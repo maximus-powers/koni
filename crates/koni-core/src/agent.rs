@@ -280,10 +280,10 @@ pub fn process_birth_identity_is_alive(identity: &ProcessBirthIdentity) -> bool 
 pub fn process_executable_path(pid: u32) -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     {
-        return fs::read_link(format!("/proc/{pid}/exe"))
+        fs::read_link(format!("/proc/{pid}/exe"))
             .ok()?
             .canonicalize()
-            .ok();
+            .ok()
     }
     #[cfg(target_os = "macos")]
     {
