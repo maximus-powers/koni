@@ -28,7 +28,15 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Tests
+        if: matrix.os == 'macos-latest'
+        env:
+          RUST_TEST_THREADS: 1
         run: cargo test --workspace --locked
+      - name: Unsupported-platform safety
+        if: matrix.os == 'ubuntu-latest'
+        run: >-
+          cargo test -p koni-core --test research_profile
+          automatic_gate_compile_fails_closed_without_supported_os_sandbox --locked
       - name: Brand audit
         if: matrix.os == 'ubuntu-latest'
         run: ./scripts/check-brand.sh
