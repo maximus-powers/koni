@@ -8,7 +8,8 @@ inspectable run.
 - Git 2.x
 - Codex installed and authenticated for agent-backed stages
 - A terminal at least 82 columns wide for the interactive control center
-- Rust 1.97 only when building Köni from source
+- Rust 1.96 or newer only when building Köni from source. Development through
+  rustup uses the newer toolchain pinned by this repository.
 
 Köni can configure a directory that is not yet a Git repository. It does not
 initialize Git during `koni init`; Git initialization and the baseline commit
