@@ -1,0 +1,20 @@
+schema_version: "1.0"
+id: 018f4c2e-0001-7000-8000-000000000001
+type: hypothesis
+title: Exact parity seed
+status: active
+spec:
+  hypothesis: A configuration-driven engine can reproduce the research oracle's observable semantics.
+  objective: Exercise the first deterministic formulation transition.
+edges: {}
+readiness:
+  state: unknown
+  reason: initial_hypothesis
+obligations:
+  unmet:
+    -
+      key: hypothesis.drill
+      severity: blocking
+compiler:
+  pins: []
+  updated_by: autoresearch-compiler

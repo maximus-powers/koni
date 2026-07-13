@@ -1,0 +1,149 @@
+schema_version: "1.0"
+module: {id: updog.rules, version: 0.1.0}
+
+rules:
+  - id: objective.map-architecture
+    phase: architecture
+    priority: 100
+    for_each: objectives
+    bind: target
+    when: {op: edge_count, subject: $target, relation: systems, exact: 0}
+    derive:
+      - {kind: obligation, key: objective.architecture, severity: blocking, reason: Objective has no mapped system boundary}
+    emit:
+      operation: map-architecture
+      source_state: objective-without-architecture
+      target_state: objective-has-system-interface-data-flow-map
+      obligations: [objective.architecture]
+      target_nodes: $target
+      read_scope: $target
+      write_scope: $target
+      read_paths: [.]
+      workflow: architecture-map
+      title: "Map architecture for {{ target.title }}"
+  - id: system.specify-contracts
+    phase: contracts
+    priority: 90
+    for_each: active_systems
+    bind: target
+    when: {op: edge_count, subject: $target, relation: owns, exact: 0}
+    derive:
+      - {kind: obligation, key: system.contracts, severity: blocking, reason: System boundary lacks explicit owned contracts or data models}
+    emit:
+      operation: specify-contracts
+      source_state: system-contract-boundaries-implicit
+      target_state: system-contract-boundaries-explicit
+      obligations: [system.contracts]
+      target_nodes: $target
+      read_scope: $target
+      write_scope: $target
+      read_paths:
+        - {select: $target, field: spec.owned_paths}
+      workflow: contract-design
+  - id: objective.plan-change
+    phase: design
+    priority: 80
+    for_each: objectives
+    bind: target
+    when:
+      all:
+        - {op: edge_count, subject: $target, relation: systems, min: 1}
+        - {op: edge_count, subject: $target, relation: realized_by, exact: 0}
+    emit:
+      operation: plan-change
+      source_state: objective-without-change-plan
+      target_state: objective-has-bounded-change-plan
+      obligations: [objective.change-plan]
+      target_nodes: $target
+      read_scope:
+        union:
+          - $target
+          - traverse: {from: $target, relations: [systems, contracts, flows], max_depth: 2}
+      write_scope: $target
+      read_paths:
+        - {select: {traverse: {from: $target, relations: [systems], max_depth: 1}}, field: spec.owned_paths}
+      workflow: change-design
+  - id: decision.resolve
+    phase: design
+    priority: 75
+    for_each: open_decisions
+    bind: target
+    when: true
+    emit:
+      operation: resolve-decision
+      source_state: decision-open
+      target_state: decision-accepted-or-rejected-with-rationale
+      obligations: [decision.disposition]
+      target_nodes: $target
+      read_scope:
+        union:
+          - $target
+          - traverse: {from: $target, relation: concerns, max_depth: 1}
+      write_scope: $target
+      read_paths: [.]
+      workflow: decision-resolution
+  - id: change.implement
+    phase: implementation
+    priority: 60
+    for_each: planned_changes
+    bind: target
+    when: true
+    emit:
+      operation: implement-change
+      source_state: change-planned
+      target_state: change-implemented-in-owned-paths
+      obligations: [change.implementation]
+      target_nodes: $target
+      read_scope:
+        union:
+          - $target
+          - traverse: {from: $target, relations: [affects, depends_on, requires, introduces], max_depth: 2}
+      write_scope: $target
+      read_paths:
+        - {select: $target, field: spec.owned_paths}
+      write_paths:
+        - {select: $target, field: spec.owned_paths}
+      workflow: bounded-implementation
+  - id: proof.establish
+    phase: assurance
+    priority: 50
+    for_each: pending_proofs
+    bind: target
+    when: true
+    emit:
+      operation: establish-proof
+      source_state: proof-not-currently-passing
+      target_state: proof-has-current-passing-receipt
+      obligations: [proof.current-receipt]
+      target_nodes: $target
+      read_scope:
+        union:
+          - $target
+          - traverse: {from: $target, relations: [verifies, uses], max_depth: 2}
+      write_scope: $target
+      read_paths:
+        - {select: {traverse: {from: $target, relations: [uses], max_depth: 1}}, field: spec.owned_paths}
+      workflow: proof-execution
+  - id: delivery.prepare
+    phase: delivery
+    priority: 10
+    for_each: objectives
+    bind: target
+    when:
+      all:
+        - {op: edge_count, subject: $target, relation: realized_by, min: 1}
+        - {op: edge_count, subject: $target, relation: delivered_by, exact: 0}
+    emit:
+      operation: prepare-delivery
+      source_state: objective-changes-not-integrated-for-delivery
+      target_state: reviewed-pr-ready-delivery
+      obligations: [delivery.review, delivery.current-proof]
+      target_nodes: $target
+      read_scope:
+        union:
+          - $target
+          - traverse: {from: $target, relations: [realized_by, systems, contracts, flows], max_depth: 4}
+      write_scope: $target
+      read_paths:
+        - {select: {traverse: {from: $target, relations: [systems], max_depth: 1}}, field: spec.owned_paths}
+      workflow: delivery-review

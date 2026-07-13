@@ -1,0 +1,44 @@
+schema_version: "1.0"
+module: {id: software.personas, version: 0.1.0}
+
+personas:
+  - id: run-planner
+    codex_agent: run-planner
+    model_role: planner
+    sandbox: {mode: read-only, approval_policy: never, network_access: true, writable_roots: []}
+  - id: lead
+    codex_agent: lead
+    model_role: lead
+    sandbox: {mode: read-only, approval_policy: never, network_access: false, writable_roots: []}
+  - id: architecture-mapper
+    codex_agent: architecture-mapper
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: false, writable_roots: []}
+  - id: contract-designer
+    codex_agent: contract-designer
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: false, writable_roots: []}
+  - id: change-designer
+    codex_agent: change-designer
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: false, writable_roots: []}
+  - id: risk-analyst
+    codex_agent: risk-analyst
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: false, writable_roots: []}
+  - id: implementer
+    codex_agent: implementer
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}
+  - id: verifier
+    codex_agent: verifier
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}
+  - id: integrator
+    codex_agent: integrator
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: false, writable_roots: []}
+  - id: reviewer
+    codex_agent: reviewer
+    model_role: reviewer
+    sandbox: {mode: read-only, approval_policy: never, network_access: false}

@@ -1,0 +1,60 @@
+schema_version: "1.0"
+id: small
+title: Small
+description: A focused change with direct approval, one worker at a time, and no agent planning pass.
+instructions:
+  planning: |
+    Ask no planning questions for this run type. Proceed conservatively, make
+    reversible assumptions where necessary, and list those assumptions clearly
+    for the user's approval before implementation begins.
+profile:
+  source: .codex/koni/profile.yaml
+intake:
+  fields:
+    goal:
+      label: Goal
+      description: Describe the outcome Köni should deliver.
+      type: text
+      required: true
+  order: [goal]
+pipeline:
+  stages:
+    intake:
+      kind: action
+      title: Validate intake
+      config: {compiler_owned: true, action: planning.intake}
+    approval:
+      kind: approval
+      title: Approve the run
+    initialize:
+      kind: initialize
+      title: Initialize the run
+    orchestrate:
+      kind: orchestration
+      title: Execute compiled work
+    report:
+      kind: action
+      title: Compile final report
+      config: {action: report, automatic: true}
+  order: [intake, approval, initialize, orchestrate, report]
+questions:
+  policy: autonomous
+  default_scope: run
+git:
+  branch_template: "koni/runs/{{ run.slug }}-{{ run.short_id }}"
+  ticket_branch_template: "koni/runs/{{ run.id }}/tickets/{{ ticket.id }}"
+run_card:
+  sections: [goal, pipeline, graph, tickets, checks, report]
+agents:
+  roles:
+    planner: {model: gpt-5.6-terra, reasoning_effort: high}
+    lead: {model: gpt-5.6-terra, reasoning_effort: high}
+    ticket_worker: {model: gpt-5.6-terra, reasoning_effort: high}
+    reviewer: {model: gpt-5.6-terra, reasoning_effort: high}
+  personas: {}
+orchestration:
+  auto_start: true
+  max_parallel: 1
+  compile_action: compile
+  lead_action: spawn-lead
+  report_action: report

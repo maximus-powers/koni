@@ -1,0 +1,112 @@
+views:
+  - id: research-status
+    title: Status
+    kind: summary
+    source: {state: [validation, branch, queues, latest_fixpoint, agents, orchestration, recent_events]}
+    columns:
+      - {id: health, value: $row.validation.health}
+      - {id: branch, value: $row.branch}
+      - {id: queues, value: $row.queues}
+      - {id: compiled, value: $row.latest_fixpoint}
+      - {id: agents, value: $row.agents}
+    actions: [compile-full]
+    options:
+      event_limit: 3
+      invalid_state_visible: true
+      attention_conditions: [blocked-tickets, todo-without-active-worker, detached-agents]
+
+  - id: research-tickets
+    title: Tickets
+    kind: tabbed_table
+    source: {tickets: all}
+    columns:
+      - {id: operation, value: $row.operation}
+      - {id: agents, value: $row.attached_agents}
+      - {id: steps, value: $row.step_progress}
+    actions: [start, spawn-worker, context, compile-ticket, review, finish, steer, recover]
+    options:
+      tabs: [active, todo, blocked, proposed, closed]
+      default_tab: active
+      active_states: [in_progress, integrating]
+      show_raw_ids: false
+      worktree_states: [active, active-question, retained, none]
+      agent_active_glyph: "⚙"
+      step_glyphs: {done: "●", active: "◐", pending: "○"}
+
+  - id: research-ticket-details
+    title: Details
+    kind: nested_detail
+    source: {selection_from: research-tickets}
+    columns:
+      - {id: lifecycle, value: $row.lifecycle}
+      - {id: scope, value: $row.graph_scope.write}
+      - {id: review, value: $row.review_and_receipts}
+      - {id: scratch_commits, value: $row.git.scratch_commit_graph}
+    actions: [context, compile-ticket, review, finish, steer, recover]
+    options:
+      sections: [lifecycle, steps, scope, review, scratch-commit-graph]
+      recent_ticket_events: 3
+      scope_mode: write_only
+      gate_preview: compact
+      show_context_receipts: true
+      show_runtime_receipts: true
+
+  - id: research-graph
+    title: Project Graph
+    kind: typed_tree
+    source: {graph: main_checkout}
+    columns:
+      - {id: type, value: $row.type}
+      - {id: primary_parent, value: $row.visual_parent}
+      - {id: secondary_edges, value: $row.secondary_edges}
+    actions: []
+    options:
+      hierarchy: [hypothesis, literature, claim, experiment, method, prerequisite, metric, ablation, gate, asset, run, evidence, report]
+      primary_parent_preferences:
+        claim: [claim, hypothesis]
+        experiment: [hypothesis, claim]
+        method: [experiment, claim, hypothesis]
+        metric: [experiment, method]
+        ablation: [method, experiment, claim]
+        gate: [experiment, method, ablation, claim, hypothesis, asset, metric, prerequisite, run]
+        asset: [method, experiment, ablation, prerequisite, run]
+        run: [ablation, experiment, method]
+        evidence: [run, experiment, ablation, claim, method, hypothesis]
+        report: [evidence, run, experiment, claim, hypothesis]
+      reverse_display_edges:
+        experiment.target_claims: tests
+        gate.applies_to: gates
+        evidence.supports: evidence
+        evidence.contradicts: neg-evidence
+        evidence.informs: evidence
+        report.summarizes: reports
+        run.evaluates: runs
+      secondary_edge_style: independent_right_lanes
+      repeat_semantic_types: [gate]
+      show_titles: true
+
+  - id: research-agents
+    title: Agents
+    kind: status_overlay
+    source: {codex: [state_database, rollout_tail], correlate_by: [project_root, ticket_worktree, ticket_id]}
+    columns:
+      - {id: ticket, value: $row.ticket_id}
+      - {id: persona, value: $row.persona}
+      - {id: state, value: $row.state}
+      - {id: age, value: $row.age}
+    actions: [spawn-lead, spawn-worker, recover]
+    options:
+      stale_seconds: 1800
+      completion_marker: task_complete
+      detached_agents_in_status_only: true
+
+  - id: research-orchestration-controls
+    title: Orchestration
+    kind: controls
+    source: {file: program/orchestration.yaml}
+    columns: []
+    actions: [compile-full]
+    options:
+      controls: [pause, play, parallel-3, parallel-5, unchained]
+      keybindings: {toggle: space, parallel_3: "3", parallel_5: "5", unchained: u}
+      compiler_effect: paused-full-compile-is-read-only

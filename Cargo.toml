@@ -1,0 +1,43 @@
+[workspace]
+members = ["crates/koni-core", "crates/koni-cli", "crates/koni-tui"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT"
+repository = "https://github.com/maximus-powers/koni"
+homepage = "https://github.com/maximus-powers/koni"
+readme = "README.md"
+
+[workspace.dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+fs2 = "0.4"
+git2 = { version = "0.21", default-features = false }
+glob = "0.3"
+hex = "0.4"
+indexmap = { version = "2", features = ["serde"] }
+jsonschema = "0.33"
+minijinja = { version = "2", features = ["loader"] }
+regex = "1"
+ratatui = "0.29"
+rustix = { version = "1.1", features = ["fs"] }
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "2"
+toml = "0.9"
+uuid = { version = "1", features = ["v7", "serde"] }
+walkdir = "2"
+unicode-width = "0.2"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"

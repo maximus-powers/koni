@@ -1,0 +1,115 @@
+schema_version: "1.0"
+module: {id: software.actions, version: 0.1.0}
+
+actions:
+  - id: recover
+    recipe:
+      - {primitive: profile.validate}
+      - {primitive: recovery.dispatch}
+  - id: compile
+    aliases: [compile-full]
+    recipe:
+      - {primitive: project.validate}
+      - {primitive: rules.evaluate}
+      - {primitive: project.validate}
+      - {primitive: event.append, type: compiler.compile.full}
+    recovery: recover
+  - id: compile-ticket
+    params:
+      ticket: {type: ticket_id, required: true}
+    allowed_ticket_states: [in_progress, integrating]
+    requires_ticket_worktree: true
+    recipe:
+      - {primitive: project.validate}
+      - {primitive: scope.validate, ticket: "${params.ticket}"}
+      - {primitive: check.run, checks_from_current_step: true, ticket: "${params.ticket}"}
+      - {primitive: rules.evaluate, mode: scoped, ticket: "${params.ticket}"}
+      - {primitive: project.validate}
+      - {primitive: board.render, view: ticket_health}
+    recovery: recover
+  - id: spawn-lead
+    requires_main_checkout: true
+    recipe:
+      - {primitive: project.validate}
+      - {id: lead, primitive: agent.spawn, persona: lead, prompt: "Operate the configured software Lead pull loop until compiler-verifiable terminal state.", transport: compiler_broker, duplicate_policy: reject}
+      - {primitive: event.append, type: compiler.lead.spawned}
+    compensation:
+      - {primitive: agent.stop, target: spawned_process_group}
+    recovery: recover
+  - id: start
+    actor: lead
+    params:
+      ticket: {type: ticket_id, required: true}
+    allowed_ticket_states: [todo]
+    requires_main_checkout: true
+    recipe:
+      - {primitive: project.validate}
+      - {primitive: lease.acquire, ticket: "${params.ticket}"}
+      - {primitive: project.validate}
+      - {primitive: ticket.transition, ticket: "${params.ticket}", to: in_progress}
+      - {primitive: event.append, type: compiler.start.leased, ticket: "${params.ticket}"}
+    compensation:
+      - {primitive: lease.release, ticket: "${params.ticket}"}
+  - id: context
+    params:
+      ticket: {type: ticket_id, required: true}
+      step: {type: string}
+    allowed_ticket_states: [in_progress, integrating]
+    requires_ticket_worktree: true
+    recipe:
+      - {primitive: ticket.validate, ticket: "${params.ticket}"}
+      - {id: context_pack, primitive: context.compile, ticket: "${params.ticket}", step: "${params.step}"}
+      - {primitive: event.append, type: compiler.context.issued, ticket: "${params.ticket}"}
+  - id: run-check
+    params:
+      check: {type: string, required: true}
+    recipe:
+      - {primitive: project.validate}
+      - {primitive: check.run, check: "${params.check}"}
+  - id: output
+    params:
+      ticket: {type: ticket_id, required: true}
+      step: {type: string, required: true}
+      persona: {type: string, required: true}
+      payload: {type: json, required: true}
+    allowed_ticket_states: [in_progress, integrating]
+    requires_ticket_worktree: true
+    recipe:
+      - {primitive: output.validate, ticket: "${params.ticket}", require_product_change_declarations: true}
+      - {primitive: output.record, ticket: "${params.ticket}", step: "${params.step}", persona: "${params.persona}", payload: "${params.payload}"}
+      - {primitive: project.validate}
+      - {primitive: git.commit, message: "chore(koni): record ${params.step} output"}
+    recovery: recover
+  - id: review
+    params:
+      ticket: {type: ticket_id, required: true}
+      status: {type: string, required: true}
+      notes: {type: string, default: ""}
+    allowed_ticket_states: [in_progress, integrating]
+    recipe:
+      - {primitive: review.validate, ticket: "${params.ticket}"}
+      - {primitive: review.record, ticket: "${params.ticket}", status: "${params.status}", notes: "${params.notes}"}
+      - {primitive: event.append, type: compiler.review.recorded, ticket: "${params.ticket}"}
+  - id: finish
+    params:
+      ticket: {type: ticket_id, required: true}
+      message: {type: string, default: ""}
+    allowed_ticket_states: [in_progress, integrating]
+    requires_main_checkout: true
+    recipe:
+      - {primitive: integration.validate, ticket: "${params.ticket}"}
+      - {primitive: git.integrate_squash, ticket: "${params.ticket}", message: "${params.message}"}
+    recovery: recover
+  - id: report
+    recipe:
+      - {primitive: project.validate}
+      - {primitive: report.render}
+  - id: spawn-worker
+    params:
+      ticket: {type: ticket_id, required: true}
+      prompt: {type: string, required: true}
+    allowed_ticket_states: [in_progress]
+    recipe:
+      - {primitive: project.validate}
+      - {primitive: agent.spawn, ticket: "${params.ticket}", prompt: "${params.prompt}"}
+    recovery: recover

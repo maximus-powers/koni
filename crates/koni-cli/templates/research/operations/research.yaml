@@ -1,0 +1,586 @@
+operations:
+  # Higher priorities run first. Bands preserve the research lifecycle while
+  # leaving room for project-specific operations between bundled stages.
+  - id: formulation.hypothesis.drill-hypothesis
+    operation: drill-hypothesis
+    stage: formulation
+    target_types: [hypothesis]
+    workflow: drill-hypothesis
+    allowed_new_node_types: [claim, literature]
+    allowed_existing_node_types: [hypothesis]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: false
+    change_control_barrier: false
+    change_control: &ordinary_upstream_change {role: ordinary, allow_upstream_requests: true, proposal_operation: change-request}
+    review_contract: pre-commit graph transition review
+    output_contract: claims and related-work graph delta plus structured step outputs
+    dispatch_priority: 830
+    ranking_hints: [stage, hypothesis-id, missing-obligations]
+
+  - id: formulation.hypothesis.map-literature
+    operation: map-literature
+    stage: formulation
+    target_types: [hypothesis, literature]
+    workflow: standard-research-transition
+    allowed_new_node_types: [literature]
+    allowed_existing_node_types: [hypothesis, literature]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: false
+    change_control_barrier: false
+    change_control: *ordinary_upstream_change
+    review_contract: pre-commit literature mapping review
+    output_contract: literature graph delta plus structured step outputs
+    dispatch_priority: 820
+    ranking_hints: [stage, hypothesis-id, citation-gap]
+
+  - id: formulation.claim.decompose-claims
+    operation: decompose-claims
+    stage: formulation
+    target_types: [claim, hypothesis]
+    workflow: standard-research-transition
+    allowed_new_node_types: [claim, literature]
+    allowed_existing_node_types: [claim, hypothesis]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: false
+    change_control_barrier: false
+    change_control: *ordinary_upstream_change
+    review_contract: pre-commit claim decomposition review
+    output_contract: claim decomposition graph delta plus structured step outputs
+    dispatch_priority: 810
+    ranking_hints: [stage, claim-id, falsification-gap]
+
+  - id: experiment-design.claim.design-experiment
+    operation: design-experiment
+    stage: experiment_design
+    target_types: [claim]
+    workflow: design-claim-experiment
+    allowed_new_node_types: [experiment]
+    allowed_existing_node_types: [claim]
+    existing_node_edge_additions_only: {claim: [tested_by]}
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: false
+    change_control_barrier: false
+    change_control: *ordinary_upstream_change
+    review_contract: pre-commit experiment ontology and graph transition review rejecting static proof inspection traceability audit and review work modeled as experiments
+    output_contract: empirical experiment graph delta with meaningful empirical_mode execution_protocol and observable_outcome plus structured step outputs
+    dispatch_priority: 730
+    ranking_hints: [stage, claim-id, claim-readiness]
+
+  - id: experiment-design.hypothesis.design-experiment
+    operation: design-experiment
+    stage: experiment_design
+    target_types: [hypothesis]
+    workflow: design-experiment-portfolio
+    allowed_new_node_types: [experiment]
+    allowed_existing_node_types: [hypothesis, claim]
+    existing_node_edge_additions_only: {hypothesis: [experiments], claim: [tested_by]}
+    max_new_nodes: 3
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: false
+    change_control_barrier: false
+    change_control: *ordinary_upstream_change
+    review_contract: pre-commit experiment portfolio ontology and granularity review rejecting non-executed proof static inspection traceability audit review work and needless one-node-per-check atomization
+    output_contract: at most three cohesive portfolio-level empirical programs covering related claim checks together; every experiment declares meaningful empirical_mode execution_protocol and observable_outcome plus structured step outputs
+    dispatch_priority: 720
+    ranking_hints: [stage, hypothesis-id, uncovered-claim-count, experiment-coverage]
+    portfolio_guidance:
+      preferred_count: 2
+      unit: cohesive empirical program
+      group_when: checks share an executable setup intervention observation mode or result interpretation
+      split_when: checks require genuinely different subjects execution environments interventions or observables
+      avoid: one experiment node per example assertion edge case or deterministic check
+
+  - id: preparation.experiment.design-experiment
+    operation: design-experiment
+    stage: preparation
+    target_types: [experiment]
+    workflow: design-experiment-constitution
+    allowed_new_node_types: [ablation, method, metric, prerequisite]
+    allowed_existing_node_types: [experiment]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: false
+    change_control_barrier: false
+    change_control: *ordinary_upstream_change
+    review_contract: pre-commit graph transition review
+    output_contract: method metric ablation prerequisite graph delta plus structured step outputs
+    dispatch_priority: 630
+    ranking_hints: [stage, experiment-id, constitution-missing-count]
+
+  - id: preparation.node.define-metrics
+    operation: define-metrics
+    stage: preparation
+    target_types: [experiment, method, ablation]
+    workflow: standard-research-transition
+    allowed_new_node_types: [metric]
+    allowed_existing_node_types: [experiment, method, ablation]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: false
+    change_control_barrier: false
+    change_control: *ordinary_upstream_change
+    review_contract: pre-commit metric contract review
+    output_contract: metric graph delta plus structured step outputs
+    dispatch_priority: 620
+    ranking_hints: [stage, target-node-id, metric-gap]
+
+  - id: preparation.node.map-prereqs
+    operation: map-prereqs
+    stage: preparation
+    target_types: [experiment, method, ablation]
+    workflow: standard-research-transition
+    allowed_new_node_types: [prerequisite]
+    allowed_existing_node_types: [experiment, method, ablation]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: false
+    change_control_barrier: false
+    change_control: *ordinary_upstream_change
+    review_contract: pre-commit prerequisite mapping review
+    output_contract: prerequisite graph delta plus structured step outputs
+    dispatch_priority: 610
+    ranking_hints: [stage, target-node-id, asset-need-gap]
+
+  - id: graph-compilation.node.define-gates
+    operation: define-gates
+    stage: graph_compilation
+    target_types: [ablation, claim, experiment, method, metric, prerequisite]
+    workflow: define-gates
+    allowed_new_node_types: [gate]
+    allowed_existing_node_types: [ablation, claim, experiment, method, metric, prerequisite]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: true
+    change_control_barrier: false
+    change_control: *ordinary_upstream_change
+    review_contract: pre-commit gate contract review
+    output_contract: expected-red gate contract graph delta with reciprocal gate.applies_to and target.gates links plus structured step outputs
+    dispatch_priority: 530
+    ranking_hints: [stage, node-type-priority, node-id]
+
+  - id: graph-compilation.node.compile-gates
+    operation: compile-gates
+    stage: graph_compilation
+    target_types: [ablation, claim, experiment, method, metric, prerequisite]
+    workflow: compile-gate-package
+    allowed_new_node_types: [gate]
+    allowed_existing_node_types: [ablation, claim, experiment, method, metric, prerequisite]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: true
+    change_control_barrier: true
+    change_control: *ordinary_upstream_change
+    single_flight_group: gate-compilation
+    review_contract: pre-commit gate package compilation review
+    output_contract: gate package/stub contract output plus structured step outputs
+    dispatch_priority: 520
+    ranking_hints: [stage, node-type-priority, gate-package-gap]
+
+  - id: graph-compilation.node.compile-tests
+    operation: compile-tests
+    stage: graph_compilation
+    target_types: [ablation, claim, experiment, method, metric, prerequisite]
+    workflow: compile-gate-package
+    allowed_new_node_types: [gate]
+    allowed_existing_node_types: [ablation, claim, experiment, method, metric, prerequisite]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: true
+    change_control_barrier: true
+    change_control: *ordinary_upstream_change
+    single_flight_group: gate-compilation
+    review_contract: pre-commit executable test contract review
+    output_contract: expected-red test contract output plus structured step outputs
+    dispatch_priority: 510
+    ranking_hints: [stage, node-type-priority, test-gap]
+
+  - id: execution.node.compile-run-plan
+    operation: compile-run-plan
+    stage: execution
+    target_types: [ablation, experiment, method, run]
+    workflow: compile-run-plan
+    allowed_new_node_types: [run]
+    allowed_existing_node_types: [ablation, experiment, method, run]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: false
+    change_control_barrier: true
+    change_control: *ordinary_upstream_change
+    review_contract: pre-commit run plan review
+    output_contract: run graph delta with a complete typed runtime_contract exact uses links for bound assets and structured step outputs
+    dispatch_priority: 230
+    ranking_hints: [stage, target-node-id, run-plan-gap]
+
+  - id: asset-resolution.prerequisite.resolve-assets
+    operation: resolve-assets
+    stage: asset_resolution
+    target_types: [prerequisite]
+    workflow: resolve-assets
+    allowed_new_node_types: [asset]
+    allowed_existing_node_types: [prerequisite, asset]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: true
+    change_control_barrier: false
+    change_control: *ordinary_upstream_change
+    review_contract: pre-commit asset readiness review
+    output_contract: asset graph delta or asset-build recommendation plus structured step outputs
+    dispatch_priority: 430
+    ranking_hints: [stage, prerequisite-id, gate-blockers]
+
+  - id: asset-resolution.prerequisite.plan-build-asset
+    operation: plan-build-asset
+    stage: asset_resolution
+    target_types: [prerequisite, gate, asset]
+    workflow: resolve-assets
+    allowed_new_node_types: [asset]
+    allowed_existing_node_types: [prerequisite, gate, asset]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: false
+    change_control_barrier: false
+    change_control: *ordinary_upstream_change
+    review_contract: pre-commit asset build plan review
+    output_contract: one capability-compatible asset with spec.implementation_plan.root and nonempty spec.implementation_plan.files; new nodes omit every compiler-owned field, while existing complete-node upserts preserve current compiler-owned values exactly
+    dispatch_priority: 420
+    ranking_hints: [stage, prerequisite-id, build-needed]
+
+  - id: asset-resolution.asset.validate-asset
+    operation: validate-asset
+    stage: asset_resolution
+    target_types: [asset]
+    workflow: implement-asset
+    allowed_new_node_types: [asset, run]
+    allowed_existing_node_types: [asset, prerequisite, run]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: false
+    change_control_barrier: true
+    change_control: *ordinary_upstream_change
+    review_contract: pre-commit asset validation review
+    output_contract: asset validation receipt/run graph delta plus structured step outputs
+    dispatch_priority: 400
+    ranking_hints: [stage, asset-id, gate-blockers]
+
+  - id: asset-resolution.asset.implement-asset
+    operation: implement-asset
+    stage: asset_resolution
+    target_types: [asset, prerequisite]
+    workflow: implement-asset
+    allowed_new_node_types: [asset, run]
+    allowed_existing_node_types: [asset, prerequisite, run]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: false
+    change_control_barrier: false
+    change_control: *ordinary_upstream_change
+    review_contract: pre-commit asset implementation review
+    output_contract: concrete nonempty files under spec.implementation_plan.root plus authored spec.implementation.kind and project-relative spec.implementation.entrypoints, exact per-gate spec.gate_contracts, and validates links; new nodes omit compiler-owned fields and existing upserts preserve them byte-for-byte without claiming readiness
+    dispatch_priority: 410
+    ranking_hints: [stage, asset-id, implementation-gap]
+
+  - id: gates.gate.run-gate
+    operation: run-gate
+    stage: gates
+    target_types: [gate]
+    workflow: run-gate-runtime
+    allowed_new_node_types: [run]
+    allowed_existing_node_types: [gate, run]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: false
+    change_control_barrier: true
+    change_control: *ordinary_upstream_change
+    review_contract: pre-commit gate-run review
+    output_contract: gate receipt from exactly one ticket-scoped asset command contract plus run graph delta and structured step outputs
+    dispatch_priority: 330
+    ranking_hints: [stage, gate-id, candidate-asset-id]
+
+  - id: gates.gate.evaluate-gate
+    operation: evaluate-gate
+    stage: gates
+    target_types: [gate]
+    workflow: standard-research-transition
+    allowed_new_node_types: [evidence, report]
+    allowed_existing_node_types: [gate, evidence, report]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: false
+    change_control_barrier: true
+    change_control: *ordinary_upstream_change
+    review_contract: pre-commit gate evaluation review
+    output_contract: gate evaluation evidence/report candidate plus structured step outputs
+    dispatch_priority: 320
+    ranking_hints: [stage, gate-id, evaluation-gap]
+
+  - id: execution.run.run-experiment
+    operation: run-experiment
+    stage: execution
+    target_types: [run]
+    workflow: run-experiment-runtime
+    allowed_new_node_types: [run]
+    allowed_existing_node_types: [run]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: false
+    change_control_barrier: true
+    change_control: *ordinary_upstream_change
+    review_contract: pre-commit run receipt review
+    output_contract: scientific runtime receipt satisfying the ticket-bound required measurement keys and project-contained result/artifact policy plus graph delta and structured step outputs
+    dispatch_priority: 220
+    ranking_hints: [stage, run-id]
+
+  - id: evidence-reports.node.synthesize-evidence
+    operation: synthesize-evidence
+    stage: evidence_reports
+    target_types: [claim, evidence, experiment, method, run]
+    workflow: synthesize-evidence
+    allowed_new_node_types: [evidence, report]
+    allowed_existing_node_types: [claim, evidence, report]
+    receipt_coverage:
+      candidate_node_types: [evidence]
+      required_nodes:
+        relations: [claims, experiments, tested_by, target_claims, ablations, runs]
+        direction: both
+        min_depth: 1
+        max_depth: 4
+        node_types: [run]
+      candidate_link_relation: from_runs
+      coverage: exact
+      receipt_type: runtime.receipt
+      receipt_statuses: [passed]
+      receipt_refs_path: spec.receipt_refs
+      disposition_map_path: spec.run_dispositions
+      disposition:
+        value_path: disposition
+        receipt_id_path: receipt_id
+        rationale_path: rationale
+        allowed_values: [supports, contradicts, neutral, out_of_scope]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: false
+    change_control_barrier: true
+    change_control: *ordinary_upstream_change
+    review_contract: pre-commit evidence synthesis review
+    output_contract: evidence/report graph delta plus structured step outputs
+    review_effects:
+      - id: promote-candidate-evidence
+        verdict: passed
+        select:
+          node_types: [evidence]
+          predicate: {field: spec.promotion_state, op: absent}
+        count: {exact: 1}
+        preconditions:
+          - {field: spec.summary, op: non_empty}
+          - {field: spec.interpretation, op: non_empty}
+          - {field: spec.evidence_basis, op: equals, value: empirical_runtime}
+          - {field: spec.inference_scope, op: equals, value: bounded_empirical}
+          - {field: spec.scope, op: non_empty}
+          - {field: spec.limitations, op: non_empty}
+          - {field: spec.receipt_refs, op: non_empty}
+          - {field: spec.run_dispositions, op: non_empty}
+          - {field: spec.promoted_by, op: absent}
+          - {field: spec.promotion_review_id, op: absent}
+        set:
+          spec.promotion_state: lead-promoted
+          spec.promoted_by: lead
+          spec.promotion_review_id: "$review.id"
+    dispatch_priority: 130
+    ranking_hints: [stage, claim-id, evidence-gap]
+
+  - id: evidence-reports.report.compile-report
+    operation: compile-report
+    stage: evidence_reports
+    target_types: [evidence, report]
+    workflow: compile-report
+    allowed_new_node_types: [report]
+    allowed_existing_node_types: [evidence, report]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: false
+    change_control_barrier: true
+    change_control: *ordinary_upstream_change
+    review_contract: pre-commit report compilation review
+    output_contract: report graph delta plus deterministic ledger output references
+    dispatch_priority: 120
+    ranking_hints: [stage, report-id, paper-context-gap]
+
+  - id: evidence-reports.hypothesis.conclude-hypothesis
+    operation: conclude-hypothesis
+    stage: evidence_reports
+    target_types: [hypothesis]
+    workflow: conclude-hypothesis
+    allowed_new_node_types: [report]
+    allowed_existing_node_types: [report]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: false
+    change_control_barrier: true
+    change_control: *ordinary_upstream_change
+    review_contract: pre-commit hypothesis adjudication review
+    output_contract: reviewed hypothesis conclusion covering every claim and current promoted evidence atom
+    review_effects:
+      - id: accept-conclusion-report
+        verdict: passed
+        select:
+          node_types: [report]
+          predicate: {field: spec.conclusion, op: non_empty}
+        count: {exact: 1}
+        preconditions:
+          - {field: spec.summary, op: non_empty}
+          - {field: spec.synthesis, op: non_empty}
+          - {field: spec.claim_dispositions, op: non_empty}
+          - {field: spec.curated_evidence_refs, op: non_empty}
+          - {field: spec.conclusion_rationale, op: non_empty}
+          - {field: spec.limitations, op: non_empty}
+          - {field: spec.hypothesis_id, op: non_empty}
+          - {field: spec.paper_context_role, op: absent}
+          - {field: spec.paper_input_role, op: absent}
+          - {field: spec.paper_section, op: absent}
+          - {field: spec.paper_input_status, op: absent}
+          - {field: spec.concluded_by, op: absent}
+          - {field: spec.conclusion_review_id, op: absent}
+        coverage:
+          - id: exact-claim-dispositions
+            required: {traverse: {from: $target, relation: claims, direction: outgoing, max_depth: 1, node_types: [claim]}}
+            actual:
+              kind: object_keys
+              field: spec.claim_dispositions
+              allowed_values: [supported, contradicted, inconclusive]
+          - id: exact-curated-evidence
+            required: &current_conclusion_evidence
+              intersection:
+                - promoted-current-evidence
+                - traverse:
+                    from: {traverse: {from: $target, relation: claims, direction: outgoing, max_depth: 1, node_types: [claim]}}
+                    relations: [supports, contradicts, informs]
+                    direction: incoming
+                    max_depth: 1
+                    node_types: [evidence]
+            actual: {kind: field_values, field: spec.curated_evidence_refs}
+          - id: exact-evidence-citations
+            required: *current_conclusion_evidence
+            actual: {kind: outgoing_relation, relation: cites}
+          - id: exact-target-hypothesis
+            required: $target
+            actual: {kind: outgoing_relation, relation: summarizes}
+          - id: exact-hypothesis-reference
+            required: $target
+            actual: {kind: field_value, field: spec.hypothesis_id}
+        set:
+          spec.concluded_by: lead
+          spec.conclusion_review_id: "$review.id"
+    dispatch_priority: 110
+    ranking_hints: [stage, hypothesis-id, claim-disposition-coverage]
+
+  - id: evidence-reports.report.draft-paper-input
+    operation: draft-paper-input
+    stage: evidence_reports
+    target_types: [report]
+    workflow: draft-paper-input
+    allowed_new_node_types: []
+    allowed_existing_node_types: [report]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: false
+    change_control_barrier: true
+    change_control: *ordinary_upstream_change
+    review_contract: pre-commit paper input review
+    output_contract: update the accepted report with nonempty paper_context_role, useful paper_input_role and paper_section, and exact paper_input_status ready while preserving compiler-owned conclusion provenance and exact evidence citations
+    dispatch_priority: 100
+    ranking_hints: [stage, report-id, writing-gap]
+
+  - id: lifecycle.change-request
+    operation: change-request
+    stage: dynamic
+    target_types: [hypothesis, literature, claim, experiment, prerequisite, metric, method, ablation, asset, gate, run, evidence, report]
+    workflow: change-request
+    allowed_new_node_types: []
+    allowed_existing_node_types: []
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: false
+    change_control_barrier: false
+    single_flight_group: change-control
+    change_control:
+      role: proposal
+      proposal_step: propose-graph-delta
+      application_operations: [apply-change-request, no-op]
+    review_contract: hash-bound change proposal review
+    output_contract: typed bounded application contract or no-op disposition
+    dispatch_priority: 910
+    ranking_hints: [stage, target-node-id]
+
+  - id: lifecycle.apply-change-request
+    operation: apply-change-request
+    stage: dynamic
+    target_types: [hypothesis, literature, claim, experiment, prerequisite, metric, method, ablation, asset, gate, run, evidence, report]
+    workflow: apply-change-request
+    allowed_new_node_types: []
+    allowed_existing_node_types: [hypothesis, literature, claim, experiment, prerequisite, metric, method, ablation, gate, run, evidence, report]
+    allow_node_deletion: true
+    allow_gate_contract_edits: true
+    gate_blocking_exempt: true
+    change_control_barrier: false
+    single_flight_group: change-control
+    change_control: {role: application}
+    review_contract: pre-commit approved change review
+    output_contract: exact approved semantic graph delta
+    dispatch_priority: 920
+    ranking_hints: [stage, source-change-request-id]
+
+  - id: lifecycle.resolve-conflict
+    operation: resolve-conflict
+    stage: recovery
+    target_types: [hypothesis, literature, claim, experiment, prerequisite, metric, method, ablation, asset, gate, run, evidence, report]
+    workflow: resolve-conflict
+    allowed_new_node_types: [hypothesis, literature, claim, experiment, prerequisite, metric, method, ablation, asset, gate, run, evidence, report]
+    allowed_existing_node_types: [hypothesis, literature, claim, experiment, prerequisite, metric, method, ablation, asset, gate, run, evidence, report]
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: true
+    change_control_barrier: false
+    single_flight_group: recovery
+    terminal_resolver: true
+    review_contract: pre-commit recovery review
+    output_contract: conflict diagnosis and bounded resolution
+    dispatch_priority: 1000
+    ranking_hints: [blocked-ticket-id]
+
+  - id: lifecycle.review-ticket
+    operation: review-ticket
+    stage: review
+    target_types: []
+    workflow: review-ticket
+    allowed_new_node_types: []
+    allowed_existing_node_types: []
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: true
+    change_control_barrier: false
+    review_contract: typed review receipt
+    output_contract: passed or failed checklist decision
+    dispatch_priority: 900
+    ranking_hints: [parent-ticket-id]
+
+  - id: lifecycle.no-op
+    operation: no-op
+    stage: dynamic
+    target_types: []
+    workflow: change-request
+    allowed_new_node_types: []
+    allowed_existing_node_types: []
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: true
+    change_control_barrier: false
+    change_control: {role: disposition, outcome: no_op}
+    review_contract: hash-bound no-op review
+    output_contract: explicit assertion that reviewed desired state is already satisfied
+    dispatch_priority: 890
+    ranking_hints: [source-change-request-id]

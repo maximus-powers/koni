@@ -1,0 +1,156 @@
+gate_policies:
+  - id: research-capability-gates
+    description: Select the exact capability-compatible executable asset for each research gate with the original deterministic preference order.
+    gate_node_types: [gate]
+    gate_subjects: gate-evaluation-subjects
+    candidate_node_types: [asset]
+    candidate_pool: gate-candidate-assets
+    evaluation_targets:
+      select: {traverse: {from: $gate, relation: applies_to, direction: outgoing, min_depth: 1, max_depth: 1}}
+      cardinality: exactly_one
+    capability:
+      required_name_fields: [spec.capability.name]
+      required_version_req_fields: [spec.capability.protocol_range, spec.capability.protocol, spec.capability.protocol_version]
+      provider_collection_fields: [spec.capabilities]
+      provider_name_fields: [name]
+      provider_version_fields: [protocol_version, protocol, version]
+    selection:
+      mode: ranked_first
+      ranks:
+        - {id: exact-gate-contract, kind: map_has_gate_key, fields: [spec.gate_contracts]}
+        - {id: exact-passing-result, kind: merged_map_value_equals, fields: [spec.gate_results, spec.spec.gate_results, spec.capabilities.*.gate_results], value: passed}
+        - {id: exact-target-gate, kind: field_equals_gate_id, fields: [spec.target_gate_id, spec.spec.target_gate_id]}
+        - {id: explicit-validates-edge, kind: edge_contains_gate, relations: [validates]}
+        - {id: any-exact-result, kind: merged_map_has_gate_key, fields: [spec.gate_results, spec.spec.gate_results, spec.capabilities.*.gate_results]}
+        - {id: compatible-fallback, kind: compatible}
+      tie_break: {field: id, direction: ascending}
+    passing_receipt_statuses: [passed]
+    auto_evaluate: {check: gate-verifier, boundaries: [full, scoped]}
+    execution_ready:
+      all:
+        - {op: filesystem_manifest_current, subject: $winner}
+        - {op: field_equals, subject: $winner, field: asset_manifest.implementation_status, value: ready}
+        - {op: field_equals, subject: $winner, field: asset_manifest.vendor_status, value: vendored}
+    obligation_key_template: "gate.{{ gate.id }}"
+    missing_gate_obligation_key_template: "gate.required.{{ subject.id }}"
+    applicability:
+      subject_node_types: [hypothesis, claim, experiment, method, metric, ablation, prerequisite, asset, gate, run, evidence, report]
+      required_subject_node_types: [claim, experiment, method, metric, ablation, prerequisite]
+      context_class_order: [hypothesis, claim, experiment, method_metric, ablation_prerequisite, asset_gate, run, evidence, report]
+      direct_gates:
+        union:
+          - {traverse: {from: $subject, relation: gates, direction: outgoing, min_depth: 1, max_depth: 1, node_types: [gate]}}
+          - {traverse: {from: $subject, relation: applies_to, direction: incoming, min_depth: 1, max_depth: 1, node_types: [gate]}}
+      inherited_gates:
+        union:
+          - {traverse: {from: $ancestors, relation: gates, direction: outgoing, min_depth: 1, max_depth: 1, node_types: [gate]}}
+          - {traverse: {from: $ancestors, relation: applies_to, direction: incoming, min_depth: 1, max_depth: 1, node_types: [gate]}}
+      context: {union: [$subject, $ancestors]}
+      context_classes:
+        hypothesis: {nodes: {node_types: [hypothesis]}}
+        claim: {nodes: {node_types: [claim]}}
+        experiment: {nodes: {node_types: [experiment]}}
+        method_metric: {nodes: {node_types: [method, metric]}}
+        ablation_prerequisite: {nodes: {node_types: [ablation, prerequisite]}}
+        asset_gate: {nodes: {node_types: [asset, gate]}}
+        run: {nodes: {node_types: [run]}}
+        evidence: {nodes: {node_types: [evidence]}}
+        report: {nodes: {node_types: [report]}}
+    context:
+      select:
+        union:
+          - $gate
+          - $evaluation_targets
+          - $winner
+          - $ancestors
+          - $inherited_gates
+          - {traverse: {from: $gate, relations: [applies_to, requires, strengthens], direction: outgoing, min_depth: 1, max_depth: 1}}
+      read_paths:
+        - {select: $winner, field: spec.implementation_plan.root}
+
+edge_types:
+  - {source: hypothesis, relation: claims, targets: [claim]}
+  - {source: hypothesis, relation: experiments, targets: [experiment]}
+  - {source: hypothesis, relation: gates, targets: [gate]}
+  - {source: hypothesis, relation: literature, targets: [literature]}
+  - {source: hypothesis, relation: reports, targets: [report]}
+
+  - {source: literature, relation: cites, targets: [literature]}
+  - {source: literature, relation: contradicts, targets: [claim, experiment, hypothesis, method]}
+  - {source: literature, relation: informs, targets: [claim, experiment, hypothesis, method]}
+  - {source: literature, relation: supports, targets: [claim, experiment, hypothesis, method]}
+
+  - {source: claim, relation: contradicts, targets: [claim]}
+  - {source: claim, relation: decomposes_to, targets: [claim]}
+  - {source: claim, relation: evidence, targets: [evidence]}
+  - {source: claim, relation: gates, targets: [gate]}
+  - {source: claim, relation: informs, targets: [claim]}
+  - {source: claim, relation: literature, targets: [literature]}
+  - {source: claim, relation: supports, targets: [claim]}
+  - {source: claim, relation: tested_by, targets: [ablation, experiment], inverse: target_claims}
+
+  - {source: experiment, relation: ablations, targets: [ablation]}
+  - {source: experiment, relation: assets, targets: [asset]}
+  - {source: experiment, relation: gates, targets: [gate]}
+  - {source: experiment, relation: methods, targets: [method]}
+  - {source: experiment, relation: metrics, targets: [metric]}
+  - {source: experiment, relation: produces, targets: [evidence, report]}
+  - {source: experiment, relation: requires, targets: [asset, gate, method, metric, prerequisite]}
+  - {source: experiment, relation: runs, targets: [run]}
+  - {source: experiment, relation: target_claims, targets: [claim], inverse: tested_by}
+
+  - {source: prerequisite, relation: requires, targets: [asset, gate, prerequisite]}
+  - {source: prerequisite, relation: gates, targets: [gate]}
+  - {source: prerequisite, relation: satisfied_by, targets: [asset, evidence, run]}
+
+  - {source: metric, relation: applies_to, targets: [ablation, experiment, method, run]}
+  - {source: metric, relation: gates, targets: [gate]}
+
+  - {source: method, relation: ablations, targets: [ablation]}
+  - {source: method, relation: experiments, targets: [experiment]}
+  - {source: method, relation: gates, targets: [gate]}
+  - {source: method, relation: implements, targets: [asset]}
+  - {source: method, relation: metrics, targets: [metric]}
+  - {source: method, relation: requires, targets: [asset, gate, metric, prerequisite]}
+  - {source: method, relation: target_claims, targets: [claim]}
+
+  - {source: ablation, relation: baseline, targets: [asset, method, run]}
+  - {source: ablation, relation: gates, targets: [gate]}
+  - {source: ablation, relation: method, targets: [method]}
+  - {source: ablation, relation: metrics, targets: [metric]}
+  - {source: ablation, relation: requires, targets: [asset, gate, metric, prerequisite]}
+  - {source: ablation, relation: runs, targets: [run]}
+  - {source: ablation, relation: target_claims, targets: [claim]}
+  - {source: ablation, relation: variant, targets: [asset, method, run]}
+
+  - {source: asset, relation: derived_from, targets: [asset, literature, run]}
+  - {source: asset, relation: produces, targets: [evidence, run]}
+  - {source: asset, relation: satisfies, targets: [prerequisite]}
+  - {source: asset, relation: used_by, targets: [ablation, experiment, method, run]}
+  - source: asset
+    relation: validates
+    targets: [gate]
+    when:
+      op: gate_policy_compatible
+      gate_policy: research-capability-gates
+      subject: $source
+      gate_subject: $target
+
+  - {source: gate, relation: applies_to, targets: [ablation, asset, claim, experiment, gate, hypothesis, method, metric, prerequisite, run]}
+  - {source: gate, relation: requires, targets: [asset, metric, prerequisite]}
+  - {source: gate, relation: strengthens, targets: [gate]}
+  - {source: gate, relation: validates, targets: [ablation, asset, experiment, method]}
+
+  - {source: run, relation: evaluates, targets: [ablation, claim, experiment, gate, method]}
+  - {source: run, relation: produces, targets: [evidence, report]}
+  - {source: run, relation: uses, targets: [ablation, asset, experiment, gate, method, metric]}
+
+  - {source: evidence, relation: contradicts, targets: [ablation, claim, experiment, hypothesis, method]}
+  - {source: evidence, relation: from_gates, targets: [gate]}
+  - {source: evidence, relation: from_runs, targets: [run]}
+  - {source: evidence, relation: informs, targets: [ablation, asset, claim, experiment, gate, hypothesis, method, metric, prerequisite, run]}
+  - {source: evidence, relation: source_assets, targets: [asset]}
+  - {source: evidence, relation: supports, targets: [ablation, claim, experiment, hypothesis, method]}
+
+  - {source: report, relation: cites, targets: [ablation, asset, claim, evidence, experiment, gate, literature, method, run]}
+  - {source: report, relation: summarizes, targets: [ablation, claim, evidence, experiment, hypothesis, method]}

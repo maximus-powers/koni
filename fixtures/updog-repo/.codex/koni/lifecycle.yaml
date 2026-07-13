@@ -1,0 +1,27 @@
+schema_version: "1.0"
+module: {id: updog.lifecycle, version: 0.1.0}
+
+state_machines:
+  - id: ticket
+    initial: todo
+    states: [proposed, todo, in_progress, integrating, blocked, closed, retired]
+    terminal_states: [closed, retired]
+    transitions:
+      - {id: approve, from: [proposed], to: todo, actors: [lead]}
+      - {id: start, from: [todo], to: in_progress, actors: [lead]}
+      - {id: request-review, from: [in_progress], to: integrating, actors: [lead, compiler]}
+      - {id: rework, from: [integrating], to: in_progress, actors: [reviewer, compiler]}
+      - {id: block-todo, from: [todo], to: blocked, actors: [compiler]}
+      - {id: block-active, from: [in_progress, integrating], to: blocked, actors: [compiler]}
+      - {id: release, from: [blocked], to: todo, actors: [compiler, lead]}
+      - {id: finish, from: [integrating, in_progress], to: closed, actors: [compiler]}
+      - {id: retire, from: [proposed, todo, blocked], to: retired, actors: [compiler]}
+  - id: run
+    initial: active
+    states: [active, paused, concluded, stopped, failed]
+    terminal_states: [concluded, stopped, failed]
+    transitions:
+      - {id: pause, from: [active], to: paused, actors: [human, lead]}
+      - {id: resume, from: [paused], to: active, actors: [human, lead]}
+      - {id: conclude, from: [active, paused], to: concluded, actors: [compiler, lead]}
+      - {id: stop, from: [active, paused], to: stopped, actors: [human]}

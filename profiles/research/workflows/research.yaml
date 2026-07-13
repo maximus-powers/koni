@@ -1,0 +1,171 @@
+workflows:
+  - id: standard-research-transition
+    applies_to: [map-literature, decompose-claims, define-metrics, map-prereqs, evaluate-gate]
+    review_failure_reopen_from: work
+    steps:
+      - {id: work, persona: experiment-designer, depends_on: [], expected_output: structured findings risks graph delta receipt refs and next recommendation, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [scope-broadening, upstream-semantic-change], stop_conditions: [stale-context, structural-validation-failure, out-of-scope-write]}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [work], expected_output: integrated bounded graph delta, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [scope-broadening], stop_conditions: [structural-validation-failure]}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: typed review receipt, validation_action: review, required_receipts: [review-receipt], escalation_triggers: [ambiguous-semantic-acceptance], stop_conditions: [transition-checklist-failed]}
+
+  - id: drill-hypothesis
+    applies_to: [drill-hypothesis]
+    steps:
+      - {id: drill-claims, persona: hypothesis-planner, depends_on: [], expected_output: claim graph delta within formulation scope, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [major-research-pivot], stop_conditions: [stage-skip, concrete-asset-creation]}
+      - {id: map-related-work, persona: research-scout, depends_on: [], expected_output: literature graph delta with provenance, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [unavailable-source], stop_conditions: [stage-skip, concrete-asset-creation]}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [drill-claims, map-related-work], expected_output: integrated claims and literature transition, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [scope-broadening], stop_conditions: [structural-validation-failure]}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: typed review receipt, validation_action: review, required_receipts: [review-receipt], escalation_triggers: [ambiguous-semantic-acceptance], stop_conditions: [transition-checklist-failed]}
+
+  - id: design-experiment-portfolio
+    applies_to: [design-experiment]
+    review_failure_reopen_from: design-experiment-portfolio
+    steps:
+      - {id: map-claim-portfolio, persona: research-scout, depends_on: [], expected_output: claim portfolio and coverage gaps, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [claim-scope-ambiguity], stop_conditions: [stage-skip]}
+      - {id: design-experiment-portfolio, persona: experiment-designer, depends_on: [map-claim-portfolio], expected_output: a small cohesive empirical experiment-only portfolio grouping related claim checks into shared executable programs within the configured max_new_nodes; every experiment declares meaningful empirical_mode execution_protocol and observable_outcome and excludes static proof inspection traceability audit or review work, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [major-research-pivot, no-empirical-test], stop_conditions: [downstream-node-creation, concrete-asset-creation, non-empirical-experiment]}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [design-experiment-portfolio], expected_output: integrated cohesive empirical experiment portfolio within the configured node budget with executable protocols and runtime-observable outcomes, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [scope-broadening], stop_conditions: [structural-validation-failure, ontology-drift]}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: typed ontology granularity and transition review receipt rejecting non-empirical experiment nodes placeholder empirical fields and needless one-node-per-check atomization, validation_action: review, required_receipts: [review-receipt], escalation_triggers: [ambiguous-semantic-acceptance], stop_conditions: [transition-checklist-failed, experiment-ontology-failed]}
+
+  - id: design-claim-experiment
+    applies_to: [design-experiment]
+    review_failure_reopen_from: design-experiment
+    steps:
+      - {id: map-claim-context, persona: research-scout, depends_on: [], expected_output: claim context and experiment-only constraints, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [claim-scope-ambiguity], stop_conditions: [stage-skip]}
+      - {id: design-experiment, persona: experiment-designer, depends_on: [map-claim-context], expected_output: empirical experiment graph delta for target claim declaring meaningful empirical_mode execution_protocol and observable_outcome and excluding static proof inspection traceability audit or review work, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [major-research-pivot, no-empirical-test], stop_conditions: [downstream-node-creation, concrete-asset-creation, non-empirical-experiment]}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [design-experiment], expected_output: integrated empirical experiment transition with an executable protocol and runtime-observable outcome, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [scope-broadening], stop_conditions: [structural-validation-failure, ontology-drift]}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: typed ontology and transition review receipt rejecting non-empirical experiment nodes and placeholder empirical fields, validation_action: review, required_receipts: [review-receipt], escalation_triggers: [ambiguous-semantic-acceptance], stop_conditions: [transition-checklist-failed, experiment-ontology-failed]}
+
+  - id: design-experiment-constitution
+    applies_to: [design-experiment]
+    review_failure_reopen_from: design-methods
+    steps:
+      - {id: design-methods, persona: experiment-designer, depends_on: [], expected_output: method graph delta, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [scope-broadening], stop_conditions: [concrete-asset-creation]}
+      - {id: define-metrics, persona: experiment-designer, depends_on: [design-methods], expected_output: metric definitions and thresholds, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [metric-contract-ambiguity], stop_conditions: [concrete-asset-creation]}
+      - {id: map-prerequisites, persona: gate-designer, depends_on: [design-methods], expected_output: prerequisite needs without concrete assets, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [external-side-effect], stop_conditions: [concrete-asset-creation]}
+      - {id: plan-ablations, persona: experiment-designer, depends_on: [define-metrics], expected_output: controlled ablation graph delta, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [major-research-pivot], stop_conditions: [concrete-asset-creation]}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [map-prerequisites, plan-ablations], expected_output: integrated experiment constitution, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [scope-broadening], stop_conditions: [stage-skip]}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: typed review receipt, validation_action: review, required_receipts: [review-receipt], escalation_triggers: [ambiguous-semantic-acceptance], stop_conditions: [transition-checklist-failed]}
+
+  - id: define-gates
+    applies_to: [define-gates]
+    review_failure_reopen_from: write-gate-contracts
+    steps:
+      - {id: compile-gate-stack, persona: gate-designer, depends_on: [], expected_output: direct and inherited gate analysis, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [gate-placement-ambiguity], stop_conditions: [gate-weakening]}
+      - {id: write-gate-contracts, persona: gate-designer, depends_on: [compile-gate-stack], expected_output: expected-red typed gate contract with reciprocal gate.applies_to and target.gates semantic links, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [gate-waiver], stop_conditions: [asset-creation, skipped-gate-state, incomplete-gate-linkage]}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [write-gate-contracts], expected_output: integrated expected-red gate transition satisfying both configured gate relationship contracts, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [scope-broadening], stop_conditions: [structural-validation-failure]}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: typed review receipt, validation_action: review, required_receipts: [review-receipt], escalation_triggers: [ambiguous-gate-contract], stop_conditions: [transition-checklist-failed]}
+
+  - id: compile-gate-package
+    applies_to: [compile-gates, compile-tests]
+    review_failure_reopen_from: work
+    steps:
+      - {id: work, persona: experiment-designer, depends_on: [], expected_output: expected-red executable gate package or test contract, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [nondeterministic-oracle], stop_conditions: [protected-tooling-write]}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [work], expected_output: integrated executable contract surface, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [scope-broadening], stop_conditions: [structural-validation-failure]}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: typed review receipt, validation_action: review, required_receipts: [review-receipt], escalation_triggers: [ambiguous-gate-contract], stop_conditions: [transition-checklist-failed]}
+
+  - id: resolve-assets
+    applies_to: [resolve-assets, plan-build-asset]
+    review_failure_reopen_from: plan-asset
+    steps:
+      - {id: map-capability, persona: gate-designer, depends_on: [], expected_output: capability and protocol analysis with an empty graph delta, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [credential-change], stop_conditions: [scope-broadening, asset-creation]}
+      - {id: plan-asset, persona: asset-builder, depends_on: [map-capability], expected_output: one planned asset with spec.implementation_plan.root and nonempty project-relative files plus validates links; new nodes omit every compiler-owned field and existing upserts preserve current compiler-owned values exactly, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [expensive-download, license-ambiguity], stop_conditions: [unvendored-external-payload, compiler-owned-field-authorship]}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [plan-asset], expected_output: linked asset delta or bounded build recommendation, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [scope-broadening], stop_conditions: [upstream-semantic-rewrite]}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: typed review receipt, validation_action: review, required_receipts: [review-receipt], escalation_triggers: [ambiguous-asset-provenance], stop_conditions: [transition-checklist-failed]}
+
+  - id: implement-asset
+    applies_to: [validate-asset, implement-asset]
+    review_failure_reopen_from: implement
+    steps:
+      - {id: inspect-contracts, persona: gate-designer, depends_on: [], expected_output: implementation and gate contract analysis, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [gate-contract-defect], stop_conditions: [stale-context]}
+      - {id: implement, persona: asset-builder, depends_on: [inspect-contracts], expected_output: concrete nonempty payload plus spec.implementation.kind and unique project-relative entrypoints under the authorized root, including deterministic autoresearch.gate-result.v1 verifier commands for every target gate; preserve existing compiler-owned values exactly and never author them on new nodes, validation_action: compile-ticket, required_receipts: [context-pack, scoped-compile, runtime-receipt-when-command-runs], escalation_triggers: [destructive-operation, expensive-run], stop_conditions: [out-of-scope-write, gate-weakening, compiler-owned-field-authorship]}
+      - {id: verify, persona: run-operator, depends_on: [implement], expected_output: typed validation receipts, validation_action: compile-ticket, required_receipts: [context-pack, scoped-compile, runtime-receipt-when-command-runs], escalation_triggers: [irreversible-side-effect], stop_conditions: [invalid-contract]}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [verify], expected_output: canonical existing-asset upsert preserving current compiler-owned fields exactly while adding authored implementation kind, entrypoints, exact gate_contracts, and validates links; new nodes omit compiler-owned fields, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [scope-broadening], stop_conditions: [upstream-semantic-rewrite, missing-concrete-file, missing-verification-receipt, missing-gate-contract, compiler-owned-field-authorship]}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: typed review receipt, validation_action: review, required_receipts: [review-receipt], escalation_triggers: [ambiguous-asset-provenance], stop_conditions: [transition-checklist-failed]}
+
+  - id: compile-run-plan
+    applies_to: [compile-run-plan]
+    review_failure_reopen_from: design-runtime-contract
+    steps:
+      - {id: design-runtime-contract, persona: experiment-designer, depends_on: [], expected_output: executable scientific contract with exact autoresearch.research-result.v1 protocol nonempty unique required_measurements and an explicit stdout-with-empty-artifacts or durable-output requirement, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [major-research-pivot], stop_conditions: [missing-result-protocol]}
+      - {id: bind-concrete-assets, persona: asset-builder, depends_on: [design-runtime-contract], expected_output: typed asset_entrypoints and prerequisite-complete scientific_inputs whose project-relative paths are exact argv items plus a narrow output_root whenever result_path or nonempty produced artifacts are possible; omitting output_root requires stdout and artifacts empty, validation_action: compile-ticket, required_receipts: [context-pack, scoped-compile], escalation_triggers: [missing-concrete-asset], stop_conditions: [local-substitute, unbound-input]}
+      - {id: validate-result-protocol, persona: run-operator, depends_on: [bind-concrete-assets], expected_output: validated research result protocol with dynamic required measurement keys result_path beneath its predeclared output_root and only fresh created-or-content-changed artifact files; omitting output_root requires stdout and artifacts empty, validation_action: compile-ticket, required_receipts: [context-pack, scoped-compile, runtime-receipt-when-command-runs], escalation_triggers: [irreversible-run], stop_conditions: [invalid-contract]}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [validate-result-protocol], expected_output: linked run with the complete typed runtime_contract and uses edges for every bound asset, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [scope-broadening], stop_conditions: [asset-mutation]}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: typed review receipt, validation_action: review, required_receipts: [review-receipt], escalation_triggers: [ambiguous-scientific-contract], stop_conditions: [transition-checklist-failed]}
+
+  - id: run-gate-runtime
+    applies_to: [run-gate]
+    steps:
+      - {id: run, persona: run-operator, depends_on: [], expected_output: compiler-executed typed gate receipt from the policy-selected ticket-authorized asset gate contract, validation_action: compile-ticket, checks: [gate-verifier], required_receipts: [context-pack, scoped-compile, gate.receipt], escalation_triggers: [expensive-or-irreversible-runtime], stop_conditions: [invalid-contract, ambiguous-policy-selection, unauthorized-policy-winner, stop-steering]}
+      - {id: analyze, persona: evidence-analyst, depends_on: [run], expected_output: receipt interpretation as audit or evidence candidate, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [upstream-contract-defect], stop_conditions: [stale-receipt, invalid-scientific-binding]}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [analyze], expected_output: integrated receipt and graph state, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [scope-broadening], stop_conditions: [target-state-incomplete]}
+
+  - id: run-experiment-runtime
+    applies_to: [run-experiment]
+    steps:
+      - {id: run, persona: run-operator, depends_on: [], expected_output: typed scientific runtime receipt bound to the virtual ticket command and output contract; no output_root means a stdout result with empty artifacts while result_path and artifacts require fresh produced files beneath the predeclared root, validation_action: compile-ticket, checks: [scientific-runtime], required_receipts: [context-pack, scoped-compile, runtime.receipt], escalation_triggers: [expensive-or-irreversible-runtime], stop_conditions: [invalid-contract, missing-required-measurement, invalid-artifact-path, stop-steering]}
+      - {id: analyze, persona: evidence-analyst, depends_on: [run], expected_output: receipt interpretation as an evidence candidate, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [upstream-contract-defect], stop_conditions: [stale-receipt, invalid-scientific-binding]}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [analyze], expected_output: integrated receipt and graph state, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [scope-broadening], stop_conditions: [target-state-incomplete]}
+
+  - id: synthesize-evidence
+    applies_to: [synthesize-evidence]
+    review_failure_reopen_from: work
+    steps:
+      - {id: work, persona: experiment-designer, depends_on: [], expected_output: candidate evidence covering every preflight run and exact receipt disposition, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [ambiguous-disposition], stop_conditions: [self-promotion, stale-provenance]}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [work], expected_output: integrated evidence candidate graph delta, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [scope-broadening], stop_conditions: [incomplete-run-coverage]}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: Lead review and promotion decision, validation_action: review, required_receipts: [review-receipt], escalation_triggers: [ambiguous-evidence-interpretation], stop_conditions: [transition-checklist-failed]}
+
+  - id: compile-report
+    applies_to: [compile-report]
+    review_failure_reopen_from: analyze-evidence
+    steps:
+      - {id: analyze-evidence, persona: evidence-analyst, depends_on: [], expected_output: current promoted evidence synthesis with threats, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [stale-evidence], stop_conditions: [unpromoted-evidence-use]}
+      - {id: draft-report, persona: report-writer, depends_on: [analyze-evidence], expected_output: report citing promoted current evidence, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [unsupported-conclusion], stop_conditions: [missing-citation-provenance]}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [draft-report], expected_output: integrated report graph delta, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [scope-broadening], stop_conditions: [stale-evidence]}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: typed review receipt, validation_action: review, required_receipts: [review-receipt], escalation_triggers: [ambiguous-synthesis], stop_conditions: [transition-checklist-failed]}
+
+  - id: conclude-hypothesis
+    applies_to: [conclude-hypothesis]
+    review_failure_reopen_from: synthesize-claims
+    steps:
+      - {id: synthesize-claims, persona: evidence-analyst, depends_on: [], expected_output: every claim paired with current promoted evidence, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [missing-claim-evidence], stop_conditions: [stale-evidence]}
+      - {id: adjudicate-hypothesis, persona: evidence-analyst, depends_on: [synthesize-claims], expected_output: bounded disposition for every claim and hypothesis, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [ambiguous-disposition], stop_conditions: [unsupported-certainty]}
+      - {id: draft-conclusion, persona: report-writer, depends_on: [adjudicate-hypothesis], expected_output: conclusion report citing every current evidence atom, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [missing-limitations], stop_conditions: [incomplete-evidence-citation]}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [draft-conclusion], expected_output: integrated conclusion report, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [scope-broadening], stop_conditions: [stale-evidence]}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: Lead-bound conclusion acceptance, validation_action: review, required_receipts: [review-receipt], escalation_triggers: [ambiguous-hypothesis-conclusion], stop_conditions: [transition-checklist-failed]}
+
+  - id: draft-paper-input
+    applies_to: [draft-paper-input]
+    review_failure_reopen_from: draft-paper-input
+    steps:
+      - {id: map-paper-role, persona: report-writer, depends_on: [], expected_output: nonempty paper_context_role plus useful paper_input_role and paper_section for the accepted report, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [paper-scope-ambiguity], stop_conditions: [stale-report]}
+      - {id: draft-paper-input, persona: report-writer, depends_on: [map-paper-role], expected_output: paper fragment grounded in the reviewed conclusion with exact paper_input_status ready, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [unsupported-claim], stop_conditions: [uncited-evidence]}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [draft-paper-input], expected_output: update the accepted report while preserving compiler-owned conclusion fields and its exact evidence citations, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [scope-broadening], stop_conditions: [stale-report]}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: typed review receipt, validation_action: review, required_receipts: [review-receipt], escalation_triggers: [ambiguous-paper-role], stop_conditions: [transition-checklist-failed]}
+
+  - id: change-request
+    applies_to: [change-request, no-op]
+    review_failure_reopen_from: scope-change
+    steps:
+      - {id: scope-change, kind: integration, persona: integrator, depends_on: [], expected_output: bounded analysis with zero semantic or asset payload mutation, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [scope-broadening], stop_conditions: [payload-mutation]}
+      - {id: propose-graph-delta, kind: integration, persona: integrator, depends_on: [scope-change], expected_output: typed application operation targets summary risks and proposal, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [unrepresentable-change], stop_conditions: [payload-mutation, target-outside-source-scope]}
+      - {id: risk-review, kind: review, persona: reviewer, depends_on: [propose-graph-delta], expected_output: review bound to exact proposal hash, validation_action: review, required_receipts: [review-receipt], escalation_triggers: [major-research-pivot], stop_conditions: [proposal-hash-changed]}
+
+  - id: apply-change-request
+    applies_to: [apply-change-request]
+    review_failure_reopen_from: inspect-approved-change
+    steps:
+      - {id: inspect-approved-change, kind: integration, persona: integrator, depends_on: [], expected_output: approved proposal and contract provenance, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [approval-ambiguity], stop_conditions: [approval-hash-mismatch]}
+      - {id: apply-approved-delta, kind: integration, persona: integrator, depends_on: [inspect-approved-change], expected_output: exact approved existing-node semantic delta, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [scope-broadening], stop_conditions: [new-node-creation, asset-payload-mutation]}
+      - {id: verify, kind: review, persona: reviewer, depends_on: [apply-approved-delta], expected_output: review of exact approved delta, validation_action: review, required_receipts: [review-receipt], escalation_triggers: [concurrent-main-change], stop_conditions: [approval-hash-mismatch]}
+
+  - id: resolve-conflict
+    applies_to: [resolve-conflict]
+    review_failure_reopen_from: diagnose
+    steps:
+      - {id: diagnose, kind: integration, persona: integrator, depends_on: [], expected_output: conflict diagnosis preserving original worktree and base, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [semantic-ambiguity, unrecoverable-corruption], stop_conditions: [destructive-history-rewrite]}
+      - {id: resolve, kind: integration, persona: integrator, depends_on: [diagnose], expected_output: bounded resolution and original-ticket release plan, validation_action: compile-ticket, required_receipts: [context-pack, structured-output, scoped-compile], escalation_triggers: [semantic-ambiguity], stop_conditions: [resolver-chain, out-of-scope-write]}
+      - {id: review, kind: review, persona: reviewer, depends_on: [resolve], expected_output: typed recovery review, validation_action: review, required_receipts: [review-receipt], escalation_triggers: [unrecoverable-corruption], stop_conditions: [transition-checklist-failed]}
+
+  - id: review-ticket
+    applies_to: [review-ticket]
+    steps:
+      - {id: inspect, kind: review, persona: reviewer, depends_on: [], expected_output: strict transition checklist inspection, validation_action: review, required_receipts: [context-pack], escalation_triggers: [ambiguous-semantic-acceptance], stop_conditions: [active-worker]}
+      - {id: record-review, kind: review, persona: reviewer, depends_on: [inspect], expected_output: passed or failed typed review receipt, validation_action: review, required_receipts: [review-receipt], escalation_triggers: [ambiguous-semantic-acceptance], stop_conditions: [transition-checklist-failed-for-pass]}

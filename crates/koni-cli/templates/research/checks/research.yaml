@@ -1,0 +1,229 @@
+checks:
+  - id: scoped-operational-probe
+    kind: command
+    applies_to: [drill-hypothesis, map-literature, decompose-claims, design-experiment, define-metrics, map-prereqs, define-gates, compile-gates, compile-tests, compile-run-plan, resolve-assets, plan-build-asset, validate-asset, implement-asset, evaluate-gate, synthesize-evidence, compile-report, conclude-hypothesis, draft-paper-input, apply-change-request, resolve-conflict]
+    argv: [python3, -c, "import json; print(json.dumps({'protocol':'process-exit.v1','status':'passed'}))"]
+    cwd: .
+    timeout_seconds: 900
+    result_protocol: process-exit.v1
+    required_result_fields: [status]
+    receipt_type: compiler.scoped-probe
+    effect: read_only
+    environment:
+      inherit: [PATH, HOME, TMPDIR]
+      set: {PYTHONDONTWRITEBYTECODE: "1"}
+    retry_policy: {max_attempts: 1, transient_exit_codes: [], backoff_seconds: []}
+
+  - id: gate-verifier
+    kind: command
+    applies_to: [run-gate, validate-asset, implement-asset]
+    command_source:
+      kind: node
+      gate_policy: research-capability-gates
+      node_types: [asset]
+      role: asset
+      field: spec.gate_contracts[$gate.id].command
+    cwd: .
+    timeout_seconds: 900
+    result_protocol: autoresearch.gate-result.v1
+    required_result_fields: [schema_version, protocol, gate_id, verdict, measurements]
+    result_schema:
+      type: object
+      required: [schema_version, protocol, gate_id, verdict, measurements]
+      properties:
+        schema_version: {type: string, const: "1.0"}
+        protocol: {type: string, const: autoresearch.gate-result.v1}
+        gate_id: {type: string, pattern: '.*\S.*'}
+        verdict: {type: string, enum: [passed, failed, inconclusive]}
+        measurements: {type: object, minProperties: 1}
+    result_identity_field: gate_id
+    result_acceptance: {field: verdict, values: [passed]}
+    allow_nonpassing_receipt: true
+    receipt_type: gate.receipt
+    effect: read_only
+    environment:
+      inherit: [PATH, HOME, TMPDIR]
+      set: {PYTHONDONTWRITEBYTECODE: "1"}
+    retry_policy: {max_attempts: 1, transient_exit_codes: [], backoff_seconds: []}
+
+  - id: scientific-runtime
+    kind: command
+    applies_to: [run-experiment]
+    command_source:
+      kind: ticket
+      role: ticket
+      field: runtime_contract.command
+    cwd: .
+    timeout_seconds: 86400
+    result_protocol: autoresearch.research-result.v1
+    required_result_fields: [schema_version, protocol, verdict, measurements, observations, artifacts]
+    result_schema:
+      type: object
+      required: [schema_version, protocol, verdict, measurements, observations, artifacts]
+      properties:
+        schema_version: {type: string, const: "1.0"}
+        protocol: {type: string, const: autoresearch.research-result.v1}
+        verdict: {type: string, enum: [supported, contradicted, inconclusive]}
+        measurements: {type: object, minProperties: 1}
+        observations: {type: array}
+        artifacts:
+          type: array
+          items:
+            oneOf:
+              - {type: string, pattern: '.*\S.*'}
+              - type: object
+                required: [path]
+                properties:
+                  path: {type: string, pattern: '.*\S.*'}
+    dynamic_result:
+      required_keys:
+        source: {role: ticket, field: runtime_contract.required_measurements}
+        actual_field: measurements
+        relation: superset
+      result_path:
+        role: ticket
+        field: runtime_contract.result_path
+        path_authorities:
+          - {authority: write_paths, provenance: produced_output}
+      artifacts:
+        field: artifacts
+        allow_path_strings: true
+        path_field: path
+        path_authorities:
+          - {authority: write_paths, provenance: produced_output}
+    argv_input_bindings:
+      from: runtime_contract.scientific_inputs
+      path_field: path
+      required_fields: [asset_id, role, path]
+      require_nonempty: true
+      require_project_file: true
+      require_exact_argument: true
+    receipt_type: runtime.receipt
+    effect: workspace_write
+    environment:
+      inherit: [PATH, HOME, TMPDIR]
+      set: {PYTHONDONTWRITEBYTECODE: "1"}
+    retry_policy: {max_attempts: 1, transient_exit_codes: [], backoff_seconds: []}
+
+  - {id: ticket-transition-checklist, kind: graph, applies_to: [], cwd: ., receipt_type: review.receipt}
+  - {id: profile-native-validation, kind: graph, applies_to: [], cwd: ., receipt_type: validation.receipt}
+
+  # Domain gap evaluators are declarative graph checks consumed by the rule VM.
+  # Their IDs are stable public profile interfaces and replace Python branches.
+  - id: gap.hypothesis-formulation
+    kind: graph
+    applies_to: [drill-hypothesis]
+    cwd: .
+    receipt_type: graph.check
+    predicate:
+      any:
+        - {op: edge_count, relation: claims, exact: 0}
+        - {op: edge_count, relation: literature, exact: 0}
+  - id: gap.experiment-portfolio
+    kind: graph
+    applies_to: [design-experiment]
+    cwd: .
+    receipt_type: graph.check
+    predicate:
+      all:
+        - {op: edge_count, relation: claims, min: 1}
+        - {op: edge_count, relation: literature, min: 1}
+        - any:
+            - {op: edge_count, relation: experiments, exact: 0}
+            - not:
+                for_all:
+                  select: {traverse: {from: $target, relation: claims, direction: outgoing, max_depth: 1, node_types: [claim]}}
+                  bind: claim
+                  satisfies:
+                    all:
+                      - {op: edge_count, subject: $claim, relation: tested_by, min: 1}
+                      - op: set_relation
+                        left: {traverse: {from: $claim, relation: tested_by, direction: outgoing, max_depth: 1, node_types: [experiment]}}
+                        right: {traverse: {from: $claim, relation: target_claims, direction: incoming, max_depth: 1, node_types: [experiment]}}
+                        relation_kind: equal
+                      - op: set_relation
+                        left: {traverse: {from: $claim, relation: tested_by, direction: outgoing, max_depth: 1, node_types: [experiment]}}
+                        right: {traverse: {from: $target, relation: experiments, direction: outgoing, max_depth: 1, node_types: [experiment]}}
+                        relation_kind: subset
+  - id: gap.experiment-constitution
+    kind: graph
+    applies_to: [design-experiment]
+    cwd: .
+    receipt_type: graph.check
+    predicate:
+      any:
+        - {op: edge_count, relation: methods, exact: 0}
+        - {op: edge_count, relation: metrics, exact: 0}
+        - {op: edge_count, relation: ablations, exact: 0}
+        - {op: edge_count, relation: requires, exact: 0}
+  - id: gap.gate-contract
+    kind: graph
+    applies_to: [define-gates]
+    cwd: .
+    receipt_type: graph.check
+    predicate:
+      any:
+        - not:
+            exists: {policy_applicability: {policy: research-capability-gates, subject: $target, result: direct_gates}}
+        - not:
+            for_all:
+              select: {policy_applicability: {policy: research-capability-gates, subject: $target, result: direct_gates}}
+              bind: gate
+              satisfies:
+                all:
+                  - {op: field_present, subject: $gate, field: spec.command_result_contract}
+                  - {op: field_present, subject: $gate, field: spec.oracle_semantics}
+                  - {op: field_present, subject: $gate, field: spec.applicability}
+                  - {op: field_present, subject: $gate, field: spec.failure_meaning}
+                  - {op: field_equals, subject: $gate, field: spec.expected_red, value: true}
+  - id: gap.prerequisite-asset
+    kind: graph
+    applies_to: [resolve-assets]
+    cwd: .
+    receipt_type: graph.check
+    predicate:
+      all:
+        - {op: edge_count, relation: satisfied_by, exact: 0}
+        - {op: incoming_count, relation: satisfies, exact: 0}
+  - id: gap.asset-implementation
+    kind: graph
+    applies_to: [implement-asset]
+    cwd: .
+    receipt_type: graph.check
+    predicate:
+      any:
+        - {not: {op: filesystem_manifest_current}}
+        - {not: {op: field_equals, field: asset_manifest.implementation_status, value: ready}}
+        - {not: {op: field_equals, field: asset_manifest.vendor_status, value: vendored}}
+        - {op: edge_count, relation: validates, exact: 0}
+        - {not: {op: field_present, field: spec.gate_contracts}}
+  - {id: gap.gate-compatible-asset, kind: graph, applies_to: [plan-build-asset], cwd: ., receipt_type: graph.check, predicate: {not: {op: gate_policy_has_selection, gate_policy: research-capability-gates, gate_subject: $target}}}
+  - id: gap.gate-verdict
+    kind: graph
+    applies_to: [run-gate]
+    cwd: .
+    receipt_type: graph.check
+    predicate:
+      all:
+        - {op: gate_policy_has_selection, gate_policy: research-capability-gates, gate_subject: $target}
+        - {not: {op: current_receipt, receipt_type: gate.receipt}}
+  - {id: gap.run-plan, kind: graph, applies_to: [compile-run-plan], cwd: ., receipt_type: graph.check, predicate: {op: edge_count, relation: runs, exact: 0}}
+  - {id: gap.run-contract, kind: graph, applies_to: [compile-run-plan], cwd: ., receipt_type: graph.check, predicate: {not: {op: field_present, field: spec.runtime_contract.command}}}
+  - {id: gap.current-runtime-receipt, kind: graph, applies_to: [run-experiment], cwd: ., receipt_type: graph.check, predicate: {not: {op: current_receipt, receipt_type: runtime.receipt}}}
+  - {id: target.run-experiment-eligible, kind: graph, applies_to: [run-experiment], cwd: ., receipt_type: graph.check}
+  - {id: gap.current-promoted-evidence, kind: graph, applies_to: [synthesize-evidence], cwd: ., receipt_type: graph.check}
+  - {id: gap.reviewed-hypothesis-conclusion, kind: graph, applies_to: [conclude-hypothesis], cwd: ., receipt_type: graph.check}
+  - {id: gap.evidence-report, kind: graph, applies_to: [compile-report], cwd: ., receipt_type: graph.check}
+  - id: terminal.hypothesis-concluded-and-paper-ready
+    kind: graph
+    applies_to: []
+    cwd: .
+    receipt_type: graph.check
+    predicate:
+      all:
+        - {op: edge_count, relation: claims, min: 1}
+        - exists:
+            intersection:
+              - reviewed-conclusion-reports
+              - paper-ready-reports
+              - traverse: {from: $target, relation: summarizes, direction: incoming, max_depth: 1, node_types: [report]}

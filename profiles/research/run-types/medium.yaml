@@ -1,0 +1,80 @@
+schema_version: "1.0"
+id: medium
+title: Medium
+description: A standard project with one combined plan, targeted questions, parallel execution, and a verification checkpoint.
+instructions:
+  planning: |
+    Identify at most two focused questions whose answers would materially change
+    scope, research design, validity, provenance, or verification. When related
+    decisions are already visible together, return them in one compiler-owned
+    structured question batch instead of splitting them across turns. A batch
+    may contain one to three questions; give each two to four choices, one
+    recommendation, and the consequence of each choice.
+    Keep conclusions bounded to configured empirical receipts and their
+    observed scope. Evidence candidates must retain the profile markers
+    `evidence_basis: empirical_runtime` and
+    `inference_scope: bounded_empirical`. Route proof, source review, API shape,
+    termination, provenance, and hygiene to methods, prerequisites, gates, or
+    review rather than treating them as promotable evidence or inventing
+    receipt classes.
+profile:
+  source: .codex/koni/profile.yaml
+intake:
+  fields:
+    goal:
+      label: Goal
+      description: Describe the research outcome Koni should deliver.
+      type: text
+      required: true
+  order: [goal]
+pipeline:
+  stages:
+    intake:
+      kind: action
+      title: Validate intake
+      config: {compiler_owned: true, action: planning.intake}
+    combined-plan:
+      kind: planning
+      title: Plan implementation, architecture, and risk
+      config:
+        persona: run-planner
+        prompt: Produce one research plan covering scoped scientific claims, a small cohesive empirical portfolio, dependencies, risks, configured receipt provenance, empirical_runtime evidence with bounded_empirical inference scope, and verification.
+    approval:
+      kind: approval
+      title: Approve the plan
+    initialize:
+      kind: initialize
+      title: Initialize the run
+    orchestrate:
+      kind: orchestration
+      title: Execute compiled work
+    verification:
+      kind: checkpoint
+      title: Verify the completed run
+      config: {checkpoint: verification}
+    report:
+      kind: action
+      title: Compile final report
+      config: {action: report, automatic: true}
+  order: [intake, combined-plan, approval, initialize, orchestrate, verification, report]
+questions:
+  policy: high_impact_only
+  default_scope: run
+git:
+  branch_template: "koni/runs/{{ run.slug }}-{{ run.short_id }}"
+  ticket_branch_template: "koni/runs/{{ run.id }}/tickets/{{ ticket.id }}"
+run_card:
+  sections: [goal, pipeline, graph, tickets, checks, report]
+agents:
+  roles:
+    planner: {model: gpt-5.6-sol, reasoning_effort: xhigh}
+    lead: {model: gpt-5.6-sol, reasoning_effort: xhigh}
+    ticket_worker: {model: gpt-5.6-terra, reasoning_effort: high}
+    reviewer: {model: gpt-5.6-terra, reasoning_effort: xhigh}
+  personas: {}
+orchestration:
+  auto_start: true
+  max_parallel: 3
+  compile_action: compile
+  lead_action: spawn-lead
+  report_action: report

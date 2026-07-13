@@ -1,0 +1,302 @@
+node_types:
+  - id: hypothesis
+    description: A falsifiable research proposition that organizes the claims, experiments, and evidence needed to evaluate it.
+    stage: formulation
+    required_any: [[hypothesis, statement]]
+    gate_required: false
+    statuses: [draft, active, blocked, satisfied, failed, superseded, archived]
+    initial_status: draft
+    semantic_fields: [schema_version, id, type, title, spec, edges]
+    compiler_owned_fields: [status, readiness, obligations, tickets, gates, receipts, evidence, reports, compiler, spec.planning_context]
+    fields:
+      hypothesis:
+        type: json
+        description: The primary falsifiable proposition supplied as the run goal.
+      statement:
+        type: json
+        description: An alternate concise statement of the proposition when hypothesis is not used.
+      objective:
+        type: string
+        description: The bounded empirical research objective used to clarify and test the proposition.
+      planning_context:
+        type: object
+        required: false
+        description: A bounded, compiler-owned record of the approved plan and resolved decisions that authoritatively guide this run.
+
+  - id: literature
+    description: An external scholarly source or prior result, recorded with enough citation and summary context to support research decisions.
+    stage: formulation
+    required_any: [[summary, citation, source_locator]]
+    gate_required: false
+    statuses: [draft, active, blocked, satisfied, failed, superseded, archived]
+    initial_status: draft
+    semantic_fields: [schema_version, id, type, title, spec, edges]
+    compiler_owned_fields: [status, readiness, obligations, tickets, gates, receipts, evidence, reports, compiler]
+
+  - id: claim
+    description: A precise scientific statement whose support or refutation can be traced to experiments and evidence.
+    stage: experiment_design
+    required_any: [[claim, statement], [scope], [assumptions], [falsification, falsification_criteria], [evidence_standard], [threat_model]]
+    gate_required: true
+    statuses: [draft, active, blocked, satisfied, failed, superseded, archived]
+    initial_status: draft
+    semantic_fields: [schema_version, id, type, title, spec, edges]
+    compiler_owned_fields: [status, readiness, obligations, tickets, gates, receipts, evidence, reports, compiler]
+    fields:
+      claim: {type: string, required: false, description: "The precise falsifiable scientific statement."}
+      statement: {type: string, required: false, description: "An alternate precise statement when claim is not used."}
+      scope: {type: string, required: true, description: "The population, interface, conditions, and boundaries to which evidence dispositions apply."}
+      assumptions: {type: json, required: true, description: "Nonempty assumptions needed to interpret or test the claim, including an explicit none-beyond-scope statement when appropriate."}
+      falsification: {type: string, required: false, description: "A concrete observation that would contradict the claim."}
+      falsification_criteria: {type: string, required: false, description: "Alternate field for the concrete observations that would contradict the claim."}
+      evidence_standard: {type: string, required: true, description: "What observations can support, contradict, or leave the claim inconclusive and how conclusions remain bounded to their receipt-backed scope."}
+      threat_model: {type: json, required: true, description: "Nonempty validity threats and the controls needed before evidence may be promoted."}
+
+  - id: experiment
+    description: A planned, executable empirical intervention or observation that can produce a runtime observation capable of discriminating among claim outcomes. Static reasoning, proofs, source inspection, traceability audits, documentation review, and other non-executed checks are not experiments; represent those as methods, gates, prerequisites, or review work.
+    stage: preparation
+    required_any: [[objective, target_claim_summary]]
+    gate_required: true
+    statuses: [draft, active, blocked, satisfied, failed, superseded, archived]
+    initial_status: draft
+    semantic_fields: [schema_version, id, type, title, spec, edges]
+    compiler_owned_fields: [status, readiness, obligations, tickets, gates, receipts, evidence, reports, compiler]
+    annotations:
+      ontology_contract:
+        category: empirical_execution
+        required_characteristics: [empirical intervention or observation, executable protocol, runtime-observable outcome]
+        excluded_work: [static reasoning or proof, source inspection, traceability mapping, documentation audit, no-write review, unexecuted verification]
+        route_excluded_work_to: [method, gate, prerequisite, review]
+    fields:
+      objective: {type: string, required: true, description: "The falsifiable empirical objective; it must say what runtime observation could support, refute, or qualify the target claim."}
+      target_claim_summary: {type: string, required: true, description: "The claim outcomes this empirical execution is intended to discriminate among."}
+      empirical_mode: {type: string, required: true, enum: [intervention, observation], description: "Whether execution deliberately intervenes on an input/condition or observes a subject at runtime; static or review-only work is not a valid mode."}
+      execution_protocol: {type: string, required: true, description: "A prospective executable procedure that will run, measure, sample, or query the subject. Reading or reasoning about existing artifacts alone is not execution."}
+      observable_outcome: {type: string, required: true, description: "The runtime-produced measurement or observation and how different values distinguish claim outcomes; a review opinion or proof conclusion is not an observable outcome."}
+
+  - id: prerequisite
+    description: A capability, dataset, dependency, or condition that must be resolved before a research operation can proceed safely.
+    stage: preparation
+    required_any: [[required_asset_type, validation_approach]]
+    gate_required: true
+    statuses: [draft, active, blocked, satisfied, failed, superseded, archived]
+    initial_status: draft
+    semantic_fields: [schema_version, id, type, title, spec, edges]
+    compiler_owned_fields: [status, readiness, obligations, tickets, gates, receipts, evidence, reports, compiler]
+
+  - id: metric
+    description: An operationally defined measure used to evaluate experimental outcomes consistently.
+    stage: preparation
+    required_any: [[name], [definition]]
+    gate_required: true
+    statuses: [draft, active, blocked, satisfied, failed, superseded, archived]
+    initial_status: draft
+    semantic_fields: [schema_version, id, type, title, spec, edges]
+    compiler_owned_fields: [status, readiness, obligations, tickets, gates, receipts, evidence, reports, compiler]
+
+  - id: method
+    description: A reproducible analytical or experimental procedure used to produce interpretable results.
+    stage: preparation
+    required_any: [[approach, summary, method]]
+    gate_required: true
+    statuses: [draft, active, blocked, satisfied, failed, superseded, archived]
+    initial_status: draft
+    semantic_fields: [schema_version, id, type, title, spec, edges]
+    compiler_owned_fields: [status, readiness, obligations, tickets, gates, receipts, evidence, reports, compiler]
+
+  - id: ablation
+    description: A controlled comparison that isolates the consequence of one deliberate methodological difference.
+    stage: preparation
+    required_any: [[controlled_difference, decision_key, summary]]
+    gate_required: true
+    statuses: [draft, active, blocked, satisfied, failed, superseded, archived]
+    initial_status: draft
+    semantic_fields: [schema_version, id, type, title, spec, edges]
+    compiler_owned_fields: [status, readiness, obligations, tickets, gates, receipts, evidence, reports, compiler]
+
+  - id: asset
+    description: A materialized research resource such as code, data, a model, or a tool that provides declared capabilities.
+    stage: asset_resolution
+    required_any: [[capabilities]]
+    gate_required: false
+    statuses: [draft, active, blocked, satisfied, failed, superseded, archived]
+    initial_status: draft
+    semantic_fields: [schema_version, id, type, title, spec, edges]
+    compiler_owned_fields: [status, readiness, obligations, tickets, gates, receipts, evidence, reports, compiler, asset_manifest]
+    filesystem_manifest:
+      root_field: spec.implementation_plan.root
+      implementation_contract_field: spec.implementation
+      implementation_kind_field: spec.implementation.kind
+      implementation_entrypoints_field: spec.implementation.entrypoints
+      contract_fields: [spec.implementation_plan, spec.capabilities, spec.gate_contracts, spec.vendor]
+      output_field: asset_manifest
+      allowed_root_prefixes: [program/assets]
+      scan:
+        ignored_file_names: [.coverage]
+        ignored_path_components: [__pycache__, .pytest_cache, .mypy_cache, .ruff_cache, .git, target]
+        ignored_suffixes: [.pyc, .pyo]
+        ignored_path_prefixes: [scratch, tmp, runtime]
+        symlinks: reject
+      source:
+        field: spec.source_strategy
+        external_values: [external, vendored, downloaded]
+        vendor:
+          path_fields: [spec.vendor.paths]
+          blocked_reason_fields: [spec.vendor.blocked_reason]
+    fields:
+      capabilities: {type: list, required: false, items: {type: object}, description: "Capability objects containing stable names, provided protocol versions/ranges, and entrypoints."}
+      gate_contracts: {type: object, required: false, description: "Per-gate deterministic verifier contracts keyed by exact gate id; each contract carries protocol autoresearch.gate-result.v1 and a nonempty command argv."}
+      implementation_plan:
+        type: object
+        required: false
+        additional_properties: false
+        description: "Authored plan for compiler-scanned product files; it is never evidence that the files exist."
+        properties:
+          root: {type: path, required: true, pattern: '^program/assets(?:/.*)?$', description: "Project-relative compiler-scanned payload root under program/assets."}
+          files: {type: list, required: true, items: {type: path, pattern: '^program/assets(?:/.*)?$'}, description: "Planned project-relative product paths; the compiler independently inventories actual files."}
+      implementation:
+        type: object
+        required: false
+        additional_properties: false
+        description: "Authored implementation contract; compiler-owned asset_manifest records whether it is concretely satisfied."
+        properties:
+          kind: {type: string, required: true, pattern: '.*\S.*', description: "Nonempty implementation kind such as script, dataset, model, or tool."}
+          entrypoints: {type: list, required: true, items: {type: path, pattern: '^program/assets(?:/.*)?$'}, description: "Nonempty unique project-relative product entrypoints under the planned root."}
+      source_strategy: {type: string, required: false, enum: [internal, generated, external, vendored, downloaded], description: "Whether the payload is generated locally or must satisfy configured external vendoring policy."}
+      vendor:
+        type: object
+        required: false
+        additional_properties: false
+        description: "Optional external-source vendoring expectations interpreted by the compiler."
+        properties:
+          paths: {type: list, required: false, items: {type: path, pattern: '^program/assets(?:/.*)?$'}, description: "Expected project-relative vendored files under the payload root."}
+          blocked_reason: {type: string, required: false, pattern: '.*\S.*', description: "Explicit licensing, credential, or acquisition blocker."}
+
+  - id: gate
+    description: A deterministic readiness assertion that must be evaluated from a declared capability and typed result contract.
+    stage: graph_compilation
+    required_any: [[assertion], [capability]]
+    gate_required: false
+    statuses: [draft, active, blocked, satisfied, failed, superseded, archived]
+    initial_status: draft
+    semantic_fields: [schema_version, id, type, title, spec, edges]
+    compiler_owned_fields: [status, readiness, obligations, tickets, gates, receipts, evidence, reports, compiler, gate_state]
+    fields:
+      assertion: {type: string, required: true, description: "The deterministic proposition evaluated by this gate."}
+      applicability: {type: string, required: true, description: "The graph and scientific context in which the gate is authoritative."}
+      capability:
+        type: object
+        required: true
+        additional_properties: false
+        description: "Required semantic capability contract. Its version range is distinct from the autoresearch.gate-result.v1 executable adapter protocol."
+        properties:
+          name: {type: string, required: true, pattern: '^[A-Za-z][A-Za-z0-9_.-]*$', description: "Stable capability identifier shared by gates and compatible assets."}
+          protocol_range: {type: string, required: true, pattern: '^(?:>=|<=|>|<|=|\^|~)[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:(?:,\s*|\s+)(?:>=|<=|>|<|=|\^|~)[0-9]+\.[0-9]+(?:\.[0-9]+)?)*$', description: "Semantic-version comparator range such as >=1.0,<2.0 or >=1.0.0 <2.0.0; never the autoresearch.gate-result.v1 adapter result protocol."}
+      command_result_contract: {type: object, required: true, description: "Semantic command inputs and typed result expectations; executable asset argv lives in asset.spec.gate_contracts."}
+      oracle_semantics:
+        type: object
+        required: true
+        additional_properties: false
+        description: "Exact deterministic interpretation for all four supported outcomes."
+        properties:
+          pass: {type: string, required: true, description: "How a passing adapter verdict is interpreted."}
+          fail: {type: string, required: true, description: "How a failing adapter verdict is interpreted."}
+          inconclusive: {type: string, required: true, description: "How an inconclusive adapter verdict is interpreted."}
+          contract_error: {type: string, required: true, description: "How malformed or protocol-incompatible adapter output is interpreted."}
+      failure_meaning: {type: string, required: true, description: "What a nonpassing verdict means for the target without overstating evidence."}
+      expected_red: {type: boolean, required: true, description: "True while the gate lacks a current passing compiler-owned receipt."}
+
+  - id: run
+    description: A concrete execution attempt of an experiment or method, with enough intent and result context for provenance.
+    stage: execution
+    required_any: [[intent, summary, result_summary]]
+    gate_required: false
+    statuses: [draft, active, blocked, satisfied, failed, superseded, archived]
+    initial_status: draft
+    semantic_fields: [schema_version, id, type, title, spec, edges]
+    compiler_owned_fields: [status, readiness, obligations, tickets, gates, receipts, evidence, reports, compiler]
+    fields:
+      intent: {type: string, required: false, pattern: '.*\S.*', description: "The planned purpose, empirical condition, or comparison this execution attempt is intended to realize."}
+      summary: {type: string, required: false, pattern: '.*\S.*', description: "A concise human-readable description of the run plan or execution context."}
+      result_summary: {type: string, required: false, pattern: '.*\S.*', description: "A concise outcome summary grounded in the run's current typed runtime receipt."}
+      runtime_contract:
+        type: object
+        required: false
+        additional_properties: false
+        description: "Executable scientific contract copied into the virtual run ticket and validated before compiler-owned execution."
+        properties:
+          command: {type: list, required: true, items: {type: string, pattern: '.*\S.*'}, description: "Nonempty argv executed exactly, without shell interpolation or fallback substitution."}
+          result_protocol: {type: string, required: true, enum: [autoresearch.research-result.v1], description: "Exact typed scientific result protocol emitted on stdout or at result_path."}
+          required_measurements: {type: list, required: true, items: {type: string, pattern: '.*\S.*'}, description: "Nonempty unique measurement keys that must all occur in the result measurements object."}
+          output_root: {type: path, required: false, pattern: '.*\S.*', description: "Optional narrow project-relative root authorized for fresh result and artifact files; omit it only when stdout is the result source and artifacts is empty."}
+          asset_entrypoints:
+            type: list
+            required: true
+            description: "Concrete linked asset entrypoints available to the command; at least one must be an exact argv item."
+            items:
+              type: object
+              additional_properties: false
+              properties:
+                asset_id: {type: node_ref, required: true, description: "Asset node linked by the run's uses edge."}
+                path: {type: path, required: true, description: "Project-relative concrete implementation entrypoint belonging to asset_id."}
+          scientific_inputs:
+            type: list
+            required: true
+            description: "Exact project-file bindings for every inherited scientific prerequisite."
+            items:
+              type: object
+              additional_properties: false
+              properties:
+                asset_id: {type: node_ref, required: true, description: "Concrete asset node supplying this scientific input."}
+                role: {type: string, required: true, pattern: '.*\S.*', description: "Scientific role such as evaluator, dataset, fixture, or model."}
+                path: {type: path, required: true, description: "Project-relative asset-owned file that appears as an exact command argument."}
+          result_path: {type: path, required: false, pattern: '.*\S.*', description: "Optional project-relative JSON result file below output_root; when absent, the runtime parses command stdout."}
+
+  - id: evidence
+    description: An interpreted empirical runtime observation linked to the scientific claim it supports, refutes, or qualifies within a bounded inference scope.
+    stage: evidence_reports
+    required_any: [[summary], [interpretation], [evidence_basis], [inference_scope], [polarity], [confidence], [scope], [limitations], [receipt_refs]]
+    gate_required: false
+    statuses: [draft, active, blocked, satisfied, failed, superseded, archived]
+    initial_status: draft
+    semantic_fields: [schema_version, id, type, title, spec, edges]
+    compiler_owned_fields: [status, readiness, obligations, tickets, gates, receipts, evidence, reports, compiler, spec.promotion_state, spec.promoted_by, spec.promotion_review_id]
+    fields:
+      summary: {type: string, required: true, description: "A concise receipt-grounded observation without extending beyond the measured scope."}
+      interpretation: {type: string, required: true, description: "How the current runtime receipts support, contradict, or fail to resolve the target within the declared scope."}
+      evidence_basis: {type: string, required: true, enum: [empirical_runtime], description: "The configured epistemic source for this evidence atom. This empirical profile accepts runtime observations only; a formal-research profile may define a different basis."}
+      inference_scope: {type: string, required: true, enum: [bounded_empirical], description: "The permitted inference class. Bounded empirical evidence may speak only to the observed population, interface, conditions, and implementation."}
+      polarity: {type: string, required: true, enum: [supported, contradicted, inconclusive], description: "The evidence disposition within scope; supported never means universal proof."}
+      confidence: {type: string, required: true, enum: [low, medium, high], description: "Confidence in the scoped interpretation, not confidence that an unbounded proposition is universally true."}
+      scope: {type: string, required: true, description: "The exact tested or observed population, interfaces, conditions, and implementations covered by the cited receipts."}
+      limitations: {type: list, required: true, items: {type: string, pattern: '.*\S.*'}, description: "Nonempty boundaries and unresolved threats, including finite-corpus or untested-population limits where applicable."}
+      receipt_refs: {type: list, required: true, items: {type: string, pattern: '.*\S.*'}, description: "Exact current runtime receipt identities interpreted by this evidence atom; static proof or review prose is not a substitute."}
+      run_dispositions: {type: object, required: true, description: "Exact map keyed by every linked source-run ID; each value records supports, contradicts, neutral, or out_of_scope plus the latest current receipt ID and a nonempty bounded rationale."}
+      promotion_state: {type: string, required: false, enum: [lead-promoted], description: "Compiler-owned acceptance state set only after the configured reviewer passes this ticket."}
+      promoted_by: {type: string, required: false, enum: [lead], description: "Compiler-owned identity of the evidence-promotion authority."}
+      promotion_review_id: {type: string, required: false, description: "Compiler-owned identity of the exact hash-bound review that promoted this evidence."}
+
+  - id: report
+    description: A curated synthesis of evidence and research conclusions intended for paper writing or downstream communication.
+    stage: evidence_reports
+    required_any: [[synthesis, summary], [paper_context_role, curated_evidence_refs], [limitations]]
+    gate_required: false
+    statuses: [draft, active, blocked, satisfied, failed, superseded, archived]
+    initial_status: draft
+    semantic_fields: [schema_version, id, type, title, spec, edges]
+    compiler_owned_fields: [status, readiness, obligations, tickets, gates, receipts, evidence, reports, compiler, spec.concluded_by, spec.conclusion_review_id]
+    fields:
+      summary: {type: string, required: false, pattern: '.*\S.*', description: "A concise synthesis explicitly bounded to current promoted evidence."}
+      synthesis: {type: string, required: false, pattern: '.*\S.*', description: "A curated interpretation of current promoted evidence and claim dispositions."}
+      limitations: {type: list, required: true, items: {type: string, pattern: '.*\S.*'}, description: "Nonempty evidence-scope boundaries and unresolved threats that every downstream conclusion must retain."}
+      curated_evidence_refs: {type: list, required: false, items: {type: node_ref}, description: "Current Lead-promoted evidence nodes cited by the report."}
+      claim_dispositions: {type: object, required: false, description: "A disposition for every hypothesis claim, keyed by exact claim id and bounded to cited current evidence."}
+      conclusion_rationale: {type: string, required: false, pattern: '.*\S.*', description: "The evidence-grounded rationale for the bounded hypothesis disposition."}
+      hypothesis_id: {type: node_ref, required: false, description: "The exact hypothesis adjudicated by this conclusion report; compiler coverage requires it to agree with the canonical summarizes edge."}
+      paper_context_role: {type: string, required: false, pattern: '.*\S.*', description: "The report's intended role in downstream paper context."}
+      paper_input_role: {type: string, required: false, pattern: '.*\S.*', description: "The concrete rhetorical function this report should serve in the downstream paper."}
+      paper_section: {type: string, required: false, pattern: '.*\S.*', description: "The useful downstream paper section or placement for this report input."}
+      paper_input_status: {type: string, required: false, enum: [ready], description: "Whether this report is ready to serve as a bounded downstream paper input."}
+      conclusion: {type: string, required: false, enum: [supported, contradicted, inconclusive], description: "A reviewed hypothesis disposition bounded to the cited evidence and its limitations."}
+      concluded_by: {type: string, required: false, enum: [lead], description: "Compiler-owned identity of the conclusion-acceptance authority."}
+      conclusion_review_id: {type: string, required: false, description: "Compiler-owned identity of the exact hash-bound review that accepted this conclusion."}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Configure Köni"
+  short_description: "Configure Köni projects from natural language"
+  default_prompt: "Use $configure-koni to translate my workflow requirements into a validated Köni project configuration."

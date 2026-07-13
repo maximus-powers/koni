@@ -1,0 +1,108 @@
+schema_version: "1.0"
+protocol: harness.parity-normalization.v1
+
+identity_maps:
+  - name: graph_node
+    match: "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    replacement: "<node:{ordinal}>"
+  - name: ticket
+    match: "^T-[0-9a-f]+$"
+    replacement: "<ticket:{ordinal}>"
+  - name: context
+    match: "^CTX-[0-9a-f]+$"
+    replacement: "<context:{ordinal}>"
+  - name: output
+    match: "^OUT-[0-9a-f]+$"
+    replacement: "<output:{ordinal}>"
+  - name: review
+    match: "^REV-[0-9a-f]+$"
+    replacement: "<review:{ordinal}>"
+  - name: runtime_receipt
+    match: "^RT-[0-9a-f]+$"
+    replacement: "<runtime:{ordinal}>"
+  - name: gate_receipt
+    match: "^GR-[0-9a-f]+$"
+    replacement: "<gate-receipt:{ordinal}>"
+  - name: snapshot
+    match: "^S-[0-9a-f]+$"
+    replacement: "<snapshot:{ordinal}>"
+  - name: fixpoint
+    match: "^CF-[0-9a-f]+$"
+    replacement: "<fixpoint:{ordinal}>"
+  - name: steering
+    match: "^ST-[0-9a-f]+$"
+    replacement: "<steering:{ordinal}>"
+  - name: report
+    match: "^(RPT|LEDGER)-[0-9a-f]+$"
+    replacement: "<report:{ordinal}>"
+  - name: recovery
+    match: "^(REC|RB|MIG)-[0-9a-f]+$"
+    replacement: "<recovery:{ordinal}>"
+
+scalar_replacements:
+  - name: project_root
+    fields: [root, project_root, cwd, worktree, context_pack_path, log_path, prompt_path]
+    replacement: "<project-root>"
+    preserve_relative_suffix: true
+  - name: timestamp
+    fields_matching: "(^|_)(at|time|timestamp)$|^(started_at|finished_at|issued_at|reviewed_at|recorded_at|created_at|updated_at|leased_at|heartbeat_at)$"
+    replacement: "<timestamp>"
+  - name: duration
+    fields: [duration_seconds, elapsed_seconds]
+    replacement: 0
+  - name: process
+    fields: [pid, broker_pid, lead_pid]
+    replacement: 1
+  - name: git_commit
+    fields: [git_commit, source_main_commit, commit, head, target_commit, parent_commit, transaction_commit_id]
+    replacement: "<commit>"
+
+drop_fields:
+  - annotations
+  - platform
+  - python
+  - stdout_bytes
+  - stderr_bytes
+
+ordering:
+  mappings: sort_keys
+  preserve_sequence_for:
+    - events
+    - structured_events
+    - retry_attempts
+    - step_dag
+    - passes
+  sort_as_sets:
+    - target_nodes
+    - obligation_keys
+    - included_graph_node_ids
+    - included_ticket_ids
+    - included_steering_event_ids
+    - included_receipt_ids
+    - included_file_paths
+    - required_run_receipts
+
+hashes:
+  policy: recompute_after_normalization
+  algorithm: sha256-canonical-json
+  fields_matching: "(^|_)(hash|hashes)$"
+  compare_original_only_when:
+    - protocol_identity_depends_on_hash
+
+stdout:
+  compare: semantic_lines
+  ignore_prefixes:
+    - "Created autoresearch project at "
+    - "Worktree: "
+    - "Worker log: "
+    - "Worker pid: "
+    - "Prompt: "
+  preserve_prefixes:
+    - "Graph valid"
+    - "Research status:"
+    - "Ticket board:"
+    - "Fixpoint:"
+    - "Finish ready:"
+    - "Review required"
+    - "Closed "
+    - "Status:"

@@ -1,0 +1,13 @@
+schema_version: "1.0"
+project:
+  id: research
+  title: Research project
+  description: Graph-first research delivery with selectable run complexity.
+default_run_type: medium
+run_types:
+  - id: small
+    path: run-types/small.yaml
+  - id: medium
+    path: run-types/medium.yaml
+  - id: large
+    path: run-types/large.yaml

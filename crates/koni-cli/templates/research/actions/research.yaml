@@ -1,0 +1,235 @@
+actions:
+  - id: validate
+    requires_main_checkout: false
+    requires_ticket_worktree: false
+    recipe:
+      - {primitive: profile.validate}
+      - {primitive: graph.validate}
+      - {primitive: ticket.validate}
+      - {primitive: project.validate}
+
+  - id: compile-full
+    aliases: [compile]
+    params:
+      summary: {type: string, required: false}
+    requires_main_checkout: true
+    recipe:
+      - {primitive: lock.acquire}
+      - {primitive: project.validate}
+      - {primitive: rules.evaluate, mode: full_fixpoint, max_passes_from: orchestration.max_fixpoint_passes, paused_mode: render_only}
+      - {primitive: tickets.reconcile, retire_obsolete: true, reconcile_change_control: true, recover_workers_and_leases: true}
+      - {primitive: project.validate}
+      - {primitive: receipt.write, receipt_type: compiler.fixpoint}
+      - {primitive: snapshot.write, reason: compile-full}
+      - {primitive: event.append, type: compiler.compile.full}
+      - {primitive: board.render}
+    compensation:
+      - {primitive: recovery.dispatch, preserve_fixpoint_receipt: true}
+    recovery: recover
+
+  - id: start
+    params:
+      ticket_id: {type: ticket_id, required: true}
+    allowed_ticket_states: [todo]
+    requires_main_checkout: true
+    recipe:
+      - {primitive: lock.acquire}
+      - {primitive: project.validate}
+      - {primitive: scope.validate, ticket: "${params.ticket_id}", change_control_barrier: reject, single_flight: enforce, overlap: warn}
+      - {primitive: worktree.create, ticket: "${params.ticket_id}", branch_template_from: git.ticket_branch_template}
+      - {primitive: ticket.transition, ticket: "${params.ticket_id}", to: in_progress}
+      - {primitive: context.compile, ticket: "${params.ticket_id}", kind: worker_prompt_only}
+      - {primitive: event.append, type: compiler.start.leased, ticket: "${params.ticket_id}"}
+      - {primitive: project.validate}
+    compensation:
+      - {primitive: recovery.dispatch, mode: rollback_failed_start}
+    recovery: recover
+
+  - id: spawn-lead
+    requires_main_checkout: true
+    recipe:
+      - {primitive: lock.acquire}
+      - {primitive: project.validate}
+      - {id: lead, primitive: agent.spawn, persona: lead, prompt: "Operate the configured research Lead pull loop until compiler-verifiable terminal state.", transport: compiler_broker, duplicate_policy: reject}
+      - {primitive: event.append, type: compiler.lead.spawned}
+    compensation:
+      - {primitive: agent.stop, target: spawned_process_group}
+    recovery: recover
+
+  - id: spawn-worker
+    params:
+      ticket_id: {type: ticket_id, required: true}
+    allowed_ticket_states: [in_progress, integrating]
+    requires_main_checkout: true
+    recipe:
+      - {primitive: lock.acquire}
+      - {primitive: project.validate}
+      - {primitive: scope.validate, ticket: "${params.ticket_id}", require_active_lease: true, require_compiler_worktree: true, duplicate_worker_policy: reject}
+      - {primitive: agent.spawn, ticket: "${params.ticket_id}", prompt: "Execute only the next dependency-ready configured ticket step, record structured output, run scoped compile, then stop before review and finish.", persona_from: next_dependency_ready_step, transport: compiler_broker, request_fields: [request_id, ticket_id]}
+      - {primitive: event.append, type: compiler.worker.spawned, ticket: "${params.ticket_id}"}
+    compensation:
+      - {primitive: agent.stop, target: spawned_process_group}
+    recovery: recover
+
+  - id: context
+    params:
+      ticket_id: {type: ticket_id, required: true}
+      step: {type: string, required: false}
+      persona: {type: string, required: false}
+    allowed_ticket_states: [in_progress, integrating]
+    requires_ticket_worktree: true
+    recipe:
+      - {primitive: lock.acquire}
+      - {primitive: project.validate}
+      - {primitive: scope.validate, ticket: "${params.ticket_id}", require_no_upstream_change_hold: true, validate_step_persona_dependencies: true}
+      - {id: context_pack, primitive: context.compile, ticket: "${params.ticket_id}", include: [graph_closure, ticket, contracts, outputs, review, steering], hash_manifest: true}
+      - {primitive: event.append, type: compiler.context.issued, ticket: "${params.ticket_id}"}
+    compensation:
+      - {primitive: recovery.dispatch, mode: remove_incomplete_context}
+    recovery: recover
+
+  - id: compile-ticket
+    params:
+      ticket_id: {type: ticket_id, required: true}
+      summary: {type: string, required: false}
+    allowed_ticket_states: [in_progress, integrating]
+    requires_ticket_worktree: true
+    recipe:
+      - {primitive: lock.acquire}
+      - {primitive: project.validate}
+      - {primitive: scope.validate, ticket: "${params.ticket_id}", require_no_upstream_change_hold: true, refresh_from_integration: rebase}
+      - {primitive: check.run, checks_from_current_step: true, ticket: "${params.ticket_id}"}
+      - {primitive: check.run, check: scoped-operational-probe, ticket: "${params.ticket_id}"}
+      - {primitive: rules.evaluate, mode: scoped, ticket: "${params.ticket_id}", derive_assets_and_gates: true}
+      - {primitive: event.append, type: compiler.compile.scoped, ticket: "${params.ticket_id}"}
+      - {primitive: project.validate}
+      - {primitive: board.render, view: ticket_health}
+    compensation:
+      - {primitive: recovery.dispatch, preserve_started_runtime_receipt: true}
+    recovery: recover
+
+  - id: output
+    params:
+      ticket_id: {type: ticket_id, required: true}
+      step: {type: string, required: true}
+      persona: {type: string, required: true}
+      payload: {type: json, required: true}
+    allowed_ticket_states: [in_progress, integrating]
+    requires_ticket_worktree: true
+    recipe:
+      - {primitive: lock.acquire}
+      - {primitive: project.validate}
+      - {primitive: output.validate, ticket: "${params.ticket_id}", require_context: true, concrete_project_relative_file_refs: true, require_product_change_declarations: true, validate_change_handoffs: true}
+      - {primitive: output.record, ticket: "${params.ticket_id}", step: "${params.step}", persona: "${params.persona}", payload: "${params.payload}"}
+      - {primitive: receipt.write, receipt: {type: structured-output, ticket_id: "${params.ticket_id}", step: "${params.step}", persona: "${params.persona}", payload: "${params.payload}"}, hash_bind_context: true}
+      - {primitive: event.append, type: compiler.output.recorded, ticket: "${params.ticket_id}"}
+      - {primitive: project.validate}
+    compensation:
+      - {primitive: recovery.dispatch, mode: remove_uncommitted_output}
+    recovery: recover
+
+  - id: review
+    params:
+      ticket_id: {type: ticket_id, required: true}
+      status: {type: string, required: true, description: passed or failed}
+      notes: {type: string, required: false, default: ""}
+    allowed_ticket_states: [in_progress, integrating]
+    requires_ticket_worktree: true
+    recipe:
+      - {primitive: lock.acquire}
+      - {primitive: project.validate}
+      - {primitive: review.validate, ticket: "${params.ticket_id}", require_no_live_worker: true, strict_checklist_when_passing: true, bind_current_output: true}
+      - {primitive: review.record, ticket: "${params.ticket_id}", status: "${params.status}", notes: "${params.notes}"}
+      - {primitive: receipt.write, receipt: {type: review.receipt, ticket_id: "${params.ticket_id}", status: "${params.status}", notes: "${params.notes}"}}
+      - {primitive: event.append, type: compiler.review.recorded, ticket: "${params.ticket_id}"}
+      - {primitive: project.validate}
+    compensation:
+      - {primitive: recovery.dispatch, never_write_pass_on_failed_checklist: true}
+    recovery: recover
+
+  - id: finish
+    params:
+      ticket_id: {type: ticket_id, required: true}
+    allowed_ticket_states: [in_progress, integrating]
+    requires_ticket_worktree: true
+    recipe:
+      - {primitive: lock.acquire}
+      - {primitive: project.validate}
+      - {primitive: review.validate, ticket: "${params.ticket_id}", strict_transition_checklist: true, request_review_and_stop_if_missing: true, require_no_live_worker: true}
+      - {primitive: ticket.transition, ticket: "${params.ticket_id}", to: integrating}
+      - {primitive: graph.apply_delta, ticket: "${params.ticket_id}", authority_from_operation: true, project_only_owned_scope: true}
+      - {primitive: integration.validate}
+      - {primitive: snapshot.write, reason: "finish-${params.ticket_id}", recompute_from_integration_projection: true}
+      - {primitive: git.integrate_squash, ticket: "${params.ticket_id}", preserve_other_leases: true, retain_closed_worktree: true}
+      - {primitive: event.append, type: compiler.finish.closed, ticket: "${params.ticket_id}"}
+    compensation:
+      - {primitive: recovery.dispatch, mode: block_and_emit_single_resolver, preserve_worktree: true, keep_integration_clean: true}
+    recovery: recover
+
+  - id: steer
+    actor: lead
+    params:
+      kind: {type: string, required: true}
+      message: {type: string, required: true}
+      ticket_id: {type: ticket_id, required: false}
+      target_nodes: {type: json, required: false, default: []}
+      priority: {type: string, required: false, default: normal}
+    requires_main_checkout: true
+    recipe:
+      - {primitive: lock.acquire}
+      - {primitive: project.validate}
+      - {primitive: event.append, type: compiler.steering.recorded, data: {kind: "${params.kind}", message: "${params.message}", ticket_id: "${params.ticket_id}", target_nodes: "${params.target_nodes}", priority: "${params.priority}"}}
+      - {primitive: project.validate}
+    compensation:
+      - {primitive: recovery.dispatch, mode: remove_uncommitted_steering}
+    recovery: recover
+
+  - id: migrate
+    requires_main_checkout: true
+    recipe:
+      - {primitive: lock.acquire}
+      - {primitive: project.validate}
+      - {primitive: scope.validate, reject_dirty_protected_tooling: true}
+      - {primitive: snapshot.write, reason: migration-pre}
+      - {primitive: graph.write, source: configured_profile_migrations, dry_run_first: true}
+      - {primitive: project.validate}
+      - {primitive: snapshot.write, reason: migration-post}
+      - {primitive: receipt.write, receipt_type: migration.receipt}
+      - {primitive: event.append, type: compiler.migration.completed}
+    compensation:
+      - {primitive: recovery.dispatch, write_blocked_migration_receipt: true}
+    recovery: recover
+
+  - id: recover
+    requires_main_checkout: true
+    recipe:
+      - {primitive: lock.acquire}
+      - {primitive: graph.inspect}
+      - {primitive: ticket.inspect}
+      - {primitive: recovery.dispatch, modes: [retryable_workers, terminal_workers, stale_leases, missing_worktrees, invalid_snapshots], preserve_evidence_and_audit: true}
+      - {primitive: receipt.write, receipt_type: recovery.diagnostic}
+      - {primitive: event.append, type: compiler.recovery.diagnostic}
+      - {primitive: project.validate}
+
+  - id: report
+    requires_main_checkout: true
+    recipe:
+      - {primitive: lock.acquire}
+      - {primitive: project.validate}
+      - {primitive: report.render, deterministic: true, projections_from: profile.reports}
+
+  - id: rollback
+    params:
+      target: {type: string, required: true}
+      reason: {type: string, required: true}
+    requires_main_checkout: true
+    recipe:
+      - {primitive: project.validate}
+      - {primitive: rollback.forward_reversal, target: "${params.target}", reason: "${params.reason}"}
+    recovery: recover
+
+  - id: cockpit
+    params:
+      path: {type: path, required: false, default: "."}
+    recipe:
+      - {primitive: board.render, view: cockpit, orchestration_controls: [pause, play, parallel-3, parallel-5, unchained]}

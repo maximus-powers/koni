@@ -1,0 +1,92 @@
+schema_version: "1.0"
+id: large
+title: Large
+description: A high-complexity change with separate architecture, risk, and verification plans plus independent review.
+instructions:
+  planning: |
+    Across the planning passes, actively identify roughly three to six
+    decision-bearing questions whose answers would shape the implementation.
+    When two or three related decisions are already visible together, return
+    them in one compiler-owned structured question batch instead of splitting
+    them across turns. A batch may contain one to three questions; give each two
+    to four choices, one recommendation, and the consequences of each choice.
+    Avoid repeating questions answered by prior passes.
+profile:
+  source: .codex/koni/profile.yaml
+intake:
+  fields:
+    goal:
+      label: Goal
+      description: Describe the outcome Koni should deliver.
+      type: text
+      required: true
+  order: [goal]
+pipeline:
+  stages:
+    intake:
+      kind: action
+      title: Validate intake
+      config: {compiler_owned: true, action: planning.intake}
+    architecture-plan:
+      kind: planning
+      title: Plan architecture
+      config:
+        persona: run-planner
+        prompt: Map the affected architecture, contracts, dependencies, and implementation boundaries.
+    risk-plan:
+      kind: planning
+      title: Plan risk controls
+      config:
+        persona: run-planner
+        prompt: Identify failure modes, compatibility risks, mitigations, and escalation boundaries.
+    verification-plan:
+      kind: planning
+      title: Plan verification
+      config:
+        persona: run-planner
+        prompt: Define the evidence, checks, regressions, and acceptance criteria required for completion.
+    approval:
+      kind: approval
+      title: Approve the plans
+    initialize:
+      kind: initialize
+      title: Initialize the run
+    orchestrate:
+      kind: orchestration
+      title: Execute compiled work
+    independent-review:
+      kind: agent_review
+      title: Independently review the run
+      config:
+        persona: reviewer
+        prompt: Independently review the completed run against its goal, evidence, checks, and unresolved risks.
+    verification:
+      kind: checkpoint
+      title: Verify the completed run
+      config: {checkpoint: verification}
+    report:
+      kind: action
+      title: Compile final report
+      config: {action: report, automatic: true}
+  order: [intake, architecture-plan, risk-plan, verification-plan, approval, initialize, orchestrate, independent-review, verification, report]
+questions:
+  policy: interactive
+  default_scope: run
+git:
+  branch_template: "koni/runs/{{ run.slug }}-{{ run.short_id }}"
+  ticket_branch_template: "koni/runs/{{ run.id }}/tickets/{{ ticket.id }}"
+run_card:
+  sections: [goal, pipeline, graph, tickets, checks, report]
+agents:
+  roles:
+    planner: {model: gpt-5.6-sol, reasoning_effort: ultra}
+    lead: {model: gpt-5.6-sol, reasoning_effort: ultra}
+    ticket_worker: {model: gpt-5.6-terra, reasoning_effort: xhigh}
+    reviewer: {model: gpt-5.6-sol, reasoning_effort: ultra}
+  personas: {}
+orchestration:
+  auto_start: true
+  max_parallel: 5
+  compile_action: compile
+  lead_action: spawn-lead
+  report_action: report

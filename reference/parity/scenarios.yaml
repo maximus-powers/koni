@@ -1,0 +1,64 @@
+schema_version: "1.0"
+protocol: koni.compatibility-scenarios.v1
+normalization: normalization.yaml
+
+scenarios:
+  - id: formulation-lifecycle
+    fixture: fixtures/formulation
+    checkpoints: [initialized, full_compiled, started, context_issued, scoped_compiled, reviewed, finished]
+    compare: [graph, tickets, state, events, context_manifests, fixpoint_receipts, snapshots, git_topology]
+    invariants:
+      - initial hypothesis produces one formulation transition until claims and literature exist
+      - a ticket cannot close without context, scoped compile, every required output, and passed review
+      - accepted ticket work becomes one main transaction and loses its live lease
+
+  - id: constitution-and-delta-policy
+    checkpoints: [each_stage_compile, rejected_finish, accepted_stage_transition]
+    compare: [graph, tickets, state, finish_errors, events]
+    invariants:
+      - stages advance only in configured precedence order
+      - operation authority cannot be widened by a broad declared write scope
+      - ordinary transitions cannot delete existing nodes or rewrite protected tooling
+
+  - id: gate-first-assets
+    checkpoints: [gate_defined, expected_red, asset_linked, verifier_failed, verifier_passed]
+    compare: [graph, tickets, asset_manifests, gate_packages, gate_receipts, obligations]
+    invariants:
+      - expected-red authoring can finish while the new gate still blocks downstream readiness
+      - only a compatible concrete asset and executed typed verifier can pass a gate
+      - failed, inconclusive, and error verdicts are valid receipts but remain blocking
+
+  - id: scientific-runtime-evidence-report
+    checkpoints: [preflight, invalid_contract, invalid_result, passed_run, evidence_candidate, promoted_evidence, report_compiled]
+    compare: [graph, tickets, runtime_receipts, raw_log_refs, evidence_preflight, reviews, reports, state]
+    invariants:
+      - every inherited prerequisite is bound to a linked concrete asset and exact argv path
+      - only the latest provenance-current typed result can satisfy a run
+      - workers create evidence candidates and passed Lead review performs promotion
+      - identical report inputs produce byte-stable JSON and Markdown ledgers
+
+  - id: change-control
+    checkpoints: [proposed, approved, proposal_reviewed, application_materialized, source_requeued]
+    compare: [tickets, events, steering, outputs, reviews, barriers, resolved_blockers]
+    invariants:
+      - proposal work has zero semantic and asset payload delta
+      - review binds the exact typed proposal hash
+      - one approval hash creates at most one bounded application ticket
+      - the source remains blocked until rejection, reviewed no-op, or closed application
+
+  - id: worktrees-conflicts-and-recovery
+    checkpoints: [parallel_started, conflict, resolver_created, recovery, rollback]
+    compare: [tickets, leases, blockers, events, recovery_receipts, snapshots, retained_worktrees, git_topology]
+    invariants:
+      - conflicts preserve ticket work and keep main clean
+      - one blocked ticket has at most one resolver and resolvers never form chains
+      - external-capacity retry is not misclassified as a semantic conflict
+      - rollback is a new forward transaction and preserves audit/evidence history
+
+  - id: orchestration-agents-and-cockpit
+    checkpoints: [paused, running, lead_spawned, worker_spawned, cockpit_snapshot]
+    compare: [orchestration, spawn_events, broker_receipts, board_actions, cockpit_semantics]
+    invariants:
+      - paused full compile validates and renders without advancing durable state
+      - the broker accepts only canonical ticket IDs and reconstructs bounded worker execution
+      - cockpit state is a projection of canonical files and only orchestration controls mutate state

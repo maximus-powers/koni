@@ -1,0 +1,40 @@
+schema_version: "1.0"
+module: {id: software.checks, version: 0.1.0}
+
+checks:
+  - id: focused-test
+    kind: command
+    applies_to: [implement-change, implement-migration, establish-proof]
+    argv: [pnpm, test]
+    cwd: .
+    timeout_seconds: 300
+    receipt_type: test
+    effect: read_only
+    environment:
+      inherit: [PATH, HOME, TMPDIR, CI]
+  - id: package-typecheck
+    kind: command
+    applies_to: [implement-change, implement-migration]
+    argv: [pnpm, typecheck]
+    cwd: .
+    timeout_seconds: 600
+    receipt_type: typecheck
+    effect: read_only
+    environment:
+      inherit: [PATH, HOME, TMPDIR, CI]
+  - id: repo-lint
+    kind: command
+    applies_to: [prepare-delivery]
+    argv: [pnpm, lint]
+    cwd: .
+    timeout_seconds: 900
+    receipt_type: lint
+    effect: read_only
+    environment:
+      inherit: [PATH, HOME, TMPDIR, CI]
+  - id: browser-smoke
+    kind: agent
+    applies_to: [establish-proof]
+    timeout_seconds: 900
+    receipt_type: browser_smoke
+    effect: external

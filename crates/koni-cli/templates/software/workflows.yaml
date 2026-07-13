@@ -1,0 +1,68 @@
+schema_version: "1.0"
+module: {id: software.workflows, version: 0.1.0}
+
+workflows:
+  - id: architecture-map
+    version: 1.0.0
+    applies_to: [map-architecture]
+    steps:
+      - {id: inspect-repository, persona: architecture-mapper, expected_output: Systems and owned paths grounded in repository evidence}
+      - {id: map-boundaries, persona: architecture-mapper, depends_on: [inspect-repository], expected_output: Interfaces, data models, contracts, and flows}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [map-boundaries], expected_output: Coherent linked architecture graph}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: Architecture validity review, validation_action: review}
+  - id: contract-design
+    version: 1.0.0
+    applies_to: [specify-contracts]
+    steps:
+      - {id: inspect-enforcement, persona: contract-designer, expected_output: Current enforcement and compatibility boundaries}
+      - {id: specify-contracts, persona: contract-designer, depends_on: [inspect-enforcement], expected_output: Explicit invariants and failure meanings}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [specify-contracts], expected_output: Linked contract graph}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: Contract completeness review, validation_action: review}
+  - id: change-design
+    version: 1.0.0
+    applies_to: [plan-change]
+    steps:
+      - {id: analyze-impact, persona: change-designer, expected_output: Current-to-target deltas and affected architecture}
+      - {id: model-risk, persona: risk-analyst, depends_on: [analyze-impact], expected_output: Regression risks, migrations, and required proof}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [model-risk], expected_output: Dependency-ordered bounded change plan}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: Plan feasibility and completeness review, validation_action: review}
+  - id: decision-resolution
+    version: 1.0.0
+    applies_to: [resolve-decision]
+    steps:
+      - {id: evaluate-options, persona: change-designer, expected_output: Evidence-backed option comparison}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [evaluate-options], expected_output: Choice, rationale, and reversibility}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: Decision review, validation_action: review}
+  - id: bounded-implementation
+    version: 1.0.0
+    applies_to: [implement-change, implement-migration]
+    steps:
+      - {id: characterize, persona: implementer, expected_output: Existing behavior and focused failing or characterization proof}
+      - {id: implement, persona: implementer, depends_on: [characterize], expected_output: Scoped patch inside declared owned paths, checks: [focused-test]}
+      - {id: verify, persona: verifier, depends_on: [implement], expected_output: Focused tests and typecheck receipts, checks: [focused-test, package-typecheck]}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [verify], expected_output: Coherent ticket delta}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: Correctness, scope, regression, and elegance review, validation_action: review}
+  - id: proof-execution
+    version: 1.0.0
+    applies_to: [establish-proof]
+    steps:
+      - {id: select-proof-path, persona: verifier, expected_output: Lowest trustworthy proof layer and freshness inputs}
+      - {id: execute-proof, persona: verifier, depends_on: [select-proof-path], expected_output: Typed command or agent/manual smoke receipt}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [execute-proof], expected_output: Proof status bound to receipt hashes}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: Proof relevance and sufficiency review, validation_action: review}
+  - id: integration-assessment
+    version: 1.0.0
+    applies_to: [assess-integration]
+    steps:
+      - {id: inspect-composed-diff, persona: risk-analyst, expected_output: Cross-ticket interaction and surprise audit}
+      - {id: verify-flows, persona: verifier, depends_on: [inspect-composed-diff], expected_output: End-to-end flow and regression receipts}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [verify-flows], expected_output: Remediation or acceptance result}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: Integration acceptance review, validation_action: review}
+  - id: delivery-review
+    version: 1.0.0
+    applies_to: [prepare-delivery]
+    steps:
+      - {id: audit-proof, persona: verifier, expected_output: Current proof and unresolved-gap ledger, checks: [repo-lint]}
+      - {id: audit-history, kind: integration, persona: integrator, expected_output: One intentional squash commit per completed ticket}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [audit-proof, audit-history], expected_output: PR-ready delivery summary}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: Final merge-readiness review, validation_action: review}

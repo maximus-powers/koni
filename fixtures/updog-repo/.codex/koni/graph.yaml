@@ -1,0 +1,181 @@
+schema_version: "1.0"
+module: {id: updog.graph, version: 0.1.1}
+
+node_types:
+  - id: objective
+    description: A desired user, product, or operational outcome that gives the run its scope and success criteria.
+    stage: framing
+    required_any: [[outcome]]
+    statuses: [draft, active, satisfied, superseded]
+    compiler_owned_fields: [spec.planning_context]
+    fields:
+      outcome: {type: string, required: true}
+      motivation: {type: string}
+      scope_boundaries: {type: list}
+      success_signals: {type: list}
+      external_refs: {type: list}
+      planning_context:
+        type: object
+        required: false
+        description: A bounded, compiler-owned record of the approved plan and resolved decisions that authoritatively guide this run.
+  - id: system
+    description: An architectural ownership boundary such as an application, service, package, domain, integration, or infrastructure component.
+    stage: architecture
+    required_any: [[responsibility]]
+    statuses: [draft, active, changed, superseded]
+    fields:
+      kind: {type: string, required: true, enum: [package, service, app, domain, integration, infrastructure]}
+      responsibility: {type: string, required: true}
+      owned_paths: {type: list, required: true}
+      owned_packages: {type: list}
+      instructions: {type: list}
+  - id: interface
+    description: A boundary surface exposed by one system and consumed by another, including its compatibility expectations.
+    stage: architecture
+    required_any: [[surface]]
+    statuses: [draft, active, changed, deprecated]
+    fields:
+      kind: {type: string, required: true}
+      surface: {type: string, required: true}
+      compatibility: {type: string, required: true}
+      consumers: {type: list}
+  - id: data_model
+    description: A structured data shape and its ownership, storage, and compatibility constraints.
+    stage: architecture
+    required_any: [[shape]]
+    statuses: [draft, active, changed, deprecated]
+    fields:
+      owner: {type: string, required: true}
+      storage: {type: string}
+      shape: {type: string, required: true}
+      compatibility_constraints: {type: list}
+  - id: contract
+    description: An invariant the implementation must preserve, together with its enforcement point and failure meaning.
+    stage: contracts
+    required_any: [[invariant]]
+    statuses: [draft, active, satisfied, violated, superseded]
+    fields:
+      invariant: {type: string, required: true}
+      enforcement_point: {type: string, required: true}
+      failure_meaning: {type: string, required: true}
+      observability: {type: string}
+  - id: flow
+    description: An ordered interaction across systems or interfaces that achieves a specific intent and exit condition.
+    stage: architecture
+    required_any: [[intent]]
+    statuses: [draft, active, changed, superseded]
+    fields:
+      intent: {type: string, required: true}
+      entrypoint: {type: string, required: true}
+      exit_condition: {type: string, required: true}
+      ordered_steps: {type: list, required: true}
+  - id: decision
+    description: A consequential design question, its available options, selected choice, rationale, and reversibility.
+    stage: design
+    required_any: [[question]]
+    statuses: [open, accepted, rejected, superseded]
+    fields:
+      question: {type: string, required: true}
+      options: {type: list, required: true}
+      choice: {type: string}
+      rationale: {type: string}
+      reversibility: {type: string}
+  - id: change
+    description: A bounded implementation transition from the current system state to a defined target state.
+    stage: implementation
+    required_any: [[target_state]]
+    statuses: [planned, active, implemented, verified, superseded]
+    fields:
+      current_state: {type: string, required: true}
+      target_state: {type: string, required: true}
+      owned_paths: {type: list, required: true}
+      blast_radius: {type: string, required: true}
+      commit_type: {type: string, required: true}
+  - id: migration
+    description: A compatibility-aware transition plan for data, interfaces, or systems, including rollback and safety controls.
+    stage: implementation
+    required_any: [[forward_plan]]
+    statuses: [planned, active, complete, rolled_back, superseded]
+    fields:
+      forward_plan: {type: list, required: true}
+      compatibility_window: {type: string, required: true}
+      rollback_plan: {type: list, required: true}
+      data_safety: {type: string}
+  - id: risk
+    description: A plausible failure scenario whose impact, likelihood, detection, and mitigation must be understood.
+    stage: assurance
+    required_any: [[scenario]]
+    statuses: [open, controlled, accepted, realized, superseded]
+    fields:
+      scenario: {type: string, required: true}
+      impact: {type: string, required: true}
+      likelihood: {type: string, required: true}
+      detection: {type: string, required: true}
+      mitigation: {type: string}
+  - id: proof
+    description: A verification obligation that establishes a specific implementation or safety claim with fresh evidence.
+    stage: assurance
+    required_any: [[claim]]
+    statuses: [planned, expected_red, passing, failed, blocked, superseded]
+    fields:
+      claim: {type: string, required: true}
+      method: {type: string, required: true}
+      check_id: {type: string}
+      required_artifacts: {type: list}
+      freshness_inputs: {type: list}
+  - id: delivery
+    description: The reviewed integration package that fulfills the objective and records included changes, proofs, and accepted risks.
+    stage: delivery
+    required_any: [[target_branch]]
+    statuses: [assembling, reviewing, pr_ready, blocked, superseded]
+    fields:
+      target_branch: {type: string, required: true}
+      summary: {type: string, required: true}
+      unresolved_risks: {type: list}
+      external_refs: {type: list}
+
+edge_types:
+  - {source: objective, relation: systems, targets: [system], min: 0}
+  - {source: objective, relation: contracts, targets: [contract], min: 0}
+  - {source: objective, relation: flows, targets: [flow], min: 0}
+  - {source: objective, relation: realized_by, targets: [change], min: 0}
+  - {source: objective, relation: delivered_by, targets: [delivery], min: 0, max: 1}
+  - {source: system, relation: contains, targets: [system], acyclic: true}
+  - {source: system, relation: exposes, targets: [interface]}
+  - {source: system, relation: owns, targets: [data_model, contract]}
+  - {source: system, relation: participates_in, targets: [flow]}
+  - {source: system, relation: depends_on, targets: [system, interface], acyclic: true}
+  - {source: interface, relation: produced_by, targets: [system], min: 1, max: 1}
+  - {source: interface, relation: consumed_by, targets: [system]}
+  - {source: interface, relation: constrained_by, targets: [contract]}
+  - {source: data_model, relation: owned_by, targets: [system], min: 1, max: 1}
+  - {source: data_model, relation: constrained_by, targets: [contract]}
+  - {source: contract, relation: applies_to, targets: [system, interface, data_model, flow]}
+  - {source: flow, relation: participants, targets: [system, interface], min: 1}
+  - {source: decision, relation: concerns, targets: [objective, system, interface, data_model, contract, flow, change, migration]}
+  - {source: decision, relation: selects, targets: [change, migration, contract]}
+  - {source: change, relation: realizes, targets: [objective], min: 1}
+  - {source: change, relation: affects, targets: [system, interface, data_model, contract, flow], min: 1}
+  - {source: change, relation: depends_on, targets: [change], acyclic: true}
+  - {source: change, relation: requires, targets: [decision, migration, proof]}
+  - {source: change, relation: introduces, targets: [risk]}
+  - {source: migration, relation: changes, targets: [data_model, interface, system], min: 1}
+  - {source: migration, relation: protects, targets: [contract]}
+  - {source: migration, relation: verified_by, targets: [proof]}
+  - {source: risk, relation: threatens, targets: [contract, flow, system, interface, data_model], min: 1}
+  - {source: risk, relation: mitigated_by, targets: [change, migration, contract]}
+  - {source: risk, relation: verified_by, targets: [proof]}
+  - {source: proof, relation: verifies, targets: [contract, flow, change, migration, risk], min: 1}
+  - {source: proof, relation: uses, targets: [system, interface, data_model]}
+  - {source: delivery, relation: fulfills, targets: [objective], min: 1}
+  - {source: delivery, relation: includes, targets: [change, migration, decision, proof], min: 1}
+  - {source: delivery, relation: acknowledges, targets: [risk]}
+
+queries:
+  - {id: objectives, node_types: [objective], status_excluding: [satisfied, superseded]}
+  - {id: active_systems, node_types: [system], status_excluding: [superseded]}
+  - {id: open_decisions, node_types: [decision], statuses: [open]}
+  - {id: planned_changes, node_types: [change], statuses: [planned]}
+  - {id: implemented_changes, node_types: [change], statuses: [implemented]}
+  - {id: pending_proofs, node_types: [proof], statuses: [planned, expected_red, failed, blocked]}
+  - {id: deliveries, node_types: [delivery], status_excluding: [pr_ready, superseded]}

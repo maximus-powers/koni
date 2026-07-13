@@ -1,0 +1,56 @@
+personas:
+  - id: run-planner
+    prompt: personas/prompts/run-planner.md
+    model_role: planner
+    sandbox: {mode: read-only, approval_policy: never, network_access: true, writable_roots: []}
+  - id: lead
+    prompt: personas/prompts/lead.md
+    model_role: lead
+    # The Lead can inspect the checkout but has no direct write authority.
+    # Compiler-issued lifecycle tools run through the required runtime MCP
+    # broker, which Codex launches outside the shell-command sandbox.
+    sandbox: {mode: read-only, approval_policy: never, network_access: false, writable_roots: []}
+  - id: research-scout
+    prompt: personas/prompts/research-scout.md
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}
+  - id: hypothesis-planner
+    prompt: personas/prompts/hypothesis-planner.md
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}
+  - id: experiment-designer
+    prompt: personas/prompts/experiment-designer.md
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}
+  - id: gate-designer
+    prompt: personas/prompts/gate-designer.md
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}
+  - id: asset-builder
+    prompt: personas/prompts/asset-builder.md
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}
+  - id: run-operator
+    prompt: personas/prompts/run-operator.md
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}
+  - id: evidence-analyst
+    prompt: personas/prompts/evidence-analyst.md
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}
+  - id: report-writer
+    prompt: personas/prompts/report-writer.md
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}
+  - id: dashboard-reporter
+    prompt: personas/prompts/dashboard-reporter.md
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}
+  - id: reviewer
+    prompt: personas/prompts/reviewer.md
+    model_role: reviewer
+    sandbox: {mode: read-only, approval_policy: never, network_access: false}
+  - id: integrator
+    prompt: personas/prompts/integrator.md
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}

@@ -1,0 +1,9 @@
+/target/
+/.koni/
+/apps/docs/.next/
+/apps/docs/.vercel/
+/apps/docs/node_modules/
+**/__pycache__/
+*.pyc
+.env*.local
+.DS_Store

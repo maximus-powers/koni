@@ -1,0 +1,96 @@
+schema_version: "1.0"
+module: {id: updog.operations, version: 0.1.0}
+
+operations:
+  - id: architecture.objective.map
+    operation: map-architecture
+    stage: architecture
+    target_types: [objective]
+    workflow: architecture-map
+    allowed_new_node_types: [system, interface, data_model, contract, flow]
+    allowed_existing_node_types: [objective]
+    review_contract: Architecture map is grounded in repository paths, boundaries, and end-to-end flows.
+    output_contract: Systems, interfaces, data models, contracts, and flows linked to the objective.
+    ranking_hints: [phase, objective-id]
+  - id: contracts.system.specify
+    operation: specify-contracts
+    stage: contracts
+    target_types: [system]
+    workflow: contract-design
+    allowed_new_node_types: [interface, data_model, contract, flow, decision]
+    allowed_existing_node_types: [system]
+    review_contract: Contracts name enforcement points, failure meanings, compatibility, and owners.
+    output_contract: Explicit interface/data/behavioral contracts and any unresolved decisions.
+    ranking_hints: [phase, system-id]
+  - id: design.objective.plan-change
+    operation: plan-change
+    stage: design
+    target_types: [objective]
+    workflow: change-design
+    allowed_new_node_types: [change, migration, risk, proof, decision]
+    allowed_existing_node_types: [objective, system, interface, data_model, contract, flow]
+    review_contract: Every delta has ownership, blast radius, dependencies, risks, and proof obligations.
+    output_contract: Bounded current-to-target change plan with migrations, risks, and proof nodes.
+    ranking_hints: [phase, objective-id]
+  - id: design.decision.resolve
+    operation: resolve-decision
+    stage: design
+    target_types: [decision]
+    workflow: decision-resolution
+    allowed_existing_node_types: [decision]
+    review_contract: Choice is explicit, alternatives are represented, and rationale/reversibility are recorded.
+    output_contract: Accepted or rejected decision with rationale.
+    ranking_hints: [phase, decision-id]
+    single_flight_group: architecture-decisions
+  - id: implementation.change.apply
+    operation: implement-change
+    stage: implementation
+    target_types: [change]
+    workflow: bounded-implementation
+    allowed_existing_node_types: [change]
+    review_contract: Patch stays inside owned paths and preserves declared contracts.
+    output_contract: Tested implementation patch plus structured outputs and receipts.
+    ranking_hints: [phase, dependency-depth, change-id]
+    checks: [focused-test, package-typecheck]
+  - id: implementation.migration.apply
+    operation: implement-migration
+    stage: implementation
+    target_types: [migration]
+    workflow: bounded-implementation
+    allowed_existing_node_types: [migration]
+    review_contract: Forward, compatibility, data-safety, and rollback paths are implemented.
+    output_contract: Migration payload with rollback and compatibility receipts.
+    ranking_hints: [phase, migration-id]
+    checks: [focused-test, package-typecheck]
+    single_flight_group: migrations
+  - id: assurance.proof.establish
+    operation: establish-proof
+    stage: assurance
+    target_types: [proof]
+    workflow: proof-execution
+    allowed_existing_node_types: [proof]
+    review_contract: Receipt exercises the declared contract/flow/risk and is fresh for current inputs.
+    output_contract: Typed command or agent-smoke receipt and evidence artifacts.
+    ranking_hints: [phase, proof-id]
+  - id: assurance.integration.assess
+    operation: assess-integration
+    stage: assurance
+    target_types: [objective, change]
+    workflow: integration-assessment
+    allowed_new_node_types: [risk, proof, change]
+    allowed_existing_node_types: [objective, change, risk, proof]
+    review_contract: Cross-change interactions, likely regressions, and remaining proof gaps are explicit.
+    output_contract: Integration findings, remediation deltas, and proof coverage.
+    ranking_hints: [phase, objective-id]
+  - id: delivery.objective.prepare
+    operation: prepare-delivery
+    stage: delivery
+    target_types: [objective]
+    workflow: delivery-review
+    allowed_new_node_types: [delivery]
+    allowed_existing_node_types: [objective, change, migration, proof, risk, decision]
+    review_contract: All included changes are reviewed, proofs current, and unresolved risks visible.
+    output_contract: PR-ready delivery node and one reviewed integration commit per ticket.
+    ranking_hints: [phase, objective-id]
+    checks: [repo-lint]
+    single_flight_group: delivery

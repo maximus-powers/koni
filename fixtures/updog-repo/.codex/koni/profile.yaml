@@ -1,0 +1,52 @@
+schema_version: "1.0"
+engine: ">=0.1,<0.2"
+
+profile:
+  id: updog-software-transformation
+  version: "0.1.1"
+  description: Architecture-first software change delivery
+
+initialization:
+  root_node_type: objective
+  goal_field: outcome
+  planning_context_field: planning_context
+  root_status: active
+
+storage:
+  backend: git_common_dir
+  graph_dir: program/graph
+  tickets_dir: program/tickets
+  state_path: program/state.yaml
+  work_dir: program/work
+  receipts_dir: program/receipts
+  reports_dir: program/reports
+  semantic_hash_excludes: [annotations, readiness, obligations, tickets, receipts, compiler]
+
+git:
+  enabled: true
+  backend: libgit2
+  integration_branch: current
+  ticket_branch_template: "koni/{{ run.id }}/{{ ticket.id }}"
+  worktree_root: .worktrees
+  integration_strategy: squash
+  commit_template: "{{ ticket.operation }}: {{ ticket.title }}"
+
+orchestration:
+  running: true
+  max_parallel: 5
+  lease_stale_seconds: 1800
+  max_fixpoint_passes: 8
+  max_boundaries_per_lead: 1
+  disjoint_scope_parallelism: true
+
+imports:
+  graph: [graph.yaml]
+  rules: [rules.yaml]
+  operations: [operations.yaml]
+  workflows: [workflows.yaml]
+  actions: [actions.yaml]
+  checks: [checks.yaml]
+  personas: [personas.yaml]
+  reports: [reports.yaml]
+  cockpit: [cockpit.yaml]
+  lifecycles: [lifecycle.yaml]

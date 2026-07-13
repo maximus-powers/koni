@@ -1,0 +1,19 @@
+schema_version: "1.0"
+module: {id: updog.reports, version: 0.1.0}
+
+reports:
+  - id: architecture-map
+    title: Architecture and Change Map
+    formats: [json, markdown]
+    source: graph
+    output: history/koni/architecture-map.json
+  - id: proof-ledger
+    title: Proof and Risk Ledger
+    formats: [json, markdown]
+    source: graph
+    output: history/koni/proof-ledger.json
+  - id: delivery-manifest
+    title: PR-Ready Delivery Manifest
+    formats: [json, markdown]
+    source: graph
+    output: history/koni/delivery-manifest.json

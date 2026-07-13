@@ -1,0 +1,36 @@
+state_machines:
+  - id: ticket
+    initial: todo
+    states: [proposed, todo, in_progress, integrating, closed, blocked]
+    terminal_states: [closed]
+    transitions:
+      - {id: approve-change-request, from: [proposed], to: todo, actors: [compiler]}
+      - {id: reject-change-request, from: [proposed], to: closed, actors: [compiler]}
+      - {id: make-actionable, from: [proposed], to: todo, actors: [compiler]}
+      - {id: start, from: [todo], to: in_progress, actors: [compiler]}
+      - {id: request-review, from: [in_progress], to: integrating, actors: [compiler]}
+      - {id: review-failed, from: [integrating], to: in_progress, actors: [compiler]}
+      - {id: finish-reviewed, from: [integrating], to: closed, actors: [compiler]}
+      - {id: block-active, from: [in_progress, integrating], to: blocked, actors: [compiler]}
+      - {id: release-blocker, from: [blocked], to: todo, actors: [compiler]}
+      - {id: retire-todo, from: [todo], to: closed, actors: [compiler]}
+      - {id: retire-active, from: [in_progress, integrating, blocked], to: closed, actors: [compiler]}
+
+  - id: gate
+    initial: pending
+    states: [pending, ready, running, complete]
+    terminal_states: [complete]
+    transitions:
+      - {id: inputs-ready, from: [pending], to: ready, actors: [compiler]}
+      - {id: begin, from: [ready], to: running, actors: [compiler]}
+      - {id: record-verdict, from: [running], to: complete, actors: [compiler]}
+      - {id: invalidate-inputs, from: [complete], to: pending, actors: [compiler]}
+
+  - id: research
+    initial: active
+    states: [active, reporting, concluded]
+    terminal_states: [concluded]
+    transitions:
+      - {id: conclusions-reviewed, from: [active], to: reporting, actors: [compiler]}
+      - {id: paper-inputs-ready, from: [reporting], to: concluded, actors: [compiler]}
+      - {id: current-input-invalidated, from: [reporting, concluded], to: active, actors: [compiler]}

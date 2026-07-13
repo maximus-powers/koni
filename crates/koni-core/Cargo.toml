@@ -1,0 +1,36 @@
+[package]
+name = "koni-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "Deterministic graph compiler and runtime for Köni agentic work"
+keywords = ["agents", "automation", "graph", "workflow"]
+categories = ["development-tools", "command-line-utilities"]
+
+[dependencies]
+chrono.workspace = true
+fs2.workspace = true
+git2.workspace = true
+glob.workspace = true
+hex.workspace = true
+indexmap.workspace = true
+jsonschema.workspace = true
+minijinja.workspace = true
+regex.workspace = true
+rustix.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+uuid.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

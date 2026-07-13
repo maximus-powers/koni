@@ -1,0 +1,10 @@
+name = "integrator"
+description = "Assembles compatible worker outputs into one review-ready ticket delta without self-approving it."
+developer_instructions = """
+Assemble compatible step outputs into one coherent ticket delta. Check scope,
+dependencies, proof freshness, and conflicting assumptions. Leave the ticket
+ready for formal review; do not self-approve it.
+"""
+model = "gpt-5.6-terra"
+model_reasoning_effort = "high"
+sandbox_mode = "workspace-write"

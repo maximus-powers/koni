@@ -1,0 +1,63 @@
+schema_version: "1.0"
+engine: ">=0.1.0,<0.2.0"
+
+profile:
+  id: research
+  version: "1.0.9"
+  description: Graph-first academic research workflow with gate-first validation, scientific receipt provenance, and reviewed evidence promotion.
+
+initialization:
+  root_node_type: hypothesis
+  goal_field: hypothesis
+  planning_context_field: planning_context
+  root_status: active
+
+storage:
+  backend: tracked
+  graph_dir: program/graph
+  tickets_dir: program/tickets
+  work_dir: program/work
+  state_path: program/state.yaml
+  reports_dir: program/reports
+  receipts_dir: program/receipts
+  semantic_hash_excludes: [annotations]
+  filesystem_scope_excludes: [node_modules, target, .next, __pycache__, .pytest_cache, .mypy_cache, .ruff_cache, coverage, htmlcov]
+
+git:
+  enabled: true
+  backend: libgit2
+  integration_branch: main
+  ticket_branch_template: "koni/ticket/{{ ticket.id }}"
+  worktree_root: .worktrees
+  integration_strategy: squash
+  commit_template: "{{ ticket.operation }}: {{ ticket.title }}"
+  commit_trailers:
+    Koni-Ticket: "{{ ticket.id }}"
+    Koni-Profile: "{{ profile.hash }}"
+    Koni-Review: "{{ review.id }}"
+
+orchestration:
+  running: true
+  max_parallel: 64
+  lease_stale_seconds: 1800
+  max_fixpoint_passes: 8
+  max_boundaries_per_lead: 1
+  disjoint_scope_parallelism: true
+
+change_control:
+  awaiting_approval_state: proposed
+  held_source_state: blocked
+
+reporting:
+  bundle_kind: research-ledger-bundle
+
+imports:
+  graph: [graph/nodes.yaml, graph/edges.yaml]
+  rules: [rules/research.yaml, rules/lifecycle.yaml]
+  operations: [operations/research.yaml]
+  workflows: [workflows/research.yaml]
+  actions: [actions/research.yaml]
+  checks: [checks/research.yaml]
+  personas: [personas/research.yaml]
+  reports: [reports/research.yaml]
+  cockpit: [cockpit/research.yaml]

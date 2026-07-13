@@ -1,0 +1,699 @@
+queries:
+  - id: active-hypotheses
+    node_types: [hypothesis]
+    status_excluding: [satisfied, archived, superseded]
+  - id: active-claims
+    node_types: [claim]
+    status_excluding: [satisfied, archived, superseded]
+  - id: active-experiments
+    node_types: [experiment]
+    status_excluding: [satisfied, archived, superseded]
+  - id: gate-required-nodes
+    node_types: [claim, experiment, prerequisite, metric, method, ablation]
+    status_excluding: [satisfied, archived, superseded]
+  - id: active-prerequisites
+    node_types: [prerequisite]
+    status_excluding: [satisfied, archived, superseded]
+  - id: active-assets
+    node_types: [asset]
+    status_excluding: [satisfied, archived, superseded]
+  - id: gate-evaluation-subjects
+    node_types: [gate]
+    status_excluding: [archived, superseded]
+  - id: gate-candidate-assets
+    node_types: [asset]
+    status_excluding: [archived, superseded]
+  - id: run-plan-targets
+    node_types: [experiment, ablation]
+    status_excluding: [satisfied, archived, superseded]
+    where: {op: field_equals, field: readiness.state, value: ready}
+  - id: active-runs
+    node_types: [run]
+    status_excluding: [satisfied, archived, superseded]
+  - id: promoted-current-evidence
+    node_types: [evidence]
+    where:
+      all:
+        - {op: field_in, subject: $node, field: spec.promotion_state, values: [promoted, lead-promoted]}
+        - {op: field_equals, subject: $node, field: spec.promoted_by, value: lead}
+        - {op: field_present, subject: $node, field: spec.promotion_review_id}
+        - op: receipt_coverage_current
+          subject: $node
+          receipt_coverage: evidence-reports.node.synthesize-evidence
+          coverage_targets:
+            traverse: {from: $node, relations: [supports, contradicts, informs], direction: outgoing, max_depth: 1, node_types: [claim]}
+  - id: reviewed-conclusion-reports
+    node_types: [report]
+    where:
+      all:
+        - {op: field_equals, subject: $node, field: spec.concluded_by, value: lead}
+        - {op: field_present, subject: $node, field: spec.conclusion_review_id}
+        - {op: field_present, subject: $node, field: spec.summary}
+        - {op: field_present, subject: $node, field: spec.synthesis}
+        - {op: field_present, subject: $node, field: spec.conclusion}
+        - {op: field_present, subject: $node, field: spec.claim_dispositions}
+        - {op: field_present, subject: $node, field: spec.curated_evidence_refs}
+        - {op: field_present, subject: $node, field: spec.conclusion_rationale}
+        - {op: field_present, subject: $node, field: spec.limitations}
+        - {op: field_present, subject: $node, field: spec.hypothesis_id}
+        - op: review_effect_coverage_current
+          subject: $node
+          review_operation: evidence-reports.hypothesis.conclude-hypothesis
+          review_effect: accept-conclusion-report
+          coverage_targets: {traverse: {from: $node, relation: summarizes, direction: outgoing, max_depth: 1, node_types: [hypothesis]}}
+  - id: paper-ready-reports
+    node_types: [report]
+    where:
+      all:
+        - {op: field_present, subject: $node, field: spec.paper_context_role}
+        - {op: field_equals, subject: $node, field: spec.paper_input_status, value: ready}
+  - id: hypotheses-ready-for-conclusion
+    node_types: [hypothesis]
+    status_excluding: [satisfied, archived, superseded]
+    where:
+      all:
+        - {op: edge_count, subject: $node, relation: claims, min: 1}
+        - not:
+            exists:
+              intersection:
+                - reviewed-conclusion-reports
+                - {traverse: {from: $node, relation: summarizes, direction: incoming, max_depth: 1, node_types: [report]}}
+        - for_all:
+            select: {traverse: {from: $node, relation: claims, direction: outgoing, max_depth: 1, node_types: [claim]}}
+            bind: ready_claim
+            satisfies:
+              exists:
+                intersection:
+                  - promoted-current-evidence
+                  - {traverse: {from: $ready_claim, relations: [supports, contradicts, informs], direction: incoming, max_depth: 1, node_types: [evidence]}}
+  - id: active-reports
+    node_types: [report]
+    status_excluding: [satisfied, archived, superseded]
+
+rules:
+  - id: readiness.experiment-constitution
+    phase: readiness
+    priority: 10
+    for_each: active-experiments
+    when:
+      all:
+        - {op: edge_count, relation: methods, min: 1}
+        - {op: edge_count, relation: metrics, min: 1}
+        - {op: edge_count, relation: ablations, min: 1}
+        - {op: edge_count, relation: requires, min: 1}
+    derive:
+      - {kind: readiness, value: ready, reason: Experiment constitution is complete}
+
+  - id: readiness.ablation-constitution
+    phase: readiness
+    priority: 11
+    for_each: ablation
+    when:
+      all:
+        - {op: edge_count, relation: method, min: 1}
+        - {op: edge_count, relation: metrics, min: 1}
+    derive:
+      - {kind: readiness, value: ready, reason: Ablation has method and metric bindings}
+
+  - id: readiness.asset-implementation
+    phase: readiness
+    priority: 12
+    for_each: active-assets
+    when:
+      all:
+        - {op: filesystem_manifest_current}
+        - {op: field_equals, field: asset_manifest.implementation_status, value: ready}
+        - {op: field_equals, field: asset_manifest.vendor_status, value: vendored}
+        - {op: edge_count, relation: validates, min: 1}
+        - {op: field_present, field: spec.gate_contracts}
+    derive:
+      - {kind: readiness, value: ready, reason: Asset has a current compiler-verified filesystem implementation}
+
+  - id: readiness.asset-implementation-blocked
+    phase: readiness
+    priority: 13
+    for_each: active-assets
+    when:
+      any:
+        - {not: {op: filesystem_manifest_current}}
+        - {not: {op: field_equals, field: asset_manifest.implementation_status, value: ready}}
+        - {not: {op: field_equals, field: asset_manifest.vendor_status, value: vendored}}
+    derive:
+      - {kind: readiness, value: blocked, reason: Asset filesystem implementation is incomplete or stale}
+      - {kind: obligation, key: asset.implementation, severity: blocking, reason: Satisfy the configured implementation contract with current compiler-accepted files}
+
+  - id: obligation.asset-vendor
+    phase: readiness
+    priority: 14
+    for_each: active-assets
+    when: {not: {op: field_equals, field: asset_manifest.vendor_status, value: vendored}}
+    derive:
+      - {kind: obligation, key: asset.vendor, severity: blocking, reason: External or configured vendor files must be current and contained under the asset root}
+
+  - id: readiness.gate-verdict
+    phase: readiness
+    priority: 15
+    for_each: gate-evaluation-subjects
+    when: {op: gate_policy_satisfied, gate_policy: research-capability-gates, gate_subject: $target}
+    derive:
+      - {kind: readiness, value: ready, reason: Gate has a current passing verdict}
+
+  - id: readiness.run-contract
+    phase: readiness
+    priority: 16
+    for_each: active-runs
+    when: {op: field_present, field: spec.runtime_contract.command}
+    derive:
+      - {kind: readiness, value: ready, reason: Run has an executable runtime contract}
+
+  # Stage precedence is encoded by priority. Complex graph gap checks are named
+  # graph checks, keeping the expression VM typed while leaving domain logic in
+  # this profile rather than in Rust branches.
+  - id: stage.formulation
+    phase: stage_derivation
+    priority: 0
+    for_each: active-hypotheses
+    when: {op: check_passed, check: gap.hypothesis-formulation}
+    derive:
+      - {kind: program_state, field: active_stage, value: formulation}
+      - {kind: program_state, field: constitution_state, value: building}
+
+  - id: stage.experiment-design
+    phase: stage_derivation
+    priority: 10
+    for_each: active-hypotheses
+    when: {op: check_passed, check: gap.experiment-portfolio}
+    derive:
+      - {kind: program_state, field: active_stage, value: experiment_design}
+      - {kind: program_state, field: constitution_state, value: building}
+
+  - id: stage.preparation
+    phase: stage_derivation
+    priority: 20
+    for_each: active-experiments
+    when: {op: check_passed, check: gap.experiment-constitution}
+    derive:
+      - {kind: program_state, field: active_stage, value: preparation}
+      - {kind: program_state, field: constitution_state, value: building}
+
+  - id: stage.graph-compilation
+    phase: stage_derivation
+    priority: 30
+    for_each: gate-required-nodes
+    when: {op: check_passed, check: gap.gate-contract}
+    derive:
+      - {kind: program_state, field: active_stage, value: graph_compilation}
+      - {kind: program_state, field: constitution_state, value: planned}
+
+  - id: stage.asset-resolution-prerequisite
+    phase: stage_derivation
+    priority: 40
+    for_each: active-prerequisites
+    when: {op: check_passed, check: gap.prerequisite-asset}
+    derive:
+      - {kind: program_state, field: active_stage, value: asset_resolution}
+      - {kind: program_state, field: constitution_state, value: planned}
+
+  - id: stage.asset-resolution-implementation
+    phase: stage_derivation
+    priority: 41
+    for_each: active-assets
+    when: {op: check_passed, check: gap.asset-implementation}
+    derive:
+      - {kind: program_state, field: active_stage, value: asset_resolution}
+      - {kind: program_state, field: constitution_state, value: planned}
+
+  - id: stage.asset-resolution-capability
+    phase: stage_derivation
+    priority: 42
+    for_each: gate-evaluation-subjects
+    when: {op: check_passed, check: gap.gate-compatible-asset}
+    derive:
+      - {kind: program_state, field: active_stage, value: asset_resolution}
+      - {kind: program_state, field: constitution_state, value: planned}
+
+  - id: stage.gates
+    phase: stage_derivation
+    priority: 50
+    for_each: gate-evaluation-subjects
+    when: {op: check_passed, check: gap.gate-verdict}
+    derive:
+      - {kind: program_state, field: active_stage, value: gates}
+      - {kind: program_state, field: constitution_state, value: planned}
+
+  - id: stage.execution-plan
+    phase: stage_derivation
+    priority: 60
+    for_each: run-plan-targets
+    when: {op: check_passed, check: gap.run-plan}
+    derive:
+      - {kind: program_state, field: active_stage, value: execution}
+      - {kind: program_state, field: constitution_state, value: planned}
+
+  - id: stage.execution-run
+    phase: stage_derivation
+    priority: 61
+    for_each: active-runs
+    when:
+      any:
+        - {op: check_passed, check: gap.run-contract}
+        - {op: check_passed, check: gap.current-runtime-receipt}
+    derive:
+      - {kind: program_state, field: active_stage, value: execution}
+      - {kind: program_state, field: constitution_state, value: planned}
+
+  - id: stage.evidence-reports
+    phase: stage_derivation
+    priority: 70
+    for_each: active-hypotheses
+    when: {op: always}
+    derive:
+      - {kind: program_state, field: active_stage, value: evidence_reports}
+      - {kind: program_state, field: constitution_state, value: planned}
+
+  - id: ticket.formulation
+    phase: ticket_emission
+    priority: 100
+    for_each: active-hypotheses
+    when:
+      any:
+        - {op: edge_count, relation: claims, exact: 0}
+        - {op: edge_count, relation: literature, exact: 0}
+    emit:
+      operation: drill-hypothesis
+      registry_entry_id: formulation.hypothesis.drill-hypothesis
+      source_state: hypothesis-missing-claims-or-literature
+      target_state: hypothesis-has-claims-and-related-work
+      obligations: [hypothesis.claims, hypothesis.literature]
+      target_nodes: $target
+      read_scope: $target
+      write_scope: $target
+
+  - id: ticket.experiment-portfolio
+    phase: ticket_emission
+    priority: 110
+    for_each: active-hypotheses
+    when:
+      all:
+        - {op: edge_count, relation: claims, min: 1}
+        - {op: edge_count, relation: literature, min: 1}
+        - any:
+            - {op: edge_count, relation: experiments, exact: 0}
+            - not:
+                for_all:
+                  select: {traverse: {from: $target, relation: claims, direction: outgoing, max_depth: 1, node_types: [claim]}}
+                  bind: claim
+                  satisfies:
+                    all:
+                      - {op: edge_count, subject: $claim, relation: tested_by, min: 1}
+                      - op: set_relation
+                        left: {traverse: {from: $claim, relation: tested_by, direction: outgoing, max_depth: 1, node_types: [experiment]}}
+                        right: {traverse: {from: $claim, relation: target_claims, direction: incoming, max_depth: 1, node_types: [experiment]}}
+                        relation_kind: equal
+                      - op: set_relation
+                        left: {traverse: {from: $claim, relation: tested_by, direction: outgoing, max_depth: 1, node_types: [experiment]}}
+                        right: {traverse: {from: $target, relation: experiments, direction: outgoing, max_depth: 1, node_types: [experiment]}}
+                        relation_kind: subset
+    emit:
+      operation: design-experiment
+      registry_entry_id: experiment-design.hypothesis.design-experiment
+      source_state: hypothesis-experiment-portfolio-incomplete
+      target_state: hypothesis-has-experiment-portfolio-covering-claims
+      obligations: [hypothesis.experiments, hypothesis.claim-coverage]
+      target_nodes: $target
+      read_scope: $target
+      write_scope:
+        union:
+          - $target
+          - {traverse: {from: $target, relation: claims, direction: outgoing, max_depth: 1}}
+
+  - id: ticket.experiment-constitution
+    phase: ticket_emission
+    priority: 120
+    for_each: active-experiments
+    when:
+      any:
+        - {op: edge_count, relation: methods, exact: 0}
+        - {op: edge_count, relation: metrics, exact: 0}
+        - {op: edge_count, relation: ablations, exact: 0}
+        - {op: edge_count, relation: requires, exact: 0}
+    emit:
+      operation: design-experiment
+      registry_entry_id: preparation.experiment.design-experiment
+      source_state: experiment-constitution-incomplete
+      target_state: experiment-has-methods-metrics-ablations-prerequisites
+      obligations: [experiment.methods, experiment.metrics, experiment.ablations, experiment.prerequisites]
+      target_nodes: $target
+      read_scope: $target
+      write_scope: $target
+
+  - id: ticket.define-gate
+    phase: ticket_emission
+    priority: 130
+    for_each: gate-required-nodes
+    when:
+      any:
+        - not:
+            exists: {policy_applicability: {policy: research-capability-gates, subject: $target, result: direct_gates}}
+        - not:
+            for_all:
+              select: {policy_applicability: {policy: research-capability-gates, subject: $target, result: direct_gates}}
+              bind: gate
+              satisfies:
+                all:
+                  - {op: field_present, subject: $gate, field: spec.command_result_contract}
+                  - {op: field_present, subject: $gate, field: spec.oracle_semantics}
+                  - {op: field_present, subject: $gate, field: spec.applicability}
+                  - {op: field_present, subject: $gate, field: spec.failure_meaning}
+                  - {op: field_equals, subject: $gate, field: spec.expected_red, value: true}
+    emit:
+      operation: define-gates
+      registry_entry_id: graph-compilation.node.define-gates
+      source_state: target-has-no-gate
+      target_state: target-has-executable-gate-contract
+      obligations: [target.gates]
+      target_nodes: $target
+      read_scope: $target
+      write_scope: $target
+
+  - id: ticket.resolve-prerequisite-asset
+    phase: ticket_emission
+    priority: 140
+    for_each: active-prerequisites
+    when:
+      all:
+        - {op: edge_count, relation: satisfied_by, exact: 0}
+        - {op: incoming_count, relation: satisfies, exact: 0}
+    emit:
+      operation: resolve-assets
+      registry_entry_id: asset-resolution.prerequisite.resolve-assets
+      source_state: prerequisite-has-no-asset
+      target_state: prerequisite-has-linked-asset
+      obligations: [prerequisite.asset]
+      target_nodes: $target
+      read_scope: $target
+      write_scope: $target
+
+  - id: ticket.repair-asset-plan
+    phase: ticket_emission
+    priority: 150
+    for_each: active-assets
+    when: {not: {op: field_present, field: spec.implementation_plan.root}}
+    emit:
+      operation: plan-build-asset
+      registry_entry_id: asset-resolution.prerequisite.plan-build-asset
+      source_state: asset-missing-standard-implementation-plan
+      target_state: asset-has-standard-implementation-plan
+      obligations: [asset.implementation-plan]
+      target_nodes: $target
+      read_scope: $target
+      write_scope: $target
+
+  - id: ticket.implement-asset
+    phase: ticket_emission
+    priority: 155
+    for_each: active-assets
+    when:
+      all:
+        - {op: field_present, field: spec.implementation_plan.root}
+        - any:
+            - {not: {op: filesystem_manifest_current}}
+            - {not: {op: field_equals, field: asset_manifest.implementation_status, value: ready}}
+            - {not: {op: field_equals, field: asset_manifest.vendor_status, value: vendored}}
+            - {op: edge_count, relation: validates, exact: 0}
+            - {not: {op: field_present, field: spec.gate_contracts}}
+            - not:
+                for_all:
+                  select: gate-evaluation-subjects
+                  bind: candidate_gate
+                  satisfies:
+                    any:
+                      - {not: {op: gate_policy_selected, subject: $target, gate_policy: research-capability-gates, gate_subject: $candidate_gate}}
+                      - {op: gate_policy_command_available, gate_policy: research-capability-gates, gate_subject: $candidate_gate}
+            - not:
+                for_all:
+                  select: gate-evaluation-subjects
+                  bind: candidate_gate
+                  satisfies:
+                    any:
+                      - {not: {op: gate_policy_selected, subject: $target, gate_policy: research-capability-gates, gate_subject: $candidate_gate}}
+                      - {not: {op: gate_policy_has_current_terminal, gate_policy: research-capability-gates, gate_subject: $candidate_gate}}
+                      - {op: gate_policy_satisfied, gate_policy: research-capability-gates, gate_subject: $candidate_gate}
+    emit:
+      operation: implement-asset
+      registry_entry_id: asset-resolution.asset.implement-asset
+      source_state: asset-incomplete-or-gates-unsatisfied
+      target_state: asset-concrete-and-applicable-gates-satisfied
+      obligations: [asset.implementation, asset.gates]
+      target_nodes: $target
+      read_scope: $target
+      write_scope: $target
+      read_paths:
+        - {select: $target, field: spec.implementation_plan.root}
+      write_paths:
+        - {select: $target, field: spec.implementation_plan.root}
+
+  - id: ticket.plan-build-asset
+    phase: ticket_emission
+    priority: 160
+    for_each: gate-evaluation-subjects
+    when: {not: {op: gate_policy_has_selection, gate_policy: research-capability-gates, gate_subject: $target}}
+    emit:
+      operation: plan-build-asset
+      registry_entry_id: asset-resolution.prerequisite.plan-build-asset
+      source_state: gate-has-no-compatible-asset
+      target_state: gate-has-compatible-asset
+      obligations: [gate.asset-capability]
+      target_nodes: $target
+      read_scope: $target
+      write_scope: $target
+
+  - id: ticket.run-gate
+    phase: ticket_emission
+    priority: 170
+    for_each: gate-evaluation-subjects
+    when:
+      all:
+        - {op: gate_policy_has_selection, gate_policy: research-capability-gates, gate_subject: $target}
+        - {op: gate_policy_evaluation_targets_ready, gate_policy: research-capability-gates, gate_subject: $target}
+        - {op: gate_policy_command_available, gate_policy: research-capability-gates, gate_subject: $target}
+        - {op: gate_policy_execution_ready, gate_policy: research-capability-gates, gate_subject: $target}
+        - {not: {op: gate_policy_has_current_terminal, gate_policy: research-capability-gates, gate_subject: $target}}
+    emit:
+      operation: run-gate
+      registry_entry_id: gates.gate.run-gate
+      source_state: gate-missing-current-terminal-verdict
+      target_state: gate-has-current-terminal-verdict
+      obligations: [gate.verdict]
+      target_nodes: $target
+      read_scope:
+        union:
+          - $target
+          - {policy_selection: {policy: research-capability-gates, gate: $target, result: winner}}
+          - traverse: {from: $target, relations: [applies_to, requires, strengthens], direction: outgoing, max_depth: 1}
+          - policy_applicability:
+              policy: research-capability-gates
+              subject: {traverse: {from: $target, relation: applies_to, direction: outgoing, min_depth: 1, max_depth: 1}}
+              result: context
+          - policy_applicability:
+              policy: research-capability-gates
+              subject: {traverse: {from: $target, relation: applies_to, direction: outgoing, min_depth: 1, max_depth: 1}}
+              result: applicable_gates
+      write_scope: $target
+      read_paths:
+        - {select: {policy_selection: {policy: research-capability-gates, gate: $target, result: winner}}, field: spec.implementation_plan.root}
+
+  - id: ticket.compile-run-plan
+    phase: ticket_emission
+    priority: 180
+    for_each: run-plan-targets
+    when: {op: edge_count, relation: runs, exact: 0}
+    emit:
+      operation: compile-run-plan
+      registry_entry_id: execution.node.compile-run-plan
+      source_state: target-has-no-run-plan
+      target_state: target-has-linked-run
+      obligations: [target.runs]
+      target_nodes: $target
+      read_scope: $target
+      write_scope: $target
+
+  - id: ticket.repair-run-contract
+    phase: ticket_emission
+    priority: 190
+    for_each: active-runs
+    when: {not: {op: field_present, field: spec.runtime_contract.command}}
+    emit:
+      operation: compile-run-plan
+      registry_entry_id: execution.node.compile-run-plan
+      source_state: run-missing-executable-contract
+      target_state: run-has-executable-scientific-contract
+      obligations: [run.runtime-contract]
+      target_nodes: $target
+      read_scope:
+        union:
+          - $target
+          - traverse: {from: $target, relation: evaluates, direction: outgoing, max_depth: 1, node_types: [ablation, claim, experiment, gate, method]}
+          - traverse: {from: $target, relation: uses, direction: outgoing, max_depth: 1, node_types: [ablation, asset, experiment, gate, method, metric]}
+      write_scope: $target
+      read_paths:
+        - {select: {traverse: {from: $target, relation: uses, direction: outgoing, max_depth: 1, node_types: [asset]}}, field: spec.implementation_plan.root}
+
+  - id: ticket.run-experiment
+    phase: ticket_emission
+    priority: 200
+    for_each: active-runs
+    when:
+      all:
+        - {op: field_equals, field: readiness.state, value: ready}
+        - {op: field_present, field: spec.runtime_contract.command}
+        - {not: {op: current_receipt, receipt_type: runtime.receipt}}
+    emit:
+      operation: run-experiment
+      registry_entry_id: execution.run.run-experiment
+      source_state: run-missing-current-valid-runtime-receipt
+      target_state: run-has-current-valid-runtime-receipt
+      obligations: [run.receipt]
+      target_nodes: $target
+      read_scope:
+        union:
+          - $target
+          - traverse: {from: $target, relation: evaluates, direction: outgoing, max_depth: 1, node_types: [ablation, claim, experiment, gate, method]}
+          - traverse: {from: $target, relation: uses, direction: outgoing, max_depth: 1, node_types: [ablation, asset, experiment, gate, method, metric]}
+      write_scope: $target
+      read_paths:
+        - {select: {traverse: {from: $target, relation: uses, direction: outgoing, max_depth: 1, node_types: [asset]}}, field: spec.implementation_plan.root}
+      write_paths:
+        - {select: $target, field: spec.runtime_contract.output_root}
+
+  - id: ticket.synthesize-evidence
+    phase: ticket_emission
+    priority: 210
+    for_each: active-claims
+    when:
+      all:
+        - {op: incoming_count, relation: claims, min: 1}
+        - for_all:
+            select: {traverse: {from: $target, relation: claims, direction: incoming, max_depth: 1, node_types: [hypothesis]}}
+            bind: hypothesis
+            satisfies:
+              all:
+                - {op: edge_count, subject: $hypothesis, relation: experiments, min: 1}
+                - for_all:
+                    select: {traverse: {from: $hypothesis, relation: experiments, direction: outgoing, max_depth: 1, node_types: [experiment]}}
+                    bind: experiment
+                    satisfies:
+                      all:
+                        - {op: edge_count, subject: $experiment, relation: runs, min: 1}
+                        - for_all:
+                            select: {traverse: {from: $experiment, relation: runs, direction: outgoing, max_depth: 1, node_types: [run]}}
+                            bind: experiment_run
+                            satisfies: {op: current_receipt, subject: $experiment_run, receipt_type: runtime.receipt}
+                        - {op: edge_count, subject: $experiment, relation: ablations, min: 1}
+                        - for_all:
+                            select: {traverse: {from: $experiment, relation: ablations, direction: outgoing, max_depth: 1, node_types: [ablation]}}
+                            bind: descendant_ablation
+                            satisfies:
+                              all:
+                                - {op: edge_count, subject: $descendant_ablation, relation: runs, min: 1}
+                                - for_all:
+                                    select: {traverse: {from: $descendant_ablation, relation: runs, direction: outgoing, max_depth: 1, node_types: [run]}}
+                                    bind: ablation_run
+                                    satisfies: {op: current_receipt, subject: $ablation_run, receipt_type: runtime.receipt}
+        - not:
+            exists:
+              intersection:
+                - promoted-current-evidence
+                - {traverse: {from: $target, relations: [supports, contradicts, informs], direction: incoming, max_depth: 1, node_types: [evidence]}}
+    emit:
+      operation: synthesize-evidence
+      registry_entry_id: evidence-reports.node.synthesize-evidence
+      source_state: claim-has-runs-without-current-promoted-evidence
+      target_state: claim-has-current-lead-promoted-evidence
+      obligations: [claim.evidence]
+      target_nodes: $target
+      read_scope: $target
+      write_scope: $target
+
+  - id: ticket.conclude-hypothesis
+    phase: ticket_emission
+    priority: 220
+    for_each: active-hypotheses
+    when:
+      all:
+        - {op: edge_count, relation: claims, min: 1}
+        - not:
+            exists:
+              intersection:
+                - reviewed-conclusion-reports
+                - {traverse: {from: $target, relation: summarizes, direction: incoming, max_depth: 1, node_types: [report]}}
+        - for_all:
+            select:
+              traverse:
+                from: $target
+                relation: claims
+                direction: outgoing
+                node_types: [claim]
+            bind: claim
+            satisfies:
+              exists:
+                intersection:
+                  - promoted-current-evidence
+                  - {traverse: {from: $claim, relations: [supports, contradicts, informs], direction: incoming, max_depth: 1, node_types: [evidence]}}
+    emit:
+      operation: conclude-hypothesis
+      registry_entry_id: evidence-reports.hypothesis.conclude-hypothesis
+      source_state: claims-have-evidence-without-reviewed-conclusion
+      target_state: hypothesis-has-reviewed-conclusion-report
+      obligations: [hypothesis.conclusion, claim.dispositions]
+      target_nodes: $target
+      read_scope: $target
+      write_scope: $target
+
+  - id: ticket.compile-report
+    phase: ticket_emission
+    priority: 230
+    for_each: promoted-current-evidence
+    when:
+      all:
+        - {op: incoming_count, relation: cites, exact: 0}
+        - {op: query_count, query: hypotheses-ready-for-conclusion, exact: 0}
+    emit:
+      operation: compile-report
+      registry_entry_id: evidence-reports.report.compile-report
+      source_state: promoted-evidence-not-in-report
+      target_state: promoted-evidence-cited-by-report
+      obligations: [evidence.report]
+      target_nodes: $target
+      read_scope: $target
+      write_scope: $target
+
+  - id: ticket.draft-paper-input
+    phase: ticket_emission
+    priority: 240
+    for_each: reviewed-conclusion-reports
+    when:
+      any:
+        - {not: {op: field_present, field: spec.paper_context_role}}
+        - {not: {op: field_equals, field: spec.paper_input_status, value: ready}}
+        - not:
+            exists:
+              intersection: [reviewed-conclusion-reports, $target]
+    emit:
+      operation: draft-paper-input
+      registry_entry_id: evidence-reports.report.draft-paper-input
+      source_state: accepted-report-missing-paper-input-role-or-ready-status
+      target_state: accepted-report-has-paper-input-role-and-ready-status
+      obligations: [report.paper-input]
+      target_nodes: $target
+      read_scope: $target
+      write_scope: $target
+
+  - id: derive.research-status
+    phase: terminal_derivation
+    priority: 300
+    for_each: active-hypotheses
+    when: {op: check_passed, check: terminal.hypothesis-concluded-and-paper-ready}
+    derive:
+      - {kind: program_state, field: research_status, value: concluded}
+      - {kind: projection, field: hypothesis_conclusions, value: reviewed-conclusion-map}

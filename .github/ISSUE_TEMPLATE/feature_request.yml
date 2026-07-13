@@ -1,0 +1,50 @@
+name: Feature request
+description: Propose a focused improvement to Köni
+title: "[Feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or maintainer problem should Köni solve?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the behavior and acceptance criteria, not only an implementation.
+    validations:
+      required: true
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Likely layer
+      options:
+        - Generic engine
+        - Project profile or schema
+        - Codex agent or skill
+        - TUI or CLI
+        - Documentation site
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and migration
+      description: Note effects on configuration, durable state, Git topology, or existing runs.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched for an existing request.
+          required: true
+        - label: I can participate in design or testing.
+          required: false

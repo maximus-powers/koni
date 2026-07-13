@@ -1,0 +1,139 @@
+reports:
+  - id: evidence-ledger
+    title: Evidence Ledger
+    formats: [json, markdown]
+    source: {query: promoted-current-evidence}
+    columns:
+      - {id: evidence_id, title: evidence, value: $row.id}
+      - {id: polarity, value: $row.spec.polarity}
+      - {id: confidence, value: $row.spec.confidence}
+      - {id: claim_refs, title: claims, value: $row.edges}
+      - {id: summary, value: $row.spec.summary}
+    output: program/reports/evidence-ledger
+
+  - id: claim-evidence-ledger
+    title: Claim Evidence Ledger
+    formats: [json, markdown]
+    source: {query: active-claims, join: current-promoted-evidence}
+    columns:
+      - {id: claim_id, title: claim, value: $row.id}
+      - {id: status, value: $row.status}
+      - {id: support_count, title: supports, value: $row.derived.support_count}
+      - {id: contradiction_count, title: contradicts, value: $row.derived.contradiction_count}
+      - {id: inform_count, title: informs, value: $row.derived.inform_count}
+      - {id: statement, value: $row.spec.statement}
+    output: program/reports/claim-evidence-ledger
+
+  - id: asset-validation-ledger
+    title: Asset Validation Ledger
+    formats: [json, markdown]
+    source: {node_type: asset, join: [asset_manifest, current_gate_receipts]}
+    columns:
+      - {id: asset_id, title: asset, value: $row.id}
+      - {id: status, value: $row.status}
+      - {id: readiness, value: $row.readiness}
+      - {id: source_strategy, title: source, value: $row.spec.source_strategy}
+      - {id: asset_manifest, title: manifest, value: $row.asset_manifest}
+      - {id: capabilities, value: $row.spec.capabilities}
+      - {id: gate_receipts, value: $row.receipts.gates}
+      - {id: gate_results, value: $row.gates}
+    output: program/reports/asset-validation-ledger
+
+  - id: method-comparison-table
+    title: Method Comparison Table
+    formats: [json, markdown]
+    source: {node_type: method}
+    columns:
+      - {id: method_id, title: method, value: $row.id}
+      - {id: status, value: $row.status}
+      - {id: target_claims, title: claims, value: $row.edges.target_claims}
+      - {id: metrics, value: $row.edges.metrics}
+      - {id: experiments, value: $row.edges.experiments}
+      - {id: readiness, value: $row.readiness}
+    output: program/reports/method-comparison-table
+
+  - id: ablation-matrix
+    title: Ablation Matrix
+    formats: [json, markdown]
+    source: {node_type: ablation}
+    columns:
+      - {id: ablation_id, title: ablation, value: $row.id}
+      - {id: method_refs, title: method, value: $row.edges.method}
+      - {id: baseline_refs, title: baseline, value: $row.edges.baseline}
+      - {id: variant_refs, title: variant, value: $row.edges.variant}
+      - {id: metrics, value: $row.edges.metrics}
+      - {id: runs, value: $row.edges.runs}
+    output: program/reports/ablation-matrix
+
+  - id: negative-result-ledger
+    title: Negative Result Ledger
+    formats: [json, markdown]
+    source:
+      union:
+        - {query: current-promoted-evidence}
+        - {receipt_type: gate.receipt}
+        - {receipt_type: runtime.receipt}
+      negative_only: true
+    columns:
+      - {id: source_type, title: source, value: $row.type}
+      - {id: source_id, title: id, value: $row.id}
+      - {id: status, value: $row.status}
+      - {id: target_refs, title: targets, value: $row.targets}
+      - {id: summary, value: $row.summary}
+    output: program/reports/negative-result-ledger
+
+  - id: run-receipt-ledger
+    title: Run Receipt Ledger
+    formats: [json, markdown]
+    source: {receipt_type: runtime.receipt}
+    columns:
+      - {id: receipt_id, title: receipt, value: $row.id}
+      - {id: ticket_id, title: ticket, value: $row.ticket_id}
+      - {id: status, value: $row.status}
+      - {id: exit_code, title: exit, value: $row.exit_code}
+      - {id: runtime, value: $row.runtime}
+      - {id: command, value: $row.command}
+    output: program/reports/run-receipt-ledger
+
+  - id: gate-receipt-ledger
+    title: Gate Receipt Ledger
+    formats: [json, markdown]
+    source: {receipt_type: gate.receipt}
+    columns:
+      - {id: receipt_id, title: receipt, value: $row.id}
+      - {id: gate_id, title: gate, value: $row.gate_id}
+      - {id: asset_id, title: asset, value: $row.asset_id}
+      - {id: target_node_id, title: target, value: $row.target_node_id}
+      - {id: verdict, value: $row.verdict}
+      - {id: summary, value: $row.summary}
+    output: program/reports/gate-receipt-ledger
+
+  - id: ticket-ledger
+    title: Ticket Ledger
+    formats: [json, markdown]
+    source: {tickets: all}
+    columns:
+      - {id: ticket_id, title: ticket, value: $row.id}
+      - {id: status, value: $row.status}
+      - {id: operation, value: $row.operation}
+      - {id: priority, value: $row.priority}
+      - {id: target_nodes, title: targets, value: $row.target_nodes}
+      - {id: steering_events, title: steering, value: $row.steering}
+      - {id: step_output_count, title: outputs, value: $row.step_outputs}
+      - {id: scope_warnings, value: $row.scope_warnings}
+      - {id: review_status, title: review, value: $row.review_result.status}
+      - {id: blocker, value: $row.blocker}
+    output: program/reports/ticket-ledger
+
+  - id: paper-input-pack
+    title: Paper Input Pack
+    formats: [json, markdown]
+    source: {node_type: report, paper_context_role_required: true}
+    columns:
+      - {id: input_id, title: input, value: $row.id}
+      - {id: role, value: $row.spec.paper_context_role}
+      - {id: status, value: $row.status}
+      - {id: evidence_refs, title: evidence, value: $row.spec.curated_evidence_refs}
+      - {id: threats, value: $row.spec.threats}
+      - {id: summary, value: $row.spec.summary}
+    output: program/reports/paper-input-pack

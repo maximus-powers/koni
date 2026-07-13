@@ -1,0 +1,56 @@
+personas:
+  - id: run-planner
+    codex_agent: run-planner
+    model_role: planner
+    sandbox: {mode: read-only, approval_policy: never, network_access: true, writable_roots: []}
+  - id: lead
+    codex_agent: lead
+    model_role: lead
+    # The Lead can inspect the checkout but has no direct write authority.
+    # Compiler-issued lifecycle tools run through the required runtime MCP
+    # broker, which Codex launches outside the shell-command sandbox.
+    sandbox: {mode: read-only, approval_policy: never, network_access: false, writable_roots: []}
+  - id: research-scout
+    codex_agent: research-scout
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}
+  - id: hypothesis-planner
+    codex_agent: hypothesis-planner
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}
+  - id: experiment-designer
+    codex_agent: experiment-designer
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}
+  - id: gate-designer
+    codex_agent: gate-designer
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}
+  - id: asset-builder
+    codex_agent: asset-builder
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}
+  - id: run-operator
+    codex_agent: run-operator
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}
+  - id: evidence-analyst
+    codex_agent: evidence-analyst
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}
+  - id: report-writer
+    codex_agent: report-writer
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}
+  - id: dashboard-reporter
+    codex_agent: dashboard-reporter
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}
+  - id: reviewer
+    codex_agent: reviewer
+    model_role: reviewer
+    sandbox: {mode: read-only, approval_policy: never, network_access: false}
+  - id: integrator
+    codex_agent: integrator
+    model_role: ticket_worker
+    sandbox: {mode: workspace-write, approval_policy: never, network_access: true, writable_roots: []}

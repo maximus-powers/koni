@@ -1,0 +1,11 @@
+{
+  "name": "koni-updog-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test packages/core/core.test.js",
+    "typecheck": "node scripts/typecheck.js",
+    "lint": "node scripts/lint.js"
+  },
+  "packageManager": "pnpm@10.14.0"
+}

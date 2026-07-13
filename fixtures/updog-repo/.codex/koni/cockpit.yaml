@@ -1,0 +1,30 @@
+schema_version: "1.0"
+module: {id: updog.cockpit, version: 0.1.0}
+
+views:
+  - id: board
+    title: Delivery Board
+    kind: kanban
+    source: tickets
+    actions: [compile, start, spawn-worker, context, review, finish, recover]
+    options: {group_by: status, show_step_progress: true, show_scope_conflicts: true}
+  - id: transformation-graph
+    title: Architecture Transformation
+    kind: graph
+    source: graph
+    actions: [compile]
+    options:
+      layers: [objective, system, interface, data_model, contract, flow, decision, change, migration, risk, proof, delivery]
+      repeat_shared_nodes: true
+  - id: assurance
+    title: Risks and Proof
+    kind: table
+    source: graph
+    actions: [run-check, report]
+    options: {node_types: [risk, proof], show_receipt_freshness: true}
+  - id: agents
+    title: Agents
+    kind: status_overlay
+    source: tickets
+    actions: [spawn-worker, recover]
+    options: {completion_marker: task_complete}

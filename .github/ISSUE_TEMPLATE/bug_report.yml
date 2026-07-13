@@ -1,0 +1,83 @@
+name: Bug report
+description: Report reproducible incorrect behavior in Köni
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Köni. Remove credentials, private prompts,
+        proprietary code, and other sensitive data before submitting.
+  - type: input
+    id: version
+    attributes:
+      label: Köni version
+      description: Output of `koni --version`.
+      placeholder: koni 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: Operating system, version, and architecture.
+      placeholder: macOS 15.5, arm64
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Initialization or migration
+        - Configuration or validation
+        - Planning or questions
+        - TUI
+        - Graph or ticket compilation
+        - Agent or process runtime
+        - Git, worktree, or integration
+        - Receipts, recovery, or deletion
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest sanitized sequence that reproduces the problem.
+      placeholder: |
+        1. Run ...
+        2. Configure ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and diagnostics
+      description: Include the complete error text or relevant sanitized logs.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Include storage backend, run type, and relevant profile details.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched for an existing issue.
+          required: true
+        - label: I removed credentials and private repository content.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
