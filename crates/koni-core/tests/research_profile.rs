@@ -3674,13 +3674,16 @@ enum AutomaticGateCommand {
         verdict: &'static str,
         wrong_identity: bool,
     },
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Missing,
 }
 
 struct AutomaticGateCase {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     key: String,
     gate_id: String,
     asset_id: String,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     asset_root: String,
 }
 
@@ -3863,6 +3866,7 @@ fn automatic_gate_receipts(
     Ok(receipts)
 }
 
+#[cfg(target_os = "macos")]
 fn automatic_gate_receipt_ids(
     store: &StateStore,
     gate_id: &str,
@@ -3878,6 +3882,7 @@ fn automatic_gate_receipt_ids(
         .collect())
 }
 
+#[cfg(target_os = "macos")]
 fn legacy_run_gate_ticket(
     profile_hash: &str,
     case: &AutomaticGateCase,
