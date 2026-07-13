@@ -24,7 +24,7 @@ indexmap = { version = "2", features = ["serde"] }
 jsonschema = "0.33"
 minijinja = { version = "2", features = ["loader"] }
 regex = "1"
-ratatui = "0.29"
+ratatui = "0.30"
 rustix = { version = "1.1", features = ["fs"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
