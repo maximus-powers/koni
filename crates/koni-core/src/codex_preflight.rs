@@ -1,10 +1,13 @@
 //! Secret-safe proof of Codex's effective launch configuration.
 //!
-//! Pass one inventories inherited resource IDs without retaining their values.
-//! Koni then adds highest-layer disables for every inherited MCP server,
-//! app, and plugin. Pass two resolves the exact launch config and validates the
-//! raw reserved runtime table in memory. Raw config values can contain bearer
-//! tokens and are never returned, formatted, logged, or persisted.
+//! Both passes run with an isolated empty `CODEX_HOME`, matching the final
+//! `codex exec --ignore-user-config` boundary while still loading applicable
+//! system and trusted-project layers. Pass one inventories inherited resource
+//! IDs without retaining their values. Koni then adds highest-layer disables
+//! for every inherited MCP server, app, and plugin. Pass two resolves the exact
+//! launch config and validates the raw reserved runtime table in memory. Raw
+//! config values can contain bearer tokens and are never returned, formatted,
+//! logged, or persisted.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -688,10 +691,20 @@ fn read_raw_effective_config(
     enabled_features: &[String],
     timeout: Option<Duration>,
 ) -> Result<RawConfigRead> {
+    // App-server has no `--ignore-user-config` switch. Give config/read an
+    // empty home instead so both verification passes observe the same layers
+    // as the final hardened `codex exec --ignore-user-config` launch. The real
+    // exec keeps the user's CODEX_HOME for authentication; only config loading
+    // is ignored there.
+    let isolated_codex_home = tempfile::Builder::new()
+        .prefix("koni-codex-preflight-")
+        .tempdir()
+        .map_err(|_| KoniError::Process("could not isolate Codex config preflight".to_owned()))?;
     let mut command = Command::new(executable);
     command
         .args(["app-server", "--stdio", "--strict-config"])
         .current_dir(cwd)
+        .env("CODEX_HOME", isolated_codex_home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -1135,6 +1148,61 @@ done
         assert!(!error.contains(secret));
         let source = include_str!("codex_preflight.rs");
         assert!(source.contains("\"includeLayers\": true"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_read_uses_an_ephemeral_codex_home() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let captured_home = root.join("captured-home");
+        let response = root.join("response.jsonl");
+        fs::write(
+            &response,
+            format!("{}\n", config_read_response(json!({}), Map::new())),
+        )
+        .unwrap();
+        let executable = root.join("fake-codex");
+        fs::write(
+            &executable,
+            format!(
+                r#"#!/bin/sh
+printf '%s' "$CODEX_HOME" > {captured}
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"config/read"'*) cat {response} ;;
+  esac
+done
+"#,
+                captured = shell_quote(&captured_home),
+                response = shell_quote(&response),
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&executable, permissions).unwrap();
+
+        let raw = read_raw_effective_config(
+            &executable,
+            &root,
+            &[],
+            &[],
+            &[],
+            Some(Duration::from_secs(2)),
+        )
+        .unwrap();
+        assert!(raw.config.is_empty());
+        let captured = fs::read_to_string(captured_home).unwrap();
+        assert!(captured.contains("koni-codex-preflight-"));
+        assert_ne!(
+            std::env::var("CODEX_HOME").ok().as_deref(),
+            Some(captured.as_str())
+        );
+        assert!(
+            !Path::new(&captured).exists(),
+            "the isolated preflight home is removed after config/read"
+        );
     }
 
     #[cfg(unix)]
