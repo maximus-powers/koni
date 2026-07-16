@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://koni.dev/parity/oracle-command-capture.schema.json",
+  "title": "Koni deterministic Rust oracle command capture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "protocol", "oracle", "isolation", "platform", "install_tree", "commands", "secret_scan"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "protocol": { "const": "koni.oracle-command-capture.v1" },
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tag", "commit", "tree"],
+      "properties": {
+        "tag": { "const": "rust-oracle-baseline" },
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+      }
+    },
+    "isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["detached_oracle_worktree", "temporary_project", "temporary_home", "provider_calls", "live_project_mutations"],
+      "properties": {
+        "detached_oracle_worktree": { "const": true },
+        "temporary_project": { "const": true },
+        "temporary_home": { "const": true },
+        "provider_calls": { "const": 0 },
+        "live_project_mutations": { "const": 0 }
+      }
+    },
+    "platform": { "type": "string", "minLength": 1 },
+    "install_tree": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "bytes", "sha256", "normalization"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "bytes": { "type": "integer", "minimum": 0 },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "normalization": { "enum": ["raw", "migration-receipt-v1"] }
+        }
+      }
+    },
+    "commands": {
+      "type": "array",
+      "minItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "argv", "exit_code", "stdout", "stderr"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]+$" },
+          "argv": { "type": "array", "items": { "type": "string" } },
+          "exit_code": { "type": "integer" },
+          "stdout": {},
+          "stderr": {}
+        }
+      }
+    },
+    "secret_scan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "matches"],
+      "properties": {
+        "passed": { "const": true },
+        "matches": { "type": "array", "maxItems": 0 }
+      }
+    }
+  }
+}

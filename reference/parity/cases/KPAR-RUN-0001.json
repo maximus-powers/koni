@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-case.v1", "id": "KPAR-RUN-0001", "revision": 1,
+  "title": "Run target branch and isolated worktree", "domain": "run", "tier": "P0",
+  "summary": "Run creation binds a selected target branch and creates an isolated run branch/worktree without modifying the target checkout.",
+  "drivers": ["rust-oracle", "typescript-target"], "fixture": "fixture:multi-branch-software-project", "action_script": "reference/parity/actions/KPAR-RUN-0001.json",
+  "checkpoints": [{"id": "C01-created", "after_action": "S04-capture", "capture": ["run_state", "git", "worktrees", "filesystem"], "assertions": ["A01-target-bound", "A02-worktree-isolated"]}],
+  "assertions": [
+    {"id": "A01-target-bound", "checkpoint": "C01-created", "surface": "run_state", "comparator": "structural", "authority": "oracle", "disposition": "none", "description": "The immutable run record binds the selected target ref and its start commit.", "expected": {"target_ref": "feature/recent", "target_start_commit_bound": true}},
+    {"id": "A02-worktree-isolated", "checkpoint": "C01-created", "surface": "git", "comparator": "git_topology", "authority": "oracle", "disposition": "none", "description": "The run owns a distinct branch/worktree while the target checkout and branch remain unchanged.", "expected": {"target_checkout_dirty": false, "run_worktree_distinct": true}}
+  ]
+}

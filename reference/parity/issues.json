@@ -1,0 +1,94 @@
+{
+  "schema_version": "1.0",
+  "protocol": "koni.parity-issues.v1",
+  "issues": [
+    {
+      "id": "KBUG-CFG-0001",
+      "title": "Whole-profile replacement can overwrite project configuration",
+      "classification": "oracle_defect",
+      "state": "reproduced",
+      "evidence": ["docs/live-smoke-findings.md:24", "crates/koni-cli/src/main.rs:1272", "crates/koni-cli/src/main.rs:2117"],
+      "observed": "The Rust replacement path can swap the complete project profile directory, including project-owned edits.",
+      "desired": "Upgrades replace only a versioned managed baseline and preserve project overlays and run state byte-for-byte.",
+      "scope": {"case_ids": ["KPAR-CFG-0003"], "assertion_ids": ["A01-overlay-preserved"], "paths": ["config.project_overlay"]},
+      "closure_proof": "Run KPAR-CFG-0003 against an upgrade fixture and prove the overlay digest and run-state tree are unchanged while the managed baseline advances."
+    },
+    {
+      "id": "KBUG-PERF-0001",
+      "title": "Deterministic Lead relay consumes model turns",
+      "classification": "oracle_defect",
+      "state": "reproduced",
+      "evidence": ["docs/live-smoke-findings.md:83", "docs/live-smoke-findings.md:93", "docs/live-smoke-findings.md:408"],
+      "observed": "Rust-era runs used expensive Lead/model turns to relay compiler-derived spawn, wait, and reconciliation decisions.",
+      "desired": "The TypeScript authority schedules ready work and reconciles terminal attempts deterministically with zero model calls or tokens.",
+      "scope": {"case_ids": ["KPAR-SCH-0002"], "assertion_ids": ["A02-zero-relay"], "paths": ["usage.scheduler_model_calls", "usage.scheduler_tokens"]},
+      "closure_proof": "KPAR-SCH-0002 records a complete dispatch/reconcile cycle with both scheduler counters exactly zero."
+    },
+    {
+      "id": "KBUG-PLN-0001",
+      "title": "Planning can exceed useful exploration and synthesis budgets",
+      "classification": "oracle_defect",
+      "state": "reproduced",
+      "evidence": ["docs/live-smoke-findings.md:453", "docs/live-smoke-findings.md:458", "docs/live-smoke-findings.md:491"],
+      "observed": "Prompt-only planning spent hundreds of thousands of new tokens, millions cached, or timed out before a structured artifact.",
+      "desired": "Planning respects the compiled repository-call and token budgets while still producing the complete structured and human-readable plan.",
+      "scope": {"case_ids": ["KPAR-PLN-0001"], "assertion_ids": ["A03-planning-budget"], "paths": ["usage.repository_calls", "usage.new_tokens"]},
+      "closure_proof": "KPAR-PLN-0001 produces an approvable plan below both configured ceilings in repeated isolated fixture runs."
+    },
+    {
+      "id": "KBUG-RUN-0001",
+      "title": "Exited worker can remain durably labeled running",
+      "classification": "oracle_defect",
+      "state": "fixed_in_oracle_pending_acceptance",
+      "evidence": ["docs/live-smoke-findings.md:387", "docs/tui-cleanup-backlog.md:138"],
+      "observed": "A dead identity-bound worker could remain as a stale running warning row even though verified active counts excluded it.",
+      "desired": "Supervision durably records interrupted/inactive status and resume creates at most one fresh successor attempt.",
+      "scope": {"case_ids": ["KPAR-LIF-0001"], "assertion_ids": ["A03-resume-once"], "paths": ["agents.status", "agents.successor_attempt"]},
+      "closure_proof": "Extend KPAR-LIF-0001 with a dead-worker restart variant and verify durable terminal status plus one successor; then change state to fixed_in_oracle."
+    },
+    {
+      "id": "KBUG-RUN-0002",
+      "title": "Parallel startup and authority contention need composed proof",
+      "classification": "oracle_defect",
+      "state": "reported_unverified",
+      "evidence": ["docs/live-smoke-findings.md:77", "docs/live-smoke-findings.md:119"],
+      "observed": "Earlier smoke work required another three-worker dispatch to prove startup and authority serialization without duplicate active tickets.",
+      "desired": "Parallel dispatch starts each ready ticket once, stays under max_parallel, and serializes authority effects without contention leaks.",
+      "scope": {"case_ids": ["KPAR-SCH-0001"], "assertion_ids": ["A02-parallel-bound"], "paths": ["agents.live_attempts", "tickets.active_assignment"]},
+      "closure_proof": "Add a three-worker variant to KPAR-SCH-0001 and capture zero duplicate assignments across repeated authority restarts."
+    },
+    {
+      "id": "KBUG-TUI-0001",
+      "title": "Agent setup can show a generic work label",
+      "classification": "oracle_defect",
+      "state": "reproduced",
+      "evidence": ["docs/live-smoke-findings.md:415", "docs/tui-cleanup-backlog.md:135"],
+      "observed": "Ticket setup may spend minutes labeled Execute compiled work, which hides what is consuming tokens.",
+      "desired": "Each row shows a concise phase- and ticket-aware title such as Preparing ticket, running check, or reviewing output.",
+      "scope": {"case_ids": ["KPAR-TUI-0001"], "assertion_ids": ["A03-work-titles"], "paths": ["agents.work_title"]},
+      "closure_proof": "KPAR-TUI-0001 captures setup, execution, review, and historical rows and finds no forbidden generic title."
+    },
+    {
+      "id": "KBUG-TUI-0002",
+      "title": "Blocked stage and retry ownership can be unclear",
+      "classification": "oracle_defect",
+      "state": "reported_unverified",
+      "evidence": ["docs/live-smoke-findings.md:405"],
+      "observed": "A supervision/reaping race could leave blocked stage ownership invisible or ambiguous in the control center.",
+      "desired": "The view model exposes one durable blocked reason, retry owner, and next action on both compact and roomy surfaces.",
+      "scope": {"case_ids": ["KPAR-TUI-0001"], "assertion_ids": ["A04-compact-usable"], "paths": ["tui.blocked_reason", "tui.retry_owner"]},
+      "closure_proof": "Add a blocked-run variant to KPAR-TUI-0001 and assert the reason and one retry owner remain visible after restart."
+    },
+    {
+      "id": "KBUG-SES-0001",
+      "title": "Rust transport reconstruction is superseded by native Pi sessions",
+      "classification": "superseded",
+      "state": "superseded",
+      "evidence": ["docs/live-smoke-findings.md:569", "docs/live-smoke-findings.md:576", "docs/tui-cleanup-backlog.md:6"],
+      "observed": "Rust projected several historical Codex/direct-Pi event envelopes into a custom transcript and needed compatibility readers for each shape.",
+      "desired": "Native Pi session JSONL is canonical conversation history; Koni stores only workflow bindings, indexes, usage, and terminal results while retaining read-only legacy adapters.",
+      "scope": {"case_ids": ["KPAR-PLN-0002", "KPAR-SES-0001"], "assertion_ids": ["A02-successor-session", "A01-full-transcript", "A02-usage-complete"], "paths": ["sessions.entries", "sessions.predecessor", "usage"]},
+      "closure_proof": "KPAR-SES-0001 proves native Pi fidelity/restore and migration fixtures prove old transcript envelopes remain readable but are never newly produced."
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-actions.v1", "case_id": "KPAR-TUI-0002",
+  "isolation": {"temporary_project": true, "temporary_pi_home": true, "network": "disabled", "live_projects": false},
+  "actions": [
+    {"id": "S01-create", "op": "project.create", "args": {"seed": "pending-question-batch"}},
+    {"id": "S02-capture-pending", "op": "capture.collect", "args": {"checkpoint": "C01-pending", "surfaces": ["tui", "questions"]}},
+    {"id": "S03-focus", "op": "tui.focus", "args": {"panel": "questions"}},
+    {"id": "S04-input", "op": "tui.input", "args": {"keys": ["right", "enter"], "answer": "none", "notes": "multiline fixture notes"}},
+    {"id": "S05-answer", "op": "run.answer_question", "args": {"source": "tui-editor"}},
+    {"id": "S06-capture-answered", "op": "capture.collect", "args": {"checkpoint": "C02-answered", "surfaces": ["tui", "questions", "run_state"]}}
+  ]
+}

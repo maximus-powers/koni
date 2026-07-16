@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "protocol": "koni.parity-case.v1",
+  "id": "KPAR-CFG-0001",
+  "revision": 1,
+  "title": "Software profile install and pin",
+  "domain": "config",
+  "tier": "P0",
+  "summary": "A fresh software install materializes a validated, version-pinned baseline without ambient Pi mutation.",
+  "drivers": ["rust-oracle", "typescript-target"],
+  "fixture": "fixture:empty-git-project",
+  "action_script": "reference/parity/actions/KPAR-CFG-0001.json",
+  "checkpoints": [{"id": "C01-installed", "after_action": "S03-capture", "capture": ["profile", "config", "filesystem"], "assertions": ["A01-profile-valid", "A02-pi-preserved"]}],
+  "assertions": [
+    {"id": "A01-profile-valid", "checkpoint": "C01-installed", "surface": "profile", "comparator": "structural", "authority": "oracle", "disposition": "none", "description": "Installed software profile validates and records its immutable baseline version and digest.", "expected": {"valid": true, "profile": "software"}},
+    {"id": "A02-pi-preserved", "checkpoint": "C01-installed", "surface": "filesystem", "comparator": "security", "authority": "specification", "disposition": "oracle_gap", "description": "Existing user Pi settings, packages, skills, prompts, sessions, and credentials are byte-preserved.", "expected": {"ambient_pi_mutations": 0}}
+  ]
+}

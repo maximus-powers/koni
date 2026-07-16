@@ -1,0 +1,37 @@
+{
+  "name": "@koni/research-profile",
+  "version": "1.0.10",
+  "description": "Koni's graph-first academic research profile for Pi",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "extensions",
+    "koni",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "pi-package",
+    "koni-profile",
+    "research-agent"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/profile.ts"
+    ]
+  },
+  "koni": {
+    "kind": "profile",
+    "manifest": "./koni/profile-manifest.json"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-case.v1", "id": "KPAR-GIT-0002", "revision": 1,
+  "title": "Conflict creates an integration ticket", "domain": "git", "tier": "P0",
+  "summary": "A target-merge conflict preserves both histories and compiles one bounded integration ticket before a later explicit merge retry.",
+  "drivers": ["rust-oracle", "typescript-target"], "fixture": "fixture:conflicting-completed-run", "action_script": "reference/parity/actions/KPAR-GIT-0002.json",
+  "checkpoints": [{"id": "C01-conflict", "after_action": "S04-capture", "capture": ["run_state", "tickets", "git", "worktrees", "receipts"], "assertions": ["A01-history-preserved", "A02-one-resolver"]}],
+  "assertions": [
+    {"id": "A01-history-preserved", "checkpoint": "C01-conflict", "surface": "git", "comparator": "git_topology", "authority": "oracle", "disposition": "none", "description": "Conflict leaves the target clean and unchanged while retaining the run branch/worktree and conflict evidence.", "expected": {"target_changed": false, "target_dirty": false, "run_retained": true}},
+    {"id": "A02-one-resolver", "checkpoint": "C01-conflict", "surface": "tickets", "comparator": "invariant", "authority": "oracle", "disposition": "none", "description": "Exactly one integration ticket preserves all functionality and changes; resolver chains are forbidden.", "expected": {"integration_tickets": 1, "resolver_chain_depth": 1}}
+  ]
+}

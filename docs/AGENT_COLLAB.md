@@ -1,5 +1,16 @@
 # Koni Agent Collaboration Registry
 
+### 2026-07-16 — executable Rust/TypeScript parity contract active
+
+`parity-contract-audit/root` owns `reference/parity/**`, the narrowly named
+dependency-free parity ledger runner/tests under `scripts/`, and append-only
+coordination notes. The frozen oracle is annotated tag `rust-oracle-baseline`
+at commit `fcc425e`. The initial ledger is green with 24 cases, 29 checkpoints,
+65 assertions, 126 typed actions, and 8 exact issue records. No Rust behavior,
+`packages/**`, live project, credential, provider, installed binary, run,
+terminal, or cmux surface is in scope. Mailbox:
+[`agent-collab/parity-contract-audit.md`](agent-collab/parity-contract-audit.md).
+
 ### 2026-07-16 — full Pi-native TypeScript port claimed
 
 `pi-native-port/root` owns the coordinated end-to-end migration on branch `pi-native-port`:

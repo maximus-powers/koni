@@ -1,0 +1,10 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-actions.v1", "case_id": "KPAR-GIT-0002",
+  "isolation": {"temporary_project": true, "temporary_pi_home": true, "network": "disabled", "live_projects": false},
+  "actions": [
+    {"id": "S01-create", "op": "project.create", "args": {"seed": "completed-run"}},
+    {"id": "S02-conflict", "op": "git.inject_conflict", "args": {"target": "bound", "file": "shared.txt"}},
+    {"id": "S03-merge", "op": "run.merge", "args": {"run": "current", "target": "bound"}, "expect_error": "merge conflict"},
+    {"id": "S04-capture", "op": "capture.collect", "args": {"checkpoint": "C01-conflict", "surfaces": ["run_state", "tickets", "git", "worktrees", "receipts"]}}
+  ]
+}

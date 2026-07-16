@@ -1,0 +1,9 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-actions.v1", "case_id": "KPAR-CFG-0001",
+  "isolation": {"temporary_project": true, "temporary_pi_home": true, "network": "disabled", "live_projects": false},
+  "actions": [
+    {"id": "S01-create", "op": "project.create", "args": {"git": true, "seed_pi_home": true}},
+    {"id": "S02-install", "op": "project.install_profile", "args": {"profile": "software"}},
+    {"id": "S03-capture", "op": "capture.collect", "args": {"checkpoint": "C01-installed", "surfaces": ["profile", "config", "filesystem"]}}
+  ]
+}

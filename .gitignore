@@ -1,4 +1,6 @@
 /target/
+/node_modules/
+/packages/*/dist/
 /.koni/
 /apps/docs/.next/
 /apps/docs/.vercel/

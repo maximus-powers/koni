@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-actions.v1", "case_id": "KPAR-RCV-0001",
+  "isolation": {"temporary_project": true, "temporary_pi_home": true, "network": "disabled", "live_projects": false},
+  "actions": [
+    {"id": "S01-create", "op": "project.create", "args": {"seed": "mid-transaction-run"}},
+    {"id": "S02-tick", "op": "authority.tick", "args": {"until": "transaction_prepared"}},
+    {"id": "S03-crash", "op": "authority.crash", "args": {"mode": "after_prepare"}},
+    {"id": "S04-restart", "op": "authority.restart", "args": {"replay": true}},
+    {"id": "S05-capture", "op": "capture.collect", "args": {"checkpoint": "C01-recovered", "surfaces": ["run_state", "journal", "receipts", "git", "filesystem"]}}
+  ]
+}

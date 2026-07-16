@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-case.v1", "id": "KPAR-TUI-0001", "revision": 1,
+  "title": "Populated compact and roomy dashboard", "domain": "tui", "tier": "P0",
+  "summary": "Both Pi and standalone control centers project the same populated run semantics across supported terminal sizes.",
+  "drivers": ["rust-oracle", "typescript-target"], "fixture": "fixture:populated-active-run", "action_script": "reference/parity/actions/KPAR-TUI-0001.json",
+  "checkpoints": [{"id": "C01-roomy", "after_action": "S03-capture-roomy", "capture": ["tui", "run_state", "agents", "events"], "assertions": ["A01-roomy-layout", "A02-semantic-graph", "A03-work-titles"]}, {"id": "C02-compact", "after_action": "S05-capture-compact", "capture": ["tui", "run_state"], "assertions": ["A04-compact-usable"]}],
+  "assertions": [
+    {"id": "A01-roomy-layout", "checkpoint": "C01-roomy", "surface": "tui", "comparator": "tui_semantics", "authority": "oracle", "disposition": "none", "description": "Roomy mode uses three equal-width dashboard columns with Details centered and Graph/Agents/Activity on the right.", "expected": {"column_ratios": [1, 1, 1]}},
+    {"id": "A02-semantic-graph", "checkpoint": "C01-roomy", "surface": "tui", "comparator": "tui_semantics", "authority": "oracle", "disposition": "none", "description": "The graph uses compact muted node titles over continuous relationship lines and never renders raw IDs.", "expected": {"raw_ids_visible": false, "relationship_lines_continuous": true}},
+    {"id": "A03-work-titles", "checkpoint": "C01-roomy", "surface": "agents", "comparator": "semantic", "authority": "specification", "disposition": "oracle_defect", "issue_ref": "KBUG-TUI-0001", "description": "Every active or historical agent row has a concise phase/ticket-aware work title; generic Execute compiled work is forbidden.", "expected": {"generic_titles": 0}},
+    {"id": "A04-compact-usable", "checkpoint": "C02-compact", "surface": "tui", "comparator": "tui_semantics", "authority": "oracle", "disposition": "none", "description": "Compact mode preserves selection, status, actions, and scroll access without overlap or clipped controls.", "expected": {"overlaps": 0, "unreachable_controls": 0}}
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-case.v1", "id": "KPAR-TUI-0004", "revision": 1,
+  "title": "Configuration and run-launch control center", "domain": "tui", "tier": "P1",
+  "summary": "The UI configures semantic Koni resources and launches a provisional run with all stages and per-run overrides visible.",
+  "drivers": ["rust-oracle", "typescript-target"], "fixture": "fixture:configured-software-project", "action_script": "reference/parity/actions/KPAR-TUI-0004.json",
+  "checkpoints": [{"id": "C01-config", "after_action": "S03-capture-config", "capture": ["tui", "config"], "assertions": ["A01-guided-resources"]}, {"id": "C02-run", "after_action": "S07-capture-run", "capture": ["tui", "run_state", "config"], "assertions": ["A02-complete-launch", "A03-provisional-row"]}],
+  "assertions": [
+    {"id": "A01-guided-resources", "checkpoint": "C01-config", "surface": "tui", "comparator": "tui_semantics", "authority": "oracle", "disposition": "none", "description": "Configuration is organized by semantic domains and hides redundant run-type persona rows and raw YAML plumbing.", "expected": {"raw_yaml_required": false, "duplicate_agent_defaults": false}},
+    {"id": "A02-complete-launch", "checkpoint": "C02-run", "surface": "tui", "comparator": "tui_semantics", "authority": "oracle", "disposition": "none", "description": "New Run shows all stages, recent target branches, questions, max parallelism, and individually selectable model/reasoning for every persona.", "expected": {"stages_clipped": false, "target_branch_visible": true}},
+    {"id": "A03-provisional-row", "checkpoint": "C02-run", "surface": "run_state", "comparator": "invariant", "authority": "oracle", "disposition": "none", "description": "Starting closes the modal and synchronously inserts one provisional run row before planning worker acknowledgement.", "expected": {"provisional_rows": 1}}
+  ]
+}

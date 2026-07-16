@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-actions.v1", "case_id": "KPAR-LIF-0001",
+  "isolation": {"temporary_project": true, "temporary_pi_home": true, "network": "fixture_only", "live_projects": false},
+  "actions": [
+    {"id": "S01-create", "op": "project.create", "args": {"seed": "active-run"}},
+    {"id": "S02-pause", "op": "run.pause", "args": {"run": "current"}},
+    {"id": "S03-tick", "op": "authority.tick", "args": {"until": "drained"}},
+    {"id": "S04-crash", "op": "authority.crash", "args": {"mode": "abrupt"}},
+    {"id": "S05-restart", "op": "authority.restart", "args": {}},
+    {"id": "S06-resume", "op": "run.resume", "args": {"run": "current"}},
+    {"id": "S07-capture", "op": "capture.collect", "args": {"checkpoint": "C01-resumed", "surfaces": ["run_state", "agents", "sessions", "usage", "events", "processes"]}}
+  ]
+}

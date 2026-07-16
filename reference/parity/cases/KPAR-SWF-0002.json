@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-case.v1", "id": "KPAR-SWF-0002", "revision": 1,
+  "title": "Software feature workflow", "domain": "software", "tier": "P0",
+  "summary": "A feature run turns objective and constraints into architecture, risks, implementation slices, verification, review, and explicit delivery.",
+  "drivers": ["rust-oracle", "typescript-target"], "fixture": "fixture:software-feature", "action_script": "reference/parity/actions/KPAR-SWF-0002.json",
+  "checkpoints": [{"id": "C01-delivered", "after_action": "S07-capture", "capture": ["graph", "tickets", "plans", "receipts", "git", "reports"], "assertions": ["A01-plan-complete", "A02-dag-bounded", "A03-proof-complete"]}],
+  "assertions": [
+    {"id": "A01-plan-complete", "checkpoint": "C01-delivered", "surface": "plans", "comparator": "semantic", "authority": "oracle", "disposition": "none", "description": "Architecture decisions, requirements, risks, and verification obligations are explicit and linked before approval.", "expected": {"required_plan_sections_complete": true}},
+    {"id": "A02-dag-bounded", "checkpoint": "C01-delivered", "surface": "tickets", "comparator": "invariant", "authority": "oracle", "disposition": "none", "description": "Implementation tickets have bounded write scopes, declared dependencies, exact personas, and compiler-derived readiness.", "expected": {"unbounded_tickets": 0}},
+    {"id": "A03-proof-complete", "checkpoint": "C01-delivered", "surface": "receipts", "comparator": "invariant", "authority": "oracle", "disposition": "none", "description": "Every required verification and qualitative review is provenance-current at closure.", "expected": {"missing_obligations": 0, "stale_evidence": 0}}
+  ]
+}

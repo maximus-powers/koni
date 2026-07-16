@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-case.v1", "id": "KPAR-RES-0002", "revision": 1,
+  "title": "Research runtime, evidence, report, and conclusion", "domain": "research", "tier": "P0",
+  "summary": "A scientific run binds exact prerequisites, validates typed results, promotes reviewed evidence, and emits deterministic reports and conclusions.",
+  "drivers": ["rust-oracle", "typescript-target"], "fixture": "fixture:scientific-runtime", "action_script": "reference/parity/actions/KPAR-RES-0002.json",
+  "checkpoints": [{"id": "C01-concluded", "after_action": "S08-capture", "capture": ["graph", "tickets", "receipts", "reports", "events"], "assertions": ["A01-exact-prerequisites", "A02-reviewed-promotion", "A03-deterministic-report", "A04-supported-conclusion"]}],
+  "assertions": [
+    {"id": "A01-exact-prerequisites", "checkpoint": "C01-concluded", "surface": "receipts", "comparator": "security", "authority": "oracle", "disposition": "none", "description": "Runtime preflight binds every inherited prerequisite to a concrete asset, exact argv path, and provenance-current typed result.", "expected": {"unbound_prerequisites": 0}},
+    {"id": "A02-reviewed-promotion", "checkpoint": "C01-concluded", "surface": "graph", "comparator": "invariant", "authority": "oracle", "disposition": "none", "description": "Workers create evidence candidates; only a provenance-bound passing review promotes evidence.", "expected": {"unreviewed_promotions": 0}},
+    {"id": "A03-deterministic-report", "checkpoint": "C01-concluded", "surface": "reports", "comparator": "exact_bytes", "authority": "oracle", "disposition": "none", "description": "Identical normalized inputs produce byte-stable JSON and Markdown evidence ledgers.", "expected": {"byte_stable": true}},
+    {"id": "A04-supported-conclusion", "checkpoint": "C01-concluded", "surface": "graph", "comparator": "semantic", "authority": "oracle", "disposition": "none", "description": "Conclusions cite current promoted evidence, preserve limitations, and cannot overstate failed or inconclusive gates.", "expected": {"unsupported_conclusions": 0}}
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-actions.v1", "case_id": "KPAR-SCH-0001",
+  "isolation": {"temporary_project": true, "temporary_pi_home": true, "network": "fixture_only", "live_projects": false},
+  "actions": [
+    {"id": "S01-create", "op": "project.create", "args": {"seed": "branched-ticket-dag", "max_parallel": 2}},
+    {"id": "S02-tick", "op": "authority.tick", "args": {"count": 1}},
+    {"id": "S03-capture", "op": "capture.collect", "args": {"checkpoint": "C01-dispatched", "surfaces": ["tickets", "agents", "grants", "events"]}}
+  ]
+}

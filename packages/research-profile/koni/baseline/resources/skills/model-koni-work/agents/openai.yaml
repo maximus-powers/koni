@@ -1,0 +1,4 @@
+interface:
+  display_name: "Model Köni Work"
+  short_description: "Design graph-compiled project work"
+  default_prompt: "Use $model-koni-work to design a graph-first Köni workflow from this repository and its installed profile."

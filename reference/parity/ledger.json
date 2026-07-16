@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "protocol": "koni.parity-ledger.v1",
+  "release_mode": "development",
+  "oracle_fingerprint": {"path": "reference/parity/oracle/rust-oracle-baseline/fingerprint.json"},
+  "normalization": [
+    {"path": "reference/parity/normalization.yaml", "sha256": "7117352e8d46ff4d7737662673cad6048cf47e92e6cc0c7924f06d4538c87bb7"},
+    {"path": "reference/parity/normalization-v2.json", "sha256": "783b3ef084f0cb387891b2de267de77d689e36aed9630404dd2dda6524a07adb"}
+  ],
+  "issue_registry": {"path": "reference/parity/issues.json"},
+  "cases": [
+    {"id": "KPAR-CFG-0001", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-CFG-0001.json"}, "actions": {"path": "reference/parity/actions/KPAR-CFG-0001.json"}},
+    {"id": "KPAR-CFG-0002", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-CFG-0002.json"}, "actions": {"path": "reference/parity/actions/KPAR-CFG-0002.json"}},
+    {"id": "KPAR-CFG-0003", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-CFG-0003.json"}, "actions": {"path": "reference/parity/actions/KPAR-CFG-0003.json"}},
+    {"id": "KPAR-RUN-0001", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-RUN-0001.json"}, "actions": {"path": "reference/parity/actions/KPAR-RUN-0001.json"}},
+    {"id": "KPAR-PLN-0001", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-PLN-0001.json"}, "actions": {"path": "reference/parity/actions/KPAR-PLN-0001.json"}},
+    {"id": "KPAR-PLN-0002", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-PLN-0002.json"}, "actions": {"path": "reference/parity/actions/KPAR-PLN-0002.json"}},
+    {"id": "KPAR-SCH-0001", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-SCH-0001.json"}, "actions": {"path": "reference/parity/actions/KPAR-SCH-0001.json"}},
+    {"id": "KPAR-SCH-0002", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-SCH-0002.json"}, "actions": {"path": "reference/parity/actions/KPAR-SCH-0002.json"}},
+    {"id": "KPAR-BRK-0001", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-BRK-0001.json"}, "actions": {"path": "reference/parity/actions/KPAR-BRK-0001.json"}},
+    {"id": "KPAR-TKT-0001", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-TKT-0001.json"}, "actions": {"path": "reference/parity/actions/KPAR-TKT-0001.json"}},
+    {"id": "KPAR-GIT-0001", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-GIT-0001.json"}, "actions": {"path": "reference/parity/actions/KPAR-GIT-0001.json"}},
+    {"id": "KPAR-GIT-0002", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-GIT-0002.json"}, "actions": {"path": "reference/parity/actions/KPAR-GIT-0002.json"}},
+    {"id": "KPAR-LIF-0001", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-LIF-0001.json"}, "actions": {"path": "reference/parity/actions/KPAR-LIF-0001.json"}},
+    {"id": "KPAR-LIF-0002", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-LIF-0002.json"}, "actions": {"path": "reference/parity/actions/KPAR-LIF-0002.json"}},
+    {"id": "KPAR-RCV-0001", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-RCV-0001.json"}, "actions": {"path": "reference/parity/actions/KPAR-RCV-0001.json"}},
+    {"id": "KPAR-SES-0001", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-SES-0001.json"}, "actions": {"path": "reference/parity/actions/KPAR-SES-0001.json"}},
+    {"id": "KPAR-TUI-0001", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-TUI-0001.json"}, "actions": {"path": "reference/parity/actions/KPAR-TUI-0001.json"}},
+    {"id": "KPAR-TUI-0002", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-TUI-0002.json"}, "actions": {"path": "reference/parity/actions/KPAR-TUI-0002.json"}},
+    {"id": "KPAR-TUI-0003", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-TUI-0003.json"}, "actions": {"path": "reference/parity/actions/KPAR-TUI-0003.json"}},
+    {"id": "KPAR-TUI-0004", "revision": 1, "tier": "P1", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-TUI-0004.json"}, "actions": {"path": "reference/parity/actions/KPAR-TUI-0004.json"}},
+    {"id": "KPAR-SWF-0001", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-SWF-0001.json"}, "actions": {"path": "reference/parity/actions/KPAR-SWF-0001.json"}},
+    {"id": "KPAR-SWF-0002", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-SWF-0002.json"}, "actions": {"path": "reference/parity/actions/KPAR-SWF-0002.json"}},
+    {"id": "KPAR-RES-0001", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-RES-0001.json"}, "actions": {"path": "reference/parity/actions/KPAR-RES-0001.json"}},
+    {"id": "KPAR-RES-0002", "revision": 1, "tier": "P0", "status": "specified", "case": {"path": "reference/parity/cases/KPAR-RES-0002.json"}, "actions": {"path": "reference/parity/actions/KPAR-RES-0002.json"}}
+  ]
+}

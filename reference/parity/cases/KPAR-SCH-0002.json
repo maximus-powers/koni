@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-case.v1", "id": "KPAR-SCH-0002", "revision": 1,
+  "title": "Deterministic dispatch and reconciliation", "domain": "scheduler", "tier": "P0",
+  "summary": "Ready-ticket selection, attempt launch, terminal reconciliation, and next-batch scheduling require zero Lead model turns.",
+  "drivers": ["rust-oracle", "typescript-target"], "fixture": "fixture:ready-ticket", "action_script": "reference/parity/actions/KPAR-SCH-0002.json",
+  "checkpoints": [{"id": "C01-reconciled", "after_action": "S05-capture", "capture": ["tickets", "agents", "events", "usage"], "assertions": ["A01-exactly-once", "A02-zero-relay"]}],
+  "assertions": [
+    {"id": "A01-exactly-once", "checkpoint": "C01-reconciled", "surface": "events", "comparator": "invariant", "authority": "oracle", "disposition": "none", "description": "One readiness transition produces at most one immutable attempt and one terminal result is reconciled once.", "expected": {"duplicate_launches": 0, "duplicate_reconciliations": 0}},
+    {"id": "A02-zero-relay", "checkpoint": "C01-reconciled", "surface": "usage", "comparator": "budget", "authority": "specification", "disposition": "oracle_defect", "issue_ref": "KBUG-PERF-0001", "description": "Deterministic scheduling and reconciliation consume no Lead or supervisor model calls or tokens.", "expected": {"scheduler_model_calls": 0, "scheduler_tokens": 0}}
+  ]
+}

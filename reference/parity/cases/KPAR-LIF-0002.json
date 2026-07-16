@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-case.v1", "id": "KPAR-LIF-0002", "revision": 1,
+  "title": "Active deletion is a terminal token boundary", "domain": "lifecycle", "tier": "P0",
+  "summary": "Deleting an active run aborts all associated sessions and descendants, revokes grants, and prevents every late effect and token.",
+  "drivers": ["rust-oracle", "typescript-target"], "fixture": "fixture:active-parallel-run", "action_script": "reference/parity/actions/KPAR-LIF-0002.json",
+  "checkpoints": [{"id": "C01-deleted", "after_action": "S04-capture", "capture": ["run_state", "agents", "grants", "sessions", "usage", "filesystem", "processes"], "assertions": ["A01-all-aborted", "A02-no-late-effects", "A03-no-late-tokens"]}],
+  "assertions": [
+    {"id": "A01-all-aborted", "checkpoint": "C01-deleted", "surface": "processes", "comparator": "security", "authority": "oracle", "disposition": "none", "description": "Every associated Pi session and owned descendant process is terminal before deletion completes.", "expected": {"associated_live_sessions": 0, "descendants_alive": 0}},
+    {"id": "A02-no-late-effects", "checkpoint": "C01-deleted", "surface": "filesystem", "comparator": "security", "authority": "oracle", "disposition": "none", "description": "Late agent results, broker calls, receipts, ticket cleanup, and filesystem writes are rejected after the delete boundary.", "expected": {"post_delete_effects": 0}},
+    {"id": "A03-no-late-tokens", "checkpoint": "C01-deleted", "surface": "usage", "comparator": "budget", "authority": "specification", "disposition": "oracle_gap", "description": "Provider usage, including cached input, remains constant after deletion acknowledgement.", "expected": {"post_delete_total_tokens": 0}}
+  ]
+}

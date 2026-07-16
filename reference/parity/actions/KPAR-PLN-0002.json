@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-actions.v1", "case_id": "KPAR-PLN-0002",
+  "isolation": {"temporary_project": true, "temporary_pi_home": true, "network": "fixture_only", "live_projects": false},
+  "actions": [
+    {"id": "S01-create", "op": "project.create", "args": {"git": true}},
+    {"id": "S02-run", "op": "run.create", "args": {"run_type": "small", "goal": "planned fixture change"}},
+    {"id": "S03-tick", "op": "authority.tick", "args": {"until": "plan_approval"}},
+    {"id": "S04-revise", "op": "run.revise_plan", "args": {"steering": "Preserve the public API and add an integration check."}},
+    {"id": "S05-capture", "op": "capture.collect", "args": {"checkpoint": "C01-revised", "surfaces": ["plans", "run_state", "sessions", "events"]}}
+  ]
+}

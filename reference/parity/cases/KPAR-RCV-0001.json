@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-case.v1", "id": "KPAR-RCV-0001", "revision": 1,
+  "title": "Crash recovery is forward and exactly once", "domain": "recovery", "tier": "P0",
+  "summary": "Authority restart replays durable journal phases without duplicating effects and represents rollback as a new forward transaction.",
+  "drivers": ["rust-oracle", "typescript-target"], "fixture": "fixture:mid-transaction-run", "action_script": "reference/parity/actions/KPAR-RCV-0001.json",
+  "checkpoints": [{"id": "C01-recovered", "after_action": "S05-capture", "capture": ["run_state", "journal", "receipts", "git", "filesystem"], "assertions": ["A01-exactly-once", "A02-forward-rollback"]}],
+  "assertions": [
+    {"id": "A01-exactly-once", "checkpoint": "C01-recovered", "surface": "journal", "comparator": "invariant", "authority": "oracle", "disposition": "none", "description": "For every crash phase, recovery either completes or compensates once and never duplicates a receipt or Git transaction.", "expected": {"duplicate_effects": 0, "ambiguous_transactions": 0}},
+    {"id": "A02-forward-rollback", "checkpoint": "C01-recovered", "surface": "git", "comparator": "git_topology", "authority": "oracle", "disposition": "none", "description": "Rollback is an auditable new forward transaction that preserves prior evidence and history.", "expected": {"destructive_history_rewrite": false, "rollback_receipt": true}}
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "schema_version": "2.0",
+  "protocol": "koni.parity-normalization.v2",
+  "principle": "Normalize environmental entropy, never authority or safety evidence.",
+  "identity_assignment": {
+    "basis": "semantic_definition_site",
+    "never": "raw_identifier_encounter_order",
+    "maps": ["graph_node", "ticket", "run", "agent", "attempt", "session", "context", "output", "review", "receipt", "snapshot", "steering", "report", "recovery"]
+  },
+  "scalars": {
+    "normalize": ["absolute_temporary_root", "wall_clock_timestamp", "duration", "pid", "git_object_id", "ephemeral_port"],
+    "preserve": ["relative_path", "exit_code", "signal", "stdout_bytes", "stderr_bytes", "truncation", "platform_contract", "grant_hash", "expected_state_hash", "resource_hash", "session_parentage"]
+  },
+  "ordering": {
+    "mappings": "sort_keys",
+    "preserve_sequences": ["events", "structured_events", "retry_attempts", "step_dag", "passes", "session_entries", "journal_entries"],
+    "semantic_sets": ["target_nodes", "obligation_keys", "included_graph_node_ids", "included_ticket_ids", "included_steering_event_ids", "included_receipt_ids", "included_file_paths", "required_run_receipts"]
+  },
+  "hashes": {
+    "algorithm": "sha256-canonical-json",
+    "derived": "recompute_over_normalized_owner",
+    "protocol_identity": "compare_original"
+  },
+  "surface_comparators": {
+    "structured": ["profile", "config", "graph", "tickets", "run_state", "questions", "plans", "agents", "grants", "receipts", "journal", "usage", "reports"],
+    "ordered_jsonl": ["events", "sessions"],
+    "topology": ["git", "worktrees", "filesystem", "processes"],
+    "semantic_terminal": ["tui"],
+    "exact_bytes": ["deterministic_report", "immutable_launch_spec"]
+  },
+  "mandatory_capture": {
+    "process": ["exit_code", "stdout_sha256", "stderr_sha256", "timed_out", "descendants_alive"],
+    "security": ["secret_scan"],
+    "forbid_global_drops": true
+  }
+}

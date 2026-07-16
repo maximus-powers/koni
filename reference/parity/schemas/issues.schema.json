@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://koni.dev/parity/issues.schema.json",
+  "title": "Koni parity issue registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "protocol", "issues"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "protocol": { "const": "koni.parity-issues.v1" },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "classification", "state", "evidence", "observed", "desired", "scope", "closure_proof"],
+        "properties": {
+          "id": { "$ref": "#/$defs/issue_id" },
+          "title": { "type": "string", "minLength": 1 },
+          "classification": { "enum": ["oracle_defect", "superseded", "legacy_reader", "oracle_gap", "platform_variant", "quarantine"] },
+          "state": { "enum": ["reported_unverified", "reproduced", "fixed_in_oracle_pending_acceptance", "fixed_in_oracle", "superseded", "closed"] },
+          "evidence": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+          "observed": { "type": "string", "minLength": 1 },
+          "desired": { "type": "string", "minLength": 1 },
+          "scope": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["case_ids", "assertion_ids", "paths"],
+            "properties": {
+              "case_ids": { "type": "array", "minItems": 1, "items": { "$ref": "case.schema.json#/$defs/case_id" } },
+              "assertion_ids": { "type": "array", "minItems": 1, "items": { "$ref": "case.schema.json#/$defs/assertion_id" } },
+              "paths": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+            }
+          },
+          "closure_proof": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "issue_id": { "type": "string", "pattern": "^KBUG-[A-Z]{3,4}-[0-9]{4}$" }
+  }
+}

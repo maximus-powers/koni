@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-case.v1", "id": "KPAR-PLN-0001", "revision": 1,
+  "title": "Question batch, candidate plan, and approval", "domain": "planning", "tier": "P0",
+  "summary": "Planning durably asks configured questions, incorporates answers, emits machine and human plans, then waits for explicit approval.",
+  "drivers": ["rust-oracle", "typescript-target"], "fixture": "fixture:ambiguous-software-goal", "action_script": "reference/parity/actions/KPAR-PLN-0001.json",
+  "checkpoints": [{"id": "C01-approved", "after_action": "S06-capture", "capture": ["questions", "plans", "run_state", "sessions", "usage"], "assertions": ["A01-answers-bound", "A02-explicit-approval", "A03-planning-budget"]}],
+  "assertions": [
+    {"id": "A01-answers-bound", "checkpoint": "C01-approved", "surface": "plans", "comparator": "semantic", "authority": "oracle", "disposition": "none", "description": "The candidate plan records every answered question and exposes concise human architecture, decision, risk, and verification summaries.", "expected": {"answer_bindings_complete": true, "human_sections": ["architecture", "decisions", "risk", "verification"]}},
+    {"id": "A02-explicit-approval", "checkpoint": "C01-approved", "surface": "run_state", "comparator": "invariant", "authority": "oracle", "disposition": "none", "description": "No execution ticket becomes ready before explicit approval of the exact candidate hash.", "expected": {"approval_hash_bound": true}},
+    {"id": "A03-planning-budget", "checkpoint": "C01-approved", "surface": "usage", "comparator": "budget", "authority": "specification", "disposition": "oracle_defect", "issue_ref": "KBUG-PLN-0001", "description": "Planning completes within the configured repository-call and new-token ceilings without deterministic model relay.", "expected": {"repository_calls_lte_config": true, "new_tokens_lte_config": true}}
+  ]
+}

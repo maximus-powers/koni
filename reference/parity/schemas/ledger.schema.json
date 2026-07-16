@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://koni.dev/parity/ledger.schema.json",
+  "title": "Koni executable parity ledger",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "protocol",
+    "release_mode",
+    "oracle_fingerprint",
+    "normalization",
+    "issue_registry",
+    "cases"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "protocol": { "const": "koni.parity-ledger.v1" },
+    "release_mode": { "enum": ["development", "release"] },
+    "oracle_fingerprint": { "$ref": "#/$defs/file" },
+    "normalization": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/file" }
+    },
+    "issue_registry": { "$ref": "#/$defs/file" },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "revision", "tier", "status", "case", "actions"],
+        "properties": {
+          "id": { "$ref": "case.schema.json#/$defs/case_id" },
+          "revision": { "type": "integer", "minimum": 1 },
+          "tier": { "enum": ["P0", "P1", "P2"] },
+          "status": { "enum": ["specified", "captured", "passing", "blocked"] },
+          "case": { "$ref": "#/$defs/file" },
+          "actions": { "$ref": "#/$defs/file" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    }
+  }
+}

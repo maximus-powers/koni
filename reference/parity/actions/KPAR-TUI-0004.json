@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-actions.v1", "case_id": "KPAR-TUI-0004",
+  "isolation": {"temporary_project": true, "temporary_pi_home": true, "network": "disabled", "live_projects": false},
+  "actions": [
+    {"id": "S01-create", "op": "project.create", "args": {"seed": "configured-software-project"}},
+    {"id": "S02-focus-config", "op": "tui.focus", "args": {"screen": "configure", "resource": "run-types"}},
+    {"id": "S03-capture-config", "op": "capture.collect", "args": {"checkpoint": "C01-config", "surfaces": ["tui", "config"]}},
+    {"id": "S04-open-run", "op": "tui.input", "args": {"key": "n"}},
+    {"id": "S05-select", "op": "tui.input", "args": {"run_type": "large", "target_ref": "recent", "questions": "many", "max_parallel": 5, "model_override": true}},
+    {"id": "S06-start", "op": "run.create", "args": {"source": "tui", "goal": "fixture feature"}},
+    {"id": "S07-capture-run", "op": "capture.collect", "args": {"checkpoint": "C02-run", "surfaces": ["tui", "run_state", "config"]}}
+  ]
+}

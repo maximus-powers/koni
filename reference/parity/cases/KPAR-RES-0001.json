@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-case.v1", "id": "KPAR-RES-0001", "revision": 1,
+  "title": "Research formulation, gates, and assets", "domain": "research", "tier": "P0",
+  "summary": "Research formulation compiles typed claims, literature, experiments, ablations, gates, and concrete assets without redundant reciprocal edges.",
+  "drivers": ["rust-oracle", "typescript-target"], "fixture": "reference/parity/fixtures/formulation", "action_script": "reference/parity/actions/KPAR-RES-0001.json",
+  "checkpoints": [{"id": "C01-compiled", "after_action": "S04-capture", "capture": ["graph", "tickets", "receipts", "reports"], "assertions": ["A01-typed-formulation", "A02-gate-first", "A03-one-bidirectional-edge"]}],
+  "assertions": [
+    {"id": "A01-typed-formulation", "checkpoint": "C01-compiled", "surface": "graph", "comparator": "structural", "authority": "oracle", "disposition": "none", "description": "Claims and literature compile into the required formulation transition and typed downstream obligations.", "expected": {"valid": true, "formulation_transitions": 1}},
+    {"id": "A02-gate-first", "checkpoint": "C01-compiled", "surface": "receipts", "comparator": "invariant", "authority": "oracle", "disposition": "none", "description": "Expected-red gate authoring may finish, but downstream readiness remains blocked until a compatible concrete asset and typed verifier pass.", "expected": {"expected_red_allowed": true, "failed_gate_blocks": true}},
+    {"id": "A03-one-bidirectional-edge", "checkpoint": "C01-compiled", "surface": "graph", "comparator": "semantic", "authority": "oracle", "disposition": "none", "description": "Claim/experiment, claim/ablation, and gate applicability reciprocity use one bidirectional relationship, not two circular declarations.", "expected": {"redundant_reciprocal_edges": 0}}
+  ]
+}

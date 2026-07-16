@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-case.v1", "id": "KPAR-TKT-0001", "revision": 1,
+  "title": "Submit, compile, review, rework, and close", "domain": "ticket", "tier": "P0",
+  "summary": "A ticket closes only after complete outputs compile, review failures create bounded rework, and the current review passes.",
+  "drivers": ["rust-oracle", "typescript-target"], "fixture": "fixture:single-implementation-ticket", "action_script": "reference/parity/actions/KPAR-TKT-0001.json",
+  "checkpoints": [{"id": "C01-closed", "after_action": "S08-capture", "capture": ["graph", "tickets", "receipts", "events", "git"], "assertions": ["A01-failure-reopens", "A02-current-pass-closes", "A03-one-transaction"]}],
+  "assertions": [
+    {"id": "A01-failure-reopens", "checkpoint": "C01-closed", "surface": "tickets", "comparator": "invariant", "authority": "oracle", "disposition": "none", "description": "A failed review creates one bounded rework attempt and cannot be satisfied by stale output or review identifiers.", "expected": {"rework_attempts": 1, "stale_provenance_accepted": false}},
+    {"id": "A02-current-pass-closes", "checkpoint": "C01-closed", "surface": "receipts", "comparator": "invariant", "authority": "oracle", "disposition": "none", "description": "Closure requires context, scoped compile, every required output, checks, and a provenance-current passing review.", "expected": {"closure_receipts_complete": true}},
+    {"id": "A03-one-transaction", "checkpoint": "C01-closed", "surface": "git", "comparator": "git_topology", "authority": "oracle", "disposition": "none", "description": "Accepted work is integrated once into the run branch and the ticket loses its live lease.", "expected": {"integration_transactions": 1, "live_lease": false}}
+  ]
+}

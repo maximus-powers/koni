@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-actions.v1", "case_id": "KPAR-RES-0002",
+  "isolation": {"temporary_project": true, "temporary_pi_home": true, "network": "fixture_only", "live_projects": false},
+  "actions": [
+    {"id": "S01-create", "op": "project.create", "args": {"seed": "scientific-runtime"}},
+    {"id": "S02-install", "op": "project.install_profile", "args": {"profile": "research"}},
+    {"id": "S03-compile", "op": "compiler.compile", "args": {"scope": "full"}},
+    {"id": "S04-run", "op": "authority.tick", "args": {"until": "evidence_candidate"}},
+    {"id": "S05-review", "op": "ticket.review", "args": {"verdict": "pass", "scope": "evidence"}},
+    {"id": "S06-compile-report", "op": "compiler.compile", "args": {"scope": "report"}},
+    {"id": "S07-close", "op": "ticket.close", "args": {"scope": "conclusion"}},
+    {"id": "S08-capture", "op": "capture.collect", "args": {"checkpoint": "C01-concluded", "surfaces": ["graph", "tickets", "receipts", "reports", "events"]}}
+  ]
+}

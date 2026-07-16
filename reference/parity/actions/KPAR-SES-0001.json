@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-actions.v1", "case_id": "KPAR-SES-0001",
+  "isolation": {"temporary_project": true, "temporary_pi_home": true, "network": "fixture_only", "live_projects": false},
+  "actions": [
+    {"id": "S01-create", "op": "project.create", "args": {"seed": "contained-pi-session"}},
+    {"id": "S02-emit", "op": "session.emit", "args": {"fixture": "messages-tools-usage"}},
+    {"id": "S03-steer", "op": "agent.steer", "args": {"text": "Preserve the public contract."}},
+    {"id": "S04-compact", "op": "session.compact", "args": {"preserve": "koni-context-references"}},
+    {"id": "S05-restart", "op": "session.restart", "args": {"same_attempt": true}},
+    {"id": "S06-capture", "op": "capture.collect", "args": {"checkpoint": "C01-restored", "surfaces": ["sessions", "usage", "run_state", "grants"]}}
+  ]
+}

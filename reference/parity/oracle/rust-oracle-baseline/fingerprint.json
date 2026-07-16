@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0",
+  "protocol": "koni.rust-oracle-fingerprint.v1",
+  "captured_on": "2026-07-16",
+  "tag": {
+    "name": "rust-oracle-baseline",
+    "kind": "annotated",
+    "object": "d46ab2fc9fe67d0a6b9238c47c60e3fe753f522e",
+    "commit": "fcc425e51114bcedb9aeae44d6e8c8418a525e6b",
+    "tree": "2d96962668275f8e180f6d66cb574354ac0b0cda",
+    "message": "Green executable Rust oracle for the Pi-native TypeScript parity port"
+  },
+  "toolchain": {
+    "host": "aarch64-apple-darwin",
+    "rustc": "1.96.1 (31fca3adb283cc9dfd56b49cdee9a96eb9c96ffd)",
+    "cargo": "1.96.1 (356927216 2026-06-26)",
+    "llvm": "22.1.8",
+    "node": "v24.16.0"
+  },
+  "locked_inputs": [
+    {"path": "Cargo.lock", "source": "tag", "sha256": "298867bc6e14b578628d6d8770b7c474eb86a0ce6fcac761be1ee006b67fc05d"},
+    {"path": "reference/parity/normalization.yaml", "source": "tag", "sha256": "7117352e8d46ff4d7737662673cad6048cf47e92e6cc0c7924f06d4538c87bb7"},
+    {"path": "reference/parity/scenarios.yaml", "source": "tag", "sha256": "1b6a7192882d449c2af9c10794a479bbf225c899b15a031085c63b50eaf23d22"},
+    {"path": "reference/parity/normalization-v2.json", "source": "working-contract", "sha256": "783b3ef084f0cb387891b2de267de77d689e36aed9630404dd2dda6524a07adb"}
+  ],
+  "test_inventory": {
+    "rust_static_tests": 1227,
+    "core_unit": 705,
+    "core_integration": 134,
+    "cli": 77,
+    "tui": 311,
+    "pi_host_vitest": 49,
+    "synthetic_updog_node": 1,
+    "ignored_rust": 3,
+    "list_command": "cargo test --workspace --locked -- --list",
+    "list_exit_code": 0
+  },
+  "capture_rule": "Oracle captures run from a clean detached worktree at the annotated tag, with isolated temporary project and Pi homes; never from a live project or the mutable port worktree."
+}

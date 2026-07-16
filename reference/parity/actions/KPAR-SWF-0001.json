@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-actions.v1", "case_id": "KPAR-SWF-0001",
+  "isolation": {"temporary_project": true, "temporary_pi_home": true, "network": "fixture_only", "live_projects": false},
+  "actions": [
+    {"id": "S01-create", "op": "project.create", "args": {"seed": "software-bug"}},
+    {"id": "S02-run", "op": "run.create", "args": {"run_type": "medium", "goal": "fix fixture bug"}},
+    {"id": "S03-approve", "op": "run.approve_plan", "args": {"candidate": "fixture"}},
+    {"id": "S04-execute", "op": "authority.tick", "args": {"until": "merge_ready"}},
+    {"id": "S05-review", "op": "ticket.review", "args": {"verdict": "pass", "scope": "all"}},
+    {"id": "S06-merge", "op": "run.merge", "args": {"target": "bound"}},
+    {"id": "S07-capture", "op": "capture.collect", "args": {"checkpoint": "C01-delivered", "surfaces": ["graph", "tickets", "plans", "receipts", "git", "reports"]}}
+  ]
+}

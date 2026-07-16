@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-actions.v1", "case_id": "KPAR-TUI-0003",
+  "isolation": {"temporary_project": true, "temporary_pi_home": true, "network": "fixture_only", "live_projects": false},
+  "actions": [
+    {"id": "S01-create", "op": "project.create", "args": {"seed": "plan-awaiting-approval"}},
+    {"id": "S02-capture-review", "op": "capture.collect", "args": {"checkpoint": "C01-review", "surfaces": ["tui", "plans"]}},
+    {"id": "S03-input", "op": "tui.input", "args": {"editor": "steering", "text": "Keep API compatibility.\nAdd a rollback check."}},
+    {"id": "S04-revise", "op": "run.revise_plan", "args": {"source": "adaptive-primary-action"}},
+    {"id": "S05-capture-revision", "op": "capture.collect", "args": {"checkpoint": "C02-revision", "surfaces": ["tui", "plans", "sessions"]}}
+  ]
+}

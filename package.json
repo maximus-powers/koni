@@ -1,0 +1,32 @@
+{
+  "name": "koni",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Koni's Pi-native compiler-authoritative agent harness",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test:profiles && npm run test:parity-ledger && npm run test --workspaces --if-present",
+    "test:profiles": "node --test scripts/profile-bundles.test.mjs",
+    "test:parity-ledger": "node --test scripts/parity-ledger.test.mjs",
+    "check": "npm run parity:validate && npm run test:profiles && npm run test:parity-ledger && npm run check --workspaces --if-present",
+    "parity:validate": "node scripts/parity-ledger.mjs validate",
+    "parity:plan": "node scripts/parity-ledger.mjs plan",
+    "profiles:capture": "node scripts/capture-profile-bundles.mjs"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.10",
+    "@types/node": "24.12.4",
+    "@types/semver": "7.7.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  },
+  "packageManager": "npm@11.13.0"
+}

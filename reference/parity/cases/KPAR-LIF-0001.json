@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0", "protocol": "koni.parity-case.v1", "id": "KPAR-LIF-0001", "revision": 1,
+  "title": "Durable pause and resume", "domain": "lifecycle", "tier": "P0",
+  "summary": "Pause drains active sessions, survives authority restart, spends no tokens while paused, and resume continues from durable readiness.",
+  "drivers": ["rust-oracle", "typescript-target"], "fixture": "fixture:active-run", "action_script": "reference/parity/actions/KPAR-LIF-0001.json",
+  "checkpoints": [{"id": "C01-resumed", "after_action": "S07-capture", "capture": ["run_state", "agents", "sessions", "usage", "events", "processes"], "assertions": ["A01-pause-durable", "A02-zero-paused-usage", "A03-resume-once"]}],
+  "assertions": [
+    {"id": "A01-pause-durable", "checkpoint": "C01-resumed", "surface": "run_state", "comparator": "invariant", "authority": "oracle", "disposition": "none", "description": "Paused state survives authority restart and no new assignments become ready until resume.", "expected": {"pause_survived_restart": true}},
+    {"id": "A02-zero-paused-usage", "checkpoint": "C01-resumed", "surface": "usage", "comparator": "budget", "authority": "oracle", "disposition": "none", "description": "After drain acknowledgement, paused time accrues no provider calls, new tokens, or cached tokens.", "expected": {"paused_provider_calls": 0, "paused_total_tokens": 0}},
+    {"id": "A03-resume-once", "checkpoint": "C01-resumed", "surface": "agents", "comparator": "invariant", "authority": "oracle", "disposition": "none", "description": "Resume creates at most one successor attempt for each still-ready assignment.", "expected": {"duplicate_resume_attempts": 0}}
+  ]
+}

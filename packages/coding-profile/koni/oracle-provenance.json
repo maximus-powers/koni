@@ -1,0 +1,13 @@
+{
+  "oracle_tag": "rust-oracle-baseline",
+  "oracle_commit": "fcc425e51114bcedb9aeae44d6e8c8418a525e6b",
+  "capture_kind": "fresh-schema2-install",
+  "captured_profile": {
+    "id": "software",
+    "version": "0.6.0"
+  },
+  "excluded_generated_paths": [
+    "migration-receipt.json",
+    "resource-manifest.json"
+  ]
+}
