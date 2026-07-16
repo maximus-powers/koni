@@ -27,7 +27,6 @@ const MAX_CHECK_RUN_CAPTURE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CHECK_RESULT_DOCUMENT_BYTES: usize = 1024 * 1024;
 const MAX_CHECK_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MAX_CHECK_EVIDENCE_FILES: usize = 64;
-pub(crate) const MAX_CHECK_EVIDENCE_AGGREGATE_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MAX_CHECK_ATTEMPTS: u32 = 3;
 pub(crate) const MAX_CHECK_TOTAL_EXECUTION_SECONDS: u64 = 24 * 60 * 60;
 const MAX_CHECK_POSTPROCESSING: Duration = Duration::from_secs(30);
@@ -232,17 +231,6 @@ impl CommandRunner {
         variables: &BTreeMap<String, String>,
         stop_file: Option<&Path>,
     ) -> Result<CommandReceipt> {
-        let mut evidence = EvidenceAudit::new();
-        self.run_with_evidence_audit(spec, variables, stop_file, &mut evidence)
-    }
-
-    pub(crate) fn run_with_evidence_audit(
-        &self,
-        spec: &CommandSpec,
-        variables: &BTreeMap<String, String>,
-        stop_file: Option<&Path>,
-        evidence: &mut EvidenceAudit,
-    ) -> Result<CommandReceipt> {
         let started_at = Utc::now();
         let started = Instant::now();
         let (max_attempts, configured_attempt_timeout) = validate_command_spec_limits(spec)?;
@@ -335,17 +323,10 @@ impl CommandRunner {
                 final_status = CommandStatus::InvalidResult;
             } else if exit_code.is_some_and(|code| expected.contains(&code)) {
                 if let Some(protocol) = &spec.result_protocol {
-                    match self
-                        .result_document_with_audit(&receipt, protocol, variables, evidence)
-                    {
+                    match self.result_document(&receipt, protocol, variables) {
                         Ok((document, source)) => {
                             result_source = Some(source);
-                            let parsed = evidence.ensure_active().and_then(|()| {
-                                parse_protocol_result(&document, protocol).and_then(|value| {
-                                    evidence.ensure_active().map(|()| value)
-                                })
-                            });
-                            match parsed {
+                            match parse_protocol_result(&document, protocol) {
                                 Ok(value) => {
                                     parsed_result = Some(value);
                                     final_status = CommandStatus::Passed;
@@ -385,7 +366,7 @@ impl CommandRunner {
                 });
                 continue;
             }
-            let artifact = evidence.artifact_receipt(&self.root, &normalized)?;
+            let artifact = artifact_receipt(&self.root, &normalized)?;
             if !artifact.exists || artifact.error.is_some() {
                 final_status = CommandStatus::InvalidResult;
                 result_error.get_or_insert_with(|| {
@@ -421,7 +402,6 @@ impl CommandRunner {
         Ok(receipt)
     }
 
-    #[cfg(test)]
     fn result_document(
         &self,
         attempt: &AttemptReceipt,

@@ -1,5 +1,15 @@
 # Koni Agent Collaboration Registry
 
+### 2026-07-16 — full Pi-native TypeScript port claimed
+
+`pi-native-port/root` owns the coordinated end-to-end migration on branch `pi-native-port`:
+the executable Rust parity oracle, the coarse `@koni/core`, `@koni/coding-profile`, and
+`@koni/research-profile` package system, deterministic TypeScript authority/compiler/runtime,
+native Pi sessions and credentials, shared Pi/standalone control center, compatibility migration,
+and final Rust deletion gates. The exact pre-port shared tree is preserved by commit `86c2ba5` and
+tag `pre-pi-native-wip-2026-07-16`. No live project run, product checkout, or terminal surface is
+authorized as a test target. Mailbox: [`agent-collab/pi-native-port.md`](agent-collab/pi-native-port.md).
+
 ### 2026-07-16 — Pi-native session/resource/auth migration audit claimed
 
 `pi-native-migration-audit/root` owns documentation only: an exact pinned
