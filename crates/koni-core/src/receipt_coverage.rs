@@ -485,7 +485,7 @@ mod tests {
             r#"
 candidate_node_types: [evidence]
 required_nodes:
-  relations: [claims, experiments, tested_by, target_claims, ablations, runs]
+  relations: [claims, experiments, tests, target_claims, ablations, runs]
   direction: both
   min_depth: 1
   max_depth: 4
@@ -514,17 +514,11 @@ disposition:
 
     fn base_graph() -> Graph {
         let mut graph = Graph::default();
-        let mut claim_a = node("claim-a", "claim", json!({}));
-        claim_a
-            .edges
-            .insert("tested_by".to_owned(), vec!["experiment".to_owned()]);
-        let mut claim_b = node("claim-b", "claim", json!({}));
-        claim_b
-            .edges
-            .insert("tested_by".to_owned(), vec!["experiment".to_owned()]);
+        let claim_a = node("claim-a", "claim", json!({}));
+        let claim_b = node("claim-b", "claim", json!({}));
         let mut experiment = node("experiment", "experiment", json!({}));
         experiment.edges.insert(
-            "target_claims".to_owned(),
+            "tests".to_owned(),
             vec!["claim-a".to_owned(), "claim-b".to_owned()],
         );
         experiment.edges.insert(

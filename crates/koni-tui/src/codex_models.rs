@@ -1,11 +1,12 @@
 use std::collections::BTreeSet;
-use std::io::Read;
-use std::process::{Command, Stdio};
 use std::sync::OnceLock;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
-use serde::Deserialize;
+use koni_core::{
+    CredentialLeaseId, PI_RUNTIME_PROVIDER_ID, PiRuntimeArtifact, PiRuntimeBootstrapRequest,
+    PiRuntimeProcess, RuntimeThinkingLevel,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodexModelOption {
@@ -24,17 +25,13 @@ impl CodexModelCatalog {
     pub(crate) fn available() -> Self {
         static CATALOG: OnceLock<CodexModelCatalog> = OnceLock::new();
         CATALOG
-            .get_or_init(|| {
-                command_catalog(&["debug", "models"])
-                    .or_else(|| command_catalog(&["debug", "models", "--bundled"]))
-                    .unwrap_or_else(Self::fallback)
-            })
+            .get_or_init(|| pi_runtime_catalog().unwrap_or_else(Self::fallback))
             .clone()
     }
 
     pub(crate) fn fallback() -> Self {
         let standard = ["low", "medium", "high", "xhigh"];
-        let frontier = ["low", "medium", "high", "xhigh", "max", "ultra"];
+        let frontier = ["low", "medium", "high", "xhigh", "max"];
         let luna = ["low", "medium", "high", "xhigh", "max"];
         Self {
             models: [
@@ -111,84 +108,76 @@ impl CodexModelCatalog {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct CodexModelsResponse {
-    #[serde(default)]
-    models: Vec<CodexModelEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CodexModelEntry {
-    slug: String,
-    #[serde(default)]
-    display_name: String,
-    #[serde(default)]
-    visibility: String,
-    #[serde(default)]
-    supported_reasoning_levels: Vec<CodexReasoningLevel>,
-    #[serde(default)]
-    default_reasoning_level: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CodexReasoningLevel {
-    effort: String,
-}
-
-fn command_catalog(args: &[&str]) -> Option<CodexModelCatalog> {
-    let mut child = Command::new("codex")
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut stdout = child.stdout.take()?;
-    let reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).ok()?;
-        Some(bytes)
-    });
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let status = loop {
-        if let Some(status) = child.try_wait().ok().flatten() {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = reader.join();
-            return None;
-        }
-        thread::sleep(Duration::from_millis(20));
-    };
-    let bytes = reader.join().ok().flatten()?;
-    status.success().then(|| parse_catalog(&bytes)).flatten()
-}
-
-fn parse_catalog(bytes: &[u8]) -> Option<CodexModelCatalog> {
-    let response = serde_json::from_slice::<CodexModelsResponse>(bytes).ok()?;
+fn pi_runtime_catalog() -> Option<CodexModelCatalog> {
+    static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+    let sequence = REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let nonce = format!("{}-{sequence}", std::process::id());
+    let artifact = PiRuntimeArtifact::discover(&[]).ok()?;
+    let mut process = PiRuntimeProcess::bootstrap(
+        PiRuntimeBootstrapRequest {
+            artifact,
+            transport_session_id: format!("pi-tui-models-{nonce}"),
+            credential_lease: CredentialLeaseId(format!("pi-tui-models-lease-{nonce}")),
+            timeout: Duration::from_secs(2),
+            network_access: false,
+            oauth_callback_access: false,
+        },
+        &mut |_| Ok(()),
+    )
+    .ok()?;
+    let response = process.list_models().ok();
+    let shutdown = process.terminate();
+    let response = response.filter(|_| shutdown.is_ok())?;
     let mut seen = BTreeSet::new();
     let models = response
-        .models
         .into_iter()
-        .filter(|model| model.visibility.is_empty() || model.visibility == "list")
-        .filter(|model| seen.insert(model.slug.clone()))
+        .filter(|model| model.provider == PI_RUNTIME_PROVIDER_ID)
+        .filter(|model| seen.insert(model.id.clone()))
         .map(|model| CodexModelOption {
-            display_name: if model.display_name.trim().is_empty() {
-                model.slug.clone()
+            display_name: if model.name.trim().is_empty() {
+                model.id.clone()
             } else {
-                model.display_name
+                model.name
             },
-            slug: model.slug,
-            default_reasoning_effort: model.default_reasoning_level,
+            slug: model.id,
+            default_reasoning_effort: model
+                .thinking_levels
+                .contains(&RuntimeThinkingLevel::High)
+                .then(|| "high".to_owned())
+                .or_else(|| {
+                    model
+                        .thinking_levels
+                        .contains(&RuntimeThinkingLevel::Medium)
+                        .then(|| "medium".to_owned())
+                })
+                .or_else(|| {
+                    model
+                        .thinking_levels
+                        .first()
+                        .cloned()
+                        .map(pi_thinking_level_name)
+                }),
             reasoning_efforts: model
-                .supported_reasoning_levels
+                .thinking_levels
                 .into_iter()
-                .map(|level| level.effort)
+                .map(pi_thinking_level_name)
                 .collect(),
         })
         .collect::<Vec<_>>();
     (!models.is_empty()).then_some(CodexModelCatalog { models })
+}
+
+fn pi_thinking_level_name(level: RuntimeThinkingLevel) -> String {
+    match level {
+        RuntimeThinkingLevel::Off => "off",
+        RuntimeThinkingLevel::Minimal => "minimal",
+        RuntimeThinkingLevel::Low => "low",
+        RuntimeThinkingLevel::Medium => "medium",
+        RuntimeThinkingLevel::High => "high",
+        RuntimeThinkingLevel::Xhigh => "xhigh",
+        RuntimeThinkingLevel::Max => "max",
+    }
+    .to_owned()
 }
 
 #[cfg(test)]
@@ -196,46 +185,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_visible_models_and_their_model_specific_reasoning_levels() {
-        let catalog = parse_catalog(
-            br#"{
-                "models": [
-                    {
-                        "slug": "gpt-frontier",
-                        "display_name": "GPT Frontier",
-                        "visibility": "list",
-                        "default_reasoning_level": "max",
-                        "supported_reasoning_levels": [
-                            {"effort": "low"},
-                            {"effort": "max"},
-                            {"effort": "ultra"}
-                        ]
-                    },
-                    {
-                        "slug": "gpt-hidden",
-                        "display_name": "Hidden",
-                        "visibility": "hide",
-                        "supported_reasoning_levels": [{"effort": "medium"}]
-                    }
-                ]
-            }"#,
-        )
-        .unwrap();
-
+    fn pi_thinking_levels_use_schema_two_names() {
         assert_eq!(
-            catalog.model_choices().collect::<Vec<_>>(),
-            ["gpt-frontier"]
+            pi_thinking_level_name(RuntimeThinkingLevel::Minimal),
+            "minimal"
         );
-        assert_eq!(
-            catalog.reasoning_choices(Some("gpt-frontier")),
-            ["low", "max", "ultra"]
-        );
-        assert!(catalog.supports_reasoning("gpt-frontier", "ultra"));
-        assert!(!catalog.supports_reasoning("gpt-frontier", "medium"));
-        assert_eq!(
-            catalog.preferred_reasoning("gpt-frontier").as_deref(),
-            Some("max")
-        );
+        assert_eq!(pi_thinking_level_name(RuntimeThinkingLevel::Max), "max");
     }
 
     #[test]
@@ -244,7 +199,7 @@ mod tests {
         assert!(catalog.model_choices().any(|model| model == "gpt-5.6-sol"));
         assert_eq!(
             catalog.reasoning_choices(Some("gpt-5.6-sol")),
-            ["low", "medium", "high", "xhigh", "max", "ultra"]
+            ["low", "medium", "high", "xhigh", "max"]
         );
     }
 }

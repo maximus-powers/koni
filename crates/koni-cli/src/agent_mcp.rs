@@ -6,12 +6,13 @@
 
 use anyhow::Context;
 use koni_core::{
-    AgentBrokerIngress, AgentBrokerRole, KoniError, agent_mcp_safe_error, claim_agent_mcp_grant,
-    execute_agent_mcp_tool,
+    AgentBrokerIngress, AgentBrokerRole, AgentBrokerSafeError, KoniError,
+    agent_mcp_safe_error_for_tool, claim_agent_mcp_grant, execute_agent_mcp_tool,
+    wait_for_spawned_agent_reapers,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, Write};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -21,6 +22,13 @@ const MAX_REQUEST_FRAME_BYTES: usize = 2 * 1024 * 1024;
 // text can escape it once more, so reserve more than twice that bounded size.
 const MAX_RESPONSE_FRAME_BYTES: usize = 34 * 1024 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
+const MAX_VALIDATION_REJECTIONS_PER_TOOL: usize = 3;
+
+#[derive(Debug, Clone, Default)]
+struct ValidationRejectionState {
+    count: usize,
+    last_correction: Option<AgentBrokerSafeError>,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct AgentMcpOptions {
@@ -92,7 +100,17 @@ struct EngineBrokerBackend<'a> {
 
 impl BrokerBackend for EngineBrokerBackend<'_> {
     fn call(&mut self, tool: &str, arguments: Value) -> Result<Value, KoniError> {
-        execute_agent_mcp_tool(self.ingress, tool, arguments)
+        let result = execute_agent_mcp_tool(self.ingress, tool, arguments);
+        if tool == "yield_lead" && result.is_ok() {
+            // Workers are spawned by this MCP broker process, not by the
+            // outer CLI/TUI supervisor. Keep their actual parent-side wait(2)
+            // handles alive through the accepted Lead yield so every raw
+            // process exit is durable before control returns to orchestration.
+            // A dispatch batch reaches yield only after all of its workers are
+            // started, so the workers still execute in parallel.
+            wait_for_spawned_agent_reapers();
+        }
+        result
     }
 }
 
@@ -111,6 +129,51 @@ struct SubmitOutputArguments {
 struct CompileArguments {
     #[serde(default)]
     summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+enum GraphContextDirection {
+    Outgoing,
+    Incoming,
+    #[default]
+    Both,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphContextArguments {
+    #[serde(default)]
+    anchors: Vec<String>,
+    #[serde(default)]
+    relations: Vec<String>,
+    #[serde(default)]
+    direction: GraphContextDirection,
+    #[serde(default)]
+    max_depth: Option<u64>,
+    #[serde(default)]
+    node_types: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RecordNoteKind {
+    Observation,
+    ImplementationDetail,
+    Rationale,
+    Nit,
+    OpenQuestion,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordNoteArguments {
+    node_id: String,
+    kind: RecordNoteKind,
+    body: String,
+    #[serde(default)]
+    supersedes: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,7 +198,29 @@ fn validate_tool_arguments(
         (AgentBrokerRole::Worker { .. }, "context") => {
             serde_json::from_value::<EmptyArguments>(arguments.clone())?;
         }
-        (AgentBrokerRole::Worker { .. }, "submit_output") => {
+        (AgentBrokerRole::Worker { .. }, "graph_context") => {
+            let parsed = serde_json::from_value::<GraphContextArguments>(arguments.clone())?;
+            validate_string_list(&parsed.anchors, "anchors", 16)?;
+            validate_string_list(&parsed.relations, "relations", 32)?;
+            validate_string_list(&parsed.node_types, "node_types", 32)?;
+            let _ = (parsed.direction, parsed.max_depth);
+        }
+        (AgentBrokerRole::Worker { .. }, "record_note") => {
+            let parsed = serde_json::from_value::<RecordNoteArguments>(arguments.clone())?;
+            anyhow::ensure!(
+                !parsed.node_id.trim().is_empty(),
+                "node_id must not be empty"
+            );
+            anyhow::ensure!(!parsed.body.trim().is_empty(), "body must not be empty");
+            if let Some(supersedes) = parsed.supersedes {
+                anyhow::ensure!(
+                    !supersedes.trim().is_empty(),
+                    "supersedes must not be empty"
+                );
+            }
+            let _ = parsed.kind;
+        }
+        (AgentBrokerRole::Worker { .. }, "submit_output" | "submit_and_compile") => {
             let parsed = serde_json::from_value::<SubmitOutputArguments>(arguments.clone())?;
             anyhow::ensure!(parsed.payload.is_object(), "payload must be a JSON object");
         }
@@ -159,7 +244,10 @@ fn validate_tool_arguments(
             let parsed = serde_json::from_value::<YieldArguments>(arguments.clone())?;
             if let Some(reason) = parsed.reason {
                 anyhow::ensure!(
-                    matches!(reason.as_str(), "boundary-complete" | "paused"),
+                    matches!(
+                        reason.as_str(),
+                        "boundary-complete" | "paused" | "capacity-reached"
+                    ),
                     "invalid yield reason"
                 );
             }
@@ -172,14 +260,51 @@ fn validate_tool_arguments(
     Ok(arguments)
 }
 
+fn validate_string_list(values: &[String], name: &str, maximum: usize) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        values.len() <= maximum,
+        "{name} accepts at most {maximum} entries"
+    );
+    anyhow::ensure!(
+        values.iter().all(|value| !value.trim().is_empty()),
+        "{name} entries must be nonempty strings"
+    );
+    Ok(())
+}
+
 fn minimal_model_response(tool: &str, value: Value) -> anyhow::Result<Value> {
     match tool {
         "context" => {
-            let document = value
-                .get("document")
-                .cloned()
+            if let Some(document) = value.get("document").cloned() {
+                return Ok(json!({"document": document}));
+            }
+            let document_path = value
+                .get("document_path")
+                .and_then(Value::as_str)
                 .ok_or_else(|| anyhow::anyhow!("context response is missing its document"))?;
-            Ok(json!({"document": document}))
+            Ok(json!({
+                "status": "already_issued",
+                "document_path": document_path,
+                "message": value.get("message").and_then(Value::as_str).unwrap_or(
+                    "Use the complete context from the first call or read only this exact compiler-issued document path."
+                ),
+            }))
+        }
+        "graph_context" => Ok(value),
+        "record_note" => {
+            let note_id = value
+                .get("note")
+                .and_then(|note| note.get("id"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("record_note response is missing its note ID"))?;
+            Ok(json!({
+                "status": "accepted",
+                "note_id": note_id,
+                "replayed": value.get("replayed").and_then(Value::as_bool).unwrap_or(false),
+                "authority": value.get("authority").and_then(Value::as_str).unwrap_or(
+                    "advisory_non_authoritative"
+                ),
+            }))
         }
         // WorkerWaitOutcome is deliberately a compact public broker DTO: it
         // contains no process identity, path, persona, or internal step.
@@ -246,6 +371,7 @@ fn serve<R: BufRead, W: Write, B: BrokerBackend>(
     backend: &mut B,
 ) -> anyhow::Result<()> {
     let mut state = ProtocolState::AwaitInitialize;
+    let mut validation_rejections = BTreeMap::<String, ValidationRejectionState>::new();
     loop {
         let frame = match read_request_frame(&mut reader)? {
             RequestFrame::Eof => return Ok(()),
@@ -330,7 +456,7 @@ fn serve<R: BufRead, W: Write, B: BrokerBackend>(
             "tools/list" | "tools/call" if state != ProtocolState::Ready => {
                 jsonrpc_error(id, -32600, "MCP initialization is incomplete")
             }
-            "tools/list" if empty_params(object.get("params")) => jsonrpc_result(
+            "tools/list" if valid_tools_list_params(object.get("params")) => jsonrpc_result(
                 id,
                 json!({
                     "tools": catalog
@@ -367,19 +493,49 @@ fn serve<R: BufRead, W: Write, B: BrokerBackend>(
                             id,
                             "invalid_arguments: use exactly the compiler-issued tool schema",
                         ),
-                        Ok(arguments) => match backend.call(name, arguments) {
-                            Ok(value) => match minimal_model_response(name, value) {
-                                Ok(value) => tool_success_result(id, value),
-                                Err(_) => tool_error_result(id, safe_tool_error(name)),
-                            },
-                            Err(error) => tool_error_result(
-                                id,
-                                serde_json::to_string(&agent_mcp_safe_error(&error))
-                                    .unwrap_or_else(|_| {
-                                        "{\"code\":\"internal_stop\",\"message\":\"Stop this agent and let the supervisor recover.\",\"retryable\":false}".to_owned()
-                                    }),
-                            ),
-                        },
+                        Ok(arguments) => {
+                            let rejection_state = validation_rejections.get(name);
+                            if bounded_validation_tool(name)
+                                && rejection_state.is_some_and(|state| {
+                                    state.count >= MAX_VALIDATION_REJECTIONS_PER_TOOL
+                                })
+                            {
+                                tool_error_result(
+                                    id,
+                                    serialize_safe_error(validation_retry_limit_error(
+                                        rejection_state
+                                            .and_then(|state| state.last_correction.as_ref()),
+                                    )),
+                                )
+                            } else {
+                                match backend.call(name, arguments) {
+                                    Ok(value) => match minimal_model_response(name, value) {
+                                        Ok(value) => tool_success_result(id, value),
+                                        Err(_) => tool_error_result(id, safe_tool_error(name)),
+                                    },
+                                    Err(error) => {
+                                        let mut safe = agent_mcp_safe_error_for_tool(name, &error);
+                                        if bounded_validation_tool(name)
+                                            && safe.code == "revise_validation"
+                                        {
+                                            let rejection_state = validation_rejections
+                                                .entry(name.to_owned())
+                                                .or_default();
+                                            rejection_state.count += 1;
+                                            rejection_state.last_correction = Some(safe.clone());
+                                            if rejection_state.count
+                                                >= MAX_VALIDATION_REJECTIONS_PER_TOOL
+                                            {
+                                                safe = validation_retry_limit_error(
+                                                    rejection_state.last_correction.as_ref(),
+                                                );
+                                            }
+                                        }
+                                        tool_error_result(id, serialize_safe_error(safe))
+                                    }
+                                }
+                            }
+                        }
                     },
                     None => jsonrpc_error(id, -32602, "tools/call requires a tool name"),
                 }
@@ -390,10 +546,39 @@ fn serve<R: BufRead, W: Write, B: BrokerBackend>(
     }
 }
 
+fn bounded_validation_tool(tool: &str) -> bool {
+    matches!(tool, "submit_output" | "submit_and_compile" | "compile")
+}
+
+fn validation_retry_limit_error(
+    last_correction: Option<&AgentBrokerSafeError>,
+) -> AgentBrokerSafeError {
+    let mut message = "The compiler returned three bounded validation rejections in this agent session. Stop this agent so Koni can preserve the exact ticket boundary and recover without an unbounded retry loop."
+        .to_owned();
+    if let Some(correction) =
+        last_correction.filter(|correction| correction.code == "revise_validation")
+    {
+        message.push_str(" Final compiler correction: ");
+        message.push_str(correction.message.trim());
+    }
+    AgentBrokerSafeError {
+        code: "validation_retry_limit".to_owned(),
+        message,
+        retryable: false,
+    }
+}
+
+fn serialize_safe_error(error: AgentBrokerSafeError) -> String {
+    serde_json::to_string(&error).unwrap_or_else(|_| {
+        "{\"code\":\"internal_stop\",\"message\":\"Stop this agent and let the supervisor recover.\",\"retryable\":false}"
+            .to_owned()
+    })
+}
+
 fn safe_tool_error(tool: &str) -> &'static str {
     match tool {
         "context" => "context_unavailable: the compiler could not provide this step context",
-        "submit_output" => {
+        "submit_output" | "submit_and_compile" => {
             "output_rejected: revise the structured payload to satisfy the issued context"
         }
         "compile" => {
@@ -417,6 +602,20 @@ fn empty_params(params: Option<&Value>) -> bool {
     match params {
         None | Some(Value::Null) => true,
         Some(Value::Object(object)) => object.is_empty(),
+        _ => false,
+    }
+}
+
+fn valid_tools_list_params(params: Option<&Value>) -> bool {
+    match params {
+        None | Some(Value::Null) => true,
+        Some(Value::Object(object)) => {
+            object
+                .keys()
+                .all(|key| matches!(key.as_str(), "cursor" | "_meta"))
+                && object.get("cursor").is_none_or(Value::is_null)
+                && object.get("_meta").is_none_or(Value::is_object)
+        }
         _ => false,
     }
 }
@@ -528,8 +727,77 @@ fn tool_definition(name: &str, role: &AgentBrokerRole) -> anyhow::Result<Value> 
             empty(),
             true,
         ),
+        (AgentBrokerRole::Worker { .. }, "graph_context") => (
+            "Read a bounded graph neighborhood anchored within this ticket's compiler-issued scope, including advisory working notes.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "anchors": {
+                        "type": "array",
+                        "maxItems": 16,
+                        "items": {"type": "string", "minLength": 1}
+                    },
+                    "relations": {
+                        "type": "array",
+                        "maxItems": 32,
+                        "items": {"type": "string", "minLength": 1}
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["outgoing", "incoming", "both"],
+                        "default": "both"
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 1
+                    },
+                    "node_types": {
+                        "type": "array",
+                        "maxItems": 32,
+                        "items": {"type": "string", "minLength": 1}
+                    }
+                }
+            }),
+            true,
+        ),
+        (AgentBrokerRole::Worker { .. }, "record_note") => (
+            "Append a provenance-bound advisory working note to a graph node visible from this ticket. This does not change typed graph authority.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["node_id", "kind", "body"],
+                "properties": {
+                    "node_id": {"type": "string", "minLength": 1},
+                    "kind": {
+                        "type": "string",
+                        "enum": [
+                            "observation",
+                            "implementation_detail",
+                            "rationale",
+                            "nit",
+                            "open_question"
+                        ]
+                    },
+                    "body": {"type": "string", "minLength": 1},
+                    "supersedes": {"type": "string", "minLength": 1}
+                }
+            }),
+            false,
+        ),
         (AgentBrokerRole::Worker { .. }, "submit_output") => (
             "Submit structured output for this ticket step.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["payload"],
+                "properties": {"payload": {"type": "object"}}
+            }),
+            false,
+        ),
+        (AgentBrokerRole::Worker { .. }, "submit_and_compile") => (
+            "Atomically submit structured output, materialize its graph delta, and run the scoped compile for this ticket step.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -593,14 +861,14 @@ fn tool_definition(name: &str, role: &AgentBrokerRole) -> anyhow::Result<Value> 
             false,
         ),
         (AgentBrokerRole::Lead { .. }, "yield_lead") => (
-            "Return this completed Lead boundary to the supervisor and stop.",
+            "Return this completed or compiler-verified interrupted Lead boundary to the supervisor and stop.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
                     "reason": {
                         "type": "string",
-                        "enum": ["boundary-complete", "paused"]
+                        "enum": ["boundary-complete", "paused", "capacity-reached"]
                     }
                 }
             }),
@@ -645,10 +913,17 @@ mod tests {
                 step: "implement".to_owned(),
                 persona: "builder".to_owned(),
             },
-            ["context", "submit_output", "compile"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
+            [
+                "context",
+                "graph_context",
+                "record_note",
+                "submit_and_compile",
+                "submit_output",
+                "compile",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
         )
         .unwrap()
     }
@@ -691,7 +966,173 @@ mod tests {
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(names, ["context", "submit_output", "compile"]);
+        assert_eq!(
+            names,
+            [
+                "context",
+                "graph_context",
+                "record_note",
+                "submit_and_compile",
+                "submit_output",
+                "compile",
+            ]
+        );
+    }
+
+    #[test]
+    fn first_page_tools_list_accepts_current_mcp_pagination_and_metadata_shape() {
+        let catalog = worker_catalog();
+        let mut backend = FakeBackend::default();
+        let input = format!(
+            "{}{}{}",
+            handshake(),
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{\"cursor\":null}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"progressToken\":\"inventory\"}}}\n"
+        );
+        let responses = run_protocol(&input, &catalog, &mut backend);
+        assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 6);
+        assert_eq!(responses[2]["result"]["tools"].as_array().unwrap().len(), 6);
+        assert!(backend.calls.is_empty());
+    }
+
+    #[test]
+    fn graph_resource_tools_publish_bounded_non_destructive_schemas() {
+        let role = AgentBrokerRole::Worker {
+            ticket: "TK-pinned".to_owned(),
+            step: "implement".to_owned(),
+            persona: "builder".to_owned(),
+        };
+        let graph_context = tool_definition("graph_context", &role).unwrap();
+        assert_eq!(
+            graph_context["inputSchema"]["properties"]["anchors"]["maxItems"],
+            16
+        );
+        assert_eq!(
+            graph_context["inputSchema"]["properties"]["relations"]["maxItems"],
+            32
+        );
+        assert_eq!(
+            graph_context["inputSchema"]["properties"]["direction"]["enum"],
+            json!(["outgoing", "incoming", "both"])
+        );
+        assert_eq!(
+            graph_context["inputSchema"]["properties"]["direction"]["default"],
+            "both"
+        );
+        assert_eq!(
+            graph_context["inputSchema"]["properties"]["max_depth"]["minimum"],
+            0
+        );
+        assert_eq!(graph_context["annotations"]["readOnlyHint"], true);
+        assert_eq!(graph_context["annotations"]["destructiveHint"], false);
+
+        let record_note = tool_definition("record_note", &role).unwrap();
+        assert_eq!(
+            record_note["inputSchema"]["required"],
+            json!(["node_id", "kind", "body"])
+        );
+        assert_eq!(
+            record_note["inputSchema"]["properties"]["kind"]["enum"],
+            json!([
+                "observation",
+                "implementation_detail",
+                "rationale",
+                "nit",
+                "open_question"
+            ])
+        );
+        assert_eq!(record_note["annotations"]["readOnlyHint"], false);
+        assert_eq!(record_note["annotations"]["destructiveHint"], false);
+    }
+
+    #[test]
+    fn graph_resource_tool_arguments_are_strictly_validated() {
+        let role = AgentBrokerRole::Worker {
+            ticket: "TK-pinned".to_owned(),
+            step: "implement".to_owned(),
+            persona: "builder".to_owned(),
+        };
+        assert!(
+            validate_tool_arguments(
+                &role,
+                "graph_context",
+                json!({
+                    "anchors": ["ND-root"],
+                    "relations": ["contains"],
+                    "direction": "incoming",
+                    "max_depth": 0,
+                    "node_types": ["system"]
+                }),
+            )
+            .is_ok()
+        );
+        for invalid in [
+            json!({"direction": "sideways"}),
+            json!({"max_depth": -1}),
+            json!({"max_depth": 1.5}),
+            json!({"anchors": [""]}),
+            json!({"anchors": (0..17).map(|index| format!("ND-{index}")).collect::<Vec<_>>() }),
+            json!({"invented_scope": "all"}),
+        ] {
+            assert!(
+                validate_tool_arguments(&role, "graph_context", invalid).is_err(),
+                "invalid graph query reached dispatch"
+            );
+        }
+
+        assert!(
+            validate_tool_arguments(
+                &role,
+                "record_note",
+                json!({
+                    "node_id": "ND-root",
+                    "kind": "rationale",
+                    "body": "The existing seam keeps this change local.",
+                    "supersedes": "NT-previous"
+                }),
+            )
+            .is_ok()
+        );
+        for invalid in [
+            json!({"node_id": "ND-root", "kind": "decision", "body": "text"}),
+            json!({"node_id": " ", "kind": "nit", "body": "text"}),
+            json!({"node_id": "ND-root", "kind": "nit", "body": "  "}),
+            json!({"node_id": "ND-root", "kind": "nit", "body": "text", "supersedes": " "}),
+            json!({"node_id": "ND-root", "kind": "nit", "body": "text", "state": "confirmed"}),
+        ] {
+            assert!(
+                validate_tool_arguments(&role, "record_note", invalid).is_err(),
+                "invalid advisory note reached dispatch"
+            );
+        }
+    }
+
+    #[test]
+    fn graph_context_and_record_note_keep_their_model_facing_results() {
+        let graph_context = json!({
+            "nodes": [{"id": "ND-root", "type": "objective"}],
+            "edges": [],
+            "supplement_hash": "sha256:bounded"
+        });
+        assert_eq!(
+            minimal_model_response("graph_context", graph_context.clone()).unwrap(),
+            graph_context
+        );
+
+        let note = minimal_model_response(
+            "record_note",
+            json!({
+                "accepted": true,
+                "replayed": false,
+                "authority": "advisory_non_authoritative",
+                "note": {"id": "NT-new", "body": "private working detail"}
+            }),
+        )
+        .unwrap();
+        assert_eq!(note["status"], "accepted");
+        assert_eq!(note["note_id"], "NT-new");
+        assert_eq!(note["authority"], "advisory_non_authoritative");
+        assert!(note.get("body").is_none());
     }
 
     #[test]
@@ -816,6 +1257,18 @@ mod tests {
             definition["inputSchema"]["properties"]["ticket"]["enum"],
             json!(["TK-a", "TK-b"])
         );
+        let yield_definition = tool_definition("yield_lead", &role).unwrap();
+        assert_eq!(
+            yield_definition["inputSchema"]["properties"]["reason"]["enum"],
+            json!(["boundary-complete", "paused", "capacity-reached"])
+        );
+        assert!(
+            validate_tool_arguments(&role, "yield_lead", json!({"reason": "capacity-reached"}),)
+                .is_ok()
+        );
+        assert!(
+            validate_tool_arguments(&role, "yield_lead", json!({"reason": "invented"})).is_err()
+        );
     }
 
     #[test]
@@ -833,14 +1286,139 @@ mod tests {
         let input = format!(
             "{}{}",
             handshake(),
-            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"compile\",\"arguments\":{}}}\n"
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"submit_and_compile\",\"arguments\":{\"payload\":{}}}}\n"
         );
         let responses = run_protocol(&input, &catalog, &mut backend);
         let text = responses[1]["result"]["content"][0]["text"]
             .as_str()
             .unwrap();
-        assert!(text.contains("revise_validation"));
+        assert!(text.contains("validation_stop"));
         assert!(!text.contains("SECRET_SENTINEL"));
         assert!(!text.contains("/private/path"));
+    }
+
+    #[test]
+    fn repeated_validation_rejections_stop_before_an_agent_can_loop_forever() {
+        #[derive(Default)]
+        struct RejectingBackend {
+            calls: usize,
+        }
+
+        impl BrokerBackend for RejectingBackend {
+            fn call(&mut self, _tool: &str, _arguments: Value) -> Result<Value, KoniError> {
+                self.calls += 1;
+                let diagnostic = match self.calls {
+                    1 => "node SECRET_CHANGE_ID type change requires field scope",
+                    2 => "node SECRET_PROOF_ID type proof field layer has the wrong type",
+                    _ => {
+                        "node SECRET_RISK_ID type risk requires field detection; offending_value=SECRET_VALUE /private/SECRET_PATH"
+                    }
+                };
+                Err(KoniError::Graph(diagnostic.to_owned()))
+            }
+        }
+
+        let catalog = worker_catalog();
+        let mut backend = RejectingBackend::default();
+        let requests = (2..=6)
+            .map(|id| {
+                format!(
+                    "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\"name\":\"submit_and_compile\",\"arguments\":{{\"payload\":{{}}}}}}}}\n"
+                )
+            })
+            .collect::<String>();
+        let responses = run_protocol(
+            &format!("{}{requests}", handshake()),
+            &catalog,
+            &mut backend,
+        );
+        let errors = responses[1..]
+            .iter()
+            .map(|response| {
+                serde_json::from_str::<Value>(
+                    response["result"]["content"][0]["text"].as_str().unwrap(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            backend.calls, 3,
+            "later retries must not reach the compiler"
+        );
+        assert_eq!(errors[0]["code"], "revise_validation");
+        assert_eq!(errors[1]["code"], "revise_validation");
+        for error in &errors[2..] {
+            assert_eq!(error["code"], "validation_retry_limit");
+            assert_eq!(error["retryable"], false);
+            let message = error["message"].as_str().unwrap();
+            assert!(message.contains("Stop this agent"));
+            assert!(message.contains("Final compiler correction:"));
+            assert!(message.contains("node type `risk` is missing required field `detection`"));
+            for secret in [
+                "SECRET_CHANGE_ID",
+                "SECRET_PROOF_ID",
+                "SECRET_RISK_ID",
+                "SECRET_VALUE",
+                "/private/SECRET_PATH",
+                "offending_value",
+            ] {
+                assert!(!message.contains(secret), "leaked {secret}: {message}");
+            }
+        }
+    }
+
+    #[test]
+    fn zero_argument_review_rejections_stop_instead_of_retrying() {
+        struct RejectingReviewBackend;
+        impl BrokerBackend for RejectingReviewBackend {
+            fn call(&mut self, _tool: &str, _arguments: Value) -> Result<Value, KoniError> {
+                Err(KoniError::Action(
+                    "SECRET_SENTINEL has no dependency-ready configured review step".to_owned(),
+                ))
+            }
+        }
+        let catalog = ToolCatalog::new(
+            AgentBrokerRole::Lead {
+                generation: 7,
+                boundary: koni_core::LeadSliceBoundary::Review {
+                    ticket: "TK-issued".to_owned(),
+                },
+            },
+            ["review"].into_iter().map(str::to_owned).collect(),
+        )
+        .unwrap();
+        let mut backend = RejectingReviewBackend;
+        let input = format!(
+            "{}{}",
+            handshake(),
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"review\",\"arguments\":{}}}\n"
+        );
+        let responses = run_protocol(&input, &catalog, &mut backend);
+        let text = responses[1]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("review_boundary_stop"));
+        assert!(text.contains("\"retryable\":false"));
+        assert!(!text.contains("SECRET_SENTINEL"));
+    }
+
+    #[test]
+    fn repeated_context_is_a_compact_recovery_pointer() {
+        let response = minimal_model_response(
+            "context",
+            json!({
+                "status": "already_issued",
+                "document_path": "program/work/tickets/TK-test/context/context.md",
+                "message": "Use the first response.",
+            }),
+        )
+        .unwrap();
+        assert_eq!(response["status"], "already_issued");
+        assert_eq!(
+            response["document_path"],
+            "program/work/tickets/TK-test/context/context.md"
+        );
+        assert!(response.get("document").is_none());
     }
 }

@@ -44,12 +44,30 @@ cd koni
 cargo install --path crates/koni-cli
 ```
 
+> **Pi/schema-2 source-install update — 2026-07-14:** The historical `cargo install` command above
+> installs only the Rust binary and is no longer a complete current-source installation. The
+> direct Pi runtime also requires its exact bundled host and build-pinned Node image (plus
+> bubblewrap on Linux). Use `./scripts/install-dev.sh`, which builds, packages, and smoke-tests that
+> complete closure under `${KONI_INSTALL_PREFIX:-$HOME/.local}`. Tagged release archives carry the
+> same `bin/` + `libexec/koni/` layout and signed build provenance.
+
 Homebrew packaging is being prepared, but no formula is published yet. Once it
 is available, installation will be:
 
 ```sh
 brew install koni
 ```
+
+Current source exposes `koni models`, `koni auth status|login|logout`, and the explicit
+`koni migrate-pi --dry-run|--apply` transaction. OAuth login is device-code-only and uses the
+ChatGPT subscription path; API keys are neither required nor accepted by this runtime.
+
+> **Current authentication flow — 2026-07-16:** The device-code-only sentence above records an
+> earlier checkpoint. Current macOS `koni auth login` requests Pi's standard browser-PKCE flow,
+> opens the OpenAI authorization page, and receives the scoped localhost callback. Koni can still
+> present a device-code interaction if the runtime/provider supplies one, but it is not the normal
+> local flow. The ChatGPT-subscription and no-API-key boundaries remain unchanged; network-enabled
+> login and inference are still fail-closed on Linux pending the documented egress broker.
 
 Initialize Köni from anywhere inside a project:
 
@@ -59,11 +77,19 @@ koni init
 koni
 ```
 
-`koni init` finds the enclosing project root, creates `.codex/` when
-needed, and installs the bundled software profile, native Codex agents, and
-repository skills. It preserves unrelated Codex resources and validates the
-complete staged configuration before publishing it. Initialization configures
-the project; it does not create a run.
+`koni init` finds the enclosing project root, asks an interactive user to
+choose the bundled Software or Research profile before writing, creates
+`.codex/` when needed, and installs its native Codex agents and repository
+skills. Non-interactive callers must pass `--profile` or `--from`. It preserves
+unrelated Codex resources and validates the complete staged configuration
+before publishing it. Initialization configures the project; it does not create
+a run.
+
+> **Schema-2 layout update — 2026-07-14:** The `.codex/koni` and native Codex-agent description
+> above is retained as schema-1 history. Fresh Pi-era configuration is provider-neutral under
+> `.koni/agents` and `.koni`; repository skills remain under `.agents/skills`. Existing projects
+> move only through `koni migrate-pi`, which preserves unrelated `.codex` resources and archives
+> active Codex-backed runs instead of resuming them under Pi.
 
 In the control center, press `n` to describe a run, choose its run type, and
 review its effective models, question policy, and parallelism. Planning pins
@@ -72,6 +98,7 @@ the base commit and configuration. Work begins only after explicit approval.
 For other initialization modes:
 
 ```sh
+koni init --profile software
 koni init --profile research
 koni init --from /path/to/profile
 koni init --target /path/to/project
@@ -101,6 +128,25 @@ The installed `.codex/koni/` tree is the project contract. The global
 `koni` executable supplies the compiler, runtime, TUI, schemas, bundled
 templates, migrations, and validation machinery. Initialized projects do not
 depend on a Köni source checkout.
+
+> **Current schema-2 installation layout — 2026-07-14:** The tree above is retained as the
+> schema-1 installation record. A fresh Pi-era initialization now publishes this provider-neutral
+> layout; it does not create executable Codex agents or a live `.codex/koni` tree:
+>
+> ```text
+> my-project/
+> ├── .koni/
+> │   ├── project.yaml            # schema-2 run-type catalog
+> │   ├── run-types/              # complete selectable run behaviors
+> │   ├── profile.yaml            # schema-2 semantic model entry point
+> │   ├── agents/                 # provider-neutral Koni agent resources
+> │   └── resource-manifest.json  # owned external-resource hashes
+> └── .agents/
+>     └── skills/                 # repository-local Koni skills
+> ```
+>
+> Existing schema-1 projects reach this layout only through `koni migrate-pi --apply`; unrelated
+> `.codex` files remain project-owned and untouched.
 
 ## Documentation
 

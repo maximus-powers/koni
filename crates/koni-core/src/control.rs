@@ -87,6 +87,262 @@ pub struct AgentSessionRecord {
     pub updated_at: chrono::DateTime<Utc>,
 }
 
+pub const GRAPH_NOTE_SCHEMA_VERSION: &str = "1.0";
+pub const MAX_GRAPH_NOTE_BODY_BYTES: usize = 64 * 1024;
+
+/// The semantic role of one graph-bound knowledge note. Notes supplement the
+/// typed graph; their authority is expressed separately by [`GraphNoteState`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphNoteKind {
+    Observation,
+    ImplementationDetail,
+    Rationale,
+    Nit,
+    OpenQuestion,
+}
+
+/// Review state for graph-bound working knowledge. Agent-authored notes begin
+/// as `working`; only an explicit review path should promote them to
+/// `confirmed` or retire them as superseded/invalidated.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphNoteState {
+    Working,
+    Confirmed,
+    Superseded,
+    Invalidated,
+}
+
+/// Durable provenance for a note-producing agent turn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GraphNoteSource {
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
+    pub persona: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_hash: Option<String>,
+    pub recorded_at: chrono::DateTime<Utc>,
+}
+
+/// One compiler-owned, graph-bound working-memory record.
+///
+/// The note ID is also its storage key. `supersedes` supports append-only
+/// corrections without erasing the provenance of the earlier decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GraphNote {
+    pub schema_version: String,
+    pub id: String,
+    pub node_id: String,
+    pub kind: GraphNoteKind,
+    pub state: GraphNoteState,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
+    pub source: GraphNoteSource,
+}
+
+impl GraphNote {
+    pub fn new(
+        id: impl Into<String>,
+        node_id: impl Into<String>,
+        kind: GraphNoteKind,
+        body: impl Into<String>,
+        source: GraphNoteSource,
+    ) -> Result<Self> {
+        let note = Self {
+            schema_version: GRAPH_NOTE_SCHEMA_VERSION.to_owned(),
+            id: id.into(),
+            node_id: node_id.into(),
+            kind,
+            state: GraphNoteState::Working,
+            body: body.into(),
+            supersedes: None,
+            source,
+        };
+        note.validate()?;
+        Ok(note)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        validate_graph_note_id(&self.id)?;
+        validate_node_reference(&self.node_id)?;
+        validate_id(&self.source.run_id)?;
+        if let Some(ticket_id) = &self.source.ticket_id {
+            validate_id(ticket_id)?;
+        }
+        if let Some(step_id) = &self.source.step_id {
+            validate_id(step_id)?;
+        }
+        if let Some(agent_id) = &self.source.agent_id {
+            validate_id(agent_id)?;
+        }
+        if let Some(supersedes) = &self.supersedes {
+            validate_graph_note_id(supersedes)?;
+            if supersedes == &self.id {
+                return Err(KoniError::Workflow(format!(
+                    "graph note {} cannot supersede itself",
+                    self.id
+                )));
+            }
+        }
+        if self.schema_version != GRAPH_NOTE_SCHEMA_VERSION
+            || self.source.persona.trim().is_empty()
+            || self.source.persona.len() > 256
+            || self.body.trim().is_empty()
+            || self.body.len() > MAX_GRAPH_NOTE_BODY_BYTES
+        {
+            return Err(KoniError::Workflow(format!(
+                "invalid graph knowledge note {}",
+                self.id
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn graph_note_immutable_fields_match(existing: &GraphNote, reviewed: &GraphNote) -> bool {
+    existing.schema_version == reviewed.schema_version
+        && existing.id == reviewed.id
+        && existing.node_id == reviewed.node_id
+        && existing.kind == reviewed.kind
+        && existing.body == reviewed.body
+        && existing.supersedes == reviewed.supersedes
+        && existing.source == reviewed.source
+}
+
+fn graph_note_state_transition_allowed(existing: GraphNoteState, reviewed: GraphNoteState) -> bool {
+    matches!(
+        (existing, reviewed),
+        (
+            GraphNoteState::Working,
+            GraphNoteState::Confirmed | GraphNoteState::Superseded | GraphNoteState::Invalidated
+        ) | (
+            GraphNoteState::Confirmed,
+            GraphNoteState::Superseded | GraphNoteState::Invalidated
+        )
+    )
+}
+
+/// Cumulative Codex token accounting for one shared planning thread.
+/// `reasoning_output_tokens` is a breakdown of `output_tokens`, not an
+/// additional charge. `new_tokens` therefore excludes cached input and does
+/// not add reasoning a second time.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanningTokenUsage {
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_output_tokens: u64,
+    pub total_tokens: u64,
+    pub new_tokens: u64,
+}
+
+impl PlanningTokenUsage {
+    pub fn from_breakdown(
+        input_tokens: u64,
+        cached_input_tokens: u64,
+        output_tokens: u64,
+        reasoning_output_tokens: u64,
+    ) -> Self {
+        Self {
+            input_tokens,
+            cached_input_tokens,
+            output_tokens,
+            reasoning_output_tokens,
+            total_tokens: input_tokens.saturating_add(output_tokens),
+            new_tokens: input_tokens
+                .saturating_sub(cached_input_tokens)
+                .saturating_add(output_tokens),
+        }
+    }
+
+    pub fn saturating_sub(self, baseline: Self) -> Self {
+        Self::from_breakdown(
+            self.input_tokens.saturating_sub(baseline.input_tokens),
+            self.cached_input_tokens
+                .saturating_sub(baseline.cached_input_tokens),
+            self.output_tokens.saturating_sub(baseline.output_tokens),
+            self.reasoning_output_tokens
+                .saturating_sub(baseline.reasoning_output_tokens),
+        )
+    }
+}
+
+/// Run-owned planning thread state. A single Codex thread may span question
+/// resumes and, when configured, multiple consecutive planning stages.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanningSessionState {
+    pub schema_version: String,
+    pub run_id: String,
+    pub session_id: String,
+    pub session_scope: String,
+    pub budget_metric: String,
+    pub budget_limit: u64,
+    pub synthesis_reserve: u64,
+    pub on_exhausted: String,
+    #[serde(default)]
+    pub usage: PlanningTokenUsage,
+    /// Usage already represented by legacy `codex exec` turn logs when a
+    /// pre-app-server planning thread is resumed after an upgrade.
+    #[serde(default)]
+    pub accounted_baseline: PlanningTokenUsage,
+    #[serde(default)]
+    pub synthesis_forced: bool,
+    #[serde(default)]
+    pub synthesis_only: bool,
+    #[serde(default)]
+    pub completed_turns: u64,
+    #[serde(default)]
+    pub last_stage_id: Option<String>,
+    pub updated_at: chrono::DateTime<Utc>,
+}
+
+impl PlanningSessionState {
+    pub fn validate(&self) -> Result<()> {
+        validate_id(&self.run_id)?;
+        if self.schema_version != "1.0"
+            || self.session_id.trim().is_empty()
+            || !matches!(self.session_scope.as_str(), "stage" | "run")
+            || !matches!(
+                self.budget_metric.as_str(),
+                "new_tokens" | "processed_tokens"
+            )
+            || !matches!(self.on_exhausted.as_str(), "force_synthesis" | "fail")
+            || self.budget_limit == 0
+            || self.synthesis_reserve == 0
+            || self.synthesis_reserve >= self.budget_limit
+        {
+            return Err(KoniError::Workflow(
+                "invalid compiler-owned planning session state".to_owned(),
+            ));
+        }
+        if let Some(stage_id) = &self.last_stage_id {
+            validate_id(stage_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn accounted_usage(&self) -> PlanningTokenUsage {
+        self.usage.saturating_sub(self.accounted_baseline)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OrchestrationState {
     pub schema_version: String,
@@ -94,6 +350,14 @@ pub struct OrchestrationState {
     pub max_parallel: usize,
     #[serde(default)]
     pub unchained: bool,
+    /// Approval starts the operator-facing active-runtime clock. These fields
+    /// are mutable control state, never part of the pinned run definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_runtime_approved_at: Option<chrono::DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_runtime_started_at: Option<chrono::DateTime<Utc>>,
+    #[serde(default)]
+    pub active_runtime_milliseconds: u64,
     pub updated_at: chrono::DateTime<Utc>,
 }
 
@@ -208,6 +472,132 @@ pub struct RunLifecycleState {
     pub updated_at: chrono::DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PromotionStatus {
+    PendingSync,
+    Synchronizing,
+    Conflict,
+    AwaitingAuthorization,
+    Authorized,
+    Promoting,
+    Promoted,
+    Blocked,
+    Invalidated,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PromotionAuthorization {
+    pub id: String,
+    pub target_branch: String,
+    pub authorized_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PromotionTransactionPhase {
+    Prepared,
+    RefUpdated,
+    CheckoutUpdated,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PromotionTransaction {
+    pub prior_target: String,
+    pub promoted_head: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<PathBuf>,
+    pub phase: PromotionTransactionPhase,
+    pub started_at: chrono::DateTime<Utc>,
+}
+
+/// Compiler-owned durable state for target synchronization and the explicit
+/// user authorization required before advancing the selected product branch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PromotionState {
+    pub schema_version: String,
+    pub run_id: String,
+    pub target_branch: String,
+    pub initial_target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_synced_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_synced_run_head: Option<String>,
+    pub status: PromotionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<PromotionAuthorization>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_ticket: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction: Option<PromotionTransaction>,
+    pub updated_at: chrono::DateTime<Utc>,
+}
+
+impl PromotionState {
+    pub fn new(run_id: impl Into<String>, target_branch: String, initial_target: String) -> Self {
+        Self {
+            schema_version: "1.0".to_owned(),
+            run_id: run_id.into(),
+            target_branch,
+            initial_target,
+            last_synced_target: None,
+            last_synced_run_head: None,
+            status: PromotionStatus::PendingSync,
+            authorization: None,
+            conflict_ticket: None,
+            blocker: None,
+            transaction: None,
+            updated_at: Utc::now(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        validate_id(&self.run_id)?;
+        if self.schema_version != "1.0"
+            || !self.target_branch.starts_with("refs/heads/")
+            || self.target_branch == "refs/heads/koni"
+            || self.target_branch.starts_with("refs/heads/koni/")
+            || !git2::Reference::is_valid_name(&self.target_branch)
+            || !is_commit_id(&self.initial_target)
+            || self
+                .last_synced_target
+                .as_deref()
+                .is_some_and(|commit| !is_commit_id(commit))
+            || self
+                .last_synced_run_head
+                .as_deref()
+                .is_some_and(|commit| !is_commit_id(commit))
+        {
+            return Err(KoniError::Workflow(
+                "invalid compiler-owned promotion state".to_owned(),
+            ));
+        }
+        if let Some(authorization) = &self.authorization
+            && (authorization.id.trim().is_empty()
+                || authorization.target_branch != self.target_branch)
+        {
+            return Err(KoniError::Workflow(
+                "promotion authorization does not match its target".to_owned(),
+            ));
+        }
+        if let Some(transaction) = &self.transaction
+            && (!is_commit_id(&transaction.prior_target)
+                || !is_commit_id(&transaction.promoted_head))
+        {
+            return Err(KoniError::Workflow(
+                "promotion transaction contains an invalid commit".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn is_commit_id(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 impl RunLifecycleState {
     pub fn running() -> Self {
         Self {
@@ -247,18 +637,91 @@ impl OrchestrationState {
             running,
             max_parallel,
             unchained: false,
+            active_runtime_approved_at: None,
+            active_runtime_started_at: None,
+            active_runtime_milliseconds: 0,
             updated_at: Utc::now(),
         })
     }
 
+    pub fn begin_active_runtime(&mut self, approved_at: chrono::DateTime<Utc>) {
+        if self.active_runtime_approved_at.is_some() {
+            return;
+        }
+        self.active_runtime_approved_at = Some(approved_at);
+        if self.running {
+            self.active_runtime_started_at = Some(approved_at);
+        }
+    }
+
+    /// Upgrade a pre-clock run without losing its useful elapsed interval.
+    /// A legacy paused state has only one durable boundary (`updated_at`), so
+    /// that boundary is the best conservative end of its initial active span.
+    pub fn bootstrap_active_runtime(&mut self, approved_at: chrono::DateTime<Utc>) {
+        if self.active_runtime_approved_at.is_some() {
+            return;
+        }
+        self.active_runtime_approved_at = Some(approved_at);
+        if self.running {
+            self.active_runtime_started_at = Some(approved_at);
+        } else {
+            self.active_runtime_milliseconds = elapsed_milliseconds(approved_at, self.updated_at);
+        }
+    }
+
+    pub fn set_running_at(&mut self, running: bool, at: chrono::DateTime<Utc>) {
+        if self.running != running {
+            if self.running {
+                if let Some(started_at) = self.active_runtime_started_at.take() {
+                    self.active_runtime_milliseconds = self
+                        .active_runtime_milliseconds
+                        .saturating_add(elapsed_milliseconds(started_at, at));
+                }
+            } else if self.active_runtime_approved_at.is_some() {
+                self.active_runtime_started_at = Some(at);
+            }
+            self.running = running;
+        }
+        self.updated_at = at;
+    }
+
+    pub fn active_runtime_at(&self, at: chrono::DateTime<Utc>) -> std::time::Duration {
+        let current = self
+            .active_runtime_started_at
+            .filter(|_| self.running)
+            .map(|started_at| elapsed_milliseconds(started_at, at))
+            .unwrap_or_default();
+        std::time::Duration::from_millis(self.active_runtime_milliseconds.saturating_add(current))
+    }
+
     pub fn validate(&self) -> Result<()> {
-        if self.schema_version != "1.0" || self.max_parallel == 0 {
+        if self.schema_version != "1.0"
+            || self.max_parallel == 0
+            || (self.active_runtime_started_at.is_some()
+                && (!self.running || self.active_runtime_approved_at.is_none()))
+            || self
+                .active_runtime_started_at
+                .zip(self.active_runtime_approved_at)
+                .is_some_and(|(started_at, approved_at)| started_at < approved_at)
+        {
             return Err(KoniError::Workflow(
                 "invalid orchestration state".to_owned(),
             ));
         }
         Ok(())
     }
+}
+
+fn elapsed_milliseconds(
+    started_at: chrono::DateTime<Utc>,
+    finished_at: chrono::DateTime<Utc>,
+) -> u64 {
+    finished_at
+        .signed_duration_since(started_at)
+        .num_milliseconds()
+        .max(0)
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 impl RunControlStore {
@@ -372,6 +835,7 @@ impl RunControlStore {
             self.root.join("reports"),
             self.root.join("planning"),
             self.root.join("lead-slices"),
+            self.root.join("knowledge/notes"),
         ] {
             fs::create_dir_all(&directory).map_err(|error| io_error(&directory, error))?;
         }
@@ -433,6 +897,20 @@ impl RunControlStore {
         state.validate()?;
         self.ensure_layout()?;
         atomic_write_yaml(&self.root.join("lifecycle.yaml"), state)
+    }
+
+    pub fn write_promotion(&self, state: &PromotionState) -> Result<()> {
+        state.validate()?;
+        self.ensure_layout()?;
+        atomic_write_yaml(&self.root.join("promotion.yaml"), state)
+    }
+
+    pub fn promotion(&self) -> Result<Option<PromotionState>> {
+        let state: Option<PromotionState> = read_optional_yaml(&self.root.join("promotion.yaml"))?;
+        if let Some(state) = &state {
+            state.validate()?;
+        }
+        Ok(state)
     }
 
     pub fn lifecycle(&self) -> Result<Option<RunLifecycleState>> {
@@ -524,8 +1002,24 @@ impl RunControlStore {
         option_id: &str,
         actor: &str,
     ) -> Result<ResumeDirective> {
+        self.answer_question_option_with_notes(question_id, option_id, None, actor)
+    }
+
+    pub fn answer_question_option_with_notes(
+        &self,
+        question_id: &str,
+        option_id: &str,
+        notes: Option<String>,
+        actor: &str,
+    ) -> Result<ResumeDirective> {
         let mut question = self.question(question_id)?;
-        question.answer_option(option_id, QuestionAnswerSource::Human, actor, Utc::now())?;
+        question.answer_option_with_notes(
+            option_id,
+            notes,
+            QuestionAnswerSource::Human,
+            actor,
+            Utc::now(),
+        )?;
         self.write_question(&question)?;
         resume_directive(&question)
     }
@@ -536,8 +1030,24 @@ impl RunControlStore {
         answer: &str,
         actor: &str,
     ) -> Result<ResumeDirective> {
+        self.answer_question_custom_with_notes(question_id, answer, None, actor)
+    }
+
+    pub fn answer_question_custom_with_notes(
+        &self,
+        question_id: &str,
+        answer: &str,
+        notes: Option<String>,
+        actor: &str,
+    ) -> Result<ResumeDirective> {
         let mut question = self.question(question_id)?;
-        question.answer_custom(answer, QuestionAnswerSource::Human, actor, Utc::now())?;
+        question.answer_custom_with_notes(
+            answer,
+            notes,
+            QuestionAnswerSource::Human,
+            actor,
+            Utc::now(),
+        )?;
         self.write_question(&question)?;
         resume_directive(&question)
     }
@@ -714,6 +1224,124 @@ impl RunControlStore {
         read_optional_yaml(&self.root.join("agents").join(format!("{agent_id}.yaml")))
     }
 
+    /// Atomically persist an explicit state review of an existing graph note.
+    /// Note content, provenance, and supersession lineage are append-only;
+    /// callers must use [`Self::append_graph_note`] to create a new record.
+    pub fn write_graph_note(&self, note: &GraphNote) -> Result<()> {
+        note.validate()?;
+        self.ensure_layout()?;
+        let existing = self.graph_note(&note.id)?.ok_or_else(|| {
+            KoniError::Workflow(format!(
+                "graph knowledge note {} does not exist; append it before review",
+                note.id
+            ))
+        })?;
+        if existing == *note {
+            return Ok(());
+        }
+        if !graph_note_immutable_fields_match(&existing, note) {
+            return Err(KoniError::Workflow(format!(
+                "graph knowledge note {} content, source, and supersession lineage are immutable",
+                note.id
+            )));
+        }
+        if !graph_note_state_transition_allowed(existing.state, note.state) {
+            return Err(KoniError::Workflow(format!(
+                "graph knowledge note {} cannot transition from {:?} to {:?}",
+                note.id, existing.state, note.state
+            )));
+        }
+        atomic_write_yaml(&self.graph_note_path(&note.id), note)
+    }
+
+    /// Append a new graph note without replacing an existing record.
+    /// Multi-process callers should hold the run's `graph-notes` control lock
+    /// across this existence check and write.
+    pub fn append_graph_note(&self, note: &GraphNote) -> Result<()> {
+        note.validate()?;
+        self.ensure_layout()?;
+        let path = self.graph_note_path(&note.id);
+        if path.exists() {
+            return Err(KoniError::Workflow(format!(
+                "graph knowledge note {} already exists",
+                note.id
+            )));
+        }
+        atomic_write_yaml(&path, note)
+    }
+
+    pub fn graph_note(&self, note_id: &str) -> Result<Option<GraphNote>> {
+        validate_graph_note_id(note_id)?;
+        let note: Option<GraphNote> = read_optional_yaml(&self.graph_note_path(note_id))?;
+        if let Some(note) = &note {
+            note.validate()?;
+            if note.id != note_id {
+                return Err(KoniError::Workflow(format!(
+                    "graph knowledge note file {note_id} contains record {}",
+                    note.id
+                )));
+            }
+        }
+        Ok(note)
+    }
+
+    pub fn graph_notes(&self) -> Result<Vec<GraphNote>> {
+        let root = self.root.join("knowledge/notes");
+        if !root.exists() {
+            return Ok(Vec::new());
+        }
+        let mut notes = Vec::new();
+        for path in yaml_paths(&root)? {
+            let note: GraphNote = read_yaml(&path)?;
+            note.validate()?;
+            let expected_file = format!("{}.yaml", note.id);
+            if path.file_name().and_then(|value| value.to_str()) != Some(&expected_file) {
+                return Err(KoniError::Workflow(format!(
+                    "graph knowledge note {} is stored under an unexpected file name",
+                    note.id
+                )));
+            }
+            notes.push(note);
+        }
+        notes.sort_by(|left, right| {
+            left.source
+                .recorded_at
+                .cmp(&right.source.recorded_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(notes)
+    }
+
+    pub fn graph_notes_for_node(&self, node_id: &str) -> Result<Vec<GraphNote>> {
+        validate_node_reference(node_id)?;
+        Ok(self
+            .graph_notes()?
+            .into_iter()
+            .filter(|note| note.node_id == node_id)
+            .collect())
+    }
+
+    fn graph_note_path(&self, note_id: &str) -> PathBuf {
+        self.root
+            .join("knowledge/notes")
+            .join(format!("{note_id}.yaml"))
+    }
+
+    pub fn write_planning_session(&self, state: &PlanningSessionState) -> Result<()> {
+        state.validate()?;
+        self.ensure_layout()?;
+        atomic_write_yaml(&self.root.join("planning/session.yaml"), state)
+    }
+
+    pub fn planning_session(&self) -> Result<Option<PlanningSessionState>> {
+        let state: Option<PlanningSessionState> =
+            read_optional_yaml(&self.root.join("planning/session.yaml"))?;
+        if let Some(state) = &state {
+            state.validate()?;
+        }
+        Ok(state)
+    }
+
     pub fn append_planning_message(&self, value: &Value) -> Result<()> {
         self.ensure_layout()?;
         let path = self.root.join("planning/transcript.jsonl");
@@ -768,7 +1396,7 @@ pub(crate) fn resume_directive(question: &QuestionRecord) -> Result<ResumeDirect
         .answer
         .as_ref()
         .ok_or_else(|| KoniError::Workflow("question answer was not recorded".to_owned()))?;
-    let answer_text = answer
+    let mut answer_text = answer
         .custom
         .clone()
         .or_else(|| {
@@ -781,6 +1409,12 @@ pub(crate) fn resume_directive(question: &QuestionRecord) -> Result<ResumeDirect
             })
         })
         .unwrap_or_default();
+    if let Some(notes) = answer.notes.as_deref() {
+        if !answer_text.is_empty() {
+            answer_text.push_str("\nUser notes: ");
+        }
+        answer_text.push_str(notes);
+    }
     Ok(ResumeDirective {
         question_id: question.id.clone(),
         session_id: question.session_resume.session_id.clone(),
@@ -844,6 +1478,29 @@ fn validate_id(id: &str) -> Result<()> {
     {
         return Err(KoniError::Action(format!(
             "invalid control record ID: {id}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_graph_note_id(id: &str) -> Result<()> {
+    validate_id(id)?;
+    if id.len() > 128 || matches!(id, "." | "..") {
+        return Err(KoniError::Action(format!(
+            "invalid graph knowledge note ID: {id}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_node_reference(node_id: &str) -> Result<()> {
+    if node_id.is_empty()
+        || node_id.trim() != node_id
+        || node_id.len() > 512
+        || node_id.chars().any(char::is_control)
+    {
+        return Err(KoniError::Action(format!(
+            "invalid graph node reference: {node_id}"
         )));
     }
     Ok(())
@@ -976,9 +1633,17 @@ mod tests {
         )
         .unwrap();
         store.write_question(&question).unwrap();
-        let directive = store.answer_question_option("q-1", "safe", "user").unwrap();
+        let directive = store
+            .answer_question_option_with_notes(
+                "q-1",
+                "safe",
+                Some("Keep compatibility with existing callers.".to_owned()),
+                "user",
+            )
+            .unwrap();
         assert_eq!(directive.session_id, "session-1");
         assert!(directive.prompt.contains("Safe"));
+        assert!(directive.prompt.contains("Keep compatibility"));
         assert_eq!(store.open_questions().unwrap().len(), 0);
     }
 
@@ -1001,6 +1666,280 @@ mod tests {
         let playing = store.lifecycle().unwrap().unwrap();
         assert!(playing.running);
         assert!(playing.pause_requested_at.is_none());
+    }
+
+    #[test]
+    fn orchestration_active_runtime_excludes_every_paused_interval() {
+        let at = |value: &str| {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .unwrap()
+                .with_timezone(&Utc)
+        };
+        let approved_at = at("2026-07-14T12:00:00Z");
+        let mut orchestration = OrchestrationState::new(true, 1).unwrap();
+        orchestration.begin_active_runtime(approved_at);
+
+        orchestration.set_running_at(false, at("2026-07-14T12:10:00Z"));
+        assert_eq!(
+            orchestration.active_runtime_at(at("2026-07-14T12:25:00Z")),
+            std::time::Duration::from_secs(10 * 60),
+            "time remains frozen throughout the first pause"
+        );
+
+        orchestration.set_running_at(true, at("2026-07-14T12:25:00Z"));
+        orchestration.set_running_at(false, at("2026-07-14T12:30:00Z"));
+        orchestration.set_running_at(true, at("2026-07-14T12:40:00Z"));
+        assert_eq!(
+            orchestration.active_runtime_at(at("2026-07-14T12:45:30Z")),
+            std::time::Duration::from_secs(20 * 60 + 30),
+            "only approved, unpaused intervals contribute to active runtime"
+        );
+
+        let round_trip: OrchestrationState =
+            serde_yaml::from_str(&serde_yaml::to_string(&orchestration).unwrap()).unwrap();
+        assert_eq!(
+            round_trip.active_runtime_at(at("2026-07-14T12:45:30Z")),
+            orchestration.active_runtime_at(at("2026-07-14T12:45:30Z")),
+            "the clock must survive cockpit and binary restarts"
+        );
+    }
+
+    fn graph_note(id: &str, node_id: &str, recorded_at: chrono::DateTime<Utc>) -> GraphNote {
+        GraphNote::new(
+            id,
+            node_id,
+            GraphNoteKind::ImplementationDetail,
+            "The adapter preserves the legacy wire shape.",
+            GraphNoteSource {
+                run_id: "run-1".to_owned(),
+                ticket_id: Some("ticket-1".to_owned()),
+                step_id: Some("implement".to_owned()),
+                agent_id: None,
+                attempt: None,
+                persona: "implementer".to_owned(),
+                profile_hash: None,
+                graph_hash: None,
+                node_hash: None,
+                context_hash: None,
+                recorded_at,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn graph_notes_round_trip_as_atomic_individual_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RunControlStore::new(temp.path().to_path_buf());
+        let later = Utc::now();
+        let earlier = later - Duration::seconds(5);
+        let second = graph_note("note-2", "node-b", later);
+        let first = graph_note("note-1", "node-a", earlier);
+
+        store.append_graph_note(&second).unwrap();
+        store.append_graph_note(&first).unwrap();
+
+        assert!(temp.path().join("knowledge/notes/note-1.yaml").is_file());
+        assert_eq!(store.graph_note("note-1").unwrap(), Some(first.clone()));
+        assert_eq!(store.graph_notes().unwrap(), vec![first.clone(), second]);
+        assert_eq!(store.graph_notes_for_node("node-a").unwrap(), vec![first]);
+    }
+
+    #[test]
+    fn graph_note_source_optional_provenance_is_backward_compatible() {
+        let mut note = graph_note("note-1", "node-a", Utc::now());
+        let legacy_yaml = serde_yaml::to_string(&note).unwrap();
+        for field in [
+            "agent_id:",
+            "attempt:",
+            "profile_hash:",
+            "graph_hash:",
+            "node_hash:",
+            "context_hash:",
+        ] {
+            assert!(!legacy_yaml.contains(field), "unexpected field {field}");
+        }
+        assert_eq!(
+            serde_yaml::from_str::<GraphNote>(&legacy_yaml).unwrap(),
+            note
+        );
+
+        note.source.agent_id = Some("agent-7".to_owned());
+        note.source.attempt = Some(3);
+        note.source.profile_hash = Some("sha256:profile".to_owned());
+        note.source.graph_hash = Some("sha256:graph".to_owned());
+        note.source.node_hash = Some("sha256:node".to_owned());
+        note.source.context_hash = Some("sha256:context".to_owned());
+        let provenance_yaml = serde_yaml::to_string(&note).unwrap();
+        assert!(provenance_yaml.contains("agent_id: agent-7"));
+        assert!(provenance_yaml.contains("attempt: 3"));
+        assert_eq!(
+            serde_yaml::from_str::<GraphNote>(&provenance_yaml).unwrap(),
+            note
+        );
+    }
+
+    #[test]
+    fn graph_note_append_refuses_replacement_and_write_preserves_immutable_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RunControlStore::new(temp.path().to_path_buf());
+        let mut note = graph_note("note-1", "node-a", Utc::now());
+        note.supersedes = Some("note-prior".to_owned());
+        store.append_graph_note(&note).unwrap();
+
+        let error = store.append_graph_note(&note).unwrap_err();
+        assert!(error.to_string().contains("already exists"));
+
+        store.write_graph_note(&note).unwrap();
+
+        let absent = graph_note("note-absent", "node-a", Utc::now());
+        let error = store.write_graph_note(&absent).unwrap_err();
+        assert!(error.to_string().contains("does not exist"));
+
+        let mut rewritten = note.clone();
+        rewritten.body = "Rewritten content".to_owned();
+        assert!(
+            store
+                .write_graph_note(&rewritten)
+                .unwrap_err()
+                .to_string()
+                .contains("immutable")
+        );
+
+        let mut rewritten = note.clone();
+        rewritten.source.agent_id = Some("different-agent".to_owned());
+        assert!(
+            store
+                .write_graph_note(&rewritten)
+                .unwrap_err()
+                .to_string()
+                .contains("immutable")
+        );
+
+        let mut rewritten = note.clone();
+        rewritten.supersedes = Some("different-prior".to_owned());
+        assert!(
+            store
+                .write_graph_note(&rewritten)
+                .unwrap_err()
+                .to_string()
+                .contains("immutable")
+        );
+
+        let mut rewritten = note.clone();
+        rewritten.node_id = "node-b".to_owned();
+        assert!(
+            store
+                .write_graph_note(&rewritten)
+                .unwrap_err()
+                .to_string()
+                .contains("immutable")
+        );
+
+        note.state = GraphNoteState::Confirmed;
+        store.write_graph_note(&note).unwrap();
+        assert_eq!(
+            store.graph_note("note-1").unwrap().unwrap().state,
+            GraphNoteState::Confirmed
+        );
+    }
+
+    #[test]
+    fn graph_note_write_allows_only_one_way_state_transitions() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RunControlStore::new(temp.path().to_path_buf());
+        let allowed = [
+            (GraphNoteState::Working, GraphNoteState::Confirmed),
+            (GraphNoteState::Working, GraphNoteState::Superseded),
+            (GraphNoteState::Working, GraphNoteState::Invalidated),
+            (GraphNoteState::Confirmed, GraphNoteState::Superseded),
+            (GraphNoteState::Confirmed, GraphNoteState::Invalidated),
+        ];
+
+        for (index, (from, to)) in allowed.into_iter().enumerate() {
+            let id = format!("note-transition-{index}");
+            let mut note = graph_note(&id, "node-a", Utc::now());
+            store.append_graph_note(&note).unwrap();
+            if from == GraphNoteState::Confirmed {
+                note.state = GraphNoteState::Confirmed;
+                store.write_graph_note(&note).unwrap();
+            }
+            note.state = to;
+            store.write_graph_note(&note).unwrap();
+            store.write_graph_note(&note).unwrap();
+            assert_eq!(store.graph_note(&id).unwrap().unwrap().state, to);
+        }
+
+        let mut confirmed = store.graph_note("note-transition-0").unwrap().unwrap();
+        confirmed.state = GraphNoteState::Working;
+        assert!(
+            store
+                .write_graph_note(&confirmed)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot transition")
+        );
+
+        let mut superseded = store.graph_note("note-transition-1").unwrap().unwrap();
+        superseded.state = GraphNoteState::Invalidated;
+        assert!(
+            store
+                .write_graph_note(&superseded)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot transition")
+        );
+
+        let mut invalidated = store.graph_note("note-transition-2").unwrap().unwrap();
+        invalidated.state = GraphNoteState::Superseded;
+        assert!(
+            store
+                .write_graph_note(&invalidated)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot transition")
+        );
+    }
+
+    #[test]
+    fn graph_notes_reject_unsafe_ids_and_invalid_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RunControlStore::new(temp.path().to_path_buf());
+        assert!(
+            GraphNote::new(
+                "../escaped",
+                "node-a",
+                GraphNoteKind::ImplementationDetail,
+                "unsafe note",
+                GraphNoteSource {
+                    run_id: "run-1".to_owned(),
+                    ticket_id: Some("ticket-1".to_owned()),
+                    step_id: Some("implement".to_owned()),
+                    agent_id: None,
+                    attempt: None,
+                    persona: "implementer".to_owned(),
+                    profile_hash: None,
+                    graph_hash: None,
+                    node_hash: None,
+                    context_hash: None,
+                    recorded_at: Utc::now(),
+                },
+            )
+            .is_err()
+        );
+        assert!(!temp.path().join("escaped.yaml").exists());
+
+        let mut note = graph_note("note-1", "node-a", Utc::now());
+        note.body = "   ".to_owned();
+        assert!(store.write_graph_note(&note).is_err());
+
+        note.body = "valid".to_owned();
+        note.supersedes = Some("note-1".to_owned());
+        assert!(store.write_graph_note(&note).is_err());
+
+        note.supersedes = None;
+        note.source.agent_id = Some("../escaped-agent".to_owned());
+        assert!(note.validate().is_err());
     }
 
     #[test]

@@ -4,11 +4,12 @@ Keep planning, approval, execution, and integration as distinct trust boundaries
 
 ## Initialize the project
 
-`koni init` discovers the project root, installs the bundled software profile by default, and populates project-local Köni and Codex resources. Use:
+`koni init` discovers the project root, asks an interactive user to choose the bundled Software or Research profile before writing, and publishes current schema-2 `.koni` configuration plus repository skills. A detected schema-1 `.codex/koni` project follows the explicit migration path rather than becoming a second live layout. Non-interactive callers must pass `--profile` or `--from` for a fresh or replacement install. Use:
 
 ```sh
 koni init --dry-run
 koni init
+koni init --profile software
 koni init --profile research
 koni init --from /path/to/profile
 koni init --target /path/to/project
@@ -20,7 +21,7 @@ Initialization validates staged resources before publication, preserves unrelate
 
 ## Plan
 
-Planning selects one run type, resolves one immutable base commit, hashes the resolved run type and profile, snapshots Köni plus referenced native Codex resources, records typed intake, materializes the ordered pipeline, and creates a detached read-only planning checkout.
+Planning selects one run type, resolves one immutable base commit, hashes the resolved run type and profile, snapshots Köni plus referenced provider-neutral agents and repository skills, records typed intake, materializes the ordered pipeline, and creates a detached read-only planning checkout. Historical schema-1 snapshots retain their exact Codex resources as audit inputs; they are not a schema-2 fallback.
 
 No permanent run ref exists during planning. Configured planning stages may ask structured questions. `interactive` pauses every question, `high_impact_only` pauses high-impact questions, and `autonomous` selects recommendations without a human pause. A pausing answer resumes the same bound planning session; it does not start a replacement conversation.
 

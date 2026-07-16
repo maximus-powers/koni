@@ -1,0 +1,62 @@
+schema_version: "1.0"
+module: {id: software.cockpit, version: 0.1.0}
+
+views:
+  - id: board
+    title: Delivery Board
+    kind: kanban
+    source: tickets
+    actions: [compile, start, spawn-worker, context, review, finish, steer, recover]
+    options: {group_by: status, show_step_progress: true, show_scope_conflicts: true}
+  - id: transformation-graph
+    title: Architecture Transformation
+    kind: graph
+    source: graph
+    actions: [compile]
+    options:
+      # Match autoresearch-v2's relationship outline. Primary edges form the
+      # nested branches, secondary edges use independent rails, and short muted
+      # titles are painted after linework so letters replace crossed cells.
+      layout: nested
+      upward_edge_policy: mapped_only
+      hierarchy: [objective, system, interface, data_model, contract, flow, decision, change, migration, risk, proof, delivery]
+      primary_parent_preferences:
+        system: [objective, system]
+        interface: [system, objective]
+        data_model: [system]
+        contract: [system, objective, interface, data_model]
+        flow: [objective, system, interface]
+        decision: [objective, system, interface, data_model, contract, flow]
+        change: [objective, system, interface, data_model, contract, flow, decision, change]
+        migration: [change, system, data_model, interface, objective]
+        risk: [change, migration, contract, flow, system, interface, data_model]
+        proof: [change, migration, risk, contract, flow, system, interface, data_model]
+        delivery: [objective, change, migration, decision, proof, risk]
+      reverse_display_edges:
+        decision.concerns: decisions
+        change.realizes: realized_by
+        change.affects: changes
+        change.requires: required_by
+        migration.changes: migrations
+        migration.protects: migrations
+        risk.threatens: risks
+        risk.mitigated_by: mitigates
+        proof.verifies: proofs
+        proof.uses: proofs
+        delivery.fulfills: delivered_by
+        delivery.includes: deliveries
+        delivery.acknowledges: deliveries
+      secondary_edge_style: independent_right_lanes
+      show_titles: true
+  - id: assurance
+    title: Risks and Proof
+    kind: table
+    source: graph
+    actions: [run-check, report]
+    options: {node_types: [risk, proof], show_receipt_freshness: true}
+  - id: agents
+    title: Agents
+    kind: status_overlay
+    source: tickets
+    actions: [spawn-worker, steer, recover]
+    options: {completion_marker: task_complete}

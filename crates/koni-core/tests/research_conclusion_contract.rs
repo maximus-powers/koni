@@ -14,6 +14,7 @@ use walkdir::WalkDir;
 
 const CONCLUDE_OPERATION: &str = "conclude-hypothesis";
 const DRAFT_PAPER_OPERATION: &str = "draft-paper-input";
+const SCIENTIFIC_INPUT_PATH: &str = "research-fixture/runtime-input.json";
 
 #[test]
 fn canonical_conclusion_becomes_the_only_paper_input_without_backlinks()
@@ -134,13 +135,15 @@ fn conclusion_review_rejects_every_missing_or_extra_exact_coverage_dimension()
         let mut fixture = ConclusionFixture::new()?;
         let mut report = fixture.valid_conclusion_report();
         case.apply(&fixture, &mut report);
-        fixture.prepare_conclusion(report)?;
         let reviewer = StaticReviewLauncher::passing();
-        let error = fixture
-            .work_engine
-            .review_ticket_with(&fixture.conclusion_ticket_id, &reviewer)
-            .expect_err(case.label());
-        let message = error.to_string();
+        let message = match fixture.prepare_conclusion(report) {
+            Ok(()) => fixture
+                .work_engine
+                .review_ticket_with(&fixture.conclusion_ticket_id, &reviewer)
+                .expect_err(case.label())
+                .to_string(),
+            Err(error) => error.to_string(),
+        };
         assert!(
             message.contains(case.coverage_id()),
             "{} should fail its configured coverage contract: {message}",
@@ -317,6 +320,8 @@ impl ConclusionFixture {
         let installed = root.join(".codex/koni");
         copy_fixture(&profile_root(), &installed)?;
         minimize_fixture_profile(&installed)?;
+        fs::create_dir_all(root.join("research-fixture"))?;
+        fs::write(root.join(SCIENTIFIC_INPUT_PATH), "{\"rows\":1}\n")?;
         initialize_repository(&root)?;
 
         let mut main = Engine::open_with_profile(&root, None)?;
@@ -351,15 +356,12 @@ impl ConclusionFixture {
         ))?;
         for (index, claim_id) in claim_ids.iter().enumerate() {
             let experiment_id = format!("experiment-{}", index + 1);
-            let mut claim = fixed_node(
+            let claim = fixed_node(
                 claim_id,
                 "claim",
                 format!("Bounded claim {}", index + 1),
                 empirical_claim_spec(index + 1),
             );
-            claim
-                .edges
-                .insert("tested_by".to_owned(), vec![experiment_id.clone()]);
             graph.insert(claim)?;
 
             let mut experiment = fixed_node(
@@ -696,19 +698,19 @@ fn configure_runtime_contracts(
             "command": [
                 "python3",
                 "-c",
-                "import json; print(json.dumps({'schema_version':'1.0','protocol':'autoresearch.research-result.v1','verdict':'supported','measurements':{'rows':1},'observations':[],'artifacts':[]}))",
-                ".codex/koni/profile.yaml"
+                "import json, sys; data=json.load(open(sys.argv[1], encoding='utf-8')); print(json.dumps({'schema_version':'1.0','protocol':'autoresearch.research-result.v1','verdict':'supported','measurements':{'rows':data['rows']},'observations':[],'artifacts':[]}))",
+                SCIENTIFIC_INPUT_PATH
             ],
             "result_protocol": "autoresearch.research-result.v1",
             "required_measurements": ["rows"],
             "asset_entrypoints": [{
                 "asset_id": asset_id,
-                "path": ".codex/koni/profile.yaml"
+                "path": SCIENTIFIC_INPUT_PATH
             }],
             "scientific_inputs": [{
                 "asset_id": asset_id,
                 "role": "fixture",
-                "path": ".codex/koni/profile.yaml"
+                "path": SCIENTIFIC_INPUT_PATH
             }]
         });
         run.edges
@@ -739,7 +741,7 @@ fn write_runtime_receipts(
             scope: Scope {
                 read_nodes: BTreeSet::from([run_id.clone(), "fixture-runtime-asset".to_owned()]),
                 write_nodes: BTreeSet::from([run_id.clone()]),
-                read_paths: BTreeSet::from([".codex/koni/profile.yaml".to_owned()]),
+                read_paths: BTreeSet::from([SCIENTIFIC_INPUT_PATH.to_owned()]),
                 write_paths: BTreeSet::new(),
             },
             source_state_key: "fixture-missing-receipt".to_owned(),
@@ -902,11 +904,12 @@ impl AgentProcessLauncher for StaticReviewLauncher {
         fs::write(
             output_path,
             serde_json::to_string(&json!({
-                "schema_version": "1.0",
+                "schema_version": "1.1",
                 "verdict": "passed",
+                "failure_domain": "none",
                 "summary": "The exact bounded conclusion contract is satisfied.",
                 "findings": ["No blocking findings remain at this boundary."],
-                "evidence_pointers": ["ticket outputs and compiler coverage checks"]
+                "evidence_pointers": ["packet://review/acceptance"]
             }))
             .expect("review result serializes"),
         )

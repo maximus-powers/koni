@@ -14,8 +14,8 @@ use std::path::{Component, Path, PathBuf};
 
 use git2::build::CheckoutBuilder;
 use git2::{
-    AttrCheckFlags, ErrorCode, IndexAddOption, IndexEntry, IndexTime, MergeOptions, Oid, Reference,
-    Repository, Signature, Status, StatusOptions, WorktreeAddOptions,
+    AttrCheckFlags, BranchType, ErrorCode, IndexAddOption, IndexEntry, IndexTime, MergeOptions,
+    Oid, Reference, Repository, Signature, Status, StatusOptions, StatusShow, WorktreeAddOptions,
 };
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +56,26 @@ pub struct RepositoryInfo {
     pub branch_ref: Option<String>,
     pub head: String,
     pub is_linked_worktree: bool,
+}
+
+/// One user-owned local branch that can be selected as a run's eventual
+/// integration target. Koni-owned branches are deliberately omitted from this
+/// view so a new run cannot accidentally target another run's implementation
+/// namespace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalBranchCandidate {
+    /// Short branch name suitable for display, such as `main`.
+    pub name: String,
+    /// Immutable identity of the selected ref, such as `refs/heads/main`.
+    pub reference: String,
+    /// Current commit at the moment this candidate list was read.
+    pub tip: String,
+    /// Best-effort recency derived from both the tip commit and branch reflog.
+    pub activity_unix: i64,
+    /// Whether this branch is checked out in the checkout used to open Koni.
+    pub current: bool,
+    /// Whether this branch is checked out in any worktree in the repository.
+    pub checked_out: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -317,6 +337,47 @@ pub enum SquashOutcome {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetSyncRequest {
+    pub run_ref: String,
+    pub target_ref: String,
+    pub expected_run_head: Oid,
+    pub expected_target_head: Oid,
+    pub identity: Option<CommitIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TargetSyncOutcome {
+    UpToDate {
+        run_head: String,
+        target_head: String,
+    },
+    Merged {
+        commit: String,
+        tree: String,
+        prior_run_head: String,
+        target_head: String,
+    },
+    Conflict(ConflictReport),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetPromotionRequest {
+    pub run_ref: String,
+    pub target_ref: String,
+    pub expected_run_head: Oid,
+    pub expected_target_head: Oid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetPromotionResult {
+    pub target_ref: String,
+    pub prior_target: String,
+    pub promoted_head: String,
+    pub checkout: Option<PathBuf>,
+    pub replayed: bool,
+}
+
 /// An exclusive, cross-process lock shared by every linked checkout.
 pub struct RepositoryLock {
     _lock: PersistentFileLock,
@@ -386,6 +447,102 @@ impl GitBackend {
             names.push(name.to_owned());
         }
         Ok(names)
+    }
+
+    /// Return selectable user branches with the current branch first and the
+    /// remainder ordered by recent branch activity.
+    pub fn recent_local_branches(&self) -> Result<Vec<LocalBranchCandidate>> {
+        let checked_out = self.checked_out_branch_refs()?;
+        let mut candidates = Vec::new();
+        for branch in self.repository.branches(Some(BranchType::Local))? {
+            let (branch, _) = branch?;
+            let name = branch
+                .name()?
+                .ok_or_else(|| action_error("repository contains a non-UTF-8 local branch"))?;
+            if name == "koni" || name.starts_with("koni/") {
+                continue;
+            }
+            let reference = format!("refs/heads/{name}");
+            let commit = branch.get().peel_to_commit()?;
+            let mut activity_unix = commit.time().seconds();
+            if let Ok(reflog) = self.repository.reflog(&reference) {
+                for entry in reflog.iter() {
+                    activity_unix = activity_unix.max(entry.committer().when().seconds());
+                }
+            }
+            let current = branch.is_head();
+            candidates.push(LocalBranchCandidate {
+                name: name.to_owned(),
+                reference: reference.clone(),
+                tip: commit.id().to_string(),
+                activity_unix,
+                current,
+                checked_out: checked_out.contains(&reference),
+            });
+        }
+        candidates.sort_by(|left, right| {
+            right
+                .current
+                .cmp(&left.current)
+                .then_with(|| right.activity_unix.cmp(&left.activity_unix))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        Ok(candidates)
+    }
+
+    /// Resolve a local user branch while holding the repository-wide Koni
+    /// lock. `HEAD` is accepted only when it names a local branch.
+    pub fn pin_local_target(&self, selector: &str) -> Result<(String, Oid)> {
+        let _lock = self.lock()?;
+        let selector = selector.trim();
+        if selector.is_empty() {
+            return Err(action_error("target branch must not be empty"));
+        }
+        let reference = if selector == "HEAD" {
+            self.branch_ref()?
+        } else {
+            qualify_local_branch(selector)?
+        };
+        let name = local_branch_name(&reference)?;
+        if name == "koni" || name.starts_with("koni/") {
+            return Err(action_error(format!(
+                "Koni-owned branch {name} cannot be used as a run target"
+            )));
+        }
+        let tip = self
+            .repository
+            .find_reference(&reference)
+            .map_err(|error| action_error(format!("cannot resolve target branch {name}: {error}")))?
+            .peel_to_commit()?
+            .id();
+        Ok((reference, tip))
+    }
+
+    fn checked_out_branch_refs(&self) -> Result<BTreeSet<String>> {
+        let mut references = BTreeSet::new();
+        if let Ok(reference) = self.branch_ref() {
+            references.insert(reference);
+        }
+        let administration = self.common_dir.join("worktrees");
+        if !administration.is_dir() {
+            return Ok(references);
+        }
+        for entry in
+            fs::read_dir(&administration).map_err(|error| io_error(&administration, error))?
+        {
+            let entry = entry.map_err(|error| io_error(&administration, error))?;
+            let head_path = entry.path().join("HEAD");
+            let Ok(head) = fs::read_to_string(&head_path) else {
+                continue;
+            };
+            if let Some(reference) = head.trim().strip_prefix("ref: ")
+                && reference.starts_with("refs/heads/")
+                && Reference::is_valid_name(reference)
+            {
+                references.insert(reference.to_owned());
+            }
+        }
+        Ok(references)
     }
 
     pub fn worktree_path(&self, name: &str) -> Result<Option<PathBuf>> {
@@ -1018,7 +1175,25 @@ impl GitBackend {
     /// Koni owns scratch commits and rebuilds the index from HEAD.
     pub fn checkpoint(&self, request: &CheckpointRequest) -> Result<Option<CheckpointCommit>> {
         let _lock = self.lock()?;
-        self.checkpoint_unlocked(request, None)
+        self.checkpoint_unlocked(request, None, &[])
+    }
+
+    /// Publish only the named existing paths from the worktree onto the
+    /// current parent tree. This is for compiler-owned authority files whose
+    /// publication must neither rely on libgit2's broad worktree discovery nor
+    /// admit an unrelated write racing beside the checkpoint.
+    pub fn checkpoint_with_required_paths(
+        &self,
+        request: &CheckpointRequest,
+        required_paths: &[PathBuf],
+    ) -> Result<Option<CheckpointCommit>> {
+        if required_paths.is_empty() {
+            return Err(action_error(
+                "exact required-path checkpoint needs at least one path",
+            ));
+        }
+        let _lock = self.lock()?;
+        self.checkpoint_unlocked(request, None, required_paths)
     }
 
     /// Publish a checkpoint only when the checked-out branch still has the
@@ -1029,15 +1204,36 @@ impl GitBackend {
         expected_parent: Oid,
     ) -> Result<Option<CheckpointCommit>> {
         let _lock = self.lock()?;
-        self.checkpoint_unlocked(request, Some(expected_parent))
+        self.checkpoint_unlocked(request, Some(expected_parent), &[])
+    }
+
+    /// Publish required compiler-owned paths only when the checked-out branch
+    /// still has the exact parent proven by the semantic transaction.
+    pub fn checkpoint_from_with_required_paths(
+        &self,
+        request: &CheckpointRequest,
+        expected_parent: Oid,
+        required_paths: &[PathBuf],
+    ) -> Result<Option<CheckpointCommit>> {
+        if required_paths.is_empty() {
+            return Err(action_error(
+                "exact required-path checkpoint needs at least one path",
+            ));
+        }
+        let _lock = self.lock()?;
+        self.checkpoint_unlocked(request, Some(expected_parent), required_paths)
     }
 
     fn checkpoint_unlocked(
         &self,
         request: &CheckpointRequest,
         expected_parent: Option<Oid>,
+        required_paths: &[PathBuf],
     ) -> Result<Option<CheckpointCommit>> {
         validate_excluded_paths(&request.tree_excluded_paths)?;
+        for path in required_paths {
+            validate_relative_path(path, "required checkpoint path")?;
+        }
         let branch_ref = self.branch_ref()?;
         let parent = self.repository.head()?.peel_to_commit()?;
         if let Some(expected_parent) = expected_parent
@@ -1051,9 +1247,37 @@ impl GitBackend {
         let parent_tree = parent.tree()?;
         let status_exclusions =
             combined_excluded_paths(&request.excluded_paths, &request.tree_excluded_paths);
+        for path in required_paths {
+            if path_is_excluded(path, &status_exclusions) {
+                return Err(action_error(format!(
+                    "required checkpoint path is excluded from publication: {}",
+                    path.display()
+                )));
+            }
+        }
         let changed = self.status(&status_exclusions)?;
-        let lfs_paths =
-            self.lfs_tracked_paths(changed.iter().map(|change| change.path.as_path()))?;
+        if !required_paths.is_empty() {
+            let required = required_paths.iter().collect::<BTreeSet<_>>();
+            let unexpected = changed
+                .iter()
+                .filter(|change| !required.contains(&change.path))
+                .map(|change| change.path.clone())
+                .collect::<Vec<_>>();
+            if !unexpected.is_empty() {
+                return Err(action_error(format!(
+                    "exact required-path checkpoint refuses unrelated worktree changes: {}",
+                    display_paths(&unexpected)
+                )));
+            }
+        }
+        let lfs_paths = self.lfs_tracked_paths(if required_paths.is_empty() {
+            changed
+                .iter()
+                .map(|change| change.path.as_path())
+                .collect::<Vec<_>>()
+        } else {
+            required_paths.iter().map(PathBuf::as_path).collect()
+        })?;
         if !lfs_paths.is_empty() {
             return Err(action_error(format!(
                 "libgit2 cannot safely checkpoint changed Git LFS paths; run a configured LFS adapter first: {}",
@@ -1063,11 +1287,18 @@ impl GitBackend {
 
         let mut index = self.repository.index()?;
         index.read_tree(&parent_tree)?;
-        let excluded = &status_exclusions;
-        let mut filter =
-            |path: &Path, _matched: &[u8]| -> i32 { i32::from(path_is_excluded(path, excluded)) };
-        index.update_all(["*"], Some(&mut filter))?;
-        index.add_all(["*"], IndexAddOption::DEFAULT, Some(&mut filter))?;
+        if required_paths.is_empty() {
+            let excluded = &status_exclusions;
+            let mut filter = |path: &Path, _matched: &[u8]| -> i32 {
+                i32::from(path_is_excluded(path, excluded))
+            };
+            index.update_all(["*"], Some(&mut filter))?;
+            index.add_all(["*"], IndexAddOption::DEFAULT, Some(&mut filter))?;
+        } else {
+            for path in required_paths {
+                index.add_path(path)?;
+            }
+        }
         let removed_tree_paths =
             remove_tree_excluded_entries(&mut index, &request.tree_excluded_paths)?;
         let tree_oid = index.write_tree()?;
@@ -1094,11 +1325,19 @@ impl GitBackend {
             return Err(error.into());
         }
         index.write()?;
-        let mut changed_paths = changed
-            .into_iter()
-            .map(|change| change.path)
-            .chain(removed_tree_paths)
-            .collect::<Vec<_>>();
+        let mut changed_paths = if required_paths.is_empty() {
+            changed
+                .into_iter()
+                .map(|change| change.path)
+                .chain(removed_tree_paths)
+                .collect::<Vec<_>>()
+        } else {
+            required_paths
+                .iter()
+                .cloned()
+                .chain(removed_tree_paths)
+                .collect::<Vec<_>>()
+        };
         changed_paths.sort();
         changed_paths.dedup();
         Ok(Some(CheckpointCommit {
@@ -1152,6 +1391,11 @@ impl GitBackend {
         let base_tree = base.tree()?;
         let integration_tree = integration.tree()?;
         let ticket_tree = ticket.tree()?;
+        let retired_ticket_authoritative_paths = retired_ticket_authoritative_paths(
+            &integration_tree,
+            &ticket_tree,
+            &request.ticket_authoritative_paths,
+        )?;
         if ticket_tree.id() == base_tree.id() {
             return Ok(SquashOutcome::NoChanges {
                 integration_head: integration.id().to_string(),
@@ -1181,6 +1425,12 @@ impl GitBackend {
                 &request.ticket_authoritative_paths,
             )?;
         }
+        project_ticket_authoritative_paths(
+            &self.repository,
+            &mut index,
+            &ticket_tree,
+            &request.ticket_authoritative_paths,
+        )?;
         remove_tree_excluded_entries(&mut index, &request.tree_excluded_paths)?;
         if index.has_conflicts() {
             return Ok(SquashOutcome::Conflict(ConflictReport {
@@ -1259,6 +1509,37 @@ impl GitBackend {
                 "integration checkout failed and the ref was restored: {checkout_error}"
             )));
         }
+        if let Err(cleanup_error) = remove_retired_ticket_authoritative_paths(
+            &self.workdir,
+            &retired_ticket_authoritative_paths,
+        ) {
+            let rollback = self.repository.reference_matching(
+                &request.integration_ref,
+                integration.id(),
+                true,
+                commit_oid,
+                "koni rollback failed authoritative ticket cleanup",
+            );
+            if let Ok(mut index) = self.repository.index() {
+                let _ = index.read_tree(&integration_tree);
+                let _ = index.write();
+                let mut restore = CheckoutBuilder::new();
+                restore
+                    .force()
+                    .recreate_missing(true)
+                    .remove_untracked(false)
+                    .update_index(true);
+                let _ = self.repository.checkout_head(Some(&mut restore));
+            }
+            if let Err(rollback_error) = rollback {
+                return Err(action_error(format!(
+                    "integration ref advanced to {commit_oid}, authoritative ticket cleanup failed ({cleanup_error}), and ref compensation failed ({rollback_error}); recovery is required"
+                )));
+            }
+            return Err(action_error(format!(
+                "authoritative ticket cleanup failed and the integration ref was restored: {cleanup_error}"
+            )));
+        }
 
         Ok(SquashOutcome::Integrated(IntegrationCommit {
             commit: commit_oid.to_string(),
@@ -1266,6 +1547,267 @@ impl GitBackend {
             parent: integration.id().to_string(),
             ticket_head: ticket.id().to_string(),
         }))
+    }
+
+    /// Merge the currently selected product-branch tip into the checked-out
+    /// run branch as a real two-parent commit. Conflicts are reported from an
+    /// in-memory index and never write markers into the run checkout.
+    pub fn sync_target_into_run(&self, request: &TargetSyncRequest) -> Result<TargetSyncOutcome> {
+        let _lock = self.lock()?;
+        validate_reference(&request.run_ref)?;
+        validate_user_target_reference(&request.target_ref)?;
+        if self.branch_ref()? != request.run_ref {
+            return Err(action_error(format!(
+                "target synchronization must run in the {} checkout",
+                request.run_ref
+            )));
+        }
+        let dirty = self.status(&[])?;
+        if !dirty.is_empty() {
+            return Err(action_error(format!(
+                "run checkout is dirty before target synchronization: {}",
+                display_paths(
+                    &dirty
+                        .iter()
+                        .map(|change| change.path.clone())
+                        .collect::<Vec<_>>()
+                )
+            )));
+        }
+        let run = self
+            .repository
+            .find_reference(&request.run_ref)?
+            .peel_to_commit()?;
+        let target = self
+            .repository
+            .find_reference(&request.target_ref)?
+            .peel_to_commit()?;
+        if run.id() != request.expected_run_head || target.id() != request.expected_target_head {
+            return Err(action_error(format!(
+                "target synchronization inputs moved (run {}, target {})",
+                run.id(),
+                target.id()
+            )));
+        }
+        if run.id() == target.id() || self.repository.graph_descendant_of(run.id(), target.id())? {
+            return Ok(TargetSyncOutcome::UpToDate {
+                run_head: run.id().to_string(),
+                target_head: target.id().to_string(),
+            });
+        }
+        let base_oid = self
+            .repository
+            .merge_base(run.id(), target.id())
+            .map_err(|error| {
+                action_error(format!(
+                    "run and target branches have no merge base ({} and {}): {error}",
+                    run.id(),
+                    target.id()
+                ))
+            })?;
+        let base = self.repository.find_commit(base_oid)?;
+        let base_tree = base.tree()?;
+        let run_tree = run.tree()?;
+        let target_tree = target.tree()?;
+        let mut merge_options = MergeOptions::new();
+        merge_options.find_renames(true);
+        let mut index = self.repository.merge_trees(
+            &base_tree,
+            &run_tree,
+            &target_tree,
+            Some(&merge_options),
+        )?;
+        if index.has_conflicts() {
+            return Ok(TargetSyncOutcome::Conflict(ConflictReport {
+                base: base.id().to_string(),
+                integration_head: run.id().to_string(),
+                ticket_head: target.id().to_string(),
+                conflicts: collect_conflicts(&index)?,
+            }));
+        }
+        let tree_oid = index.write_tree_to(&self.repository)?;
+        let tree = self.repository.find_tree(tree_oid)?;
+        let identity = signature(&self.repository, request.identity.as_ref())?;
+        let target_name = local_branch_name(&request.target_ref)?;
+        let message = format!("chore(koni): synchronize target {target_name}\n");
+        let commit_oid = self.repository.commit(
+            None,
+            &identity,
+            &identity,
+            &message,
+            &tree,
+            &[&run, &target],
+        )?;
+        self.repository.reference_matching(
+            &request.run_ref,
+            commit_oid,
+            true,
+            run.id(),
+            &format!("koni synchronize target {target_name}"),
+        )?;
+        if let Err(error) = update_checked_out_tree(&self.repository, &tree) {
+            let rollback = self.repository.reference_matching(
+                &request.run_ref,
+                run.id(),
+                true,
+                commit_oid,
+                "koni rollback failed target synchronization",
+            );
+            let _ = update_checked_out_tree(&self.repository, &run_tree);
+            if let Err(rollback_error) = rollback {
+                return Err(action_error(format!(
+                    "run ref advanced to {commit_oid}, checkout update failed ({error}), and compensation failed ({rollback_error}); recovery is required"
+                )));
+            }
+            return Err(action_error(format!(
+                "target synchronization checkout failed and the run ref was restored: {error}"
+            )));
+        }
+        Ok(TargetSyncOutcome::Merged {
+            commit: commit_oid.to_string(),
+            tree: tree_oid.to_string(),
+            prior_run_head: run.id().to_string(),
+            target_head: target.id().to_string(),
+        })
+    }
+
+    /// Advance the user-selected target only when it still names the exact
+    /// synchronized commit and the run is a fast-forward descendant. A clean
+    /// checked-out target is updated together with its index/files; a dirty
+    /// checkout is a hard operator-visible blocker.
+    pub fn promote_run_to_target(
+        &self,
+        request: &TargetPromotionRequest,
+    ) -> Result<TargetPromotionResult> {
+        let _lock = self.lock()?;
+        validate_reference(&request.run_ref)?;
+        validate_user_target_reference(&request.target_ref)?;
+        let run = self
+            .repository
+            .find_reference(&request.run_ref)?
+            .peel_to_commit()?;
+        let target = self
+            .repository
+            .find_reference(&request.target_ref)?
+            .peel_to_commit()?;
+        if run.id() != request.expected_run_head {
+            return Err(action_error(format!(
+                "run branch moved after promotion preflight: expected {}, found {}",
+                request.expected_run_head,
+                run.id()
+            )));
+        }
+        let checkout = self.target_checkout_path_unlocked(&request.target_ref)?;
+
+        if target.id() == run.id() {
+            if let Some(path) = &checkout {
+                repair_replayed_target_checkout(path, request.expected_target_head, &run)?;
+            }
+            return Ok(TargetPromotionResult {
+                target_ref: request.target_ref.clone(),
+                prior_target: request.expected_target_head.to_string(),
+                promoted_head: run.id().to_string(),
+                checkout,
+                replayed: true,
+            });
+        }
+        if target.id() != request.expected_target_head {
+            return Err(action_error(format!(
+                "target branch moved after promotion preflight: expected {}, found {}",
+                request.expected_target_head,
+                target.id()
+            )));
+        }
+        ensure_ancestor(&self.repository, target.id(), run.id(), "run")?;
+        let target_tree = target.tree()?;
+        let run_tree = run.tree()?;
+        let checkout_repository = checkout.as_ref().map(Repository::open).transpose()?;
+        if let Some(repository) = &checkout_repository {
+            ensure_clean_repository(repository, "target checkout")?;
+        }
+        self.repository.reference_matching(
+            &request.target_ref,
+            run.id(),
+            true,
+            target.id(),
+            "koni promote completed run",
+        )?;
+        if let Some(repository) = &checkout_repository
+            && let Err(error) = update_checked_out_tree(repository, &run_tree)
+        {
+            let rollback = self.repository.reference_matching(
+                &request.target_ref,
+                target.id(),
+                true,
+                run.id(),
+                "koni rollback failed target promotion checkout",
+            );
+            let _ = update_checked_out_tree(repository, &target_tree);
+            if let Err(rollback_error) = rollback {
+                return Err(action_error(format!(
+                    "target ref advanced to {}, checkout update failed ({error}), and compensation failed ({rollback_error}); recovery is required",
+                    run.id()
+                )));
+            }
+            return Err(action_error(format!(
+                "target checkout update failed and the target ref was restored: {error}"
+            )));
+        }
+        Ok(TargetPromotionResult {
+            target_ref: request.target_ref.clone(),
+            prior_target: target.id().to_string(),
+            promoted_head: run.id().to_string(),
+            checkout,
+            replayed: false,
+        })
+    }
+
+    pub fn target_checkout_path(&self, target_ref: &str) -> Result<Option<PathBuf>> {
+        validate_user_target_reference(target_ref)?;
+        self.target_checkout_path_unlocked(target_ref)
+    }
+
+    pub fn is_ancestor(&self, ancestor: Oid, descendant: Oid) -> Result<bool> {
+        Ok(ancestor == descendant || self.repository.graph_descendant_of(descendant, ancestor)?)
+    }
+
+    fn target_checkout_path_unlocked(&self, target_ref: &str) -> Result<Option<PathBuf>> {
+        let mut matches = Vec::new();
+        if let Some(primary) = self.common_dir.parent()
+            && let Ok(repository) = Repository::open(primary)
+            && repository_branch_ref(&repository).as_deref() == Some(target_ref)
+        {
+            matches.push(canonicalize_existing(primary)?);
+        }
+        let administration = self.common_dir.join("worktrees");
+        if administration.is_dir() {
+            for entry in
+                fs::read_dir(&administration).map_err(|error| io_error(&administration, error))?
+            {
+                let entry = entry.map_err(|error| io_error(&administration, error))?;
+                let head = fs::read_to_string(entry.path().join("HEAD")).unwrap_or_default();
+                if head.trim() != format!("ref: {target_ref}") {
+                    continue;
+                }
+                let gitdir = fs::read_to_string(entry.path().join("gitdir"))
+                    .map_err(|error| io_error(entry.path().join("gitdir"), error))?;
+                let gitlink = canonicalize_existing(Path::new(gitdir.trim()))?;
+                let path = gitlink.parent().ok_or_else(|| {
+                    action_error("target worktree git link has no checkout directory")
+                })?;
+                matches.push(canonicalize_existing(path)?);
+            }
+        }
+        matches.sort();
+        matches.dedup();
+        match matches.as_slice() {
+            [] => Ok(None),
+            [path] => Ok(Some(path.clone())),
+            _ => Err(action_error(format!(
+                "target branch is unexpectedly checked out more than once: {}",
+                display_paths(&matches)
+            ))),
+        }
     }
 
     /// Roll back one exact squash commit after a later transaction phase fails.
@@ -1402,6 +1944,102 @@ pub fn format_commit_message(
 
 fn action_error(message: impl Into<String>) -> KoniError {
     KoniError::Action(message.into())
+}
+
+fn validate_user_target_reference(reference: &str) -> Result<()> {
+    validate_reference(reference)?;
+    let branch = local_branch_name(reference)?;
+    if branch == "koni" || branch.starts_with("koni/") {
+        return Err(action_error(format!(
+            "Koni-owned branch {branch} cannot be used as a promotion target"
+        )));
+    }
+    Ok(())
+}
+
+fn repository_branch_ref(repository: &Repository) -> Option<String> {
+    if repository.head_detached().ok()? {
+        return None;
+    }
+    let head = repository.head().ok()?;
+    std::str::from_utf8(head.name_bytes())
+        .ok()
+        .map(ToOwned::to_owned)
+}
+
+fn repository_changes(repository: &Repository, show: StatusShow) -> Result<Vec<PathBuf>> {
+    let mut options = StatusOptions::new();
+    options
+        .show(show)
+        .include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(false)
+        .renames_head_to_index(true)
+        .renames_index_to_workdir(true);
+    let mut paths = repository
+        .statuses(Some(&mut options))?
+        .iter()
+        .filter(|entry| entry.status() != Status::CURRENT)
+        .map(|entry| {
+            entry
+                .path()
+                .map(PathBuf::from)
+                .map_err(|_| action_error("Git status contains a non-UTF-8 path"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn ensure_clean_repository(repository: &Repository, label: &str) -> Result<()> {
+    let changes = repository_changes(repository, StatusShow::IndexAndWorkdir)?;
+    if !changes.is_empty() {
+        return Err(action_error(format!(
+            "{label} is dirty: {}",
+            display_paths(&changes)
+        )));
+    }
+    Ok(())
+}
+
+fn update_checked_out_tree(repository: &Repository, tree: &git2::Tree<'_>) -> Result<()> {
+    let mut index = repository.index()?;
+    index.read_tree(tree)?;
+    index.write()?;
+    let mut checkout = CheckoutBuilder::new();
+    checkout
+        .force()
+        .recreate_missing(true)
+        .remove_untracked(false)
+        .update_index(true);
+    repository.checkout_head(Some(&mut checkout))?;
+    Ok(())
+}
+
+fn repair_replayed_target_checkout(
+    path: &Path,
+    prior_target: Oid,
+    promoted: &git2::Commit<'_>,
+) -> Result<()> {
+    let repository = Repository::open(path)?;
+    let changes = repository_changes(&repository, StatusShow::IndexAndWorkdir)?;
+    if changes.is_empty() {
+        return Ok(());
+    }
+    let workdir_changes = repository_changes(&repository, StatusShow::Workdir)?;
+    let mut index = repository.index()?;
+    let index_tree = index.write_tree_to(&repository)?;
+    let prior_tree = repository.find_commit(prior_target)?.tree_id();
+    if workdir_changes.is_empty() && index_tree == prior_tree {
+        let promoted_tree = promoted.tree()?;
+        return update_checked_out_tree(&repository, &promoted_tree);
+    }
+    Err(action_error(format!(
+        "target promotion ref is already advanced, but checkout {} needs guarded recovery; changed paths: {}",
+        path.display(),
+        display_paths(&changes)
+    )))
 }
 
 fn canonicalize_existing(path: &Path) -> Result<PathBuf> {
@@ -1729,6 +2367,139 @@ fn resolve_ticket_authoritative_conflicts(
     Ok(())
 }
 
+/// Project entity-level ticket authority after Git's path-level merge.
+///
+/// A ticket changes lifecycle lanes by moving one YAML document between
+/// directories. When the integration and ticket branches add different lane
+/// paths relative to their base, Git sees two non-conflicting additions and
+/// keeps both. Conflict-only preference is therefore insufficient: every
+/// configured lane must exactly match the ticket tree, including deletions.
+fn project_ticket_authoritative_paths(
+    repository: &Repository,
+    index: &mut git2::Index,
+    ticket_tree: &git2::Tree<'_>,
+    ticket_authoritative_paths: &[PathBuf],
+) -> Result<()> {
+    for path in ticket_authoritative_paths {
+        if index.get_path(path, 0).is_some() {
+            index.remove_path(path)?;
+        }
+        let entry = match ticket_tree.get_path(path) {
+            Ok(entry) => entry,
+            Err(error) if error.code() == ErrorCode::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if entry.kind() != Some(git2::ObjectType::Blob) {
+            return Err(action_error(format!(
+                "authoritative ticket projection is not a file: {}",
+                path.display()
+            )));
+        }
+        let blob = repository.find_blob(entry.id())?;
+        index.add(&IndexEntry {
+            ctime: IndexTime::new(0, 0),
+            mtime: IndexTime::new(0, 0),
+            dev: 0,
+            ino: 0,
+            mode: u32::try_from(entry.filemode()).map_err(|_| {
+                action_error(format!(
+                    "authoritative ticket projection has an invalid file mode: {}",
+                    path.display()
+                ))
+            })?,
+            uid: 0,
+            gid: 0,
+            file_size: u32::try_from(blob.content().len()).map_err(|_| {
+                action_error(format!(
+                    "authoritative ticket projection is too large for the Git index: {}",
+                    path.display()
+                ))
+            })?,
+            id: entry.id(),
+            flags: 0,
+            flags_extended: 0,
+            path: path.to_string_lossy().as_bytes().to_vec(),
+        })?;
+    }
+    Ok(())
+}
+
+fn retired_ticket_authoritative_paths(
+    integration_tree: &git2::Tree<'_>,
+    ticket_tree: &git2::Tree<'_>,
+    ticket_authoritative_paths: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
+    let mut retired = Vec::new();
+    for path in ticket_authoritative_paths {
+        validate_relative_path(path, "authoritative ticket path")?;
+        if path
+            .components()
+            .any(|component| component == Component::CurDir)
+        {
+            return Err(action_error(format!(
+                "authoritative ticket path must be normalized: {}",
+                path.display()
+            )));
+        }
+        let integration_entry = match integration_tree.get_path(path) {
+            Ok(entry) => Some(entry),
+            Err(error) if error.code() == ErrorCode::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let ticket_entry = match ticket_tree.get_path(path) {
+            Ok(entry) => Some(entry),
+            Err(error) if error.code() == ErrorCode::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        for entry in integration_entry.iter().chain(ticket_entry.iter()) {
+            if entry.kind() != Some(git2::ObjectType::Blob) {
+                return Err(action_error(format!(
+                    "authoritative ticket projection is not a file: {}",
+                    path.display()
+                )));
+            }
+        }
+        if integration_entry.is_some() && ticket_entry.is_none() {
+            retired.push(path.clone());
+        }
+    }
+    retired.sort();
+    retired.dedup();
+    Ok(retired)
+}
+
+fn remove_retired_ticket_authoritative_paths(workdir: &Path, paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
+        let absolute = workdir.join(path);
+        let metadata = match fs::symlink_metadata(&absolute) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io_error(&absolute, error)),
+        };
+        let parent = absolute.parent().ok_or_else(|| {
+            action_error(format!(
+                "authoritative ticket path has no worktree parent: {}",
+                path.display()
+            ))
+        })?;
+        let canonical_parent = canonicalize_existing(parent)?;
+        if !canonical_parent.starts_with(workdir) {
+            return Err(action_error(format!(
+                "authoritative ticket path escapes the integration worktree: {}",
+                path.display()
+            )));
+        }
+        if !metadata.is_file() && !metadata.file_type().is_symlink() {
+            return Err(action_error(format!(
+                "retired authoritative ticket path is not a file: {}",
+                path.display()
+            )));
+        }
+        fs::remove_file(&absolute).map_err(|error| io_error(&absolute, error))?;
+    }
+    Ok(())
+}
+
 fn merge_append_only_jsonl(
     repository: &Repository,
     conflict: &TreeConflict,
@@ -1931,6 +2702,266 @@ mod tests {
             })
             .expect("checkpoint succeeds")
             .expect("checkpoint created")
+    }
+
+    #[test]
+    fn local_target_candidates_prefer_head_and_hide_koni_namespaces() {
+        let (_temp, root, base) = init_repository();
+        let repository = Repository::open(&root).expect("open repository");
+        let commit = repository.find_commit(base).expect("find base commit");
+        repository
+            .branch("feature/notes", &commit, false)
+            .expect("create user branch");
+        repository
+            .branch("koni/runs/hidden", &commit, false)
+            .expect("create internal branch");
+        drop(commit);
+        drop(repository);
+
+        let backend = GitBackend::discover(&root).expect("discover repository");
+        let candidates = backend
+            .recent_local_branches()
+            .expect("discover local branches");
+        assert_eq!(
+            candidates.first().map(|branch| branch.name.as_str()),
+            Some("main")
+        );
+        assert!(candidates[0].current);
+        assert!(candidates[0].checked_out);
+        assert!(
+            candidates
+                .iter()
+                .any(|branch| branch.name == "feature/notes")
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|branch| !branch.name.starts_with("koni/"))
+        );
+    }
+
+    #[test]
+    fn pinning_a_target_requires_a_user_owned_local_branch() {
+        let (_temp, root, base) = init_repository();
+        let repository = Repository::open(&root).expect("open repository");
+        let commit = repository.find_commit(base).expect("find base commit");
+        repository
+            .branch("feature/notes", &commit, false)
+            .expect("create user branch");
+        repository
+            .branch("koni/runs/hidden", &commit, false)
+            .expect("create internal branch");
+        repository
+            .set_head_detached(base)
+            .expect("detach repository HEAD");
+        drop(commit);
+        drop(repository);
+
+        let backend = GitBackend::discover(&root).expect("discover repository");
+        assert!(backend.pin_local_target("HEAD").is_err());
+        assert!(backend.pin_local_target("missing").is_err());
+        assert!(backend.pin_local_target("koni/runs/hidden").is_err());
+        assert_eq!(
+            backend
+                .pin_local_target("feature/notes")
+                .expect("pin explicit local branch"),
+            ("refs/heads/feature/notes".to_owned(), base),
+        );
+    }
+
+    fn create_run_worktree(
+        backend: &GitBackend,
+        parent: &Path,
+        name: &str,
+        base: Oid,
+    ) -> TicketWorktree {
+        backend
+            .create_ticket_worktree(&TicketWorktreeSpec {
+                name: name.to_owned(),
+                branch_ref: format!("refs/heads/koni/runs/{name}"),
+                path: parent.join(name),
+                base,
+                lock: true,
+            })
+            .expect("create run worktree")
+    }
+
+    #[test]
+    fn target_sync_creates_a_two_parent_commit_and_promotion_updates_the_clean_target() {
+        let (temp, root, base) = init_repository();
+        let target = GitBackend::discover(&root).expect("discover target checkout");
+        let worktree = create_run_worktree(&target, temp.path(), "run-sync", base);
+        let run = GitBackend::discover(&worktree.path).expect("discover run checkout");
+
+        fs::write(worktree.path.join("run.txt"), "run change\n").expect("write run change");
+        let run_before = checkpoint(&run, "run change");
+        fs::write(root.join("target.txt"), "target change\n").expect("write target change");
+        let target_before = checkpoint(&target, "target change");
+
+        let outcome = run
+            .sync_target_into_run(&TargetSyncRequest {
+                run_ref: worktree.branch_ref.clone(),
+                target_ref: "refs/heads/main".to_owned(),
+                expected_run_head: Oid::from_str(&run_before.commit).expect("run oid"),
+                expected_target_head: Oid::from_str(&target_before.commit).expect("target oid"),
+                identity: None,
+            })
+            .expect("synchronize target");
+        let merged = match outcome {
+            TargetSyncOutcome::Merged {
+                commit,
+                prior_run_head,
+                target_head,
+                ..
+            } => {
+                assert_eq!(prior_run_head, run_before.commit);
+                assert_eq!(target_head, target_before.commit);
+                commit
+            }
+            other => panic!("expected target merge, got {other:?}"),
+        };
+        let repository = Repository::open(&worktree.path).expect("open run repository");
+        let merge_commit = repository
+            .find_commit(Oid::from_str(&merged).expect("merged oid"))
+            .expect("find merge commit");
+        assert_eq!(merge_commit.parent_count(), 2);
+        assert_eq!(
+            merge_commit.parent_id(0).expect("run parent"),
+            Oid::from_str(&run_before.commit).unwrap()
+        );
+        assert_eq!(
+            merge_commit.parent_id(1).expect("target parent"),
+            Oid::from_str(&target_before.commit).unwrap()
+        );
+
+        let promoted = run
+            .promote_run_to_target(&TargetPromotionRequest {
+                run_ref: worktree.branch_ref.clone(),
+                target_ref: "refs/heads/main".to_owned(),
+                expected_run_head: Oid::from_str(&merged).expect("run oid"),
+                expected_target_head: Oid::from_str(&target_before.commit).expect("target oid"),
+            })
+            .expect("promote run");
+        assert!(!promoted.replayed);
+        assert_eq!(promoted.promoted_head, merged);
+        assert_eq!(target.head_oid().expect("target head").to_string(), merged);
+        assert_eq!(
+            fs::read_to_string(root.join("run.txt")).unwrap(),
+            "run change\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("target.txt")).unwrap(),
+            "target change\n"
+        );
+        assert!(!target.is_dirty(&[]).expect("promoted target is clean"));
+    }
+
+    #[test]
+    fn promotion_rejects_a_run_ref_advance_after_preflight() {
+        let (temp, root, base) = init_repository();
+        let target = GitBackend::discover(&root).expect("discover target checkout");
+        let worktree = create_run_worktree(&target, temp.path(), "run-moved", base);
+        let run = GitBackend::discover(&worktree.path).expect("discover run checkout");
+
+        fs::write(worktree.path.join("run.txt"), "verified work\n")
+            .expect("write verified run work");
+        let verified = checkpoint(&run, "verified run");
+        let request = TargetPromotionRequest {
+            run_ref: worktree.branch_ref,
+            target_ref: "refs/heads/main".to_owned(),
+            expected_run_head: Oid::from_str(&verified.commit).expect("verified run oid"),
+            expected_target_head: base,
+        };
+
+        fs::write(worktree.path.join("run.txt"), "unverified later work\n")
+            .expect("write later run work");
+        let advanced = checkpoint(&run, "advance run after promotion preflight");
+
+        let error = run
+            .promote_run_to_target(&request)
+            .expect_err("a moved run ref must block promotion");
+        assert!(
+            error
+                .to_string()
+                .contains("run branch moved after promotion preflight")
+        );
+        assert_eq!(target.head_oid().expect("target head"), base);
+        assert_eq!(
+            run.head_oid().expect("run head").to_string(),
+            advanced.commit
+        );
+        assert!(
+            !root.join("run.txt").exists(),
+            "rejected promotion must not update the target checkout"
+        );
+    }
+
+    #[test]
+    fn target_sync_conflict_never_mutates_the_run_checkout() {
+        let (temp, root, base) = init_repository();
+        let target = GitBackend::discover(&root).expect("discover target checkout");
+        let worktree = create_run_worktree(&target, temp.path(), "run-conflict", base);
+        let run = GitBackend::discover(&worktree.path).expect("discover run checkout");
+
+        fs::write(worktree.path.join("shared.txt"), "run version\n").expect("write run side");
+        let run_before = checkpoint(&run, "run side");
+        fs::write(root.join("shared.txt"), "target version\n").expect("write target side");
+        let target_before = checkpoint(&target, "target side");
+
+        let outcome = run
+            .sync_target_into_run(&TargetSyncRequest {
+                run_ref: worktree.branch_ref,
+                target_ref: "refs/heads/main".to_owned(),
+                expected_run_head: Oid::from_str(&run_before.commit).unwrap(),
+                expected_target_head: Oid::from_str(&target_before.commit).unwrap(),
+                identity: None,
+            })
+            .expect("return structured conflict");
+        let TargetSyncOutcome::Conflict(report) = outcome else {
+            panic!("expected conflict outcome")
+        };
+        assert!(!report.conflicts.is_empty());
+        assert_eq!(run.head_oid().unwrap().to_string(), run_before.commit);
+        assert_eq!(
+            fs::read_to_string(worktree.path.join("shared.txt")).unwrap(),
+            "run version\n"
+        );
+        assert!(
+            !Repository::open(&worktree.path)
+                .unwrap()
+                .path()
+                .join("MERGE_HEAD")
+                .exists()
+        );
+        assert!(!run.is_dirty(&[]).expect("run checkout remains clean"));
+    }
+
+    #[test]
+    fn promotion_refuses_a_dirty_target_without_advancing_its_ref() {
+        let (temp, root, base) = init_repository();
+        let target = GitBackend::discover(&root).expect("discover target checkout");
+        let worktree = create_run_worktree(&target, temp.path(), "run-dirty-target", base);
+        let run = GitBackend::discover(&worktree.path).expect("discover run checkout");
+        fs::write(worktree.path.join("run.txt"), "finished work\n").expect("write run work");
+        let run_head = checkpoint(&run, "finished run");
+        fs::write(root.join("local-draft.txt"), "do not overwrite\n")
+            .expect("write dirty target file");
+
+        let error = run
+            .promote_run_to_target(&TargetPromotionRequest {
+                run_ref: worktree.branch_ref,
+                target_ref: "refs/heads/main".to_owned(),
+                expected_run_head: Oid::from_str(&run_head.commit).expect("run oid"),
+                expected_target_head: base,
+            })
+            .expect_err("dirty checkout must block promotion");
+        assert!(error.to_string().contains("target checkout is dirty"));
+        assert_eq!(target.head_oid().expect("target head"), base);
+        assert_eq!(
+            fs::read_to_string(root.join("local-draft.txt")).unwrap(),
+            "do not overwrite\n"
+        );
+        assert_ne!(run_head.commit, base.to_string());
     }
 
     #[cfg(unix)]
@@ -2328,6 +3359,134 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_tracks_nested_untracked_file_beside_tree_exclusion() {
+        let (_temp, root, base) = init_repository();
+        let backend = GitBackend::discover(&root).expect("discover repository");
+        let journal = PathBuf::from("program/journals/action.yaml");
+        let lock = PathBuf::from("program/locks/compiler.lock");
+        fs::create_dir_all(root.join("program/journals")).expect("create journal directory");
+        fs::create_dir_all(root.join("program/locks")).expect("create lock directory");
+        fs::write(root.join(&journal), "status: complete\n").expect("write action Journal");
+        fs::write(root.join(&lock), "").expect("write compiler lock");
+
+        let created = backend
+            .checkpoint(&CheckpointRequest {
+                subject: "chore: checkpoint nested Journal".to_owned(),
+                body: None,
+                trailers: Vec::new(),
+                excluded_paths: Vec::new(),
+                tree_excluded_paths: vec![PathBuf::from("program/locks")],
+                identity: None,
+            })
+            .expect("checkpoint")
+            .expect("new commit");
+
+        assert_eq!(created.parent, base.to_string());
+        assert!(created.changed_paths.contains(&journal));
+        let commit = backend
+            .repository
+            .find_commit(Oid::from_str(&created.commit).expect("commit oid"))
+            .expect("find checkpoint");
+        let tree = commit.tree().expect("checkpoint tree");
+        assert!(tree.get_path(&journal).is_ok());
+        assert!(tree.get_path(&lock).is_err());
+        assert!(
+            backend
+                .status(&[PathBuf::from("program/locks")])
+                .expect("non-transient status")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn checkpoint_required_path_is_explicitly_committed_and_clean() {
+        let (_temp, root, base) = init_repository();
+        let backend = GitBackend::discover(&root).expect("discover repository");
+        let journal = PathBuf::from("program/journals/action.yaml");
+        let lock = PathBuf::from("program/locks/compiler.lock");
+        let journal_bytes = b"status: complete\nresult: relocated\n";
+        fs::create_dir_all(root.join("program/journals")).expect("create journal directory");
+        fs::create_dir_all(root.join("program/locks")).expect("create lock directory");
+        fs::write(root.join(&journal), journal_bytes).expect("write action Journal");
+        fs::write(root.join(&lock), "").expect("write compiler lock");
+
+        let created = backend
+            .checkpoint_with_required_paths(
+                &CheckpointRequest {
+                    subject: "chore: checkpoint required Journal".to_owned(),
+                    body: None,
+                    trailers: Vec::new(),
+                    excluded_paths: Vec::new(),
+                    tree_excluded_paths: vec![PathBuf::from("program/locks")],
+                    identity: None,
+                },
+                std::slice::from_ref(&journal),
+            )
+            .expect("checkpoint")
+            .expect("new commit");
+
+        assert_eq!(created.parent, base.to_string());
+        assert!(created.changed_paths.contains(&journal));
+        let commit = backend
+            .repository
+            .find_commit(Oid::from_str(&created.commit).expect("commit oid"))
+            .expect("find checkpoint");
+        let entry = commit
+            .tree()
+            .expect("checkpoint tree")
+            .get_path(&journal)
+            .expect("required Journal tree entry");
+        assert_eq!(
+            backend
+                .repository
+                .find_blob(entry.id())
+                .expect("required Journal blob")
+                .content(),
+            journal_bytes
+        );
+        assert!(
+            backend
+                .status(&[PathBuf::from("program/locks")])
+                .expect("non-transient status")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn checkpoint_required_path_refuses_unrelated_dirt_without_advancing_ref() {
+        let (_temp, root, base) = init_repository();
+        let backend = GitBackend::discover(&root).expect("discover repository");
+        let journal = PathBuf::from("program/journals/action.yaml");
+        fs::create_dir_all(root.join("program/journals")).expect("create journal directory");
+        fs::write(root.join(&journal), "status: complete\n").expect("write action Journal");
+        fs::write(root.join("README.md"), "unrelated edit\n").expect("modify unrelated file");
+
+        let error = backend
+            .checkpoint_with_required_paths(
+                &CheckpointRequest {
+                    subject: "chore: exact authority only".to_owned(),
+                    body: None,
+                    trailers: Vec::new(),
+                    excluded_paths: Vec::new(),
+                    tree_excluded_paths: Vec::new(),
+                    identity: None,
+                },
+                std::slice::from_ref(&journal),
+            )
+            .expect_err("unrelated dirt must be rejected before publication");
+
+        assert!(error.to_string().contains("README.md"));
+        assert_eq!(backend.head_oid().expect("HEAD"), base);
+        let head = backend
+            .repository
+            .find_commit(base)
+            .expect("base commit")
+            .tree()
+            .expect("base tree");
+        assert!(head.get_path(&journal).is_err());
+    }
+
+    #[test]
     fn checkpoint_from_refuses_an_advanced_preflight_parent_without_committing_dirt() {
         let (_temp, root, base) = init_repository();
         let backend = GitBackend::discover(&root).expect("discover repository");
@@ -2595,6 +3754,68 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.join(projection)).expect("read merged projection"),
             "status: integrating\noutputs: [accepted]\n"
+        );
+    }
+
+    #[test]
+    fn squash_integration_projects_nonconflicting_ticket_lifecycle_lanes() {
+        let (temp, root, base) = init_repository();
+        let main = GitBackend::discover(&root).expect("discover main");
+        let ticket = create_ticket(&main, temp.path(), "T-lifecycle-lane", base);
+        let ticket_backend = GitBackend::discover(&ticket.path).expect("discover ticket");
+        let in_progress = PathBuf::from("program/tickets/in_progress/T-lifecycle-lane.yaml");
+        let closed = PathBuf::from("program/tickets/closed/T-lifecycle-lane.yaml");
+        let allowed_untracked = PathBuf::from(".codex/project-local.toml");
+
+        fs::create_dir_all(root.join("program/tickets/in_progress"))
+            .expect("create integration lane");
+        fs::write(
+            root.join(&in_progress),
+            "id: T-lifecycle-lane\nstatus: in_progress\n",
+        )
+        .expect("write integration projection");
+        checkpoint(&main, "checkpoint integration lifecycle lane");
+
+        fs::create_dir_all(ticket.path.join("program/tickets/closed")).expect("create ticket lane");
+        fs::write(
+            ticket.path.join(&closed),
+            "id: T-lifecycle-lane\nstatus: closed\n",
+        )
+        .expect("write ticket projection");
+        checkpoint(&ticket_backend, "checkpoint ticket lifecycle lane");
+        fs::create_dir_all(root.join(".codex")).expect("create allowed dirty directory");
+        fs::write(root.join(&allowed_untracked), "project-local = true\n")
+            .expect("write allowed dirty file");
+
+        let outcome = main
+            .squash_integrate(&SquashRequest {
+                integration_ref: "refs/heads/main".to_owned(),
+                ticket_ref: ticket.branch_ref,
+                base,
+                subject: "chore: project authoritative ticket lifecycle lane".to_owned(),
+                body: None,
+                trailers: Vec::new(),
+                allowed_dirty_paths: vec![allowed_untracked.clone()],
+                tree_excluded_paths: Vec::new(),
+                append_only_paths: Vec::new(),
+                ticket_authoritative_paths: vec![in_progress.clone(), closed.clone()],
+                identity: None,
+            })
+            .expect("ticket lifecycle integration");
+
+        assert!(matches!(outcome, SquashOutcome::Integrated(_)));
+        assert!(
+            !root.join(in_progress).exists(),
+            "the integration-only lane must be deleted"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(closed)).expect("read authoritative closed ticket"),
+            "id: T-lifecycle-lane\nstatus: closed\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(allowed_untracked)).expect("read allowed dirty file"),
+            "project-local = true\n",
+            "targeted lifecycle cleanup must preserve unrelated allowed dirty paths"
         );
     }
 

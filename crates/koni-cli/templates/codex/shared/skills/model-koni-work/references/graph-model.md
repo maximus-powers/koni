@@ -2,10 +2,13 @@
 
 Use graph nodes for durable, independently meaningful project facts. Use edges for typed relationships whose direction and cardinality affect planning or validation.
 
+The examples use schema 2. Preserve `schema_version: "1.0"` only when the active catalog is an
+unmigrated `.codex/koni` profile; do not mix versions inside one profile.
+
 ## Node types
 
 ```yaml
-schema_version: "1.0"
+schema_version: "2.0"
 module: {id: delivery.graph, version: "0.1.0"}
 
 node_types:
@@ -15,6 +18,7 @@ node_types:
     required_any: [[outcome]]
     statuses: [draft, active, satisfied, superseded]
     compiler_owned_fields: [spec.planning_context]
+    agent_visible_compiler_owned_fields: [spec.planning_context]
     fields:
       outcome: {type: string, required: true}
       success_signals: {type: list}
@@ -34,19 +38,18 @@ node_types:
       blast_radius: {type: string, required: true}
 ```
 
-Give every maintained node type a concise nonempty description explaining what it represents and when to create or update it. Declare fields, required alternatives, legal statuses, and compiler-owned fields explicitly. Keep agent-authored semantic fields distinct from readiness, receipts, manifests, acceptance stamps, and other compiler-owned state.
+Give every maintained node type a concise nonempty description explaining what it represents and when to create or update it. Declare fields, required alternatives, legal statuses, and compiler-owned fields explicitly. Keep agent-authored semantic fields distinct from readiness, receipts, manifests, acceptance stamps, and other compiler-owned state. Ownership controls writes, not visibility: list only authoritative compiler-owned inputs that agents must read, such as an approved planning handoff, in `agent_visible_compiler_owned_fields`; leave operational projections hidden.
 
 ## Edge types
 
 ```yaml
 edge_types:
-  - {source: objective, relation: realized_by, targets: [change], min: 0}
-  - {source: change, relation: realizes, targets: [objective], min: 1}
+  - {source: change, relation: realizes, targets: [objective], min: 1, bidirectional: true, inverse: realized_by}
   - {source: change, relation: depends_on, targets: [change], acyclic: true}
   - {source: change, relation: affects, targets: [system, interface, contract], min: 1}
 ```
 
-Use cardinality for real invariants. Mark dependency or containment relations acyclic. Define inverse relationships when both directions must remain consistent. Avoid decorative edges that never affect a query, rule, scope, report, or agent context.
+Use cardinality for real invariants. Mark dependency or containment relations acyclic. When one fact is naturally readable from both endpoints, define one canonical `bidirectional: true` edge with an `inverse` alias. Author and store only the canonical edge; traverse the inverse alias when reading from the other endpoint. Never model the same fact as two reciprocal stored edges or add rules that merely require those redundant edges to match. Use two directed edges only when they represent genuinely independent facts that can differ. Avoid decorative edges that never affect a query, rule, scope, report, or agent context.
 
 ## Queries
 

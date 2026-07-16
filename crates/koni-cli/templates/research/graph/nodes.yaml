@@ -8,6 +8,7 @@ node_types:
     initial_status: draft
     semantic_fields: [schema_version, id, type, title, spec, edges]
     compiler_owned_fields: [status, readiness, obligations, tickets, gates, receipts, evidence, reports, compiler, spec.planning_context]
+    agent_visible_compiler_owned_fields: [spec.planning_context]
     fields:
       hypothesis:
         type: json
@@ -226,6 +227,7 @@ node_types:
         description: "Executable scientific contract copied into the virtual run ticket and validated before compiler-owned execution."
         properties:
           command: {type: list, required: true, items: {type: string, pattern: '.*\S.*'}, description: "Nonempty argv executed exactly, without shell interpolation or fallback substitution."}
+          composed_verification_command: {type: list, required: false, items: {type: string, pattern: '.*\S.*'}, description: "Required before execution: distinct repository-owned read-only argv that validates the current scientific inputs and any durable result artifacts without rerunning the empirical intervention; Koni runs it after scientific execution and replays it on the target-synchronized composed tree."}
           result_protocol: {type: string, required: true, enum: [autoresearch.research-result.v1], description: "Exact typed scientific result protocol emitted on stdout or at result_path."}
           required_measurements: {type: list, required: true, items: {type: string, pattern: '.*\S.*'}, description: "Nonempty unique measurement keys that must all occur in the result measurements object."}
           output_root: {type: path, required: false, pattern: '.*\S.*', description: "Optional narrow project-relative root authorized for fresh result and artifact files; omit it only when stdout is the result source and artifacts is empty."}

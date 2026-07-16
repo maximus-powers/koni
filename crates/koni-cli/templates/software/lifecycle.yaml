@@ -1,5 +1,5 @@
 schema_version: "1.0"
-module: {id: software.lifecycle, version: 0.1.0}
+module: {id: software.lifecycle, version: 0.2.0}
 
 state_machines:
   - id: ticket
@@ -8,7 +8,7 @@ state_machines:
     terminal_states: [closed, retired]
     transitions:
       - {id: approve, from: [proposed], to: todo, actors: [lead]}
-      - {id: start, from: [todo], to: in_progress, actors: [lead]}
+      - {id: start, from: [todo], to: in_progress, actors: [lead, compiler]}
       - {id: request-review, from: [in_progress], to: integrating, actors: [lead, compiler]}
       - {id: rework, from: [integrating], to: in_progress, actors: [reviewer, compiler]}
       - {id: block-todo, from: [todo], to: blocked, actors: [compiler]}

@@ -49,6 +49,52 @@ impl Default for RunOptions {
     }
 }
 
+const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const ACTIVITY_ANIMATION_INTERVAL: Duration = Duration::from_millis(500);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RedrawDecision {
+    redraw: bool,
+    advance_activity: bool,
+}
+
+struct RedrawSchedule {
+    dirty: bool,
+    last_activity_frame: Instant,
+}
+
+impl RedrawSchedule {
+    fn new(now: Instant) -> Self {
+        Self {
+            dirty: true,
+            last_activity_frame: now,
+        }
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    fn take(&mut self, now: Instant, animate_activity: bool) -> RedrawDecision {
+        if !animate_activity {
+            // A newly appearing live cue is already drawn by its snapshot/event.
+            // Start its pulse cadence from that state instead of immediately
+            // scheduling a redundant second frame.
+            self.last_activity_frame = now;
+        }
+        let advance_activity = animate_activity
+            && now.saturating_duration_since(self.last_activity_frame)
+                >= ACTIVITY_ANIMATION_INTERVAL;
+        if advance_activity {
+            self.last_activity_frame = now;
+        }
+        RedrawDecision {
+            redraw: std::mem::take(&mut self.dirty) || advance_activity,
+            advance_activity,
+        }
+    }
+}
+
 enum WorkerCommand {
     PlanRun {
         intake: crate::model::NewRunDraft,
@@ -56,8 +102,15 @@ enum WorkerCommand {
     ApproveRun {
         run_id: String,
     },
+    AuthorizePromotion {
+        run_id: String,
+    },
     ResumePlanning {
         run_id: String,
+    },
+    ReviseRunPlan {
+        run_id: String,
+        instructions: String,
     },
     AnswerQuestion {
         operation_id: String,
@@ -65,6 +118,7 @@ enum WorkerCommand {
         question_id: String,
         option_id: Option<String>,
         custom_answer: Option<String>,
+        notes: Option<String>,
     },
     ReviseQuestion {
         operation_id: String,
@@ -72,6 +126,7 @@ enum WorkerCommand {
         question_id: String,
         option_id: Option<String>,
         custom_answer: Option<String>,
+        notes: Option<String>,
     },
     ResolveQuestions {
         run_id: String,
@@ -125,7 +180,7 @@ enum WorkerCommand {
 }
 
 enum RefreshCommand {
-    Refresh,
+    Refresh { selected_run_id: Option<String> },
     Shutdown,
 }
 
@@ -141,8 +196,10 @@ impl WorkerHandle {
             .map_err(|_| anyhow::anyhow!("mutation worker stopped"))
     }
 
-    fn refresh(&self) {
-        let _ = self.refresh_tx.send(RefreshCommand::Refresh);
+    fn refresh(&self, selected_run_id: Option<&str>) {
+        let _ = self.refresh_tx.send(RefreshCommand::Refresh {
+            selected_run_id: selected_run_id.map(ToOwned::to_owned),
+        });
     }
 
     fn shutdown(&self) {
@@ -185,8 +242,16 @@ struct QuestionAnsweredEvent {
 enum WorkerEvent {
     Snapshots(Vec<serde_json::Value>),
     RunPlanned(Box<RunPlannedEvent>),
+    RunPlanFailed {
+        operation_id: String,
+        error: String,
+    },
     PlanningFinished(Box<PlanningFinishedEvent>),
     RunApproved(String),
+    PromotionAuthorized {
+        run_id: String,
+        tick: koni_core::RunSupervisionTick,
+    },
     QuestionAnswered(Box<QuestionAnsweredEvent>),
     QuestionSubmissionFailed {
         run_id: String,
@@ -236,6 +301,8 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
     }
 
     let (workers, event_rx) = spawn_workers(model.root.clone());
+    let mut automatically_presented_approvals = BTreeSet::new();
+    present_ready_approval_once(&mut model, &mut automatically_presented_approvals);
     let mut terminal = TerminalSession::enter()?;
     let mut last_refresh = Instant::now();
     let mut refresh_in_flight = false;
@@ -248,23 +315,28 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
         &mut supervision_next_poll,
         options.refresh_interval,
     );
-    let tick = Duration::from_millis(100);
+    let mut redraw = RedrawSchedule::new(Instant::now());
     loop {
-        terminal.terminal.draw(|frame| ui::draw(frame, &model))?;
+        let mut received_worker_event = false;
         while let Ok(update) = event_rx.try_recv() {
+            received_worker_event = true;
             match update {
                 WorkerEvent::Snapshots(snapshots) => {
                     refresh_in_flight = false;
+                    // A completed snapshot—whether periodic or requested by a
+                    // mutation—starts the next refresh window. Without this,
+                    // an event-driven refresh can be followed immediately by
+                    // the already-expired periodic timer, duplicating the
+                    // expensive cockpit projection.
+                    last_refresh = Instant::now();
                     let selected_id = model.selected_run_id().map(ToOwned::to_owned);
                     let selected_ticket_id = model
                         .selected_ticket_value()
                         .and_then(|ticket| ticket.get("id"))
                         .and_then(serde_json::Value::as_str)
                         .map(ToOwned::to_owned);
-                    model.runs = snapshots
-                        .into_iter()
-                        .map(crate::model::RunData::from_snapshot)
-                        .collect();
+                    let selected_agent_key = model.selected_agent_key();
+                    model.replace_runs_preserving_provisional(snapshots);
                     model.selected_run = selected_id
                         .and_then(|selected_id| {
                             model.runs.iter().position(|run| {
@@ -290,11 +362,14 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
                     model.selected_question = model
                         .selected_question
                         .min(model.selected_pending_questions().len().saturating_sub(1));
+                    model.restore_selected_agent(selected_agent_key.as_deref());
                     model.normalize_conditional_focus();
                     model.sync_orchestration();
                     if model.status == "refreshing…" {
                         model.status = "refreshed".to_owned();
                     }
+                    settle_completed_pause_feedback(&mut model);
+                    present_ready_approval_once(&mut model, &mut automatically_presented_approvals);
                     enqueue_automatic_supervision(
                         &model,
                         &workers,
@@ -305,6 +380,7 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
                 }
                 WorkerEvent::RunPlanned(event) => {
                     let RunPlannedEvent { intake, planner } = *event;
+                    model.remove_provisional_run(&intake.operation_id);
                     apply_run_planned_dialog_completion(&mut model, &intake);
                     model.status = planner.as_ref().map_or_else(
                         || "planning initialized · select the run to review progress".to_owned(),
@@ -315,18 +391,39 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
                             )
                         },
                     );
-                    workers.refresh();
+                    workers.refresh(model.selected_run_id());
+                    refresh_in_flight = true;
+                }
+                WorkerEvent::RunPlanFailed {
+                    operation_id,
+                    error,
+                } => {
+                    model.remove_provisional_run(&operation_id);
+                    model.status = format!("planning could not start: {error}");
+                    workers.refresh(model.selected_run_id());
                     refresh_in_flight = true;
                 }
                 WorkerEvent::RunApproved(id) => {
                     apply_approval_dialog_completion(&mut model, &id);
                     model.status = "✓ run approved · integration branch ready".to_owned();
-                    workers.refresh();
+                    workers.refresh(model.selected_run_id());
+                    refresh_in_flight = true;
+                }
+                WorkerEvent::PromotionAuthorized { run_id, tick } => {
+                    if matches!(
+                        model.ordinary_dialog(),
+                        Some(Dialog::MergeRun(draft)) if draft.preview.run_id == run_id
+                    ) {
+                        model.dismiss_ordinary_dialog();
+                    }
+                    model.status = supervision_status(&tick);
+                    workers.refresh(model.selected_run_id());
                     refresh_in_flight = true;
                 }
                 WorkerEvent::PlanningFinished(event) => {
                     let PlanningFinishedEvent { run_id, planner } = *event;
                     apply_approval_dialog_completion(&mut model, &run_id);
+                    automatically_presented_approvals.remove(&run_id);
                     model.status = planner.as_ref().map_or_else(
                         || "✓ planning updated · reopen review after refresh".to_owned(),
                         |planner| {
@@ -336,17 +433,17 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
                             )
                         },
                     );
-                    workers.refresh();
+                    workers.refresh(model.selected_run_id());
                     refresh_in_flight = true;
                 }
                 WorkerEvent::QuestionAnswered(event) => {
                     apply_question_answered_event(&mut model, &event);
-                    workers.refresh();
+                    workers.refresh(model.selected_run_id());
                     refresh_in_flight = true;
                 }
                 WorkerEvent::QuestionSubmissionFailed { run_id, error } => {
                     apply_question_submission_failed(&mut model, &run_id, &error);
-                    workers.refresh();
+                    workers.refresh(model.selected_run_id());
                     refresh_in_flight = true;
                 }
                 WorkerEvent::ActionFinished(event) => {
@@ -373,7 +470,7 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
                             .map(|status| format!(" · {status}"))
                             .unwrap_or_default()
                     );
-                    workers.refresh();
+                    workers.refresh(model.selected_run_id());
                     refresh_in_flight = true;
                 }
                 WorkerEvent::OrchestrationUpdated { run_id, state } => {
@@ -383,14 +480,14 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
                         model.unchained = state.unchained;
                     }
                     model.status = "orchestration updated".to_owned();
-                    workers.refresh();
+                    workers.refresh(model.selected_run_id());
                     refresh_in_flight = true;
                 }
                 WorkerEvent::RunLifecycleUpdated(update) => {
                     let message = update.message.clone();
                     model.apply_run_lifecycle_update(&update);
                     model.status = message;
-                    workers.refresh();
+                    workers.refresh(model.selected_run_id());
                     refresh_in_flight = true;
                 }
                 WorkerEvent::RunDeletionInspected(preview) => {
@@ -404,7 +501,7 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
                     model.status = format!(
                         "✓ run removed · {removed_worktrees} worktree(s) cleaned · {branches} owned branch(es) deleted"
                     );
-                    workers.refresh();
+                    workers.refresh(model.selected_run_id());
                     refresh_in_flight = true;
                 }
                 WorkerEvent::ExternalLoopUpdated { run_id, value } => {
@@ -419,7 +516,7 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
                         phase.map(|phase| format!(" · {phase}")).unwrap_or_default(),
                         if selected { "" } else { " · background run" }
                     );
-                    workers.refresh();
+                    workers.refresh(model.selected_run_id());
                     refresh_in_flight = true;
                 }
                 WorkerEvent::PipelineStageDriven { run_id, stage_id } => {
@@ -432,7 +529,7 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
                             " · background run"
                         }
                     );
-                    workers.refresh();
+                    workers.refresh(model.selected_run_id());
                     refresh_in_flight = true;
                 }
                 WorkerEvent::QuestionsResolved { run_id, count } => {
@@ -446,7 +543,7 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
                     } else {
                         format!("✓ resolved and resumed {count} question(s){background}")
                     };
-                    workers.refresh();
+                    workers.refresh(model.selected_run_id());
                     refresh_in_flight = true;
                 }
                 WorkerEvent::RunSupervised { run_id, tick } => {
@@ -458,8 +555,16 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
                     if model.selected_run_id() == Some(run_id.as_str()) {
                         model.status = supervision_status(&tick);
                     }
-                    workers.refresh();
-                    refresh_in_flight = true;
+                    // A normal waiting tick is a poll, not a state change.
+                    // The regular snapshot cadence will surface agent
+                    // progress; immediately projecting again here creates a
+                    // costly supervision -> snapshot -> supervision loop on
+                    // populated runs. Terminal, blocked, operator, and stage
+                    // advancement ticks remain eager.
+                    if supervision_tick_needs_immediate_refresh(&tick) {
+                        workers.refresh(model.selected_run_id());
+                        refresh_in_flight = true;
+                    }
                 }
                 WorkerEvent::SupervisionError { run_id, error } => {
                     supervision_in_flight.remove(&run_id);
@@ -468,7 +573,12 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
                         Instant::now() + supervision_poll_interval(options.refresh_interval),
                     );
                     if model.selected_run_id() == Some(run_id.as_str()) {
-                        model.status = format!("automatic supervision failed: {error}");
+                        model.status = if transient_run_authority_contention(&error) {
+                            "waiting for the current run action to reach its durable boundary…"
+                                .to_owned()
+                        } else {
+                            format!("automatic supervision failed: {error}")
+                        };
                     }
                 }
                 WorkerEvent::RefreshError(error) => {
@@ -478,24 +588,33 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
                 WorkerEvent::Error(error) => {
                     let lifecycle_refresh = model.selected_run_transition().is_some();
                     if reset_dialog_after_worker_error(&mut model) {
-                        workers.refresh();
+                        workers.refresh(model.selected_run_id());
                         refresh_in_flight = true;
                     }
                     model.status = error;
                     if lifecycle_refresh {
-                        workers.refresh();
+                        workers.refresh(model.selected_run_id());
                         refresh_in_flight = true;
                     }
                 }
             }
         }
+        if received_worker_event {
+            redraw.mark_dirty();
+        }
         if last_refresh.elapsed() >= options.refresh_interval && !refresh_in_flight {
-            workers.refresh();
+            workers.refresh(model.selected_run_id());
             refresh_in_flight = true;
             last_refresh = Instant::now();
         }
-        model.advance_activity_animation();
-        if !event::poll(tick)? {
+        let redraw_decision = redraw.take(Instant::now(), model.has_live_activity_cue());
+        if redraw_decision.advance_activity {
+            model.advance_activity_animation();
+        }
+        if redraw_decision.redraw {
+            terminal.terminal.draw(|frame| ui::draw(frame, &model))?;
+        }
+        if !event::poll(EVENT_POLL_INTERVAL)? {
             continue;
         }
         match event::read()? {
@@ -533,9 +652,37 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
             Event::Paste(text) => handle_paste(&mut model, &text),
             Event::Resize(_, _) | Event::FocusGained | Event::FocusLost => {}
         }
+        redraw.mark_dirty();
     }
     workers.shutdown();
     Ok(())
+}
+
+fn present_ready_approval_once(model: &mut ControlCenterModel, presented: &mut BTreeSet<String>) {
+    let ready = model
+        .runs
+        .iter()
+        .filter_map(|run| {
+            run.planning_is_ready_for_approval()
+                .then(|| run.summary.as_ref().map(|summary| summary.id.clone()))
+                .flatten()
+        })
+        .collect::<BTreeSet<_>>();
+    presented.retain(|run_id| ready.contains(run_id));
+    if model.ordinary_dialog().is_some() {
+        return;
+    }
+    let Some(run_id) = model
+        .selected_run_data()
+        .filter(|run| run.planning_is_ready_for_approval())
+        .and_then(|run| run.summary.as_ref())
+        .map(|summary| summary.id.clone())
+    else {
+        return;
+    };
+    if presented.insert(run_id) {
+        model.open_selected_run_approval();
+    }
 }
 
 /// Open an interactive, read-only control-center projection without a project engine.
@@ -562,11 +709,16 @@ pub fn run_read_only_snapshot(root: PathBuf, snapshot: Value) -> anyhow::Result<
         refresh_tx,
     };
     let mut terminal = TerminalSession::enter()?;
-    let tick = Duration::from_millis(100);
+    let mut redraw = RedrawSchedule::new(Instant::now());
     loop {
-        terminal.terminal.draw(|frame| ui::draw(frame, &model))?;
-        model.advance_activity_animation();
-        if !event::poll(tick)? {
+        let redraw_decision = redraw.take(Instant::now(), model.has_live_activity_cue());
+        if redraw_decision.advance_activity {
+            model.advance_activity_animation();
+        }
+        if redraw_decision.redraw {
+            terminal.terminal.draw(|frame| ui::draw(frame, &model))?;
+        }
+        if !event::poll(EVENT_POLL_INTERVAL)? {
             continue;
         }
         match event::read()? {
@@ -604,6 +756,7 @@ pub fn run_read_only_snapshot(root: PathBuf, snapshot: Value) -> anyhow::Result<
             Event::Paste(text) => handle_paste(&mut model, &text),
             Event::Resize(_, _) | Event::FocusGained | Event::FocusLost => {}
         }
+        redraw.mark_dirty();
     }
     Ok(())
 }
@@ -654,13 +807,14 @@ fn spawn_workers(root: PathBuf) -> (WorkerHandle, Receiver<WorkerEvent>) {
                     let root = mutation_root.clone();
                     let events = mutation_events.clone();
                     thread::spawn(move || {
+                        let operation_id = intake.operation_id.clone();
                         let event = planning_intake_value(&intake)
                             .and_then(|intake_value| {
-                                Engine::plan_run_with_overrides(
+                                Engine::plan_run_on_target_with_overrides(
                                     &root,
                                     Some(&intake.run_type),
                                     &intake.goal,
-                                    &intake.base_ref,
+                                    &intake.target_branch,
                                     Some(&intake.question_policy),
                                     &run_plan_overrides(&intake),
                                 )
@@ -676,7 +830,10 @@ fn spawn_workers(root: PathBuf) -> (WorkerHandle, Receiver<WorkerEvent>) {
                                     })))
                                 })
                             })
-                            .unwrap_or_else(|error| WorkerEvent::Error(error.to_string()));
+                            .unwrap_or_else(|error| WorkerEvent::RunPlanFailed {
+                                operation_id,
+                                error: error.to_string(),
+                            });
                         let _ = events.send(event);
                     });
                     continue;
@@ -685,6 +842,18 @@ fn spawn_workers(root: PathBuf) -> (WorkerHandle, Receiver<WorkerEvent>) {
                     { Engine::approve_run(&mutation_root, &run_id) }
                         .map(|approved| WorkerEvent::RunApproved(approved.run_id))
                         .map_err(|error| error.to_string())
+                }
+                WorkerCommand::AuthorizePromotion { run_id } => {
+                    let root = mutation_root.clone();
+                    let events = mutation_events.clone();
+                    thread::spawn(move || {
+                        let event = Engine::authorize_run_promotion(&root, &run_id)
+                            .and_then(|_| Engine::supervise_run_once(&root, &run_id))
+                            .map(|tick| WorkerEvent::PromotionAuthorized { run_id, tick })
+                            .unwrap_or_else(|error| WorkerEvent::Error(error.to_string()));
+                        let _ = events.send(event);
+                    });
+                    continue;
                 }
                 WorkerCommand::ResumePlanning { run_id } => {
                     let root = mutation_root.clone();
@@ -702,23 +871,44 @@ fn spawn_workers(root: PathBuf) -> (WorkerHandle, Receiver<WorkerEvent>) {
                     });
                     continue;
                 }
+                WorkerCommand::ReviseRunPlan {
+                    run_id,
+                    instructions,
+                } => {
+                    let root = mutation_root.clone();
+                    let events = mutation_events.clone();
+                    thread::spawn(move || {
+                        let event = Engine::revise_run_plan(&root, &run_id, &instructions)
+                            .map(|planner| {
+                                WorkerEvent::PlanningFinished(Box::new(PlanningFinishedEvent {
+                                    run_id,
+                                    planner,
+                                }))
+                            })
+                            .unwrap_or_else(|error| WorkerEvent::Error(error.to_string()));
+                        let _ = events.send(event);
+                    });
+                    continue;
+                }
                 WorkerCommand::AnswerQuestion {
                     operation_id,
                     run_id,
                     question_id,
                     option_id,
                     custom_answer,
+                    notes,
                 } => {
                     let root = mutation_root.clone();
                     let events = mutation_events.clone();
                     thread::spawn(move || {
                         let submitted_question_id = question_id.clone();
-                        let event = match Engine::answer_question(
+                        let event = match Engine::answer_question_with_notes(
                             &root,
                             &run_id,
                             &question_id,
                             option_id.as_deref(),
                             custom_answer.as_deref(),
+                            notes.as_deref(),
                         ) {
                             Ok(answered) => {
                                 WorkerEvent::QuestionAnswered(Box::new(QuestionAnsweredEvent {
@@ -743,17 +933,19 @@ fn spawn_workers(root: PathBuf) -> (WorkerHandle, Receiver<WorkerEvent>) {
                     question_id,
                     option_id,
                     custom_answer,
+                    notes,
                 } => {
                     let root = mutation_root.clone();
                     let events = mutation_events.clone();
                     thread::spawn(move || {
                         let submitted_question_id = question_id.clone();
-                        let event = match Engine::revise_planning_batch_answer(
+                        let event = match Engine::revise_planning_batch_answer_with_notes(
                             &root,
                             &run_id,
                             &question_id,
                             option_id.as_deref(),
                             custom_answer.as_deref(),
+                            notes.as_deref(),
                         ) {
                             Ok(answered) => {
                                 WorkerEvent::QuestionAnswered(Box::new(QuestionAnsweredEvent {
@@ -944,12 +1136,14 @@ fn spawn_workers(root: PathBuf) -> (WorkerHandle, Receiver<WorkerEvent>) {
         }
     });
     thread::spawn(move || {
+        let mut snapshot_cache = crate::model::ProjectSnapshotCache::default();
         while let Ok(command) = refresh_rx.recv() {
             match command {
-                RefreshCommand::Refresh => {
-                    let event = load_snapshots(&root)
-                        .map(WorkerEvent::Snapshots)
-                        .unwrap_or_else(|error| WorkerEvent::RefreshError(error.to_string()));
+                RefreshCommand::Refresh { selected_run_id } => {
+                    let event =
+                        load_snapshots(&root, selected_run_id.as_deref(), &mut snapshot_cache)
+                            .map(WorkerEvent::Snapshots)
+                            .unwrap_or_else(|error| WorkerEvent::RefreshError(error.to_string()));
                     let _ = event_tx.send(event);
                 }
                 RefreshCommand::Shutdown => break,
@@ -1014,6 +1208,7 @@ fn reset_dialog_after_worker_error(model: &mut ControlCenterModel) -> bool {
         Some(Dialog::AnswerQuestion(draft)) => draft.submitted = false,
         Some(Dialog::ActionForm(draft)) => draft.submitted = false,
         Some(Dialog::DeleteRun(draft)) => draft.submitted = false,
+        Some(Dialog::MergeRun(draft)) => draft.submitted = false,
         _ => {}
     }
     false
@@ -1075,8 +1270,12 @@ fn apply_question_submission_failed(model: &mut ControlCenterModel, run_id: &str
     );
 }
 
-fn load_snapshots(root: &Path) -> koni_core::Result<Vec<serde_json::Value>> {
-    crate::model::project_snapshots(root)
+fn load_snapshots(
+    root: &Path,
+    selected_run_id: Option<&str>,
+    cache: &mut crate::model::ProjectSnapshotCache,
+) -> koni_core::Result<Vec<serde_json::Value>> {
+    crate::model::project_snapshots_cached(root, selected_run_id, cache)
 }
 
 fn run_has_automatic_stage(run: &crate::model::RunData) -> bool {
@@ -1115,7 +1314,24 @@ fn run_has_automatic_stage(run: &crate::model::RunData) -> bool {
         return false;
     }
     let definition = stage.get("definition").unwrap_or(&serde_json::Value::Null);
-    stage_definition_is_automatic(definition)
+    run_stage_definition_is_automatic(run, definition)
+}
+
+fn run_stage_definition_is_automatic(
+    run: &crate::model::RunData,
+    definition: &serde_json::Value,
+) -> bool {
+    match definition.get("kind").and_then(serde_json::Value::as_str) {
+        // Target synchronization is engine-owned. Promotion becomes automatic
+        // only after the operator has durably authorized this exact run.
+        Some("target_sync") => true,
+        Some("promotion") => run
+            .snapshot
+            .get("promotion")
+            .and_then(|promotion| promotion.get("authorization"))
+            .is_some_and(|authorization| !authorization.is_null()),
+        _ => stage_definition_is_automatic(definition),
+    }
 }
 
 fn stage_definition_is_automatic(definition: &serde_json::Value) -> bool {
@@ -1167,7 +1383,17 @@ fn enqueue_automatic_supervision(
 }
 
 fn supervision_poll_interval(configured: Duration) -> Duration {
-    configured.max(Duration::from_millis(250))
+    // A supervision tick recompiles enough authoritative run state to make a
+    // scheduling decision. On a long research run that is materially more
+    // expensive than the read-only visual refresh, and polling it every two
+    // seconds can keep a full CPU core busy while a known Lead/reviewer is
+    // simply still alive. Five seconds remains responsive at durable agent
+    // boundaries while avoiding continuous compiler projection work.
+    configured.max(Duration::from_secs(5))
+}
+
+fn transient_run_authority_contention(error: &str) -> bool {
+    error.contains("run authority barrier") && error.contains("remained busy")
 }
 
 fn supervision_status(tick: &koni_core::RunSupervisionTick) -> String {
@@ -1186,6 +1412,29 @@ fn supervision_status(tick: &koni_core::RunSupervisionTick) -> String {
         }
     };
     format!("{prefix}{state}")
+}
+
+fn settle_completed_pause_feedback(model: &mut ControlCenterModel) {
+    let pause_has_settled = model.selected_run_data().is_some_and(|run| {
+        run.summary
+            .as_ref()
+            .is_some_and(|summary| summary.status == "paused" && summary.active_agents == 0)
+    });
+    if !pause_has_settled {
+        return;
+    }
+    model.status = match model.status.as_str() {
+        "new work is paused; active agents are draining" => {
+            "automatic scheduling is paused".to_owned()
+        }
+        "planning pause requested; an owned process is draining" => "planning is paused".to_owned(),
+        _ => return,
+    };
+}
+
+fn supervision_tick_needs_immediate_refresh(tick: &koni_core::RunSupervisionTick) -> bool {
+    !tick.advanced_stages.is_empty()
+        || !matches!(tick.outcome, koni_core::RunSupervisionState::Waiting { .. })
 }
 
 fn handle_key(
@@ -1223,6 +1472,12 @@ fn handle_key(
             }
             KeyCode::Char('p') => {
                 if let Err(error) = model.publish_config() {
+                    model.status = error.to_string();
+                }
+                return Ok(false);
+            }
+            KeyCode::Char('d') => {
+                if let Err(error) = model.discard_all_config_drafts() {
                     model.status = error.to_string();
                 }
                 return Ok(false);
@@ -1315,10 +1570,10 @@ fn handle_key(
             }
         },
         KeyCode::Char('r') => {
-            worker.refresh();
+            worker.refresh(model.selected_run_id());
             model.status = "refreshing…".to_owned();
         }
-        KeyCode::Char('R') if model.mode == Mode::Operate && model.focus == Focus::Questions => {
+        KeyCode::Char('a') if model.mode == Mode::Operate && model.focus == Focus::Questions => {
             if let Some(run_id) = model.selected_run_id().map(ToOwned::to_owned) {
                 worker.send(WorkerCommand::ResolveQuestions { run_id })?;
                 model.status = "resolving due automatic questions…".to_owned();
@@ -1327,39 +1582,40 @@ fn handle_key(
         KeyCode::Char('c') => model.toggle_mode(),
         KeyCode::Char('1') if model.mode == Mode::Operate => model.focus_runs(),
         KeyCode::Char('2') if model.mode == Mode::Operate => model.focus_tickets(),
-        KeyCode::Char('3') if model.mode == Mode::Operate => model.focus = Focus::Details,
-        KeyCode::Char('4') if model.mode == Mode::Operate => model.focus = Focus::Agents,
-        KeyCode::Char('5') if model.mode == Mode::Operate => model.focus = Focus::Graph,
+        KeyCode::Char('3') if model.mode == Mode::Operate => model.focus_agents(),
+        KeyCode::Char('4') if model.mode == Mode::Operate => model.focus = Focus::Details,
+        KeyCode::Char('5') if model.mode == Mode::Operate => model.focus = Focus::Activity,
+        KeyCode::Char('6') if model.mode == Mode::Operate => model.focus = Focus::Graph,
         KeyCode::Char('n') if model.mode == Mode::Operate => model.open_new_run(),
         KeyCode::Char('?') if model.mode == Mode::Operate => model.open_selected_question(),
-        KeyCode::Char('D') if model.mode == Mode::Operate && model.focus == Focus::Runs => {
+        KeyCode::Char('d') if model.mode == Mode::Operate && model.focus == Focus::Runs => {
             if let Some(run_id) = model.selected_run_id().map(ToOwned::to_owned) {
                 worker.send(WorkerCommand::InspectRunDeletion { run_id })?;
                 model.status =
                     "checking whether the selected run can be removed safely…".to_owned();
             }
         }
-        KeyCode::Char('T') if model.mode == Mode::Configure => {
+        KeyCode::Char('t') if model.mode == Mode::Configure => {
             model.open_run_type_wizard();
         }
-        KeyCode::Char('L') if model.mode == Mode::Configure && model.legacy_migration_available => {
+        KeyCode::Char('l') if model.mode == Mode::Configure && model.legacy_migration_available => {
             model.open_legacy_migration();
         }
-        KeyCode::Char('N')
+        KeyCode::Char('n')
             if model.mode == Mode::Configure
                 && model.focus == Focus::ConfigForm
                 && model.config.selected_domain() == ConfigDomain::Advanced =>
         {
             model.open_new_config_document();
         }
-        KeyCode::Char('M')
+        KeyCode::Char('m')
             if model.mode == Mode::Configure
                 && model.focus == Focus::ConfigForm
                 && model.config.selected_domain() == ConfigDomain::Advanced =>
         {
             model.open_rename_config_document();
         }
-        KeyCode::Char('D')
+        KeyCode::Char('d')
             if model.mode == Mode::Configure
                 && model.focus == Focus::ConfigForm
                 && model.config.selected_domain() == ConfigDomain::Advanced =>
@@ -1369,11 +1625,31 @@ fn handle_key(
             }
         }
         KeyCode::Char('a') if model.mode == Mode::Operate => model.open_action_palette(),
+        KeyCode::Char('m') if model.mode == Mode::Operate && model.focus == Focus::Runs => {
+            model.open_selected_run_merge();
+        }
+        KeyCode::Char('v') if model.mode == Mode::Operate => {
+            model.open_selected_run_approval();
+        }
         KeyCode::Enter if model.mode == Mode::Operate && model.focus == Focus::Runs => {
             model.open_selected_run_approval();
         }
         KeyCode::Enter if model.mode == Mode::Operate && model.focus == Focus::Questions => {
             model.open_selected_question();
+        }
+        KeyCode::Enter if model.mode == Mode::Operate && model.focus == Focus::Agents => {
+            if let Some(form) = model.agent_guidance_form() {
+                model.dialog = Some(Dialog::ActionForm(form));
+            } else {
+                model.status = "inactive agents are read-only; live guidance also requires a configured steering action".to_owned();
+            }
+        }
+        KeyCode::Esc
+            if model.mode == Mode::Operate
+                && model.focus == Focus::Details
+                && model.agent_chat_is_open() =>
+        {
+            model.close_agent_chat();
         }
         KeyCode::Enter
             if model.mode == Mode::Operate
@@ -1415,7 +1691,7 @@ fn handle_key(
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
-                let automatic = !planning_run && stage_definition_is_automatic(definition);
+                let automatic = !planning_run && run_stage_definition_is_automatic(run, definition);
                 if automatic && matches!(status.as_str(), "blocked" | "failed") {
                     worker.send(WorkerCommand::RetrySupervisedStage {
                         run_id,
@@ -1512,18 +1788,6 @@ fn handle_key(
         }
         KeyCode::Tab => model.cycle_focus(false),
         KeyCode::BackTab => model.cycle_focus(true),
-        KeyCode::Char('[') => match model.focus {
-            Focus::Tickets => model.cycle_ticket_tab(-1),
-            Focus::Details => model.cycle_detail_panel(-1),
-            Focus::Questions => model.select_next_question(-1),
-            _ => {}
-        },
-        KeyCode::Char(']') => match model.focus {
-            Focus::Tickets => model.cycle_ticket_tab(1),
-            Focus::Details => model.cycle_detail_panel(1),
-            Focus::Questions => model.select_next_question(1),
-            _ => {}
-        },
         KeyCode::Char(' ') if model.mode == Mode::Operate && model.focus == Focus::Runs => {
             if model.selected_run_transition().is_some() {
                 model.status = "the selected run is already changing play/pause state…".to_owned();
@@ -1606,7 +1870,21 @@ fn handle_key(
         KeyCode::Down | KeyCode::Char('j') => move_focused(model, 1),
         KeyCode::PageUp => scroll_focused(model, -8),
         KeyCode::PageDown => scroll_focused(model, 8),
-        KeyCode::Left => {
+        KeyCode::Home
+            if model.mode == Mode::Operate
+                && model.focus == Focus::Details
+                && model.agent_chat_is_open() =>
+        {
+            model.scroll_agent_chat_to_start();
+        }
+        KeyCode::End
+            if model.mode == Mode::Operate
+                && model.focus == Focus::Details
+                && model.agent_chat_is_open() =>
+        {
+            model.scroll_agent_chat_to_end();
+        }
+        KeyCode::Left | KeyCode::Char('[') => {
             if model.focus == Focus::Tickets {
                 model.cycle_ticket_tab(-1);
             } else if model.focus == Focus::Details {
@@ -1615,7 +1893,7 @@ fn handle_key(
                 model.select_next_question(-1);
             }
         }
-        KeyCode::Right | KeyCode::Char('l') => {
+        KeyCode::Right | KeyCode::Char(']') | KeyCode::Char('l') => {
             if model.focus == Focus::Tickets {
                 model.cycle_ticket_tab(1);
             } else if model.focus == Focus::Details {
@@ -1650,6 +1928,7 @@ fn handle_dialog_key(
     let intake_schemas = model.run_type_intake.clone();
     let run_types = model.run_types.clone();
     let codex_models = model.codex_models.clone();
+    let mut submitted_run = None;
     let Some(dialog) = model.dialog.as_mut() else {
         return Ok(false);
     };
@@ -1658,18 +1937,52 @@ fn handle_dialog_key(
         Dialog::Help(_) => {}
         Dialog::NewRun(draft) => {
             let fields = new_run_field_indices(draft);
+            let literal_text_active = new_run_literal_text_active(draft);
+            let objective_active = draft.active_field == 0;
             match key.code {
                 _ if draft.submitted => {}
-                KeyCode::Tab | KeyCode::Down => {
+                KeyCode::PageDown => {
+                    let last_stage_row =
+                        ui::new_run_stage_line_count(&run_types, &draft.run_type).saturating_sub(1);
+                    draft.stage_scroll = draft.stage_scroll.saturating_add(1).min(last_stage_row);
+                }
+                KeyCode::PageUp => {
+                    draft.stage_scroll = draft.stage_scroll.saturating_sub(1);
+                }
+                KeyCode::Tab => {
                     draft.active_field = (draft.active_field + 1) % fields.count;
                 }
-                KeyCode::BackTab | KeyCode::Up => {
+                KeyCode::Down if objective_active => draft.move_objective_cursor_down(),
+                KeyCode::Down => {
+                    draft.active_field = (draft.active_field + 1) % fields.count;
+                }
+                KeyCode::Char('j') if !literal_text_active => {
+                    draft.active_field = (draft.active_field + 1) % fields.count;
+                }
+                KeyCode::BackTab => {
                     draft.active_field = (draft.active_field + fields.count - 1) % fields.count;
                 }
-                KeyCode::Left | KeyCode::Right => {
-                    let delta = if key.code == KeyCode::Left { -1 } else { 1 };
+                KeyCode::Up if objective_active => draft.move_objective_cursor_up(),
+                KeyCode::Up => {
+                    draft.active_field = (draft.active_field + fields.count - 1) % fields.count;
+                }
+                KeyCode::Char('k') if !literal_text_active => {
+                    draft.active_field = (draft.active_field + fields.count - 1) % fields.count;
+                }
+                KeyCode::Left if objective_active => draft.move_objective_cursor_left(),
+                KeyCode::Right if objective_active => draft.move_objective_cursor_right(),
+                KeyCode::Left | KeyCode::Right | KeyCode::Char('[') | KeyCode::Char(']')
+                    if !literal_text_active =>
+                {
+                    let delta = if matches!(key.code, KeyCode::Left | KeyCode::Char('[')) {
+                        -1
+                    } else {
+                        1
+                    };
                     let active = draft.active_field;
-                    if active == fields.run_type {
+                    if active == fields.target {
+                        cycle_target_branch(draft, delta);
+                    } else if active == fields.run_type {
                         cycle_run_type(draft, &run_types, &intake_schemas, delta);
                     } else if active == fields.questions {
                         cycle_text_choice(
@@ -1723,6 +2036,8 @@ fn handle_dialog_key(
                         }
                     }
                 }
+                KeyCode::Home if objective_active => draft.move_objective_cursor_home(),
+                KeyCode::End if objective_active => draft.move_objective_cursor_end(),
                 KeyCode::Home if draft.active_field == fields.run_type => {
                     if let Some(run_type) = run_types.first() {
                         apply_run_type(draft, run_type, &intake_schemas);
@@ -1733,6 +2048,7 @@ fn handle_dialog_key(
                         apply_run_type(draft, run_type, &intake_schemas);
                     }
                 }
+                KeyCode::Delete if objective_active => draft.delete_objective(),
                 KeyCode::Enter if draft.active_field == fields.submit => {
                     if let Some(missing) = draft
                         .intake_fields
@@ -1748,14 +2064,17 @@ fn handle_dialog_key(
                         worker.send(WorkerCommand::PlanRun {
                             intake: draft.clone(),
                         })?;
+                        submitted_run = Some(draft.clone());
                         draft.submitted = true;
                         close_dialog = true;
                         model.status = "starting planning…".to_owned();
                     }
                 }
+                KeyCode::Enter if objective_active => draft.insert_objective_text("\n"),
                 KeyCode::Enter => {
                     draft.active_field = (draft.active_field + 1).min(fields.submit);
                 }
+                KeyCode::Backspace if objective_active => draft.backspace_objective(),
                 KeyCode::Backspace => {
                     if let Some(field) = active_run_field_mut(draft) {
                         field.pop();
@@ -1766,7 +2085,9 @@ fn handle_dialog_key(
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
-                    if let Some(field) = active_run_field_mut(draft) {
+                    if objective_active {
+                        draft.insert_objective_text(&character.to_string());
+                    } else if let Some(field) = active_run_field_mut(draft) {
                         field.push(character);
                     }
                 }
@@ -1774,17 +2095,104 @@ fn handle_dialog_key(
             }
         }
         Dialog::Approval(approval) => match key.code {
-            KeyCode::Left if !approval.submitted => approval.cycle_section(-1),
-            KeyCode::Right if !approval.submitted => approval.cycle_section(1),
-            KeyCode::Up if !approval.submitted => approval.scroll_by(-1),
-            KeyCode::Down if !approval.submitted => approval.scroll_by(1),
-            KeyCode::PageUp if !approval.submitted => approval.scroll_by(-8),
-            KeyCode::PageDown if !approval.submitted => approval.scroll_by(8),
+            KeyCode::Left if !approval.submitted && approval.revision_focused => {
+                approval.move_revision_cursor_left();
+            }
+            KeyCode::Right if !approval.submitted && approval.revision_focused => {
+                approval.move_revision_cursor_right();
+            }
+            KeyCode::Up if !approval.submitted && approval.revision_focused => {
+                approval.move_revision_cursor_up();
+            }
+            KeyCode::Down if !approval.submitted && approval.revision_focused => {
+                approval.move_revision_cursor_down();
+            }
+            KeyCode::Home if !approval.submitted && approval.revision_focused => {
+                approval.move_revision_cursor_home();
+            }
+            KeyCode::End if !approval.submitted && approval.revision_focused => {
+                approval.move_revision_cursor_end();
+            }
+            KeyCode::Delete if !approval.submitted && approval.revision_focused => {
+                approval.delete_revision();
+            }
+            KeyCode::Left | KeyCode::Char('[')
+                if !approval.submitted && !approval.revision_focused =>
+            {
+                approval.cycle_section(-1);
+            }
+            KeyCode::Right | KeyCode::Char(']')
+                if !approval.submitted && !approval.revision_focused =>
+            {
+                approval.cycle_section(1);
+            }
+            KeyCode::Up | KeyCode::Char('k')
+                if !approval.submitted && !approval.revision_focused =>
+            {
+                approval.scroll_by(-1);
+            }
+            KeyCode::Down | KeyCode::Char('j')
+                if !approval.submitted && !approval.revision_focused =>
+            {
+                approval.scroll_by(1);
+            }
+            KeyCode::PageUp if !approval.submitted && !approval.revision_focused => {
+                approval.scroll_by(-8);
+            }
+            KeyCode::PageDown if !approval.submitted && !approval.revision_focused => {
+                approval.scroll_by(8);
+            }
             KeyCode::Tab | KeyCode::BackTab if !approval.submitted => {
-                approval.approve_focused = !approval.approve_focused;
+                if approval.action_focused {
+                    approval.action_focused = false;
+                    approval.revision_focused = true;
+                } else if approval.revision_focused {
+                    approval.revision_focused = false;
+                    approval.action_focused = true;
+                } else {
+                    approval.action_focused = true;
+                    approval.revision_focused = false;
+                }
+            }
+            KeyCode::Backspace if !approval.submitted && approval.revision_focused => {
+                approval.backspace_revision();
             }
             KeyCode::Enter
-                if !approval.submitted && approval.approve_focused && approval.approval_enabled =>
+                if !approval.submitted
+                    && approval.revision_focused
+                    && key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                if approval.revision.trim().is_empty() {
+                    model.status = "add steering instructions before revising the plan".to_owned();
+                } else {
+                    worker.send(WorkerCommand::ReviseRunPlan {
+                        run_id: approval.run_id.clone(),
+                        instructions: approval.revision.trim().to_owned(),
+                    })?;
+                    approval.submitted = true;
+                    model.status = "reopening planning with your steering…".to_owned();
+                }
+            }
+            KeyCode::Enter if !approval.submitted && approval.revision_focused => {
+                approval.insert_revision_text("\n");
+            }
+            KeyCode::Enter
+                if !approval.submitted
+                    && approval.action_focused
+                    && !approval.revision.trim().is_empty() =>
+            {
+                worker.send(WorkerCommand::ReviseRunPlan {
+                    run_id: approval.run_id.clone(),
+                    instructions: approval.revision.trim().to_owned(),
+                })?;
+                approval.submitted = true;
+                model.status = "reopening planning with your steering…".to_owned();
+            }
+            KeyCode::Enter
+                if !approval.submitted
+                    && approval.action_focused
+                    && approval.revision.trim().is_empty()
+                    && approval.approval_enabled =>
             {
                 worker.send(WorkerCommand::ApproveRun {
                     run_id: approval.run_id.clone(),
@@ -1794,14 +2202,23 @@ fn handle_dialog_key(
             }
             KeyCode::Enter
                 if !approval.submitted
-                    && approval.approve_focused
+                    && approval.action_focused
+                    && approval.revision.trim().is_empty()
                     && !approval.approval_enabled =>
             {
                 model.status = format!("approval unavailable · {}", approval.blockers.join(" · "));
             }
             KeyCode::Enter if !approval.submitted => {
-                model.status =
-                    "review the planning sections, then press Tab to focus Approve run".to_owned();
+                model.status = "review the planning sections, then press Tab to focus the steering editor or primary action".to_owned();
+            }
+            KeyCode::Char(character)
+                if !approval.submitted
+                    && approval.revision_focused
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                approval.insert_revision_text(&character.to_string());
             }
             KeyCode::Char('r') if !approval.submitted => {
                 worker.send(WorkerCommand::ResumePlanning {
@@ -1812,24 +2229,60 @@ fn handle_dialog_key(
             }
             _ => {}
         },
+        Dialog::MergeRun(merge) => match key.code {
+            KeyCode::Enter if !merge.submitted && merge.preview.can_authorize => {
+                worker.send(WorkerCommand::AuthorizePromotion {
+                    run_id: merge.preview.run_id.clone(),
+                })?;
+                merge.submitted = true;
+                model.status = if merge.preview.target_advanced {
+                    "authorization recorded · resynchronizing target and rerunning verification…"
+                        .to_owned()
+                } else {
+                    "authorization recorded · promoting run…".to_owned()
+                };
+            }
+            KeyCode::Enter if !merge.submitted => {
+                model.status =
+                    format!("merge unavailable · {}", merge.preview.blockers.join(" · "));
+            }
+            _ => {}
+        },
         Dialog::AnswerQuestion(answer) => match key.code {
             KeyCode::Up
                 if (!answer.pending_resume || answer.waiting_for_batch) && !answer.submitted =>
             {
                 answer.selected = answer.selected.saturating_sub(1)
             }
+            KeyCode::Char('k')
+                if !answer.custom_active
+                    && (!answer.pending_resume || answer.waiting_for_batch)
+                    && !answer.submitted =>
+            {
+                answer.selected = answer.selected.saturating_sub(1)
+            }
             KeyCode::Down
                 if (!answer.pending_resume || answer.waiting_for_batch) && !answer.submitted =>
             {
+                let choice_count = answer.options.len() + usize::from(answer.allow_custom);
                 answer.selected = answer
                     .selected
                     .saturating_add(1)
-                    .min(answer.options.len().saturating_sub(1));
+                    .min(choice_count.saturating_sub(1));
             }
-            KeyCode::Tab
-                if answer.allow_custom
+            KeyCode::Char('j')
+                if !answer.custom_active
                     && (!answer.pending_resume || answer.waiting_for_batch)
                     && !answer.submitted =>
+            {
+                let choice_count = answer.options.len() + usize::from(answer.allow_custom);
+                answer.selected = answer
+                    .selected
+                    .saturating_add(1)
+                    .min(choice_count.saturating_sub(1));
+            }
+            KeyCode::Tab
+                if (!answer.pending_resume || answer.waiting_for_batch) && !answer.submitted =>
             {
                 answer.custom_active = !answer.custom_active;
             }
@@ -1848,48 +2301,67 @@ fn handle_dialog_key(
                 answer.custom.push(character)
             }
             KeyCode::Enter if !answer.submitted => {
-                let custom_answer = answer
-                    .custom_active
-                    .then(|| answer.custom.trim().to_owned())
-                    .filter(|answer| !answer.is_empty());
-                let option_id = custom_answer.is_none().then(|| {
-                    answer
-                        .options
-                        .get(answer.selected)
-                        .map(|(id, _, _, _)| id.clone())
-                        .unwrap_or_default()
-                });
-                let operation_id = answer.operation_id.clone();
-                let run_id = answer.run_id.clone();
-                let question_id = answer.question_id.clone();
-                if answer.pending_resume && answer.waiting_for_batch {
-                    worker.send(WorkerCommand::ReviseQuestion {
-                        operation_id,
-                        run_id,
-                        question_id,
-                        option_id,
-                        custom_answer,
-                    })?;
+                let text =
+                    (!answer.custom.trim().is_empty()).then(|| answer.custom.trim().to_owned());
+                let custom_selected =
+                    answer.allow_custom && answer.selected == answer.options.len();
+                if custom_selected && text.is_none() {
+                    answer.custom_active = true;
+                    model.status =
+                        "write your answer below before selecting None of the above".to_owned();
                 } else {
-                    worker.send(WorkerCommand::AnswerQuestion {
-                        operation_id,
-                        run_id,
-                        question_id,
-                        option_id,
-                        custom_answer,
-                    })?;
+                    let (option_id, custom_answer, notes) = if custom_selected {
+                        (None, text, None)
+                    } else {
+                        (
+                            answer
+                                .options
+                                .get(answer.selected)
+                                .map(|(id, _, _, _)| id.clone()),
+                            None,
+                            text,
+                        )
+                    };
+                    if option_id.is_none() && custom_answer.is_none() {
+                        model.status = "this question has no answerable choices".to_owned();
+                    } else {
+                        let operation_id = answer.operation_id.clone();
+                        let run_id = answer.run_id.clone();
+                        let question_id = answer.question_id.clone();
+                        if answer.pending_resume && answer.waiting_for_batch {
+                            worker.send(WorkerCommand::ReviseQuestion {
+                                operation_id,
+                                run_id,
+                                question_id,
+                                option_id,
+                                custom_answer,
+                                notes,
+                            })?;
+                        } else {
+                            worker.send(WorkerCommand::AnswerQuestion {
+                                operation_id,
+                                run_id,
+                                question_id,
+                                option_id,
+                                custom_answer,
+                                notes,
+                            })?;
+                        }
+                        model.status = if answer.pending_resume && answer.waiting_for_batch {
+                            "updating saved answer…".to_owned()
+                        } else if answer.batch_position.is_some()
+                            && answer.remaining_batch_questions > 1
+                        {
+                            format!(
+                                "answer save requested · {} remaining",
+                                answer.remaining_batch_questions - 1
+                            )
+                        } else {
+                            "planner resume requested · see Agents".to_owned()
+                        };
+                        close_dialog = true;
+                    }
                 }
-                model.status = if answer.pending_resume && answer.waiting_for_batch {
-                    "updating saved answer…".to_owned()
-                } else if answer.batch_position.is_some() && answer.remaining_batch_questions > 1 {
-                    format!(
-                        "answer save requested · {} remaining",
-                        answer.remaining_batch_questions - 1
-                    )
-                } else {
-                    "planner resume requested · see Agents".to_owned()
-                };
-                close_dialog = true;
             }
             _ => {}
         },
@@ -1948,12 +2420,16 @@ fn handle_dialog_key(
         },
         Dialog::ActionForm(action) => match key.code {
             KeyCode::Tab | KeyCode::Down if !action.submitted => {
-                if !action.params.is_empty() {
+                if action.is_agent_guidance() {
+                    action.select_agent_guidance_message();
+                } else if !action.params.is_empty() {
                     action.selected = (action.selected + 1) % action.params.len();
                 }
             }
             KeyCode::BackTab | KeyCode::Up if !action.submitted => {
-                if !action.params.is_empty() {
+                if action.is_agent_guidance() {
+                    action.select_agent_guidance_message();
+                } else if !action.params.is_empty() {
                     action.selected =
                         (action.selected + action.params.len() - 1) % action.params.len();
                 }
@@ -2004,7 +2480,11 @@ fn handle_dialog_key(
                         configured_ticket_review: action.configured_ticket_review,
                     })?;
                     action.submitted = true;
-                    model.status = format!("executing {}…", friendly_key(&action.action));
+                    model.status = if action.is_agent_guidance() {
+                        "recording durable agent guidance…".to_owned()
+                    } else {
+                        format!("executing {}…", friendly_key(&action.action))
+                    };
                 }
             }
             _ => {}
@@ -2050,17 +2530,26 @@ fn handle_dialog_key(
         },
         Dialog::RunTypeWizard(draft) => {
             let mut submit = false;
+            let literal_text_active = matches!(draft.active_field, 1..=3);
             match key.code {
                 KeyCode::Tab | KeyCode::Down => {
+                    draft.active_field = (draft.active_field + 1) % 6;
+                }
+                KeyCode::Char('j') if !literal_text_active => {
                     draft.active_field = (draft.active_field + 1) % 6;
                 }
                 KeyCode::BackTab | KeyCode::Up => {
                     draft.active_field = (draft.active_field + 5) % 6;
                 }
-                KeyCode::Left | KeyCode::Right if draft.active_field == 0 => {
+                KeyCode::Char('k') if !literal_text_active => {
+                    draft.active_field = (draft.active_field + 5) % 6;
+                }
+                KeyCode::Left | KeyCode::Right | KeyCode::Char('[') | KeyCode::Char(']')
+                    if draft.active_field == 0 =>
+                {
                     let count = draft.templates.len();
                     if count > 0 {
-                        let delta = if key.code == KeyCode::Left {
+                        let delta = if matches!(key.code, KeyCode::Left | KeyCode::Char('[')) {
                             count - 1
                         } else {
                             1
@@ -2072,7 +2561,13 @@ fn handle_dialog_key(
                 KeyCode::End if draft.active_field == 0 => {
                     draft.selected_template = draft.templates.len().saturating_sub(1);
                 }
-                KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if draft.active_field == 4 => {
+                KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Char('[')
+                | KeyCode::Char(']')
+                | KeyCode::Char(' ')
+                    if draft.active_field == 4 =>
+                {
                     draft.make_default = !draft.make_default;
                 }
                 KeyCode::Backspace if draft.active_field == 1 => {
@@ -2130,21 +2625,15 @@ fn handle_dialog_key(
         }
         Dialog::DeleteRun(draft) => match key.code {
             _ if draft.submitted => {}
-            KeyCode::Up | KeyCode::BackTab => {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
                 draft.selected = (draft.selected + 2) % 3;
                 draft.confirm_owned_branches = false;
             }
-            KeyCode::Down | KeyCode::Tab => {
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
                 draft.selected = (draft.selected + 1) % 3;
                 draft.confirm_owned_branches = false;
             }
             KeyCode::Enter if draft.selected == 0 => model.dialog = None,
-            KeyCode::Enter if !draft.preview.can_delete => {
-                model.status = format!(
-                    "run removal blocked by {} safety condition(s); pause live work and resolve dirty worktrees first",
-                    draft.preview.blockers.len()
-                );
-            }
             KeyCode::Enter if draft.selected == 2 && !draft.confirm_owned_branches => {
                 draft.confirm_owned_branches = true;
             }
@@ -2166,6 +2655,9 @@ fn handle_dialog_key(
     }
     if close_dialog {
         model.dialog = None;
+    }
+    if let Some(intake) = submitted_run {
+        model.insert_provisional_run(&intake);
     }
     Ok(false)
 }
@@ -2202,16 +2694,19 @@ fn handle_paste(model: &mut ControlCenterModel, pasted: &str) {
     };
     match dialog {
         Dialog::NewRun(draft) if !draft.submitted => {
-            if let Some(field) = active_run_field_mut(draft) {
+            if draft.active_field == 0 {
+                draft.insert_objective_text(&normalized);
+            } else if let Some(field) = active_run_field_mut(draft) {
                 field.push_str(&normalized);
             }
         }
         Dialog::AnswerQuestion(answer)
-            if answer.allow_custom
-                && answer.custom_active
-                && (!answer.pending_resume || answer.waiting_for_batch) =>
+            if answer.custom_active && (!answer.pending_resume || answer.waiting_for_batch) =>
         {
             answer.custom.push_str(&normalized);
+        }
+        Dialog::Approval(approval) if approval.revision_focused && !approval.submitted => {
+            approval.insert_revision_text(&normalized);
         }
         Dialog::ActionPalette(palette) => {
             palette.filter.extend(
@@ -2257,6 +2752,7 @@ fn handle_paste(model: &mut ControlCenterModel, pasted: &str) {
         Dialog::NewRun(_)
         | Dialog::Help(_)
         | Dialog::Approval(_)
+        | Dialog::MergeRun(_)
         | Dialog::AnswerQuestion(_)
         | Dialog::LegacyMigration(_)
         | Dialog::DeleteRun(_) => {}
@@ -2267,9 +2763,11 @@ fn contextual_help_topic(model: &ControlCenterModel) -> HelpTopic {
     match (model.mode, model.focus) {
         (Mode::Operate, Focus::Runs) => HelpTopic::Runs,
         (Mode::Operate, Focus::Tickets) => HelpTopic::Tickets,
+        (Mode::Operate, Focus::Details) if model.agent_chat_is_open() => HelpTopic::Agents,
         (Mode::Operate, Focus::Details) => HelpTopic::Details(model.detail_panel),
         (Mode::Operate, Focus::Questions) => HelpTopic::PendingQuestions,
         (Mode::Operate, Focus::Agents) => HelpTopic::Agents,
+        (Mode::Operate, Focus::Activity) => HelpTopic::Activity,
         (Mode::Operate, Focus::Graph) => HelpTopic::Graph,
         (Mode::Configure, Focus::ConfigTree) => HelpTopic::ConfigDomains,
         (Mode::Configure, Focus::ConfigForm) => HelpTopic::ConfigResources {
@@ -2299,6 +2797,7 @@ fn contextual_help_topic(model: &ControlCenterModel) -> HelpTopic {
             | Focus::Details
             | Focus::Questions
             | Focus::Agents
+            | Focus::Activity
             | Focus::Graph,
         ) => HelpTopic::ConfigDomains,
     }
@@ -2387,6 +2886,7 @@ const NEW_RUN_AGENT_ROLES: [&str; 4] = ["planner", "lead", "ticket_worker", "rev
 
 #[derive(Debug, Clone, Copy)]
 struct NewRunFieldIndices {
+    target: usize,
     run_type: usize,
     questions: usize,
     parallel: usize,
@@ -2396,12 +2896,14 @@ struct NewRunFieldIndices {
 }
 
 fn new_run_field_indices(draft: &crate::model::NewRunDraft) -> NewRunFieldIndices {
-    let run_type = 1 + draft.intake_fields.len();
+    let target = 1 + draft.intake_fields.len();
+    let run_type = target + 1;
     let questions = run_type + 1;
     let parallel = questions + 1;
     let agents = parallel + 1;
     let submit = agents + NEW_RUN_AGENT_ROLES.len() * 2;
     NewRunFieldIndices {
+        target,
         run_type,
         questions,
         parallel,
@@ -2411,15 +2913,41 @@ fn new_run_field_indices(draft: &crate::model::NewRunDraft) -> NewRunFieldIndice
     }
 }
 
+fn cycle_target_branch(draft: &mut crate::model::NewRunDraft, delta: isize) {
+    if draft.target_branches.is_empty() {
+        return;
+    }
+    let current = draft
+        .target_branches
+        .iter()
+        .position(|branch| branch.reference == draft.target_branch)
+        .unwrap_or_default();
+    let next = (current as isize + delta).rem_euclid(draft.target_branches.len() as isize) as usize;
+    draft.target_branch = draft.target_branches[next].reference.clone();
+}
+
 fn active_run_field_mut(draft: &mut crate::model::NewRunDraft) -> Option<&mut String> {
     match draft.active_field {
-        0 => Some(&mut draft.goal),
-        index if index <= draft.intake_fields.len() => draft
+        index if index > 0 && index <= draft.intake_fields.len() => draft
             .intake_fields
             .get_mut(index - 1)
             .map(|field| &mut field.value),
         _ => None,
     }
+}
+
+/// Literal text inputs keep printable navigation aliases available for typing. Every other new-run
+/// control is a selector, button, or numeric stepper and can therefore use both arrow and Vim-style
+/// navigation without making ordinary goal or intake text impossible to enter.
+fn new_run_literal_text_active(draft: &crate::model::NewRunDraft) -> bool {
+    if draft.active_field == 0 {
+        return true;
+    }
+    let Some(field) = draft.intake_fields.get(draft.active_field - 1) else {
+        return false;
+    };
+    field.field_type == "multi_choice"
+        || (field.field_type != "boolean" && field.options.is_empty())
 }
 
 fn cycle_parallelism(
@@ -2599,6 +3127,7 @@ fn apply_run_type(
     draft.max_parallel = run_type.max_parallel.unwrap_or(1);
     draft.agent_roles.clone_from(&run_type.agents);
     draft.overridden_fields.clear();
+    draft.stage_scroll = 0;
     draft.intake_fields = intake_schemas
         .get(&run_type.id)
         .cloned()
@@ -2639,8 +3168,8 @@ fn planning_intake_value(
             serde_json::Value::String(draft.run_type.clone()),
         ),
         (
-            "base_ref".to_owned(),
-            serde_json::Value::String(draft.base_ref.clone()),
+            "target_branch".to_owned(),
+            serde_json::Value::String(draft.target_branch.clone()),
         ),
         (
             "question_policy".to_owned(),
@@ -2798,9 +3327,13 @@ fn move_focused(model: &mut ControlCenterModel, delta: isize) {
     match model.focus {
         Focus::Runs => model.select_next_run(delta),
         Focus::Tickets => model.select_next_ticket(delta),
-        Focus::Questions => model.select_next_question(delta),
+        Focus::Questions => model.select_next_question_option(delta),
         Focus::Agents => model.select_next_agent(delta),
+        Focus::Activity => {
+            model.activity_scroll = model.activity_scroll.saturating_add_signed(delta)
+        }
         Focus::Graph => model.graph_scroll = model.graph_scroll.saturating_add_signed(delta),
+        Focus::Details if model.agent_chat_is_open() => model.scroll_agent_chat(delta),
         Focus::Details => model.detail_scroll = model.detail_scroll.saturating_add_signed(delta),
         Focus::ConfigTree => model.config.select_domain(delta),
         Focus::ConfigForm => model.config.select_resource(delta),
@@ -2819,7 +3352,11 @@ fn scroll_focused(model: &mut ControlCenterModel, delta: isize) {
     match model.focus {
         Focus::Graph => model.graph_scroll = model.graph_scroll.saturating_add_signed(delta),
         Focus::Agents => model.select_next_agent(delta),
-        Focus::Questions => model.select_next_question(delta),
+        Focus::Activity => {
+            model.activity_scroll = model.activity_scroll.saturating_add_signed(delta)
+        }
+        Focus::Questions => model.select_next_question_option(delta),
+        Focus::Details if model.agent_chat_is_open() => model.scroll_agent_chat(delta),
         Focus::Details => model.detail_scroll = model.detail_scroll.saturating_add_signed(delta),
         Focus::Runs => model.select_next_run(delta),
         Focus::Tickets => model.select_next_ticket(delta),
@@ -2849,12 +3386,26 @@ fn scroll_at(
             .is_some_and(|questions| rect_contains(questions, column, row))
         {
             model.focus = Focus::Questions;
-            model.select_next_question(delta);
+            model.select_next_question_option(delta);
+            return;
+        }
+        if rect_contains(layout.details, column, row) {
+            model.focus = Focus::Details;
+            if model.agent_chat_is_open() {
+                model.scroll_agent_chat(delta);
+            } else {
+                model.detail_scroll = model.detail_scroll.saturating_add_signed(delta);
+            }
             return;
         }
         if rect_contains(layout.active_agents, column, row) {
-            model.focus = Focus::Agents;
+            model.focus_agents();
             model.select_next_agent(delta);
+            return;
+        }
+        if rect_contains(layout.activity, column, row) {
+            model.focus = Focus::Activity;
+            model.activity_scroll = model.activity_scroll.saturating_add_signed(delta);
             return;
         }
     }
@@ -2986,12 +3537,11 @@ fn handle_mouse(
             }
         } else if rect_contains(layout.details, column, row) {
             model.focus = Focus::Details;
-            if rect_contains(layout.detail_switcher, column, row) {
-                let midpoint = layout
-                    .detail_switcher
-                    .x
-                    .saturating_add(layout.detail_switcher.width / 2);
-                model.cycle_detail_panel(if column < midpoint { -1 } else { 1 });
+            if !model.agent_chat_is_open()
+                && rect_contains(layout.detail_switcher, column, row)
+                && let Some(panel) = ui::detail_panel_at(column, row, layout.detail_switcher)
+            {
+                model.select_detail_panel(panel);
             }
         } else if layout
             .pending_questions
@@ -3005,10 +3555,12 @@ fn handle_mouse(
                 model.selected_question = index;
             }
         } else if rect_contains(layout.active_agents, column, row) {
-            model.focus = Focus::Agents;
+            model.focus_agents();
             if let Some(index) = ui::agent_at(model, column, row, layout.active_agents) {
                 model.select_next_agent(index as isize - model.selected_agent as isize);
             }
+        } else if rect_contains(layout.activity, column, row) {
+            model.focus = Focus::Activity;
         } else if rect_contains(layout.graph, column, row) {
             model.focus = Focus::Graph;
         }
@@ -3117,7 +3669,7 @@ pub fn plain_snapshot(model: &ControlCenterModel) -> String {
         .unwrap_or_default();
     let active_agents = agents.iter().filter(|agent| agent.live).count();
     lines.push(format!(
-        "Agents · {active_agents} active / {} total",
+        "Agents · {active_agents} / {} active",
         agents.len()
     ));
     if agents.is_empty() {
@@ -3148,7 +3700,7 @@ pub fn plain_snapshot(model: &ControlCenterModel) -> String {
     let selected = model.selected_run_data();
     let graph = selected.map(|run| run.graph.as_slice()).unwrap_or_default();
     lines.extend(
-        ui::graph_renderer_for_options(true, selected.and_then(|run| run.graph_options.as_ref()))
+        ui::graph_renderer_for_options(true, model.selected_graph_options())
             .render_values(graph, 118)
             .into_iter()
             .map(|line| line.text),
@@ -3196,6 +3748,61 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn redraw_schedule_is_idle_until_state_changes_and_caps_live_frames() {
+        let start = Instant::now();
+        let mut idle = RedrawSchedule::new(start);
+        assert_eq!(
+            idle.take(start, false),
+            RedrawDecision {
+                redraw: true,
+                advance_activity: false,
+            }
+        );
+        assert_eq!(
+            idle.take(start + Duration::from_secs(2), false),
+            RedrawDecision {
+                redraw: false,
+                advance_activity: false,
+            },
+            "an idle dashboard must not rebuild frames on the poll cadence"
+        );
+        idle.mark_dirty();
+        assert!(
+            idle.take(start + Duration::from_millis(2_100), false)
+                .redraw
+        );
+
+        let mut live = RedrawSchedule::new(start);
+        assert!(live.take(start, true).redraw);
+        assert!(!live.take(start + Duration::from_millis(499), true).redraw);
+        let first_pulse = live.take(start + Duration::from_millis(500), true);
+        assert!(first_pulse.redraw && first_pulse.advance_activity);
+        assert!(!live.take(start + Duration::from_millis(999), true).redraw);
+        let second_pulse = live.take(start + Duration::from_millis(1_000), true);
+        assert!(second_pulse.redraw && second_pulse.advance_activity);
+    }
+
+    #[test]
+    fn activity_animation_requires_a_rendered_live_work_cue() {
+        let mut model = ControlCenterModel::from_snapshot(
+            "/tmp/demo".into(),
+            json!({
+                "run":{"id":"r1","goal":"Demo","status":"active","profile_id":"default"},
+                "tickets":[{"id":"t1","status":"todo","title":"Pending work"}],
+                "agents":[]
+            }),
+        );
+        assert!(!model.has_live_activity_cue());
+
+        model.runs[0].summary.as_mut().unwrap().active_agents = 1;
+        assert!(model.has_live_activity_cue());
+
+        model.runs[0].summary.as_mut().unwrap().active_agents = 0;
+        model.runs[0].provisional_operation_id = Some("starting-run".to_owned());
+        assert!(model.has_live_activity_cue());
+    }
 
     #[test]
     fn snapshot_contains_project_runs_tickets_and_graph() {
@@ -3264,6 +3871,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(model.detail_panel, crate::model::Panel::Planning);
+
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert_eq!(model.detail_panel, crate::model::Panel::Stages);
     }
 
     #[test]
@@ -3304,7 +3919,7 @@ mod tests {
         .unwrap();
         handle_key(
             &mut model,
-            KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
             &workers,
         )
         .unwrap();
@@ -3337,7 +3952,7 @@ mod tests {
         model.dialog = None;
         handle_key(
             &mut model,
-            KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
             &workers,
         )
         .unwrap();
@@ -3345,6 +3960,84 @@ mod tests {
             mutation_rx.try_recv(),
             Ok(WorkerCommand::ResolveQuestions { ref run_id }) if run_id == "run-secret"
         ));
+    }
+
+    #[test]
+    fn enter_on_a_live_agent_records_guidance_through_the_configured_action() {
+        let mut model = ControlCenterModel::from_snapshot(
+            "/tmp/demo".into(),
+            json!({
+                "run":{"id":"run-secret","goal":"Demo","status":"active"},
+                "tickets":[{
+                    "id":"ticket-secret",
+                    "title":"Validate boundaries",
+                    "status":"in_progress",
+                    "workflow":[],
+                    "outputs":[]
+                }],
+                "agents":[{
+                    "id":"agent-secret",
+                    "ticket_id":"ticket-secret",
+                    "persona":"reviewer",
+                    "status":"running"
+                }],
+                "actions":[{
+                    "id":"steer",
+                    "params":{
+                        "kind":{"type":"string","required":true},
+                        "message":{"type":"string","required":true},
+                        "ticket_id":{"type":"ticket_id","required":false},
+                        "target_nodes":{"type":"json","default":[]},
+                        "priority":{"type":"string","default":"normal"}
+                    }
+                }]
+            }),
+        );
+        model.focus_tickets();
+        model.focus = Focus::Agents;
+        let (mutation_tx, mutation_rx) = mpsc::channel();
+        let (refresh_tx, _refresh_rx) = mpsc::channel();
+        let workers = WorkerHandle {
+            mutation_tx,
+            refresh_tx,
+        };
+
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert!(matches!(
+            model.dialog,
+            Some(Dialog::ActionForm(ref form)) if form.is_agent_guidance()
+        ));
+        for character in ['h', 'i'] {
+            handle_key(
+                &mut model,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                &workers,
+            )
+            .unwrap();
+        }
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+
+        let WorkerCommand::ExecuteAction { action, params, .. } = mutation_rx.try_recv().unwrap()
+        else {
+            panic!("agent guidance did not use the configured action boundary");
+        };
+        assert_eq!(action, "steer");
+        assert_eq!(params.get("kind").map(String::as_str), Some("agent_chat"));
+        assert_eq!(params.get("message").map(String::as_str), Some("hi"));
+        assert_eq!(
+            params.get("ticket_id").map(String::as_str),
+            Some("ticket-secret")
+        );
     }
 
     #[test]
@@ -3409,6 +4102,7 @@ mod tests {
             (Focus::Tickets, HelpTopic::Tickets),
             (Focus::Questions, HelpTopic::PendingQuestions),
             (Focus::Agents, HelpTopic::Agents),
+            (Focus::Activity, HelpTopic::Activity),
             (Focus::Graph, HelpTopic::Graph),
         ] {
             model.mode = Mode::Operate;
@@ -3480,7 +4174,7 @@ mod tests {
             KeyCode::F(1),
         ] {
             let mut model = ControlCenterModel::from_snapshot("/tmp/demo".into(), json!(null));
-            model.open_new_run();
+            model.dialog = Some(Dialog::NewRun(crate::model::NewRunDraft::default()));
 
             handle_key(
                 &mut model,
@@ -3532,7 +4226,7 @@ mod tests {
     #[test]
     fn completed_new_run_beneath_help_is_not_resurrected() {
         let mut model = ControlCenterModel::from_snapshot("/tmp/demo".into(), json!(null));
-        model.open_new_run();
+        model.dialog = Some(Dialog::NewRun(crate::model::NewRunDraft::default()));
         let intake = match model.dialog.as_mut() {
             Some(Dialog::NewRun(draft)) => {
                 draft.goal = "submitted goal".to_owned();
@@ -3775,6 +4469,18 @@ mod tests {
     }
 
     #[test]
+    fn automatic_supervision_polling_has_a_compiler_friendly_floor() {
+        assert_eq!(
+            supervision_poll_interval(Duration::from_millis(250)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            supervision_poll_interval(Duration::from_secs(8)),
+            Duration::from_secs(8)
+        );
+    }
+
+    #[test]
     fn blocked_automatic_stage_enter_dispatches_explicit_retry_without_showing_ids() {
         let mut model = automatic_stage_model("orchestration", "blocked", false);
         model.focus = Focus::Details;
@@ -3819,6 +4525,67 @@ mod tests {
             "✓ advanced one automatic stage · automation is working"
         );
         assert!(!status.contains("private"));
+    }
+
+    #[test]
+    fn settled_pause_replaces_only_the_stale_draining_footer() {
+        let paused_snapshot = || {
+            json!({
+                "run":{"id":"run-private-id","goal":"Demo","status":"active"},
+                "lifecycle":{"running":false,"draining":false,"active_agents":0},
+                "orchestration":{"running":false,"max_parallel":3}
+            })
+        };
+        let mut model = ControlCenterModel::from_snapshot("/tmp/project".into(), paused_snapshot());
+        model.status = "new work is paused; active agents are draining".to_owned();
+
+        settle_completed_pause_feedback(&mut model);
+
+        assert_eq!(model.status, "automatic scheduling is paused");
+
+        let mut planning =
+            ControlCenterModel::from_snapshot("/tmp/project".into(), paused_snapshot());
+        planning.status = "planning pause requested; an owned process is draining".to_owned();
+        settle_completed_pause_feedback(&mut planning);
+        assert_eq!(planning.status, "planning is paused");
+
+        let mut unrelated =
+            ControlCenterModel::from_snapshot("/tmp/project".into(), paused_snapshot());
+        unrelated.status = "✓ recovery completed".to_owned();
+        settle_completed_pause_feedback(&mut unrelated);
+        assert_eq!(unrelated.status, "✓ recovery completed");
+    }
+
+    #[test]
+    fn ordinary_waiting_supervision_ticks_share_the_periodic_refresh() {
+        let waiting = koni_core::RunSupervisionTick {
+            run_id: "run-private-id".to_owned(),
+            advanced_stages: Vec::new(),
+            outcome: koni_core::RunSupervisionState::Waiting {
+                stage_id: "stage-private-id".to_owned(),
+                agent_id: Some("agent-private-id".to_owned()),
+                reason: "still running".to_owned(),
+            },
+        };
+        assert!(!supervision_tick_needs_immediate_refresh(&waiting));
+
+        let mut advanced = waiting.clone();
+        advanced.advanced_stages.push("stage-private-id".to_owned());
+        assert!(supervision_tick_needs_immediate_refresh(&advanced));
+
+        let mut complete = waiting;
+        complete.outcome = koni_core::RunSupervisionState::Complete;
+        assert!(supervision_tick_needs_immediate_refresh(&complete));
+    }
+
+    #[test]
+    fn only_run_authority_contention_is_treated_as_transient_supervision() {
+        assert!(transient_run_authority_contention(
+            "action error: run authority barrier for private-run remained busy"
+        ));
+        assert!(!transient_run_authority_contention(
+            "action error: configured review failed"
+        ));
     }
 
     #[test]
@@ -3890,14 +4657,20 @@ mod tests {
         ));
         assert!(model.status.contains("press Tab"));
 
-        for _ in 0..3 {
+        for code in [KeyCode::Right, KeyCode::Char(']')] {
             handle_key(
                 &mut model,
-                KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+                KeyEvent::new(code, KeyModifiers::NONE),
                 &workers,
             )
             .unwrap();
         }
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
         handle_key(
             &mut model,
             KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
@@ -3907,12 +4680,9 @@ mod tests {
         let Some(Dialog::Approval(approval)) = &model.dialog else {
             panic!("approval review closed unexpectedly");
         };
-        assert_eq!(
-            approval.selected_section().unwrap().title,
-            "Verification plan"
-        );
-        assert_eq!(approval.scroll, 8);
-        assert!(!approval.approve_focused);
+        assert_eq!(approval.selected_section().unwrap().title, "Verification");
+        assert_eq!(approval.scroll, 9);
+        assert!(!approval.action_focused);
 
         handle_key(
             &mut model,
@@ -3984,6 +4754,81 @@ mod tests {
     }
 
     #[test]
+    fn approval_review_can_send_explicit_revision_steering() {
+        let mut model = ControlCenterModel::from_snapshot(
+            "/tmp/demo".into(),
+            json!({
+                "run":{"id":"run-revise","goal":"Demo","status":"planning"},
+                "stages":[
+                    {
+                        "status":"succeeded",
+                        "definition":{"id":"combined-plan","kind":"planning","title":"Combined plan","required":true},
+                        "output":{"output":{"output":"Architecture, risk, and verification plan"}}
+                    },
+                    {"status":"pending","definition":{"id":"approval","kind":"manual","title":"Approve"}}
+                ]
+            }),
+        );
+        model.open_selected_run_approval();
+        let (mutation_tx, mutation_rx) = mpsc::channel();
+        let (refresh_tx, _refresh_rx) = mpsc::channel();
+        let workers = WorkerHandle {
+            mutation_tx,
+            refresh_tx,
+        };
+
+        // First Tab focuses approval; the second selects the multiline revision editor.
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        handle_paste(&mut model, "Keep the old API.");
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        handle_paste(&mut model, "Add a rollback check.");
+        let Some(Dialog::Approval(approval)) = &model.dialog else {
+            panic!("approval review closed while editing steering");
+        };
+        assert_eq!(
+            approval.revision,
+            "Keep the old API.\nAdd a rollback check."
+        );
+
+        // The single primary action becomes revision once steering is present.
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            mutation_rx.try_recv(),
+            Ok(WorkerCommand::ReviseRunPlan { ref run_id, ref instructions })
+                if run_id == "run-revise"
+                    && instructions == "Keep the old API.\nAdd a rollback check."
+        ));
+    }
+
+    #[test]
     fn paste_is_forwarded_to_the_active_dialog_field() {
         let mut model = ControlCenterModel::from_snapshot("/tmp/demo".into(), json!(null));
         let draft = crate::model::NewRunDraft {
@@ -3998,6 +4843,477 @@ mod tests {
             panic!("new-run dialog was unexpectedly closed");
         };
         assert_eq!(draft.goal, "first line\nsecond line");
+    }
+
+    #[test]
+    fn selector_aliases_do_not_steal_literal_characters_from_new_run_text() {
+        let mut model = ControlCenterModel::from_snapshot("/tmp/demo".into(), json!(null));
+        model.run_types = vec![
+            crate::model::RunTypeOption {
+                id: "small".to_owned(),
+                title: "Small".to_owned(),
+                description: String::new(),
+                planning_passes: 0,
+                question_policy: "autonomous".to_owned(),
+                max_parallel: Some(1),
+                model_summary: None,
+                stages: Vec::new(),
+                agents: BTreeMap::new(),
+            },
+            crate::model::RunTypeOption {
+                id: "large".to_owned(),
+                title: "Large".to_owned(),
+                description: String::new(),
+                planning_passes: 2,
+                question_policy: "interactive".to_owned(),
+                max_parallel: Some(4),
+                model_summary: None,
+                stages: Vec::new(),
+                agents: BTreeMap::new(),
+            },
+        ];
+        let run_type_field = new_run_field_indices(&crate::model::NewRunDraft::default()).run_type;
+        model.dialog = Some(Dialog::NewRun(crate::model::NewRunDraft {
+            run_type: "small".to_owned(),
+            question_policy: "autonomous".to_owned(),
+            active_field: run_type_field,
+            ..crate::model::NewRunDraft::default()
+        }));
+        let (mutation_tx, _mutation_rx) = mpsc::channel();
+        let (refresh_tx, _refresh_rx) = mpsc::channel();
+        let workers = WorkerHandle {
+            mutation_tx,
+            refresh_tx,
+        };
+
+        for code in [KeyCode::Char(']'), KeyCode::Char('j'), KeyCode::Char('k')] {
+            handle_key(
+                &mut model,
+                KeyEvent::new(code, KeyModifiers::NONE),
+                &workers,
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            model.dialog,
+            Some(Dialog::NewRun(ref draft))
+                if draft.run_type == "large" && draft.active_field == run_type_field
+        ));
+
+        if let Some(Dialog::NewRun(draft)) = model.dialog.as_mut() {
+            draft.active_field = 0;
+        }
+        for character in ['j', 'k', '[', ']'] {
+            handle_key(
+                &mut model,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                &workers,
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            model.dialog,
+            Some(Dialog::NewRun(ref draft)) if draft.goal == "jk[]"
+        ));
+    }
+
+    #[test]
+    fn new_run_page_keys_reach_every_stage_without_moving_the_active_control() {
+        let mut model = ControlCenterModel::from_snapshot("/tmp/demo".into(), json!(null));
+        model.run_types = vec![crate::model::RunTypeOption {
+            id: "medium".to_owned(),
+            title: "Medium".to_owned(),
+            description: String::new(),
+            planning_passes: 1,
+            question_policy: "high_impact_only".to_owned(),
+            max_parallel: Some(3),
+            model_summary: None,
+            stages: (1..=4)
+                .map(|number| crate::model::RunStageOption {
+                    id: format!("stage-{number}"),
+                    title: if number == 4 {
+                        "Stage 4 has a deliberately long custom title whose final wrapped row must remain reachable"
+                            .to_owned()
+                    } else {
+                        format!("Stage {number}")
+                    },
+                    kind: "action".to_owned(),
+                })
+                .collect(),
+            agents: BTreeMap::new(),
+        }];
+        model.dialog = Some(Dialog::NewRun(crate::model::NewRunDraft {
+            run_type: "medium".to_owned(),
+            question_policy: "high_impact_only".to_owned(),
+            active_field: 2,
+            ..crate::model::NewRunDraft::default()
+        }));
+        let (mutation_tx, _mutation_rx) = mpsc::channel();
+        let (refresh_tx, _refresh_rx) = mpsc::channel();
+        let workers = WorkerHandle {
+            mutation_tx,
+            refresh_tx,
+        };
+
+        let last_stage_row =
+            ui::new_run_stage_line_count(&model.run_types, "medium").saturating_sub(1);
+        for _ in 0..last_stage_row.saturating_add(5) {
+            handle_key(
+                &mut model,
+                KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+                &workers,
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            model.dialog,
+            Some(Dialog::NewRun(ref draft))
+                if draft.stage_scroll == last_stage_row && draft.active_field == 2
+        ));
+
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert!(matches!(
+            model.dialog,
+            Some(Dialog::NewRun(ref draft))
+                if draft.stage_scroll == last_stage_row.saturating_sub(1)
+                    && draft.active_field == 2
+        ));
+    }
+
+    #[test]
+    fn new_run_objective_supports_multiline_unicode_caret_editing() {
+        let mut model = ControlCenterModel::from_snapshot("/tmp/demo".into(), json!(null));
+        model.dialog = Some(Dialog::NewRun(crate::model::NewRunDraft::default()));
+        let (mutation_tx, _mutation_rx) = mpsc::channel();
+        let (refresh_tx, _refresh_rx) = mpsc::channel();
+        let workers = WorkerHandle {
+            mutation_tx,
+            refresh_tx,
+        };
+        let press = |model: &mut ControlCenterModel, code| {
+            handle_key(model, KeyEvent::new(code, KeyModifiers::NONE), &workers).unwrap();
+        };
+
+        for character in ['a', 'b'] {
+            press(&mut model, KeyCode::Char(character));
+        }
+        press(&mut model, KeyCode::Left);
+        press(&mut model, KeyCode::Char('é'));
+        assert!(matches!(
+            model.dialog,
+            Some(Dialog::NewRun(ref draft))
+                if draft.goal == "aéb" && draft.objective_cursor == 2
+        ));
+        press(&mut model, KeyCode::Backspace);
+        press(&mut model, KeyCode::Delete);
+        press(&mut model, KeyCode::Enter);
+        press(&mut model, KeyCode::Char('x'));
+        press(&mut model, KeyCode::Char('y'));
+        press(&mut model, KeyCode::Home);
+        press(&mut model, KeyCode::Right);
+        press(&mut model, KeyCode::Backspace);
+        press(&mut model, KeyCode::Up);
+        press(&mut model, KeyCode::End);
+        press(&mut model, KeyCode::Char('!'));
+        press(&mut model, KeyCode::Down);
+        press(&mut model, KeyCode::Left);
+        press(&mut model, KeyCode::Delete);
+        press(&mut model, KeyCode::Enter);
+
+        assert!(matches!(
+            model.dialog,
+            Some(Dialog::NewRun(ref draft))
+                if draft.goal == "a!\n\n" && draft.objective_cursor == 4 && draft.active_field == 0
+        ));
+        press(&mut model, KeyCode::Tab);
+        assert!(matches!(
+            model.dialog,
+            Some(Dialog::NewRun(ref draft)) if draft.active_field == 1
+        ));
+    }
+
+    #[test]
+    fn new_run_paste_inserts_at_the_objective_caret() {
+        let mut model = ControlCenterModel::from_snapshot("/tmp/demo".into(), json!(null));
+        model.dialog = Some(Dialog::NewRun(crate::model::NewRunDraft {
+            goal: "first last".to_owned(),
+            objective_cursor: 6,
+            ..crate::model::NewRunDraft::default()
+        }));
+
+        handle_paste(&mut model, "middle\r\nnext ");
+
+        assert!(matches!(
+            model.dialog,
+            Some(Dialog::NewRun(ref draft))
+                if draft.goal == "first middle\nnext last"
+                    && draft.objective_cursor == "first middle\nnext ".chars().count()
+        ));
+    }
+
+    #[test]
+    fn questions_panel_and_modal_share_the_same_choice_cursor() {
+        let mut model = ControlCenterModel::from_snapshot(
+            "/tmp/demo".into(),
+            json!({
+                "run":{"id":"run","goal":"Demo","status":"planning"},
+                "questions":[{
+                    "id":"question",
+                    "status":"open",
+                    "prompt":"Choose",
+                    "options":[
+                        {"id":"one","label":"One","recommended":true},
+                        {"id":"two","label":"Two"}
+                    ]
+                }]
+            }),
+        );
+        model.focus = Focus::Questions;
+        let (mutation_tx, _mutation_rx) = mpsc::channel();
+        let (refresh_tx, _refresh_rx) = mpsc::channel();
+        let workers = WorkerHandle {
+            mutation_tx,
+            refresh_tx,
+        };
+
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert_eq!(model.selected_question_option, 1);
+
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert!(matches!(
+            model.dialog,
+            Some(Dialog::AnswerQuestion(ref answer)) if answer.selected == 1
+        ));
+
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert!(model.dialog.is_none());
+        assert_eq!(model.selected_question_option, 1);
+    }
+
+    #[test]
+    fn provided_question_option_can_carry_notes() {
+        let mut model = ControlCenterModel::from_snapshot(
+            "/tmp/demo".into(),
+            json!({
+                "run":{"id":"run","goal":"Demo","status":"planning"},
+                "questions":[{
+                    "id":"question",
+                    "status":"open",
+                    "prompt":"Choose",
+                    "options":[{"id":"safe","label":"Safe","recommended":true}]
+                }]
+            }),
+        );
+        model.open_selected_question();
+        let (mutation_tx, mutation_rx) = mpsc::channel();
+        let (refresh_tx, _refresh_rx) = mpsc::channel();
+        let workers = WorkerHandle {
+            mutation_tx,
+            refresh_tx,
+        };
+
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        handle_paste(&mut model, "Preserve compatibility with saved notes");
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            mutation_rx.try_recv(),
+            Ok(WorkerCommand::AnswerQuestion {
+                option_id: Some(ref option_id),
+                custom_answer: None,
+                notes: Some(ref notes),
+                ..
+            }) if option_id == "safe" && notes == "Preserve compatibility with saved notes"
+        ));
+    }
+
+    #[test]
+    fn none_of_the_above_requires_and_submits_a_custom_answer() {
+        let mut model = ControlCenterModel::from_snapshot(
+            "/tmp/demo".into(),
+            json!({
+                "run":{"id":"run","goal":"Demo","status":"planning"},
+                "questions":[{
+                    "id":"question",
+                    "status":"open",
+                    "prompt":"Choose",
+                    "options":[{"id":"safe","label":"Safe","recommended":true}]
+                }]
+            }),
+        );
+        model.open_selected_question();
+        let (mutation_tx, mutation_rx) = mpsc::channel();
+        let (refresh_tx, _refresh_rx) = mpsc::channel();
+        let workers = WorkerHandle {
+            mutation_tx,
+            refresh_tx,
+        };
+
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert!(model.dialog.is_some());
+        assert!(mutation_rx.try_recv().is_err());
+        assert!(model.status.contains("write your answer"));
+
+        handle_paste(&mut model, "Use a project-specific contract");
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert!(matches!(
+            mutation_rx.try_recv(),
+            Ok(WorkerCommand::AnswerQuestion {
+                option_id: None,
+                custom_answer: Some(ref answer),
+                notes: None,
+                ..
+            }) if answer == "Use a project-specific contract"
+        ));
+    }
+
+    #[test]
+    fn question_and_delete_selectors_accept_arrow_and_vim_navigation() {
+        let mut model = ControlCenterModel::from_snapshot("/tmp/demo".into(), json!(null));
+        model.dialog = Some(Dialog::AnswerQuestion(crate::model::AnswerDraft {
+            operation_id: "question-operation".to_owned(),
+            run_id: "run".to_owned(),
+            question_id: "question".to_owned(),
+            prompt: "Choose".to_owned(),
+            context: String::new(),
+            options: vec![
+                ("one".to_owned(), "One".to_owned(), String::new(), true),
+                ("two".to_owned(), "Two".to_owned(), String::new(), false),
+            ],
+            selected: 0,
+            custom: String::new(),
+            custom_active: false,
+            allow_custom: true,
+            pending_resume: false,
+            waiting_for_batch: false,
+            remaining_batch_questions: 0,
+            batch_position: None,
+            submitted: false,
+        }));
+        let (mutation_tx, _mutation_rx) = mpsc::channel();
+        let (refresh_tx, _refresh_rx) = mpsc::channel();
+        let workers = WorkerHandle {
+            mutation_tx,
+            refresh_tx,
+        };
+
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert!(matches!(
+            model.dialog,
+            Some(Dialog::AnswerQuestion(ref answer)) if answer.selected == 1
+        ));
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        for character in ['j', 'k', '[', ']'] {
+            handle_key(
+                &mut model,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                &workers,
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            model.dialog,
+            Some(Dialog::AnswerQuestion(ref answer))
+                if answer.selected == 0 && answer.custom == "jk[]"
+        ));
+
+        model.dialog = Some(Dialog::DeleteRun(crate::model::DeleteRunDraft {
+            preview: koni_core::RunDeletionPreview {
+                run_id: "run".to_owned(),
+                goal: "Delete safely".to_owned(),
+                run_status: "paused".to_owned(),
+                worktrees: Vec::new(),
+                owned_branches: Vec::new(),
+                owned_archive_refs: Vec::new(),
+                owned_authority_paths: Vec::new(),
+                live_agents: 0,
+                dirty_worktrees: Vec::new(),
+                blockers: Vec::new(),
+                can_delete: true,
+            },
+            selected: 0,
+            confirm_owned_branches: false,
+            submitted: false,
+        }));
+        for code in [
+            KeyCode::Char('j'),
+            KeyCode::Down,
+            KeyCode::Char('k'),
+            KeyCode::Up,
+        ] {
+            handle_key(
+                &mut model,
+                KeyEvent::new(code, KeyModifiers::NONE),
+                &workers,
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            model.dialog,
+            Some(Dialog::DeleteRun(ref draft)) if draft.selected == 0
+        ));
     }
 
     #[test]
@@ -4099,7 +5415,7 @@ mod tests {
         model.dialog = Some(Dialog::NewRun(crate::model::NewRunDraft {
             run_type: "small-internal".to_owned(),
             question_policy: "autonomous".to_owned(),
-            active_field: 1,
+            active_field: 2,
             ..crate::model::NewRunDraft::default()
         }));
         let (mutation_tx, _mutation_rx) = mpsc::channel();
@@ -4120,6 +5436,28 @@ mod tests {
             Some(Dialog::NewRun(ref draft))
                 if draft.run_type == "medium-internal"
                     && draft.question_policy == "high_impact_only"
+        ));
+
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert!(matches!(
+            model.dialog,
+            Some(Dialog::NewRun(ref draft)) if draft.run_type == "small-internal"
+        ));
+
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert!(matches!(
+            model.dialog,
+            Some(Dialog::NewRun(ref draft)) if draft.run_type == "medium-internal"
         ));
 
         handle_key(
@@ -4205,8 +5543,10 @@ mod tests {
     #[test]
     fn new_run_enter_submits_only_from_the_start_button_and_closes_on_acceptance() {
         let mut model = ControlCenterModel::from_snapshot("/tmp/demo".into(), json!(null));
+        let goal = "Build a notes app";
         model.dialog = Some(Dialog::NewRun(crate::model::NewRunDraft {
-            goal: "Build a notes app".to_owned(),
+            goal: goal.to_owned(),
+            objective_cursor: goal.chars().count(),
             active_field: 0,
             ..crate::model::NewRunDraft::default()
         }));
@@ -4226,7 +5566,25 @@ mod tests {
         assert!(mutation_rx.try_recv().is_err());
         assert!(matches!(
             model.dialog,
-            Some(Dialog::NewRun(ref draft)) if draft.active_field == 1
+            Some(Dialog::NewRun(ref draft))
+                if draft.active_field == 0 && draft.goal == "Build a notes app\n"
+        ));
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert!(matches!(
+            model.dialog,
+            Some(Dialog::NewRun(ref draft))
+                if draft.active_field == 1 && draft.goal == "Build a notes app"
         ));
 
         let Some(Dialog::NewRun(draft)) = model.dialog.as_mut() else {
@@ -4246,6 +5604,30 @@ mod tests {
             Ok(WorkerCommand::PlanRun { ref intake }) if intake.goal == "Build a notes app"
         ));
         assert_eq!(model.status, "starting planning…");
+        let provisional = model
+            .runs
+            .iter()
+            .find(|run| run.is_provisional())
+            .expect("new run should be visible before the worker returns");
+        let summary = provisional.summary.as_ref().unwrap();
+        assert_eq!(summary.goal, "Build a notes app");
+        assert_eq!(summary.status, "planning");
+        assert_eq!(summary.target_branch.as_deref(), Some("HEAD"));
+
+        model.replace_runs_preserving_provisional(Vec::new());
+        assert!(model.runs.iter().any(crate::model::RunData::is_provisional));
+        model.replace_runs_preserving_provisional(vec![json!({
+            "run":{
+                "id":"durable-run",
+                "goal":"Build a notes app",
+                "status":"planning",
+                "run_type_id":"default",
+                "target_branch":"HEAD"
+            }
+        })]);
+        assert_eq!(model.runs.len(), 1);
+        assert!(!model.runs[0].is_provisional());
+        assert_eq!(model.runs[0].summary.as_ref().unwrap().id, "durable-run");
     }
 
     #[test]
@@ -4651,6 +6033,15 @@ mod tests {
             !model.status.is_empty(),
             "Ctrl-P should publish or surface validation from the guided form"
         );
+
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            &workers,
+        )
+        .unwrap();
+        assert_eq!(model.unpublished_config_change_count(), 0);
+        assert!(model.status.starts_with("discarded 2 unpublished"));
     }
 
     #[test]
@@ -4903,7 +6294,8 @@ mod tests {
             operation_id: "test-planning".to_owned(),
             run_type: "software".to_owned(),
             goal: "Ship it".to_owned(),
-            base_ref: "HEAD".to_owned(),
+            target_branch: "refs/heads/main".to_owned(),
+            target_branches: Vec::new(),
             question_policy: "interactive".to_owned(),
             active_field: 0,
             intake_fields: vec![
@@ -5189,15 +6581,25 @@ mod tests {
         );
         assert_eq!(model.ticket_tab, crate::model::TicketTab::All);
 
-        // Details is the middle panel; clicking its right switcher half advances the view.
-        handle_mouse(
-            &mut model,
-            layout.detail_switcher.x + layout.detail_switcher.width * 3 / 4,
-            layout.detail_switcher.y,
-            size,
-        );
+        // Details is the middle panel; its three visible tabs are direct click targets.
+        let planning_x = (layout.detail_switcher.x..layout.detail_switcher.right())
+            .find(|column| {
+                ui::detail_panel_at(*column, layout.detail_switcher.y, layout.detail_switcher)
+                    == Some(crate::model::Panel::Planning)
+            })
+            .unwrap();
+        handle_mouse(&mut model, planning_x, layout.detail_switcher.y, size);
         assert_eq!(model.focus, Focus::Details);
         assert_eq!(model.detail_panel, crate::model::Panel::Planning);
+
+        let stages_x = (layout.detail_switcher.x..layout.detail_switcher.right())
+            .find(|column| {
+                ui::detail_panel_at(*column, layout.detail_switcher.y, layout.detail_switcher)
+                    == Some(crate::model::Panel::Stages)
+            })
+            .unwrap();
+        handle_mouse(&mut model, stages_x, layout.detail_switcher.y, size);
+        assert_eq!(model.detail_panel, crate::model::Panel::Stages);
 
         // The graph is the rightmost panel.
         handle_mouse(&mut model, layout.graph.x, layout.graph.y, size);
@@ -5297,7 +6699,7 @@ mod tests {
 
         handle_key(
             &mut model,
-            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
             &workers,
         )
         .unwrap();
@@ -5519,6 +6921,81 @@ mod tests {
     }
 
     #[test]
+    fn selected_agent_chat_survives_details_focus_and_uses_normal_scroll_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let mut model = ControlCenterModel::from_snapshot(
+            root.path().to_path_buf(),
+            json!({
+                "run":{"id":"run-secret","goal":"Demo","status":"active"},
+                "agents":[
+                    {"id":"agent-secret","persona":"builder","status":"running"}
+                ]
+            }),
+        );
+        model.focus_agents();
+        assert!(model.agent_chat_is_open());
+        assert_eq!(model.agent_chat_scroll_from_top, None);
+        model.cycle_focus(false);
+        assert_eq!(model.focus, Focus::Details);
+        assert!(model.agent_chat_is_open());
+
+        let (mutation_tx, _mutation_rx) = mpsc::channel();
+        let (refresh_tx, _refresh_rx) = mpsc::channel();
+        let workers = WorkerHandle {
+            mutation_tx,
+            refresh_tx,
+        };
+        for key in [KeyCode::Up, KeyCode::PageUp] {
+            handle_key(&mut model, KeyEvent::new(key, KeyModifiers::NONE), &workers).unwrap();
+        }
+        assert_eq!(model.agent_chat_scroll_from_bottom, 9);
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert_eq!(model.agent_chat_scroll_from_bottom, 8);
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert_eq!(model.agent_chat_scroll_from_top, Some(0));
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert_eq!(model.agent_chat_scroll_from_top, Some(8));
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert_eq!(model.agent_chat_scroll_from_top, None);
+        assert_eq!(model.agent_chat_scroll_from_bottom, 0);
+
+        let size = ratatui::layout::Size::new(120, 34);
+        let area = Rect::new(0, 4, size.width, size.height.saturating_sub(5));
+        let details = ui::operate_layout(area).details;
+        scroll_at(&mut model, details.x + 1, details.y + 1, size, -1);
+        assert_eq!(model.focus, Focus::Details);
+        assert_eq!(model.agent_chat_scroll_from_bottom, 1);
+
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert!(!model.agent_chat_is_open());
+    }
+
+    #[test]
     fn contextual_help_blocks_mouse_wheel_changes_to_the_underlying_panel() {
         let mut model = ControlCenterModel::from_snapshot(
             "/tmp/demo".into(),
@@ -5582,7 +7059,7 @@ mod tests {
 
         handle_key(
             &mut model,
-            KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
             &workers,
         )
         .unwrap();
@@ -5682,7 +7159,7 @@ mod tests {
             &workers,
         )
         .unwrap();
-        assert_eq!(model.focus, Focus::Details);
+        assert_eq!(model.focus, Focus::Agents);
 
         handle_key(
             &mut model,
@@ -5690,7 +7167,7 @@ mod tests {
             &workers,
         )
         .unwrap();
-        assert_eq!(model.focus, Focus::Agents);
+        assert_eq!(model.focus, Focus::Details);
 
         handle_key(
             &mut model,
@@ -5698,7 +7175,65 @@ mod tests {
             &workers,
         )
         .unwrap();
+        assert_eq!(model.focus, Focus::Activity);
+
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Char('6'), KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
         assert_eq!(model.focus, Focus::Graph);
+    }
+
+    #[test]
+    fn run_overview_navigation_scrolls_the_single_composed_document() {
+        let mut model = ControlCenterModel::from_snapshot(
+            "/tmp/demo".into(),
+            json!({"run":{"id":"run","goal":"A long objective","status":"active"}}),
+        );
+        model.focus = Focus::Details;
+        let (mutation_tx, _mutation_rx) = mpsc::channel();
+        let (refresh_tx, _refresh_rx) = mpsc::channel();
+        let workers = WorkerHandle {
+            mutation_tx,
+            refresh_tx,
+        };
+
+        assert_eq!(model.detail_section, 1);
+
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert_eq!(model.detail_section, 1);
+        assert_eq!(model.detail_scroll, 1);
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert_eq!(model.detail_section, 1);
+        assert_eq!(model.detail_scroll, 0);
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert_eq!(model.detail_section, 1);
+        assert_eq!(model.detail_scroll, 1);
+        handle_key(
+            &mut model,
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            &workers,
+        )
+        .unwrap();
+        assert_eq!(model.detail_section, 1);
+        assert_eq!(model.detail_scroll, 9);
     }
 
     #[test]
@@ -5825,7 +7360,12 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(refresh_rx.try_recv(), Ok(RefreshCommand::Refresh)));
+        assert!(matches!(
+            refresh_rx.try_recv(),
+            Ok(RefreshCommand::Refresh {
+                selected_run_id: Some(ref run_id)
+            }) if run_id == "run"
+        ));
         assert!(mutation_rx.try_recv().is_err());
         assert_eq!(model.status, "refreshing…");
     }

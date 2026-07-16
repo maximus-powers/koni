@@ -3,13 +3,14 @@ engine: ">=0.1,<0.2"
 
 profile:
   id: software
-  version: "0.1.2"
-  description: Architecture-first software change delivery
+  version: "0.6.0"
+  description: Evidence-guided vertical software delivery with risk-adaptive, compiler-current proof
 
 initialization:
   root_node_type: objective
   goal_field: outcome
   planning_context_field: planning_context
+  planning_seed_operation: initialization.objective.seed-approved-plan
   root_status: active
 
 storage:

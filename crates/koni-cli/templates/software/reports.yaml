@@ -1,5 +1,5 @@
 schema_version: "1.0"
-module: {id: software.reports, version: 0.1.0}
+module: {id: software.reports, version: 0.2.0}
 
 reports:
   - id: architecture-map
@@ -13,7 +13,7 @@ reports:
     source: graph
     output: history/koni/proof-ledger.json
   - id: delivery-manifest
-    title: PR-Ready Delivery Manifest
+    title: Candidate-Ready Delivery Manifest
     formats: [json, markdown]
     source: graph
     output: history/koni/delivery-manifest.json

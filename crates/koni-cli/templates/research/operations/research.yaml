@@ -1,4 +1,12 @@
 operations:
+  - id: initialization.hypothesis.seed-approved-plan
+    operation: seed-approved-plan
+    stage: initialization
+    target_types: [hypothesis]
+    allowed_new_node_types: [literature, claim, experiment, prerequisite, metric, method, ablation, asset, gate]
+    allowed_existing_node_types: [hypothesis]
+    max_new_nodes: 64
+
   # Higher priorities run first. Bands preserve the research lifecycle while
   # leaving room for project-specific operations between bundled stages.
   - id: formulation.hypothesis.drill-hypothesis
@@ -59,7 +67,6 @@ operations:
     workflow: design-claim-experiment
     allowed_new_node_types: [experiment]
     allowed_existing_node_types: [claim]
-    existing_node_edge_additions_only: {claim: [tested_by]}
     allow_node_deletion: false
     allow_gate_contract_edits: false
     gate_blocking_exempt: false
@@ -76,8 +83,8 @@ operations:
     target_types: [hypothesis]
     workflow: design-experiment-portfolio
     allowed_new_node_types: [experiment]
-    allowed_existing_node_types: [hypothesis, claim]
-    existing_node_edge_additions_only: {hypothesis: [experiments], claim: [tested_by]}
+    allowed_existing_node_types: [hypothesis]
+    existing_node_edge_additions_only: {hypothesis: [experiments]}
     max_new_nodes: 3
     allow_node_deletion: false
     allow_gate_contract_edits: false
@@ -152,14 +159,14 @@ operations:
     target_types: [ablation, claim, experiment, method, metric, prerequisite]
     workflow: define-gates
     allowed_new_node_types: [gate]
-    allowed_existing_node_types: [ablation, claim, experiment, method, metric, prerequisite]
+    allowed_existing_node_types: []
     allow_node_deletion: false
     allow_gate_contract_edits: false
     gate_blocking_exempt: true
     change_control_barrier: false
     change_control: *ordinary_upstream_change
-    review_contract: pre-commit gate contract review
-    output_contract: expected-red gate contract graph delta with reciprocal gate.applies_to and target.gates links plus structured step outputs
+    review_contract: independent expected-red gate semantics review; require the configured typed command/result, capability, oracle, applicability, failure, and canonical gate.applies_to contract, but because this operation is gate-blocking-exempt and asset creation is a stop condition, do not require a downstream executable asset, runtime execution, or passing gate receipt at this boundary
+    output_contract: expected-red gate contract graph delta with one canonical gate.applies_to fact whose inverse gates view is compiler-derived, plus structured step outputs
     dispatch_priority: 530
     ranking_hints: [stage, node-type-priority, node-id]
 
@@ -169,7 +176,7 @@ operations:
     target_types: [ablation, claim, experiment, method, metric, prerequisite]
     workflow: compile-gate-package
     allowed_new_node_types: [gate]
-    allowed_existing_node_types: [ablation, claim, experiment, method, metric, prerequisite]
+    allowed_existing_node_types: []
     allow_node_deletion: false
     allow_gate_contract_edits: false
     gate_blocking_exempt: true
@@ -187,7 +194,7 @@ operations:
     target_types: [ablation, claim, experiment, method, metric, prerequisite]
     workflow: compile-gate-package
     allowed_new_node_types: [gate]
-    allowed_existing_node_types: [ablation, claim, experiment, method, metric, prerequisite]
+    allowed_existing_node_types: []
     allow_node_deletion: false
     allow_gate_contract_edits: false
     gate_blocking_exempt: true
@@ -212,7 +219,7 @@ operations:
     change_control_barrier: true
     change_control: *ordinary_upstream_change
     review_contract: pre-commit run plan review
-    output_contract: run graph delta with a complete typed runtime_contract exact uses links for bound assets and structured step outputs
+    output_contract: run graph delta with a complete typed runtime_contract containing distinct empirical and repository-owned read-only composed-verification argv exact uses links for bound assets and structured step outputs
     dispatch_priority: 230
     ranking_hints: [stage, target-node-id, run-plan-gap]
 
@@ -331,7 +338,7 @@ operations:
     change_control_barrier: true
     change_control: *ordinary_upstream_change
     review_contract: pre-commit run receipt review
-    output_contract: scientific runtime receipt satisfying the ticket-bound required measurement keys and project-contained result/artifact policy plus graph delta and structured step outputs
+    output_contract: current causal scientific runtime receipt plus a passing repository-owned read-only integrity receipt satisfying the ticket-bound input and project-contained result/artifact policy without implicitly rerunning the experiment
     dispatch_priority: 220
     ranking_hints: [stage, run-id]
 
@@ -345,7 +352,7 @@ operations:
     receipt_coverage:
       candidate_node_types: [evidence]
       required_nodes:
-        relations: [claims, experiments, tested_by, target_claims, ablations, runs]
+        relations: [claims, experiments, target_claims, ablations, runs]
         direction: both
         min_depth: 1
         max_depth: 4
@@ -567,6 +574,23 @@ operations:
     output_contract: passed or failed checklist decision
     dispatch_priority: 900
     ranking_hints: [parent-ticket-id]
+
+  - id: integration.target.resolve-conflict
+    operation: resolve-target-integration
+    stage: integration
+    target_types: []
+    workflow: target-integration-conflict
+    allowed_new_node_types: []
+    allowed_existing_node_types: []
+    allow_node_deletion: false
+    allow_gate_contract_edits: false
+    gate_blocking_exempt: true
+    change_control_barrier: true
+    review_contract: the target branch is composed with the completed empirical-research run without discarding either side; the composed tree receives fresh verification, and no semantic graph state is mutated
+    output_contract: a conflict-resolved product tree preserving both run and target changes, with fresh verification and independent review evidence before target promotion can resume
+    dispatch_priority: 20
+    ranking_hints: [stage]
+    single_flight_group: target-integration
 
   - id: lifecycle.no-op
     operation: no-op

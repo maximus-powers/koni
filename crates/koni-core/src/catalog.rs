@@ -19,6 +19,7 @@ use crate::error::{KoniError, Result, io_error};
 use crate::graph::normalized_hash;
 
 pub const PROJECT_CATALOG_SCHEMA_VERSION: &str = "1.0";
+pub const PROJECT_CATALOG_SCHEMA_V2_VERSION: &str = "2.0";
 pub const LEGACY_RUN_TYPE_ID: &str = "legacy";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +73,10 @@ pub struct RunTypeDocument {
     pub agents: Option<RunTypeAgents>,
     #[serde(default)]
     pub orchestration: Option<RunTypeOrchestrationPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion: Option<RunPromotionPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planning: Option<RunPlanningPolicy>,
     #[serde(default, skip_serializing_if = "RunTypeInstructions::is_empty")]
     pub instructions: RunTypeInstructions,
     #[serde(default)]
@@ -166,6 +171,72 @@ pub struct RunGitDefaults {
     pub ticket_branch_template: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunPromotionPolicy {
+    /// Public operation used for a compiler-owned ticket when synchronizing
+    /// the selected target into the run branch produces conflicts.
+    pub conflict_operation: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanningSessionScope {
+    #[default]
+    Stage,
+    Run,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanningTokenMetric {
+    #[default]
+    NewTokens,
+    ProcessedTokens,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanningBudgetExhaustion {
+    #[default]
+    ForceSynthesis,
+    Fail,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanningTokenBudget {
+    #[serde(default)]
+    pub metric: PlanningTokenMetric,
+    pub limit: u64,
+    pub synthesis_reserve: u64,
+    #[serde(default)]
+    pub on_exhausted: PlanningBudgetExhaustion,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunPlanningPolicy {
+    #[serde(default)]
+    pub session_scope: PlanningSessionScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_seed_stage: Option<String>,
+    #[serde(
+        default = "default_planning_repository_tool_calls",
+        skip_serializing_if = "is_default_planning_repository_tool_calls"
+    )]
+    pub max_repository_tool_calls: u32,
+    pub token_budget: PlanningTokenBudget,
+}
+
+fn default_planning_repository_tool_calls() -> u32 {
+    32
+}
+
+fn is_default_planning_repository_tool_calls(value: &u32) -> bool {
+    *value == default_planning_repository_tool_calls()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunCardDef {
@@ -199,8 +270,20 @@ pub struct RunTypeAgents {
 pub struct AgentSettings {
     #[serde(default)]
     pub model: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
+}
+
+impl AgentSettings {
+    /// Return the provider-neutral reasoning policy while retaining the
+    /// generation-native field name for configuration round trips.
+    pub fn effective_thinking_level(&self) -> Option<&str> {
+        self.thinking_level
+            .as_deref()
+            .or(self.reasoning_effort.as_deref())
+    }
 }
 
 /// A one-run change to an individual agent setting.
@@ -244,12 +327,19 @@ impl AgentSettingsOverride {
         self.model.is_none() && self.reasoning_effort.is_none()
     }
 
-    pub fn apply_to(&self, settings: &mut AgentSettings) {
+    pub fn apply_to(&self, settings: &mut AgentSettings, schema_version: &str) {
         if let Some(model) = &self.model {
             settings.model = model.effective_value();
         }
         if let Some(reasoning_effort) = &self.reasoning_effort {
-            settings.reasoning_effort = reasoning_effort.effective_value();
+            let value = reasoning_effort.effective_value();
+            if schema_version == PROJECT_CATALOG_SCHEMA_V2_VERSION {
+                settings.thinking_level = value;
+                settings.reasoning_effort = None;
+            } else {
+                settings.reasoning_effort = value;
+                settings.thinking_level = None;
+            }
         }
     }
 }
@@ -394,6 +484,10 @@ struct RunTypeBehavior {
     agents: Option<RunTypeAgents>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     orchestration: Option<RunTypeOrchestrationPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    promotion: Option<RunPromotionPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    planning: Option<RunPlanningPolicy>,
     #[serde(default)]
     instructions: RunTypeInstructions,
 }
@@ -418,6 +512,7 @@ pub struct ResolvedProfileSource {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedRunType {
+    pub schema_version: String,
     pub id: String,
     pub title: String,
     #[serde(default)]
@@ -436,6 +531,10 @@ pub struct ResolvedRunType {
     pub agents: Option<RunTypeAgents>,
     #[serde(default)]
     pub orchestration: Option<RunTypeOrchestrationPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion: Option<RunPromotionPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planning: Option<RunPlanningPolicy>,
     #[serde(default, skip_serializing_if = "RunTypeInstructions::is_empty")]
     pub instructions: RunTypeInstructions,
     pub hash: String,
@@ -447,7 +546,7 @@ impl ResolvedRunType {
     /// configuration snapshot; the reusable project source remains untouched.
     pub fn standalone_document(&self) -> RunTypeDocument {
         RunTypeDocument {
-            schema_version: PROJECT_CATALOG_SCHEMA_VERSION.to_owned(),
+            schema_version: self.schema_version.clone(),
             id: self.id.clone(),
             title: self.title.clone(),
             description: self.description.clone(),
@@ -462,6 +561,8 @@ impl ResolvedRunType {
             run_card: Some(self.run_card.clone()),
             agents: self.agents.clone(),
             orchestration: self.orchestration.clone(),
+            promotion: self.promotion.clone(),
+            planning: self.planning.clone(),
             instructions: self.instructions.clone(),
             overrides: Vec::new(),
         }
@@ -470,7 +571,11 @@ impl ResolvedRunType {
     /// Revalidate behavior changed by a compiler-owned, run-local override and
     /// refresh the hash that will be pinned by the run registry.
     pub(crate) fn validate_and_refresh_hash(&mut self) -> Result<()> {
-        validate_behavior(&behavior_from_resolved(self), &self.id)?;
+        validate_behavior_for_schema(
+            &behavior_from_resolved(self),
+            &self.id,
+            &self.schema_version,
+        )?;
         self.hash = resolved_run_type_hash(self);
         Ok(())
     }
@@ -580,6 +685,48 @@ fn locate_project_config(input: &Path) -> Result<LocatedProjectConfig> {
         )));
     }
 
+    // Once the schema-2 root exists it is the only live configuration
+    // authority. In particular, an incomplete or redirected `.koni` must not
+    // fall back to executable Codex-era project configuration that happens to
+    // remain in `.codex/koni` during recovery or operator cleanup.
+    let schema2_root = input.join(".koni");
+    match fs::symlink_metadata(&schema2_root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            let project_path = schema2_root.join("project.yaml");
+            let project_metadata = fs::symlink_metadata(&project_path).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    KoniError::NotFound(format!(
+                        "schema-2 configuration has no project catalog: {}",
+                        project_path.display()
+                    ))
+                } else {
+                    io_error(&project_path, error)
+                }
+            })?;
+            if !project_metadata.is_file() || project_metadata.file_type().is_symlink() {
+                return Err(catalog_error(format!(
+                    "schema-2 project catalog must be a regular, non-symlink file: {}",
+                    project_path.display()
+                )));
+            }
+            let project_path = project_path
+                .canonicalize()
+                .map_err(|source| io_error(&project_path, source))?;
+            return Ok(LocatedProjectConfig::Canonical {
+                project_root: infer_project_root(&project_path)?,
+                project_path,
+            });
+        }
+        Ok(_) => {
+            return Err(catalog_error(format!(
+                "schema-2 configuration root must be a real directory: {}",
+                schema2_root.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io_error(&schema2_root, error)),
+    }
+
     let canonical_candidates = [
         input.join(".codex/koni/project.yaml"),
         input.join("project.yaml"),
@@ -599,7 +746,7 @@ fn locate_project_config(input: &Path) -> Result<LocatedProjectConfig> {
     let manifest_path = unique_existing_candidate(&legacy_candidates, "legacy manifests")?
         .ok_or_else(|| {
             KoniError::NotFound(format!(
-                "no .codex/koni/project.yaml or koni.toml beneath {}",
+                "no .koni/project.yaml, .codex/koni/project.yaml, or koni.toml beneath {}",
                 input.display()
             ))
         })?;
@@ -639,7 +786,11 @@ fn infer_project_root(config_path: &Path) -> Result<PathBuf> {
             config_path.display()
         ))
     })?;
-    let root = if parent.file_name().and_then(|value| value.to_str()) == Some("koni")
+    let root = if parent.file_name().and_then(|value| value.to_str()) == Some(".koni") {
+        parent
+            .parent()
+            .ok_or_else(|| catalog_error(".koni has no project parent"))?
+    } else if parent.file_name().and_then(|value| value.to_str()) == Some("koni")
         && parent
             .parent()
             .and_then(Path::file_name)
@@ -659,6 +810,18 @@ fn infer_project_root(config_path: &Path) -> Result<PathBuf> {
 fn compile_canonical(project_root: &Path, project_path: &Path) -> Result<CompiledProjectCatalog> {
     let document: ProjectCatalogDocument = load_yaml(project_path)?;
     validate_project_document(&document)?;
+
+    let expected_schema = catalog_root_schema(project_path);
+    if let Some(expected_schema) = expected_schema
+        && document.schema_version != expected_schema
+    {
+        return Err(catalog_error(format!(
+            "project catalog {} declares schema {}, but its configuration root requires {}",
+            project_path.display(),
+            document.schema_version,
+            expected_schema
+        )));
+    }
 
     let catalog_dir = project_path.parent().ok_or_else(|| {
         catalog_error(format!("catalog {} has no parent", project_path.display()))
@@ -697,6 +860,14 @@ fn compile_canonical(project_root: &Path, project_path: &Path) -> Result<Compile
         }
         let run_type: RunTypeDocument = load_yaml(&run_type_path)?;
         validate_run_type_header(&run_type, &run_type_path)?;
+        if run_type.schema_version != document.schema_version {
+            return Err(catalog_error(format!(
+                "run type document {} declares schema {}, but the project catalog declares {}",
+                run_type_path.display(),
+                run_type.schema_version,
+                document.schema_version
+            )));
+        }
         if run_type.id != entry.id {
             return Err(catalog_error(format!(
                 "run type catalog id `{}` does not match document id `{}` in {}",
@@ -771,9 +942,18 @@ fn validate_run_type_profile_cross_references(
     run_type: &ResolvedRunType,
     profile: &CompiledProfile,
 ) -> Result<()> {
+    if profile.manifest.schema_version != run_type.schema_version {
+        return Err(catalog_error(format!(
+            "run type `{}` declares schema {}, but profile `{}` declares schema {}",
+            run_type.id,
+            run_type.schema_version,
+            profile.manifest.profile.id,
+            profile.manifest.schema_version
+        )));
+    }
     for (stage_id, stage) in &run_type.pipeline.stages {
         let persona = match stage.kind.as_str() {
-            "planning" | "agent_dialog" => stage_persona(run_type, stage_id, stage, None)?,
+            "planning" | "agent_dialog" | "ai" => stage_persona(run_type, stage_id, stage, None)?,
             "agent_review" => stage_persona(run_type, stage_id, stage, Some("reviewer"))?,
             _ => None,
         };
@@ -799,6 +979,45 @@ fn validate_run_type_profile_cross_references(
                     run_type.id, profile.manifest.profile.id
                 )));
             }
+        }
+    }
+    if let Some(promotion) = &run_type.promotion {
+        let mut operations = profile
+            .operations
+            .values()
+            .filter(|operation| operation.public_operation() == promotion.conflict_operation);
+        let operation = operations.next().ok_or_else(|| {
+            catalog_error(format!(
+                "run type `{}` promotion conflict operation `{}` is missing from profile `{}`",
+                run_type.id, promotion.conflict_operation, profile.manifest.profile.id
+            ))
+        })?;
+        if operations.next().is_some() {
+            return Err(catalog_error(format!(
+                "run type `{}` promotion conflict operation `{}` is ambiguous",
+                run_type.id, promotion.conflict_operation
+            )));
+        }
+        let workflow_id = operation.workflow.as_deref().ok_or_else(|| {
+            catalog_error(format!(
+                "promotion conflict operation `{}` has no workflow",
+                promotion.conflict_operation
+            ))
+        })?;
+        let workflow = profile.workflows.get(workflow_id).ok_or_else(|| {
+            catalog_error(format!(
+                "promotion conflict operation `{}` references missing workflow `{workflow_id}`",
+                promotion.conflict_operation
+            ))
+        })?;
+        if workflow
+            .steps
+            .iter()
+            .any(|step| step.graph_mutation != crate::config::GraphMutationPolicyDef::Forbidden)
+        {
+            return Err(catalog_error(format!(
+                "promotion conflict workflow `{workflow_id}` must forbid graph mutation on every step"
+            )));
         }
     }
     Ok(())
@@ -886,6 +1105,7 @@ fn compile_legacy(project_root: &Path, manifest_path: &Path) -> Result<CompiledP
         source_hash: normalized_hash(&canonical_toml),
     };
     let mut resolved = ResolvedRunType {
+        schema_version: PROJECT_CATALOG_SCHEMA_VERSION.to_owned(),
         id: LEGACY_RUN_TYPE_ID.to_owned(),
         title: manifest.profile.id.clone(),
         description,
@@ -899,6 +1119,8 @@ fn compile_legacy(project_root: &Path, manifest_path: &Path) -> Result<CompiledP
         run_card: behavior.run_card,
         agents: behavior.agents,
         orchestration: behavior.orchestration,
+        promotion: behavior.promotion,
+        planning: behavior.planning,
         instructions: behavior.instructions,
         hash: String::new(),
     };
@@ -957,12 +1179,32 @@ fn validate_run_type_header(document: &RunTypeDocument, path: &Path) -> Result<(
 }
 
 fn validate_schema(version: &str, context: &str) -> Result<()> {
-    if version != PROJECT_CATALOG_SCHEMA_VERSION {
+    if !matches!(
+        version,
+        PROJECT_CATALOG_SCHEMA_VERSION | PROJECT_CATALOG_SCHEMA_V2_VERSION
+    ) {
         return Err(catalog_error(format!(
-            "{context} schema_version must be `{PROJECT_CATALOG_SCHEMA_VERSION}`, got `{version}`"
+            "{context} schema_version must be `{PROJECT_CATALOG_SCHEMA_VERSION}` or `{PROJECT_CATALOG_SCHEMA_V2_VERSION}`, got `{version}`"
         )));
     }
     Ok(())
+}
+
+fn catalog_root_schema(project_path: &Path) -> Option<&'static str> {
+    let parent = project_path.parent()?;
+    if parent.file_name().and_then(|name| name.to_str()) == Some(".koni") {
+        return Some(PROJECT_CATALOG_SCHEMA_V2_VERSION);
+    }
+    if parent.file_name().and_then(|name| name.to_str()) == Some("koni")
+        && parent
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some(".codex")
+    {
+        return Some(PROJECT_CATALOG_SCHEMA_VERSION);
+    }
+    None
 }
 
 fn validate_id(value: &str, label: &str) -> Result<()> {
@@ -1077,9 +1319,10 @@ fn resolve_run_type(
         )
     };
 
-    validate_behavior(&behavior, id)?;
+    validate_behavior_for_schema(&behavior, id, &document.schema_version)?;
     let profile = resolve_yaml_profile_source(project_root, &behavior.profile, id)?;
     let mut run_type = ResolvedRunType {
+        schema_version: document.schema_version.clone(),
         id: document.id.clone(),
         title: document.title.clone(),
         description,
@@ -1093,6 +1336,8 @@ fn resolve_run_type(
         run_card: behavior.run_card,
         agents: behavior.agents,
         orchestration: behavior.orchestration,
+        promotion: behavior.promotion,
+        planning: behavior.planning,
         instructions: behavior.instructions,
         hash: String::new(),
     };
@@ -1127,6 +1372,12 @@ fn reject_derived_inline_behavior(document: &RunTypeDocument) -> Result<()> {
     }
     if document.orchestration.is_some() {
         fields.push("orchestration");
+    }
+    if document.promotion.is_some() {
+        fields.push("promotion");
+    }
+    if document.planning.is_some() {
+        fields.push("planning");
     }
     if document.instructions != RunTypeInstructions::default() {
         fields.push("instructions");
@@ -1169,6 +1420,8 @@ fn base_behavior(document: &RunTypeDocument) -> Result<RunTypeBehavior> {
         run_card: document.run_card.clone().expect("validated above"),
         agents: document.agents.clone(),
         orchestration: document.orchestration.clone(),
+        promotion: document.promotion.clone(),
+        planning: document.planning.clone(),
         instructions: document.instructions.clone(),
     })
 }
@@ -1185,6 +1438,8 @@ fn behavior_from_resolved(run_type: &ResolvedRunType) -> RunTypeBehavior {
         run_card: run_type.run_card.clone(),
         agents: run_type.agents.clone(),
         orchestration: run_type.orchestration.clone(),
+        promotion: run_type.promotion.clone(),
+        planning: run_type.planning.clone(),
         instructions: run_type.instructions.clone(),
     }
 }
@@ -1230,6 +1485,8 @@ fn apply_override(
         "run_card",
         "agents",
         "orchestration",
+        "promotion",
+        "planning",
         "instructions",
     ];
     if !BEHAVIOR_ROOTS.contains(&segments[0].as_str()) {
@@ -1350,7 +1607,38 @@ fn recursive_object_merge(target: &mut Value, incoming: Value) {
     }
 }
 
+fn belongs_to_preapproval_planning_prefix(stage: &PipelineStageDef) -> bool {
+    if matches!(
+        stage.kind.as_str(),
+        "planning" | "agent_dialog" | "checkpoint" | "initialize"
+    ) {
+        return true;
+    }
+    if !matches!(
+        stage.kind.as_str(),
+        "action" | "koni" | "profile" | "legacy_profile"
+    ) {
+        return false;
+    }
+    let Some(config) = stage.config.as_ref().and_then(Value::as_object) else {
+        return false;
+    };
+    config.get("compiler_owned").and_then(Value::as_bool) == Some(true)
+        && matches!(
+            config.get("action").and_then(Value::as_str),
+            Some("planning.intake" | "intake.capture" | "intake.validate")
+        )
+}
+
 fn validate_behavior(behavior: &RunTypeBehavior, run_type_id: &str) -> Result<()> {
+    validate_behavior_for_schema(behavior, run_type_id, PROJECT_CATALOG_SCHEMA_VERSION)
+}
+
+fn validate_behavior_for_schema(
+    behavior: &RunTypeBehavior,
+    run_type_id: &str,
+    schema_version: &str,
+) -> Result<()> {
     if !behavior.instructions.planning.is_empty()
         && behavior.instructions.planning.trim().is_empty()
     {
@@ -1415,6 +1703,156 @@ fn validate_behavior(behavior: &RunTypeBehavior, run_type_id: &str) -> Result<()
             }
         }
     }
+    let target_sync_stages = behavior
+        .pipeline
+        .stages
+        .iter()
+        .filter_map(|(id, stage)| (stage.kind == "target_sync").then_some(id))
+        .collect::<Vec<_>>();
+    let verification_stages = behavior
+        .pipeline
+        .stages
+        .iter()
+        .filter_map(|(id, stage)| {
+            (stage.kind == "checkpoint"
+                && stage
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.get("checkpoint"))
+                    .and_then(Value::as_str)
+                    == Some("verification"))
+            .then_some(id)
+        })
+        .collect::<Vec<_>>();
+    let promotion_stages = behavior
+        .pipeline
+        .stages
+        .iter()
+        .filter_map(|(id, stage)| (stage.kind == "promotion").then_some(id))
+        .collect::<Vec<_>>();
+    let has_target_stage = !target_sync_stages.is_empty() || !promotion_stages.is_empty();
+    if has_target_stage && behavior.promotion.is_none() {
+        return Err(catalog_error(format!(
+            "run type `{run_type_id}` uses target-sync/promotion stages without a promotion policy"
+        )));
+    }
+    if behavior
+        .promotion
+        .as_ref()
+        .is_some_and(|policy| policy.conflict_operation.trim().is_empty())
+    {
+        return Err(catalog_error(format!(
+            "run type `{run_type_id}` promotion conflict operation must not be empty"
+        )));
+    }
+    if behavior.promotion.is_some() || has_target_stage {
+        for (stage, ids) in [
+            ("target_sync", &target_sync_stages),
+            ("verification checkpoint", &verification_stages),
+            ("promotion", &promotion_stages),
+        ] {
+            if ids.len() != 1 {
+                return Err(catalog_error(format!(
+                    "run type `{run_type_id}` target-promotion pipeline must contain exactly one {stage} stage; found {}",
+                    ids.len()
+                )));
+            }
+        }
+
+        let stage_index = |id: &str| {
+            behavior
+                .pipeline
+                .order
+                .iter()
+                .position(|ordered| ordered == id)
+                .expect("pipeline order was validated against stage definitions")
+        };
+        let target_sync_index = stage_index(target_sync_stages[0]);
+        let verification_index = stage_index(verification_stages[0]);
+        let promotion_index = stage_index(promotion_stages[0]);
+        if !(target_sync_index < verification_index && verification_index < promotion_index) {
+            return Err(catalog_error(format!(
+                "run type `{run_type_id}` target-promotion stages must be ordered target_sync < verification checkpoint < promotion"
+            )));
+        }
+    }
+    if let Some(planning) = &behavior.planning {
+        let budget = &planning.token_budget;
+        if !(1..=256).contains(&planning.max_repository_tool_calls) {
+            return Err(catalog_error(format!(
+                "run type `{run_type_id}` planning max_repository_tool_calls must be between 1 and 256"
+            )));
+        }
+        if budget.limit == 0 {
+            return Err(catalog_error(format!(
+                "run type `{run_type_id}` planning token budget must be positive"
+            )));
+        }
+        if budget.synthesis_reserve == 0 || budget.synthesis_reserve >= budget.limit {
+            return Err(catalog_error(format!(
+                "run type `{run_type_id}` planning synthesis reserve must be positive and smaller than its token limit"
+            )));
+        }
+        let planning_stage_count = behavior
+            .pipeline
+            .stages
+            .values()
+            .filter(|stage| stage.kind == "planning")
+            .count();
+        if planning_stage_count == 0 {
+            return Err(catalog_error(format!(
+                "run type `{run_type_id}` configures planning policy without a planning stage"
+            )));
+        }
+        if planning.session_scope == PlanningSessionScope::Stage && planning_stage_count > 1 {
+            return Err(catalog_error(format!(
+                "run type `{run_type_id}` must use run-scoped planning sessions when it has multiple planning stages"
+            )));
+        }
+        if let Some(seed_stage_id) = &planning.graph_seed_stage {
+            let seed_stage = behavior.pipeline.stages.get(seed_stage_id).ok_or_else(|| {
+                catalog_error(format!(
+                    "run type `{run_type_id}` planning graph seed stage `{seed_stage_id}` is missing from its pipeline"
+                ))
+            })?;
+            if seed_stage.kind != "planning" {
+                return Err(catalog_error(format!(
+                    "run type `{run_type_id}` planning graph seed stage `{seed_stage_id}` must have kind `planning`; found `{}`",
+                    seed_stage.kind
+                )));
+            }
+
+            let required_planning_stage_ids = behavior
+                .pipeline
+                .order
+                .iter()
+                .take_while(|stage_id| {
+                    belongs_to_preapproval_planning_prefix(&behavior.pipeline.stages[*stage_id])
+                })
+                .filter(|stage_id| {
+                    matches!(
+                        behavior.pipeline.stages[*stage_id].kind.as_str(),
+                        "planning" | "agent_dialog"
+                    )
+                })
+                .collect::<Vec<_>>();
+            if !required_planning_stage_ids.contains(&seed_stage_id) {
+                return Err(catalog_error(format!(
+                    "run type `{run_type_id}` planning graph seed stage `{seed_stage_id}` is outside the executable pre-approval planning prefix"
+                )));
+            }
+            let final_planning_stage_id = required_planning_stage_ids.last().ok_or_else(|| {
+                catalog_error(format!(
+                    "run type `{run_type_id}` planning graph seed stage `{seed_stage_id}` is outside the executable pre-approval planning prefix"
+                ))
+            })?;
+            if seed_stage_id != *final_planning_stage_id {
+                return Err(catalog_error(format!(
+                    "run type `{run_type_id}` planning graph seed stage must name the final pre-approval planning stage `{final_planning_stage_id}`; found `{seed_stage_id}`"
+                )));
+            }
+        }
+    }
 
     validate_nonempty(
         &behavior.git.branch_template,
@@ -1437,8 +1875,8 @@ fn validate_behavior(behavior: &RunTypeBehavior, run_type_id: &str) -> Result<()
         }
     }
     if let Some(agents) = &behavior.agents {
-        validate_agent_settings_map(&agents.roles, run_type_id, "role")?;
-        validate_agent_settings_map(&agents.personas, run_type_id, "persona")?;
+        validate_agent_settings_map(&agents.roles, run_type_id, "role", schema_version)?;
+        validate_agent_settings_map(&agents.personas, run_type_id, "persona", schema_version)?;
     }
     if let Some(orchestration) = &behavior.orchestration {
         if orchestration.max_parallel == Some(0) {
@@ -1469,6 +1907,7 @@ fn validate_agent_settings_map(
     settings: &IndexMap<String, AgentSettings>,
     run_type_id: &str,
     kind: &str,
+    schema_version: &str,
 ) -> Result<()> {
     for (id, setting) in settings {
         validate_id(id, &format!("run type `{run_type_id}` agent {kind} id"))?;
@@ -1478,10 +1917,26 @@ fn validate_agent_settings_map(
                 &format!("run type `{run_type_id}` agent {kind} `{id}` model"),
             )?;
         }
-        if let Some(reasoning_effort) = &setting.reasoning_effort {
+        if setting.reasoning_effort.is_some() && setting.thinking_level.is_some() {
+            return Err(catalog_error(format!(
+                "run type `{run_type_id}` agent {kind} `{id}` cannot define both reasoning_effort and thinking_level"
+            )));
+        }
+        if schema_version == PROJECT_CATALOG_SCHEMA_V2_VERSION && setting.reasoning_effort.is_some()
+        {
+            return Err(catalog_error(format!(
+                "run type `{run_type_id}` schema 2 agent {kind} `{id}` uses legacy reasoning_effort; use thinking_level"
+            )));
+        }
+        if schema_version == PROJECT_CATALOG_SCHEMA_VERSION && setting.thinking_level.is_some() {
+            return Err(catalog_error(format!(
+                "run type `{run_type_id}` schema 1 agent {kind} `{id}` uses thinking_level; use reasoning_effort"
+            )));
+        }
+        if let Some(thinking_level) = setting.effective_thinking_level() {
             validate_nonempty(
-                reasoning_effort,
-                &format!("run type `{run_type_id}` agent {kind} `{id}` reasoning_effort"),
+                thinking_level,
+                &format!("run type `{run_type_id}` agent {kind} `{id}` thinking level"),
             )?;
         }
     }
@@ -1609,6 +2064,8 @@ struct ResolvedProfileHashView<'a> {
 
 #[derive(Serialize)]
 struct ResolvedRunTypeHashView<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema_version: Option<&'a str>,
     id: &'a str,
     title: &'a str,
     description: &'a Option<String>,
@@ -1624,12 +2081,21 @@ struct ResolvedRunTypeHashView<'a> {
     agents: Option<&'a RunTypeAgents>,
     #[serde(skip_serializing_if = "Option::is_none")]
     orchestration: Option<&'a RunTypeOrchestrationPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    promotion: Option<&'a RunPromotionPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    planning: Option<&'a RunPlanningPolicy>,
     #[serde(skip_serializing_if = "RunTypeInstructions::is_empty")]
     instructions: &'a RunTypeInstructions,
 }
 
 fn resolved_run_type_hash(run_type: &ResolvedRunType) -> String {
     normalized_hash(&ResolvedRunTypeHashView {
+        // Preserve schema-1 run identities exactly. Schema 2 adds its
+        // generation to the hash domain so provider-neutral documents can
+        // never collide with an otherwise equivalent historical run type.
+        schema_version: (run_type.schema_version == PROJECT_CATALOG_SCHEMA_V2_VERSION)
+            .then_some(run_type.schema_version.as_str()),
         id: &run_type.id,
         title: &run_type.title,
         description: &run_type.description,
@@ -1647,6 +2113,8 @@ fn resolved_run_type_hash(run_type: &ResolvedRunType) -> String {
         run_card: &run_type.run_card,
         agents: run_type.agents.as_ref(),
         orchestration: run_type.orchestration.as_ref(),
+        promotion: run_type.promotion.as_ref(),
+        planning: run_type.planning.as_ref(),
         instructions: &run_type.instructions,
     })
 }
@@ -1723,6 +2191,8 @@ fn legacy_behavior(manifest: &ProfileManifest, source: PathBuf) -> RunTypeBehavi
         },
         agents: None,
         orchestration: None,
+        promotion: None,
+        planning: None,
         instructions: RunTypeInstructions::default(),
     }
 }
@@ -1757,6 +2227,8 @@ fn legacy_migration(manifest: &ProfileManifest) -> LegacyCatalogMigration {
         run_card: Some(behavior.run_card),
         agents: behavior.agents,
         orchestration: behavior.orchestration,
+        promotion: behavior.promotion,
+        planning: behavior.planning,
         instructions: behavior.instructions,
         overrides: Vec::new(),
     };
@@ -1880,6 +2352,31 @@ overrides:
             fixture
         }
 
+        fn schema2() -> Self {
+            let fixture = Self {
+                temp: TempDir::new().unwrap(),
+            };
+            fixture.write(
+                ".koni/project.yaml",
+                &PROJECT.replace("schema_version: \"1.0\"", "schema_version: \"2.0\""),
+            );
+            fixture.write(
+                ".koni/run-types/base.yaml",
+                &BASE
+                    .replace("schema_version: \"1.0\"", "schema_version: \"2.0\"")
+                    .replace(".codex/koni/profile.yaml", ".koni/profile.yaml"),
+            );
+            fixture.write(
+                ".koni/run-types/fast.yaml",
+                &DERIVED.replace("schema_version: \"1.0\"", "schema_version: \"2.0\""),
+            );
+            fixture.write(
+                ".koni/profile.yaml",
+                "schema_version: '2.0'\nprofile:\n  id: demo\n  version: 1.0.0\n",
+            );
+            fixture
+        }
+
         fn write(&self, path: &str, contents: &str) {
             let path = self.temp.path().join(path);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1946,12 +2443,116 @@ actions:
         }
     }
 
+    #[test]
+    fn schema2_root_is_live_and_never_imports_a_coexisting_codex_catalog() {
+        let fixture = Fixture::schema2();
+        fixture.write(".codex/koni/project.yaml", "not: valid: yaml\n");
+
+        let catalog = fixture.compile().expect("schema-2 catalog compiles");
+        assert_eq!(catalog.document.schema_version, "2.0");
+        assert_eq!(catalog.default_run_type().schema_version, "2.0");
+        assert!(matches!(
+            catalog.source,
+            ProjectCatalogSource::Canonical { ref project_path }
+                if project_path.ends_with(".koni/project.yaml")
+        ));
+    }
+
+    #[test]
+    fn schema2_thinking_level_round_trips_and_supports_inherited_overrides() {
+        let fixture = Fixture::schema2();
+        let base_path = ".koni/run-types/base.yaml";
+        let base = fs::read_to_string(fixture.temp.path().join(base_path)).unwrap();
+        fixture.write(
+            base_path,
+            &format!(
+                "{base}\nagents:\n  roles:\n    planner:\n      model: gpt-test\n      thinking_level: high\n"
+            ),
+        );
+        let derived_path = ".koni/run-types/fast.yaml";
+        let derived = fs::read_to_string(fixture.temp.path().join(derived_path)).unwrap();
+        fixture.write(
+            derived_path,
+            &format!(
+                "{derived}  - op: replace\n    path: /agents/roles/planner/thinking_level\n    value: max\n"
+            ),
+        );
+
+        let catalog = fixture.compile().expect("schema-2 catalog compiles");
+        let planner = &catalog.default_run_type().agents.as_ref().unwrap().roles["planner"];
+        assert_eq!(planner.effective_thinking_level(), Some("max"));
+        assert_eq!(planner.reasoning_effort, None);
+        assert_eq!(planner.thinking_level.as_deref(), Some("max"));
+
+        let encoded = serde_yaml::to_string(&catalog.default_run_type().standalone_document())
+            .expect("standalone run type serializes");
+        assert!(encoded.contains("thinking_level: max"), "{encoded}");
+        assert!(!encoded.contains("reasoning_effort"), "{encoded}");
+    }
+
+    #[test]
+    fn run_type_agent_reasoning_field_is_generation_strict() {
+        let schema2 = Fixture::schema2();
+        let path = ".koni/run-types/base.yaml";
+        let base = fs::read_to_string(schema2.temp.path().join(path)).unwrap();
+        schema2.write(
+            path,
+            &format!("{base}\nagents:\n  roles:\n    planner:\n      reasoning_effort: high\n"),
+        );
+        assert_error_contains(schema2.compile(), "uses legacy reasoning_effort");
+
+        let schema1 = Fixture::canonical();
+        let path = ".codex/koni/run-types/base.yaml";
+        let base = fs::read_to_string(schema1.temp.path().join(path)).unwrap();
+        schema1.write(
+            path,
+            &format!("{base}\nagents:\n  roles:\n    planner:\n      thinking_level: high\n"),
+        );
+        assert_error_contains(schema1.compile(), "uses thinking_level");
+    }
+
+    #[test]
+    fn configuration_root_and_catalog_generation_must_match() {
+        let fixture = Fixture::schema2();
+        fs::write(fixture.temp.path().join(".koni/project.yaml"), PROJECT).unwrap();
+        let error = fixture.compile().unwrap_err().to_string();
+        assert!(error.contains("configuration root requires 2.0"), "{error}");
+    }
+
     fn assert_error_contains(result: Result<CompiledProjectCatalog>, needle: &str) {
         let error = result.expect_err("compilation should fail").to_string();
         assert!(
             error.contains(needle),
             "expected error containing {needle:?}, got {error:?}"
         );
+    }
+
+    fn target_promotion_behavior() -> RunTypeBehavior {
+        let document: RunTypeDocument = serde_yaml::from_str(BASE).unwrap();
+        let mut behavior = base_behavior(&document).unwrap();
+        for (id, kind, config) in [
+            ("target-sync", "target_sync", None),
+            (
+                "verification",
+                "checkpoint",
+                Some(serde_json::json!({"checkpoint": "verification"})),
+            ),
+            ("promotion", "promotion", None),
+        ] {
+            behavior.pipeline.stages.insert(
+                id.to_owned(),
+                PipelineStageDef {
+                    kind: kind.to_owned(),
+                    title: id.to_owned(),
+                    config,
+                },
+            );
+            behavior.pipeline.order.push(id.to_owned());
+        }
+        behavior.promotion = Some(RunPromotionPolicy {
+            conflict_operation: "resolve-target-integration".to_owned(),
+        });
+        behavior
     }
 
     #[test]
@@ -2170,12 +2771,13 @@ actions:
         let mut settings = AgentSettings {
             model: Some("inherited-model".to_owned()),
             reasoning_effort: Some("high".to_owned()),
+            thinking_level: None,
         };
         AgentSettingsOverride {
             model: Some(AgentSettingOverride::Configured("one-run-model".to_owned())),
             reasoning_effort: None,
         }
-        .apply_to(&mut settings);
+        .apply_to(&mut settings, PROJECT_CATALOG_SCHEMA_VERSION);
         assert_eq!(settings.model.as_deref(), Some("one-run-model"));
         assert_eq!(settings.reasoning_effort.as_deref(), Some("high"));
 
@@ -2185,7 +2787,7 @@ actions:
         };
         let encoded = serde_json::to_value(&clear_reasoning).unwrap();
         let decoded: AgentSettingsOverride = serde_json::from_value(encoded).unwrap();
-        decoded.apply_to(&mut settings);
+        decoded.apply_to(&mut settings, PROJECT_CATALOG_SCHEMA_VERSION);
         assert_eq!(settings.model.as_deref(), Some("one-run-model"));
         assert_eq!(settings.reasoning_effort, None);
     }
@@ -2340,6 +2942,81 @@ actions:
             .unwrap_err()
             .to_string();
         assert!(error.contains("reuse config id `review`"), "{error}");
+    }
+
+    #[test]
+    fn target_promotion_pipeline_requires_exactly_one_of_each_boundary_stage() {
+        validate_behavior(&target_promotion_behavior(), "targeted").unwrap();
+
+        for (stage_id, kind, config, label) in [
+            ("target-sync", "target_sync", None, "target_sync"),
+            (
+                "verification",
+                "checkpoint",
+                Some(serde_json::json!({"checkpoint": "verification"})),
+                "verification checkpoint",
+            ),
+            ("promotion", "promotion", None, "promotion"),
+        ] {
+            let mut missing = target_promotion_behavior();
+            missing.pipeline.stages.shift_remove(stage_id);
+            missing.pipeline.order.retain(|id| id != stage_id);
+            let error = validate_behavior(&missing, "targeted")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!("exactly one {label} stage; found 0")),
+                "{error}"
+            );
+
+            let mut duplicate = target_promotion_behavior();
+            let duplicate_id = format!("duplicate-{stage_id}");
+            duplicate.pipeline.stages.insert(
+                duplicate_id.clone(),
+                PipelineStageDef {
+                    kind: kind.to_owned(),
+                    title: duplicate_id.clone(),
+                    config: config.clone(),
+                },
+            );
+            duplicate.pipeline.order.push(duplicate_id);
+            let error = validate_behavior(&duplicate, "targeted")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!("exactly one {label} stage; found 2")),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn target_promotion_pipeline_orders_sync_before_verification_before_promotion() {
+        let mut behavior = target_promotion_behavior();
+        behavior.pipeline.order = ["plan", "verification", "target-sync", "promotion"]
+            .map(str::to_owned)
+            .to_vec();
+
+        let error = validate_behavior(&behavior, "targeted")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(
+                "target-promotion stages must be ordered target_sync < verification checkpoint < promotion"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn target_boundary_stages_still_require_a_promotion_policy() {
+        let mut behavior = target_promotion_behavior();
+        behavior.promotion = None;
+
+        let error = validate_behavior(&behavior, "targeted")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("without a promotion policy"), "{error}");
     }
 
     #[test]
@@ -2563,6 +3240,90 @@ questions:
         assert_error_contains(
             fixture.compile(),
             "pipeline order must name every definition",
+        );
+    }
+
+    #[test]
+    fn planning_policy_validates_budget_and_shared_multi_stage_sessions() {
+        let fixture = Fixture::canonical();
+        let configured = BASE.replace(
+            "questions:\n",
+            "planning:\n  session_scope: run\n  graph_seed_stage: plan\n  token_budget:\n    metric: new_tokens\n    limit: 1000000\n    synthesis_reserve: 200000\n    on_exhausted: force_synthesis\nquestions:\n",
+        );
+        fixture.write(".codex/koni/run-types/base.yaml", &configured);
+        let compiled = fixture.compile().unwrap();
+        let policy = compiled
+            .run_type("base")
+            .unwrap()
+            .planning
+            .as_ref()
+            .unwrap();
+        assert_eq!(policy.session_scope, PlanningSessionScope::Run);
+        assert_eq!(policy.graph_seed_stage.as_deref(), Some("plan"));
+        assert_eq!(policy.token_budget.limit, 1_000_000);
+
+        let stage_scoped = configured
+            .replace("session_scope: run", "session_scope: stage")
+            .replace(
+                "  order: [plan]",
+                "    verify:\n      kind: planning\n      title: Verify plan\n  order: [plan, verify]",
+            );
+        fixture.write(".codex/koni/run-types/base.yaml", &stage_scoped);
+        assert_error_contains(
+            fixture.compile(),
+            "must use run-scoped planning sessions when it has multiple planning stages",
+        );
+    }
+
+    #[test]
+    fn planning_graph_seed_stage_must_be_the_final_planning_stage() {
+        let fixture = Fixture::canonical();
+        let configured = BASE.replace(
+            "questions:\n",
+            "planning:\n  session_scope: run\n  graph_seed_stage: plan\n  token_budget:\n    metric: new_tokens\n    limit: 1000000\n    synthesis_reserve: 200000\n    on_exhausted: force_synthesis\nquestions:\n",
+        );
+
+        fixture.write(
+            ".codex/koni/run-types/base.yaml",
+            &configured.replace("graph_seed_stage: plan", "graph_seed_stage: absent"),
+        );
+        assert_error_contains(
+            fixture.compile(),
+            "planning graph seed stage `absent` is missing from its pipeline",
+        );
+
+        let non_planning_seed = configured
+            .replace("graph_seed_stage: plan", "graph_seed_stage: finalize")
+            .replace(
+                "  order: [plan]",
+                "    finalize:\n      kind: checkpoint\n      title: Finalize plan\n  order: [plan, finalize]",
+            );
+        fixture.write(".codex/koni/run-types/base.yaml", &non_planning_seed);
+        assert_error_contains(
+            fixture.compile(),
+            "planning graph seed stage `finalize` must have kind `planning`; found `checkpoint`",
+        );
+
+        let earlier_planning_seed = configured.replace(
+            "  order: [plan]",
+            "    verify:\n      kind: planning\n      title: Verify plan\n  order: [plan, verify]",
+        );
+        fixture.write(".codex/koni/run-types/base.yaml", &earlier_planning_seed);
+        assert_error_contains(
+            fixture.compile(),
+            "planning graph seed stage must name the final pre-approval planning stage `verify`; found `plan`",
+        );
+
+        let post_approval_seed = configured
+            .replace("graph_seed_stage: plan", "graph_seed_stage: verify")
+            .replace(
+                "  order: [plan]",
+                "    approval:\n      kind: execution\n      title: Approve plan\n    verify:\n      kind: planning\n      title: Verify plan\n  order: [plan, approval, verify]",
+            );
+        fixture.write(".codex/koni/run-types/base.yaml", &post_approval_seed);
+        assert_error_contains(
+            fixture.compile(),
+            "planning graph seed stage `verify` is outside the executable pre-approval planning prefix",
         );
     }
 

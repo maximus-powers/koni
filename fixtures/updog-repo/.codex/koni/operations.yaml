@@ -10,7 +10,8 @@ operations:
     allowed_new_node_types: [system, interface, data_model, contract, flow]
     allowed_existing_node_types: [objective]
     review_contract: Architecture map is grounded in repository paths, boundaries, and end-to-end flows.
-    output_contract: Systems, interfaces, data models, contracts, and flows linked to the objective.
+    output_contract: >-
+      Systems linked directly to the objective; interfaces and data models linked transitively through valid system exposes/owns relationships; contracts and flows linked through their configured objective relations. Integration preserves every material direct-dependency boundary, shared boundary identity, and exact repository-relative owned path; it may omit or replace upstream evidence only when findings records a verified explicit contradiction.
     ranking_hints: [phase, objective-id]
   - id: contracts.system.specify
     operation: specify-contracts

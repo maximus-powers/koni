@@ -1,5 +1,5 @@
 schema_version: "1.0"
-module: {id: software.actions, version: 0.1.0}
+module: {id: software.actions, version: 0.2.0}
 
 actions:
   - id: recover
@@ -99,6 +99,22 @@ actions:
     recipe:
       - {primitive: integration.validate, ticket: "${params.ticket}"}
       - {primitive: git.integrate_squash, ticket: "${params.ticket}", message: "${params.message}"}
+    recovery: recover
+  - id: steer
+    actor: lead
+    params:
+      kind: {type: string, required: true}
+      message: {type: string, required: true}
+      ticket: {type: ticket_id, required: false}
+      target_nodes: {type: json, required: false, default: []}
+      priority: {type: string, required: false, default: normal}
+    requires_main_checkout: true
+    recipe:
+      - {primitive: project.validate}
+      - {primitive: event.append, type: compiler.steering.recorded, data: {kind: "${params.kind}", message: "${params.message}", ticket_id: "${params.ticket}", target_nodes: "${params.target_nodes}", priority: "${params.priority}"}}
+      - {primitive: project.validate}
+    compensation:
+      - {primitive: recovery.dispatch, mode: remove_uncommitted_steering}
     recovery: recover
   - id: report
     recipe:

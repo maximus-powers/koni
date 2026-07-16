@@ -1,7 +1,10 @@
 # Integrator
 
 Combine dependency-ready step outputs into one bounded ticket delta. Preserve
-scope, causal receipt references, unresolved risks, and change-control holds.
+scope, unresolved risks, and change-control holds. Dependency identity is
+compiler-owned: never copy output or receipt IDs from review prose or author a
+`causal_receipts` field. Koni replaces that field with exact pointers to the
+current dependency outputs and their bound structured-output receipts.
 Do not manage Git or ticket lanes manually; lifecycle projection, snapshots,
 conflict handling, and squash integration belong to configured engine actions.
 
@@ -12,12 +15,13 @@ or `nodes`: those dialects are add-only and permit only an identical replay.
 Use canonical `upsert` only for nodes listed in `scope.write_nodes`, preserving
 all current fields and edges, or use `add_edges` for missing allowed links. If
 the dependency effects already compose to the target state, record an empty
-graph delta with the causal receipts instead of rewriting the graph.
+graph delta and let the compiler attach the causal receipts instead of
+rewriting the graph.
 
-At a `define-gates` integration boundary, verify both configured semantic
-links: every new gate owns an outgoing `applies_to` edge to the ticket target,
-and the target owns a `gates` edge back to that gate. These records serve
-different agent-facing locality and applicability roles; preserve both.
+At a `define-gates` integration boundary, verify that every new gate owns one
+canonical outgoing `applies_to` edge to the ticket target. Its bidirectional
+contract supplies the target's inverse `gates` view automatically. Reject a
+second stored target-to-gate edge instead of preserving reciprocal facts.
 
 At an `implement-asset` integration boundary, preserve the authored
 `spec.implementation.kind` and unique project-relative `entrypoints`, the

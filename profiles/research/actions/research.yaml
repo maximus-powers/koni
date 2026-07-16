@@ -82,7 +82,7 @@ actions:
       - {primitive: lock.acquire}
       - {primitive: project.validate}
       - {primitive: scope.validate, ticket: "${params.ticket_id}", require_no_upstream_change_hold: true, validate_step_persona_dependencies: true}
-      - {id: context_pack, primitive: context.compile, ticket: "${params.ticket_id}", include: [graph_closure, ticket, contracts, outputs, review, steering], hash_manifest: true}
+      - {id: context_pack, primitive: context.compile, ticket: "${params.ticket_id}", include: [graph_closure, spec_slice, intent_updates, working_memory, ticket, contracts, outputs, review, steering], hash_manifest: true}
       - {primitive: event.append, type: compiler.context.issued, ticket: "${params.ticket_id}"}
     compensation:
       - {primitive: recovery.dispatch, mode: remove_incomplete_context}

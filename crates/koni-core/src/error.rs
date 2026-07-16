@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::agent_runtime::PiRuntimeFailure;
+
 #[derive(Debug, thiserror::Error)]
 pub enum KoniError {
     #[error("I/O error at {path}: {source}")]
@@ -38,6 +40,20 @@ pub enum KoniError {
     Git(#[from] git2::Error),
     #[error("process error: {0}")]
     Process(String),
+    #[error("Pi runtime turn {turn_id} failed: {failure}")]
+    PiRuntimeTurn {
+        turn_id: String,
+        failure: PiRuntimeFailure,
+    },
+    /// A bounded, already-redacted correction that is safe to return through
+    /// the compiler-owned agent tool boundary. Callers must never construct
+    /// this variant from a raw process, Git, profile, or compiler error.
+    #[error("agent tool feedback ({code}): {message}")]
+    AgentToolFeedback {
+        code: String,
+        message: String,
+        retryable: bool,
+    },
     #[error("not found: {0}")]
     NotFound(String),
 }

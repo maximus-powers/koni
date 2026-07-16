@@ -42,6 +42,12 @@ impl ValueType {
 pub struct ExpressionSymbols {
     pub node_types: BTreeSet<String>,
     pub queries: BTreeSet<String>,
+    /// Registry-entry IDs for operations that structured predicates may bind
+    /// without falling back to a model-authored string at runtime.
+    pub operations: BTreeSet<String>,
+    /// Configured check IDs available to predicates whose contract names an
+    /// executable proof boundary directly.
+    pub checks: BTreeSet<String>,
     /// Operation registry entries that expose a receipt_coverage contract and
     /// can therefore be referenced by the generic currentness predicate.
     pub receipt_coverages: BTreeSet<String>,
@@ -509,6 +515,8 @@ pub enum PredicateOp {
     StatusIs,
     NodeTypeIs,
     CheckPassed,
+    CheckHasCurrentTerminal,
+    ProofPreparationCurrent,
     PathExists,
     Acyclic,
     SetRelation,
@@ -561,6 +569,10 @@ pub struct LeafPredicate {
     pub review_effect: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage_targets: Option<Selector>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation_operation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation_targets: Option<Selector>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -650,9 +662,15 @@ impl Predicate {
                 if let Some(query) = &leaf.query {
                     output.insert(query.clone());
                 }
-                for selector in [&leaf.numerator, &leaf.denominator, &leaf.left, &leaf.right]
-                    .into_iter()
-                    .flatten()
+                for selector in [
+                    &leaf.numerator,
+                    &leaf.denominator,
+                    &leaf.left,
+                    &leaf.right,
+                    &leaf.preparation_targets,
+                ]
+                .into_iter()
+                .flatten()
                 {
                     selector.referenced_queries(output);
                 }
@@ -678,7 +696,14 @@ impl Predicate {
             }
             Self::Not(envelope) => envelope.not.referenced_checks(output),
             Self::ForAll(envelope) => envelope.for_all.satisfies.referenced_checks(output),
-            Self::Leaf(leaf) if leaf.op == PredicateOp::CheckPassed => {
+            Self::Leaf(leaf)
+                if matches!(
+                    leaf.op,
+                    PredicateOp::CheckPassed
+                        | PredicateOp::CheckHasCurrentTerminal
+                        | PredicateOp::ProofPreparationCurrent
+                ) =>
+            {
                 if let Some(check) = &leaf.check {
                     output.insert(check.clone());
                 }
@@ -738,9 +763,15 @@ impl Predicate {
                 if let Some(policy) = &leaf.gate_policy {
                     output.insert(policy.clone());
                 }
-                for selector in [&leaf.numerator, &leaf.denominator, &leaf.left, &leaf.right]
-                    .into_iter()
-                    .flatten()
+                for selector in [
+                    &leaf.numerator,
+                    &leaf.denominator,
+                    &leaf.left,
+                    &leaf.right,
+                    &leaf.preparation_targets,
+                ]
+                .into_iter()
+                .flatten()
                 {
                     selector.referenced_gate_policies(output);
                 }
@@ -774,6 +805,9 @@ impl LeafPredicate {
             selector.validate(symbols)?;
         }
         if let Some(selector) = &self.coverage_targets {
+            selector.validate(symbols)?;
+        }
+        if let Some(selector) = &self.preparation_targets {
             selector.validate(symbols)?;
         }
         if let (Some(min), Some(max)) = (self.min, self.max)
@@ -856,6 +890,60 @@ impl LeafPredicate {
                 }
             }
             PredicateOp::CheckPassed => require(self.check.as_deref(), self.op, "check")?,
+            PredicateOp::CheckHasCurrentTerminal => {
+                require(self.subject.as_deref(), self.op, "subject")?;
+                require(self.check.as_deref(), self.op, "check")?;
+                if self.statuses.is_empty() {
+                    return Err("check_has_current_terminal requires nonempty statuses".to_owned());
+                }
+                let allowed = ["failed", "timed_out", "invalid_result"];
+                if self.statuses.iter().any(|status| {
+                    status.trim() != status
+                        || status.is_empty()
+                        || !allowed.contains(&status.as_str())
+                }) {
+                    return Err(format!(
+                        "check_has_current_terminal statuses must be drawn from {}",
+                        allowed.join(", ")
+                    ));
+                }
+                if self.statuses.iter().collect::<BTreeSet<_>>().len() != self.statuses.len() {
+                    return Err(
+                        "check_has_current_terminal statuses must not contain duplicates"
+                            .to_owned(),
+                    );
+                }
+            }
+            PredicateOp::ProofPreparationCurrent => {
+                require(self.subject.as_deref(), self.op, "subject")?;
+                require(self.check.as_deref(), self.op, "check")?;
+                require(
+                    self.preparation_operation.as_deref(),
+                    self.op,
+                    "preparation_operation",
+                )?;
+                if self.preparation_targets.is_none() {
+                    return Err(
+                        "proof_preparation_current requires preparation_targets selector"
+                            .to_owned(),
+                    );
+                }
+                let check = self.check.as_deref().expect("required check");
+                if !symbols.checks.contains(check) {
+                    return Err(format!(
+                        "proof_preparation_current references unknown check {check}"
+                    ));
+                }
+                let operation = self
+                    .preparation_operation
+                    .as_deref()
+                    .expect("required preparation operation");
+                if !symbols.operations.contains(operation) {
+                    return Err(format!(
+                        "proof_preparation_current references unknown operation {operation}"
+                    ));
+                }
+            }
             PredicateOp::GatePolicyCompatible
             | PredicateOp::GatePolicyHasSelection
             | PredicateOp::GatePolicySelected
@@ -958,6 +1046,8 @@ all:
         let symbols = ExpressionSymbols {
             node_types: ["hypothesis".to_owned()].into_iter().collect(),
             queries: BTreeSet::new(),
+            operations: BTreeSet::new(),
+            checks: BTreeSet::new(),
             receipt_coverages: BTreeSet::new(),
             review_effects: BTreeSet::new(),
             gate_policies: BTreeSet::new(),
@@ -999,5 +1089,109 @@ traverse:
                 .unwrap_err()
                 .contains("min_depth")
         );
+    }
+
+    #[test]
+    fn current_terminal_predicate_is_typed_and_tracks_its_check() {
+        let predicate: Predicate = serde_yaml::from_str(
+            r#"
+op: check_has_current_terminal
+subject: $proof
+check: promotion-proof-set
+statuses: [failed, timed_out, invalid_result]
+"#,
+        )
+        .unwrap();
+        let symbols = ExpressionSymbols::default().with_variable("proof", ValueType::Node);
+
+        assert_eq!(predicate.validate(&symbols), Ok(ValueType::Boolean));
+        let mut referenced = BTreeSet::new();
+        predicate.referenced_checks(&mut referenced);
+        assert_eq!(
+            referenced,
+            BTreeSet::from(["promotion-proof-set".to_owned()])
+        );
+
+        let encoded = serde_yaml::to_string(&predicate).unwrap();
+        let decoded: Predicate = serde_yaml::from_str(&encoded).unwrap();
+        assert_eq!(decoded, predicate);
+    }
+
+    #[test]
+    fn current_terminal_predicate_rejects_missing_or_nonadverse_statuses() {
+        let symbols = ExpressionSymbols::default().with_variable("proof", ValueType::Node);
+        for (statuses, expected) in [
+            ("[]", "nonempty statuses"),
+            ("[passed]", "must be drawn from"),
+            ("[failed, failed]", "must not contain duplicates"),
+        ] {
+            let predicate: Predicate = serde_yaml::from_str(&format!(
+                "op: check_has_current_terminal\nsubject: $proof\ncheck: proof-set\nstatuses: {statuses}\n"
+            ))
+            .unwrap();
+            let error = predicate.validate(&symbols).unwrap_err();
+            assert!(error.contains(expected), "{statuses}: {error}");
+        }
+
+        let missing_subject: Predicate = serde_yaml::from_str(
+            "op: check_has_current_terminal\ncheck: proof-set\nstatuses: [failed]\n",
+        )
+        .unwrap();
+        assert!(
+            missing_subject
+                .validate(&symbols)
+                .unwrap_err()
+                .contains("subject")
+        );
+    }
+
+    #[test]
+    fn proof_preparation_predicate_binds_registered_operation_check_and_targets() {
+        let predicate: Predicate = serde_yaml::from_str(
+            r#"
+op: proof_preparation_current
+subject: $proof
+check: baseline-proof-set
+preparation_operation: assurance.proof.prepare
+preparation_targets:
+  union:
+    - $proof
+    - traverse: {from: $proof, relation: verifies, min_depth: 1, max_depth: 1}
+"#,
+        )
+        .unwrap();
+        let mut symbols = ExpressionSymbols::default().with_variable("proof", ValueType::Node);
+        symbols
+            .operations
+            .insert("assurance.proof.prepare".to_owned());
+        symbols.checks.insert("baseline-proof-set".to_owned());
+
+        assert_eq!(predicate.validate(&symbols), Ok(ValueType::Boolean));
+        let mut checks = BTreeSet::new();
+        predicate.referenced_checks(&mut checks);
+        assert_eq!(checks, BTreeSet::from(["baseline-proof-set".to_owned()]));
+
+        let encoded = serde_yaml::to_string(&predicate).unwrap();
+        assert_eq!(
+            serde_yaml::from_str::<Predicate>(&encoded).unwrap(),
+            predicate
+        );
+    }
+
+    #[test]
+    fn proof_preparation_predicate_rejects_unregistered_contracts() {
+        let predicate: Predicate = serde_yaml::from_str(
+            r#"
+op: proof_preparation_current
+subject: $proof
+check: missing-set
+preparation_operation: missing.operation
+preparation_targets: $proof
+"#,
+        )
+        .unwrap();
+        let symbols = ExpressionSymbols::default().with_variable("proof", ValueType::Node);
+        let error = predicate.validate(&symbols).unwrap_err();
+        assert!(error.contains("unknown check missing-set"), "{error}");
     }
 }

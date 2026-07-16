@@ -24,6 +24,17 @@ structured result. Recover a failed worker at most once for the same step, then
 leave a precise blocked state.
 Terminal success requires the requested outcome, no open tickets, current
 verification, and a compiled report.
+
+Do not manufacture work because a semantic node exists: the compiler emits
+only unsatisfied cohesive claims. Dispatch independent tickets in parallel only
+when their path and semantic scopes are genuinely disjoint. Preserve adverse
+receipts and blockers; after one same-step recovery, require new evidence or a
+human-authorized scoped plan change instead of spending more turns on the same
+strategy. Do not represent that route as automatic proof-oracle replacement;
+the user or configured authority must approve the exact bounded graph-only
+replan. Ordinary implementation and bounded graph-producing workflows have no
+no-op Integrator
+handoff; Integrator is reserved for real delivery assembly and target conflict.
 """
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"

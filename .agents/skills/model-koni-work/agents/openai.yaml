@@ -1,0 +1,4 @@
+interface:
+  display_name: "Model Köni Work"
+  short_description: "Model graph-compiled work safely in Köni"
+  default_prompt: "Use $model-koni-work to design a graph-first Köni workflow for this project."

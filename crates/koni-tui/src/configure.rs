@@ -439,11 +439,10 @@ pub(crate) fn derive_resources(documents: &[ConfigDocument]) -> Vec<ConfigResour
                 ConfigDomain::RunTypes,
                 ConfigResourceKind::RunType,
                 title.clone(),
-                "Run behavior and intake".to_owned(),
+                "Run behavior, intake, and planning questions".to_owned(),
                 path,
                 Vec::new(),
             ));
-            push_agent_policy_resources(&mut resources, value, path, &title);
             push_mapping_resource(
                 &mut resources,
                 value,
@@ -922,47 +921,6 @@ fn persona_prompt_metadata(
     prompts
 }
 
-fn push_agent_policy_resources(
-    resources: &mut Vec<ConfigResource>,
-    root: &Value,
-    path: &Path,
-    run_type_title: &str,
-) {
-    let Some(agents) = root.get("agents").and_then(Value::as_object) else {
-        return;
-    };
-    for (group, suffix) in [("roles", "role policy"), ("personas", "persona override")] {
-        let Some(settings) = agents.get(group).and_then(Value::as_object) else {
-            continue;
-        };
-        for id in settings.keys() {
-            let (title, subtitle) = if group == "roles" {
-                (
-                    format!("{run_type_title} model"),
-                    format!("{} {suffix}", agent_role_label(id)),
-                )
-            } else {
-                (
-                    format!("{run_type_title} · {} override", humanize(id)),
-                    suffix.to_owned(),
-                )
-            };
-            resources.push(resource(
-                ConfigDomain::Agents,
-                ConfigResourceKind::AgentPolicy,
-                title,
-                subtitle,
-                path,
-                vec![
-                    FormPathToken::Key("agents".to_owned()),
-                    FormPathToken::Key(group.to_owned()),
-                    FormPathToken::Key(id.clone()),
-                ],
-            ));
-        }
-    }
-}
-
 fn push_persona_resources(
     resources: &mut Vec<ConfigResource>,
     root: &Value,
@@ -1354,16 +1312,16 @@ personas:
             .filter(|resource| resource.domain == ConfigDomain::Agents)
             .collect::<Vec<_>>();
 
-        for title in ["Planner", "Lead", "Workers", "Reviewer", "Specialist"] {
-            assert!(
-                agent_resources.iter().any(|resource| {
-                    resource.kind == ConfigResourceKind::AgentPolicy
-                        && resource.title == "Custom model"
-                        && resource.subtitle.starts_with(title)
-                }),
-                "missing {title} policy"
-            );
-        }
+        assert!(
+            agent_resources
+                .iter()
+                .all(|resource| resource.kind != ConfigResourceKind::AgentPolicy)
+        );
+        assert!(resources.iter().any(|resource| {
+            resource.domain == ConfigDomain::RunTypes
+                && resource.kind == ConfigResourceKind::RunType
+                && resource.title == "Custom"
+        }));
         assert!(agent_resources.iter().any(|resource| {
             resource.kind == ConfigResourceKind::Persona
                 && resource.title == "Lead"

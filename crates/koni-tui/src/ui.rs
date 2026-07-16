@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -8,19 +9,98 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use serde_json::Value;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::agent_chat::render_markdown_preserving_lines;
 use crate::configure::{ConfigDomain, ConfigResource};
-use crate::graph::GraphRenderer;
+use crate::graph::{GraphEdgeRef, GraphRenderer, truncate_graph_line};
 use crate::help::{HelpAction, HelpTopic};
 use crate::model::{
     AnswerDraft, ApprovalDraft, ControlCenterModel, Dialog, EditScalarDraft, Focus, Mode,
     NewRunDraft, OverviewSubject, Panel, RunData, RunSummary, RunTypeOption,
-    configured_orchestration_key_is_protected, question_answer_is_pending_resume,
+    configured_orchestration_key_is_protected, durable_approved_plan_sections,
+    question_allows_custom, question_answer_is_pending_resume, question_options,
 };
 
 const MIN_WIDTH: u16 = 82;
 const MIN_HEIGHT: u16 = 20;
 pub(crate) const CONFIG_DOMAIN_ROW_HEIGHT: u16 = 1;
 pub(crate) const CONFIG_RESOURCE_CARD_HEIGHT: u16 = 2;
+
+struct QuestionChoiceLines {
+    lines: Vec<Line<'static>>,
+    selected_line: usize,
+}
+
+/// The Questions panel and answer modal intentionally share this renderer so
+/// previewing a decision never presents a second, subtly different UI.
+fn question_choice_lines(
+    options: &[(String, String, String, bool)],
+    selected: usize,
+    allow_custom: bool,
+    width: usize,
+) -> QuestionChoiceLines {
+    let mut lines = Vec::new();
+    let mut selected_line = 0;
+    for (index, (_, label, description, recommended)) in options.iter().enumerate() {
+        if index == selected {
+            selected_line = lines.len();
+        }
+        lines.push(Line::styled(
+            format!(
+                "{} {}{}",
+                if index == selected { "▸" } else { " " },
+                label,
+                if *recommended { "  ★" } else { "" }
+            ),
+            if index == selected {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default()
+            },
+        ));
+        if index == selected && !description.trim().is_empty() {
+            lines.extend(
+                wrap_full_text(description, width.saturating_sub(4).max(1))
+                    .into_iter()
+                    .map(|line| {
+                        Line::styled(format!("    {line}"), Style::default().fg(Color::DarkGray))
+                    }),
+            );
+        }
+    }
+    if allow_custom {
+        let index = options.len();
+        if index == selected {
+            selected_line = lines.len();
+        }
+        lines.push(Line::styled(
+            format!(
+                "{} None of the above",
+                if index == selected { "▸" } else { " " }
+            ),
+            if index == selected {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default()
+            },
+        ));
+        if index == selected {
+            lines.extend(
+                wrap_full_text(
+                    "Write your own answer in the field below.",
+                    width.saturating_sub(4).max(1),
+                )
+                .into_iter()
+                .map(|line| {
+                    Line::styled(format!("    {line}"), Style::default().fg(Color::DarkGray))
+                }),
+            );
+        }
+    }
+    QuestionChoiceLines {
+        lines,
+        selected_line,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ConfigureLayout {
@@ -33,7 +113,7 @@ pub(crate) struct ConfigureLayout {
 pub(crate) fn configure_layout(area: Rect) -> ConfigureLayout {
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(8)])
+        .constraints([Constraint::Min(8), Constraint::Length(3)])
         .split(area);
     let columns = Layout::default()
         .direction(Direction::Horizontal)
@@ -42,9 +122,9 @@ pub(crate) fn configure_layout(area: Rect) -> ConfigureLayout {
             Constraint::Percentage(30),
             Constraint::Min(32),
         ])
-        .split(rows[1]);
+        .split(rows[0]);
     ConfigureLayout {
-        draft_bar: Some(rows[0]),
+        draft_bar: Some(rows[1]),
         domains: columns[0],
         resources: columns[1],
         editor: columns[2],
@@ -91,7 +171,7 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, model: &ControlCenterMode
     let area = match dialog {
         Dialog::Help(_) => centered_box(84, 24, frame.area()),
         Dialog::NewRun(draft) => new_run_dialog_area(frame.area(), draft, &model.run_types),
-        Dialog::Approval(_) => centered_box(110, 32, frame.area()),
+        Dialog::Approval(_) => centered_box(110, 36, frame.area()),
         Dialog::AnswerQuestion(draft) => {
             let width = frame.area().width.saturating_sub(4).min(92);
             centered_box(
@@ -107,7 +187,11 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, model: &ControlCenterMode
         ),
         Dialog::ActionForm(draft) => centered_box(
             84,
-            (9 + u16::try_from(draft.params.len()).unwrap_or(8) * 2).min(26),
+            if draft.is_agent_guidance() {
+                14
+            } else {
+                (9 + u16::try_from(draft.params.len()).unwrap_or(8) * 2).min(26)
+            },
             frame.area(),
         ),
         Dialog::EditScalar(edit) => {
@@ -119,6 +203,7 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, model: &ControlCenterMode
         Dialog::RunTypeWizard(draft) => run_type_wizard_dialog_area(frame.area(), draft),
         Dialog::LegacyMigration(_) => centered_box(82, 18, frame.area()),
         Dialog::DeleteRun(_) => centered_box(82, 24, frame.area()),
+        Dialog::MergeRun(_) => centered_box(96, 30, frame.area()),
     };
     frame.render_widget(Clear, area);
     match dialog {
@@ -163,7 +248,7 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, model: &ControlCenterMode
                 );
             } else if draft.pending_resume {
                 lines.push(Line::styled(
-                    "Answer is durable; Enter retries the bound session resume.",
+                    "Answer is durable; the bound agent session still needs to resume.",
                     Style::default().fg(Color::Yellow),
                 ));
             }
@@ -178,43 +263,30 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, model: &ControlCenterMode
                 ));
             }
             lines.push(Line::raw(""));
-            for (index, (_, label, description, recommended)) in draft.options.iter().enumerate() {
-                lines.push(Line::styled(
-                    format!(
-                        "{} {}{}",
-                        if index == draft.selected { "▸" } else { " " },
-                        label,
-                        if *recommended { "  (recommended)" } else { "" }
-                    ),
-                    if index == draft.selected {
-                        Style::default().fg(Color::Cyan)
-                    } else {
-                        Style::default()
-                    },
-                ));
-                if index == draft.selected && !description.is_empty() {
-                    lines.extend(
-                        wrap_full_text(description, content_width.saturating_sub(4))
-                            .into_iter()
-                            .map(|line| {
-                                Line::styled(
-                                    format!("    {line}"),
-                                    Style::default().fg(Color::DarkGray),
-                                )
-                            }),
-                    );
-                }
-            }
+            lines.extend(
+                question_choice_lines(
+                    &draft.options,
+                    draft.selected,
+                    draft.allow_custom,
+                    content_width,
+                )
+                .lines,
+            );
             lines.push(Line::raw(""));
+            let custom_selected = draft.allow_custom && draft.selected == draft.options.len();
             lines.push(Line::styled(
-                if draft.allow_custom {
+                if custom_selected {
                     format!(
-                        "Custom{}: {}",
+                        "Your answer{}: {}",
                         if draft.custom_active { " ▸" } else { "" },
                         draft.custom
                     )
                 } else {
-                    "Custom answers disabled for this question".to_owned()
+                    format!(
+                        "Notes (optional){}: {}",
+                        if draft.custom_active { " ▸" } else { "" },
+                        draft.custom
+                    )
                 },
                 if draft.custom_active && (!draft.pending_resume || draft.waiting_for_batch) {
                     Style::default().fg(Color::Cyan)
@@ -222,15 +294,25 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, model: &ControlCenterMode
                     Style::default().fg(Color::DarkGray)
                 },
             ));
+            let controls = if draft.pending_resume && !draft.waiting_for_batch {
+                "Enter retry resume · Esc close"
+            } else if draft.custom_active {
+                "↑/↓ select · type answer/notes · Tab choices · Enter submit · Esc cancel"
+            } else {
+                "↑/↓ or j/k select · Tab answer/notes · Enter submit · Esc cancel"
+            };
             frame.render_widget(
                 Paragraph::new(lines)
-                    .block(Block::default().borders(Borders::ALL).title(
-                        if draft.waiting_for_batch {
-                            " Revise answer "
-                        } else {
-                            " Answer agent "
-                        },
-                    ))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(if draft.waiting_for_batch {
+                                " Revise answer "
+                            } else {
+                                " Answer agent "
+                            })
+                            .title_bottom(control_tip(controls)),
+                    )
                     .wrap(Wrap { trim: false }),
                 area,
             );
@@ -266,13 +348,6 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, model: &ControlCenterMode
                     Style::default().fg(Color::DarkGray),
                 ));
             }
-            lines.extend([
-                Line::raw(""),
-                Line::styled(
-                    "Type to filter · Enter to configure · Esc to close",
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]);
             let filter = if palette.filter.is_empty() {
                 String::new()
             } else {
@@ -284,7 +359,10 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, model: &ControlCenterMode
                         Block::default()
                             .borders(Borders::ALL)
                             .border_style(Style::default().fg(Color::Cyan))
-                            .title(format!(" Available actions{filter} ")),
+                            .title(format!(" Available actions{filter} "))
+                            .title_bottom(control_tip(
+                                "Type to filter · Enter configure · Esc close",
+                            )),
                     )
                     .wrap(Wrap { trim: false }),
                 area,
@@ -302,10 +380,14 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, model: &ControlCenterMode
                     Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Cyan))
-                        .title(format!(" Edit {field} ")),
+                        .title(format!(" Edit {field} "))
+                        .title_bottom(control_tip(edit_scalar_controls())),
                 ),
                 area,
             );
+        }
+        Dialog::ActionForm(action) if action.is_agent_guidance() => {
+            draw_agent_guidance_dialog(frame, area, action, model);
         }
         Dialog::ActionForm(action) => {
             let mut lines = vec![Line::styled(action_label(&action.action), heading_style())];
@@ -355,25 +437,23 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, model: &ControlCenterMode
             lines.extend([
                 Line::raw(""),
                 Line::styled(
-                    if action.submitted {
-                        "Executing… · Esc closes this view; the action remains durable"
-                    } else {
-                        "Tab: next parameter · Enter: execute · Esc: cancel"
-                    },
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Line::styled(
                     "Execution is compiler-mediated and lifecycle-validated.",
                     Style::default().fg(Color::Yellow),
                 ),
             ]);
+            let controls = if action.submitted {
+                "Esc close · execution remains durable"
+            } else {
+                "Tab next parameter · Enter execute · Esc cancel"
+            };
             frame.render_widget(
                 Paragraph::new(lines)
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
                             .border_style(Style::default().fg(Color::Cyan))
-                            .title(" Configured action "),
+                            .title(" Configured action ")
+                            .title_bottom(control_tip(controls)),
                     )
                     .wrap(Wrap { trim: false }),
                 area,
@@ -390,10 +470,6 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, model: &ControlCenterMode
                     ),
                     Line::raw(""),
                     Line::styled(
-                        "Enter: create draft · Esc: cancel",
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Line::styled(
                         "The document is published only after full catalog/profile validation.",
                         Style::default().fg(Color::Yellow),
                     ),
@@ -402,7 +478,8 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, model: &ControlCenterMode
                     Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Cyan))
-                        .title(" New configuration document "),
+                        .title(" New configuration document ")
+                        .title_bottom(control_tip("Enter create draft · Esc cancel")),
                 )
                 .wrap(Wrap { trim: false }),
                 area,
@@ -419,10 +496,6 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, model: &ControlCenterMode
                     ),
                     Line::raw(""),
                     Line::styled(
-                        "Enter: stage rename · Esc: cancel",
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Line::styled(
                         "Rename and reference edits publish together after full validation.",
                         Style::default().fg(Color::Yellow),
                     ),
@@ -431,7 +504,8 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, model: &ControlCenterMode
                     Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Cyan))
-                        .title(" Rename configuration document "),
+                        .title(" Rename configuration document ")
+                        .title_bottom(control_tip("Enter stage rename · Esc cancel")),
                 )
                 .wrap(Wrap { trim: false }),
                 area,
@@ -460,11 +534,7 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, model: &ControlCenterMode
                     ),
                     Line::raw(""),
                     Line::styled(
-                        "Enter: stage conversion · Esc: cancel",
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Line::styled(
-                        "Nothing is replaced now. Ctrl-P validates and publishes all files together.",
+                        "Nothing is replaced now. Publication validates and replaces all files together.",
                         Style::default().fg(Color::Yellow),
                     ),
                 ])
@@ -472,7 +542,8 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, model: &ControlCenterMode
                     Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Yellow))
-                        .title(" Migrate Legacy configuration "),
+                        .title(" Migrate Legacy configuration ")
+                        .title_bottom(control_tip("Enter stage conversion · Esc cancel")),
                 )
                 .wrap(Wrap { trim: false }),
                 area,
@@ -480,17 +551,11 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, model: &ControlCenterMode
         }
         Dialog::DeleteRun(draft) => {
             let preview = &draft.preview;
-            let mut lines = vec![
-                Line::styled(
-                    if preview.goal.trim().is_empty() {
-                        "Selected run".to_owned()
-                    } else {
-                        preview.goal.clone()
-                    },
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
+            let mut lines = delete_run_objective_preview_lines(
+                &preview.goal,
+                usize::from(area.width.saturating_sub(2)).max(1),
+            );
+            lines.extend([
                 Line::styled(
                     format!("Current state · {}", humanize(&preview.run_status)),
                     Style::default().fg(status_color(&preview.run_status)),
@@ -516,11 +581,11 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, model: &ControlCenterMode
                     preview.dirty_worktrees.len(),
                     plural(preview.dirty_worktrees.len())
                 )),
-            ];
+            ]);
             if !preview.blockers.is_empty() {
                 lines.push(Line::styled(
                     format!(
-                        "! {} safety blocker{} must be resolved before removal",
+                        "! {} condition{} will be re-checked after agents stop",
                         preview.blockers.len(),
                         plural(preview.blockers.len())
                     ),
@@ -531,7 +596,7 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, model: &ControlCenterMode
             }
             lines.extend([
                 Line::raw(""),
-                Line::styled("Choose an action", heading_style()),
+                Line::styled("Select an action", heading_style()),
             ]);
             for (index, (label, detail)) in [
                 ("Cancel", "Keep this run and all of its resources."),
@@ -570,35 +635,340 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, model: &ControlCenterMode
                 }
             }
             lines.push(Line::raw(""));
-            lines.push(Line::styled(
-                if draft.submitted {
-                    "Removing the selected run through the engine…"
-                } else if draft.selected == 2 && draft.confirm_owned_branches {
-                    "Strong confirmation: press Enter again to delete proven owned branches."
-                } else if !preview.can_delete && draft.selected > 0 {
-                    "Removal is disabled until every safety blocker is cleared."
-                } else {
-                    "↑/↓ choose · Enter confirm · Esc cancel"
-                },
-                Style::default().fg(if draft.selected == 2 {
-                    Color::Yellow
-                } else {
-                    Color::DarkGray
-                }),
-            ));
+            let (status, controls) = if draft.submitted {
+                (
+                    Some("Removing the selected run through the engine…"),
+                    "Esc close; removal remains durable",
+                )
+            } else if draft.selected == 2 && draft.confirm_owned_branches {
+                (
+                    Some("Strong confirmation is required to delete proven owned branches."),
+                    "Enter confirm branch deletion · Esc cancel",
+                )
+            } else if !preview.can_delete && draft.selected > 0 {
+                (
+                    Some("Run-owned agents must stop before file removal can be re-checked."),
+                    "Enter stop agents and re-check · Esc cancel",
+                )
+            } else {
+                (None, "↑/↓ or j/k select · Enter confirm · Esc cancel")
+            };
+            if let Some(status) = status {
+                lines.push(Line::styled(
+                    status,
+                    Style::default().fg(if draft.selected == 2 {
+                        Color::Yellow
+                    } else {
+                        Color::DarkGray
+                    }),
+                ));
+            }
             frame.render_widget(
                 Paragraph::new(lines)
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
                             .border_style(Style::default().fg(Color::LightRed))
-                            .title(" Delete run "),
+                            .title(" Delete run ")
+                            .title_bottom(control_tip(controls)),
                     )
                     .wrap(Wrap { trim: false }),
                 area,
             );
         }
+        Dialog::MergeRun(draft) => draw_merge_run_dialog(frame, area, draft),
     }
+}
+
+fn delete_run_objective_preview_lines(objective: &str, width: usize) -> Vec<Line<'static>> {
+    let objective = if objective.trim().is_empty() {
+        "Selected run"
+    } else {
+        objective.trim()
+    };
+    let wrapped = objective
+        .split('\n')
+        .flat_map(|source| {
+            if source.is_empty() {
+                vec![String::new()]
+            } else {
+                wrap_full_text(source.trim_end_matches('\r'), width)
+            }
+        })
+        .collect::<Vec<_>>();
+    let truncated = wrapped.len() > 2;
+    let mut visible = wrapped.into_iter().take(2).collect::<Vec<_>>();
+    for line in &mut visible {
+        *line = short_display_width(line, width);
+    }
+    if truncated && let Some(last) = visible.last_mut() {
+        let with_ellipsis = format!("{}…", last.trim_end_matches('…'));
+        *last = short_display_width(&with_ellipsis, width);
+    }
+    visible
+        .into_iter()
+        .map(|line| {
+            Line::styled(
+                line,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )
+        })
+        .collect()
+}
+
+fn draw_merge_run_dialog(frame: &mut Frame<'_>, area: Rect, draft: &crate::model::MergeRunDraft) {
+    let preview = &draft.preview;
+    let target = preview
+        .target_branch
+        .strip_prefix("refs/heads/")
+        .unwrap_or(&preview.target_branch);
+    let checkout = preview.target_checkout.as_ref().map_or_else(
+        || "not currently checked out".to_owned(),
+        |path| path.display().to_string(),
+    );
+    let target_head = preview
+        .target_head
+        .as_deref()
+        .map(short_revision)
+        .unwrap_or_else(|| "missing".to_owned());
+    let run_head = short_revision(&preview.run_head);
+
+    let mut lines = vec![
+        Line::styled(
+            "Destination",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::from(vec![
+            Span::styled("  Branch  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!(" {target} "),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  at {target_head}"),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::styled(
+            format!("  Checkout  {checkout}"),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Line::raw(""),
+        Line::styled(
+            "Prepared run",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::from(vec![
+            Span::styled("  Commit  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(run_head, Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("  ·  {}", humanize(&preview.current_stage)),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+    ];
+
+    if preview.tickets.is_empty() {
+        lines.push(Line::styled(
+            "  No work tickets are attached to this promotion.",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        let completed = preview
+            .tickets
+            .iter()
+            .filter(|ticket| matches!(ticket.status.as_str(), "completed" | "closed"))
+            .count();
+        lines.push(Line::styled(
+            format!("  {completed}/{} tickets complete", preview.tickets.len()),
+            Style::default().fg(if completed == preview.tickets.len() {
+                Color::Green
+            } else {
+                Color::Yellow
+            }),
+        ));
+        for ticket in preview.tickets.iter().take(4) {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if matches!(ticket.status.as_str(), "completed" | "closed") {
+                        "  ✓ "
+                    } else {
+                        "  ○ "
+                    },
+                    Style::default().fg(status_color(&ticket.status)),
+                ),
+                Span::styled(ticket.title.clone(), Style::default().fg(Color::Gray)),
+            ]));
+        }
+        if preview.tickets.len() > 4 {
+            lines.push(Line::styled(
+                format!("    +{} more", preview.tickets.len() - 4),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    }
+
+    lines.push(Line::raw(""));
+    if preview.target_advanced {
+        lines.push(Line::styled(
+            "↻ The target advanced since the last sync. Koni will resynchronize and rerun downstream checks before promotion.",
+            Style::default().fg(Color::Yellow),
+        ));
+    } else {
+        lines.push(Line::styled(
+            "✓ Target is synchronized with the verified run base.",
+            Style::default().fg(Color::Green),
+        ));
+    }
+    for blocker in preview.blockers.iter().take(4) {
+        lines.push(Line::styled(
+            format!("! {blocker}"),
+            Style::default().fg(Color::LightRed),
+        ));
+    }
+
+    lines.push(Line::raw(""));
+    let button_label = if draft.submitted {
+        " Authorizing merge… ".to_owned()
+    } else if preview.can_authorize {
+        format!(" Merge into {target} ")
+    } else {
+        " Merge unavailable ".to_owned()
+    };
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            button_label,
+            if preview.can_authorize && !draft.submitted {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray).bg(Color::DarkGray)
+            },
+        ),
+    ]));
+    let controls = if preview.can_authorize {
+        "Enter confirm branch promotion · Esc cancel"
+    } else {
+        "Esc close · refresh and select merge after resolving blockers"
+    };
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(if preview.can_authorize {
+                        Color::LightGreen
+                    } else {
+                        Color::Yellow
+                    }))
+                    .title(" Merge run ")
+                    .title_bottom(control_tip(controls)),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn short_revision(revision: &str) -> String {
+    revision.chars().take(8).collect()
+}
+
+fn draw_agent_guidance_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    action: &crate::model::ActionFormDraft,
+    model: &ControlCenterModel,
+) {
+    let agents = model.selected_agent_summaries();
+    let persona = agents
+        .get(model.selected_agent)
+        .map(|agent| agent.persona.as_str())
+        .unwrap_or("agent");
+    let message = action
+        .params
+        .iter()
+        .find(|param| param.id == "message")
+        .map(|param| param.value.as_str())
+        .unwrap_or_default();
+    let guidance_scope = if action.params.iter().any(|param| {
+        matches!(param.id.as_str(), "ticket" | "ticket_id") && !param.value.trim().is_empty()
+    }) {
+        "selected ticket"
+    } else {
+        "selected run"
+    };
+    let content_width = usize::from(area.width.saturating_sub(6)).max(1);
+    let input = if message.is_empty() {
+        "Type guidance…".to_owned()
+    } else {
+        short(message, content_width)
+    };
+    let lines = vec![
+        Line::styled(
+            format!("Guidance for {persona}"),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::styled(
+            format!("This becomes durable guidance for the {guidance_scope}."),
+            Style::default().fg(Color::Gray),
+        ),
+        Line::raw(""),
+        Line::styled(
+            format!("▸ {input}"),
+            Style::default()
+                .fg(if message.is_empty() {
+                    Color::Gray
+                } else {
+                    Color::White
+                })
+                .bg(Color::DarkGray),
+        ),
+        Line::raw(""),
+        Line::styled(
+            "The current turn keeps its issued context; this is applied at the next compiler boundary.",
+            Style::default().fg(Color::Yellow),
+        ),
+        Line::styled(
+            if action.submitted {
+                "Recording guidance…"
+            } else {
+                "Ready to record durable guidance."
+            },
+            Style::default().fg(Color::Cyan),
+        ),
+    ];
+    let controls = if action.submitted {
+        "Esc close; guidance remains durable"
+    } else {
+        "Enter send guidance · Esc cancel"
+    };
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan))
+                    .title(" Send agent guidance ")
+                    .title_bottom(control_tip(controls)),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 fn answer_question_dialog_height(draft: &AnswerDraft, outer_width: u16) -> u16 {
@@ -619,7 +989,7 @@ fn answer_question_dialog_height(draft: &AnswerDraft, outer_width: u16) -> u16 {
                 }
             )
         } else if draft.pending_resume {
-            "Answer is durable; Enter retries the bound session resume.".to_owned()
+            "Answer is durable; the bound agent session still needs to resume.".to_owned()
         } else {
             "Recording answer and resuming agent…".to_owned()
         };
@@ -629,23 +999,18 @@ fn answer_question_dialog_height(draft: &AnswerDraft, outer_width: u16) -> u16 {
         }
     }
     lines += 1;
-    for (index, (_, label, description, recommended)) in draft.options.iter().enumerate() {
-        let label = format!(
-            "  {label}{}",
-            if *recommended { "  (recommended)" } else { "" }
-        );
-        lines += wrap_full_text(&label, width).len();
-        if index == draft.selected && !description.is_empty() {
-            lines += wrap_full_text(description, width.saturating_sub(4)).len();
-        }
-    }
+    lines += question_choice_lines(&draft.options, draft.selected, draft.allow_custom, width)
+        .lines
+        .len();
     lines += 1;
-    let custom = if draft.allow_custom {
-        format!("Custom: {}", draft.custom)
+    let custom = if draft.allow_custom && draft.selected == draft.options.len() {
+        format!("Your answer: {}", draft.custom)
     } else {
-        "Custom answers disabled for this question".to_owned()
+        format!("Notes (optional): {}", draft.custom)
     };
     lines += wrap_full_text(&custom, width).len();
+    // The control tip is carried by the modal's bottom border, not the body.
+    lines += 1;
     u16::try_from(lines.saturating_add(2))
         .unwrap_or(u16::MAX)
         .max(12)
@@ -655,17 +1020,15 @@ fn draw_approval_dialog(frame: &mut Frame<'_>, area: Rect, draft: &ApprovalDraft
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))
-        .title(" Review planning and approve ");
+        .title(" Review plan ");
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2),
-            Constraint::Length(2),
             Constraint::Min(5),
-            Constraint::Length(1),
-            Constraint::Length(2),
+            Constraint::Length(9),
             Constraint::Length(1),
         ])
         .split(inner);
@@ -689,20 +1052,9 @@ fn draw_approval_dialog(frame: &mut Frame<'_>, area: Rect, draft: &ApprovalDraft
         rows[0],
     );
 
-    let compact_tabs = rows[1].width < 100;
     let mut tab_spans = vec![Span::raw(" ")];
     for (index, section) in draft.sections.iter().enumerate() {
-        let label = if compact_tabs {
-            match section.title.as_str() {
-                "Resolved decisions" => "Decisions",
-                "Architecture plan" => "Architecture",
-                "Risk plan" => "Risks",
-                "Verification plan" => "Verification",
-                title => title,
-            }
-        } else {
-            section.title.as_str()
-        };
+        let label = section.title.as_str();
         let selected = index == draft.selected_section;
         tab_spans.push(Span::styled(
             format!(" {label} "),
@@ -717,154 +1069,250 @@ fn draw_approval_dialog(frame: &mut Frame<'_>, area: Rect, draft: &ApprovalDraft
         ));
         tab_spans.push(Span::raw(" "));
     }
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(tab_spans).alignment(Alignment::Center),
-            Line::styled("←/→ sections", Style::default().fg(Color::DarkGray))
-                .alignment(Alignment::Center),
-        ]),
-        rows[1],
-    );
-
     let section = draft.selected_section();
-    let section_title = section.map_or("Planning review", |section| section.title.as_str());
-    let section_count = draft.sections.len().max(1);
-    let content_block = Block::default().borders(Borders::ALL).title(format!(
-        " {}/{} · {} ",
-        draft.selected_section.saturating_add(1).min(section_count),
-        section_count,
-        section_title
-    ));
-    let content_inner = content_block.inner(rows[2]);
-    frame.render_widget(content_block, rows[2]);
+    let content_block = Block::default()
+        .borders(Borders::ALL)
+        .title(Line::from(tab_spans).alignment(Alignment::Center));
+    let content_inner = content_block.inner(rows[1]);
+    frame.render_widget(content_block, rows[1]);
     let body = section.map_or("No durable review text is available.", |section| {
         section.body.as_str()
     });
-    let body_lines = approval_wrapped_lines(body, usize::from(content_inner.width).max(1));
+    let body_lines = approval_markdown_lines(body, usize::from(content_inner.width).max(1));
     let visible = usize::from(content_inner.height).max(1);
     let max_scroll = body_lines.len().saturating_sub(visible);
     let scroll = draft.scroll.min(max_scroll);
     let end = scroll.saturating_add(visible).min(body_lines.len());
     frame.render_widget(
-        Paragraph::new(
-            body_lines[scroll..end]
-                .iter()
-                .map(|line| approval_body_line(line))
-                .collect::<Vec<_>>(),
-        ),
+        Paragraph::new(body_lines[scroll..end].to_vec()),
         content_inner,
     );
-
+    let action_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(6),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .split(rows[2]);
+    let editor_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(if draft.revision_focused {
+            Color::Cyan
+        } else {
+            Color::DarkGray
+        }))
+        .title(
+            Line::styled(
+                " Steering instructions ",
+                Style::default()
+                    .fg(if draft.revision_focused {
+                        Color::Cyan
+                    } else {
+                        Color::Gray
+                    })
+                    .add_modifier(if draft.revision_focused {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            )
+            .alignment(Alignment::Center),
+        );
+    let editor_inner = editor_block.inner(action_rows[0]);
+    frame.render_widget(editor_block, action_rows[0]);
     frame.render_widget(
-        Paragraph::new(format!(
-            "Lines {}-{} of {} · ↑/↓ one · PgUp/PgDn page",
-            scroll.saturating_add(1).min(body_lines.len()),
-            end.max(1),
-            body_lines.len()
+        Paragraph::new(approval_revision_editor_lines(
+            draft,
+            editor_inner.width,
+            editor_inner.height,
         ))
-        .style(Style::default().fg(Color::DarkGray))
-        .alignment(Alignment::Center),
-        rows[3],
+        .style(if draft.revision_focused {
+            Style::default().bg(Color::DarkGray)
+        } else {
+            Style::default()
+        }),
+        editor_inner,
     );
 
-    let (action, action_style, note) = if draft.submitted {
-        (
-            " Working… ",
-            Style::default().fg(Color::Yellow),
-            "Approval is durable; Esc closes this view.",
-        )
-    } else if !draft.approval_enabled {
-        (
-            " Approval unavailable ",
-            Style::default().fg(Color::DarkGray),
+    let has_steering = !draft.revision.trim().is_empty();
+    let action_label = if has_steering {
+        "Revise plan"
+    } else {
+        "Approve run"
+    };
+    let action_enabled = !draft.submitted && (has_steering || draft.approval_enabled);
+    let action_style = primary_modal_button_style(draft.action_focused, action_enabled);
+    let buttons = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Fill(1),
+            Constraint::Length(17),
+            Constraint::Fill(1),
+        ])
+        .split(action_rows[1]);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("  {action_label}  "),
+            action_style,
+        )))
+        .alignment(Alignment::Center),
+        buttons[1],
+    );
+
+    let note = if draft.submitted {
+        if has_steering {
+            "Regenerating the planning artifacts…"
+        } else {
+            "Creating the approved run…"
+        }
+    } else if draft.revision_focused {
+        "Enter newline · arrows/Home/End move · Ctrl+Enter submit · Tab selects the action"
+    } else if draft.action_focused {
+        if has_steering {
+            "Enter sends the plan back for revision."
+        } else if draft.approval_enabled {
+            "Enter approves the plans and creates the integration branch."
+        } else {
             draft
                 .blockers
                 .first()
                 .map(String::as_str)
-                .unwrap_or("Required planning output is incomplete."),
-        )
+                .unwrap_or("Required planning output is incomplete.")
+        }
     } else {
-        (
-            " Approve run ",
-            if draft.approve_focused {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::LightGreen)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::LightGreen)
-            },
-            if draft.approve_focused {
-                "Enter approves and creates the integration branch."
-            } else {
-                "Tab focuses the approval action after review."
-            },
-        )
+        "Tab selects the steering editor or primary action. Full artifacts remain available."
     };
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled(
-                    if draft.approve_focused {
-                        "▸ ["
-                    } else {
-                        "  ["
-                    },
-                    action_style,
-                ),
-                Span::styled(action, action_style),
-                Span::styled("]", action_style),
-            ])
-            .alignment(Alignment::Center),
-            Line::styled(
-                short(note, usize::from(rows[4].width)),
-                Style::default().fg(if draft.approval_enabled {
-                    Color::DarkGray
-                } else {
-                    Color::LightRed
-                }),
-            )
-            .alignment(Alignment::Center),
-        ]),
-        rows[4],
+        Paragraph::new(Line::styled(
+            short(note, usize::from(action_rows[2].width)),
+            Style::default().fg(Color::DarkGray),
+        ))
+        .alignment(Alignment::Center),
+        action_rows[2],
     );
+    let controls = "←→/[] sections · ↑↓/jk/PgUp/PgDn scroll · Tab focus · Enter · Esc";
     frame.render_widget(
-        Paragraph::new("←/→ sections · ↑/↓/Pg scroll · Tab action · r resume · Esc close")
+        Paragraph::new(controls)
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center),
-        rows[5],
+        rows[3],
     );
 }
 
-fn approval_wrapped_lines(body: &str, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    for source in body.lines() {
-        if source.trim().is_empty() {
-            lines.push(String::new());
-        } else {
-            lines.extend(wrap_full_text(source, width));
-        }
+fn primary_modal_button_style(focused: bool, enabled: bool) -> Style {
+    if !enabled {
+        Style::default().fg(Color::Gray).bg(Color::DarkGray)
+    } else if focused {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Cyan).bg(Color::DarkGray)
     }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
 }
 
-fn approval_body_line(line: &str) -> Line<'static> {
-    let text = line.to_owned();
-    if line.starts_with('#') {
-        Line::styled(
-            text,
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else if line.trim_start().starts_with("Decision:") {
-        Line::styled(text, Style::default().fg(Color::LightGreen))
+fn approval_revision_editor_lines(
+    draft: &ApprovalDraft,
+    width: u16,
+    height: u16,
+) -> Vec<Line<'static>> {
+    let width = usize::from(width.max(1));
+    let value_style = if draft.revision_focused {
+        Style::default().fg(Color::White).bg(Color::DarkGray)
     } else {
-        Line::raw(text)
+        Style::default().fg(Color::Gray)
+    };
+    let caret_style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let mut wrapped = if draft.revision.is_empty() {
+        if draft.revision_focused {
+            vec![Line::from(vec![
+                Span::styled("▏", caret_style),
+                Span::styled(
+                    " Type what should change…",
+                    Style::default().fg(Color::Gray),
+                ),
+            ])]
+        } else {
+            vec![Line::styled(
+                "Add steering here to request a revised plan…",
+                value_style,
+            )]
+        }
+    } else {
+        multiline_editor_value_lines(
+            &draft.revision,
+            draft.revision_focused.then_some(draft.revision_cursor),
+            width,
+            value_style,
+            caret_style,
+        )
+    };
+    if wrapped.is_empty() {
+        wrapped.push(Line::raw(""));
     }
+
+    let visible_rows = usize::from(height.max(1));
+    let caret_row = wrapped
+        .iter()
+        .position(|line| line.spans.iter().any(|span| span.style == caret_style));
+    let max_start = wrapped.len().saturating_sub(visible_rows);
+    let start = caret_row
+        .map_or(0, |row| row.saturating_sub(visible_rows - 1))
+        .min(max_start);
+    (0..visible_rows)
+        .map(|offset| wrapped.get(start + offset).cloned().unwrap_or_default())
+        .collect()
+}
+
+fn approval_markdown_lines(body: &str, width: usize) -> Vec<Line<'static>> {
+    render_markdown_preserving_lines(body, width)
+        .into_iter()
+        .map(|mut line| {
+            let text = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            let semantic = text
+                .trim_start()
+                .strip_prefix('•')
+                .map(str::trim_start)
+                .unwrap_or_else(|| text.trim_start());
+            let heading = line.spans.iter().any(|span| {
+                span.style.fg == Some(Color::Cyan)
+                    && span.style.add_modifier.contains(Modifier::BOLD)
+            });
+            if semantic.starts_with("Decision:") {
+                for span in &mut line.spans {
+                    let content = span.content.trim();
+                    if !content.is_empty()
+                        && content != "•"
+                        && span.style.fg != Some(Color::LightBlue)
+                    {
+                        span.style = span.style.fg(Color::LightGreen);
+                    }
+                }
+            } else if semantic.starts_with("Notes:") {
+                for span in &mut line.spans {
+                    if !span.content.trim().is_empty() {
+                        span.style = span.style.fg(Color::DarkGray);
+                    }
+                }
+            } else if !heading && !semantic.is_empty() {
+                for span in &mut line.spans {
+                    if !span.content.trim().is_empty() && span.style.fg.is_none() {
+                        span.style = span.style.fg(Color::Gray);
+                    }
+                }
+            }
+            line
+        })
+        .collect()
 }
 
 fn draw_help_dialog(
@@ -926,11 +1374,6 @@ fn draw_help_dialog(
             Span::raw(action.description),
         ])
     }));
-    lines.extend(spacer());
-    lines.push(Line::styled(
-        "Close: h · Esc · Enter · q · F1",
-        Style::default().fg(Color::DarkGray),
-    ));
     frame.render_widget(
         Paragraph::new(lines)
             .block(
@@ -938,7 +1381,8 @@ fn draw_help_dialog(
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Cyan))
                     .title(format!(" Help · {} ", content.title))
-                    .title_alignment(Alignment::Center),
+                    .title_alignment(Alignment::Center)
+                    .title_bottom(control_tip("Close: h · Esc · Enter · q · F1")),
             )
             .wrap(Wrap { trim: false }),
         area,
@@ -950,10 +1394,10 @@ fn configured_runs_orchestration_help_actions(model: &ControlCenterModel) -> Vec
         return Vec::new();
     };
     if run.orchestration.is_none()
-        || !run
+        || run
             .summary
             .as_ref()
-            .is_some_and(|summary| summary.status == "active")
+            .is_none_or(|summary| summary.status != "active")
     {
         return Vec::new();
     }
@@ -1100,7 +1544,7 @@ fn selector_heading(
     let indices = visible_indices.collect::<Vec<_>>();
     let first = indices.first().copied().unwrap_or_default() + 1;
     let last = indices.last().copied().unwrap_or_default() + 1;
-    format!("{label} · showing {first}–{last} of {total_items} · ←/→ choose · Home/End")
+    format!("{label} · showing {first}–{last} of {total_items}")
 }
 
 fn wizard_template_chip_layout(
@@ -1274,29 +1718,23 @@ fn draw_run_type_wizard(
             Style::default().fg(Color::White).bg(Color::DarkGray)
         },
     ));
-    lines.extend([
-        Line::styled(
-            short(
-                "Tab/↑/↓: move · ←/→: choose · Enter: continue · F5: create · Esc: cancel",
-                usize::from(inner_width),
-            ),
-            Style::default().fg(Color::DarkGray),
+    lines.push(Line::styled(
+        short(
+            "Creates a standalone draft for review and later publication.",
+            usize::from(inner_width),
         ),
-        Line::styled(
-            short(
-                "Creates a standalone copy. Review it here; Ctrl-P validates and publishes later.",
-                usize::from(inner_width),
-            ),
-            Style::default().fg(Color::Yellow),
-        ),
-    ]);
+        Style::default().fg(Color::Yellow),
+    ));
     frame.render_widget(
         Paragraph::new(lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Cyan))
-                    .title(" New run type · guided setup "),
+                    .title(" New run type · guided setup ")
+                    .title_bottom(control_tip(
+                        "Tab/↑↓/jk move · ←→/[] change · Home/End · Enter next · F5 create · Esc",
+                    )),
             )
             .wrap(Wrap { trim: false }),
         area,
@@ -1351,7 +1789,8 @@ struct RunTypeChip {
 fn new_run_dialog_area(screen: Rect, draft: &NewRunDraft, run_types: &[RunTypeOption]) -> Rect {
     let width = screen.width.saturating_sub(4).min(108);
     let inner_width = width.saturating_sub(2).max(1);
-    let prompt_rows = 1_u16.saturating_add(
+    let objective_rows = new_run_objective_rows(screen.height);
+    let prompt_rows = objective_rows.saturating_add(
         u16::try_from(draft.intake_fields.len())
             .unwrap_or(u16::MAX)
             .saturating_mul(2),
@@ -1364,17 +1803,20 @@ fn new_run_dialog_area(screen: Rect, draft: &NewRunDraft, run_types: &[RunTypeOp
     )
     .unwrap_or(u16::MAX);
     let gap = new_run_section_gap(screen.height.saturating_sub(2));
-    let base_height = 16_u16.saturating_add(gap.saturating_mul(4));
+    let base_height = 17_u16.saturating_add(gap.saturating_mul(5));
     let one_chip_row_height = base_height
         .saturating_add(prompt_rows)
         .saturating_add(stage_rows);
-    let chip_rows = run_type_chip_layout(run_types, inner_width)
+    let chip_layout = run_type_chip_layout(run_types, inner_width);
+    let chips_inline = run_type_layout_fits_inline(&chip_layout, inner_width);
+    let chip_rows = chip_layout
         .last()
         .map_or(1, |chip| chip.row + 1)
         .min(if one_chip_row_height >= 30 { 3 } else { 1 });
+    let chip_extra_rows = if chips_inline { 0 } else { chip_rows };
     let natural_height = base_height
         .saturating_add(prompt_rows)
-        .saturating_add(chip_rows)
+        .saturating_add(chip_extra_rows)
         .saturating_add(stage_rows)
         .min(40)
         .max(if gap > 0 { 28 } else { 0 });
@@ -1392,19 +1834,27 @@ fn new_run_dialog_area(screen: Rect, draft: &NewRunDraft, run_types: &[RunTypeOp
 }
 
 fn new_run_section_gap(dialog_height: u16) -> u16 {
-    u16::from(dialog_height >= 28)
+    u16::from(dialog_height >= 30)
 }
 
-fn new_run_prompt_row_height(index: usize) -> u16 {
-    if index == 0 { 1 } else { 2 }
+fn new_run_objective_rows(dialog_height: u16) -> u16 {
+    if dialog_height >= 30 { 4 } else { 2 }
 }
 
-fn new_run_prompt_window(draft: &NewRunDraft, available_rows: u16) -> (usize, usize, u16) {
+fn new_run_prompt_row_height(index: usize, objective_rows: u16) -> u16 {
+    if index == 0 { objective_rows } else { 2 }
+}
+
+fn new_run_prompt_window(
+    draft: &NewRunDraft,
+    available_rows: u16,
+    objective_rows: u16,
+) -> (usize, usize, u16) {
     let total = 1 + draft.intake_fields.len();
     let active = draft.active_field.min(total.saturating_sub(1));
-    let available_rows = available_rows.max(new_run_prompt_row_height(active));
+    let available_rows = available_rows.max(new_run_prompt_row_height(active, objective_rows));
     let all_rows = (0..total).fold(0_u16, |rows, index| {
-        rows.saturating_add(new_run_prompt_row_height(index))
+        rows.saturating_add(new_run_prompt_row_height(index, objective_rows))
     });
     if all_rows <= available_rows {
         return (0, total, all_rows);
@@ -1414,7 +1864,7 @@ fn new_run_prompt_window(draft: &NewRunDraft, available_rows: u16) -> (usize, us
         let mut end = start;
         let mut rows = 0_u16;
         while end < total {
-            let height = new_run_prompt_row_height(end);
+            let height = new_run_prompt_row_height(end, objective_rows);
             if end > start && rows.saturating_add(height) > available_rows {
                 break;
             }
@@ -1475,6 +1925,14 @@ fn run_type_chip_page(
         chip.row -= window.start;
     }
     (chips, window)
+}
+
+fn run_type_layout_fits_inline(chips: &[RunTypeChip], width: u16) -> bool {
+    let prefix = u16::try_from(2 + CONFIG_CONTROL_LABEL_WIDTH).unwrap_or(u16::MAX);
+    chips.iter().all(|chip| chip.row == 0)
+        && chips
+            .last()
+            .is_none_or(|chip| prefix.saturating_add(chip.x).saturating_add(chip.width) <= width)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1616,7 +2074,7 @@ fn draw_new_run_dialog_legacy(
         lines.push(Line::styled(
             short(
                 &format!(
-                    "{planning} · {} questions · {parallel}",
+                    "{planning} · planning questions: {} · {parallel}",
                     humanize(&selected.question_policy).to_lowercase()
                 ),
                 usize::from(inner_width),
@@ -1632,14 +2090,14 @@ fn draw_new_run_dialog_legacy(
     }
 
     let mut fields = vec![
+        ("Objective".to_owned(), draft.goal.clone(), String::new()),
         (
-            "Goal / work request".to_owned(),
-            draft.goal.clone(),
+            "Target branch".to_owned(),
+            draft.target_branch.clone(),
             String::new(),
         ),
-        ("Base ref".to_owned(), draft.base_ref.clone(), String::new()),
         (
-            "Question policy".to_owned(),
+            "Planning questions".to_owned(),
             humanize(&draft.question_policy),
             String::new(),
         ),
@@ -1684,7 +2142,7 @@ fn draw_new_run_dialog_legacy(
         lines.push(Line::styled(
             short(
                 &format!(
-                    "Details · showing {}–{} of {} · Tab/↑/↓ move",
+                    "Details · showing {}–{} of {}",
                     field_window.start + 1,
                     field_window.end,
                     field_window.total
@@ -1739,31 +2197,30 @@ fn draw_new_run_dialog_legacy(
         Line::styled(
             short(
                 if draft.submitted {
-                    "Planning agent is running… · Esc: close (the run remains durable)"
-                } else if draft.active_field == 0 {
-                    "←/→ or Home/End: select · click: choose · Enter: continue · Esc: cancel"
+                    "Planning agent is running; the run remains durable after this view closes."
                 } else {
-                    "Enter: next/start planning · ←/→: configured choices · Esc: cancel"
+                    "A permanent branch is created only after plan approval."
                 },
-                usize::from(inner_width),
-            ),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Line::styled(
-            short(
-                "A permanent branch is created only after plan approval.",
                 usize::from(inner_width),
             ),
             Style::default().fg(Color::Yellow),
         ),
     ]);
+    let controls = if draft.submitted {
+        "Esc close"
+    } else if draft.active_field == 0 {
+        "←/→ or [/] or Home/End select · click select · Enter continue · Esc cancel"
+    } else {
+        "Enter next/start planning · ←/→ or [/] change · Esc cancel"
+    };
     frame.render_widget(
         Paragraph::new(lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Cyan))
-                    .title(" New run · guided intake "),
+                    .title(" New run · guided intake ")
+                    .title_bottom(control_tip(controls)),
             )
             .wrap(Wrap { trim: false }),
         area,
@@ -1779,6 +2236,7 @@ const NEW_RUN_AGENT_ROLES: [(&str, &str); 4] = [
 
 #[derive(Debug, Clone, Copy)]
 struct NewRunControlIndices {
+    target: usize,
     run_type: usize,
     questions: usize,
     parallel: usize,
@@ -1787,17 +2245,60 @@ struct NewRunControlIndices {
 }
 
 fn new_run_control_indices(draft: &NewRunDraft) -> NewRunControlIndices {
-    let run_type = 1 + draft.intake_fields.len();
+    let target = 1 + draft.intake_fields.len();
+    let run_type = target + 1;
     let questions = run_type + 1;
     let parallel = questions + 1;
     let agents = parallel + 1;
     NewRunControlIndices {
+        target,
         run_type,
         questions,
         parallel,
         agents,
         submit: agents + NEW_RUN_AGENT_ROLES.len() * 2,
     }
+}
+
+fn target_branch_line(draft: &NewRunDraft, focused: bool, width: u16) -> Line<'static> {
+    let candidate = draft
+        .target_branches
+        .iter()
+        .find(|branch| branch.reference == draft.target_branch);
+    let branch = candidate
+        .map(|branch| branch.name.as_str())
+        .or_else(|| draft.target_branch.strip_prefix("refs/heads/"))
+        .unwrap_or(draft.target_branch.as_str());
+    let suffix = candidate
+        .filter(|branch| branch.checked_out)
+        .map(|_| "  checked out")
+        .unwrap_or_default();
+    let badge = format!("  ◀  {branch}  ▶  ");
+    let available = usize::from(width).saturating_sub(2 + CONFIG_CONTROL_LABEL_WIDTH);
+    Line::from(vec![
+        Span::styled(
+            if focused { "▸ " } else { "  " },
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::styled(
+            format!("{:<CONFIG_CONTROL_LABEL_WIDTH$}", "Target branch"),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            short(&badge, available.saturating_sub(suffix.chars().count())),
+            if focused {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White).bg(Color::DarkGray)
+            },
+        ),
+        Span::styled(suffix, Style::default().fg(Color::DarkGray)),
+    ])
 }
 
 fn section_divider(title: &str, width: u16) -> Line<'static> {
@@ -1810,7 +2311,7 @@ fn section_divider(title: &str, width: u16) -> Line<'static> {
         Span::styled(
             format!(" {title} "),
             Style::default()
-                .fg(Color::Gray)
+                .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("─".repeat(right), Style::default().fg(Color::DarkGray)),
@@ -1818,16 +2319,24 @@ fn section_divider(title: &str, width: u16) -> Line<'static> {
 }
 
 const QUESTION_POLICIES: [(&str, &str, Color); 3] = [
-    ("autonomous", "no", Color::LightGreen),
-    ("high_impact_only", "some", Color::Yellow),
-    ("interactive", "many", Color::LightMagenta),
+    ("autonomous", "no", Color::Rgb(112, 148, 214)),
+    ("high_impact_only", "some", Color::Rgb(92, 181, 201)),
+    ("interactive", "many", Color::Rgb(174, 126, 211)),
 ];
 
 fn question_policy_chips(policy: &str, focused: bool) -> Line<'static> {
-    let mut spans = vec![Span::styled(
-        if focused { "▸ " } else { "  " },
-        Style::default().fg(Color::Cyan),
-    )];
+    let mut spans = vec![
+        Span::styled(
+            if focused { "▸ " } else { "  " },
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::styled(
+            format!("{:<CONFIG_CONTROL_LABEL_WIDTH$}", "Questions"),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
     for (index, (value, label, color)) in QUESTION_POLICIES.iter().enumerate() {
         if index > 0 {
             spans.push(Span::raw(" "));
@@ -1858,7 +2367,7 @@ fn question_policy_chips(policy: &str, focused: bool) -> Line<'static> {
 }
 
 fn question_policy_badge_ranges(width: u16) -> Vec<(&'static str, BadgeRange)> {
-    let mut start = 2_u16;
+    let mut start = u16::try_from(2 + CONFIG_CONTROL_LABEL_WIDTH).unwrap_or(u16::MAX);
     QUESTION_POLICIES
         .iter()
         .map(|(policy, label, _)| {
@@ -1999,7 +2508,14 @@ fn workflow_stage_rows(
             Style::default().fg(Color::DarkGray),
         )]];
     }
-    let title_width = usize::from(width).saturating_sub(17).max(1);
+    // Keep wrapping stable across every supported terminal width so the draft
+    // can own a row offset without coupling keyboard handling to a particular
+    // render frame. Fifty-nine columns is the title budget at the documented
+    // 82-column minimum; roomier dialogs retain that readable line length.
+    const STAGE_TITLE_WIDTH: usize = 59;
+    let title_width = usize::from(width)
+        .saturating_sub(17)
+        .clamp(1, STAGE_TITLE_WIDTH);
     canonical
         .iter()
         .enumerate()
@@ -2061,23 +2577,57 @@ fn workflow_stage_rows(
         .collect()
 }
 
-fn visible_workflow_stage_lines(
+#[derive(Debug, Clone)]
+struct WorkflowStageWindow {
+    lines: Vec<Line<'static>>,
+    first_stage: usize,
+    end_stage: usize,
+}
+
+fn workflow_stage_window(
     stages: &[Vec<Line<'static>>],
+    requested_first_line: usize,
     capacity: usize,
-) -> (Vec<Line<'static>>, usize) {
-    let mut lines = Vec::new();
-    let mut visible_stages = 0;
-    for stage in stages {
-        if lines.len().saturating_add(stage.len()) > capacity {
-            if lines.is_empty() {
-                lines.extend(stage.iter().take(capacity).cloned());
-            }
-            break;
-        }
-        lines.extend(stage.iter().cloned());
-        visible_stages += 1;
+) -> WorkflowStageWindow {
+    if stages.is_empty() || capacity == 0 {
+        return WorkflowStageWindow {
+            lines: Vec::new(),
+            first_stage: 0,
+            end_stage: 0,
+        };
     }
-    (lines, visible_stages)
+    let flattened = stages
+        .iter()
+        .enumerate()
+        .flat_map(|(stage_index, lines)| lines.iter().cloned().map(move |line| (stage_index, line)))
+        .collect::<Vec<_>>();
+    let first_line = requested_first_line.min(flattened.len().saturating_sub(1));
+    let visible = flattened
+        .iter()
+        .skip(first_line)
+        .take(capacity)
+        .cloned()
+        .collect::<Vec<_>>();
+    let first_stage = visible.first().map_or(0, |(stage, _)| *stage);
+    let end_stage = visible
+        .last()
+        .map_or(first_stage, |(stage, _)| stage.saturating_add(1));
+    WorkflowStageWindow {
+        lines: visible.into_iter().map(|(_, line)| line).collect(),
+        first_stage,
+        end_stage,
+    }
+}
+
+pub(crate) fn new_run_stage_line_count(
+    run_types: &[RunTypeOption],
+    selected_run_type: &str,
+) -> usize {
+    // 76 = the New Run inner width at the supported 82-column minimum.
+    workflow_stage_rows(run_types, selected_run_type, 76)
+        .iter()
+        .map(Vec::len)
+        .sum()
 }
 
 const CONFIG_CONTROL_LABEL_WIDTH: usize = 22;
@@ -2169,19 +2719,19 @@ fn agent_table_header_line() -> Line<'static> {
         Span::styled(
             format!("{:<AGENT_ROLE_WIDTH$}", "Agent"),
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("{:<AGENT_MODEL_COLUMN_WIDTH$}", "Model"),
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             "Reasoning",
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         ),
     ])
@@ -2189,42 +2739,62 @@ fn agent_table_header_line() -> Line<'static> {
 
 fn stable_model_color(model: &str) -> Color {
     match model {
-        "Codex default" => return Color::Gray,
-        "gpt-5.5" => return Color::LightBlue,
-        "gpt-5.6-sol" => return Color::LightGreen,
-        "gpt-5.6-terra" => return Color::LightMagenta,
-        "gpt-5.6-luna" => return Color::LightCyan,
-        "gpt-5.4" => return Color::Yellow,
-        "gpt-5.4-mini" => return Color::LightRed,
-        "gpt-5.3-codex-spark" => return Color::Cyan,
+        "Codex default" => return Color::Rgb(132, 142, 158),
+        "gpt-5.5" => return Color::Rgb(112, 158, 222),
+        "gpt-5.6-sol" => return Color::Rgb(121, 185, 204),
+        "gpt-5.6-terra" => return Color::Rgb(177, 132, 214),
+        "gpt-5.6-luna" => return Color::Rgb(111, 199, 190),
+        "gpt-5.4" => return Color::Rgb(151, 145, 218),
+        "gpt-5.4-mini" => return Color::Rgb(197, 131, 197),
+        "gpt-5.3-codex-spark" => return Color::Rgb(101, 181, 224),
         _ => {}
     }
     let hash = model.bytes().fold(2_166_136_261_usize, |hash, byte| {
         hash.wrapping_mul(16_777_619) ^ usize::from(byte)
     });
     // Dynamic catalogs can introduce models we did not know at compile time.
-    // Derive a stable, readable true-color badge instead of collapsing them
-    // into a small palette where unrelated models frequently look identical.
-    let channel = |shift: usize| {
+    // Keep their identity colors in a cool categorical palette so ordinary
+    // model choices never borrow the red/green semantics reserved for state.
+    let channel = |shift: usize, floor: u8, range: u8| {
         let value = u8::try_from((hash >> shift) & 0xff).unwrap_or_default();
-        96_u8.saturating_add(value % 144)
+        floor.saturating_add(value % range)
     };
-    Color::Rgb(channel(0), channel(8), channel(16))
+    Color::Rgb(
+        channel(0, 92, 104),
+        channel(8, 126, 84),
+        channel(16, 178, 70),
+    )
 }
 
 fn stable_reasoning_color(reasoning: &str) -> Color {
-    match reasoning {
-        "none" => Color::DarkGray,
-        "minimal" => Color::Gray,
-        "low" => Color::LightGreen,
-        "medium" => Color::LightBlue,
-        "high" => Color::Yellow,
-        "xhigh" => Color::LightMagenta,
-        "max" => Color::LightRed,
-        "ultra" => Color::LightCyan,
-        "Codex default" => Color::Gray,
-        other => stable_model_color(other),
-    }
+    const AXIS: [Color; 8] = [
+        Color::Rgb(218, 202, 210),
+        Color::Rgb(222, 191, 207),
+        Color::Rgb(226, 180, 204),
+        Color::Rgb(230, 165, 199),
+        Color::Rgb(234, 148, 193),
+        Color::Rgb(238, 128, 187),
+        Color::Rgb(242, 105, 179),
+        Color::Rgb(246, 80, 170),
+    ];
+    let index = match reasoning {
+        "none" => 0,
+        "minimal" => 1,
+        "low" => 2,
+        "medium" => 3,
+        "high" => 4,
+        "xhigh" => 5,
+        "max" => 6,
+        "ultra" => 7,
+        "Codex default" => return Color::Rgb(210, 198, 204),
+        other => {
+            let hash = other.bytes().fold(2_166_136_261_usize, |hash, byte| {
+                hash.wrapping_mul(16_777_619) ^ usize::from(byte)
+            });
+            hash % AXIS.len()
+        }
+    };
+    AXIS[index]
 }
 
 fn identity_badge(value: &str, color: Color, focused: bool) -> Span<'static> {
@@ -2282,6 +2852,69 @@ fn agent_selector_line(
     ])
 }
 
+fn objective_editor_lines(
+    draft: &NewRunDraft,
+    width: u16,
+    height: u16,
+    focused: bool,
+) -> Vec<Line<'static>> {
+    let editor_width = usize::from(width.saturating_sub(2).max(1));
+    let value_style = if focused {
+        Style::default().fg(Color::White).bg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let caret_style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let mut wrapped = if draft.goal.is_empty() && !focused {
+        vec![Line::styled("—", value_style)]
+    } else {
+        multiline_editor_value_lines(
+            &draft.goal,
+            focused.then_some(draft.objective_cursor),
+            editor_width,
+            value_style,
+            caret_style,
+        )
+    };
+    if wrapped.is_empty() {
+        wrapped.push(Line::raw(""));
+    }
+
+    let visible_rows = usize::from(height.max(1));
+    let caret_row = wrapped
+        .iter()
+        .position(|line| line.spans.iter().any(|span| span.style == caret_style));
+    let max_start = wrapped.len().saturating_sub(visible_rows);
+    let start = caret_row
+        .map_or(0, |row| row.saturating_sub(visible_rows - 1))
+        .min(max_start);
+    let mut output = Vec::with_capacity(visible_rows);
+    for visible_index in 0..visible_rows {
+        let source_index = start + visible_index;
+        let prefix = if focused && visible_index == 0 {
+            "▸ "
+        } else {
+            "  "
+        };
+        let mut spans = vec![Span::styled(
+            prefix,
+            Style::default().fg(if focused {
+                Color::Cyan
+            } else {
+                Color::DarkGray
+            }),
+        )];
+        if let Some(line) = wrapped.get(source_index) {
+            spans.extend(line.spans.clone());
+        }
+        output.push(Line::from(spans));
+    }
+    output
+}
+
 fn draw_new_run_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -2293,8 +2926,11 @@ fn draw_new_run_dialog(
     let indices = new_run_control_indices(draft);
     let (chips, window) = run_type_chip_page(draft, run_types, width, area.height);
     let chip_rows = chips.last().map_or(1, |chip| chip.row + 1);
+    let chips_inline = !window.is_paged() && run_type_layout_fits_inline(&chips, width);
+    let chip_extra_rows = if chips_inline { 0 } else { chip_rows };
     let stage_groups = workflow_stage_rows(run_types, &draft.run_type, width);
     let gap = new_run_section_gap(area.height);
+    let objective_rows = new_run_objective_rows(area.height);
     // At compact terminal sizes, preserve every interactive control and use
     // the remaining rows for the ordered stage preview. A taller terminal
     // naturally expands this window until every full stage title is shown.
@@ -2302,43 +2938,35 @@ fn draw_new_run_dialog(
     let active_prompt = draft.active_field.min(prompt_total.saturating_sub(1));
     let stage_capacity = usize::from(
         inner_height.saturating_sub(
-            14_u16
-                .saturating_add(gap.saturating_mul(4))
-                .saturating_add(chip_rows)
-                .saturating_add(new_run_prompt_row_height(active_prompt)),
+            15_u16
+                .saturating_add(gap.saturating_mul(5))
+                .saturating_add(chip_extra_rows)
+                .saturating_add(new_run_prompt_row_height(active_prompt, objective_rows)),
         ),
     );
-    let (visible_stage_lines, visible_stage_count) =
-        visible_workflow_stage_lines(&stage_groups, stage_capacity);
-    let fixed_rows = 14_u16
-        .saturating_add(gap.saturating_mul(4))
-        .saturating_add(chip_rows)
+    let stage_window = workflow_stage_window(&stage_groups, draft.stage_scroll, stage_capacity);
+    let visible_stage_lines = stage_window.lines;
+    let first_visible_stage = stage_window.first_stage;
+    let end_visible_stage = stage_window.end_stage;
+    let fixed_rows = 15_u16
+        .saturating_add(gap.saturating_mul(5))
+        .saturating_add(chip_extra_rows)
         .saturating_add(u16::try_from(visible_stage_lines.len()).unwrap_or(u16::MAX));
-    let (prompt_start, prompt_end, _) =
-        new_run_prompt_window(draft, inner_height.saturating_sub(fixed_rows));
+    let (prompt_start, prompt_end, _) = new_run_prompt_window(
+        draft,
+        inner_height.saturating_sub(fixed_rows),
+        objective_rows,
+    );
 
-    let mut lines = vec![section_divider("Goal Prompt", width)];
+    let mut lines = vec![section_divider("Objective", width)];
     for prompt_index in prompt_start..prompt_end {
         let focused = draft.active_field == prompt_index;
         if prompt_index == 0 {
-            let input = if draft.goal.is_empty() {
-                if focused {
-                    "▸ ▏".to_owned()
-                } else {
-                    "  —".to_owned()
-                }
-            } else if focused {
-                format!("▸ {}", draft.goal)
-            } else {
-                format!("  {}", draft.goal)
-            };
-            lines.push(Line::styled(
-                short(&input, usize::from(width)),
-                if focused {
-                    Style::default().fg(Color::White).bg(Color::DarkGray)
-                } else {
-                    Style::default()
-                },
+            lines.extend(objective_editor_lines(
+                draft,
+                width,
+                objective_rows,
+                focused,
             ));
             continue;
         }
@@ -2384,27 +3012,68 @@ fn draw_new_run_dialog(
     }
 
     lines.push(section_divider("Run Config", width));
-    lines.push(Line::styled(
-        selector_heading(
-            "Run type",
-            chips.iter().map(|chip| chip.index),
-            run_types.len(),
-            window,
-        ),
-        Style::default()
-            .fg(if draft.active_field == indices.run_type {
-                Color::Cyan
-            } else {
-                Color::DarkGray
-            })
-            .add_modifier(Modifier::BOLD),
+    lines.push(target_branch_line(
+        draft,
+        draft.active_field == indices.target,
+        width,
     ));
+    if gap > 0 {
+        lines.push(Line::raw(""));
+    }
+    if !chips_inline {
+        lines.push(Line::from(vec![
+            Span::styled(
+                if draft.active_field == indices.run_type {
+                    "▸ "
+                } else {
+                    "  "
+                },
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(
+                selector_heading(
+                    "Run type",
+                    chips.iter().map(|chip| chip.index),
+                    run_types.len(),
+                    window,
+                ),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
     for row in 0..chip_rows {
-        let mut spans = Vec::new();
-        let mut cursor = 0_u16;
+        let mut spans = if chips_inline {
+            vec![
+                Span::styled(
+                    if draft.active_field == indices.run_type {
+                        "▸ "
+                    } else {
+                        "  "
+                    },
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    format!("{:<CONFIG_CONTROL_LABEL_WIDTH$}", "Run type"),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]
+        } else {
+            Vec::new()
+        };
+        let prefix = if chips_inline {
+            u16::try_from(2 + CONFIG_CONTROL_LABEL_WIDTH).unwrap_or(u16::MAX)
+        } else {
+            0
+        };
+        let mut cursor = prefix;
         for chip in chips.iter().filter(|chip| chip.row == row) {
-            if chip.x > cursor {
-                spans.push(Span::raw(" ".repeat(usize::from(chip.x - cursor))));
+            let chip_x = prefix.saturating_add(chip.x);
+            if chip_x > cursor {
+                spans.push(Span::raw(" ".repeat(usize::from(chip_x - cursor))));
             }
             let run_type = &run_types[chip.index];
             let selected = run_type.id == draft.run_type;
@@ -2420,7 +3089,7 @@ fn draw_new_run_dialog(
                     Style::default().fg(Color::White).bg(Color::DarkGray)
                 },
             ));
-            cursor = chip.x.saturating_add(chip.width);
+            cursor = chip_x.saturating_add(chip.width);
         }
         lines.push(Line::from(spans));
     }
@@ -2429,10 +3098,11 @@ fn draw_new_run_dialog(
         lines.push(Line::raw(""));
     }
 
-    let stage_heading = if visible_stage_count < stage_groups.len() {
+    let stage_heading = if first_visible_stage > 0 || end_visible_stage < stage_groups.len() {
         format!(
-            "Stages · showing 1–{} of {}",
-            visible_stage_count.max(1),
+            "Stages · {}–{} of {} · PgUp/PgDn",
+            first_visible_stage.saturating_add(1),
+            end_visible_stage.max(first_visible_stage.saturating_add(1)),
             stage_groups.len()
         )
     } else {
@@ -2441,23 +3111,13 @@ fn draw_new_run_dialog(
     lines.push(Line::styled(
         stage_heading,
         Style::default()
-            .fg(Color::DarkGray)
+            .fg(Color::White)
             .add_modifier(Modifier::BOLD),
     ));
     lines.extend(visible_stage_lines);
     if gap > 0 {
         lines.push(Line::raw(""));
     }
-    lines.push(Line::styled(
-        "Questions",
-        Style::default()
-            .fg(if draft.active_field == indices.questions {
-                Color::Cyan
-            } else {
-                Color::DarkGray
-            })
-            .add_modifier(Modifier::BOLD),
-    ));
     lines.push(question_policy_chips(
         &draft.question_policy,
         draft.active_field == indices.questions,
@@ -2482,6 +3142,10 @@ fn draw_new_run_dialog(
             draft.active_field == model_field + 1,
         ));
     }
+    lines.push(Line::styled(
+        "─".repeat(usize::from(width)),
+        Style::default().fg(Color::DarkGray),
+    ));
 
     let selected_workflow = run_types
         .iter()
@@ -2506,23 +3170,20 @@ fn draw_new_run_dialog(
         ))
         .alignment(Alignment::Center),
     );
-    lines.push(
-        Line::styled(
-            "Tab/↑/↓ move · ←/→ change · Enter activates selected control · Esc cancels",
-            Style::default().fg(Color::DarkGray),
-        )
-        .alignment(Alignment::Center),
-    );
+    let footer = if draft.active_field == 0 {
+        "Enter newline · arrows/Home/End · Backspace/Delete · Tab next · Esc"
+    } else {
+        "Tab/↑↓/jk move · ←→/[] change · Enter activates control · Esc cancels"
+    };
     lines.truncate(usize::from(inner_height));
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan))
-                    .title(" New run "),
-            )
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(" New run ")
+                .title_bottom(control_tip(footer)),
+        ),
         area,
     );
 }
@@ -2549,7 +3210,7 @@ pub(crate) fn new_run_hit_at(
         draft,
         &model.run_types,
     );
-    let (chips, _) = run_type_chip_page(
+    let (chips, window) = run_type_chip_page(
         draft,
         &model.run_types,
         area.width.saturating_sub(2).max(1),
@@ -2558,38 +3219,60 @@ pub(crate) fn new_run_hit_at(
     let chip_rows = chips.last().map_or(1, |chip| chip.row + 1);
     let inner_height = area.height.saturating_sub(2);
     let width = area.width.saturating_sub(2).max(1);
+    let chips_inline = !window.is_paged() && run_type_layout_fits_inline(&chips, width);
+    let chip_extra_rows = if chips_inline { 0 } else { chip_rows };
     let stage_groups = workflow_stage_rows(&model.run_types, &draft.run_type, width);
     let gap = new_run_section_gap(area.height);
+    let objective_rows = new_run_objective_rows(area.height);
     let prompt_total = 1 + draft.intake_fields.len();
     let active_prompt = draft.active_field.min(prompt_total.saturating_sub(1));
     let stage_capacity = usize::from(
         inner_height.saturating_sub(
-            14_u16
-                .saturating_add(gap.saturating_mul(4))
-                .saturating_add(chip_rows)
-                .saturating_add(new_run_prompt_row_height(active_prompt)),
+            15_u16
+                .saturating_add(gap.saturating_mul(5))
+                .saturating_add(chip_extra_rows)
+                .saturating_add(new_run_prompt_row_height(active_prompt, objective_rows)),
         ),
     );
-    let (visible_stage_lines, _) = visible_workflow_stage_lines(&stage_groups, stage_capacity);
-    let fixed_rows = 14_u16
-        .saturating_add(gap.saturating_mul(4))
-        .saturating_add(chip_rows)
+    let visible_stage_lines =
+        workflow_stage_window(&stage_groups, draft.stage_scroll, stage_capacity).lines;
+    let fixed_rows = 15_u16
+        .saturating_add(gap.saturating_mul(5))
+        .saturating_add(chip_extra_rows)
         .saturating_add(u16::try_from(visible_stage_lines.len()).unwrap_or(u16::MAX));
-    let (prompt_start, prompt_end, prompt_rows) =
-        new_run_prompt_window(draft, inner_height.saturating_sub(fixed_rows));
+    let (prompt_start, prompt_end, prompt_rows) = new_run_prompt_window(
+        draft,
+        inner_height.saturating_sub(fixed_rows),
+        objective_rows,
+    );
     let inner_y = area.y.saturating_add(1);
     let prompt_y = inner_y.saturating_add(1);
     let mut field_y = prompt_y;
     for index in prompt_start..prompt_end {
-        let height = new_run_prompt_row_height(index);
+        let height = new_run_prompt_row_height(index, objective_rows);
         if row >= field_y && row < field_y.saturating_add(height) {
             return Some(NewRunHit::Field(index));
         }
         field_y = field_y.saturating_add(height);
     }
-    let chip_y = inner_y.saturating_add(3).saturating_add(prompt_rows);
+    let target_selector_y = inner_y.saturating_add(2).saturating_add(prompt_rows);
+    let run_selector_y = target_selector_y.saturating_add(1).saturating_add(gap);
+    let chip_y = if chips_inline {
+        run_selector_y
+    } else {
+        run_selector_y.saturating_add(1)
+    };
+    let chip_prefix = if chips_inline {
+        u16::try_from(2 + CONFIG_CONTROL_LABEL_WIDTH).unwrap_or(u16::MAX)
+    } else {
+        0
+    };
     if let Some(id) = chips.into_iter().find_map(|chip| {
-        let x = area.x.saturating_add(1).saturating_add(chip.x);
+        let x = area
+            .x
+            .saturating_add(1)
+            .saturating_add(chip_prefix)
+            .saturating_add(chip.x);
         let y = chip_y.saturating_add(chip.row);
         (column >= x && column < x.saturating_add(chip.width) && row == y)
             .then(|| model.run_types[chip.index].id.clone())
@@ -2597,14 +3280,20 @@ pub(crate) fn new_run_hit_at(
         return Some(NewRunHit::RunType(id));
     }
     let indices = new_run_control_indices(draft);
-    let stage_y = chip_y
-        .saturating_add(chip_rows)
+    if row == target_selector_y {
+        return Some(NewRunHit::Field(indices.target));
+    }
+    if row == run_selector_y {
+        return Some(NewRunHit::Field(indices.run_type));
+    }
+    let run_type_rows = 1_u16.saturating_add(chip_extra_rows);
+    let stage_y = run_selector_y
+        .saturating_add(run_type_rows)
         .saturating_add(gap)
         .saturating_add(1);
-    let questions_heading_y = stage_y
+    let questions_y = stage_y
         .saturating_add(u16::try_from(visible_stage_lines.len()).unwrap_or(u16::MAX))
         .saturating_add(gap);
-    let questions_y = questions_heading_y.saturating_add(1);
     let parallel_y = questions_y.saturating_add(1).saturating_add(gap);
     let agents_header_y = parallel_y.saturating_add(1).saturating_add(gap);
     let agents_y = agents_header_y.saturating_add(1);
@@ -2616,9 +3305,6 @@ pub(crate) fn new_run_hit_at(
     let in_range = |range: BadgeRange| {
         local_column >= range.start && local_column < range.start.saturating_add(range.width)
     };
-    if row == questions_heading_y {
-        return Some(NewRunHit::Field(indices.questions));
-    }
     if row == questions_y {
         if let Some((policy, _)) = question_policy_badge_ranges(width)
             .into_iter()
@@ -2653,8 +3339,9 @@ pub(crate) fn new_run_hit_at(
             return Some(NewRunHit::Field(indices.agents + offset * 2 + 1));
         }
     }
-    let submit_y =
-        agents_y.saturating_add(u16::try_from(NEW_RUN_AGENT_ROLES.len()).unwrap_or(u16::MAX));
+    let submit_y = agents_y
+        .saturating_add(u16::try_from(NEW_RUN_AGENT_ROLES.len()).unwrap_or(u16::MAX))
+        .saturating_add(1);
     if row == submit_y {
         let button_label = if model
             .run_types
@@ -2717,6 +3404,10 @@ fn edit_scalar_dialog_area(
     centered_box(MAX_WIDTH, height, bounds)
 }
 
+fn edit_scalar_controls() -> &'static str {
+    "←→ · Home/End · Bksp/Del · type/paste at caret · Enter apply · Esc"
+}
+
 fn edit_scalar_dialog_lines(
     edit: &EditScalarDraft,
     width: usize,
@@ -2743,12 +3434,6 @@ fn edit_scalar_dialog_lines(
     }
     lines.push(Line::raw(""));
     lines.extend(edit_scalar_value_lines(edit, width));
-    lines.push(Line::raw(""));
-    lines.extend(wrap_scalar_editor_text(
-        "←/→ move · Home/End start/end · Backspace/Delete remove · type/paste insert at caret · Enter apply · Esc cancel",
-        Style::default().fg(Color::DarkGray),
-        width,
-    ));
     lines
 }
 
@@ -2780,12 +3465,28 @@ fn edit_scalar_value_lines(edit: &EditScalarDraft, width: usize) -> Vec<Line<'st
         .fg(Color::Black)
         .bg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
-    let cursor = edit.cursor.min(edit.value.chars().count());
+    multiline_editor_value_lines(
+        &edit.value,
+        Some(edit.cursor),
+        width,
+        value_style,
+        caret_style,
+    )
+}
+
+fn multiline_editor_value_lines(
+    value: &str,
+    cursor: Option<usize>,
+    width: usize,
+    value_style: Style,
+    caret_style: Style,
+) -> Vec<Line<'static>> {
+    let cursor = cursor.map(|cursor| cursor.min(value.chars().count()));
     let mut lines = Vec::new();
     let mut glyphs = Vec::new();
     let mut position = 0;
-    for character in edit.value.chars() {
-        if position == cursor {
+    for character in value.chars() {
+        if cursor == Some(position) {
             glyphs.push(ScalarEditorGlyph {
                 text: "▏".to_owned(),
                 width: 1,
@@ -2800,7 +3501,7 @@ fn edit_scalar_value_lines(edit: &EditScalarDraft, width: usize) -> Vec<Line<'st
         }
         position += 1;
     }
-    if position == cursor {
+    if cursor == Some(position) {
         glyphs.push(ScalarEditorGlyph {
             text: "▏".to_owned(),
             width: 1,
@@ -2923,7 +3624,7 @@ fn draw_header(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
                 " {} · {completed}/{} tickets · {}",
                 current_run_stage_label(run_data, run),
                 run.ticket_count,
-                compact_token_count(run.total_tokens)
+                compact_new_token_count(run.new_tokens)
             ),
         )
     });
@@ -2975,9 +3676,28 @@ fn draw_header(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
         ]);
     } else {
         run_spans.push(Span::styled(
-            "no run selected · press n to start",
+            "no run selected",
             Style::default().fg(Color::LightBlue),
         ));
+    }
+    if run_is_planning && let Some(progress) = run_data.and_then(RunData::planning_budget_progress)
+    {
+        run_spans.extend([
+            Span::styled(" · plan ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!(
+                    "{}/{} {}",
+                    compact_token_count(progress.used).trim_end_matches(" tks"),
+                    compact_token_count(progress.limit).trim_end_matches(" tks"),
+                    progress.metric.label()
+                ),
+                Style::default().fg(if progress.synthesis_forced {
+                    Color::Yellow
+                } else {
+                    Color::LightMagenta
+                }),
+            ),
+        ]);
     }
     if planning_questions > 0 {
         run_spans.extend([
@@ -2993,7 +3713,7 @@ fn draw_header(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
         run_spans.extend([
             Span::raw(" · "),
             Span::styled(
-                "◇ awaiting approval",
+                "◇ awaiting approval · [v Review plan]",
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
@@ -3033,6 +3753,7 @@ pub(crate) struct OperateLayout {
     pub detail_switcher: Rect,
     pub pending_questions: Option<Rect>,
     pub active_agents: Rect,
+    pub activity: Rect,
     pub graph: Rect,
 }
 
@@ -3054,17 +3775,40 @@ pub(crate) fn operate_layout_with_questions(
     area: Rect,
     show_pending_questions: bool,
 ) -> OperateLayout {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(28),
-            Constraint::Percentage(42),
-            Constraint::Percentage(30),
-        ])
-        .split(area);
+    // Runs, Details, and Graph are peer control-center surfaces. Keeping them
+    // equal prevents the graph from silently taking space from the document
+    // the operator is currently reading.
+    let peer_width = area.width / 3;
+    let left_width = area.width.saturating_sub(peer_width.saturating_mul(2));
+    let middle_width = peer_width;
+    let right_width = area
+        .width
+        .saturating_sub(left_width)
+        .saturating_sub(middle_width);
+    let columns = [
+        Rect::new(area.x, area.y, left_width, area.height),
+        Rect::new(
+            area.x.saturating_add(left_width),
+            area.y,
+            middle_width,
+            area.height,
+        ),
+        Rect::new(
+            area.x
+                .saturating_add(left_width)
+                .saturating_add(middle_width),
+            area.y,
+            right_width,
+            area.height,
+        ),
+    ];
     let left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
+        .constraints([
+            Constraint::Percentage(30),
+            Constraint::Percentage(42),
+            Constraint::Percentage(28),
+        ])
         .split(columns[0]);
     let (ticket_switcher, ticket_items) = bordered_switcher_and_body(left[1]);
     let middle = if show_pending_questions {
@@ -3080,9 +3824,16 @@ pub(crate) fn operate_layout_with_questions(
     };
     let right = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(6), Constraint::Min(5)])
+        .constraints([Constraint::Length(8), Constraint::Min(5)])
         .split(columns[2]);
-    let (detail_switcher, _) = bordered_switcher_and_body(middle[0]);
+    // Details navigation lives in the panel's top border rather than consuming
+    // a row from its scrollable document.
+    let detail_switcher = Rect::new(
+        middle[0].x.saturating_add(1),
+        middle[0].y,
+        middle[0].width.saturating_sub(2),
+        1,
+    );
     OperateLayout {
         runs: left[0],
         tickets: left[1],
@@ -3091,7 +3842,8 @@ pub(crate) fn operate_layout_with_questions(
         details: middle[0],
         detail_switcher,
         pending_questions: show_pending_questions.then_some(middle[1]),
-        active_agents: right[0],
+        active_agents: left[2],
+        activity: right[0],
         graph: right[1],
     }
 }
@@ -3106,6 +3858,7 @@ fn draw_operate(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
         draw_pending_questions(frame, model, questions);
     }
     draw_active_agents(frame, model, layout.active_agents);
+    draw_recent_activity(frame, model, layout.activity);
     draw_graph(frame, model, layout.graph);
 }
 
@@ -3119,8 +3872,14 @@ fn draw_pending_questions(frame: &mut Frame<'_>, model: &ControlCenterModel, are
     } else {
         format!("{} / {}", selected + 1, questions.len())
     };
-    let title = format!(" Questions · ‹ {position} › · Enter answer ");
-    let block = panel_block(&title, model.focus == Focus::Questions);
+    let title = if area.width >= 60 {
+        format!(" Questions · ‹ {position} › ")
+    } else {
+        format!(" Questions {}/{} ", selected + 1, questions.len())
+    };
+    let controls = "←→/[] · ↑↓/jk · Enter";
+    let block =
+        panel_block(&title, model.focus == Focus::Questions).title_bottom(control_tip(controls));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let Some(question) = questions.get(selected) else {
@@ -3134,7 +3893,6 @@ fn draw_pending_questions(frame: &mut Frame<'_>, model: &ControlCenterModel, are
     let width = usize::from(inner.width).max(1);
     let mut lines = wrap_full_text(prompt, width)
         .into_iter()
-        .take(2)
         .map(|line| {
             Line::styled(
                 line,
@@ -3149,57 +3907,38 @@ fn draw_pending_questions(frame: &mut Frame<'_>, model: &ControlCenterModel, are
         .and_then(Value::as_str)
         .filter(|context| !context.trim().is_empty())
     {
-        lines.push(Line::styled(
-            short(context, width),
-            Style::default().fg(Color::DarkGray),
-        ));
+        lines.extend(
+            wrap_full_text(context, width)
+                .into_iter()
+                .map(|line| Line::styled(line, Style::default().fg(Color::DarkGray))),
+        );
     }
     lines.push(Line::raw(""));
-    if let Some(options) = question.get("options").and_then(Value::as_array) {
-        for (index, option) in options.iter().enumerate() {
-            let label = option
-                .get("label")
-                .and_then(Value::as_str)
-                .filter(|label| !label.trim().is_empty())
-                .unwrap_or("Option");
-            let description = option
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let recommended = option
-                .get("recommended")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let badge = format!(" {} {} ", index + 1, label);
-            let badge_width = UnicodeWidthStr::width(badge.as_str());
-            let description = short(
-                description,
-                width.saturating_sub(badge_width).saturating_sub(2),
-            );
-            lines.push(Line::from(vec![
-                Span::styled(
-                    badge,
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(if recommended {
-                            Color::Cyan
-                        } else {
-                            Color::Gray
-                        })
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled(description, Style::default().fg(Color::DarkGray)),
-            ]));
-        }
-    }
+    let options = question_options(question);
+    let allow_custom = question_allows_custom(question);
+    let choice_count = options.len() + usize::from(allow_custom);
+    let selected_option = model
+        .selected_question_option
+        .min(choice_count.saturating_sub(1));
+    let choice_start = lines.len();
+    let choices = question_choice_lines(&options, selected_option, allow_custom, width);
+    let selected_line = choice_start + choices.selected_line;
+    lines.extend(choices.lines);
     if question_answer_is_pending_resume(question) {
+        lines.push(Line::raw(""));
         lines.push(Line::styled(
             "✓ Answer recorded · planning will resume after this batch is complete",
             Style::default().fg(Color::Green),
         ));
     }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    let viewport = usize::from(inner.height).max(1);
+    let scroll = selected_line.saturating_sub(viewport.saturating_sub(1));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
 }
 
 pub(crate) fn pending_question_at(
@@ -3234,19 +3973,13 @@ pub(crate) fn agent_at(
     if !rect_contains(inner, column, row) {
         return None;
     }
-    let count = model
-        .selected_run_data()
-        .map(|run| run.agent_summaries().len())
-        .unwrap_or_default();
+    let count = model.selected_agent_summaries().len();
     let index = agent_first(model, inner, count) + usize::from(row.saturating_sub(inner.y));
     (index < count).then_some(index)
 }
 
 fn draw_active_agents(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
-    let agents = model
-        .selected_run_data()
-        .map(RunData::agent_summaries)
-        .unwrap_or_default();
+    let agents = model.selected_agent_summaries();
     let active = agents.iter().filter(|agent| agent.live).count();
     let block = Block::default().borders(Borders::ALL);
     let inner = block.inner(area);
@@ -3256,11 +3989,15 @@ fn draw_active_agents(frame: &mut Frame<'_>, model: &ControlCenterModel, area: R
         .min(agents.len());
     let range =
         (agents.len() > usize::from(inner.height)).then(|| format!(" · {}–{}", first + 1, end));
-    let title = format!(
-        " Agents · {active} active / {}{} ",
-        agents.len(),
-        range.as_deref().unwrap_or_default()
-    );
+    let title = if area.width < 34 {
+        format!(" Agents {active} / {} active", agents.len())
+    } else {
+        format!(
+            " Agents · {active} / {} active{} ",
+            agents.len(),
+            range.as_deref().unwrap_or_default()
+        )
+    };
     let block = panel_block(&title, model.focus == Focus::Agents);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -3326,7 +4063,10 @@ fn draw_active_agents(frame: &mut Frame<'_>, model: &ControlCenterModel, area: R
                     },
                 ),
                 Span::styled(
-                    agent.title.clone(),
+                    short(
+                        &agent_panel_label(model.overview_subject, agent),
+                        usize::from(inner.width).saturating_sub(3),
+                    ),
                     if agent.live {
                         Style::default().fg(Color::White)
                     } else {
@@ -3341,6 +4081,453 @@ fn draw_active_agents(frame: &mut Frame<'_>, model: &ControlCenterModel, area: R
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+fn agent_panel_label(subject: OverviewSubject, agent: &crate::model::AgentSummary) -> String {
+    let work_title_is_useful = !agent.title.eq_ignore_ascii_case(&agent.persona)
+        && !matches!(
+            agent.title.as_str(),
+            "Current run work" | "Completed ticket work"
+        );
+    if subject == OverviewSubject::Run {
+        if let Some(ticket) = agent.ticket_title.as_deref() {
+            return format!("{ticket} · {}", agent.persona);
+        }
+        return if work_title_is_useful {
+            format!("Run · {} · {}", agent.persona, agent.title)
+        } else {
+            format!("Run · {}", agent.persona)
+        };
+    }
+    if work_title_is_useful {
+        format!("{} · {}", agent.persona, agent.title)
+    } else {
+        agent.persona.clone()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivityTone {
+    Added,
+    Modified,
+    Deleted,
+    Compiler,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActivityItem {
+    at: String,
+    text: String,
+    tone: ActivityTone,
+    count: usize,
+}
+
+fn draw_recent_activity(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
+    let run = model.selected_run_data();
+    let items = run.map(recent_activity_items).unwrap_or_default();
+    let visible = usize::from(area.height.saturating_sub(2)).max(1);
+    let first = model
+        .activity_scroll
+        .min(items.len().saturating_sub(visible));
+    let title = recent_activity_title(run, area.width);
+    let block = panel_block(&title, model.focus == Focus::Activity);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if items.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                if run.is_some() {
+                    "◇ No run activity yet"
+                } else {
+                    "◇ Select a run to inspect activity"
+                },
+                Style::default().fg(Color::DarkGray),
+            )),
+            inner,
+        );
+        return;
+    }
+    let lines = items
+        .iter()
+        .skip(first)
+        .take(visible)
+        .map(|item| {
+            let (marker, color) = match item.tone {
+                ActivityTone::Added => ("+", Color::Green),
+                ActivityTone::Modified => ("~", Color::Yellow),
+                ActivityTone::Deleted => ("−", Color::LightRed),
+                ActivityTone::Compiler => ("◇", Color::White),
+            };
+            let suffix = if item.count > 1 {
+                format!(" ×{}", item.count)
+            } else {
+                String::new()
+            };
+            let timestamp = compact_planning_timestamp(&item.at);
+            let text = short(
+                &item.text,
+                usize::from(inner.width)
+                    .saturating_sub(12)
+                    .saturating_sub(suffix.chars().count()),
+            );
+            Line::from(vec![
+                Span::styled(
+                    format!("{timestamp:<8}  "),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("{marker} {text}{suffix}"),
+                    Style::default().fg(color),
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn recent_activity_title(run: Option<&RunData>, area_width: u16) -> String {
+    let available_width = usize::from(area_width.saturating_sub(2));
+    let identity = " Recent activity ";
+    let Some(runtime) = active_runtime_label(run) else {
+        return if UnicodeWidthStr::width(identity) <= available_width {
+            identity.to_owned()
+        } else {
+            " Activity ".to_owned()
+        };
+    };
+
+    let full = format!(" Recent activity · {runtime} ");
+    if UnicodeWidthStr::width(full.as_str()) <= available_width {
+        return full;
+    }
+
+    let elapsed = runtime.strip_suffix(" active").unwrap_or(runtime.as_str());
+    let compact_elapsed = elapsed.split_whitespace().collect::<String>();
+    let compact = format!(" Activity · {compact_elapsed} ");
+    if UnicodeWidthStr::width(compact.as_str()) <= available_width {
+        compact
+    } else {
+        " Activity ".to_owned()
+    }
+}
+
+fn active_runtime_label(run: Option<&RunData>) -> Option<String> {
+    let run = run?;
+    if run.is_provisional()
+        || run
+            .summary
+            .as_ref()
+            .is_some_and(|summary| summary.status == "planning")
+    {
+        return None;
+    }
+    let approved_at = run
+        .snapshot
+        .get("orchestration")
+        .and_then(|orchestration| orchestration.get("active_runtime_approved_at"))
+        .or_else(|| {
+            run.snapshot
+                .get("lifecycle")
+                .and_then(|lifecycle| lifecycle.get("active_runtime_approved_at"))
+        })
+        .and_then(Value::as_str)
+        .filter(|approved_at| !approved_at.trim().is_empty())?;
+    if chrono::DateTime::parse_from_rfc3339(approved_at).is_err() {
+        return None;
+    }
+    let milliseconds = run
+        .snapshot
+        .get("lifecycle")
+        .and_then(|lifecycle| lifecycle.get("active_runtime_milliseconds"))
+        .and_then(Value::as_u64)?;
+    let seconds = milliseconds / 1_000;
+    let days = seconds / 86_400;
+    let hours = seconds % 86_400 / 3_600;
+    let minutes = seconds % 3_600 / 60;
+    let seconds = seconds % 60;
+    let elapsed = if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes:02}m")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    };
+    Some(format!("{elapsed} active"))
+}
+
+fn recent_activity_items(run: &RunData) -> Vec<ActivityItem> {
+    let mut node_labels = BTreeMap::<String, (String, String)>::new();
+    for node in &run.graph {
+        remember_activity_node(&mut node_labels, node);
+    }
+    for ticket in &run.tickets {
+        for output in ticket
+            .get("outputs")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(delta) = output_graph_delta(output) else {
+                continue;
+            };
+            for key in ["add_nodes", "nodes", "upsert"] {
+                for node in delta
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    remember_activity_node(&mut node_labels, node);
+                }
+            }
+        }
+    }
+
+    let mut items = Vec::new();
+    for ticket in &run.tickets {
+        for output in ticket
+            .get("outputs")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let at = output
+                .get("recorded_at")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let Some(delta) = output_graph_delta(output) else {
+                continue;
+            };
+            let mut emitted = BTreeSet::new();
+            for key in ["add_nodes", "nodes"] {
+                for node in delta
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    push_graph_activity(
+                        &mut items,
+                        &mut emitted,
+                        at,
+                        ActivityTone::Added,
+                        node,
+                        &node_labels,
+                    );
+                }
+            }
+            for node in delta
+                .get("upsert")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                push_graph_activity(
+                    &mut items,
+                    &mut emitted,
+                    at,
+                    ActivityTone::Modified,
+                    node,
+                    &node_labels,
+                );
+            }
+            for deleted in delta
+                .get("delete")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let id = deleted
+                    .as_str()
+                    .or_else(|| deleted.get("id").and_then(Value::as_str));
+                let identity = id
+                    .and_then(|id| node_labels.get(id))
+                    .map(|(node_type, title)| (node_type.as_str(), title.as_str()));
+                let text = identity.map_or_else(
+                    || "Deleted graph node".to_owned(),
+                    |(node_type, title)| format!("Deleted {}: {title}", humanize(node_type)),
+                );
+                let key = format!("deleted:{}", id.unwrap_or("unknown"));
+                if emitted.insert(key) {
+                    items.push(ActivityItem {
+                        at: at.to_owned(),
+                        text,
+                        tone: ActivityTone::Deleted,
+                        count: 1,
+                    });
+                }
+            }
+            for key in ["add_edges", "edges"] {
+                for edge in delta
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let Some(source) = edge.get("source").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some((node_type, title)) = node_labels.get(source) else {
+                        continue;
+                    };
+                    let dedupe = format!("modified:{source}");
+                    if emitted.insert(dedupe) {
+                        items.push(ActivityItem {
+                            at: at.to_owned(),
+                            text: format!("Modified {}: {title}", humanize(node_type)),
+                            tone: ActivityTone::Modified,
+                            count: 1,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let ticket_titles = run
+        .tickets
+        .iter()
+        .filter_map(|ticket| {
+            Some((
+                ticket.get("id")?.as_str()?.to_owned(),
+                display_ticket_title(ticket),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut compiler_buckets = BTreeSet::new();
+    for event in &run.events {
+        let event_type = event
+            .get("event_type")
+            .or_else(|| event.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if event_type.contains(".action.") {
+            continue;
+        }
+        let ticket_title = event
+            .get("ticket_id")
+            .and_then(Value::as_str)
+            .and_then(|id| ticket_titles.get(id))
+            .map(String::as_str);
+        let Some(text) = compiler_activity_text(event_type, ticket_title) else {
+            continue;
+        };
+        let at = event
+            .get("at")
+            .or_else(|| event.get("recorded_at"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let second = at.get(..19).unwrap_or(at);
+        let bucket = format!(
+            "{second}\0{event_type}\0{}",
+            ticket_title.unwrap_or_default()
+        );
+        if compiler_buckets.insert(bucket) {
+            items.push(ActivityItem {
+                at: at.to_owned(),
+                text,
+                tone: ActivityTone::Compiler,
+                count: 1,
+            });
+        }
+    }
+    items.sort_by(|left, right| {
+        right
+            .at
+            .cmp(&left.at)
+            .then_with(|| left.text.cmp(&right.text))
+    });
+    let mut collapsed = Vec::<ActivityItem>::new();
+    for item in items {
+        if let Some(previous) = collapsed
+            .last_mut()
+            .filter(|previous| previous.tone == item.tone && previous.text == item.text)
+        {
+            previous.count += item.count;
+        } else {
+            collapsed.push(item);
+        }
+    }
+    collapsed
+}
+
+fn output_graph_delta(output: &Value) -> Option<&Value> {
+    output
+        .get("typed")
+        .and_then(|typed| typed.get("graph_delta"))
+        .or_else(|| output.get("graph_delta"))
+        .filter(|delta| delta.is_object())
+}
+
+fn remember_activity_node(labels: &mut BTreeMap<String, (String, String)>, node: &Value) {
+    let Some(id) = node.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    let node_type = node
+        .get("type")
+        .or_else(|| node.get("node_type"))
+        .and_then(Value::as_str)
+        .unwrap_or("node");
+    let title = node
+        .get("title")
+        .or_else(|| node.get("label"))
+        .and_then(Value::as_str)
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or("Untitled graph node");
+    labels.insert(id.to_owned(), (node_type.to_owned(), title.to_owned()));
+}
+
+fn push_graph_activity(
+    items: &mut Vec<ActivityItem>,
+    emitted: &mut BTreeSet<String>,
+    at: &str,
+    tone: ActivityTone,
+    node: &Value,
+    labels: &BTreeMap<String, (String, String)>,
+) {
+    let id = node.get("id").and_then(Value::as_str).unwrap_or("unknown");
+    let (node_type, title) = labels
+        .get(id)
+        .map(|(node_type, title)| (node_type.as_str(), title.as_str()))
+        .unwrap_or(("node", "Untitled graph node"));
+    let verb = match tone {
+        ActivityTone::Added => "Added",
+        ActivityTone::Modified => "Modified",
+        ActivityTone::Deleted => "Deleted",
+        ActivityTone::Compiler => return,
+    };
+    if emitted.insert(format!("{verb}:{id}")) {
+        items.push(ActivityItem {
+            at: at.to_owned(),
+            text: format!("{verb} {}: {title}", humanize(node_type)),
+            tone,
+            count: 1,
+        });
+    }
+}
+
+fn compiler_activity_text(event_type: &str, ticket_title: Option<&str>) -> Option<String> {
+    let with_ticket = |verb: &str| {
+        ticket_title.map_or_else(|| verb.to_owned(), |title| format!("{verb}: {title}"))
+    };
+    Some(match event_type {
+        "run.planning.started" => "Started run planning".to_owned(),
+        "compiler.context.issued" => with_ticket("Prepared agent context"),
+        "compiler.output.recorded" => with_ticket("Recorded step output"),
+        "compiler.compile.scoped" => with_ticket("Compiled ticket"),
+        "compiler.compile.full" => "Recompiled project graph".to_owned(),
+        "compiler.worker.spawned" => with_ticket("Started worker"),
+        "compiler.lead.spawned" => "Started Lead agent".to_owned(),
+        "compiler.review.recorded" => with_ticket("Recorded review"),
+        "compiler.finish.closed" => with_ticket("Closed ticket"),
+        "compiler.start.leased" => with_ticket("Prepared ticket checkout"),
+        "compiler.recovery.required" => with_ticket("Recovery needed"),
+        "compiler.recovery.diagnostic" => "Checked recovery state".to_owned(),
+        value if value.starts_with("compiler.") => humanize(value.trim_start_matches("compiler.")),
+        _ => return None,
+    })
+}
+
 fn live_activity_style(model: &ControlCenterModel) -> Style {
     let colors = [
         Color::Green,
@@ -3351,16 +4538,16 @@ fn live_activity_style(model: &ControlCenterModel) -> Style {
     let color = if std::env::var("TERM").as_deref() == Ok("dumb") {
         Color::Green
     } else {
-        colors[(model.activity_tick as usize / 2) % colors.len()]
+        colors[model.activity_tick as usize % colors.len()]
     };
     Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
 
 fn draw_runs(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
-    let block = panel_block(" Runs [n new] ", model.focus == Focus::Runs);
+    let block = panel_block(" Runs ", model.focus == Focus::Runs);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let controls_height = u16::from(!model.runs.is_empty());
+    let controls_height = 1;
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(controls_height)])
@@ -3370,7 +4557,7 @@ fn draw_runs(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
         .saturating_sub(usize::from(rows[0].height / 2).saturating_sub(1));
     let items = if model.runs.is_empty() {
         vec![ListItem::new(Line::styled(
-            "No runs — press n",
+            "No runs yet",
             Style::default().fg(Color::DarkGray),
         ))]
     } else {
@@ -3391,16 +4578,23 @@ fn draw_runs(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
                             run.ticket_count,
                             run.open_questions,
                             run.active_agents,
-                            run.total_tokens,
+                            run.new_tokens,
                             run.validation_errors > 0,
                         )
                     })
                     .unwrap_or(("Unknown run", "unknown", "default", 0, 0, 0, 0, false));
                 let live = agents > 0;
+                let merge_ready = summary.is_some_and(|summary| summary.merge_ready);
+                let planning_ready = summary.is_some_and(|summary| summary.status == "planning")
+                    && run.planning_is_ready_for_approval();
                 let marker = if invalid {
                     "!"
                 } else if live {
                     "⚙"
+                } else if merge_ready {
+                    "◆"
+                } else if planning_ready {
+                    "◇"
                 } else {
                     status_glyph(status)
                 };
@@ -3408,12 +4602,20 @@ fn draw_runs(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
                     Color::LightRed
                 } else if live {
                     Color::Green
+                } else if merge_ready {
+                    Color::LightGreen
+                } else if planning_ready {
+                    Color::Yellow
                 } else {
                     status_color(status)
                 };
                 let run_type = summary
                     .map(|summary| model.display_run_type_title(summary))
                     .unwrap_or_else(|| humanize(run_type));
+                let target_branch = summary
+                    .and_then(|summary| summary.target_branch.as_deref())
+                    .and_then(|reference| reference.strip_prefix("refs/heads/"))
+                    .unwrap_or("target-less");
                 let lines = vec![
                     Line::from(vec![
                         Span::styled(
@@ -3436,7 +4638,28 @@ fn draw_runs(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
                     Line::from(vec![
                         Span::raw("    "),
                         Span::styled(
-                            compact_token_count(tokens),
+                            format!("→ {target_branch}"),
+                            Style::default().fg(if target_branch == "target-less" {
+                                Color::DarkGray
+                            } else {
+                                Color::LightGreen
+                            }),
+                        ),
+                        Span::styled(
+                            if merge_ready {
+                                " · ◆ ready to merge"
+                            } else if planning_ready {
+                                " · ◇ v review plan"
+                            } else {
+                                ""
+                            },
+                            Style::default()
+                                .fg(Color::LightGreen)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            compact_new_token_count(tokens),
                             Style::default()
                                 .fg(Color::LightMagenta)
                                 .add_modifier(Modifier::BOLD),
@@ -3463,7 +4686,7 @@ fn draw_runs(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
     frame.render_widget(List::new(items), rows[0]);
     if controls_height > 0 {
         frame.render_widget(
-            Paragraph::new(run_controls_hint(model, inner.width))
+            Paragraph::new(run_controls_hint(model))
                 .alignment(Alignment::Center)
                 .style(Style::default().fg(Color::Cyan)),
             rows[1],
@@ -3471,23 +4694,40 @@ fn draw_runs(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
     }
 }
 
-fn run_controls_hint(model: &ControlCenterModel, width: u16) -> String {
+fn run_controls_hint(model: &ControlCenterModel) -> String {
+    if model.runs.is_empty() {
+        return "n New run".to_owned();
+    }
     let action = match model.selected_run_transition() {
         Some("pausing") => "Pausing…",
         Some("resuming") => "Resuming…",
         _ if !model.selected_run_running() => "Resume run",
         _ => "Pause run",
     };
-    if width >= 31 {
-        format!("Space {action} · D Delete run")
-    } else if action.starts_with("Resume") {
-        "Space play·D delete".to_owned()
+    let merge = model
+        .selected_run_data()
+        .and_then(|run| run.summary.as_ref())
+        .filter(|summary| summary.target_branch.is_some())
+        .map(|summary| {
+            if summary.merge_ready {
+                "m Merge ready"
+            } else {
+                "m Review merge"
+            }
+        });
+    let merge_suffix = if merge.is_some() { "·m merge" } else { "" };
+    let review = model
+        .selected_run_data()
+        .is_some_and(|run| run.planning_is_ready_for_approval());
+    let review_suffix = if review { "·v review" } else { "" };
+    if action.starts_with("Resume") {
+        format!("Space play{review_suffix}{merge_suffix}·d delete·n new")
     } else if action.starts_with("Pausing") {
-        "Pausing…·D delete".to_owned()
+        format!("Pausing…{review_suffix}{merge_suffix}·d delete·n new")
     } else if action.starts_with("Resuming") {
-        "Resuming…·D delete".to_owned()
+        format!("Resuming…{review_suffix}{merge_suffix}·d delete·n new")
     } else {
-        "Space pause·D delete".to_owned()
+        format!("Space pause{review_suffix}{merge_suffix}·d delete·n new")
     }
 }
 
@@ -3610,40 +4850,274 @@ fn ticket_item(
 }
 
 fn draw_graph(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
-    let scope = if model.selected_graph_is_ticket_projection() {
+    let diff = selected_ticket_graph_diff(model);
+    let nodes = diff.as_ref().map_or_else(
+        || model.selected_graph_values().to_vec(),
+        |diff| diff.graph.clone(),
+    );
+    let scope = if diff.is_some() {
         "ticket checkout"
     } else {
         "integration"
     };
-    let node_count = model.selected_graph_values().len();
-    let title = format!(" Project graph · {scope} · {node_count} nodes ");
-    let block = panel_block(&title, model.focus == Focus::Graph);
+    let title = if area.width < 40 {
+        if diff.is_some() {
+            format!(" Checkout graph · {} nodes ", nodes.len())
+        } else {
+            format!(" Project graph · {} nodes ", nodes.len())
+        }
+    } else if diff.is_some() && area.width < 48 {
+        format!(" Graph · {scope} · {} nodes ", nodes.len())
+    } else {
+        format!(" Project graph · {scope} · {} nodes ", nodes.len())
+    };
+    let mut block = panel_block(&title, model.focus == Focus::Graph);
+    if let Some(diff) = &diff {
+        block = block.title_bottom(graph_diff_legend(diff, area.width));
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let nodes = model.selected_graph_values();
     let renderer = graph_renderer_for_options(
         std::env::var("TERM").as_deref() == Ok("dumb"),
-        model
-            .selected_run_data()
-            .and_then(|run| run.graph_options.as_ref()),
+        model.selected_graph_options(),
     );
-    let width = usize::from(inner.width.saturating_sub(1));
-    let rendered = renderer.render_values(nodes, width);
+    let width = usize::from(inner.width);
+    let rendered = renderer.render_values(&nodes, width);
+    let visible_height = usize::from(inner.height);
+    let scroll = model
+        .graph_scroll
+        .min(rendered.len().saturating_sub(visible_height));
     let lines = rendered
         .iter()
-        .skip(model.graph_scroll)
-        .take(usize::from(inner.height))
-        .map(|line| graph_line(line))
+        .skip(scroll)
+        .take(visible_height)
+        .map(|line| graph_line(line, diff.as_ref()))
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum GraphChange {
+    Added,
+    Modified,
+    Deleted,
+}
+
+#[derive(Debug, Clone)]
+struct TicketGraphDiff {
+    graph: Vec<Value>,
+    nodes: BTreeMap<String, GraphChange>,
+    edges: BTreeMap<GraphEdgeRef, GraphChange>,
+}
+
+fn selected_ticket_graph_diff(model: &ControlCenterModel) -> Option<TicketGraphDiff> {
+    if !model.selected_graph_is_ticket_projection() {
+        return None;
+    }
+    let run = model.selected_run_data()?;
+    let ticket_id = model.selected_ticket_value()?.get("id")?.as_str()?;
+    let projected = run.ticket_graphs.get(ticket_id)?;
+    Some(ticket_graph_diff(&run.graph, projected))
+}
+
+fn ticket_graph_diff(baseline: &[Value], projected: &[Value]) -> TicketGraphDiff {
+    let baseline_nodes = graph_nodes_by_id(baseline);
+    let projected_nodes = graph_nodes_by_id(projected);
+    let mut nodes = BTreeMap::new();
+    for id in baseline_nodes.keys().chain(projected_nodes.keys()) {
+        let change = match (baseline_nodes.get(id), projected_nodes.get(id)) {
+            (None, Some(_)) => Some(GraphChange::Added),
+            (Some(_), None) => Some(GraphChange::Deleted),
+            (Some(before), Some(after))
+                if graph_node_metadata(before) != graph_node_metadata(after) =>
+            {
+                Some(GraphChange::Modified)
+            }
+            _ => None,
+        };
+        if let Some(change) = change {
+            nodes.insert(id.clone(), change);
+        }
+    }
+
+    let baseline_edges = graph_edge_set(baseline);
+    let projected_edges = graph_edge_set(projected);
+    let mut edges = BTreeMap::new();
+    for edge in projected_edges.difference(&baseline_edges) {
+        edges.insert(edge.clone(), GraphChange::Added);
+    }
+    for edge in baseline_edges.difference(&projected_edges) {
+        edges.insert(edge.clone(), GraphChange::Deleted);
+    }
+    // A relation rename between the same semantic endpoints reads as one
+    // modification, not as an unrelated red/green pair.
+    let changed_pairs = edges
+        .keys()
+        .map(|edge| (edge.source.clone(), edge.target.clone()))
+        .collect::<BTreeSet<_>>();
+    for (source, target) in changed_pairs {
+        let has_addition = edges.iter().any(|(edge, change)| {
+            edge.source == source && edge.target == target && *change == GraphChange::Added
+        });
+        let has_deletion = edges.iter().any(|(edge, change)| {
+            edge.source == source && edge.target == target && *change == GraphChange::Deleted
+        });
+        if has_addition && has_deletion {
+            for (edge, change) in &mut edges {
+                if edge.source == source && edge.target == target {
+                    *change = GraphChange::Modified;
+                }
+            }
+        }
+    }
+
+    let mut union = baseline_nodes;
+    union.extend(projected_nodes);
+    let union_edges = baseline_edges
+        .union(&projected_edges)
+        .cloned()
+        .collect::<Vec<_>>();
+    for node in union.values_mut() {
+        if let Some(object) = node.as_object_mut() {
+            object.insert("edges".to_owned(), Value::Object(Default::default()));
+        }
+    }
+    for edge in union_edges {
+        let Some(source) = union.get_mut(&edge.source).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let relations = source
+            .entry("edges".to_owned())
+            .or_insert_with(|| Value::Object(Default::default()));
+        let Some(relations) = relations.as_object_mut() else {
+            continue;
+        };
+        let targets = relations
+            .entry(edge.relation)
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(targets) = targets.as_array_mut() {
+            targets.push(Value::String(edge.target));
+        }
+    }
+    let graph = union.into_values().collect();
+    TicketGraphDiff {
+        graph,
+        nodes,
+        edges,
+    }
+}
+
+fn graph_nodes_by_id(values: &[Value]) -> BTreeMap<String, Value> {
+    values
+        .iter()
+        .filter_map(|node| {
+            node.get("id")
+                .and_then(Value::as_str)
+                .map(|id| (id.to_owned(), node.clone()))
+        })
+        .collect()
+}
+
+fn graph_node_metadata(node: &Value) -> Value {
+    let mut node = node.clone();
+    if let Some(object) = node.as_object_mut() {
+        object.remove("edges");
+    }
+    node
+}
+
+fn graph_edge_set(values: &[Value]) -> BTreeSet<GraphEdgeRef> {
+    let mut output = BTreeSet::new();
+    for node in values {
+        let Some(source) = node.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(relations) = node.get("edges").and_then(Value::as_object) else {
+            continue;
+        };
+        for (relation, targets) in relations {
+            match targets {
+                Value::Array(targets) => {
+                    for target in targets.iter().filter_map(Value::as_str) {
+                        output.insert(GraphEdgeRef {
+                            source: source.to_owned(),
+                            relation: relation.clone(),
+                            target: target.to_owned(),
+                        });
+                    }
+                }
+                Value::String(target) => {
+                    output.insert(GraphEdgeRef {
+                        source: source.to_owned(),
+                        relation: relation.clone(),
+                        target: target.clone(),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    output
+}
+
+fn graph_diff_legend(diff: &TicketGraphDiff, width: u16) -> Line<'static> {
+    let count = |change| {
+        diff.nodes
+            .values()
+            .filter(|value| **value == change)
+            .count()
+            + diff
+                .edges
+                .values()
+                .filter(|value| **value == change)
+                .count()
+    };
+    if width < 40 {
+        return Line::from(vec![
+            Span::styled(
+                format!(" +{} ", count(GraphChange::Added)),
+                graph_change_style(GraphChange::Added, true),
+            ),
+            Span::styled(
+                format!(" ~{} ", count(GraphChange::Modified)),
+                graph_change_style(GraphChange::Modified, true),
+            ),
+            Span::styled(
+                format!(" −{} ", count(GraphChange::Deleted)),
+                graph_change_style(GraphChange::Deleted, true),
+            ),
+        ]);
+    }
+    Line::from(vec![
+        Span::styled(
+            format!(" + {} added ", count(GraphChange::Added)),
+            graph_change_style(GraphChange::Added, true),
+        ),
+        Span::styled(
+            format!(" ~ {} modified ", count(GraphChange::Modified)),
+            graph_change_style(GraphChange::Modified, true),
+        ),
+        Span::styled(
+            format!(" − {} deleted ", count(GraphChange::Deleted)),
+            graph_change_style(GraphChange::Deleted, true),
+        ),
+    ])
 }
 
 pub(crate) fn graph_renderer_for_options(ascii: bool, options: Option<&Value>) -> GraphRenderer {
     let mut renderer = GraphRenderer::new(ascii);
     if let Some(options) = options {
+        if let Some(layout) = options.get("layout").and_then(Value::as_str) {
+            renderer = renderer.with_layout(layout);
+        }
+        renderer = renderer.with_upward_edge_policy(
+            options
+                .get("upward_edge_policy")
+                .and_then(Value::as_str)
+                .unwrap_or("preserve"),
+        );
         let hierarchy = options
             .get("hierarchy")
-            .or_else(|| options.get("layers"))
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
@@ -3651,6 +5125,32 @@ pub(crate) fn graph_renderer_for_options(ascii: bool, options: Option<&Value>) -
             .map(ToOwned::to_owned)
             .collect::<Vec<_>>();
         renderer = renderer.with_hierarchy(hierarchy);
+        let layers = options
+            .get("layers")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|layer| match layer {
+                Value::Array(types) => types
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>(),
+                Value::String(node_type) => vec![node_type.clone()],
+                _ => Vec::new(),
+            })
+            .filter(|layer| !layer.is_empty())
+            .collect::<Vec<_>>();
+        renderer = renderer.with_layers(layers);
+        let repeat_semantic_types = options
+            .get("repeat_semantic_types")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        renderer = renderer.with_repeat_semantic_types(repeat_semantic_types);
         let preferences = options
             .get("primary_parent_preferences")
             .and_then(Value::as_object)
@@ -3710,60 +5210,132 @@ pub(crate) fn graph_renderer_for_options(ascii: bool, options: Option<&Value>) -
     renderer
 }
 
-fn graph_line(line: &crate::graph::GraphLine) -> Line<'static> {
-    if line.node_spans.is_empty() {
-        return Line::raw(line.text.clone());
+fn graph_change_style(change: GraphChange, emphatic: bool) -> Style {
+    let color = match change {
+        GraphChange::Added => Color::LightGreen,
+        GraphChange::Modified => Color::Yellow,
+        GraphChange::Deleted => Color::LightRed,
+    };
+    let style = Style::default().fg(color);
+    if emphatic {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
+}
+
+fn edge_span_change(edge_refs: &[GraphEdgeRef], diff: &TicketGraphDiff) -> Option<GraphChange> {
+    let mut changes = edge_refs
+        .iter()
+        .filter_map(|edge_ref| diff.edges.get(edge_ref).copied())
+        .collect::<BTreeSet<_>>();
+    if changes.len() > 1 {
+        Some(GraphChange::Modified)
+    } else {
+        changes.pop_first()
+    }
+}
+
+fn graph_line(line: &crate::graph::GraphLine, diff: Option<&TicketGraphDiff>) -> Line<'static> {
+    let characters: Vec<_> = line.text.chars().collect();
+    if characters.is_empty() {
+        return Line::raw("");
+    }
+    let connector_style = if diff.is_some() {
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM)
+    } else {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    };
+    let title_style = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::DIM);
+    let mut styles = vec![connector_style; characters.len()];
+    for span in &line.edge_spans {
+        let style = diff.map_or_else(
+            || {
+                Style::default()
+                    .fg(node_color(&span.node_type))
+                    .add_modifier(Modifier::BOLD)
+            },
+            |diff| {
+                edge_span_change(&span.edge_refs, diff)
+                    .map(|change| graph_change_style(change, true))
+                    .unwrap_or(connector_style)
+            },
+        );
+        for target in styles
+            .iter_mut()
+            .take(span.end.min(characters.len()))
+            .skip(span.start.min(characters.len()))
+        {
+            *target = style;
+        }
+    }
+    for span in &line.title_spans {
+        let style = diff
+            .and_then(|diff| span.node_id.as_ref().and_then(|id| diff.nodes.get(id)))
+            .copied()
+            .map(|change| graph_change_style(change, false))
+            .unwrap_or(title_style);
+        for target in styles
+            .iter_mut()
+            .take(span.end.min(characters.len()))
+            .skip(span.start.min(characters.len()))
+        {
+            *target = style;
+        }
+    }
+    for span in &line.node_spans {
+        let style = diff.map_or_else(
+            || {
+                Style::default()
+                    .fg(node_color(&span.node_type))
+                    .add_modifier(Modifier::BOLD)
+            },
+            |diff| {
+                span.node_id
+                    .as_ref()
+                    .and_then(|id| diff.nodes.get(id))
+                    .copied()
+                    .map(|change| graph_change_style(change, true))
+                    .unwrap_or(connector_style)
+            },
+        );
+        for target in styles
+            .iter_mut()
+            .take(span.end.min(characters.len()))
+            .skip(span.start.min(characters.len()))
+        {
+            *target = style;
+        }
     }
     let mut spans = Vec::new();
-    let characters: Vec<_> = line.text.chars().collect();
-    let mut cursor = 0;
-    let mut node_spans = line.node_spans.clone();
-    node_spans.sort_by_key(|span| span.start);
-    for span in node_spans {
-        let start = span.start.min(characters.len());
-        let end = span.end.min(characters.len());
-        if start < cursor || start >= end {
-            continue;
-        }
-        if cursor < start {
-            spans.push(Span::raw(
-                characters[cursor..start].iter().collect::<String>(),
+    let mut start = 0usize;
+    for index in 1..=characters.len() {
+        if index == characters.len() || styles[index] != styles[start] {
+            spans.push(Span::styled(
+                characters[start..index].iter().collect::<String>(),
+                styles[start],
             ));
+            start = index;
         }
-        spans.push(Span::styled(
-            characters[start..end].iter().collect::<String>(),
-            Style::default()
-                .fg(node_color(&span.node_type))
-                .add_modifier(Modifier::BOLD),
-        ));
-        cursor = end;
-    }
-    if cursor < characters.len() {
-        spans.push(Span::raw(characters[cursor..].iter().collect::<String>()));
     }
     Line::from(spans)
 }
 
 fn draw_details(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
-    let title = format!(" Details [{}] ", model.detail_panel.label());
-    let block = panel_block(&title, model.focus == Focus::Details);
+    if model.agent_chat_is_open() {
+        draw_agent_chat(frame, model, area);
+        return;
+    }
+    let block = details_block(model, area.width);
+    let body = block.inner(area);
     frame.render_widget(block, area);
-    let (switcher, body) = bordered_switcher_and_body(area);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("‹ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                humanize(model.detail_panel.label()),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" ›", Style::default().fg(Color::DarkGray)),
-        ]))
-        .alignment(Alignment::Center),
-        switcher,
-    );
-    let lines = detail_lines(model);
+    let lines = detail_lines(model, usize::from(body.width).max(1));
     frame.render_widget(
         Paragraph::new(lines)
             .scroll((model.detail_scroll.min(u16::MAX as usize) as u16, 0))
@@ -3772,7 +5344,143 @@ fn draw_details(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
     );
 }
 
-fn detail_lines(model: &ControlCenterModel) -> Text<'static> {
+const DETAILS_TITLE_PREFIX: &str = " Details: ";
+const DETAILS_TITLE_SEPARATOR: &str = " - ";
+const COMPACT_DETAILS_TITLE_PREFIX: &str = " D:";
+const COMPACT_DETAILS_TITLE_SEPARATOR: &str = "-";
+
+fn details_title_tokens(available_width: u16) -> (&'static str, &'static str) {
+    let full_width = UnicodeWidthStr::width(DETAILS_TITLE_PREFIX)
+        + Panel::ALL
+            .iter()
+            .map(|panel| UnicodeWidthStr::width(humanize(panel.label()).as_str()))
+            .sum::<usize>()
+        + UnicodeWidthStr::width(DETAILS_TITLE_SEPARATOR) * (Panel::ALL.len() - 1);
+    if usize::from(available_width) >= full_width {
+        (DETAILS_TITLE_PREFIX, DETAILS_TITLE_SEPARATOR)
+    } else {
+        (
+            COMPACT_DETAILS_TITLE_PREFIX,
+            COMPACT_DETAILS_TITLE_SEPARATOR,
+        )
+    }
+}
+
+fn details_block(model: &ControlCenterModel, area_width: u16) -> Block<'static> {
+    let (prefix, separator) = details_title_tokens(area_width.saturating_sub(2));
+    let mut spans = vec![Span::styled(
+        prefix,
+        Style::default().fg(if model.focus == Focus::Details {
+            Color::Cyan
+        } else {
+            Color::Gray
+        }),
+    )];
+    for (index, panel) in Panel::ALL.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(
+                separator,
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        spans.push(Span::styled(
+            humanize(panel.label()),
+            if panel == model.detail_panel {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        ));
+    }
+    spans.push(Span::raw(" "));
+    Block::default()
+        .borders(Borders::ALL)
+        .title(Line::from(spans))
+        .border_style(if model.focus == Focus::Details {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        })
+}
+
+fn detail_tab_areas(area: Rect) -> Rc<[Rect]> {
+    let (prefix, separator) = details_title_tokens(area.width);
+    let mut x = area.x.saturating_add(UnicodeWidthStr::width(prefix) as u16);
+    let mut tabs = Vec::with_capacity(Panel::ALL.len());
+    for (index, panel) in Panel::ALL.into_iter().enumerate() {
+        if index > 0 {
+            x = x.saturating_add(UnicodeWidthStr::width(separator) as u16);
+        }
+        let width = UnicodeWidthStr::width(humanize(panel.label()).as_str()) as u16;
+        let clipped = width.min(area.right().saturating_sub(x));
+        tabs.push(Rect::new(x, area.y, clipped, area.height.min(1)));
+        x = x.saturating_add(width);
+    }
+    tabs.into()
+}
+
+pub(crate) fn detail_panel_at(column: u16, row: u16, area: Rect) -> Option<Panel> {
+    if row < area.y || row >= area.bottom() {
+        return None;
+    }
+    Panel::ALL
+        .into_iter()
+        .zip(detail_tab_areas(area).iter().copied())
+        .find_map(|(panel, tab)| rect_contains(tab, column, row).then_some(panel))
+}
+
+fn draw_agent_chat(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
+    let agents = model.selected_agent_summaries();
+    let agent = agents.get(model.selected_agent);
+    let rendered = model.selected_agent_chat_render(area.width.saturating_sub(2));
+    let active = rendered
+        .as_ref()
+        .is_some_and(|rendered| rendered.has_running_operation);
+    let title = agent.map_or_else(
+        || " Chat ".to_owned(),
+        |agent| {
+            let prefix = if active { "⚙ " } else { "" };
+            if model.agent_chat_scroll_from_top.is_none()
+                && model.agent_chat_scroll_from_bottom == 0
+            {
+                format!(" {prefix}Chat · {} ", agent.persona)
+            } else {
+                format!(" {prefix}Chat · {} · history ", agent.persona)
+            }
+        },
+    );
+    let block = panel_block(&title, model.focus == Focus::Details);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if agent.is_none() {
+        frame.render_widget(
+            Paragraph::new("Select an agent to inspect its conversation."),
+            inner,
+        );
+        return;
+    }
+    let Some(rendered) = rendered else {
+        return;
+    };
+    let viewport = usize::from(inner.height);
+    let maximum_offset = rendered.lines.len().saturating_sub(viewport);
+    let offset = model.agent_chat_scroll_from_top.map_or_else(
+        || {
+            let from_bottom = model.agent_chat_scroll_from_bottom.min(maximum_offset);
+            maximum_offset.saturating_sub(from_bottom)
+        },
+        |from_top| from_top.min(maximum_offset),
+    );
+    frame.render_widget(
+        Paragraph::new(rendered.lines.as_ref().clone())
+            .scroll((offset.min(u16::MAX as usize) as u16, 0)),
+        inner,
+    );
+}
+
+fn detail_lines(model: &ControlCenterModel, width: usize) -> Text<'static> {
     let run = model.selected_run_data();
     match model.detail_panel {
         Panel::Overview => {
@@ -3782,31 +5490,38 @@ fn detail_lines(model: &ControlCenterModel) -> Text<'static> {
                 _ => model.overview_subject,
             };
             if overview_subject == OverviewSubject::Run {
-                return run_overview_details(model, run);
+                return run_overview_details(model, run, width);
             }
             let Some(ticket) = model.selected_ticket_value() else {
-                return run_overview_details(model, run);
+                return run_overview_details(model, run, width);
             };
-            let mut overview = metadata_text(ticket, run, model);
+            let mut overview = metadata_text(ticket, run, model, width);
             if let Some(run) = run {
                 overview.lines.extend([
                     Line::raw(""),
                     Line::styled("Run health & evidence", heading_style()),
                 ]);
-                overview
-                    .lines
-                    .extend(report_text(run, model.selected_graph_values().len(), model).lines);
+                overview.lines.extend(
+                    report_text(run, model.selected_graph_values().len(), model, true).lines,
+                );
             }
             overview
         }
         Panel::Planning => {
+            if let Some(run) = run.filter(|run| run_plan_is_approved(run)) {
+                return approved_plan_text(run, width);
+            }
             let transcript = run
                 .map(|run| run.planning_transcript.as_slice())
                 .unwrap_or_default();
             if transcript.is_empty() {
                 Text::from("No planning transcript for this run.")
             } else {
-                narrative_cards(transcript)
+                planning_timeline(
+                    transcript,
+                    run.map(|run| run.stages.as_slice()).unwrap_or_default(),
+                    width,
+                )
             }
         }
         Panel::Stages => {
@@ -3830,24 +5545,17 @@ fn detail_lines(model: &ControlCenterModel) -> Text<'static> {
                 let definition = stage.get("definition").unwrap_or(stage);
                 text.lines.extend([
                     Line::styled(
-                        format!(
-                            "▶ Enter controls the current {} stage",
-                            pipeline_stage_category(definition)
-                        ),
+                        format!("▶ Current {} stage", pipeline_stage_category(definition)),
                         Style::default()
                             .fg(Color::Black)
                             .bg(Color::Yellow)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Line::styled(
-                        "The compiler cursor chooses the stage; completed stages are never rerun.",
-                        Style::default().fg(Color::DarkGray),
-                    ),
                     Line::raw(""),
                 ]);
             }
             text.lines
-                .extend(pipeline_stage_cards(stages, run, model).lines);
+                .extend(pipeline_stage_cards(stages, run, model, width).lines);
             if !loops.is_empty() {
                 text.lines
                     .push(Line::styled("external loops", heading_style()));
@@ -3877,13 +5585,63 @@ fn detail_lines(model: &ControlCenterModel) -> Text<'static> {
     }
 }
 
-fn run_overview_details(model: &ControlCenterModel, run: Option<&RunData>) -> Text<'static> {
+fn run_plan_is_approved(run: &RunData) -> bool {
+    run.stages.iter().any(|stage| {
+        if stage.get("status").and_then(Value::as_str) != Some("succeeded") {
+            return false;
+        }
+        let definition = stage.get("definition").unwrap_or(stage);
+        if pipeline_stage_category(definition) == "Approval" {
+            return true;
+        }
+        let id = definition
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let title = definition
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        id == "explicit_run_approval" || title_has_word(title, &["approve", "approval"])
+    })
+}
+
+fn approved_plan_text(run: &RunData, width: usize) -> Text<'static> {
+    let Some(summary) = run.summary.as_ref() else {
+        return Text::from("No approved plan is available for this run.");
+    };
+    let sections = durable_approved_plan_sections(run, summary);
+    if sections.is_empty() {
+        return Text::from("No durable approved plan is available for this run.");
+    }
+    let mut lines = vec![Line::styled(
+        "Approved plan",
+        Style::default()
+            .fg(Color::LightGreen)
+            .add_modifier(Modifier::BOLD),
+    )];
+    for section in sections {
+        lines.extend([Line::raw(""), overview_section_heading(&section.title)]);
+        lines.extend(approval_markdown_lines(
+            &section.body,
+            width.saturating_sub(2).max(1),
+        ));
+    }
+    Text::from(lines)
+}
+
+fn run_overview_details(
+    model: &ControlCenterModel,
+    run: Option<&RunData>,
+    width: usize,
+) -> Text<'static> {
+    let mut lines = Vec::new();
     if let Some(errors) = run
         .and_then(|run| run.snapshot.get("validation_errors"))
         .and_then(Value::as_array)
         .filter(|errors| !errors.is_empty())
     {
-        let mut lines = vec![Line::styled(
+        lines.push(Line::styled(
             format!(
                 "! {} validation issue{}",
                 errors.len(),
@@ -3892,7 +5650,7 @@ fn run_overview_details(model: &ControlCenterModel, run: Option<&RunData>) -> Te
             Style::default()
                 .fg(Color::LightRed)
                 .add_modifier(Modifier::BOLD),
-        )];
+        ));
         lines.extend(errors.iter().map(|error| {
             let message = error
                 .as_str()
@@ -3900,30 +5658,90 @@ fn run_overview_details(model: &ControlCenterModel, run: Option<&RunData>) -> Te
                 .unwrap_or("Configuration or project state is invalid");
             Line::raw(format!("  • {message}"))
         }));
-        return Text::from(lines);
+        lines.push(Line::raw(""));
     }
-    let mut overview = run
+
+    let objective = run
+        .and_then(|run| run.summary.as_ref())
+        .map(|summary| summary.goal.trim())
+        .filter(|objective| !objective.is_empty());
+
+    lines.push(overview_section_heading("Objective"));
+    if let Some(objective) = objective {
+        let collapsed_lines = (model.focus != Focus::Details).then_some(4);
+        lines.extend(objective_preview_lines(objective, width, collapsed_lines));
+    } else {
+        lines.push(Line::styled(
+            "No objective recorded.",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    lines.push(Line::raw(""));
+
+    lines.push(overview_section_heading("Run"));
+    let metadata = run
         .and_then(|run| run.summary.as_ref().map(|summary| (run, summary)))
         .map(|(run, summary)| {
             run_overview_text(run, summary, &model.display_run_type_title(summary), model)
         })
         .unwrap_or_else(|| Text::from("No run overview available."));
+    lines.extend(metadata.lines);
+    lines.push(Line::raw(""));
+
+    lines.push(overview_section_heading("Evidence"));
     if let Some(run) = run {
-        overview.lines.extend([
-            Line::raw(""),
-            Line::styled("Health & evidence", heading_style()),
-        ]);
-        overview
-            .lines
-            .extend(report_text(run, run.graph.len(), model).lines);
+        lines.extend(report_text(run, run.graph.len(), model, false).lines);
+    } else {
+        lines.push(Line::styled(
+            "No run evidence available.",
+            Style::default().fg(Color::DarkGray),
+        ));
     }
-    overview
+    Text::from(lines)
+}
+
+fn overview_section_heading(label: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("▸ ", Style::default().fg(Color::Cyan)),
+        Span::styled(
+            label.to_owned(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+fn objective_preview_lines(
+    objective: &str,
+    width: usize,
+    maximum_lines: Option<usize>,
+) -> Vec<Line<'static>> {
+    let wrapped = objective
+        .split('\n')
+        .flat_map(|source| {
+            if source.is_empty() {
+                vec![String::new()]
+            } else {
+                wrap_full_text(source.trim_end_matches('\r'), width.max(1))
+            }
+        })
+        .collect::<Vec<_>>();
+    let limit = maximum_lines.unwrap_or(usize::MAX);
+    let truncated = wrapped.len() > limit;
+    let mut visible = wrapped.into_iter().take(limit).collect::<Vec<_>>();
+    if truncated && let Some(last) = visible.last_mut() {
+        let budget = width.saturating_sub(1).max(1);
+        *last = format!("{}…", truncate_graph_line(last, budget));
+    }
+    visible.into_iter().map(Line::raw).collect()
 }
 
 fn metadata_text(
     ticket: &Value,
     run: Option<&RunData>,
     model: &ControlCenterModel,
+    width: usize,
 ) -> Text<'static> {
     let status = ticket
         .get("status")
@@ -3931,34 +5749,23 @@ fn metadata_text(
         .unwrap_or("unknown");
     let operation = string_at(ticket, "operation");
     let progress = ticket_progress(ticket, run);
-    let mut lines = vec![
-        Line::styled(
-            display_ticket_title(ticket),
+    let mut lines = vec![Line::styled(
+        display_ticket_title(ticket),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )];
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" {} {} ", status_glyph(status), humanize(status)),
             Style::default()
-                .fg(Color::White)
+                .fg(Color::Black)
+                .bg(status_color(status))
                 .add_modifier(Modifier::BOLD),
         ),
-        Line::from(vec![
-            Span::styled(
-                format!(" {} {} ", status_glyph(status), humanize(status)),
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(status_color(status))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(humanize(&operation), Style::default().fg(Color::LightBlue)),
-        ]),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled("Workflow  ", heading_style()),
-            Span::styled(
-                format!("{}/{} complete", progress.done, progress.states.len()),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]),
-        Line::from(workflow_rail_spans(&progress.states, &progress.glyphs)),
-    ];
+        Span::raw("  "),
+        Span::styled(humanize(&operation), Style::default().fg(Color::LightBlue)),
+    ]));
     if progress.worker_running {
         lines.push(Line::styled(
             format!(
@@ -3992,12 +5799,23 @@ fn metadata_text(
             Style::default().fg(Color::DarkGray),
         ));
     }
-    if let Some(scope) = ticket.get("scope") {
+    lines.extend([
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("Workflow  ", heading_style()),
+            Span::styled(
+                format!("{}/{} complete", progress.done, progress.states.len()),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(workflow_rail_spans(&progress.states, &progress.glyphs)),
+    ]);
+    let scope_lines = ticket.get("scope").map(|scope| {
         let read_nodes = value_len(scope.get("read_nodes"));
         let write_nodes = value_len(scope.get("write_nodes"));
         let read_paths = value_len(scope.get("read_paths"));
         let write_paths = value_len(scope.get("write_paths"));
-        lines.extend([
+        vec![
             Line::raw(""),
             Line::styled("Scope", heading_style()),
             Line::styled(
@@ -4014,8 +5832,8 @@ fn metadata_text(
                 ),
                 Style::default().fg(Color::DarkGray),
             ),
-        ]);
-    }
+        ]
+    });
     lines.extend([Line::raw(""), Line::styled("Steps", heading_style())]);
     let outputs = ticket
         .get("outputs")
@@ -4039,97 +5857,698 @@ fn metadata_text(
         } else {
             "├"
         };
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{connector}─"),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(
-                format!("{} ", progress.glyphs.for_state(state)),
-                Style::default().fg(step_color(state)),
-            ),
-            Span::styled(humanize(&id), Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(
-                format!("  {}", step_label(state)),
-                Style::default().fg(step_color(state)),
-            ),
-        ]));
         let persona = string_at(step, "persona");
+        let step_name = humanize(&id);
+        let persona_name = humanize(&persona);
+        let state_name = step_label(state);
+        let state_width = if state == StepVisualState::Done {
+            0
+        } else {
+            2 + state_name.chars().count()
+        };
+        let wide_width =
+            4 + step_name.chars().count() + state_width + 5 + persona_name.chars().count();
+        if width >= 52 && wide_width <= width {
+            let mut spans = vec![
+                Span::styled(
+                    format!("{connector}─"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("{} ", progress.glyphs.for_state(state)),
+                    Style::default().fg(step_color(state)),
+                ),
+                Span::styled(step_name, Style::default().add_modifier(Modifier::BOLD)),
+            ];
+            if state != StepVisualState::Done {
+                spans.push(Span::styled(
+                    format!("  {state_name}"),
+                    Style::default().fg(step_color(state)),
+                ));
+            }
+            spans.extend([
+                Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(persona_name, Style::default().fg(Color::LightBlue)),
+            ]);
+            lines.push(Line::from(spans));
+        } else {
+            let persona_name = compact_step_persona(&persona);
+            let suffix_width = if state == StepVisualState::Done {
+                3 + persona_name.chars().count()
+            } else {
+                3 + state_name.chars().count() + 3 + persona_name.chars().count()
+            };
+            let name_budget = width.saturating_sub(4 + suffix_width).max(1);
+            let mut spans = vec![
+                Span::styled(
+                    format!("{connector}─"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("{} ", progress.glyphs.for_state(state)),
+                    Style::default().fg(step_color(state)),
+                ),
+                Span::styled(
+                    truncate_graph_line(&step_name, name_budget),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+            ];
+            if state != StepVisualState::Done {
+                spans.extend([
+                    Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(state_name, Style::default().fg(step_color(state))),
+                ]);
+            }
+            spans.extend([
+                Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+                Span::styled(persona_name, Style::default().fg(Color::LightBlue)),
+            ]);
+            lines.push(Line::from(spans));
+        }
         let prefix = if index + 1 == workflow.len() {
             "   "
         } else {
             "│  "
         };
-        lines.push(Line::styled(
-            format!("{prefix}{}", humanize(&persona)),
-            Style::default().fg(Color::LightBlue),
-        ));
-        if let Some(output) = outputs
+        let output = outputs
             .iter()
-            .find(|output| string_at(output, "step_id") == id)
+            .find(|output| string_at(output, "step_id") == id);
+        if state == StepVisualState::Done {
+            let (summary, style) = completed_step_summary(ticket, step, output).map_or_else(
+                || {
+                    (
+                        "No outcome summary recorded".to_owned(),
+                        Style::default().fg(Color::DarkGray),
+                    )
+                },
+                |summary| (summary, Style::default().fg(Color::Green)),
+            );
+            lines.extend(prefixed_detail_lines(prefix, &summary, width, style));
+        } else if let Some(expected) =
+            step.get("expected_output")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    step.get("expected_outputs")
+                        .and_then(Value::as_array)
+                        .and_then(|items| items.first())
+                        .and_then(Value::as_str)
+                })
         {
-            let findings = value_len(output.get("findings"));
-            let risks = value_len(output.get("risks"));
-            let files =
-                value_len(output.get("files_written")) + value_len(output.get("files_deleted"));
-            lines.push(Line::styled(
-                format!("{prefix}{findings} findings · {risks} risks · {files} files changed"),
-                Style::default().fg(Color::DarkGray),
-            ));
-        } else if let Some(expected) = step
-            .get("expected_outputs")
-            .and_then(Value::as_array)
-            .and_then(|items| items.first())
-            .and_then(Value::as_str)
-        {
-            lines.push(Line::styled(
-                format!("{prefix}expects {}", short(expected, 62)),
+            lines.extend(prefixed_detail_lines(
+                prefix,
+                &format!("expects {}", short(expected, 62)),
+                width,
                 Style::default().fg(Color::DarkGray),
             ));
         }
     }
-    let blocker_count = value_len(ticket.get("blockers"));
-    if blocker_count > 0 {
-        lines.extend([
+    if let Some(scope_lines) = scope_lines {
+        lines.extend(scope_lines);
+    }
+    lines.extend(ticket_blocker_lines(ticket, run, width));
+    Text::from(lines)
+}
+
+/// Project the first useful durable blocker into operator-facing prose.
+///
+/// Blocker records are compiler evidence, but their raw messages may contain
+/// record identifiers, hashes, or checkout paths. Keep those exact bytes on
+/// disk and redact only this display projection. If no message remains useful
+/// after redaction, retain the older count-only disclosure instead of
+/// inventing a reason.
+fn ticket_blocker_lines(ticket: &Value, run: Option<&RunData>, width: usize) -> Vec<Line<'static>> {
+    let Some(blockers) = ticket.get("blockers").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    if blockers.is_empty() {
+        return Vec::new();
+    }
+
+    let style = Style::default().fg(Color::LightRed);
+    let durable_blockers = blockers
+        .iter()
+        .filter(|blocker| ticket_blocker_is_durable(blocker))
+        .collect::<Vec<_>>();
+    let Some(reason) = durable_blockers
+        .iter()
+        .find_map(|blocker| ticket_blocker_reason(blocker, run))
+    else {
+        return vec![
             Line::raw(""),
             Line::styled(
                 format!(
-                    "! {blocker_count} blocker{} need attention",
-                    plural(blocker_count)
+                    "! {} blocker{} need attention",
+                    blockers.len(),
+                    plural(blockers.len())
                 ),
-                Style::default().fg(Color::LightRed),
+                style,
             ),
-        ]);
+        ];
+    };
+
+    let content_width = width.saturating_sub(2).max(1);
+    let mut lines = vec![Line::raw("")];
+    for (index, line) in wrap_blocker_reason(&reason, content_width)
+        .into_iter()
+        .enumerate()
+    {
+        lines.push(Line::styled(
+            format!("{}{line}", if index == 0 { "! " } else { "  " }),
+            style,
+        ));
     }
-    if let Some(run) = run {
-        let ticket_id = string_at(ticket, "id");
-        let recent = run
-            .events
-            .iter()
-            .filter(|event| string_at(event, "ticket_id") == ticket_id)
-            .rev()
-            .take(4)
-            .collect::<Vec<_>>();
-        if !recent.is_empty() {
-            lines.extend([
-                Line::raw(""),
-                Line::styled("Recent activity", heading_style()),
-            ]);
-            for event in recent {
-                lines.push(Line::raw(format!(
-                    "  • {}",
-                    humanize(
-                        event
-                            .get("event_type")
-                            .or_else(|| event.get("type"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("activity")
-                    )
-                )));
+    if durable_blockers.len() > 1 {
+        lines.push(Line::styled(
+            format!("  +{} more", durable_blockers.len() - 1),
+            Style::default().fg(Color::Red),
+        ));
+    }
+    lines
+}
+
+fn ticket_blocker_is_durable(blocker: &Value) -> bool {
+    blocker.get("kind").and_then(Value::as_str).is_some()
+        && blocker.get("message").and_then(Value::as_str).is_some()
+        && blocker.get("created_at").and_then(Value::as_str).is_some()
+}
+
+fn ticket_blocker_reason(blocker: &Value, run: Option<&RunData>) -> Option<String> {
+    let message = blocker.get("message")?.as_str()?;
+    let kind = blocker
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let message = collapse_display_whitespace(message);
+    if blocker_reason_is_generic(&message, kind)
+        || serde_json::from_str::<Value>(&message)
+            .is_ok_and(|value| value.is_object() || value.is_array())
+    {
+        return None;
+    }
+
+    let known_records_redacted = run.map_or_else(
+        || message.clone(),
+        |run| redact_blocker_control_record_ids(&message, run),
+    );
+    let without_raw_record = redact_embedded_compiler_record(&known_records_redacted);
+    let sanitized = without_raw_record
+        .split_whitespace()
+        .map(sanitize_blocker_token)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let sanitized = collapse_display_whitespace(&sanitized);
+    if blocker_reason_is_generic(&sanitized, kind)
+        || !blocker_reason_has_semantic_content(&sanitized)
+        || matches!(
+            sanitized.to_ascii_lowercase().as_str(),
+            "a local path"
+                | "a content hash"
+                | "an internal record"
+                | "an internal compiler record"
+        )
+    {
+        None
+    } else {
+        Some(sanitized)
+    }
+}
+
+fn redact_blocker_control_record_ids(message: &str, run: &RunData) -> String {
+    let mut replacements = BTreeMap::<String, String>::new();
+    let mut add = |value: Option<&str>, replacement: &str| {
+        if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            replacements
+                .entry(value.to_owned())
+                .or_insert_with(|| replacement.to_owned());
+        }
+    };
+    add(
+        run.summary.as_ref().map(|summary| summary.id.as_str()),
+        "this run",
+    );
+    for ticket in &run.tickets {
+        add(
+            ticket.get("id").and_then(Value::as_str),
+            "the affected ticket",
+        );
+    }
+    for stage in &run.stages {
+        let definition = stage.get("definition").unwrap_or(stage);
+        add(
+            definition.get("id").and_then(Value::as_str),
+            "the affected stage",
+        );
+    }
+    for agent in &run.agents {
+        add(
+            agent.get("id").and_then(Value::as_str),
+            "the affected agent",
+        );
+    }
+    for node in &run.graph {
+        add(
+            node.get("id").and_then(Value::as_str),
+            "the affected graph item",
+        );
+    }
+    for question in &run.questions {
+        add(
+            question.get("id").and_then(Value::as_str),
+            "the pending question",
+        );
+    }
+    for action in &run.actions {
+        add(
+            action.get("id").and_then(Value::as_str),
+            "the affected action",
+        );
+    }
+
+    let mut replacements = replacements.into_iter().collect::<Vec<_>>();
+    replacements.sort_by_key(|(source, _)| std::cmp::Reverse(source.len()));
+    replace_display_tokens(message, &replacements)
+}
+
+fn collapse_display_whitespace(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn blocker_reason_is_generic(message: &str, kind: &str) -> bool {
+    let normalized = message
+        .trim_matches(|character: char| character.is_whitespace() || ".:;!?-".contains(character))
+        .to_ascii_lowercase();
+    normalized.is_empty()
+        || (!kind.trim().is_empty() && normalized == kind.trim().to_ascii_lowercase())
+        || matches!(
+            normalized.as_str(),
+            "blocked"
+                | "ticket blocked"
+                | "ticket is blocked"
+                | "work blocked"
+                | "work is blocked"
+                | "needs attention"
+                | "attention required"
+                | "error"
+                | "failed"
+                | "failure"
+                | "unknown"
+                | "none"
+                | "n/a"
+        )
+}
+
+fn blocker_reason_has_semantic_content(message: &str) -> bool {
+    let mut semantic = message.to_ascii_lowercase();
+    for placeholder in [
+        "the affected graph item",
+        "the affected ticket",
+        "the affected stage",
+        "the affected agent",
+        "the pending question",
+        "the affected action",
+        "this run",
+        "a local path",
+        "a content hash",
+        "an internal record",
+        "an internal compiler record",
+    ] {
+        semantic = semantic.replace(placeholder, " ");
+    }
+    semantic
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty() && !word.chars().all(|character| character.is_numeric()))
+        .any(|word| {
+            !matches!(
+                word,
+                "a" | "an"
+                    | "and"
+                    | "at"
+                    | "attention"
+                    | "blocked"
+                    | "by"
+                    | "compiler"
+                    | "error"
+                    | "failed"
+                    | "failure"
+                    | "for"
+                    | "from"
+                    | "in"
+                    | "integration"
+                    | "is"
+                    | "need"
+                    | "needs"
+                    | "of"
+                    | "on"
+                    | "or"
+                    | "record"
+                    | "required"
+                    | "review"
+                    | "that"
+                    | "the"
+                    | "this"
+                    | "ticket"
+                    | "to"
+                    | "validation"
+                    | "with"
+                    | "work"
+                    | "worker"
+            )
+        })
+}
+
+fn redact_embedded_compiler_record(message: &str) -> String {
+    let mut rendered = String::with_capacity(message.len());
+    let mut copied_through = 0;
+    let mut scan_from = 0;
+    while let Some((relative, _)) = message[scan_from..]
+        .char_indices()
+        .find(|(_, character)| matches!(character, '{' | '['))
+    {
+        let start = scan_from + relative;
+        let mut stream = serde_json::Deserializer::from_str(&message[start..]).into_iter::<Value>();
+        let Some(Ok(record)) = stream.next() else {
+            scan_from = start + message[start..].chars().next().map_or(1, char::len_utf8);
+            continue;
+        };
+        if !record.is_object() && !record.is_array() {
+            scan_from = start + stream.byte_offset().max(1);
+            continue;
+        }
+        rendered.push_str(&message[copied_through..start]);
+        rendered.push_str("an internal compiler record");
+        copied_through = start + stream.byte_offset();
+        scan_from = copied_through;
+    }
+    rendered.push_str(&message[copied_through..]);
+    rendered
+}
+
+fn wrap_blocker_reason(value: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width: usize = 0;
+    for word in value.split_whitespace() {
+        let word_width = UnicodeWidthStr::width(word);
+        if !current.is_empty() && current_width.saturating_add(1 + word_width) <= width {
+            current.push(' ');
+            current.push_str(word);
+            current_width += 1 + word_width;
+            continue;
+        }
+        if !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        for character in word.chars() {
+            let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+            if !current.is_empty() && current_width.saturating_add(character_width) > width {
+                lines.push(std::mem::take(&mut current));
+                current_width = 0;
+            }
+            current.push(character);
+            current_width += character_width;
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn sanitize_blocker_token(token: &str) -> String {
+    let trailing_start = token
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !matches!(character, ',' | '.' | ';' | ':' | '!' | '?'))
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    let (body, trailing) = token.split_at(trailing_start);
+    let body = body.trim_matches(|character: char| {
+        matches!(
+            character,
+            '(' | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '"'
+                | '\''
+                | '`'
+                | '‘'
+                | '’'
+                | '“'
+                | '”'
+                | '<'
+                | '>'
+        )
+    });
+    let replacement = if blocker_token_is_path(body) {
+        Some("a local path")
+    } else if blocker_token_is_hash(body) {
+        Some("a content hash")
+    } else if blocker_token_is_control_id(body) {
+        Some("an internal record")
+    } else {
+        None
+    };
+    replacement.map_or_else(
+        || token.to_owned(),
+        |replacement| format!("{replacement}{trailing}"),
+    )
+}
+
+fn blocker_token_is_path(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    let explicitly_path = ["path=", "path:", "file=", "file:", "worktree=", "worktree:"]
+        .iter()
+        .any(|marker| lower.contains(marker));
+    let value = lower
+        .strip_prefix("path=")
+        .or_else(|| lower.strip_prefix("path:"))
+        .or_else(|| lower.strip_prefix("file="))
+        .or_else(|| lower.strip_prefix("file:"))
+        .or_else(|| lower.strip_prefix("worktree="))
+        .or_else(|| lower.strip_prefix("worktree:"))
+        .unwrap_or(&lower);
+    explicitly_path || value.contains('/') || value.contains('\\')
+}
+
+fn blocker_token_is_hash(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    if [
+        "sha1:",
+        "sha256:",
+        "sha512:",
+        "blake3:",
+        "hash=",
+        "hash:",
+        "commit=",
+        "commit:",
+        "digest=",
+        "digest:",
+        "checksum=",
+        "checksum:",
+        "oid=",
+        "oid:",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return true;
+    }
+    let value = lower.strip_prefix("0x").unwrap_or(&lower);
+    value.len() >= 7 && value.chars().all(|character| character.is_ascii_hexdigit())
+}
+
+fn blocker_token_is_control_id(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    let keyed_value = lower
+        .split_once(['=', ':'])
+        .filter(|(key, _)| key == &"id" || key.ends_with("_id") || key.ends_with("-id"))
+        .map(|(_, value)| value);
+    if keyed_value.is_some_and(|value| !value.is_empty()) {
+        return true;
+    }
+    blocker_control_id_atom(token)
+        || token
+            .split(|character: char| {
+                !(character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+            })
+            .filter(|segment| !segment.is_empty() && *segment != token)
+            .any(blocker_control_id_atom)
+}
+
+fn blocker_control_id_atom(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    let value = lower.as_str();
+    let uuid_parts = value.split('-').map(str::len).collect::<Vec<_>>();
+    if uuid_parts == [8, 4, 4, 4, 12]
+        && value
+            .chars()
+            .filter(|character| *character != '-')
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return true;
+    }
+    let opaque_prefix = [
+        "agent-",
+        "event-",
+        "journal-",
+        "lease-",
+        "output-",
+        "question-",
+        "receipt-",
+        "request-",
+        "resolver-",
+        "run-",
+        "stage-",
+        "ticket-",
+        "tk-",
+    ]
+    .iter()
+    .find(|prefix| value.starts_with(*prefix));
+    let opaque_suffix_len = opaque_prefix.map_or(0, |prefix| value.len() - prefix.len());
+    let tagged_id = token.split_once('-').is_some_and(|(prefix, suffix)| {
+        (2..=10).contains(&prefix.len())
+            && prefix
+                .chars()
+                .all(|character| character.is_ascii_uppercase())
+            && suffix.len() >= 6
+    });
+    let has_letter = value
+        .chars()
+        .any(|character| character.is_ascii_alphabetic());
+    let has_digit = value.chars().any(|character| character.is_ascii_digit());
+    tagged_id
+        || (opaque_prefix.is_some() && (has_digit || opaque_suffix_len >= 6))
+        || (value.len() >= 16
+            && has_letter
+            && has_digit
+            && value
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "-_".contains(character)))
+}
+
+fn prefixed_detail_lines(
+    prefix: &str,
+    value: &str,
+    width: usize,
+    style: Style,
+) -> Vec<Line<'static>> {
+    let content_width = width.saturating_sub(prefix.chars().count()).max(1);
+    wrap_full_text(value, content_width)
+        .into_iter()
+        .map(|line| Line::styled(format!("{prefix}{line}"), style))
+        .collect()
+}
+
+fn compact_step_persona(persona: &str) -> String {
+    match persona {
+        "architecture-mapper" => "Architect".to_owned(),
+        "change-designer" => "Designer".to_owned(),
+        "contract-designer" => "Contracts".to_owned(),
+        "risk-analyst" => "Risk".to_owned(),
+        "run-planner" => "Planner".to_owned(),
+        _ => humanize(persona),
+    }
+}
+
+fn completed_step_summary(ticket: &Value, step: &Value, output: Option<&Value>) -> Option<String> {
+    if let Some(output) = output {
+        for path in [
+            &["typed", "summary"][..],
+            &["typed", "result_summary"][..],
+            &["typed", "outcome"][..],
+            &["typed", "message"][..],
+            &["summary"][..],
+        ] {
+            if let Some(summary) = string_path(output, path)
+                && !summary.trim().is_empty()
+                && let Some(summary) = concise_outcome(summary)
+            {
+                return Some(summary);
+            }
+        }
+        if let Some(finding) = output
+            .get("findings")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(Value::as_str)
+            .filter(|finding| !finding.trim().is_empty())
+            && let Some(finding) = concise_outcome(finding)
+        {
+            return Some(finding);
+        }
+        let files = value_len(output.get("files_written")) + value_len(output.get("files_deleted"));
+        if files > 0 {
+            return Some(format!("Updated {files} project file{}", plural(files)));
+        }
+        let receipts = value_len(output.get("receipts"));
+        if receipts > 0 {
+            return Some(format!(
+                "Recorded {receipts} verification receipt{}",
+                plural(receipts)
+            ));
+        }
+        if let Some(delta) = output_graph_delta(output) {
+            let added = value_len(delta.get("add_nodes")) + value_len(delta.get("nodes"));
+            let modified = value_len(delta.get("upsert"));
+            let deleted = value_len(delta.get("delete"));
+            if added > 0 {
+                return Some(format!("Added {added} graph node{}", plural(added)));
+            }
+            if modified > 0 || deleted > 0 || value_len(delta.get("add_edges")) > 0 {
+                return Some("Updated the project graph".to_owned());
             }
         }
     }
-    Text::from(lines)
+    let review_step = step.get("kind").and_then(Value::as_str) == Some("review");
+    if review_step
+        && let Some(review) = ticket
+            .get("reviews")
+            .and_then(Value::as_array)
+            .and_then(|reviews| reviews.last())
+        && let Some(status) = review
+            .get("status")
+            .and_then(Value::as_str)
+            .filter(|status| !status.trim().is_empty())
+    {
+        return Some(format!("Review {}", humanize(status).to_lowercase()));
+    }
+    None
+}
+
+fn concise_outcome(value: &str) -> Option<String> {
+    let words = value
+        .split_whitespace()
+        .map(|word| {
+            word.trim_matches(|character: char| !character.is_alphanumeric() && character != '-')
+        })
+        .filter(|word| !word.is_empty())
+        .take(8)
+        .collect::<Vec<_>>();
+    (!words.is_empty()).then(|| short(&words.join(" "), 58))
+}
+
+fn string_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
+    path.iter()
+        .try_fold(value, |current, key| current.get(*key))?
+        .as_str()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4228,6 +6647,7 @@ fn ticket_progress(ticket: &Value, run: Option<&RunData>) -> TicketProgress {
     let reported_worker_running = worker_state == "running";
     let reported_worker_failed = worker_state == "exited_before_output";
     let closed = ticket_is_closed(ticket);
+    let successfully_closed = ticket_completed_successfully(ticket);
     let worker_running = reported_worker_running && !closed;
     let worker_failed = reported_worker_failed && !closed;
     let assigned_step = compiled
@@ -4247,14 +6667,14 @@ fn ticket_progress(ticket: &Value, run: Option<&RunData>) -> TicketProgress {
             let review_step = step.get("kind").and_then(Value::as_str) == Some("review");
             if completed.contains(&id)
                 || (review_step && review_complete)
-                || (compiled.is_none() && closed)
+                || (compiled.is_none() && successfully_closed)
             {
                 StepVisualState::Done
             } else if active_step == Some(id) {
                 StepVisualState::Active
             } else if failed_step == Some(id) {
                 StepVisualState::Failed
-            } else if ready.contains(&id) || (compiled.is_none() && index == 0) {
+            } else if ready.contains(&id) || (compiled.is_none() && !closed && index == 0) {
                 StepVisualState::Ready
             } else {
                 StepVisualState::Pending
@@ -4392,14 +6812,21 @@ fn run_overview_text(
         "─".repeat(bar_width - filled),
         Style::default().fg(Color::DarkGray),
     ));
-    let lines = vec![
+    let status_marker = if workers > 0 {
+        Span::styled("⚙ ", live_activity_style(model))
+    } else {
+        Span::styled(
+            format!("{} ", status_glyph(&summary.status)),
+            Style::default()
+                .fg(status_color(&summary.status))
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+    let mut lines = vec![
         Line::from(vec![
+            status_marker,
             Span::styled(
-                format!(
-                    " {} {} ",
-                    status_glyph(&summary.status),
-                    humanize(&summary.status)
-                ),
+                format!(" {} ", humanize(&summary.status)),
                 Style::default()
                     .fg(Color::Black)
                     .bg(status_color(&summary.status))
@@ -4410,11 +6837,6 @@ fn run_overview_text(
                 Style::default().fg(Color::LightBlue),
             ),
         ]),
-        Line::raw(""),
-        Line::styled(
-            summary.goal.clone(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
         Line::raw(""),
         Line::styled("Progress", heading_style()),
         Line::from(progress),
@@ -4445,11 +6867,74 @@ fn run_overview_text(
             summary.open_questions
         )),
     ];
+    let tokens = run.token_breakdown();
+    if tokens.new > 0 || tokens.cached_input > 0 || run.planning_budget_progress().is_some() {
+        let uncached_input = tokens.input.saturating_sub(tokens.cached_input);
+        lines.extend([
+            Line::raw(""),
+            Line::styled("Model usage", heading_style()),
+            Line::from(vec![
+                Span::styled(
+                    compact_token_count(tokens.new),
+                    Style::default().fg(Color::LightMagenta),
+                ),
+                Span::styled(
+                    " new · cache excluded",
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]),
+            Line::styled(
+                format!(
+                    "Uncached input {} · output {} · reasoning {}",
+                    compact_token_count(uncached_input),
+                    compact_token_count(tokens.output),
+                    compact_token_count(tokens.reasoning_output)
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Line::styled(
+                format!(
+                    "Cached input {} · provider total {}",
+                    compact_token_count(tokens.cached_input),
+                    compact_token_count(tokens.total)
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+        if let Some(progress) = run.planning_budget_progress() {
+            let synthesis_at = progress.limit.saturating_sub(progress.synthesis_reserve);
+            lines.push(Line::from(vec![
+                Span::styled("Planning budget  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!(
+                        "{} / {} {}",
+                        compact_token_count(progress.used),
+                        compact_token_count(progress.limit),
+                        progress.metric.label()
+                    ),
+                    Style::default().fg(if progress.synthesis_forced {
+                        Color::Yellow
+                    } else {
+                        Color::Cyan
+                    }),
+                ),
+                Span::styled(
+                    format!(
+                        " · synthesis reserve at {}",
+                        compact_token_count(synthesis_at)
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+    }
     Text::from(lines)
 }
 
-fn narrative_cards(items: &[Value]) -> Text<'static> {
-    let mut lines = Vec::new();
+fn planning_timeline(items: &[Value], stages: &[Value], width: usize) -> Text<'static> {
+    // Consecutive identical projections are transport retries or repeated tool failures, not
+    // distinct operator decisions. Keep their count without letting them dominate the viewport.
+    let mut groups = Vec::<(String, Vec<(String, String, usize)>)>::new();
     for item in items {
         if item
             .get("type")
@@ -4460,110 +6945,174 @@ fn narrative_cards(items: &[Value]) -> Text<'static> {
             // durable audit records remain on disk without becoming a second question-history UI.
             continue;
         }
-        let (title, body, color) = planning_event_projection(item);
-        lines.push(Line::from(vec![
-            Span::styled("● ", Style::default().fg(color)),
-            Span::styled(title, heading_style()),
-        ]));
-        if let Some(body) = body.filter(|body| !body.trim().is_empty()) {
-            lines.push(Line::styled(body, Style::default().fg(Color::Gray)));
+        let Some(summary) = planning_event_summary(item) else {
+            continue;
+        };
+        let stage = planning_event_stage_title(item, stages);
+        let timestamp = planning_event_timestamp(item);
+        if let Some((_, rows)) = groups.iter_mut().find(|(title, _)| title == &stage) {
+            if let Some((_, _, count)) = rows
+                .last_mut()
+                .filter(|(_, previous, _)| previous == &summary)
+            {
+                *count += 1;
+            } else {
+                rows.push((timestamp, summary, 1));
+            }
+        } else {
+            groups.push((stage, vec![(timestamp, summary, 1)]));
         }
-        lines.push(Line::raw(""));
+    }
+
+    if groups.is_empty() {
+        return Text::from("No operator-facing planning events yet.");
+    }
+
+    let mut lines = Vec::new();
+    let text_column = 12usize;
+    let event_width = width.saturating_sub(text_column).max(1);
+    for (group_index, (stage, rows)) in groups.into_iter().enumerate() {
+        if group_index > 0 {
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::styled(
+            stage,
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ));
+        for (timestamp, summary, count) in rows {
+            let summary = if count > 1 {
+                format!("{summary} ×{count}")
+            } else {
+                summary
+            };
+            for (line_index, line) in wrap_full_text(&summary, event_width)
+                .into_iter()
+                .enumerate()
+            {
+                if line_index == 0 {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("  {timestamp:<8}  "),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::styled(line, Style::default().fg(Color::Gray)),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::raw(" ".repeat(text_column)),
+                        Span::styled(line, Style::default().fg(Color::Gray)),
+                    ]));
+                }
+            }
+        }
     }
     Text::from(lines)
 }
 
-/// Turn the nested Codex JSONL stream into operator-facing activity. The durable transcript keeps
-/// the exact event; this projection deliberately names what happened instead of repeating the
-/// transport envelope (`planning.agent.event`) for every row.
-fn planning_event_projection(item: &Value) -> (String, Option<String>, Color) {
+fn planning_event_stage_title(item: &Value, stages: &[Value]) -> String {
+    let Some(stage_id) = item.get("stage_id").and_then(Value::as_str) else {
+        return "Run setup".to_owned();
+    };
+    stages
+        .iter()
+        .find_map(|stage| {
+            let definition = stage.get("definition").unwrap_or(stage);
+            (definition.get("id").and_then(Value::as_str) == Some(stage_id))
+                .then(|| definition.get("title").and_then(Value::as_str))
+                .flatten()
+        })
+        .filter(|title| !title.trim().is_empty())
+        .map(str::trim)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| humanize(stage_id))
+}
+
+fn planning_event_timestamp(item: &Value) -> String {
+    let raw = ["at", "timestamp", "created_at"]
+        .into_iter()
+        .find_map(|field| item.get(field).and_then(Value::as_str))
+        .or_else(|| {
+            let event = item.get("event")?;
+            ["at", "timestamp", "created_at"]
+                .into_iter()
+                .find_map(|field| event.get(field).and_then(Value::as_str))
+        });
+    raw.map(compact_planning_timestamp)
+        .unwrap_or_else(|| "--:--:--".to_owned())
+}
+
+fn compact_planning_timestamp(value: &str) -> String {
+    let value = value.trim();
+    let clock = value
+        .split_once('T')
+        .map(|(_, clock)| clock)
+        .unwrap_or(value);
+    let clock = clock.trim_start_matches(|character: char| character.is_whitespace());
+    if clock.len() >= 8
+        && clock.as_bytes().get(2) == Some(&b':')
+        && clock.as_bytes().get(5) == Some(&b':')
+    {
+        clock[..8].to_owned()
+    } else {
+        short(value, 8)
+    }
+}
+
+/// Turn the nested Codex JSONL stream into a quiet operator-facing timeline. The durable
+/// transcript retains raw commands and transport envelopes; this projection only keeps events
+/// that help a person understand planning progress.
+fn planning_event_summary(item: &Value) -> Option<String> {
     let event_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
-    let stage = item
-        .get("stage_id")
-        .and_then(Value::as_str)
-        .map(humanize)
-        .unwrap_or_else(|| "Planning".to_owned());
     match event_type {
-        "planning.intake" => (
-            "Goal and run settings captured".to_owned(),
-            item.get("intake")
-                .and_then(|intake| intake.get("question_policy"))
-                .and_then(Value::as_str)
-                .map(|policy| format!("Question policy · {}", humanize(policy))),
-            Color::Cyan,
-        ),
-        "planning.compiler_stage.completed" => (
-            format!("{stage} validated"),
-            Some("Compiler checks passed and the workflow advanced.".to_owned()),
-            Color::Green,
-        ),
-        "planning.agent.starting" => (
-            format!("{stage} started"),
-            Some("The planning agent is reading the project and shaping this pass.".to_owned()),
-            Color::Yellow,
-        ),
-        "planning.agent.resuming" => (
-            format!("{stage} resumed"),
-            Some("Recorded answers were returned to the same planning session.".to_owned()),
-            Color::Yellow,
-        ),
-        "planning.agent.completed" => {
+        "planning.intake" => Some("Captured objective and run settings".to_owned()),
+        "planning.compiler_stage.completed" => Some("Compiler checks passed".to_owned()),
+        "pipeline.approval_stage.completed" => Some("Run approved".to_owned()),
+        "planning.agent.starting" => Some("Started planning pass".to_owned()),
+        "planning.agent.resuming" => Some("Resumed planning pass".to_owned()),
+        "planning.agent.paused" => Some("Paused planning pass".to_owned()),
+        "planning.agent.interrupted" => Some("Planning pass interrupted".to_owned()),
+        "planning.agent.process_error" => Some(with_planning_detail(
+            "Planning process failed",
+            item.get("error").and_then(Value::as_str),
+        )),
+        "planning.agent.completed" | "planning.agent.finished" => {
             let status = item
                 .get("status")
                 .and_then(Value::as_str)
                 .unwrap_or("completed");
-            (
-                format!("{stage} {}", humanize(status)),
-                Some("The pass reached a durable boundary.".to_owned()),
-                if status == "succeeded" {
-                    Color::Green
-                } else {
-                    Color::LightRed
-                },
-            )
+            Some(format!("Planning pass {}", humanize(status).to_lowercase()))
         }
-        "planning.question.opened" => (
-            "Clarification requested".to_owned(),
-            item.get("request")
-                .and_then(|request| request.get("prompt"))
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
-            Color::Yellow,
-        ),
-        "planning.question.resumed" => (
-            "Answer returned to planning".to_owned(),
-            Some(format!("{stage} can continue with the recorded decision.")),
-            Color::Green,
-        ),
-        "planning.output" => {
-            let output = item.get("output").unwrap_or(&Value::Null);
-            let body = ["summary", "content", "message", "text", "plan"]
-                .into_iter()
-                .find_map(|field| output.get(field).and_then(Value::as_str))
-                .or_else(|| output.as_str())
-                .map(|body| short(body, 220));
-            (format!("{stage} plan recorded"), body, Color::Green)
+        "planning.output" => Some("Recorded plan".to_owned()),
+        "pipeline.initialization_stage.completed" => Some("Initialized run".to_owned()),
+        "planning.budget.synthesis_forced" => {
+            Some("Entered synthesis reserve to finish the plan".to_owned())
         }
-        "planning.agent.event" => project_nested_planning_event(item, &stage),
+        "planning.revision.requested" => Some(with_planning_detail(
+            "Revision requested",
+            item.get("instructions").and_then(Value::as_str),
+        )),
+        "planning.agent.event" => project_nested_planning_event(item),
         other => {
-            let body = ["content", "message", "summary", "text", "prompt"]
+            let detail = ["summary", "message", "content", "text"]
                 .into_iter()
-                .find_map(|field| item.get(field).and_then(Value::as_str))
-                .map(|body| short(body, 220));
-            (
-                if other.is_empty() {
-                    "Planning update".to_owned()
-                } else {
-                    humanize(other)
-                },
-                body,
-                Color::Cyan,
-            )
+                .find_map(|field| item.get(field).and_then(Value::as_str));
+            detail.map(|detail| {
+                with_planning_detail(
+                    if other.is_empty() {
+                        "Planning update".to_owned()
+                    } else {
+                        humanize(other)
+                    },
+                    Some(detail),
+                )
+            })
         }
     }
 }
 
-fn project_nested_planning_event(item: &Value, stage: &str) -> (String, Option<String>, Color) {
+fn project_nested_planning_event(item: &Value) -> Option<String> {
     let event = item.get("event").unwrap_or(&Value::Null);
     let event_type = event
         .get("type")
@@ -4575,17 +7124,9 @@ fn project_nested_planning_event(item: &Value, stage: &str) -> (String, Option<S
         .and_then(Value::as_str)
         .unwrap_or_default();
     match (event_type, nested_type) {
-        ("thread.started", _) => (
-            format!("{stage} session connected"),
-            Some("A new planning conversation is ready.".to_owned()),
-            Color::Cyan,
-        ),
-        ("turn.started", _) => (
-            format!("{stage} reasoning"),
-            Some("The agent is considering the project context.".to_owned()),
-            Color::Yellow,
-        ),
-        ("turn.completed", _) => {
+        ("thread.started", _) => Some("Connected planning session".to_owned()),
+        ("turn.started", _) => Some("Started reasoning".to_owned()),
+        ("turn.completed" | "turn.finished", _) => {
             let usage = event.get("usage").unwrap_or(&Value::Null);
             let total = usage
                 .get("input_tokens")
@@ -4597,63 +7138,88 @@ fn project_nested_planning_event(item: &Value, stage: &str) -> (String, Option<S
                         .and_then(Value::as_u64)
                         .unwrap_or_default(),
                 );
-            (
-                format!("{stage} reasoning complete"),
-                (total > 0).then(|| format!("{} used in this turn.", compact_token_count(total))),
-                Color::Green,
-            )
+            Some(if total > 0 {
+                format!("Finished reasoning · {} used", compact_token_count(total))
+            } else {
+                "Finished reasoning".to_owned()
+            })
         }
-        ("item.started", "command_execution") => (
-            "Inspecting the project".to_owned(),
-            nested
-                .get("command")
-                .and_then(Value::as_str)
-                .map(|command| short_command(command, 180)),
-            Color::Yellow,
-        ),
+        // Started items and usage ticks dominate Codex's raw JSONL. The durable transcript and
+        // selected-agent chat retain them; this overview waits for their meaningful outcome.
+        ("token.usage.updated", _) | ("item.started", _) => None,
         ("item.completed", "command_execution") => {
             let exit = nested.get("exit_code").and_then(Value::as_i64);
-            (
-                if exit == Some(0) {
-                    "Project inspection completed".to_owned()
-                } else {
-                    "Project inspection needs attention".to_owned()
-                },
-                nested
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .map(|command| short_command(command, 180)),
-                if exit == Some(0) {
-                    Color::Green
-                } else {
-                    Color::LightRed
-                },
-            )
+            (exit != Some(0)).then(|| {
+                exit.map_or_else(
+                    || "A project inspection command failed".to_owned(),
+                    |code| format!("A project inspection command failed (exit {code})"),
+                )
+            })
         }
-        ("item.completed", "agent_message") => (
-            "Agent shared its reasoning".to_owned(),
-            nested
+        ("item.completed", "userMessage" | "user_message") => None,
+        ("item.completed", "agent_message") => nested
+            .get("text")
+            .and_then(Value::as_str)
+            .map(planning_agent_message_summary),
+        ("item.completed", "reasoning" | "reasoning_summary") => planning_reasoning_summary(nested)
+            .map(|text| with_planning_detail("Reasoned", Some(&text))),
+        _ => {
+            let detail = nested
                 .get("text")
                 .and_then(Value::as_str)
-                .map(planning_agent_message_summary),
-            Color::Cyan,
-        ),
-        _ => (
-            format!(
-                "{stage} · {}",
-                humanize(if nested_type.is_empty() {
-                    event_type
-                } else {
-                    nested_type
-                })
-            ),
-            nested
-                .get("text")
-                .and_then(Value::as_str)
-                .map(|text| short(text, 220)),
-            Color::Cyan,
-        ),
+                .or_else(|| event.get("message").and_then(Value::as_str))
+                .or_else(|| event.get("error").and_then(Value::as_str));
+            detail.map(|detail| {
+                with_planning_detail(
+                    humanize(if nested_type.is_empty() {
+                        event_type
+                    } else {
+                        nested_type
+                    }),
+                    Some(detail),
+                )
+            })
+        }
     }
+}
+
+/// Codex exposes optional reasoning *summaries* as strings or structured text fragments. These
+/// are suitable for an operator timeline; empty arrays and raw reasoning content are deliberately
+/// ignored so the control center never invents a thought-process transcript.
+fn planning_reasoning_summary(item: &Value) -> Option<String> {
+    fn collect(value: &Value, output: &mut Vec<String>) {
+        match value {
+            Value::String(text) if !text.trim().is_empty() => output.push(text.trim().to_owned()),
+            Value::Array(values) => {
+                for value in values {
+                    collect(value, output);
+                }
+            }
+            Value::Object(object) => {
+                for field in ["text", "summary"] {
+                    if let Some(value) = object.get(field) {
+                        collect(value, output);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut fragments = Vec::new();
+    if let Some(summary) = item.get("summary") {
+        collect(summary, &mut fragments);
+    }
+    (!fragments.is_empty()).then(|| short(&fragments.join(" "), 220))
+}
+
+fn with_planning_detail(label: impl Into<String>, detail: Option<&str>) -> String {
+    let label = label.into();
+    detail
+        .map(str::trim)
+        .filter(|detail| !detail.is_empty())
+        .map(|detail| format!("{label} — {}", short(detail, 220)))
+        .unwrap_or(label)
 }
 
 fn planning_agent_message_summary(text: &str) -> String {
@@ -4675,19 +7241,264 @@ fn planning_agent_message_summary(text: &str) -> String {
         .unwrap_or_else(|| short(text, 220))
 }
 
-fn short_command(command: &str, width: usize) -> String {
-    let command = command
-        .strip_prefix("/bin/zsh -lc ")
-        .or_else(|| command.strip_prefix("/bin/bash -lc "))
-        .unwrap_or(command)
-        .trim_matches('"');
-    short(command, width)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvidenceBasis {
+    TicketResult,
+    PassedReview,
+    Verification,
+    FinalReport,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvidenceHealth {
+    Attention,
+    Recorded(EvidenceBasis),
+    NoRecordedIssues,
+}
+
+fn evidence_health(run: &RunData, summary: &RunSummary) -> EvidenceHealth {
+    let blocked = run
+        .tickets
+        .iter()
+        .any(|ticket| value_len(ticket.get("blockers")) > 0);
+    let board = run.snapshot.get("board");
+    let workflow_rows = board
+        .and_then(|board| board.get("ticket_workflows"))
+        .and_then(Value::as_object);
+    let failed_worker = workflow_rows.is_some_and(|rows| {
+        rows.values().any(|progress| {
+            progress.get("worker_state").and_then(Value::as_str) == Some("exited_before_output")
+        })
+    });
+    let failed_review = workflow_rows.is_some_and(|rows| {
+        rows.values()
+            .any(|progress| progress.get("review_status").and_then(Value::as_str) == Some("failed"))
+    });
+    let failed_pipeline = run.stages.iter().any(|stage| {
+        matches!(
+            stage.get("status").and_then(Value::as_str),
+            Some("failed" | "blocked")
+        )
+    });
+    let failed_ticket = run.tickets.iter().any(|ticket| {
+        matches!(
+            ticket.get("status").and_then(Value::as_str),
+            Some("failed" | "blocked")
+        )
+    });
+    let recorded_issue = summary.validation_errors > 0
+        || matches!(summary.status.as_str(), "failed" | "blocked")
+        || blocked
+        || failed_worker
+        || failed_review
+        || failed_pipeline
+        || failed_ticket
+        || board.is_some_and(|board| {
+            value_len(board.get("failed_journals")) > 0
+                || value_len(board.get("incomplete_journals")) > 0
+                || value_len(board.get("incomplete_integrations")) > 0
+        });
+    if recorded_issue {
+        return EvidenceHealth::Attention;
+    }
+    if !health_telemetry_complete(run) {
+        return EvidenceHealth::NoRecordedIssues;
+    }
+    recorded_evidence_basis(run)
+        .map(EvidenceHealth::Recorded)
+        .unwrap_or(EvidenceHealth::NoRecordedIssues)
+}
+
+fn health_telemetry_complete(run: &RunData) -> bool {
+    if run
+        .snapshot
+        .get("validation_errors")
+        .and_then(Value::as_array)
+        .is_none()
+    {
+        return false;
+    }
+    if run
+        .snapshot
+        .get("stages")
+        .and_then(Value::as_array)
+        .is_none()
+    {
+        return false;
+    }
+    let Some(board) = run.snapshot.get("board").and_then(Value::as_object) else {
+        return false;
+    };
+    if [
+        "failed_journals",
+        "incomplete_journals",
+        "incomplete_integrations",
+    ]
+    .into_iter()
+    .any(|field| board.get(field).and_then(Value::as_array).is_none())
+    {
+        return false;
+    }
+    let Some(workflows) = board.get("ticket_workflows").and_then(Value::as_object) else {
+        return false;
+    };
+    let Some(tickets) = run.snapshot.get("tickets").and_then(Value::as_array) else {
+        return false;
+    };
+    tickets.iter().all(|ticket| {
+        let Some(ticket_id) = ticket.get("id").and_then(Value::as_str) else {
+            return false;
+        };
+        if ticket.get("blockers").and_then(Value::as_array).is_none()
+            || ticket.get("workflow").and_then(Value::as_array).is_none()
+        {
+            return false;
+        }
+        let Some(progress) = workflows.get(ticket_id).and_then(Value::as_object) else {
+            return false;
+        };
+        progress.get("status").and_then(Value::as_str).is_some()
+            && ["completed_steps", "ready_steps", "pending_steps"]
+                .into_iter()
+                .all(|field| {
+                    progress
+                        .get(field)
+                        .and_then(Value::as_array)
+                        .is_some_and(|steps| steps.iter().all(|step| step.as_str().is_some()))
+                })
+            && progress
+                .get("worker_state")
+                .and_then(Value::as_str)
+                .is_some_and(|state| {
+                    matches!(
+                        state,
+                        "idle" | "running" | "completed" | "exited_before_output"
+                    )
+                })
+            && progress
+                .get("active_worker_step")
+                .is_some_and(|value| value.is_null() || value.as_str().is_some())
+            && progress.get("review_status").is_some_and(|value| {
+                value.is_null() || matches!(value.as_str(), Some("passed" | "failed"))
+            })
+    })
+}
+
+fn recorded_evidence_basis(run: &RunData) -> Option<EvidenceBasis> {
+    if successful_pipeline_evidence(run, EvidenceBasis::FinalReport) {
+        return Some(EvidenceBasis::FinalReport);
+    }
+    if successful_pipeline_evidence(run, EvidenceBasis::Verification) {
+        return Some(EvidenceBasis::Verification);
+    }
+    if compiler_projects_current_passed_review(run) {
+        return Some(EvidenceBasis::PassedReview);
+    }
+    run.tickets
+        .iter()
+        .any(|ticket| {
+            ticket
+                .get("outputs")
+                .and_then(Value::as_array)
+                .is_some_and(|outputs| outputs.iter().any(Value::is_object))
+        })
+        .then_some(EvidenceBasis::TicketResult)
+}
+
+fn compiler_projects_current_passed_review(run: &RunData) -> bool {
+    let Some(workflows) = run
+        .snapshot
+        .get("board")
+        .and_then(|board| board.get("ticket_workflows"))
+        .and_then(Value::as_object)
+    else {
+        return false;
+    };
+    run.tickets.iter().any(|ticket| {
+        let review_steps = ticket
+            .get("workflow")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|step| step.get("kind").and_then(Value::as_str) == Some("review"))
+            .filter_map(|step| step.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        if review_steps.is_empty() {
+            return false;
+        }
+        let Some(progress) = ticket
+            .get("id")
+            .and_then(Value::as_str)
+            .and_then(|ticket_id| workflows.get(ticket_id))
+        else {
+            return false;
+        };
+        let pending = progress
+            .get("pending_steps")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<BTreeSet<_>>();
+        progress.get("review_status").and_then(Value::as_str) == Some("passed")
+            && review_steps
+                .into_iter()
+                .all(|step_id| !pending.contains(step_id))
+    })
+}
+
+fn successful_pipeline_evidence(run: &RunData, basis: EvidenceBasis) -> bool {
+    run.stages.iter().any(|stage| {
+        if stage.get("status").and_then(Value::as_str) != Some("succeeded")
+            || stage.get("output").is_none_or(Value::is_null)
+        {
+            return false;
+        }
+        let config = stage
+            .get("definition")
+            .and_then(|definition| definition.get("config"));
+        match basis {
+            EvidenceBasis::Verification => {
+                config
+                    .and_then(|config| config.get("checkpoint"))
+                    .and_then(Value::as_str)
+                    == Some("verification")
+            }
+            EvidenceBasis::FinalReport => {
+                config
+                    .and_then(|config| config.get("action"))
+                    .and_then(Value::as_str)
+                    == Some("report")
+            }
+            EvidenceBasis::TicketResult | EvidenceBasis::PassedReview => false,
+        }
+    })
+}
+
+fn evidence_basis_detail(basis: EvidenceBasis) -> &'static str {
+    match basis {
+        EvidenceBasis::TicketResult => "✓ Ticket result recorded · no known issues",
+        EvidenceBasis::PassedReview => "✓ Review passed · no known issues",
+        EvidenceBasis::Verification => "✓ Verification recorded · no known issues",
+        EvidenceBasis::FinalReport => "✓ Final report recorded · no known issues",
+    }
+}
+
+fn final_report_status(run: &RunData) -> &'static str {
+    if successful_pipeline_evidence(run, EvidenceBasis::FinalReport) {
+        "Final report recorded."
+    } else if run.report.is_some() {
+        "No final report yet."
+    } else {
+        "No final report configured."
+    }
 }
 
 fn report_text(
     run: &RunData,
     visible_graph_nodes: usize,
     model: &ControlCenterModel,
+    compact: bool,
 ) -> Text<'static> {
     let Some(summary) = run.summary.as_ref() else {
         return Text::from("No run status available.");
@@ -4723,58 +7534,266 @@ fn report_text(
         .filter(|ticket| value_len(ticket.get("blockers")) > 0)
         .count();
     let workers = run.live_agent_summaries().len();
-    let failed_workers = run
+    let board = run.snapshot.get("board");
+    let workflow_rows = board
+        .and_then(|board| board.get("ticket_workflows"))
+        .and_then(Value::as_object);
+    let failed_workers = workflow_rows.map_or(0, |rows| {
+        rows.values()
+            .filter(|progress| {
+                progress.get("worker_state").and_then(Value::as_str) == Some("exited_before_output")
+            })
+            .count()
+    });
+    let failed_reviews = workflow_rows.map_or(0, |rows| {
+        rows.values()
+            .filter(|progress| {
+                progress.get("review_status").and_then(Value::as_str) == Some("failed")
+            })
+            .count()
+    });
+    let failed_stages = run
+        .stages
+        .iter()
+        .filter(|stage| {
+            matches!(
+                stage.get("status").and_then(Value::as_str),
+                Some("failed" | "blocked")
+            )
+        })
+        .count();
+    let failed_tickets = run
         .tickets
         .iter()
-        .filter(|ticket| ticket_progress(ticket, Some(run)).worker_failed)
+        .filter(|ticket| ticket.get("status").and_then(Value::as_str) == Some("failed"))
         .count();
-    let board = run.snapshot.get("board");
+    let blocked_ticket_states_without_reason = run
+        .tickets
+        .iter()
+        .filter(|ticket| {
+            ticket.get("status").and_then(Value::as_str) == Some("blocked")
+                && value_len(ticket.get("blockers")) == 0
+        })
+        .count();
     let failed_actions = board.map_or(0, |board| value_len(board.get("failed_journals")));
     let interrupted_actions = board.map_or(0, |board| value_len(board.get("incomplete_journals")));
     let interrupted_integrations =
         board.map_or(0, |board| value_len(board.get("incomplete_integrations")));
-    let healthy = summary.validation_errors == 0
-        && blocked == 0
-        && failed_workers == 0
-        && failed_actions == 0
-        && interrupted_actions == 0
-        && interrupted_integrations == 0;
-    let health_color = if healthy {
-        Color::Green
-    } else {
-        Color::LightRed
+    let health = evidence_health(run, summary);
+    let health_badge = match health {
+        EvidenceHealth::Attention => Span::styled(
+            " ! ATTENTION ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::LightRed)
+                .add_modifier(Modifier::BOLD),
+        ),
+        EvidenceHealth::Recorded(_) => Span::styled(
+            " ● Evidence recorded ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        EvidenceHealth::NoRecordedIssues => Span::styled(
+            " ◇ No recorded issues ",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
     };
-    let lines = vec![
-        Line::from(vec![
-            Span::styled(
-                if healthy {
-                    " ● HEALTHY "
-                } else {
-                    " ! ATTENTION "
-                },
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(health_color)
-                    .add_modifier(Modifier::BOLD),
+    let health_line = Line::from(vec![
+        health_badge,
+        Span::styled(
+            format!("  {}", humanize(&summary.status)),
+            Style::default().fg(status_color(&summary.status)),
+        ),
+    ]);
+    if compact {
+        let mut lines = vec![
+            health_line,
+            Line::from(vec![
+                Span::styled(
+                    format!("● {closed} done"),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("◐ {active} active"),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("○ {todo} waiting"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]),
+        ];
+        match health {
+            EvidenceHealth::Recorded(basis) => lines.push(Line::styled(
+                evidence_basis_detail(basis),
+                Style::default().fg(Color::Green),
+            )),
+            EvidenceHealth::NoRecordedIssues => lines.push(Line::styled(
+                "◇ Evidence pending",
+                Style::default().fg(Color::DarkGray),
+            )),
+            EvidenceHealth::Attention => {
+                if blocked > 0 {
+                    lines.push(Line::styled(
+                        format!("! {blocked} blocked ticket{}", plural(blocked)),
+                        Style::default().fg(Color::LightRed),
+                    ));
+                }
+                if failed_tickets > 0 {
+                    lines.push(Line::styled(
+                        format!("! {failed_tickets} failed ticket{}", plural(failed_tickets)),
+                        Style::default().fg(Color::LightRed),
+                    ));
+                }
+                if blocked_ticket_states_without_reason > 0 {
+                    lines.push(Line::styled(
+                        format!(
+                            "! {blocked_ticket_states_without_reason} blocked ticket state{}",
+                            plural(blocked_ticket_states_without_reason)
+                        ),
+                        Style::default().fg(Color::LightRed),
+                    ));
+                }
+                if failed_workers > 0 {
+                    lines.push(Line::styled(
+                        format!(
+                            "! {failed_workers} worker{} need recovery",
+                            plural(failed_workers)
+                        ),
+                        Style::default().fg(Color::LightRed),
+                    ));
+                }
+                if failed_reviews > 0 {
+                    lines.push(Line::styled(
+                        format!("! {failed_reviews} review{} failed", plural(failed_reviews)),
+                        Style::default().fg(Color::LightRed),
+                    ));
+                }
+                if failed_stages > 0 {
+                    lines.push(Line::styled(
+                        format!(
+                            "! {failed_stages} pipeline stage{} failed or blocked",
+                            plural(failed_stages)
+                        ),
+                        Style::default().fg(Color::LightRed),
+                    ));
+                }
+                if failed_actions > 0 {
+                    lines.push(Line::styled(
+                        format!("! {failed_actions} failed action{}", plural(failed_actions)),
+                        Style::default().fg(Color::LightRed),
+                    ));
+                }
+                if interrupted_actions > 0 {
+                    lines.push(Line::styled(
+                        format!(
+                            "! {interrupted_actions} interrupted action{}",
+                            plural(interrupted_actions)
+                        ),
+                        Style::default().fg(Color::LightRed),
+                    ));
+                }
+                if interrupted_integrations > 0 {
+                    lines.push(Line::styled(
+                        format!(
+                            "! {interrupted_integrations} interrupted integration{}",
+                            plural(interrupted_integrations)
+                        ),
+                        Style::default().fg(Color::LightRed),
+                    ));
+                }
+                if summary.validation_errors > 0 {
+                    lines.push(Line::styled(
+                        format!(
+                            "! {} validation issue{}",
+                            summary.validation_errors,
+                            plural(summary.validation_errors)
+                        ),
+                        Style::default().fg(Color::LightRed),
+                    ));
+                }
+            }
+        }
+        lines.extend([
+            Line::from(vec![
+                Span::styled(
+                    if workers > 0 { "⚙ " } else { "○ " },
+                    if workers > 0 {
+                        live_activity_style(model)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
+                Span::styled(
+                    format!("{workers} working"),
+                    Style::default().fg(if workers > 0 {
+                        Color::Yellow
+                    } else {
+                        Color::DarkGray
+                    }),
+                ),
+                Span::styled(
+                    format!(
+                        " · ◇{visible_graph_nodes} nodes · ?{} questions",
+                        summary.open_questions
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]),
+            Line::styled(
+                final_report_status(run),
+                Style::default().fg(Color::DarkGray),
             ),
-            Span::styled(
-                format!("  {}", humanize(&summary.status)),
-                Style::default().fg(status_color(&summary.status)),
-            ),
-        ]),
+        ]);
+        return Text::from(lines);
+    }
+    let mut lines = vec![health_line];
+    match health {
+        EvidenceHealth::Recorded(basis) => lines.push(Line::styled(
+            evidence_basis_detail(basis),
+            Style::default().fg(Color::Green),
+        )),
+        EvidenceHealth::NoRecordedIssues => lines.push(Line::styled(
+            "◇ Evidence pending",
+            Style::default().fg(Color::DarkGray),
+        )),
+        EvidenceHealth::Attention => {}
+    }
+    lines.extend([
         Line::raw(""),
         Line::styled("Tickets", heading_style()),
         Line::raw(format!("● {closed} complete")),
         Line::raw(format!("◐ {active} active")),
         Line::raw(format!("○ {todo} waiting")),
-        Line::styled(
+    ]);
+    if blocked > 0 {
+        lines.push(Line::styled(
             format!("! {blocked} blocked"),
-            Style::default().fg(if blocked > 0 {
-                Color::LightRed
-            } else {
-                Color::DarkGray
-            }),
-        ),
+            Style::default().fg(Color::LightRed),
+        ));
+    }
+    if failed_tickets > 0 {
+        lines.push(Line::styled(
+            format!("! {failed_tickets} failed ticket{}", plural(failed_tickets)),
+            Style::default().fg(Color::LightRed),
+        ));
+    }
+    if blocked_ticket_states_without_reason > 0 {
+        lines.push(Line::styled(
+            format!(
+                "! {blocked_ticket_states_without_reason} blocked ticket state{}",
+                plural(blocked_ticket_states_without_reason)
+            ),
+            Style::default().fg(Color::LightRed),
+        ));
+    }
+    lines.extend([
         Line::raw(""),
         Line::styled("System", heading_style()),
         Line::from(vec![
@@ -4788,70 +7807,80 @@ fn report_text(
             ),
             Span::raw(format!("{workers} active worker{}", plural(workers))),
         ]),
-        Line::styled(
+    ]);
+    if failed_workers > 0 {
+        lines.push(Line::styled(
             format!(
                 "! {failed_workers} worker{} need recovery",
                 plural(failed_workers)
             ),
-            Style::default().fg(if failed_workers > 0 {
-                Color::LightRed
-            } else {
-                Color::DarkGray
-            }),
-        ),
-        Line::styled(
-            format!("! {failed_actions} failed action{}", plural(failed_actions)),
-            Style::default().fg(if failed_actions > 0 {
-                Color::LightRed
-            } else {
-                Color::DarkGray
-            }),
-        ),
-        Line::styled(
+            Style::default().fg(Color::LightRed),
+        ));
+    }
+    if failed_reviews > 0 {
+        lines.push(Line::styled(
+            format!("! {failed_reviews} review{} failed", plural(failed_reviews)),
+            Style::default().fg(Color::LightRed),
+        ));
+    }
+    if failed_stages > 0 {
+        lines.push(Line::styled(
             format!(
-                "! {interrupted_actions} interrupted action{} · {interrupted_integrations} integration{}",
+                "! {failed_stages} pipeline stage{} failed or blocked",
+                plural(failed_stages)
+            ),
+            Style::default().fg(Color::LightRed),
+        ));
+    }
+    if failed_actions > 0 {
+        lines.push(Line::styled(
+            format!("! {failed_actions} failed action{}", plural(failed_actions)),
+            Style::default().fg(Color::LightRed),
+        ));
+    }
+    if interrupted_actions > 0 {
+        lines.push(Line::styled(
+            format!(
+                "! {interrupted_actions} interrupted action{}",
                 plural(interrupted_actions),
+            ),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    if interrupted_integrations > 0 {
+        lines.push(Line::styled(
+            format!(
+                "! {interrupted_integrations} interrupted integration{}",
                 plural(interrupted_integrations)
             ),
-            Style::default().fg(if interrupted_actions > 0 || interrupted_integrations > 0 {
-                Color::Yellow
-            } else {
-                Color::DarkGray
-            }),
-        ),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    lines.extend([
         Line::raw(format!("◇ {visible_graph_nodes} graph nodes")),
         Line::raw(format!(
             "? {} open question{}",
             summary.open_questions,
             plural(summary.open_questions)
         )),
-        Line::styled(
+    ]);
+    if summary.validation_errors > 0 {
+        lines.push(Line::styled(
             format!(
-                "{} {} validation issue{}",
-                if summary.validation_errors == 0 {
-                    "✓"
-                } else {
-                    "!"
-                },
+                "! {} validation issue{}",
                 summary.validation_errors,
                 plural(summary.validation_errors)
             ),
-            Style::default().fg(if summary.validation_errors == 0 {
-                Color::Green
-            } else {
-                Color::LightRed
-            }),
-        ),
+            Style::default().fg(Color::LightRed),
+        ));
+    }
+    lines.extend([
         Line::raw(""),
         Line::styled(
-            if run.report.is_some() {
-                "Configured report is ready when the run reaches its reporting stage."
-            } else {
-                "No final report has been produced yet."
-            },
+            final_report_status(run),
             Style::default().fg(Color::DarkGray),
         ),
-    ];
+    ]);
     Text::from(lines)
 }
 
@@ -4984,14 +8013,7 @@ fn configure_field_window(
 }
 
 fn draw_configure_draft_bar(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
-    let edited_documents = model
-        .config
-        .documents
-        .iter()
-        .filter(|document| document.dirty() || document.is_new)
-        .count();
-    let file_operations = model.config.pending_deletes.len() + model.config.pending_renames.len();
-    let changes = edited_documents + file_operations;
+    let changes = model.unpublished_config_change_count();
     let issues = model
         .config
         .documents
@@ -4999,77 +8021,49 @@ fn draw_configure_draft_bar(frame: &mut Frame<'_>, model: &ControlCenterModel, a
         .map(|document| document.diagnostics.len())
         .sum::<usize>()
         + usize::from(model.catalog_error.is_some());
-    let (marker, state, color) = if issues > 0 {
-        (
-            "!",
-            format!("{issues} issue{} block publication", plural(issues)),
-            Color::LightRed,
-        )
+    let (state, color) = if issues > 0 {
+        if changes > 0 {
+            (
+                format!("! {issues} draft issue{} block publication", plural(issues)),
+                Color::LightRed,
+            )
+        } else {
+            (
+                format!("! {issues} configuration issue{}", plural(issues)),
+                Color::LightRed,
+            )
+        }
     } else if changes > 0 {
         (
-            "●",
-            format!("{changes} staged change{}", plural(changes)),
+            format!("● {changes} unpublished change{}", plural(changes)),
             Color::Yellow,
         )
     } else {
-        ("✓", "published configuration".to_owned(), Color::Green)
+        ("Future runs only".to_owned(), Color::LightBlue)
     };
-    let primary_action = if model.legacy_migration_available {
-        "T New run type · L Migrate Legacy"
+    let compact_action = if model.legacy_migration_available {
+        "t run type · l migrate"
     } else {
-        "T New run type"
+        "t run type"
     };
-    if area.width < 110 {
-        let compact_state = if issues > 0 {
-            format!("{marker} {issues} issue{}", plural(issues))
-        } else if changes > 0 {
-            format!("{marker} {changes} draft{}", plural(changes))
-        } else {
-            format!("{marker} published")
-        };
-        let compact_action = if model.legacy_migration_available {
-            "T run type · L migrate"
-        } else {
-            "T run type"
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(compact_state, Style::default().fg(color)),
-                Span::styled(" · future runs · ", Style::default().fg(Color::LightBlue)),
-                Span::styled("Ctrl-P publish", Style::default().fg(Color::Cyan)),
-                Span::styled(" · ", Style::default().fg(Color::DarkGray)),
-                Span::styled("Ctrl-S save", Style::default().fg(Color::Cyan)),
-                Span::styled(
-                    format!(" · {compact_action}"),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Draft workspace "),
-            ),
-            area,
-        );
-        return;
+    let mut spans = vec![Span::styled(state, Style::default().fg(color))];
+    if changes > 0 {
+        spans.extend([
+            Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Ctrl-P publish", Style::default().fg(Color::Cyan)),
+            Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Ctrl-D discard all", Style::default().fg(Color::Cyan)),
+        ]);
     }
+    spans.push(Span::styled(
+        format!(" · {compact_action}"),
+        Style::default().fg(Color::DarkGray),
+    ));
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(format!("{marker} {state}"), Style::default().fg(color)),
-            Span::styled(
-                "  ·  Future runs only  ·  ",
-                Style::default().fg(Color::LightBlue),
-            ),
-            Span::styled(primary_action, Style::default().fg(Color::Cyan)),
-            Span::styled(
-                "  ·  Ctrl-S save all · Ctrl-P validate & publish",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]))
-        .block(
+        Paragraph::new(Line::from(spans)).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Draft workspace "),
+                .title(" Configuration "),
         ),
         area,
     );
@@ -5140,12 +8134,13 @@ fn draw_config_resources(frame: &mut Frame<'_>, model: &ControlCenterModel, area
             .map(|(index, resource)| {
                 let selected = index == model.config.selected_resource;
                 let (state, state_label, state_color) = config_resource_state(model, resource);
-                let state_suffix = if compact {
+                let state_suffix = if compact || state_label.is_empty() {
                     String::new()
                 } else {
                     format!("  {state_label}")
                 };
-                let fixed_width = 6 + UnicodeWidthStr::width(state_suffix.as_str());
+                let state_width = usize::from(!state.is_empty()) * 2;
+                let fixed_width = 4 + state_width + UnicodeWidthStr::width(state_suffix.as_str());
                 let title = short_display_width(
                     &config_resource_display_title(domain, resource),
                     inner_width.saturating_sub(fixed_width),
@@ -5175,26 +8170,36 @@ fn draw_config_resources(frame: &mut Frame<'_>, model: &ControlCenterModel, area
                                 .add_modifier(Modifier::BOLD),
                         ),
                     ]),
-                    Line::from(vec![
-                        Span::styled(
-                            if selected { "▸ " } else { "  " },
-                            Style::default().fg(Color::Cyan),
-                        ),
-                        Span::styled(
-                            if ends_group { "└─" } else { "├─" },
-                            Style::default().fg(config_domain_color(domain)),
-                        ),
-                        Span::styled(format!("{state} "), Style::default().fg(state_color)),
-                        Span::styled(
-                            title,
-                            Style::default().add_modifier(if selected {
-                                Modifier::BOLD
-                            } else {
-                                Modifier::empty()
-                            }),
-                        ),
-                        Span::styled(state_suffix, Style::default().fg(state_color)),
-                    ]),
+                    Line::from({
+                        let mut spans = vec![
+                            Span::styled(
+                                if selected { "▸ " } else { "  " },
+                                Style::default().fg(Color::Cyan),
+                            ),
+                            Span::styled(
+                                if ends_group { "└─" } else { "├─" },
+                                Style::default().fg(config_domain_color(domain)),
+                            ),
+                        ];
+                        if !state.is_empty() {
+                            spans.push(Span::styled(
+                                format!("{state} "),
+                                Style::default().fg(state_color),
+                            ));
+                        }
+                        spans.extend([
+                            Span::styled(
+                                title,
+                                Style::default().add_modifier(if selected {
+                                    Modifier::BOLD
+                                } else {
+                                    Modifier::empty()
+                                }),
+                            ),
+                            Span::styled(state_suffix, Style::default().fg(state_color)),
+                        ]);
+                        spans
+                    }),
                 ])
                 .style(if selected {
                     Style::default().bg(Color::Rgb(24, 52, 64))
@@ -5229,7 +8234,7 @@ fn draw_config_editor(frame: &mut Frame<'_>, model: &ControlCenterModel, area: R
                 ),
                 Line::raw(""),
                 Line::styled(
-                    "Choose a resource to edit its guided fields.",
+                    "Select a resource to edit its guided fields.",
                     Style::default().fg(Color::DarkGray),
                 ),
             ])
@@ -5261,7 +8266,11 @@ fn draw_guided_resource_editor(
     frame.render_widget(block, area);
     let (_, state_label, state_color) = config_resource_state(model, resource);
     let inner_width = usize::from(inner.width);
-    let state_suffix = format!("  {state_label}");
+    let state_suffix = if state_label.is_empty() {
+        String::new()
+    } else {
+        format!("  {state_label}")
+    };
     let title = short_display_width(
         &resource.title,
         inner_width.saturating_sub(UnicodeWidthStr::width(state_suffix.as_str())),
@@ -5413,7 +8422,7 @@ fn config_domain_description(domain: ConfigDomain) -> &'static str {
     match domain {
         ConfigDomain::Project => "Identity, initialization, storage, Git, and global defaults.",
         ConfigDomain::RunTypes => {
-            "Intake, run pipelines, questions, and orchestration for future runs."
+            "Intake, run pipelines, planning questions, and orchestration for future runs."
         }
         ConfigDomain::Agents => {
             "Planner, Lead, worker, and reviewer personas, models, prompts, and policy."
@@ -5493,20 +8502,39 @@ fn config_resource_state(
             .values()
             .any(|target| target == &document.relative_path)
     });
+    let resource_changed = primary.dirty_at(&resource.locator)
+        || resource.linked_locators.iter().any(|linked| {
+            model
+                .config
+                .documents
+                .iter()
+                .find(|document| document.relative_path == linked.document_path)
+                .is_some_and(|document| document.dirty_at(&linked.locator))
+        })
+        || resource.linked_documents.iter().any(|linked| {
+            model
+                .config
+                .documents
+                .iter()
+                .find(|document| document.relative_path == linked.document_path)
+                .is_some_and(|document| document.dirty() || document.is_new)
+        });
     if model.config_document_deleted(primary) {
-        ("×", "delete staged", Color::LightRed)
+        ("●", "publish or discard", Color::Yellow)
     } else if documents
         .iter()
         .any(|document| !document.diagnostics.is_empty())
     {
-        ("!", "needs repair", Color::LightRed)
-    } else if documents.iter().any(|document| {
-        document.dirty() || document.is_new || model.config_document_deleted(document)
-    }) || renamed
+        ("!", "fix or discard", Color::LightRed)
+    } else if resource_changed
+        || documents
+            .iter()
+            .any(|document| model.config_document_deleted(document))
+        || renamed
     {
-        ("●", "draft", Color::Yellow)
+        ("●", "publish or discard", Color::Yellow)
     } else {
-        ("✓", "published", Color::Green)
+        ("", "", Color::DarkGray)
     }
 }
 
@@ -5757,21 +8785,33 @@ fn draw_yaml(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
                 .min(split[0].bottom().saturating_sub(1));
             frame.set_cursor_position((x, y));
         }
+        let unpublished =
+            document.dirty()
+                || document.is_new
+                || model.config_document_deleted(document)
+                || model.config.pending_renames.iter().any(|(from, to)| {
+                    from == &document.relative_path || to == &document.relative_path
+                });
+        let has_error = !document.diagnostics.is_empty() || model.catalog_error.is_some();
         let diagnostic = if !document.diagnostics.is_empty() {
             document.diagnostics.join("\n")
         } else if let Some(error) = &model.catalog_error {
             format!("semantic validation: {error}")
+        } else if unpublished {
+            "syntax valid · unpublished".to_owned()
         } else {
-            if document.dirty() {
-                "syntax valid · draft saved separately from live configuration".to_owned()
-            } else {
-                "syntax valid · published source".to_owned()
-            }
+            "syntax valid".to_owned()
         };
-        let valid = document.diagnostics.is_empty() && model.catalog_error.is_none();
+        let diagnostic_color = if has_error {
+            Color::LightRed
+        } else if unpublished {
+            Color::Yellow
+        } else {
+            Color::DarkGray
+        };
         frame.render_widget(
             Paragraph::new(diagnostic)
-                .style(Style::default().fg(if valid { Color::Green } else { Color::LightRed }))
+                .style(Style::default().fg(diagnostic_color))
                 .block(
                     Block::default()
                         .borders(Borders::TOP)
@@ -5790,10 +8830,10 @@ fn orchestration_claims_key(model: &ControlCenterModel, key: &str) -> bool {
         return false;
     };
     if run.orchestration.is_none()
-        || !run
+        || run
             .summary
             .as_ref()
-            .is_some_and(|summary| summary.status == "active")
+            .is_none_or(|summary| summary.status != "active")
     {
         return false;
     }
@@ -5816,34 +8856,46 @@ fn focus_key_label(model: &ControlCenterModel, key: &str, panel: &str) -> String
 fn draw_footer(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
     let panel_keys = match (model.mode, model.focus) {
         (Mode::Operate, Focus::Runs) => format!(
-            "{} · Space pause/play · D delete · n new · j/k select · Enter open · Tab focus · q quit",
+            "{} · Space pause/play · d delete · n new · ↑/↓ or j/k select · Enter open · Tab focus · q quit",
             focus_key_label(model, "1", "Runs")
         ),
         (Mode::Operate, Focus::Tickets) => format!(
-            "{} · j/k select · [/] queue · a actions · Tab focus · Space pause · r refresh",
+            "{} · ↑/↓ or j/k select · ←/→ or [/] queue · a actions · Tab focus · Space pause · r refresh",
             focus_key_label(model, "2", "Tickets")
         ),
         (Mode::Operate, Focus::Graph) => format!(
-            "{} · j/k or PgUp/PgDn scroll · Tab focus · c configure · r refresh",
-            focus_key_label(model, "5", "Graph")
+            "{} · ↑/↓ or j/k/PgUp/PgDn scroll · Tab focus · c configure · r refresh",
+            focus_key_label(model, "6", "Graph")
         ),
         (Mode::Operate, Focus::Agents) => format!(
-            "{} · j/k or PgUp/PgDn scroll · wheel anywhere over Agents · Tab focus · r refresh",
-            focus_key_label(model, "4", "Agents")
+            "{} · {} · ↑/↓ or j/k select · 4 chat focus · wheel over Agents · r refresh",
+            focus_key_label(model, "3", "Agents"),
+            if model.agent_guidance_form().is_some() {
+                "Enter message"
+            } else {
+                "read-only history"
+            }
+        ),
+        (Mode::Operate, Focus::Activity) => format!(
+            "{} · ↑/↓ or j/k/PgUp/PgDn scroll · wheel over Activity · Tab focus · r refresh",
+            focus_key_label(model, "5", "Activity")
         ),
         (Mode::Operate, Focus::Questions) => {
-            "Questions · ←/→ switch · Enter/? answer · R auto-resolve · Tab focus · r refresh"
-                .to_owned()
+            "Questions · ←→/[] question · ↑↓/jk option · Enter/? answer · a auto-resolve · Tab focus · r refresh".to_owned()
         }
+        (Mode::Operate, Focus::Details) if model.agent_chat_is_open() => format!(
+            "{} · ↑/↓ or j/k/PgUp/PgDn scroll · Home/End · Esc overview · Tab focus · r refresh",
+            focus_key_label(model, "4", "Chat")
+        ),
         (Mode::Operate, Focus::Details) if model.detail_panel == crate::model::Panel::Stages => {
             format!(
-                "{} · Enter control current stage · [/] view · j/k scroll · Tab focus · r refresh",
-                focus_key_label(model, "3", "Details")
+                "{} · Enter control current stage · ←/→ or [/] view · ↑/↓ or j/k scroll · Tab focus · r refresh",
+                focus_key_label(model, "4", "Details")
             )
         }
         (Mode::Operate, Focus::Details) => format!(
-            "{} · [/] view · j/k scroll · a actions · Tab focus · r refresh",
-            focus_key_label(model, "3", "Details")
+            "{} · ←/→ or [/] view · ↑/↓ or j/k scroll · a actions · Tab focus · r refresh",
+            focus_key_label(model, "4", "Details")
         ),
         (Mode::Operate, _) => "Tab focus · r refresh · c configure · q quit".to_owned(),
         (Mode::Configure, Focus::Yaml)
@@ -5853,35 +8905,35 @@ fn draw_footer(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
                     .selected_resource()
                     .is_some_and(ConfigResource::is_raw_source) =>
         {
-            "Source editor · type to edit · Esc resources · Ctrl-S save all · Ctrl-P validate & publish".to_owned()
+            "Source editor · type to edit · Esc resources · Ctrl-S save · Ctrl-P publish · Ctrl-D discard all".to_owned()
         }
         (Mode::Configure, Focus::Yaml) => {
-            "Guided editor · j/k setting · Enter edit · Esc resources · Ctrl-S save all · Ctrl-P validate & publish · c operate".to_owned()
+            "Guided editor · ↑/↓ or j/k setting · Enter edit · Esc resources · Ctrl-S save · Ctrl-P publish · Ctrl-D discard all · c operate".to_owned()
         }
         (Mode::Configure, Focus::ConfigTree) => {
-            "Domains · j/k choose · Enter resources · Tab focus · Ctrl-S save all · Ctrl-P validate & publish".to_owned()
+            "Domains · ↑/↓ or j/k select · Enter resources · Tab focus · Ctrl-P publish · Ctrl-D discard all".to_owned()
         }
         (Mode::Configure, Focus::ConfigForm)
             if model.config.selected_domain() == ConfigDomain::Advanced =>
         {
-            "Resources · j/k choose · Enter open · N new source · M rename · D delete · Tab focus · c operate".to_owned()
+            "Resources · ↑/↓ or j/k select · Enter open · n new · m rename · d delete · Ctrl-P publish · Ctrl-D discard all".to_owned()
         }
         (Mode::Configure, Focus::ConfigForm) => {
             let create = if model.config.selected_domain() == ConfigDomain::RunTypes {
                 if model.legacy_migration_available {
-                    " · T new run type · L migrate Legacy"
+                    " · t new run type · l migrate Legacy"
                 } else {
-                    " · T new run type"
+                    " · t new run type"
                 }
             } else {
                 ""
             };
             format!(
-                "Resources · j/k choose · Enter open{create} · Tab focus · Ctrl-P validate & publish"
+                "Resources · ↑/↓ or j/k select · Enter open{create} · Tab focus · Ctrl-P publish · Ctrl-D discard all"
             )
         }
         (Mode::Configure, _) => {
-            "Tab focus · Ctrl-S save all · Ctrl-P validate & publish · c operate".to_owned()
+            "Tab focus · Ctrl-S save · Ctrl-P publish · Ctrl-D discard all · c operate".to_owned()
         }
     };
     let help_key = if config_source_help_uses_f1(model) {
@@ -5890,10 +8942,10 @@ fn draw_footer(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
         "h help"
     };
     let width = usize::from(area.width);
-    if model.mode == Mode::Configure && area.width < 110 {
+    if model.mode == Mode::Configure {
         let focus = match model.focus {
-            Focus::ConfigTree => "Domains j/k · Enter open",
-            Focus::ConfigForm => "Resources j/k · Enter open",
+            Focus::ConfigTree => "Domains ↑/↓ or j/k · Enter open",
+            Focus::ConfigForm => "Resources ↑/↓ or j/k · Enter open",
             Focus::Yaml
                 if model.config.linked_document_editor_active()
                     || model
@@ -5903,10 +8955,10 @@ fn draw_footer(frame: &mut Frame<'_>, model: &ControlCenterModel, area: Rect) {
             {
                 "Source edit · Esc back"
             }
-            Focus::Yaml => "Fields j/k · Enter edit · Esc back",
+            Focus::Yaml => "Fields ↑/↓ or j/k · Enter edit · Esc back",
             _ => "Tab focus",
         };
-        let mut compact = format!(" {help_key} · Ctrl-P publish · Ctrl-S save · {focus}");
+        let mut compact = format!(" {help_key} · Ctrl-P publish · Ctrl-D discard · {focus}");
         let used = UnicodeWidthStr::width(compact.as_str());
         if !model.status.is_empty() && used + 4 < width {
             compact.push_str(" │ ");
@@ -5977,6 +9029,18 @@ fn panel_block<'a>(title: &'a str, focused: bool) -> Block<'a> {
         } else {
             Style::default().fg(Color::DarkGray)
         })
+}
+
+/// A control hint is always attached to the bottom edge of its surface.
+///
+/// Keeping this as a shared primitive makes modal and panel renderers follow
+/// the same placement, tone, and alignment convention.
+fn control_tip(text: impl Into<String>) -> Line<'static> {
+    Line::styled(
+        format!(" {} ", text.into()),
+        Style::default().fg(Color::DarkGray),
+    )
+    .alignment(Alignment::Center)
 }
 
 fn metadata_line(label: &str, value: String) -> Line<'static> {
@@ -6051,6 +9115,7 @@ fn pipeline_stage_cards(
     stages: &[Value],
     run: Option<&RunData>,
     model: &ControlCenterModel,
+    width: usize,
 ) -> Text<'static> {
     let mut lines = Vec::new();
     for stage in stages {
@@ -6068,43 +9133,74 @@ fn pipeline_stage_cards(
             .get("id")
             .and_then(Value::as_str)
             .is_some_and(|stage_id| run.is_some_and(|run| run.stage_has_live_agent(stage_id)));
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{} ", if live { "⚙" } else { status_glyph(status) }),
-                if live {
-                    live_activity_style(model)
-                } else {
-                    Style::default()
-                        .fg(status_color(status))
-                        .add_modifier(Modifier::BOLD)
-                },
-            ),
-            Span::styled(
-                title.to_owned(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(
-                    "  {}",
-                    if live {
-                        "Working".to_owned()
+        let display_status = if status == "running" && !model.orchestration_running && !live {
+            "paused"
+        } else {
+            status
+        };
+        let glyph_style = if live {
+            live_activity_style(model)
+        } else {
+            Style::default()
+                .fg(status_color(display_status))
+                .add_modifier(Modifier::BOLD)
+        };
+        let status_style = if live {
+            live_activity_style(model)
+        } else {
+            Style::default().fg(status_color(display_status))
+        };
+        let status_label = if live {
+            "Working".to_owned()
+        } else {
+            humanize(display_status)
+        };
+        let title_lines = wrap_full_text(title, width.saturating_sub(2).max(1));
+        let title_style = Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD);
+        let compact_metadata = 2 + title.chars().count() + 2 + status_label.chars().count() > width;
+        for (index, title_line) in title_lines.into_iter().enumerate() {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if index == 0 {
+                        format!(
+                            "{} ",
+                            if live {
+                                "⚙"
+                            } else {
+                                status_glyph(display_status)
+                            }
+                        )
                     } else {
-                        humanize(status)
-                    }
+                        "  ".to_owned()
+                    },
+                    glyph_style,
                 ),
-                if live {
-                    live_activity_style(model)
+                Span::styled(title_line, title_style),
+                if index == 0 && !compact_metadata {
+                    Span::styled(format!("  {status_label}"), status_style)
                 } else {
-                    Style::default().fg(status_color(status))
+                    Span::raw("")
                 },
-            ),
-        ]));
-        lines.push(Line::styled(
-            format!("  {}", pipeline_stage_category(definition)),
-            Style::default().fg(Color::DarkGray),
-        ));
+            ]));
+        }
+        if compact_metadata {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(status_label, status_style),
+                Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    pipeline_stage_category(definition),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        } else {
+            lines.push(Line::styled(
+                format!("  {}", pipeline_stage_category(definition)),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
         if let Some(reason) = stage_status_reason(stage) {
             let reason = run.map_or_else(
                 || reason.to_owned(),
@@ -6441,6 +9537,13 @@ fn compact_token_count(tokens: u64) -> String {
     format!("{amount}{} tks", UNITS[unit].0)
 }
 
+fn compact_new_token_count(tokens: u64) -> String {
+    format!(
+        "{} new tks",
+        compact_token_count(tokens).trim_end_matches(" tks")
+    )
+}
+
 fn rounded_token_tenths(tokens: u64, divisor: u64) -> u128 {
     (u128::from(tokens) * 10 + u128::from(divisor) / 2) / u128::from(divisor)
 }
@@ -6460,6 +9563,13 @@ fn ticket_is_closed(ticket: &Value) -> bool {
     matches!(
         ticket.get("status").and_then(Value::as_str),
         Some("closed" | "complete" | "completed" | "done" | "cancelled" | "superseded")
+    )
+}
+
+fn ticket_completed_successfully(ticket: &Value) -> bool {
+    matches!(
+        ticket.get("status").and_then(Value::as_str),
+        Some("closed" | "complete" | "completed" | "done")
     )
 }
 
@@ -6573,6 +9683,17 @@ fn form_path_parts(path: &str) -> (String, String) {
 fn semantic_form_parts(resource: &ConfigResource, path: &str) -> (String, String) {
     if resource.kind == crate::configure::ConfigResourceKind::GatePolicy {
         return gate_policy_form_parts(path);
+    }
+    if resource.domain == ConfigDomain::RunTypes {
+        let (context, field) = form_path_parts(path);
+        if path
+            .trim_start_matches(['$', '.', '/'])
+            .split(['.', '/'])
+            .any(|segment| segment == "questions")
+        {
+            return ("Planning Questions".to_owned(), field);
+        }
+        return (context, field);
     }
     if resource.domain != ConfigDomain::Agents {
         return form_path_parts(path);
@@ -6801,19 +9922,17 @@ fn humanize_path_segment(segment: &str) -> String {
 }
 
 fn node_color(node_type: &str) -> Color {
-    const PALETTE: [Color; 7] = [
-        Color::LightMagenta,
-        Color::LightBlue,
-        Color::LightCyan,
-        Color::Yellow,
-        Color::LightRed,
-        Color::Green,
-        Color::LightGreen,
-    ];
-    let hash = node_type.bytes().fold(0_usize, |hash, byte| {
-        hash.wrapping_mul(31).wrapping_add(usize::from(byte))
-    });
-    PALETTE[hash % PALETTE.len()]
+    // Preserve the stable node palette from the autoresearch-v2 cockpit.
+    // Relationship segments inherit their target node's color.
+    match node_type {
+        "hypothesis" | "run" => Color::LightMagenta,
+        "claim" | "method" | "report" => Color::LightBlue,
+        "experiment" | "gate" => Color::Yellow,
+        "ablation" => Color::LightRed,
+        "asset" | "evidence" => Color::Green,
+        "metric" => Color::LightCyan,
+        _ => Color::White,
+    }
 }
 
 fn scalar_color(kind: &str) -> Color {
@@ -6875,6 +9994,328 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn delete_run_objective_preview_is_capped_at_two_lines() {
+        let preview = delete_run_objective_preview_lines(
+            "First objective line\nSecond objective line\nThird objective line must stay hidden",
+            40,
+        );
+        let text = preview
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(text.len(), 2);
+        assert_eq!(text[0], "First objective line");
+        assert_eq!(text[1], "Second objective line…");
+        assert!(!text.join("\n").contains("Third objective line"));
+    }
+
+    #[test]
+    fn approval_markdown_uses_indented_lists_and_highlights_decisions() {
+        let lines = approval_markdown_lines(
+            "1. Choose the storage format\n   - Decision: Use notes.json\n2. Add src/store.ts",
+            80,
+        );
+        let rendered = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(rendered[0].starts_with("  1. "), "{rendered:#?}");
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.starts_with("    • Decision:")),
+            "{rendered:#?}"
+        );
+        assert!(rendered.iter().any(|line| line.starts_with("  2. ")));
+        assert!(lines.iter().any(|line| {
+            line.spans.iter().any(|span| {
+                span.content.contains("Decision:") && span.style.fg == Some(Color::LightGreen)
+            })
+        }));
+        assert!(lines.iter().any(|line| {
+            line.spans.iter().any(|span| {
+                span.content.contains("src/store.ts") && span.style.fg == Some(Color::LightBlue)
+            })
+        }));
+    }
+
+    #[test]
+    fn approval_review_items_render_as_scan_heading_and_muted_description() {
+        let lines = approval_markdown_lines(
+            "### Shared storage contract\n\nKeep every SPICED field in one typed record.",
+            80,
+        );
+
+        assert!(lines.iter().any(|line| {
+            line.spans.iter().any(|span| {
+                span.content.contains("Shared storage contract")
+                    && span.style.fg == Some(Color::Cyan)
+                    && span.style.add_modifier.contains(Modifier::BOLD)
+            })
+        }));
+        assert!(lines.iter().any(|line| {
+            line.spans.iter().any(|span| {
+                span.content
+                    .contains("Keep every SPICED field in one typed record.")
+                    && span.style.fg == Some(Color::Gray)
+            })
+        }));
+    }
+
+    #[test]
+    fn legacy_graph_options_without_layout_keep_the_autoresearch_outline_default() {
+        let values = vec![
+            json!({
+                "id": "h",
+                "type": "hypothesis",
+                "title": "Finite list sortedness",
+                "edges": {"claims": ["c"]}
+            }),
+            json!({
+                "id": "c",
+                "type": "claim",
+                "title": "Adjacent pairs are ordered",
+                "edges": {}
+            }),
+        ];
+        let options = json!({
+            "hierarchy": ["hypothesis", "claim"],
+            "show_titles": true
+        });
+        let text = graph_renderer_for_options(false, Some(&options))
+            .render_values(&values, 72)
+            .into_iter()
+            .map(|line| line.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("[hypothesis]"), "{text}");
+        assert!(text.contains("[claim]"), "{text}");
+        assert!(text.contains("<claims>"), "{text}");
+        assert!(text.starts_with("[hypothesis]"), "{text}");
+        assert!(text.contains('│') || text.contains('─'), "{text}");
+    }
+
+    #[test]
+    fn graph_options_wire_layering_and_contextual_node_repetition() {
+        let values = vec![
+            json!({
+                "id":"h",
+                "type":"hypothesis",
+                "title":"Root",
+                "edges":{"claims":["c"],"gates":["g"]}
+            }),
+            json!({
+                "id":"c",
+                "type":"claim",
+                "title":"Claim",
+                "edges":{"gates":["g"]}
+            }),
+            json!({"id":"g","type":"gate","title":"Shared gate","edges":{}}),
+        ];
+        let options = json!({
+            "layout":"layered",
+            "hierarchy":["hypothesis","claim","gate"],
+            "layers":[["hypothesis"],["claim"],["gate"]],
+            "primary_parent_preferences":{
+                "claim":["hypothesis"],
+                "gate":["hypothesis","claim"]
+            },
+            "repeat_semantic_types":["gate"],
+            "show_titles":true
+        });
+        let lines = graph_renderer_for_options(false, Some(&options)).render_values(&values, 72);
+
+        assert_eq!(
+            lines
+                .iter()
+                .flat_map(|line| &line.node_spans)
+                .filter(|span| span.node_type == "gate")
+                .count(),
+            2,
+            "{lines:#?}"
+        );
+    }
+
+    #[test]
+    fn ticket_graph_is_a_semantic_diff_lens_over_the_run_graph() {
+        let baseline = vec![
+            json!({
+                "id":"root",
+                "type":"claim",
+                "title":"Original root",
+                "edges":{"supports":["stable"]}
+            }),
+            json!({"id":"stable","type":"evidence","title":"Stable node","edges":{}}),
+            json!({"id":"removed","type":"gate","title":"Removed node","edges":{}}),
+        ];
+        let projected = vec![
+            json!({
+                "id":"root",
+                "type":"claim",
+                "title":"Changed root",
+                "edges":{"tests":["stable"],"adds":["new"]}
+            }),
+            json!({"id":"stable","type":"evidence","title":"Stable node","edges":{}}),
+            json!({"id":"new","type":"experiment","title":"New node","edges":{}}),
+        ];
+
+        let diff = ticket_graph_diff(&baseline, &projected);
+        assert_eq!(diff.nodes.get("root"), Some(&GraphChange::Modified));
+        assert_eq!(diff.nodes.get("new"), Some(&GraphChange::Added));
+        assert_eq!(diff.nodes.get("removed"), Some(&GraphChange::Deleted));
+        assert!(!diff.nodes.contains_key("stable"));
+        for relation in ["supports", "tests"] {
+            assert_eq!(
+                diff.edges.get(&GraphEdgeRef {
+                    source: "root".to_owned(),
+                    relation: relation.to_owned(),
+                    target: "stable".to_owned(),
+                }),
+                Some(&GraphChange::Modified)
+            );
+        }
+        assert_eq!(
+            diff.edges.get(&GraphEdgeRef {
+                source: "root".to_owned(),
+                relation: "adds".to_owned(),
+                target: "new".to_owned(),
+            }),
+            Some(&GraphChange::Added)
+        );
+        assert_eq!(diff.graph.len(), 4);
+
+        let lines = GraphRenderer::new(false).render_values(&diff.graph, 80);
+        assert!(lines.iter().flat_map(|line| &line.edge_spans).any(|span| {
+            edge_span_change(&span.edge_refs, &diff) == Some(GraphChange::Modified)
+        }));
+        let styled = lines
+            .iter()
+            .map(|line| graph_line(line, Some(&diff)))
+            .collect::<Vec<_>>();
+        for (title, color) in [
+            ("Changed root", Color::Yellow),
+            ("New node", Color::LightGreen),
+            ("Removed node", Color::LightRed),
+            ("Stable node", Color::DarkGray),
+        ] {
+            assert!(
+                styled.iter().any(|line| {
+                    line.spans
+                        .iter()
+                        .any(|span| span.content.contains(title) && span.style.fg == Some(color))
+                }),
+                "missing {title:?} in {styled:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn selected_ticket_graph_is_labeled_as_its_checkout() {
+        let mut model = ControlCenterModel::from_snapshot(
+            "/tmp/project".into(),
+            json!({
+                "run":{"id":"run","goal":"Demo","status":"active"},
+                "graph":[{"id":"base","type":"task","title":"Base","edges":{}}],
+                "ticket_graphs":{"ticket":{"graph":[
+                    {"id":"base","type":"task","title":"Base","edges":{}},
+                    {"id":"candidate","type":"task","title":"Candidate","edges":{}}
+                ]}},
+                "tickets":[{"id":"ticket","title":"Scoped work","status":"in_progress"}]
+            }),
+        );
+        model.focus_tickets();
+        model.focus = Focus::Graph;
+        let backend = TestBackend::new(44, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                draw_graph(frame, &model, area);
+            })
+            .unwrap();
+        let rendered = rendered_text(&terminal);
+
+        assert!(
+            rendered.contains("Graph · ticket checkout · 2 nodes"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn compact_ticket_selection_renders_a_colored_graph_diff_dashboard() {
+        let mut model = ControlCenterModel::from_snapshot(
+            "/tmp/project".into(),
+            json!({
+                "run":{"id":"run","goal":"Test graph diffs","status":"active"},
+                "tickets":[{
+                    "id":"ticket",
+                    "title":"Change the graph",
+                    "status":"in_progress",
+                    "operation":"implement",
+                    "workflow":[],
+                    "outputs":[],
+                    "blockers":[]
+                }],
+                "graph":[
+                    {"id":"root","type":"claim","title":"Original root","edges":{"supports":["stable"]}},
+                    {"id":"stable","type":"evidence","title":"Stable node","edges":{}},
+                    {"id":"removed","type":"gate","title":"Removed node","edges":{}}
+                ],
+                "ticket_graphs":{"ticket":{"graph":[
+                    {"id":"root","type":"claim","title":"Changed root","edges":{"tests":["stable"],"adds":["new"]}},
+                    {"id":"stable","type":"evidence","title":"Stable node","edges":{}},
+                    {"id":"new","type":"experiment","title":"New node","edges":{}}
+                ]}}
+            }),
+        );
+        model.focus_tickets();
+        let backend = TestBackend::new(82, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &model)).unwrap();
+        let rendered = rendered_text(&terminal);
+        assert!(rendered.contains("Checkout graph"), "{rendered}");
+        for (title, color) in [
+            ("Changed root", Color::Yellow),
+            ("New node", Color::LightGreen),
+            ("Removed node", Color::LightRed),
+            ("Stab", Color::DarkGray),
+        ] {
+            let position = rendered_cell_position(&terminal, title)
+                .unwrap_or_else(|| panic!("missing {title}: {rendered}"));
+            assert_eq!(
+                terminal.backend().buffer().cell(position).unwrap().fg,
+                color,
+                "wrong color for {title}: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn objective_collapses_to_four_lines_and_expands_without_truncation() {
+        let objective = "one\ntwo\nthree\nfour\nfive\nsix\nseven";
+        let collapsed = objective_preview_lines(objective, 40, Some(4));
+        assert_eq!(collapsed.len(), 4);
+        assert!(collapsed[3].spans[0].content.ends_with('…'));
+
+        let expanded = objective_preview_lines(objective, 40, None);
+        assert_eq!(expanded.len(), 7);
+        assert!(!expanded[6].spans[0].content.ends_with('…'));
+    }
 
     fn run_type(
         id: &str,
@@ -7084,9 +10525,10 @@ run_card:
             assert!(rendered.contains(title), "missing {title}: {rendered}");
         }
         assert!(!rendered.contains("A coordinated feature with explicit planning."));
-        assert!(rendered.contains("Goal Prompt"), "{rendered}");
+        assert!(rendered.contains("Objective"), "{rendered}");
         assert!(rendered.contains("Run Config"), "{rendered}");
         assert!(rendered.contains("Questions"), "{rendered}");
+        assert!(!rendered.contains("Planning Questions"), "{rendered}");
         for choice in ["no", "some", "many"] {
             assert!(rendered.contains(choice), "missing {choice}: {rendered}");
         }
@@ -7097,6 +10539,24 @@ run_card:
         assert!(rendered.contains("xhigh"), "{rendered}");
         assert_eq!(rendered.matches("Model").count(), 1, "{rendered}");
         assert_eq!(rendered.matches("Reasoning").count(), 1, "{rendered}");
+        for header in [
+            "Objective",
+            "Run Config",
+            "Run type",
+            "Stages",
+            "Questions",
+            "Agent",
+            "Model",
+            "Reasoning",
+        ] {
+            let position = rendered_cell_position(&terminal, header)
+                .unwrap_or_else(|| panic!("missing {header}: {rendered}"));
+            assert_eq!(
+                terminal.backend().buffer().cell(position).unwrap().fg,
+                Color::White,
+                "{header} should use the shared white heading style"
+            );
+        }
         assert!(rendered.contains("Start Planning"), "{rendered}");
         assert!(!rendered.contains("guided intake"), "{rendered}");
         assert!(!rendered.contains("What should Koni build?"), "{rendered}");
@@ -7110,6 +10570,93 @@ run_card:
         ] {
             assert!(!rendered.contains(id), "leaked {id}: {rendered}");
         }
+    }
+
+    #[test]
+    fn new_run_objective_wraps_long_text_and_preserves_explicit_lines() {
+        let mut model = ControlCenterModel::from_snapshot("/tmp/project".into(), json!(null));
+        model.run_types = vec![run_type("medium", "Medium", "", 1, "high_impact_only", 3)];
+        let goal = "WRAP-START This objective has enough prose to cross the editor width while preserving every word and then WRAP-CONTINUATION\nEXPLICIT-SECOND-LINE";
+        model.dialog = Some(Dialog::NewRun(NewRunDraft {
+            run_type: "medium".to_owned(),
+            goal: goal.to_owned(),
+            objective_cursor: goal.chars().count(),
+            ..NewRunDraft::default()
+        }));
+        let backend = TestBackend::new(100, 38);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw(frame, &model)).unwrap();
+        let rendered = rendered_text(&terminal);
+        let start = rendered_cell_position(&terminal, "WRAP-START")
+            .unwrap_or_else(|| panic!("missing wrapped objective start: {rendered}"));
+        let continuation = rendered_cell_position(&terminal, "WRAP-CONTINUATION")
+            .unwrap_or_else(|| panic!("missing wrapped continuation: {rendered}"));
+        let explicit = rendered_cell_position(&terminal, "EXPLICIT-SECOND-LINE")
+            .unwrap_or_else(|| panic!("missing explicit objective line: {rendered}"));
+
+        assert!(
+            start.1 < continuation.1,
+            "long objective did not wrap: {rendered}"
+        );
+        assert!(
+            continuation.1 < explicit.1,
+            "explicit newline did not create a new row: {rendered}"
+        );
+        assert!(
+            rendered.contains('▏'),
+            "active caret is missing: {rendered}"
+        );
+        assert!(
+            !rendered.contains("WRAP-CONTINU…"),
+            "objective was cropped: {rendered}"
+        );
+    }
+
+    #[test]
+    fn new_run_objective_viewport_follows_the_active_caret() {
+        let mut model = ControlCenterModel::from_snapshot("/tmp/project".into(), json!(null));
+        model.run_types = vec![run_type("small", "Small", "", 0, "autonomous", 1)];
+        let goal = (1..=8)
+            .map(|line| format!("objective-line-{line:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        model.dialog = Some(Dialog::NewRun(NewRunDraft {
+            run_type: "small".to_owned(),
+            goal: goal.clone(),
+            objective_cursor: goal.chars().count(),
+            ..NewRunDraft::default()
+        }));
+        let backend = TestBackend::new(100, 38);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw(frame, &model)).unwrap();
+        let rendered_at_end = rendered_text(&terminal);
+        assert!(
+            rendered_at_end.contains("objective-line-08"),
+            "{rendered_at_end}"
+        );
+        assert!(
+            !rendered_at_end.contains("objective-line-01"),
+            "{rendered_at_end}"
+        );
+        assert!(rendered_at_end.contains('▏'), "{rendered_at_end}");
+
+        let Some(Dialog::NewRun(draft)) = model.dialog.as_mut() else {
+            unreachable!();
+        };
+        draft.objective_cursor = 0;
+        terminal.draw(|frame| draw(frame, &model)).unwrap();
+        let rendered_at_start = rendered_text(&terminal);
+        assert!(
+            rendered_at_start.contains("objective-line-01"),
+            "{rendered_at_start}"
+        );
+        assert!(
+            !rendered_at_start.contains("objective-line-08"),
+            "{rendered_at_start}"
+        );
+        assert!(rendered_at_start.contains('▏'), "{rendered_at_start}");
     }
 
     #[test]
@@ -7145,20 +10692,31 @@ run_card:
                 .unwrap_or_else(|| panic!("missing {needle}"))
         };
         let run_type = row_containing("Run type");
+        let run_type_option = row_containing("Medium");
         let stages = row_containing("Stages");
         let last_stage = row_containing("Compile report");
         let questions = row_containing("Questions");
         let question_chips = row_containing("some");
         let parallel = row_containing("Max parallel agents");
         let agents = row_containing("Agent");
+        let reviewer = row_containing("Reviewer");
+        let start = row_containing("Start Planning");
 
+        assert_eq!(run_type_option, run_type);
         assert!(
-            stages >= run_type + 3,
+            stages >= run_type + 2,
             "run_type={run_type}, stages={stages}, area={area:?}"
         );
         assert!(questions >= last_stage + 2);
+        assert_eq!(question_chips, questions);
         assert!(parallel >= question_chips + 2);
         assert!(agents >= parallel + 2);
+        assert_eq!(start, reviewer + 2);
+        let separator = (area.x + 1..area.right() - 1)
+            .filter_map(|column| terminal.backend().buffer().cell((column, start - 1)))
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(separator.chars().all(|character| character == '─'));
     }
 
     #[test]
@@ -7200,6 +10758,7 @@ run_card:
         assert!(rendered.contains("○ Plan pass 1  skipped"), "{rendered}");
         assert!(rendered.contains("● Approve plan"), "{rendered}");
         assert!(rendered.contains("Questions"), "{rendered}");
+        assert!(!rendered.contains("Planning Questions"), "{rendered}");
         for choice in ["no", "some", "many"] {
             assert!(rendered.contains(choice), "missing {choice}: {rendered}");
         }
@@ -7310,6 +10869,62 @@ run_card:
     }
 
     #[test]
+    fn constrained_new_run_pages_to_every_configured_stage_without_hiding_controls() {
+        let mut option = run_type("medium-internal", "Medium", "", 1, "high_impact_only", 3);
+        option.stages = (1..=10)
+            .map(|number| crate::model::RunStageOption {
+                id: format!("stage-{number:02}"),
+                title: if number == 10 {
+                    "Pipeline boundary 10 deliberately wraps across several rows and ends with FINAL-STAGE-TAIL"
+                        .to_owned()
+                } else {
+                    format!("Pipeline boundary {number:02}")
+                },
+                kind: "action".to_owned(),
+            })
+            .collect();
+        let agents = option.agents.clone();
+        let mut model = ControlCenterModel::from_snapshot("/tmp/project".into(), json!(null));
+        model.run_types = vec![option];
+        model.dialog = Some(Dialog::NewRun(NewRunDraft {
+            run_type: "medium-internal".to_owned(),
+            question_policy: "high_impact_only".to_owned(),
+            max_parallel: 3,
+            agent_roles: agents,
+            active_field: 1,
+            ..NewRunDraft::default()
+        }));
+        let backend = TestBackend::new(82, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw(frame, &model)).unwrap();
+        let first_page = rendered_text(&terminal);
+        assert!(first_page.contains("Stages · 1–"), "{first_page}");
+        assert!(first_page.contains("of 10 · PgUp/PgDn"), "{first_page}");
+        assert!(first_page.contains("Pipeline boundary 01"), "{first_page}");
+        assert!(!first_page.contains("Pipeline boundary 10"), "{first_page}");
+        assert!(first_page.contains("Start Planning"), "{first_page}");
+        assert!(
+            first_page.contains("Enter activates control"),
+            "{first_page}"
+        );
+
+        let Some(Dialog::NewRun(draft)) = model.dialog.as_mut() else {
+            unreachable!();
+        };
+        draft.stage_scroll =
+            new_run_stage_line_count(&model.run_types, "medium-internal").saturating_sub(1);
+        terminal.draw(|frame| draw(frame, &model)).unwrap();
+        let last_page = rendered_text(&terminal);
+        assert!(last_page.contains("Stages · 10–10 of 10"), "{last_page}");
+        assert!(last_page.contains("FINAL-STAGE-TAIL"), "{last_page}");
+        assert!(!last_page.contains("Pipeline boundary 01"), "{last_page}");
+        assert!(last_page.contains("Questions"), "{last_page}");
+        assert!(last_page.contains("Start Planning"), "{last_page}");
+        assert!(last_page.contains("Enter activates control"), "{last_page}");
+    }
+
+    #[test]
     fn new_run_agent_model_and_reasoning_are_separate_filled_click_targets() {
         let mut model = ControlCenterModel::from_snapshot("/tmp/project".into(), json!(null));
         let mut option = run_type("medium", "Medium", "", 1, "interactive", 3);
@@ -7336,11 +10951,11 @@ run_card:
 
         assert_eq!(
             new_run_hit_at(&model, model_position.0, model_position.1, size),
-            Some(NewRunHit::Field(4))
+            Some(NewRunHit::Field(5))
         );
         assert_eq!(
             new_run_hit_at(&model, reasoning_position.0, reasoning_position.1, size),
-            Some(NewRunHit::Field(5))
+            Some(NewRunHit::Field(6))
         );
         assert_eq!(
             terminal.backend().buffer().cell(model_position).unwrap().bg,
@@ -7389,6 +11004,35 @@ run_card:
                 );
             }
         }
+        let reasoning_colors = efforts
+            .iter()
+            .map(|effort| stable_reasoning_color(effort))
+            .collect::<Vec<_>>();
+        for color in &reasoning_colors {
+            let Color::Rgb(red, green, blue) = color else {
+                panic!("reasoning color is not a pink-axis RGB value: {color:?}");
+            };
+            assert!(red > blue && blue > green, "not pink-axis: {color:?}");
+        }
+        let saturation = |color: Color| match color {
+            Color::Rgb(red, green, _) => red.saturating_sub(green),
+            _ => 0,
+        };
+        assert!(
+            reasoning_colors
+                .windows(2)
+                .all(|pair| saturation(pair[1]) > saturation(pair[0])),
+            "reasoning saturation should rise with effort: {reasoning_colors:?}"
+        );
+        for model in models {
+            assert!(
+                !matches!(
+                    stable_model_color(model),
+                    Color::Red | Color::LightRed | Color::Green | Color::LightGreen
+                ),
+                "categorical model color should not imply success or failure: {model}"
+            );
+        }
     }
 
     #[test]
@@ -7410,6 +11054,13 @@ run_card:
 
         terminal.draw(|frame| draw(frame, &model)).unwrap();
         for (policy, label, selected_color) in QUESTION_POLICIES {
+            assert!(
+                !matches!(
+                    selected_color,
+                    Color::Red | Color::LightRed | Color::Green | Color::LightGreen
+                ),
+                "question policy color should be neutral: {label}"
+            );
             let expected_hit = NewRunHit::QuestionPolicy(policy.to_owned());
             let position = (0..size.height)
                 .find_map(|row| {
@@ -7557,16 +11208,13 @@ run_card:
         for title in ["Small", "Medium", "Large"] {
             assert!(rendered.contains(title), "missing {title}: {rendered}");
         }
-        assert!(rendered.contains("Goal Prompt"), "{rendered}");
+        assert!(rendered.contains("Objective"), "{rendered}");
         assert!(rendered.contains("Run Config"), "{rendered}");
         assert!(rendered.contains("Constraint 12 *"), "{rendered}");
         assert!(rendered.contains("Configured value 12"), "{rendered}");
         assert!(!rendered.contains("Constraint 01"), "{rendered}");
         assert!(rendered.contains("Start Planning"), "{rendered}");
-        assert!(
-            rendered.contains("Enter activates selected control"),
-            "{rendered}"
-        );
+        assert!(rendered.contains("Enter activates control"), "{rendered}");
     }
 
     #[test]
@@ -7612,7 +11260,11 @@ run_card:
         assert!(rendered.contains("Title"));
         assert!(rendered.contains("Slug"));
         assert!(rendered.contains("Make this the default run type"));
-        assert!(rendered.contains("Ctrl-P validates and publishes later"));
+        assert!(
+            rendered.contains("standalone draft for review and later publication"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Enter next"), "{rendered}");
         assert!(!rendered.contains("showing 1–"), "{rendered}");
 
         let hits = (0..size.height)
@@ -7692,7 +11344,7 @@ run_card:
     }
 
     #[test]
-    fn configure_mode_advertises_run_type_and_legacy_migration_actions() {
+    fn configure_mode_uses_short_run_type_and_legacy_migration_tips() {
         let mut model = ControlCenterModel::from_snapshot("/tmp/project".into(), json!(null));
         model.mode = Mode::Configure;
         model.focus = Focus::ConfigTree;
@@ -7703,10 +11355,10 @@ run_card:
         terminal.draw(|frame| draw(frame, &model)).unwrap();
         let rendered = rendered_text(&terminal);
 
-        assert!(rendered.contains("New run type"), "{rendered}");
-        assert!(rendered.contains("Migrate Legacy"), "{rendered}");
-        assert!(rendered.contains("T New run type"), "{rendered}");
-        assert!(rendered.contains("L Migrate Legacy"), "{rendered}");
+        assert!(rendered.contains("t run type"), "{rendered}");
+        assert!(rendered.contains("l migrate"), "{rendered}");
+        assert!(!rendered.contains("t New run type"), "{rendered}");
+        assert!(!rendered.contains("l Migrate Legacy"), "{rendered}");
     }
 
     #[test]
@@ -7721,10 +11373,12 @@ run_card:
         ] {
             assert_eq!(compact_token_count(tokens), expected);
         }
+        assert_eq!(compact_new_token_count(0), "0 new tks");
+        assert_eq!(compact_new_token_count(1_050_000), "1.1M new tks");
     }
 
     #[test]
-    fn runs_panel_shows_each_runs_total_token_usage() {
+    fn header_and_runs_panel_show_cache_excluding_token_usage() {
         let snapshot = json!({
             "run": {
                 "id": "run-1",
@@ -7735,8 +11389,10 @@ run_card:
             },
             "token_usage": {
                 "input_tokens": 1_000_000,
+                "cached_input_tokens": 800_000,
                 "output_tokens": 50_000,
-                "total_tokens": 1_050_000
+                "total_tokens": 1_050_000,
+                "new_tokens": 250_000
             },
             "tickets": [],
             "graph": []
@@ -7748,12 +11404,88 @@ run_card:
         terminal.draw(|frame| draw(frame, &model)).unwrap();
         let rendered = rendered_text(&terminal);
 
-        assert!(rendered.contains("1.1M tks"), "{rendered}");
         let runs = operate_layout(Rect::new(0, 4, 120, 27)).runs;
         assert!(
-            (runs.y..runs.bottom()).any(|row| rendered_row(&terminal, row).contains("1.1M tks")),
+            (runs.y..runs.bottom())
+                .any(|row| rendered_row(&terminal, row).contains("250K new tks")),
             "token badge was clipped outside Runs {runs:?}: {rendered}"
         );
+        assert!(
+            !(runs.y..runs.bottom()).any(|row| rendered_row(&terminal, row).contains("1.1M tks")),
+            "Runs must not headline the provider total: {rendered}"
+        );
+        assert!(
+            (0..4).any(|row| rendered_row(&terminal, row).contains("250K new tks")),
+            "header must show cache-excluding usage: {rendered}"
+        );
+    }
+
+    #[test]
+    fn run_overview_leads_with_new_usage_and_labels_provider_telemetry() {
+        let snapshot = json!({
+            "run":{"id":"run-1","goal":"Build it","status":"active","profile_id":"default"},
+            "token_usage": {
+                "input_tokens": 1_000,
+                "cached_input_tokens": 800,
+                "output_tokens": 100,
+                "reasoning_output_tokens": 25,
+                "total_tokens": 1_100,
+                "new_tokens": 300
+            },
+            "tickets":[],
+            "graph":[]
+        });
+        let model = ControlCenterModel::from_snapshot("/tmp/project".into(), snapshot);
+        let run = &model.runs[0];
+        let summary = run.summary.as_ref().unwrap();
+        let overview = run_overview_text(run, summary, "Default", &model)
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            overview.contains("300 tks new · cache excluded"),
+            "{overview}"
+        );
+        assert!(
+            overview.contains("Uncached input 200 tks · output 100 tks · reasoning 25 tks"),
+            "{overview}"
+        );
+        assert!(
+            overview.contains("Cached input 800 tks · provider total 1.1K tks"),
+            "{overview}"
+        );
+    }
+
+    #[test]
+    fn processed_planning_budget_is_not_labeled_new() {
+        let snapshot = json!({
+            "run": {"id":"run-1","goal":"Plan it","status":"planning","run_type_id":"small"},
+            "planning_session": {
+                "budget_metric": "processed_tokens",
+                "budget_limit": 2_000,
+                "synthesis_reserve": 500,
+                "usage": {"total_tokens": 1_100, "new_tokens": 300},
+                "accounted_baseline": {"total_tokens": 100, "new_tokens": 50}
+            },
+            "tickets":[],
+            "graph":[]
+        });
+        let model = ControlCenterModel::from_snapshot("/tmp/project".into(), snapshot);
+        let backend = TestBackend::new(140, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw(frame, &model)).unwrap();
+        let rendered = rendered_text(&terminal);
+        assert!(rendered.contains("1K/2K processed"), "{rendered}");
+        assert!(!rendered.contains("1K/2K new"), "{rendered}");
     }
 
     #[test]
@@ -7776,15 +11508,120 @@ run_card:
             .collect::<String>();
         assert!(rendered.contains("KONI"));
         assert!(rendered.contains("Project graph"));
-        assert!(rendered.contains("Details [overview]"));
+        assert!(rendered.contains("Details: Overview - Plan - Stages"));
         assert!(rendered.contains("/tmp/project"));
         assert!(!rendered.contains("Ticket checkout is ready"));
-        let details = rendered_cell_position(&terminal, "Details [overview]").unwrap();
+        let details = rendered_cell_position(&terminal, "Details: Overview").unwrap();
         let agents = rendered_cell_position(&terminal, "Agents").unwrap();
+        let activity = rendered_cell_position(&terminal, "Recent activity").unwrap();
         let graph = rendered_cell_position(&terminal, "Project graph").unwrap();
-        assert_eq!(details.1, agents.1);
-        assert!(agents.1 < graph.1, "agents={agents:?}, graph={graph:?}");
+        assert!(
+            agents.0 < details.0,
+            "agents={agents:?}, details={details:?}"
+        );
+        assert!(
+            agents.1 > details.1,
+            "agents={agents:?}, details={details:?}"
+        );
+        assert!(
+            details.0 < activity.0,
+            "details={details:?}, activity={activity:?}"
+        );
+        assert!(
+            activity.1 < graph.1,
+            "activity={activity:?}, graph={graph:?}"
+        );
         assert!(details.0 < graph.0, "details={details:?}, graph={graph:?}");
+    }
+
+    #[test]
+    fn approval_review_uses_neutral_title_and_complete_section_navigation_help() {
+        let mut model = ControlCenterModel::from_snapshot(
+            "/tmp/project".into(),
+            json!({
+                "run":{"id":"run-review","goal":"Review safely","status":"planning"},
+                "stages":[
+                    {
+                        "status":"succeeded",
+                        "definition":{"id":"combined-plan","kind":"planning","title":"Combined plan","required":true},
+                        "output":{"output":{"output":"Architecture, risk, and verification plan"}}
+                    },
+                    {"status":"pending","definition":{"id":"approval","kind":"manual","title":"Approve"}}
+                ]
+            }),
+        );
+        model.open_selected_run_approval();
+
+        let backend = TestBackend::new(82, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &model)).unwrap();
+        let rendered = rendered_text(&terminal);
+
+        assert!(rendered.contains("Review plan"), "{rendered}");
+        assert!(
+            !rendered.contains("Review planning and approve"),
+            "{rendered}"
+        );
+        let controls = "←→/[] sections · ↑↓/jk/PgUp/PgDn scroll · Tab focus · Enter · Esc";
+        assert_eq!(UnicodeWidthStr::width(controls), 65);
+        assert!(rendered.contains(controls), "{rendered}");
+    }
+
+    #[test]
+    fn approval_revision_editor_wraps_steering_and_shows_one_adaptive_action() {
+        let mut model = ControlCenterModel::from_snapshot(
+            "/tmp/project".into(),
+            json!({
+                "run":{"id":"run-revise","goal":"Revise safely","status":"planning"},
+                "stages":[
+                    {
+                        "status":"succeeded",
+                        "definition":{"id":"combined-plan","kind":"planning","title":"Combined plan","required":true},
+                        "output":{"output":{"output":"Architecture, risk, and verification plan"}}
+                    },
+                    {"status":"pending","definition":{"id":"approval","kind":"manual","title":"Approve"}}
+                ]
+            }),
+        );
+        model.open_selected_run_approval();
+        let steering = "Preserve current API behavior while changing storage boundaries and maintaining compatibility through the migration.\nRequire a rollback check and targeted regression coverage.";
+        let Some(Dialog::Approval(approval)) = model.dialog.as_mut() else {
+            panic!("approval review did not open");
+        };
+        approval.revision = steering.to_owned();
+        approval.revision_cursor = steering.chars().count();
+        approval.revision_focused = true;
+
+        let backend = TestBackend::new(82, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &model)).unwrap();
+        let row_containing = |needle: &str| {
+            (0..24)
+                .find(|row| {
+                    (0..82)
+                        .filter_map(|column| terminal.backend().buffer().cell((column, *row)))
+                        .map(|cell| cell.symbol())
+                        .collect::<String>()
+                        .contains(needle)
+                })
+                .unwrap_or_else(|| panic!("missing {needle}"))
+        };
+        let first_line = row_containing("Preserve current API behavior");
+        let wrapped_line = row_containing("through the migration");
+        let explicit_second_line = row_containing("Require a rollback check");
+        assert!(wrapped_line > first_line);
+        assert!(explicit_second_line > wrapped_line);
+
+        let button_row = row_containing("Revise plan");
+        let button_text = (0..82)
+            .filter_map(|column| terminal.backend().buffer().cell((column, button_row)))
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(button_text.contains("Revise plan"), "{button_text}");
+        assert!(!button_text.contains("Approve run"), "{button_text}");
+        let rendered = rendered_text(&terminal);
+        assert!(rendered.contains("Enter newline"), "{rendered}");
+        assert!(rendered.contains('▏'), "{rendered}");
     }
 
     #[test]
@@ -7823,7 +11660,30 @@ run_card:
                 {
                     "status":"succeeded",
                     "definition":{"id":"verification-secret","kind":"planning","title":"Plan verification","required":true},
-                    "output":{"output":{"output":verification}}
+                    "output":{"output":{
+                        "output":verification,
+                        "graph_seed":{
+                            "root_spec":{
+                                "acceptance_intent":"Acceptance remains explicit",
+                                "source_path":"/tmp/seed-root-secret",
+                                "graph_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                            },
+                            "nodes":[{
+                                "key":"seed-key-secret",
+                                "type":"change",
+                                "title":"Preserve sortedness behavior",
+                                "spec":{
+                                    "purpose":"Keep the shared ordering contract explicit",
+                                    "path":"src/private-seed.rs"
+                                }
+                            }],
+                            "edges":[{
+                                "source":"$root",
+                                "relation":"decomposes_into",
+                                "target":"seed-key-secret"
+                            }]
+                        }
+                    }}
                 }
             ],
             "agents":[{
@@ -7841,16 +11701,15 @@ run_card:
         compact.draw(|frame| draw(frame, &compact_model)).unwrap();
         let compact_text = rendered_text(&compact);
         for visible in [
-            "Review planning and approve",
-            "Decisions",
+            "Review plan",
             "Architecture",
-            "Risks",
+            "Risk",
             "Verification",
-            "Resolved decisions",
-            "How should invalid inputs",
-            "Decision: Raise TypeError",
+            "Graph Seed",
+            "Architecture contract body",
             "Approve run",
-            "Tab focuses",
+            "←→/[] sections",
+            "↑↓/jk/PgUp/PgDn scroll",
         ] {
             assert!(
                 compact_text.contains(visible),
@@ -7858,17 +11717,97 @@ run_card:
             );
         }
         assert!(
+            !compact_text.contains("Review planning and approve"),
+            "{compact_text}"
+        );
+        assert!(!compact_text.contains("Decisions"), "{compact_text}");
+        assert!(!compact_text.contains("Revise plan"), "{compact_text}");
+        assert!(
             !compact_text.contains("Structured planner output"),
             "{compact_text}"
+        );
+        let Some(Dialog::Approval(approval)) = compact_model.dialog.as_mut() else {
+            panic!("approval review did not open");
+        };
+        approval.selected_section = approval
+            .sections
+            .iter()
+            .position(|section| section.title == "Graph Seed")
+            .expect("Graph Seed tab remains selectable at the compact size");
+        let graph_seed_backend = TestBackend::new(82, 24);
+        let mut compact_graph_seed = Terminal::new(graph_seed_backend).unwrap();
+        compact_graph_seed
+            .draw(|frame| draw(frame, &compact_model))
+            .unwrap();
+        let compact_graph_seed_text = rendered_text(&compact_graph_seed);
+        for visible in [
+            "Graph Seed",
+            "3 root facts · 1 semantic node · 1 relationship",
+            "Acceptance intent: Acceptance remains explicit",
+        ] {
+            assert!(
+                compact_graph_seed_text.contains(visible),
+                "missing {visible}: {compact_graph_seed_text}"
+            );
+        }
+        let Some(Dialog::Approval(approval)) = compact_model.dialog.as_mut() else {
+            panic!("approval review did not open");
+        };
+        approval.scroll = 5;
+        let scrolled_graph_seed_backend = TestBackend::new(82, 24);
+        let mut scrolled_compact_graph_seed = Terminal::new(scrolled_graph_seed_backend).unwrap();
+        scrolled_compact_graph_seed
+            .draw(|frame| draw(frame, &compact_model))
+            .unwrap();
+        let scrolled_graph_seed_text = rendered_text(&scrolled_compact_graph_seed);
+        for visible in [
+            "Preserve sortedness behavior",
+            "Keep the shared ordering contract explicit",
+        ] {
+            assert!(
+                scrolled_graph_seed_text.contains(visible),
+                "missing {visible}: {scrolled_graph_seed_text}"
+            );
+        }
+        let Some(Dialog::Approval(approval)) = compact_model.dialog.as_mut() else {
+            panic!("approval review did not open");
+        };
+        approval.scroll = 10;
+        let tail_graph_seed_backend = TestBackend::new(82, 24);
+        let mut tail_compact_graph_seed = Terminal::new(tail_graph_seed_backend).unwrap();
+        tail_compact_graph_seed
+            .draw(|frame| draw(frame, &compact_model))
+            .unwrap();
+        let tail_graph_seed_text = rendered_text(&tail_compact_graph_seed);
+        {
+            let visible = "Objective → decomposes into → Preserve sortedness behavior";
+            assert!(
+                tail_graph_seed_text.contains(visible),
+                "missing {visible}: {tail_graph_seed_text}"
+            );
+        }
+        let Some(Dialog::Approval(approval)) = compact_model.dialog.as_mut() else {
+            panic!("approval review did not open");
+        };
+        approval.scroll = usize::MAX;
+        let end_graph_seed_backend = TestBackend::new(82, 24);
+        let mut end_compact_graph_seed = Terminal::new(end_graph_seed_backend).unwrap();
+        end_compact_graph_seed
+            .draw(|frame| draw(frame, &compact_model))
+            .unwrap();
+        let end_graph_seed_text = rendered_text(&end_compact_graph_seed);
+        assert!(
+            end_graph_seed_text.contains("2 root facts · 0 nodes · 0 relationships"),
+            "{end_graph_seed_text}"
         );
 
         let mut roomy_model = ControlCenterModel::from_snapshot("/tmp/project".into(), snapshot);
         roomy_model.open_selected_run_approval();
         let expected = [
-            (0, "How should invalid inputs be rejected?"),
-            (1, "Architecture contract body"),
-            (2, "Risk controls body"),
-            (3, "Verification evidence line 1"),
+            (0, "Architecture contract body"),
+            (1, "Risk controls body"),
+            (2, "Verification evidence line 1"),
+            (3, "3 root facts · 1 semantic node · 1 relationship"),
         ];
         let mut all_rendered = String::new();
         for (section, body) in expected {
@@ -7891,20 +11830,21 @@ run_card:
         let Some(Dialog::Approval(approval)) = roomy_model.dialog.as_mut() else {
             panic!("approval review did not open");
         };
-        approval.selected_section = 3;
-        approval.scroll = 16;
+        approval.selected_section = 2;
+        approval.scroll = 4;
         let scrolled_backend = TestBackend::new(140, 36);
         let mut scrolled = Terminal::new(scrolled_backend).unwrap();
         scrolled.draw(|frame| draw(frame, &roomy_model)).unwrap();
         let scrolled_text = rendered_text(&scrolled);
         assert!(
-            scrolled_text.contains("Verification evidence line 30"),
+            scrolled_text.contains("Verification evidence line 5"),
             "{scrolled_text}"
         );
         assert!(
-            scrolled_text.contains("Lines 13-32 of 32"),
+            !scrolled_text.contains("Verification evidence line 30"),
             "{scrolled_text}"
         );
+        assert!(!scrolled_text.contains("Lines "), "{scrolled_text}");
 
         all_rendered.push_str(&scrolled_text);
         for secret in [
@@ -7919,6 +11859,10 @@ run_card:
             "424242",
             "private-project-path",
             "agent-path-secret",
+            "seed-key-secret",
+            "seed-root-secret",
+            "private-seed.rs",
+            "0123456789abcdef",
         ] {
             assert!(!all_rendered.contains(secret), "leaked {secret}");
         }
@@ -7940,12 +11884,12 @@ run_card:
         let Some(Dialog::Approval(approval)) = model.dialog.as_mut() else {
             panic!("approval review did not open");
         };
-        approval.approve_focused = true;
+        approval.action_focused = true;
         let backend = TestBackend::new(82, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, &model)).unwrap();
         let rendered = rendered_text(&terminal);
-        assert!(rendered.contains("Approval unavailable"), "{rendered}");
+        assert!(rendered.contains("Approve run"), "{rendered}");
         assert!(
             rendered.contains("Plan risk controls is incomplete"),
             "{rendered}"
@@ -7960,7 +11904,10 @@ run_card:
         assert!(quiet.pending_questions.is_none());
         assert_eq!(quiet.details.y, area.y);
         assert_eq!(quiet.details.height, area.height);
-        assert!(quiet.active_agents.y < quiet.graph.y);
+        assert_eq!(quiet.active_agents.x, quiet.runs.x);
+        assert!(quiet.active_agents.y > quiet.tickets.y);
+        assert_eq!(quiet.activity.y, area.y);
+        assert!(quiet.activity.y < quiet.graph.y);
         assert!(quiet.graph.height > 0);
 
         let pending = operate_layout_with_questions(area, true);
@@ -7970,6 +11917,23 @@ run_card:
         assert_eq!(pending.details.height + questions.height, area.height);
         assert!(pending.details.height > questions.height);
         assert_eq!(pending.graph, quiet.graph);
+
+        for width in 82..120 {
+            let layout = operate_layout_with_questions(Rect::new(0, 4, width, 19), false);
+            assert_eq!(layout.details.width, layout.activity.width, "width {width}");
+            assert_eq!(layout.details.width, layout.graph.width, "width {width}");
+        }
+        for width in 120..=181 {
+            let layout = operate_layout_with_questions(Rect::new(0, 4, width, 19), false);
+            assert_eq!(layout.details.width, layout.graph.width, "width {width}");
+            assert!(layout.runs.width >= layout.details.width, "width {width}");
+            assert!(layout.runs.width.saturating_sub(layout.details.width) <= 2);
+            assert_eq!(
+                layout.runs.width + layout.details.width + layout.graph.width,
+                width,
+                "width {width}"
+            );
+        }
     }
 
     #[test]
@@ -7991,12 +11955,16 @@ run_card:
             model.detail_panel = panel;
             terminal.draw(|frame| draw(frame, &model)).unwrap();
             let rendered = rendered_text(&terminal);
-            assert!(
-                rendered.contains(&format!("Details [{}]", panel.label())),
-                "{rendered}"
-            );
-            assert!(rendered.contains("Questions · ‹"), "{rendered}");
-            assert!(!rendered.contains("Details [questions]"), "{rendered}");
+            assert!(rendered.contains("D:Overview-Plan-Stages"), "{rendered}");
+            assert!(rendered.contains("Questions"), "{rendered}");
+            let layout = operate_layout_with_questions(Rect::new(0, 4, 82, 15), true);
+            let tabs = rendered_row(&terminal, layout.detail_switcher.y);
+            for label in ["Overview", "Plan", "Stages"] {
+                assert!(
+                    tabs.contains(label),
+                    "missing {label} from visible tabs: {tabs}"
+                );
+            }
         }
     }
 
@@ -8019,7 +11987,7 @@ run_card:
 
         terminal.draw(|frame| draw(frame, &model)).unwrap();
         let pending = rendered_text(&terminal);
-        assert!(pending.contains("Questions · ‹"), "{pending}");
+        assert!(pending.contains("Questions"), "{pending}");
         assert!(pending.contains("Choose storage"), "{pending}");
         assert!(pending.contains("Project graph"), "{pending}");
 
@@ -8028,9 +11996,9 @@ run_card:
         terminal.draw(|frame| draw(frame, &model)).unwrap();
         let settled = rendered_text(&terminal);
         assert_eq!(model.focus, Focus::Details);
-        assert!(!settled.contains("Questions · ‹"), "{settled}");
+        assert!(!settled.contains("Questions"), "{settled}");
         assert!(!settled.contains("Choose storage"), "{settled}");
-        assert!(settled.contains("Details [overview]"), "{settled}");
+        assert!(settled.contains("D:Overview-Plan-Stages"), "{settled}");
         assert!(settled.contains("Project graph"), "{settled}");
 
         let area = Rect::new(0, 4, 82, 15);
@@ -8074,14 +12042,14 @@ run_card:
         terminal.draw(|frame| draw(frame, &model)).unwrap();
         let rendered = rendered_text(&terminal);
 
-        assert!(rendered.contains("Agents · 1 active / 2"), "{rendered}");
-        assert!(rendered.contains("Plan risk controls"), "{rendered}");
+        assert!(rendered.contains("Agents 1 / 2 active"), "{rendered}");
+        assert!(rendered.contains("Run · Planner"), "{rendered}");
         assert!(rendered.contains("Reviewer"), "{rendered}");
         assert_eq!(
             terminal
                 .backend()
                 .buffer()
-                .cell(rendered_cell_position(&terminal, "Plan risk controls").unwrap())
+                .cell(rendered_cell_position(&terminal, "Run · Planner").unwrap())
                 .unwrap()
                 .fg,
             Color::White
@@ -8095,7 +12063,19 @@ run_card:
                 .fg,
             Color::DarkGray
         );
-        assert!(rendered.contains("Questions · ‹"), "{rendered}");
+        assert!(rendered.contains("Questions"), "{rendered}");
+        assert!(rendered.contains("←→/[]"), "{rendered}");
+        assert!(rendered.contains("↑↓/jk"), "{rendered}");
+        let question_panel = operate_layout_with_questions(Rect::new(0, 4, 82, 19), true)
+            .pending_questions
+            .expect("question panel should be visible");
+        assert_eq!(
+            rendered_cell_position(&terminal, "←→/[]")
+                .expect("question controls should render")
+                .1,
+            question_panel.bottom() - 1,
+            "question controls must stay on the panel's bottom edge"
+        );
         assert!(rendered.contains("Should notes sync"), "{rendered}");
         assert!(rendered.contains("Project graph"), "{rendered}");
         for secret in [
@@ -8146,7 +12126,7 @@ run_card:
         let mut compact = Terminal::new(compact_backend).unwrap();
         compact.draw(|frame| draw(frame, &compact_model)).unwrap();
         let compact_text = rendered_text(&compact);
-        assert!(compact_text.contains("1 / 3"), "{compact_text}");
+        assert!(compact_text.contains("1/3"), "{compact_text}");
         assert!(
             compact_text.contains("Choose rejection behavior"),
             "{compact_text}"
@@ -8171,9 +12151,8 @@ run_card:
         compact_model.select_next_question(1);
         compact.draw(|frame| draw(frame, &compact_model)).unwrap();
         let second = rendered_text(&compact);
-        assert!(second.contains("2 / 3"), "{second}");
+        assert!(second.contains("2/3"), "{second}");
         assert!(second.contains("Choose element policy"), "{second}");
-        assert!(second.contains("✓ Answer recorded"), "{second}");
         assert_eq!(
             compact
                 .backend()
@@ -8188,14 +12167,17 @@ run_card:
         let roomy_backend = TestBackend::new(140, 36);
         let mut roomy = Terminal::new(roomy_backend).unwrap();
         for (position, prompt) in [
-            ("1 / 3", "Choose rejection behavior"),
-            ("2 / 3", "Choose element policy"),
-            ("3 / 3", "Choose corpus boundary"),
+            ("1/3", "Choose rejection behavior"),
+            ("2/3", "Choose element policy"),
+            ("3/3", "Choose corpus boundary"),
         ] {
             roomy.draw(|frame| draw(frame, &roomy_model)).unwrap();
             let text = rendered_text(&roomy);
             assert!(text.contains(position), "missing {position}: {text}");
             assert!(text.contains(prompt), "missing {prompt}: {text}");
+            if position == "2/3" {
+                assert!(text.contains("✓ Answer recorded"), "{text}");
+            }
             assert!(!text.contains("batch-secret"), "{text}");
             roomy_model.select_next_question(1);
         }
@@ -8255,7 +12237,8 @@ run_card:
             rendered.contains("every position in the input"),
             "{rendered}"
         );
-        assert!(rendered.contains("Custom"), "{rendered}");
+        assert!(rendered.contains("Notes (optional)"), "{rendered}");
+        assert!(rendered.contains("None of the above"), "{rendered}");
         assert!(!rendered.contains("saved-secret"), "{rendered}");
         assert!(!rendered.contains("batch-secret"), "{rendered}");
     }
@@ -8275,12 +12258,12 @@ run_card:
                     {"definition":{"id":"old-stage-e-secret","title":"Map app structure"}}
                 ],
                 "agents":[
-                    {"id":"live-agent-secret","stage_id":"live-stage-secret","status":"running","updated_at":"2026-07-11T12:06:00Z"},
-                    {"id":"old-agent-a-secret","stage_id":"old-stage-a-secret","status":"completed","updated_at":"2026-07-11T12:05:00Z"},
-                    {"id":"old-agent-b-secret","stage_id":"old-stage-b-secret","status":"completed","updated_at":"2026-07-11T12:04:00Z"},
-                    {"id":"old-agent-c-secret","stage_id":"old-stage-c-secret","status":"completed","updated_at":"2026-07-11T12:03:00Z"},
-                    {"id":"old-agent-d-secret","stage_id":"old-stage-d-secret","status":"completed","updated_at":"2026-07-11T12:02:00Z"},
-                    {"id":"old-agent-e-secret","stage_id":"old-stage-e-secret","status":"completed","updated_at":"2026-07-11T12:01:00Z"}
+                    {"id":"live-agent-secret","stage_id":"live-stage-secret","persona":"builder","status":"running","updated_at":"2026-07-11T12:06:00Z"},
+                    {"id":"old-agent-a-secret","stage_id":"old-stage-a-secret","persona":"validator","status":"completed","updated_at":"2026-07-11T12:05:00Z"},
+                    {"id":"old-agent-b-secret","stage_id":"old-stage-b-secret","persona":"planner","status":"completed","updated_at":"2026-07-11T12:04:00Z"},
+                    {"id":"old-agent-c-secret","stage_id":"old-stage-c-secret","persona":"reviewer","status":"completed","updated_at":"2026-07-11T12:03:00Z"},
+                    {"id":"old-agent-d-secret","stage_id":"old-stage-d-secret","persona":"tester","status":"completed","updated_at":"2026-07-11T12:02:00Z"},
+                    {"id":"old-agent-e-secret","stage_id":"old-stage-e-secret","persona":"mapper","status":"completed","updated_at":"2026-07-11T12:01:00Z"}
                 ]
             }),
         );
@@ -8290,19 +12273,19 @@ run_card:
 
         terminal.draw(|frame| draw(frame, &model)).unwrap();
         let first = rendered_text(&terminal);
-        assert!(first.contains("Agents · 1 active / 6"), "{first}");
-        assert!(first.contains("Build note editor"), "{first}");
-        assert!(!first.contains("Map app structure"), "{first}");
+        assert!(first.contains("Agents 1 / 6 active"), "{first}");
+        assert!(first.contains("Run · Builder"), "{first}");
+        assert!(!first.contains("Run · Mapper"), "{first}");
 
         model.selected_agent = 5;
         terminal.draw(|frame| draw(frame, &model)).unwrap();
         let scrolled = rendered_text(&terminal);
-        assert!(scrolled.contains("Map app structure"), "{scrolled}");
+        assert!(scrolled.contains("Run · Mapper"), "{scrolled}");
         assert_eq!(
             terminal
                 .backend()
                 .buffer()
-                .cell(rendered_cell_position(&terminal, "Map app structure").unwrap())
+                .cell(rendered_cell_position(&terminal, "Run · Mapper").unwrap())
                 .unwrap()
                 .fg,
             Color::DarkGray
@@ -8310,6 +12293,245 @@ run_card:
         for secret in ["live-agent-secret", "old-agent", "stage-secret"] {
             assert!(!scrolled.contains(secret), "leaked {secret}: {scrolled}");
         }
+    }
+
+    #[test]
+    fn agents_panel_follows_run_or_ticket_selection_scope() {
+        let mut model = ControlCenterModel::from_snapshot(
+            "/tmp/project".into(),
+            json!({
+                "run":{"id":"run-secret","goal":"Build notes","status":"active"},
+                "tickets":[
+                    {"id":"notes-ticket","title":"Build note editor","status":"in_progress","workflow":[],"outputs":[]},
+                    {"id":"search-ticket","title":"Add note search","status":"in_progress","workflow":[],"outputs":[]}
+                ],
+                "agents":[
+                    {"id":"notes-lead","ticket_id":"notes-ticket","persona":"lead","status":"running"},
+                    {"id":"search-lead","ticket_id":"search-ticket","persona":"lead","status":"running"},
+                    {"id":"run-reviewer","persona":"reviewer","status":"completed"}
+                ]
+            }),
+        );
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        model.focus_runs();
+        model.focus_agents();
+        terminal.draw(|frame| draw(frame, &model)).unwrap();
+        let run_scope = rendered_text(&terminal);
+        assert!(
+            run_scope.contains("Build note editor · Lead"),
+            "{run_scope}"
+        );
+        assert!(run_scope.contains("Add note search · Lead"), "{run_scope}");
+        assert!(run_scope.contains("Run · Reviewer"), "{run_scope}");
+
+        model.focus_tickets();
+        model.focus_agents();
+        terminal.draw(|frame| draw(frame, &model)).unwrap();
+        let ticket_scope = rendered_text(&terminal);
+        assert!(ticket_scope.contains("Agents"), "{ticket_scope}");
+        assert!(ticket_scope.contains("1 / 1 active"), "{ticket_scope}");
+        assert!(ticket_scope.contains("Lead"), "{ticket_scope}");
+        assert!(
+            ticket_scope.contains("Lead · Build note editor"),
+            "{ticket_scope}"
+        );
+        assert!(
+            !ticket_scope.contains("Add note search · Lead"),
+            "{ticket_scope}"
+        );
+        assert!(!ticket_scope.contains("Reviewer"), "{ticket_scope}");
+    }
+
+    #[test]
+    fn focusing_an_agent_turns_details_into_a_full_codex_style_chat_view() {
+        let root = tempfile::tempdir().unwrap();
+        let transcript = root.path().join(".git/koni/agents/worker.jsonl");
+        let prompt = root.path().join(".git/koni/agents/prompt.md");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&prompt, "Inspect **the runtime** before editing.").unwrap();
+        std::fs::write(
+            &transcript,
+            concat!(
+                "{\"type\":\"thread.started\",\"thread_id\":\"older-session-secret\"}\n",
+                "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Older step transcript must stay hidden.\"}}\n",
+                "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":999999,\"output_tokens\":999999}}\n",
+                "{\"type\":\"thread.started\",\"thread_id\":\"session-secret\"}\n",
+                "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Mapped the runtime prerequisites.\"}}\n",
+                "{\"type\":\"item.completed\",\"item\":{\"type\":\"mcp_tool_call\",\"tool\":\"spawn_worker\",\"status\":\"failed\",\"result\":{\"content\":[{\"text\":\"internal-secret\"}]}}}\n",
+                "{\"type\":\"item.completed\",\"item\":{\"type\":\"mcp_tool_call\",\"tool\":\"yield_lead\",\"arguments\":{\"grant\":\"grant-secret\"}}}\n",
+                "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1200,\"output_tokens\":300}}\n"
+            ),
+        )
+        .unwrap();
+        let mut model = ControlCenterModel::from_snapshot(
+            root.path().to_path_buf(),
+            json!({
+                "run":{"id":"run-secret","goal":"Research sortedness","status":"active"},
+                "stages":[{"definition":{"id":"stage-secret","title":"Map prerequisites"}}],
+                "agents":[{
+                    "id":"agent-secret",
+                    "stage_id":"stage-secret",
+                    "persona":"builder",
+                    "status":"running",
+                    "stdout_path":transcript.display().to_string(),
+                    "prompt_path":prompt.display().to_string(),
+                    "codex_session_id":"session-secret"
+                }]
+            }),
+        );
+        model.focus_runs();
+        model.focus_agents();
+        let backend = TestBackend::new(120, 34);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw(frame, &model)).unwrap();
+        let chat = rendered_text(&terminal);
+        assert!(chat.contains("Chat · Builder"), "{chat}");
+        assert!(
+            chat.contains("Inspect **the runtime** before") && chat.contains("editing."),
+            "{chat}"
+        );
+        assert!(
+            chat.contains("Mapped the runtime") && chat.contains("prerequisites."),
+            "{chat}"
+        );
+        assert!(!chat.contains("Older step transcript"), "{chat}");
+        assert!(!chat.contains("999.9K"), "{chat}");
+        assert!(chat.contains("Call failed Spawn worker"), "{chat}");
+        assert!(chat.contains("Called Yield lead"), "{chat}");
+        assert!(!chat.contains("grant-secret"), "{chat}");
+        assert!(!chat.contains("internal-secret"), "{chat}");
+        assert!(chat.contains("1.2K tks in · 300 tks out"), "{chat}");
+        for secret in ["session-secret", "agent-secret", "stage-secret"] {
+            assert!(!chat.contains(secret), "leaked {secret}: {chat}");
+        }
+        assert!(
+            !chat.contains(transcript.to_string_lossy().as_ref()),
+            "{chat}"
+        );
+
+        model.focus = Focus::Details;
+        terminal.draw(|frame| draw(frame, &model)).unwrap();
+        let focused_chat = rendered_text(&terminal);
+        assert!(focused_chat.contains("Chat · Builder"), "{focused_chat}");
+        assert!(
+            focused_chat.contains("Mapped the runtime") && focused_chat.contains("prerequisites."),
+            "{focused_chat}"
+        );
+
+        model.close_agent_chat();
+        terminal.draw(|frame| draw(frame, &model)).unwrap();
+        let overview = rendered_text(&terminal);
+        assert!(
+            overview.contains("Details: Overview - Plan - Stages"),
+            "{overview}"
+        );
+        assert!(!overview.contains("Chat · Builder"), "{overview}");
+    }
+
+    #[test]
+    fn live_agent_chat_styles_compiler_mediated_guidance_as_a_user_message() {
+        let root = tempfile::tempdir().unwrap();
+        let mut model = ControlCenterModel::from_snapshot(
+            root.path().to_path_buf(),
+            json!({
+                "run":{"id":"run-secret","goal":"Research sortedness","status":"active"},
+                "tickets":[{
+                    "id":"ticket-secret",
+                    "title":"Validate boundary semantics",
+                    "status":"in_progress",
+                    "workflow":[],
+                    "outputs":[]
+                }],
+                "agents":[{
+                    "id":"agent-secret",
+                    "ticket_id":"ticket-secret",
+                    "persona":"reviewer",
+                    "status":"running"
+                }],
+                "events":[{
+                    "id":"event-secret",
+                    "type":"compiler.steering.recorded",
+                    "ticket_id":"ticket-secret",
+                    "data":{
+                        "kind":"agent_chat",
+                        "message":"Check the negative-count verdict.",
+                        "ticket_id":"ticket-secret"
+                    }
+                }],
+                "actions":[{
+                    "id":"steer",
+                    "params":{
+                        "kind":{"type":"string","required":true},
+                        "message":{"type":"string","required":true},
+                        "ticket_id":{"type":"ticket_id","required":false},
+                        "target_nodes":{"type":"json","default":[]},
+                        "priority":{"type":"string","default":"normal"}
+                    }
+                }]
+            }),
+        );
+        model.focus_tickets();
+        model.focus_agents();
+        let backend = TestBackend::new(120, 34);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw(frame, &model)).unwrap();
+        let chat = rendered_text(&terminal);
+        assert!(
+            chat.contains("Check the negative-count") && chat.contains("verdict."),
+            "{chat}"
+        );
+        assert!(!chat.contains("Working on"), "{chat}");
+        assert!(rendered_row(&terminal, 33).contains("Enter message"));
+
+        let mut form = model.agent_guidance_form().unwrap();
+        assert!(form.is_agent_guidance());
+        assert_eq!(form.params[form.selected].id, "message");
+        assert_eq!(
+            form.params
+                .iter()
+                .find(|param| param.id == "ticket_id")
+                .map(|param| param.value.as_str()),
+            Some("ticket-secret")
+        );
+        form.params[form.selected].value = "Recheck the total verdict function.".to_owned();
+        model.dialog = Some(Dialog::ActionForm(form));
+        terminal.draw(|frame| draw(frame, &model)).unwrap();
+        let composer = rendered_text(&terminal);
+        assert!(composer.contains("Send agent guidance"), "{composer}");
+        assert!(
+            composer.contains("Recheck the total verdict function."),
+            "{composer}"
+        );
+        assert!(composer.contains("selected ticket"), "{composer}");
+        assert!(composer.contains("next compiler"), "{composer}");
+        assert!(composer.contains("boundary."), "{composer}");
+        for secret in [
+            "run-secret",
+            "ticket-secret",
+            "agent-secret",
+            "event-secret",
+        ] {
+            assert!(!composer.contains(secret), "leaked {secret}: {composer}");
+        }
+
+        if let Some(Dialog::ActionForm(form)) = model.dialog.as_mut() {
+            for param in &mut form.params {
+                if matches!(param.id.as_str(), "ticket" | "ticket_id") {
+                    param.value.clear();
+                }
+            }
+        }
+        terminal.draw(|frame| draw(frame, &model)).unwrap();
+        let lead_composer = rendered_text(&terminal);
+        assert!(lead_composer.contains("selected run"), "{lead_composer}");
+        assert!(
+            !lead_composer.contains("selected ticket"),
+            "{lead_composer}"
+        );
     }
 
     #[test]
@@ -8332,10 +12554,11 @@ run_card:
         for (focus, guidance) in [
             (Focus::Runs, "1 Runs"),
             (Focus::Tickets, "2 Tickets"),
-            (Focus::Details, "3 Details"),
+            (Focus::Agents, "3 Agents"),
+            (Focus::Details, "4 Details"),
             (Focus::Questions, "Questions"),
-            (Focus::Agents, "4 Agents"),
-            (Focus::Graph, "5 Graph"),
+            (Focus::Activity, "5 Activity"),
+            (Focus::Graph, "6 Graph"),
         ] {
             model.focus = focus;
             terminal.draw(|frame| draw(frame, &model)).unwrap();
@@ -8540,7 +12763,7 @@ run_card:
         let rendered = rendered_text(&terminal);
 
         assert!(rendered.contains("Help · Runs"), "{rendered}");
-        assert!(rendered.contains("Goal Prompt"), "{rendered}");
+        assert!(rendered.contains("Objective"), "{rendered}");
         assert!(rendered.contains("Run Config"), "{rendered}");
         assert!(!rendered.contains("guided intake"), "{rendered}");
     }
@@ -8699,8 +12922,11 @@ run_card:
         terminal.draw(|frame| draw(frame, &model)).unwrap();
         let rendered = rendered_text(&terminal);
 
+        assert!(rendered.contains("Original Research Sprint"), "{rendered}");
+        let runs = operate_layout(Rect::new(0, 4, 160, 37)).runs;
         assert!(
-            rendered.matches("Original Research Sprint").count() >= 3,
+            (runs.y..runs.bottom())
+                .any(|row| rendered_row(&terminal, row).contains("Original Resea")),
             "{rendered}"
         );
         assert!(
@@ -8766,7 +12992,7 @@ run_card:
             let header = rendered_row(&terminal, 2);
 
             assert!(header.contains("Large · ⚙ Planning"), "{header}");
-            assert!(header.contains("0/0 tickets · 0 tks"), "{header}");
+            assert!(header.contains("0/0 tickets · 0 new tks"), "{header}");
             assert!(!header.contains("Plan it"), "{header}");
             assert!(!header.contains("awaiting approval"), "{header}");
             for private_id in [
@@ -8935,7 +13161,7 @@ run_card:
 
         assert!(header.contains("Large Research · ◐ Active"), "{header}");
         assert!(header.contains("· 1/2 tickets"), "{header}");
-        assert!(header.contains("· 0 tks"), "{header}");
+        assert!(header.contains("· 0 new tks"), "{header}");
         assert!(!header.contains(goal), "goal leaked into header: {header}");
         assert!(!header.contains("parallel"), "{header}");
         assert!(!header.contains("play/pause"), "{header}");
@@ -9023,11 +13249,52 @@ run_card:
         ] {
             assert!(rendered.contains(domain), "missing {domain}: {rendered}");
         }
-        assert!(rendered.contains("Draft workspace"), "{rendered}");
+        assert!(rendered.contains("Configuration"), "{rendered}");
         assert!(rendered.contains("Future runs only"), "{rendered}");
         assert!(rendered.contains("Guided editor"), "{rendered}");
         assert!(!rendered.contains("Project graph"), "{rendered}");
         assert!(!rendered.contains("[task]"), "{rendered}");
+    }
+
+    #[test]
+    fn control_tips_are_anchored_to_surface_footers() {
+        let size = ratatui::layout::Size::new(120, 30);
+        let screen = Rect::new(0, 0, size.width, size.height);
+
+        let mut modal_model = ControlCenterModel::from_snapshot("/tmp/project".into(), json!(null));
+        modal_model.dialog = Some(Dialog::NewConfigDocument(
+            crate::model::NewConfigDocumentDraft {
+                relative_path: "run-types/custom.yaml".to_owned(),
+            },
+        ));
+        let backend = TestBackend::new(size.width, size.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &modal_model)).unwrap();
+        let modal = centered_box(76, 16, screen);
+        let (_, controls_y) = rendered_cell_position(&terminal, "Enter create draft")
+            .expect("new-document controls should render");
+        let (_, explanation_y) = rendered_cell_position(&terminal, "The document is published")
+            .expect("new-document explanation should render");
+        assert_eq!(controls_y, modal.bottom() - 1);
+        assert!(explanation_y < controls_y);
+
+        let mut runs_model = ControlCenterModel::from_snapshot("/tmp/project".into(), json!(null));
+        runs_model.runs.clear();
+        terminal.draw(|frame| draw(frame, &runs_model)).unwrap();
+        let operate = operate_layout(Rect::new(0, 4, size.width, size.height - 5));
+        let runs_title = rendered_row(&terminal, operate.runs.y);
+        let runs_footer = rendered_row(&terminal, operate.runs.bottom() - 2);
+        assert!(!runs_title.contains("n new"), "{runs_title}");
+        assert!(runs_footer.contains("n New run"), "{runs_footer}");
+
+        let mut configure_model = runs_model;
+        configure_model.mode = Mode::Configure;
+        terminal
+            .draw(|frame| draw(frame, &configure_model))
+            .unwrap();
+        let configure = configure_layout(Rect::new(0, 4, size.width, size.height - 5));
+        assert_eq!(configure.draft_bar.unwrap().bottom(), size.height - 1);
+        assert!(rendered_row(&terminal, configure.draft_bar.unwrap().y + 1).contains("t run type"));
     }
 
     #[test]
@@ -9103,7 +13370,7 @@ sandbox_mode = "workspace-write"
             guided_editor_header_height(&model, ConfigDomain::Agents, editor_inner_width);
 
         assert!(rendered.contains("Ctrl-P publish"), "{rendered}");
-        assert!(rendered.contains("Ctrl-S save"), "{rendered}");
+        assert!(rendered.contains("Ctrl-D discard"), "{rendered}");
         assert!(rendered.contains("Reasoning"), "{rendered}");
         assert!(rendered.contains("Workers · Arch"), "{rendered}");
         assert!(rendered.contains("Workers · Chan"), "{rendered}");
@@ -9111,13 +13378,22 @@ sandbox_mode = "workspace-write"
             rendered.contains('…'),
             "compact identities need an explicit ellipsis: {rendered}"
         );
-        assert!(rendered.contains("published"), "{rendered}");
-        assert!(!rendered.contains("publishedpublished"), "{rendered}");
+        assert!(!rendered.contains("published"), "{rendered}");
+        assert!(!rendered.contains('✓'), "{rendered}");
         assert_eq!(header_height, 7);
         assert_eq!(
             configure_field_at(&model, editor.x + 1, editor.y + 1 + header_height, content,),
             Some(0)
         );
+
+        model.config.documents[0]
+            .text
+            .push_str("# unpublished operator change\n");
+        terminal.draw(|frame| draw(frame, &model)).unwrap();
+        let dirty = rendered_text(&terminal);
+        assert!(dirty.contains("unpublished"), "{dirty}");
+        assert!(dirty.contains("publish or discard"), "{dirty}");
+        assert!(dirty.contains("Ctrl-D discard"), "{dirty}");
     }
 
     #[test]
@@ -9211,7 +13487,10 @@ agents:
         let run_types = rendered_text(&terminal);
         assert!(run_types.contains("Run Types Resources"), "{run_types}");
         assert!(run_types.contains("Medium"), "{run_types}");
-        assert!(run_types.contains("Run behavior and intake"), "{run_types}");
+        assert!(
+            run_types.contains("Run behavior, intake, and planning questions"),
+            "{run_types}"
+        );
         assert!(run_types.contains("Guided editor"), "{run_types}");
         assert!(!run_types.contains("run-types/medium.yaml"), "{run_types}");
         assert!(!run_types.contains("Project graph"), "{run_types}");
@@ -9222,9 +13501,8 @@ agents:
         model.focus = Focus::ConfigForm;
         terminal.draw(|frame| draw(frame, &model)).unwrap();
         let agents = rendered_text(&terminal);
-        for role in ["Planner", "Lead", "Workers", "Reviewer"] {
-            assert!(agents.contains(role), "missing {role}: {agents}");
-        }
+        assert!(agents.contains("No resources in this domain"), "{agents}");
+        assert!(!agents.contains("Run type defaults"), "{agents}");
 
         model
             .config
@@ -9315,7 +13593,7 @@ agents:
         assert!(editor.contains("MARKDOWN"), "{editor}");
         assert!(!editor.contains("prompts/reviewer.md"), "{editor}");
 
-        assert_eq!(config_resource_state(&model, &resource).1, "published",);
+        assert_eq!(config_resource_state(&model, &resource).1, "");
         model
             .config
             .documents
@@ -9324,7 +13602,51 @@ agents:
             .unwrap()
             .text
             .push_str("Check current proof.\n");
-        assert_eq!(config_resource_state(&model, &resource).1, "draft");
+        assert_eq!(
+            config_resource_state(&model, &resource).1,
+            "publish or discard"
+        );
+    }
+
+    #[test]
+    fn shared_config_files_mark_only_the_semantic_resource_that_changed() {
+        let mut model = ControlCenterModel::from_snapshot("/tmp/project".into(), json!(null));
+        model.config.documents = vec![
+            config_document(
+                "profile.yaml",
+                "schema_version: '1.0'\nimports:\n  graph: [graph.yaml]\n",
+            ),
+            config_document(
+                "graph.yaml",
+                "node_types:\n  - id: first\n    description: First node\n    stage: framing\n    statuses: [active]\n  - id: second\n    description: Second node\n    stage: assurance\n    statuses: [active]\n",
+            ),
+        ];
+        model.config.rebuild_projection();
+        let resources = model
+            .config
+            .resources
+            .iter()
+            .filter(|resource| {
+                resource.domain == ConfigDomain::GraphRules
+                    && resource.kind == crate::configure::ConfigResourceKind::NodeType
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(resources.len(), 2);
+
+        let graph = model
+            .config
+            .documents
+            .iter_mut()
+            .find(|document| document.relative_path == Path::new("graph.yaml"))
+            .unwrap();
+        graph.text = graph.text.replacen("stage: framing", "stage: design", 1);
+
+        assert_eq!(
+            config_resource_state(&model, &resources[0]).1,
+            "publish or discard"
+        );
+        assert_eq!(config_resource_state(&model, &resources[1]).1, "");
     }
 
     #[test]
@@ -9431,8 +13753,8 @@ agents:
                 assert_eq!(buffer.cell((area.right() - 1, row)).unwrap().symbol(), "│");
             }
             let rendered = rendered_text(&terminal);
-            assert!(rendered.contains("type/paste insert"), "{rendered}");
-            assert!(rendered.contains("at caret · Enter apply"), "{rendered}");
+            assert!(rendered.contains("type/paste"), "{rendered}");
+            assert!(rendered.contains("Enter apply"), "{rendered}");
             assert!(!rendered.contains("019f-secret"), "{rendered}");
             assert!(!rendered.contains("019f-private-locator"), "{rendered}");
         }
@@ -9567,6 +13889,33 @@ agents:
     }
 
     #[test]
+    fn cancelled_and_superseded_tickets_do_not_synthesize_completed_steps() {
+        for status in ["cancelled", "superseded"] {
+            let ticket = json!({
+                "id":"ticket",
+                "status":status,
+                "workflow":[
+                    {"id":"build","persona":"builder","expected_output":"built product"},
+                    {"id":"review","persona":"reviewer","expected_output":"passed review"}
+                ],
+                "outputs":[]
+            });
+
+            let progress = ticket_progress(&ticket, None);
+
+            assert_eq!(progress.done, 0, "{status} ticket looked complete");
+            assert!(
+                progress
+                    .states
+                    .iter()
+                    .all(|state| *state == StepVisualState::Pending),
+                "{status} ticket synthesized workflow state: {:?}",
+                progress.states
+            );
+        }
+    }
+
+    #[test]
     fn workflow_uses_compiler_completion_and_review_truth() {
         let snapshot = json!({
             "run":{"id":"run","goal":"Trust the board","status":"active","profile_id":"default"},
@@ -9608,29 +13957,93 @@ agents:
     }
 
     #[test]
-    fn planning_transcript_names_nested_activity_instead_of_repeating_transport_events() {
-        let text = narrative_cards(&[
-            json!({
-                "type":"planning.agent.event",
-                "stage_id":"architecture-plan",
-                "event":{"type":"item.started","item":{
-                    "type":"command_execution",
-                    "command":"/bin/zsh -lc \"git status --short\""
-                }}
-            }),
-            json!({
-                "type":"planning.agent.event",
-                "stage_id":"architecture-plan",
-                "event":{"type":"item.completed","item":{
-                    "type":"agent_message",
-                    "text":"{\"questions\":[{\"prompt\":\"Which storage boundary should notes use?\"}]}"
-                }}
-            }),
-            json!({
-                "type":"planning.question.opened",
-                "request":{"prompt":"This durable question must not become history UI"}
-            }),
-        ]);
+    fn planning_timeline_groups_stage_events_and_hides_command_noise() {
+        let text = planning_timeline(
+            &[
+                json!({
+                    "type":"planning.intake",
+                    "at":"2026-07-13T09:14:30Z"
+                }),
+                json!({
+                    "type":"planning.agent.starting",
+                    "stage_id":"architecture-plan",
+                    "at":"2026-07-13T09:14:32Z"
+                }),
+                json!({
+                    "type":"planning.agent.event",
+                    "stage_id":"architecture-plan",
+                    "at":"2026-07-13T09:14:33Z",
+                    "event":{"type":"item.started","item":{
+                        "type":"reasoning",
+                        "summary":[]
+                    }}
+                }),
+                json!({
+                    "type":"planning.agent.event",
+                    "stage_id":"architecture-plan",
+                    "at":"2026-07-13T09:14:33Z",
+                    "event":{"type":"item.completed","item":{
+                        "type":"reasoning",
+                        "summary":[{"text":"Mapped the storage boundary"}]
+                    }}
+                }),
+                json!({
+                    "type":"planning.agent.event",
+                    "stage_id":"architecture-plan",
+                    "at":"2026-07-13T09:14:33Z",
+                    "event":{"type":"token.usage.updated","usage":{
+                        "total_tokens":12000
+                    }}
+                }),
+                json!({
+                    "type":"planning.agent.event",
+                    "stage_id":"architecture-plan",
+                    "at":"2026-07-13T09:14:33Z",
+                    "event":{"type":"item.started","item":{
+                        "type":"command_execution",
+                        "command":"/bin/zsh -lc \"git status --short\""
+                    }}
+                }),
+                json!({
+                    "type":"planning.agent.event",
+                    "stage_id":"architecture-plan",
+                    "at":"2026-07-13T09:14:33Z",
+                    "event":{"type":"item.completed","item":{
+                        "type":"command_execution",
+                        "exit_code":1
+                    }}
+                }),
+                json!({
+                    "type":"planning.agent.event",
+                    "stage_id":"architecture-plan",
+                    "at":"2026-07-13T09:14:33Z",
+                    "event":{"type":"item.completed","item":{
+                        "type":"command_execution",
+                        "exit_code":1
+                    }}
+                }),
+                json!({
+                    "type":"planning.agent.event",
+                    "stage_id":"architecture-plan",
+                    "at":"2026-07-13T09:14:34Z",
+                    "event":{"type":"item.completed","item":{
+                        "type":"agent_message",
+                        "text":"{\"questions\":[{\"prompt\":\"Which storage boundary should notes use?\"}]}"
+                    }}
+                }),
+                json!({
+                    "type":"planning.question.opened",
+                    "request":{"prompt":"This durable question must not become history UI"}
+                }),
+            ],
+            &[json!({
+                "definition":{
+                    "id":"architecture-plan",
+                    "title":"Plan architecture"
+                }
+            })],
+            72,
+        );
         let rendered = text
             .lines
             .iter()
@@ -9643,12 +14056,672 @@ agents:
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(rendered.contains("Inspecting the project"), "{rendered}");
-        assert!(rendered.contains("git status --short"), "{rendered}");
+        assert!(rendered.contains("Run setup"), "{rendered}");
+        assert!(
+            rendered.contains("  09:14:30  Captured objective"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Plan architecture"), "{rendered}");
+        assert!(
+            rendered.contains("  09:14:32  Started planning pass"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("  09:14:34  Planning paused"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Reasoned — Mapped the storage"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("project inspection command failed (exit 1) ×2"),
+            "{rendered}"
+        );
         assert!(rendered.contains("Planning paused for input"), "{rendered}");
+        assert!(!rendered.contains("Inspecting the project"), "{rendered}");
+        assert!(!rendered.contains("git status --short"), "{rendered}");
+        assert!(!rendered.contains('●'), "{rendered}");
         assert!(!rendered.contains("Which storage boundary"), "{rendered}");
         assert!(!rendered.contains("durable question"), "{rendered}");
         assert!(!rendered.contains("Planning agent event"), "{rendered}");
+        assert!(!rendered.contains("Token usage updated"), "{rendered}");
+        assert!(!rendered.contains("  Reasoning"), "{rendered}");
+    }
+
+    #[test]
+    fn recent_activity_combines_colored_graph_edits_with_compiler_work() {
+        let run = RunData::from_snapshot(json!({
+            "run":{"id":"run","goal":"Observe it","status":"active","profile_id":"research"},
+            "graph":[
+                {"id":"claim-1","type":"claim","title":"Stable adjacency claim","edges":{}},
+                {"id":"experiment-1","type":"experiment","title":"Sortedness runtime probe","edges":{}}
+            ],
+            "tickets":[{
+                "id":"ticket-secret",
+                "title":"Prepare bounded experiment",
+                "status":"in_progress",
+                "workflow":[],
+                "outputs":[{
+                    "step_id":"design",
+                    "recorded_at":"2026-07-13T03:00:01Z",
+                    "typed":{"graph_delta":{
+                        "add_nodes":[{"id":"claim-2","type":"claim","title":"Boundary cases hold","edges":{}}],
+                        "upsert":[{"id":"experiment-1","type":"experiment","title":"Sortedness runtime probe","edges":{}}],
+                        "delete":["claim-1"]
+                    }}
+                }]
+            }],
+            "events":[{
+                "type":"compiler.compile.scoped",
+                "at":"2026-07-13T03:00:02Z",
+                "ticket_id":"ticket-secret",
+                "data":{"graph_hash":"sha256:hidden"}
+            },{
+                "type":"compiler.recovery.required",
+                "at":"2026-07-13T03:00:04Z",
+                "ticket_id":"ticket-secret"
+            },{
+                "type":"compiler.recovery.required",
+                "at":"2026-07-13T03:00:03Z",
+                "ticket_id":"ticket-secret"
+            }]
+        }));
+        let items = recent_activity_items(&run);
+
+        assert!(items.iter().any(|item| {
+            item.tone == ActivityTone::Added && item.text == "Added Claim: Boundary cases hold"
+        }));
+        assert!(items.iter().any(|item| {
+            item.tone == ActivityTone::Modified
+                && item.text == "Modified Experiment: Sortedness runtime probe"
+        }));
+        assert!(items.iter().any(|item| {
+            item.tone == ActivityTone::Deleted
+                && item.text == "Deleted Claim: Stable adjacency claim"
+        }));
+        assert!(items.iter().any(|item| {
+            item.tone == ActivityTone::Compiler
+                && item.text == "Compiled ticket: Prepare bounded experiment"
+        }));
+        assert!(items.iter().any(|item| {
+            item.tone == ActivityTone::Compiler
+                && item.text == "Recovery needed: Prepare bounded experiment"
+                && item.count == 2
+        }));
+        let rendered = items
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!rendered.contains("ticket-secret"), "{rendered}");
+        assert!(!rendered.contains("sha256"), "{rendered}");
+    }
+
+    #[test]
+    fn recent_activity_shows_row_timestamps_and_only_active_runtime_in_its_header() {
+        let mut model = ControlCenterModel::from_snapshot(
+            "/tmp/project".into(),
+            json!({
+                "run":{"id":"run","goal":"Observe it","status":"active","profile_id":"software"},
+                "orchestration":{"active_runtime_approved_at":"2026-07-14T20:00:00Z"},
+                "lifecycle":{"running":true,"active_runtime_milliseconds":3_723_000},
+                "events":[{
+                    "type":"compiler.compile.full",
+                    "at":"2026-07-13T03:04:05Z"
+                }]
+            }),
+        );
+        model.focus = Focus::Activity;
+        let backend = TestBackend::new(72, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw_recent_activity(frame, &model, frame.area()))
+            .unwrap();
+        let rendered = rendered_text(&terminal);
+
+        assert!(
+            rendered.contains("Recent activity · 1h 02m active"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("03:04:05  ◇ Recompiled project graph"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("1–1"), "{rendered}");
+        assert!(!rendered.contains("· 1 "), "{rendered}");
+    }
+
+    #[test]
+    fn compact_dashboard_adapts_recent_activity_title_without_clipping_runtime() {
+        fn model(milliseconds: u64) -> ControlCenterModel {
+            ControlCenterModel::from_snapshot(
+                "/tmp/project".into(),
+                json!({
+                    "run":{"id":"run","goal":"Observe it","status":"active","profile_id":"software"},
+                    "orchestration":{"active_runtime_approved_at":"2026-07-14T20:00:00Z"},
+                    "lifecycle":{"running":true,"active_runtime_milliseconds":milliseconds},
+                    "events":[{"type":"compiler.compile.full","at":"2026-07-13T03:04:05Z"}]
+                }),
+            )
+        }
+
+        fn draw_dashboard(model: &ControlCenterModel, width: u16) -> (Terminal<TestBackend>, Rect) {
+            let backend = TestBackend::new(width, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| draw(frame, model)).unwrap();
+            let activity = operate_layout(Rect::new(0, 4, width, 19)).activity;
+            (terminal, activity)
+        }
+
+        fn panel_top(terminal: &Terminal<TestBackend>, area: Rect) -> String {
+            (area.x..area.right())
+                .filter_map(|column| terminal.backend().buffer().cell((column, area.y)))
+                .map(|cell| cell.symbol())
+                .collect()
+        }
+
+        fn expected_panel_top(title: &str, width: u16) -> String {
+            let fill = usize::from(width)
+                .saturating_sub(2)
+                .saturating_sub(UnicodeWidthStr::width(title));
+            format!("┌{title}{}┐", "─".repeat(fill))
+        }
+
+        let elapsed = model(3_723_000);
+        let (compact, compact_activity) = draw_dashboard(&elapsed, 82);
+        assert_eq!(compact_activity.width, 27);
+        assert_eq!(
+            panel_top(&compact, compact_activity),
+            expected_panel_top(" Activity · 1h02m ", compact_activity.width)
+        );
+
+        let (roomy, roomy_activity) = draw_dashboard(&elapsed, 105);
+        assert_eq!(
+            panel_top(&roomy, roomy_activity),
+            expected_panel_top(" Recent activity · 1h 02m active ", roomy_activity.width)
+        );
+
+        let (zero, zero_activity) = draw_dashboard(&model(0), 82);
+        assert_eq!(
+            panel_top(&zero, zero_activity),
+            expected_panel_top(" Activity · 0s ", zero_activity.width)
+        );
+
+        let (extreme, extreme_activity) = draw_dashboard(&model(u64::MAX), 82);
+        assert_eq!(
+            panel_top(&extreme, extreme_activity),
+            expected_panel_top(" Activity ", extreme_activity.width)
+        );
+    }
+
+    #[test]
+    fn active_runtime_requires_a_durable_approval_anchor_and_explicit_duration() {
+        assert_eq!(active_runtime_label(None), None);
+
+        let no_anchor = RunData::from_snapshot(json!({
+            "run":{"id":"run","goal":"Observe it","status":"active"},
+            "lifecycle":{"active_runtime_milliseconds":3_723_000}
+        }));
+        assert_eq!(active_runtime_label(Some(&no_anchor)), None);
+
+        let missing_duration = RunData::from_snapshot(json!({
+            "run":{"id":"run","goal":"Observe it","status":"active"},
+            "orchestration":{"active_runtime_approved_at":"2026-07-14T20:00:00Z"},
+            "lifecycle":{}
+        }));
+        assert_eq!(active_runtime_label(Some(&missing_duration)), None);
+
+        let malformed_anchor = RunData::from_snapshot(json!({
+            "run":{"id":"run","goal":"Observe it","status":"active"},
+            "orchestration":{"active_runtime_approved_at":"not-a-timestamp"},
+            "lifecycle":{"active_runtime_milliseconds":3_723_000}
+        }));
+        assert_eq!(active_runtime_label(Some(&malformed_anchor)), None);
+
+        let planning = RunData::from_snapshot(json!({
+            "run":{"id":"run","goal":"Observe it","status":"planning"},
+            "orchestration":{"active_runtime_approved_at":"2026-07-14T20:00:00Z"},
+            "lifecycle":{"active_runtime_milliseconds":3_723_000}
+        }));
+        assert_eq!(active_runtime_label(Some(&planning)), None);
+
+        let approved_zero = RunData::from_snapshot(json!({
+            "run":{"id":"run","goal":"Observe it","status":"active"},
+            "orchestration":{"active_runtime_approved_at":"2026-07-14T20:00:00Z"},
+            "lifecycle":{"active_runtime_milliseconds":0}
+        }));
+        assert_eq!(
+            active_runtime_label(Some(&approved_zero)).as_deref(),
+            Some("0s active")
+        );
+
+        let approved_elapsed = RunData::from_snapshot(json!({
+            "run":{"id":"run","goal":"Observe it","status":"active"},
+            "orchestration":{"active_runtime_approved_at":"2026-07-14T20:00:00Z"},
+            "lifecycle":{"active_runtime_milliseconds":3_723_000}
+        }));
+        assert_eq!(
+            active_runtime_label(Some(&approved_elapsed)).as_deref(),
+            Some("1h 02m active")
+        );
+    }
+
+    #[test]
+    fn recent_activity_omits_unanchored_runtime_but_preserves_approved_zero() {
+        let mut no_run = ControlCenterModel::from_snapshot("/tmp/project".into(), json!({}));
+        no_run.runs.clear();
+        let backend = TestBackend::new(72, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw_recent_activity(frame, &no_run, frame.area()))
+            .unwrap();
+        let rendered = rendered_text(&terminal);
+        assert!(
+            rendered.contains("Select a run to inspect activity"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains(" active"), "{rendered}");
+
+        let planning = ControlCenterModel::from_snapshot(
+            "/tmp/project".into(),
+            json!({
+                "run":{"id":"run","goal":"Plan it","status":"planning"},
+                "lifecycle":{"active_runtime_milliseconds":0}
+            }),
+        );
+        terminal
+            .draw(|frame| draw_recent_activity(frame, &planning, frame.area()))
+            .unwrap();
+        let rendered = rendered_text(&terminal);
+        assert!(rendered.contains("Recent activity"), "{rendered}");
+        assert!(!rendered.contains("0s active"), "{rendered}");
+
+        let approved = ControlCenterModel::from_snapshot(
+            "/tmp/project".into(),
+            json!({
+                "run":{"id":"run","goal":"Run it","status":"active"},
+                "orchestration":{"active_runtime_approved_at":"2026-07-14T20:00:00Z"},
+                "lifecycle":{"active_runtime_milliseconds":0}
+            }),
+        );
+        terminal
+            .draw(|frame| draw_recent_activity(frame, &approved, frame.area()))
+            .unwrap();
+        let rendered = rendered_text(&terminal);
+        assert!(
+            rendered.contains("Recent activity · 0s active"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn ticket_overview_keeps_live_status_near_title_and_summarizes_completed_steps() {
+        let snapshot = json!({
+            "run":{"id":"run","goal":"Build it","status":"active","profile_id":"software"},
+            "board":{"ticket_workflows":{"ticket":{
+                "completed_steps":["build"],
+                "ready_steps":["review"],
+                "pending_steps":["review"],
+                "active_worker_step":"review",
+                "worker_state":"running"
+            }}},
+            "tickets":[{
+                "id":"ticket",
+                "title":"Implement note storage",
+                "status":"in_progress",
+                "operation":"build",
+                "workflow":[
+                    {"id":"build","persona":"builder","expected_output":"implemented note persistence"},
+                    {"id":"review","kind":"review","persona":"reviewer","expected_output":"review receipt"}
+                ],
+                "outputs":[{
+                    "step_id":"build",
+                    "persona":"builder",
+                    "typed":{"summary":"Implemented durable note storage"}
+                }],
+                "blockers":[],
+                "lease":{}
+            }],
+            "events":[{"type":"compiler.output.recorded","ticket_id":"ticket"}],
+            "agents":[{"ticket_id":"ticket","stage_id":"review","persona":"reviewer","status":"running"}]
+        });
+        let model = ControlCenterModel::from_snapshot("/tmp/project".into(), snapshot);
+        let ticket = model.selected_ticket_value().unwrap();
+        let text = metadata_text(ticket, model.selected_run_data(), &model, 80)
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let lines = text.lines().collect::<Vec<_>>();
+        assert_eq!(lines[0], "Implement note storage");
+        assert!(lines[1].contains("In progress"), "{text}");
+        assert!(lines[2].contains("Working now · Reviewer"), "{text}");
+        assert!(text.contains("Build  ·  Builder"), "{text}");
+        assert!(!text.contains("Build  done"), "{text}");
+        assert!(text.contains("Review  working  ·  Reviewer"), "{text}");
+        assert!(text.contains("Implemented durable note storage"), "{text}");
+        assert!(!text.contains("Recent activity"), "{text}");
+
+        let compact = metadata_text(ticket, model.selected_run_data(), &model, 24);
+        let build_row = compact
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .find(|line| line.contains("Builder"))
+            .expect("compact details retain the completed step row");
+        assert!(build_row.contains("Build · Builder"), "{build_row}");
+        assert!(!build_row.contains("done"), "{build_row}");
+        assert!(build_row.chars().count() <= 24, "{build_row}");
+        assert_eq!(compact_step_persona("change-designer"), "Designer");
+        assert_eq!(compact_step_persona("risk-analyst"), "Risk");
+    }
+
+    #[test]
+    fn completed_step_without_recorded_outcome_does_not_claim_its_expectation() {
+        let snapshot = json!({
+            "run":{"id":"run","goal":"Build it","status":"active","profile_id":"software"},
+            "board":{"ticket_workflows":{"ticket":{
+                "completed_steps":["build"],
+                "ready_steps":[],
+                "pending_steps":[],
+                "worker_state":"idle"
+            }}},
+            "tickets":[{
+                "id":"ticket",
+                "title":"Implement note storage",
+                "status":"closed",
+                "operation":"build",
+                "workflow":[{
+                    "id":"build",
+                    "persona":"builder",
+                    "expected_output":"implemented note persistence"
+                }],
+                "outputs":[{"step_id":"build"}],
+                "blockers":[]
+            }]
+        });
+        let mut model = ControlCenterModel::from_snapshot("/tmp/project".into(), snapshot);
+        model.ticket_tab = crate::model::TicketTab::All;
+        let ticket = model.selected_ticket_value().unwrap();
+        let details = metadata_text(ticket, model.selected_run_data(), &model, 80);
+        let rendered = details
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            rendered.contains("No outcome summary recorded"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("Produced implemented note"),
+            "{rendered}"
+        );
+        let missing = details
+            .lines
+            .iter()
+            .find(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.content.contains("No outcome summary recorded"))
+            })
+            .expect("missing outcome disclosure remains visible");
+        assert!(
+            missing
+                .spans
+                .iter()
+                .all(|span| span.style.fg != Some(Color::Green)),
+            "missing outcome was styled as a success: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn ticket_overview_wraps_the_first_useful_sanitized_blocker_reason() {
+        let snapshot = json!({
+            "run":{"id":"run-private","goal":"Repair it","status":"blocked","profile_id":"software"},
+            "board":{"ticket_workflows":{"TK-private":{
+                "completed_steps":[],
+                "ready_steps":[],
+                "pending_steps":[],
+                "active_worker_step":null,
+                "worker_state":"idle"
+            }}},
+            "tickets":[{
+                "id":"TK-private",
+                "title":"Unsafe /Users/max/private-title.rs sha256:fedcba9876543210",
+                "status":"blocked",
+                "operation":"build",
+                "workflow":[],
+                "outputs":[],
+                "blockers":[
+                    {
+                        "kind":"blocked",
+                        "message":"blocked",
+                        "created_at":"2026-07-14T20:00:00Z",
+                        "related_ticket":null
+                    },
+                    {
+                        "kind":"integration-failure",
+                        "message":"Review failed for ticket TK-private at /Users/max/Desktop/private.rs after sha256:0123456789abcdef in journal-019fdeadbeef123456; revise the proof boundary.",
+                        "created_at":"2026-07-14T20:01:00Z",
+                        "related_ticket":"TK-private"
+                    },
+                    {
+                        "kind":"another-failure",
+                        "message":"A second durable issue remains.",
+                        "created_at":"2026-07-14T20:02:00Z",
+                        "related_ticket":null
+                    }
+                ]
+            }]
+        });
+        let mut model = ControlCenterModel::from_snapshot("/tmp/project".into(), snapshot);
+        model.ticket_tab = crate::model::TicketTab::All;
+        let ticket = model.selected_ticket_value().unwrap();
+        let lines = ticket_blocker_lines(ticket, model.selected_run_data(), 32);
+        let rendered = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let flattened = collapse_display_whitespace(&rendered);
+
+        assert!(flattened.contains("Review failed"), "{rendered}");
+        assert!(flattened.contains("the affected ticket"), "{rendered}");
+        assert!(flattened.contains("a local path"), "{rendered}");
+        assert!(flattened.contains("a content hash"), "{rendered}");
+        assert!(flattened.contains("an internal record"), "{rendered}");
+        assert!(rendered.contains("+2 more"), "{rendered}");
+        for secret in [
+            "TK-private",
+            "/Users/max/Desktop/private.rs",
+            "/Users/max/private-title.rs",
+            "0123456789abcdef",
+            "fedcba9876543210",
+            "journal-019fdeadbeef123456",
+            "2026-07-14T20:01:00Z",
+        ] {
+            assert!(!rendered.contains(secret), "leaked {secret}: {rendered}");
+        }
+        for line in lines.iter().skip(1) {
+            let width = line
+                .spans
+                .iter()
+                .map(|span| span.content.width())
+                .sum::<usize>();
+            assert!(width <= 32, "blocker line is {width} cells wide: {line:?}");
+        }
+    }
+
+    #[test]
+    fn ticket_overview_retains_count_only_copy_when_blocker_reasons_are_noise() {
+        let ticket = json!({
+            "blockers":[
+                {
+                    "kind":"blocked",
+                    "message":"blocked",
+                    "created_at":"2026-07-14T20:00:00Z",
+                    "related_ticket":null
+                },
+                {
+                    "kind":"raw-record",
+                    "message":"{\"run_id\":\"run-private\",\"path\":\"/tmp/private\"}",
+                    "created_at":"2026-07-14T20:01:00Z",
+                    "related_ticket":null
+                },
+                "untyped legacy payload"
+            ]
+        });
+        let rendered = ticket_blocker_lines(&ticket, None, 80)
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(
+            rendered.contains("! 3 blockers need attention"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("run-private"), "{rendered}");
+        assert!(!rendered.contains("/tmp/private"), "{rendered}");
+        assert!(!rendered.contains("untyped legacy payload"), "{rendered}");
+    }
+
+    #[test]
+    fn ticket_blocker_projection_redacts_adversarial_tokens_and_hard_wraps() {
+        let ticket = json!({
+            "blockers":[{
+                "kind":"integration-failure",
+                "message":"TK-aaaaaaaaaaaaaaaa and EV-secret failed ticket_id:opaque at private/checkout and private\\checkout for commit=deadbee and node@sha256:0123456789abcdef; compiler record {\"status\":\"blocked\",\"retry\":false}; revise the plan with 超長界面調整🙂 and extraordinarilylongunbrokentoken.\u{001b}[31m",
+                "created_at":"2026-07-14T20:00:00Z",
+                "related_ticket":null
+            }]
+        });
+        let lines = ticket_blocker_lines(&ticket, None, 18);
+        let rendered = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let flattened = collapse_display_whitespace(&rendered);
+        let without_whitespace = rendered
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+
+        assert!(flattened.contains("revise the plan"), "{rendered}");
+        assert!(flattened.contains("internal compiler"), "{rendered}");
+        assert!(without_whitespace.contains("超長界面調整🙂"), "{rendered}");
+        assert!(
+            without_whitespace.contains("extraordinarilylongunbrokentoken"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains('\u{001b}'), "{rendered:?}");
+        for secret in [
+            "TK-aaaaaaaaaaaaaaaa",
+            "EV-secret",
+            "ticket_id:opaque",
+            "private/checkout",
+            "private\\checkout",
+            "commit=deadbee",
+            "node@sha256:",
+            "\"status\"",
+            "\"retry\"",
+        ] {
+            assert!(!rendered.contains(secret), "leaked {secret}: {rendered}");
+        }
+        for line in lines.iter().skip(1) {
+            let width = line
+                .spans
+                .iter()
+                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                .sum::<usize>();
+            assert!(width <= 18, "blocker line is {width} cells wide: {line:?}");
+        }
+    }
+
+    #[test]
+    fn ticket_blocker_projection_rejects_placeholder_only_failure_copy() {
+        let snapshot = json!({
+            "run":{"id":"run-private","goal":"Repair it","status":"blocked"},
+            "tickets":[{
+                "id":"TK-private",
+                "title":"Private work",
+                "status":"blocked",
+                "workflow":[],
+                "outputs":[],
+                "blockers":[
+                    {
+                        "kind":"integration-failure",
+                        "message":"Failed for TK-private at /private/checkout",
+                        "created_at":"2026-07-14T20:00:00Z",
+                        "related_ticket":null
+                    },
+                    {
+                        "kind":"compiler-error",
+                        "message":"Error at path:private for commit:deadbee and hash:abcdef1 in ref(EV-secret) {\"run_id\":\"run-private\"}",
+                        "created_at":"2026-07-14T20:01:00Z",
+                        "related_ticket":null
+                    }
+                ]
+            }]
+        });
+        let mut model = ControlCenterModel::from_snapshot("/tmp/project".into(), snapshot);
+        model.ticket_tab = crate::model::TicketTab::All;
+        let ticket = model.selected_ticket_value().unwrap();
+        let rendered = ticket_blocker_lines(ticket, model.selected_run_data(), 80)
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(
+            rendered.contains("! 2 blockers need attention"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("local path"), "{rendered}");
+        assert!(!rendered.contains("internal compiler record"), "{rendered}");
+        for secret in [
+            "TK-private",
+            "/private/checkout",
+            "path:private",
+            "commit:deadbee",
+            "hash:abcdef1",
+            "EV-secret",
+            "run-private",
+        ] {
+            assert!(!rendered.contains(secret), "leaked {secret}: {rendered}");
+        }
     }
 
     #[test]
@@ -9727,7 +14800,11 @@ agents:
             .collect::<String>();
 
         assert!(
-            rendered.contains("Enter controls the current Human decision stage"),
+            rendered.contains("▶ Current Human decision stage"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Enter control current stage"),
             "{rendered}"
         );
         assert!(rendered.contains("○ Workflow step"), "{rendered}");
@@ -9872,6 +14949,82 @@ agents:
     }
 
     #[test]
+    fn narrow_stage_cards_keep_status_and_category_together() {
+        let snapshot = json!({
+            "run":{"id":"run","goal":"Operate safely","status":"active","profile_id":"default"},
+            "stages":[],
+            "tickets":[],
+            "graph":[]
+        });
+        let model = ControlCenterModel::from_snapshot("/tmp/project".into(), snapshot);
+        let stages = [json!({
+            "definition":{
+                "id":"synchronize",
+                "kind":"action",
+                "title":"Synchronize the target branch",
+                "config":null
+            },
+            "status":"pending"
+        })];
+
+        let rendered = pipeline_stage_cards(&stages, model.selected_run_data(), &model, 39)
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            rendered.contains("○ Synchronize the target branch\n  Pending · Automation"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn paused_run_projects_its_open_stage_as_paused_until_work_resumes() {
+        let snapshot = json!({
+            "run":{"id":"run","goal":"Operate safely","status":"active","profile_id":"default"},
+            "orchestration":{"running":false,"max_parallel":1,"unchained":false},
+            "stages":[],
+            "tickets":[],
+            "graph":[]
+        });
+        let model = ControlCenterModel::from_snapshot("/tmp/project".into(), snapshot);
+        let stages = [json!({
+            "definition":{
+                "id":"orchestrate",
+                "kind":"orchestration",
+                "title":"Execute compiled work",
+                "config":null
+            },
+            "status":"running"
+        })];
+
+        let rendered = pipeline_stage_cards(&stages, model.selected_run_data(), &model, 50)
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            rendered.contains("○ Execute compiled work  Paused"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("Running"), "{rendered}");
+    }
+
+    #[test]
     fn live_stage_terminal_pause_and_error_reasons_redact_control_ids_only_for_display() {
         let run_id = "019f551e-7fb4-7862-889a-890af6d0314e";
         let agent_id = "orchestration-orchestrate";
@@ -9943,7 +15096,7 @@ agents:
         model.focus = Focus::Details;
         model.detail_panel = Panel::Stages;
 
-        let text = detail_lines(&model);
+        let text = detail_lines(&model, 80);
         let rendered = text
             .lines
             .iter()
@@ -10018,16 +15171,368 @@ agents:
 
         assert!(rendered.contains("ATTENTION"), "{rendered}");
         assert!(rendered.contains("1 failed action"), "{rendered}");
-        assert!(rendered.contains("2 graph nodes"), "{rendered}");
+        assert!(rendered.contains("◇2 nodes"), "{rendered}");
         assert!(!rendered.contains("internal-journal-id"), "{rendered}");
     }
 
     #[test]
-    fn overview_preserves_the_last_run_or_ticket_subject_when_details_receives_focus() {
+    fn report_health_requires_complete_telemetry_and_recorded_evidence() {
+        let workflow_row = |review_status: Value, pending_steps: Vec<Value>, worker_state: &str| {
+            json!({
+                "status":"in_progress",
+                "completed_steps":[],
+                "ready_steps":[],
+                "pending_steps":pending_steps,
+                "active_worker_step":null,
+                "worker_state":worker_state,
+                "review_status":review_status
+            })
+        };
+        let complete_snapshot =
+            |tickets: Vec<Value>,
+             stages: Vec<Value>,
+             failed_journals: Vec<Value>,
+             overrides: BTreeMap<String, Value>| {
+                let ticket_workflows = tickets
+                    .iter()
+                    .filter_map(|ticket| {
+                        let ticket_id = ticket.get("id").and_then(Value::as_str)?;
+                        let progress = overrides
+                            .get(ticket_id)
+                            .cloned()
+                            .unwrap_or_else(|| workflow_row(Value::Null, Vec::new(), "idle"));
+                        Some((ticket_id.to_owned(), progress))
+                    })
+                    .collect::<serde_json::Map<_, _>>();
+                json!({
+                    "run":{"id":"run","goal":"Report truth","status":"active","profile_id":"default"},
+                    "validation_errors":[],
+                    "board":{
+                        "failed_journals":failed_journals,
+                        "incomplete_journals":[],
+                        "incomplete_integrations":[],
+                        "ticket_workflows":ticket_workflows
+                    },
+                    "tickets":tickets,
+                    "stages":stages,
+                    "graph":[]
+                })
+            };
+        let ticket_output = json!({
+            "id":"ticket",
+            "status":"in_progress",
+            "workflow":[],
+            "outputs":[{"id":"current-output","step_id":"build"}],
+            "reviews":[],
+            "blockers":[]
+        });
+        let passed_review = json!({
+            "id":"ticket",
+            "status":"review",
+            "workflow":[{"id":"review","kind":"review"}],
+            "outputs":[],
+            "reviews":[{"status":"passed"}],
+            "blockers":[]
+        });
+        let verification = json!({
+            "status":"succeeded",
+            "definition":{"kind":"checkpoint","config":{"checkpoint":"verification"}},
+            "output":{}
+        });
+
+        let mut incomplete_with_output =
+            complete_snapshot(vec![ticket_output.clone()], vec![], vec![], BTreeMap::new());
+        incomplete_with_output
+            .as_object_mut()
+            .unwrap()
+            .remove("validation_errors");
+        let mut missing_ticket_workflow =
+            complete_snapshot(vec![ticket_output.clone()], vec![], vec![], BTreeMap::new());
+        missing_ticket_workflow["board"]["ticket_workflows"] = json!({});
+        let failed_review = BTreeMap::from([(
+            "ticket".to_owned(),
+            workflow_row(json!("failed"), vec![json!("review")], "idle"),
+        )]);
+        let passed_current_review = BTreeMap::from([(
+            "ticket".to_owned(),
+            workflow_row(json!("passed"), vec![], "idle"),
+        )]);
+        let stale_passed_review = BTreeMap::from([(
+            "ticket".to_owned(),
+            workflow_row(json!("passed"), vec![json!("review")], "idle"),
+        )]);
+        let cases = [
+            (
+                "bare snapshot",
+                json!({"run":{"id":"run","goal":"Report truth","status":"active"}}),
+                EvidenceHealth::NoRecordedIssues,
+            ),
+            (
+                "complete but empty",
+                complete_snapshot(vec![], vec![], vec![], BTreeMap::new()),
+                EvidenceHealth::NoRecordedIssues,
+            ),
+            (
+                "current ticket output",
+                complete_snapshot(vec![ticket_output.clone()], vec![], vec![], BTreeMap::new()),
+                EvidenceHealth::Recorded(EvidenceBasis::TicketResult),
+            ),
+            (
+                "incomplete telemetry with output",
+                incomplete_with_output,
+                EvidenceHealth::NoRecordedIssues,
+            ),
+            (
+                "ticket workflow row missing",
+                missing_ticket_workflow,
+                EvidenceHealth::NoRecordedIssues,
+            ),
+            (
+                "passed current review",
+                complete_snapshot(
+                    vec![passed_review.clone()],
+                    vec![],
+                    vec![],
+                    passed_current_review,
+                ),
+                EvidenceHealth::Recorded(EvidenceBasis::PassedReview),
+            ),
+            (
+                "stale passed review is not current review evidence",
+                complete_snapshot(
+                    vec![json!({
+                        "id":"ticket",
+                        "status":"review",
+                        "workflow":[{"id":"review","kind":"review"}],
+                        "outputs":[{"id":"new-current-output","step_id":"build"}],
+                        "reviews":[{"status":"passed"}],
+                        "blockers":[]
+                    })],
+                    vec![],
+                    vec![],
+                    stale_passed_review,
+                ),
+                EvidenceHealth::Recorded(EvidenceBasis::TicketResult),
+            ),
+            (
+                "failed current review wins over output",
+                complete_snapshot(
+                    vec![json!({
+                        "id":"ticket",
+                        "status":"review",
+                        "workflow":[{"id":"review","kind":"review"}],
+                        "outputs":[{"id":"current-output","step_id":"build"}],
+                        "reviews":[{"status":"failed"}],
+                        "blockers":[]
+                    })],
+                    vec![],
+                    vec![],
+                    failed_review,
+                ),
+                EvidenceHealth::Attention,
+            ),
+            (
+                "successful verification",
+                complete_snapshot(vec![], vec![verification], vec![], BTreeMap::new()),
+                EvidenceHealth::Recorded(EvidenceBasis::Verification),
+            ),
+            (
+                "failed pipeline wins over output",
+                complete_snapshot(
+                    vec![ticket_output.clone()],
+                    vec![json!({"status":"failed","output":{"reason":"failed"}})],
+                    vec![],
+                    BTreeMap::new(),
+                ),
+                EvidenceHealth::Attention,
+            ),
+            (
+                "blocked pipeline wins over output",
+                complete_snapshot(
+                    vec![ticket_output.clone()],
+                    vec![json!({"status":"blocked","output":{"reason":"blocked"}})],
+                    vec![],
+                    BTreeMap::new(),
+                ),
+                EvidenceHealth::Attention,
+            ),
+            (
+                "known issue wins over output",
+                complete_snapshot(
+                    vec![ticket_output],
+                    vec![],
+                    vec![json!("failed-journal")],
+                    BTreeMap::new(),
+                ),
+                EvidenceHealth::Attention,
+            ),
+        ];
+
+        for (label, snapshot, expected) in cases {
+            let model = ControlCenterModel::from_snapshot("/tmp/project".into(), snapshot);
+            let run = &model.runs[0];
+            let summary = run.summary.as_ref().unwrap();
+            assert_eq!(evidence_health(run, summary), expected, "{label}");
+            let text = report_text(run, 0, &model, true);
+            let rendered = text
+                .lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            assert!(!rendered.contains("HEALTHY"), "{label}: {rendered}");
+            if label == "failed current review wins over output" {
+                assert!(rendered.contains("1 review failed"), "{rendered}");
+            }
+            if matches!(
+                label,
+                "failed pipeline wins over output" | "blocked pipeline wins over output"
+            ) {
+                assert!(
+                    rendered.contains("1 pipeline stage failed or blocked"),
+                    "{rendered}"
+                );
+            }
+            match expected {
+                EvidenceHealth::Attention => {
+                    assert!(rendered.contains("ATTENTION"), "{label}: {rendered}");
+                    assert!(
+                        !rendered.contains("Evidence recorded"),
+                        "{label}: {rendered}"
+                    );
+                }
+                EvidenceHealth::Recorded(basis) => {
+                    assert!(
+                        rendered.contains("Evidence recorded"),
+                        "{label}: {rendered}"
+                    );
+                    assert!(rendered.contains("no known issues"), "{label}: {rendered}");
+                    let expanded = report_text(run, 0, &model, false)
+                        .lines
+                        .iter()
+                        .flat_map(|line| line.spans.iter())
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>();
+                    assert!(
+                        expanded.contains(evidence_basis_detail(basis)),
+                        "{label}: {expanded}"
+                    );
+                }
+                EvidenceHealth::NoRecordedIssues => {
+                    assert!(
+                        rendered.contains("No recorded issues"),
+                        "{label}: {rendered}"
+                    );
+                    assert!(
+                        !rendered.contains("Evidence recorded"),
+                        "{label}: {rendered}"
+                    );
+                    let neutral = text
+                        .lines
+                        .iter()
+                        .flat_map(|line| line.spans.iter())
+                        .find(|span| span.content.contains("No recorded issues"))
+                        .unwrap();
+                    assert_eq!(neutral.style.fg, Some(Color::DarkGray), "{label}");
+                    assert_eq!(neutral.style.bg, None, "{label}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn configured_report_is_not_presented_as_a_recorded_final_report() {
+        let configured = json!({
+            "run":{"id":"run","goal":"Report truth","status":"active"},
+            "validation_errors":[],
+            "board":{
+                "failed_journals":[],
+                "incomplete_journals":[],
+                "incomplete_integrations":[],
+                "ticket_workflows":{}
+            },
+            "tickets":[],
+            "stages":[],
+            "views":[{"id":"final-report","kind":"report"}]
+        });
+        let configured_model = ControlCenterModel::from_snapshot("/tmp/project".into(), configured);
+        let configured_run = &configured_model.runs[0];
+        assert_eq!(
+            evidence_health(configured_run, configured_run.summary.as_ref().unwrap()),
+            EvidenceHealth::NoRecordedIssues
+        );
+        assert_eq!(final_report_status(configured_run), "No final report yet.");
+
+        let recorded = json!({
+            "run":{"id":"run","goal":"Report truth","status":"active"},
+            "validation_errors":[],
+            "board":{
+                "failed_journals":[],
+                "incomplete_journals":[],
+                "incomplete_integrations":[],
+                "ticket_workflows":{}
+            },
+            "tickets":[],
+            "stages":[{
+                "status":"succeeded",
+                "definition":{"kind":"action","config":{"action":"report"}},
+                "output":{}
+            }],
+            "views":[{"id":"final-report","kind":"report"}]
+        });
+        let recorded_model = ControlCenterModel::from_snapshot("/tmp/project".into(), recorded);
+        let recorded_run = &recorded_model.runs[0];
+        assert_eq!(
+            evidence_health(recorded_run, recorded_run.summary.as_ref().unwrap()),
+            EvidenceHealth::Recorded(EvidenceBasis::FinalReport)
+        );
+        assert_eq!(final_report_status(recorded_run), "Final report recorded.");
+    }
+
+    #[test]
+    fn run_overview_marks_only_live_planning_as_token_spending_work() {
+        let live_snapshot = json!({
+            "run":{"id":"run-live","goal":"Plan safely","status":"planning","run_type":"large"},
+            "agents":[{"id":"planner","persona":"planner","status":"running"}],
+            "tickets":[],
+            "graph":[]
+        });
+        let live_model = ControlCenterModel::from_snapshot("/tmp/project".into(), live_snapshot);
+        let live_run = &live_model.runs[0];
+        let live_summary = live_run.summary.as_ref().unwrap();
+        let live = run_overview_text(live_run, live_summary, "Large", &live_model).lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(live.contains("⚙"), "{live}");
+        assert!(live.contains("Planning"), "{live}");
+
+        let quiet_snapshot = json!({
+            "run":{"id":"run-quiet","goal":"Await input","status":"planning","run_type":"large"},
+            "agents":[],
+            "tickets":[],
+            "graph":[]
+        });
+        let quiet_model = ControlCenterModel::from_snapshot("/tmp/project".into(), quiet_snapshot);
+        let quiet_run = &quiet_model.runs[0];
+        let quiet_summary = quiet_run.summary.as_ref().unwrap();
+        let quiet = run_overview_text(quiet_run, quiet_summary, "Large", &quiet_model).lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(quiet.contains("○"), "{quiet}");
+        assert!(!quiet.contains("⚙"), "{quiet}");
+    }
+
+    #[test]
+    fn overview_composes_objective_run_and_evidence_before_preserving_ticket_focus() {
+        let objective = "Objective line one\nObjective line two\nObjective line three\nObjective line four\nObjective line five\nObjective line six";
         let snapshot = json!({
             "run":{
                 "id":"run-secret",
-                "goal":"Run-level delivery goal",
+                "goal":objective,
                 "status":"active",
                 "profile_id":"default"
             },
@@ -10044,7 +15549,7 @@ agents:
         });
         let mut model = ControlCenterModel::from_snapshot("/tmp/project".into(), snapshot);
         let rendered = |model: &ControlCenterModel| {
-            detail_lines(model)
+            detail_lines(model, 80)
                 .lines
                 .iter()
                 .flat_map(|line| line.spans.iter())
@@ -10054,16 +15559,25 @@ agents:
         };
 
         model.focus_runs();
+        let collapsed = rendered(&model);
+        for section in ["Objective", "Run", "Evidence"] {
+            assert!(
+                collapsed.contains(section),
+                "missing {section}: {collapsed}"
+            );
+        }
+        assert!(collapsed.contains("tickets complete"), "{collapsed}");
+        assert!(collapsed.contains("No recorded issues"), "{collapsed}");
+        assert!(!collapsed.contains("HEALTHY"), "{collapsed}");
+        assert!(collapsed.contains("Objective line four…"), "{collapsed}");
+        assert!(!collapsed.contains("Objective line six"), "{collapsed}");
+
         model.focus = Focus::Details;
-        let run_overview = rendered(&model);
-        assert!(
-            run_overview.contains("Run-level delivery goal"),
-            "{run_overview}"
-        );
-        assert!(
-            !run_overview.contains("Ticket-level implementation"),
-            "{run_overview}"
-        );
+        let expanded = rendered(&model);
+        assert!(expanded.contains("Objective line six"), "{expanded}");
+        assert!(expanded.contains("tickets complete"), "{expanded}");
+        assert!(expanded.contains("No recorded issues"), "{expanded}");
+        assert!(!expanded.contains("HEALTHY"), "{expanded}");
 
         model.focus_tickets();
         model.focus = Focus::Details;
@@ -10073,6 +15587,108 @@ agents:
             "{ticket_overview}"
         );
         assert_eq!(model.overview_subject, OverviewSubject::Ticket);
+    }
+
+    #[test]
+    fn plan_panel_switches_from_live_activity_to_the_full_approved_human_plan() {
+        let snapshot = json!({
+            "run":{
+                "id":"run-secret",
+                "goal":"Replace the questionnaire section",
+                "status":"active",
+                "run_type_title":"Medium"
+            },
+            "stages":[
+                {
+                    "status":"succeeded",
+                    "definition":{
+                        "id":"combined-plan",
+                        "title":"Plan the focused slice",
+                        "kind":"planning",
+                        "required":true
+                    },
+                    "output":{"output":{
+                        "output":"Complete compiler-facing plan text",
+                        "review":{
+                            "architecture":[{
+                                "heading":"Shared field contract",
+                                "description":"Use one definition across both questionnaire surfaces."
+                            }],
+                            "risk":[{
+                                "heading":"Preserve legacy notes",
+                                "description":"Migrate without detaching existing values."
+                            }],
+                            "verification":[{
+                                "heading":"Prove both surfaces",
+                                "description":"Exercise persistence and rendering with focused tests."
+                            }]
+                        },
+                        "graph_seed":{
+                            "root_spec":{"acceptance_intent":"Approval is explicit"},
+                            "nodes":[{
+                                "key":"seed-key-secret",
+                                "type":"change",
+                                "title":"Preserve the shared field contract",
+                                "spec":{"purpose":"Keep both questionnaire surfaces aligned"}
+                            }],
+                            "edges":[{
+                                "source":"$root",
+                                "relation":"decomposes_into",
+                                "target":"seed-key-secret"
+                            }]
+                        }
+                    }}
+                },
+                {
+                    "status":"succeeded",
+                    "definition":{
+                        "id":"explicit_run_approval",
+                        "title":"Approve the plan",
+                        "kind":"approval"
+                    }
+                }
+            ],
+            "planning_transcript":[{
+                "type":"planning.agent.started",
+                "stage_id":"combined-plan",
+                "at":"2026-07-14T03:04:05Z"
+            }]
+        });
+        let mut model = ControlCenterModel::from_snapshot("/tmp/project".into(), snapshot);
+        model.detail_panel = Panel::Planning;
+        let rendered = detail_lines(&model, 76)
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for expected in [
+            "Approved plan",
+            "Plan the focused slice",
+            "Complete compiler-facing plan text",
+            "Graph Seed",
+            "1 root fact · 1 semantic node · 1 relationship",
+            "Objective → decomposes into → Preserve the shared field contract",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing {expected}: {rendered}"
+            );
+        }
+        assert!(!rendered.contains("Use one definition across both questionnaire surfaces."));
+        assert!(!rendered.contains("seed-key-secret"), "{rendered}");
+
+        model.runs[0].stages[1]["status"] = Value::String("pending".to_owned());
+        let planning = detail_lines(&model, 76)
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!planning.contains("Approved plan"), "{planning}");
     }
 
     #[test]
@@ -10157,9 +15773,33 @@ agents:
         assert!(rendered.contains("Overview"), "{rendered}");
         assert!(rendered.contains("●─◐"), "{rendered}");
         assert!(!rendered.contains("TK-secret"), "{rendered}");
-        let details = rendered_cell_position(&terminal, "Details [overview]").unwrap();
+        let details = rendered_cell_position(&terminal, "D:Overview").unwrap();
         let graph = rendered_cell_position(&terminal, "Project graph").unwrap();
         assert!(details.0 < graph.0, "details={details:?}, graph={graph:?}");
+    }
+
+    #[test]
+    fn run_type_question_fields_are_labeled_as_planning_questions() {
+        let resource = ConfigResource {
+            key: "large".to_owned(),
+            title: "Large".to_owned(),
+            subtitle: "Run behavior, intake, and planning questions".to_owned(),
+            domain: ConfigDomain::RunTypes,
+            document_path: std::path::PathBuf::from("run-types/large.yaml"),
+            kind: crate::configure::ConfigResourceKind::RunType,
+            locator: Vec::new(),
+            linked_locators: Vec::new(),
+            linked_documents: Vec::new(),
+        };
+
+        assert_eq!(
+            semantic_form_parts(&resource, "$.questions.policy"),
+            ("Planning Questions".to_owned(), "Policy".to_owned())
+        );
+        assert_eq!(
+            semantic_form_parts(&resource, "$.questions.default_scope"),
+            ("Planning Questions".to_owned(), "Default scope".to_owned())
+        );
     }
 
     #[test]

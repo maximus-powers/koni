@@ -100,6 +100,30 @@ checks:
       require_exact_argument: true
     receipt_type: runtime.receipt
     effect: workspace_write
+    composed_replay: never
+    environment:
+      inherit: [PATH, HOME, TMPDIR]
+      set: {PYTHONDONTWRITEBYTECODE: "1"}
+    retry_policy: {max_attempts: 1, transient_exit_codes: [], backoff_seconds: []}
+
+  - id: scientific-result-integrity
+    kind: command
+    applies_to: [run-experiment]
+    command_source:
+      kind: ticket
+      role: ticket
+      field: runtime_contract.composed_verification_command
+    cwd: .
+    timeout_seconds: 900
+    argv_input_bindings:
+      from: runtime_contract.scientific_inputs
+      path_field: path
+      required_fields: [asset_id, role, path]
+      require_nonempty: true
+      require_project_file: true
+      require_exact_argument: true
+    receipt_type: runtime.integrity-receipt
+    effect: read_only
     environment:
       inherit: [PATH, HOME, TMPDIR]
       set: {PYTHONDONTWRITEBYTECODE: "1"}
@@ -137,10 +161,6 @@ checks:
                   satisfies:
                     all:
                       - {op: edge_count, subject: $claim, relation: tested_by, min: 1}
-                      - op: set_relation
-                        left: {traverse: {from: $claim, relation: tested_by, direction: outgoing, max_depth: 1, node_types: [experiment]}}
-                        right: {traverse: {from: $claim, relation: target_claims, direction: incoming, max_depth: 1, node_types: [experiment]}}
-                        relation_kind: equal
                       - op: set_relation
                         left: {traverse: {from: $claim, relation: tested_by, direction: outgoing, max_depth: 1, node_types: [experiment]}}
                         right: {traverse: {from: $target, relation: experiments, direction: outgoing, max_depth: 1, node_types: [experiment]}}
@@ -208,7 +228,15 @@ checks:
         - {op: gate_policy_has_selection, gate_policy: research-capability-gates, gate_subject: $target}
         - {not: {op: current_receipt, receipt_type: gate.receipt}}
   - {id: gap.run-plan, kind: graph, applies_to: [compile-run-plan], cwd: ., receipt_type: graph.check, predicate: {op: edge_count, relation: runs, exact: 0}}
-  - {id: gap.run-contract, kind: graph, applies_to: [compile-run-plan], cwd: ., receipt_type: graph.check, predicate: {not: {op: field_present, field: spec.runtime_contract.command}}}
+  - id: gap.run-contract
+    kind: graph
+    applies_to: [compile-run-plan]
+    cwd: .
+    receipt_type: graph.check
+    predicate:
+      any:
+        - {not: {op: field_present, field: spec.runtime_contract.command}}
+        - {not: {op: field_present, field: spec.runtime_contract.composed_verification_command}}
   - {id: gap.current-runtime-receipt, kind: graph, applies_to: [run-experiment], cwd: ., receipt_type: graph.check, predicate: {not: {op: current_receipt, receipt_type: runtime.receipt}}}
   - {id: target.run-experiment-eligible, kind: graph, applies_to: [run-experiment], cwd: ., receipt_type: graph.check}
   - {id: gap.current-promoted-evidence, kind: graph, applies_to: [synthesize-evidence], cwd: ., receipt_type: graph.check}

@@ -11,20 +11,23 @@ use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
 use chrono::Utc;
+use fs2::FileExt;
 use git2::{IndexAddOption, Oid, Repository, Signature};
 use koni_core::catalog::{AgentSettingOverride, AgentSettingsOverride};
 use koni_core::git::{CheckpointRequest, GitBackend, RunGitTemplates, RunTicketWorktreeRequest};
-use koni_core::pipeline::{PipelineStageStatus, RunPipelineStatus};
+use koni_core::pipeline::{PipelineStageOutput, PipelineStageStatus, RunPipelineStatus};
 use koni_core::state::{
-    Journal, JournalStatus, Lease, ProjectRegistryStore, RunManifest, RunRegistration,
-    RunRegistrationStatus, Scope, StateStore, Ticket,
+    Blocker, Event, GraphMutationPolicy, Journal, JournalStatus, Lease, ProjectRegistryStore,
+    Review, RunManifest, RunRegistration, RunRegistrationStatus, Scope, StateStore, Step,
+    StepOutput, Ticket,
 };
 use koni_core::{
     AgentProcessLauncher, AgentProcessRequest, AgentProcessResult, AgentSessionRecord, Engine,
-    KoniError, ProjectCatalogCompiler, QuestionAutoResolution, QuestionImpact, QuestionOption,
-    QuestionPauseScope, QuestionPolicy, QuestionRecord, QuestionSessionResume, QuestionStatus,
-    RunControlStore, RunDeletionMode, RunPlanOverrides, RunSupervisionState, WorkerNextBoundary,
-    WorkerWaitState, capture_owned_agent_process_identity,
+    KoniError, ProjectCatalogCompiler, PromotionAuthorization, PromotionStatus,
+    QuestionAutoResolution, QuestionImpact, QuestionOption, QuestionPauseScope, QuestionPolicy,
+    QuestionRecord, QuestionSessionResume, QuestionStatus, RunControlStore, RunDeletionMode,
+    RunPlanOverrides, RunSupervisionState, WorkerNextBoundary, WorkerWaitState,
+    capture_owned_agent_process_identity,
 };
 use serde_json::{Value, json};
 
@@ -363,6 +366,55 @@ agents:
 orchestration: {auto_start: true, max_parallel: 1}
 "#;
 
+const TARGET_PROMOTION_RUN_TYPE: &str = r#"
+schema_version: "1.0"
+id: canonical
+title: Target-bound canonical run
+profile:
+  source: .codex/koni/profile.yaml
+intake:
+  fields:
+    goal: {label: Goal, type: text, required: true}
+  order: [goal]
+pipeline:
+  stages:
+    approval: {kind: approval, title: Explicit human approval}
+    initialize: {kind: initialize, title: Initialize the run}
+    orchestrate: {kind: orchestration, title: Execute compiled work}
+    target-sync: {kind: target_sync, title: Synchronize target branch}
+    verification:
+      kind: checkpoint
+      title: Verify the synchronized run tree
+      config: {checkpoint: verification}
+    promotion: {kind: promotion, title: Merge into target branch}
+  order: [approval, initialize, orchestrate, target-sync, verification, promotion]
+questions: {policy: autonomous, default_scope: run}
+git:
+  branch_template: koni/runs/{{ run.slug }}-{{ run.short_id }}
+  ticket_branch_template: koni/runs/{{ run.id }}/tickets/{{ ticket.id }}
+promotion:
+  conflict_operation: resolve-target-integration
+run_card: {sections: [goal, pipeline]}
+orchestration:
+  auto_start: true
+  max_parallel: 1
+  compile_action: compile
+  lead_action: spawn-lead
+  report_action: report
+"#;
+
+const TARGET_CONFLICT_WORKFLOWS: &str = r#"
+schema_version: "1.0"
+module: {id: lifecycle.workflows, version: 1.0.0}
+workflows:
+  - id: target-integration-conflict
+    version: 1.0.0
+    applies_to: [resolve-target-integration]
+    steps:
+      - {id: resolve, persona: reviewer, graph_mutation: forbidden, expected_output: Conflict-resolved tree preserving both sides}
+      - {id: verify, persona: reviewer, graph_mutation: forbidden, depends_on: [resolve], expected_output: Independent integration verification}
+"#;
+
 const PROFILE: &str = r#"
 schema_version: "1.0"
 engine: ">=0.1,<0.2"
@@ -399,6 +451,7 @@ node_types:
     statuses: [active]
     semantic_fields: [goal]
     compiler_owned_fields: [spec.planning_context]
+    agent_visible_compiler_owned_fields: [spec.planning_context]
     fields:
       goal: {type: string, required: true}
       planning_context: {type: object, required: false, description: Bounded approved plan and decisions.}
@@ -528,6 +581,203 @@ fn canonical_fixture_with_run_type(run_type: &str) -> (tempfile::TempDir, PathBu
     drop(tree);
     drop(repository);
     (temp, root, base)
+}
+
+fn target_promotion_fixture() -> (tempfile::TempDir, PathBuf, Oid) {
+    let (temp, root, _) = canonical_fixture_with_run_type(TARGET_PROMOTION_RUN_TYPE);
+    let profile = PROFILE.replace(
+        "  reports: [reports.yaml]\n",
+        "  reports: [reports.yaml]\n  workflows: [workflows.yaml]\n  checks: [checks.yaml]\n",
+    );
+    let graph = GRAPH.replace(
+        "    output_contract: Compiler-issued context document.\n",
+        r#"    output_contract: Compiler-issued context document.
+  - id: integration.target.resolve-conflict
+    operation: resolve-target-integration
+    stage: integration
+    target_types: []
+    workflow: target-integration-conflict
+    allowed_new_node_types: []
+    allowed_existing_node_types: []
+    review_contract: Preserve the target and run changes without graph mutation.
+    output_contract: A conflict-resolved and independently verified product tree.
+"#,
+    );
+    write(&root, ".codex/koni/profile.yaml", &profile);
+    write(&root, ".codex/koni/graph.yaml", &graph);
+    write(
+        &root,
+        ".codex/koni/workflows.yaml",
+        TARGET_CONFLICT_WORKFLOWS,
+    );
+    write(
+        &root,
+        ".codex/koni/actions.yaml",
+        &ACTIONS.replace(
+            "  - id: spawn-lead\n",
+            r#"  - id: lifecycle-proof
+    params:
+      ticket: {type: ticket_id, required: true}
+    recipe:
+      - {id: proof, primitive: check.run, ticket: "${params.ticket}", check: lifecycle-proof}
+  - id: spawn-lead
+"#,
+        ),
+    );
+    write(
+        &root,
+        ".codex/koni/checks.yaml",
+        r#"schema_version: "1.0"
+module: {id: lifecycle.checks, version: 1.0.0}
+checks:
+  - id: lifecycle-proof
+    kind: command
+    applies_to: [lifecycle-test]
+    argv: [python3, -c, "from pathlib import Path; assert Path('proof.txt').read_text().startswith('proof-')"]
+    cwd: .
+    timeout_seconds: 10
+    receipt_type: lifecycle.proof
+    effect: read_only
+    environment:
+      inherit: [PATH, HOME, TMPDIR]
+    retry_policy: {max_attempts: 1, transient_exit_codes: [], backoff_seconds: []}
+"#,
+    );
+    write(&root, "proof.txt", "proof-one\n");
+    let base = commit_all(&root, "test: configure target promotion lifecycle");
+    (temp, root, base)
+}
+
+fn seed_terminal_verification_ticket(
+    root: &Path,
+    run_id: &str,
+    worktree: &Path,
+) -> (StateStore, String) {
+    let mut engine = Engine::open_run(root, run_id).expect("open target verification run");
+    let state_root = if engine.profile().manifest.storage.backend
+        == koni_core::config::StorageBackend::Tracked
+    {
+        worktree.join("program")
+    } else {
+        GitBackend::discover(root)
+            .expect("discover git-common verification project")
+            .sidecar_path(format!("runs/{run_id}"))
+            .expect("git-common verification state root")
+    };
+    let store = StateStore::with_storage(state_root, &engine.profile().manifest.storage)
+        .expect("open target verification state");
+    let ticket_id = "TK-lifecycle-proof".to_owned();
+    let context_hash = koni_core::graph::normalized_hash(&json!({
+        "ticket": ticket_id,
+        "step": "verify",
+        "read_paths": ["proof.txt"],
+    }));
+    let ticket = Ticket {
+        schema_version: "1.0".to_owned(),
+        id: ticket_id.clone(),
+        operation: "lifecycle-test".to_owned(),
+        status: "closed".to_owned(),
+        title: "Verify the composed proof fixture".to_owned(),
+        target_nodes: Vec::new(),
+        scope: Scope {
+            read_paths: BTreeSet::from(["proof.txt".to_owned()]),
+            ..Scope::default()
+        },
+        source_state_key: "ready".to_owned(),
+        target_state_key: "closed".to_owned(),
+        obligation_keys: Vec::new(),
+        profile_hash: engine.profile().hash.clone(),
+        rule_id: "lifecycle-proof".to_owned(),
+        workflow: vec![Step {
+            id: "verify".to_owned(),
+            persona: "reviewer".to_owned(),
+            depends_on: Vec::new(),
+            required: true,
+            kind: Default::default(),
+            read_nodes: None,
+            write_nodes: None,
+            read_paths: Some(BTreeSet::from(["proof.txt".to_owned()])),
+            write_paths: Some(BTreeSet::new()),
+            preserve_source_paths_from: None,
+            compiled_check_sets: Vec::new(),
+            expected_outputs: vec!["Fresh proof receipt".to_owned()],
+            graph_mutation: GraphMutationPolicy::Forbidden,
+            required_receipts: vec!["lifecycle.proof".to_owned()],
+            validation_checks: vec!["lifecycle-proof".to_owned()],
+            escalation_triggers: Vec::new(),
+            stop_conditions: Vec::new(),
+            validation_action: None,
+            context_hash: context_hash.clone(),
+        }],
+        outputs: vec![StepOutput {
+            id: "output-lifecycle-proof".to_owned(),
+            step_id: "verify".to_owned(),
+            persona: "reviewer".to_owned(),
+            context_hash,
+            recorded_at: Utc::now(),
+            files_read: vec!["proof.txt".to_owned()],
+            files_written: Vec::new(),
+            files_deleted: Vec::new(),
+            findings: vec!["The focused proof passes before target synchronization.".to_owned()],
+            risks: Vec::new(),
+            receipts: Vec::new(),
+            patch_proposal: String::new(),
+            recommended_next_step: "Synchronize and replay the proof.".to_owned(),
+            upstream_change: None,
+            change_application: None,
+            typed: BTreeMap::new(),
+        }],
+        reviews: Vec::new(),
+        blockers: Vec::new(),
+        lease: None,
+        change_control: Default::default(),
+        extensions: BTreeMap::new(),
+    };
+    store
+        .write_ticket(&ticket)
+        .expect("write terminal verification ticket");
+    engine
+        .execute_action(
+            "lifecycle-proof",
+            BTreeMap::from([("ticket".to_owned(), ticket_id.clone())]),
+        )
+        .expect("record the pre-sync proof receipt");
+    if engine.profile().manifest.storage.backend == koni_core::config::StorageBackend::Tracked {
+        GitBackend::discover(worktree)
+            .expect("discover verification worktree")
+            .checkpoint(&CheckpointRequest {
+                subject: "test: seed terminal proof evidence".to_owned(),
+                body: None,
+                trailers: Vec::new(),
+                excluded_paths: Vec::new(),
+                tree_excluded_paths: Vec::new(),
+                identity: None,
+            })
+            .expect("checkpoint terminal proof fixture");
+    }
+    (store, ticket_id)
+}
+
+fn command_receipts(store: &StateStore, check_id: &str) -> Vec<Value> {
+    let mut receipts = fs::read_dir(store.receipts_dir())
+        .expect("read receipt directory")
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("yaml"))
+        .map(|entry| {
+            serde_yaml::from_str::<Value>(
+                &fs::read_to_string(entry.path()).expect("read command receipt"),
+            )
+            .expect("parse command receipt")
+        })
+        .filter(|receipt| receipt["check_id"] == check_id)
+        .collect::<Vec<_>>();
+    receipts.sort_by_key(|receipt| {
+        receipt["recorded_at"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    });
+    receipts
 }
 
 fn commit_all(root: &Path, message: &str) -> Oid {
@@ -1465,6 +1715,1812 @@ fn planned_run_pins_run_type_policy_and_initializes_orchestration_from_it() {
 }
 
 #[test]
+fn target_bound_run_waits_for_authorization_then_promotes_the_verified_head() {
+    let (_temp, root, base) = target_promotion_fixture();
+    let planned = Engine::plan_run_on_target(
+        &root,
+        Some("canonical"),
+        "Promote a verified target-bound run",
+        "main",
+        None,
+    )
+    .expect("plan target-bound run");
+    assert_eq!(planned.target_branch.as_deref(), Some("refs/heads/main"));
+    assert_eq!(planned.base_commit, base.to_string());
+    let approved = Engine::approve_run(&root, &planned.run_id).expect("approve run");
+    let (store, _ticket_id) =
+        seed_terminal_verification_ticket(&root, &planned.run_id, &approved.worktree);
+    let before_sync = command_receipts(&store, "lifecycle-proof");
+    assert_eq!(before_sync.len(), 1, "seed exactly one pre-sync receipt");
+    let before_sync_id = before_sync[0]["id"].as_str().unwrap().to_owned();
+
+    fs::write(root.join("proof.txt"), "proof-two\n").expect("advance target proof input");
+    let target_head = commit_all(&root, "test: advance target proof input");
+
+    let waiting = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect("drive work through synchronized-tree verification");
+    assert!(waiting.advanced_stages.contains(&"orchestrate".to_owned()));
+    assert!(waiting.advanced_stages.contains(&"target-sync".to_owned()));
+    assert!(waiting.advanced_stages.contains(&"verification".to_owned()));
+    assert!(matches!(
+        waiting.outcome,
+        RunSupervisionState::Waiting { ref stage_id, ref reason, .. }
+            if stage_id == "promotion" && reason.contains("ready")
+    ));
+    assert_eq!(
+        GitBackend::discover(&root).unwrap().head_oid().unwrap(),
+        target_head,
+        "reaching promotion must not advance the target"
+    );
+    let after_sync = command_receipts(&store, "lifecycle-proof");
+    assert_eq!(
+        after_sync.len(),
+        2,
+        "target synchronization must replay a fresh composed-tree proof"
+    );
+    let fresh_receipt = after_sync
+        .iter()
+        .find(|receipt| receipt["id"] != before_sync_id)
+        .expect("find post-sync proof receipt");
+    assert_ne!(
+        before_sync[0]["execution_binding"]["read_path_manifest"],
+        fresh_receipt["execution_binding"]["read_path_manifest"],
+        "the fresh receipt must bind the target-updated proof input"
+    );
+
+    let project_git = GitBackend::discover(&root).expect("discover verified target");
+    let registry = ProjectRegistryStore::new(project_git.sidecar_root(), root.clone()).unwrap();
+    let control = RunControlStore::new(registry.run_root(&planned.run_id).unwrap());
+    let promotion = control.promotion().unwrap().unwrap();
+    let verified_run_head = project_git
+        .reference_oid(&approved.branch)
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        promotion.last_synced_run_head.as_deref(),
+        Some(verified_run_head.as_str()),
+        "the compiler-only receipt checkpoint must not reopen target sync"
+    );
+
+    let pipeline = control.pipeline().unwrap().unwrap();
+    let verification_output = pipeline
+        .stages
+        .iter()
+        .find(|stage| stage.definition.id == "verification")
+        .and_then(|stage| stage.output.as_ref())
+        .expect("successful verification output");
+    let fresh_receipt_id = verification_output.output["verification_receipts"][0]["receipt_id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(fresh_receipt_id, fresh_receipt["id"].as_str().unwrap());
+    let fresh_receipt_path = store
+        .receipts_dir()
+        .join(format!("{fresh_receipt_id}.yaml"));
+    let fresh_receipt_bytes = fs::read(&fresh_receipt_path).expect("read fresh receipt bytes");
+    let mut tampered = fresh_receipt.clone();
+    tampered
+        .as_object_mut()
+        .unwrap()
+        .insert("tampered".to_owned(), Value::Bool(true));
+    fs::write(
+        &fresh_receipt_path,
+        serde_yaml::to_string(&tampered).expect("serialize tampered receipt"),
+    )
+    .expect("tamper fresh receipt");
+    let blocked_preview = Engine::preview_run_promotion(&root, &planned.run_id)
+        .expect("tampered receipt produces a guarded preview");
+    assert!(!blocked_preview.can_authorize);
+    assert!(
+        blocked_preview
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("receipt") && blocker.contains("changed")),
+        "{:?}",
+        blocked_preview.blockers
+    );
+    fs::write(&fresh_receipt_path, fresh_receipt_bytes).expect("restore fresh receipt");
+
+    let preview =
+        Engine::preview_run_promotion(&root, &planned.run_id).expect("preview guarded promotion");
+    assert!(preview.can_authorize, "{:?}", preview.blockers);
+    assert_eq!(preview.target_branch, "refs/heads/main");
+    assert!(!preview.authorized);
+    Engine::authorize_run_promotion(&root, &planned.run_id).expect("durably authorize promotion");
+    let promoted =
+        Engine::supervise_run_once(&root, &planned.run_id).expect("perform authorized promotion");
+    assert!(promoted.advanced_stages.contains(&"promotion".to_owned()));
+    assert!(matches!(promoted.outcome, RunSupervisionState::Complete));
+
+    let project_git = GitBackend::discover(&root).expect("discover promoted target");
+    let run_head = project_git
+        .reference_oid(&approved.branch)
+        .expect("read run head");
+    assert_eq!(project_git.head_oid().expect("target head"), run_head);
+    assert!(!project_git.is_dirty(&[]).expect("target checkout is clean"));
+    let registry = Engine::project_registry(&root).expect("load concluded registry");
+    assert_eq!(
+        registry.runs[&planned.run_id].status,
+        RunRegistrationStatus::Concluded
+    );
+}
+
+#[test]
+fn tracked_report_after_verification_preserves_the_exact_product_projection() {
+    let (_temp, root, _base) = target_promotion_fixture();
+    let report_run_type = TARGET_PROMOTION_RUN_TYPE
+        .replace(
+            "    promotion: {kind: promotion, title: Merge into target branch}\n",
+            "    report:\n      kind: action\n      title: Render the verified report\n      config: {action: report, automatic: true}\n    promotion: {kind: promotion, title: Merge into target branch}\n",
+        )
+        .replace(
+            "  order: [approval, initialize, orchestrate, target-sync, verification, promotion]",
+            "  order: [approval, initialize, orchestrate, target-sync, verification, report, promotion]",
+        );
+    write(
+        &root,
+        ".codex/koni/run-types/canonical.yaml",
+        &report_run_type,
+    );
+    commit_all(&root, "test: report after composed verification");
+    let planned = Engine::plan_run_on_target(
+        &root,
+        Some("canonical"),
+        "Report without invalidating the verified product tree",
+        "main",
+        None,
+    )
+    .expect("plan report-bound run");
+    let approved = Engine::approve_run(&root, &planned.run_id).expect("approve report-bound run");
+    seed_terminal_verification_ticket(&root, &planned.run_id, &approved.worktree);
+
+    let waiting = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect("verify, report, and wait for promotion");
+    assert!(waiting.advanced_stages.contains(&"verification".to_owned()));
+    assert!(waiting.advanced_stages.contains(&"report".to_owned()));
+    assert!(matches!(
+        waiting.outcome,
+        RunSupervisionState::Waiting { ref stage_id, .. } if stage_id == "promotion"
+    ));
+
+    let project_git = GitBackend::discover(&root).expect("discover report project");
+    let registry = ProjectRegistryStore::new(project_git.sidecar_root(), root.clone()).unwrap();
+    let control = RunControlStore::new(registry.run_root(&planned.run_id).unwrap());
+    let pipeline = control.pipeline().unwrap().unwrap();
+    let verification_head = pipeline
+        .stages
+        .iter()
+        .find(|stage| stage.definition.id == "verification")
+        .and_then(|stage| stage.output.as_ref())
+        .and_then(|output| output.output.get("head"))
+        .and_then(Value::as_str)
+        .expect("verification output head");
+    let report_head = project_git
+        .reference_oid(&approved.branch)
+        .expect("report-updated run head");
+    assert_ne!(
+        report_head.to_string(),
+        verification_head,
+        "tracked report state should exercise the safe post-verification rebind"
+    );
+    let preview = Engine::preview_run_promotion(&root, &planned.run_id)
+        .expect("preview tracked report promotion");
+    assert!(preview.can_authorize, "{:?}", preview.blockers);
+
+    Engine::authorize_run_promotion(&root, &planned.run_id).expect("authorize report promotion");
+    let promoted = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect("promote compiler-only report descendant");
+    assert!(promoted.advanced_stages.contains(&"promotion".to_owned()));
+}
+
+#[test]
+fn unchecked_product_changes_after_verification_never_become_promotion_ready() {
+    let (_temp, root, _base) = target_promotion_fixture();
+    let planned = Engine::plan_run_on_target(
+        &root,
+        Some("canonical"),
+        "Reject unchecked post-verification product changes",
+        "main",
+        None,
+    )
+    .expect("plan guarded run");
+    let approved = Engine::approve_run(&root, &planned.run_id).expect("approve guarded run");
+    seed_terminal_verification_ticket(&root, &planned.run_id, &approved.worktree);
+    Engine::supervise_run_once(&root, &planned.run_id).expect("reach verified promotion wait");
+
+    let unchecked = approved.worktree.join("unchecked-product.txt");
+    fs::write(&unchecked, "dirty after verification\n").expect("dirty the product tree");
+    let dirty_preview =
+        Engine::preview_run_promotion(&root, &planned.run_id).expect("preview dirty verified run");
+    assert!(!dirty_preview.can_authorize);
+    assert!(
+        dirty_preview
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("dirty after verification")),
+        "{:?}",
+        dirty_preview.blockers
+    );
+
+    GitBackend::discover(&approved.worktree)
+        .unwrap()
+        .checkpoint(&CheckpointRequest {
+            subject: "test: unchecked product commit".to_owned(),
+            body: None,
+            trailers: Vec::new(),
+            excluded_paths: Vec::new(),
+            tree_excluded_paths: Vec::new(),
+            identity: None,
+        })
+        .expect("commit unchecked product")
+        .expect("unchecked product advances run ref");
+    let committed_preview = Engine::preview_run_promotion(&root, &planned.run_id)
+        .expect("preview unchecked descendant");
+    assert!(!committed_preview.can_authorize);
+    assert!(
+        committed_preview.blockers.iter().any(|blocker| {
+            blocker.contains("unchecked product changes")
+                || blocker.contains("verified product tree")
+        }),
+        "{:?}",
+        committed_preview.blockers
+    );
+}
+
+#[test]
+fn git_common_verification_binds_promotion_to_the_exact_checked_head() {
+    let (_temp, root, _base) = target_promotion_fixture();
+    let profile_path = root.join(".codex/koni/profile.yaml");
+    let profile = fs::read_to_string(&profile_path)
+        .expect("read target profile")
+        .replace("  backend: tracked\n", "  backend: git_common_dir\n");
+    fs::write(&profile_path, profile).expect("select git-common state");
+    commit_all(&root, "test: use git-common verification state");
+    let planned = Engine::plan_run_on_target(
+        &root,
+        Some("canonical"),
+        "Bind git-common promotion to the checked commit",
+        "main",
+        None,
+    )
+    .expect("plan git-common run");
+    let approved = Engine::approve_run(&root, &planned.run_id).expect("approve git-common run");
+    seed_terminal_verification_ticket(&root, &planned.run_id, &approved.worktree);
+    Engine::supervise_run_once(&root, &planned.run_id).expect("reach git-common promotion wait");
+
+    let project_git = GitBackend::discover(&root).expect("discover git-common project");
+    let registry = ProjectRegistryStore::new(project_git.sidecar_root(), root.clone()).unwrap();
+    let control = RunControlStore::new(registry.run_root(&planned.run_id).unwrap());
+    let pipeline = control.pipeline().unwrap().unwrap();
+    let verification = pipeline
+        .stages
+        .iter()
+        .find(|stage| stage.definition.id == "verification")
+        .and_then(|stage| stage.output.as_ref())
+        .expect("git-common verification output");
+    let checked_head = verification.output["composed_verification"]["composed_run_head"]
+        .as_str()
+        .unwrap();
+    assert_eq!(verification.output["head"].as_str(), Some(checked_head));
+    assert_eq!(
+        project_git
+            .reference_oid(&approved.branch)
+            .unwrap()
+            .to_string(),
+        checked_head
+    );
+    let ready = Engine::preview_run_promotion(&root, &planned.run_id)
+        .expect("preview exact git-common head");
+    assert!(ready.can_authorize, "{:?}", ready.blockers);
+
+    fs::write(approved.worktree.join("late-product.txt"), "unchecked\n")
+        .expect("write late product commit");
+    GitBackend::discover(&approved.worktree)
+        .unwrap()
+        .checkpoint(&CheckpointRequest {
+            subject: "test: late git-common product commit".to_owned(),
+            body: None,
+            trailers: Vec::new(),
+            excluded_paths: Vec::new(),
+            tree_excluded_paths: Vec::new(),
+            identity: None,
+        })
+        .expect("checkpoint late product")
+        .expect("late product advances ref");
+    let blocked = Engine::preview_run_promotion(&root, &planned.run_id)
+        .expect("preview advanced git-common run");
+    assert!(!blocked.can_authorize);
+    assert!(
+        blocked
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("git-common run head advanced")),
+        "{:?}",
+        blocked.blockers
+    );
+}
+
+#[test]
+fn composed_verification_rejects_nonpassing_receipts_even_when_the_check_allows_them() {
+    let (_temp, root, _base) = target_promotion_fixture();
+    let checks_path = root.join(".codex/koni/checks.yaml");
+    let checks = fs::read_to_string(&checks_path)
+        .expect("read checks")
+        .replace(
+            "    effect: read_only\n",
+            "    effect: read_only\n    allow_nonpassing_receipt: true\n",
+        );
+    fs::write(&checks_path, checks).expect("allow diagnostic nonpassing receipt");
+    commit_all(&root, "test: allow nonpassing diagnostic receipt");
+    let planned = Engine::plan_run_on_target(
+        &root,
+        Some("canonical"),
+        "Require passing composed verification",
+        "main",
+        None,
+    )
+    .expect("plan nonpassing guard run");
+    let approved = Engine::approve_run(&root, &planned.run_id).expect("approve guard run");
+    let (store, _ticket_id) =
+        seed_terminal_verification_ticket(&root, &planned.run_id, &approved.worktree);
+    fs::write(root.join("proof.txt"), "broken\n").expect("break target proof");
+    commit_all(&root, "test: break composed proof");
+
+    let error = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect_err("nonpassing diagnostic receipt must block verification")
+        .to_string();
+    assert!(error.contains("not passed"), "{error}");
+    assert!(
+        command_receipts(&store, "lifecycle-proof")
+            .iter()
+            .any(|receipt| receipt["status"] != "passed"),
+        "the failed diagnostic receipt should remain available without satisfying verification"
+    );
+}
+
+#[test]
+fn promotion_requires_one_safe_receipt_projection_for_each_bound_check() {
+    let (_temp, root, _base) = target_promotion_fixture();
+    let planned = Engine::plan_run_on_target(
+        &root,
+        Some("canonical"),
+        "Reject duplicate or unsafe verification receipt projections",
+        "main",
+        None,
+    )
+    .expect("plan receipt projection run");
+    let approved = Engine::approve_run(&root, &planned.run_id).expect("approve receipt run");
+    seed_terminal_verification_ticket(&root, &planned.run_id, &approved.worktree);
+    Engine::supervise_run_once(&root, &planned.run_id).expect("reach receipt-bound promotion");
+    let project_git = GitBackend::discover(&root).expect("discover receipt project");
+    let registry = ProjectRegistryStore::new(project_git.sidecar_root(), root.clone()).unwrap();
+    let control = RunControlStore::new(registry.run_root(&planned.run_id).unwrap());
+    let original = control.pipeline().unwrap().unwrap();
+
+    let mut duplicate = original.clone();
+    let output = duplicate
+        .stages
+        .iter_mut()
+        .find(|stage| stage.definition.id == "verification")
+        .and_then(|stage| stage.output.as_mut())
+        .expect("verification stage output");
+    let receipts = output.output["verification_receipts"]
+        .as_array_mut()
+        .expect("verification receipt projections");
+    let repeated = receipts[0].clone();
+    receipts.push(repeated);
+    output.output_hash = PipelineStageOutput::output_hash_for(
+        &output.stage_id,
+        &output.stage_definition_hash,
+        output.attempt,
+        &output.input_hash,
+        &output.output,
+    );
+    control
+        .write_pipeline(&duplicate)
+        .expect("persist internally consistent duplicate projection");
+    let duplicate_preview = Engine::preview_run_promotion(&root, &planned.run_id)
+        .expect("preview duplicate receipt projection");
+    assert!(!duplicate_preview.can_authorize);
+    assert!(
+        duplicate_preview
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("duplicates receipt projection")),
+        "{:?}",
+        duplicate_preview.blockers
+    );
+
+    let mut missing = original.clone();
+    let output = missing
+        .stages
+        .iter_mut()
+        .find(|stage| stage.definition.id == "verification")
+        .and_then(|stage| stage.output.as_mut())
+        .expect("verification stage output");
+    output.output["verification_receipts"] = Value::Array(Vec::new());
+    output.output_hash = PipelineStageOutput::output_hash_for(
+        &output.stage_id,
+        &output.stage_definition_hash,
+        output.attempt,
+        &output.input_hash,
+        &output.output,
+    );
+    control
+        .write_pipeline(&missing)
+        .expect("persist internally consistent missing projection");
+    let missing_preview = Engine::preview_run_promotion(&root, &planned.run_id)
+        .expect("preview missing receipt projection");
+    assert!(!missing_preview.can_authorize);
+    assert!(
+        missing_preview
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("missing a receipt")),
+        "{:?}",
+        missing_preview.blockers
+    );
+
+    let mut mismatched = original.clone();
+    let output = mismatched
+        .stages
+        .iter_mut()
+        .find(|stage| stage.definition.id == "verification")
+        .and_then(|stage| stage.output.as_mut())
+        .expect("verification stage output");
+    output.output["verification_receipts"][0]["step_id"] = Value::String("swapped-step".to_owned());
+    output.output_hash = PipelineStageOutput::output_hash_for(
+        &output.stage_id,
+        &output.stage_definition_hash,
+        output.attempt,
+        &output.input_hash,
+        &output.output,
+    );
+    control
+        .write_pipeline(&mismatched)
+        .expect("persist internally consistent mismatched projection");
+    let mismatched_preview = Engine::preview_run_promotion(&root, &planned.run_id)
+        .expect("preview mismatched receipt projection");
+    assert!(!mismatched_preview.can_authorize);
+    assert!(
+        mismatched_preview
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("unexpected receipt projection")),
+        "{:?}",
+        mismatched_preview.blockers
+    );
+    assert!(
+        mismatched_preview
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("missing a receipt")),
+        "{:?}",
+        mismatched_preview.blockers
+    );
+
+    let mut unsafe_id = original.clone();
+    let output = unsafe_id
+        .stages
+        .iter_mut()
+        .find(|stage| stage.definition.id == "verification")
+        .and_then(|stage| stage.output.as_mut())
+        .expect("verification stage output");
+    output.output["verification_receipts"][0]["receipt_id"] =
+        Value::String("../outside".to_owned());
+    output.output_hash = PipelineStageOutput::output_hash_for(
+        &output.stage_id,
+        &output.stage_definition_hash,
+        output.attempt,
+        &output.input_hash,
+        &output.output,
+    );
+    control
+        .write_pipeline(&unsafe_id)
+        .expect("persist internally consistent unsafe receipt id");
+    let unsafe_preview =
+        Engine::preview_run_promotion(&root, &planned.run_id).expect("preview unsafe receipt id");
+    assert!(!unsafe_preview.can_authorize);
+    assert!(
+        unsafe_preview
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("missing or unsafe")),
+        "{:?}",
+        unsafe_preview.blockers
+    );
+    control
+        .write_pipeline(&original)
+        .expect("restore original verification output");
+}
+
+#[test]
+fn intervening_run_commit_after_target_sync_reopens_sync_before_verification() {
+    let (_temp, root, _base) = target_promotion_fixture();
+    let held_run_type = TARGET_PROMOTION_RUN_TYPE
+        .replace(
+            "    target-sync: {kind: target_sync, title: Synchronize target branch}\n",
+            "    target-sync: {kind: target_sync, title: Synchronize target branch}\n    hold: {kind: manual, title: Hold before verification}\n",
+        )
+        .replace(
+            "  order: [approval, initialize, orchestrate, target-sync, verification, promotion]",
+            "  order: [approval, initialize, orchestrate, target-sync, hold, verification, promotion]",
+        );
+    write(
+        &root,
+        ".codex/koni/run-types/canonical.yaml",
+        &held_run_type,
+    );
+    commit_all(&root, "test: expose the post-sync verification boundary");
+    let planned = Engine::plan_run_on_target(
+        &root,
+        Some("canonical"),
+        "Resynchronize an intervening run commit",
+        "main",
+        None,
+    )
+    .expect("plan held verification run");
+    let approved = Engine::approve_run(&root, &planned.run_id).expect("approve held run");
+    let (store, _ticket_id) =
+        seed_terminal_verification_ticket(&root, &planned.run_id, &approved.worktree);
+    let project_git = GitBackend::discover(&root).expect("discover intervening project");
+    let registry = ProjectRegistryStore::new(project_git.sidecar_root(), root.clone()).unwrap();
+    let run_root = registry.run_root(&planned.run_id).unwrap();
+    let control = RunControlStore::new(run_root.clone());
+
+    let held = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect("reach the manual post-sync hold");
+    assert!(held.advanced_stages.contains(&"target-sync".to_owned()));
+    assert!(matches!(
+        held.outcome,
+        RunSupervisionState::AwaitingOperator { ref stage_id, .. } if stage_id == "hold"
+    ));
+    let mut stale_promotion = control.promotion().unwrap().unwrap();
+    stale_promotion.authorization = Some(PromotionAuthorization {
+        id: "stale-post-sync-authorization".to_owned(),
+        target_branch: stale_promotion.target_branch.clone(),
+        authorized_at: Utc::now(),
+    });
+    stale_promotion.status = PromotionStatus::Authorized;
+    stale_promotion.updated_at = Utc::now();
+    control
+        .write_promotion(&stale_promotion)
+        .expect("seed stale authorization for fail-closed recovery proof");
+    fs::write(
+        approved.worktree.join("intervening-product.txt"),
+        "must be resynchronized\n",
+    )
+    .expect("write intervening run product");
+    GitBackend::discover(&approved.worktree)
+        .unwrap()
+        .checkpoint(&CheckpointRequest {
+            subject: "test: intervening post-sync run commit".to_owned(),
+            body: None,
+            trailers: Vec::new(),
+            excluded_paths: Vec::new(),
+            tree_excluded_paths: Vec::new(),
+            identity: None,
+        })
+        .expect("checkpoint intervening product")
+        .expect("intervening product advances the run");
+    Engine::drive_current_stage(&root, &planned.run_id, "hold")
+        .expect("release the first verification hold");
+
+    let blocked_pipeline_temp = run_root.join("pipeline.yaml.tmp");
+    fs::create_dir(&blocked_pipeline_temp).expect("block only the pipeline atomic-write temp path");
+    let write_error = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect_err("promotion invalidation must persist before a failed pipeline reopen write")
+        .to_string();
+    assert!(write_error.contains("pipeline.yaml.tmp"), "{write_error}");
+    let invalidated = control.promotion().unwrap().unwrap();
+    assert_eq!(invalidated.status, PromotionStatus::PendingSync);
+    assert!(invalidated.authorization.is_none());
+    assert!(
+        invalidated
+            .blocker
+            .as_deref()
+            .is_some_and(|reason| reason.contains("run head changed")),
+        "{:?}",
+        invalidated.blocker
+    );
+    let not_yet_reopened = control.pipeline().unwrap().unwrap();
+    assert_eq!(
+        not_yet_reopened.current().unwrap().definition.id,
+        "verification",
+        "a failed second write must leave the old pipeline with authorization already invalidated"
+    );
+    fs::remove_dir(&blocked_pipeline_temp).expect("restore pipeline atomic writes");
+
+    let error = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect_err("verification must reject the post-sync run commit")
+        .to_string();
+    assert!(
+        error.contains("target synchronization was reopened"),
+        "{error}"
+    );
+    let reopened = control.pipeline().unwrap().unwrap();
+    assert_eq!(reopened.current().unwrap().definition.id, "target-sync");
+    assert_eq!(
+        reopened.current().unwrap().status,
+        PipelineStageStatus::Pending
+    );
+    assert_eq!(reopened.current().unwrap().attempt, 1);
+    assert!(reopened.current().unwrap().input_hash.is_none());
+
+    fs::write(
+        root.join("second-target-move.txt"),
+        "bind this target tip\n",
+    )
+    .expect("advance the target again before retry");
+    let second_target = commit_all(&root, "test: second target move before resynchronization");
+
+    let resynchronized = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect("bind the latest run and target heads when replaying target sync");
+    assert!(
+        resynchronized
+            .advanced_stages
+            .contains(&"target-sync".to_owned())
+    );
+    assert!(matches!(
+        resynchronized.outcome,
+        RunSupervisionState::AwaitingOperator { ref stage_id, .. } if stage_id == "hold"
+    ));
+    let rebound = control.pipeline().unwrap().unwrap();
+    let target_sync_output = rebound
+        .stages
+        .iter()
+        .find(|stage| stage.definition.id == "target-sync")
+        .and_then(|stage| stage.output.as_ref())
+        .expect("resynchronized target output");
+    assert_eq!(
+        target_sync_output.output["target_head"]
+            .as_str()
+            .expect("target sync binds a target head"),
+        second_target.to_string()
+    );
+    Engine::drive_current_stage(&root, &planned.run_id, "hold")
+        .expect("release the resynchronized verification hold");
+    let verified = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect("verify only after the new sync boundary");
+    assert!(
+        verified
+            .advanced_stages
+            .contains(&"verification".to_owned())
+    );
+    assert!(matches!(
+        verified.outcome,
+        RunSupervisionState::Waiting { ref stage_id, .. } if stage_id == "promotion"
+    ));
+    assert_eq!(
+        command_receipts(&store, "lifecycle-proof").len(),
+        2,
+        "only the seed and the post-resynchronization verification should execute"
+    );
+}
+
+#[test]
+fn target_only_commit_after_target_sync_reopens_before_verification() {
+    let (_temp, root, _base) = target_promotion_fixture();
+    let held_run_type = TARGET_PROMOTION_RUN_TYPE
+        .replace(
+            "    target-sync: {kind: target_sync, title: Synchronize target branch}\n",
+            "    target-sync: {kind: target_sync, title: Synchronize target branch}\n    hold: {kind: manual, title: Hold before verification}\n",
+        )
+        .replace(
+            "  order: [approval, initialize, orchestrate, target-sync, verification, promotion]",
+            "  order: [approval, initialize, orchestrate, target-sync, hold, verification, promotion]",
+        );
+    write(
+        &root,
+        ".codex/koni/run-types/canonical.yaml",
+        &held_run_type,
+    );
+    commit_all(&root, "test: expose target-only verification drift");
+    let planned = Engine::plan_run_on_target(
+        &root,
+        Some("canonical"),
+        "Resynchronize target-only drift",
+        "main",
+        None,
+    )
+    .expect("plan target-only drift run");
+    let approved = Engine::approve_run(&root, &planned.run_id).expect("approve target drift run");
+    seed_terminal_verification_ticket(&root, &planned.run_id, &approved.worktree);
+
+    let held = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect("reach post-sync hold before target-only drift");
+    assert!(matches!(
+        held.outcome,
+        RunSupervisionState::AwaitingOperator { ref stage_id, .. } if stage_id == "hold"
+    ));
+    let project_git = GitBackend::discover(&root).expect("discover target-only project");
+    let registry = ProjectRegistryStore::new(project_git.sidecar_root(), root.clone()).unwrap();
+    let control = RunControlStore::new(registry.run_root(&planned.run_id).unwrap());
+    let synchronized = control.pipeline().unwrap().unwrap();
+    let synchronized_run_head = synchronized
+        .stages
+        .iter()
+        .find(|stage| stage.definition.id == "target-sync")
+        .and_then(|stage| stage.output.as_ref())
+        .and_then(|output| output.output["run_head"].as_str())
+        .expect("target sync output run head")
+        .to_owned();
+    assert_eq!(
+        project_git
+            .reference_oid(&approved.branch)
+            .unwrap()
+            .to_string(),
+        synchronized_run_head
+    );
+
+    fs::write(root.join("target-only.txt"), "new target product\n")
+        .expect("write target-only change");
+    let moved_target = commit_all(&root, "test: target moves without run movement");
+    assert_eq!(
+        project_git
+            .reference_oid(&approved.branch)
+            .unwrap()
+            .to_string(),
+        synchronized_run_head,
+        "the run head must remain exactly synchronized while only the target moves"
+    );
+    Engine::drive_current_stage(&root, &planned.run_id, "hold")
+        .expect("release target-only verification hold");
+
+    let error = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect_err("target-only drift must reopen synchronization")
+        .to_string();
+    assert!(error.contains("target head changed"), "{error}");
+    assert!(
+        error.contains("target synchronization was reopened"),
+        "{error}"
+    );
+    let reopened = control.pipeline().unwrap().unwrap();
+    assert_eq!(reopened.current().unwrap().definition.id, "target-sync");
+    assert_eq!(
+        reopened.current().unwrap().status,
+        PipelineStageStatus::Pending
+    );
+    assert!(reopened.current().unwrap().input_hash.is_none());
+    let promotion = control.promotion().unwrap().unwrap();
+    assert!(promotion.authorization.is_none());
+    assert_eq!(promotion.status, PromotionStatus::PendingSync);
+
+    let resynchronized = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect("resynchronize target-only drift");
+    assert!(matches!(
+        resynchronized.outcome,
+        RunSupervisionState::AwaitingOperator { ref stage_id, .. } if stage_id == "hold"
+    ));
+    let rebound = control.pipeline().unwrap().unwrap();
+    let rebound_target = rebound
+        .stages
+        .iter()
+        .find(|stage| stage.definition.id == "target-sync")
+        .and_then(|stage| stage.output.as_ref())
+        .and_then(|output| output.output["target_head"].as_str())
+        .expect("rebound target head");
+    assert_eq!(rebound_target, moved_target.to_string());
+    Engine::drive_current_stage(&root, &planned.run_id, "hold")
+        .expect("release rebound target-only hold");
+    let verified = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect("verify after target-only resynchronization");
+    assert!(matches!(
+        verified.outcome,
+        RunSupervisionState::Waiting { ref stage_id, .. } if stage_id == "promotion"
+    ));
+}
+
+#[test]
+fn target_sync_cas_input_move_returns_to_pending_and_rebinds() {
+    let (_temp, root, _base) = target_promotion_fixture();
+    let held_run_type = TARGET_PROMOTION_RUN_TYPE
+        .replace(
+            "    target-sync: {kind: target_sync, title: Synchronize target branch}\n",
+            "    pre-sync-hold: {kind: manual, title: Hold before target sync}\n    target-sync: {kind: target_sync, title: Synchronize target branch}\n",
+        )
+        .replace(
+            "  order: [approval, initialize, orchestrate, target-sync, verification, promotion]",
+            "  order: [approval, initialize, orchestrate, pre-sync-hold, target-sync, verification, promotion]",
+        );
+    write(
+        &root,
+        ".codex/koni/run-types/canonical.yaml",
+        &held_run_type,
+    );
+    commit_all(&root, "test: expose target-sync CAS boundary");
+    let planned = Engine::plan_run_on_target(
+        &root,
+        Some("canonical"),
+        "Recover a target-sync compare-and-swap race",
+        "main",
+        None,
+    )
+    .expect("plan target-sync race run");
+    let approved = Engine::approve_run(&root, &planned.run_id).expect("approve CAS race run");
+    seed_terminal_verification_ticket(&root, &planned.run_id, &approved.worktree);
+
+    let held = Engine::supervise_run_once(&root, &planned.run_id).expect("reach pre-sync hold");
+    assert!(matches!(
+        held.outcome,
+        RunSupervisionState::AwaitingOperator { ref stage_id, .. } if stage_id == "pre-sync-hold"
+    ));
+    Engine::drive_current_stage(&root, &planned.run_id, "pre-sync-hold")
+        .expect("release pre-sync hold");
+
+    let project_git = GitBackend::discover(&root).expect("discover CAS-race project");
+    let registry = ProjectRegistryStore::new(project_git.sidecar_root(), root.clone()).unwrap();
+    let control = RunControlStore::new(registry.run_root(&planned.run_id).unwrap());
+    let repository_lock = project_git
+        .lock()
+        .expect("hold repository lock before target sync");
+    let thread_root = root.clone();
+    let thread_run_id = planned.run_id.clone();
+    let supervisor =
+        std::thread::spawn(move || Engine::supervise_run_once(&thread_root, &thread_run_id));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let pipeline = control.pipeline().unwrap().unwrap();
+        if pipeline.current().is_some_and(|stage| {
+            stage.definition.id == "target-sync" && stage.status == PipelineStageStatus::Running
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "target sync did not persist its running CAS attempt"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    fs::write(
+        root.join("cas-race-target.txt"),
+        "target moved while sync waited\n",
+    )
+    .expect("write racing target change");
+    let raced_target = commit_all(&root, "test: move target during target-sync CAS");
+    drop(repository_lock);
+    let raced = supervisor
+        .join()
+        .expect("join target-sync supervisor")
+        .expect("CAS drift becomes retryable waiting state");
+    assert!(matches!(
+        raced.outcome,
+        RunSupervisionState::Waiting { ref stage_id, ref reason, .. }
+            if stage_id == "target-sync" && reason.contains("compare-and-swap")
+    ));
+    let retryable = control.pipeline().unwrap().unwrap();
+    assert_eq!(retryable.current().unwrap().definition.id, "target-sync");
+    assert_eq!(
+        retryable.current().unwrap().status,
+        PipelineStageStatus::Pending
+    );
+    assert_eq!(retryable.current().unwrap().attempt, 1);
+    assert!(retryable.current().unwrap().input_hash.is_none());
+    let invalidated = control.promotion().unwrap().unwrap();
+    assert_eq!(invalidated.status, PromotionStatus::PendingSync);
+    assert!(invalidated.authorization.is_none());
+
+    let resumed = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect("rebind live target-sync inputs and verify");
+    assert!(resumed.advanced_stages.contains(&"target-sync".to_owned()));
+    assert!(resumed.advanced_stages.contains(&"verification".to_owned()));
+    assert!(matches!(
+        resumed.outcome,
+        RunSupervisionState::Waiting { ref stage_id, .. } if stage_id == "promotion"
+    ));
+    let completed = control.pipeline().unwrap().unwrap();
+    let sync_output = completed
+        .stages
+        .iter()
+        .find(|stage| stage.definition.id == "target-sync")
+        .and_then(|stage| stage.output.as_ref())
+        .expect("rebound target-sync output");
+    assert_eq!(
+        sync_output.output["target_head"]
+            .as_str()
+            .expect("target-sync output target head"),
+        raced_target.to_string()
+    );
+    assert_eq!(
+        completed
+            .stages
+            .iter()
+            .find(|stage| stage.definition.id == "target-sync")
+            .unwrap()
+            .attempt,
+        2,
+        "rebound execution must retain and increment the abandoned attempt"
+    );
+}
+
+#[test]
+fn failed_composed_verification_blocks_and_retry_rebinds_the_fixed_run_tree() {
+    let (_temp, root, _base) = target_promotion_fixture();
+    let planned = Engine::plan_run_on_target(
+        &root,
+        Some("canonical"),
+        "Retry a failed composed verification safely",
+        "main",
+        None,
+    )
+    .expect("plan verification retry run");
+    let approved = Engine::approve_run(&root, &planned.run_id).expect("approve retry run");
+    let (store, _ticket_id) =
+        seed_terminal_verification_ticket(&root, &planned.run_id, &approved.worktree);
+
+    fs::write(root.join("proof.txt"), "broken\n").expect("break target proof input");
+    commit_all(&root, "test: break target proof input");
+    let error = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect_err("the synchronized proof must fail closed")
+        .to_string();
+    assert!(error.contains("composed verification failed"), "{error}");
+
+    let project_git = GitBackend::discover(&root).expect("discover retry project");
+    let registry = ProjectRegistryStore::new(project_git.sidecar_root(), root.clone()).unwrap();
+    let control = RunControlStore::new(registry.run_root(&planned.run_id).unwrap());
+    let blocked = control.pipeline().unwrap().unwrap();
+    assert_eq!(blocked.current().unwrap().definition.id, "verification");
+    assert_eq!(
+        blocked.current().unwrap().status,
+        PipelineStageStatus::Blocked
+    );
+
+    fs::write(approved.worktree.join("proof.txt"), "proof-fixed\n")
+        .expect("repair synchronized run proof");
+    GitBackend::discover(&approved.worktree)
+        .unwrap()
+        .checkpoint(&CheckpointRequest {
+            subject: "fix: restore composed proof".to_owned(),
+            body: None,
+            trailers: Vec::new(),
+            excluded_paths: Vec::new(),
+            tree_excluded_paths: Vec::new(),
+            identity: None,
+        })
+        .expect("checkpoint proof repair")
+        .expect("proof repair advances the run");
+    let retry_error = Engine::retry_supervised_stage(&root, &planned.run_id, "verification")
+        .expect_err("a repaired run commit must replay target sync before verification")
+        .to_string();
+    assert!(
+        retry_error.contains("target synchronization was reopened"),
+        "{retry_error}"
+    );
+    let reopened = control.pipeline().unwrap().unwrap();
+    assert_eq!(reopened.current().unwrap().definition.id, "target-sync");
+    let resumed = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect("resynchronize and replay proof against repaired run tree");
+    assert!(resumed.advanced_stages.contains(&"target-sync".to_owned()));
+    assert!(resumed.advanced_stages.contains(&"verification".to_owned()));
+    assert!(matches!(
+        resumed.outcome,
+        RunSupervisionState::Waiting { ref stage_id, .. } if stage_id == "promotion"
+    ));
+
+    let receipts = command_receipts(&store, "lifecycle-proof");
+    assert_eq!(receipts.len(), 3, "pre-sync, failed, and retried proofs");
+    assert_eq!(
+        receipts
+            .iter()
+            .filter(|receipt| receipt["status"] == "passed")
+            .count(),
+        2
+    );
+    assert_eq!(
+        receipts
+            .iter()
+            .filter(|receipt| receipt["status"] != "passed")
+            .count(),
+        1
+    );
+    let preview = Engine::preview_run_promotion(&root, &planned.run_id)
+        .expect("preview repaired composed verification");
+    assert!(preview.can_authorize, "{:?}", preview.blockers);
+}
+
+#[test]
+fn target_sync_conflict_creates_configured_operational_ticket_and_reopens_work() {
+    let (_temp, root, _base) = target_promotion_fixture();
+    let planned = Engine::plan_run_on_target(
+        &root,
+        Some("canonical"),
+        "Resolve target integration safely",
+        "main",
+        None,
+    )
+    .expect("plan conflict run");
+    let approved = Engine::approve_run(&root, &planned.run_id).expect("approve conflict run");
+
+    let run_git = GitBackend::discover(&approved.worktree).expect("discover run checkout");
+    fs::write(approved.worktree.join("shared.txt"), "run side\n").expect("write run side");
+    run_git
+        .checkpoint(&CheckpointRequest {
+            subject: "test: run-side product change".to_owned(),
+            body: None,
+            trailers: Vec::new(),
+            excluded_paths: Vec::new(),
+            tree_excluded_paths: Vec::new(),
+            identity: None,
+        })
+        .expect("checkpoint run-side change")
+        .expect("run-side checkpoint exists");
+    fs::write(root.join("shared.txt"), "target side\n").expect("write target side");
+    commit_all(&root, "test: target-side product change");
+
+    let tick = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect("route target conflict into compiler work");
+    assert!(matches!(
+        tick.outcome,
+        RunSupervisionState::Waiting { ref reason, .. }
+            if reason.contains("orchestration will resolve")
+    ));
+    let project_git = GitBackend::discover(&root).expect("discover project");
+    let registry = ProjectRegistryStore::new(project_git.sidecar_root(), root.clone()).unwrap();
+    let run_root = registry.run_root(&planned.run_id).unwrap();
+    let engine = Engine::open_run(&root, &planned.run_id).expect("open conflicted run");
+    let tickets = StateStore::with_storage(
+        approved.worktree.join("program"),
+        &engine.profile().manifest.storage,
+    )
+    .unwrap()
+    .tickets()
+    .expect("read operational ticket");
+    assert_eq!(tickets.len(), 1);
+    let ticket = &tickets[0];
+    assert_eq!(ticket.operation, "resolve-target-integration");
+    assert!(ticket.target_nodes.is_empty());
+    assert_eq!(
+        ticket.extensions.get("compiler_owned_operational"),
+        Some(&Value::Bool(true))
+    );
+    assert!(
+        ticket
+            .workflow
+            .iter()
+            .all(|step| step.graph_mutation == koni_core::state::GraphMutationPolicy::Forbidden)
+    );
+
+    let control = RunControlStore::new(run_root);
+    let pipeline = control.pipeline().unwrap().unwrap();
+    assert_eq!(pipeline.current().unwrap().definition.id, "orchestrate");
+    let promotion = control.promotion().unwrap().unwrap();
+    assert_eq!(
+        promotion.conflict_ticket.as_deref(),
+        Some(ticket.id.as_str())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn supervisor_passively_waits_for_a_live_worker_without_spawning_a_lead() {
+    let (_temp, root, _base) = canonical_fixture_with_run_type(AUTOMATIC_ORCHESTRATION_RUN_TYPE);
+    let planned = Engine::plan_run(
+        &root,
+        Some("canonical"),
+        "Observe a live worker without spending a Lead turn",
+        "HEAD",
+        None,
+    )
+    .expect("plan passive-worker run");
+    let approved = Engine::approve_run(&root, &planned.run_id).expect("approve passive-worker run");
+    let engine = Engine::open_run(&root, &planned.run_id).expect("open passive-worker run");
+    let store = StateStore::with_storage(
+        approved.worktree.join("program"),
+        &engine.profile().manifest.storage,
+    )
+    .expect("open passive-worker state");
+    let integration_branch = GitBackend::discover(&approved.worktree)
+        .expect("discover passive-worker integration checkout")
+        .branch_ref()
+        .expect("read passive-worker integration branch")
+        .strip_prefix("refs/heads/")
+        .expect("integration branch is local")
+        .to_owned();
+
+    let mut command = Command::new("sleep");
+    command.arg("10").process_group(0).stdin(Stdio::null());
+    let mut child = command.spawn().expect("spawn passive-worker process");
+    let identity = (0..50)
+        .find_map(|_| {
+            let identity = capture_owned_agent_process_identity(child.id());
+            if identity.is_none() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            identity
+        })
+        .expect("capture passive-worker identity");
+    let agent_id = "worker-passive-wait";
+    let agent_input_hash = koni_core::graph::normalized_hash(&json!({
+        "ticket": "TK-passive-wait",
+        "step": "produce",
+        "persona": "reviewer",
+    }));
+    let ticket: Ticket = serde_json::from_value(json!({
+        "schema_version": "1.0",
+        "id": "TK-passive-wait",
+        "operation": "lifecycle-test",
+        "status": "in_progress",
+        "title": "Run one live worker",
+        "source_state_key": "before",
+        "target_state_key": "after",
+        "profile_hash": engine.profile().hash,
+        "rule_id": "wait.passive",
+        "workflow": [{
+            "id": "produce",
+            "persona": "reviewer",
+            "context_hash": "ctx-passive"
+        }],
+        "lease": {
+            "id": "lease-passive",
+            "branch": integration_branch,
+            "worktree": approved.worktree,
+            "base_commit": planned.base_commit,
+            "started_at": "2026-07-15T12:00:00Z",
+            "heartbeat_at": "2026-07-15T12:00:00Z",
+            "worker_pid": identity.pid
+        },
+        "extensions": {
+            "active_worker": {
+                "kind": "worker",
+                "pid": identity.pid,
+                "agent_id": agent_id,
+                "attempt": 1,
+                "input_hash": agent_input_hash,
+                "persona": "reviewer",
+                "step": "produce",
+                "process_identity": identity
+            }
+        }
+    }))
+    .expect("construct passive-worker ticket");
+    store
+        .write_ticket(&ticket)
+        .expect("persist passive-worker ticket");
+
+    let backend = GitBackend::discover(&root).expect("discover passive-worker repository");
+    let control = RunControlStore::new(
+        backend
+            .sidecar_path(format!("runs/{}", planned.run_id))
+            .expect("passive-worker run root"),
+    );
+    let now = Utc::now();
+    control
+        .write_agent(&AgentSessionRecord {
+            schema_version: "1.0".to_owned(),
+            id: agent_id.to_owned(),
+            run_id: planned.run_id.clone(),
+            ticket_id: Some(ticket.id.clone()),
+            stage_id: Some("produce".to_owned()),
+            persona: "reviewer".to_owned(),
+            model: Some("test-model".to_owned()),
+            reasoning_effort: Some("medium".to_owned()),
+            status: "running".to_owned(),
+            attempt: 1,
+            codex_session_id: None,
+            pid: Some(identity.pid),
+            process_identity: Some(identity.clone()),
+            working_directory: Some(approved.worktree.clone()),
+            prompt_path: None,
+            stdout_path: None,
+            stderr_path: None,
+            output_path: None,
+            output_hash: None,
+            input_hash: Some(agent_input_hash),
+            result: Some(json!({"broker_grant_id": "grant-passive-wait"})),
+            exit_code: None,
+            timed_out: false,
+            started_at: Some(now),
+            finished_at: None,
+            updated_at: now,
+        })
+        .expect("persist exact passive-worker agent identity");
+
+    let before_full = Engine::supervision_preflight_counters(&planned.run_id);
+    let first_tick =
+        Engine::supervise_run_once(&root, &planned.run_id).expect("supervise passive-worker run");
+    assert!(matches!(
+        first_tick.outcome,
+        RunSupervisionState::Waiting { ref reason, ref agent_id, .. }
+            if agent_id.is_none()
+                && reason.contains("passively waiting")
+                && reason.contains("without an agent turn")
+    ));
+    let after_full = Engine::supervision_preflight_counters(&planned.run_id);
+    assert_eq!(after_full.exact_live_waits, before_full.exact_live_waits);
+    assert_eq!(after_full.full_preflights, before_full.full_preflights + 1);
+    assert_eq!(
+        after_full.quarantine_checks,
+        before_full.quarantine_checks + 1
+    );
+    assert!(control.lead_slice().expect("read Lead slice").is_none());
+    let records = control.agents().expect("read orchestration records");
+    let aggregate = records
+        .iter()
+        .find(|record| record.id == "orchestration-orchestrate")
+        .expect("ordinary preflight publishes passive-wait marker");
+    assert_eq!(aggregate.status, "waiting_workers");
+    assert!(aggregate.pid.is_none());
+    assert!(aggregate.process_identity.is_none());
+
+    let before_fast = Engine::supervision_preflight_counters(&planned.run_id);
+    let repeated =
+        Engine::supervise_run_once(&root, &planned.run_id).expect("repeat exact live-worker poll");
+    assert!(matches!(
+        repeated.outcome,
+        RunSupervisionState::Waiting { ref reason, ref agent_id, .. }
+            if agent_id.is_none()
+                && reason.contains("passively waiting")
+                && reason.contains("without an agent turn")
+    ));
+    let after_fast = Engine::supervision_preflight_counters(&planned.run_id);
+    assert_eq!(
+        after_fast.exact_live_waits,
+        before_fast.exact_live_waits + 1
+    );
+    assert_eq!(after_fast.full_preflights, before_fast.full_preflights);
+    assert_eq!(after_fast.quarantine_checks, before_fast.quarantine_checks);
+
+    let exact_worker = control
+        .agent(agent_id)
+        .expect("read exact worker before transitional-row regressions")
+        .expect("exact worker exists");
+    for (id, status, ticket_id, stage_id) in [
+        (
+            "worker-stranded-starting",
+            "starting",
+            Some(ticket.id.clone()),
+            Some("produce".to_owned()),
+        ),
+        (
+            "lead-stranded-starting",
+            "starting",
+            None,
+            Some("orchestrate".to_owned()),
+        ),
+        (
+            "worker-boundary-committed",
+            "boundary_committed",
+            Some(ticket.id.clone()),
+            Some("produce".to_owned()),
+        ),
+    ] {
+        let mut transitional = exact_worker.clone();
+        transitional.id = id.to_owned();
+        transitional.status = status.to_owned();
+        transitional.ticket_id = ticket_id;
+        transitional.stage_id = stage_id;
+        transitional.pid = None;
+        transitional.process_identity = None;
+        transitional.exit_code = None;
+        transitional.finished_at = (status == "boundary_committed").then(Utc::now);
+        transitional.updated_at = Utc::now();
+        control
+            .write_agent(&transitional)
+            .expect("persist extra transitional agent row");
+        let before_transition = Engine::supervision_preflight_counters(&planned.run_id);
+        let transition_tick = Engine::supervise_run_once(&root, &planned.run_id)
+            .expect("extra transition falls through to ordinary supervision");
+        assert!(matches!(
+            transition_tick.outcome,
+            RunSupervisionState::Waiting { ref reason, .. }
+                if reason.contains("passively waiting")
+        ));
+        let after_transition = Engine::supervision_preflight_counters(&planned.run_id);
+        assert_eq!(
+            after_transition.exact_live_waits, before_transition.exact_live_waits,
+            "{status} must not use the exact-live optimization"
+        );
+        assert_eq!(
+            after_transition.full_preflights,
+            before_transition.full_preflights + 1,
+            "{status} must enter full compiler supervision"
+        );
+        fs::remove_file(control.root().join("agents").join(format!("{id}.yaml")))
+            .expect("remove synthetic transitional history");
+    }
+
+    for (id, status, exit_code) in [
+        ("worker-completed-history", "completed", Some(0)),
+        ("worker-failed-history", "failed", Some(1)),
+    ] {
+        let mut historical = exact_worker.clone();
+        historical.id = id.to_owned();
+        historical.status = status.to_owned();
+        historical.pid = None;
+        historical.process_identity = None;
+        historical.exit_code = exit_code;
+        historical.finished_at = Some(Utc::now());
+        historical.updated_at = Utc::now();
+        control
+            .write_agent(&historical)
+            .expect("persist terminal agent history");
+    }
+    let before_history = Engine::supervision_preflight_counters(&planned.run_id);
+    let historical = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect("terminal history remains compatible with exact-live supervision");
+    assert!(matches!(
+        historical.outcome,
+        RunSupervisionState::Waiting { ref reason, .. }
+            if reason.contains("passively waiting")
+    ));
+    let after_history = Engine::supervision_preflight_counters(&planned.run_id);
+    assert_eq!(
+        after_history.exact_live_waits,
+        before_history.exact_live_waits + 1
+    );
+    assert_eq!(
+        after_history.full_preflights,
+        before_history.full_preflights
+    );
+    for id in ["worker-completed-history", "worker-failed-history"] {
+        fs::remove_file(control.root().join("agents").join(format!("{id}.yaml")))
+            .expect("remove synthetic terminal history");
+    }
+
+    Engine::update_orchestration(&root, &planned.run_id, Some(false), None, None)
+        .expect("pause exact-live fixture");
+    let before_paused = Engine::supervision_preflight_counters(&planned.run_id);
+    let paused = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect("paused worker falls through to full fail-closed supervision");
+    assert!(matches!(
+        paused.outcome,
+        RunSupervisionState::AwaitingOperator { ref reason, .. }
+            if reason == "automatic orchestration is paused"
+    ));
+    let after_paused = Engine::supervision_preflight_counters(&planned.run_id);
+    assert_eq!(
+        after_paused.exact_live_waits,
+        before_paused.exact_live_waits
+    );
+    assert_eq!(
+        after_paused.full_preflights,
+        before_paused.full_preflights + 1
+    );
+    assert_eq!(
+        after_paused.quarantine_checks,
+        before_paused.quarantine_checks + 1
+    );
+
+    Engine::update_orchestration(&root, &planned.run_id, Some(true), None, None)
+        .expect("resume exact-live fixture");
+    let question = QuestionRecord::new(
+        "exact-live-question",
+        "Choose the next boundary",
+        "An operator decision must invalidate passive supervision.",
+        vec![
+            QuestionOption {
+                id: "continue".to_owned(),
+                label: "Continue".to_owned(),
+                description: "Continue after the operator answers.".to_owned(),
+                recommended: true,
+            },
+            QuestionOption {
+                id: "hold".to_owned(),
+                label: "Hold".to_owned(),
+                description: "Keep the run waiting.".to_owned(),
+                recommended: false,
+            },
+        ],
+        false,
+        QuestionPauseScope::Run {
+            run_id: planned.run_id.clone(),
+        },
+        QuestionPolicy::Interactive,
+        QuestionImpact::High,
+        None,
+        QuestionSessionResume {
+            session_id: "exact-live-question-session".to_owned(),
+            agent_id: None,
+            turn_id: None,
+            working_directory: None,
+            context_hash: koni_core::graph::normalized_hash(&"exact-live-question"),
+            captured_at: Utc::now(),
+        },
+        Utc::now(),
+    )
+    .expect("construct exact-live question");
+    control
+        .write_question(&question)
+        .expect("persist exact-live question");
+    let before_question = Engine::supervision_preflight_counters(&planned.run_id);
+    let questioned = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect("questioned worker falls through to full supervision");
+    assert!(matches!(
+        questioned.outcome,
+        RunSupervisionState::AwaitingOperator { ref reason, .. }
+            if reason.contains("exact-live-question")
+    ));
+    let after_question = Engine::supervision_preflight_counters(&planned.run_id);
+    assert_eq!(
+        after_question.exact_live_waits,
+        before_question.exact_live_waits
+    );
+    assert_eq!(
+        after_question.full_preflights,
+        before_question.full_preflights + 1
+    );
+    assert_eq!(
+        after_question.quarantine_checks,
+        before_question.quarantine_checks + 1
+    );
+    control
+        .delete_question("exact-live-question")
+        .expect("remove exact-live question");
+
+    let mut mismatched_agent = control
+        .agent(agent_id)
+        .expect("read exact-live agent")
+        .expect("exact-live agent exists");
+    let original_attempt = mismatched_agent.attempt;
+    mismatched_agent.attempt += 1;
+    mismatched_agent.updated_at = Utc::now();
+    control
+        .write_agent(&mismatched_agent)
+        .expect("persist mismatched worker attempt");
+    let before_mismatch = Engine::supervision_preflight_counters(&planned.run_id);
+    let mismatched = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect("mismatched worker falls through to full supervision");
+    assert!(matches!(
+        mismatched.outcome,
+        RunSupervisionState::Waiting { ref reason, .. }
+            if reason.contains("passively waiting")
+    ));
+    let after_mismatch = Engine::supervision_preflight_counters(&planned.run_id);
+    assert_eq!(
+        after_mismatch.exact_live_waits,
+        before_mismatch.exact_live_waits
+    );
+    assert_eq!(
+        after_mismatch.full_preflights,
+        before_mismatch.full_preflights + 1
+    );
+    assert_eq!(
+        after_mismatch.quarantine_checks,
+        before_mismatch.quarantine_checks + 1
+    );
+    mismatched_agent.attempt = original_attempt;
+    mismatched_agent.updated_at = Utc::now();
+    control
+        .write_agent(&mismatched_agent)
+        .expect("restore exact worker attempt");
+
+    let mut blocked_ticket = store
+        .ticket("TK-passive-wait")
+        .expect("read exact-live ticket");
+    blocked_ticket.blockers.push(Blocker {
+        kind: "test-blocker".to_owned(),
+        message: "A blocker must invalidate exact-live supervision.".to_owned(),
+        created_at: Utc::now(),
+        related_ticket: None,
+    });
+    store
+        .write_ticket(&blocked_ticket)
+        .expect("persist blocked exact-live ticket");
+    let before_blocked = Engine::supervision_preflight_counters(&planned.run_id);
+    let blocked = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect("blocked worker falls through to full supervision");
+    assert!(matches!(
+        blocked.outcome,
+        RunSupervisionState::Waiting { ref reason, .. }
+            if reason.contains("passively waiting")
+    ));
+    let after_blocked = Engine::supervision_preflight_counters(&planned.run_id);
+    assert_eq!(
+        after_blocked.exact_live_waits,
+        before_blocked.exact_live_waits
+    );
+    assert_eq!(
+        after_blocked.full_preflights,
+        before_blocked.full_preflights + 1
+    );
+    assert_eq!(
+        after_blocked.quarantine_checks,
+        before_blocked.quarantine_checks + 1
+    );
+    blocked_ticket.blockers.clear();
+    store
+        .write_ticket(&blocked_ticket)
+        .expect("restore unblocked exact-live ticket");
+
+    let deletion = control.root().join("deletion.yaml");
+    fs::write(&deletion, "schema_version: '1.0'\n")
+        .expect("persist synthetic deletion transaction");
+    let before_deleted = Engine::supervision_preflight_counters(&planned.run_id);
+    let deleted_error = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect_err("deletion state must fall through and fail closed")
+        .to_string();
+    assert!(
+        deleted_error.contains("deletion transaction"),
+        "{deleted_error}"
+    );
+    let after_deleted = Engine::supervision_preflight_counters(&planned.run_id);
+    assert_eq!(
+        after_deleted.exact_live_waits,
+        before_deleted.exact_live_waits
+    );
+    assert_eq!(
+        after_deleted.full_preflights,
+        before_deleted.full_preflights + 1
+    );
+    assert_eq!(
+        after_deleted.quarantine_checks,
+        before_deleted.quarantine_checks
+    );
+    fs::remove_file(deletion).expect("remove synthetic deletion transaction");
+
+    child.kill().expect("stop passive-worker process");
+    child.wait().expect("reap passive-worker process");
+    let mut terminal_pipeline = control
+        .pipeline()
+        .expect("read exact-live pipeline")
+        .expect("exact-live pipeline exists");
+    terminal_pipeline.status = RunPipelineStatus::Blocked;
+    let cursor = terminal_pipeline.cursor;
+    let current = terminal_pipeline
+        .stages
+        .get_mut(cursor)
+        .expect("exact-live stage remains current");
+    current.status = PipelineStageStatus::Blocked;
+    current.terminal_reason = Some("test terminal boundary".to_owned());
+    let terminal_at = Utc::now();
+    current.finished_at = Some(terminal_at);
+    terminal_pipeline.updated_at = terminal_at;
+    control
+        .write_pipeline(&terminal_pipeline)
+        .expect("persist terminal exact-live pipeline");
+    let before_terminal = Engine::supervision_preflight_counters(&planned.run_id);
+    let terminal = Engine::supervise_run_once(&root, &planned.run_id)
+        .expect("dead terminal worker falls through to full supervision");
+    assert!(matches!(
+        terminal.outcome,
+        RunSupervisionState::Blocked { ref reason, .. }
+            if reason == "test terminal boundary"
+    ));
+    let after_terminal = Engine::supervision_preflight_counters(&planned.run_id);
+    assert_eq!(
+        after_terminal.exact_live_waits,
+        before_terminal.exact_live_waits
+    );
+    assert_eq!(
+        after_terminal.full_preflights,
+        before_terminal.full_preflights + 1
+    );
+    assert_eq!(
+        after_terminal.quarantine_checks,
+        before_terminal.quarantine_checks + 1
+    );
+}
+
+#[test]
+fn exhausted_review_rework_recovery_advises_then_allows_explicit_orchestration_retry() {
+    let (_temp, root, _base) = canonical_fixture_with_run_type(AUTOMATIC_ORCHESTRATION_RUN_TYPE);
+    write(
+        &root,
+        ".codex/koni/profile.yaml",
+        &PROFILE.replace("backend: tracked", "backend: git_common_dir"),
+    );
+    commit_all(&root, "test: use git-common review recovery state");
+
+    let planned = Engine::plan_run(
+        &root,
+        Some("canonical"),
+        "Recover an exhausted review correction without implicitly retrying orchestration",
+        "HEAD",
+        None,
+    )
+    .expect("plan review-rework recovery run");
+    let approved =
+        Engine::approve_run(&root, &planned.run_id).expect("approve review-rework recovery run");
+    let backend = GitBackend::discover(&root).expect("discover review-rework project");
+    let run_root = backend
+        .sidecar_path(format!("runs/{}", planned.run_id))
+        .expect("review-rework run root");
+    let control = RunControlStore::new(run_root.clone());
+    let mut engine = Engine::open_run(&root, &planned.run_id).expect("open review-rework run");
+    let store = StateStore::with_storage(run_root, &engine.profile().manifest.storage)
+        .expect("open review-rework state");
+    let now = Utc::now();
+    let opened_at = now - chrono::Duration::minutes(1);
+    let ticket_id = "TK-review-rework".to_owned();
+    let step_id = "author-correction".to_owned();
+    let context_hash = koni_core::graph::normalized_hash(&json!({
+        "ticket": ticket_id,
+        "step": step_id,
+    }));
+    let ticket = Ticket {
+        schema_version: "1.0".to_owned(),
+        id: ticket_id.clone(),
+        operation: "lifecycle-test".to_owned(),
+        status: "blocked".to_owned(),
+        title: "Correct a twice-rejected proof".to_owned(),
+        target_nodes: Vec::new(),
+        scope: Scope::default(),
+        source_state_key: "before".to_owned(),
+        target_state_key: "after".to_owned(),
+        obligation_keys: Vec::new(),
+        profile_hash: engine.profile().hash.clone(),
+        rule_id: "review.rework".to_owned(),
+        workflow: vec![Step {
+            id: step_id.clone(),
+            persona: "reviewer".to_owned(),
+            depends_on: Vec::new(),
+            required: true,
+            kind: Default::default(),
+            read_nodes: None,
+            write_nodes: None,
+            read_paths: Some(BTreeSet::new()),
+            write_paths: Some(BTreeSet::new()),
+            preserve_source_paths_from: None,
+            compiled_check_sets: Vec::new(),
+            expected_outputs: vec!["A materially corrected proof".to_owned()],
+            graph_mutation: GraphMutationPolicy::Forbidden,
+            required_receipts: Vec::new(),
+            validation_checks: Vec::new(),
+            escalation_triggers: Vec::new(),
+            stop_conditions: Vec::new(),
+            validation_action: None,
+            context_hash: context_hash.clone(),
+        }],
+        outputs: vec![StepOutput {
+            id: "rejected-candidate".to_owned(),
+            step_id: step_id.clone(),
+            persona: "reviewer".to_owned(),
+            context_hash,
+            recorded_at: opened_at - chrono::Duration::minutes(1),
+            files_read: Vec::new(),
+            files_written: Vec::new(),
+            files_deleted: Vec::new(),
+            findings: vec!["The replacement still copied the production seam locally.".to_owned()],
+            risks: Vec::new(),
+            receipts: Vec::new(),
+            patch_proposal: String::new(),
+            recommended_next_step: "Await explicit review-rework disposition.".to_owned(),
+            upstream_change: None,
+            change_application: None,
+            typed: BTreeMap::new(),
+        }],
+        reviews: vec![
+            Review {
+                id: "first-rejection".to_owned(),
+                status: "failed".to_owned(),
+                notes: "Exercise the production seam.".to_owned(),
+                reviewed_at: opened_at - chrono::Duration::minutes(2),
+                ticket_hash: koni_core::graph::normalized_hash(&"first ticket"),
+                output_hash: koni_core::graph::normalized_hash(&"first output"),
+                agent_binding: None,
+            },
+            Review {
+                id: "second-rejection".to_owned(),
+                status: "failed".to_owned(),
+                notes: "The replacement remains a local replica.".to_owned(),
+                reviewed_at: opened_at,
+                ticket_hash: koni_core::graph::normalized_hash(&"second ticket"),
+                output_hash: koni_core::graph::normalized_hash(&"second output"),
+                agent_binding: None,
+            },
+        ],
+        blockers: vec![Blocker {
+            kind: "review-rework-exhausted".to_owned(),
+            message: "Two independent review failures require explicit disposition.".to_owned(),
+            created_at: opened_at,
+            related_ticket: None,
+        }],
+        lease: Some(Lease {
+            id: "review-rework-lease".to_owned(),
+            branch: approved
+                .branch
+                .strip_prefix("refs/heads/")
+                .unwrap_or(&approved.branch)
+                .to_owned(),
+            worktree: approved.worktree.clone(),
+            base_commit: planned.base_commit.clone(),
+            started_at: opened_at,
+            heartbeat_at: opened_at,
+            worker_pid: None,
+        }),
+        change_control: Default::default(),
+        extensions: BTreeMap::from([
+            (
+                "review_failure_reopen_from".to_owned(),
+                Value::String(step_id.clone()),
+            ),
+            (
+                "review_rework_exhaustion".to_owned(),
+                json!({
+                    "status": "open",
+                    "opened_at": opened_at,
+                    "failed_review_count": 2,
+                    "latest_review_id": "second-rejection",
+                }),
+            ),
+        ]),
+    };
+    store
+        .write_ticket(&ticket)
+        .expect("persist exhausted review ticket");
+    let mut steering = Event::new(
+        &planned.run_id,
+        "compiler.steering.recorded",
+        Some(ticket_id.clone()),
+        json!({
+            "kind": "review-rework",
+            "message": "Invoke the production seam directly.",
+            "ticket_id": ticket_id,
+            "target_nodes": [],
+            "priority": "normal",
+        }),
+    );
+    steering.actor = "lead".to_owned();
+    store
+        .append_event(&steering)
+        .expect("persist targeted review-rework steering");
+
+    let mut pipeline = control.pipeline().unwrap().unwrap();
+    assert_eq!(pipeline.current().unwrap().definition.id, "orchestrate");
+    pipeline
+        .start_current(
+            koni_core::graph::normalized_hash(&"blocked review-rework orchestration"),
+            now,
+        )
+        .expect("start orchestration before blocking");
+    pipeline
+        .block_current(
+            "The compiler board is nonterminal but has no safe dispatch.",
+            Utc::now(),
+        )
+        .expect("block orchestration at the exhausted review circuit");
+    control
+        .write_pipeline(&pipeline)
+        .expect("persist blocked orchestration");
+
+    let recovery = engine
+        .execute_action("recover", BTreeMap::new())
+        .expect("recover explicitly dispositioned review rework");
+    assert_eq!(
+        recovery["recovery_advisory"]["retry_required"],
+        Value::Bool(true)
+    );
+    assert_eq!(recovery["recovery_advisory"]["stage_id"], "orchestrate");
+    assert_eq!(
+        recovery["recovery_advisory"]["action"],
+        "retry-supervised-stage"
+    );
+    let board = engine.inspect().expect("inspect recovered board");
+    assert_eq!(
+        board.active_tickets.as_slice(),
+        std::slice::from_ref(&ticket_id)
+    );
+    assert_eq!(
+        board.ticket_workflows[&ticket_id].ready_steps.as_slice(),
+        std::slice::from_ref(&step_id)
+    );
+    let still_blocked = control.pipeline().unwrap().unwrap();
+    assert_eq!(still_blocked.status, RunPipelineStatus::Blocked);
+    assert_eq!(
+        still_blocked.current().unwrap().status,
+        PipelineStageStatus::Blocked,
+        "recover must not cross the explicit stage-retry boundary"
+    );
+
+    Engine::retry_supervised_stage(&root, &planned.run_id, "orchestrate")
+        .expect("explicitly retry recovered orchestration");
+    let retried = control.pipeline().unwrap().unwrap();
+    assert_eq!(retried.status, RunPipelineStatus::Running);
+    assert_eq!(
+        retried.current().unwrap().status,
+        PipelineStageStatus::Running
+    );
+    assert_eq!(retried.current().unwrap().attempt, 2);
+    assert!(retried.current().unwrap().terminal_reason.is_none());
+    let post_retry_board = engine.inspect().expect("inspect retried board");
+    assert_eq!(
+        post_retry_board.ticket_workflows[&ticket_id].ready_steps,
+        [step_id]
+    );
+}
+
+#[test]
 fn supervisor_completes_terminal_orchestration_without_spawning_a_lead() {
     let (_temp, root, _base) = canonical_fixture_with_run_type(AUTOMATIC_ORCHESTRATION_RUN_TYPE);
     let planned = Engine::plan_run(
@@ -2002,6 +4058,60 @@ fn supervisor_review_releases_run_authority_while_agent_is_active() {
         .expect("pipeline state");
     assert_eq!(pipeline.stages[0].status, PipelineStageStatus::Succeeded);
     assert_ne!(pipeline.status, RunPipelineStatus::Complete);
+}
+
+#[test]
+fn overlapping_supervisor_probe_fails_fast_without_disrupting_run_control() {
+    let (_temp, root, _base) = canonical_fixture_with_run_type(REVIEW_RUN_TYPE);
+    let planned = Engine::plan_run(
+        &root,
+        Some("canonical"),
+        "Keep overlapping cockpit supervision out of run authority",
+        "HEAD",
+        None,
+    )
+    .expect("plan reviewed run");
+    Engine::approve_run(&root, &planned.run_id).expect("approve reviewed run");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let launcher = Arc::new(BlockingAgentLauncher {
+        started: started_tx,
+        release: Mutex::new(release_rx),
+        output: Some("The run is complete.\n\nKONI_REVIEW_VERDICT: approved".to_owned()),
+    });
+    let thread_root = root.clone();
+    let thread_run_id = planned.run_id.clone();
+    let thread_launcher = launcher.clone();
+    let supervision = std::thread::spawn(move || {
+        Engine::supervise_run_once_with(&thread_root, &thread_run_id, thread_launcher.as_ref())
+    });
+
+    started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("first supervisor holds its lease around the reviewer");
+    let overlap_started = Instant::now();
+    let overlap =
+        Engine::supervise_run_once_with(&root, &planned.run_id, &FakeAgentLauncher::new([]))
+            .expect_err("a second supervisor must not enter the active tick");
+    assert!(
+        overlap
+            .to_string()
+            .contains("run control lock supervisor is held"),
+        "{overlap}"
+    );
+    assert!(
+        overlap_started.elapsed() < Duration::from_secs(1),
+        "an overlapping cockpit tick must fail before accumulated-run preflight"
+    );
+
+    let paused = Engine::set_run_running(&root, &planned.run_id, false)
+        .expect("the rejected overlap did not retain run authority");
+    assert!(!paused.running);
+    release_tx.send(()).expect("release reviewer");
+    supervision
+        .join()
+        .expect("join supervisor")
+        .expect("active supervisor drains to its durable boundary");
 }
 
 #[test]
@@ -3027,6 +5137,11 @@ fn planning_batch_launch_failure_keeps_all_answers_pending_for_one_retry() {
     .expect_err("missing fake process must fail before launch")
     .to_string();
     assert!(error.contains("no queued result"), "{error}");
+    assert_eq!(
+        control.lifecycle().unwrap().map(|state| state.running),
+        Some(false),
+        "a failed planner launch pauses before an operator explicitly resumes it"
+    );
     assert!(
         control
             .questions()
@@ -3046,6 +5161,13 @@ fn planning_batch_launch_failure_keeps_all_answers_pending_for_one_retry() {
     .to_string();
     assert!(revision_error.contains("another batch question remains open"));
 
+    // The public play command immediately resumes through the production Pi
+    // launcher. This injectable integration fixture publishes the same
+    // durable operator intent directly, then exercises that resume through
+    // its queued fake launcher below.
+    let mut lifecycle = control.lifecycle().unwrap().unwrap();
+    lifecycle.set_running(true);
+    control.write_lifecycle(&lifecycle).unwrap();
     let retry = FakeAgentLauncher::new([FakeAgentStep {
         result: AgentProcessResult {
             pid: 41402,
@@ -3783,8 +5905,12 @@ fn approved_planning_context_is_utf8_safe_content_addressed_and_strictly_bounded
         None,
     )
     .expect("initialize bounded planning run");
-    let architecture = "architecture-🧭-".repeat(8_000);
-    let verification = "verification-🧪-".repeat(8_000);
+    // Each response stays inside both the 24,000-character plan contract and
+    // the visible 96 KiB response contract. Four-byte Unicode keeps each
+    // stage above 32 KiB, so the combined handoff still exercises both the
+    // per-stage and aggregate approved-context truncation limits.
+    let architecture = "🧭".repeat(23_000);
+    let verification = "🧪".repeat(23_000);
     let launcher = FakeAgentLauncher::new([
         FakeAgentStep {
             result: AgentProcessResult {
@@ -3924,8 +6050,14 @@ fn later_planning_pass_resume_keeps_the_same_cumulative_input_binding() {
         .last()
         .expect("resumed verification prompt")
         .clone();
-    assert!(resumed_prompt.contains("Keep the API boundary narrow"));
-    assert!(resumed_prompt.contains("bounded resume of the same planning session"));
+    assert!(
+        !resumed_prompt.contains("Keep the API boundary narrow"),
+        "the resumed Codex thread already owns the original cumulative prompt"
+    );
+    assert!(resumed_prompt.contains("Continue the same bounded planning session"));
+    assert!(resumed_prompt.contains(
+        "Prior successful planning passes and their evidence remain in this shared thread"
+    ));
     assert_eq!(
         control
             .agent("planning-verification")
@@ -4081,6 +6213,82 @@ fn selected_run_play_pause_is_durable_across_planning_and_active_phases() {
 }
 
 #[test]
+fn pause_intent_is_durable_before_authority_barrier_drains() {
+    let (_temp, root, _base) = canonical_fixture();
+    let planned = Engine::plan_run(
+        &root,
+        Some("canonical"),
+        "Latch pause before another compiler boundary can start",
+        "HEAD",
+        None,
+    )
+    .expect("plan pause-ordering run");
+    Engine::record_planning_intake(
+        &root,
+        &planned.run_id,
+        json!({"goal": "Latch pause before another compiler boundary can start"}),
+    )
+    .expect("complete planning intake");
+    Engine::approve_run(&root, &planned.run_id).expect("approve pause-ordering run");
+
+    let git = GitBackend::discover(&root).expect("discover project");
+    let registry =
+        ProjectRegistryStore::new(git.sidecar_root(), root.clone()).expect("open project registry");
+    let control = RunControlStore::new(
+        registry
+            .run_root(&planned.run_id)
+            .expect("resolve run control root"),
+    );
+    let barrier_path = git
+        .common_dir()
+        .join("koni/locks/run-authority")
+        .join(format!("{}.lock", planned.run_id));
+    fs::create_dir_all(barrier_path.parent().expect("barrier parent"))
+        .expect("create barrier directory");
+    let barrier = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&barrier_path)
+        .expect("open authority barrier");
+    barrier.lock_exclusive().expect("hold authority barrier");
+
+    let pause_root = root.clone();
+    let pause_run_id = planned.run_id.clone();
+    let pause =
+        std::thread::spawn(move || Engine::set_run_running(&pause_root, &pause_run_id, false));
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if control
+            .orchestration()
+            .expect("read orchestration while pause waits")
+            .is_some_and(|state| !state.running)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "pause intent must be persisted before compiler authority becomes available"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !pause.is_finished(),
+        "pause reconciliation must still be waiting behind the held compiler boundary"
+    );
+
+    FileExt::unlock(&barrier).expect("release authority barrier");
+    let paused = pause
+        .join()
+        .expect("join pause thread")
+        .expect("reconcile durable pause");
+    assert!(!paused.running);
+    assert!(!control.orchestration().unwrap().unwrap().running);
+}
+
+#[test]
 fn planning_pause_wins_while_launcher_runs_without_semantic_completion() {
     let (_temp, root, _base) = canonical_fixture_with_run_type(PLANNING_AGENT_RUN_TYPE);
     let planned = Engine::plan_run(
@@ -4230,6 +6438,91 @@ fn planning_pause_terminates_only_a_durably_owned_process_group() {
             .expect("planner record")
             .status,
         "paused"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn deleting_an_active_run_stops_its_durably_owned_agent_before_removing_state() {
+    let (_temp, root, _base) = canonical_fixture();
+    let planned = Engine::plan_run(
+        &root,
+        Some("canonical"),
+        "Delete an active run without leaking agent tokens",
+        "HEAD",
+        None,
+    )
+    .expect("plan active deletion run");
+    Engine::approve_run(&root, &planned.run_id).expect("approve active deletion run");
+    let mut child = Command::new("sh")
+        .args(["-c", "sleep 30"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .expect("spawn isolated fake agent");
+    let pid = child.id();
+    let identity = (0..50)
+        .find_map(|_| {
+            let identity = capture_owned_agent_process_identity(pid);
+            if identity.is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            identity
+        })
+        .unwrap_or_else(|| {
+            let _ = child.kill();
+            panic!("capture fake agent identity")
+        });
+    let reaper = std::thread::spawn(move || child.wait());
+    let run_root = GitBackend::discover(&root)
+        .expect("discover project")
+        .sidecar_path(format!("runs/{}", planned.run_id))
+        .expect("run root");
+    RunControlStore::new(run_root)
+        .write_agent(&AgentSessionRecord {
+            schema_version: "1.0".to_owned(),
+            id: "ticket-worker".to_owned(),
+            run_id: planned.run_id.clone(),
+            ticket_id: Some("ticket".to_owned()),
+            stage_id: Some("work".to_owned()),
+            persona: "builder".to_owned(),
+            model: None,
+            reasoning_effort: None,
+            status: "running".to_owned(),
+            attempt: 1,
+            codex_session_id: None,
+            pid: Some(pid),
+            process_identity: Some(identity),
+            working_directory: Some(planned.planning_worktree.clone()),
+            prompt_path: None,
+            stdout_path: None,
+            stderr_path: None,
+            output_path: None,
+            output_hash: None,
+            input_hash: None,
+            result: None,
+            exit_code: None,
+            timed_out: false,
+            started_at: Some(Utc::now()),
+            finished_at: None,
+            updated_at: Utc::now(),
+        })
+        .expect("persist fake agent ownership");
+
+    Engine::delete_run(&root, &planned.run_id, RunDeletionMode::PreserveBranches)
+        .expect("stop the agent and delete its run");
+    reaper
+        .join()
+        .expect("join fake agent reaper")
+        .expect("reap fake agent");
+    assert!(
+        !Engine::project_registry(&root)
+            .expect("registry after active deletion")
+            .runs
+            .contains_key(&planned.run_id),
+        "deletion removes the run only after its proven agent is stopped"
     );
 }
 

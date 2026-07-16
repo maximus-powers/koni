@@ -1,12 +1,31 @@
 schema_version: "1.0"
 id: small
 title: Small
-description: A focused change with direct approval, one worker at a time, and no agent planning pass.
+description: One bounded claim in a known domain, with proportional planning, focused proof, and one worker at a time.
 instructions:
   planning: |
-    Ask no planning questions for this run type. Proceed conservatively, make
-    reversible assumptions where necessary, and list those assumptions clearly
-    for the user's approval before implementation begins.
+    Perform a cheap decision scan, then ask at most one question and only when
+    an unanswered product decision blocks acceptance. Do not ask the user for
+    repository-discoverable implementation facts. Otherwise state the safest
+    reversible assumption for approval and produce the smallest sufficient
+    plan and root-connected semantic graph seed. Seed objective.work_kind and
+    the affected repository-native system, then add only material contracts,
+    boundaries, risks, changes, and proof. A normal Small run is one cohesive
+    vertical change with one primary focused proof; add another only for a
+    distinct evidence gap that cannot be covered by that seam, and do not manufacture architecture or
+    risk ceremony. Give every proof structured oracle cases whose exact
+    production seam paths are also explicit read-only covered paths; do not
+    inherit a system's other owned paths. Escalate when discovery reveals a material interface, data,
+    security, privacy, migration, concurrency, or unresolved product boundary.
+planning:
+  session_scope: run
+  graph_seed_stage: focused-plan
+  max_repository_tool_calls: 16
+  token_budget:
+    metric: new_tokens
+    limit: 120000
+    synthesis_reserve: 30000
+    on_exhausted: force_synthesis
 profile:
   source: .codex/koni/profile.yaml
 intake:
@@ -23,34 +42,66 @@ pipeline:
       kind: action
       title: Validate intake
       config: {compiler_owned: true, action: planning.intake}
+    focused-plan:
+      kind: planning
+      title: Plan the focused slice
+      config:
+        persona: run-planner
+        prompt: >-
+          Produce one concise, implementation-ready vertical-slice plan and the smallest
+          sufficient root-connected graph seed. Record the observable outcome, non-goals,
+          success signals, objective.work_kind, one affected repository-native system, one
+          approval-sentence change, its risk tier and concrete factors, and one primary focused proof
+          with an exact repository-native argv and honest red_green, characterization, or
+          current_verification baseline. Bind each proof condition and claim through structured
+          oracle_cases to its callable production seam, exact seam_paths, action, assertions, and
+          material environment/recipe; every seam path must resolve to the same normalized
+          project-relative identity present in read-only covered_paths.
+          Add interfaces, data, flows, and contracts only when
+          material. If discovery truly makes the slice elevated or critical, introduce the
+          material risk and give that risk—not the change—a distinct boundary proof plus explicit
+          treatment; otherwise escalate the run rather than hiding scope. Never seed statuses,
+          receipts, tickets, transient investigation notes, or compiler-owned fields.
     approval:
       kind: approval
-      title: Approve the run
+      title: Approve the plan
     initialize:
       kind: initialize
       title: Initialize the run
     orchestrate:
       kind: orchestration
       title: Execute compiled work
+    target-sync:
+      kind: target_sync
+      title: Synchronize the target branch
+    verification:
+      kind: checkpoint
+      title: Verify the composed run
+      config: {checkpoint: verification}
     report:
       kind: action
       title: Compile final report
       config: {action: report, automatic: true}
-  order: [intake, approval, initialize, orchestrate, report]
+    promotion:
+      kind: promotion
+      title: Merge the completed run
+  order: [intake, focused-plan, approval, initialize, orchestrate, target-sync, verification, report, promotion]
 questions:
-  policy: autonomous
+  policy: high_impact_only
   default_scope: run
 git:
   branch_template: "koni/runs/{{ run.slug }}-{{ run.short_id }}"
   ticket_branch_template: "koni/runs/{{ run.id }}/tickets/{{ ticket.id }}"
+promotion:
+  conflict_operation: resolve-target-integration
 run_card:
   sections: [goal, pipeline, graph, tickets, checks, report]
 agents:
   roles:
-    planner: {model: gpt-5.6-terra, reasoning_effort: high}
+    planner: {model: gpt-5.6-terra, reasoning_effort: xhigh}
     lead: {model: gpt-5.6-terra, reasoning_effort: high}
-    ticket_worker: {model: gpt-5.6-terra, reasoning_effort: high}
-    reviewer: {model: gpt-5.6-terra, reasoning_effort: high}
+    ticket_worker: {model: gpt-5.6-luna, reasoning_effort: medium}
+    reviewer: {model: gpt-5.6-terra, reasoning_effort: max}
   personas: {}
 orchestration:
   auto_start: true

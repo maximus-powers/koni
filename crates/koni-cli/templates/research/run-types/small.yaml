@@ -36,23 +36,35 @@ pipeline:
     orchestrate:
       kind: orchestration
       title: Execute compiled work
+    target-sync:
+      kind: target_sync
+      title: Synchronize the target branch
+    verification:
+      kind: checkpoint
+      title: Verify the completed research
+      config: {checkpoint: verification}
     report:
       kind: action
       title: Compile final report
       config: {action: report, automatic: true}
-  order: [intake, approval, initialize, orchestrate, report]
+    promotion:
+      kind: promotion
+      title: Promote the completed research to the target branch
+  order: [intake, approval, initialize, orchestrate, target-sync, verification, report, promotion]
 questions:
   policy: autonomous
   default_scope: run
 git:
   branch_template: "koni/runs/{{ run.slug }}-{{ run.short_id }}"
   ticket_branch_template: "koni/runs/{{ run.id }}/tickets/{{ ticket.id }}"
+promotion:
+  conflict_operation: resolve-target-integration
 run_card:
   sections: [goal, pipeline, graph, tickets, checks, report]
 agents:
   roles:
     planner: {model: gpt-5.6-terra, reasoning_effort: high}
-    lead: {model: gpt-5.6-terra, reasoning_effort: high}
+    lead: {model: gpt-5.4-mini, reasoning_effort: low}
     ticket_worker: {model: gpt-5.6-terra, reasoning_effort: high}
     reviewer: {model: gpt-5.6-terra, reasoning_effort: high}
   personas: {}

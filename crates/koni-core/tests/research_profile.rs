@@ -11,10 +11,12 @@ use std::process::Command;
 use std::time::Duration;
 
 use git2::{IndexAddOption, Oid, Repository, RepositoryInitOptions, Signature, StatusOptions};
-use koni_core::config::{ChangeControlDispositionKind, OperationChangeControlDef};
+use koni_core::config::{
+    ChangeControlDispositionKind, GraphMutationPolicyDef, OperationChangeControlDef,
+};
 use koni_core::git::GitBackend;
 use koni_core::graph::{Graph, Node, normalized_hash};
-use koni_core::state::{Event, Scope, StateStore, Ticket};
+use koni_core::state::{Blocker, Event, Journal, JournalStatus, Scope, StateStore, Ticket};
 use koni_core::{
     AgentProcessLauncher, AgentProcessRequest, AgentProcessResult, AgentSessionRecord, Engine,
     ProfileCompiler, RunControlStore, capture_owned_agent_process_identity,
@@ -52,6 +54,318 @@ fn research_profile_owns_the_complete_typed_change_control_route() -> Result<(),
         OperationChangeControlDef::Disposition {
             outcome: ChangeControlDispositionKind::NoOp,
         }
+    );
+    Ok(())
+}
+
+#[test]
+fn research_ontology_matches_autoresearch_v2_effective_graph_contract() -> Result<(), Box<dyn Error>>
+{
+    let profile = ProfileCompiler::compile(&profile_root())?;
+    let expected_node_types = BTreeSet::from([
+        "ablation",
+        "asset",
+        "claim",
+        "evidence",
+        "experiment",
+        "gate",
+        "hypothesis",
+        "literature",
+        "method",
+        "metric",
+        "prerequisite",
+        "report",
+        "run",
+    ]);
+    let actual_node_types = profile
+        .node_types
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual_node_types, expected_node_types);
+
+    // This is the complete effective EDGE_TARGETS contract from
+    // autoresearch-v2 plus the configured semantic inverse views.
+    // Bidirectional Koni declarations are expanded here so one stored edge can
+    // expose its inverse without persisting a redundant reciprocal fact.
+    let expected_rows: &[((&str, &str), &[&str])] = &[
+        (("ablation", "baseline"), &["asset", "method", "run"]),
+        (("ablation", "gates"), &["gate"]),
+        (("ablation", "method"), &["method"]),
+        (("ablation", "metrics"), &["metric"]),
+        (
+            ("ablation", "requires"),
+            &["asset", "gate", "metric", "prerequisite"],
+        ),
+        (("ablation", "runs"), &["run"]),
+        (("ablation", "target_claims"), &["claim"]),
+        (("ablation", "variant"), &["asset", "method", "run"]),
+        (("asset", "derived_from"), &["asset", "literature", "run"]),
+        (("asset", "gates"), &["gate"]),
+        (("asset", "produces"), &["evidence", "run"]),
+        (("asset", "satisfies"), &["prerequisite"]),
+        (
+            ("asset", "used_by"),
+            &["ablation", "experiment", "method", "run"],
+        ),
+        (("asset", "validates"), &["gate"]),
+        (("claim", "contradicts"), &["claim"]),
+        (("claim", "decomposes_to"), &["claim"]),
+        (("claim", "evidence"), &["evidence"]),
+        (("claim", "gates"), &["gate"]),
+        (("claim", "informs"), &["claim"]),
+        (("claim", "literature"), &["literature"]),
+        (("claim", "supports"), &["claim"]),
+        (("claim", "tested_by"), &["ablation", "experiment"]),
+        (
+            ("evidence", "contradicts"),
+            &["ablation", "claim", "experiment", "hypothesis", "method"],
+        ),
+        (("evidence", "from_gates"), &["gate"]),
+        (("evidence", "from_runs"), &["run"]),
+        (
+            ("evidence", "informs"),
+            &[
+                "ablation",
+                "asset",
+                "claim",
+                "experiment",
+                "gate",
+                "hypothesis",
+                "method",
+                "metric",
+                "prerequisite",
+                "run",
+            ],
+        ),
+        (("evidence", "source_assets"), &["asset"]),
+        (
+            ("evidence", "supports"),
+            &["ablation", "claim", "experiment", "hypothesis", "method"],
+        ),
+        (("experiment", "ablations"), &["ablation"]),
+        (("experiment", "assets"), &["asset"]),
+        (("experiment", "gates"), &["gate"]),
+        (("experiment", "methods"), &["method"]),
+        (("experiment", "metrics"), &["metric"]),
+        (("experiment", "produces"), &["evidence", "report"]),
+        (
+            ("experiment", "requires"),
+            &["asset", "gate", "method", "metric", "prerequisite"],
+        ),
+        (("experiment", "runs"), &["run"]),
+        (("experiment", "target_claims"), &["claim"]),
+        (
+            ("gate", "applies_to"),
+            &[
+                "ablation",
+                "asset",
+                "claim",
+                "experiment",
+                "gate",
+                "hypothesis",
+                "method",
+                "metric",
+                "prerequisite",
+                "run",
+            ],
+        ),
+        (("gate", "gates"), &["gate"]),
+        (("gate", "requires"), &["asset", "metric", "prerequisite"]),
+        (("gate", "strengthens"), &["gate"]),
+        (
+            ("gate", "validates"),
+            &["ablation", "asset", "experiment", "method"],
+        ),
+        (("hypothesis", "claims"), &["claim"]),
+        (("hypothesis", "experiments"), &["experiment"]),
+        (("hypothesis", "gates"), &["gate"]),
+        (("hypothesis", "literature"), &["literature"]),
+        (("hypothesis", "reports"), &["report"]),
+        (("literature", "cites"), &["literature"]),
+        (
+            ("literature", "contradicts"),
+            &["claim", "experiment", "hypothesis", "method"],
+        ),
+        (
+            ("literature", "informs"),
+            &["claim", "experiment", "hypothesis", "method"],
+        ),
+        (
+            ("literature", "supports"),
+            &["claim", "experiment", "hypothesis", "method"],
+        ),
+        (("method", "ablations"), &["ablation"]),
+        (("method", "experiments"), &["experiment"]),
+        (("method", "gates"), &["gate"]),
+        (("method", "implements"), &["asset"]),
+        (("method", "metrics"), &["metric"]),
+        (
+            ("method", "requires"),
+            &["asset", "gate", "metric", "prerequisite"],
+        ),
+        (("method", "target_claims"), &["claim"]),
+        (
+            ("metric", "applies_to"),
+            &["ablation", "experiment", "method", "run"],
+        ),
+        (("metric", "gates"), &["gate"]),
+        (("prerequisite", "gates"), &["gate"]),
+        (
+            ("prerequisite", "requires"),
+            &["asset", "gate", "prerequisite"],
+        ),
+        (
+            ("prerequisite", "satisfied_by"),
+            &["asset", "evidence", "run"],
+        ),
+        (
+            ("report", "cites"),
+            &[
+                "ablation",
+                "asset",
+                "claim",
+                "evidence",
+                "experiment",
+                "gate",
+                "literature",
+                "method",
+                "run",
+            ],
+        ),
+        (
+            ("report", "summarizes"),
+            &[
+                "ablation",
+                "claim",
+                "evidence",
+                "experiment",
+                "hypothesis",
+                "method",
+            ],
+        ),
+        (
+            ("run", "evaluates"),
+            &["ablation", "claim", "experiment", "gate", "method"],
+        ),
+        (("run", "gates"), &["gate"]),
+        (("run", "produces"), &["evidence", "report"]),
+        (
+            ("run", "uses"),
+            &[
+                "ablation",
+                "asset",
+                "experiment",
+                "gate",
+                "method",
+                "metric",
+            ],
+        ),
+    ];
+    let expected_edges = expected_rows
+        .iter()
+        .map(|((source, relation), targets)| {
+            (
+                ((*source).to_owned(), (*relation).to_owned()),
+                targets
+                    .iter()
+                    .map(|target| (*target).to_owned())
+                    .collect::<BTreeSet<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut actual_edges = BTreeMap::<(String, String), BTreeSet<String>>::new();
+    for edge in &profile.edge_types {
+        actual_edges
+            .entry((edge.source.clone(), edge.relation.clone()))
+            .or_default()
+            .extend(edge.targets.iter().cloned());
+        if edge.bidirectional {
+            let inverse = edge
+                .inverse
+                .as_ref()
+                .expect("validated bidirectional edge has an inverse");
+            for target in &edge.targets {
+                actual_edges
+                    .entry((target.clone(), inverse.clone()))
+                    .or_default()
+                    .insert(edge.source.clone());
+            }
+        }
+    }
+    assert_eq!(actual_edges, expected_edges);
+    for operation in [
+        "graph-compilation.node.define-gates",
+        "graph-compilation.node.compile-gates",
+        "graph-compilation.node.compile-tests",
+    ] {
+        assert!(
+            profile.operations[operation]
+                .allowed_existing_node_types
+                .is_empty(),
+            "{operation} must attach new gates canonically without editing the target node"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn research_run_types_verify_after_target_sync_and_require_guarded_promotion()
+-> Result<(), Box<dyn Error>> {
+    for id in ["small", "medium", "large"] {
+        let run_type: Value = serde_yaml::from_str(&fs::read_to_string(
+            profile_root().join(format!("run-types/{id}.yaml")),
+        )?)?;
+        let stages = run_type["pipeline"]["stages"]
+            .as_object()
+            .expect("research run stages");
+        for (stage, kind) in [
+            ("target-sync", "target_sync"),
+            ("verification", "checkpoint"),
+            ("report", "action"),
+            ("promotion", "promotion"),
+        ] {
+            assert_eq!(
+                stages[stage]["kind"], kind,
+                "{id} research run must configure {stage} as {kind}"
+            );
+        }
+        let order = run_type["pipeline"]["order"]
+            .as_array()
+            .expect("research pipeline order")
+            .iter()
+            .map(|stage| stage.as_str().expect("stage id"))
+            .collect::<Vec<_>>();
+        let position = |stage: &str| {
+            order
+                .iter()
+                .position(|candidate| *candidate == stage)
+                .unwrap_or_else(|| panic!("{id} research run is missing {stage}"))
+        };
+        assert!(position("orchestrate") < position("target-sync"));
+        assert!(position("target-sync") < position("verification"));
+        assert!(position("verification") < position("report"));
+        assert!(position("report") < position("promotion"));
+        assert_eq!(
+            run_type["promotion"]["conflict_operation"],
+            "resolve-target-integration"
+        );
+    }
+
+    let profile = ProfileCompiler::compile(&profile_root())?;
+    let operation = &profile.operations["integration.target.resolve-conflict"];
+    assert_eq!(operation.public_operation(), "resolve-target-integration");
+    assert!(operation.target_types.is_empty());
+    assert!(operation.allowed_new_node_types.is_empty());
+    assert!(operation.allowed_existing_node_types.is_empty());
+    let workflow = &profile.workflows["target-integration-conflict"];
+    assert_eq!(workflow.applies_to, ["resolve-target-integration"]);
+    assert!(
+        workflow
+            .steps
+            .iter()
+            .all(|step| step.graph_mutation == GraphMutationPolicyDef::Forbidden),
+        "target integration recovery must not rewrite the empirical graph"
     );
     Ok(())
 }
@@ -196,9 +510,11 @@ fn research_experiment_ontology_is_owned_by_compiled_profile_contracts()
         operation.existing_node_edge_additions_only["hypothesis"],
         vec!["experiments"]
     );
-    assert_eq!(
-        operation.existing_node_edge_additions_only["claim"],
-        vec!["tested_by"]
+    assert!(
+        !operation
+            .allowed_existing_node_types
+            .iter()
+            .any(|node_type| node_type == "claim")
     );
     assert_eq!(
         operation.extensions["portfolio_guidance"]["preferred_count"],
@@ -251,23 +567,32 @@ fn research_experiment_ontology_is_owned_by_compiled_profile_contracts()
         receipt_coverage.disposition.allowed_values,
         vec!["supports", "contradicts", "neutral", "out_of_scope"]
     );
-    let claim_tested_by = engine
-        .profile()
-        .edge_types
-        .iter()
-        .find(|edge| edge.source == "claim" && edge.relation == "tested_by")
-        .expect("claim tested_by edge exists");
-    assert_eq!(claim_tested_by.inverse.as_deref(), Some("target_claims"));
+    assert!(
+        !engine
+            .profile()
+            .edge_types
+            .iter()
+            .any(|edge| edge.source == "claim" && edge.relation == "tested_by")
+    );
     let experiment_target_claims = engine
         .profile()
         .edge_types
         .iter()
         .find(|edge| edge.source == "experiment" && edge.relation == "target_claims")
         .expect("experiment target_claims edge exists");
+    assert!(experiment_target_claims.bidirectional);
     assert_eq!(
         experiment_target_claims.inverse.as_deref(),
         Some("tested_by")
     );
+    let ablation_target_claims = engine
+        .profile()
+        .edge_types
+        .iter()
+        .find(|edge| edge.source == "ablation" && edge.relation == "target_claims")
+        .expect("ablation target_claims edge exists");
+    assert!(ablation_target_claims.bidirectional);
+    assert_eq!(ablation_target_claims.inverse.as_deref(), Some("tested_by"));
 
     let evidence = &engine.profile().node_types["evidence"];
     for field in [
@@ -447,7 +772,7 @@ fn context_contract_selection_is_stable_under_unrelated_profile_additions()
 }
 
 #[test]
-fn representative_gate_context_is_compact_and_keeps_reciprocal_relations()
+fn representative_gate_context_is_compact_and_keeps_one_canonical_gate_relation()
 -> Result<(), Box<dyn Error>> {
     let temp = TempDir::new()?;
     let root = temp.path().join("research-project");
@@ -466,7 +791,7 @@ fn representative_gate_context_is_compact_and_keeps_reciprocal_relations()
     let claim = Node::new(
         "claim",
         "Representative scoped claim",
-        empirical_claim_spec("The configured context compiler keeps reciprocal gate semantics."),
+        empirical_claim_spec("The configured context compiler keeps canonical gate semantics."),
     );
     hypothesis
         .edges
@@ -518,6 +843,39 @@ fn representative_gate_context_is_compact_and_keeps_reciprocal_relations()
         ),
     )?;
     let compiled = compiled_context_json(&document)?;
+    let graph_closure = compiled["graph_closure"]
+        .as_array()
+        .expect("model-facing graph closure");
+    assert!(graph_closure.iter().all(|node| {
+        node.get("status").is_none()
+            && node.get("readiness").is_none()
+            && node.get("obligations").is_none()
+            && node.get("compiler").is_none()
+    }));
+    assert!(
+        graph_closure
+            .iter()
+            .all(|node| { node.pointer("/spec/planning_context").is_none() })
+    );
+    assert_eq!(compiled["selected_step"]["graph_mutation"], "forbidden");
+    assert_eq!(
+        compiled["contracts"]["graph_delta_policy"]["step_policy"],
+        "forbidden"
+    );
+    assert_eq!(
+        compiled["contracts"]["output_payload"]["field_shapes"]["receipts"],
+        json!(["<string>"])
+    );
+    assert_eq!(
+        compiled["contracts"]["output_payload"]["field_shapes"]["structured_output"],
+        json!({})
+    );
+    assert!(
+        compiled["contracts"]["output_payload"]["rule"]
+            .as_str()
+            .is_some_and(|rule| rule.contains("receipts") && rule.contains("strings only")),
+        "the issued payload contract must prevent object-shaped receipt retries"
+    );
     let edge_contracts = compiled["contracts"]["edge_types"]
         .as_array()
         .expect("gate edge contracts");
@@ -542,16 +900,16 @@ fn representative_gate_context_is_compact_and_keeps_reciprocal_relations()
         gate_subjects["status_excluding"],
         json!(["archived", "superseded"])
     );
-    assert!(edge_contracts.iter().any(|edge| {
-        edge["source"] == "claim"
-            && edge["relation"] == "gates"
-            && edge["targets"]
-                .as_array()
-                .is_some_and(|targets| targets.iter().any(|target| target == "gate"))
-    }));
+    assert!(
+        !edge_contracts
+            .iter()
+            .any(|edge| { edge["source"] == "claim" && edge["relation"] == "gates" })
+    );
     assert!(edge_contracts.iter().any(|edge| {
         edge["source"] == "gate"
             && edge["relation"] == "applies_to"
+            && edge["bidirectional"] == true
+            && edge["inverse"] == "gates"
             && edge["targets"]
                 .as_array()
                 .is_some_and(|targets| targets.iter().any(|target| target == "claim"))
@@ -570,12 +928,21 @@ fn representative_gate_context_is_compact_and_keeps_reciprocal_relations()
         .as_u64()
         .expect("unpruned contract bytes");
     assert!(
-        selected_bytes * 2 < unpruned_bytes,
-        "the representative gate ticket should remove more than half of its generic contract bytes: {stats}"
+        selected_bytes * 3 < unpruned_bytes * 2,
+        "the representative gate ticket should remove at least one third of its generic contract bytes: {stats}"
+    );
+    let graph_stats = &pack["manifest"]["size_stats"]["graph_closure"];
+    assert_eq!(
+        graph_stats["projection"],
+        "semantic_fields_without_compiler_owned_fields"
     );
     assert!(
-        document.len() < 32_000,
-        "the representative gate context, including its self-contained policy/query contract, must stay suitable for one-shot reading: {} bytes",
+        graph_stats["bytes_saved"].as_u64().unwrap_or_default() > 0,
+        "compiler-owned graph projections should stay out of worker context: {graph_stats}"
+    );
+    assert!(
+        document.len() < 48 * 1024,
+        "the representative gate context, including its self-contained policy/query contract, must stay below 48 KiB for one-shot reading: {} bytes",
         document.len()
     );
     Ok(())
@@ -1001,7 +1368,6 @@ fn catalog_formulation_ticket_squash_integrates_from_ticket_worktree() -> Result
     );
     assert!(ticket_worktree.is_dir());
 
-    let integration_before = head_oid(&integration_repository)?;
     let mut ticket_engine = Engine::open_run(&ticket_worktree, &run_id)?;
     let first_context = ticket_engine.execute_action(
         "context",
@@ -1338,9 +1704,75 @@ fn catalog_formulation_ticket_squash_integrates_from_ticket_worktree() -> Result
         .id
         .clone();
 
+    // Recovery repairs the live ticket checkout and must publish that repaired
+    // semantic projection to the ticket branch. Board inspection intentionally
+    // reads the atomic branch tip, so leaving only an uncommitted worktree edit
+    // would make a recovered ticket appear permanently blocked.
+    let mut blocked_ticket = ticket_store.ticket(&ticket_id)?;
+    blocked_ticket.status = "blocked".to_owned();
+    blocked_ticket.blockers.push(Blocker {
+        kind: "integration-failure".to_owned(),
+        message: "simulated ticket integration conflict".to_owned(),
+        created_at: chrono::Utc::now(),
+        related_ticket: None,
+    });
+    ticket_store.write_ticket(&blocked_ticket)?;
+    let ticket_repository = Repository::open(&ticket_worktree)?;
+    commit_all_changes(
+        &ticket_repository,
+        "test: persist blocked ticket projection",
+    )?;
+    let blocked_head = head_oid(&ticket_repository)?;
+    let blocked_board = main_engine.inspect()?;
+    assert!(blocked_board.blocked_tickets.contains(&ticket_id));
+
+    main_engine.execute_action("recover", BTreeMap::new())?;
+    let recovered_head = head_oid(&ticket_repository)?;
+    assert_ne!(
+        recovered_head, blocked_head,
+        "recovery checkpoints the repaired ticket projection on its branch"
+    );
+    assert!(repository_status(&ticket_repository)?.is_empty());
+    let recovered_board = main_engine.inspect()?;
+    assert!(!recovered_board.blocked_tickets.contains(&ticket_id));
+    assert!(
+        recovered_board.tickets_by_status["in_progress"].contains(&ticket_id),
+        "atomic branch-tip inspection observes the recovered ticket status"
+    );
+    let integration_before = head_oid(&integration_repository)?;
+
     // A failed or rejected Lead action can append valid compiler control state
     // in the integration checkout while ticket work remains isolated. Finish
     // must preserve that state in a checkpoint before composing the squash.
+    // A disjoint ticket may also have advanced compiler-owned projection data
+    // on a node whose reviewed semantic fields remain unchanged. Finish must
+    // rebase that volatile projection rather than report a semantic conflict.
+    let mut concurrent_graph = main_store.graph()?;
+    let mut concurrent_hypothesis = concurrent_graph
+        .node(&hypothesis.id)
+        .cloned()
+        .expect("integration retains the root hypothesis");
+    let mut compiler_projection = concurrent_hypothesis
+        .extensions
+        .get("compiler")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    compiler_projection
+        .as_object_mut()
+        .expect("compiler projection is an object")
+        .insert(
+            "concurrent_projection".to_owned(),
+            Value::String("integration".to_owned()),
+        );
+    concurrent_hypothesis
+        .extensions
+        .insert("compiler".to_owned(), compiler_projection);
+    concurrent_graph.upsert(concurrent_hypothesis);
+    let concurrent_graph_path =
+        concurrent_graph.save_node(&main_store.graph_dir(), &hypothesis.id)?;
+    let concurrent_graph_relative = concurrent_graph_path
+        .strip_prefix(&approved.worktree)?
+        .to_path_buf();
     let observer_event = Event::new(
         &run_id,
         "test.observer-note",
@@ -1348,10 +1780,9 @@ fn catalog_formulation_ticket_squash_integrates_from_ticket_worktree() -> Result
         json!({"note": "control state written outside the ticket worktree"}),
     );
     main_store.append_event(&observer_event)?;
-    assert_eq!(
-        repository_status(&integration_repository)?,
-        vec![PathBuf::from("program/events.jsonl")]
-    );
+    let integration_changes = repository_status(&integration_repository)?;
+    assert!(integration_changes.contains(&PathBuf::from("program/events.jsonl")));
+    assert!(integration_changes.contains(&concurrent_graph_relative));
     assert!(repository_status(&repository)?.is_empty());
 
     // Recovery can replay finish after its durable transition step completed
@@ -1404,6 +1835,15 @@ fn catalog_formulation_ticket_squash_integrates_from_ticket_worktree() -> Result
     let stored_hypothesis = final_graph
         .node(&hypothesis.id)
         .expect("the integrated graph retains the hypothesis");
+    assert_eq!(
+        stored_hypothesis
+            .extensions
+            .get("compiler")
+            .and_then(|compiler| compiler.get("concurrent_projection"))
+            .and_then(Value::as_str),
+        Some("integration"),
+        "finish preserves the latest compiler-owned integration projection"
+    );
     assert_eq!(
         stored_hypothesis.edges.get("claims"),
         Some(&vec![claim.id.clone()])
@@ -1539,27 +1979,28 @@ fn catalog_formulation_ticket_squash_integrates_from_ticket_worktree() -> Result
                 == Some("experiment-design.hypothesis.design-experiment")
         })
         .expect("formulation completion emits the configured portfolio ticket");
-    assert_eq!(
-        experiment_ticket.scope.read_nodes,
-        experiment_ticket.target_nodes.iter().cloned().collect(),
-        "the portfolio ticket's static scope is only its hypothesis target"
-    );
-    let expected_portfolio_write_scope = experiment_ticket
+    let expected_portfolio_read_scope = experiment_ticket
         .target_nodes
         .iter()
         .cloned()
         .chain([claim.id.clone()])
         .collect();
     assert_eq!(
+        experiment_ticket.scope.read_nodes, expected_portfolio_read_scope,
+        "portfolio work reads its hypothesis and claims without gaining claim write authority"
+    );
+    let expected_portfolio_write_scope = experiment_ticket.target_nodes.iter().cloned().collect();
+    assert_eq!(
         experiment_ticket.scope.write_nodes, expected_portfolio_write_scope,
-        "portfolio work may address claim reciprocity as well as the hypothesis portfolio edge"
+        "portfolio work writes the hypothesis edge; new experiments own their canonical claim links"
     );
     let portfolio_operation =
         &next_stage_engine.profile().operations["experiment-design.hypothesis.design-experiment"];
-    assert_eq!(
-        portfolio_operation.existing_node_edge_additions_only["claim"],
-        vec!["tested_by"],
-        "writable claim scope grants only reciprocal coverage-edge additions, never claim semantic rewrites"
+    assert!(
+        !portfolio_operation
+            .allowed_existing_node_types
+            .iter()
+            .any(|node_type| node_type == "claim")
     );
     let experiment_ticket_id = experiment_ticket.id.clone();
     next_stage_engine.execute_action(
@@ -1640,6 +2081,8 @@ fn catalog_formulation_ticket_squash_integrates_from_ticket_worktree() -> Result
     assert!(edge_contracts.iter().any(|edge| {
         edge["source"] == "experiment"
             && edge["relation"] == "target_claims"
+            && edge["bidirectional"] == true
+            && edge["inverse"] == "tested_by"
             && edge["targets"]
                 .as_array()
                 .is_some_and(|targets| targets.iter().any(|target| target == "claim"))
@@ -1687,13 +2130,8 @@ fn catalog_formulation_ticket_squash_integrates_from_ticket_worktree() -> Result
                 ("payload", rewrite_payload.as_str()),
             ]),
         )
-        .expect_err("portfolio claim authority is edge-addition-only");
-    assert!(
-        error
-            .to_string()
-            .contains("may only add configured edges on existing claim nodes"),
-        "{error}"
-    );
+        .expect_err("portfolio claims are read-only context");
+    assert!(error.to_string().contains("out-of-scope"), "{error}");
     assert_eq!(
         experiment_store.graph()?.node(&target_claim.id).cloned(),
         Some(target_claim.clone()),
@@ -1759,7 +2197,7 @@ fn catalog_formulation_ticket_squash_integrates_from_ticket_worktree() -> Result
                 }),
             );
             experiment.edges.insert(
-                "target_claims".to_owned(),
+                "tests".to_owned(),
                 vec![target_claim.id.clone()],
             );
             experiment
@@ -2034,8 +2472,18 @@ fn compatible_additions_are_idempotent_but_cannot_update_existing_nodes()
     );
     assert_eq!(
         main_engine.inspect()?.failed_journals.len(),
-        3,
-        "the integration-checkout board includes failed ticket-worktree journals"
+        0,
+        "successful corrected outputs supersede retryable failures on the exact same ticket step"
+    );
+    let recovered = ticket_store
+        .journals()?
+        .into_iter()
+        .filter(|journal| journal.status == koni_core::state::JournalStatus::Recovered)
+        .collect::<Vec<_>>();
+    assert_eq!(recovered.len(), 3);
+    assert!(
+        recovered.iter().all(|journal| journal.error.is_some()),
+        "superseded validation failures remain auditable"
     );
     Ok(())
 }
@@ -2100,7 +2548,7 @@ fn output_rejects_compiler_internal_typed_wrapper_before_materialization()
     assert!(
         error
             .to_string()
-            .contains("field `typed` is compiler-reserved")
+            .contains("fields `typed` and `context_supplements` are compiler-reserved")
     );
     assert!(ticket_store.graph()?.node(&claim.id).is_none());
     assert!(ticket_store.ticket(&ticket_id)?.outputs.is_empty());
@@ -2344,7 +2792,7 @@ fn compiler_filesystem_manifest_scopes_acceptance_and_reopens_on_vendor_or_file_
     let entrypoint = format!("{asset_root}/main.py");
     let supporting = format!("{asset_root}/nested/data.txt");
     let gate_result = format!(
-        "{{\"schema_version\":\"1.0\",\"protocol\":\"autoresearch.gate-result.v1\",\"gate_id\":\"{}\",\"verdict\":\"passed\",\"measurements\":{{\"ready\":true}}}}\n",
+        "{{\"schema_version\":\"1.0\",\"protocol\":\"autoresearch.gate-result.v1\",\"gate_id\":\"{}\",\"verdict\":\"passed\",\"measurements\":{{\"ready\":true}}}}",
         gate.id
     );
     asset.spec = json!({
@@ -2551,7 +2999,7 @@ fn compile_ticket_action_reaccepts_filesystem_changes_for_tracked_and_git_common
         let asset_root = format!("program/assets/{}", asset.id);
         let entrypoint = format!("{asset_root}/main.py");
         let gate_result = format!(
-            "{{\"schema_version\":\"1.0\",\"protocol\":\"autoresearch.gate-result.v1\",\"gate_id\":\"{}\",\"verdict\":\"passed\",\"measurements\":{{\"ready\":true}}}}\n",
+            "{{\"schema_version\":\"1.0\",\"protocol\":\"autoresearch.gate-result.v1\",\"gate_id\":\"{}\",\"verdict\":\"passed\",\"measurements\":{{\"ready\":true}}}}",
             gate.id
         );
         asset.spec = json!({
@@ -2577,7 +3025,9 @@ fn compile_ticket_action_reaccepts_filesystem_changes_for_tracked_and_git_common
         graph.save_node(&store.graph_dir(), &asset.id)?;
         fs::create_dir_all(root.join(&asset_root))?;
         fs::write(root.join(&entrypoint), "print('version one')\n")?;
-        engine.compile(None, false)?;
+        engine.compile(None, false).map_err(|error| {
+            std::io::Error::other(format!("{backend} initial full compile failed: {error}"))
+        })?;
         let mut ticket = store
             .tickets()?
             .into_iter()
@@ -2594,7 +3044,11 @@ fn compile_ticket_action_reaccepts_filesystem_changes_for_tracked_and_git_common
             &repository,
             &format!("test: checkpoint {backend} asset fixture"),
         )?;
-        engine.execute_action("start", string_params([("ticket_id", ticket.id.as_str())]))?;
+        engine
+            .execute_action("start", string_params([("ticket_id", ticket.id.as_str())]))
+            .map_err(|error| {
+                std::io::Error::other(format!("{backend} ticket start failed: {error}"))
+            })?;
         let ticket_worktree = store
             .ticket(&ticket.id)?
             .lease
@@ -2609,10 +3063,14 @@ fn compile_ticket_action_reaccepts_filesystem_changes_for_tracked_and_git_common
             },
             &ticket_engine.profile().manifest.storage,
         )?;
-        ticket_engine.execute_action(
-            "compile-ticket",
-            string_params([("ticket_id", ticket.id.as_str())]),
-        )?;
+        ticket_engine
+            .execute_action(
+                "compile-ticket",
+                string_params([("ticket_id", ticket.id.as_str())]),
+            )
+            .map_err(|error| {
+                std::io::Error::other(format!("{backend} initial scoped compile failed: {error}"))
+            })?;
         let scoped_receipts = fs::read_dir(ticket_store.receipts_dir())?
             .filter_map(|entry| entry.ok())
             .filter_map(|entry| fs::read_to_string(entry.path()).ok())
@@ -2626,6 +3084,24 @@ fn compile_ticket_action_reaccepts_filesystem_changes_for_tracked_and_git_common
             receipt["filesystem_manifests"][&asset.id]["manifest"]["implementation_status"]
                 == "ready"
         }));
+        let accepted_content_hashes = || -> Result<BTreeSet<String>, Box<dyn Error>> {
+            Ok(fs::read_dir(ticket_store.receipts_dir())?
+                .filter_map(|entry| entry.ok())
+                .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+                .filter_map(|text| serde_yaml::from_str::<Value>(&text).ok())
+                .filter(|receipt| {
+                    receipt.get("receipt_type").and_then(Value::as_str) == Some("scoped-compile")
+                        && receipt.get("ticket_id").and_then(Value::as_str)
+                            == Some(ticket.id.as_str())
+                })
+                .filter_map(|receipt| {
+                    receipt["filesystem_manifests"][&asset.id]["manifest"]["accepted_content_hash"]
+                        .as_str()
+                        .map(ToOwned::to_owned)
+                })
+                .collect())
+        };
+        assert_eq!(accepted_content_hashes()?.len(), 1);
 
         let worktree_repository = Repository::open(&ticket_worktree)?;
         commit_file(
@@ -2634,52 +3110,54 @@ fn compile_ticket_action_reaccepts_filesystem_changes_for_tracked_and_git_common
             "print('version two')\n",
             "test: mutate accepted filesystem input",
         )?;
-        let review_error = ticket_engine
+        ticket_engine
+            .execute_action(
+                "compile-ticket",
+                string_params([("ticket_id", ticket.id.as_str())]),
+            )
+            .map_err(|error| {
+                std::io::Error::other(format!("{backend} mutated scoped compile failed: {error}"))
+            })?;
+        assert_eq!(
+            accepted_content_hashes()?.len(),
+            2,
+            "{backend} scoped compilation reaccepts the first content mutation"
+        );
+        ticket_engine
             .execute_action(
                 "review",
                 string_params([("ticket_id", ticket.id.as_str()), ("status", "passed")]),
             )
-            .expect_err("file mutation must stale review acceptance")
-            .to_string();
-        assert!(
-            review_error.contains("not review-ready") && review_error.contains("target state"),
-            "{backend} review rejection should identify stale target state: {review_error}"
-        );
-
-        ticket_engine.execute_action(
-            "compile-ticket",
-            string_params([("ticket_id", ticket.id.as_str())]),
-        )?;
-        ticket_engine.execute_action(
-            "review",
-            string_params([("ticket_id", ticket.id.as_str()), ("status", "passed")]),
-        )?;
+            .map_err(|error| std::io::Error::other(format!("{backend} review failed: {error}")))?;
         commit_file(
             &worktree_repository,
             Path::new(&entrypoint),
             "print('version three')\n",
             "test: stale reviewed filesystem input",
         )?;
-        let finish_error = ticket_engine
-            .execute_action("finish", string_params([("ticket_id", ticket.id.as_str())]))
-            .expect_err("file mutation must stale finish acceptance")
-            .to_string();
-        assert!(
-            finish_error.contains("target state") || finish_error.contains("review-ready"),
-            "{backend} finish rejection should identify stale acceptance: {finish_error}"
+        ticket_engine
+            .execute_action(
+                "compile-ticket",
+                string_params([("ticket_id", ticket.id.as_str())]),
+            )
+            .map_err(|error| {
+                std::io::Error::other(format!(
+                    "{backend} post-review scoped compile failed: {error}"
+                ))
+            })?;
+        assert_eq!(
+            accepted_content_hashes()?.len(),
+            3,
+            "{backend} scoped compilation reaccepts a post-review content mutation"
         );
-        ticket_engine.execute_action(
-            "compile-ticket",
-            string_params([("ticket_id", ticket.id.as_str())]),
-        )?;
     }
     Ok(())
 }
 
 #[test]
 #[cfg(target_os = "macos")]
-fn oracle_edge_vocabulary_and_compatible_asset_relationship_advance_gate()
--> Result<(), Box<dyn Error>> {
+fn canonical_gate_edge_and_compatible_asset_relationship_advance_gate() -> Result<(), Box<dyn Error>>
+{
     let temp = TempDir::new()?;
     let root = temp.path().join("research-project");
     copy_fixture(&profile_root(), &root.join(".codex/koni"))?;
@@ -2689,32 +3167,19 @@ fn oracle_edge_vocabulary_and_compatible_asset_relationship_advance_gate()
     assert!(engine.profile().edge_types.iter().any(|edge| {
         edge.source == "gate"
             && edge.relation == "applies_to"
+            && edge.bidirectional
+            && edge.inverse.as_deref() == Some("gates")
             && edge.targets.contains(&"claim".to_owned())
     }));
-    assert!(engine.profile().edge_types.iter().any(|edge| {
-        edge.source == "claim"
-            && edge.relation == "gates"
-            && edge.targets.contains(&"gate".to_owned())
-    }));
-    for source in [
-        "hypothesis",
-        "claim",
-        "experiment",
-        "prerequisite",
-        "metric",
-        "method",
-        "ablation",
-    ] {
-        assert!(
-            engine.profile().edge_types.iter().any(|edge| {
-                edge.source == source
-                    && edge.relation == "gates"
-                    && edge.targets == vec!["gate".to_owned()]
-            }),
-            "missing oracle-compatible {source}.gates relation"
-        );
-    }
-    assert_eq!(engine.profile().edge_types.len(), 66);
+    assert!(
+        !engine
+            .profile()
+            .edge_types
+            .iter()
+            .any(|edge| edge.relation == "gates"),
+        "the inverse gates view must not have a second stored declaration"
+    );
+    assert_eq!(engine.profile().edge_types.len(), 58);
     assert_eq!(
         engine
             .profile()
@@ -2722,7 +3187,7 @@ fn oracle_edge_vocabulary_and_compatible_asset_relationship_advance_gate()
             .iter()
             .map(|edge| edge.targets.len())
             .sum::<usize>(),
-        158
+        149
     );
     assert!(
         !engine
@@ -3353,7 +3818,12 @@ fn configured_review_effects_own_promotion_and_bind_it_to_the_exact_pass()
         "context",
         string_params([("ticket_id", fixture.ticket_id.as_str()), ("step", "work")]),
     )?;
-    prepare_review_effect_candidate(&mut fixture, std::slice::from_ref(&candidate))?;
+    let mut corrected_candidate = candidate.clone();
+    corrected_candidate.spec["limitations"] = json!([
+        "This fixture is not a universal proof.",
+        "The corrected candidate is limited to the declared deterministic fixture."
+    ]);
+    prepare_review_effect_candidate(&mut fixture, std::slice::from_ref(&corrected_candidate))?;
     fixture.engine.review_ticket_with(
         &fixture.ticket_id,
         &StaticReviewLauncher::passing(
@@ -3411,7 +3881,22 @@ fn configured_review_effects_own_promotion_and_bind_it_to_the_exact_pass()
         "lead",
         "a forged effect binding cannot mutate the compiler-owned graph field"
     );
+    let blocked_source = fixture.store.ticket(&fixture.ticket_id)?;
+    assert_eq!(blocked_source.status, "blocked");
+    let resolver_ticket = fixture
+        .store
+        .tickets()?
+        .into_iter()
+        .find(|ticket| ticket.operation == "resolve-conflict")
+        .expect("terminal provenance failure emits one typed resolver ticket");
+    assert_eq!(
+        resolver_ticket.extensions["terminal_resolver_binding"]["source_ticket_id"],
+        fixture.ticket_id
+    );
 
+    // Restore the previously proven ticket projection to isolate the original
+    // successful-finish assertion. The failed action's resolver remains
+    // durable evidence because this test intentionally bypasses its workflow.
     fixture.store.write_ticket(&original)?;
     fixture.engine.execute_action(
         "finish",
@@ -3419,7 +3904,7 @@ fn configured_review_effects_own_promotion_and_bind_it_to_the_exact_pass()
     )?;
     let integrated = Engine::open(&fixture.root)?;
     let board = integrated.inspect()?;
-    assert!(board.eligible_tickets.is_empty());
+    assert_eq!(board.eligible_tickets, vec![resolver_ticket.id]);
     assert_eq!(
         StateStore::with_storage(
             fixture.root.join("program"),
@@ -3436,22 +3921,285 @@ fn configured_review_effects_own_promotion_and_bind_it_to_the_exact_pass()
 }
 
 #[test]
-fn configured_review_effect_exact_count_fails_without_partial_promotion()
+fn newer_review_rework_restores_tracked_review_effects_before_reopening()
+-> Result<(), Box<dyn Error>> {
+    let mut fixture = review_effect_fixture()?;
+    let candidate =
+        review_effect_evidence("Evidence superseded after review", &fixture.hypothesis_id);
+    prepare_review_effect_candidate(&mut fixture, std::slice::from_ref(&candidate))?;
+
+    let graph_before_review = fixture.store.graph()?;
+    let unrelated_hypothesis_before = graph_before_review
+        .node(&fixture.hypothesis_id)
+        .cloned()
+        .expect("the fixture hypothesis exists before review");
+    fixture.engine.review_ticket_with(
+        &fixture.ticket_id,
+        &StaticReviewLauncher::passing(
+            "The bounded evidence candidate is ready for compiler-owned promotion.",
+        ),
+    )?;
+
+    let reviewed = fixture.store.ticket(&fixture.ticket_id)?;
+    let review = reviewed
+        .reviews
+        .last()
+        .cloned()
+        .expect("the passed review is durable");
+    assert_eq!(review.status, "passed");
+    let effect_application = review
+        .agent_binding
+        .as_ref()
+        .and_then(|binding| binding.review_effects.as_ref())
+        .expect("the passed review authenticates its compiler-owned effects");
+    let authenticated_pre_effect_candidate: Node = serde_json::from_value(
+        effect_application["pre_effect_nodes"]
+            .get(candidate.id.as_str())
+            .cloned()
+            .expect("the effect records the exact pre-review candidate"),
+    )?;
+    assert_eq!(
+        graph_before_review.node(&candidate.id),
+        Some(&authenticated_pre_effect_candidate),
+        "the authenticated pre-effect snapshot agrees with the reviewed candidate"
+    );
+    let promoted = fixture
+        .store
+        .graph()?
+        .node(&candidate.id)
+        .cloned()
+        .expect("the passed review materializes the candidate");
+    assert_eq!(promoted.spec["promotion_state"], "lead-promoted");
+    assert_eq!(promoted.spec["promotion_review_id"], review.id);
+
+    let original_output_ids = reviewed
+        .outputs
+        .iter()
+        .map(|output| output.id.clone())
+        .collect::<BTreeSet<_>>();
+    assert!(
+        !original_output_ids.is_empty(),
+        "the passed review is bound to current authored outputs"
+    );
+
+    // Ticket steering is authoritative at the integration checkout, while
+    // the reviewed ticket and its compiler-owned effect live in the isolated
+    // tracked worktree. Persist the correction on that authority surface and
+    // invoke the profile's real recovery action from the main checkout.
+    let mut main_engine = Engine::open(&fixture.root)?;
+    let main_store = StateStore::with_storage(
+        fixture.root.join("program"),
+        &main_engine.profile().manifest.storage,
+    )?;
+    let main_manifest = main_store.manifest()?;
+    let run_id = main_manifest.id.clone();
+
+    // Model the Tracked crash seam precisely: preparation has already moved
+    // the ticket to its terminal lane and marked the correlated finish journal
+    // Complete, but deferred squash integration has not run. The newer
+    // correction must retire that replay authority before reopening rework.
+    let prior_status = reviewed.status.clone();
+    let terminal_status = fixture.engine.profile().state_machines["ticket"]
+        .terminal_states
+        .first()
+        .cloned()
+        .expect("the fixture ticket machine has a terminal state");
+    let mut prepared_ticket = reviewed.clone();
+    prepared_ticket.status = terminal_status;
+    fixture.store.write_ticket(&prepared_ticket)?;
+    let prepared_journal = Journal {
+        id: "journal-review-rework-prepared-finish".to_owned(),
+        action: "finish".to_owned(),
+        input_hash: Some("sha256:review-rework-prepared-finish".to_owned()),
+        status: JournalStatus::Complete,
+        started_at: review.reviewed_at,
+        profile_hash: fixture.engine.profile().hash.clone(),
+        completed_steps: vec![0, 1],
+        outputs: BTreeMap::new(),
+        error: None,
+    };
+    fixture.store.write_journal(&prepared_journal)?;
+    let transaction_path = Repository::open(&fixture.root)?
+        .commondir()
+        .join("koni/transactions")
+        .join(&run_id)
+        .join(format!("{}.yaml", prepared_journal.id));
+    fs::create_dir_all(
+        transaction_path
+            .parent()
+            .expect("transaction has a run directory"),
+    )?;
+    let mut steering = Event::new(
+        &run_id,
+        "compiler.steering.recorded",
+        Some(fixture.ticket_id.clone()),
+        json!({
+            "kind": "review-rework",
+            "message": "The evidence summary overstates what the bounded fixture demonstrates.",
+            "ticket_id": fixture.ticket_id,
+            "target_nodes": [fixture.hypothesis_id],
+            "priority": "normal"
+        }),
+    );
+    steering.actor = "lead".to_owned();
+    let steering_id = steering.id.clone();
+    main_store.append_event(&steering)?;
+    commit_all_changes(
+        &Repository::open(&fixture.root)?,
+        "test: record authoritative review correction",
+    )?;
+
+    let terminal_ticket_hash = normalized_hash(&fixture.store.ticket(&fixture.ticket_id)?);
+    let terminal_graph_hash = normalized_hash(&fixture.store.graph()?);
+    let terminal_journal_hash = normalized_hash(
+        &fixture
+            .store
+            .journals()?
+            .into_iter()
+            .find(|journal| journal.id == prepared_journal.id)
+            .expect("the early-complete finish journal exists"),
+    );
+    let terminal_error = main_engine
+        .execute_action("recover", BTreeMap::new())
+        .expect_err("a completed or missing integration boundary cannot be partially reopened");
+    assert!(
+        terminal_error
+            .to_string()
+            .contains("no safely reversible prepared integration boundary"),
+        "{terminal_error}"
+    );
+    assert_eq!(
+        normalized_hash(&fixture.store.ticket(&fixture.ticket_id)?),
+        terminal_ticket_hash
+    );
+    assert_eq!(
+        normalized_hash(&fixture.store.graph()?),
+        terminal_graph_hash
+    );
+    assert_eq!(
+        normalized_hash(
+            &fixture
+                .store
+                .journals()?
+                .into_iter()
+                .find(|journal| journal.id == prepared_journal.id)
+                .expect("fail-closed recovery preserves the finish journal"),
+        ),
+        terminal_journal_hash
+    );
+    assert!(!transaction_path.exists());
+
+    fs::write(
+        &transaction_path,
+        serde_yaml::to_string(&json!({
+            "schema_version": "1.0",
+            "journal_id": prepared_journal.id,
+            "run_id": run_id,
+            "action": "finish",
+            "ticket_id": fixture.ticket_id,
+            "status": "prepared",
+            "integration_ref": main_manifest.integration_branch,
+            "expected_head": head_oid(&Repository::open(&fixture.root)?)?.to_string(),
+            "preintegration_status": prior_status,
+            "result": null,
+            "error": null,
+            "updated_at": review.reviewed_at.to_rfc3339()
+        }))?,
+    )?;
+
+    main_engine.execute_action("recover", BTreeMap::new())?;
+
+    let recovered = fixture.store.ticket(&fixture.ticket_id)?;
+    let recovered_graph = fixture.store.graph()?;
+    assert_eq!(
+        recovered_graph.node(&candidate.id),
+        Some(&authenticated_pre_effect_candidate),
+        "recovery restores the candidate exactly to its authenticated pre-effect state"
+    );
+    assert_eq!(
+        recovered_graph.node(&fixture.hypothesis_id),
+        Some(&unrelated_hypothesis_before),
+        "rolling back the review effect preserves unrelated graph state"
+    );
+    assert!(
+        recovered.outputs.is_empty(),
+        "the configured author boundary and its dependent integration output reopen"
+    );
+    assert_eq!(
+        recovered.status, prior_status,
+        "recovery restores the exact active state replaced by integration preparation"
+    );
+    assert_eq!(
+        fixture
+            .store
+            .journals()?
+            .into_iter()
+            .find(|journal| journal.id == prepared_journal.id)
+            .expect("prepared journal remains durable")
+            .status,
+        JournalStatus::Recovered,
+        "the completed prepared journal cannot replay after correction"
+    );
+    let recovered_transaction: Value =
+        serde_yaml::from_str(&fs::read_to_string(&transaction_path)?)?;
+    assert_eq!(recovered_transaction["status"], "superseded_review_rework");
+    assert_eq!(
+        normalized_hash(&recovered.reviews),
+        normalized_hash(&reviewed.reviews),
+        "the superseded passed review remains durable audit history"
+    );
+    let supersession_history = recovered.extensions["review_rework_supersessions"]
+        .as_array()
+        .expect("recovery records structured review supersession history");
+    assert_eq!(supersession_history.len(), 1);
+    assert_eq!(supersession_history[0]["review_id"], review.id);
+    assert_eq!(supersession_history[0]["steering_event_id"], steering_id);
+    assert_eq!(
+        supersession_history[0]["message"],
+        "The evidence summary overstates what the bounded fixture demonstrates."
+    );
+    let superseded_output_ids = recovered.extensions["superseded_outputs"]
+        .as_array()
+        .expect("reopened outputs remain durable history")
+        .iter()
+        .filter_map(|output| output.get("id").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(superseded_output_ids, original_output_ids);
+
+    let recovered_graph_hash = normalized_hash(&recovered_graph);
+    let recovered_ticket_hash = normalized_hash(&recovered);
+    main_engine.execute_action("recover", BTreeMap::new())?;
+    let replayed = fixture.store.ticket(&fixture.ticket_id)?;
+    assert_eq!(
+        normalized_hash(&fixture.store.graph()?),
+        recovered_graph_hash
+    );
+    assert_eq!(
+        normalized_hash(&replayed),
+        recovered_ticket_hash,
+        "replaying recovery neither reopens history twice nor mutates the repaired ticket"
+    );
+    assert_eq!(
+        replayed.extensions["review_rework_supersessions"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    Ok(())
+}
+
+#[test]
+fn configured_review_effect_exact_count_fails_before_review_without_partial_promotion()
 -> Result<(), Box<dyn Error>> {
     let mut fixture = review_effect_fixture()?;
     let first = review_effect_evidence("First ambiguous candidate", &fixture.hypothesis_id);
     let second = review_effect_evidence("Second ambiguous candidate", &fixture.hypothesis_id);
-    prepare_review_effect_candidate(&mut fixture, &[first.clone(), second.clone()])?;
-    let reviewer = StaticReviewLauncher::passing("Both candidates look plausible.");
-    let error = fixture
-        .engine
-        .review_ticket_with(&fixture.ticket_id, &reviewer)
-        .expect_err("an exact-one effect cannot ambiguously select two candidates");
+    let error = prepare_review_effect_candidate(&mut fixture, &[first.clone(), second.clone()])
+        .expect_err(
+            "the pre-review integration boundary must reject an ambiguous exact-one effect",
+        );
     assert!(error.to_string().contains("expected exactly 1"), "{error}");
-    assert!(
-        reviewer.requests.borrow().is_empty(),
-        "count/precondition readiness is compiler-validated before spending reviewer tokens"
-    );
     let graph = fixture.store.graph()?;
     for node_id in [&first.id, &second.id] {
         let evidence = graph.node(node_id).expect("candidate remains present");
@@ -3614,7 +4362,16 @@ fn prepare_review_effect_candidate(
             // Rework owns the candidate it previously materialized, but an
             // existing-node update must preserve the compiler projections
             // added since that first output.
-            update_nodes.push(serde_json::to_value(current)?);
+            let mut revised = current.clone();
+            revised.title.clone_from(&candidate.title);
+            revised.spec.clone_from(&candidate.spec);
+            revised.edges.clone_from(&candidate.edges);
+            for field in ["promotion_state", "promoted_by", "promotion_review_id"] {
+                if let Some(value) = current.spec.get(field) {
+                    revised.spec[field] = value.clone();
+                }
+            }
+            update_nodes.push(serde_json::to_value(revised)?);
         } else {
             add_nodes.push(agent_new_node_value(candidate)?);
         }
@@ -4133,11 +4890,12 @@ impl StaticReviewLauncher {
     fn passing(summary: &str) -> Self {
         Self {
             output: serde_json::to_string(&json!({
-                "schema_version": "1.0",
+                "schema_version": "1.1",
                 "verdict": "passed",
+                "failure_domain": "none",
                 "summary": summary,
                 "findings": ["No blocking findings remain at the configured boundary."],
-                "evidence_pointers": ["ticket outputs and scoped compile receipts"]
+                "evidence_pointers": ["packet://review/acceptance"]
             }))
             .expect("review result serializes"),
             requests: RefCell::new(Vec::new()),
@@ -4147,11 +4905,12 @@ impl StaticReviewLauncher {
     fn failed(summary: &str) -> Self {
         Self {
             output: serde_json::to_string(&json!({
-                "schema_version": "1.0",
+                "schema_version": "1.1",
                 "verdict": "failed",
+                "failure_domain": "ticket_rework",
                 "summary": summary,
                 "findings": ["The configured acceptance boundary is not yet satisfied."],
-                "evidence_pointers": ["ticket outputs and scoped compile receipts"]
+                "evidence_pointers": ["packet://review/acceptance"]
             }))
             .expect("review result serializes"),
             requests: RefCell::new(Vec::new()),

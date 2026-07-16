@@ -59,7 +59,14 @@ pub(crate) const HARDENED_DISABLED_FEATURES: &[&str] = &[
 
 const MAX_PREFLIGHT_LINE_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(10);
-const RUNTIME_STARTUP_TIMEOUT_SECONDS: u64 = 10;
+// Grant claiming performs compiler-owned currentness checks over the pinned
+// run. Large, long-lived runs can legitimately take several seconds to load,
+// so the required local broker needs more headroom than Codex's 10s default.
+// A large run may start several compiler-bound workers together. Runtime
+// integrity preflight is normally fast and concurrent, but required MCP
+// startup must remain above the bounded run-authority queue so the last
+// healthy worker is not killed merely for being third in the dispatch batch.
+pub(crate) const RUNTIME_STARTUP_TIMEOUT_SECONDS: u64 = 60;
 const RUNTIME_TOOL_TIMEOUT_SECONDS: u64 = 3_660;
 
 #[derive(Debug, Clone)]
@@ -1125,6 +1132,19 @@ done
         .to_string();
         assert!(!error.contains(secret));
         assert!(error.contains("differs from the compiler-owned launch boundary"));
+    }
+
+    #[test]
+    fn required_runtime_gets_large_run_startup_headroom() {
+        let runtime = normalized_runtime_expectation(&RuntimeMcpExpectation {
+            command: PathBuf::from("/bin/echo"),
+            args: vec!["agent-mcp".to_owned()],
+            enabled_tools: vec!["context".to_owned()],
+        })
+        .unwrap();
+
+        assert_eq!(runtime["startup_timeout_sec"], 60.0);
+        assert_eq!(runtime["required"], true);
     }
 
     #[test]

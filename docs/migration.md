@@ -4,6 +4,22 @@ Köni includes a one-time migration for projects configured by its predecessor.
 The old name appears in this document only where it identifies a literal path
 or namespace that the migration must recognize.
 
+> **Distinct Pi/schema 2 migration in progress — 2026-07-14 (`pi_product_docs_transition`):**
+> This document's Pythagoras-to-Köni transaction remains the executable schema-1 migration and its
+> history is not being replaced. A separate, unreleased transaction will migrate a current
+> `.codex/koni` schema-1 project to `.koni` schema 2 and the direct Pi runtime described in
+> [Direct Pi runtime](pi-runtime.md). Schema-1 snapshots remain readable, active Codex-backed runs
+> are archived through compiler-issued evidence, and a migrated project has no Codex fallback.
+
+> **Release-candidate supersession — 2026-07-14 (`pi_product_docs_transition`):** The separate
+> “unreleased transaction” status is historical. Current source contains the schema-1-to-2/Pi
+> release-candidate transaction, with `.koni` as the live post-migration root and no production
+> Codex fallback. Its macOS runtime uses an exact first-cut credential TCB comprising the Köni Rust
+> binary, bundled Pi host, pinned Pi SDK 0.80.7 dependency closure, and official pinned Node 22.19.0;
+> Node retains no compiler-tool, graph, Git, receipt, or project-file authority. Linux login and
+> inference fail closed pending allowlisted egress. Running this migration is a separate guarded
+> operator action, and protected forensic Updog state is never authorization to apply it.
+
 ## What is detected
 
 When `.codex/koni/` is absent, `koni init` checks for the legacy
@@ -12,6 +28,18 @@ listed in that installation's ownership manifest.
 
 Migration does not maintain two live layouts. A successful project uses only
 the Köni configuration and namespace going forward.
+
+> **Schema-2 no-dual-runtime boundary — 2026-07-14 (`pi_product_docs_transition`):** The same
+> one-live-layout principle applies to the planned schema-1-to-2 cutover: `.koni` becomes the only
+> execution source after publication, while old `.codex` snapshots and transcripts remain
+> historical readers rather than executable fallback. The schema-2 transaction is not available
+> until migration recovery/security and the frozen runtime matrix are green.
+
+> **No-dual-runtime supersession — 2026-07-14 (`pi_product_docs_transition`):** Recovery,
+> security, and frozen-matrix evidence now pass for the release candidate, so the explicit
+> transaction is present in current source. The one-live-layout rule is unchanged: publication
+> activates `.koni`, archives active Codex runs permanently, preserves historical readers, and
+> provides no Codex execution fallback.
 
 If both `.codex/koni/` and the legacy directory exist, initialization refuses
 to guess which is authoritative. Reconcile or archive one layout explicitly,
@@ -61,6 +89,20 @@ Validation or publication failure rolls the project back to its exact
 pre-migration state. A failed staging directory is not treated as an installed
 project.
 
+> **Schema-2 migration security hold — 2026-07-14 (`pi_product_docs_transition`):** The six steps
+> above apply to the predecessor-name migration. The new schema-2 transaction must additionally
+> transform only known schema fields, reject symlinked source ancestors, revalidate source and
+> authoritative run-registry state at publication, archive every active Codex run with opaque
+> compiler-issued evidence, and journal/fsync each multi-rename phase for idempotent crash
+> recovery. Prompt, metadata, and embedded schema strings that merely resemble legacy field names
+> must remain byte-preserved. Those gates, plus historical-reader fixtures and the complete Pi
+> security/frozen matrix, remain open in [Direct Pi runtime](pi-runtime.md).
+
+> **Migration-security supersession — 2026-07-14 (`pi_product_docs_transition`):** The current
+> release candidate closes those field-scoped conversion, no-follow ancestor/leaf publication,
+> registry revalidation, compiler-issued archival, fsynced recovery, historical-reader, and frozen-
+> matrix gates. They remain enforced transaction invariants, not checks an operator may waive.
+
 ## Conflicts
 
 Migration stops when:
@@ -75,6 +117,17 @@ Migration stops when:
 Do not use `--replace` to silence an ownership problem you have not inspected.
 Move intentional project customizations into a distinct resource or incorporate
 them into the converted profile, validate, and retry.
+
+> **Schema-2 ownership hold — 2026-07-14 (`pi_product_docs_transition`):** `--replace` likewise
+> cannot authorize schema-2 conversion or retirement. Only manifest-proven owned resources may be
+> converted/retired; unrelated `.codex` content, project customization, and historical readers are
+> preserved. Ancestor redirects, stale ownership hashes, newly appeared legacy runs, partial
+> archival, or an interrupted publication fail closed and require the migration recovery path.
+
+> **Ownership-hold supersession — 2026-07-14 (`pi_product_docs_transition`):** Those fail-closed
+> ownership and recovery rules are implemented in the release candidate. This supersedes their
+> status as open implementation work, not their force: `--replace` still cannot bypass ownership,
+> archival, pathname, or recovery evidence, and unrelated `.codex` resources remain untouched.
 
 ## Legacy profile format
 
@@ -108,3 +161,55 @@ The initializer migrates project configuration and its owned native resources;
 it does not guess at active run directories, worktrees, or Git refs. Do not
 rename those resources manually. Conclude or archive legacy active runs, then
 create new work through Köni.
+
+> **Post-cutover transition in progress — 2026-07-14 (`pi_product_docs_transition`):** The
+> instruction to start a new Codex chat remains correct after the predecessor-name/schema-1
+> migration above. It will not apply after schema 2: Köni will start its pinned Pi host directly,
+> with no Codex fallback, and will retain old run/transcript resources only for inspection.
+> Operator-directed archival is not sufficient evidence for the new transaction; production must
+> bind compiler-issued no-active-runs/archive proof to the current registry revision and migration
+> ID, then resolve the credential-TCB choice (Rust-owned allowlisted auth proxy versus signed/pinned
+> host dependency closure) and pass artifact/containment/protocol/token and frozen-matrix review
+> before publication.
+
+> **Post-cutover supersession — 2026-07-14 (`pi_product_docs_transition`):** The credential-TCB
+> choice is now decided and the named source matrix passes: the exact Köni Rust, bundled host/Pi SDK
+> 0.80.7 closure, and pinned Node 22.19.0 runtime are trusted for provider credentials, while Rust
+> alone owns compiler tools, graph, receipts, Git, and project files. Schema-2 publication still
+> requires the exact compiler-owned migration proof; source readiness or operator intent cannot
+> substitute for it.
+
+## Schema 2 / Pi migration implementation checkpoint — 2026-07-14
+
+The holds above remain the discovery history. The current source implements the explicit
+transaction as:
+
+```sh
+koni migrate-pi --root . --dry-run
+koni migrate-pi --root . --apply
+```
+
+Dry-run hashes every owned source and returns the configuration plus run-disposition plan without
+writing. Apply requires that exact compiler proof, holds migration/registry/per-run authority,
+stages and recompiles `.koni`, archives every eligible active Codex-backed run with the migration
+reason, and publishes with an fsynced recovery journal under Git-common compiler state. Publication
+uses no-follow parent/source descriptors, rechecks the bound inode, performs descriptor-relative
+`renameat`, fsyncs both parents, and verifies the destination inode. Synchronized same-byte leaf
+replacement and ancestor replacement regressions prove that a substituted pathname is rejected or
+that only the already-bound original is moved.
+
+The new live layout is `.koni/` with provider-neutral YAML agents under `.koni/agents/`; repository
+skills remain in `.agents/skills/`. Unrelated `.codex` files and all historical transcript/read
+surfaces remain. A migrated Codex run is forensic history only—Köni never resumes it under Pi.
+
+Focused current-source evidence: schema migration 14/14, migration run-archive/proof 3/3, and CLI
+dry-run/apply 2/2. These focused results establish the transaction boundary; release adoption still
+requires the final whole-workspace and packaged-runtime matrix described in
+[Direct Pi runtime](pi-runtime.md).
+
+> **Migration-candidate endpoint — 2026-07-14 (`pi_product_docs_transition`):** The later final
+> endpoint completes that whole-workspace and packaged-runtime matrix: locked workspace 1,041/0/3,
+> locked clippy/formatting, Pi host 34/34, and a verified temporary-prefix package/model probe. No
+> user installation or live migration occurred during that proof. Apply only as a separate guarded
+> operator action in an authorized project; never reinterpret the protected forensic Updog runs as
+> migration authority.

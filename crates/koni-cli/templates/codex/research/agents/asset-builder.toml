@@ -51,7 +51,8 @@ argv, and verify that same argv exactly; never declare `python` while testing
 Keep the checkout free of transient interpreter/build output: suppress or
 remove `__pycache__`, `*.pyc`, coverage caches, temporary results, and any
 runtime scratch file not explicitly declared by the implementation plan before
-submitting the bounded result through `koni_runtime.submit_output`. Do not
+submitting and compiling the bounded result through
+`koni_runtime.submit_and_compile`. Do not
 invoke Koni lifecycle commands through the shell. Report every product file
 you created or changed in the root-level `files_written` list and every removed
 product file in `files_deleted`; inline file contents in graph metadata are not

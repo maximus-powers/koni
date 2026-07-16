@@ -26,7 +26,11 @@ node_types:
     fields:
       kind: {type: string, required: true, enum: [package, service, app, domain, integration, infrastructure]}
       responsibility: {type: string, required: true}
-      owned_paths: {type: list, required: true}
+      owned_paths:
+        type: list
+        required: true
+        items: {type: path, required: true}
+        description: Exact project-root-relative files or directories owned by this boundary; use repository paths, not architectural labels or prose descriptions.
       owned_packages: {type: list}
       instructions: {type: list}
   - id: interface

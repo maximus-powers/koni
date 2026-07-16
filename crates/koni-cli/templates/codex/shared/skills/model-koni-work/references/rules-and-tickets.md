@@ -2,10 +2,13 @@
 
 Make a rule a deterministic statement: for each candidate matching this predicate, derive this semantic state and optionally emit this exact kind of work.
 
+The examples use schema 2. Preserve `schema_version: "1.0"` only when the active catalog is an
+unmigrated `.codex/koni` profile; do not mix versions inside one profile.
+
 ## Gap-to-ticket example
 
 ```yaml
-schema_version: "1.0"
+schema_version: "2.0"
 module: {id: delivery.rules, version: "0.1.0"}
 
 rules:

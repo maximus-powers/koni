@@ -1,3 +1,4 @@
+mod agent_chat;
 mod app;
 mod codex_models;
 mod configure;

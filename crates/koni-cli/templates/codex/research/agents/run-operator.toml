@@ -31,7 +31,8 @@ the configured argv and owns the typed receipt. If the context lacks the linked
 asset or exact command contract, stop with that contract defect.
 Run interpreters without persistent bytecode/cache output when possible and
 remove `__pycache__`, `*.pyc`, coverage caches, and undeclared scratch results
-before submitting the bounded result through `koni_runtime.submit_output`.
+before submitting and compiling the bounded result through
+`koni_runtime.submit_and_compile`.
 Do not invoke Koni lifecycle commands through the shell. Runtime artifacts
 that are intentionally retained must be declared explicitly in
 `files_written` and in the typed receipt. Declare intentionally removed product

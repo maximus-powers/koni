@@ -1,0 +1,123 @@
+schema_version: "1.0"
+module: {id: software.workflows, version: 0.1.0}
+
+workflows:
+  - id: architecture-map
+    version: 1.0.0
+    applies_to: [map-architecture]
+    steps:
+      - {id: inspect-repository, persona: architecture-mapper, graph_mutation: forbidden, expected_output: Systems and owned paths grounded in repository evidence}
+      - {id: map-boundaries, persona: architecture-mapper, graph_mutation: forbidden, depends_on: [inspect-repository], expected_output: "Interfaces, data models, contracts, flows, exact owned paths, and shared boundary identities"}
+      - {id: integrate, kind: integration, persona: integrator, graph_mutation: required, depends_on: [map-boundaries], expected_output: Coherent linked architecture graph}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: Architecture validity review, validation_action: review}
+  - id: contract-design
+    version: 1.0.0
+    applies_to: [specify-contracts]
+    steps:
+      - {id: inspect-enforcement, persona: contract-designer, graph_mutation: forbidden, expected_output: Current enforcement and compatibility boundaries}
+      - {id: specify-contracts, persona: contract-designer, graph_mutation: forbidden, depends_on: [inspect-enforcement], expected_output: Explicit invariants and failure meanings}
+      - {id: integrate, kind: integration, persona: integrator, graph_mutation: required, depends_on: [specify-contracts], expected_output: Linked contract graph}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: Contract completeness review, validation_action: review}
+  - id: change-design
+    version: 1.0.0
+    applies_to: [plan-change]
+    steps:
+      - {id: analyze-impact, persona: change-designer, graph_mutation: forbidden, expected_output: "Current-to-target deltas, owned paths, and test seams"}
+      - {id: model-risk, persona: risk-analyst, graph_mutation: forbidden, depends_on: [analyze-impact], expected_output: "Regression risks, migrations, and executable proof obligations"}
+      - {id: integrate, kind: integration, persona: integrator, graph_mutation: required, depends_on: [model-risk], expected_output: Dependency-ordered bounded change plan with exact red/green argv and readback contracts}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: Plan feasibility and completeness review, validation_action: review}
+  - id: decision-resolution
+    version: 1.0.0
+    applies_to: [resolve-decision]
+    steps:
+      - {id: evaluate-options, persona: change-designer, graph_mutation: forbidden, expected_output: Evidence-backed option comparison}
+      - {id: integrate, kind: integration, persona: integrator, graph_mutation: required, depends_on: [evaluate-options], expected_output: "Choice, rationale, and reversibility"}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: Decision review, validation_action: review}
+  - id: bounded-implementation
+    version: 2.0.0
+    applies_to: [implement-change, implement-migration]
+    review_failure_reopen_from: write-red-test
+    steps:
+      - id: write-red-test
+        persona: implementer
+        graph_mutation: forbidden
+        read_paths:
+          - {select: $target, field: spec.owned_paths}
+          - {select: $target, field: spec.test_paths}
+        write_paths:
+          - {select: $target, field: spec.test_paths}
+        expected_output: Focused test-only delta plus readback of conditions, expected observation, exact expected failure, why it proves missing behavior, and what remains outside the proof boundary
+        checks: [expected-red]
+        required_receipts: [expected_red]
+        stop_conditions: [Do not modify production behavior before the compiler records the expected-red receipt]
+      - id: implement
+        persona: implementer
+        graph_mutation: forbidden
+        depends_on: [write-red-test]
+        read_paths:
+          - {select: $target, field: spec.owned_paths}
+          - {select: $target, field: spec.test_paths}
+        write_paths:
+          - {select: $target, field: spec.owned_paths}
+        expected_output: Smallest production delta that makes the compiler-bound focused test pass without weakening its assertions
+      - id: verify
+        persona: verifier
+        graph_mutation: forbidden
+        depends_on: [implement]
+        read_paths:
+          - {select: $target, field: spec.owned_paths}
+          - {select: $target, field: spec.test_paths}
+        write_paths: []
+        expected_output: Independent readback plus fresh focused-test and package-typecheck receipts with remaining gaps stated explicitly
+        checks: [focused-test, package-typecheck]
+        required_receipts: [test, typecheck]
+      - id: integrate
+        kind: integration
+        persona: integrator
+        graph_mutation: forbidden
+        depends_on: [verify]
+        read_paths:
+          - {select: $target, field: spec.owned_paths}
+          - {select: $target, field: spec.test_paths}
+        write_paths: []
+        expected_output: Coherent ticket delta preserving the red test, production patch, and bound receipts
+      - id: review
+        kind: review
+        persona: reviewer
+        depends_on: [integrate]
+        read_paths:
+          - {select: $target, field: spec.owned_paths}
+          - {select: $target, field: spec.test_paths}
+        write_paths: []
+        expected_output: Correctness, scope, regression, and elegance review
+        validation_action: review
+  - id: proof-execution
+    version: 2.0.0
+    applies_to: [establish-proof]
+    review_failure_reopen_from: execute-proof
+    steps:
+      - {id: execute-proof, persona: verifier, graph_mutation: forbidden, expected_output: Semantic readback of the configured proof and one fresh compiler-bound command receipt, checks: [proof-command], required_receipts: [proof]}
+      - {id: review, kind: review, persona: reviewer, depends_on: [execute-proof], expected_output: "Proof relevance, freshness, and sufficiency review", validation_action: review}
+  - id: integration-assessment
+    version: 1.0.0
+    applies_to: [assess-integration]
+    steps:
+      - {id: inspect-composed-diff, persona: risk-analyst, expected_output: Cross-ticket interaction and surprise audit}
+      - {id: verify-flows, persona: verifier, depends_on: [inspect-composed-diff], expected_output: End-to-end flow and regression receipts}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [verify-flows], expected_output: Remediation or acceptance result}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: Integration acceptance review, validation_action: review}
+  - id: delivery-review
+    version: 1.0.0
+    applies_to: [prepare-delivery]
+    steps:
+      - {id: audit-proof, persona: verifier, graph_mutation: forbidden, expected_output: Current proof and unresolved-gap ledger, checks: [repo-lint], required_receipts: [lint]}
+      - {id: audit-history, kind: integration, persona: integrator, graph_mutation: forbidden, expected_output: One intentional squash commit per completed ticket}
+      - {id: integrate, kind: integration, persona: integrator, graph_mutation: required, depends_on: [audit-proof, audit-history], expected_output: PR-ready delivery node linked to the objective and included changes and proofs}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: Final merge-readiness review, validation_action: review}
+  - id: target-integration-conflict
+    version: 1.0.0
+    applies_to: [resolve-target-integration]
+    steps:
+      - {id: resolve-conflicts, persona: integrator, graph_mutation: forbidden, expected_output: Conflict-resolved product tree preserving both the run and target changes}
+      - {id: verify-composed-tree, persona: verifier, graph_mutation: forbidden, depends_on: [resolve-conflicts], expected_output: Focused regression evidence for the composed product tree}
+      - {id: review, kind: review, persona: reviewer, graph_mutation: forbidden, depends_on: [verify-composed-tree], expected_output: Independent preservation and regression review, validation_action: review}

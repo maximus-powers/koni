@@ -173,6 +173,11 @@ pub struct QuestionAnswer {
     pub option_id: Option<String>,
     #[serde(default)]
     pub custom: Option<String>,
+    /// Optional operator context that supplements either a selected option or
+    /// a custom answer. This is kept distinct from `custom` so choosing a
+    /// configured option never discards the user's qualification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
     pub source: QuestionAnswerSource,
     pub actor: String,
     pub answered_at: DateTime<Utc>,
@@ -192,6 +197,13 @@ impl QuestionAnswer {
         }
         if self.custom.is_some() && !has_custom {
             return question_error("custom answer must not be blank");
+        }
+        if self
+            .notes
+            .as_deref()
+            .is_some_and(|notes| notes.trim().is_empty())
+        {
+            return question_error("answer notes must not be blank when present");
         }
         if let Some(option_id) = &self.option_id
             && !question
@@ -222,9 +234,10 @@ impl QuestionAnswer {
                 })?;
                 if self.option_id.as_deref() != Some(recommended.id.as_str())
                     || self.custom.is_some()
+                    || self.notes.is_some()
                 {
                     return question_error(
-                        "automatic answer must select the one recommended option",
+                        "automatic answer must select the one recommended option without notes",
                     );
                 }
                 let deadline = question.auto_resolution.as_ref().ok_or_else(|| {
@@ -361,6 +374,17 @@ impl QuestionRecord {
         actor: impl Into<String>,
         now: DateTime<Utc>,
     ) -> Result<()> {
+        self.answer_option_with_notes(option_id, None, source, actor, now)
+    }
+
+    pub fn answer_option_with_notes(
+        &mut self,
+        option_id: impl Into<String>,
+        notes: Option<String>,
+        source: QuestionAnswerSource,
+        actor: impl Into<String>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
         if source == QuestionAnswerSource::AutoResolution {
             return question_error("use auto_resolve to record an automatic answer");
         }
@@ -368,6 +392,7 @@ impl QuestionRecord {
             QuestionAnswer {
                 option_id: Some(option_id.into()),
                 custom: None,
+                notes,
                 source,
                 actor: actor.into(),
                 answered_at: now,
@@ -384,6 +409,17 @@ impl QuestionRecord {
         actor: impl Into<String>,
         now: DateTime<Utc>,
     ) -> Result<()> {
+        self.prepare_answer_option_with_notes(option_id, None, source, actor, now)
+    }
+
+    pub fn prepare_answer_option_with_notes(
+        &mut self,
+        option_id: impl Into<String>,
+        notes: Option<String>,
+        source: QuestionAnswerSource,
+        actor: impl Into<String>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
         if source == QuestionAnswerSource::AutoResolution {
             return question_error("use auto_resolve to record an automatic answer");
         }
@@ -391,6 +427,7 @@ impl QuestionRecord {
             QuestionAnswer {
                 option_id: Some(option_id.into()),
                 custom: None,
+                notes,
                 source,
                 actor: actor.into(),
                 answered_at: now,
@@ -407,6 +444,17 @@ impl QuestionRecord {
         actor: impl Into<String>,
         now: DateTime<Utc>,
     ) -> Result<()> {
+        self.answer_custom_with_notes(custom, None, source, actor, now)
+    }
+
+    pub fn answer_custom_with_notes(
+        &mut self,
+        custom: impl Into<String>,
+        notes: Option<String>,
+        source: QuestionAnswerSource,
+        actor: impl Into<String>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
         if source == QuestionAnswerSource::AutoResolution {
             return question_error("automatic resolution cannot use a custom answer");
         }
@@ -414,6 +462,7 @@ impl QuestionRecord {
             QuestionAnswer {
                 option_id: None,
                 custom: Some(custom.into()),
+                notes,
                 source,
                 actor: actor.into(),
                 answered_at: now,
@@ -430,6 +479,17 @@ impl QuestionRecord {
         actor: impl Into<String>,
         now: DateTime<Utc>,
     ) -> Result<()> {
+        self.prepare_answer_custom_with_notes(custom, None, source, actor, now)
+    }
+
+    pub fn prepare_answer_custom_with_notes(
+        &mut self,
+        custom: impl Into<String>,
+        notes: Option<String>,
+        source: QuestionAnswerSource,
+        actor: impl Into<String>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
         if source == QuestionAnswerSource::AutoResolution {
             return question_error("automatic resolution cannot use a custom answer");
         }
@@ -437,6 +497,7 @@ impl QuestionRecord {
             QuestionAnswer {
                 option_id: None,
                 custom: Some(custom.into()),
+                notes,
                 source,
                 actor: actor.into(),
                 answered_at: now,
@@ -459,6 +520,17 @@ impl QuestionRecord {
         actor: impl Into<String>,
         now: DateTime<Utc>,
     ) -> Result<()> {
+        self.revise_prepared_answer_option_with_notes(option_id, None, source, actor, now)
+    }
+
+    pub fn revise_prepared_answer_option_with_notes(
+        &mut self,
+        option_id: impl Into<String>,
+        notes: Option<String>,
+        source: QuestionAnswerSource,
+        actor: impl Into<String>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
         if source == QuestionAnswerSource::AutoResolution {
             return question_error("use auto-resolve to record an automatic answer");
         }
@@ -466,6 +538,7 @@ impl QuestionRecord {
             QuestionAnswer {
                 option_id: Some(option_id.into()),
                 custom: None,
+                notes,
                 source,
                 actor: actor.into(),
                 answered_at: now,
@@ -481,6 +554,17 @@ impl QuestionRecord {
         actor: impl Into<String>,
         now: DateTime<Utc>,
     ) -> Result<()> {
+        self.revise_prepared_answer_custom_with_notes(custom, None, source, actor, now)
+    }
+
+    pub fn revise_prepared_answer_custom_with_notes(
+        &mut self,
+        custom: impl Into<String>,
+        notes: Option<String>,
+        source: QuestionAnswerSource,
+        actor: impl Into<String>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
         if source == QuestionAnswerSource::AutoResolution {
             return question_error("automatic resolution cannot use a custom answer");
         }
@@ -488,6 +572,7 @@ impl QuestionRecord {
             QuestionAnswer {
                 option_id: None,
                 custom: Some(custom.into()),
+                notes,
                 source,
                 actor: actor.into(),
                 answered_at: now,
@@ -537,6 +622,7 @@ impl QuestionRecord {
             QuestionAnswer {
                 option_id: Some(option_id),
                 custom: None,
+                notes: None,
                 source: QuestionAnswerSource::AutoResolution,
                 actor: "koni:auto-resolution".to_owned(),
                 answered_at: now,
@@ -923,6 +1009,73 @@ mod tests {
         let mut unknown = serde_json::to_value(&question).unwrap();
         unknown["unexpected"] = json!(true);
         assert!(QuestionRecord::from_json(&unknown.to_string()).is_err());
+    }
+
+    #[test]
+    fn selected_option_preserves_optional_operator_notes() {
+        let mut question = QuestionRecord::new(
+            "question-notes",
+            "Choose a path",
+            "Context",
+            options(),
+            true,
+            QuestionPauseScope::Run {
+                run_id: "run-1".to_owned(),
+            },
+            QuestionPolicy::Interactive,
+            QuestionImpact::High,
+            None,
+            resume(),
+            now(),
+        )
+        .unwrap();
+        question
+            .answer_option_with_notes(
+                "recommended",
+                Some("Keep the existing compatibility boundary.".to_owned()),
+                QuestionAnswerSource::Human,
+                "user",
+                now() + Duration::seconds(1),
+            )
+            .unwrap();
+
+        let yaml = serde_yaml::to_string(&question).unwrap();
+        let restored = QuestionRecord::from_yaml(&yaml).unwrap();
+        let answer = restored.answer.unwrap();
+        assert_eq!(answer.option_id.as_deref(), Some("recommended"));
+        assert_eq!(
+            answer.notes.as_deref(),
+            Some("Keep the existing compatibility boundary.")
+        );
+        assert!(answer.custom.is_none());
+
+        let mut blank_notes = QuestionRecord::new(
+            "question-blank-notes",
+            "Choose a path",
+            "Context",
+            options(),
+            true,
+            QuestionPauseScope::Run {
+                run_id: "run-1".to_owned(),
+            },
+            QuestionPolicy::Interactive,
+            QuestionImpact::High,
+            None,
+            resume(),
+            now(),
+        )
+        .unwrap();
+        assert!(
+            blank_notes
+                .answer_option_with_notes(
+                    "recommended",
+                    Some("   ".to_owned()),
+                    QuestionAnswerSource::Human,
+                    "user",
+                    now() + Duration::seconds(1),
+                )
+                .is_err()
+        );
     }
 
     #[test]

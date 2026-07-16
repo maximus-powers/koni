@@ -28,6 +28,34 @@ untrusted code.
 | Always-running daemon or background scheduler | Not included |
 | Stable 1.0 schema/migration guarantee | Not yet |
 
+> **Pi/schema 2 maturity transition — 2026-07-14 (`pi_product_docs_transition`):** The native
+> Codex/resource and end-to-end rows above describe the executable schema-1 checkpoints and remain
+> valid historical evidence. The direct Pi/schema-2 runtime in
+> [Direct Pi runtime](pi-runtime.md) is source-in-progress, not an implemented/shipped row. A
+> migrated project will have Pi as its only runtime, but release still requires independently
+> trusted runtime artifacts, fail-closed teardown, operation-scoped credential authority,
+> and a coherent credential TCB: either a Rust-owned allowlisted TLS/auth proxy or a signed/pinned
+> host-plus-dependency closure. Protocol/token/OAuth containment proof, ownership- and crash-safe
+> migration with active-run archival, historical readers, and one frozen host/Rust/CLI/TUI/profile
+> matrix also remain gates.
+
+> **Release-candidate supersession — 2026-07-14 (`pi_product_docs_transition`):** The preceding
+> source-in-progress/undecided status is historical. Current source is the schema-2/direct-Pi
+> release candidate for the macOS Seatbelt target, with no production Codex fallback. Its exact
+> accepted credential TCB is the Köni Rust binary, bundled Pi host, pinned Pi SDK 0.80.7 dependency
+> closure, and official pinned Node 22.19.0 runtime; Node still owns no compiler-tool, graph, Git,
+> receipt, or project-file authority. Linux networked login and inference fail closed pending a
+> destination-allowlisted egress broker. Installation, migration, credentials, and live acceptance
+> remain separate guarded operator actions; protected forensic Updog state authorizes none of them.
+
+> **Current profile-evidence qualification — 2026-07-14:** The Software and
+> Research row preserves the end-to-end checkpoint that was true for its
+> recorded profile versions. The staged Software 0.4 redesign is not released
+> by that row: its expanded semantic matrix, deterministic same-ticket reopen,
+> prepared-source authority, direct Pi broker path, final independent design
+> review, and one immutable Pi-era integration fingerprint remain separate
+> gates. Research retains its own independently executed profile evidence.
+
 The distinction between “configuration compiles” and “behavior is executable”
 is important. Structural validation proves that IDs, references, selectors,
 workflow graphs, action effects, and schemas are coherent. A primitive or check
@@ -47,6 +75,18 @@ profile should rely on it.
   is explicit and should not be treated as a permanent dual-format mode.
 
 Pin the Köni version used by CI and long-running projects.
+
+> **Schema compatibility transition in progress — 2026-07-14 (`pi_product_docs_transition`):**
+> Schema-1 snapshots and transcripts remain readable, while new schema-1 execution stops only
+> after an explicit successful schema-2 migration. That transaction is not a dual-runtime mode:
+> active Codex runs are authoritatively archived and there is no Codex fallback. Until migration
+> security/recovery and the frozen matrix are green, schema 1 remains the executable product.
+
+> **Schema-compatibility supersession — 2026-07-14 (`pi_product_docs_transition`):** Migration
+> security/recovery, archival, historical readers, and the locked source matrix now pass for the
+> release candidate. Fresh schema-2 projects execute Pi; an existing schema-1 installation remains
+> on its current executable contract until a separately authorized migration, after which Codex is
+> archival history only and cannot be a fallback.
 
 ### Scheduling and recovery
 
@@ -80,9 +120,22 @@ profile labels the action read-only.
 
 - Native command and graph checks are implemented. Agent, manual, and composite
   check declarations require an explicit handler or external receipt.
+  > **Built-in composite exception — 2026-07-14:** The limitation above remains
+  > true for ordinary composite declarations. A validated opt-in
+  > `kind: composite` check with `graph_set` now has a generic built-in handler:
+  > it compiles an exact finite step-scoped member set, executes registered
+  > read-only child commands, derives non-vacuous aggregate readiness, and
+  > participates in currentness and composed replay. Profiles that omit
+  > `graph_set` retain the earlier handler/receipt-only behavior.
 - Context packs and core receipts bind current profile, graph, ticket, target,
   output, and command inputs where applicable. Provenance is not yet uniform
   across every custom artifact and third-party receipt type.
+  > **Step-relevant transport — 2026-07-15:** Eligible graph-forbidden
+  > file/check execution packets now additionally bind hashes for the complete
+  > pre-projection ticket, review history, selected contract set, dependency
+  > outputs, and prior outputs. Full schema `1.0` packets remain the conservative
+  > compatibility path; provenance outside compiler-owned context/receipts is
+  > still subject to the limitation above.
 - Retry policies are bounded, but complex provider-specific backoff and every
   external failure mode remain profile/integration work.
 
@@ -134,6 +187,60 @@ For a serious evaluation:
 7. verify required receipts independently;
 8. test run deletion in preview and safe modes;
 9. document project-specific recovery and credential policy.
+
+> **Pi evaluation gate — 2026-07-14 (`pi_product_docs_transition`):** Steps 1–9 remain the
+> schema-1 adoption checklist. A schema-2 evaluation must additionally exercise migration
+> collision/rollback/crash recovery and historical readers; fake-vault login/logout/refresh and
+> operation-scoped credential intent; macOS/Linux containment; artifact trust and rehash-to-exec;
+> malformed protocol, cancellation, terminal, secret-redaction, and enforceable token cases; and
+> the complete existing compiler/Git/CLI/TUI/profile suites on one immutable fingerprint. The
+> active Pi checkout is not yet a guarded-refresh candidate.
+
+> **Evaluation-gate supersession — 2026-07-14 (`pi_product_docs_transition`):** That frozen
+> release-candidate evidence now records locked workspace 1,041 passed, 0 failed, 3 intentionally
+> ignored; locked clippy and formatting green; Pi host 34/34; the verified pinned runtime bundle;
+> and a clean temporary-prefix packaged model probe. It did not install for the user, mutate
+> credentials, migrate a project, or exercise a protected forensic run. A fresh isolated macOS
+> acceptance remains an explicit operator action, not a guarded refresh of protected state.
+
+> **Evolving to — Software default 0.4.0 (2026-07-14):** Step 4 preserves the original validation
+> baseline. After the Evidence-Guided Vertical Delivery profile lands, Software evaluations should
+> additionally exercise the inherited New Feature and Bug Fix presets, including scope escalation,
+> causal regression proof, structural risk disposition, and exact composed verification. Research
+> continues to use its deliberately designed Small, Medium, and Large catalog unchanged. See
+> [Software Profile Engineering](software-profile-engineering.md).
+
+> **Software evaluation matrix expanded — 2026-07-14:** “After ... lands” above records the
+> pre-implementation checkpoint. The frozen Software candidate now additionally requires causal
+> write-capable diagnosis, multi-defect exact coverage, source-only diagnostic/boundary preparation,
+> shared-boundary terminal ordering, wrong-objective mitigation rejection, all three proof
+> strategies through real compiler/review effects, stale-delivery in-place revision, and real
+> broker context -> output -> compile ordering. Release evidence must also include generic
+> proof-source/production-path disjointness, cross-ticket preparation source identity, and exact
+> review-effect replay provenance; a green happy path alone is not sufficient maturity evidence.
+
+## Pi/schema-2 implementation maturity — 2026-07-14
+
+The direct Pi cutover is now implemented as a source candidate rather than an architecture-only
+proposal: production model turns no longer select Codex CLI, provider-neutral schema-2 migration
+is transactional, OAuth/model controls exist, the TUI reads the Pi registry, and release layouts
+carry the verified host/runtime closure. The prior “source-in-progress” notes remain useful history
+but should not be read as saying these components are absent.
+
+Adoption is still pre-release. Focused runtime and migration suites are green, but this shared
+worktree contains many parallel changes and needs one final immutable, locked whole-workspace
+matrix plus packaged macOS containment/OAuth/inference smoke. Linux inference and login are
+explicitly unsupported until a destination-allowlisted egress broker replaces the denied network
+namespace. No existing installed project should be refreshed implicitly; use migration dry-run,
+review the archive plan, and apply only with a release that publishes the complete provenance and
+verification record.
+
+> **Implementation-maturity supersession — 2026-07-14 (`pi_product_docs_transition`):** The final
+> immutable locked matrix and packaged temporary-prefix probe are complete, so the source endpoint
+> is now the release candidate rather than merely a pre-release implementation candidate. The
+> platform and operator limits remain: macOS is the supported networked target; Linux login/model
+> inference fail closed until allowlisted egress exists; installation, OAuth use, project migration,
+> and any live acceptance run require separate guarded authorization.
 
 ## Reporting gaps
 

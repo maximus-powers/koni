@@ -1,0 +1,41 @@
+{
+  "name": "@koni/pi-host",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Koni-owned direct Pi SDK runtime host",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "main": "./dist/koni-pi-host.mjs",
+  "types": "./dist/types/entry.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/entry.d.ts",
+      "import": "./dist/koni-pi-host.mjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build-bundle.mjs && tsc -p tsconfig.build.json && npm run artifact:verify",
+    "artifact:verify": "node scripts/verify-artifact.mjs",
+    "smoke:bundle": "node scripts/smoke-bundle.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run test && npm run build && npm run smoke:bundle"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.80.7",
+    "@earendil-works/pi-ai": "0.80.7"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.4",
+    "esbuild": "0.28.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  },
+  "packageManager": "npm@11.13.0"
+}

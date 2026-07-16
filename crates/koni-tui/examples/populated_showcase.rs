@@ -134,7 +134,20 @@ fn main() -> anyhow::Result<()> {
         ],
         "orchestration":{"running":true,"max_parallel":3,"unchained":false},
         "views":[
-            {"id":"research-graph","kind":"graph","options":{"show_titles":true,"hierarchy":["hypothesis","claim","gate","experiment","evidence"]}},
+            {"id":"research-graph","kind":"graph","options":{
+                "layout":"relationship_outline",
+                "show_titles":true,
+                "hierarchy":["hypothesis","literature","claim","experiment","method","prerequisite","metric","ablation","gate","asset","run","evidence","report"],
+                "layers":[
+                    ["hypothesis"],
+                    ["literature","claim"],
+                    ["experiment"],
+                    ["method","prerequisite","metric","ablation"],
+                    ["gate"],
+                    ["asset","run","evidence"],
+                    ["report"]
+                ]
+            }},
             {"id":"run-report","kind":"report"}
         ]
     });

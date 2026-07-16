@@ -14,8 +14,37 @@ views:
     source: graph
     actions: [compile]
     options:
-      layers: [objective, system, interface, data_model, contract, flow, decision, change, migration, risk, proof, delivery]
-      repeat_shared_nodes: true
+      layout: nested
+      upward_edge_policy: mapped_only
+      hierarchy: [objective, system, interface, data_model, contract, flow, decision, change, migration, risk, proof, delivery]
+      primary_parent_preferences:
+        system: [objective, system]
+        interface: [system, objective]
+        data_model: [system]
+        contract: [system, objective, interface, data_model]
+        flow: [objective, system, interface]
+        decision: [objective, system, interface, data_model, contract, flow]
+        change: [objective, system, interface, data_model, contract, flow, decision, change]
+        migration: [change, system, data_model, interface, objective]
+        risk: [change, migration, contract, flow, system, interface, data_model]
+        proof: [change, migration, risk, contract, flow, system, interface, data_model]
+        delivery: [objective, change, migration, decision, proof, risk]
+      reverse_display_edges:
+        decision.concerns: decisions
+        change.realizes: realized_by
+        change.affects: changes
+        change.requires: required_by
+        migration.changes: migrations
+        migration.protects: migrations
+        risk.threatens: risks
+        risk.mitigated_by: mitigates
+        proof.verifies: proofs
+        proof.uses: proofs
+        delivery.fulfills: delivered_by
+        delivery.includes: deliveries
+        delivery.acknowledges: deliveries
+      secondary_edge_style: independent_right_lanes
+      show_titles: true
   - id: assurance
     title: Risks and Proof
     kind: table

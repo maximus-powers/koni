@@ -105,6 +105,27 @@ impl NativeCodexCatalog {
         })
     }
 
+    /// Discover only provider-neutral repository skills.
+    ///
+    /// Schema-2 profiles keep `.agents/skills` as project-scoped resources,
+    /// but must not acquire an executable dependency on `.codex/config.toml`
+    /// or `.codex/agents`. Keeping that distinction here makes it impossible
+    /// for the schema-2 compiler path to read those Codex-native inputs by
+    /// accident.
+    pub fn discover_skills_only(project_root: &Path) -> Result<Self> {
+        let mut files = BTreeMap::new();
+        let skills = load_skills(project_root, &mut files)?;
+        let hash = normalized_hash(&files);
+        Ok(Self {
+            project_root: project_root.to_path_buf(),
+            project_config: None,
+            agents: BTreeMap::new(),
+            skills,
+            files,
+            hash,
+        })
+    }
+
     pub fn agent(&self, name: &str) -> Option<&CodexAgentDef> {
         self.agents.get(name)
     }
@@ -148,10 +169,14 @@ fn reject_runtime_mcp_server_collisions(
 
 /// Locate the repository root from a compiled Koni profile root.
 ///
-/// Installed profiles live at `<project>/.codex/koni`. Profiles used by
-/// unit tests and embedders may live elsewhere, in which case that directory is
-/// treated as the project root.
+/// Current profiles live at `<project>/.koni`, while historical installed
+/// profiles live at `<project>/.codex/koni`. Profiles used by unit tests and
+/// embedders may live elsewhere, in which case that directory is treated as
+/// the project root.
 pub fn project_root_for_profile(profile_root: &Path) -> PathBuf {
+    if profile_root.file_name().is_some_and(|name| name == ".koni") {
+        return profile_root.parent().unwrap_or(profile_root).to_path_buf();
+    }
     let is_koni = profile_root.file_name().is_some_and(|name| name == "koni");
     let codex_dir = profile_root.parent().filter(|_| is_koni);
     if codex_dir
@@ -314,6 +339,11 @@ fn load_skills(
             continue;
         };
         let skill_path = source_directory.join("SKILL.md");
+        match fs::metadata(&skill_path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io_error(&skill_path, error)),
+        }
         ensure_resolved_regular_file(&skill_path, "Codex skill SKILL.md")?;
         let text = fs::read_to_string(&skill_path).map_err(|error| io_error(&skill_path, error))?;
         let frontmatter = parse_skill_frontmatter(&text, &skill_path)?;
@@ -573,6 +603,29 @@ command = "forged"
         );
         let error = NativeCodexCatalog::discover(temp.path()).unwrap_err();
         assert!(error.to_string().contains("invalid YAML"));
+    }
+
+    #[test]
+    fn directories_without_skill_manifests_are_ignored() {
+        let temp = TempDir::new().unwrap();
+        write(
+            &temp.path().join(".agents/skills/rule-pack/README.md"),
+            "Supporting material that is not itself a Codex skill.\n",
+        );
+        write(
+            &temp.path().join(".agents/skills/review/SKILL.md"),
+            "---\nname: review\ndescription: Review changes\n---\nInstructions\n",
+        );
+
+        let catalog = NativeCodexCatalog::discover(temp.path()).unwrap();
+
+        assert_eq!(catalog.skills.len(), 1);
+        assert!(catalog.skills.contains_key("review"));
+        assert!(
+            !catalog
+                .files
+                .contains_key(Path::new(".agents/skills/rule-pack/README.md"))
+        );
     }
 
     #[test]

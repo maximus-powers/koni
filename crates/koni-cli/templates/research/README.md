@@ -13,7 +13,15 @@ choices live in those run-type documents, while all three share this one
 research profile and its personas retain prompts and sandbox boundaries. Every
 run still requires explicit approval; afterward the run type's automatic
 stages are supervised until the run concludes or reaches an explicit
-question/failure boundary.
+question/failure boundary. After ticket orchestration, every size synchronizes
+the current target branch into the isolated run, verifies the composed result,
+compiles its receipt-backed report, and waits for an explicit promotion
+authorization. A configured graph-forbidden recovery workflow resolves target
+integration conflicts without rewriting research semantics.
+
+Gate applicability also has one canonical stored direction. Authors persist
+only `gate.applies_to`; its bidirectional `gates` inverse is a compiler-derived
+view for constrained nodes, never a second reciprocal fact.
 
 ## Modules
 
@@ -91,10 +99,16 @@ runtime resolves from the virtual ticket value, which combines the ticket
 record with its single run target's typed contract. These sources are profile
 IR, participate in the profile hash, and cannot broaden ticket authority.
 
-A run's `spec.runtime_contract` declares exact argv, protocol, required
+A run's `spec.runtime_contract` declares exact empirical argv, a distinct
+repository-owned read-only `composed_verification_command`, protocol, required
 measurement keys, concrete asset entrypoints, scientific input bindings, and
 optionally a narrow project-relative `output_root` with a `result_path` beneath
-it. Omitting `output_root` is the stdout-only contract: `result_path`
+it. The side-effecting empirical command produces current causal evidence but
+declares `composed_replay: never`; Koni never reruns it implicitly after target
+synchronization. The integrity command runs after the experiment and is the
+only scientific command replayed against the composed tree. It must validate
+the current inputs and any durable result artifacts without repeating the
+intervention or observation. Omitting `output_root` is the stdout-only contract: `result_path`
 must be absent and the typed result's `artifacts` array must be empty. With an
 output root, a configured result file replaces stdout as the result source and
 every result-declared artifact—either a path string or an object carrying

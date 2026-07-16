@@ -162,7 +162,10 @@ rules:
     phase: readiness
     priority: 16
     for_each: active-runs
-    when: {op: field_present, field: spec.runtime_contract.command}
+    when:
+      all:
+        - {op: field_present, field: spec.runtime_contract.command}
+        - {op: field_present, field: spec.runtime_contract.composed_verification_command}
     derive:
       - {kind: readiness, value: ready, reason: Run has an executable runtime contract}
 
@@ -308,10 +311,6 @@ rules:
                       - {op: edge_count, subject: $claim, relation: tested_by, min: 1}
                       - op: set_relation
                         left: {traverse: {from: $claim, relation: tested_by, direction: outgoing, max_depth: 1, node_types: [experiment]}}
-                        right: {traverse: {from: $claim, relation: target_claims, direction: incoming, max_depth: 1, node_types: [experiment]}}
-                        relation_kind: equal
-                      - op: set_relation
-                        left: {traverse: {from: $claim, relation: tested_by, direction: outgoing, max_depth: 1, node_types: [experiment]}}
                         right: {traverse: {from: $target, relation: experiments, direction: outgoing, max_depth: 1, node_types: [experiment]}}
                         relation_kind: subset
     emit:
@@ -321,11 +320,11 @@ rules:
       target_state: hypothesis-has-experiment-portfolio-covering-claims
       obligations: [hypothesis.experiments, hypothesis.claim-coverage]
       target_nodes: $target
-      read_scope: $target
-      write_scope:
+      read_scope:
         union:
           - $target
           - {traverse: {from: $target, relation: claims, direction: outgoing, max_depth: 1}}
+      write_scope: $target
 
   - id: ticket.experiment-constitution
     phase: ticket_emission
@@ -371,7 +370,7 @@ rules:
       registry_entry_id: graph-compilation.node.define-gates
       source_state: target-has-no-gate
       target_state: target-has-executable-gate-contract
-      obligations: [target.gates]
+      obligations: [gate.applies_to]
       target_nodes: $target
       read_scope: $target
       write_scope: $target
@@ -522,7 +521,10 @@ rules:
     phase: ticket_emission
     priority: 190
     for_each: active-runs
-    when: {not: {op: field_present, field: spec.runtime_contract.command}}
+    when:
+      any:
+        - {not: {op: field_present, field: spec.runtime_contract.command}}
+        - {not: {op: field_present, field: spec.runtime_contract.composed_verification_command}}
     emit:
       operation: compile-run-plan
       registry_entry_id: execution.node.compile-run-plan
@@ -547,6 +549,7 @@ rules:
       all:
         - {op: field_equals, field: readiness.state, value: ready}
         - {op: field_present, field: spec.runtime_contract.command}
+        - {op: field_present, field: spec.runtime_contract.composed_verification_command}
         - {not: {op: current_receipt, receipt_type: runtime.receipt}}
     emit:
       operation: run-experiment
@@ -563,6 +566,7 @@ rules:
       write_scope: $target
       read_paths:
         - {select: {traverse: {from: $target, relation: uses, direction: outgoing, max_depth: 1, node_types: [asset]}}, field: spec.implementation_plan.root}
+        - {select: $target, field: spec.runtime_contract.output_root}
       write_paths:
         - {select: $target, field: spec.runtime_contract.output_root}
 

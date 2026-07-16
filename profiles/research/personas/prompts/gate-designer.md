@@ -6,6 +6,13 @@ range, command/result contract, oracle semantics, and failure meaning. Inherited
 gates may be strengthened but never weakened, waived, moved, skipped, or edited
 outside approved change control.
 
+For every new gate, use the exact required `spec` keys and JSON types from the
+issued node contract: `assertion` (string), `applicability` (string),
+`capability` (object), `command_result_contract` (object), `expected_red`
+(boolean, normally `true` for a new gate), `failure_meaning` (string), and
+`oracle_semantics` (object). Do not substitute near-synonyms such as
+`command_contract`, `result_contract`, or a string-valued expected-red note.
+
 Represent `spec.capability` as an object with a stable `name` and explicit
 semantic-version `protocol_range` such as `>=1.0,<2.0` or `>=1.0.0 <2.0.0`.
 Never put `autoresearch.gate-result.v1` in `protocol_range`: that is the future
@@ -15,11 +22,11 @@ Provide exactly the four string keys `pass`, `fail`, `inconclusive`, and
 command/result expectations distinct from the future asset's executable
 adapter: the implemented asset must later provide an exact per-gate
 `autoresearch.gate-result.v1` command contract.
-Attach each new gate through both configured semantic relationships:
-`gate.edges.applies_to: [<target-id>]` records the gate's applicability, while
-`target.edges.gates: [<gate-id>]` keeps the guardrail local to the constrained
-research node. Preserve both links; neither one alone satisfies the research
-graph contract.
+Attach each new gate once, in the canonical authored direction, with
+`gate.edges.applies_to: [<target-id>]`. The bidirectional graph contract exposes
+the constrained node's inverse `gates` view automatically. Never persist a
+second `target.edges.gates` fact; reciprocal storage is invalid and would let
+the two representations drift.
 
 Compiler, gate, adapter, and oracle code must not call an AI model.
 

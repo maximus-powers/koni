@@ -11,8 +11,16 @@ use crate::codex::{NativeCodexCatalog, project_root_for_profile};
 use crate::error::{KoniError, Result, io_error};
 use crate::expr::{ExpressionSymbols, LeafPredicate, Predicate, PredicateOp, Selector, ValueType};
 use crate::graph::normalized_hash;
+use crate::schema2_migration::{
+    AgentInstructionSourceV2, CapabilityPolicyV2, CommandAccessV2, KONI_SCHEMA2_VERSION,
+    KoniAgentResourceV2, WorkspaceAccessV2,
+};
 
+/// Historical profile schema retained for installed schema-1 projects.
 pub const PROFILE_SCHEMA_VERSION: &str = "1.0";
+/// Provider-neutral profile schema used by `.koni` catalogs.
+pub const PROFILE_SCHEMA_V2_VERSION: &str = KONI_SCHEMA2_VERSION;
+const SCHEMA2_AGENT_PROVIDER: &str = "openai-codex";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileManifest {
@@ -29,6 +37,12 @@ pub struct ProfileManifest {
     pub git: GitConfig,
     #[serde(default)]
     pub orchestration: OrchestrationConfig,
+    /// Compiler-enforced budgets for the ticket context bundle and the two
+    /// bounded knowledge-ledger broker capabilities. The default is omitted
+    /// from serialization so profiles pinned before graph context expansion
+    /// retain their existing semantic hash.
+    #[serde(default, skip_serializing_if = "ContextPolicy::is_default")]
+    pub context: ContextPolicy,
     #[serde(default, skip_serializing_if = "ChangeControlConfig::is_default")]
     pub change_control: ChangeControlConfig,
     #[serde(default, skip_serializing_if = "ReportingConfig::is_default")]
@@ -48,6 +62,7 @@ fn default_engine_requirement() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReportingConfig {
     #[serde(default = "default_report_bundle_kind")]
     pub bundle_kind: String,
@@ -72,6 +87,7 @@ fn default_report_bundle_kind() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ChangeControlConfig {
     #[serde(default = "default_awaiting_approval_state")]
     pub awaiting_approval_state: String,
@@ -104,6 +120,7 @@ fn default_held_source_state() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProfileMetadata {
     pub id: String,
     pub version: String,
@@ -112,6 +129,7 @@ pub struct ProfileMetadata {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InitializationConfig {
     #[serde(default)]
     pub root_node_type: Option<String>,
@@ -119,9 +137,92 @@ pub struct InitializationConfig {
     pub goal_field: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planning_context_field: Option<String>,
+    /// Registry entry whose graph mutation authority bounds the typed graph
+    /// seed compiled from an approved planning stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planning_seed_operation: Option<String>,
     #[serde(default)]
     pub root_status: Option<String>,
 }
+
+/// Profile-owned hard budgets for graph-backed agent context.
+///
+/// These values bound compiler work as well as model-visible output. Runtime
+/// callers may ask for a smaller neighborhood, but cannot raise these limits.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextPolicy {
+    #[serde(default = "default_context_expansion_max_depth")]
+    pub expansion_max_depth: usize,
+    #[serde(default = "default_context_expansion_max_nodes")]
+    pub expansion_max_nodes: usize,
+    #[serde(default = "default_context_expansion_max_calls_per_step")]
+    pub expansion_max_calls_per_step: usize,
+    #[serde(default = "default_context_expansion_max_response_bytes")]
+    pub expansion_max_response_bytes: usize,
+    #[serde(default = "default_context_note_max_bytes")]
+    pub note_max_bytes: usize,
+    #[serde(default = "default_context_note_max_calls_per_step")]
+    pub note_max_calls_per_step: usize,
+    #[serde(default = "default_context_notes_max_bundle_bytes")]
+    pub notes_max_bundle_bytes: usize,
+}
+
+impl ContextPolicy {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+impl Default for ContextPolicy {
+    fn default() -> Self {
+        Self {
+            expansion_max_depth: default_context_expansion_max_depth(),
+            expansion_max_nodes: default_context_expansion_max_nodes(),
+            expansion_max_calls_per_step: default_context_expansion_max_calls_per_step(),
+            expansion_max_response_bytes: default_context_expansion_max_response_bytes(),
+            note_max_bytes: default_context_note_max_bytes(),
+            note_max_calls_per_step: default_context_note_max_calls_per_step(),
+            notes_max_bundle_bytes: default_context_notes_max_bundle_bytes(),
+        }
+    }
+}
+
+fn default_context_expansion_max_depth() -> usize {
+    2
+}
+
+fn default_context_expansion_max_nodes() -> usize {
+    32
+}
+
+fn default_context_expansion_max_calls_per_step() -> usize {
+    4
+}
+
+fn default_context_expansion_max_response_bytes() -> usize {
+    64 * 1024
+}
+
+fn default_context_note_max_bytes() -> usize {
+    4 * 1024
+}
+
+fn default_context_note_max_calls_per_step() -> usize {
+    16
+}
+
+fn default_context_notes_max_bundle_bytes() -> usize {
+    32 * 1024
+}
+
+const CONTEXT_EXPANSION_DEPTH_HARD_MAX: usize = 8;
+const CONTEXT_EXPANSION_NODES_HARD_MAX: usize = 256;
+const CONTEXT_EXPANSION_CALLS_HARD_MAX: usize = 16;
+const CONTEXT_EXPANSION_RESPONSE_BYTES_HARD_MAX: usize = 256 * 1024;
+const CONTEXT_NOTE_BYTES_HARD_MAX: usize = 16 * 1024;
+const CONTEXT_NOTE_CALLS_HARD_MAX: usize = 64;
+const CONTEXT_NOTES_BUNDLE_BYTES_HARD_MAX: usize = 128 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -132,6 +233,7 @@ pub enum StorageBackend {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StorageConfig {
     #[serde(default)]
     pub backend: StorageBackend,
@@ -194,6 +296,7 @@ fn default_annotations() -> Vec<String> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GitConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -211,6 +314,11 @@ pub struct GitConfig {
     pub commit_template: String,
     #[serde(default)]
     pub commit_trailers: BTreeMap<String, String>,
+    /// Optional idempotent static command check run once in every newly
+    /// leased ticket worktree before a worker is allowed to start. This is the
+    /// profile-owned hook for dependency installation or local tool setup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket_worktree_setup_check: Option<String>,
 }
 
 impl Default for GitConfig {
@@ -224,6 +332,7 @@ impl Default for GitConfig {
             integration_strategy: default_integration_strategy(),
             commit_template: default_commit_template(),
             commit_trailers: BTreeMap::new(),
+            ticket_worktree_setup_check: None,
         }
     }
 }
@@ -251,6 +360,7 @@ fn default_commit_template() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OrchestrationConfig {
     #[serde(default = "default_true")]
     pub running: bool,
@@ -302,6 +412,7 @@ fn is_default_lead_boundaries(value: &usize) -> bool {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ImportsConfig {
     #[serde(default)]
     pub graph: Vec<PathBuf>,
@@ -358,6 +469,10 @@ pub struct ModuleDocument {
     pub gate_policies: Vec<GatePolicyDef>,
     #[serde(default)]
     pub queries: Vec<QueryDef>,
+    /// Domain-neutral invariants over selected semantic graph fields. These
+    /// run against the whole graph before rules may emit work.
+    #[serde(default)]
+    pub graph_constraints: Vec<GraphConstraintDef>,
     #[serde(default)]
     pub rules: Vec<RuleDef>,
     #[serde(default)]
@@ -381,6 +496,7 @@ pub struct ModuleDocument {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModuleMetadata {
     pub id: String,
     #[serde(default = "default_module_version")]
@@ -414,6 +530,12 @@ pub struct NodeTypeDef {
     pub semantic_fields: Vec<String>,
     #[serde(default)]
     pub compiler_owned_fields: Vec<String>,
+    /// Compiler-owned paths that remain visible in model-facing graph
+    /// context. Ownership still forbids agent mutation; this list separates
+    /// read visibility from write authority for inputs such as an approved
+    /// planning handoff.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_visible_compiler_owned_fields: Vec<String>,
     /// Whether this type participates in the profile's gate admission model.
     /// Phase-one records and validates this contract; admission is enforced by
     /// the gate-readiness phase rather than inferred from a type name.
@@ -553,6 +675,23 @@ pub struct FieldDef {
     /// Optional regular-expression constraint for string-like fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
+    /// Require this list's values to be contained by a list field on the same
+    /// root node. This remains valid at any recursive object/list-item depth;
+    /// the reference always resolves from the root node rather than relative
+    /// to the nested value instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subset_of: Option<String>,
+    /// Require this list to have no values in common with a compatible list
+    /// field on the same root node. String values use exact identity. Path
+    /// values use normalized authority overlap, so equality and either
+    /// ancestor/descendant direction are conflicts. Declare this on one side
+    /// only; disjointness is symmetric at validation time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disjoint_from: Option<String>,
+    /// Require every object in this list to have a distinct value for one
+    /// declared, required scalar property on the list item contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unique_by: Option<String>,
     #[serde(default, rename = "enum")]
     pub enum_values: Vec<Value>,
     #[serde(default)]
@@ -577,6 +716,7 @@ pub enum FieldType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EdgeTypeDef {
     pub source: String,
     pub relation: String,
@@ -589,12 +729,21 @@ pub struct EdgeTypeDef {
     pub acyclic: bool,
     #[serde(default)]
     pub inverse: Option<String>,
+    /// Treat one stored edge as traversable from both endpoints. `relation`
+    /// is the canonical authored direction and `inverse` is its reverse alias;
+    /// agents must not persist a second reciprocal edge.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bidirectional: bool,
     #[serde(default)]
     pub on_delete: EdgeDeletePolicy,
     /// Optional predicate evaluated for every concrete source/target pair.
     /// Validation binds exactly `$source` and `$target` to those nodes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<Predicate>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -776,6 +925,7 @@ pub enum EdgeDeletePolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueryDef {
     pub id: String,
     #[serde(default)]
@@ -795,6 +945,7 @@ pub struct QueryDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueryTraverseDef {
     pub from: Selector,
     #[serde(default)]
@@ -805,11 +956,45 @@ pub struct QueryTraverseDef {
     pub max_depth: usize,
 }
 
+/// One typed set of project paths selected from the semantic graph.
+///
+/// `node_types` is deliberately explicit even when the selector is a named
+/// query. It makes the field contract statically checkable and causes a
+/// selector that later returns a different type to fail closed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphPathSetDef {
+    pub select: Selector,
+    pub node_types: Vec<String>,
+    pub field: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphConstraintKind {
+    PathSetsDisjoint,
+}
+
+/// A profile-authored whole-graph invariant. The compiler supplies only the
+/// deterministic selector, typed field, and filesystem-authority mechanics;
+/// profiles decide which domain concepts must be kept apart.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphConstraintDef {
+    pub id: String,
+    pub kind: GraphConstraintKind,
+    pub left: GraphPathSetDef,
+    pub right: GraphPathSetDef,
+    #[serde(default)]
+    pub distinct_nodes: bool,
+}
+
 fn default_max_depth() -> usize {
     1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuleDef {
     pub id: String,
     #[serde(default)]
@@ -868,6 +1053,7 @@ pub enum DerivationKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TicketEmitDef {
     pub operation: String,
     #[serde(default)]
@@ -963,6 +1149,13 @@ pub struct OperationDef {
     /// the historical operation behavior and serialized profile hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt_coverage: Option<ReceiptCoverageDef>,
+    /// Composite check whose independently reviewed historical command
+    /// members establish immutable proof-source paths for this operation.
+    /// The compiler validates the complete workflow/review contract and uses
+    /// the declaration at ticket emission and lease admission; omission keeps
+    /// ordinary operations outside prepared-source authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof_source_preparation_check: Option<String>,
     #[serde(default)]
     pub allow_node_deletion: bool,
     /// Permit complete-node upserts to remove relationships already present
@@ -986,6 +1179,11 @@ pub struct OperationDef {
     /// enforcement is intentionally deferred to the next gate slice.
     #[serde(default)]
     pub gate_blocking_exempt: bool,
+    /// Designate the one operation a recovery compensation may use to resolve
+    /// a terminal ticket failure. This is typed so recovery policy cannot hide
+    /// in an inert extension or select an ambiguous resolver.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub terminal_resolver: bool,
     #[serde(default)]
     pub single_flight_group: Option<String>,
     #[serde(default)]
@@ -1232,6 +1430,7 @@ impl OperationDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkflowDef {
     pub id: String,
     #[serde(default = "default_module_version")]
@@ -1243,10 +1442,49 @@ pub struct WorkflowDef {
     /// this preserves the legacy integration-only rework behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_failure_reopen_from: Option<String>,
+    /// Compiler-bound routing for structured independent-review failure
+    /// domains. New workflows should prefer this map over the legacy single
+    /// `review_failure_reopen_from` boundary so a reviewer can distinguish a
+    /// correction the selected step is authorized to make from an upstream
+    /// defect that must stop automatic dispatch.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub review_failure_routes: BTreeMap<String, ReviewFailureRouteDef>,
     pub steps: Vec<WorkflowStepDef>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewFailureDisposition {
+    Reopen,
+    Block,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewFailureRecovery {
+    /// Preserve the rejected materialization and return to planning against
+    /// the clean integration state. The blocked candidate must never become
+    /// the source tree for upstream proof or scope repair.
+    ReplanFromCleanIntegration,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewFailureRouteDef {
+    pub disposition: ReviewFailureDisposition,
+    /// Human/model-facing classification boundary. This is trusted profile
+    /// configuration and is included in the compiler-bound review packet.
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reopen_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<ReviewFailureRecovery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_instructions: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkflowStepDef {
     pub id: String,
     #[serde(default)]
@@ -1260,8 +1498,29 @@ pub struct WorkflowStepDef {
     pub read_scope: Selector,
     #[serde(default = "default_ticket_write_scope")]
     pub write_scope: Selector,
+    /// Optional filesystem read scope for this step. Omission inherits the
+    /// ticket's complete read scope; an explicit empty list grants no product
+    /// filesystem reads. Projections are resolved when the ticket is emitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_paths: Option<Vec<PathScopeDef>>,
+    /// Optional filesystem write scope for this step. Omission inherits the
+    /// ticket's complete write scope; an explicit empty list makes the step
+    /// product-filesystem read-only. Projections are resolved when the ticket
+    /// is emitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_paths: Option<Vec<PathScopeDef>>,
+    /// Earlier causal workflow step whose graph-selected proof sources must
+    /// remain byte-identical when this step executes. The referenced step must
+    /// be a transitive dependency; omission preserves legacy workflows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserve_source_paths_from: Option<String>,
     #[serde(default)]
     pub expected_output: String,
+    /// Compiler-enforced permission for this step to author semantic graph
+    /// changes. Keeping this on the step lets one workflow separate analysis
+    /// from graph production without relying on prompt wording.
+    #[serde(default, skip_serializing_if = "graph_mutation_is_allowed")]
+    pub graph_mutation: GraphMutationPolicyDef,
     #[serde(default)]
     pub validation_action: Option<String>,
     #[serde(default)]
@@ -1272,6 +1531,19 @@ pub struct WorkflowStepDef {
     pub stop_conditions: Vec<String>,
     #[serde(default)]
     pub checks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphMutationPolicyDef {
+    #[default]
+    Allowed,
+    Forbidden,
+    Required,
+}
+
+fn graph_mutation_is_allowed(value: &GraphMutationPolicyDef) -> bool {
+    *value == GraphMutationPolicyDef::Allowed
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1298,6 +1570,7 @@ fn default_ticket_write_scope() -> Selector {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActionDef {
     pub id: String,
     #[serde(default = "default_action_actor")]
@@ -1325,6 +1598,7 @@ fn default_action_actor() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActionParameterDef {
     #[serde(rename = "type", default)]
     pub value_type: ParameterType,
@@ -1362,11 +1636,16 @@ pub struct ActionStepDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CheckDef {
     pub id: String,
     pub kind: CheckKind,
     #[serde(default)]
     pub predicate: Option<Predicate>,
+    /// Complete, deterministic graph-local command-member selection for a
+    /// composite check. Omission preserves registry-selected legacy checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_set: Option<GraphCheckSetDef>,
     #[serde(default)]
     pub applies_to: Vec<String>,
     #[serde(default)]
@@ -1379,6 +1658,11 @@ pub struct CheckDef {
     pub cwd: PathBuf,
     #[serde(default = "default_check_timeout")]
     pub timeout_seconds: u64,
+    /// Exit codes which make the process execution itself successful. An
+    /// empty list preserves the conventional `[0]` default. Profiles can use
+    /// an explicit non-zero code for compiler-owned expected-red checks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_exit_codes: Vec<i32>,
     #[serde(default)]
     pub result_protocol: Option<String>,
     #[serde(default = "default_result_protocol_field")]
@@ -1402,12 +1686,56 @@ pub struct CheckDef {
     #[serde(default)]
     pub artifact_paths: Vec<String>,
     pub receipt_type: String,
+    /// Whether a passing receipt must still match the current workspace or is
+    /// durable causal evidence for an earlier workflow boundary. Historical
+    /// receipts remain integrity- and ticket-bound; they are never promoted
+    /// into current graph evidence.
+    #[serde(default, skip_serializing_if = "receipt_freshness_is_current")]
+    pub receipt_freshness: ReceiptFreshness,
+    /// Whether the command must be replayed automatically against the composed
+    /// run tree after target synchronization. Side-effecting or prohibitively
+    /// expensive execution can opt out explicitly while a distinct read-only
+    /// currentness check remains replayable.
+    #[serde(default, skip_serializing_if = "composed_replay_is_required")]
+    pub composed_replay: ComposedReplayPolicy,
     #[serde(default)]
     pub retry_policy: RetryPolicyDef,
     #[serde(default = "default_process_effect")]
     pub effect: ProcessEffect,
     #[serde(default)]
     pub environment: EnvironmentPolicyDef,
+}
+
+/// Profile-owned contract for compiling one target-anchored semantic
+/// neighborhood into exact registered command-check members.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphCheckSetDef {
+    pub members: Selector,
+    pub member_node_types: Vec<String>,
+    /// Literal child command check. Exactly one of this field and
+    /// `member_check_field` must be configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_check: Option<String>,
+    /// Node field containing a registry-backed child command-check ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_check_field: Option<String>,
+    pub source_paths_field: String,
+    pub covered_paths_field: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory_field: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub statuses: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub status_excluding: Vec<String>,
+    #[serde(default = "default_graph_set_min_members")]
+    pub min_members: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_members: Option<usize>,
+}
+
+fn default_graph_set_min_members() -> usize {
+    1
 }
 
 /// A bounded, ticket-relative source for a dynamically resolved command.
@@ -1548,6 +1876,7 @@ fn default_process_effect() -> ProcessEffect {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArgvInputBindingsDef {
     pub from: String,
     #[serde(default = "default_binding_path_field")]
@@ -1578,6 +1907,30 @@ pub enum CheckKind {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ReceiptFreshness {
+    #[default]
+    Current,
+    Historical,
+}
+
+fn receipt_freshness_is_current(value: &ReceiptFreshness) -> bool {
+    *value == ReceiptFreshness::Current
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComposedReplayPolicy {
+    #[default]
+    Required,
+    Never,
+}
+
+fn composed_replay_is_required(value: &ComposedReplayPolicy) -> bool {
+    *value == ComposedReplayPolicy::Required
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProcessEffect {
     #[default]
     ReadOnly,
@@ -1586,6 +1939,7 @@ pub enum ProcessEffect {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RetryPolicyDef {
     #[serde(default)]
     pub max_attempts: usize,
@@ -1596,6 +1950,7 @@ pub struct RetryPolicyDef {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EnvironmentPolicyDef {
     #[serde(default)]
     pub inherit: Vec<String>,
@@ -1606,6 +1961,7 @@ pub struct EnvironmentPolicyDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PersonaDef {
     pub id: String,
     #[serde(default)]
@@ -1616,10 +1972,21 @@ pub struct PersonaDef {
     pub model_role: String,
     #[serde(default)]
     pub model: Option<String>,
+    /// Schema-2 provider-neutral reasoning policy.
+    #[serde(default)]
+    pub thinking_level: Option<String>,
+    /// Historical schema-1 Codex reasoning policy.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    /// Schema-2 Koni-owned authority policy.
+    #[serde(default)]
+    pub capabilities: Option<CapabilityPolicyV2>,
+    /// Historical schema-1 Codex sandbox policy.
     #[serde(default)]
     pub sandbox: Option<SandboxDef>,
+    /// Name of a provider-neutral agent resource in `.koni/agents/*.yaml`.
+    #[serde(default)]
+    pub agent: Option<String>,
     /// Name of a project-scoped custom agent in `.codex/agents/*.toml`.
     #[serde(default)]
     pub codex_agent: Option<String>,
@@ -1629,6 +1996,7 @@ pub struct PersonaDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SandboxDef {
     #[serde(default = "default_sandbox_mode")]
     pub mode: String,
@@ -1658,7 +2026,246 @@ fn default_approval_policy() -> String {
     "never".to_owned()
 }
 
+/// A validated schema-2 agent resource with its resolved instruction content.
+#[derive(Debug, Clone)]
+pub struct KoniAgentDefV2 {
+    pub resource: KoniAgentResourceV2,
+    pub path: PathBuf,
+    pub instructions: String,
+    pub instruction_source: PathBuf,
+    pub hash: String,
+}
+
+/// Provider-neutral resources discovered below `.koni/agents`.
+#[derive(Debug, Clone)]
+pub struct KoniAgentCatalogV2 {
+    pub project_root: PathBuf,
+    pub profile_root: PathBuf,
+    pub agents: BTreeMap<String, KoniAgentDefV2>,
+    pub files: BTreeMap<PathBuf, String>,
+    pub hash: String,
+    references: BTreeMap<String, String>,
+}
+
+impl KoniAgentCatalogV2 {
+    fn empty(project_root: &Path, profile_root: &Path) -> Self {
+        Self {
+            project_root: project_root.to_path_buf(),
+            profile_root: profile_root.to_path_buf(),
+            agents: BTreeMap::new(),
+            files: BTreeMap::new(),
+            hash: normalized_hash(&BTreeMap::<PathBuf, String>::new()),
+            references: BTreeMap::new(),
+        }
+    }
+
+    fn discover(project_root: &Path, profile_root: &Path) -> Result<Self> {
+        let agents_root = profile_root.join("agents");
+        if !agents_root.exists() {
+            return Ok(Self::empty(project_root, profile_root));
+        }
+        let root_metadata =
+            fs::symlink_metadata(&agents_root).map_err(|error| io_error(&agents_root, error))?;
+        if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+            return profile_error(format!(
+                "schema-2 agent resource root must be a real directory: {}",
+                agents_root.display()
+            ));
+        }
+
+        let mut paths = fs::read_dir(&agents_root)
+            .map_err(|error| io_error(&agents_root, error))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|error| io_error(&agents_root, error))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        paths.sort();
+
+        let mut catalog = Self::empty(project_root, profile_root);
+        for path in paths {
+            if !matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("yaml" | "yml")
+            ) {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(&path).map_err(|error| io_error(&path, error))?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return profile_error(format!(
+                    "schema-2 agent resource must be a regular, non-symlink file: {}",
+                    path.display()
+                ));
+            }
+            let text = fs::read_to_string(&path).map_err(|error| io_error(&path, error))?;
+            let resource: KoniAgentResourceV2 =
+                serde_yaml::from_str(&text).map_err(|source| KoniError::Yaml {
+                    path: path.clone(),
+                    source,
+                })?;
+            validate_schema2_agent_resource(&resource, &path)?;
+
+            let (instructions, instruction_source) = match &resource.instructions {
+                AgentInstructionSourceV2::Inline { text } => {
+                    if text.trim().is_empty() {
+                        return profile_error(format!(
+                            "schema-2 agent {} inline instructions must not be empty",
+                            resource.id
+                        ));
+                    }
+                    (text.clone(), path.clone())
+                }
+                AgentInstructionSourceV2::Path { path: relative } => {
+                    let instruction_path = resolve_profile_resource(
+                        profile_root,
+                        relative,
+                        &format!("schema-2 agent {} instruction path", resource.id),
+                    )?;
+                    let instructions = fs::read_to_string(&instruction_path)
+                        .map_err(|error| io_error(&instruction_path, error))?;
+                    if instructions.trim().is_empty() {
+                        return profile_error(format!(
+                            "schema-2 agent {} instructions must not be empty: {}",
+                            resource.id,
+                            instruction_path.display()
+                        ));
+                    }
+                    (instructions, instruction_path)
+                }
+            };
+
+            let resource_relative = project_relative_path(project_root, &path);
+            catalog
+                .files
+                .insert(resource_relative, normalized_hash(&text.as_bytes()));
+            if instruction_source != path {
+                catalog.files.insert(
+                    project_relative_path(project_root, &instruction_source),
+                    normalized_hash(&instructions.as_bytes()),
+                );
+            }
+            let hash = normalized_hash(&(&resource, &instructions));
+            let id = resource.id.clone();
+            for reference in std::iter::once(&resource.id).chain(resource.aliases.iter()) {
+                if let Some(owner) = catalog.references.insert(reference.clone(), id.clone()) {
+                    return profile_error(format!(
+                        "schema-2 agent reference {reference} is claimed by both {owner} and {id}"
+                    ));
+                }
+            }
+            let definition = KoniAgentDefV2 {
+                resource,
+                path,
+                instructions,
+                instruction_source,
+                hash,
+            };
+            if catalog.agents.insert(id.clone(), definition).is_some() {
+                return profile_error(format!("duplicate schema-2 agent id {id}"));
+            }
+        }
+        catalog.hash = normalized_hash(&catalog.files);
+        Ok(catalog)
+    }
+
+    pub fn agent(&self, reference: &str) -> Option<&KoniAgentDefV2> {
+        self.references
+            .get(reference)
+            .and_then(|id| self.agents.get(id))
+    }
+}
+
+fn validate_schema2_agent_resource(resource: &KoniAgentResourceV2, path: &Path) -> Result<()> {
+    if resource.schema_version != PROFILE_SCHEMA_V2_VERSION {
+        return profile_error(format!(
+            "schema-2 agent resource {} declares schema {}; expected {}",
+            path.display(),
+            resource.schema_version,
+            PROFILE_SCHEMA_V2_VERSION
+        ));
+    }
+    validate_identifier("schema-2 agent id", &resource.id)?;
+    if resource.description.trim().is_empty() {
+        return profile_error(format!(
+            "schema-2 agent {} description must not be empty",
+            resource.id
+        ));
+    }
+    if resource.provider != SCHEMA2_AGENT_PROVIDER {
+        return profile_error(format!(
+            "schema-2 agent {} uses unsupported provider {}; expected {}",
+            resource.id, resource.provider, SCHEMA2_AGENT_PROVIDER
+        ));
+    }
+    for (label, value) in [
+        ("model", resource.model.as_deref()),
+        ("thinking_level", resource.thinking_level.as_deref()),
+    ] {
+        if value.is_some_and(|value| value.trim().is_empty()) {
+            return profile_error(format!(
+                "schema-2 agent {} {label} must not be empty",
+                resource.id
+            ));
+        }
+    }
+    let mut references = BTreeSet::new();
+    references.insert(resource.id.as_str());
+    for alias in &resource.aliases {
+        validate_identifier("schema-2 agent alias", alias)?;
+        if !references.insert(alias) {
+            return profile_error(format!(
+                "schema-2 agent {} repeats reference {alias}",
+                resource.id
+            ));
+        }
+    }
+    let mut skills = BTreeSet::new();
+    for skill in &resource.skills {
+        if skill.trim().is_empty() || !skills.insert(skill) {
+            return profile_error(format!(
+                "schema-2 agent {} has an empty or duplicate skill reference",
+                resource.id
+            ));
+        }
+    }
+    validate_capabilities(
+        &resource.capabilities,
+        &format!("schema-2 agent {}", resource.id),
+    )
+}
+
+fn resolve_profile_resource(root: &Path, relative: &Path, label: &str) -> Result<PathBuf> {
+    validate_relative_path(relative, label)?;
+    let path = root.join(relative);
+    let metadata = fs::symlink_metadata(&path).map_err(|error| io_error(&path, error))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return profile_error(format!(
+            "{label} must reference a regular, non-symlink file: {}",
+            path.display()
+        ));
+    }
+    let canonical_root = root.canonicalize().map_err(|error| io_error(root, error))?;
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| io_error(&path, error))?;
+    if !canonical.starts_with(canonical_root) {
+        return profile_error(format!(
+            "{label} escapes the profile root: {}",
+            relative.display()
+        ));
+    }
+    Ok(path)
+}
+
+fn project_relative_path(project_root: &Path, path: &Path) -> PathBuf {
+    path.strip_prefix(project_root)
+        .unwrap_or(path)
+        .to_path_buf()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReportDef {
     pub id: String,
     pub title: String,
@@ -1683,6 +2290,7 @@ pub enum ReportFormat {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReportColumnDef {
     pub id: String,
     #[serde(default)]
@@ -1691,6 +2299,7 @@ pub struct ReportColumnDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ViewDef {
     pub id: String,
     pub title: String,
@@ -1713,6 +2322,7 @@ fn default_view_kind() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StateMachineDef {
     pub id: String,
     pub initial: String,
@@ -1723,6 +2333,7 @@ pub struct StateMachineDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StateTransitionDef {
     pub id: String,
     pub from: Vec<String>,
@@ -1743,6 +2354,7 @@ pub struct CompiledProfile {
     pub edge_types: Vec<EdgeTypeDef>,
     pub gate_policies: IndexMap<String, GatePolicyDef>,
     pub queries: IndexMap<String, QueryDef>,
+    pub graph_constraints: IndexMap<String, GraphConstraintDef>,
     pub rules: IndexMap<String, RuleDef>,
     pub operations: IndexMap<String, OperationDef>,
     pub workflows: IndexMap<String, WorkflowDef>,
@@ -1752,12 +2364,16 @@ pub struct CompiledProfile {
     pub reports: IndexMap<String, ReportDef>,
     pub views: IndexMap<String, ViewDef>,
     pub state_machines: IndexMap<String, StateMachineDef>,
+    /// Provider-neutral schema-2 agent resources. Empty for schema 1.
+    pub koni_agents: KoniAgentCatalogV2,
+    /// Historical Codex-native resources for schema 1. Under schema 2 this
+    /// catalog contains only `.agents/skills` and no executable Codex config.
     pub native_codex: NativeCodexCatalog,
     pub hash: String,
 }
 
-/// The effective, runnable persona after resolving an optional native Codex
-/// custom agent beneath explicit Koni overrides.
+/// The effective, runnable persona after resolving its schema-specific agent
+/// resource beneath explicit Koni overrides.
 #[derive(Debug, Clone)]
 pub struct ResolvedPersona {
     pub id: String,
@@ -1766,8 +2382,15 @@ pub struct ResolvedPersona {
     pub instruction_source: PathBuf,
     pub model_role: String,
     pub model: Option<String>,
+    /// Provider-neutral schema-2 name. Mirrored into `reasoning_effort` until
+    /// all historical engine consumers have moved to this field.
+    pub thinking_level: Option<String>,
     pub reasoning_effort: Option<String>,
+    /// Koni-owned schema-2 authority policy. Schema-1 personas leave this
+    /// unset and continue to use their historical sandbox contract.
+    pub capabilities: Option<CapabilityPolicyV2>,
     pub sandbox: SandboxDef,
+    pub agent: Option<String>,
     pub codex_agent: Option<String>,
     /// Whether `instructions` came from an explicit Koni prompt rather
     /// than solely from the native agent's developer-instruction layer.
@@ -1797,6 +2420,11 @@ impl CompiledProfile {
     }
 
     pub fn resolve_persona_def(&self, persona: &PersonaDef) -> Result<ResolvedPersona> {
+        validate_persona_schema_fields(&self.manifest.schema_version, persona)?;
+        if self.manifest.schema_version == PROFILE_SCHEMA_V2_VERSION {
+            return self.resolve_schema2_persona(persona);
+        }
+
         let native_agent = persona
             .codex_agent
             .as_deref()
@@ -1850,15 +2478,98 @@ impl CompiledProfile {
                 .model
                 .clone()
                 .or_else(|| native_agent.and_then(|agent| agent.model.clone())),
+            thinking_level: None,
             reasoning_effort: persona
                 .reasoning_effort
                 .clone()
                 .or_else(|| native_agent.and_then(|agent| agent.model_reasoning_effort.clone())),
+            capabilities: None,
             sandbox,
+            agent: None,
             codex_agent: persona.codex_agent.clone(),
             explicit_prompt: persona.prompt.is_some(),
             skills: persona.skills.clone(),
             native_codex_config_overrides,
+        })
+    }
+
+    fn resolve_schema2_persona(&self, persona: &PersonaDef) -> Result<ResolvedPersona> {
+        let agent = persona
+            .agent
+            .as_deref()
+            .map(|reference| {
+                self.koni_agents.agent(reference).ok_or_else(|| {
+                    KoniError::Profile(format!(
+                        "persona {} references unknown schema-2 agent {reference}",
+                        persona.id
+                    ))
+                })
+            })
+            .transpose()?;
+        let (instructions, instruction_source) = if let Some(prompt) = &persona.prompt {
+            let path = resolve_profile_resource(
+                &self.root,
+                prompt,
+                &format!("persona {} prompt", persona.id),
+            )?;
+            let instructions = fs::read_to_string(&path).map_err(|error| io_error(&path, error))?;
+            (instructions, path)
+        } else if let Some(agent) = agent {
+            (agent.instructions.clone(), agent.instruction_source.clone())
+        } else {
+            return Err(KoniError::Profile(format!(
+                "schema-2 persona {} must define prompt or agent",
+                persona.id
+            )));
+        };
+        let capabilities = persona
+            .capabilities
+            .clone()
+            .or_else(|| agent.map(|agent| agent.resource.capabilities.clone()))
+            .ok_or_else(|| {
+                KoniError::Profile(format!(
+                    "schema-2 persona {} must define capabilities or inherit them from agent",
+                    persona.id
+                ))
+            })?;
+        validate_capabilities(&capabilities, &format!("persona {}", persona.id))?;
+        let thinking_level = persona
+            .thinking_level
+            .clone()
+            .or_else(|| agent.and_then(|agent| agent.resource.thinking_level.clone()));
+        let description = if persona.description.trim().is_empty() {
+            agent
+                .map(|agent| agent.resource.description.clone())
+                .unwrap_or_default()
+        } else {
+            persona.description.clone()
+        };
+        let skills = if persona.skills.is_empty() {
+            agent
+                .map(|agent| agent.resource.skills.clone())
+                .unwrap_or_default()
+        } else {
+            persona.skills.clone()
+        };
+        Ok(ResolvedPersona {
+            id: persona.id.clone(),
+            description,
+            instructions,
+            instruction_source,
+            model_role: persona.model_role.clone(),
+            model: persona
+                .model
+                .clone()
+                .or_else(|| agent.and_then(|agent| agent.resource.model.clone())),
+            thinking_level: thinking_level.clone(),
+            reasoning_effort: thinking_level,
+            sandbox: capabilities_to_sandbox(&capabilities),
+            capabilities: Some(capabilities),
+            agent: agent.map(|agent| agent.resource.id.clone()),
+            codex_agent: None,
+            explicit_prompt: persona.prompt.is_some(),
+            skills,
+            native_codex_config_overrides: Vec::new(),
         })
     }
 
@@ -1910,11 +2621,130 @@ impl CompiledProfile {
         ExpressionSymbols {
             node_types,
             queries,
+            operations: self.operations.keys().cloned().collect(),
+            checks: self.checks.keys().cloned().collect(),
             receipt_coverages,
             review_effects,
             gate_policies: self.gate_policies.keys().cloned().collect(),
             variables: BTreeMap::new(),
         }
+    }
+}
+
+fn validate_persona_schema_fields(schema_version: &str, persona: &PersonaDef) -> Result<()> {
+    for (current, current_present, legacy, legacy_present) in [
+        (
+            "agent",
+            persona.agent.is_some(),
+            "codex_agent",
+            persona.codex_agent.is_some(),
+        ),
+        (
+            "thinking_level",
+            persona.thinking_level.is_some(),
+            "reasoning_effort",
+            persona.reasoning_effort.is_some(),
+        ),
+        (
+            "capabilities",
+            persona.capabilities.is_some(),
+            "sandbox",
+            persona.sandbox.is_some(),
+        ),
+    ] {
+        if current_present && legacy_present {
+            return profile_error(format!(
+                "persona {} defines conflicting {current} and {legacy} fields",
+                persona.id
+            ));
+        }
+    }
+    if schema_version == PROFILE_SCHEMA_V2_VERSION {
+        let legacy = [
+            ("codex_agent", persona.codex_agent.is_some()),
+            ("reasoning_effort", persona.reasoning_effort.is_some()),
+            ("sandbox", persona.sandbox.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(field, present)| present.then_some(field))
+        .collect::<Vec<_>>();
+        if !legacy.is_empty() {
+            return profile_error(format!(
+                "schema-2 persona {} contains legacy field{} {}; use agent, thinking_level, and capabilities",
+                persona.id,
+                if legacy.len() == 1 { "" } else { "s" },
+                legacy.join(", ")
+            ));
+        }
+    } else {
+        let current = [
+            ("agent", persona.agent.is_some()),
+            ("thinking_level", persona.thinking_level.is_some()),
+            ("capabilities", persona.capabilities.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(field, present)| present.then_some(field))
+        .collect::<Vec<_>>();
+        if !current.is_empty() {
+            return profile_error(format!(
+                "schema-1 persona {} contains schema-2 field{} {}; migrate the profile before using provider-neutral persona fields",
+                persona.id,
+                if current.len() == 1 { "" } else { "s" },
+                current.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_capabilities(capabilities: &CapabilityPolicyV2, owner: &str) -> Result<()> {
+    if capabilities.workspace_access == WorkspaceAccessV2::ReadOnly
+        && capabilities.commands == CommandAccessV2::WorkspaceWrite
+    {
+        return profile_error(format!(
+            "{owner} grants workspace-write commands inside a read-only workspace"
+        ));
+    }
+    if capabilities.workspace_access == WorkspaceAccessV2::ReadOnly
+        && !capabilities.writable_roots.is_empty()
+    {
+        return profile_error(format!(
+            "{owner} may not declare writable roots with read-only workspace access"
+        ));
+    }
+    for root in &capabilities.writable_roots {
+        if matches!(root.as_str(), "git_metadata" | "main_git_metadata") {
+            return profile_error(format!(
+                "{owner} writable root {root} is forbidden; Git metadata is compiler-only authority"
+            ));
+        }
+        if matches!(root.as_str(), "project_root" | "ticket_worktree") {
+            continue;
+        }
+        let root_path = Path::new(root);
+        validate_relative_path(root_path, &format!("{owner} writable root"))?;
+        if root_path
+            .components()
+            .next()
+            .is_some_and(|component| matches!(component, Component::Normal(name) if name == ".git"))
+        {
+            return profile_error(format!(
+                "{owner} writable root {root} is forbidden; .git is compiler-only authority"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn capabilities_to_sandbox(capabilities: &CapabilityPolicyV2) -> SandboxDef {
+    SandboxDef {
+        mode: match capabilities.workspace_access {
+            WorkspaceAccessV2::ReadOnly => "read-only".to_owned(),
+            WorkspaceAccessV2::WorkspaceWrite => "workspace-write".to_owned(),
+        },
+        approval_policy: "never".to_owned(),
+        network_access: capabilities.network_access,
+        writable_roots: capabilities.writable_roots.clone(),
     }
 }
 
@@ -1941,6 +2771,17 @@ pub struct ProfileCompiler;
 
 impl ProfileCompiler {
     pub fn compile(input: &Path) -> Result<CompiledProfile> {
+        Self::compile_inner(input, None)
+    }
+
+    /// Compile a profile staged outside its eventual project root while still
+    /// resolving project-scoped resources such as `.agents/skills` against the
+    /// real repository. Migration callers use this before publishing `.koni`.
+    pub fn compile_with_project_root(input: &Path, project_root: &Path) -> Result<CompiledProfile> {
+        Self::compile_inner(input, Some(project_root))
+    }
+
+    fn compile_inner(input: &Path, project_root: Option<&Path>) -> Result<CompiledProfile> {
         let manifest_path = locate_manifest(input)?;
         let root = manifest_path
             .parent()
@@ -1989,13 +2830,33 @@ impl ProfileCompiler {
                     path: path.clone(),
                     source,
                 })?;
+            validate_module_document(&module, &identity, &manifest.schema_version)?;
             merge_document(&mut document, module);
             imported_files.push(path);
         }
 
-        let project_root = project_root_for_profile(&root);
-        let native_codex = NativeCodexCatalog::discover(&project_root)?;
-        let mut profile = compile_document(manifest, root, imported_files, document, native_codex)?;
+        let project_root = project_root
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| project_root_for_profile(&root));
+        let (native_codex, koni_agents) = if manifest.schema_version == PROFILE_SCHEMA_V2_VERSION {
+            (
+                NativeCodexCatalog::discover_skills_only(&project_root)?,
+                KoniAgentCatalogV2::discover(&project_root, &root)?,
+            )
+        } else {
+            (
+                NativeCodexCatalog::discover(&project_root)?,
+                KoniAgentCatalogV2::empty(&project_root, &root),
+            )
+        };
+        let mut profile = compile_document(
+            manifest,
+            root,
+            imported_files,
+            document,
+            koni_agents,
+            native_codex,
+        )?;
         validate_profile(&profile)?;
         profile.hash = profile_hash(&profile)?;
         Ok(profile)
@@ -2007,6 +2868,9 @@ fn locate_manifest(input: &Path) -> Result<PathBuf> {
         return Ok(input.to_path_buf());
     }
     let candidates = [
+        input.join(".koni/profile.yaml"),
+        input.join(".koni/koni.yaml"),
+        input.join(".koni/koni.toml"),
         input.join("profile.yaml"),
         input.join("koni.yaml"),
         input.join(".codex/koni/profile.yaml"),
@@ -2021,10 +2885,14 @@ fn locate_manifest(input: &Path) -> Result<PathBuf> {
 }
 
 fn validate_manifest(manifest: &ProfileManifest) -> Result<()> {
-    if manifest.schema_version != PROFILE_SCHEMA_VERSION {
+    reject_unsupported_keys("profile manifest", manifest.extensions.keys())?;
+    if !matches!(
+        manifest.schema_version.as_str(),
+        PROFILE_SCHEMA_VERSION | PROFILE_SCHEMA_V2_VERSION
+    ) {
         return Err(KoniError::Profile(format!(
-            "unsupported profile schema {}; expected {}",
-            manifest.schema_version, PROFILE_SCHEMA_VERSION
+            "unsupported profile schema {}; expected {} or {}",
+            manifest.schema_version, PROFILE_SCHEMA_VERSION, PROFILE_SCHEMA_V2_VERSION
         )));
     }
     validate_identifier("profile id", &manifest.profile.id)?;
@@ -2059,6 +2927,7 @@ fn validate_manifest(manifest: &ProfileManifest) -> Result<()> {
                 .to_owned(),
         ));
     }
+    validate_context_policy(&manifest.context)?;
     if manifest.git.enabled {
         if manifest.git.backend != "libgit2" {
             return Err(KoniError::Profile(format!(
@@ -2139,6 +3008,94 @@ fn validate_manifest(manifest: &ProfileManifest) -> Result<()> {
     Ok(())
 }
 
+fn validate_context_policy(policy: &ContextPolicy) -> Result<()> {
+    let limits = [
+        (
+            "expansion_max_depth",
+            policy.expansion_max_depth,
+            CONTEXT_EXPANSION_DEPTH_HARD_MAX,
+        ),
+        (
+            "expansion_max_nodes",
+            policy.expansion_max_nodes,
+            CONTEXT_EXPANSION_NODES_HARD_MAX,
+        ),
+        (
+            "expansion_max_calls_per_step",
+            policy.expansion_max_calls_per_step,
+            CONTEXT_EXPANSION_CALLS_HARD_MAX,
+        ),
+        (
+            "expansion_max_response_bytes",
+            policy.expansion_max_response_bytes,
+            CONTEXT_EXPANSION_RESPONSE_BYTES_HARD_MAX,
+        ),
+        (
+            "note_max_bytes",
+            policy.note_max_bytes,
+            CONTEXT_NOTE_BYTES_HARD_MAX,
+        ),
+        (
+            "note_max_calls_per_step",
+            policy.note_max_calls_per_step,
+            CONTEXT_NOTE_CALLS_HARD_MAX,
+        ),
+        (
+            "notes_max_bundle_bytes",
+            policy.notes_max_bundle_bytes,
+            CONTEXT_NOTES_BUNDLE_BYTES_HARD_MAX,
+        ),
+    ];
+    for (field, value, maximum) in limits {
+        if value == 0 {
+            return profile_error(format!("context.{field} must be positive"));
+        }
+        if value > maximum {
+            return profile_error(format!(
+                "context.{field} must not exceed the compiler hard maximum {maximum}"
+            ));
+        }
+    }
+    if policy.note_max_bytes > policy.notes_max_bundle_bytes {
+        return profile_error(
+            "context.note_max_bytes must not exceed context.notes_max_bundle_bytes".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_module_document(
+    module: &ModuleDocument,
+    identity: &str,
+    profile_schema: &str,
+) -> Result<()> {
+    reject_unsupported_keys(
+        &format!("profile module {identity}"),
+        module.extensions.keys(),
+    )?;
+    if profile_schema == PROFILE_SCHEMA_V2_VERSION
+        && let Some(module_schema) = &module.schema_version
+        && module_schema != profile_schema
+    {
+        return profile_error(format!(
+            "profile module {identity} declares schema {module_schema}, but the profile declares {profile_schema}"
+        ));
+    }
+    Ok(())
+}
+
+fn reject_unsupported_keys<'a>(owner: &str, keys: impl Iterator<Item = &'a String>) -> Result<()> {
+    let keys = keys.cloned().collect::<Vec<_>>();
+    if keys.is_empty() {
+        return Ok(());
+    }
+    profile_error(format!(
+        "{owner} contains unsupported field{}: {}",
+        if keys.len() == 1 { "" } else { "s" },
+        keys.join(", ")
+    ))
+}
+
 fn resolve_import(root: &Path, relative: &Path) -> Result<PathBuf> {
     validate_relative_path(relative, "profile import")?;
     let path = root.join(relative);
@@ -2197,7 +3154,10 @@ pub fn validate_project_relative_scope_path(path: &Path) -> Result<()> {
             "ticket path scope must not contain a NUL byte".to_owned(),
         ));
     }
-    if raw.contains(['*', '?', '[', ']']) {
+    // Ticket scopes are matched as exact path prefixes, never parsed by a glob
+    // engine. Reject the two unambiguous wildcard characters while preserving
+    // ordinary repository names such as Next.js `[companyId]` route segments.
+    if raw.contains(['*', '?']) {
         return Err(KoniError::Profile(format!(
             "ticket path scope must be a literal path, not a glob: {raw}"
         )));
@@ -2217,6 +3177,9 @@ fn merge_document(target: &mut ModuleDocument, mut source: ModuleDocument) {
     target.edge_types.append(&mut source.edge_types);
     target.gate_policies.append(&mut source.gate_policies);
     target.queries.append(&mut source.queries);
+    target
+        .graph_constraints
+        .append(&mut source.graph_constraints);
     target.rules.append(&mut source.rules);
     target.operations.append(&mut source.operations);
     target.workflows.append(&mut source.workflows);
@@ -2233,6 +3196,7 @@ fn compile_document(
     root: PathBuf,
     imported_files: Vec<PathBuf>,
     document: ModuleDocument,
+    koni_agents: KoniAgentCatalogV2,
     native_codex: NativeCodexCatalog,
 ) -> Result<CompiledProfile> {
     Ok(CompiledProfile {
@@ -2243,6 +3207,9 @@ fn compile_document(
         edge_types: document.edge_types,
         gate_policies: unique_map("gate policy", document.gate_policies, |item| &item.id)?,
         queries: unique_map("query", document.queries, |item| &item.id)?,
+        graph_constraints: unique_map("graph constraint", document.graph_constraints, |item| {
+            &item.id
+        })?,
         rules: unique_map("rule", document.rules, |item| &item.id)?,
         operations: unique_map("operation registry entry", document.operations, |item| {
             &item.id
@@ -2254,6 +3221,7 @@ fn compile_document(
         reports: unique_map("report", document.reports, |item| &item.id)?,
         views: unique_map("view", document.views, |item| &item.id)?,
         state_machines: unique_map("state machine", document.state_machines, |item| &item.id)?,
+        koni_agents,
         native_codex,
         hash: String::new(),
     })
@@ -2289,16 +3257,215 @@ fn validate_profile(profile: &CompiledProfile) -> Result<()> {
     validate_node_types(profile)?;
     validate_edges(profile)?;
     validate_queries(profile)?;
+    validate_graph_constraints(profile)?;
     validate_gate_policies(profile)?;
     validate_rules(profile)?;
+    validate_proof_preparation_predicate_declarations(profile)?;
     validate_operations(profile)?;
+    validate_planning_seed_operation(profile)?;
     validate_workflows(profile)?;
     validate_actions(profile)?;
     validate_checks(profile)?;
+    validate_ticket_worktree_setup(profile)?;
     validate_personas(profile)?;
     validate_reports(profile)?;
     validate_views(profile)?;
     validate_state_machines(profile)?;
+    Ok(())
+}
+
+fn validate_proof_preparation_predicate_declarations(profile: &CompiledProfile) -> Result<()> {
+    fn validate(owner: &str, predicate: &Predicate, profile: &CompiledProfile) -> Result<()> {
+        match predicate {
+            Predicate::Constant(_) | Predicate::Exists(_) => Ok(()),
+            Predicate::All(envelope) => envelope
+                .all
+                .iter()
+                .try_for_each(|predicate| validate(owner, predicate, profile)),
+            Predicate::Any(envelope) => envelope
+                .any
+                .iter()
+                .try_for_each(|predicate| validate(owner, predicate, profile)),
+            Predicate::Not(envelope) => validate(owner, &envelope.not, profile),
+            Predicate::ForAll(envelope) => validate(owner, &envelope.for_all.satisfies, profile),
+            Predicate::Leaf(leaf) if leaf.op == PredicateOp::ProofPreparationCurrent => {
+                let Some(operation_id) = leaf.preparation_operation.as_deref() else {
+                    return profile_error(format!(
+                        "{owner} proof_preparation_current requires preparation_operation"
+                    ));
+                };
+                let Some(check_id) = leaf.check.as_deref() else {
+                    return profile_error(format!(
+                        "{owner} proof_preparation_current requires check"
+                    ));
+                };
+                let operation = profile.operations.get(operation_id).ok_or_else(|| {
+                    KoniError::Profile(format!(
+                        "{owner} proof_preparation_current references unknown operation {operation_id}"
+                    ))
+                })?;
+                if operation.proof_source_preparation_check.as_deref() != Some(check_id) {
+                    return profile_error(format!(
+                        "{owner} proof_preparation_current operation {operation_id} declares proof_source_preparation_check {:?}, not {check_id}",
+                        operation.proof_source_preparation_check
+                    ));
+                }
+                Ok(())
+            }
+            Predicate::Leaf(_) => Ok(()),
+        }
+    }
+
+    for edge in &profile.edge_types {
+        if let Some(predicate) = &edge.when {
+            validate(
+                &format!("edge {}.{}", edge.source, edge.relation),
+                predicate,
+                profile,
+            )?;
+        }
+    }
+    for query in profile.queries.values() {
+        if let Some(predicate) = &query.predicate {
+            validate(&format!("query {}", query.id), predicate, profile)?;
+        }
+    }
+    for rule in profile.rules.values() {
+        validate(&format!("rule {}", rule.id), &rule.when, profile)?;
+    }
+    for check in profile.checks.values() {
+        if let Some(predicate) = &check.predicate {
+            validate(&format!("check {}", check.id), predicate, profile)?;
+        }
+    }
+    for policy in profile.gate_policies.values() {
+        if let Some(predicate) = &policy.execution_ready {
+            validate(
+                &format!("gate policy {} execution_ready", policy.id),
+                predicate,
+                profile,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_planning_seed_operation(profile: &CompiledProfile) -> Result<()> {
+    let Some(operation_id) = profile
+        .manifest
+        .initialization
+        .planning_seed_operation
+        .as_deref()
+    else {
+        return Ok(());
+    };
+    let root_type = profile
+        .manifest
+        .initialization
+        .root_node_type
+        .as_deref()
+        .ok_or_else(|| {
+            KoniError::Profile(
+                "initialization planning_seed_operation requires root_node_type".to_owned(),
+            )
+        })?;
+    let operation = profile.operations.get(operation_id).ok_or_else(|| {
+        KoniError::Profile(format!(
+            "initialization planning_seed_operation references unknown operation registry entry {operation_id}"
+        ))
+    })?;
+    if operation.stage != "initialization"
+        || operation.target_types.len() != 1
+        || operation.target_types.first().map(String::as_str) != Some(root_type)
+    {
+        return profile_error(format!(
+            "initialization planning_seed_operation {operation_id} must use stage initialization and target only root node type {root_type}"
+        ));
+    }
+    if !operation
+        .allowed_existing_node_types
+        .iter()
+        .any(|node_type| node_type == root_type)
+    {
+        return profile_error(format!(
+            "initialization planning_seed_operation {operation_id} must permit existing root node type {root_type}"
+        ));
+    }
+    if operation
+        .existing_node_edge_additions_only
+        .contains_key(root_type)
+    {
+        return profile_error(format!(
+            "initialization planning_seed_operation {operation_id} must permit semantic root updates, not only edge additions for {root_type}"
+        ));
+    }
+    if operation.allowed_new_node_types.is_empty() || operation.max_new_nodes == Some(0) {
+        return profile_error(format!(
+            "initialization planning_seed_operation {operation_id} must permit at least one new typed graph node"
+        ));
+    }
+    if operation.workflow.is_some()
+        || !operation.checks.is_empty()
+        || operation.receipt_coverage.is_some()
+        || !operation.review_effects.is_empty()
+        || operation.change_control_barrier
+        || !operation.change_control.is_default()
+        || operation.allow_node_deletion
+        || operation.allow_edge_deletion
+        || operation.allow_gate_contract_edits
+        || operation.terminal_resolver
+    {
+        return profile_error(format!(
+            "initialization planning_seed_operation {operation_id} must be a compiler-only graph authority without workflow, checks, receipt/review effects, deletion, gate, change-control, or recovery behavior"
+        ));
+    }
+    if let Some(rule) = profile.rules.values().find(|rule| {
+        rule.emit.as_ref().is_some_and(|emit| {
+            emit.operation == operation.public_operation()
+                || emit.registry_entry_id.as_deref() == Some(operation_id)
+        })
+    }) {
+        return profile_error(format!(
+            "initialization planning_seed_operation {operation_id} is compiler-only and cannot be emitted by rule {}",
+            rule.id
+        ));
+    }
+    Ok(())
+}
+
+fn validate_ticket_worktree_setup(profile: &CompiledProfile) -> Result<()> {
+    let Some(check_id) = &profile.manifest.git.ticket_worktree_setup_check else {
+        return Ok(());
+    };
+    if !profile.manifest.git.enabled {
+        return profile_error(
+            "git.ticket_worktree_setup_check requires git.enabled = true".to_owned(),
+        );
+    }
+    let check = profile.checks.get(check_id).ok_or_else(|| {
+        KoniError::Profile(format!(
+            "git.ticket_worktree_setup_check references unknown check {check_id}"
+        ))
+    })?;
+    if check.kind != CheckKind::Command
+        || check.effect != ProcessEffect::WorkspaceWrite
+        || check.argv.is_empty()
+        || check.argv_from.is_some()
+        || check.command_source.is_some()
+    {
+        return profile_error(format!(
+            "git.ticket_worktree_setup_check {check_id} must be a static workspace_write command check"
+        ));
+    }
+    if check.receipt_freshness != ReceiptFreshness::Current
+        || check.allow_nonpassing_receipt
+        || check.result_protocol.is_some()
+        || check.dynamic_result.is_some()
+    {
+        return profile_error(format!(
+            "git.ticket_worktree_setup_check {check_id} must require a current passing process receipt without a result protocol"
+        ));
+    }
     Ok(())
 }
 
@@ -2386,6 +3553,7 @@ fn validate_node_types(profile: &CompiledProfile) -> Result<()> {
         }
     }
     for node in profile.node_types.values() {
+        reject_unsupported_keys(&format!("node type {}", node.id), node.extensions.keys())?;
         if node
             .description
             .as_deref()
@@ -2409,6 +3577,9 @@ fn validate_node_types(profile: &CompiledProfile) -> Result<()> {
         }
         for (field, definition) in &node.fields {
             validate_field_definition(&node.id, field, definition)?;
+        }
+        for (field, definition) in &node.fields {
+            validate_field_collection_constraints(node, field, definition)?;
         }
         if let Some(manifest) = &node.filesystem_manifest {
             validate_filesystem_manifest(node, manifest)?;
@@ -2443,6 +3614,21 @@ fn validate_node_types(profile: &CompiledProfile) -> Result<()> {
                 node.id,
                 overlap.into_iter().cloned().collect::<Vec<_>>().join(", ")
             ));
+        }
+        let mut visible_owned = BTreeSet::new();
+        for field in &node.agent_visible_compiler_owned_fields {
+            if field.trim().is_empty() || !visible_owned.insert(field) {
+                return profile_error(format!(
+                    "node type {} agent_visible_compiler_owned_fields must contain unique nonempty paths",
+                    node.id
+                ));
+            }
+            if !owned.contains(field) {
+                return profile_error(format!(
+                    "node type {} exposes {} to agents but it is not compiler-owned",
+                    node.id, field
+                ));
+            }
         }
     }
     Ok(())
@@ -2771,6 +3957,133 @@ fn validate_field_definition(node_type: &str, path: &str, field: &FieldDef) -> R
     Ok(())
 }
 
+fn validate_field_collection_constraints(
+    node: &NodeTypeDef,
+    path: &str,
+    field: &FieldDef,
+) -> Result<()> {
+    if let Some(reference) = &field.subset_of {
+        validate_compatible_scalar_list_reference(node, path, field, "subset_of", reference)?;
+    }
+    if let Some(reference) = &field.disjoint_from {
+        validate_compatible_scalar_list_reference(node, path, field, "disjoint_from", reference)?;
+    }
+    if let Some(property) = &field.unique_by {
+        validate_unique_by_contract(node, path, field, property)?;
+    }
+    if let Some(items) = &field.items {
+        validate_field_collection_constraints(node, &format!("{path}[]"), items)?;
+    }
+    for (name, property) in &field.properties {
+        validate_field_collection_constraints(node, &format!("{path}.{name}"), property)?;
+    }
+    Ok(())
+}
+
+fn validate_compatible_scalar_list_reference(
+    node: &NodeTypeDef,
+    path: &str,
+    field: &FieldDef,
+    keyword: &str,
+    reference: &str,
+) -> Result<FieldType> {
+    validate_contract_field_path(reference).map_err(|error| {
+        KoniError::Profile(format!(
+            "node type {} field {path} has invalid {keyword} reference {reference:?}: {error}",
+            node.id
+        ))
+    })?;
+    let source_item_type = constrained_scalar_item_type(field).ok_or_else(|| {
+        KoniError::Profile(format!(
+            "node type {} field {path} configures {keyword} but must be a list with string or path items",
+            node.id
+        ))
+    })?;
+    let target = node_field_definition(node, reference).ok_or_else(|| {
+        KoniError::Profile(format!(
+            "node type {} field {path} {keyword} references undeclared root-node field {reference}",
+            node.id
+        ))
+    })?;
+    let target_item_type = constrained_scalar_item_type(target).ok_or_else(|| {
+        KoniError::Profile(format!(
+            "node type {} field {path} {keyword} reference {reference} must be a list with string or path items",
+            node.id
+        ))
+    })?;
+    if source_item_type != target_item_type {
+        return profile_error(format!(
+            "node type {} field {path} {keyword} reference {reference} has incompatible item type {:?}; expected {:?}",
+            node.id, target_item_type, source_item_type
+        ));
+    }
+    Ok(source_item_type)
+}
+
+fn constrained_scalar_item_type(field: &FieldDef) -> Option<FieldType> {
+    if field.value_type != FieldType::List {
+        return None;
+    }
+    let item_type = field.items.as_deref()?.value_type;
+    matches!(item_type, FieldType::String | FieldType::Path).then_some(item_type)
+}
+
+fn validate_unique_by_contract(
+    node: &NodeTypeDef,
+    path: &str,
+    field: &FieldDef,
+    property: &str,
+) -> Result<()> {
+    validate_contract_field_path(property).map_err(|error| {
+        KoniError::Profile(format!(
+            "node type {} field {path} has invalid unique_by property {property:?}: {error}",
+            node.id
+        ))
+    })?;
+    if property.contains('.') || property.starts_with("$.") || property.starts_with("spec.") {
+        return profile_error(format!(
+            "node type {} field {path} unique_by property {property:?} must name one direct list-item property",
+            node.id
+        ));
+    }
+    let items = field.items.as_deref().filter(|items| {
+        field.value_type == FieldType::List && items.value_type == FieldType::Object
+    });
+    let Some(items) = items else {
+        return profile_error(format!(
+            "node type {} field {path} configures unique_by but must be a list with object items",
+            node.id
+        ));
+    };
+    let Some(identity) = items.properties.get(property) else {
+        return profile_error(format!(
+            "node type {} field {path} unique_by references undeclared list-item property {property}",
+            node.id
+        ));
+    };
+    if !identity.required {
+        return profile_error(format!(
+            "node type {} field {path} unique_by property {property} must be required",
+            node.id
+        ));
+    }
+    if !matches!(
+        identity.value_type,
+        FieldType::String
+            | FieldType::Integer
+            | FieldType::Number
+            | FieldType::Boolean
+            | FieldType::Path
+            | FieldType::NodeRef
+    ) {
+        return profile_error(format!(
+            "node type {} field {path} unique_by property {property} must be a scalar string, number, boolean, path, or node_ref",
+            node.id
+        ));
+    }
+    Ok(())
+}
+
 fn normalized_root_spec_field(path: &str) -> Option<&str> {
     let trimmed = path.trim();
     if trimmed.is_empty() || trimmed != path {
@@ -2828,6 +4141,34 @@ fn validate_edges(profile: &CompiledProfile) -> Result<()> {
                 edge.source, edge.relation
             ));
         }
+        if edge.bidirectional {
+            let inverse = edge
+                .inverse
+                .as_deref()
+                .filter(|value| !value.trim().is_empty());
+            let Some(inverse) = inverse else {
+                return profile_error(format!(
+                    "bidirectional edge {}.{} requires a nonempty inverse alias",
+                    edge.source, edge.relation
+                ));
+            };
+            if inverse == edge.relation {
+                return profile_error(format!(
+                    "bidirectional edge {}.{} inverse alias must differ from its canonical relation",
+                    edge.source, edge.relation
+                ));
+            }
+            for target_type in &edge.targets {
+                if profile.edge_types.iter().any(|candidate| {
+                    candidate.source == *target_type && candidate.relation == inverse
+                }) {
+                    return profile_error(format!(
+                        "bidirectional edge {}.{} already exposes reverse alias {target_type}.{inverse}; remove the redundant reciprocal edge declaration",
+                        edge.source, edge.relation
+                    ));
+                }
+            }
+        }
         if let Some(predicate) = &edge.when {
             let symbols = profile
                 .expression_symbols()
@@ -2841,7 +4182,7 @@ fn validate_edges(profile: &CompiledProfile) -> Result<()> {
     for edge in profile
         .edge_types
         .iter()
-        .filter(|edge| edge.inverse.is_some())
+        .filter(|edge| edge.inverse.is_some() && !edge.bidirectional)
     {
         let inverse = edge.inverse.as_deref().expect("filtered inverse exists");
         for target_type in &edge.targets {
@@ -3203,13 +4544,13 @@ fn validate_gate_policies(profile: &CompiledProfile) -> Result<()> {
                     | GateRankKind::MergedMapHasGateKey
             );
             let relations_required = rank.kind == GateRankKind::EdgeContainsGate;
-            if fields_required != !rank.fields.is_empty() {
+            if fields_required == rank.fields.is_empty() {
                 return profile_error(format!(
                     "gate policy {} rank {} has invalid fields for {:?}",
                     policy.id, rank.id, rank.kind
                 ));
             }
-            if relations_required != !rank.relations.is_empty() {
+            if relations_required == rank.relations.is_empty() {
                 return profile_error(format!(
                     "gate policy {} rank {} has invalid relations for {:?}",
                     policy.id, rank.id, rank.kind
@@ -3368,6 +4709,8 @@ fn validate_gate_execution_ready_leaf(policy_id: &str, leaf: &LeafPredicate) -> 
         || leaf.review_operation.is_some()
         || leaf.review_effect.is_some()
         || leaf.coverage_targets.is_some()
+        || leaf.preparation_operation.is_some()
+        || leaf.preparation_targets.is_some()
         || leaf.check.is_some()
         || leaf.gate_policy.is_some()
         || leaf.gate_subject.is_some()
@@ -3561,13 +4904,23 @@ fn validate_gate_rank_path(policy: &str, rank: &str, path: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_queries(profile: &CompiledProfile) -> Result<()> {
-    let base_symbols = profile.expression_symbols();
-    let relation_names: BTreeSet<_> = profile
+fn configured_relation_names(profile: &CompiledProfile) -> BTreeSet<&str> {
+    profile
         .edge_types
         .iter()
-        .map(|edge| edge.relation.as_str())
-        .collect();
+        .flat_map(|edge| {
+            std::iter::once(edge.relation.as_str()).chain(
+                edge.bidirectional
+                    .then_some(edge.inverse.as_deref())
+                    .flatten(),
+            )
+        })
+        .collect()
+}
+
+fn validate_queries(profile: &CompiledProfile) -> Result<()> {
+    let base_symbols = profile.expression_symbols();
+    let relation_names = configured_relation_names(profile);
     for query in profile.queries.values() {
         if !query.params.is_empty() {
             return profile_error(format!(
@@ -3611,6 +4964,72 @@ fn validate_queries(profile: &CompiledProfile) -> Result<()> {
         }
     }
     validate_query_cycles(profile)
+}
+
+fn validate_graph_constraints(profile: &CompiledProfile) -> Result<()> {
+    let symbols = profile.expression_symbols();
+    for constraint in profile.graph_constraints.values() {
+        for (side_name, side) in [("left", &constraint.left), ("right", &constraint.right)] {
+            side.select.validate(&symbols).map_err(|error| {
+                profile_expr_error(
+                    "graph constraint",
+                    &constraint.id,
+                    format!("{side_name} selector: {error}"),
+                )
+            })?;
+            if side.node_types.is_empty()
+                || side
+                    .node_types
+                    .iter()
+                    .any(|node_type| node_type.trim().is_empty())
+                || side.node_types.iter().collect::<BTreeSet<_>>().len() != side.node_types.len()
+            {
+                return profile_error(format!(
+                    "graph constraint {} {} node_types must be nonempty, unique, trimmed names",
+                    constraint.id, side_name
+                ));
+            }
+            validate_known_node_types(
+                profile,
+                &side.node_types,
+                &format!("graph constraint {} {side_name}", constraint.id),
+            )?;
+            validate_contract_field_path(&side.field).map_err(|error| {
+                KoniError::Profile(format!(
+                    "graph constraint {} {side_name} has invalid field {:?}: {error}",
+                    constraint.id, side.field
+                ))
+            })?;
+            for node_type in &side.node_types {
+                let definition = node_field_definition(&profile.node_types[node_type], &side.field)
+                    .ok_or_else(|| {
+                        KoniError::Profile(format!(
+                            "graph constraint {} {side_name} field {} is not declared by node type {}",
+                            constraint.id, side.field, node_type
+                        ))
+                    })?;
+                let path_typed = definition.value_type == FieldType::Path
+                    || (definition.value_type == FieldType::List
+                        && definition
+                            .items
+                            .as_deref()
+                            .is_some_and(|item| item.value_type == FieldType::Path));
+                if !path_typed {
+                    return profile_error(format!(
+                        "graph constraint {} {side_name} field {} on node type {} must be Path or list<Path>",
+                        constraint.id, side.field, node_type
+                    ));
+                }
+            }
+        }
+        if constraint.left == constraint.right && !constraint.distinct_nodes {
+            return profile_error(format!(
+                "graph constraint {} compares one path set with itself and must set distinct_nodes: true",
+                constraint.id
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_query_cycles(profile: &CompiledProfile) -> Result<()> {
@@ -3924,6 +5343,17 @@ fn validate_operations(profile: &CompiledProfile) -> Result<()> {
                 ));
             }
         }
+        let unsupported_extensions = operation
+            .extensions
+            .keys()
+            .filter(|key| key.as_str() != "portfolio_guidance");
+        reject_unsupported_keys(
+            &format!("operation {}", operation.id),
+            unsupported_extensions,
+        )?;
+        if let Some(guidance) = operation.extensions.get("portfolio_guidance") {
+            validate_portfolio_guidance(&operation.id, guidance)?;
+        }
         if operation.stage.trim().is_empty() {
             return profile_error(format!("operation {} has an empty stage", operation.id));
         }
@@ -3990,8 +5420,22 @@ fn validate_operations(profile: &CompiledProfile) -> Result<()> {
                 ));
             }
         }
+        validate_proof_source_preparation_operation(profile, operation)?;
         validate_review_effects(profile, operation)?;
         validate_change_control_operation(profile, operation)?;
+        validate_terminal_resolver(operation)?;
+    }
+    let terminal_resolvers = profile
+        .operations
+        .values()
+        .filter(|operation| operation.terminal_resolver)
+        .map(|operation| operation.id.as_str())
+        .collect::<Vec<_>>();
+    if terminal_resolvers.len() > 1 {
+        return profile_error(format!(
+            "profile declares multiple terminal resolver operations: {}",
+            terminal_resolvers.join(", ")
+        ));
     }
     for rule in profile.rules.values() {
         if let Some(emit) = &rule.emit {
@@ -4026,6 +5470,290 @@ fn validate_operations(profile: &CompiledProfile) -> Result<()> {
                     rule.id, workflow
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_proof_source_preparation_operation(
+    profile: &CompiledProfile,
+    operation: &OperationDef,
+) -> Result<()> {
+    let Some(check_id) = operation.proof_source_preparation_check.as_deref() else {
+        return Ok(());
+    };
+    validate_identifier("proof source preparation check", check_id)?;
+    let check = profile.checks.get(check_id).ok_or_else(|| {
+        KoniError::Profile(format!(
+            "operation {} proof_source_preparation_check references unknown check {check_id}",
+            operation.id
+        ))
+    })?;
+    let graph_set = check.graph_set.as_ref().filter(|_| check.kind == CheckKind::Composite).ok_or_else(
+        || {
+            KoniError::Profile(format!(
+                "operation {} proof_source_preparation_check {check_id} must be a composite graph-set check",
+                operation.id
+            ))
+        },
+    )?;
+    if !normalized_check_operations(profile, check).contains(operation.public_operation()) {
+        return profile_error(format!(
+            "operation {} proof_source_preparation_check {check_id} does not apply to operation {}",
+            operation.id,
+            operation.public_operation()
+        ));
+    }
+
+    let workflow_id = operation.workflow.as_deref().ok_or_else(|| {
+        KoniError::Profile(format!(
+            "operation {} proof_source_preparation_check requires a workflow",
+            operation.id
+        ))
+    })?;
+    let workflow = profile.workflows.get(workflow_id).ok_or_else(|| {
+        KoniError::Profile(format!(
+            "operation {} proof_source_preparation_check references missing workflow {workflow_id}",
+            operation.id
+        ))
+    })?;
+    let scheduled = workflow
+        .steps
+        .iter()
+        .flat_map(|step| {
+            step.checks
+                .iter()
+                .filter(move |scheduled| scheduled.as_str() == check_id)
+                .map(move |_| step)
+        })
+        .collect::<Vec<_>>();
+    let [baseline_step] = scheduled.as_slice() else {
+        return profile_error(format!(
+            "operation {} proof_source_preparation_check {check_id} must be scheduled exactly once in workflow {workflow_id}; found {}",
+            operation.id,
+            scheduled.len()
+        ));
+    };
+    if !baseline_step.required || baseline_step.kind == WorkflowStepKind::Review {
+        return profile_error(format!(
+            "operation {} proof source preparation step {} must be required and non-review",
+            operation.id, baseline_step.id
+        ));
+    }
+    if check.receipt_type.trim().is_empty()
+        || !baseline_step
+            .required_receipts
+            .contains(&check.receipt_type)
+    {
+        return profile_error(format!(
+            "operation {} proof source preparation step {} must require composite receipt type {}",
+            operation.id, baseline_step.id, check.receipt_type
+        ));
+    }
+
+    for child_id in graph_set_child_check_ids(profile, check, graph_set)? {
+        let child = profile
+            .checks
+            .get(&child_id)
+            .expect("graph-set child IDs are registry validated");
+        if child.kind != CheckKind::Command || child.effect != ProcessEffect::ReadOnly {
+            return profile_error(format!(
+                "operation {} proof source preparation child {child_id} must be a read-only command check",
+                operation.id
+            ));
+        }
+        if child.receipt_freshness != ReceiptFreshness::Historical {
+            return profile_error(format!(
+                "operation {} proof source preparation child {child_id} must declare receipt_freshness: historical",
+                operation.id
+            ));
+        }
+        if !normalized_check_operations(profile, child).contains(operation.public_operation()) {
+            return profile_error(format!(
+                "operation {} proof source preparation child {child_id} does not apply to operation {}",
+                operation.id,
+                operation.public_operation()
+            ));
+        }
+    }
+
+    let review_steps = workflow
+        .steps
+        .iter()
+        .filter(|step| step.kind == WorkflowStepKind::Review)
+        .collect::<Vec<_>>();
+    let [review_step] = review_steps.as_slice() else {
+        return profile_error(format!(
+            "operation {} proof source preparation workflow {workflow_id} requires exactly one review step; found {}",
+            operation.id,
+            review_steps.len()
+        ));
+    };
+    if !review_step.required
+        || review_step.persona == baseline_step.persona
+        || !workflow_step_has_ancestor(
+            &workflow
+                .steps
+                .iter()
+                .map(|step| {
+                    (
+                        step.id.as_str(),
+                        step.depends_on.iter().cloned().collect::<BTreeSet<_>>(),
+                    )
+                })
+                .collect::<HashMap<_, _>>(),
+            &review_step.id,
+            &baseline_step.id,
+        )
+    {
+        return profile_error(format!(
+            "operation {} proof source preparation review {} must be required, use a persona independent from {}, and transitively depend on it",
+            operation.id, review_step.id, baseline_step.id
+        ));
+    }
+    Ok(())
+}
+
+fn graph_set_child_check_ids(
+    profile: &CompiledProfile,
+    parent: &CheckDef,
+    graph_set: &GraphCheckSetDef,
+) -> Result<BTreeSet<String>> {
+    match (
+        graph_set.member_check.as_deref(),
+        graph_set.member_check_field.as_deref(),
+    ) {
+        (Some(check_id), None) => {
+            if !profile.checks.contains_key(check_id) {
+                return profile_error(format!(
+                    "composite check {} graph_set references unknown child check {check_id}",
+                    parent.id
+                ));
+            }
+            Ok(BTreeSet::from([check_id.to_owned()]))
+        }
+        (None, Some(field_path)) => {
+            let mut check_ids = BTreeSet::new();
+            for node_type in &graph_set.member_node_types {
+                let definition = profile.node_types.get(node_type).ok_or_else(|| {
+                    KoniError::Profile(format!(
+                        "composite check {} references unknown member node type {node_type}",
+                        parent.id
+                    ))
+                })?;
+                let field = graph_set_node_field(definition, node_type, field_path, &parent.id)?;
+                for value in &field.enum_values {
+                    let Some(check_id) = value.as_str() else {
+                        return profile_error(format!(
+                            "composite check {} graph_set member_check_field {} on node type {} must contain only string check IDs",
+                            parent.id, field_path, node_type
+                        ));
+                    };
+                    if !profile.checks.contains_key(check_id) {
+                        return profile_error(format!(
+                            "composite check {} graph_set references unknown child check {check_id}",
+                            parent.id
+                        ));
+                    }
+                    check_ids.insert(check_id.to_owned());
+                }
+            }
+            Ok(check_ids)
+        }
+        _ => profile_error(format!(
+            "composite check {} graph_set requires exactly one child-check source",
+            parent.id
+        )),
+    }
+}
+
+fn validate_terminal_resolver(operation: &OperationDef) -> Result<()> {
+    if !operation.terminal_resolver {
+        return Ok(());
+    }
+    if operation.workflow.is_none() {
+        return profile_error(format!(
+            "terminal resolver operation {} must name a workflow",
+            operation.id
+        ));
+    }
+    if !operation.gate_blocking_exempt {
+        return profile_error(format!(
+            "terminal resolver operation {} must be gate_blocking_exempt",
+            operation.id
+        ));
+    }
+    if operation.change_control_barrier {
+        return profile_error(format!(
+            "terminal resolver operation {} must not create a change-control barrier",
+            operation.id
+        ));
+    }
+    if operation.allow_node_deletion {
+        return profile_error(format!(
+            "terminal resolver operation {} must not allow node deletion",
+            operation.id
+        ));
+    }
+    if operation
+        .single_flight_group
+        .as_deref()
+        .is_none_or(|group| group.trim().is_empty())
+    {
+        return profile_error(format!(
+            "terminal resolver operation {} must declare a nonempty single_flight_group",
+            operation.id
+        ));
+    }
+    if !operation.change_control.is_default() {
+        return profile_error(format!(
+            "terminal resolver operation {} must use closed ordinary change control",
+            operation.id
+        ));
+    }
+    Ok(())
+}
+
+fn validate_portfolio_guidance(operation_id: &str, guidance: &Value) -> Result<()> {
+    let owner = format!("operation {operation_id} portfolio_guidance");
+    let object = guidance
+        .as_object()
+        .ok_or_else(|| KoniError::Profile(format!("{owner} must be an object")))?;
+    const ALLOWED: [&str; 5] = [
+        "preferred_count",
+        "unit",
+        "group_when",
+        "split_when",
+        "avoid",
+    ];
+    let unsupported = object
+        .keys()
+        .filter(|key| !ALLOWED.contains(&key.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unsupported.is_empty() {
+        return profile_error(format!(
+            "{owner} contains unsupported field{}: {}",
+            if unsupported.len() == 1 { "" } else { "s" },
+            unsupported.join(", ")
+        ));
+    }
+    object
+        .get("preferred_count")
+        .and_then(Value::as_u64)
+        .filter(|count| *count > 0)
+        .ok_or_else(|| {
+            KoniError::Profile(format!(
+                "{owner}.preferred_count must be a positive integer"
+            ))
+        })?;
+    for field in ["unit", "group_when", "split_when", "avoid"] {
+        if object
+            .get(field)
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return profile_error(format!("{owner}.{field} must be a nonempty string"));
         }
     }
     Ok(())
@@ -4247,11 +5975,7 @@ fn validate_receipt_coverage(
         &traversal.node_types,
         &format!("{owner} required_nodes.node_types"),
     )?;
-    let relation_names = profile
-        .edge_types
-        .iter()
-        .map(|edge| edge.relation.as_str())
-        .collect::<BTreeSet<_>>();
+    let relation_names = configured_relation_names(profile);
     let mut seen_relations = BTreeSet::new();
     for relation in &traversal.relations {
         if !relation_names.contains(relation.as_str()) {
@@ -4536,6 +6260,7 @@ fn validate_review_effects(profile: &CompiledProfile, operation: &OperationDef) 
                     operation.id, effect.id, error
                 ))
             })?;
+            let destination = left.as_str();
             if paths.iter().skip(index + 1).any(|right| {
                 left.starts_with(&format!("{right}.")) || right.starts_with(&format!("{left}."))
             }) {
@@ -4561,6 +6286,18 @@ fn validate_review_effects(profile: &CompiledProfile, operation: &OperationDef) 
                         "operation {} review effect {} destination {} is not a declared field of node type {}",
                         operation.id, effect.id, left, node_type
                     ));
+                }
+                if let Some(manifest) = definition.filesystem_manifest.as_ref() {
+                    let output = manifest.output_field.as_str();
+                    if destination == output
+                        || destination.starts_with(&format!("{output}."))
+                        || output.starts_with(&format!("{destination}."))
+                    {
+                        return profile_error(format!(
+                            "operation {} review effect {} destination {} overlaps compiler-derived filesystem manifest output {} for node type {}",
+                            operation.id, effect.id, destination, output, node_type
+                        ));
+                    }
                 }
             }
             validate_review_effect_value_tokens(operation, effect, &effect.set[*left])?;
@@ -4875,6 +6612,83 @@ fn validate_workflows(profile: &CompiledProfile) -> Result<()> {
                 ));
             }
         }
+        if workflow.review_failure_reopen_from.is_some()
+            && !workflow.review_failure_routes.is_empty()
+        {
+            return profile_error(format!(
+                "workflow {} cannot configure both review_failure_reopen_from and review_failure_routes",
+                workflow.id
+            ));
+        }
+        for (domain, route) in &workflow.review_failure_routes {
+            validate_identifier("review failure domain", domain)?;
+            if domain == "none" {
+                return profile_error(format!(
+                    "workflow {} review failure domain none is reserved for passed reviews",
+                    workflow.id
+                ));
+            }
+            if route.description.trim().is_empty() {
+                return profile_error(format!(
+                    "workflow {} review failure route {} requires a nonempty description",
+                    workflow.id, domain
+                ));
+            }
+            match route.disposition {
+                ReviewFailureDisposition::Reopen => {
+                    let Some(reopen_from) = route.reopen_from.as_deref() else {
+                        return profile_error(format!(
+                            "workflow {} review failure route {} with disposition reopen requires reopen_from",
+                            workflow.id, domain
+                        ));
+                    };
+                    let Some(reopen_step) =
+                        workflow.steps.iter().find(|step| step.id == reopen_from)
+                    else {
+                        return profile_error(format!(
+                            "workflow {} review failure route {} references unknown reopen_from step {}",
+                            workflow.id, domain, reopen_from
+                        ));
+                    };
+                    if reopen_step.kind == WorkflowStepKind::Review {
+                        return profile_error(format!(
+                            "workflow {} review failure route {} cannot reopen review step {}",
+                            workflow.id, domain, reopen_from
+                        ));
+                    }
+                    if route.recovery.is_some() || route.recovery_instructions.is_some() {
+                        return profile_error(format!(
+                            "workflow {} review failure route {} with disposition reopen cannot configure blocked recovery",
+                            workflow.id, domain
+                        ));
+                    }
+                }
+                ReviewFailureDisposition::Block => {
+                    if route.reopen_from.is_some() {
+                        return profile_error(format!(
+                            "workflow {} review failure route {} with disposition block cannot configure reopen_from",
+                            workflow.id, domain
+                        ));
+                    }
+                    if route.recovery != Some(ReviewFailureRecovery::ReplanFromCleanIntegration)
+                        || route
+                            .recovery_instructions
+                            .as_deref()
+                            .is_none_or(|instructions| instructions.trim().is_empty())
+                    {
+                        return profile_error(format!(
+                            "workflow {} review failure route {} with disposition block requires replan_from_clean_integration and nonempty recovery_instructions",
+                            workflow.id, domain
+                        ));
+                    }
+                }
+            }
+        }
+        let workflow_scope_symbols = profile
+            .expression_symbols()
+            .with_variable("target", ValueType::Node)
+            .with_variable("ticket_read_scope", ValueType::NodeSet)
+            .with_variable("ticket_write_scope", ValueType::NodeSet);
         let mut dependencies: HashMap<&str, BTreeSet<String>> = HashMap::new();
         for step in &workflow.steps {
             validate_identifier("workflow step", &step.id)?;
@@ -4941,6 +6755,36 @@ fn validate_workflows(profile: &CompiledProfile) -> Result<()> {
                     ));
                 }
             }
+            for (label, selector) in [
+                ("read_scope", &step.read_scope),
+                ("write_scope", &step.write_scope),
+            ] {
+                selector
+                    .validate(&workflow_scope_symbols)
+                    .map_err(|error| {
+                        profile_expr_error(
+                            "workflow step",
+                            &format!("{}:{}:{label}", workflow.id, step.id),
+                            error,
+                        )
+                    })?;
+            }
+            if let Some(paths) = &step.read_paths {
+                validate_path_scopes(
+                    &format!("workflow {} step {}", workflow.id, step.id),
+                    "read_paths",
+                    paths,
+                    &workflow_scope_symbols,
+                )?;
+            }
+            if let Some(paths) = &step.write_paths {
+                validate_path_scopes(
+                    &format!("workflow {} step {}", workflow.id, step.id),
+                    "write_paths",
+                    paths,
+                    &workflow_scope_symbols,
+                )?;
+            }
             dependencies.insert(&step.id, step.depends_on.iter().cloned().collect());
         }
         let mut visiting = HashSet::new();
@@ -4954,8 +6798,97 @@ fn validate_workflows(profile: &CompiledProfile) -> Result<()> {
                 "workflow step",
             )?;
         }
+        for step in &workflow.steps {
+            let Some(source_step_id) = step.preserve_source_paths_from.as_deref() else {
+                continue;
+            };
+            validate_identifier("preserve_source_paths_from step", source_step_id)?;
+            let Some(source_step) = workflow
+                .steps
+                .iter()
+                .find(|candidate| candidate.id == source_step_id)
+            else {
+                return profile_error(format!(
+                    "workflow {} step {} preserve_source_paths_from references unknown step {}",
+                    workflow.id, step.id, source_step_id
+                ));
+            };
+            if !workflow_step_has_ancestor(&dependencies, &step.id, source_step_id) {
+                return profile_error(format!(
+                    "workflow {} step {} preserve_source_paths_from {} must name a transitive dependency",
+                    workflow.id, step.id, source_step_id
+                ));
+            }
+            let current_sets = workflow_step_graph_sets(profile, step);
+            let source_sets = workflow_step_graph_sets(profile, source_step);
+            if current_sets.len() != 1 || source_sets.len() != 1 {
+                return profile_error(format!(
+                    "workflow {} step {} preserve_source_paths_from {} requires exactly one graph-set check on each step (found {} and {})",
+                    workflow.id,
+                    step.id,
+                    source_step_id,
+                    current_sets.len(),
+                    source_sets.len()
+                ));
+            }
+            if !graph_sets_preserve_compatible(current_sets[0].1, source_sets[0].1) {
+                return profile_error(format!(
+                    "workflow {} step {} graph-set check {} is not source-compatible with dependency step {} check {}",
+                    workflow.id, step.id, current_sets[0].0, source_step_id, source_sets[0].0
+                ));
+            }
+        }
     }
     Ok(())
+}
+
+fn workflow_step_has_ancestor(
+    dependencies: &HashMap<&str, BTreeSet<String>>,
+    step_id: &str,
+    expected_ancestor: &str,
+) -> bool {
+    let mut pending = vec![step_id.to_owned()];
+    let mut visited = BTreeSet::new();
+    while let Some(current) = pending.pop() {
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+        for dependency in dependencies.get(current.as_str()).into_iter().flatten() {
+            if dependency == expected_ancestor {
+                return true;
+            }
+            pending.push(dependency.clone());
+        }
+    }
+    false
+}
+
+fn workflow_step_graph_sets<'a>(
+    profile: &'a CompiledProfile,
+    step: &'a WorkflowStepDef,
+) -> Vec<(&'a str, &'a GraphCheckSetDef)> {
+    step.checks
+        .iter()
+        .filter_map(|check_id| {
+            profile
+                .checks
+                .get(check_id)
+                .and_then(|check| check.graph_set.as_ref())
+                .map(|graph_set| (check_id.as_str(), graph_set))
+        })
+        .collect()
+}
+
+fn graph_sets_preserve_compatible(current: &GraphCheckSetDef, source: &GraphCheckSetDef) -> bool {
+    current.members == source.members
+        && current.member_node_types == source.member_node_types
+        && current.source_paths_field == source.source_paths_field
+        && current.covered_paths_field == source.covered_paths_field
+        && current.working_directory_field == source.working_directory_field
+        && current.statuses == source.statuses
+        && current.status_excluding == source.status_excluding
+        && current.min_members == source.min_members
+        && current.max_members == source.max_members
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -5059,6 +6992,18 @@ pub fn primitive_effect(step: &ActionStepDef) -> std::result::Result<PrimitiveEf
         }
         "lease.acquire" | "lease.release" => {
             PrimitiveEffect::write(ReversibleWrite, [Tickets, Audit], true)
+        }
+        "snapshot.write"
+            if step
+                .args
+                .get("recompute_from_integration_projection")
+                .and_then(Value::as_bool)
+                .unwrap_or(false) =>
+        {
+            // Projection refresh writes only declared compiler-owned graph
+            // fields and validates the result internally; semantic validation
+            // therefore remains current for the following integration CAS.
+            PrimitiveEffect::write(ReversibleWrite, [Audit, Graph], false)
         }
         "snapshot.write" | "event.append" | "receipt.write" => {
             PrimitiveEffect::write(ReversibleWrite, [Audit], false)
@@ -5188,6 +7133,29 @@ fn validate_actions(profile: &CompiledProfile) -> Result<()> {
             ));
         }
     }
+    if let Some(action) = profile.actions.values().find(|action| {
+        action
+            .recipe
+            .iter()
+            .chain(&action.compensation)
+            .any(|step| {
+                step.primitive == "recovery.dispatch"
+                    && step.args.get("mode").and_then(Value::as_str)
+                        == Some("block_and_emit_single_resolver")
+            })
+    }) {
+        let resolver_count = profile
+            .operations
+            .values()
+            .filter(|operation| operation.terminal_resolver)
+            .count();
+        if resolver_count != 1 {
+            return profile_error(format!(
+                "action {} uses recovery.dispatch mode block_and_emit_single_resolver but the profile declares {resolver_count} terminal resolver operations; expected exactly one",
+                action.id
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -5276,6 +7244,21 @@ fn validate_checks(profile: &CompiledProfile) -> Result<()> {
         if check.receipt_type.trim().is_empty() {
             return profile_error(format!("check {} has an empty receipt_type", check.id));
         }
+        match (check.kind, check.graph_set.as_ref()) {
+            (CheckKind::Composite, Some(graph_set)) => {
+                validate_graph_check_set(profile, check, graph_set)?;
+            }
+            (CheckKind::Composite, None) => {
+                return profile_error(format!("composite check {} requires graph_set", check.id));
+            }
+            (_, Some(_)) => {
+                return profile_error(format!(
+                    "non-composite check {} may not configure graph_set",
+                    check.id
+                ));
+            }
+            (_, None) => {}
+        }
         if let Some(predicate) = &check.predicate {
             if check.kind != CheckKind::Graph {
                 return profile_error(format!(
@@ -5303,6 +7286,63 @@ fn validate_checks(profile: &CompiledProfile) -> Result<()> {
         if check.timeout_seconds == 0 {
             return profile_error(format!(
                 "check {} timeout_seconds must be positive",
+                check.id
+            ));
+        }
+        if check
+            .expected_exit_codes
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != check.expected_exit_codes.len()
+        {
+            return profile_error(format!(
+                "check {} expected_exit_codes must not contain duplicates",
+                check.id
+            ));
+        }
+        if !matches!(check.kind, CheckKind::Command) && !check.expected_exit_codes.is_empty() {
+            return profile_error(format!(
+                "non-command check {} may not configure expected_exit_codes",
+                check.id
+            ));
+        }
+        if check.receipt_freshness == ReceiptFreshness::Historical
+            && (!matches!(check.kind, CheckKind::Command)
+                || check.effect != ProcessEffect::ReadOnly)
+        {
+            return profile_error(format!(
+                "check {} historical receipt_freshness requires a read_only command check",
+                check.id
+            ));
+        }
+        if check.receipt_freshness == ReceiptFreshness::Historical
+            && (check.result_protocol.is_some()
+                || check.dynamic_result.is_some()
+                || !check.artifact_paths.is_empty())
+        {
+            return profile_error(format!(
+                "check {} historical receipt_freshness may record process evidence but not current result or artifact evidence",
+                check.id
+            ));
+        }
+        if check.composed_replay == ComposedReplayPolicy::Never
+            && !matches!(check.kind, CheckKind::Command)
+        {
+            return profile_error(format!(
+                "check {} composed_replay is only meaningful for command checks",
+                check.id
+            ));
+        }
+        if check.expected_exit_codes.iter().any(|code| {
+            check
+                .retry_policy
+                .transient_exit_codes
+                .iter()
+                .any(|transient| transient == code)
+        }) {
+            return profile_error(format!(
+                "check {} may not use the same exit code as both expected and transient",
                 check.id
             ));
         }
@@ -5473,8 +7513,351 @@ fn validate_checks(profile: &CompiledProfile) -> Result<()> {
                 check.id
             ));
         }
+        let effective_attempts = check.retry_policy.max_attempts.max(1);
+        if effective_attempts > crate::process::MAX_CHECK_ATTEMPTS as usize {
+            return profile_error(format!(
+                "check {} retry_policy requests {effective_attempts} attempts; the maximum is {}",
+                check.id,
+                crate::process::MAX_CHECK_ATTEMPTS
+            ));
+        }
+        let aggregate_seconds = check
+            .timeout_seconds
+            .checked_mul(effective_attempts as u64)
+            .ok_or_else(|| {
+                KoniError::Profile(format!(
+                    "check {} aggregate retry timeout overflowed",
+                    check.id
+                ))
+            })?;
+        if aggregate_seconds > crate::process::MAX_CHECK_TOTAL_EXECUTION_SECONDS {
+            return profile_error(format!(
+                "check {} requests {aggregate_seconds} aggregate execution seconds; the maximum is {}",
+                check.id,
+                crate::process::MAX_CHECK_TOTAL_EXECUTION_SECONDS
+            ));
+        }
     }
     Ok(())
+}
+
+fn validate_graph_check_set(
+    profile: &CompiledProfile,
+    parent: &CheckDef,
+    graph_set: &GraphCheckSetDef,
+) -> Result<()> {
+    let symbols = profile
+        .expression_symbols()
+        .with_variable("target", ValueType::Node);
+    graph_set.members.validate(&symbols).map_err(|error| {
+        profile_expr_error(
+            "composite check",
+            &parent.id,
+            format!("graph_set members: {error}"),
+        )
+    })?;
+    if !validate_graph_set_selector(profile, &parent.id, &graph_set.members)? {
+        return profile_error(format!(
+            "composite check {} graph_set members must be rooted directly at or traverse from $target",
+            parent.id
+        ));
+    }
+
+    validate_nonempty_unique_values(
+        &graph_set.member_node_types,
+        &format!("composite check {} graph_set member_node_types", parent.id),
+    )?;
+    validate_known_node_types(
+        profile,
+        &graph_set.member_node_types,
+        &format!("composite check {} graph_set", parent.id),
+    )?;
+    if graph_set.min_members == 0 {
+        return profile_error(format!(
+            "composite check {} graph_set min_members must be positive",
+            parent.id
+        ));
+    }
+    if graph_set
+        .max_members
+        .is_some_and(|maximum| maximum < graph_set.min_members)
+    {
+        return profile_error(format!(
+            "composite check {} graph_set max_members must be at least min_members",
+            parent.id
+        ));
+    }
+
+    validate_optional_unique_manifest_values(
+        &graph_set.statuses,
+        &format!("composite check {} graph_set statuses", parent.id),
+    )?;
+    validate_optional_unique_manifest_values(
+        &graph_set.status_excluding,
+        &format!("composite check {} graph_set status_excluding", parent.id),
+    )?;
+    if graph_set
+        .statuses
+        .iter()
+        .any(|status| graph_set.status_excluding.contains(status))
+    {
+        return profile_error(format!(
+            "composite check {} graph_set statuses and status_excluding must be disjoint",
+            parent.id
+        ));
+    }
+    let known_statuses = graph_set
+        .member_node_types
+        .iter()
+        .flat_map(|node_type| profile.node_types[node_type].statuses.iter())
+        .collect::<BTreeSet<_>>();
+    for status in graph_set.statuses.iter().chain(&graph_set.status_excluding) {
+        if !known_statuses.contains(status) {
+            return profile_error(format!(
+                "composite check {} graph_set references unknown member status {}",
+                parent.id, status
+            ));
+        }
+    }
+
+    if graph_set.source_paths_field == graph_set.covered_paths_field {
+        return profile_error(format!(
+            "composite check {} graph_set source_paths_field and covered_paths_field must differ",
+            parent.id
+        ));
+    }
+    for node_type in &graph_set.member_node_types {
+        let definition = &profile.node_types[node_type];
+        validate_graph_set_path_list_field(
+            definition,
+            node_type,
+            &graph_set.source_paths_field,
+            &parent.id,
+            "source_paths_field",
+        )?;
+        validate_graph_set_path_list_field(
+            definition,
+            node_type,
+            &graph_set.covered_paths_field,
+            &parent.id,
+            "covered_paths_field",
+        )?;
+        if let Some(path) = &graph_set.working_directory_field {
+            let field = graph_set_node_field(definition, node_type, path, &parent.id)?;
+            if field.value_type != FieldType::Path {
+                return profile_error(format!(
+                    "composite check {} graph_set working_directory_field {} on node type {} must be a path",
+                    parent.id, path, node_type
+                ));
+            }
+        }
+    }
+
+    match (
+        graph_set.member_check.as_deref(),
+        graph_set.member_check_field.as_deref(),
+    ) {
+        (Some(check_id), None) if !check_id.trim().is_empty() => {
+            validate_graph_set_child_check(profile, parent, check_id)?;
+        }
+        (None, Some(field_path)) if !field_path.trim().is_empty() => {
+            let mut child_check_ids = BTreeSet::new();
+            for node_type in &graph_set.member_node_types {
+                let definition = &profile.node_types[node_type];
+                let field = graph_set_node_field(definition, node_type, field_path, &parent.id)?;
+                if field.value_type != FieldType::String || field.enum_values.is_empty() {
+                    return profile_error(format!(
+                        "composite check {} graph_set member_check_field {} on node type {} must be a string with a nonempty enum",
+                        parent.id, field_path, node_type
+                    ));
+                }
+                for value in &field.enum_values {
+                    let Some(check_id) = value.as_str() else {
+                        return profile_error(format!(
+                            "composite check {} graph_set member_check_field {} on node type {} must contain only string check IDs",
+                            parent.id, field_path, node_type
+                        ));
+                    };
+                    child_check_ids.insert(check_id.to_owned());
+                }
+            }
+            for child_check_id in child_check_ids {
+                validate_graph_set_child_check(profile, parent, &child_check_id)?;
+            }
+        }
+        _ => {
+            return profile_error(format!(
+                "composite check {} graph_set requires exactly one of member_check or member_check_field",
+                parent.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Returns whether every positive selector branch stays anchored to the
+/// ticket target. A bare `$target` is a safe, exact one-member graph set; the
+/// compiler still applies node-type, status, scope, and cardinality filters.
+fn validate_graph_set_selector(
+    profile: &CompiledProfile,
+    check_id: &str,
+    selector: &Selector,
+) -> Result<bool> {
+    match selector {
+        Selector::Named(name) if name == "$target" => Ok(true),
+        Selector::Traverse(envelope) => {
+            validate_graph_set_selector(profile, check_id, &envelope.traverse.from)?;
+            let relations = envelope
+                .traverse
+                .relation
+                .iter()
+                .chain(&envelope.traverse.relations)
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            if relations.is_empty()
+                || relations
+                    .iter()
+                    .any(|relation| relation.trim().is_empty() || relation.trim() != *relation)
+                || relations.iter().collect::<BTreeSet<_>>().len() != relations.len()
+            {
+                return profile_error(format!(
+                    "composite check {check_id} graph_set traversal requires explicit unique relations"
+                ));
+            }
+            let known_relations = configured_relation_names(profile);
+            for relation in relations {
+                if !known_relations.contains(relation) {
+                    return profile_error(format!(
+                        "composite check {check_id} graph_set traversal references unknown relation {relation}"
+                    ));
+                }
+            }
+            Ok(true)
+        }
+        Selector::Union(envelope) => {
+            for branch in &envelope.union {
+                if !validate_graph_set_selector(profile, check_id, branch)? {
+                    return profile_error(format!(
+                        "composite check {check_id} graph_set branches must be rooted directly at or traverse from $target"
+                    ));
+                }
+            }
+            Ok(true)
+        }
+        Selector::Intersection(envelope) => {
+            for branch in &envelope.intersection {
+                if !validate_graph_set_selector(profile, check_id, branch)? {
+                    return profile_error(format!(
+                        "composite check {check_id} graph_set branches must be rooted directly at or traverse from $target"
+                    ));
+                }
+            }
+            Ok(true)
+        }
+        Selector::Difference(envelope) => {
+            let left = validate_graph_set_selector(profile, check_id, &envelope.difference.left)?;
+            let right = validate_graph_set_selector(profile, check_id, &envelope.difference.right)?;
+            if !left || !right {
+                return profile_error(format!(
+                    "composite check {check_id} graph_set branches must be rooted directly at or traverse from $target"
+                ));
+            }
+            Ok(true)
+        }
+        _ => profile_error(format!(
+            "composite check {check_id} graph_set members may only use $target, target-anchored traversals, and set operations"
+        )),
+    }
+}
+
+fn graph_set_node_field<'a>(
+    definition: &'a NodeTypeDef,
+    node_type: &str,
+    path: &str,
+    check_id: &str,
+) -> Result<&'a FieldDef> {
+    validate_contract_field_path(path).map_err(|error| {
+        KoniError::Profile(format!(
+            "composite check {check_id} graph_set field {path:?} is malformed: {error}"
+        ))
+    })?;
+    node_field_definition(definition, path).ok_or_else(|| {
+        KoniError::Profile(format!(
+            "composite check {check_id} graph_set field {path} is not declared by node type {node_type}"
+        ))
+    })
+}
+
+fn validate_graph_set_path_list_field(
+    definition: &NodeTypeDef,
+    node_type: &str,
+    path: &str,
+    check_id: &str,
+    label: &str,
+) -> Result<()> {
+    let field = graph_set_node_field(definition, node_type, path, check_id)?;
+    if field.value_type != FieldType::List
+        || !field
+            .items
+            .as_deref()
+            .is_some_and(|item| item.value_type == FieldType::Path)
+    {
+        return profile_error(format!(
+            "composite check {check_id} graph_set {label} {path} on node type {node_type} must be a list with path items"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_graph_set_child_check(
+    profile: &CompiledProfile,
+    parent: &CheckDef,
+    child_check_id: &str,
+) -> Result<()> {
+    let child = profile.checks.get(child_check_id).ok_or_else(|| {
+        KoniError::Profile(format!(
+            "composite check {} graph_set references unknown child check {}",
+            parent.id, child_check_id
+        ))
+    })?;
+    if child.kind != CheckKind::Command || child.effect != ProcessEffect::ReadOnly {
+        return profile_error(format!(
+            "composite check {} graph_set child {} must be a read-only command check",
+            parent.id, child_check_id
+        ));
+    }
+    let parent_operations = normalized_check_operations(profile, parent);
+    let child_operations = normalized_check_operations(profile, child);
+    if !parent_operations.is_subset(&child_operations) {
+        return profile_error(format!(
+            "composite check {} graph_set child {} does not apply to every parent operation",
+            parent.id, child_check_id
+        ));
+    }
+    Ok(())
+}
+
+fn normalized_check_operations(profile: &CompiledProfile, check: &CheckDef) -> BTreeSet<String> {
+    let configured = if check.applies_to.is_empty() {
+        profile
+            .operations
+            .values()
+            .map(OperationDef::public_operation)
+            .collect::<Vec<_>>()
+    } else {
+        check.applies_to.iter().map(String::as_str).collect()
+    };
+    configured
+        .into_iter()
+        .map(|operation| {
+            profile
+                .operations
+                .get(operation)
+                .map(OperationDef::public_operation)
+                .unwrap_or(operation)
+                .to_owned()
+        })
+        .collect()
 }
 
 fn validate_dynamic_command_source(
@@ -5523,6 +7906,7 @@ fn validate_dynamic_command_source(
                 &source.node_types,
                 &format!("check {} command_source", check.id),
             )?;
+            validate_node_command_field_contract(profile, check, source)?;
             if let Some(policy_id) = &source.gate_policy {
                 let policy = profile.gate_policies.get(policy_id).ok_or_else(|| {
                     KoniError::Profile(format!(
@@ -5550,6 +7934,56 @@ fn validate_dynamic_command_source(
                     check.id
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_node_command_field_contract(
+    profile: &CompiledProfile,
+    check: &CheckDef,
+    source: &DynamicCommandSourceDef,
+) -> Result<()> {
+    for node_type in &source.node_types {
+        let definition = profile
+            .node_types
+            .get(node_type)
+            .expect("node command source types were validated");
+        if source.field.contains('[') {
+            let normalized = source.field.strip_prefix("spec.").unwrap_or(&source.field);
+            let root_end = normalized.find(['.', '[']).unwrap_or(normalized.len());
+            let root = &normalized[..root_end];
+            let field = definition.fields.get(root).ok_or_else(|| {
+                KoniError::Profile(format!(
+                    "check {} command_source field {} is not declared by node type {}",
+                    check.id, source.field, node_type
+                ))
+            })?;
+            if !matches!(field.value_type, FieldType::Object | FieldType::Json) {
+                return profile_error(format!(
+                    "check {} dynamic command_source field {} requires an object contract on node type {}",
+                    check.id, source.field, node_type
+                ));
+            }
+            continue;
+        }
+
+        let field = node_field_definition(definition, &source.field).ok_or_else(|| {
+            KoniError::Profile(format!(
+                "check {} command_source field {} is not declared by node type {}",
+                check.id, source.field, node_type
+            ))
+        })?;
+        if field.value_type != FieldType::List
+            || !field
+                .items
+                .as_deref()
+                .is_some_and(|items| items.value_type == FieldType::String)
+        {
+            return profile_error(format!(
+                "check {} command_source field {} on node type {} must be a list with string items",
+                check.id, source.field, node_type
+            ));
         }
     }
     Ok(())
@@ -5753,7 +8187,21 @@ fn validate_dynamic_field_syntax(field: &str) -> std::result::Result<(), ()> {
 }
 
 fn validate_personas(profile: &CompiledProfile) -> Result<()> {
+    let schema2 = profile.manifest.schema_version == PROFILE_SCHEMA_V2_VERSION;
+    if schema2 {
+        for agent in profile.koni_agents.agents.values() {
+            for skill in &agent.resource.skills {
+                if profile.native_codex.skill(skill).is_none() {
+                    return profile_error(format!(
+                        "schema-2 agent {} references unknown repository skill {skill}",
+                        agent.resource.id
+                    ));
+                }
+            }
+        }
+    }
     for persona in profile.personas.values() {
+        validate_persona_schema_fields(&profile.manifest.schema_version, persona)?;
         if let Some(prompt) = &persona.prompt {
             validate_relative_path(prompt, &format!("persona {} prompt", persona.id))?;
             let prompt = profile.root.join(prompt);
@@ -5764,25 +8212,42 @@ fn validate_personas(profile: &CompiledProfile) -> Result<()> {
                     prompt.display()
                 )));
             }
-        } else if persona.codex_agent.is_none() {
+        } else if schema2 && persona.agent.is_none() {
+            return profile_error(format!(
+                "schema-2 persona {} must define prompt or agent",
+                persona.id
+            ));
+        } else if !schema2 && persona.codex_agent.is_none() {
             return profile_error(format!(
                 "persona {} must define prompt or codex_agent",
                 persona.id
             ));
         }
+        let agent_reference = if schema2 {
+            persona.agent.as_deref()
+        } else {
+            persona.codex_agent.as_deref()
+        };
+        if agent_reference.is_some_and(|name| name.trim().is_empty()) {
+            return profile_error(format!(
+                "persona {} {} must not be empty",
+                persona.id,
+                if schema2 { "agent" } else { "codex_agent" }
+            ));
+        }
         if persona
-            .codex_agent
+            .thinking_level
             .as_deref()
-            .is_some_and(|name| name.trim().is_empty())
+            .is_some_and(|value| value.trim().is_empty())
         {
             return profile_error(format!(
-                "persona {} codex_agent must not be empty",
+                "persona {} thinking_level must not be empty",
                 persona.id
             ));
         }
         let resolved = profile.resolve_persona_def(persona)?;
         let mut unique_skills = BTreeSet::new();
-        for skill in &persona.skills {
+        for skill in &resolved.skills {
             if skill.trim().is_empty() {
                 return profile_error(format!(
                     "persona {} skill name must not be empty",
@@ -5791,13 +8256,13 @@ fn validate_personas(profile: &CompiledProfile) -> Result<()> {
             }
             if !unique_skills.insert(skill) {
                 return profile_error(format!(
-                    "persona {} references Codex skill {skill} more than once",
+                    "persona {} references repository skill {skill} more than once",
                     persona.id
                 ));
             }
             if profile.native_codex.skill(skill).is_none() {
                 return profile_error(format!(
-                    "persona {} references unknown Codex skill {skill}",
+                    "persona {} references unknown repository skill {skill}",
                     persona.id
                 ));
             }
@@ -5815,7 +8280,7 @@ fn validate_personas(profile: &CompiledProfile) -> Result<()> {
             "read-only" | "workspace-write" | "danger-full-access"
         ) {
             return profile_error(format!(
-                "persona {} uses unsupported Codex sandbox mode {}",
+                "persona {} uses unsupported runtime sandbox mode {}",
                 persona.id, resolved.sandbox.mode
             ));
         }
@@ -5824,7 +8289,7 @@ fn validate_personas(profile: &CompiledProfile) -> Result<()> {
             "never" | "on-request" | "on-failure" | "untrusted"
         ) {
             return profile_error(format!(
-                "persona {} uses unsupported Codex approval policy {}",
+                "persona {} uses unsupported runtime approval policy {}",
                 persona.id, resolved.sandbox.approval_policy
             ));
         }
@@ -6073,6 +8538,8 @@ struct ProfileHashInput<'a> {
     edge_types: &'a [EdgeTypeDef],
     gate_policies: &'a IndexMap<String, GatePolicyDef>,
     queries: &'a IndexMap<String, QueryDef>,
+    #[serde(skip_serializing_if = "IndexMap::is_empty")]
+    graph_constraints: &'a IndexMap<String, GraphConstraintDef>,
     rules: &'a IndexMap<String, RuleDef>,
     operations: &'a IndexMap<String, OperationDef>,
     workflows: &'a IndexMap<String, WorkflowDef>,
@@ -6089,16 +8556,28 @@ struct ProfileHashInput<'a> {
 fn profile_hash(profile: &CompiledProfile) -> Result<String> {
     let mut persona_prompts = BTreeMap::new();
     let mut native_resources = BTreeMap::new();
-    if let Some(config) = &profile.native_codex.project_config {
+    let schema2 = profile.manifest.schema_version == PROFILE_SCHEMA_V2_VERSION;
+    if !schema2 && let Some(config) = &profile.native_codex.project_config {
         native_resources.insert("project-config".to_owned(), config.hash.clone());
     }
     for (id, persona) in &profile.personas {
+        let resolved = profile.resolve_persona_def(persona)?;
         if let Some(prompt) = &persona.prompt {
             let path = profile.root.join(prompt);
             let contents = fs::read_to_string(&path).map_err(|error| io_error(&path, error))?;
             persona_prompts.insert(id.clone(), contents);
         }
-        if let Some(agent_name) = &persona.codex_agent {
+        if let Some(agent_name) = &persona.agent {
+            let agent = profile.koni_agents.agent(agent_name).ok_or_else(|| {
+                KoniError::Profile(format!(
+                    "persona {id} references unknown schema-2 agent {agent_name}"
+                ))
+            })?;
+            native_resources.insert(
+                format!("persona:{id}:agent:{}", agent.resource.id),
+                agent.hash.clone(),
+            );
+        } else if let Some(agent_name) = &persona.codex_agent {
             let agent = profile.native_codex.agent(agent_name).ok_or_else(|| {
                 KoniError::Profile(format!(
                     "persona {id} references unknown Codex custom agent {agent_name}"
@@ -6109,10 +8588,10 @@ fn profile_hash(profile: &CompiledProfile) -> Result<String> {
                 agent.hash.clone(),
             );
         }
-        for skill_name in &persona.skills {
+        for skill_name in &resolved.skills {
             let skill = profile.native_codex.skill(skill_name).ok_or_else(|| {
                 KoniError::Profile(format!(
-                    "persona {id} references unknown Codex skill {skill_name}"
+                    "persona {id} references unknown repository skill {skill_name}"
                 ))
             })?;
             native_resources.insert(
@@ -6127,6 +8606,7 @@ fn profile_hash(profile: &CompiledProfile) -> Result<String> {
         edge_types: &profile.edge_types,
         gate_policies: &profile.gate_policies,
         queries: &profile.queries,
+        graph_constraints: &profile.graph_constraints,
         rules: &profile.rules,
         operations: &profile.operations,
         workflows: &profile.workflows,
@@ -6313,6 +8793,89 @@ state_machines:
 "#
     }
 
+    fn graph_set_check_definition(id: &str, member_mapping: &str) -> String {
+        format!(
+            r#"  - id: {id}
+    kind: composite
+    applies_to: [implement]
+    receipt_type: proof_set
+    graph_set:
+      members:
+        traverse:
+          from: $target
+          relation: verified_by
+          min_depth: 1
+          max_depth: 1
+          node_types: [proof]
+      member_node_types: [proof]
+      {member_mapping}
+      source_paths_field: spec.source_paths
+      covered_paths_field: spec.covered_paths
+      working_directory_field: spec.working_directory
+      statuses: [planned]
+      status_excluding: [superseded]
+      min_members: 1
+      max_members: 4
+"#,
+        )
+    }
+
+    fn module_with_graph_check_set() -> String {
+        let proof_contract = r#"  - id: proof
+    description: A repository-backed executable proof obligation.
+    stage: assurance
+    statuses: [planned, passing, superseded]
+    semantic_fields: [claim]
+    fields:
+      claim: {type: string, required: true}
+      check_id: {type: string, required: true, enum: [unit]}
+      command: {type: list, required: true, items: {type: string, required: true}}
+      source_paths: {type: list, required: true, items: {type: path, required: true}}
+      covered_paths: {type: list, required: true, items: {type: path, required: true}}
+      working_directory: {type: path, required: true}
+
+"#;
+        let proof_edge = r#"  - source: proof
+    relation: verifies
+    inverse: verified_by
+    bidirectional: true
+    targets: [system]
+
+"#;
+        let check = graph_set_check_definition("proof-set", "member_check: unit");
+        valid_module()
+            .replace(
+                "edge_types:\n",
+                &format!("{proof_contract}edge_types:\n{proof_edge}"),
+            )
+            .replace("        checks: [unit]\n", "        checks: [proof-set]\n")
+            .replace("checks:\n", &format!("checks:\n{check}"))
+    }
+
+    fn module_with_proof_source_preparation() -> String {
+        module_with_graph_check_set()
+            .replace(
+                "    ranking_hints: [stage, target]\n",
+                "    ranking_hints: [stage, target]\n    proof_source_preparation_check: proof-set\n",
+            )
+            .replace(
+                "    receipt_type: test\n",
+                "    receipt_type: test\n    receipt_freshness: historical\n",
+            )
+            .replace(
+                "        checks: [proof-set]\n\nactions:",
+                "        checks: [proof-set]\n        required_receipts: [proof_set]\n      - id: review\n        kind: review\n        persona: reviewer\n        depends_on: [work]\n        validation_action: review\n\nactions:",
+            )
+            .replace(
+                "  - id: recover\n",
+                "  - id: review\n    recipe:\n      - primitive: review.record\n\n  - id: recover\n",
+            )
+            .replace(
+                "\nreports:\n",
+                "\n  - id: reviewer\n    prompt: personas/coder.md\n    model_role: reviewer\n    sandbox:\n      mode: read-only\n      approval_policy: never\n      network_access: false\n\nreports:\n",
+            )
+    }
+
     fn module_with_path_scopes(scopes: &str) -> String {
         let scopes = scopes
             .lines()
@@ -6434,9 +8997,14 @@ state_machines:
     }
 
     fn module_with_structured_dynamic_check() -> String {
-        valid_module().replace(
-            "\npersonas:\n",
-            r#"
+        valid_module()
+            .replace(
+                "    compiler_owned_fields: [readiness]\n",
+                "    compiler_owned_fields: [readiness]\n    fields:\n      contracts: {type: object}\n",
+            )
+            .replace(
+                "\npersonas:\n",
+                r#"
   - id: dynamic-contract
     kind: command
     applies_to: [implement]
@@ -6471,7 +9039,7 @@ state_machines:
 
 personas:
 "#,
-        )
+            )
     }
 
     fn fixture(module: &str) -> TempDir {
@@ -6483,6 +9051,290 @@ personas:
             "You are a bounded coder.\n",
         );
         temp
+    }
+
+    fn schema2_manifest() -> String {
+        manifest().replacen("schema_version = \"1.0\"", "schema_version = \"2.0\"", 1)
+    }
+
+    fn schema2_module(persona: &str) -> String {
+        let legacy_persona = r#"personas:
+  - id: coder
+    prompt: personas/coder.md
+    model_role: ticket_worker
+    sandbox:
+      mode: workspace-write
+      approval_policy: never
+      network_access: false
+"#;
+        format!(
+            "schema_version: \"2.0\"\n{}",
+            valid_module().replace(legacy_persona, persona)
+        )
+    }
+
+    fn write_schema2_fixture(temp: &TempDir, persona: &str, provider: &str) -> PathBuf {
+        let root = temp.path().join(".koni");
+        write(&root.join("koni.toml"), &schema2_manifest());
+        write(&root.join("module.yaml"), &schema2_module(persona));
+        write(
+            &root.join("agents/reviewer.yaml"),
+            &format!(
+                r#"schema_version: "2.0"
+id: reviewer
+description: Review changes against their contracts.
+instructions:
+  source: path
+  path: agent-prompts/reviewer.md
+aliases: [reviewer-alias]
+provider: {provider}
+model: gpt-native
+thinking_level: high
+capabilities:
+  workspace_access: read_only
+  commands: read_only
+  network_access: false
+skills: [review]
+"#
+            ),
+        );
+        write(
+            &root.join("agent-prompts/reviewer.md"),
+            "Review like an owner.\n",
+        );
+        write(
+            &temp.path().join(".agents/skills/review/SKILL.md"),
+            "---\nname: review\ndescription: Review a change\n---\nReview carefully.\n",
+        );
+        root
+    }
+
+    #[test]
+    fn schema2_prefers_koni_and_resolves_provider_neutral_agent_resources() {
+        let temp = TempDir::new().unwrap();
+        let profile_root = write_schema2_fixture(
+            &temp,
+            r#"personas:
+  - id: coder
+    agent: reviewer-alias
+    model_role: ticket_worker
+"#,
+            "openai-codex",
+        );
+        write(&temp.path().join("koni.toml"), "not valid toml = [\n");
+        write(
+            &temp.path().join(".codex/koni/koni.toml"),
+            "also not valid toml = [\n",
+        );
+        write(
+            &temp.path().join(".codex/config.toml"),
+            "invalid executable codex config = [\n",
+        );
+        write(
+            &temp.path().join(".codex/agents/reviewer.toml"),
+            "invalid executable codex agent = [\n",
+        );
+
+        let original = ProfileCompiler::compile(temp.path()).unwrap();
+        assert_eq!(original.root, profile_root);
+        assert_eq!(original.manifest.schema_version, "2.0");
+        assert!(original.native_codex.project_config.is_none());
+        assert!(original.native_codex.agents.is_empty());
+        assert!(original.native_codex.skill("review").is_some());
+        assert!(original.koni_agents.agent("reviewer-alias").is_some());
+
+        let persona = original.resolve_persona("coder").unwrap();
+        assert_eq!(persona.instructions, "Review like an owner.\n");
+        assert_eq!(
+            persona.instruction_source,
+            profile_root.join("agent-prompts/reviewer.md")
+        );
+        assert_eq!(
+            persona.description,
+            "Review changes against their contracts."
+        );
+        assert_eq!(persona.model.as_deref(), Some("gpt-native"));
+        assert_eq!(persona.thinking_level.as_deref(), Some("high"));
+        assert_eq!(persona.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(persona.sandbox.mode, "read-only");
+        assert_eq!(persona.sandbox.approval_policy, "never");
+        assert_eq!(persona.agent.as_deref(), Some("reviewer"));
+        assert!(persona.codex_agent.is_none());
+        assert_eq!(persona.skills, ["review"]);
+        assert!(persona.codex_config_overrides().next().is_none());
+        let capabilities = persona.capabilities.as_ref().unwrap();
+        assert_eq!(capabilities.workspace_access, WorkspaceAccessV2::ReadOnly);
+        assert_eq!(capabilities.commands, CommandAccessV2::ReadOnly);
+
+        write(
+            &temp.path().join(".codex/config.toml"),
+            "a different invalid executable config = [\n",
+        );
+        let codex_change_ignored = ProfileCompiler::compile(temp.path()).unwrap();
+        assert_eq!(original.hash, codex_change_ignored.hash);
+
+        write(
+            &profile_root.join("agent-prompts/reviewer.md"),
+            "Review with a changed provider-neutral contract.\n",
+        );
+        let changed_agent = ProfileCompiler::compile(temp.path()).unwrap();
+        assert_ne!(original.hash, changed_agent.hash);
+
+        write(
+            &temp.path().join(".agents/skills/review/SKILL.md"),
+            "---\nname: review\ndescription: Review a change\n---\nRevised skill.\n",
+        );
+        let changed_skill = ProfileCompiler::compile(temp.path()).unwrap();
+        assert_ne!(changed_agent.hash, changed_skill.hash);
+
+        let staging_root = temp.path().join(".koni-migration-test");
+        fs::create_dir(&staging_root).unwrap();
+        let staged_profile_root = staging_root.join(".koni");
+        fs::rename(&profile_root, &staged_profile_root).unwrap();
+        let staged =
+            ProfileCompiler::compile_with_project_root(&staged_profile_root, temp.path()).unwrap();
+        assert!(staged.native_codex.skill("review").is_some());
+        assert_eq!(staged.root, staged_profile_root);
+    }
+
+    #[test]
+    fn schema2_rejects_non_openai_codex_providers_and_mismatched_modules() {
+        let persona = r#"personas:
+  - id: coder
+    agent: reviewer
+    model_role: ticket_worker
+"#;
+        let unsupported = TempDir::new().unwrap();
+        write_schema2_fixture(&unsupported, persona, "anthropic");
+        let error = ProfileCompiler::compile(unsupported.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("unsupported provider anthropic; expected openai-codex"),
+            "{error}"
+        );
+
+        let mismatched = TempDir::new().unwrap();
+        let root = write_schema2_fixture(&mismatched, persona, "openai-codex");
+        let module = schema2_module(persona).replacen(
+            "schema_version: \"2.0\"",
+            "schema_version: \"1.0\"",
+            1,
+        );
+        write(&root.join("module.yaml"), &module);
+        let error = ProfileCompiler::compile(mismatched.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("declares schema 1.0, but the profile declares 2.0"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn persona_schema_generations_cannot_be_mixed() {
+        let cases = [
+            (
+                r#"personas:
+  - id: coder
+    agent: reviewer
+    codex_agent: legacy-reviewer
+    model_role: ticket_worker
+"#,
+                "conflicting agent and codex_agent",
+            ),
+            (
+                r#"personas:
+  - id: coder
+    agent: reviewer
+    thinking_level: high
+    reasoning_effort: low
+    model_role: ticket_worker
+"#,
+                "conflicting thinking_level and reasoning_effort",
+            ),
+            (
+                r#"personas:
+  - id: coder
+    agent: reviewer
+    model_role: ticket_worker
+    capabilities:
+      workspace_access: read_only
+      commands: read_only
+    sandbox:
+      mode: read-only
+      approval_policy: never
+"#,
+                "conflicting capabilities and sandbox",
+            ),
+        ];
+        for (persona, expected) in cases {
+            let temp = TempDir::new().unwrap();
+            write_schema2_fixture(&temp, persona, "openai-codex");
+            let error = ProfileCompiler::compile(temp.path())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(expected),
+                "expected {expected:?}, got {error}"
+            );
+        }
+
+        let schema2_legacy_only = TempDir::new().unwrap();
+        write_schema2_fixture(
+            &schema2_legacy_only,
+            r#"personas:
+  - id: coder
+    codex_agent: legacy-reviewer
+    model_role: ticket_worker
+"#,
+            "openai-codex",
+        );
+        let error = ProfileCompiler::compile(schema2_legacy_only.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("schema-2 persona coder contains legacy field"),
+            "{error}"
+        );
+
+        let schema1_current = fixture(&valid_module().replace(
+            "    model_role: ticket_worker\n",
+            "    model_role: ticket_worker\n    agent: reviewer\n",
+        ));
+        let error = ProfileCompiler::compile(schema1_current.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("schema-1 persona coder contains schema-2 field"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn schema1_profile_manifest_wins_when_project_catalog_is_also_present() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join(".codex/koni");
+        write(&root.join("profile.yaml"), yaml_manifest());
+        write(&root.join("module.yaml"), valid_module());
+        write(
+            &root.join("personas/coder.md"),
+            "You are a bounded coder.\n",
+        );
+        write(
+            &root.join("project.yaml"),
+            r#"schema_version: "1.0"
+project:
+  id: fixture
+  title: Fixture catalog
+default_run_type: medium
+run_types: []
+"#,
+        );
+
+        let profile = ProfileCompiler::compile(temp.path()).unwrap();
+        assert_eq!(profile.manifest.profile.id, "fixture-yaml");
+        assert_eq!(profile.root, root);
     }
 
     fn automatic_gate_profile() -> CompiledProfile {
@@ -6834,6 +9686,29 @@ personas:
         )
     }
 
+    fn manifest_with_context(context: &str) -> String {
+        manifest().replace(
+            "\n[storage]",
+            &format!("\n[context]\n{context}\n\n[storage]"),
+        )
+    }
+
+    fn module_with_planning_seed_operation() -> String {
+        valid_module().replace(
+            "\nworkflows:\n",
+            r#"
+  - id: initialization.graph.seed
+    operation: seed-graph
+    stage: initialization
+    target_types: [system]
+    allowed_new_node_types: [system]
+    allowed_existing_node_types: [system]
+
+workflows:
+"#,
+        )
+    }
+
     fn module_with_planning_context(field_type: &str) -> String {
         valid_module().replace(
             "    compiler_owned_fields: [readiness]\n",
@@ -6882,7 +9757,8 @@ personas:
         let legacy_check = serde_json::to_value(&profile.checks["unit"]).unwrap();
         assert!(
             legacy_check.get("command_source").is_none()
-                && legacy_check.get("dynamic_result").is_none(),
+                && legacy_check.get("dynamic_result").is_none()
+                && legacy_check.get("graph_set").is_none(),
             "omitted structured command fields must not perturb legacy check hashes"
         );
         assert!(
@@ -6922,12 +9798,42 @@ personas:
                 .is_none(),
             "an absent optional rework policy must not perturb pinned profile hashes"
         );
+        assert_eq!(
+            profile.workflows["implement-system"].steps[0].graph_mutation,
+            GraphMutationPolicyDef::Allowed
+        );
+        assert!(
+            serde_json::to_value(&profile.workflows["implement-system"].steps[0])
+                .unwrap()
+                .get("graph_mutation")
+                .is_none(),
+            "the legacy allowed graph policy must not perturb already-pinned profile hashes"
+        );
+        assert!(
+            serde_json::to_value(&profile.workflows["implement-system"].steps[0])
+                .unwrap()
+                .get("preserve_source_paths_from")
+                .is_none(),
+            "an absent source-preservation dependency must not perturb pinned profile hashes"
+        );
         assert!(
             serde_json::to_value(&profile.operations["architecture.system.implement"])
                 .unwrap()
                 .get("review_effects")
                 .is_none(),
             "omitted review effects must not perturb legacy profile hashes"
+        );
+        assert!(
+            profile.operations["architecture.system.implement"]
+                .proof_source_preparation_check
+                .is_none()
+        );
+        assert!(
+            serde_json::to_value(&profile.operations["architecture.system.implement"])
+                .unwrap()
+                .get("proof_source_preparation_check")
+                .is_none(),
+            "an omitted proof-source preparation declaration must not perturb legacy profile hashes"
         );
         assert!(
             profile
@@ -6944,10 +9850,51 @@ personas:
                 .is_none(),
             "a disabled planning handoff must not perturb legacy profile hashes"
         );
+        assert!(
+            profile
+                .manifest
+                .initialization
+                .planning_seed_operation
+                .is_none(),
+            "legacy profiles default approved-plan graph seeding to disabled"
+        );
+        assert!(
+            serde_json::to_value(&profile.manifest.initialization)
+                .unwrap()
+                .get("planning_seed_operation")
+                .is_none(),
+            "a disabled graph seed must not perturb legacy profile hashes"
+        );
+        assert_eq!(profile.manifest.context, ContextPolicy::default());
+        assert!(
+            serde_json::to_value(&profile.manifest)
+                .unwrap()
+                .get("context")
+                .is_none(),
+            "the default context budget must not perturb legacy profile hashes"
+        );
         assert!(profile.hash.starts_with("sha256:"));
 
         let again = ProfileCompiler::compile(&temp.path().join("koni.toml")).unwrap();
         assert_eq!(profile.hash, again.hash);
+    }
+
+    #[test]
+    fn nondefault_step_graph_mutation_policy_is_profile_hashed() {
+        let baseline = fixture(valid_module());
+        let baseline = ProfileCompiler::compile(baseline.path()).unwrap();
+        let forbidden_module = valid_module().replace(
+            "        expected_output: scoped patch\n",
+            "        expected_output: scoped patch\n        graph_mutation: forbidden\n",
+        );
+        let forbidden = fixture(&forbidden_module);
+        let forbidden = ProfileCompiler::compile(forbidden.path()).unwrap();
+
+        assert_eq!(
+            forbidden.workflows["implement-system"].steps[0].graph_mutation,
+            GraphMutationPolicyDef::Forbidden
+        );
+        assert_ne!(baseline.hash, forbidden.hash);
     }
 
     #[test]
@@ -7111,6 +10058,43 @@ personas:
             .to_string();
         assert!(error.contains("ambiguous overlapping selectors"), "{error}");
 
+        let manifest_output = valid
+            .replace(
+                "    compiler_owned_fields: [readiness, spec.acceptance, spec.accepted_by]\n    fields:\n      name: {type: string}\n",
+                r#"    compiler_owned_fields: [readiness, spec.acceptance, spec.accepted_by, asset_manifest]
+    filesystem_manifest:
+      root_field: spec.implementation_plan.root
+      implementation_contract_field: spec.implementation
+      implementation_kind_field: spec.implementation.kind
+      implementation_entrypoints_field: spec.implementation.entrypoints
+      output_field: asset_manifest
+      allowed_root_prefixes: [artifacts]
+    fields:
+      name: {type: string}
+      implementation_plan:
+        type: object
+        properties:
+          root: {type: path}
+      implementation:
+        type: object
+        properties:
+          kind: {type: string}
+          entrypoints: {type: list, items: {type: path}}
+"#,
+            )
+            .replace(
+                "          spec.acceptance: accepted\n",
+                "          asset_manifest: {}\n",
+            );
+        let configured = fixture(&manifest_output);
+        let error = ProfileCompiler::compile(configured.path())
+            .expect_err("review effects must not overwrite compiler-derived manifests")
+            .to_string();
+        assert!(
+            error.contains("overlaps compiler-derived filesystem manifest output"),
+            "{error}"
+        );
+
         for (module, expected) in [
             (
                 valid.replace(
@@ -7234,6 +10218,346 @@ personas:
     }
 
     #[test]
+    fn graph_check_sets_are_typed_target_anchored_and_profile_hashed() {
+        let baseline = ProfileCompiler::compile(fixture(valid_module()).path()).unwrap();
+        let configured_module = module_with_graph_check_set();
+        let configured = ProfileCompiler::compile(fixture(&configured_module).path()).unwrap();
+        let graph_set = configured.checks["proof-set"]
+            .graph_set
+            .as_ref()
+            .expect("composite graph-set contract");
+        assert_eq!(configured.checks["proof-set"].kind, CheckKind::Composite);
+        assert_eq!(graph_set.member_node_types, vec!["proof"]);
+        assert_eq!(graph_set.member_check.as_deref(), Some("unit"));
+        assert_eq!(graph_set.min_members, 1);
+        assert_eq!(graph_set.max_members, Some(4));
+        assert_ne!(baseline.hash, configured.hash);
+
+        let direct_target = configured_module.replace(
+            r#"      members:
+        traverse:
+          from: $target
+          relation: verified_by
+          min_depth: 1
+          max_depth: 1
+          node_types: [proof]"#,
+            "      members: $target",
+        );
+        let direct_target = ProfileCompiler::compile(fixture(&direct_target).path()).unwrap();
+        assert!(matches!(
+            &direct_target.checks["proof-set"]
+                .graph_set
+                .as_ref()
+                .unwrap()
+                .members,
+            Selector::Named(target) if target == "$target"
+        ));
+
+        let field_mapped =
+            configured_module.replace("member_check: unit", "member_check_field: spec.check_id");
+        let field_mapped = ProfileCompiler::compile(fixture(&field_mapped).path()).unwrap();
+        assert_eq!(
+            field_mapped.checks["proof-set"]
+                .graph_set
+                .as_ref()
+                .unwrap()
+                .member_check_field
+                .as_deref(),
+            Some("spec.check_id")
+        );
+        assert_ne!(configured.hash, field_mapped.hash);
+    }
+
+    #[test]
+    fn proof_source_preparation_declaration_is_typed_serialized_and_profile_hashed() {
+        let configured_module = module_with_proof_source_preparation();
+        let legacy_shape =
+            configured_module.replace("    proof_source_preparation_check: proof-set\n", "");
+        let legacy_shape = ProfileCompiler::compile(fixture(&legacy_shape).path()).unwrap();
+        let configured = ProfileCompiler::compile(fixture(&configured_module).path()).unwrap();
+        let operation = &configured.operations["architecture.system.implement"];
+        assert_eq!(
+            operation.proof_source_preparation_check.as_deref(),
+            Some("proof-set")
+        );
+        assert_eq!(
+            serde_json::to_value(operation).unwrap()["proof_source_preparation_check"],
+            "proof-set"
+        );
+        assert_ne!(legacy_shape.hash, configured.hash);
+    }
+
+    #[test]
+    fn proof_source_preparation_rejects_incomplete_or_unsafe_workflow_contracts() {
+        let valid = module_with_proof_source_preparation();
+        let with_other_operation = |module: String| {
+            module.replace(
+                "operations:\n",
+                "operations:\n  - id: architecture.system.other\n    operation: other\n    stage: architecture\n    target_types: [system]\n\n",
+            )
+        };
+        let parent_not_applicable = with_other_operation(
+            valid
+                .replace(
+                    "    kind: composite\n    applies_to: [implement]\n    receipt_type: proof_set",
+                    "    kind: composite\n    applies_to: [other]\n    receipt_type: proof_set",
+                )
+                .replace(
+                    "    applies_to: [implement]\n    argv: [cargo, test]",
+                    "    applies_to: [implement, other]\n    argv: [cargo, test]",
+                ),
+        );
+        let child_not_applicable = with_other_operation(valid.replace(
+            "    applies_to: [implement]\n    argv: [cargo, test]",
+            "    applies_to: [other]\n    argv: [cargo, test]",
+        ));
+        let missing_review = valid.replace(
+            "      - id: review\n        kind: review\n        persona: reviewer\n        depends_on: [work]\n        validation_action: review\n",
+            "",
+        );
+        let multiple_reviews = valid.replace(
+            "        validation_action: review\n\nactions:",
+            "        validation_action: review\n      - id: second-review\n        kind: review\n        persona: reviewer\n        depends_on: [work]\n        validation_action: review\n\nactions:",
+        );
+        let cases =
+            vec![
+            (
+                valid.replace(
+                    "proof_source_preparation_check: proof-set",
+                    "proof_source_preparation_check: missing",
+                ),
+                "references unknown check missing",
+            ),
+            (
+                valid.replace(
+                    "proof_source_preparation_check: proof-set",
+                    "proof_source_preparation_check: unit",
+                ),
+                "must be a composite graph-set check",
+            ),
+            (parent_not_applicable, "does not apply to operation implement"),
+            (
+                child_not_applicable,
+                "proof source preparation child unit does not apply to operation implement",
+            ),
+            (
+                valid.replace("        checks: [proof-set]\n", ""),
+                "must be scheduled exactly once",
+            ),
+            (
+                valid.replace(
+                    "        validation_action: review\n\nactions:",
+                    "        validation_action: review\n        checks: [proof-set]\n\nactions:",
+                ),
+                "must be scheduled exactly once",
+            ),
+            (
+                valid.replace("    receipt_freshness: historical\n", ""),
+                "must declare receipt_freshness: historical",
+            ),
+            (
+                valid.replace(
+                    "    receipt_freshness: historical\n",
+                    "    receipt_freshness: historical\n    effect: workspace_write\n",
+                ),
+                "must be a read-only command check",
+            ),
+            (
+                valid.replace("        required_receipts: [proof_set]\n", ""),
+                "must require composite receipt type proof_set",
+            ),
+            (missing_review, "requires exactly one review step"),
+            (multiple_reviews, "requires exactly one review step"),
+            (
+                valid.replacen(
+                    "        persona: reviewer\n        depends_on: [work]",
+                    "        persona: coder\n        depends_on: [work]",
+                    1,
+                ),
+                "must be required, use a persona independent",
+            ),
+            (
+                valid.replace("        depends_on: [work]\n", "        depends_on: []\n"),
+                "must be required, use a persona independent",
+            ),
+        ];
+        for (index, (module, expected)) in cases.into_iter().enumerate() {
+            let error = ProfileCompiler::compile(fixture(&module).path())
+                .expect_err("invalid proof preparation contract must fail closed")
+                .to_string();
+            assert!(
+                error.contains(expected),
+                "case {index} expected {expected:?}, got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn proof_preparation_predicate_must_match_the_typed_operation_declaration() {
+        let mismatched = module_with_proof_source_preparation().replace(
+            "    when:\n      op: edge_count\n      subject: $target\n      relation: depends_on\n      exact: 0",
+            "    when:\n      op: proof_preparation_current\n      subject: $target\n      check: unit\n      preparation_operation: architecture.system.implement\n      preparation_targets: $target",
+        );
+        let error = ProfileCompiler::compile(fixture(&mismatched).path())
+            .expect_err("predicate/declaration disagreement must fail closed")
+            .to_string();
+        assert!(
+            error.contains("declares proof_source_preparation_check") && error.contains("not unit"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn malformed_check_preparation_predicate_returns_profile_error_without_panicking() {
+        let malformed = module_with_proof_source_preparation().replace(
+            "checks:\n",
+            "checks:\n  - id: malformed-preparation\n    kind: graph\n    receipt_type: malformed\n    predicate:\n      op: proof_preparation_current\n      subject: $target\n      preparation_targets: $target\n\n",
+        );
+        let result =
+            std::panic::catch_unwind(|| ProfileCompiler::compile(fixture(&malformed).path()));
+        let error = result
+            .expect("malformed preparation predicate must not panic profile compilation")
+            .expect_err("missing preparation operation/check must fail closed")
+            .to_string();
+        assert!(
+            error.contains("check malformed-preparation proof_preparation_current requires preparation_operation"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn graph_check_sets_reject_ambiguous_untyped_or_unbounded_contracts() {
+        let valid = module_with_graph_check_set();
+        let definition = graph_set_check_definition("proof-set", "member_check: unit");
+        let cases = vec![
+            (
+                valid.replace(
+                    &definition,
+                    "  - id: proof-set\n    kind: composite\n    applies_to: [implement]\n    receipt_type: proof_set\n",
+                ),
+                "requires graph_set",
+            ),
+            (
+                valid.replacen("    kind: composite", "    kind: command", 1),
+                "non-composite check proof-set may not configure graph_set",
+            ),
+            (
+                valid.replace("          from: $target", "          from: active_systems"),
+                "target-anchored",
+            ),
+            (
+                valid.replace("          relation: verified_by", "          relation: missing"),
+                "unknown relation missing",
+            ),
+            (
+                valid.replace(
+                    "      member_check: unit",
+                    "      member_check: unit\n      member_check_field: spec.check_id",
+                ),
+                "exactly one of member_check or member_check_field",
+            ),
+            (
+                valid.replace(
+                    "source_paths: {type: list, required: true, items: {type: path, required: true}}",
+                    "source_paths: {type: list, required: true, items: {type: string, required: true}}",
+                ),
+                "must be a list with path items",
+            ),
+            (
+                valid.replace("      max_members: 4", "      max_members: 0"),
+                "max_members must be at least min_members",
+            ),
+            (
+                valid.replace("      statuses: [planned]", "      statuses: [missing]"),
+                "unknown member status missing",
+            ),
+            (
+                valid
+                    .replace("member_check: unit", "member_check_field: spec.check_id")
+                    .replace("enum: [unit]", "enum: [missing]"),
+                "unknown child check missing",
+            ),
+            (
+                valid
+                    .replace("member_check: unit", "member_check_field: spec.check_id")
+                    .replace(", enum: [unit]", ""),
+                "must be a string with a nonempty enum",
+            ),
+        ];
+
+        for (module, expected) in cases {
+            let error = ProfileCompiler::compile(fixture(&module).path())
+                .expect_err("invalid graph-set contracts must fail closed")
+                .to_string();
+            assert!(
+                error.contains(expected),
+                "expected {expected:?}, got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_preservation_requires_one_compatible_graph_set_on_an_ancestor() {
+        let base = module_with_graph_check_set();
+        let original = graph_set_check_definition("proof-set", "member_check: unit");
+        let baseline = graph_set_check_definition("baseline-set", "member_check: expected-red");
+        let green = graph_set_check_definition("green-set", "member_check: unit");
+        let expected_red = r#"  - id: expected-red
+    kind: command
+    applies_to: [implement]
+    argv: [cargo, test]
+    cwd: .
+    timeout_seconds: 60
+    expected_exit_codes: [1]
+    receipt_type: expected_red
+    receipt_freshness: historical
+    composed_replay: never
+"#;
+        let configured = base
+            .replace(&original, &format!("{baseline}{green}"))
+            .replace(
+                "      - id: work\n        persona: coder\n        expected_output: scoped patch\n        validation_action: compile\n        checks: [proof-set]\n",
+                "      - id: baseline\n        persona: coder\n        checks: [baseline-set]\n      - id: work\n        persona: coder\n        depends_on: [baseline]\n        preserve_source_paths_from: baseline\n        expected_output: scoped patch\n        validation_action: compile\n        checks: [green-set]\n",
+            )
+            .replace("  - id: unit\n", &format!("{expected_red}  - id: unit\n"));
+        let profile = ProfileCompiler::compile(fixture(&configured).path()).unwrap();
+        assert_eq!(
+            profile.workflows["implement-system"].steps[1]
+                .preserve_source_paths_from
+                .as_deref(),
+            Some("baseline")
+        );
+        let baseline_contract = profile.checks["baseline-set"].graph_set.as_ref().unwrap();
+        let mut mismatched_coverage = profile.checks["green-set"].graph_set.clone().unwrap();
+        mismatched_coverage.covered_paths_field = "spec.other_covered_paths".to_owned();
+        assert!(
+            !graph_sets_preserve_compatible(&mismatched_coverage, baseline_contract),
+            "red-to-green preservation must not silently change its product subject paths"
+        );
+
+        let not_an_ancestor = configured.replace("        depends_on: [baseline]\n", "");
+        let error = ProfileCompiler::compile(fixture(&not_an_ancestor).path())
+            .expect_err("source preservation must follow workflow causality")
+            .to_string();
+        assert!(
+            error.contains("must name a transitive dependency"),
+            "{error}"
+        );
+
+        let ambiguous = configured.replace(
+            "        checks: [baseline-set]\n",
+            "        checks: [baseline-set, green-set]\n",
+        );
+        let error = ProfileCompiler::compile(fixture(&ambiguous).path())
+            .expect_err("source preservation cannot guess among graph sets")
+            .to_string();
+        assert!(
+            error.contains("requires exactly one graph-set check on each step"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn structured_dynamic_checks_are_typed_and_profile_hashed() {
         let module = module_with_structured_dynamic_check();
         let temp = fixture(&module);
@@ -7354,6 +10678,31 @@ personas:
     }
 
     #[test]
+    fn bidirectional_edge_uses_one_canonical_declaration_and_inverse_alias() {
+        let module = valid_module().replace(
+            "    acyclic: true",
+            "    acyclic: true\n    bidirectional: true\n    inverse: required_by",
+        );
+        let profile = ProfileCompiler::compile(fixture(&module).path()).unwrap();
+        let edge = &profile.edge_types[0];
+        assert!(edge.bidirectional);
+        assert_eq!(edge.relation, "depends_on");
+        assert_eq!(edge.inverse.as_deref(), Some("required_by"));
+
+        let redundant = module.replace(
+            "queries:",
+            "  - source: system\n    relation: required_by\n    targets: [system]\n\nqueries:",
+        );
+        let error = ProfileCompiler::compile(fixture(&redundant).path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("redundant reciprocal edge declaration"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn validates_typed_planning_context_initialization() {
         for planning_context_path in ["planning_context", "spec.planning_context"] {
             let module = module_with_planning_context("object");
@@ -7437,6 +10786,243 @@ personas:
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn context_policy_is_typed_bounded_and_profile_hashed() {
+        let baseline = ProfileCompiler::compile(fixture(valid_module()).path()).unwrap();
+        let configured = fixture(valid_module());
+        write(
+            &configured.path().join("koni.toml"),
+            &manifest_with_context(
+                r#"expansion_max_depth = 3
+expansion_max_nodes = 24
+expansion_max_calls_per_step = 3
+expansion_max_response_bytes = 32768
+note_max_bytes = 2048
+note_max_calls_per_step = 8
+notes_max_bundle_bytes = 16384"#,
+            ),
+        );
+        let configured = ProfileCompiler::compile(configured.path()).unwrap();
+        assert_eq!(configured.manifest.context.expansion_max_depth, 3);
+        assert_eq!(configured.manifest.context.expansion_max_nodes, 24);
+        assert_eq!(configured.manifest.context.note_max_bytes, 2048);
+        assert_ne!(baseline.hash, configured.hash);
+        assert!(
+            serde_json::to_value(&configured.manifest)
+                .unwrap()
+                .get("context")
+                .is_some()
+        );
+
+        for (field, value, expected) in [
+            ("expansion_max_depth", "0", "must be positive"),
+            (
+                "expansion_max_nodes",
+                "257",
+                "must not exceed the compiler hard maximum 256",
+            ),
+            (
+                "note_max_bytes",
+                "16385",
+                "must not exceed the compiler hard maximum 16384",
+            ),
+        ] {
+            let invalid = fixture(valid_module());
+            write(
+                &invalid.path().join("koni.toml"),
+                &manifest_with_context(&format!("{field} = {value}")),
+            );
+            let error = ProfileCompiler::compile(invalid.path())
+                .expect_err("invalid context policy must fail closed")
+                .to_string();
+            assert!(error.contains(expected), "{field}: {error}");
+        }
+
+        let invalid = fixture(valid_module());
+        write(
+            &invalid.path().join("koni.toml"),
+            &manifest_with_context("note_max_bytes = 4096\nnotes_max_bundle_bytes = 2048"),
+        );
+        let error = ProfileCompiler::compile(invalid.path())
+            .expect_err("a single note must fit its context bundle")
+            .to_string();
+        assert!(error.contains("note_max_bytes must not exceed"), "{error}");
+    }
+
+    #[test]
+    fn context_policy_rejects_unknown_fields() {
+        let invalid = fixture(valid_module());
+        write(
+            &invalid.path().join("koni.toml"),
+            &manifest_with_context("unbounded_graph_dump = true"),
+        );
+        let error = ProfileCompiler::compile(invalid.path())
+            .expect_err("unknown context policy fields must fail closed")
+            .to_string();
+        assert!(error.contains("unbounded_graph_dump"), "{error}");
+    }
+
+    #[test]
+    fn validates_compiler_only_planning_seed_operation() {
+        let baseline = ProfileCompiler::compile(fixture(valid_module()).path()).unwrap();
+        let configured = fixture(&module_with_planning_seed_operation());
+        write(
+            &configured.path().join("koni.toml"),
+            &manifest_with_initialization(
+                r#"root_node_type = "system"
+goal_field = "name"
+planning_seed_operation = "initialization.graph.seed""#,
+            ),
+        );
+        let configured = ProfileCompiler::compile(configured.path()).unwrap();
+        assert_eq!(
+            configured
+                .manifest
+                .initialization
+                .planning_seed_operation
+                .as_deref(),
+            Some("initialization.graph.seed")
+        );
+        assert_ne!(baseline.hash, configured.hash);
+    }
+
+    #[test]
+    fn rejects_unsafe_or_unbound_planning_seed_operation() {
+        let valid_module = module_with_planning_seed_operation();
+        let cases = [
+            (
+                valid_module.clone(),
+                r#"planning_seed_operation = "initialization.graph.seed""#.to_owned(),
+                "requires root_node_type",
+            ),
+            (
+                valid_module.clone(),
+                r#"root_node_type = "system"
+goal_field = "name"
+planning_seed_operation = "missing""#
+                    .to_owned(),
+                "references unknown operation registry entry missing",
+            ),
+            (
+                valid_module.replace(
+                    "    stage: initialization\n    target_types: [system]",
+                    "    stage: framing\n    target_types: [system]",
+                ),
+                r#"root_node_type = "system"
+goal_field = "name"
+planning_seed_operation = "initialization.graph.seed""#
+                    .to_owned(),
+                "must use stage initialization and target only root node type system",
+            ),
+            (
+                valid_module.replace(
+                    "    stage: initialization\n    target_types: [system]",
+                    "    stage: initialization\n    target_types: []",
+                ),
+                r#"root_node_type = "system"
+goal_field = "name"
+planning_seed_operation = "initialization.graph.seed""#
+                    .to_owned(),
+                "must use stage initialization and target only root node type system",
+            ),
+            (
+                valid_module.replace(
+                    "    allowed_existing_node_types: [system]\n\nworkflows:",
+                    "    allowed_existing_node_types: []\n\nworkflows:",
+                ),
+                r#"root_node_type = "system"
+goal_field = "name"
+planning_seed_operation = "initialization.graph.seed""#
+                    .to_owned(),
+                "must permit existing root node type system",
+            ),
+            (
+                valid_module.replace(
+                    "    allowed_new_node_types: [system]",
+                    "    allowed_new_node_types: []",
+                ),
+                r#"root_node_type = "system"
+goal_field = "name"
+planning_seed_operation = "initialization.graph.seed""#
+                    .to_owned(),
+                "must permit at least one new typed graph node",
+            ),
+            (
+                valid_module.replace(
+                    "    allowed_new_node_types: [system]",
+                    "    allowed_new_node_types: [system]\n    max_new_nodes: 0",
+                ),
+                r#"root_node_type = "system"
+goal_field = "name"
+planning_seed_operation = "initialization.graph.seed""#
+                    .to_owned(),
+                "must permit at least one new typed graph node",
+            ),
+            (
+                valid_module.replace(
+                    "    allowed_existing_node_types: [system]\n\nworkflows:",
+                    "    allowed_existing_node_types: [system]\n    existing_node_edge_additions_only:\n      system: [depends_on]\n\nworkflows:",
+                ),
+                r#"root_node_type = "system"
+goal_field = "name"
+planning_seed_operation = "initialization.graph.seed""#
+                    .to_owned(),
+                "must permit semantic root updates",
+            ),
+            (
+                valid_module.replace(
+                    "    allowed_existing_node_types: [system]\n\nworkflows:",
+                    "    allowed_existing_node_types: [system]\n    workflow: implement-system\n\nworkflows:",
+                ),
+                r#"root_node_type = "system"
+goal_field = "name"
+planning_seed_operation = "initialization.graph.seed""#
+                    .to_owned(),
+                "must be a compiler-only graph authority",
+            ),
+            (
+                valid_module.replace(
+                    "\noperations:",
+                    r#"
+  - id: system.seed-ticket
+    phase: architecture
+    for_each: active_systems
+    when: true
+    emit:
+      operation: seed-graph
+      registry_entry_id: initialization.graph.seed
+      source_state: unseeded
+      target_state: seeded
+      target_nodes: $target
+      read_scope: $target
+      write_scope: $target
+
+operations:"#,
+                ),
+                r#"root_node_type = "system"
+goal_field = "name"
+planning_seed_operation = "initialization.graph.seed""#
+                    .to_owned(),
+                "is compiler-only and cannot be emitted by rule system.seed-ticket",
+            ),
+        ];
+
+        for (module, initialization, expected) in cases {
+            let invalid = fixture(&module);
+            write(
+                &invalid.path().join("koni.toml"),
+                &manifest_with_initialization(&initialization),
+            );
+            let error = ProfileCompiler::compile(invalid.path())
+                .expect_err("invalid planning seed authority must fail closed")
+                .to_string();
+            assert!(
+                error.contains(expected),
+                "expected {expected:?}, got {error}"
+            );
         }
     }
 
@@ -7672,6 +11258,159 @@ config = [{ path = ".agents/skills/review/SKILL.md", enabled = true }]
         assert!(error.contains("contract.protocol_range"), "{error}");
     }
 
+    fn module_with_nested_subset_constraint() -> String {
+        valid_module().replace(
+            "    compiler_owned_fields: [readiness]\n",
+            r#"    compiler_owned_fields: [readiness]
+    fields:
+      covered_paths:
+        type: list
+        items: {type: path}
+      source_paths:
+        type: list
+        items: {type: path}
+        disjoint_from: spec.covered_paths
+      oracle_cases:
+        type: list
+        unique_by: id
+        items:
+          type: object
+          additional_properties: false
+          properties:
+            id: {type: string, required: true}
+            seam_paths:
+              type: list
+              items: {type: path}
+              subset_of: spec.covered_paths
+"#,
+        )
+    }
+
+    #[test]
+    fn compiles_nested_list_subset_constraint_against_root_node_field() {
+        let temp = fixture(&module_with_nested_subset_constraint());
+        let profile = ProfileCompiler::compile(temp.path()).unwrap();
+        let seam_paths = &profile.node_types["system"].fields["oracle_cases"]
+            .items
+            .as_deref()
+            .unwrap()
+            .properties["seam_paths"];
+        assert_eq!(seam_paths.subset_of.as_deref(), Some("spec.covered_paths"));
+        assert_eq!(
+            profile.node_types["system"].fields["source_paths"]
+                .disjoint_from
+                .as_deref(),
+            Some("spec.covered_paths")
+        );
+        assert_eq!(
+            profile.node_types["system"].fields["oracle_cases"]
+                .unique_by
+                .as_deref(),
+            Some("id")
+        );
+        assert_eq!(seam_paths.value_type, FieldType::List);
+        assert_eq!(
+            seam_paths.items.as_deref().map(|item| item.value_type),
+            Some(FieldType::Path)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_disjoint_and_unique_list_contracts() {
+        let valid = module_with_nested_subset_constraint();
+        let missing_disjoint_target = valid.replace(
+            "disjoint_from: spec.covered_paths",
+            "disjoint_from: spec.missing_paths",
+        );
+        let incompatible_disjoint_target = valid.replace(
+            "      source_paths:\n        type: list\n        items: {type: path}\n        disjoint_from: spec.covered_paths",
+            "      source_paths:\n        type: list\n        items: {type: string}\n        disjoint_from: spec.covered_paths",
+        );
+        let unique_non_object = valid_module().replace(
+            "    compiler_owned_fields: [readiness]\n",
+            r#"    compiler_owned_fields: [readiness]
+    fields:
+      oracle_cases:
+        type: list
+        unique_by: id
+        items: {type: string}
+"#,
+        );
+        let unique_missing_property = valid.replace("unique_by: id", "unique_by: missing_id");
+        let unique_optional_property =
+            valid.replace("id: {type: string, required: true}", "id: {type: string}");
+        let unique_non_scalar_property = valid.replace(
+            "id: {type: string, required: true}",
+            "id: {type: object, required: true}",
+        );
+        let unique_nested_property = valid.replace("unique_by: id", "unique_by: meta.id");
+
+        for (module, expected) in [
+            (
+                missing_disjoint_target,
+                "disjoint_from references undeclared root-node field",
+            ),
+            (incompatible_disjoint_target, "has incompatible item type"),
+            (unique_non_object, "must be a list with object items"),
+            (
+                unique_missing_property,
+                "references undeclared list-item property",
+            ),
+            (unique_optional_property, "property id must be required"),
+            (unique_non_scalar_property, "property id must be a scalar"),
+            (
+                unique_nested_property,
+                "must name one direct list-item property",
+            ),
+        ] {
+            let temp = fixture(&module);
+            let error = ProfileCompiler::compile(temp.path())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "expected {expected:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_missing_non_list_and_incompatible_subset_references() {
+        let valid = module_with_nested_subset_constraint();
+        let invalid_path = valid.replace(
+            "subset_of: spec.covered_paths",
+            "subset_of: 'spec.covered paths'",
+        );
+        let missing = valid.replace(
+            "subset_of: spec.covered_paths",
+            "subset_of: spec.missing_paths",
+        );
+        let non_list = valid.replace(
+            "      covered_paths:\n        type: list\n        items: {type: path}",
+            "      covered_paths:\n        type: string",
+        );
+        let incompatible = valid.replacen("items: {type: path}", "items: {type: string}", 1);
+        let constrained_non_list = valid.replace(
+            "            seam_paths:\n              type: list\n              items: {type: path}\n              subset_of: spec.covered_paths",
+            "            seam_paths:\n              type: string\n              subset_of: spec.covered_paths",
+        );
+
+        for (module, expected) in [
+            (invalid_path, "invalid subset_of reference"),
+            (missing, "references undeclared root-node field"),
+            (non_list, "reference spec.covered_paths must be a list"),
+            (incompatible, "has incompatible item type"),
+            (
+                constrained_non_list,
+                "configures subset_of but must be a list",
+            ),
+        ] {
+            let temp = fixture(&module);
+            let error = ProfileCompiler::compile(temp.path())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "expected {expected:?}: {error}");
+            assert!(error.contains("oracle_cases[].seam_paths"), "{error}");
+        }
+    }
+
     #[test]
     fn rejects_nested_field_keywords_on_incompatible_types() {
         let invalid_properties = valid_module().replace(
@@ -7787,6 +11526,35 @@ write_paths:
     }
 
     #[test]
+    fn literal_ticket_paths_allow_framework_dynamic_segment_names() {
+        let path = "apps/books/src/pages/companies/[companyId]/questionnaire.tsx";
+        let module = module_with_path_scopes(&format!("write_paths:\n  - '{path}'"));
+        let temp = fixture(&module);
+        let profile = ProfileCompiler::compile(temp.path()).unwrap();
+        let emit = profile.rules["system.path-scope"].emit.as_ref().unwrap();
+
+        assert!(matches!(
+            &emit.write_paths[0],
+            PathScopeDef::Literal(compiled) if compiled == Path::new(path)
+        ));
+    }
+
+    #[test]
+    fn literal_ticket_paths_still_reject_unambiguous_wildcards() {
+        for path in ["apps/*/questionnaire.tsx", "apps/?/questionnaire.tsx"] {
+            let module = module_with_path_scopes(&format!("write_paths:\n  - '{path}'"));
+            let temp = fixture(&module);
+            let error = ProfileCompiler::compile(temp.path())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("literal path, not a glob"),
+                "{path}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_absolute_or_escaping_literal_ticket_paths() {
         for path in [
             "/etc/passwd",
@@ -7839,6 +11607,108 @@ write_paths:
     }
 
     #[test]
+    fn command_checks_can_declare_expected_nonzero_exit_codes() {
+        let module = valid_module().replace(
+            "    timeout_seconds: 60\n    receipt_type: test",
+            "    timeout_seconds: 60\n    expected_exit_codes: [1]\n    receipt_type: test\n    receipt_freshness: historical",
+        );
+        let temp = fixture(&module);
+        let profile = ProfileCompiler::compile(temp.path()).unwrap();
+        assert_eq!(profile.checks["unit"].expected_exit_codes, vec![1]);
+        assert_eq!(
+            profile.checks["unit"].receipt_freshness,
+            ReceiptFreshness::Historical
+        );
+
+        let duplicate = module.replace("expected_exit_codes: [1]", "expected_exit_codes: [1, 1]");
+        let temp = fixture(&duplicate);
+        let error = ProfileCompiler::compile(temp.path())
+            .expect_err("duplicate exit codes make the execution contract ambiguous")
+            .to_string();
+        assert!(error.contains("must not contain duplicates"), "{error}");
+
+        let overlapping = module.replace(
+            "    expected_exit_codes: [1]\n    receipt_type: test",
+            "    expected_exit_codes: [1]\n    receipt_type: test\n    retry_policy: {max_attempts: 2, transient_exit_codes: [1]}",
+        );
+        let temp = fixture(&overlapping);
+        let error = ProfileCompiler::compile(temp.path())
+            .expect_err("one exit code cannot be both accepted and retried")
+            .to_string();
+        assert!(error.contains("both expected and transient"), "{error}");
+
+        let workspace_write = module.replace(
+            "    receipt_freshness: historical",
+            "    receipt_freshness: historical\n    effect: workspace_write",
+        );
+        let temp = fixture(&workspace_write);
+        let error = ProfileCompiler::compile(temp.path())
+            .expect_err("historical process evidence must not authorize stale write effects")
+            .to_string();
+        assert!(error.contains("requires a read_only command"), "{error}");
+    }
+
+    #[test]
+    fn command_retry_attempts_and_aggregate_wall_time_are_bounded() {
+        let too_many_attempts = valid_module().replace(
+            "    receipt_type: test",
+            "    receipt_type: test\n    retry_policy: {max_attempts: 4, transient_exit_codes: [75]}",
+        );
+        let error = ProfileCompiler::compile(fixture(&too_many_attempts).path())
+            .expect_err("profiles may not create an unbounded retry receipt vector")
+            .to_string();
+        assert!(error.contains("maximum is 3"), "{error}");
+
+        let excessive_wall = valid_module()
+            .replace("    timeout_seconds: 60", "    timeout_seconds: 43201")
+            .replace(
+                "    receipt_type: test",
+                "    receipt_type: test\n    retry_policy: {max_attempts: 2, transient_exit_codes: [75]}",
+            );
+        let error = ProfileCompiler::compile(fixture(&excessive_wall).path())
+            .expect_err("aggregate retry execution must stay within one day")
+            .to_string();
+        assert!(error.contains("aggregate execution seconds"), "{error}");
+
+        let one_day =
+            valid_module().replace("    timeout_seconds: 60", "    timeout_seconds: 86400");
+        let profile = ProfileCompiler::compile(fixture(&one_day).path()).unwrap();
+        assert_eq!(profile.checks["unit"].timeout_seconds, 86_400);
+        assert_eq!(profile.checks["unit"].retry_policy.max_attempts, 0);
+    }
+
+    #[test]
+    fn command_checks_can_explicitly_opt_out_of_composed_replay() {
+        let module = valid_module().replace(
+            "    receipt_type: test",
+            "    receipt_type: test\n    effect: workspace_write\n    composed_replay: never",
+        );
+        let temp = fixture(&module);
+        let profile = ProfileCompiler::compile(temp.path()).unwrap();
+        assert_eq!(
+            profile.checks["unit"].composed_replay,
+            ComposedReplayPolicy::Never
+        );
+        assert_eq!(
+            profile.checks["unit"].receipt_freshness,
+            ReceiptFreshness::Current,
+            "replay policy must not demote current causal evidence"
+        );
+
+        let graph_check = module
+            .replace("    kind: command", "    kind: graph")
+            .replace("    argv: [cargo, test]\n", "");
+        let temp = fixture(&graph_check);
+        let error = ProfileCompiler::compile(temp.path())
+            .expect_err("only commands have composed replay semantics")
+            .to_string();
+        assert!(
+            error.contains("composed_replay is only meaningful for command checks"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn rejects_irreversible_step_before_post_mutation_validation() {
         let module = valid_module().replace(
             "      - primitive: project.validate\n      - primitive: git.commit",
@@ -7872,6 +11742,25 @@ write_paths:
         let removal = primitive_effect(&step("worktree.remove")).expect("known removal effect");
         assert_eq!(removal.class, EffectClass::Irreversible);
         assert!(!removal.invalidates_validation);
+    }
+
+    #[test]
+    fn integration_projection_snapshot_declares_its_graph_write() {
+        let refresh = ActionStepDef {
+            id: None,
+            primitive: "snapshot.write".to_owned(),
+            when: None,
+            args: BTreeMap::from([(
+                "recompute_from_integration_projection".to_owned(),
+                Value::Bool(true),
+            )]),
+        };
+        let effect = primitive_effect(&refresh).expect("projection snapshot is a known effect");
+
+        assert_eq!(effect.class, EffectClass::ReversibleWrite);
+        assert!(effect.writes.contains(&EffectResource::Audit));
+        assert!(effect.writes.contains(&EffectResource::Graph));
+        assert!(!effect.invalidates_validation);
     }
 
     #[test]
@@ -7940,6 +11829,57 @@ write_paths:
     }
 
     #[test]
+    fn validates_structured_review_failure_routes() {
+        let valid = valid_module().replace(
+            "    applies_to: [implement]\n    steps:",
+            "    applies_to: [implement]\n    review_failure_routes:\n      ticket_rework:\n        disposition: reopen\n        description: The selected work step can correct the finding.\n        reopen_from: work\n      upstream_proof:\n        disposition: block\n        description: The proof or scope must be corrected before product work.\n        recovery: replan_from_clean_integration\n        recovery_instructions: Preserve the rejected candidate and replan against clean integration state.\n    steps:",
+        );
+        let temp = fixture(&valid);
+        let profile = ProfileCompiler::compile(temp.path()).unwrap();
+        let workflow = &profile.workflows["implement-system"];
+        assert_eq!(
+            workflow.review_failure_routes["ticket_rework"]
+                .reopen_from
+                .as_deref(),
+            Some("work")
+        );
+        assert_eq!(
+            workflow.review_failure_routes["upstream_proof"].recovery,
+            Some(ReviewFailureRecovery::ReplanFromCleanIntegration)
+        );
+
+        let mixed = valid.replace(
+            "    review_failure_routes:",
+            "    review_failure_reopen_from: work\n    review_failure_routes:",
+        );
+        let error = ProfileCompiler::compile(fixture(&mixed).path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot configure both"), "{error}");
+
+        let missing_step = valid.replace("reopen_from: work", "reopen_from: missing");
+        let error = ProfileCompiler::compile(fixture(&missing_step).path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("unknown reopen_from step missing"),
+            "{error}"
+        );
+
+        let unsafe_block = valid.replace(
+            "        recovery: replan_from_clean_integration\n        recovery_instructions: Preserve the rejected candidate and replan against clean integration state.",
+            "        recovery_instructions: Preserve the rejected candidate and replan against clean integration state.",
+        );
+        let error = ProfileCompiler::compile(fixture(&unsafe_block).path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("requires replan_from_clean_integration"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn imports_cannot_escape_profile_root() {
         let temp = TempDir::new().unwrap();
         write(
@@ -7994,6 +11934,224 @@ write_paths:
                 "{legacy}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn unsupported_profile_manifest_field_fails_closed() {
+        let temp = fixture(valid_module());
+        let manifest = manifest().replace(
+            "engine = \">=0.1,<0.2\"",
+            "engine = \">=0.1,<0.2\"\nenginee = \">=9\"",
+        );
+        write(&temp.path().join("koni.toml"), &manifest);
+
+        let error = ProfileCompiler::compile(temp.path())
+            .expect_err("an unknown manifest field must not be retained as inert metadata")
+            .to_string();
+        assert!(
+            error.contains("profile manifest contains unsupported field: enginee"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn unsupported_module_node_and_operation_fields_fail_closed() {
+        let cases = [
+            (
+                "module",
+                format!("modulee: true\n{}", valid_module()),
+                "profile module module.yaml contains unsupported field: modulee",
+            ),
+            (
+                "node",
+                valid_module().replace(
+                    "    stage: architecture\n",
+                    "    stage: architecture\n    stgae: architecture\n",
+                ),
+                "node type system contains unsupported field: stgae",
+            ),
+            (
+                "operation",
+                valid_module().replace(
+                    "    ranking_hints: [stage, target]\n",
+                    "    ranking_hints: [stage, target]\n    rankng_hints: [typo]\n",
+                ),
+                "operation architecture.system.implement contains unsupported field: rankng_hints",
+            ),
+        ];
+
+        for (label, module, expected) in cases {
+            let temp = fixture(&module);
+            let error = ProfileCompiler::compile(temp.path())
+                .expect_err("an unsupported schema key must fail compilation")
+                .to_string();
+            assert!(error.contains(expected), "{label}: {error}");
+        }
+    }
+
+    #[test]
+    fn unsupported_nested_profile_fields_fail_closed() {
+        let cases = [
+            (
+                "edge",
+                valid_module().replace(
+                    "    acyclic: true\n",
+                    "    acyclic: true\n    bidirectionl: true\n",
+                ),
+                "bidirectionl",
+            ),
+            (
+                "workflow step",
+                valid_module().replace(
+                    "        expected_output: scoped patch\n",
+                    "        expected_output: scoped patch\n        write_pathz: []\n",
+                ),
+                "write_pathz",
+            ),
+            (
+                "check",
+                valid_module().replace(
+                    "    timeout_seconds: 60\n",
+                    "    timeout_seconds: 60\n    expected_exit_code: [1]\n",
+                ),
+                "expected_exit_code",
+            ),
+            (
+                "query",
+                valid_module().replace(
+                    "    status_excluding: [satisfied]\n",
+                    "    status_excluding: [satisfied]\n    status_exlcuding: [draft]\n",
+                ),
+                "status_exlcuding",
+            ),
+        ];
+
+        for (label, module, typo) in cases {
+            let error = ProfileCompiler::compile(fixture(&module).path())
+                .expect_err("nested schema typos must not fall back to broader defaults")
+                .to_string();
+            assert!(error.contains(typo), "{label}: {error}");
+        }
+
+        let temp = fixture(valid_module());
+        let manifest = manifest().replace("[storage]", "[git]\nenabeld = true\n\n[storage]");
+        write(&temp.path().join("koni.toml"), &manifest);
+        let error = ProfileCompiler::compile(temp.path())
+            .expect_err("nested manifest typos must fail before defaults are applied")
+            .to_string();
+        assert!(error.contains("enabeld"), "{error}");
+    }
+
+    #[test]
+    fn node_command_sources_resolve_to_typed_argv_fields() {
+        let configured = valid_module()
+            .replace(
+                "    compiler_owned_fields: [readiness]\n",
+                "    compiler_owned_fields: [readiness]\n    fields:\n      test_command: {type: list, required: true, items: {type: string, required: true}}\n",
+            )
+            .replace(
+                "    argv: [cargo, test]\n",
+                "    command_source:\n      kind: node\n      selection: target\n      node_types: [system]\n      role: implementation\n      field: spec.test_command\n",
+            );
+        ProfileCompiler::compile(fixture(&configured).path())
+            .expect("a declared string argv field is a valid command source");
+
+        let typo = configured.replace("spec.test_command", "spec.test_commnad");
+        let error = ProfileCompiler::compile(fixture(&typo).path())
+            .expect_err("a command source typo must fail during profile compilation")
+            .to_string();
+        assert!(
+            error.contains("field spec.test_commnad is not declared"),
+            "{error}"
+        );
+
+        let untyped = configured.replace(
+            "items: {type: string, required: true}",
+            "items: {type: path, required: true}",
+        );
+        let error = ProfileCompiler::compile(fixture(&untyped).path())
+            .expect_err("command argv items must be typed strings")
+            .to_string();
+        assert!(
+            error.contains("must be a list with string items"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn portfolio_guidance_is_the_only_validated_operation_extension() {
+        let valid = valid_module().replace(
+            "    ranking_hints: [stage, target]\n",
+            r#"    ranking_hints: [stage, target]
+    portfolio_guidance:
+      preferred_count: 2
+      unit: cohesive program
+      group_when: setup and observables are shared
+      split_when: interventions differ materially
+      avoid: one node per assertion
+"#,
+        );
+        ProfileCompiler::compile(fixture(&valid).path())
+            .expect("the explicitly supported guidance contract should compile");
+
+        let invalid = valid.replace(
+            "      avoid: one node per assertion\n",
+            "      avoid: one node per assertion\n      prefered_count: 3\n",
+        );
+        let error = ProfileCompiler::compile(fixture(&invalid).path())
+            .expect_err("typos inside the guidance contract must fail closed")
+            .to_string();
+        assert!(
+            error.contains("portfolio_guidance contains unsupported field: prefered_count"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn terminal_resolver_is_typed_and_bound_to_recovery_policy() {
+        let terminal_operation = |module: &str| {
+            module.replace(
+                "    ranking_hints: [stage, target]\n",
+                r#"    ranking_hints: [stage, target]
+    gate_blocking_exempt: true
+    terminal_resolver: true
+    single_flight_group: recovery
+"#,
+            )
+        };
+        let recovery_compensation = |module: &str| {
+            module.replace(
+                "    recovery: recover\n",
+                r#"    compensation:
+      - primitive: recovery.dispatch
+        mode: block_and_emit_single_resolver
+    recovery: recover
+"#,
+            )
+        };
+
+        let configured = terminal_operation(&recovery_compensation(valid_module()));
+        let profile = ProfileCompiler::compile(fixture(&configured).path())
+            .expect("one safe typed resolver satisfies terminal recovery dispatch");
+        let operation = &profile.operations["architecture.system.implement"];
+        assert!(operation.terminal_resolver);
+        assert!(!operation.extensions.contains_key("terminal_resolver"));
+
+        let without_resolver = recovery_compensation(valid_module());
+        let error = ProfileCompiler::compile(fixture(&without_resolver).path())
+            .expect_err("single-resolver recovery must bind exactly one typed operation")
+            .to_string();
+        assert!(
+            error.contains("declares 0 terminal resolver operations; expected exactly one"),
+            "{error}"
+        );
+
+        let unsafe_resolver =
+            terminal_operation(valid_module()).replace("    gate_blocking_exempt: true\n", "");
+        let error = ProfileCompiler::compile(fixture(&unsafe_resolver).path())
+            .expect_err("a terminal resolver cannot be blocked by the failed ticket's gates")
+            .to_string();
+        assert!(error.contains("must be gate_blocking_exempt"), "{error}");
     }
 
     #[test]

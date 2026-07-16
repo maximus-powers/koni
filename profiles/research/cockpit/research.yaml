@@ -61,6 +61,11 @@ views:
       - {id: secondary_edges, value: $row.secondary_edges}
     actions: []
     options:
+      # Match autoresearch-v2's relationship outline. Primary edges form the
+      # nested branches, secondary edges use independent rails, and short muted
+      # titles are painted after linework so letters replace crossed cells.
+      layout: nested
+      upward_edge_policy: mapped_only
       hierarchy: [hypothesis, literature, claim, experiment, method, prerequisite, metric, ablation, gate, asset, run, evidence, report]
       primary_parent_preferences:
         claim: [claim, hypothesis]
@@ -74,15 +79,22 @@ views:
         evidence: [run, experiment, ablation, claim, method, hypothesis]
         report: [evidence, run, experiment, claim, hypothesis]
       reverse_display_edges:
-        experiment.target_claims: tests
+        ablation.target_claims: ablations
+        experiment.tests: tested_by
+        experiment.target_claims: tested_by
+        ablation.tests: ablations
+        asset.used_by: assets
         gate.applies_to: gates
+        gate.validates: gates
+        metric.applies_to: metrics
+        method.experiments: methods
+        method.target_claims: methods
         evidence.supports: evidence
-        evidence.contradicts: neg-evidence
+        evidence.contradicts: negative_evidence
         evidence.informs: evidence
         report.summarizes: reports
         run.evaluates: runs
       secondary_edge_style: independent_right_lanes
-      repeat_semantic_types: [gate]
       show_titles: true
 
   - id: research-agents

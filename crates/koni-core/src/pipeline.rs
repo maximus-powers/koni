@@ -19,6 +19,9 @@ pub const RUN_PIPELINE_SCHEMA_VERSION: &str = "1.0";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PipelineStageKind {
+    /// A model turn executed by the configured Koni agent runtime. The
+    /// compiler still owns tools, receipts, and all state transitions.
+    Ai,
     Action,
     Orchestration,
     AgentReview,
@@ -26,11 +29,14 @@ pub enum PipelineStageKind {
     Question,
     Manual,
     Checkpoint,
+    TargetSync,
+    Promotion,
 }
 
 impl PipelineStageKind {
     pub fn parse(value: &str) -> Result<Self> {
         match value {
+            "ai" => Ok(Self::Ai),
             "action" | "profile" | "legacy_profile" | "planning" | "agent_dialog" | "koni" => {
                 Ok(Self::Action)
             }
@@ -40,6 +46,8 @@ impl PipelineStageKind {
             "question" | "form" => Ok(Self::Question),
             "manual" | "approval" | "handoff" => Ok(Self::Manual),
             "checkpoint" | "initialize" => Ok(Self::Checkpoint),
+            "target_sync" => Ok(Self::TargetSync),
+            "promotion" => Ok(Self::Promotion),
             other => pipeline_error(format!("unsupported pipeline stage kind {other:?}")),
         }
     }
@@ -400,8 +408,7 @@ impl PipelineStage {
         }
         match self.status {
             PipelineStageStatus::Pending => {
-                if self.attempt != 0
-                    || self.input_hash.is_some()
+                if self.input_hash.is_some()
                     || self.output.is_some()
                     || self.terminal_reason.is_some()
                     || self.started_at.is_some()
@@ -676,7 +683,7 @@ impl RunPipeline {
                 stage.definition.id, stage.status
             ));
         }
-        stage.attempt = 1;
+        stage.attempt = stage.attempt.saturating_add(1).max(1);
         stage.input_hash = Some(input_hash);
         stage.started_at = Some(now);
         stage.status = PipelineStageStatus::Running;
@@ -794,7 +801,10 @@ impl RunPipeline {
         let stage = self.stages.get_mut(self.cursor).ok_or_else(|| {
             KoniError::Workflow("pipeline: complete pipeline cannot skip".to_owned())
         })?;
-        if stage.definition.required || stage.status != PipelineStageStatus::Pending {
+        if stage.definition.required
+            || stage.status != PipelineStageStatus::Pending
+            || stage.attempt != 0
+        {
             return pipeline_error(format!("stage {} cannot be skipped", stage.definition.id));
         }
         stage.status = PipelineStageStatus::Skipped;
@@ -857,6 +867,123 @@ impl RunPipeline {
         self.validate()
     }
 
+    /// Invalidate a previously successful stage and every downstream stage
+    /// after compiler-owned state proves that the earlier success was based on
+    /// a stale input projection. The selected stage starts a fresh bound
+    /// attempt immediately; downstream outputs return to pending.
+    pub fn reopen_from(
+        &mut self,
+        stage_id: &str,
+        input_hash: impl Into<String>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.validate()?;
+        self.require_monotonic_time(now)?;
+        let input_hash = input_hash.into();
+        validate_hash("stage input", &input_hash)?;
+        let index = self
+            .stages
+            .iter()
+            .position(|stage| stage.definition.id == stage_id)
+            .ok_or_else(|| KoniError::Workflow(format!("pipeline: unknown stage {stage_id}")))?;
+        if index >= self.cursor || !self.stages[index].status.is_success_terminal() {
+            return pipeline_error(format!(
+                "stage {stage_id} is not a previously successful stage before the cursor"
+            ));
+        }
+        let attempt = self.stages[index].attempt.saturating_add(1).max(1);
+        for stage in &mut self.stages[index..] {
+            stage.status = PipelineStageStatus::Pending;
+            stage.attempt = 0;
+            stage.input_hash = None;
+            stage.output = None;
+            stage.pause_reason = None;
+            stage.terminal_reason = None;
+            stage.started_at = None;
+            stage.finished_at = None;
+        }
+        let stage = &mut self.stages[index];
+        stage.status = PipelineStageStatus::Running;
+        stage.attempt = attempt;
+        stage.input_hash = Some(input_hash);
+        stage.started_at = Some(now);
+        self.cursor = index;
+        self.status = RunPipelineStatus::Running;
+        self.updated_at = now;
+        self.validate()
+    }
+
+    /// Invalidate a previously successful stage and every downstream stage,
+    /// but defer binding the selected stage's next attempt until execution.
+    /// The selected stage retains its prior attempt count while pending; a
+    /// later `start_current` increments that count and binds the then-current
+    /// input. Downstream stages return to pristine pending state.
+    pub fn reopen_pending_from(&mut self, stage_id: &str, now: DateTime<Utc>) -> Result<()> {
+        self.validate()?;
+        self.require_monotonic_time(now)?;
+        let index = self
+            .stages
+            .iter()
+            .position(|stage| stage.definition.id == stage_id)
+            .ok_or_else(|| KoniError::Workflow(format!("pipeline: unknown stage {stage_id}")))?;
+        if index >= self.cursor || !self.stages[index].status.is_success_terminal() {
+            return pipeline_error(format!(
+                "stage {stage_id} is not a previously successful stage before the cursor"
+            ));
+        }
+        let prior_attempts = self.stages[index].attempt;
+        for stage in &mut self.stages[index..] {
+            stage.status = PipelineStageStatus::Pending;
+            stage.attempt = 0;
+            stage.input_hash = None;
+            stage.output = None;
+            stage.pause_reason = None;
+            stage.terminal_reason = None;
+            stage.started_at = None;
+            stage.finished_at = None;
+        }
+        self.stages[index].attempt = prior_attempts;
+        self.cursor = index;
+        self.status = if index == 0 {
+            RunPipelineStatus::Pending
+        } else {
+            RunPipelineStatus::Running
+        };
+        self.updated_at = now;
+        self.validate()
+    }
+
+    /// Abandon the current bound attempt before it produced output and make
+    /// the stage retryable with a future input binding. The consumed attempt
+    /// number is retained while pending; `start_current` allocates the next
+    /// attempt when execution resumes.
+    pub fn abandon_current_attempt_to_pending(&mut self, now: DateTime<Utc>) -> Result<()> {
+        self.validate()?;
+        self.require_monotonic_time(now)?;
+        let stage = self.stages.get_mut(self.cursor).ok_or_else(|| {
+            KoniError::Workflow("pipeline: complete pipeline cannot abandon an attempt".to_owned())
+        })?;
+        if stage.status != PipelineStageStatus::Running || stage.output.is_some() {
+            return pipeline_error(format!(
+                "stage {} cannot abandon an attempt from {:?}",
+                stage.definition.id, stage.status
+            ));
+        }
+        stage.status = PipelineStageStatus::Pending;
+        stage.input_hash = None;
+        stage.pause_reason = None;
+        stage.terminal_reason = None;
+        stage.started_at = None;
+        stage.finished_at = None;
+        self.status = if self.cursor == 0 {
+            RunPipelineStatus::Pending
+        } else {
+            RunPipelineStatus::Running
+        };
+        self.updated_at = now;
+        self.validate()
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.schema_version != RUN_PIPELINE_SCHEMA_VERSION {
             return pipeline_error(format!(
@@ -886,11 +1013,20 @@ impl RunPipeline {
             return pipeline_error("pipeline definition hash is stale");
         }
         let mut ids = BTreeSet::new();
-        for stage in &self.stages {
+        for (index, stage) in self.stages.iter().enumerate() {
             if !ids.insert(&stage.definition.id) {
                 return pipeline_error(format!("duplicate pipeline stage {}", stage.definition.id));
             }
             stage.validate()?;
+            if stage.status == PipelineStageStatus::Pending
+                && stage.attempt > 0
+                && index != self.cursor
+            {
+                return pipeline_error(format!(
+                    "only the current reopened pending stage may retain prior attempts; stage {} is not current",
+                    stage.definition.id
+                ));
+            }
             for timestamp in [stage.started_at, stage.finished_at].into_iter().flatten() {
                 if timestamp < self.created_at || timestamp > self.updated_at {
                     return pipeline_error(format!(
@@ -1130,6 +1266,131 @@ mod tests {
     }
 
     #[test]
+    fn stale_success_can_reopen_an_earlier_stage_and_invalidate_downstream_work() {
+        let profile_hash = normalized_hash(&"profile");
+        let first_input = normalized_hash(&"first-input");
+        let second_input = normalized_hash(&"second-input");
+        let reopened_input = normalized_hash(&"reopened-input");
+        let mut pipeline =
+            RunPipeline::new("delivery", "run-1", profile_hash, definitions(), now(0)).unwrap();
+        pipeline.start_current(&first_input, now(1)).unwrap();
+        let first = pipeline.current().unwrap().definition.clone();
+        pipeline
+            .succeed_current(
+                PipelineStageOutput::new(&first, 1, &first_input, json!({"ok": true}), now(2))
+                    .unwrap(),
+                now(3),
+            )
+            .unwrap();
+        pipeline.start_current(&second_input, now(4)).unwrap();
+
+        pipeline
+            .reopen_from("build", &reopened_input, now(5))
+            .unwrap();
+
+        assert_eq!(pipeline.cursor, 0);
+        assert_eq!(pipeline.current().unwrap().definition.id, "build");
+        assert_eq!(
+            pipeline.current().unwrap().status,
+            PipelineStageStatus::Running
+        );
+        assert_eq!(pipeline.current().unwrap().attempt, 2);
+        assert_eq!(
+            pipeline.current().unwrap().input_hash.as_deref(),
+            Some(reopened_input.as_str())
+        );
+        assert_eq!(pipeline.stages[1].status, PipelineStageStatus::Pending);
+        assert_eq!(pipeline.stages[1].attempt, 0);
+        assert!(pipeline.stages[1].input_hash.is_none());
+        pipeline.validate().unwrap();
+    }
+
+    #[test]
+    fn reopened_pending_stage_binds_fresh_input_and_only_current_retains_attempts() {
+        let profile_hash = normalized_hash(&"profile");
+        let first_input = normalized_hash(&"first-input");
+        let second_input = normalized_hash(&"second-input");
+        let fresh_input = normalized_hash(&"fresh-input");
+        let mut pipeline =
+            RunPipeline::new("delivery", "run-1", profile_hash, definitions(), now(0)).unwrap();
+        pipeline.start_current(&first_input, now(1)).unwrap();
+        let first = pipeline.current().unwrap().definition.clone();
+        pipeline
+            .succeed_current(
+                PipelineStageOutput::new(&first, 1, &first_input, json!({"ok": true}), now(2))
+                    .unwrap(),
+                now(3),
+            )
+            .unwrap();
+        pipeline.start_current(&second_input, now(4)).unwrap();
+        let second = pipeline.current().unwrap().definition.clone();
+        pipeline
+            .succeed_current(
+                PipelineStageOutput::new(&second, 1, &second_input, json!({"ok": true}), now(5))
+                    .unwrap(),
+                now(6),
+            )
+            .unwrap();
+
+        pipeline.reopen_pending_from("publish", now(7)).unwrap();
+
+        assert_eq!(pipeline.cursor, 1);
+        assert_eq!(pipeline.status, RunPipelineStatus::Running);
+        assert_eq!(
+            pipeline.current().unwrap().status,
+            PipelineStageStatus::Pending
+        );
+        assert_eq!(pipeline.current().unwrap().attempt, 1);
+        assert!(pipeline.current().unwrap().input_hash.is_none());
+        let yaml = serde_yaml::to_string(&pipeline).unwrap();
+        let restored = RunPipeline::from_yaml(&yaml).unwrap();
+        assert_eq!(restored, pipeline);
+
+        let mut malformed = restored.clone();
+        let noncurrent = &mut malformed.stages[0];
+        noncurrent.status = PipelineStageStatus::Pending;
+        noncurrent.attempt = 1;
+        noncurrent.input_hash = None;
+        noncurrent.output = None;
+        noncurrent.pause_reason = None;
+        noncurrent.terminal_reason = None;
+        noncurrent.started_at = None;
+        noncurrent.finished_at = None;
+        assert!(
+            malformed
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("only the current reopened pending stage")
+        );
+
+        pipeline.start_current(&fresh_input, now(8)).unwrap();
+        assert_eq!(
+            pipeline.current().unwrap().status,
+            PipelineStageStatus::Running
+        );
+        assert_eq!(pipeline.current().unwrap().attempt, 2);
+        assert_eq!(
+            pipeline.current().unwrap().input_hash.as_deref(),
+            Some(fresh_input.as_str())
+        );
+
+        pipeline.abandon_current_attempt_to_pending(now(9)).unwrap();
+        assert_eq!(
+            pipeline.current().unwrap().status,
+            PipelineStageStatus::Pending
+        );
+        assert_eq!(pipeline.current().unwrap().attempt, 2);
+        assert!(pipeline.current().unwrap().input_hash.is_none());
+        pipeline.start_current(&second_input, now(10)).unwrap();
+        assert_eq!(pipeline.current().unwrap().attempt, 3);
+        assert_eq!(
+            pipeline.current().unwrap().input_hash.as_deref(),
+            Some(second_input.as_str())
+        );
+    }
+
+    #[test]
     fn stages_cannot_advance_out_of_order() {
         let mut pipeline = RunPipeline::new(
             "delivery",
@@ -1226,6 +1487,14 @@ mod tests {
 
     #[test]
     fn supervised_stage_kinds_are_not_action_aliases() {
+        assert_eq!(
+            PipelineStageKind::parse("ai").unwrap(),
+            PipelineStageKind::Ai
+        );
+        assert_ne!(
+            PipelineStageKind::parse("ai").unwrap(),
+            PipelineStageKind::Action
+        );
         assert_eq!(
             PipelineStageKind::parse("orchestration").unwrap(),
             PipelineStageKind::Orchestration

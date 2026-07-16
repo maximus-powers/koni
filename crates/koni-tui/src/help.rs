@@ -12,6 +12,7 @@ pub enum HelpTopic {
     Details(Panel),
     PendingQuestions,
     Agents,
+    Activity,
     Graph,
     ConfigDomains,
     ConfigResources {
@@ -60,13 +61,14 @@ impl HelpTopic {
             Self::Runs => content(
                 "Runs",
                 "Durable project goals; selecting one scopes every Operate panel.",
-                "Goal Prompt + Run Config → planning, approval, work, checks, and reporting.",
+                "Multiline Objective + Run Config → planning, approval, work, checks, and reporting. Only the explicit Start button launches a run.",
                 vec![
-                    HelpAction::new("j / k", "Select a run"),
+                    HelpAction::new("↑ / ↓ / j / k", "Select a run"),
                     HelpAction::new("n", "Open New Run"),
                     HelpAction::new("Enter", "Open the selected planning approval"),
                     HelpAction::new("Space", "Pause or resume the selected run"),
-                    HelpAction::new("D", "Open safe run removal"),
+                    HelpAction::new("m", "Review and authorize merge into the target branch"),
+                    HelpAction::new("d", "Open safe run removal"),
                     HelpAction::new("Tab / Shift-Tab", "Move focus between main panels"),
                     HelpAction::new("r", "Refresh project state"),
                 ],
@@ -76,9 +78,8 @@ impl HelpTopic {
                 "Compiler-created units of work for the selected run. Their type defines steps, delegation, checks, and integration behavior.",
                 "The compiler derives ready tickets from the graph. Agents claim them in isolated worktrees; verified results are integrated back into the run.",
                 vec![
-                    HelpAction::new("j / k", "Select a ticket"),
-                    HelpAction::new("[ / ]", "Switch ticket status queue"),
-                    HelpAction::new("Left / Right / l", "Switch ticket status queue"),
+                    HelpAction::new("← / → / [ / ]", "Switch ticket status queue"),
+                    HelpAction::new("↑ / ↓ / j / k", "Select a ticket"),
                     HelpAction::new("a", "Open actions for the selected ticket"),
                     HelpAction::new("Tab / Shift-Tab", "Move focus between main panels"),
                     HelpAction::new("r", "Refresh project state"),
@@ -90,35 +91,53 @@ impl HelpTopic {
                 "Decisions currently blocking an agent for the selected run. Saved batch answers stay visible but muted until the batch is complete.",
                 "Each answer is recorded durably. Planning resumes the exact waiting session once, after the final unanswered member of a question batch is resolved.",
                 vec![
+                    HelpAction::new("← / → / [ / ]", "Move horizontally through questions"),
+                    HelpAction::new("↑ / ↓ / j / k / Mouse wheel", "Select an answer option"),
                     HelpAction::new(
-                        "Left / Right / [ / ]",
-                        "Move horizontally through questions",
+                        "Enter / ?",
+                        "Open the selected decision; Tab edits optional notes",
                     ),
-                    HelpAction::new("j / k / Mouse wheel", "Move through questions"),
-                    HelpAction::new("Enter / ?", "Open the selected decision"),
-                    HelpAction::new("R", "Resolve due automatic answers"),
+                    HelpAction::new("a", "Resolve due automatic answers"),
                     HelpAction::new("Tab / Shift-Tab", "Move focus between main panels"),
                     HelpAction::new("r", "Refresh question state"),
                 ],
             ),
             Self::Agents => content(
-                "Agents",
-                "Delegated Codex sessions for the selected run. Active work is bright; completed and inactive history is muted.",
-                "Configured planners shape the run; the Lead delegates ticket-sized work; workers and reviewers produce and verify outputs. This history shows where model effort is being spent.",
+                "Agents & Chat",
+                "Koni-owned Pi sessions plus migrated Codex sessions. Selecting an agent shows its complete semantic transcript in Details.",
+                "Configured planners shape runs; the Lead delegates tickets to workers and reviewers. Enter records durable guidance at the next compiler boundary. Focus Details to navigate.",
                 vec![
-                    HelpAction::new("j / k", "Select and scroll through agents"),
-                    HelpAction::new("PgUp / PgDn", "Scroll several agents"),
+                    HelpAction::new(
+                        "↑ / ↓ / j / k",
+                        "Select an agent, or scroll when Details is focused",
+                    ),
+                    HelpAction::new("PgUp / PgDn", "Scroll several transcript lines in Details"),
+                    HelpAction::new("Home / End", "Jump to the start or live transcript tail"),
                     HelpAction::new("Mouse wheel", "Scroll while pointing at this panel"),
+                    HelpAction::new("Enter", "Send durable guidance to a live agent"),
+                    HelpAction::new("Esc in Details", "Return to the normal overview"),
                     HelpAction::new("Tab / Shift-Tab", "Move focus between main panels"),
                     HelpAction::new("r", "Refresh agent state"),
                 ],
             ),
+            Self::Activity => content(
+                "Recent Activity",
+                "A chronological, human-readable feed of graph edits and compiler lifecycle work for the selected run.",
+                "Green entries add graph knowledge, yellow entries revise it, red entries remove it, and white entries record compiler work. The feed is derived from durable step outputs and events.",
+                vec![
+                    HelpAction::new("↑ / ↓ / j / k", "Scroll one activity item"),
+                    HelpAction::new("PgUp / PgDn", "Scroll several activity items"),
+                    HelpAction::new("Mouse wheel", "Scroll while pointing at this panel"),
+                    HelpAction::new("Tab / Shift-Tab", "Move focus between main panels"),
+                    HelpAction::new("r", "Refresh run activity"),
+                ],
+            ),
             Self::Graph => content(
                 "Graph",
-                "The compiled nodes and relationships that describe the selected run's current world model.",
-                "Rules validate this graph and emit work tickets. Selecting a ticket shows its graph projection when the profile provides one.",
+                "The compiled nodes and relationships that describe the selected run, or the selected ticket's changes to that model.",
+                "Run scope uses each node type's full color. Ticket scope becomes a diff lens: green was added, yellow was modified, red was deleted, and muted structure is unchanged.",
                 vec![
-                    HelpAction::new("j / k", "Scroll one line"),
+                    HelpAction::new("↑ / ↓ / j / k", "Scroll one line"),
                     HelpAction::new("PgUp / PgDn", "Scroll several lines"),
                     HelpAction::new("Tab / Shift-Tab", "Move focus between main panels"),
                     HelpAction::new("r", "Refresh compiled state"),
@@ -127,13 +146,14 @@ impl HelpTopic {
             Self::ConfigDomains => content(
                 "Configuration Domains",
                 "Human-oriented sections for everything Koni can configure: project behavior, runs, agents, workflows, graph rules, checks, and views.",
-                "Configuration edits affect future runs. Choose a domain, then a resource, edit its guided fields, and publish only after full validation succeeds.",
+                "Configuration edits affect future runs. Select a domain, then a resource, edit its guided fields, and publish only after full validation succeeds.",
                 vec![
-                    HelpAction::new("j / k", "Choose a domain"),
+                    HelpAction::new("↑ / ↓ / j / k", "Select a domain"),
                     HelpAction::new("Enter", "Move into that domain's resources"),
                     HelpAction::new("Tab / Shift-Tab", "Move focus between configuration panels"),
                     HelpAction::new("Ctrl-S", "Save all drafts"),
                     HelpAction::new("Ctrl-P", "Validate and publish drafts"),
+                    HelpAction::new("Ctrl-D", "Discard all unpublished changes"),
                     HelpAction::new("c", "Return to Operate mode"),
                 ],
             ),
@@ -166,16 +186,16 @@ fn details_content(panel: Panel) -> HelpContent {
         Panel::Overview => (
             "Details · Overview",
             "The selected ticket's workflow and metadata together with the run's progress, evidence, validation, and report summary.",
-            "Use this combined view to orient before acting: ticket scope explains the current unit of work, while run-level outcomes remain traceable to graph state and verification evidence.",
+            "Use this one vertically scrollable document to orient before acting. In run scope it presents Objective, Run metadata, and Evidence together; Objective expands from its four-line preview whenever Details is focused.",
             None,
-            HelpAction::new("j / k", "Scroll this view"),
+            HelpAction::new("↑ / ↓ / j / k", "Scroll the combined detail document"),
         ),
         Panel::Planning => (
-            "Details · Planning",
-            "The planning agent's progress and durable planning transcript for the selected run.",
-            "Planning turns the goal and intake answers into a structured brief. The run waits for approval before execution begins.",
+            "Details · Plan",
+            "The planning activity still in progress, or the complete durable human-readable plan after approval.",
+            "Before approval, this view follows the planner's meaningful activity. After approval, it becomes the scrollable Markdown plan that execution uses, with the bounded reviewed Graph Seed when present.",
             None,
-            HelpAction::new("j / k", "Scroll this view"),
+            HelpAction::new("↑ / ↓ / j / k", "Scroll this view"),
         ),
         Panel::Stages => (
             "Details · Stages",
@@ -185,7 +205,7 @@ fn details_content(panel: Panel) -> HelpContent {
                 "Enter",
                 "Control, retry, or advance the current stage",
             )),
-            HelpAction::new("j / k", "Scroll this view"),
+            HelpAction::new("↑ / ↓ / j / k", "Scroll this view"),
         ),
     };
     let mut actions = Vec::new();
@@ -193,9 +213,9 @@ fn details_content(panel: Panel) -> HelpContent {
         actions.push(action);
     }
     actions.extend([
-        HelpAction::new("[ / ]", "Switch Details view"),
-        HelpAction::new("Left / Right / l", "Switch Details view"),
+        HelpAction::new("← / → / [ / ]", "Switch Details view"),
         navigation_action,
+        HelpAction::new("PgUp / PgDn", "Scroll expanded content"),
         HelpAction::new("Tab / Shift-Tab", "Move focus between main panels"),
         HelpAction::new("a", "Open available configured actions"),
         HelpAction::new("r", "Refresh project state"),
@@ -206,18 +226,19 @@ fn details_content(panel: Panel) -> HelpContent {
 fn config_resources_content(domain: ConfigDomain) -> HelpContent {
     let domain_purpose = domain_purpose(domain);
     let mut actions = vec![
-        HelpAction::new("j / k", "Choose a resource"),
+        HelpAction::new("↑ / ↓ / j / k", "Select a resource"),
         HelpAction::new("Enter", "Open the selected resource editor"),
         HelpAction::new("Tab / Shift-Tab", "Move focus between configuration panels"),
         HelpAction::new("Ctrl-S", "Save all drafts"),
         HelpAction::new("Ctrl-P", "Validate and publish drafts"),
+        HelpAction::new("Ctrl-D", "Discard all unpublished changes"),
         HelpAction::new("c", "Return to Operate mode"),
     ];
     match domain {
-        ConfigDomain::RunTypes => actions.push(HelpAction::new("T", "Create a new run type")),
+        ConfigDomain::RunTypes => actions.push(HelpAction::new("t", "Create a new run type")),
         ConfigDomain::Advanced => {
             actions.push(HelpAction::new(
-                "N / M / D",
+                "n / m / d",
                 "Create, rename, or remove a source",
             ));
         }
@@ -246,7 +267,7 @@ fn config_editor_content(
             format!("Guided Editor · {kind}"),
             format!("A focused editor for this {kind}. {purpose}"),
             vec![
-                HelpAction::new("j / k", "Choose a setting"),
+                HelpAction::new("↑ / ↓ / j / k", "Select a setting"),
                 HelpAction::new("Enter", "Edit the selected setting"),
                 HelpAction::new("Esc · Tab / ⇧Tab", "Leave or move focus from the editor"),
                 HelpAction::new("c", "Return to Operate mode"),
@@ -283,6 +304,7 @@ fn config_editor_content(
     actions.extend([
         HelpAction::new("Ctrl-S", "Save all drafts"),
         HelpAction::new("Ctrl-P", "Validate and publish drafts"),
+        HelpAction::new("Ctrl-D", "Discard all unpublished changes"),
     ]);
     let workflow = if resource_kind == Some(ConfigResourceKind::GatePolicy) {
         "Required coverage blocks a required subject with a missing gate. A verifier waits for execution readiness; automatic evaluation runs at compiler boundaries. A current passing receipt clears the blocker."
@@ -298,7 +320,7 @@ fn domain_purpose(domain: ConfigDomain) -> &'static str {
             "Defines project identity, storage, Git, and global orchestration."
         }
         ConfigDomain::RunTypes => {
-            "Defines reusable run presets, stages, question policy, and agent defaults."
+            "Defines reusable run presets, stages, planning-question policy, and agent defaults."
         }
         ConfigDomain::Agents => {
             "Defines Codex personas, prompts, models, reasoning, permissions, and tools."
@@ -394,7 +416,12 @@ mod tests {
             );
             assert!(!content.summary.is_empty());
             assert!(!content.workflow.is_empty());
-            assert!(content.actions.iter().any(|action| action.keys == "[ / ]"));
+            assert!(
+                content
+                    .actions
+                    .iter()
+                    .any(|action| action.keys == "← / → / [ / ]")
+            );
         }
     }
 
@@ -470,7 +497,7 @@ mod tests {
     fn runs_help_names_the_current_new_run_sections() {
         let content = HelpTopic::Runs.content();
 
-        assert!(content.workflow.contains("Goal Prompt"));
+        assert!(content.workflow.contains("Objective"));
         assert!(content.workflow.contains("Run Config"));
         assert!(!content.workflow.contains("guided intake"));
     }
@@ -482,6 +509,28 @@ mod tests {
         for phase in ["planners", "Lead", "workers", "reviewers"] {
             assert!(content.workflow.contains(phase), "missing {phase}");
         }
+        assert!(content.summary.contains("Koni-owned Pi sessions"));
+        assert!(content.summary.contains("migrated Codex sessions"));
+    }
+
+    #[test]
+    fn details_help_matches_the_composed_overview_and_phase_aware_plan() {
+        let overview = HelpTopic::Details(Panel::Overview).content();
+        for section in ["Objective", "Run metadata", "Evidence"] {
+            assert!(
+                overview.workflow.contains(section),
+                "missing {section}: {}",
+                overview.workflow
+            );
+        }
+        assert!(overview.workflow.contains("vertically scrollable"));
+        assert!(!overview.workflow.contains("mini-view"));
+
+        let plan = HelpTopic::Details(Panel::Planning).content();
+        assert_eq!(plan.title, "Details · Plan");
+        assert!(plan.workflow.contains("Before approval"));
+        assert!(plan.workflow.contains("After approval"));
+        assert!(plan.workflow.contains("scrollable Markdown plan"));
     }
 
     #[test]
@@ -504,6 +553,12 @@ mod tests {
         for domain in ConfigDomain::ALL {
             let resources = HelpTopic::ConfigResources { domain }.content();
             assert!(resources.actions.iter().any(|action| action.keys == "c"));
+            assert!(
+                resources
+                    .actions
+                    .iter()
+                    .any(|action| action.keys == "Ctrl-D")
+            );
         }
 
         let guided = HelpTopic::ConfigEditor {
@@ -513,6 +568,7 @@ mod tests {
         }
         .content();
         assert!(guided.actions.iter().any(|action| action.keys == "c"));
+        assert!(guided.actions.iter().any(|action| action.keys == "Ctrl-D"));
 
         for mode in [
             ConfigEditorMode::LinkedInstructions,
@@ -528,6 +584,7 @@ mod tests {
                 !editor.actions.iter().any(|action| action.keys == "c"),
                 "literal text editor advertised c as a navigation command"
             );
+            assert!(editor.actions.iter().any(|action| action.keys == "Ctrl-D"));
         }
     }
 

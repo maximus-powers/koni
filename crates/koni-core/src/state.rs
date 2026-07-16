@@ -36,6 +36,11 @@ pub struct RunManifest {
     pub question_policy: Option<String>,
     pub goal: String,
     pub repository_root: PathBuf,
+    /// Full user-owned local ref selected as the eventual promotion target.
+    /// Older runs omit this field and retain their legacy, non-promotable
+    /// lifecycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_branch: Option<String>,
     pub integration_branch: Option<String>,
     pub integration_base: Option<String>,
     /// Immutable product commit selected before planning begins.
@@ -83,6 +88,7 @@ impl RunManifest {
             question_policy: None,
             goal: goal.into(),
             repository_root,
+            target_branch: None,
             integration_branch: None,
             integration_base: None,
             base_commit: None,
@@ -103,6 +109,16 @@ impl RunManifest {
         self.base_commit = Some(base_commit);
         self.config_snapshot_hash = Some(config_snapshot.hash.clone());
         self.config_snapshot_path = Some(config_snapshot.path.clone());
+    }
+
+    pub fn pin_target_inputs(
+        &mut self,
+        target_branch: impl Into<String>,
+        base_commit: impl Into<String>,
+        config_snapshot: &ConfigSnapshot,
+    ) {
+        self.target_branch = Some(target_branch.into());
+        self.pin_inputs(base_commit, config_snapshot);
     }
 
     pub fn attach_planning_worktree(&mut self, path: PathBuf) {
@@ -200,19 +216,35 @@ impl ConfigSnapshot {
         Ok(snapshot)
     }
 
-    /// Capture the project-local Koni tree and the native Codex resources
-    /// that can affect its agents while preserving their standard paths.
+    /// Capture the active project-local Koni tree and every project resource
+    /// that can affect its agents while preserving standard paths.
     ///
-    /// The snapshot intentionally excludes user-level Codex state. It includes
-    /// only `.codex/koni`, project `.codex/config.toml`, project custom
-    /// agents, and repository skills. Symlinked skill directories are resolved
-    /// into regular snapshot files because Codex supports shared skills while a
-    /// run still needs immutable, independently verifiable inputs.
+    /// `.koni` is the schema-2 authority and wins deterministically if a
+    /// Codex-era tree is also present during migration cleanup. Schema 2 never
+    /// imports `.codex/config.toml` or `.codex/agents`; only repository skills
+    /// remain shared inputs. Explicit schema-1 projects retain the historical
+    /// snapshot shape until they are migrated.
     pub fn capture_project_configuration(project_root: &Path, run_root: &Path) -> Result<Self> {
         let project_root = project_root
             .canonicalize()
             .map_err(|error| io_error(project_root, error))?;
-        let source = project_root.join(".codex/koni");
+        let schema2_source = project_root.join(".koni");
+        let legacy_source = project_root.join(".codex/koni");
+        let (source, snapshot_relative, schema2) = match fs::symlink_metadata(&schema2_source) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                (schema2_source, PathBuf::from(".koni"), true)
+            }
+            Ok(_) => {
+                return Err(KoniError::Action(format!(
+                    "schema-2 configuration root must be a real directory: {}",
+                    schema2_source.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                (legacy_source, PathBuf::from(".codex/koni"), false)
+            }
+            Err(error) => return Err(io_error(&schema2_source, error)),
+        };
         if !source.is_dir() {
             return Err(KoniError::NotFound(format!(
                 "project Koni configuration {}",
@@ -221,7 +253,7 @@ impl ConfigSnapshot {
         }
         let relative_root = PathBuf::from("config-snapshot");
         let snapshot_root = run_root.join(&relative_root);
-        let destination = snapshot_root.join(".codex/koni");
+        let destination = snapshot_root.join(&snapshot_relative);
         if run_root.join(&relative_root).exists() {
             return Err(KoniError::Action(format!(
                 "configuration snapshot already exists: {}",
@@ -230,32 +262,28 @@ impl ConfigSnapshot {
         }
         fs::create_dir_all(&destination).map_err(|error| io_error(&destination, error))?;
         let mut files = BTreeMap::new();
-        copy_snapshot_directory(
-            &source,
-            &destination,
-            Path::new(".codex/koni"),
-            false,
-            &mut files,
-        )?;
+        copy_snapshot_directory(&source, &destination, &snapshot_relative, false, &mut files)?;
 
-        let project_config = project_root.join(".codex/config.toml");
-        if project_config.exists() {
-            copy_snapshot_file(
-                &project_config,
-                &snapshot_root.join(".codex/config.toml"),
-                Path::new(".codex/config.toml"),
-                &mut files,
-            )?;
-        }
-        let project_agents = project_root.join(".codex/agents");
-        if project_agents.exists() {
-            copy_snapshot_directory(
-                &project_agents,
-                &snapshot_root.join(".codex/agents"),
-                Path::new(".codex/agents"),
-                false,
-                &mut files,
-            )?;
+        if !schema2 {
+            let project_config = project_root.join(".codex/config.toml");
+            if project_config.exists() {
+                copy_snapshot_file(
+                    &project_config,
+                    &snapshot_root.join(".codex/config.toml"),
+                    Path::new(".codex/config.toml"),
+                    &mut files,
+                )?;
+            }
+            let project_agents = project_root.join(".codex/agents");
+            if project_agents.exists() {
+                copy_snapshot_directory(
+                    &project_agents,
+                    &snapshot_root.join(".codex/agents"),
+                    Path::new(".codex/agents"),
+                    false,
+                    &mut files,
+                )?;
+            }
         }
         copy_snapshot_skills(&project_root, &snapshot_root, &mut files)?;
         let hash = normalized_hash(&files);
@@ -320,7 +348,8 @@ impl ConfigSnapshot {
                 !matches!(component, Component::Normal(_))
                     && !matches!(component, Component::CurDir)
             })
-            || !relative.starts_with(Path::new(".codex/koni"))
+            || !(relative.starts_with(Path::new(".koni"))
+                || relative.starts_with(Path::new(".codex/koni")))
         {
             return Err(KoniError::Action(format!(
                 "run-local configuration override path is invalid: {}",
@@ -389,6 +418,18 @@ fn copy_snapshot_skills(
         } else {
             continue;
         };
+        let skill_manifest = source.join("SKILL.md");
+        match fs::metadata(&skill_manifest) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => {
+                return Err(KoniError::Action(format!(
+                    "repository skill manifest is not a regular file: {}",
+                    skill_manifest.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io_error(&skill_manifest, error)),
+        }
         let name = path
             .file_name()
             .ok_or_else(|| KoniError::Action("skill path has no name".to_owned()))?;
@@ -498,6 +539,8 @@ pub struct RunRegistration {
     pub run_type_hash: Option<String>,
     #[serde(default)]
     pub question_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_branch: Option<String>,
     pub base_commit: String,
     pub config_snapshot_hash: String,
     pub config_snapshot_path: PathBuf,
@@ -518,6 +561,7 @@ type ImmutableRunKey<'a> = (
     &'a str,
     &'a str,
     &'a str,
+    Option<&'a str>,
     Option<&'a str>,
     Option<&'a str>,
     Option<&'a str>,
@@ -556,6 +600,7 @@ impl RunRegistration {
             run_type_title: manifest.run_type_title.clone(),
             run_type_hash: manifest.run_type_hash.clone(),
             question_policy: manifest.question_policy.clone(),
+            target_branch: manifest.target_branch.clone(),
             base_commit,
             config_snapshot_hash: snapshot.hash.clone(),
             config_snapshot_path: snapshot.path.clone(),
@@ -578,6 +623,7 @@ impl RunRegistration {
             self.run_type_title.as_deref(),
             self.run_type_hash.as_deref(),
             self.question_policy.as_deref(),
+            self.target_branch.as_deref(),
             &self.base_commit,
             &self.config_snapshot_hash,
             &self.config_snapshot_path,
@@ -662,9 +708,25 @@ impl ProjectRegistryStore {
         self.load_or_create_unlocked()
     }
 
+    /// Inspect an existing registry without creating either the registry or
+    /// its lock hierarchy. Registry publication is atomic, so a lock-free
+    /// reader observes one complete generation and normal registry validation
+    /// still rejects internally inconsistent content.
+    pub fn inspect_existing(&self) -> Result<Option<ProjectRegistry>> {
+        self.load_existing_unlocked()
+    }
+
+    /// Hold the exact registry publication lock across a schema migration.
+    /// Run registration and status mutation use this same persistent inode,
+    /// so no new legacy run can cross the migration commit boundary.
+    pub(crate) fn migration_barrier(&self) -> Result<ProjectRegistryLock> {
+        self.lock()
+    }
+
     pub fn register_run(&self, registration: RunRegistration) -> Result<ProjectRegistry> {
         validate_run_registration(&registration)?;
         let _lock = self.lock()?;
+        self.reject_legacy_snapshot_after_schema2(&registration)?;
         let mut registry = self.load_or_create_unlocked()?;
         if registry.runs.contains_key(&registration.id) {
             return Err(KoniError::Action(format!(
@@ -678,6 +740,60 @@ impl ProjectRegistryStore {
         registry.updated_at = Utc::now();
         self.write_unlocked(&registry)?;
         Ok(registry)
+    }
+
+    fn reject_legacy_snapshot_after_schema2(&self, registration: &RunRegistration) -> Result<()> {
+        let schema2_root = self.repository_root.join(".koni");
+        let migration_journal = self.root.join("migrations/schema2-publication.json");
+        let migration_started = match fs::symlink_metadata(&migration_journal) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(io_error(&migration_journal, error)),
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => true,
+            Ok(_) => {
+                return Err(KoniError::Action(format!(
+                    "schema-2 migration authority is redirected or invalid: {}",
+                    migration_journal.display()
+                )));
+            }
+        };
+        match fs::symlink_metadata(&schema2_root) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !migration_started => {
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(KoniError::Action(
+                    "schema-2 migration has started but its published configuration is absent; recover the migration before registering a run"
+                        .to_owned(),
+                ));
+            }
+            Err(error) => return Err(io_error(&schema2_root, error)),
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => {
+                return Err(KoniError::Action(format!(
+                    "schema-2 configuration root is redirected or invalid: {}",
+                    schema2_root.display()
+                )));
+            }
+        }
+        let run_root = self.run_root(&registration.id)?;
+        let snapshot = ConfigSnapshot::load_verified(&run_root)?;
+        if snapshot.hash != registration.config_snapshot_hash {
+            return Err(KoniError::Action(format!(
+                "run {} registry and immutable configuration snapshot hashes differ",
+                registration.id
+            )));
+        }
+        if snapshot
+            .files
+            .keys()
+            .any(|path| path.starts_with(Path::new(".codex/koni")))
+        {
+            return Err(KoniError::Action(format!(
+                "run {} captured legacy Codex configuration before the schema-2 migration committed and cannot be registered afterward",
+                registration.id
+            )));
+        }
+        Ok(())
     }
 
     pub fn approve_run(
@@ -803,6 +919,27 @@ impl ProjectRegistryStore {
             .ok_or_else(|| KoniError::NotFound(format!("run {run_id}")))
     }
 
+    /// Look up a registered run without adopting a repository that does not
+    /// yet have a project registry. The absence check returns before lock
+    /// acquisition, while an existing registry retains the normal serialized,
+    /// symlink-safe read boundary.
+    pub fn existing_run(&self, run_id: &str) -> Result<Option<RunRegistration>> {
+        validate_registry_id(run_id, "run ID")?;
+        if !self.registry_path.exists() {
+            return Ok(None);
+        }
+        let _lock = self.lock()?;
+        let Some(registry) = self.load_existing_unlocked()? else {
+            return Ok(None);
+        };
+        registry
+            .runs
+            .get(run_id)
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| KoniError::NotFound(format!("run {run_id}")))
+    }
+
     pub fn run_store(&self, run_id: &str, storage: &StorageConfig) -> Result<StateStore> {
         StateStore::with_storage(self.run_root(run_id)?, storage)
     }
@@ -833,16 +970,7 @@ impl ProjectRegistryStore {
     }
 
     fn load_or_create_unlocked(&self) -> Result<ProjectRegistry> {
-        if self.registry_path.exists() {
-            let registry: ProjectRegistry = read_yaml(&self.registry_path)?;
-            if registry.repository_root != self.repository_root {
-                return Err(KoniError::Action(format!(
-                    "project registry belongs to {}, not {}",
-                    registry.repository_root.display(),
-                    self.repository_root.display()
-                )));
-            }
-            validate_project_registry(&registry)?;
+        if let Some(registry) = self.load_existing_unlocked()? {
             return Ok(registry);
         }
         fs::create_dir_all(&self.root).map_err(|error| io_error(&self.root, error))?;
@@ -851,12 +979,33 @@ impl ProjectRegistryStore {
         Ok(registry)
     }
 
+    fn load_existing_unlocked(&self) -> Result<Option<ProjectRegistry>> {
+        if !self.registry_path.exists() {
+            return Ok(None);
+        }
+        let registry: ProjectRegistry = read_yaml(&self.registry_path)?;
+        let same_repository = || -> Result<bool> {
+            let registered = GitBackend::discover(&registry.repository_root)?;
+            let caller = GitBackend::discover(&self.repository_root)?;
+            Ok(registered.common_dir() == caller.common_dir())
+        };
+        if registry.repository_root != self.repository_root && !same_repository().unwrap_or(false) {
+            return Err(KoniError::Action(format!(
+                "project registry belongs to {}, not {}",
+                registry.repository_root.display(),
+                self.repository_root.display()
+            )));
+        }
+        validate_project_registry(&registry)?;
+        Ok(Some(registry))
+    }
+
     fn write_unlocked(&self, registry: &ProjectRegistry) -> Result<()> {
         atomic_write_yaml(&self.registry_path, registry)
     }
 }
 
-struct ProjectRegistryLock {
+pub(crate) struct ProjectRegistryLock {
     _lock: PersistentFileLock,
 }
 
@@ -891,6 +1040,24 @@ fn validate_registry_relative_path(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_target_branch(reference: &str) -> Result<()> {
+    let branch = reference
+        .strip_prefix("refs/heads/")
+        .filter(|branch| !branch.is_empty())
+        .ok_or_else(|| {
+            KoniError::Action(format!(
+                "run target branch must be a full local ref: {reference}"
+            ))
+        })?;
+    if branch == "koni" || branch.starts_with("koni/") || !git2::Reference::is_valid_name(reference)
+    {
+        return Err(KoniError::Action(format!(
+            "invalid user-owned run target branch: {reference}"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_run_registration(run: &RunRegistration) -> Result<()> {
     validate_registry_id(&run.id, "run ID")?;
     if run
@@ -902,6 +1069,9 @@ fn validate_run_registration(run: &RunRegistration) -> Result<()> {
             "run {} has an empty pinned run type title",
             run.id
         )));
+    }
+    if let Some(target_branch) = &run.target_branch {
+        validate_target_branch(target_branch)?;
     }
     validate_registry_relative_path(&run.config_snapshot_path, "configuration snapshot path")?;
     for (label, path) in [
@@ -1258,6 +1428,41 @@ impl Ticket {
     }
 }
 
+/// Exact compiler-pinned graph-local check selection persisted with a
+/// workflow step. Hashes bind both semantic selection and executable member
+/// contracts so active tickets fail closed on later topology or input drift.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledCheckSet {
+    pub schema_version: String,
+    pub parent_check_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub receipt_type: String,
+    pub parent_check_hash: String,
+    pub selector_hash: String,
+    pub anchor_nodes: Vec<NodeId>,
+    pub anchor_hashes: BTreeMap<NodeId, String>,
+    pub selection_hash: String,
+    pub members: Vec<CompiledCheckMember>,
+    pub contract_hash: String,
+}
+
+/// One exact semantic source node resolved to one registered command check.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledCheckMember {
+    pub source_node_id: NodeId,
+    pub source_node_type: String,
+    pub source_semantic_hash: String,
+    pub child_check_id: String,
+    pub child_check_hash: String,
+    pub argv: Vec<String>,
+    pub working_directory: String,
+    pub source_paths: BTreeSet<String>,
+    pub covered_paths: BTreeSet<String>,
+    pub contract_hash: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step {
     pub id: String,
@@ -1268,8 +1473,33 @@ pub struct Step {
     pub required: bool,
     #[serde(default)]
     pub kind: StepKind,
+    /// Compiler-resolved graph read authority for this exact workflow step.
+    /// Legacy tickets omit this field and inherit their ticket-level scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_nodes: Option<BTreeSet<NodeId>>,
+    /// Compiler-resolved graph write authority for this exact workflow step.
+    /// `Some(empty)` is intentionally distinct from legacy inheritance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_nodes: Option<BTreeSet<NodeId>>,
+    /// Compiler-resolved filesystem authority for this exact workflow step.
+    /// Legacy tickets omit this field and inherit their ticket-level scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_paths: Option<BTreeSet<String>>,
+    /// Compiler-resolved filesystem write authority for this exact workflow
+    /// step. `Some(empty)` is intentionally distinct from legacy inheritance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_paths: Option<BTreeSet<String>>,
+    /// Earlier dependency whose source-only proof manifest this step must
+    /// preserve. Child check identity may differ across expected-red/green.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserve_source_paths_from: Option<String>,
+    /// Exact graph-selected command members compiled for this step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compiled_check_sets: Vec<CompiledCheckSet>,
     #[serde(default)]
     pub expected_outputs: Vec<String>,
+    #[serde(default)]
+    pub graph_mutation: GraphMutationPolicy,
     #[serde(default)]
     pub required_receipts: Vec<String>,
     #[serde(default)]
@@ -1282,6 +1512,15 @@ pub struct Step {
     pub validation_action: Option<String>,
     #[serde(default)]
     pub context_hash: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphMutationPolicy {
+    #[default]
+    Allowed,
+    Forbidden,
+    Required,
 }
 
 fn default_true() -> bool {
@@ -1352,11 +1591,25 @@ pub struct ReviewAgentBinding {
     pub step_id: String,
     pub persona: String,
     pub input_hash: String,
+    /// Compiler-owned decomposition of the exact reviewer input. Its
+    /// normalized hash must equal `input_hash`, which is also persisted in
+    /// the independent agent record. Keeping the components lets later
+    /// neighborhood-local currentness revalidate only the stable evidence it
+    /// is authorized to reuse without weakening the original whole-input
+    /// review binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_binding: Option<Value>,
     pub output_hash: String,
     #[serde(default)]
     pub findings: Vec<String>,
     #[serde(default)]
     pub evidence_pointers: Vec<String>,
+    /// Structured reviewer classification for the failure boundary. New
+    /// schema-1.1 reviewer results bind `none` on pass and one
+    /// profile-declared domain on failure. Omission remains valid only for
+    /// persisted schema-1.0 review history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_domain: Option<String>,
     /// Hash of the compiler-owned review-effect application, when configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_effects_hash: Option<String>,
@@ -1593,6 +1846,11 @@ impl StateStore {
     pub fn write_ticket(&self, ticket: &Ticket) -> Result<()> {
         let directory = self.tickets_dir.join(&ticket.status);
         fs::create_dir_all(&directory).map_err(|error| io_error(&directory, error))?;
+        let target = directory.join(format!("{}.yaml", ticket.id));
+        // Publish the new lifecycle-lane value before retiring the old one.
+        // If an old-path removal fails, duplicate state fails closed but the
+        // authoritative ticket is never lost through delete-before-write.
+        atomic_write_yaml(&target, ticket)?;
         for entry in
             fs::read_dir(&self.tickets_dir).map_err(|error| io_error(&self.tickets_dir, error))?
         {
@@ -1603,12 +1861,12 @@ impl StateStore {
                 .is_dir()
             {
                 let old = entry.path().join(format!("{}.yaml", ticket.id));
-                if old.exists() && old.parent() != Some(directory.as_path()) {
+                if old.exists() && old != target {
                     fs::remove_file(&old).map_err(|error| io_error(&old, error))?;
                 }
             }
         }
-        atomic_write_yaml(&directory.join(format!("{}.yaml", ticket.id)), ticket)
+        Ok(())
     }
 
     pub fn tickets(&self) -> Result<Vec<Ticket>> {
@@ -1617,6 +1875,7 @@ impl StateStore {
             return Ok(Vec::new());
         }
         let mut tickets: Vec<Ticket> = Vec::new();
+        let mut ticket_paths = BTreeMap::<String, PathBuf>::new();
         for status in fs::read_dir(&root).map_err(|error| io_error(&root, error))? {
             let status = status.map_err(|error| io_error(&root, error))?;
             if !status
@@ -1631,7 +1890,16 @@ impl StateStore {
             {
                 let path = path.map_err(|error| io_error(status.path(), error))?.path();
                 if path.extension().and_then(|value| value.to_str()) == Some("yaml") {
-                    tickets.push(read_yaml(&path)?);
+                    let ticket: Ticket = read_yaml(&path)?;
+                    if let Some(existing) = ticket_paths.insert(ticket.id.clone(), path.clone()) {
+                        return Err(KoniError::Action(format!(
+                            "ticket {} has duplicate lifecycle authority at {} and {}",
+                            ticket.id,
+                            existing.display(),
+                            path.display()
+                        )));
+                    }
+                    tickets.push(ticket);
                 }
             }
         }
@@ -1839,6 +2107,9 @@ fn validate_manifest_pins(manifest: &RunManifest) -> Result<()> {
             manifest.id
         )));
     }
+    if let Some(target_branch) = &manifest.target_branch {
+        validate_target_branch(target_branch)?;
+    }
     if let (Some(base_commit), Some(integration_base)) =
         (&manifest.base_commit, &manifest.integration_base)
         && base_commit != integration_base
@@ -1875,6 +2146,7 @@ fn validate_manifest_immutable_inputs(existing: &RunManifest, next: &RunManifest
         || !pinned_field_unchanged(&existing.run_type_title, &next.run_type_title)
         || !pinned_field_unchanged(&existing.run_type_hash, &next.run_type_hash)
         || !pinned_field_unchanged(&existing.question_policy, &next.question_policy)
+        || !pinned_field_unchanged(&existing.target_branch, &next.target_branch)
         || !pinned_field_unchanged(&existing.integration_branch, &next.integration_branch)
         || !pinned_field_unchanged(&existing.integration_base, &next.integration_base)
         || !pinned_field_unchanged(&existing.base_commit, &next.base_commit)
@@ -1961,6 +2233,48 @@ mod tests {
         let tickets = store.tickets().unwrap();
         assert_eq!(tickets.len(), 1);
         assert_eq!(tickets[0].status, "in_progress");
+    }
+
+    #[test]
+    fn duplicate_ticket_lanes_fail_closed_instead_of_selecting_filesystem_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = StateStore::new(temp.path().to_path_buf());
+        store.ensure_layout().unwrap();
+        let ticket = Ticket {
+            schema_version: "1.0".to_owned(),
+            id: "TK-duplicate-lane".to_owned(),
+            operation: "test".to_owned(),
+            status: "todo".to_owned(),
+            title: "Duplicate lane authority".to_owned(),
+            target_nodes: Vec::new(),
+            scope: Scope::default(),
+            source_state_key: "missing".to_owned(),
+            target_state_key: "present".to_owned(),
+            obligation_keys: Vec::new(),
+            profile_hash: "hash".to_owned(),
+            rule_id: "rule".to_owned(),
+            workflow: Vec::new(),
+            outputs: Vec::new(),
+            reviews: Vec::new(),
+            blockers: Vec::new(),
+            lease: None,
+            change_control: TicketChangeControl::default(),
+            extensions: BTreeMap::new(),
+        };
+        store.write_ticket(&ticket).unwrap();
+        let mut duplicate = ticket.clone();
+        duplicate.status = "in_progress".to_owned();
+        let duplicate_path = store.ticket_path(&duplicate);
+        fs::create_dir_all(duplicate_path.parent().unwrap()).unwrap();
+        atomic_write_yaml(&duplicate_path, &duplicate).unwrap();
+
+        let error = store
+            .tickets()
+            .expect_err("two lifecycle lanes cannot both own one ticket");
+        assert!(
+            error.to_string().contains("duplicate lifecycle authority"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2214,6 +2528,81 @@ mod tests {
         assert!(updated.contains("title: After"), "{updated}");
     }
 
+    #[test]
+    fn schema2_project_snapshot_excludes_every_codex_runtime_resource() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir_all(project.join(".koni/run-types")).unwrap();
+        fs::write(
+            project.join(".koni/project.yaml"),
+            "schema_version: '2.0'\nproject: {id: demo, title: Demo}\ndefault_run_type: small\nrun_types: []\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join(".koni/profile.yaml"),
+            "schema_version: '2.0'\n",
+        )
+        .unwrap();
+        fs::create_dir_all(project.join(".codex/koni")).unwrap();
+        fs::write(project.join(".codex/koni/project.yaml"), "legacy\n").unwrap();
+        fs::write(project.join(".codex/config.toml"), "secret = 'legacy'\n").unwrap();
+        fs::create_dir_all(project.join(".codex/agents")).unwrap();
+        fs::write(
+            project.join(".codex/agents/legacy.toml"),
+            "name = 'legacy'\n",
+        )
+        .unwrap();
+        fs::create_dir_all(project.join(".agents/skills/review")).unwrap();
+        fs::write(
+            project.join(".agents/skills/review/SKILL.md"),
+            "---\nname: review\ndescription: Review\n---\n",
+        )
+        .unwrap();
+
+        let run_root = temp.path().join("run");
+        fs::create_dir(&run_root).unwrap();
+        let snapshot = ConfigSnapshot::capture_project_configuration(&project, &run_root).unwrap();
+
+        assert!(snapshot.files.contains_key(Path::new(".koni/project.yaml")));
+        assert!(
+            snapshot
+                .files
+                .contains_key(Path::new(".agents/skills/review/SKILL.md"))
+        );
+        assert!(
+            snapshot
+                .files
+                .keys()
+                .all(|path| !path.starts_with(Path::new(".codex"))),
+            "schema 2 must never snapshot executable Codex configuration: {:?}",
+            snapshot.files.keys().collect::<Vec<_>>()
+        );
+        assert!(!run_root.join("config-snapshot/.codex").exists());
+        snapshot.verify(&run_root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn schema2_project_snapshot_never_falls_back_through_a_redirected_koni_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("project.yaml"), "outside\n").unwrap();
+        symlink(&outside, project.join(".koni")).unwrap();
+        fs::create_dir_all(project.join(".codex/koni")).unwrap();
+        fs::write(project.join(".codex/koni/project.yaml"), "legacy\n").unwrap();
+        let run_root = temp.path().join("run");
+        fs::create_dir(&run_root).unwrap();
+
+        let error = ConfigSnapshot::capture_project_configuration(&project, &run_root)
+            .expect_err("a redirected schema-2 root must fail closed")
+            .to_string();
+        assert!(error.contains("schema-2 configuration root must be a real directory"));
+        assert!(!run_root.join("config-snapshot").exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn project_snapshot_pins_native_codex_resources_and_resolves_skill_symlinks() {
@@ -2249,6 +2638,12 @@ mod tests {
         .unwrap();
         fs::create_dir_all(project.join(".agents/skills")).unwrap();
         symlink(&shared, project.join(".agents/skills/review")).unwrap();
+        fs::create_dir_all(project.join(".agents/skills/rule-pack")).unwrap();
+        fs::write(
+            project.join(".agents/skills/rule-pack/README.md"),
+            "not a Codex skill\n",
+        )
+        .unwrap();
 
         let run_root = temp.path().join("run");
         fs::create_dir(&run_root).unwrap();
@@ -2262,11 +2657,29 @@ mod tests {
                 .is_file()
         );
         assert!(!snapshot_root.join(".agents/skills/review").is_symlink());
+        assert!(!snapshot_root.join(".agents/skills/rule-pack").exists());
         assert!(!snapshot_root.join(".codex/unrelated.txt").exists());
         snapshot.verify(&run_root).unwrap();
 
         fs::write(shared.join("SKILL.md"), "changed outside the snapshot\n").unwrap();
         snapshot.verify(&run_root).unwrap();
+    }
+
+    #[test]
+    fn existing_run_lookup_does_not_create_a_project_registry() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository_root = temp.path().join("project");
+        let common_root = temp.path().join("git-common");
+        fs::create_dir(&repository_root).unwrap();
+        fs::create_dir(&common_root).unwrap();
+        let registry =
+            ProjectRegistryStore::new(common_root.join("koni"), repository_root).unwrap();
+
+        assert_eq!(registry.existing_run("legacy-run").unwrap(), None);
+        assert!(
+            !registry.root().exists(),
+            "a read-only miss must not adopt the repository or create sidecar state"
+        );
     }
 
     #[test]
@@ -2300,6 +2713,7 @@ mod tests {
                         run_type_title: None,
                         run_type_hash: None,
                         question_policy: None,
+                        target_branch: None,
                         base_commit: "base".to_owned(),
                         config_snapshot_hash: "sha256:config".to_owned(),
                         config_snapshot_path: PathBuf::from("config-snapshot"),
@@ -2368,6 +2782,55 @@ mod tests {
         assert!(registry.unregister_run(&ids[0]).unwrap().is_none());
     }
 
+    #[test]
+    fn legacy_steps_omit_graph_selected_check_state() {
+        let step: Step =
+            serde_yaml::from_str("id: work\npersona: coder\ncontext_hash: sha256:context\n")
+                .unwrap();
+        assert!(step.preserve_source_paths_from.is_none());
+        assert!(step.compiled_check_sets.is_empty());
+        assert!(step.read_nodes.is_none());
+        assert!(step.write_nodes.is_none());
+
+        let serialized = serde_json::to_value(&step).unwrap();
+        assert!(serialized.get("read_nodes").is_none());
+        assert!(serialized.get("write_nodes").is_none());
+        assert!(serialized.get("preserve_source_paths_from").is_none());
+        assert!(serialized.get("compiled_check_sets").is_none());
+    }
+
+    #[test]
+    fn compiled_check_sets_round_trip_exact_member_contracts() {
+        let member = CompiledCheckMember {
+            source_node_id: "proof-1".to_owned(),
+            source_node_type: "proof".to_owned(),
+            source_semantic_hash: "sha256:proof".to_owned(),
+            child_check_id: "proof-command".to_owned(),
+            child_check_hash: "sha256:child".to_owned(),
+            argv: vec!["cargo".to_owned(), "test".to_owned()],
+            working_directory: ".".to_owned(),
+            source_paths: BTreeSet::from(["tests/proof.rs".to_owned()]),
+            covered_paths: BTreeSet::from(["src/lib.rs".to_owned()]),
+            contract_hash: "sha256:member".to_owned(),
+        };
+        let compiled = CompiledCheckSet {
+            schema_version: "1.0".to_owned(),
+            parent_check_id: "promotion-proof-set".to_owned(),
+            receipt_type: "proof_set".to_owned(),
+            parent_check_hash: "sha256:parent".to_owned(),
+            selector_hash: "sha256:selector".to_owned(),
+            anchor_nodes: vec!["change-1".to_owned()],
+            anchor_hashes: BTreeMap::from([("change-1".to_owned(), "sha256:change".to_owned())]),
+            selection_hash: "sha256:selection".to_owned(),
+            members: vec![member],
+            contract_hash: "sha256:set".to_owned(),
+        };
+
+        let encoded = serde_yaml::to_string(&compiled).unwrap();
+        let decoded: CompiledCheckSet = serde_yaml::from_str(&encoded).unwrap();
+        assert_eq!(decoded, compiled);
+    }
+
     #[cfg(unix)]
     #[test]
     fn project_registry_lock_rejects_parent_and_final_symlink_sentinels() {
@@ -2379,8 +2842,14 @@ mod tests {
         fs::create_dir(&repository_root).unwrap();
         fs::create_dir(&common).unwrap();
         fs::create_dir_all(outside.join("locks")).unwrap();
+        atomic_write_yaml(
+            &outside.join("project.yaml"),
+            &ProjectRegistry::new(repository_root.clone()),
+        )
+        .unwrap();
         symlink(&outside, &sidecar).unwrap();
         let registry = ProjectRegistryStore::new(sidecar.clone(), repository_root.clone()).unwrap();
+        assert!(registry.existing_run("redirected-run").is_err());
         assert!(registry.load_or_create().is_err());
         assert!(!outside.join("locks/project-registry.lock").exists());
 

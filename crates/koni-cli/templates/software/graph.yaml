@@ -1,15 +1,21 @@
 schema_version: "1.0"
-module: {id: software.graph, version: 0.1.1}
+module: {id: software.graph, version: 0.6.0}
 
 node_types:
   - id: objective
-    description: A desired user, product, or operational outcome that gives the run its scope and success criteria.
+    description: A desired user, product, or operational outcome that gives the run its scope, intent, non-goals, and observable success criteria.
     stage: framing
     required_any: [[outcome]]
     statuses: [draft, active, satisfied, superseded]
+    initial_status: active
     compiler_owned_fields: [spec.planning_context]
+    agent_visible_compiler_owned_fields: [spec.planning_context]
     fields:
       outcome: {type: string, required: true}
+      work_kind:
+        type: string
+        enum: [general, new_feature, bug_fix, refactor, maintenance, migration]
+        description: Optional at legacy initialization, but mechanically required before implementation begins.
       motivation: {type: string}
       scope_boundaries: {type: list}
       success_signals: {type: list}
@@ -19,115 +25,282 @@ node_types:
         required: false
         description: A bounded, compiler-owned record of the approved plan and resolved decisions that authoritatively guide this run.
   - id: system
-    description: An architectural ownership boundary such as an application, service, package, domain, integration, or infrastructure component.
+    description: The smallest repository-native ownership boundary materially affected by the objective.
     stage: architecture
     required_any: [[responsibility]]
     statuses: [draft, active, changed, superseded]
+    initial_status: active
     fields:
       kind: {type: string, required: true, enum: [package, service, app, domain, integration, infrastructure]}
       responsibility: {type: string, required: true}
-      owned_paths: {type: list, required: true}
+      contract_required:
+        type: boolean
+        required: true
+        description: True only when an acceptance, compatibility, safety, or behavioral contract materially constrains this boundary.
+      contract_reason:
+        type: string
+        required: true
+        description: Why a contract is material or why ordinary repository behavior is sufficient.
+      owned_paths:
+        type: list
+        required: true
+        items: {type: path, required: true}
+        description: Exact project-root-relative files or directories owned by this boundary.
       owned_packages: {type: list}
       instructions: {type: list}
   - id: interface
-    description: A boundary surface exposed by one system and consumed by another, including its compatibility expectations.
+    description: A material producer or consumer surface whose compatibility or ownership affects the requested outcome.
     stage: architecture
     required_any: [[surface]]
-    statuses: [draft, active, changed, deprecated]
+    statuses: [draft, active, changed, deprecated, superseded]
+    initial_status: active
     fields:
       kind: {type: string, required: true}
       surface: {type: string, required: true}
       compatibility: {type: string, required: true}
       consumers: {type: list}
   - id: data_model
-    description: A structured data shape and its ownership, storage, and compatibility constraints.
+    description: A durable data, persistence, schema, or serialization shape whose ownership or compatibility is material.
     stage: architecture
     required_any: [[shape]]
-    statuses: [draft, active, changed, deprecated]
+    statuses: [draft, active, changed, deprecated, superseded]
+    initial_status: active
     fields:
       owner: {type: string, required: true}
       storage: {type: string}
       shape: {type: string, required: true}
       compatibility_constraints: {type: list}
   - id: contract
-    description: An invariant the implementation must preserve, together with its enforcement point and failure meaning.
+    description: An observable acceptance, compatibility, safety, or behavioral invariant with an enforcement point and failure meaning.
     stage: contracts
     required_any: [[invariant]]
     statuses: [draft, active, satisfied, violated, superseded]
+    initial_status: active
     fields:
       invariant: {type: string, required: true}
       enforcement_point: {type: string, required: true}
       failure_meaning: {type: string, required: true}
       observability: {type: string}
   - id: flow
-    description: An ordered interaction across systems or interfaces that achieves a specific intent and exit condition.
+    description: An ordered user or system journey needed to understand behavior or prove cross-boundary wiring.
     stage: architecture
     required_any: [[intent]]
     statuses: [draft, active, changed, superseded]
+    initial_status: active
     fields:
       intent: {type: string, required: true}
       entrypoint: {type: string, required: true}
       exit_condition: {type: string, required: true}
       ordered_steps: {type: list, required: true}
+  - id: defect
+    description: A causal bug record that preserves expected and observed behavior, a focused diagnostic seam, and independently reviewed root-cause evidence before change planning.
+    stage: design
+    required_any: [[expected_behavior]]
+    statuses: [unresolved, diagnosed, superseded]
+    initial_status: unresolved
+    compiler_owned_fields: [status]
+    fields:
+      expected_behavior: {type: string, required: true}
+      observed_behavior: {type: string, required: true}
+      reproduction_signal:
+        type: string
+        required: true
+        description: Exact reproduction, observation, or honest explanation of why safe reproduction is unavailable.
+      root_cause: {type: string}
+      causal_chain: {type: list}
+      ruled_out_alternatives: {type: list}
+      impact: {type: string}
+      environment: {type: string}
   - id: decision
-    description: A consequential design question, its available options, selected choice, rationale, and reversibility.
+    description: A consequential approved choice with explicit options, rationale, and reversibility; only initialization may create one.
     stage: design
     required_any: [[question]]
-    statuses: [open, accepted, rejected, superseded]
+    statuses: [open, accepted, superseded]
+    initial_status: accepted
+    compiler_owned_fields: [status]
     fields:
+      kind: {type: string, required: true, enum: [design, risk_acceptance, review_authority]}
       question: {type: string, required: true}
       options: {type: list, required: true}
-      choice: {type: string}
-      rationale: {type: string}
-      reversibility: {type: string}
+      choice:
+        type: string
+        required: true
+        description: The human-approved selection already present before post-approval validation.
+      rationale: {type: string, required: true}
+      reversibility: {type: string, required: true}
   - id: change
-    description: A bounded implementation transition from the current system state to a defined target state.
+    description: One cohesive vertical behavior slice that a reviewer can approve as a single claim and one evidence packet can prove.
     stage: implementation
     required_any: [[target_state]]
-    statuses: [planned, active, implemented, verified, superseded]
+    statuses: [planned, implemented, superseded]
+    initial_status: planned
+    compiler_owned_fields: [status]
     fields:
+      approval_claim:
+        type: string
+        required: true
+        description: One sentence stating the exact cohesive outcome a reviewer is being asked to approve.
       current_state: {type: string, required: true}
       target_state: {type: string, required: true}
-      owned_paths: {type: list, required: true}
+      owned_paths:
+        type: list
+        required: true
+        items: {type: path, required: true}
+        description: Exact project-root-relative production files or directories this bounded change may modify.
       blast_radius: {type: string, required: true}
       commit_type: {type: string, required: true}
+      risk_tier: {type: string, required: true, enum: [routine, elevated, critical]}
+      risk_factors:
+        type: list
+        required: true
+        description: Concrete boundary, state, compatibility, security, operational, or reversibility factors supporting the tier.
+      recovery_plan:
+        type: list
+        description: Required for critical work; name rollback or roll-forward controls and the trigger for using them.
+      proof_strategy:
+        type: string
+        required: true
+        enum: [red_green, characterization, current_verification]
+        description: Workflow-routing metadata only. Use red_green for honestly missing behavior, characterization for behavior that must be preserved, and current_verification only when an existing proof already exercises the bounded outcome. The linked proof node is the sole executable and evidence authority.
   - id: migration
-    description: A compatibility-aware transition plan for data, interfaces, or systems, including rollback and safety controls.
+    description: A compatibility-aware transition between old and new states with explicit safety and rollback behavior.
     stage: implementation
     required_any: [[forward_plan]]
-    statuses: [planned, active, complete, rolled_back, superseded]
+    statuses: [planned, complete, rolled_back, superseded]
+    initial_status: planned
+    compiler_owned_fields: [status]
     fields:
       forward_plan: {type: list, required: true}
+      owned_paths:
+        type: list
+        required: true
+        items: {type: path, required: true}
+        description: Exact project-root-relative production files or directories this migration may modify.
       compatibility_window: {type: string, required: true}
       rollback_plan: {type: list, required: true}
       data_safety: {type: string}
+      proof_strategy:
+        type: string
+        required: true
+        enum: [red_green, characterization, current_verification]
+        description: Workflow-routing metadata only; linked proof nodes are the sole executable and evidence authority.
   - id: risk
-    description: A plausible failure scenario whose impact, likelihood, detection, and mitigation must be understood.
+    description: A concrete material failure scenario with one explicit structural treatment and residual exposure.
     stage: assurance
     required_any: [[scenario]]
-    statuses: [open, controlled, accepted, realized, superseded]
+    statuses: [active, superseded]
+    initial_status: active
+    compiler_owned_fields: [status]
     fields:
       scenario: {type: string, required: true}
       impact: {type: string, required: true}
       likelihood: {type: string, required: true}
       detection: {type: string, required: true}
-      mitigation: {type: string}
+      treatment: {type: string, required: true, enum: [mitigate, accept]}
+      treatment_rationale: {type: string, required: true}
+      residual_risk: {type: string, required: true}
   - id: proof
-    description: A verification obligation that establishes a specific implementation or safety claim with fresh evidence.
+    description: A reproducible verification obligation whose compiler-bound command establishes one focused or boundary claim with current evidence.
     stage: assurance
     required_any: [[claim]]
-    statuses: [planned, expected_red, passing, failed, blocked, superseded]
+    statuses: [planned, prepared, passing, superseded]
+    initial_status: planned
+    compiler_owned_fields: [status]
     fields:
+      purpose: {type: string, required: true, enum: [focused, boundary]}
+      baseline_check_id:
+        type: string
+        required: true
+        enum: [proof-expected-red, proof-current-baseline]
+        description: Selects the honest pre-change outcome for this proof without forcing every linked boundary proof red.
       claim: {type: string, required: true}
       method: {type: string, required: true}
-      check_id: {type: string}
+      command:
+        type: list
+        required: true
+        items: {type: string, required: true}
+        description: >-
+          Sole executable authority: one exact argv array used for compiler-bound baseline and promotion evidence; never a shell command string or multiple commands.
+      source_paths:
+        type: list
+        required: true
+        items: {type: path, required: true}
+        disjoint_from: spec.covered_paths
+        description: >-
+          Exact repository proof, test, or harness source files whose current bytes are causal evidence. These paths must be authority-disjoint from covered_paths: equality and either ancestor/descendant direction are rejected. Independently preparation-managed diagnostic, risk-boundary, red-green, and characterization proofs require pairwise physically disjoint source files and must also be disjoint from current-verification proof sources; named tests or describe blocks in one file are one compiler authority boundary, not distinct source paths. Include every repository-local executable or script named by command; external tools resolved from PATH are not project source paths.
+      covered_paths:
+        type: list
+        required: true
+        items: {type: path, required: true}
+        description: Exact product paths whose behavior the proof claims to exercise and whose current bytes the proof may read; these paths never grant write authority. This list is the canonical union of every oracle case's seam_paths, plus only additional product paths the proof genuinely exercises.
+      oracle_cases:
+        type: list
+        required: true
+        unique_by: id
+        description: One or more explicit condition-to-production-oracle contracts. Every invoked production seam must have a case, and every seam_path must resolve to the same normalized project-relative path identity present in covered_paths before any proof ticket can dispatch.
+        items:
+          type: object
+          required: true
+          description: Closed oracle-case object with required id, condition, claim, production_seam, seam_paths, action, and assertions; environment and ordered recipe are optional only when immaterial.
+          additional_properties: false
+          properties:
+            id:
+              type: string
+              required: true
+              pattern: "^[a-z][a-z0-9_-]*$"
+              description: Stable short identifier unique within this proof.
+            condition:
+              type: string
+              required: true
+              description: Exact precondition, branch, input state, or failure condition exercised by this case.
+            claim:
+              type: string
+              required: true
+              description: The bounded observable behavior this case establishes.
+            production_seam:
+              type: string
+              required: true
+              description: The callable production boundary or real consumer invoked; never a test-local reimplementation of production logic.
+            seam_paths:
+              type: list
+              required: true
+              items: {type: path, required: true}
+              subset_of: spec.covered_paths
+              description: Exact project-root-relative production files needed to inspect and invoke this case's production seam. Every entry must resolve to the same normalized project-relative path identity present in proof.covered_paths.
+            action:
+              type: string
+              required: true
+              description: The concrete stimulus or invocation performed against the production seam.
+            assertions:
+              type: list
+              required: true
+              items: {type: string, required: true}
+              description: Positive and material negative observations that would fail if the bounded behavior broke.
+            environment:
+              type: string
+              description: Optional material runtime, fixture, package, or containment assumptions for this case.
+            recipe:
+              type: list
+              items: {type: string, required: true}
+              description: Optional ordered recipe when the action needs multiple precise setup or invocation steps.
+      working_directory:
+        type: path
+        required: true
+        description: Project-root-relative contained working directory in which the exact argv executes.
+      layer: {type: string, required: true, enum: [unit, component, contract, integration, end_to_end, static]}
+      conditions: {type: list, required: true}
+      expected_signal: {type: string, required: true}
+      why: {type: string, required: true}
+      not_proven: {type: list, required: true}
       required_artifacts: {type: list}
       freshness_inputs: {type: list}
   - id: delivery
-    description: The reviewed integration package that fulfills the objective and records included changes, proofs, and accepted risks.
+    description: The exact reviewed candidate graph package assembled before target synchronization, composed verification, and promotion.
     stage: delivery
     required_any: [[target_branch]]
-    statuses: [assembling, reviewing, pr_ready, blocked, superseded]
+    statuses: [assembling, candidate_ready, superseded]
+    initial_status: assembling
+    compiler_owned_fields: [status]
     fields:
       target_branch: {type: string, required: true}
       summary: {type: string, required: true}
@@ -138,44 +311,843 @@ edge_types:
   - {source: objective, relation: systems, targets: [system], min: 0}
   - {source: objective, relation: contracts, targets: [contract], min: 0}
   - {source: objective, relation: flows, targets: [flow], min: 0}
-  - {source: objective, relation: realized_by, targets: [change], min: 0}
-  - {source: objective, relation: delivered_by, targets: [delivery], min: 0, max: 1}
   - {source: system, relation: contains, targets: [system], acyclic: true}
-  - {source: system, relation: exposes, targets: [interface]}
-  - {source: system, relation: owns, targets: [data_model, contract]}
-  - {source: system, relation: participates_in, targets: [flow]}
-  - {source: system, relation: depends_on, targets: [system, interface], acyclic: true}
-  - {source: interface, relation: produced_by, targets: [system], min: 1, max: 1}
+  - {source: system, relation: depends_on, targets: [system, interface]}
+  - {source: interface, relation: produced_by, inverse: exposes, bidirectional: true, targets: [system], min: 1, max: 1}
   - {source: interface, relation: consumed_by, targets: [system]}
-  - {source: interface, relation: constrained_by, targets: [contract]}
-  - {source: data_model, relation: owned_by, targets: [system], min: 1, max: 1}
-  - {source: data_model, relation: constrained_by, targets: [contract]}
-  - {source: contract, relation: applies_to, targets: [system, interface, data_model, flow]}
-  - {source: flow, relation: participants, targets: [system, interface], min: 1}
-  - {source: decision, relation: concerns, targets: [objective, system, interface, data_model, contract, flow, change, migration]}
+  - {source: data_model, relation: owned_by, inverse: owns, bidirectional: true, targets: [system], min: 1, max: 1}
+  - {source: contract, relation: applies_to, inverse: constrained_by, bidirectional: true, targets: [system, interface, data_model, flow], min: 1}
+  - {source: flow, relation: participants, inverse: participates_in, bidirectional: true, targets: [system, interface], min: 1}
+  - {source: defect, relation: concerns, inverse: defects, bidirectional: true, targets: [objective], min: 1, max: 1}
+  - {source: defect, relation: manifests_in, targets: [system, interface, flow], min: 1}
+  - {source: defect, relation: violates, targets: [contract]}
+  - {source: decision, relation: concerns, targets: [objective, system, interface, data_model, contract, flow, defect, change, migration, risk]}
   - {source: decision, relation: selects, targets: [change, migration, contract]}
-  - {source: change, relation: realizes, targets: [objective], min: 1}
+  - {source: change, relation: realizes, inverse: realized_by, bidirectional: true, targets: [objective], min: 1, max: 1}
   - {source: change, relation: affects, targets: [system, interface, data_model, contract, flow], min: 1}
+  - {source: change, relation: addresses, inverse: addressed_by, bidirectional: true, targets: [defect]}
   - {source: change, relation: depends_on, targets: [change], acyclic: true}
-  - {source: change, relation: requires, targets: [decision, migration, proof]}
-  - {source: change, relation: introduces, targets: [risk]}
+  - {source: change, relation: requires, targets: [decision, migration]}
+  - {source: change, relation: introduces, inverse: introduced_by, bidirectional: true, targets: [risk]}
   - {source: migration, relation: changes, targets: [data_model, interface, system], min: 1}
   - {source: migration, relation: protects, targets: [contract]}
-  - {source: migration, relation: verified_by, targets: [proof]}
   - {source: risk, relation: threatens, targets: [contract, flow, system, interface, data_model], min: 1}
-  - {source: risk, relation: mitigated_by, targets: [change, migration, contract]}
-  - {source: risk, relation: verified_by, targets: [proof]}
-  - {source: proof, relation: verifies, targets: [contract, flow, change, migration, risk], min: 1}
+  - {source: risk, relation: mitigated_by, targets: [change, migration]}
+  - {source: risk, relation: accepted_by, targets: [decision], max: 1}
+  - {source: proof, relation: verifies, inverse: verified_by, bidirectional: true, targets: [contract, flow, defect, change, migration, risk], min: 1}
   - {source: proof, relation: uses, targets: [system, interface, data_model]}
-  - {source: delivery, relation: fulfills, targets: [objective], min: 1}
-  - {source: delivery, relation: includes, targets: [change, migration, decision, proof], min: 1}
+  - {source: delivery, relation: fulfills, inverse: delivered_by, bidirectional: true, targets: [objective], min: 1, max: 1}
+  - {source: delivery, relation: includes, targets: [defect, change, migration, decision, proof], min: 1}
   - {source: delivery, relation: acknowledges, targets: [risk]}
 
 queries:
   - {id: objectives, node_types: [objective], status_excluding: [satisfied, superseded]}
   - {id: active_systems, node_types: [system], status_excluding: [superseded]}
+  - id: contract_required_systems
+    node_types: [system]
+    status_excluding: [superseded]
+    where: {op: field_equals, subject: $node, field: spec.contract_required, value: true}
+  - {id: active_contracts, node_types: [contract], status_excluding: [violated, superseded]}
+  - {id: active_defects, node_types: [defect], status_excluding: [superseded]}
+  - id: diagnosed_defects
+    node_types: [defect]
+    statuses: [diagnosed]
+    where:
+      all:
+        - {op: field_present, subject: $node, field: spec.root_cause}
+        - {op: field_present, subject: $node, field: spec.causal_chain}
+        - {op: field_present, subject: $node, field: spec.ruled_out_alternatives}
+        - exists: {intersection: [$node, grounded_defects]}
+        - for_all:
+            select:
+              intersection:
+                - {traverse: {from: $node, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                - diagnostic_proofs
+            bind: reviewed_diagnostic_proof
+            satisfies:
+              op: proof_preparation_current
+              subject: $reviewed_diagnostic_proof
+              check: baseline-proof-set
+              preparation_operation: assurance.proof.prepare
+              preparation_targets:
+                union:
+                  - $reviewed_diagnostic_proof
+                  - {traverse: {from: $reviewed_diagnostic_proof, relation: verifies, max_depth: 1, node_types: [risk]}}
   - {id: open_decisions, node_types: [decision], statuses: [open]}
+  - {id: active_changes, node_types: [change], status_excluding: [superseded]}
   - {id: planned_changes, node_types: [change], statuses: [planned]}
   - {id: implemented_changes, node_types: [change], statuses: [implemented]}
-  - {id: pending_proofs, node_types: [proof], statuses: [planned, expected_red, failed, blocked]}
-  - {id: deliveries, node_types: [delivery], status_excluding: [pr_ready, superseded]}
+  - {id: active_migrations, node_types: [migration], status_excluding: [rolled_back, superseded]}
+  - {id: planned_migrations, node_types: [migration], statuses: [planned]}
+  - {id: complete_migrations, node_types: [migration], statuses: [complete]}
+  - {id: active_risks, node_types: [risk], statuses: [active]}
+  - {id: active_proofs, node_types: [proof], status_excluding: [superseded]}
+  - id: active_focused_proofs
+    node_types: [proof]
+    status_excluding: [superseded]
+    where: {op: field_equals, subject: $node, field: spec.purpose, value: focused}
+  - id: active_boundary_proofs
+    node_types: [proof]
+    status_excluding: [superseded]
+    where: {op: field_equals, subject: $node, field: spec.purpose, value: boundary}
+  - {id: passing_proofs, node_types: [proof], statuses: [passing]}
+  - id: diagnostic_proofs
+    select: active_focused_proofs
+    where:
+      all:
+        - exists: {traverse: {from: $node, relation: verifies, max_depth: 1, node_types: [defect]}}
+        - not:
+            exists: {traverse: {from: $node, relation: verifies, max_depth: 1, node_types: [change, migration, risk]}}
+        - for_all:
+            select: {traverse: {from: $node, relation: verifies, max_depth: 1, node_types: [defect]}}
+            bind: diagnostic_defect
+            satisfies:
+              op: set_relation
+              left: {traverse: {from: $node, relation: verifies, max_depth: 1, node_types: [defect]}}
+              right: $diagnostic_defect
+              relation_kind: equal
+  - id: grounded_defects
+    select: active_defects
+    where:
+      all:
+        - exists:
+            intersection:
+              - {traverse: {from: $node, relation: verified_by, max_depth: 1, node_types: [proof]}}
+              - diagnostic_proofs
+        - for_all:
+            select:
+              intersection:
+                - {traverse: {from: $node, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                - diagnostic_proofs
+            bind: sole_diagnostic_proof
+            satisfies:
+              op: set_relation
+              left:
+                intersection:
+                  - {traverse: {from: $node, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                  - diagnostic_proofs
+              right: $sole_diagnostic_proof
+              relation_kind: equal
+  - id: grounded_diagnostic_proofs
+    select: diagnostic_proofs
+    where:
+      for_all:
+        select: {traverse: {from: $node, relation: verifies, max_depth: 1, node_types: [defect]}}
+        bind: grounded_diagnostic_defect
+        satisfies:
+          exists:
+            intersection: [$grounded_diagnostic_defect, grounded_defects]
+  - id: prepared_diagnostic_proofs
+    select: grounded_diagnostic_proofs
+    where:
+      all:
+        - {op: field_equals, subject: $node, field: status, value: prepared}
+        - op: proof_preparation_current
+          subject: $node
+          check: baseline-proof-set
+          preparation_operation: assurance.proof.prepare
+          preparation_targets:
+            union:
+              - $node
+              - {traverse: {from: $node, relation: verifies, max_depth: 1, node_types: [risk]}}
+  - id: diagnosable_defects
+    select: active_defects
+    where:
+      exists:
+        intersection:
+          - {traverse: {from: $node, relation: verified_by, max_depth: 1, node_types: [proof]}}
+          - prepared_diagnostic_proofs
+  - id: ungrounded_objectives
+    select: objectives
+    where:
+      any:
+        - all:
+            - {op: field_equals, subject: $node, field: spec.work_kind, value: bug_fix}
+            - not:
+                exists:
+                  intersection:
+                    - {traverse: {from: $node, relation: defects, max_depth: 1, node_types: [defect]}}
+                    - active_defects
+        - not:
+            op: coverage
+            numerator: grounded_defects
+            denominator:
+              intersection:
+                - {traverse: {from: $node, relation: defects, max_depth: 1, node_types: [defect]}}
+                - active_defects
+  - id: well_scoped_implementation_proofs
+    select: active_focused_proofs
+    where:
+      all:
+        - exists: {traverse: {from: $node, relation: verifies, max_depth: 1, node_types: [change, migration]}}
+        - not:
+            exists: {traverse: {from: $node, relation: verifies, max_depth: 1, node_types: [risk]}}
+        - for_all:
+            select: {traverse: {from: $node, relation: verifies, max_depth: 1, node_types: [change, migration]}}
+            bind: implementation_subject
+            satisfies:
+              all:
+                - op: set_relation
+                  left: {traverse: {from: $node, relation: verifies, max_depth: 1, node_types: [change, migration]}}
+                  right: $implementation_subject
+                  relation_kind: equal
+                - any:
+                    - all:
+                        - {op: field_equals, subject: $implementation_subject, field: spec.proof_strategy, value: red_green}
+                        - {op: field_in, subject: $node, field: spec.baseline_check_id, values: [proof-expected-red, proof-current-baseline]}
+                    - all:
+                        - {op: field_in, subject: $implementation_subject, field: spec.proof_strategy, values: [characterization, current_verification]}
+                        - {op: field_equals, subject: $node, field: spec.baseline_check_id, value: proof-current-baseline}
+  - id: expected_red_implementation_proofs
+    select: well_scoped_implementation_proofs
+    where: {op: field_equals, subject: $node, field: spec.baseline_check_id, value: proof-expected-red}
+  - id: preparation_eligible_implementation_proofs
+    select: well_scoped_implementation_proofs
+    where:
+      for_all:
+        select: {traverse: {from: $node, relation: verifies, max_depth: 1, node_types: [change, migration]}}
+        bind: preparation_subject
+        satisfies: {op: field_in, subject: $preparation_subject, field: spec.proof_strategy, values: [red_green, characterization]}
+  - id: prepared_implementation_proofs
+    select: preparation_eligible_implementation_proofs
+    where:
+      all:
+        - {op: field_in, subject: $node, field: status, values: [prepared, passing]}
+        - op: proof_preparation_current
+          subject: $node
+          check: baseline-proof-set
+          preparation_operation: assurance.proof.prepare
+          preparation_targets:
+            union:
+              - $node
+              - {traverse: {from: $node, relation: verifies, max_depth: 1, node_types: [risk]}}
+  - id: risk_boundary_proofs
+    select: active_boundary_proofs
+    where:
+      all:
+        - exists: {traverse: {from: $node, relation: verifies, max_depth: 1, node_types: [risk]}}
+        - not:
+            exists: {traverse: {from: $node, relation: verifies, max_depth: 1, node_types: [change, migration]}}
+  - id: prepared_boundary_proofs
+    select: risk_boundary_proofs
+    where:
+      all:
+        - {op: field_equals, subject: $node, field: status, value: prepared}
+        - op: proof_preparation_current
+          subject: $node
+          check: baseline-proof-set
+          preparation_operation: assurance.proof.prepare
+          preparation_targets:
+            union:
+              - $node
+              - {traverse: {from: $node, relation: verifies, max_depth: 1, node_types: [risk]}}
+  - id: proofs_requiring_preparation
+    select:
+      union: [grounded_diagnostic_proofs, risk_boundary_proofs, preparation_eligible_implementation_proofs]
+    where:
+      not:
+        op: proof_preparation_current
+        subject: $node
+        check: baseline-proof-set
+        preparation_operation: assurance.proof.prepare
+        preparation_targets:
+          union:
+            - $node
+            - {traverse: {from: $node, relation: verifies, max_depth: 1, node_types: [risk]}}
+  - id: proof_model_gaps
+    select:
+      difference:
+        left:
+          nodes:
+            node_types: [proof]
+            status_excluding: [superseded]
+            where:
+              exists: {traverse: {from: $node, relation: verifies, max_depth: 1, node_types: [change, migration, risk]}}
+        right:
+          union: [well_scoped_implementation_proofs, risk_boundary_proofs]
+  - id: current_candidate_deliveries
+    node_types: [delivery]
+    statuses: [candidate_ready]
+    where:
+      op: review_effect_coverage_current
+      subject: $node
+      review_operation: delivery.objective.prepare
+      review_effect: accept-candidate-ready-delivery
+      coverage_targets: {traverse: {from: $node, relation: fulfills, max_depth: 1, node_types: [objective]}}
+  - id: eligible_mitigation_controls
+    select:
+      union:
+        - {nodes: {node_types: [change], statuses: [planned, implemented]}}
+        - {nodes: {node_types: [migration], statuses: [planned, complete]}}
+  - id: terminal_mitigation_controls
+    select:
+      union:
+        - {nodes: {node_types: [change], statuses: [implemented]}}
+        - {nodes: {node_types: [migration], statuses: [complete]}}
+  - id: structurally_valid_risks
+    select: active_risks
+    where:
+      any:
+        - all:
+            - {op: field_equals, subject: $node, field: spec.treatment, value: mitigate}
+            - {op: edge_count, subject: $node, relation: accepted_by, exact: 0}
+            - exists:
+                intersection:
+                  - {traverse: {from: $node, relation: mitigated_by, max_depth: 1, node_types: [change, migration]}}
+                  - eligible_mitigation_controls
+            - op: set_relation
+              left: {traverse: {from: $node, relation: mitigated_by, max_depth: 1, node_types: [change, migration]}}
+              right:
+                intersection:
+                  - {traverse: {from: $node, relation: mitigated_by, max_depth: 1, node_types: [change, migration]}}
+                  - eligible_mitigation_controls
+              relation_kind: equal
+            - for_all:
+                select: {traverse: {from: $node, relation: mitigated_by, max_depth: 1, node_types: [change, migration]}}
+                bind: mitigation_control
+                satisfies:
+                  any:
+                    - all:
+                        - {op: node_type_is, subject: $mitigation_control, value: change}
+                        - exists:
+                            intersection:
+                              - {traverse: {from: $mitigation_control, relation: realizes, max_depth: 1, node_types: [objective]}}
+                              - traverse:
+                                  from: {traverse: {from: $node, relation: introduced_by, max_depth: 1, node_types: [change]}}
+                                  relation: realizes
+                                  max_depth: 1
+                                  node_types: [objective]
+                    - all:
+                        - {op: node_type_is, subject: $mitigation_control, value: migration}
+                        - exists:
+                            intersection:
+                              - {traverse: {from: $node, relation: introduced_by, max_depth: 1, node_types: [change]}}
+                              - {traverse: {from: $mitigation_control, relation: requires, direction: incoming, max_depth: 1, node_types: [change]}}
+            - exists:
+                intersection:
+                  - {traverse: {from: $node, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                  - risk_boundary_proofs
+        - all:
+            - {op: field_equals, subject: $node, field: spec.treatment, value: accept}
+            - {op: edge_count, subject: $node, relation: mitigated_by, exact: 0}
+            - {op: edge_count, subject: $node, relation: accepted_by, exact: 1}
+            - exists:
+                intersection:
+                  - {traverse: {from: $node, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                  - risk_boundary_proofs
+            - for_all:
+                select: {traverse: {from: $node, relation: accepted_by, max_depth: 1, node_types: [decision]}}
+                bind: acceptance_decision
+                satisfies:
+                  all:
+                    - {op: field_in, subject: $acceptance_decision, field: status, values: [open, accepted]}
+                    - {op: field_equals, subject: $acceptance_decision, field: spec.kind, value: risk_acceptance}
+                    - exists:
+                        intersection:
+                          - $node
+                          - {traverse: {from: $acceptance_decision, relation: concerns, max_depth: 1, node_types: [risk]}}
+  - id: upstream_risk_gaps
+    select: active_risks
+    where:
+      any:
+        - not:
+            exists:
+              intersection:
+                - {traverse: {from: $node, relation: introduced_by, max_depth: 1, node_types: [change]}}
+                - active_changes
+        - all:
+            - {op: field_equals, subject: $node, field: spec.treatment, value: mitigate}
+            - not:
+                exists:
+                  intersection:
+                    - {traverse: {from: $node, relation: mitigated_by, max_depth: 1, node_types: [change, migration]}}
+                    - eligible_mitigation_controls
+                    - union:
+                        - traverse:
+                            from:
+                              traverse:
+                                from:
+                                  traverse:
+                                    from: $node
+                                    relation: introduced_by
+                                    max_depth: 1
+                                    node_types: [change]
+                                relation: realizes
+                                max_depth: 1
+                                node_types: [objective]
+                            relation: realized_by
+                            max_depth: 1
+                            node_types: [change]
+                        - traverse:
+                            from:
+                              traverse:
+                                from: $node
+                                relation: introduced_by
+                                max_depth: 1
+                                node_types: [change]
+                            relation: requires
+                            max_depth: 1
+                            node_types: [migration]
+        - all:
+            - {op: field_equals, subject: $node, field: spec.treatment, value: accept}
+            - not:
+                all:
+                  - exists:
+                      intersection:
+                        - {traverse: {from: $node, relation: accepted_by, max_depth: 1, node_types: [decision]}}
+                        - {nodes: {node_types: [decision], statuses: [open, accepted]}}
+                  - for_all:
+                      select: {traverse: {from: $node, relation: accepted_by, max_depth: 1, node_types: [decision]}}
+                      bind: approved_acceptance_decision
+                      satisfies:
+                        all:
+                          - {op: field_in, subject: $approved_acceptance_decision, field: status, values: [open, accepted]}
+                          - {op: field_equals, subject: $approved_acceptance_decision, field: spec.kind, value: risk_acceptance}
+                          - exists:
+                              intersection:
+                                - $node
+                                - {traverse: {from: $approved_acceptance_decision, relation: concerns, max_depth: 1, node_types: [risk]}}
+  - id: treatment_risk_gaps
+    select:
+      difference:
+        left: active_risks
+        right:
+          union: [upstream_risk_gaps, structurally_valid_risks]
+  - id: implementation_ready_risks
+    select: structurally_valid_risks
+    where:
+      all:
+        - for_all:
+            select:
+              intersection:
+                - {traverse: {from: $node, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                - risk_boundary_proofs
+            bind: prepared_risk_boundary
+            satisfies:
+              exists:
+                intersection: [$prepared_risk_boundary, prepared_boundary_proofs]
+        - any:
+            - {op: field_equals, subject: $node, field: spec.treatment, value: mitigate}
+            - all:
+                - {op: field_equals, subject: $node, field: spec.treatment, value: accept}
+                - for_all:
+                    select: {traverse: {from: $node, relation: accepted_by, max_depth: 1, node_types: [decision]}}
+                    bind: accepted_decision
+                    satisfies:
+                      all:
+                        - {op: field_equals, subject: $accepted_decision, field: status, value: accepted}
+                        - {op: field_equals, subject: $accepted_decision, field: spec.kind, value: risk_acceptance}
+  - id: delivery_ready_risks
+    select: structurally_valid_risks
+    where:
+      any:
+        - all:
+            - {op: field_equals, subject: $node, field: spec.treatment, value: mitigate}
+            - op: set_relation
+              left: {traverse: {from: $node, relation: mitigated_by, max_depth: 1, node_types: [change, migration]}}
+              right:
+                intersection:
+                  - {traverse: {from: $node, relation: mitigated_by, max_depth: 1, node_types: [change, migration]}}
+                  - terminal_mitigation_controls
+              relation_kind: equal
+            - exists:
+                intersection:
+                  - {traverse: {from: $node, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                  - risk_boundary_proofs
+            - for_all:
+                select:
+                  intersection:
+                    - {traverse: {from: $node, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                    - risk_boundary_proofs
+                bind: risk_proof
+                satisfies:
+                  all:
+                    - {op: field_equals, subject: $risk_proof, field: status, value: passing}
+                    - {op: check_passed, subject: $risk_proof, check: promotion-proof-set}
+        - all:
+            - {op: field_equals, subject: $node, field: spec.treatment, value: accept}
+            - for_all:
+                select: {traverse: {from: $node, relation: accepted_by, max_depth: 1, node_types: [decision]}}
+                bind: accepted_decision
+                satisfies:
+                  all:
+                    - {op: field_equals, subject: $accepted_decision, field: status, value: accepted}
+                    - {op: field_equals, subject: $accepted_decision, field: spec.kind, value: risk_acceptance}
+            - exists:
+                intersection:
+                  - {traverse: {from: $node, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                  - risk_boundary_proofs
+            - for_all:
+                select:
+                  intersection:
+                    - {traverse: {from: $node, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                    - risk_boundary_proofs
+                bind: accepted_risk_proof
+                satisfies:
+                  all:
+                    - {op: field_equals, subject: $accepted_risk_proof, field: status, value: passing}
+                    - {op: check_passed, subject: $accepted_risk_proof, check: promotion-proof-set}
+  - id: proof_ready_risks
+    select: structurally_valid_risks
+    where:
+      all:
+        - for_all:
+            select: {traverse: {from: $node, relation: introduced_by, max_depth: 1, node_types: [change]}}
+            bind: risk_introducer
+            satisfies: {op: field_equals, subject: $risk_introducer, field: status, value: implemented}
+        - any:
+            - all:
+                - {op: field_equals, subject: $node, field: spec.treatment, value: mitigate}
+                - op: set_relation
+                  left: {traverse: {from: $node, relation: mitigated_by, max_depth: 1, node_types: [change, migration]}}
+                  right:
+                    intersection:
+                      - {traverse: {from: $node, relation: mitigated_by, max_depth: 1, node_types: [change, migration]}}
+                      - terminal_mitigation_controls
+                  relation_kind: equal
+            - all:
+                - {op: field_equals, subject: $node, field: spec.treatment, value: accept}
+                - for_all:
+                    select: {traverse: {from: $node, relation: accepted_by, max_depth: 1, node_types: [decision]}}
+                    bind: proof_acceptance_decision
+                    satisfies:
+                      all:
+                        - {op: field_equals, subject: $proof_acceptance_decision, field: status, value: accepted}
+                        - {op: field_equals, subject: $proof_acceptance_decision, field: spec.kind, value: risk_acceptance}
+  - id: design_ready_changes
+    select: active_changes
+    where:
+      all:
+        - {op: field_present, subject: $node, field: spec.approval_claim}
+        - {op: field_present, subject: $node, field: spec.risk_tier}
+        - {op: field_present, subject: $node, field: spec.risk_factors}
+        - for_all:
+            select: {traverse: {from: $node, relation: realizes, max_depth: 1, node_types: [objective]}}
+            bind: change_objective
+            satisfies: {op: field_present, subject: $change_objective, field: spec.work_kind}
+        - exists:
+            intersection:
+              - {traverse: {from: $node, relation: verified_by, max_depth: 1, node_types: [proof]}}
+              - well_scoped_implementation_proofs
+        - for_all:
+            select:
+              intersection:
+                - {traverse: {from: $node, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                - active_proofs
+            bind: direct_change_proof
+            satisfies:
+              exists:
+                intersection: [$direct_change_proof, well_scoped_implementation_proofs]
+        - any:
+            - not: {op: field_equals, subject: $node, field: spec.proof_strategy, value: red_green}
+            - exists:
+                intersection:
+                  - {traverse: {from: $node, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                  - expected_red_implementation_proofs
+        - any:
+            - {op: field_equals, subject: $node, field: spec.risk_tier, value: routine}
+            - all:
+                - {op: field_in, subject: $node, field: spec.risk_tier, values: [elevated, critical]}
+                - exists:
+                    intersection:
+                      - {traverse: {from: $node, relation: introduces, max_depth: 1, node_types: [risk]}}
+                      - active_risks
+        - any:
+            - not: {op: field_equals, subject: $node, field: spec.risk_tier, value: critical}
+            - all:
+                - {op: field_present, subject: $node, field: spec.recovery_plan}
+                - exists:
+                    intersection:
+                      - {traverse: {from: $node, relation: requires, max_depth: 1, node_types: [decision]}}
+                      - nodes:
+                          node_types: [decision]
+                          statuses: [accepted]
+                          where: {op: field_equals, subject: $node, field: spec.kind, value: review_authority}
+  - id: implementation_ready_changes
+    select: design_ready_changes
+    where:
+      all:
+        - for_all:
+            select:
+              intersection:
+                - {traverse: {from: $node, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                - preparation_eligible_implementation_proofs
+            bind: prepared_change_proof
+            satisfies:
+              exists:
+                intersection: [$prepared_change_proof, prepared_implementation_proofs]
+        - for_all:
+            select: {traverse: {from: $node, relation: depends_on, max_depth: 1, node_types: [change]}}
+            bind: dependency
+            satisfies: {op: field_equals, subject: $dependency, field: status, value: implemented}
+        - for_all:
+            select: {traverse: {from: $node, relation: requires, max_depth: 1, node_types: [decision, migration]}}
+            bind: prerequisite
+            satisfies:
+              any:
+                - all:
+                    - {op: node_type_is, subject: $prerequisite, value: decision}
+                    - {op: field_equals, subject: $prerequisite, field: status, value: accepted}
+                - all:
+                    - {op: node_type_is, subject: $prerequisite, value: migration}
+                    - {op: field_equals, subject: $prerequisite, field: status, value: complete}
+        - op: coverage
+          numerator: implementation_ready_risks
+          denominator:
+            intersection:
+              - {traverse: {from: $node, relation: introduces, max_depth: 1, node_types: [risk]}}
+              - active_risks
+        - for_all:
+            select: {traverse: {from: $node, relation: realizes, max_depth: 1, node_types: [objective]}}
+            bind: implementation_objective
+            satisfies:
+              all:
+                - any:
+                    - not: {op: field_equals, subject: $implementation_objective, field: spec.work_kind, value: bug_fix}
+                    - exists:
+                        intersection:
+                          - {traverse: {from: $implementation_objective, relation: defects, max_depth: 1, node_types: [defect]}}
+                          - active_defects
+                - op: coverage
+                  numerator: diagnosed_defects
+                  denominator:
+                    intersection:
+                      - {traverse: {from: $implementation_objective, relation: defects, max_depth: 1, node_types: [defect]}}
+                      - active_defects
+                - any:
+                    - not:
+                        exists:
+                          intersection:
+                            - {traverse: {from: $implementation_objective, relation: defects, max_depth: 1, node_types: [defect]}}
+                            - active_defects
+                    - exists:
+                        intersection:
+                          - {traverse: {from: $node, relation: addresses, max_depth: 1, node_types: [defect]}}
+                          - diagnosed_defects
+  - id: design_ready_migrations
+    select: active_migrations
+    where:
+      all:
+        - exists:
+            intersection:
+              - {traverse: {from: $node, relation: verified_by, max_depth: 1, node_types: [proof]}}
+              - well_scoped_implementation_proofs
+        - for_all:
+            select:
+              intersection:
+                - {traverse: {from: $node, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                - active_proofs
+            bind: direct_migration_proof
+            satisfies:
+              exists:
+                intersection: [$direct_migration_proof, well_scoped_implementation_proofs]
+        - any:
+            - not: {op: field_equals, subject: $node, field: spec.proof_strategy, value: red_green}
+            - exists:
+                intersection:
+                  - {traverse: {from: $node, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                  - expected_red_implementation_proofs
+  - id: implementation_ready_migrations
+    select: design_ready_migrations
+    where:
+      for_all:
+        select:
+          intersection:
+            - {traverse: {from: $node, relation: verified_by, max_depth: 1, node_types: [proof]}}
+            - preparation_eligible_implementation_proofs
+        bind: prepared_migration_proof
+        satisfies:
+          exists:
+            intersection: [$prepared_migration_proof, prepared_implementation_proofs]
+  - id: executable_proofs
+    select: active_proofs
+    where:
+      all:
+        - for_all:
+            select: {traverse: {from: $node, relation: verifies, max_depth: 1, node_types: [contract, flow, defect, change, migration, risk]}}
+            bind: proof_subject
+            satisfies:
+              any:
+                - all:
+                    - {op: node_type_is, subject: $proof_subject, value: change}
+                    - {op: field_equals, subject: $proof_subject, field: status, value: implemented}
+                - all:
+                    - {op: node_type_is, subject: $proof_subject, value: migration}
+                    - {op: field_equals, subject: $proof_subject, field: status, value: complete}
+                - all:
+                    - {op: node_type_is, subject: $proof_subject, value: risk}
+                    - exists:
+                        intersection: [$proof_subject, proof_ready_risks]
+                - all:
+                    - {op: node_type_is, subject: $proof_subject, value: defect}
+                    - exists:
+                        intersection: [$proof_subject, diagnosed_defects]
+                    - exists:
+                        intersection:
+                          - {traverse: {from: $proof_subject, relation: addressed_by, max_depth: 1, node_types: [change]}}
+                          - implemented_changes
+                - all:
+                    - {op: node_type_is, subject: $proof_subject, value: contract}
+                    - {op: field_in, subject: $proof_subject, field: status, values: [active, satisfied]}
+                - all:
+                    - {op: node_type_is, subject: $proof_subject, value: flow}
+                    - {op: field_in, subject: $proof_subject, field: status, values: [active, changed]}
+        - any:
+            - not:
+                exists:
+                  intersection:
+                    - $node
+                    - {union: [grounded_diagnostic_proofs, risk_boundary_proofs]}
+            - op: proof_preparation_current
+              subject: $node
+              check: baseline-proof-set
+              preparation_operation: assurance.proof.prepare
+              preparation_targets:
+                union:
+                  - $node
+                  - {traverse: {from: $node, relation: verifies, max_depth: 1, node_types: [risk]}}
+  - id: delivery_ready_objectives
+    select: objectives
+    where:
+      all:
+        - {op: field_present, subject: $node, field: spec.work_kind}
+        - exists:
+            intersection:
+              - {traverse: {from: $node, relation: realized_by, max_depth: 1, node_types: [change]}}
+              - active_changes
+        - op: coverage
+          numerator: implemented_changes
+          denominator:
+            intersection:
+              - {traverse: {from: $node, relation: realized_by, max_depth: 1, node_types: [change]}}
+              - active_changes
+        - op: coverage
+          numerator: design_ready_changes
+          denominator:
+            intersection:
+              - {traverse: {from: $node, relation: realized_by, max_depth: 1, node_types: [change]}}
+              - active_changes
+        - for_all:
+            select:
+              intersection:
+                - {traverse: {from: $node, relation: realized_by, max_depth: 1, node_types: [change]}}
+                - active_changes
+            bind: delivery_change
+            satisfies:
+              all:
+                - exists:
+                    intersection:
+                      - {traverse: {from: $delivery_change, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                      - active_focused_proofs
+                - for_all:
+                    select:
+                      intersection:
+                        - {traverse: {from: $delivery_change, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                        - active_proofs
+                    bind: delivery_change_proof
+                    satisfies:
+                      all:
+                        - {op: field_equals, subject: $delivery_change_proof, field: status, value: passing}
+                        - {op: check_passed, subject: $delivery_change_proof, check: promotion-proof-set}
+                - for_all:
+                    select: {traverse: {from: $delivery_change, relation: requires, max_depth: 1, node_types: [decision, migration]}}
+                    bind: delivery_prerequisite
+                    satisfies:
+                      any:
+                        - all:
+                            - {op: node_type_is, subject: $delivery_prerequisite, value: decision}
+                            - {op: field_equals, subject: $delivery_prerequisite, field: status, value: accepted}
+                        - all:
+                            - {op: node_type_is, subject: $delivery_prerequisite, value: migration}
+                            - {op: field_equals, subject: $delivery_prerequisite, field: status, value: complete}
+                            - exists:
+                                intersection:
+                                  - {traverse: {from: $delivery_prerequisite, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                                  - active_proofs
+                            - for_all:
+                                select:
+                                  intersection:
+                                    - {traverse: {from: $delivery_prerequisite, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                                    - active_proofs
+                                bind: delivery_migration_proof
+                                satisfies:
+                                  all:
+                                    - {op: field_equals, subject: $delivery_migration_proof, field: status, value: passing}
+                                    - {op: check_passed, subject: $delivery_migration_proof, check: promotion-proof-set}
+        - op: coverage
+          numerator: delivery_ready_risks
+          denominator:
+            intersection:
+              - active_risks
+              - traverse:
+                  from:
+                    intersection:
+                      - {traverse: {from: $node, relation: realized_by, max_depth: 1, node_types: [change]}}
+                      - active_changes
+                  relation: introduces
+                  max_depth: 1
+                  node_types: [risk]
+        - any:
+            - not: {op: field_equals, subject: $node, field: spec.work_kind, value: bug_fix}
+            - exists:
+                intersection:
+                  - {traverse: {from: $node, relation: defects, max_depth: 1, node_types: [defect]}}
+                  - active_defects
+        - op: coverage
+          numerator: diagnosed_defects
+          denominator:
+            intersection:
+              - {traverse: {from: $node, relation: defects, max_depth: 1, node_types: [defect]}}
+              - active_defects
+        - for_all:
+            select:
+              intersection:
+                - {traverse: {from: $node, relation: defects, max_depth: 1, node_types: [defect]}}
+                - active_defects
+            bind: delivery_defect
+            satisfies:
+              all:
+                - exists:
+                    intersection:
+                      - {traverse: {from: $delivery_defect, relation: addressed_by, max_depth: 1, node_types: [change]}}
+                      - implemented_changes
+                      - {traverse: {from: $node, relation: realized_by, max_depth: 1, node_types: [change]}}
+                - exists:
+                    intersection:
+                      - {traverse: {from: $delivery_defect, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                      - active_proofs
+                - for_all:
+                    select:
+                      intersection:
+                        - {traverse: {from: $delivery_defect, relation: verified_by, max_depth: 1, node_types: [proof]}}
+                        - active_proofs
+                    bind: delivery_defect_proof
+                    satisfies:
+                      all:
+                        - {op: field_equals, subject: $delivery_defect_proof, field: status, value: passing}
+                        - {op: check_passed, subject: $delivery_defect_proof, check: promotion-proof-set}
+  - {id: deliveries, node_types: [delivery], status_excluding: [candidate_ready, superseded]}
+
+graph_constraints:
+  - id: preparation-proof-source-paths-pairwise-disjoint
+    kind: path_sets_disjoint
+    left:
+      select: {union: [diagnostic_proofs, risk_boundary_proofs, preparation_eligible_implementation_proofs]}
+      node_types: [proof]
+      field: spec.source_paths
+    right:
+      select: {union: [diagnostic_proofs, risk_boundary_proofs, preparation_eligible_implementation_proofs]}
+      node_types: [proof]
+      field: spec.source_paths
+    distinct_nodes: true
+  - id: preparation-and-implementation-proof-source-paths-disjoint
+    kind: path_sets_disjoint
+    left:
+      select: {union: [diagnostic_proofs, risk_boundary_proofs, preparation_eligible_implementation_proofs]}
+      node_types: [proof]
+      field: spec.source_paths
+    right:
+      select: well_scoped_implementation_proofs
+      node_types: [proof]
+      field: spec.source_paths
+    distinct_nodes: true

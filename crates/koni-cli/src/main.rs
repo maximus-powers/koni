@@ -1,13 +1,29 @@
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
+use std::ffi::{CString, OsStr, OsString};
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::sync::Mutex;
 use std::time::Duration;
+
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
 use koni_core::parity::ParityComparator;
-use koni_core::{Engine, ProfileCompiler, ProjectCatalogCompiler, QuestionRecord, RunDeletionMode};
+use koni_core::{
+    Engine, HashedMigrationFile, KONI_SCHEMA2_VERSION, PiMigrationRunArchiveResult,
+    PiMigrationRunPlan, ProfileCompiler, ProjectCatalogCompiler, QuestionRecord, RunDeletionMode,
+    SCHEMA2_RESOURCE_MANIFEST, Schema2MigrationPlan, Schema2MigrationResult, Schema2Migrator,
+    wait_for_spawned_agent_reapers,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -15,6 +31,7 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 mod agent_mcp;
+mod pi_control;
 mod templates;
 
 const NATIVE_RESOURCE_MANIFEST: &str = "native-codex-resources.json";
@@ -48,10 +65,10 @@ enum Command {
         /// Install a custom profile directory instead of a bundled profile.
         #[arg(long = "from", value_name = "PATH", conflicts_with = "profile")]
         source: Option<PathBuf>,
-        /// Existing project directory that receives `.codex/koni`.
+        /// Existing project directory that receives `.koni`.
         #[arg(long, default_value = ".")]
         target: PathBuf,
-        /// Replace an existing `.codex/koni` after validation succeeds.
+        /// Replace an existing `.koni` after validation succeeds.
         #[arg(long)]
         replace: bool,
         /// Open the control center after installation.
@@ -93,8 +110,12 @@ enum Command {
         root: PathBuf,
         #[arg(long)]
         run_type: Option<String>,
-        #[arg(long, default_value = "HEAD")]
-        base: String,
+        /// User-owned local branch that will receive the finished run.
+        #[arg(long, value_name = "BRANCH", conflicts_with = "base")]
+        target_branch: Option<String>,
+        /// Legacy target-less mode pinned to an arbitrary revision.
+        #[arg(long, value_name = "REF", conflicts_with = "target_branch")]
+        base: Option<String>,
         #[arg(long)]
         question_policy: Option<String>,
         #[arg(long)]
@@ -105,6 +126,15 @@ enum Command {
         id: String,
         #[arg(long, default_value = ".")]
         root: PathBuf,
+    },
+    /// Preview or authorize promotion of a ready run into its selected target branch.
+    MergeRun {
+        id: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Show target drift, checkout cleanliness, tickets, and blockers only.
+        #[arg(long)]
+        preview: bool,
     },
     /// Advance the automatic stages of one approved run by one durable tick.
     SuperviseRun {
@@ -125,13 +155,16 @@ enum Command {
         #[arg(long, default_value = ".")]
         root: PathBuf,
     },
-    /// Answer a structured agent question and resume its bound Codex session.
+    /// Answer a structured agent question and resume its bound Pi session.
     AnswerQuestion {
         id: String,
         #[arg(long)]
         option: Option<String>,
         #[arg(long)]
         custom: Option<String>,
+        /// Optional context to attach to a selected option.
+        #[arg(long)]
+        notes: Option<String>,
         /// Revise a saved planning-batch answer before its remaining questions are resolved.
         #[arg(long)]
         revise: bool,
@@ -186,7 +219,7 @@ enum Command {
     },
     /// Install Koni into the current project.
     Init {
-        /// A profile bundled with this executable (defaults to software).
+        /// A profile bundled with this executable. Interactive fresh installs prompt when omitted.
         #[arg(long, value_enum, conflicts_with = "source")]
         profile: Option<BuiltinProfile>,
         /// Install a custom profile directory instead of a bundled profile.
@@ -221,6 +254,7 @@ enum Command {
         profile: PathBuf,
         #[arg(long, alias = "hypothesis")]
         goal: String,
+        /// Deprecated compatibility flag. Existing project files are never removed.
         #[arg(long)]
         force: bool,
     },
@@ -292,6 +326,53 @@ enum Command {
         #[arg(long)]
         print: bool,
     },
+    /// Read a bounded graph neighborhood within one compiler-issued ticket scope.
+    GraphContext {
+        ticket: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long = "anchor")]
+        anchors: Vec<String>,
+        #[arg(long = "relation")]
+        relations: Vec<String>,
+        #[arg(
+            long,
+            default_value = "both",
+            value_parser = ["outgoing", "incoming", "both"]
+        )]
+        direction: String,
+        #[arg(long, default_value_t = 1)]
+        max_depth: usize,
+        #[arg(long = "node-type")]
+        node_types: Vec<String>,
+    },
+    /// Append a non-authoritative working note to a graph node in ticket scope.
+    RecordNote {
+        ticket: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        step: String,
+        #[arg(long, default_value = "operator")]
+        persona: String,
+        #[arg(long)]
+        node_id: String,
+        #[arg(
+            long,
+            value_parser = [
+                "observation",
+                "implementation_detail",
+                "rationale",
+                "nit",
+                "open_question"
+            ]
+        )]
+        kind: String,
+        #[arg(long)]
+        body: String,
+        #[arg(long)]
+        supersedes: Option<String>,
+    },
     Output {
         ticket: String,
         #[arg(long, default_value = ".")]
@@ -353,9 +434,31 @@ enum Command {
         #[arg(long, default_value = ".")]
         root: PathBuf,
     },
+    /// Manage the ChatGPT subscription OAuth credential used by the Pi runtime.
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
+    /// List the OpenAI models exposed by Koni's pinned Pi provider registry.
+    Models {
+        /// Print runtime metadata and model descriptors as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     Migrate {
         #[arg(long, default_value = ".")]
         root: PathBuf,
+    },
+    /// Transactionally migrate `.codex/koni` and its Codex-backed runs to schema 2 for Pi.
+    MigratePi {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Print the hash-pinned configuration and run-disposition plan without writing.
+        #[arg(long, conflicts_with = "apply", required_unless_present = "apply")]
+        dry_run: bool,
+        /// Archive eligible Codex-backed runs, validate staging, and publish `.koni`.
+        #[arg(long, conflicts_with = "dry_run", required_unless_present = "dry_run")]
+        apply: bool,
     },
     Recover {
         #[arg(long, default_value = ".")]
@@ -415,9 +518,28 @@ enum Command {
     },
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Subcommand)]
+enum AuthCommand {
+    /// Show token-free subscription sign-in status.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Sign in with ChatGPT through Pi's standard browser OAuth flow.
+    Login {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete Koni's stored OpenAI subscription credential.
+    Logout {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum BuiltinProfile {
-    /// Architecture-first software delivery.
+    /// Evidence-guided vertical software delivery.
     Software,
     /// Graph-first academic research.
     Research,
@@ -484,7 +606,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             replace,
             open,
         } => {
-            let installed = install_profile(&target, profile, source.as_deref(), replace)?;
+            let installed = install_schema2_profile(&target, profile, source.as_deref(), replace)?;
             println!(
                 "Installed Koni {} profile at {}\nValidated {} {}",
                 installed.source,
@@ -493,13 +615,9 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 installed.profile_version
             );
             if open {
-                let project_root = installed
-                    .destination
-                    .parent()
-                    .and_then(Path::parent)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("installed configuration has no project root")
-                    })?;
+                let project_root = installed.destination.parent().ok_or_else(|| {
+                    anyhow::anyhow!("installed configuration has no project root")
+                })?;
                 koni_tui::run(koni_tui::RunOptions {
                     root: project_root.to_path_buf(),
                     ..koni_tui::RunOptions::default()
@@ -529,23 +647,35 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::PlanRun {
             root,
             run_type,
+            target_branch,
             base,
             question_policy,
             goal,
         } => {
-            let planned = Engine::plan_run(
-                &root,
-                run_type.as_deref(),
-                &goal,
-                &base,
-                question_policy.as_deref(),
-            )?;
+            let planned = if let Some(base) = base.as_deref() {
+                Engine::plan_run(
+                    &root,
+                    run_type.as_deref(),
+                    &goal,
+                    base,
+                    question_policy.as_deref(),
+                )?
+            } else {
+                Engine::plan_run_on_target(
+                    &root,
+                    run_type.as_deref(),
+                    &goal,
+                    target_branch.as_deref().unwrap_or("HEAD"),
+                    question_policy.as_deref(),
+                )?
+            };
             let planning_agent = Engine::record_planning_intake(
                 &root,
                 &planned.run_id,
                 json!({
                     "goal": goal,
                     "run_type": planned.run_type_id,
+                    "target_branch": planned.target_branch.clone(),
                     "base_ref": base,
                     "question_policy": planned.question_policy,
                 }),
@@ -563,6 +693,18 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             }
             print_json(&approved)?;
         }
+        Command::MergeRun { id, root, preview } => {
+            if preview {
+                print_json(&Engine::preview_run_promotion(&root, &id)?)?;
+            } else {
+                let authorization = Engine::authorize_run_promotion(&root, &id)?;
+                let supervision = Engine::supervise_run_once(&root, &id)?;
+                print_json(&json!({
+                    "authorization": authorization,
+                    "supervision": supervision,
+                }))?;
+            }
+        }
         Command::SuperviseRun { id, root } => print_json(&Engine::supervise_run_once(&root, &id)?)?,
         Command::RetrySupervisedStage { id, stage, root } => {
             Engine::retry_supervised_stage(&root, &id, &stage)?;
@@ -575,6 +717,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             id,
             option,
             custom,
+            notes,
             revise,
             root,
         } => {
@@ -582,15 +725,23 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 anyhow::anyhow!("answer-question requires the global --run <run-id> option")
             })?;
             let answered = if revise {
-                Engine::revise_planning_batch_answer(
+                Engine::revise_planning_batch_answer_with_notes(
                     &root,
                     run_id,
                     &id,
                     option.as_deref(),
                     custom.as_deref(),
+                    notes.as_deref(),
                 )
             } else {
-                Engine::answer_question(&root, run_id, &id, option.as_deref(), custom.as_deref())
+                Engine::answer_question_with_notes(
+                    &root,
+                    run_id,
+                    &id,
+                    option.as_deref(),
+                    custom.as_deref(),
+                    notes.as_deref(),
+                )
             }?;
             print_json(&answered)?;
         }
@@ -683,14 +834,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             profile,
             goal,
             force,
-        } => {
-            if path.exists() && path.read_dir()?.next().is_some() {
-                anyhow::ensure!(force, "target is not empty: {}", path.display());
-                fs::remove_dir_all(&path)?;
-            }
-            fs::create_dir_all(&path)?;
-            initialize(path, Some(profile), goal)?;
-        }
+        } => initialize_legacy_project_run(path, profile, goal, force)?,
         Command::Compile {
             root,
             full,
@@ -801,6 +945,50 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 print_json(&result)?;
             }
         }
+        Command::GraphContext {
+            ticket,
+            root,
+            anchors,
+            relations,
+            direction,
+            max_depth,
+            node_types,
+        } => {
+            let engine = open_engine(&root, selected_run.as_deref())?;
+            print_json(&engine.graph_context(
+                &ticket,
+                json!({
+                    "anchors": anchors,
+                    "relations": relations,
+                    "direction": direction,
+                    "max_depth": max_depth,
+                    "node_types": node_types,
+                }),
+            )?)?;
+        }
+        Command::RecordNote {
+            ticket,
+            root,
+            step,
+            persona,
+            node_id,
+            kind,
+            body,
+            supersedes,
+        } => {
+            let engine = open_engine(&root, selected_run.as_deref())?;
+            print_json(&engine.record_graph_note(
+                &ticket,
+                &step,
+                &persona,
+                json!({
+                    "node_id": node_id,
+                    "kind": kind,
+                    "body": body,
+                    "supersedes": supersedes,
+                }),
+            )?)?;
+        }
         Command::Output {
             ticket,
             root,
@@ -898,7 +1086,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 ),
             ]);
             if let Some(ticket) = ticket {
-                params.insert("ticket_id".to_owned(), ticket);
+                params.insert("ticket".to_owned(), ticket);
             }
             if let Some(priority) = priority {
                 params.insert("priority".to_owned(), priority);
@@ -908,8 +1096,28 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Report { root } => {
             execute_named_action(&root, selected_run.as_deref(), "report", BTreeMap::new())?
         }
+        Command::Auth { command } => match command {
+            AuthCommand::Status { json } => {
+                pi_control::run_auth(pi_control::AuthOperation::Status, json)?
+            }
+            AuthCommand::Login { json } => {
+                pi_control::run_auth(pi_control::AuthOperation::Login, json)?
+            }
+            AuthCommand::Logout { json } => {
+                pi_control::run_auth(pi_control::AuthOperation::Logout, json)?
+            }
+        },
+        Command::Models { json } => pi_control::run_models(json)?,
         Command::Migrate { root } => {
             execute_named_action(&root, selected_run.as_deref(), "migrate", BTreeMap::new())?
+        }
+        Command::MigratePi {
+            root,
+            dry_run,
+            apply,
+        } => {
+            debug_assert_ne!(dry_run, apply);
+            print_json(&execute_pi_migration(&root, apply)?)?;
         }
         Command::Recover { root } => {
             execute_named_action(&root, selected_run.as_deref(), "recover", BTreeMap::new())?
@@ -997,6 +1205,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             })?;
         }
     }
+    wait_for_spawned_agent_reapers();
     Ok(())
 }
 
@@ -1004,9 +1213,9 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
 struct InitPreview {
     project_root: PathBuf,
     profile: String,
-    creates_codex_directory: bool,
+    creates_koni_directory: bool,
     existing_installation: bool,
-    legacy_migration: bool,
+    schema1_migration: bool,
     replace: bool,
 }
 
@@ -1018,58 +1227,106 @@ fn initialize_project(
     open: bool,
     dry_run: bool,
 ) -> anyhow::Result<()> {
+    let stdin = std::io::stdin();
+    let interactive = stdin.is_terminal();
+    initialize_project_with_profile_selector(
+        builtin,
+        source,
+        target,
+        replace,
+        open,
+        dry_run,
+        interactive,
+        || {
+            let mut input = stdin.lock();
+            let stderr = std::io::stderr();
+            let mut output = stderr.lock();
+            prompt_for_builtin_profile(&mut input, &mut output)
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn initialize_project_with_profile_selector<F>(
+    builtin: Option<BuiltinProfile>,
+    source: Option<&Path>,
+    target: Option<&Path>,
+    replace: bool,
+    open: bool,
+    dry_run: bool,
+    interactive: bool,
+    select_profile: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce() -> anyhow::Result<BuiltinProfile>,
+{
     let target = discover_project_root(target)?;
     let codex_dir = target.join(".codex");
-    let destination = codex_dir.join("koni");
+    let schema1_destination = codex_dir.join("koni");
+    let destination = target.join(".koni");
     let legacy = codex_dir.join(LEGACY_PROFILE_DIRECTORY);
     anyhow::ensure!(
-        !(destination.exists() && legacy.exists()),
+        !(schema1_destination.exists() && legacy.exists()),
         "both {} and {} exist; reconcile the two configurations before running `koni init`",
-        destination.display(),
+        schema1_destination.display(),
         legacy.display()
     );
-    let selected = source
-        .map(|path| format!("custom ({})", path.display()))
-        .unwrap_or_else(|| {
-            builtin
-                .unwrap_or(BuiltinProfile::Software)
-                .label()
-                .to_owned()
-        });
+
+    if destination.exists() && !replace {
+        ensure_real_directory(&destination, "existing schema-2 Koni configuration")?;
+        anyhow::ensure!(
+            builtin.is_none() && source.is_none(),
+            "Köni is already initialized; use --replace to select a different profile"
+        );
+    } else if schema1_destination.exists() || legacy.exists() {
+        anyhow::ensure!(
+            builtin.is_none() && source.is_none() && !replace,
+            "schema migration preserves the installed profile; rerun `koni init` without --profile, --from, or --replace"
+        );
+    }
+
+    let schema1_exists = schema1_destination.exists() || legacy.exists();
+    let requires_install_source = !schema1_exists && (replace || !destination.exists());
+    let selected_builtin = if requires_install_source {
+        select_profile_for_install(builtin, source, interactive, select_profile)?
+    } else {
+        None
+    };
+    let selected = if let Some(path) = source {
+        format!("custom ({})", path.display())
+    } else if let Some(profile) = selected_builtin {
+        profile.label().to_owned()
+    } else if schema1_exists {
+        "migrated schema 1".to_owned()
+    } else {
+        "existing".to_owned()
+    };
     if dry_run {
         print_json(&InitPreview {
             project_root: target,
             profile: selected,
-            creates_codex_directory: !codex_dir.exists(),
+            creates_koni_directory: !destination.exists(),
             existing_installation: destination.exists(),
-            legacy_migration: legacy.exists(),
+            schema1_migration: schema1_exists,
             replace,
         })?;
         return Ok(());
     }
 
     let installed = if legacy.exists() {
-        anyhow::ensure!(
-            builtin.is_none() && source.is_none() && !replace,
-            "legacy migration preserves the installed profile; rerun `koni init` without --profile, --from, or --replace"
-        );
-        migrate_legacy_installation(&target)?
+        migrate_legacy_installation(&target)?;
+        execute_pi_migration(&target, true)?;
+        verify_existing_schema2_installation(&target, &destination)?
+    } else if schema1_destination.exists() {
+        execute_pi_migration(&target, true)?;
+        verify_existing_schema2_installation(&target, &destination)?
     } else if destination.is_dir() && !replace {
-        anyhow::ensure!(
-            builtin.is_none() && source.is_none(),
-            "Köni is already initialized; use --replace to select a different profile"
-        );
-        verify_existing_installation(&target, &destination)?
+        verify_existing_schema2_installation(&target, &destination)?
     } else if destination.exists() && !replace {
         ensure_real_directory(&destination, "existing Koni configuration")?;
         unreachable!("a real existing Koni configuration is a directory")
     } else {
-        let selected_builtin = if source.is_none() {
-            Some(builtin.unwrap_or(BuiltinProfile::Software))
-        } else {
-            None
-        };
-        install_profile(&target, selected_builtin, source, replace)?
+        install_schema2_profile(&target, selected_builtin, source, replace)?
     };
     println!(
         "Initialized Köni {} profile at {}\nValidated {} {}",
@@ -1085,6 +1342,51 @@ fn initialize_project(
         })?;
     }
     Ok(())
+}
+
+fn select_profile_for_install<F>(
+    builtin: Option<BuiltinProfile>,
+    source: Option<&Path>,
+    interactive: bool,
+    select_profile: F,
+) -> anyhow::Result<Option<BuiltinProfile>>
+where
+    F: FnOnce() -> anyhow::Result<BuiltinProfile>,
+{
+    if source.is_some() {
+        return Ok(None);
+    }
+    if let Some(profile) = builtin {
+        return Ok(Some(profile));
+    }
+    anyhow::ensure!(
+        interactive,
+        "`koni init` needs an explicit profile when creating or replacing a configuration without an interactive terminal; rerun with `koni init --profile software`, `koni init --profile research`, or `koni init --from <PATH>`"
+    );
+    select_profile().map(Some)
+}
+
+fn prompt_for_builtin_profile(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> anyhow::Result<BuiltinProfile> {
+    writeln!(output, "Select the project profile Köni should initialize:")?;
+    writeln!(output, "  1) Software  Evidence-guided vertical delivery")?;
+    writeln!(output, "  2) Research  Empirical, receipt-backed research")?;
+    loop {
+        write!(output, "Profile [1/2]: ")?;
+        output.flush()?;
+        let mut answer = String::new();
+        anyhow::ensure!(
+            input.read_line(&mut answer)? != 0,
+            "profile selection ended before a choice was made; rerun with `koni init --profile software`, `koni init --profile research`, or `koni init --from <PATH>`"
+        );
+        match answer.trim().to_ascii_lowercase().as_str() {
+            "1" | "software" => return Ok(BuiltinProfile::Software),
+            "2" | "research" => return Ok(BuiltinProfile::Research),
+            _ => writeln!(output, "Enter 1 or software, or 2 or research.")?,
+        }
+    }
 }
 
 fn discover_project_root(explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
@@ -1137,20 +1439,14 @@ fn find_project_root_from(start: &Path) -> anyhow::Result<PathBuf> {
     }
 }
 
-fn verify_existing_installation(
+fn verify_existing_schema2_installation(
     project_root: &Path,
     destination: &Path,
 ) -> anyhow::Result<InstalledProfile> {
-    ensure_real_directory(destination, "existing Koni configuration")?;
-    let owned = read_owned_native_resources(destination)
-        .context("the existing Koni installation has no valid ownership manifest")?;
-    anyhow::ensure!(
-        !owned.is_empty(),
-        "the existing Koni installation owns no native resources; use --replace to repair it"
-    );
-    for (path, expected_hash) in owned {
+    ensure_real_directory(destination, "existing schema-2 Koni configuration")?;
+    for (path, expected_hash) in read_schema2_owned_resources(destination)? {
         let relative = manifest_resource_path(&path)?;
-        let installed = project_root.join(&relative);
+        let installed = project_root.join(relative);
         let metadata = fs::symlink_metadata(&installed)
             .with_context(|| format!("owned Koni resource is missing: {}", installed.display()))?;
         anyhow::ensure!(
@@ -1160,12 +1456,16 @@ fn verify_existing_installation(
         );
         anyhow::ensure!(
             sha256_hex(&fs::read(&installed)?) == expected_hash,
-            "owned Koni resource was modified: {}; use --replace only after reconciling the edit",
+            "owned Koni resource was modified: {}; reconcile it before replacing the profile",
             installed.display()
         );
     }
     let catalog = ProjectCatalogCompiler::compile(project_root)
-        .context("the existing Koni installation is not valid")?;
+        .context("the existing schema-2 Koni installation is not valid")?;
+    anyhow::ensure!(
+        catalog.document.schema_version == KONI_SCHEMA2_VERSION,
+        "the live .koni catalog is not schema 2"
+    );
     let compiled = ProfileCompiler::compile(&catalog.default_run_type().profile.resolved_path)?;
     for run_type in catalog.run_types.values() {
         ProfileCompiler::compile(&run_type.profile.resolved_path)
@@ -1183,6 +1483,422 @@ fn initialize(root: PathBuf, profile: Option<PathBuf>, goal: String) -> anyhow::
     let mut engine = Engine::open_with_profile(&root, profile.as_deref())?;
     println!("{}", engine.initialize_run(&goal)?);
     Ok(())
+}
+
+#[cfg(unix)]
+static INIT_PROJECT_CWD_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const INIT_OPEN_DIRECTORY_FLAGS: i32 = 0o200000 | 0o400000 | 0o2000000;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+const INIT_OPEN_DIRECTORY_FLAGS: i32 = 0x100000 | 0x100 | 0x1000000;
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios"
+    ))
+))]
+const INIT_OPEN_DIRECTORY_FLAGS: i32 = 0;
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn openat(directory: i32, path: *const std::ffi::c_char, flags: i32, ...) -> i32;
+    fn mkdirat(directory: i32, path: *const std::ffi::c_char, mode: u32) -> i32;
+    fn fchdir(directory: i32) -> i32;
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InitDirectoryIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+impl InitDirectoryIdentity {
+    fn from_file(file: &fs::File) -> anyhow::Result<Self> {
+        let metadata = file
+            .metadata()
+            .context("could not inspect held directory")?;
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct PreparedInitProjectTarget {
+    requested_path: PathBuf,
+    directory: fs::File,
+    identity: InitDirectoryIdentity,
+}
+
+#[cfg(unix)]
+impl PreparedInitProjectTarget {
+    fn ensure_requested_path_still_matches(&self) -> anyhow::Result<()> {
+        let matches = open_existing_init_directory(&self.requested_path)
+            .and_then(|directory| InitDirectoryIdentity::from_file(&directory))
+            .is_ok_and(|identity| identity == self.identity);
+        anyhow::ensure!(
+            matches,
+            "init-project target path changed during initialization: {}; initialization stayed on the original held directory inode {}:{} and did not follow or write through the replacement path",
+            self.requested_path.display(),
+            self.identity.device,
+            self.identity.inode
+        );
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+struct InitWorkingDirectoryGuard {
+    original: fs::File,
+    original_identity: InitDirectoryIdentity,
+    restored: bool,
+}
+
+#[cfg(unix)]
+impl InitWorkingDirectoryGuard {
+    fn enter(directory: &fs::File) -> anyhow::Result<Self> {
+        let original = fs::File::open(".").context("could not retain the current directory")?;
+        let original_identity = InitDirectoryIdentity::from_file(&original)?;
+        fchdir_to(directory).context("could not enter the held init-project target")?;
+        Ok(Self {
+            original,
+            original_identity,
+            restored: false,
+        })
+    }
+
+    fn restore(mut self) -> anyhow::Result<(InitDirectoryIdentity, InitDirectoryIdentity)> {
+        fchdir_to(&self.original).context("could not restore the current directory")?;
+        let restored = fs::File::open(".").context("could not verify the restored directory")?;
+        let restored_identity = InitDirectoryIdentity::from_file(&restored)?;
+        anyhow::ensure!(
+            restored_identity == self.original_identity,
+            "current directory identity changed while restoring init-project"
+        );
+        self.restored = true;
+        Ok((self.original_identity, restored_identity))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for InitWorkingDirectoryGuard {
+    fn drop(&mut self) {
+        if !self.restored {
+            let _ = fchdir_to(&self.original);
+        }
+    }
+}
+
+fn initialize_legacy_project_run(
+    path: PathBuf,
+    profile: PathBuf,
+    goal: String,
+    force: bool,
+) -> anyhow::Result<()> {
+    initialize_legacy_project_run_with_hook(path, profile, goal, force, || {})
+}
+
+#[cfg(unix)]
+fn initialize_legacy_project_run_with_hook<F>(
+    path: PathBuf,
+    profile: PathBuf,
+    goal: String,
+    force: bool,
+    after_entering_target: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce(),
+{
+    initialize_legacy_project_run_with_hooks(
+        path,
+        profile,
+        goal,
+        force,
+        after_entering_target,
+        |_, _| {},
+    )
+}
+
+#[cfg(unix)]
+fn initialize_legacy_project_run_with_hooks<F, R>(
+    path: PathBuf,
+    profile: PathBuf,
+    goal: String,
+    force: bool,
+    after_entering_target: F,
+    after_restoring_cwd: R,
+) -> anyhow::Result<()>
+where
+    F: FnOnce(),
+    R: FnOnce(InitDirectoryIdentity, InitDirectoryIdentity),
+{
+    let _cwd_lock = INIT_PROJECT_CWD_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("init-project current-directory lock was poisoned"))?;
+    let invocation_directory =
+        std::env::current_dir().context("could not resolve current directory")?;
+    let profile = if profile.is_absolute() {
+        profile
+    } else {
+        invocation_directory.join(profile)
+    };
+    let prepared = prepare_init_project_target_locked(&path, force)?;
+    let cwd_guard = InitWorkingDirectoryGuard::enter(&prepared.directory)?;
+    let result: anyhow::Result<String> = (|| {
+        ensure_held_init_project_target_is_empty(&prepared.requested_path)?;
+        prepared.ensure_requested_path_still_matches()?;
+        after_entering_target();
+        let mut engine = Engine::open_with_profile(Path::new("."), Some(&profile))?;
+        let run_id = engine.initialize_run(&goal)?;
+        prepared.ensure_requested_path_still_matches()?;
+        Ok(run_id)
+    })();
+    let (original_cwd, restored_cwd) = cwd_guard.restore()?;
+    after_restoring_cwd(original_cwd, restored_cwd);
+    println!("{}", result?);
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn initialize_legacy_project_run_with_hook<F>(
+    _path: PathBuf,
+    _profile: PathBuf,
+    _goal: String,
+    _force: bool,
+    _after_entering_target: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce(),
+{
+    anyhow::bail!(
+        "init-project requires Unix descriptor-relative directory safety; run `koni init` from an existing project directory on this platform"
+    )
+}
+
+/// Prepare the destination used by the legacy `init-project` command without
+/// ever replacing caller-owned contents. Every component is opened relative
+/// to a held parent descriptor with symlink following disabled. The `force`
+/// argument remains only so older invocations keep parsing; it deliberately
+/// grants no deletion power.
+#[cfg(all(unix, test))]
+fn prepare_init_project_target(
+    path: &Path,
+    force: bool,
+) -> anyhow::Result<PreparedInitProjectTarget> {
+    let _cwd_lock = INIT_PROJECT_CWD_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("init-project current-directory lock was poisoned"))?;
+    let prepared = prepare_init_project_target_locked(path, force)?;
+    let cwd_guard = InitWorkingDirectoryGuard::enter(&prepared.directory)?;
+    let result = ensure_held_init_project_target_is_empty(&prepared.requested_path);
+    let _ = cwd_guard.restore()?;
+    result?;
+    Ok(prepared)
+}
+
+#[cfg(unix)]
+fn prepare_init_project_target_locked(
+    path: &Path,
+    _force: bool,
+) -> anyhow::Result<PreparedInitProjectTarget> {
+    let requested_path = absolute_init_project_path(path)?;
+    let mut components = requested_path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(component) => Some(component.to_os_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let leaf = components.pop().ok_or_else(|| {
+        anyhow::anyhow!(
+            "init-project target must name a directory beneath the filesystem root: {}",
+            requested_path.display()
+        )
+    })?;
+    let parent = open_init_directory_chain(&components, true).with_context(|| {
+        format!(
+            "init-project target ancestors must be real directories and may not be symlinks: {}",
+            requested_path.display()
+        )
+    })?;
+    let directory = match open_init_directory_at(&parent, &leaf) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            create_init_directory_at(&parent, &leaf).with_context(|| {
+                format!(
+                    "could not create init-project target directory {}",
+                    requested_path.display()
+                )
+            })?;
+            open_init_directory_at(&parent, &leaf).with_context(|| {
+                format!(
+                    "could not retain newly created init-project target directory {}",
+                    requested_path.display()
+                )
+            })?
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "init-project target must be a real directory, not a file or symlink: {}",
+                    requested_path.display()
+                )
+            });
+        }
+    };
+    let identity = InitDirectoryIdentity::from_file(&directory)?;
+    Ok(PreparedInitProjectTarget {
+        requested_path,
+        directory,
+        identity,
+    })
+}
+
+#[cfg(unix)]
+fn ensure_held_init_project_target_is_empty(requested_path: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        fs::read_dir(".")?.next().transpose()?.is_none(),
+        "target is not empty: {}; Koni never deletes existing project files, including with --force; run `koni init` from that directory instead",
+        requested_path.display()
+    );
+    Ok(())
+}
+
+#[cfg(all(not(unix), test))]
+fn prepare_init_project_target(_path: &Path, _force: bool) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "init-project requires Unix descriptor-relative directory safety; run `koni init` from an existing project directory on this platform"
+    )
+}
+
+#[cfg(unix)]
+fn absolute_init_project_path(path: &Path) -> anyhow::Result<PathBuf> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("could not resolve current directory")?
+            .join(path)
+    };
+    let mut normalized = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(_) => {
+                anyhow::bail!("unsupported init-project target prefix: {}", path.display())
+            }
+            std::path::Component::RootDir | std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::Normal(component) => normalized.push(component),
+        }
+    }
+    Ok(normalized)
+}
+
+#[cfg(unix)]
+fn open_existing_init_directory(path: &Path) -> anyhow::Result<fs::File> {
+    let path = absolute_init_project_path(path)?;
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(component) => Some(component.to_os_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    open_init_directory_chain(&components, false)
+}
+
+#[cfg(unix)]
+fn open_init_directory_chain(
+    components: &[OsString],
+    create_missing: bool,
+) -> anyhow::Result<fs::File> {
+    let mut directory = fs::File::open("/").context("could not open filesystem root")?;
+    for component in components {
+        match open_init_directory_at(&directory, component) {
+            Ok(child) => directory = child,
+            Err(error) if create_missing && error.kind() == std::io::ErrorKind::NotFound => {
+                match create_init_directory_at(&directory, component) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error.into()),
+                }
+                directory = open_init_directory_at(&directory, component)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(directory)
+}
+
+#[cfg(unix)]
+fn init_component_cstring(component: &OsStr) -> anyhow::Result<CString> {
+    CString::new(component.as_bytes()).map_err(|_| {
+        anyhow::anyhow!(
+            "init-project target contains an embedded NUL byte: {}",
+            component.to_string_lossy()
+        )
+    })
+}
+
+#[cfg(unix)]
+fn open_init_directory_at(parent: &fs::File, component: &OsStr) -> std::io::Result<fs::File> {
+    if INIT_OPEN_DIRECTORY_FLAGS == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "descriptor-relative no-follow directory opens are unsupported on this Unix platform",
+        ));
+    }
+    let component = init_component_cstring(component)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    // SAFETY: `component` is NUL-terminated for the duration of the call, the
+    // held parent descriptor is live, and no creation mode is required.
+    let descriptor = unsafe {
+        openat(
+            parent.as_raw_fd(),
+            component.as_ptr(),
+            INIT_OPEN_DIRECTORY_FLAGS,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: a successful `openat` returned one newly owned descriptor.
+    Ok(unsafe { fs::File::from_raw_fd(descriptor) })
+}
+
+#[cfg(unix)]
+fn create_init_directory_at(parent: &fs::File, component: &OsStr) -> std::io::Result<()> {
+    let component = init_component_cstring(component)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    // SAFETY: `component` is NUL-terminated, the parent descriptor is live,
+    // and mode 0700 grants access only to the invoking user before umask.
+    let result = unsafe { mkdirat(parent.as_raw_fd(), component.as_ptr(), 0o700) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(unix)]
+fn fchdir_to(directory: &fs::File) -> std::io::Result<()> {
+    // SAFETY: the descriptor remains live throughout this call and was opened
+    // as a directory with symlink following disabled.
+    if unsafe { fchdir(directory.as_raw_fd()) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 #[derive(Debug)]
@@ -1339,6 +2055,190 @@ fn install_profile(
         }
     }
     result
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Schema2ResourceManifest {
+    schema_version: String,
+    owner: String,
+    external_resources: Vec<HashedMigrationFile>,
+}
+
+/// Build a complete provider-neutral installation in private staging, then
+/// publish `.koni` and its repository skills with the existing rollback-safe
+/// resource transaction. Bundled schema-1 templates pass through the exact
+/// migration transformer; no executable Codex config or custom-agent TOML is
+/// ever copied into the destination project.
+fn install_schema2_profile(
+    target: &Path,
+    builtin: Option<BuiltinProfile>,
+    custom_source: Option<&Path>,
+    replace: bool,
+) -> anyhow::Result<InstalledProfile> {
+    let target_metadata = fs::symlink_metadata(target)
+        .with_context(|| format!("installation target does not exist: {}", target.display()))?;
+    anyhow::ensure!(
+        target_metadata.is_dir() && !target_metadata.file_type().is_symlink(),
+        "installation target is not an existing real directory: {}",
+        target.display()
+    );
+    let target = target.canonicalize()?;
+    anyhow::ensure!(
+        builtin.is_some() ^ custom_source.is_some(),
+        "choose either a bundled profile or --from <path>"
+    );
+    let destination = target.join(".koni");
+    let destination_exists =
+        optional_real_directory(&destination, "existing schema-2 Koni configuration")?;
+    anyhow::ensure!(
+        replace || !destination_exists,
+        "Koni is already installed at {}; use --replace to replace its configuration",
+        destination.display()
+    );
+    if !destination_exists && target.join(".codex/koni").exists() {
+        anyhow::bail!(
+            "a schema-1 Koni configuration exists at {}; run `koni migrate-pi --apply` instead of installing over it",
+            target.join(".codex/koni").display()
+        );
+    }
+
+    let staging = target.join(format!(".koni-install-v2-{}", Uuid::now_v7()));
+    fs::create_dir(&staging)?;
+    let mut cleanup = RemoveOnDrop::new(staging.clone());
+
+    let source_profile = custom_source
+        .map(resolve_custom_profile_root)
+        .transpose()?
+        .map(|source| {
+            let source = source.canonicalize()?;
+            let profile = ProfileCompiler::compile(&source)?;
+            Ok::<_, anyhow::Error>((source, profile.manifest.schema_version))
+        })
+        .transpose()?;
+
+    let source_label = if source_profile
+        .as_ref()
+        .is_some_and(|(_, schema)| schema == KONI_SCHEMA2_VERSION)
+    {
+        let (source, _) = source_profile.as_ref().expect("guarded as schema 2");
+        anyhow::ensure!(
+            source != &destination,
+            "custom profile source is already the installation destination: {}",
+            destination.display()
+        );
+        let staged_profile = staging.join(".koni");
+        fs::create_dir(&staged_profile)?;
+        copy_profile_tree(source, &staged_profile)?;
+        format!("custom ({})", source.display())
+    } else {
+        let installed = install_profile(&staging, builtin, custom_source, false)
+            .context("could not stage the schema-1 source for schema-2 conversion")?;
+        Schema2Migrator::convert_fresh_install(&staging)
+            .context("could not convert the staged installation to schema 2")?;
+        installed.source
+    };
+
+    let preserved_root = staging.join("preserved");
+    fs::create_dir(&preserved_root)?;
+    let staged_skills = staging.join(".agents/skills");
+    let preserved_skills = preserved_root.join(".agents/skills");
+    if staged_skills.exists() {
+        fs::create_dir_all(preserved_skills.parent().expect("skills have parent"))?;
+        fs::rename(&staged_skills, &preserved_skills)?;
+    } else {
+        write_embedded_files(&preserved_skills, templates::SHARED_SKILLS)?;
+    }
+    write_schema2_resource_manifest(&staging.join(".koni"), &preserved_root)?;
+
+    let catalog = ProjectCatalogCompiler::compile(&staging)
+        .context("staged schema-2 project catalog is invalid")?;
+    let compiled = ProfileCompiler::compile(&catalog.default_run_type().profile.resolved_path)?;
+    for run_type in catalog.run_types.values() {
+        ProfileCompiler::compile(&run_type.profile.resolved_path)
+            .with_context(|| format!("run type {} has an invalid schema-2 profile", run_type.id))?;
+    }
+    let prior_owned = if replace {
+        read_schema2_owned_resources(&destination)?
+    } else {
+        BTreeMap::new()
+    };
+    publish_staged_install(
+        &staging,
+        &staging.join(".koni"),
+        &preserved_root,
+        &target,
+        &destination,
+        replace,
+        Some(prior_owned),
+    )?;
+    cleanup.preserve();
+    Ok(InstalledProfile {
+        source: source_label,
+        destination,
+        profile_id: compiled.manifest.profile.id,
+        profile_version: compiled.manifest.profile.version,
+    })
+}
+
+fn write_schema2_resource_manifest(
+    staged_profile: &Path,
+    staged_external: &Path,
+) -> anyhow::Result<()> {
+    let mut paths = Vec::new();
+    collect_staged_files(staged_external, staged_external, &mut paths)?;
+    let external_resources = paths
+        .into_iter()
+        .map(|relative| {
+            Ok(HashedMigrationFile {
+                path: path_to_portable_string(&relative)?,
+                sha256: sha256_hex(&fs::read(staged_external.join(relative))?),
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let manifest = Schema2ResourceManifest {
+        schema_version: KONI_SCHEMA2_VERSION.to_owned(),
+        owner: "koni".to_owned(),
+        external_resources,
+    };
+    fs::write(
+        staged_profile.join(SCHEMA2_RESOURCE_MANIFEST),
+        serde_json::to_vec_pretty(&manifest)?,
+    )?;
+    Ok(())
+}
+
+fn read_schema2_owned_resources(
+    existing_profile: &Path,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    if !existing_profile.is_dir() {
+        return Ok(BTreeMap::new());
+    }
+    let manifest_path = existing_profile.join(SCHEMA2_RESOURCE_MANIFEST);
+    let manifest: Schema2ResourceManifest = serde_json::from_slice(&fs::read(&manifest_path)?)
+        .with_context(|| format!("could not read {}", manifest_path.display()))?;
+    anyhow::ensure!(
+        manifest.schema_version == KONI_SCHEMA2_VERSION && manifest.owner == "koni",
+        "unsupported schema-2 ownership manifest at {}",
+        manifest_path.display()
+    );
+    let mut resources = BTreeMap::new();
+    for resource in manifest.external_resources {
+        let path = manifest_resource_path(&resource.path)?;
+        anyhow::ensure!(
+            path.starts_with(".agents/skills"),
+            "schema-2 installation may own only repository skills: {}",
+            resource.path
+        );
+        anyhow::ensure!(
+            resources
+                .insert(resource.path.clone(), resource.sha256)
+                .is_none(),
+            "duplicate schema-2 owned resource: {}",
+            resource.path
+        );
+    }
+    Ok(resources)
 }
 
 fn migrate_legacy_installation(target: &Path) -> anyhow::Result<InstalledProfile> {
@@ -1629,6 +2529,11 @@ fn resolve_custom_profile_root(source: &Path) -> anyhow::Result<PathBuf> {
         source.display()
     );
 
+    let schema2 = source.join(".koni");
+    if profile_manifest_exists(&schema2) {
+        ensure_real_directory(&schema2, "custom schema-2 Koni configuration")?;
+        return Ok(schema2);
+    }
     let nested = source.join(".codex/koni");
     if profile_manifest_exists(&nested) {
         ensure_real_directory(&nested, "custom Koni configuration")?;
@@ -2563,6 +3468,44 @@ fn record_agent_question(
     Ok(question)
 }
 
+#[derive(Debug, Serialize)]
+struct PiMigrationCommandOutput {
+    mode: &'static str,
+    config_plan: Schema2MigrationPlan,
+    run_plan: PiMigrationRunPlan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archive: Option<PiMigrationRunArchiveResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<Schema2MigrationResult>,
+}
+
+fn execute_pi_migration(root: &Path, apply: bool) -> anyhow::Result<PiMigrationCommandOutput> {
+    let config_plan = Schema2Migrator::plan(root)?;
+    let run_plan = Engine::inspect_pi_migration_runs(&config_plan.project_root, &config_plan)?;
+    if !apply {
+        return Ok(PiMigrationCommandOutput {
+            mode: "dry_run",
+            config_plan,
+            run_plan,
+            archive: None,
+            result: None,
+        });
+    }
+
+    let archived = Engine::archive_pi_migration_runs(&config_plan, &run_plan)?;
+    let project_root = config_plan.project_root.clone();
+    let result = Schema2Migrator::apply(&config_plan, archived.proof, |staged| {
+        ProfileCompiler::compile_with_project_root(staged, &project_root).map(|_| ())
+    })?;
+    Ok(PiMigrationCommandOutput {
+        mode: "apply",
+        config_plan,
+        run_plan,
+        archive: Some(archived.result),
+        result: Some(result),
+    })
+}
+
 fn print_json(value: &impl serde::Serialize) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
@@ -2571,13 +3514,14 @@ fn print_json(value: &impl serde::Serialize) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::collections::{BTreeMap, BTreeSet};
     use std::ffi::OsString;
 
     use git2::{IndexAddOption, Repository, Signature};
 
     #[test]
-    fn init_cli_defaults_to_software_and_exposes_explicit_project_controls() {
+    fn init_cli_leaves_profile_selection_to_initialization_and_exposes_explicit_controls() {
         let defaults = Cli::try_parse_from(["koni", "init"]).expect("default init parses");
         assert!(matches!(
             defaults.command,
@@ -2625,6 +3569,400 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn init_project_target_preparation_accepts_missing_and_empty_directories() {
+        let temporary = tempfile::tempdir().expect("temporary target parent");
+        let temporary_root = temporary.path().canonicalize().unwrap();
+        let missing = temporary_root.join("missing-project");
+        prepare_init_project_target(&missing, false).expect("missing target should be created");
+        assert!(missing.is_dir());
+        assert!(fs::read_dir(&missing).unwrap().next().is_none());
+
+        let empty = temporary_root.join("empty-project");
+        fs::create_dir(&empty).unwrap();
+        prepare_init_project_target(&empty, true)
+            .expect("deprecated --force remains harmless for an empty target");
+        assert!(fs::read_dir(&empty).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_project_initializes_missing_and_empty_targets_and_restores_cwd() {
+        let temporary = tempfile::tempdir().expect("temporary initialized targets");
+        let temporary_root = temporary.path().canonicalize().unwrap();
+        let profile = temporary_root.join("test-profile");
+        write_init_project_test_profile(&profile);
+
+        for (target, create_first) in [
+            (temporary_root.join("missing-project"), false),
+            (temporary_root.join("empty-project"), true),
+        ] {
+            if create_first {
+                fs::create_dir(&target).unwrap();
+            }
+            let cwd_restored = Cell::new(false);
+            initialize_legacy_project_run_with_hooks(
+                target.clone(),
+                profile.clone(),
+                "exercise anchored initialization".to_owned(),
+                false,
+                || {},
+                |original, restored| {
+                    assert_eq!(restored, original);
+                    cwd_restored.set(true);
+                },
+            )
+            .expect("a real missing or empty target should initialize");
+            assert!(target.join(".codex/koni/profile.yaml").is_file());
+            assert!(target.join(".git").is_dir());
+            assert!(target.join("program/state.yaml").is_file());
+            assert!(cwd_restored.get(), "success must cross cwd restoration");
+        }
+    }
+
+    #[test]
+    fn init_project_force_preserves_every_nonempty_target_shape() {
+        let temporary = tempfile::tempdir().expect("temporary filesystem fixture");
+        let temporary_root = temporary.path().canonicalize().unwrap();
+        let filesystem_root = temporary_root.join("filesystem-root");
+        let home = filesystem_root.join("home");
+        let ancestor = home.join("workspace");
+        let repository = ancestor.join("repository");
+        let cwd = repository.join("packages/app");
+        let ordinary = filesystem_root.join("ordinary-project");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir(&ordinary).unwrap();
+        Repository::init(&repository).expect("repository-root fixture");
+
+        for (path, contents) in [
+            (&filesystem_root, b"filesystem root bytes".as_slice()),
+            (&home, b"home bytes".as_slice()),
+            (&ancestor, b"ancestor bytes".as_slice()),
+            (&repository, b"repository bytes".as_slice()),
+            (&cwd, b"cwd bytes".as_slice()),
+            (&ordinary, b"ordinary target bytes".as_slice()),
+        ] {
+            fs::write(path.join("koni-safety-marker"), contents).unwrap();
+        }
+
+        for (label, target) in [
+            ("filesystem root", &filesystem_root),
+            ("home", &home),
+            ("ancestor", &ancestor),
+            ("repository root", &repository),
+            ("cwd", &cwd),
+            ("ordinary target", &ordinary),
+        ] {
+            let before = snapshot_test_tree(target);
+            let error = prepare_init_project_target(target, true)
+                .expect_err("--force must never replace a nonempty target");
+            let message = error.to_string();
+            assert!(
+                message.contains("target is not empty"),
+                "{label}: {message}"
+            );
+            assert!(message.contains("`koni init`"), "{label}: {message}");
+            assert_eq!(
+                snapshot_test_tree(target),
+                before,
+                "{label} changed after rejected init-project --force"
+            );
+        }
+    }
+
+    #[test]
+    fn init_project_cli_force_rejects_before_opening_the_profile() {
+        let temporary = tempfile::tempdir().expect("temporary CLI target");
+        let temporary_root = temporary.path().canonicalize().unwrap();
+        let target = temporary_root.join("existing-project");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("important.txt"), b"preserve this project").unwrap();
+        let before = snapshot_test_tree(&target);
+        let missing_profile = temporary_root.join("missing-profile.yaml");
+        let cli = Cli::try_parse_from(vec![
+            OsString::from("koni"),
+            OsString::from("init-project"),
+            target.as_os_str().to_owned(),
+            OsString::from("--profile"),
+            missing_profile.as_os_str().to_owned(),
+            OsString::from("--goal"),
+            OsString::from("exercise safe initialization"),
+            OsString::from("--force"),
+        ])
+        .expect("legacy --force invocation still parses");
+
+        let error = dispatch(cli).expect_err("a nonempty CLI target must fail before profile open");
+        let message = error.to_string();
+        assert!(message.contains("target is not empty"), "{message}");
+        assert!(message.contains("`koni init`"), "{message}");
+        assert_eq!(snapshot_test_tree(&target), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_project_rejects_target_symlinks_without_touching_the_referent() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary symlink fixture");
+        let temporary_root = temporary.path().canonicalize().unwrap();
+        let referent = temporary_root.join("existing-project");
+        let target = temporary_root.join("linked-project");
+        fs::create_dir(&referent).unwrap();
+        fs::write(referent.join("important.txt"), b"keep these bytes").unwrap();
+        symlink(&referent, &target).unwrap();
+        let before = snapshot_test_tree(&referent);
+
+        let error = prepare_init_project_target(&target, true)
+            .expect_err("a target symlink must fail closed");
+        assert!(error.to_string().contains("file or symlink"), "{error:#}");
+        assert!(
+            fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(snapshot_test_tree(&referent), before);
+
+        let mut trailing_target = target.as_os_str().to_os_string();
+        trailing_target.push("/");
+        let trailing_error = prepare_init_project_target(Path::new(&trailing_target), true)
+            .expect_err("a trailing-separator target symlink must fail closed");
+        assert!(
+            trailing_error.to_string().contains("file or symlink"),
+            "{trailing_error:#}"
+        );
+        assert_eq!(snapshot_test_tree(&referent), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_project_rejects_file_and_symlink_ancestor_without_writing_referents() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary ancestor fixture");
+        let temporary_root = temporary.path().canonicalize().unwrap();
+        let file_target = temporary_root.join("project-file");
+        fs::write(&file_target, b"preserve file bytes").unwrap();
+        let file_error = prepare_init_project_target(&file_target, true)
+            .expect_err("an ordinary file target must fail closed");
+        assert!(file_error.to_string().contains("file or symlink"));
+        assert_eq!(fs::read(&file_target).unwrap(), b"preserve file bytes");
+
+        let referent = temporary_root.join("referent");
+        let linked_parent = temporary_root.join("linked-parent");
+        fs::create_dir(&referent).unwrap();
+        fs::write(referent.join("important.txt"), b"preserve referent bytes").unwrap();
+        symlink(&referent, &linked_parent).unwrap();
+        let before = snapshot_test_tree(&referent);
+        let error = prepare_init_project_target(&linked_parent.join("new-project"), true)
+            .expect_err("a missing child below a symlink ancestor must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("ancestors must be real directories"),
+            "{error:#}"
+        );
+        assert_eq!(snapshot_test_tree(&referent), before);
+        assert!(!referent.join("new-project").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_project_keeps_writes_on_held_inode_when_target_is_replaced() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary target-race fixture");
+        let temporary_root = temporary.path().canonicalize().unwrap();
+        let target = temporary_root.join("project");
+        let original = temporary_root.join("original-project");
+        let victim = temporary_root.join("victim");
+        fs::create_dir(&target).unwrap();
+        fs::create_dir(&victim).unwrap();
+        fs::write(victim.join("important.txt"), b"victim bytes").unwrap();
+        let victim_before = snapshot_test_tree(&victim);
+        let profile = temporary_root.join("test-profile");
+        write_init_project_test_profile(&profile);
+        let cwd_restored = Cell::new(false);
+
+        let error = initialize_legacy_project_run_with_hooks(
+            target.clone(),
+            profile,
+            "exercise target replacement safety".to_owned(),
+            true,
+            || {
+                fs::rename(&target, &original).unwrap();
+                symlink(&victim, &target).unwrap();
+            },
+            |original, restored| {
+                assert_eq!(restored, original);
+                cwd_restored.set(true);
+            },
+        )
+        .expect_err("a replaced target path must fail after anchored initialization");
+
+        let message = error.to_string();
+        assert!(message.contains("target path changed"), "{error:#}");
+        assert!(message.contains("original held directory inode"));
+        assert_eq!(snapshot_test_tree(&victim), victim_before);
+        assert!(original.join(".codex/koni/profile.yaml").is_file());
+        assert!(original.join("program/state.yaml").is_file());
+        assert!(cwd_restored.get(), "target-race error must restore cwd");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_project_keeps_writes_on_held_inode_when_ancestor_is_replaced() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary ancestor-race fixture");
+        let temporary_root = temporary.path().canonicalize().unwrap();
+        let parent = temporary_root.join("parent");
+        let original_parent = temporary_root.join("original-parent");
+        let target = parent.join("project");
+        let victim = temporary_root.join("victim");
+        fs::create_dir(&parent).unwrap();
+        fs::create_dir(&victim).unwrap();
+        fs::write(victim.join("important.txt"), b"victim bytes").unwrap();
+        let victim_before = snapshot_test_tree(&victim);
+        let profile = temporary_root.join("test-profile");
+        write_init_project_test_profile(&profile);
+        let cwd_restored = Cell::new(false);
+
+        let error = initialize_legacy_project_run_with_hooks(
+            target.clone(),
+            profile,
+            "exercise ancestor replacement safety".to_owned(),
+            false,
+            || {
+                fs::rename(&parent, &original_parent).unwrap();
+                fs::create_dir(&parent).unwrap();
+                symlink(&victim, &target).unwrap();
+            },
+            |original, restored| {
+                assert_eq!(restored, original);
+                cwd_restored.set(true);
+            },
+        )
+        .expect_err("a replaced ancestor path must fail after anchored initialization");
+
+        let message = error.to_string();
+        assert!(message.contains("target path changed"), "{error:#}");
+        assert!(message.contains("original held directory inode"));
+        assert_eq!(snapshot_test_tree(&victim), victim_before);
+        assert!(
+            original_parent
+                .join("project/.codex/koni/profile.yaml")
+                .is_file()
+        );
+        assert!(original_parent.join("project/program/state.yaml").is_file());
+        assert!(cwd_restored.get(), "ancestor-race error must restore cwd");
+    }
+
+    #[test]
+    fn non_interactive_init_requires_an_explicit_profile_source_before_writing() {
+        let temporary = tempfile::tempdir().unwrap();
+        let error = initialize_project_with_profile_selector(
+            None,
+            None,
+            Some(temporary.path()),
+            false,
+            false,
+            false,
+            false,
+            || -> anyhow::Result<BuiltinProfile> {
+                panic!("a non-interactive init must never invoke the picker")
+            },
+        )
+        .expect_err("fresh non-interactive init must require an explicit source");
+        let message = error.to_string();
+        assert!(message.contains("--profile software"), "{message}");
+        assert!(message.contains("--profile research"), "{message}");
+        assert!(message.contains("--from <PATH>"), "{message}");
+        assert!(!temporary.path().join(".codex").exists());
+        assert!(!temporary.path().join(".agents").exists());
+    }
+
+    #[test]
+    fn interactive_profile_picker_reprompts_and_accepts_names_or_numbers() {
+        let mut input = std::io::Cursor::new(b"unknown\nresearch\n");
+        let mut output = Vec::new();
+        assert_eq!(
+            prompt_for_builtin_profile(&mut input, &mut output).unwrap(),
+            BuiltinProfile::Research
+        );
+        let transcript = String::from_utf8(output).unwrap();
+        assert!(transcript.contains("1) Software"));
+        assert!(transcript.contains("2) Research"));
+        assert!(transcript.contains("Enter 1 or software"));
+
+        let mut input = std::io::Cursor::new(b"1\n");
+        assert_eq!(
+            prompt_for_builtin_profile(&mut input, &mut Vec::new()).unwrap(),
+            BuiltinProfile::Software
+        );
+    }
+
+    #[test]
+    fn fresh_and_replacement_dry_runs_use_selection_but_existing_and_legacy_do_not() {
+        let fresh = tempfile::tempdir().unwrap();
+        initialize_project_with_profile_selector(
+            None,
+            None,
+            Some(fresh.path()),
+            false,
+            false,
+            true,
+            true,
+            || Ok(BuiltinProfile::Research),
+        )
+        .expect("interactive dry run should use the selected profile");
+        assert!(!fresh.path().join(".codex").exists());
+
+        let existing = tempfile::tempdir().unwrap();
+        install_schema2_profile(existing.path(), Some(BuiltinProfile::Software), None, false)
+            .unwrap();
+        initialize_project_with_profile_selector(
+            None,
+            None,
+            Some(existing.path()),
+            false,
+            false,
+            true,
+            false,
+            || -> anyhow::Result<BuiltinProfile> {
+                panic!("an existing installation must not invoke the picker")
+            },
+        )
+        .expect("existing dry run should preserve its installed profile");
+        initialize_project_with_profile_selector(
+            None,
+            None,
+            Some(existing.path()),
+            true,
+            false,
+            true,
+            true,
+            || Ok(BuiltinProfile::Research),
+        )
+        .expect("replacement dry run should use the selected profile");
+
+        let legacy = tempfile::tempdir().unwrap();
+        fs::create_dir_all(legacy.path().join(".codex").join(LEGACY_PROFILE_DIRECTORY)).unwrap();
+        initialize_project_with_profile_selector(
+            None,
+            None,
+            Some(legacy.path()),
+            false,
+            false,
+            true,
+            false,
+            || -> anyhow::Result<BuiltinProfile> {
+                panic!("a legacy migration must not invoke the picker")
+            },
+        )
+        .expect("legacy dry run should preserve its installed profile");
     }
 
     #[test]
@@ -2759,6 +4097,89 @@ mod tests {
     }
 
     #[test]
+    fn graph_resource_cli_exposes_bounded_queries_and_advisory_notes() {
+        let context = Cli::try_parse_from([
+            "koni",
+            "graph-context",
+            "TK-one",
+            "--root",
+            "/tmp/project",
+            "--anchor",
+            "objective-one",
+            "--anchor",
+            "system-one",
+            "--relation",
+            "systems",
+            "--direction",
+            "outgoing",
+            "--max-depth",
+            "2",
+            "--node-type",
+            "system",
+        ])
+        .expect("bounded graph context command should parse");
+        assert!(matches!(
+            context.command,
+            Some(Command::GraphContext {
+                ticket,
+                root,
+                anchors,
+                relations,
+                direction,
+                max_depth: 2,
+                node_types,
+            }) if ticket == "TK-one"
+                && root == Path::new("/tmp/project")
+                && anchors == ["objective-one", "system-one"]
+                && relations == ["systems"]
+                && direction == "outgoing"
+                && node_types == ["system"]
+        ));
+        assert!(
+            Cli::try_parse_from(["koni", "graph-context", "TK-one", "--direction", "sideways",])
+                .is_err()
+        );
+
+        let note = Cli::try_parse_from([
+            "koni",
+            "record-note",
+            "TK-one",
+            "--step",
+            "implement",
+            "--persona",
+            "implementer",
+            "--node-id",
+            "system-one",
+            "--kind",
+            "rationale",
+            "--body",
+            "Keep this boundary narrow.",
+            "--supersedes",
+            "NT-prior",
+        ])
+        .expect("advisory graph note command should parse");
+        assert!(matches!(
+            note.command,
+            Some(Command::RecordNote {
+                ticket,
+                step,
+                persona,
+                node_id,
+                kind,
+                body,
+                supersedes: Some(supersedes),
+                ..
+            }) if ticket == "TK-one"
+                && step == "implement"
+                && persona == "implementer"
+                && node_id == "system-one"
+                && kind == "rationale"
+                && body == "Keep this boundary narrow."
+                && supersedes == "NT-prior"
+        ));
+    }
+
+    #[test]
     fn rollback_cli_exposes_a_read_only_dry_run() {
         let cli = Cli::try_parse_from([
             "koni",
@@ -2785,6 +4206,152 @@ mod tests {
         assert!(
             Cli::try_parse_from(["koni", "rollback", "TK-target", "--dry-run"]).is_err(),
             "an operator reason remains mandatory even for preview"
+        );
+    }
+
+    #[test]
+    fn migrate_pi_cli_requires_exactly_one_explicit_mode() {
+        let dry_run =
+            Cli::try_parse_from(["koni", "migrate-pi", "--dry-run", "--root", "/tmp/project"])
+                .expect("Pi migration dry-run should parse");
+        assert!(matches!(
+            dry_run.command,
+            Some(Command::MigratePi {
+                root,
+                dry_run: true,
+                apply: false,
+            }) if root == Path::new("/tmp/project")
+        ));
+
+        let apply = Cli::try_parse_from(["koni", "migrate-pi", "--apply"])
+            .expect("Pi migration apply should parse");
+        assert!(matches!(
+            apply.command,
+            Some(Command::MigratePi {
+                dry_run: false,
+                apply: true,
+                ..
+            })
+        ));
+        assert!(Cli::try_parse_from(["koni", "migrate-pi"]).is_err());
+        assert!(Cli::try_parse_from(["koni", "migrate-pi", "--dry-run", "--apply"]).is_err());
+    }
+
+    #[test]
+    fn pi_auth_and_model_commands_expose_only_the_subscription_control_surface() {
+        for (operation, expected_json) in [("status", false), ("login", true), ("logout", false)] {
+            let mut arguments = vec!["koni", "auth", operation];
+            if expected_json {
+                arguments.push("--json");
+            }
+            let parsed = Cli::try_parse_from(arguments).expect("Pi auth command should parse");
+            assert!(matches!(
+                (&parsed.command, operation),
+                (
+                    Some(Command::Auth {
+                        command: AuthCommand::Status { json: false }
+                    }),
+                    "status"
+                ) | (
+                    Some(Command::Auth {
+                        command: AuthCommand::Login { json: true }
+                    }),
+                    "login"
+                ) | (
+                    Some(Command::Auth {
+                        command: AuthCommand::Logout { json: false }
+                    }),
+                    "logout"
+                )
+            ));
+        }
+
+        let models = Cli::try_parse_from(["koni", "models", "--json"])
+            .expect("Pi model catalog command should parse");
+        assert!(matches!(
+            models.command,
+            Some(Command::Models { json: true })
+        ));
+        assert!(
+            Cli::try_parse_from(["koni", "auth", "api-key"]).is_err(),
+            "the CLI must not grow an API-key authentication path"
+        );
+    }
+
+    #[test]
+    fn migrate_pi_dry_run_is_read_only_and_apply_uses_engine_archive_proof() {
+        let temporary = tempfile::tempdir().expect("temporary project");
+        let root = temporary.path();
+        install_profile(root, Some(BuiltinProfile::Research), None, false)
+            .expect("install bundled schema-1 profile");
+        fs::write(root.join(".codex/unrelated.txt"), "operator-owned\n")
+            .expect("write unrelated Codex file");
+        initialize_test_repository(root);
+
+        let legacy_project =
+            fs::read(root.join(".codex/koni/project.yaml")).expect("read legacy project manifest");
+        let dry_run = execute_pi_migration(root, false).expect("inspect Pi migration");
+        assert_eq!(dry_run.mode, "dry_run");
+        assert!(dry_run.run_plan.can_apply);
+        assert!(dry_run.run_plan.runs.is_empty());
+        assert!(dry_run.archive.is_none());
+        assert!(dry_run.result.is_none());
+        assert_eq!(
+            fs::read(root.join(".codex/koni/project.yaml")).unwrap(),
+            legacy_project
+        );
+        assert!(!root.join(".koni").exists());
+        assert!(!root.join(".koni-migrations").exists());
+        assert!(!root.join(".git/koni").exists());
+        assert!(
+            serde_json::to_value(&dry_run)
+                .unwrap()
+                .get("proof")
+                .is_none(),
+            "the opaque run proof must never cross the CLI serialization boundary"
+        );
+
+        let applied = execute_pi_migration(root, true).expect("apply Pi migration");
+        assert_eq!(applied.mode, "apply");
+        let archive = applied.archive.expect("Engine archive result");
+        assert!(archive.archived_runs.is_empty());
+        assert!(archive.archive_receipts.is_empty());
+        assert!(!archive.resume_allowed);
+        let result = applied.result.expect("schema-2 migration result");
+        assert_eq!(result.migration_id, applied.config_plan.migration_id);
+        assert!(root.join(".koni/project.yaml").is_file());
+        assert!(!root.join(".codex/koni").exists());
+        assert_eq!(
+            fs::read_to_string(root.join(".codex/unrelated.txt")).unwrap(),
+            "operator-owned\n"
+        );
+        assert!(root.join(&applied.config_plan.backup_root).is_dir());
+        assert!(
+            root.join(".git/koni/migrations/schema2-publication.json")
+                .is_file(),
+            "apply keeps authenticated recovery state in the compiler-owned Git sidecar"
+        );
+
+        let catalog = ProjectCatalogCompiler::compile(root)
+            .expect("the published schema-2 catalog becomes the live compiler input");
+        assert_eq!(catalog.document.schema_version, KONI_SCHEMA2_VERSION);
+        let planned = Engine::plan_run(root, None, "Verify the Pi cutover", "HEAD", None)
+            .expect("a migrated project can create a new run without Codex configuration");
+        let run_root = root.join(".git/koni/runs").join(&planned.run_id);
+        let snapshot = koni_core::state::ConfigSnapshot::load_verified(&run_root)
+            .expect("the new run has an immutable schema-2 snapshot");
+        assert!(
+            snapshot
+                .files
+                .keys()
+                .any(|path| path.starts_with(Path::new(".koni")))
+        );
+        assert!(
+            snapshot
+                .files
+                .keys()
+                .all(|path| !path.starts_with(Path::new(".codex"))),
+            "post-migration runs must not recapture Codex runtime resources"
         );
     }
 
@@ -3242,6 +4809,11 @@ mod tests {
             None,
         )
         .expect("small run should plan");
+        let pinned_policy = serde_json::to_value(planned.question_policy)
+            .expect("pinned question policy serializes")
+            .as_str()
+            .expect("question policy serializes as a string")
+            .to_owned();
         let question_path = temporary.path().join("question.json");
         fs::write(
             &question_path,
@@ -3261,9 +4833,12 @@ mod tests {
         ])
         .expect("agent ingress invocation should parse");
         let error = dispatch(cli)
-            .expect_err("interactive question must not override Small's autonomous policy")
+            .expect_err("interactive question must not override Small's pinned policy")
             .to_string();
-        assert!(error.contains("pins autonomous"), "{error}");
+        assert!(
+            error.contains(&format!("pins {pinned_policy}")),
+            "the diagnostic must report the immutable run-pinned policy: {error}"
+        );
     }
 
     #[test]
@@ -3399,15 +4974,20 @@ mod tests {
             let catalog = ProjectCatalogCompiler::compile(&target)
                 .expect("installed project catalog should compile");
             assert_eq!(catalog.document.default_run_type, "medium");
-            assert_eq!(
-                catalog
-                    .run_types
-                    .keys()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>(),
-                vec!["small", "medium", "large"]
-            );
-            assert_bundled_run_type_contract(&catalog);
+            let run_type_ids = catalog
+                .run_types
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            if expected_id == "software" {
+                assert_eq!(
+                    run_type_ids,
+                    vec!["small", "medium", "large", "new-feature", "bug-fix"]
+                );
+            } else {
+                assert_eq!(run_type_ids, vec!["small", "medium", "large"]);
+            }
+            assert_bundled_run_type_contract(&catalog, expected_id);
             assert_eq!(
                 fs::read_to_string(target.join("PRODUCT.md")).expect("product file survives"),
                 "keep me"
@@ -3420,6 +5000,108 @@ mod tests {
             let compiled = compile_staged_profile(&installed.destination)
                 .expect("published profile should still compile");
             assert_eq!(compiled.manifest.profile.id, expected_id);
+            if expected_id == "software" {
+                for (workflow_id, baseline_persona, expected_writes) in [
+                    ("red-green-implementation", "implementer", 0),
+                    ("characterization-implementation", "implementer", 0),
+                    ("current-verification-implementation", "verifier", 0),
+                ] {
+                    let implementation = compiled
+                        .workflows
+                        .get(workflow_id)
+                        .expect("software profile has every proof-strategy workflow");
+                    assert_eq!(
+                        implementation
+                            .steps
+                            .iter()
+                            .map(|step| step.id.as_str())
+                            .collect::<Vec<_>>(),
+                        ["establish-baseline", "implement", "review"],
+                        "implementation stays baseline -> compiler-proved implementation -> independent review without a transcription or duplicate verification hop"
+                    );
+                    let baseline = implementation
+                        .steps
+                        .iter()
+                        .find(|step| step.id == "establish-baseline")
+                        .expect("proof strategy has a compiler-bound baseline step");
+                    assert_eq!(baseline.persona, baseline_persona);
+                    assert_eq!(baseline.read_paths.as_ref().map(Vec::len), Some(3));
+                    assert_eq!(
+                        baseline.write_paths.as_ref().map(Vec::len),
+                        Some(expected_writes)
+                    );
+                    assert_eq!(baseline.checks, ["baseline-proof-set"]);
+                    assert_eq!(baseline.required_receipts, ["proof_baseline_set"]);
+                    let implement_step = implementation
+                        .steps
+                        .iter()
+                        .find(|step| step.id == "implement")
+                        .expect(
+                            "software implementation has a compiler-proved implementation step",
+                        );
+                    assert_eq!(
+                        implement_step.preserve_source_paths_from.as_deref(),
+                        Some("establish-baseline")
+                    );
+                    assert_eq!(implement_step.checks, ["promotion-proof-set"]);
+                    assert_eq!(implement_step.required_receipts, ["proof_set"]);
+                }
+                for (workflow_id, step_id, expected_fragment) in [
+                    (
+                        "architecture-map",
+                        "map-affected-boundary",
+                        "Smallest repository-grounded affected system",
+                    ),
+                    (
+                        "change-design",
+                        "plan-vertical-change",
+                        "Fewest one-sentence vertical change claims",
+                    ),
+                    (
+                        "decision-resolution",
+                        "validate-approved-choice",
+                        "already populated approved-seed choice",
+                    ),
+                    (
+                        "red-green-implementation",
+                        "review",
+                        "Acceptance alignment, correctness, regression",
+                    ),
+                    (
+                        "proof-execution",
+                        "review",
+                        "Independent proof relevance, oracle quality, freshness",
+                    ),
+                    (
+                        "delivery-review",
+                        "assemble-candidate",
+                        "exact-covering the objective-local active closure",
+                    ),
+                ] {
+                    let workflow = compiled
+                        .workflows
+                        .get(workflow_id)
+                        .expect("bundled software workflow");
+                    let step = workflow
+                        .steps
+                        .iter()
+                        .find(|step| step.id == step_id)
+                        .expect("bundled software workflow step");
+                    assert!(
+                        step.expected_output.contains(expected_fragment),
+                        "{workflow_id}.{step_id} must contain {expected_fragment:?}, got {:?}",
+                        step.expected_output
+                    );
+                }
+                assert!(
+                    compiled
+                        .operations
+                        .get("architecture.objective.map")
+                        .expect("bundled architecture operation")
+                        .output_contract
+                        .contains("Do not create speculative layers")
+                );
+            }
             let compile_ticket = compiled
                 .action("compile-ticket")
                 .expect("every bundled profile routes ticket compilation through configuration");
@@ -3525,7 +5207,7 @@ mod tests {
     fn idempotent_init_verifies_owned_resources_and_rejects_profile_switches() {
         let temporary = tempfile::tempdir().unwrap();
         let target = temporary.path();
-        install_profile(target, Some(BuiltinProfile::Software), None, false).unwrap();
+        install_schema2_profile(target, Some(BuiltinProfile::Software), None, false).unwrap();
         initialize_project(None, None, Some(target), false, false, false)
             .expect("complete existing installation is idempotent");
 
@@ -3547,14 +5229,77 @@ mod tests {
     }
 
     #[test]
+    fn fresh_init_publishes_schema2_and_can_plan_a_new_run() {
+        let temporary = tempfile::tempdir().unwrap();
+        let target = temporary.path();
+        initialize_project(
+            Some(BuiltinProfile::Software),
+            None,
+            Some(target),
+            false,
+            false,
+            false,
+        )
+        .expect("fresh initialization converts the bundled profile to schema 2");
+
+        assert!(target.join(".koni/project.yaml").is_file());
+        assert!(!target.join(".codex/koni").exists());
+        assert!(!target.join(".codex/agents").exists());
+        let configure_skill =
+            fs::read_to_string(target.join(".agents/skills/configure-koni/SKILL.md"))
+                .expect("fresh schema-2 installation includes configuration guidance");
+        assert!(configure_skill.contains("Prefer current schema 2 at `.koni/project.yaml`"));
+        assert!(configure_skill.contains("use `.codex/koni/project.yaml` only when no `.koni`"));
+        let operate_skill = fs::read_to_string(target.join(".agents/skills/operate-koni/SKILL.md"))
+            .expect("fresh schema-2 installation includes operation guidance");
+        assert!(operate_skill.contains("Treat current `.koni/project.yaml` as initialized"));
+        assert!(operate_skill.contains("the normal schema-2 path is `.koni/profile.yaml`"));
+        let catalog =
+            ProjectCatalogCompiler::compile(target).expect("fresh schema-2 installation compiles");
+        assert_eq!(catalog.document.schema_version, KONI_SCHEMA2_VERSION);
+        assert!(
+            catalog
+                .run_types
+                .values()
+                .all(|run_type| run_type.schema_version == KONI_SCHEMA2_VERSION)
+        );
+
+        initialize_test_repository(target);
+        let planned = Engine::plan_run(target, Some("small"), "Exercise direct Pi", "HEAD", None)
+            .expect("a fresh schema-2 project can create a new run");
+        let snapshot = koni_core::state::ConfigSnapshot::load_verified(
+            &target.join(".git/koni/runs").join(&planned.run_id),
+        )
+        .expect("fresh run snapshot remains readable");
+        assert!(snapshot.files.contains_key(Path::new(".koni/project.yaml")));
+        assert!(
+            snapshot
+                .files
+                .keys()
+                .all(|path| !path.starts_with(Path::new(".codex")))
+        );
+    }
+
+    #[test]
     fn init_dry_run_never_creates_project_resources() {
         let temporary = tempfile::tempdir().unwrap();
-        initialize_project(None, None, Some(temporary.path()), false, false, true).unwrap();
+        initialize_project(
+            Some(BuiltinProfile::Software),
+            None,
+            Some(temporary.path()),
+            false,
+            false,
+            true,
+        )
+        .unwrap();
         assert!(!temporary.path().join(".codex").exists());
         assert!(!temporary.path().join(".agents").exists());
     }
 
-    fn assert_bundled_run_type_contract(catalog: &koni_core::CompiledProjectCatalog) {
+    fn assert_bundled_run_type_contract(
+        catalog: &koni_core::CompiledProjectCatalog,
+        profile_id: &str,
+    ) {
         let expectations = [
             (
                 "small",
@@ -3562,12 +5307,6 @@ mod tests {
                 0,
                 1,
                 "autonomous",
-                "gpt-5.6-terra",
-                "high",
-                "gpt-5.6-terra",
-                "high",
-                "gpt-5.6-terra",
-                "high",
                 vec!["intake", "approval", "initialize", "orchestrate", "report"],
             ),
             (
@@ -3576,12 +5315,6 @@ mod tests {
                 1,
                 3,
                 "high_impact_only",
-                "gpt-5.6-sol",
-                "xhigh",
-                "gpt-5.6-terra",
-                "high",
-                "gpt-5.6-terra",
-                "xhigh",
                 vec![
                     "intake",
                     "combined-plan",
@@ -3598,12 +5331,6 @@ mod tests {
                 3,
                 5,
                 "interactive",
-                "gpt-5.6-sol",
-                "ultra",
-                "gpt-5.6-terra",
-                "xhigh",
-                "gpt-5.6-sol",
-                "ultra",
                 vec![
                     "intake",
                     "architecture-plan",
@@ -3618,29 +5345,97 @@ mod tests {
                 ],
             ),
         ];
-        for (
-            id,
-            title,
-            planning_passes,
-            parallelism,
-            question_policy,
-            lead_model,
-            lead_effort,
-            worker_model,
-            worker_effort,
-            reviewer_model,
-            reviewer_effort,
-            order,
-        ) in expectations
-        {
+        for (id, title, planning_passes, parallelism, question_policy, order) in expectations {
+            let (
+                planner_model,
+                planner_effort,
+                lead_model,
+                lead_effort,
+                worker_model,
+                worker_effort,
+                reviewer_model,
+                reviewer_effort,
+            ) = match (profile_id, id) {
+                ("software", "small") => (
+                    "gpt-5.6-terra",
+                    "xhigh",
+                    "gpt-5.6-terra",
+                    "high",
+                    "gpt-5.6-luna",
+                    "medium",
+                    "gpt-5.6-terra",
+                    "max",
+                ),
+                ("software", "medium") => (
+                    "gpt-5.6-sol",
+                    "max",
+                    "gpt-5.6-sol",
+                    "xhigh",
+                    "gpt-5.6-terra",
+                    "high",
+                    "gpt-5.6-sol",
+                    "max",
+                ),
+                ("software", "large") => (
+                    "gpt-5.6-sol",
+                    "ultra",
+                    "gpt-5.6-sol",
+                    "ultra",
+                    "gpt-5.6-sol",
+                    "xhigh",
+                    "gpt-5.6-sol",
+                    "ultra",
+                ),
+                ("research", "small") => (
+                    "gpt-5.6-terra",
+                    "high",
+                    "gpt-5.4-mini",
+                    "low",
+                    "gpt-5.6-terra",
+                    "high",
+                    "gpt-5.6-terra",
+                    "high",
+                ),
+                ("research", "medium") => (
+                    "gpt-5.6-sol",
+                    "xhigh",
+                    "gpt-5.4-mini",
+                    "low",
+                    "gpt-5.6-terra",
+                    "high",
+                    "gpt-5.6-terra",
+                    "xhigh",
+                ),
+                ("research", "large") => (
+                    "gpt-5.6-sol",
+                    "ultra",
+                    "gpt-5.4-mini",
+                    "low",
+                    "gpt-5.6-terra",
+                    "xhigh",
+                    "gpt-5.6-sol",
+                    "ultra",
+                ),
+                _ => panic!("unexpected bundled profile/run type {profile_id}/{id}"),
+            };
             let run_type = catalog.run_type(id).expect("bundled run type");
             assert_eq!(run_type.title, title);
+            let expected_question_policy = if profile_id == "software" && id == "small" {
+                "high_impact_only"
+            } else {
+                question_policy
+            };
             assert_eq!(
                 serde_json::to_value(run_type.questions.policy)
                     .expect("question policy serializes")
                     .as_str(),
-                Some(question_policy)
+                Some(expected_question_policy)
             );
+            let expected_planning_passes = if profile_id == "software" && id == "small" {
+                1
+            } else {
+                planning_passes
+            };
             assert_eq!(
                 run_type
                     .pipeline
@@ -3648,11 +5443,55 @@ mod tests {
                     .values()
                     .filter(|stage| stage.kind == "planning")
                     .count(),
-                planning_passes
+                expected_planning_passes
             );
-            assert_eq!(
-                run_type.pipeline.order,
-                order.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            let mut expected_order = order.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            if profile_id == "software" && id == "small" {
+                expected_order.insert(1, "focused-plan".to_owned());
+            }
+            if profile_id == "software" && id == "large" {
+                let review = expected_order
+                    .iter()
+                    .position(|stage| stage == "independent-review")
+                    .expect("large Software run has an independent review");
+                let verification = expected_order
+                    .iter()
+                    .position(|stage| stage == "verification")
+                    .expect("large Software run has a composed verification");
+                expected_order.swap(review, verification);
+            }
+            let target_sync_index = expected_order
+                .iter()
+                .position(|stage| stage == "orchestrate")
+                .expect("bundled workflow orchestrates before target sync")
+                + 1;
+            expected_order.insert(target_sync_index, "target-sync".to_owned());
+            if id == "small" {
+                expected_order.insert(target_sync_index + 1, "verification".to_owned());
+            }
+            expected_order.push("promotion".to_owned());
+            assert_eq!(run_type.pipeline.order, expected_order);
+            let boundary_positions =
+                ["target-sync", "verification", "promotion"].map(|boundary_id| {
+                    let matching = run_type
+                        .pipeline
+                        .order
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, stage)| stage.as_str() == boundary_id)
+                        .map(|(index, _)| index)
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        matching.len(),
+                        1,
+                        "{profile_id}/{id} must contain one {boundary_id}"
+                    );
+                    matching[0]
+                });
+            assert!(
+                boundary_positions[0] < boundary_positions[1]
+                    && boundary_positions[1] < boundary_positions[2],
+                "{profile_id}/{id} must order target sync before verification before promotion"
             );
             let orchestration = run_type
                 .orchestration
@@ -3660,14 +5499,17 @@ mod tests {
                 .expect("bundled orchestration policy");
             assert!(orchestration.auto_start);
             assert_eq!(orchestration.max_parallel, Some(parallelism));
-            for role in ["planner", "lead"] {
+            for (role, model, effort) in [
+                ("planner", planner_model, planner_effort),
+                ("lead", lead_model, lead_effort),
+            ] {
                 let policy = run_type
                     .agents
                     .as_ref()
                     .and_then(|agents| agents.roles.get(role))
                     .expect("bundled planning/lead policy");
-                assert_eq!(policy.model.as_deref(), Some(lead_model));
-                assert_eq!(policy.reasoning_effort.as_deref(), Some(lead_effort));
+                assert_eq!(policy.model.as_deref(), Some(model));
+                assert_eq!(policy.reasoning_effort.as_deref(), Some(effort));
             }
             for (role, model, effort) in [
                 ("ticket_worker", worker_model, worker_effort),
@@ -3680,6 +5522,132 @@ mod tests {
                     .expect("bundled role policy");
                 assert_eq!(policy.model.as_deref(), Some(model));
                 assert_eq!(policy.reasoning_effort.as_deref(), Some(effort));
+            }
+        }
+
+        if profile_id == "software" {
+            for (id, limit, reserve) in [
+                ("small", 120_000, 30_000),
+                ("medium", 240_000, 60_000),
+                ("large", 480_000, 120_000),
+            ] {
+                let budget = &catalog
+                    .run_type(id)
+                    .expect("Software complexity run type")
+                    .planning
+                    .as_ref()
+                    .expect("Software planning policy")
+                    .token_budget;
+                assert_eq!(budget.limit, limit, "{id} planning ceiling");
+                assert_eq!(budget.synthesis_reserve, reserve, "{id} synthesis reserve");
+            }
+            let medium = catalog
+                .run_type("medium")
+                .expect("Software Medium run type");
+            for (id, title, expected_intake, max_parallel, intent_marker) in [
+                (
+                    "new-feature",
+                    "New Feature",
+                    vec!["goal", "acceptance_examples", "non_goals"],
+                    3,
+                    "new_feature",
+                ),
+                (
+                    "bug-fix",
+                    "Bug Fix",
+                    vec![
+                        "goal",
+                        "expected_behavior",
+                        "observed_behavior",
+                        "reproduction_signal",
+                    ],
+                    1,
+                    "bug_fix",
+                ),
+            ] {
+                let run_type = catalog.run_type(id).expect("Software intent run type");
+                assert_eq!(run_type.title, title);
+                assert_eq!(run_type.extends.as_deref(), Some("medium"));
+                assert_eq!(run_type.ancestry, ["medium"]);
+                assert_eq!(run_type.pipeline.order, medium.pipeline.order);
+                assert_eq!(
+                    run_type
+                        .planning
+                        .as_ref()
+                        .map(|planning| &planning.token_budget),
+                    medium
+                        .planning
+                        .as_ref()
+                        .map(|planning| &planning.token_budget),
+                    "{id} inherits Medium's planning ceiling"
+                );
+                assert_eq!(
+                    run_type
+                        .planning
+                        .as_ref()
+                        .and_then(|planning| planning.graph_seed_stage.as_deref()),
+                    Some("combined-plan")
+                );
+                assert_eq!(
+                    run_type
+                        .intake
+                        .order
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                    expected_intake
+                );
+                assert!(run_type.instructions.planning.contains(intent_marker));
+                assert_eq!(
+                    run_type
+                        .orchestration
+                        .as_ref()
+                        .and_then(|policy| policy.max_parallel),
+                    Some(max_parallel)
+                );
+                if id == "bug-fix" {
+                    assert!(
+                        run_type
+                            .instructions
+                            .planning
+                            .contains("exactly one focused diagnostic proof")
+                    );
+                    assert!(
+                        run_type
+                            .instructions
+                            .planning
+                            .contains("do not speculate a repair")
+                    );
+                    assert!(
+                        !run_type
+                            .instructions
+                            .planning
+                            .contains("localization_status")
+                    );
+                    let combined_prompt = run_type
+                        .pipeline
+                        .stages
+                        .get("combined-plan")
+                        .and_then(|stage| stage.config.as_ref())
+                        .and_then(|config| config.get("prompt"))
+                        .and_then(serde_json::Value::as_str)
+                        .expect("resolved Bug Fix keeps its causal combined-plan prompt");
+                    assert!(combined_prompt.contains("exactly one focused diagnostic proof"));
+                    assert!(combined_prompt.contains("Do not seed a speculative change"));
+                    assert!(!combined_prompt.contains("localization_status"));
+                }
+                for boundary in ["target-sync", "verification", "promotion"] {
+                    assert_eq!(
+                        run_type
+                            .pipeline
+                            .order
+                            .iter()
+                            .filter(|stage| stage.as_str() == boundary)
+                            .count(),
+                        1,
+                        "{id} must inherit exactly one {boundary} stage"
+                    );
+                }
             }
         }
     }
@@ -3990,6 +5958,83 @@ run_types:
         .unwrap();
         assert!(install_profile(&real_target, None, Some(&source), false).is_err());
         assert!(!real_target.join(".codex/koni").exists());
+    }
+
+    fn write_init_project_test_profile(root: &Path) {
+        fs::create_dir_all(root).unwrap();
+        fs::write(
+            root.join("profile.yaml"),
+            r#"schema_version: "1.0"
+engine: ">=0.1,<0.2"
+profile:
+  id: init-project-test
+  version: 1.0.0
+  description: Self-contained init-project safety fixture
+initialization:
+  root_node_type: objective
+  goal_field: goal
+  root_status: active
+storage:
+  backend: tracked
+  graph_dir: program/graph
+  tickets_dir: program/tickets
+  state_path: program/state.yaml
+  work_dir: program/work
+  receipts_dir: program/receipts
+  reports_dir: program/reports
+git:
+  enabled: true
+  integration_branch: current
+imports:
+  graph: [graph.yaml]
+"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("graph.yaml"),
+            r#"schema_version: "1.0"
+node_types:
+  - id: objective
+    description: Root objective for the init-project safety fixture.
+    stage: framing
+    required_any: [[goal]]
+    statuses: [active]
+    semantic_fields: [goal]
+    fields:
+      goal: {type: string, required: true}
+"#,
+        )
+        .unwrap();
+    }
+
+    fn snapshot_test_tree(root: &Path) -> Vec<(PathBuf, &'static str, Vec<u8>)> {
+        let mut snapshot = WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .map(|entry| {
+                let entry = entry.expect("snapshot entry");
+                let path = entry.path();
+                let relative = path.strip_prefix(root).unwrap().to_path_buf();
+                let file_type = entry.file_type();
+                if file_type.is_file() {
+                    (relative, "file", fs::read(path).expect("snapshot file"))
+                } else if file_type.is_symlink() {
+                    (
+                        relative,
+                        "symlink",
+                        fs::read_link(path)
+                            .expect("snapshot symlink")
+                            .to_string_lossy()
+                            .into_owned()
+                            .into_bytes(),
+                    )
+                } else {
+                    (relative, "directory", Vec::new())
+                }
+            })
+            .collect::<Vec<_>>();
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0));
+        snapshot
     }
 
     fn assert_no_install_scratch(codex_dir: &Path) {

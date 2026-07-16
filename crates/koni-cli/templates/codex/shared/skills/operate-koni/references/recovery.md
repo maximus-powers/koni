@@ -16,6 +16,12 @@ Recover from the narrowest durable boundary. Inspect evidence first and never er
 | Run may be removed | Preview first with `koni delete-run <run-id> --root . --preview` |
 | Semantic change must be reversed | Use the configured forward-reversal action with an exact target and nonempty reason; do not rewrite history |
 
+> **Recovery/retry clarification — 2026-07-15.** Recovery repairs ticket, journal, and runtime
+> state; it never silently retries a terminal supervised stage. When its JSON result reports
+> `recovery_advisory.retry_required: true`, invoke the named `action` for the reported `stage_id`
+> (or run the included command). This second explicit boundary revalidates recovery and the pinned
+> stage input before dispatch resumes.
+
 ## Validate the diagnosis
 
 Check:

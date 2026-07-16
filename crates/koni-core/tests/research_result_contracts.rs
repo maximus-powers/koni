@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use koni_core::ProfileCompiler;
-use koni_core::config::CheckDef;
+use koni_core::config::{CheckDef, ComposedReplayPolicy, ProcessEffect, ReceiptFreshness};
 use koni_core::process::{
     CommandRunner, CommandSpec, CommandStatus, EnvironmentPolicy, ResultProtocol,
 };
@@ -47,6 +47,7 @@ fn research_result_schemas_reject_malformed_typed_results() -> Result<(), Box<dy
     let profile = ProfileCompiler::compile(&profile_root())?;
     let gate = &profile.checks["gate-verifier"];
     let scientific = &profile.checks["scientific-runtime"];
+    let integrity = &profile.checks["scientific-result-integrity"];
     let temp = TempDir::new()?;
     let runner = CommandRunner::new(temp.path().to_path_buf());
 
@@ -58,6 +59,36 @@ fn research_result_schemas_reject_malformed_typed_results() -> Result<(), Box<dy
     assert_eq!(gate_acceptance.field, "verdict");
     assert_eq!(&gate_acceptance.values, &vec![json!("passed")]);
     assert!(gate.allow_nonpassing_receipt);
+    assert_eq!(gate.composed_replay, ComposedReplayPolicy::Required);
+    assert_eq!(gate.effect, ProcessEffect::ReadOnly);
+    assert_eq!(scientific.receipt_freshness, ReceiptFreshness::Current);
+    assert_eq!(scientific.composed_replay, ComposedReplayPolicy::Never);
+    assert_eq!(scientific.effect, ProcessEffect::WorkspaceWrite);
+    assert_eq!(integrity.composed_replay, ComposedReplayPolicy::Required);
+    assert_eq!(integrity.effect, ProcessEffect::ReadOnly);
+    assert_eq!(integrity.receipt_type, "runtime.integrity-receipt");
+    assert_eq!(
+        integrity
+            .command_source
+            .as_ref()
+            .map(|source| source.field.as_str()),
+        Some("runtime_contract.composed_verification_command")
+    );
+    let experiment_run_step = profile.workflows["run-experiment-runtime"]
+        .steps
+        .iter()
+        .find(|step| step.id == "run")
+        .expect("experiment runtime step");
+    assert_eq!(
+        experiment_run_step.checks,
+        ["scientific-runtime", "scientific-result-integrity"]
+    );
+    let gate_run_step = profile.workflows["run-gate-runtime"]
+        .steps
+        .iter()
+        .find(|step| step.id == "run")
+        .expect("gate runtime step");
+    assert_eq!(gate_run_step.checks, ["gate-verifier"]);
 
     assert_eq!(
         run_result(
@@ -174,6 +205,52 @@ fn installed_research_checks_byte_match_the_source_profile() -> Result<(), Box<d
     let installed = repository.join("crates/koni-cli/templates/research/checks/research.yaml");
 
     assert_eq!(fs::read(source)?, fs::read(installed)?);
+    Ok(())
+}
+
+#[test]
+fn research_context_action_includes_every_living_spec_layer() -> Result<(), Box<dyn Error>> {
+    let repository = repository_root();
+    let source = repository.join("profiles/research/actions/research.yaml");
+    let installed = repository.join("crates/koni-cli/templates/research/actions/research.yaml");
+    let source_bytes = fs::read(source)?;
+    let installed_bytes = fs::read(installed)?;
+
+    assert_eq!(source_bytes, installed_bytes);
+    let document: serde_yaml::Value = serde_yaml::from_slice(&source_bytes)?;
+    let context = document["actions"]
+        .as_sequence()
+        .expect("research actions are a sequence")
+        .iter()
+        .find(|action| action["id"].as_str() == Some("context"))
+        .expect("research profile declares the context action");
+    let context_compile = context["recipe"]
+        .as_sequence()
+        .expect("context action recipe is a sequence")
+        .iter()
+        .find(|step| step["primitive"].as_str() == Some("context.compile"))
+        .expect("context action compiles one context pack");
+    let included = context_compile["include"]
+        .as_sequence()
+        .expect("research context declares its included sections")
+        .iter()
+        .map(|section| section.as_str().expect("context section is a string"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        included,
+        vec![
+            "graph_closure",
+            "spec_slice",
+            "intent_updates",
+            "working_memory",
+            "ticket",
+            "contracts",
+            "outputs",
+            "review",
+            "steering",
+        ]
+    );
     Ok(())
 }
 

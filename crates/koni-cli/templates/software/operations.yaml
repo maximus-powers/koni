@@ -1,7 +1,14 @@
 schema_version: "1.0"
-module: {id: software.operations, version: 0.1.0}
+module: {id: software.operations, version: 0.6.0}
 
 operations:
+  - id: initialization.objective.seed-approved-plan
+    operation: seed-approved-plan
+    stage: initialization
+    target_types: [objective]
+    allowed_new_node_types: [system, interface, data_model, contract, flow, defect, decision, change, migration, risk, proof]
+    allowed_existing_node_types: [objective]
+    max_new_nodes: 64
   - id: architecture.objective.map
     operation: map-architecture
     stage: architecture
@@ -9,88 +16,575 @@ operations:
     workflow: architecture-map
     allowed_new_node_types: [system, interface, data_model, contract, flow]
     allowed_existing_node_types: [objective]
-    review_contract: Architecture map is grounded in repository paths, boundaries, and end-to-end flows.
-    output_contract: Systems, interfaces, data models, contracts, and flows linked to the objective.
+    existing_node_edge_additions_only: {objective: [systems, contracts, flows]}
+    max_new_nodes: 12
+    review_contract: >-
+      Model only the smallest affected repository-native boundary. Exact paths, ownership, and material interfaces are grounded in current repository evidence; contracts and flows appear only when they change compatibility, behavior, proof, or another slice.
+    output_contract: >-
+      Add at least one system linked from objective.systems with exact owned_paths, contract_required, and contract_reason. Store reciprocal architecture facts only in canonical directions: interface.produced_by, data_model.owned_by, contract.applies_to, and flow.participants. Do not create speculative layers, generic future platforms, decisions, implementation work, or assurance ceremony.
     ranking_hints: [phase, objective-id]
   - id: contracts.system.specify
     operation: specify-contracts
     stage: contracts
     target_types: [system]
     workflow: contract-design
-    allowed_new_node_types: [interface, data_model, contract, flow, decision]
-    allowed_existing_node_types: [system]
-    review_contract: Contracts name enforcement points, failure meanings, compatibility, and owners.
-    output_contract: Explicit interface/data/behavioral contracts and any unresolved decisions.
+    allowed_new_node_types: [interface, data_model, contract, flow]
+    allowed_existing_node_types: [contract]
+    max_new_nodes: 8
+    review_contract: >-
+      Each material contract states observable behavior, enforcement point, failure meaning, compatibility consequences, and the exact affected boundary without restating implementation steps.
+    output_contract: >-
+      Add the fewest active contracts needed by this explicitly contract-requiring system and link each through canonical contract.applies_to. Add an interface, data model, or flow only when the contract cannot be understood or proved without it. Do not create a decision or mutate existing repository facts.
     ranking_hints: [phase, system-id]
+  - id: design.objective.ground-defect
+    operation: ground-defect
+    stage: design
+    target_types: [objective]
+    workflow: defect-grounding
+    allowed_new_node_types: [defect, proof]
+    allowed_existing_node_types: [defect]
+    max_new_nodes: 8
+    review_contract: >-
+      Every active defect has one repository-grounded focused diagnostic proof before causal diagnosis; each diagnostic oracle binds its condition and claim to the real production seam and exact covered seam paths. Every independently prepared diagnostic proof owns a physical source file disjoint from all other diagnostic, risk-boundary, and focused implementation proof sources; named tests in one file are not separate authority. A Bug Fix with no defect gains one honest unresolved defect, while objectives with no active defect otherwise pay no ceremony.
+    output_contract: >-
+      When a Bug Fix has no active defect, add one unresolved defect with expected behavior, observed behavior, exact reproduction signal, and canonical concerns/manifests links. For each active defect with no diagnostic seam, add at most one focused proof that verifies exactly that defect and no change, migration, or risk. Populate the proof's sole command/evidence fields, honest baseline_check_id, and one or more structured oracle_cases. Give each independently lifecycle-managed diagnostic proof its own physical source file, disjoint by equality and containment from every other diagnostic, risk-boundary, and focused implementation proof source. Different named tests or describe blocks in one file do not satisfy this boundary; cases intentionally sharing a file and lifecycle belong to one proof node. Every case binds condition and claim to the callable production seam or real consumer, exact seam_paths, action, assertions, and material environment/recipe; every seam_path resolves to the same normalized project-relative path identity present in covered_paths. Do not infer other paths from a linked system's owned_paths. Create no change, migration, risk, decision, contract, or product-file delta. If a defect instead has multiple active diagnostic proofs, make no graph mutation: report the exact conflicting proof IDs and request an explicit human-authorized oracle selection or semantic replan, because this operation cannot silently choose, delete, or supersede evidence. Preserve already grounded defects and never speculate about root cause.
+    ranking_hints: [phase, objective-id, defect-id]
   - id: design.objective.plan-change
     operation: plan-change
     stage: design
     target_types: [objective]
     workflow: change-design
-    allowed_new_node_types: [change, migration, risk, proof, decision]
-    allowed_existing_node_types: [objective, system, interface, data_model, contract, flow]
-    review_contract: Every delta has ownership, blast radius, dependencies, risks, and proof obligations.
-    output_contract: Bounded current-to-target change plan with migrations, risks, and proof nodes.
+    allowed_new_node_types: [change, migration, risk, proof]
+    allowed_existing_node_types: [objective, change, risk]
+    max_new_nodes: 16
+    review_contract: >-
+      The objective has an explicit work kind, every active defect is already diagnosed, and the fewest cohesive vertical change claims exact-cover those defects. Each change has exact scope, an honest proof strategy, risk tier and factors, a well-scoped focused proof, risk-triggered boundary proof, and structurally valid treatment intent. Every independently lifecycle-managed proof has physically disjoint source authority: focused implementation sources cannot share a file or directory boundary with diagnostic or risk-boundary sources, and every preparation-eligible diagnostic, risk-boundary, red-green, or characterization proof is pairwise source-disjoint. Every proof case names the production seam it invokes and includes each exact seam path in read-only covered_paths before implementation can dispatch.
+    output_contract: >-
+      Classify objective.work_kind without changing its approved outcome. Add or complete one-sentence change.approval_claim slices rather than file or layer tasks, and exact-cover every active diagnosed defect with same-objective change.addresses edges. Give every change or migration at least one primary focused proof and add another only for a distinct remaining evidence gap; every focused proof scopes to exactly one implementation subject. Command, baseline_check_id, source_paths, covered_paths, oracle_cases, working_directory, layer, conditions, expected signal, why, and proof limits are the sole executable and evidence authority, while proof_strategy only selects the workflow. Assign a distinct physical source file to every independently authored or prepared proof: diagnostic, risk-boundary, red-green, and characterization proofs are pairwise source-disjoint, and every focused implementation proof is source-disjoint from the diagnostic/risk sets. Named tests or describe blocks within one file remain one compiler authority boundary; if cases intentionally share that file and lifecycle, model one proof node instead of independent proofs. Every oracle case binds a condition and claim to the callable production seam or real consumer, exact seam_paths, action, assertions, and material environment/recipe; every seam_path resolves to the same normalized project-relative path identity present in covered_paths, and no linked system owned_path becomes proof capability by implication. Include every repository-local executable or script named by proof.command in proof.source_paths so its bytes join the causal manifest; external PATH tools need not appear there. A red_green subject requires at least one focused proof selecting proof-expected-red, while supplementary preservation/compatibility proof may honestly select proof-current-baseline; characterization and current_verification focused proofs select proof-current-baseline. Red-green and characterization proof sources must be independently prepared and reviewed before product implementation; current_verification remains read-only and does not create a preparation-authoring ticket. Elevated or critical work introduces an explicit risk whose distinct boundary proof verifies risk rather than change; critical work also has a concrete recovery plan and requires an already accepted review_authority decision. A mitigation risk names an eligible same-objective change or directly required migration. Risk acceptance may only use an already accepted risk_acceptance decision that already concerns that risk. This operation cannot create decisions or defects. If an existing proof has a stale strategy or illegal change/risk topology, stop and request an explicit human-authorized semantic replan; ordinary planning must not silently rewrite historical proof authority. Use only canonical edges.
     ranking_hints: [phase, objective-id]
+  - id: design.defect.diagnose
+    operation: diagnose-defect
+    stage: design
+    target_types: [defect, proof]
+    workflow: defect-diagnosis
+    allowed_existing_node_types: [defect]
+    max_new_nodes: 0
+    review_contract: >-
+      The prepared diagnostic proof and historical baseline support the first invalid state and causal boundary; diagnosis distinguishes evidence from hypothesis and rules out credible competing causes without expanding into unrelated cleanup.
+    output_contract: >-
+      Preserve expected_behavior, observed_behavior, reproduction_signal, and the diagnostic proof. Add a concrete root_cause, ordered causal_chain, and nonempty ruled_out_alternatives without changing product or proof-source files. If safe localization remains impossible, stop with the exact missing evidence instead of inventing certainty. Only a passing independent review compiler-stamps the defect diagnosed.
+    ranking_hints: [phase, defect-id]
+    review_effects:
+      - id: accept-diagnosed-defect
+        verdict: passed
+        select: {node_types: [defect], predicate: {field: status, op: equals, value: unresolved}}
+        count: {exact: 1}
+        preconditions:
+          - {field: spec.root_cause, op: non_empty}
+          - {field: spec.causal_chain, op: non_empty}
+          - {field: spec.ruled_out_alternatives, op: non_empty}
+        set: {status: diagnosed}
+  - id: assurance.proof.prepare
+    operation: prepare-proof
+    stage: assurance
+    target_types: [proof, contract, flow, defect, risk]
+    workflow: proof-preparation
+    allowed_existing_node_types: [proof]
+    max_new_nodes: 0
+    checks: [baseline-proof-set]
+    proof_source_preparation_check: baseline-proof-set
+    review_contract: >-
+      The diagnostic, risk-boundary, red-green, or characterization source seam is minimal, executable, semantically relevant, physically source-disjoint from every independently lifecycle-managed proof, and produces the exact honest historical result selected by baseline_check_id without production edits or oracle weakening. Named tests in one shared file are one authority boundary, not independently preparable sources. Every structured oracle case invokes its named production seam, and every exact seam path is explicit read-only covered_paths rather than inferred from a linked system. Current-verification uses an already-existing read-only proof and does not enter this source-authoring operation.
+    output_contract: >-
+      Author or refine only the compiler-pinned proof.source_paths, execute the exact graph-selected historical baseline after output, and independently review every oracle_cases entry against its condition, claim, production_seam, seam_paths, action, assertions, and material environment/recipe. For a focused red-green or characterization implementation proof, this review must complete before the linked change or migration receives product-write authority. Do not modify covered product paths or semantic graph state. Passing review compiler-stamps prepared and establishes the compiler-bound source-only preparation identity; later command, subject, oracle, source-manifest, or review-input drift reopens this operation, while covered product changes do not. Current prepared source is immutable to overlapping production authority; only an exact compiler-proven re-preparation projection may write it.
+    ranking_hints: [phase, proof-purpose, proof-id]
+    review_effects:
+      - id: accept-prepared-proof
+        verdict: passed
+        select: {node_types: [proof]}
+        count: {exact: 1}
+        preconditions:
+          - {field: spec.command, op: non_empty}
+          - {field: spec.source_paths, op: non_empty}
+          - {field: spec.covered_paths, op: non_empty}
+          - {field: spec.oracle_cases, op: non_empty}
+          - {field: spec.working_directory, op: non_empty}
+          - {field: spec.conditions, op: non_empty}
+          - {field: spec.expected_signal, op: non_empty}
+          - {field: spec.why, op: non_empty}
+        set: {status: prepared}
+  - id: assurance.risk.plan-treatment
+    operation: plan-risk-treatment
+    stage: assurance
+    target_types: [risk]
+    workflow: risk-treatment
+    allowed_new_node_types: [proof]
+    allowed_existing_node_types: [risk]
+    max_new_nodes: 1
+    allow_edge_deletion: true
+    review_contract: >-
+      Repair only the selected risk's contradictory treatment edges or missing boundary proof. A new boundary proof must bind each risk condition to a real production or composed-system seam with exact covered seam paths and own a physical source file disjoint from every diagnostic, other risk-boundary, and focused implementation proof source. Missing product/control scope belongs upstream, and residual exposure cannot be accepted by model consensus.
+    output_contract: >-
+      For treatment mitigate, retain only eligible objective-local change or directly required migration controls, remove acceptance edges, and add at most one boundary-purpose proof when absent. Any new proof must include complete oracle_cases and use its own physical source file, disjoint by equality and containment from all independently lifecycle-managed proof sources; named tests in one file are not separate authority. Every exact seam_path is also explicit read-only covered_paths and no system owned_path is inherited by implication. For treatment accept, remove mitigation edges and link exactly one already seeded decision that already concerns this risk; never create or repurpose a decision. Preserve scenario, impact, likelihood, detection, rationale, and residual exposure. Do not broaden the objective or modify product paths.
+    ranking_hints: [phase, risk-id]
   - id: design.decision.resolve
     operation: resolve-decision
     stage: design
     target_types: [decision]
     workflow: decision-resolution
     allowed_existing_node_types: [decision]
-    review_contract: Choice is explicit, alternatives are represented, and rationale/reversibility are recorded.
-    output_contract: Accepted or rejected decision with rationale.
+    max_new_nodes: 0
+    review_contract: >-
+      Validate the already approved seed choice, rationale, and reversibility against its represented options and concerns; do not author or change the choice after approval.
+    output_contract: >-
+      Produce no graph delta. A passing independent review compiler-stamps the existing complete decision accepted; missing or newly proposed acceptance must fail closed for human change control.
+    review_effects:
+      - id: accept-decision
+        verdict: passed
+        select: {node_types: [decision], predicate: {field: status, op: equals, value: open}}
+        count: {exact: 1}
+        preconditions:
+          - {field: spec.kind, op: non_empty}
+          - {field: spec.choice, op: non_empty}
+          - {field: spec.rationale, op: non_empty}
+          - {field: spec.reversibility, op: non_empty}
+        set: {status: accepted}
     ranking_hints: [phase, decision-id]
     single_flight_group: architecture-decisions
-  - id: implementation.change.apply
+  - id: implementation.change.red-green
     operation: implement-change
     stage: implementation
-    target_types: [change]
-    workflow: bounded-implementation
-    allowed_existing_node_types: [change]
-    review_contract: Patch stays inside owned paths and preserves declared contracts.
-    output_contract: Tested implementation patch plus structured outputs and receipts.
-    ranking_hints: [phase, dependency-depth, change-id]
-    checks: [focused-test, package-typecheck]
-  - id: implementation.migration.apply
+    target_types: [change, proof]
+    workflow: red-green-implementation
+    allowed_existing_node_types: [change, proof]
+    max_new_nodes: 0
+    review_contract: >-
+      At least one configured focused baseline fails for the intended missing behavior without production edits or source weakening; any supplementary current baseline covers a distinct preservation or compatibility gap. The smallest cohesive patch stays in scope, the compiler-owned current focused proof set passes immediately after the implementation output, and one independent review judges the observable approval claim plus exactly the pinned focused proof candidates rather than merely green commands.
+    output_contract: Expected-red composite receipt, byte-preserved focused proof sources, scoped production patch, compiler-owned current promotion-proof-set receipt from the implementation boundary, semantic readback, and explicit remaining proof limits. A passing review compiler-stamps the change implemented and its exact linked focused proofs passing; risk-boundary proofs remain separate until their terminal closure.
+    ranking_hints: [phase, proof-strategy, dependency-depth, change-id]
+    checks: [baseline-proof-set, promotion-proof-set]
+    review_effects:
+      - id: accept-implemented-change
+        verdict: passed
+        select: {node_types: [change], predicate: {field: status, op: equals, value: planned}}
+        count: {exact: 1}
+        preconditions:
+          - {field: spec.approval_claim, op: non_empty}
+          - {field: spec.proof_strategy, op: equals, value: red_green}
+        set: {status: implemented}
+      - id: accept-linked-passing-proofs
+        verdict: passed
+        select: {node_types: [proof]}
+        count: {min: 1}
+        preconditions:
+          - {field: spec.purpose, op: equals, value: focused}
+          - {field: spec.command, op: non_empty}
+          - {field: spec.source_paths, op: non_empty}
+          - {field: spec.covered_paths, op: non_empty}
+          - {field: spec.oracle_cases, op: non_empty}
+          - {field: spec.working_directory, op: non_empty}
+          - {field: spec.conditions, op: non_empty}
+          - {field: spec.expected_signal, op: non_empty}
+          - {field: spec.why, op: non_empty}
+        set: {status: passing}
+  - id: implementation.change.characterize
+    operation: implement-change
+    stage: implementation
+    target_types: [change, proof]
+    workflow: characterization-implementation
+    allowed_existing_node_types: [change, proof]
+    max_new_nodes: 0
+    review_contract: >-
+      The configured focused proof honestly characterizes relevant existing behavior before production edits, its source stays byte-identical, the smallest scoped change preserves that behavior with compiler-owned current promotion proof at the implementation boundary, and one independent review judges exactly the pinned change and focused proof candidates.
+    output_contract: Passing characterization composite baseline, byte-preserved focused proof sources, scoped production patch, current promotion-proof-set receipt, and explicit proof limits. A passing review compiler-stamps the change implemented and its exact linked focused proofs passing; risk-boundary proofs remain separate until their terminal closure.
+    ranking_hints: [phase, proof-strategy, dependency-depth, change-id]
+    checks: [baseline-proof-set, promotion-proof-set]
+    review_effects:
+      - id: accept-implemented-change
+        verdict: passed
+        select: {node_types: [change], predicate: {field: status, op: equals, value: planned}}
+        count: {exact: 1}
+        preconditions:
+          - {field: spec.approval_claim, op: non_empty}
+          - {field: spec.proof_strategy, op: equals, value: characterization}
+        set: {status: implemented}
+      - id: accept-linked-passing-proofs
+        verdict: passed
+        select: {node_types: [proof]}
+        count: {min: 1}
+        preconditions:
+          - {field: spec.purpose, op: equals, value: focused}
+          - {field: spec.command, op: non_empty}
+          - {field: spec.source_paths, op: non_empty}
+          - {field: spec.covered_paths, op: non_empty}
+          - {field: spec.oracle_cases, op: non_empty}
+          - {field: spec.working_directory, op: non_empty}
+          - {field: spec.conditions, op: non_empty}
+          - {field: spec.expected_signal, op: non_empty}
+          - {field: spec.why, op: non_empty}
+        set: {status: passing}
+  - id: implementation.change.verify-current
+    operation: implement-change
+    stage: implementation
+    target_types: [change, proof]
+    workflow: current-verification-implementation
+    allowed_existing_node_types: [change, proof]
+    max_new_nodes: 0
+    review_contract: >-
+      Every configured focused proof already exercises the bounded outcome before edits, proof sources stay byte-identical, the smallest scoped change retains compiler-owned current promotion evidence without test theater, and one independent review judges exactly the pinned change and focused proof candidates.
+    output_contract: Passing current composite baseline, byte-preserved focused proof sources, scoped production patch, current promotion-proof-set receipt, and explicit proof limits. A passing review compiler-stamps the change implemented and its exact linked focused proofs passing; risk-boundary proofs remain separate until their terminal closure.
+    ranking_hints: [phase, proof-strategy, dependency-depth, change-id]
+    checks: [baseline-proof-set, promotion-proof-set]
+    review_effects:
+      - id: accept-implemented-change
+        verdict: passed
+        select: {node_types: [change], predicate: {field: status, op: equals, value: planned}}
+        count: {exact: 1}
+        preconditions:
+          - {field: spec.approval_claim, op: non_empty}
+          - {field: spec.proof_strategy, op: equals, value: current_verification}
+        set: {status: implemented}
+      - id: accept-linked-passing-proofs
+        verdict: passed
+        select: {node_types: [proof]}
+        count: {min: 1}
+        preconditions:
+          - {field: spec.purpose, op: equals, value: focused}
+          - {field: spec.command, op: non_empty}
+          - {field: spec.source_paths, op: non_empty}
+          - {field: spec.covered_paths, op: non_empty}
+          - {field: spec.oracle_cases, op: non_empty}
+          - {field: spec.working_directory, op: non_empty}
+          - {field: spec.conditions, op: non_empty}
+          - {field: spec.expected_signal, op: non_empty}
+          - {field: spec.why, op: non_empty}
+        set: {status: passing}
+  - id: implementation.migration.red-green
     operation: implement-migration
     stage: implementation
-    target_types: [migration]
-    workflow: bounded-implementation
-    allowed_existing_node_types: [migration]
-    review_contract: Forward, compatibility, data-safety, and rollback paths are implemented.
-    output_contract: Migration payload with rollback and compatibility receipts.
-    ranking_hints: [phase, migration-id]
-    checks: [focused-test, package-typecheck]
+    target_types: [migration, proof]
+    workflow: red-green-implementation
+    allowed_existing_node_types: [migration, proof]
+    max_new_nodes: 0
+    review_contract: Forward, compatibility, data-safety, and rollback behavior is implemented from an honest focused baseline through compiler-owned current promotion proof without weakening proof sources; one independent review judges exactly the pinned migration and focused proof candidates.
+    output_contract: Migration payload with expected-red, current compatibility, focused source-preservation, data-safety, and rollback evidence. A passing review compiler-stamps the migration complete and its exact linked focused proofs passing.
+    ranking_hints: [phase, proof-strategy, migration-id]
+    checks: [baseline-proof-set, promotion-proof-set]
     single_flight_group: migrations
+    review_effects:
+      - id: accept-completed-migration
+        verdict: passed
+        select: {node_types: [migration], predicate: {field: status, op: equals, value: planned}}
+        count: {exact: 1}
+        preconditions:
+          - {field: spec.proof_strategy, op: equals, value: red_green}
+          - {field: spec.rollback_plan, op: non_empty}
+        set: {status: complete}
+      - id: accept-linked-passing-proofs
+        verdict: passed
+        select: {node_types: [proof]}
+        count: {min: 1}
+        preconditions:
+          - {field: spec.purpose, op: equals, value: focused}
+          - {field: spec.command, op: non_empty}
+          - {field: spec.source_paths, op: non_empty}
+          - {field: spec.covered_paths, op: non_empty}
+          - {field: spec.oracle_cases, op: non_empty}
+          - {field: spec.working_directory, op: non_empty}
+          - {field: spec.conditions, op: non_empty}
+          - {field: spec.expected_signal, op: non_empty}
+          - {field: spec.why, op: non_empty}
+        set: {status: passing}
+  - id: implementation.migration.characterize
+    operation: implement-migration
+    stage: implementation
+    target_types: [migration, proof]
+    workflow: characterization-implementation
+    allowed_existing_node_types: [migration, proof]
+    max_new_nodes: 0
+    review_contract: Relevant existing compatibility is honestly characterized and source-preserved before the scoped forward, safety, and rollback transition is compiler-proved current; one independent review judges exactly the pinned migration and focused proof candidates.
+    output_contract: Migration payload with characterization baseline, current compatibility, focused source-preservation, data-safety, and rollback evidence. A passing review compiler-stamps the migration complete and its exact linked focused proofs passing.
+    ranking_hints: [phase, proof-strategy, migration-id]
+    checks: [baseline-proof-set, promotion-proof-set]
+    single_flight_group: migrations
+    review_effects:
+      - id: accept-completed-migration
+        verdict: passed
+        select: {node_types: [migration], predicate: {field: status, op: equals, value: planned}}
+        count: {exact: 1}
+        preconditions:
+          - {field: spec.proof_strategy, op: equals, value: characterization}
+          - {field: spec.rollback_plan, op: non_empty}
+        set: {status: complete}
+      - id: accept-linked-passing-proofs
+        verdict: passed
+        select: {node_types: [proof]}
+        count: {min: 1}
+        preconditions:
+          - {field: spec.purpose, op: equals, value: focused}
+          - {field: spec.command, op: non_empty}
+          - {field: spec.source_paths, op: non_empty}
+          - {field: spec.covered_paths, op: non_empty}
+          - {field: spec.oracle_cases, op: non_empty}
+          - {field: spec.working_directory, op: non_empty}
+          - {field: spec.conditions, op: non_empty}
+          - {field: spec.expected_signal, op: non_empty}
+          - {field: spec.why, op: non_empty}
+        set: {status: passing}
+  - id: implementation.migration.verify-current
+    operation: implement-migration
+    stage: implementation
+    target_types: [migration, proof]
+    workflow: current-verification-implementation
+    allowed_existing_node_types: [migration, proof]
+    max_new_nodes: 0
+    review_contract: Existing focused compatibility proof is sufficient before edits, proof sources stay unchanged, the scoped forward, safety, and rollback transition remains compiler-proved current, and one independent review judges exactly the pinned migration and focused proof candidates.
+    output_contract: Migration payload with current baseline, promotion proof, focused source-preservation, data-safety, and rollback evidence. A passing review compiler-stamps the migration complete and its exact linked focused proofs passing.
+    ranking_hints: [phase, proof-strategy, migration-id]
+    checks: [baseline-proof-set, promotion-proof-set]
+    single_flight_group: migrations
+    review_effects:
+      - id: accept-completed-migration
+        verdict: passed
+        select: {node_types: [migration], predicate: {field: status, op: equals, value: planned}}
+        count: {exact: 1}
+        preconditions:
+          - {field: spec.proof_strategy, op: equals, value: current_verification}
+          - {field: spec.rollback_plan, op: non_empty}
+        set: {status: complete}
+      - id: accept-linked-passing-proofs
+        verdict: passed
+        select: {node_types: [proof]}
+        count: {min: 1}
+        preconditions:
+          - {field: spec.purpose, op: equals, value: focused}
+          - {field: spec.command, op: non_empty}
+          - {field: spec.source_paths, op: non_empty}
+          - {field: spec.covered_paths, op: non_empty}
+          - {field: spec.oracle_cases, op: non_empty}
+          - {field: spec.working_directory, op: non_empty}
+          - {field: spec.conditions, op: non_empty}
+          - {field: spec.expected_signal, op: non_empty}
+          - {field: spec.why, op: non_empty}
+        set: {status: passing}
   - id: assurance.proof.establish
     operation: establish-proof
     stage: assurance
-    target_types: [proof]
+    target_types: [proof, contract, flow, defect, change, migration, risk]
     workflow: proof-execution
     allowed_existing_node_types: [proof]
-    review_contract: Receipt exercises the declared contract/flow/risk and is fresh for current inputs.
-    output_contract: Typed command or agent-smoke receipt and evidence artifacts.
+    max_new_nodes: 0
+    review_contract: >-
+      The compiler-selected promotion member exercises the declared conditions and expected signal at the cheapest trustworthy seam, the receipt is current for exact command/member/input bindings, every repository-local executable or script named by the command is included in source_paths, and the semantic claim does not exceed not_proven.
+    output_contract: Produce no model-authored graph delta; for a standalone, legacy, stale, or recovery proof execute the exact promotion set, confirm repository-local command executables and scripts are part of the causal proof-source manifest while external PATH tools remain external, and independently review exactly the targeted proof before the compiler marks it passing. Routine linked proof acceptance belongs to the implementation review.
     ranking_hints: [phase, proof-id]
-  - id: assurance.integration.assess
-    operation: assess-integration
-    stage: assurance
-    target_types: [objective, change]
-    workflow: integration-assessment
-    allowed_new_node_types: [risk, proof, change]
-    allowed_existing_node_types: [objective, change, risk, proof]
-    review_contract: Cross-change interactions, likely regressions, and remaining proof gaps are explicit.
-    output_contract: Integration findings, remediation deltas, and proof coverage.
-    ranking_hints: [phase, objective-id]
+    checks: [promotion-proof-set]
+    review_effects:
+      - id: accept-passing-proof
+        verdict: passed
+        select: {node_types: [proof]}
+        count: {exact: 1}
+        preconditions:
+          - {field: spec.command, op: non_empty}
+          - {field: spec.source_paths, op: non_empty}
+          - {field: spec.covered_paths, op: non_empty}
+          - {field: spec.oracle_cases, op: non_empty}
+          - {field: spec.working_directory, op: non_empty}
+          - {field: spec.conditions, op: non_empty}
+          - {field: spec.expected_signal, op: non_empty}
+          - {field: spec.why, op: non_empty}
+        set: {status: passing}
   - id: delivery.objective.prepare
     operation: prepare-delivery
     stage: delivery
     target_types: [objective]
     workflow: delivery-review
     allowed_new_node_types: [delivery]
-    allowed_existing_node_types: [objective, change, migration, proof, risk, decision]
-    review_contract: All included changes are reviewed, proofs current, and unresolved risks visible.
-    output_contract: PR-ready delivery node and one reviewed integration commit per ticket.
+    allowed_existing_node_types: [delivery]
+    max_new_nodes: 1
+    allow_edge_deletion: true
+    review_contract: >-
+      Candidate exact-covers the objective-local active closure, every promotion proof is currently passing, all prerequisites and mitigation controls are terminal, every introduced risk is structurally dispositioned and acknowledged, and no post-sync or promotion claim is made.
+    output_contract: >-
+      Add one assembling delivery when none exists, or revise the one stale candidate delivery after its exact reviewed closure changes; never create a second delivery for the objective. It fulfills exactly this objective, includes exactly the active implemented changes, their active proofs, direct accepted decisions and complete migrations plus migration proofs, active addressed defects plus their proofs, accepted risk decisions, eligible terminal mitigation controls, and active risk/control proofs. It acknowledges exactly every active risk introduced by the objective changes. Edge deletion is allowed only so a revised delivery can remove members no longer in the exact active closure. No product or non-delivery semantic node may change. The reviewed state is candidate_ready, not pr_ready.
     ranking_hints: [phase, objective-id]
-    checks: [repo-lint]
     single_flight_group: delivery
+    review_effects:
+      - id: accept-candidate-ready-delivery
+        verdict: passed
+        select: {node_types: [delivery]}
+        count: {exact: 1}
+        preconditions:
+          - {field: spec.target_branch, op: non_empty}
+          - {field: spec.summary, op: non_empty}
+        coverage:
+          - id: exact-ticket-objective
+            required: $target
+            actual: {kind: outgoing_relation, relation: fulfills}
+          - id: exact-objective-active-closure
+            required:
+              union:
+                - intersection:
+                    - {traverse: {from: $target, relation: realized_by, max_depth: 1, node_types: [change]}}
+                    - implemented_changes
+                - intersection:
+                    - active_proofs
+                    - traverse:
+                        from:
+                          intersection:
+                            - {traverse: {from: $target, relation: realized_by, max_depth: 1, node_types: [change]}}
+                            - implemented_changes
+                        relation: verified_by
+                        max_depth: 1
+                        node_types: [proof]
+                - intersection:
+                    - {nodes: {node_types: [decision], statuses: [accepted]}}
+                    - traverse:
+                        from:
+                          intersection:
+                            - {traverse: {from: $target, relation: realized_by, max_depth: 1, node_types: [change]}}
+                            - implemented_changes
+                        relation: requires
+                        max_depth: 1
+                        node_types: [decision]
+                - intersection:
+                    - complete_migrations
+                    - traverse:
+                        from:
+                          intersection:
+                            - {traverse: {from: $target, relation: realized_by, max_depth: 1, node_types: [change]}}
+                            - implemented_changes
+                        relation: requires
+                        max_depth: 1
+                        node_types: [migration]
+                - intersection:
+                    - active_proofs
+                    - traverse:
+                        from:
+                          intersection:
+                            - complete_migrations
+                            - traverse:
+                                from:
+                                  intersection:
+                                    - {traverse: {from: $target, relation: realized_by, max_depth: 1, node_types: [change]}}
+                                    - implemented_changes
+                                relation: requires
+                                max_depth: 1
+                                node_types: [migration]
+                        relation: verified_by
+                        max_depth: 1
+                        node_types: [proof]
+                - intersection:
+                    - {traverse: {from: $target, relation: defects, max_depth: 1, node_types: [defect]}}
+                    - active_defects
+                - intersection:
+                    - active_proofs
+                    - traverse:
+                        from:
+                          intersection:
+                            - {traverse: {from: $target, relation: defects, max_depth: 1, node_types: [defect]}}
+                            - active_defects
+                        relation: verified_by
+                        max_depth: 1
+                        node_types: [proof]
+                - intersection:
+                    - {nodes: {node_types: [decision], statuses: [accepted]}}
+                    - traverse:
+                        from:
+                          intersection:
+                            - active_risks
+                            - traverse:
+                                from:
+                                  intersection:
+                                    - {traverse: {from: $target, relation: realized_by, max_depth: 1, node_types: [change]}}
+                                    - implemented_changes
+                                relation: introduces
+                                max_depth: 1
+                                node_types: [risk]
+                        relation: accepted_by
+                        max_depth: 1
+                        node_types: [decision]
+                - intersection:
+                    - terminal_mitigation_controls
+                    - traverse:
+                        from:
+                          intersection:
+                            - active_risks
+                            - traverse:
+                                from:
+                                  intersection:
+                                    - {traverse: {from: $target, relation: realized_by, max_depth: 1, node_types: [change]}}
+                                    - implemented_changes
+                                relation: introduces
+                                max_depth: 1
+                                node_types: [risk]
+                        relation: mitigated_by
+                        max_depth: 1
+                        node_types: [change, migration]
+                - intersection:
+                    - active_proofs
+                    - traverse:
+                        from:
+                          intersection:
+                            - active_risks
+                            - traverse:
+                                from:
+                                  intersection:
+                                    - {traverse: {from: $target, relation: realized_by, max_depth: 1, node_types: [change]}}
+                                    - implemented_changes
+                                relation: introduces
+                                max_depth: 1
+                                node_types: [risk]
+                        relation: verified_by
+                        max_depth: 1
+                        node_types: [proof]
+                - intersection:
+                    - active_proofs
+                    - traverse:
+                        from:
+                          intersection:
+                            - terminal_mitigation_controls
+                            - traverse:
+                                from:
+                                  intersection:
+                                    - active_risks
+                                    - traverse:
+                                        from:
+                                          intersection:
+                                            - {traverse: {from: $target, relation: realized_by, max_depth: 1, node_types: [change]}}
+                                            - implemented_changes
+                                        relation: introduces
+                                        max_depth: 1
+                                        node_types: [risk]
+                                relation: mitigated_by
+                                max_depth: 1
+                                node_types: [change, migration]
+                        relation: verified_by
+                        max_depth: 1
+                        node_types: [proof]
+            actual: {kind: outgoing_relation, relation: includes}
+          - id: exact-introduced-risk-acknowledgement
+            required:
+              intersection:
+                - active_risks
+                - traverse:
+                    from:
+                      intersection:
+                        - {traverse: {from: $target, relation: realized_by, max_depth: 1, node_types: [change]}}
+                        - implemented_changes
+                    relation: introduces
+                    max_depth: 1
+                    node_types: [risk]
+            actual: {kind: outgoing_relation, relation: acknowledges}
+        set: {status: candidate_ready}
+  - id: integration.target.resolve-conflict
+    operation: resolve-target-integration
+    stage: integration
+    target_types: []
+    workflow: target-integration-conflict
+    allowed_new_node_types: []
+    allowed_existing_node_types: []
+    review_contract: The target branch is integrated without discarding either side, the composed tree is verified, and no semantic graph state is mutated.
+    output_contract: A conflict-resolved product tree that preserves the run and target changes, with verification and review evidence.
+    ranking_hints: [phase]
+    single_flight_group: target-integration

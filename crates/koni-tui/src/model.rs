@@ -1,20 +1,26 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 
+use anyhow::Context;
 use koni_core::catalog::{
     LEGACY_RUN_TYPE_ID, ProfileSourceDef, ProjectCatalogDocument, ProjectCatalogSource,
     ResolvedRunType, RunTypeCatalogEntry, RunTypeDocument,
 };
-use koni_core::config::ProfileManifest;
+use koni_core::config::{ProfileManifest, StorageBackend};
+use koni_core::git::GitBackend;
+use koni_core::state::{ProjectRegistry, RunRegistration, RunRegistrationStatus};
 use koni_core::{
-    CompiledProjectCatalog, Engine, KoniError, ProfileCompiler, ProjectCatalogCompiler,
-    RunDeletionPreview, RunLifecycleUpdate,
+    CompiledProjectCatalog, Engine, KoniError, LocalBranchCandidate, ProfileCompiler,
+    ProjectCatalogCompiler, RunDeletionPreview, RunLifecycleUpdate, RunPromotionPreview,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::agent_chat::{AgentChatCache, AgentChatRender, AgentChatRequest};
 use crate::codex_models::CodexModelCatalog;
 use crate::configure::{ConfigDomain, ConfigResource, ConfigResourceKind, derive_resources};
 use crate::help::HelpTopic;
@@ -24,7 +30,7 @@ static NEXT_OPERATION_ID: AtomicU64 = AtomicU64::new(1);
 /// Keys whose panel-level meaning must not be shadowed by profile-defined orchestration
 /// shortcuts. Both dispatch and contextual help use this single runtime protection list.
 pub(crate) const PROTECTED_CONFIGURED_ORCHESTRATION_KEYS: &[char] = &[
-    'h', 'q', 'r', 'R', 'c', '1', '2', '4', 'n', '?', 'D', 'a', 'j', 'k', 'l', '[', ']',
+    'h', 'q', 'r', 'c', '1', '2', '4', '6', 'n', '?', 'a', 'd', 'j', 'k', 'l', 'm', '[', ']',
 ];
 
 pub(crate) fn configured_orchestration_key_is_protected(character: char) -> bool {
@@ -54,6 +60,7 @@ pub enum Focus {
     Details,
     Questions,
     Agents,
+    Activity,
     Graph,
     ConfigTree,
     ConfigForm,
@@ -74,7 +81,7 @@ impl Panel {
     pub fn label(self) -> &'static str {
         match self {
             Self::Overview => "overview",
-            Self::Planning => "planning",
+            Self::Planning => "plan",
             Self::Stages => "stages",
         }
     }
@@ -90,6 +97,10 @@ pub enum OverviewSubject {
     Run,
     Ticket,
 }
+
+/// Preserve the historical run-overview cursor while the current Overview is
+/// rendered as one vertically composed Objective / Run / Evidence document.
+const DEFAULT_RUN_OVERVIEW_SECTION: usize = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -169,6 +180,12 @@ pub struct RunSummary {
     pub run_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_type_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion_status: Option<String>,
+    #[serde(default)]
+    pub merge_ready: bool,
     pub branch: Option<String>,
     pub base: Option<String>,
     pub ticket_count: usize,
@@ -177,6 +194,8 @@ pub struct RunSummary {
     pub validation_errors: usize,
     #[serde(default)]
     pub total_tokens: u64,
+    #[serde(default)]
+    pub new_tokens: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,13 +205,30 @@ pub struct LiveAgentSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentSummary {
+    /// Stable internal selection identity. This is never rendered.
+    pub key: String,
     pub title: String,
+    pub ticket_id: Option<String>,
+    pub ticket_title: Option<String>,
+    pub persona: String,
     pub status: String,
     pub live: bool,
+    pub transcript: Option<AgentTranscriptSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTranscriptSource {
+    pub path: PathBuf,
+    pub prompt_path: Option<PathBuf>,
+    pub output_path: Option<PathBuf>,
+    pub codex_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct RunData {
+    /// Present only for an optimistic row inserted before the compiler has
+    /// returned the durable run record. Never serialized or rendered.
+    pub provisional_operation_id: Option<String>,
     pub summary: Option<RunSummary>,
     pub snapshot: Value,
     pub graph: Vec<Value>,
@@ -209,6 +245,84 @@ pub struct RunData {
     pub external_loops: Vec<Value>,
     pub external_repairs: Vec<Value>,
     pub planning_transcript: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunTokenBreakdown {
+    pub input: u64,
+    pub cached_input: u64,
+    pub output: u64,
+    pub reasoning_output: u64,
+    pub total: u64,
+    pub new: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanningBudgetProgress {
+    pub used: u64,
+    pub limit: u64,
+    pub synthesis_reserve: u64,
+    pub synthesis_forced: bool,
+    pub metric: PlanningBudgetMetric,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanningBudgetMetric {
+    New,
+    Processed,
+}
+
+impl PlanningBudgetMetric {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Processed => "processed",
+        }
+    }
+}
+
+fn token_breakdown_from_snapshot(snapshot: &Value) -> RunTokenBreakdown {
+    let usage = snapshot.get("token_usage").unwrap_or(&Value::Null);
+    let input = usage
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let cached_input = usage
+        .get("cached_input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let output = usage
+        .get("output_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let has_input_output_breakdown = ["input_tokens", "output_tokens"]
+        .into_iter()
+        .any(|field| usage.get(field).and_then(Value::as_u64).is_some());
+    let total = usage
+        .get("total_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| input.saturating_add(output));
+    let new = usage
+        .get("new_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| {
+            if has_input_output_breakdown {
+                input.saturating_sub(cached_input).saturating_add(output)
+            } else {
+                total.saturating_sub(cached_input)
+            }
+        });
+    RunTokenBreakdown {
+        input,
+        cached_input,
+        output,
+        reasoning_output: usage
+            .get("reasoning_output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        total,
+        new,
+    }
 }
 
 impl RunData {
@@ -273,6 +387,7 @@ impl RunData {
                     .is_some_and(|id| id.contains("report"))
             })
             .cloned();
+        let token_breakdown = token_breakdown_from_snapshot(&snapshot);
         let summary = run
             .get("id")
             .and_then(Value::as_str)
@@ -303,6 +418,20 @@ impl RunData {
                     .and_then(Value::as_str)
                     .filter(|title| !title.trim().is_empty())
                     .map(ToOwned::to_owned),
+                target_branch: run
+                    .get("target_branch")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                promotion_status: snapshot
+                    .get("promotion")
+                    .and_then(|promotion| promotion.get("status"))
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                merge_ready: snapshot
+                    .get("promotion")
+                    .and_then(|promotion| promotion.get("status"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|status| status == "awaiting_authorization"),
                 branch: run
                     .get("integration_branch")
                     .and_then(Value::as_str)
@@ -322,28 +451,11 @@ impl RunData {
                     .get("validation_errors")
                     .and_then(Value::as_array)
                     .map_or(0, Vec::len),
-                total_tokens: snapshot
-                    .get("token_usage")
-                    .and_then(|usage| usage.get("total_tokens"))
-                    .and_then(Value::as_u64)
-                    .or_else(|| {
-                        let usage = snapshot.get("token_usage")?;
-                        Some(
-                            usage
-                                .get("input_tokens")
-                                .and_then(Value::as_u64)
-                                .unwrap_or_default()
-                                .saturating_add(
-                                    usage
-                                        .get("output_tokens")
-                                        .and_then(Value::as_u64)
-                                        .unwrap_or_default(),
-                                ),
-                        )
-                    })
-                    .unwrap_or_default(),
+                total_tokens: token_breakdown.total,
+                new_tokens: token_breakdown.new,
             });
         let mut data = Self {
+            provisional_operation_id: None,
             summary,
             snapshot,
             graph,
@@ -364,8 +476,119 @@ impl RunData {
         let active_agents = data.live_agent_summaries().len();
         if let Some(summary) = data.summary.as_mut() {
             summary.active_agents = active_agents;
+            let lifecycle_running = data
+                .snapshot
+                .get("lifecycle")
+                .and_then(|lifecycle| lifecycle.get("running"))
+                .and_then(Value::as_bool)
+                .or_else(|| {
+                    data.orchestration
+                        .as_ref()
+                        .and_then(|orchestration| orchestration.get("running"))
+                        .and_then(Value::as_bool)
+                });
+            let lifecycle_draining = data
+                .snapshot
+                .get("lifecycle")
+                .and_then(|lifecycle| lifecycle.get("draining"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if lifecycle_running == Some(false)
+                && !matches!(summary.status.as_str(), "concluded" | "stopped" | "failed")
+            {
+                summary.status = if lifecycle_draining {
+                    "pausing".to_owned()
+                } else {
+                    "paused".to_owned()
+                };
+            }
         }
         data
+    }
+
+    pub fn provisional(intake: &NewRunDraft, run_type: Option<&RunTypeOption>) -> Self {
+        let run_type_title = run_type
+            .map(|run_type| run_type.title.as_str())
+            .unwrap_or(intake.run_type.as_str());
+        let stages = run_type
+            .map(|run_type| {
+                run_type
+                    .stages
+                    .iter()
+                    .map(|stage| {
+                        serde_json::json!({
+                            "status":"pending",
+                            "definition":{
+                                "id":stage.id,
+                                "title":stage.title,
+                                "kind":stage.kind
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let snapshot = serde_json::json!({
+            "run":{
+                "id":format!("pending:{}", intake.operation_id),
+                "goal":intake.goal.trim(),
+                "status":"planning",
+                "run_type_id":intake.run_type,
+                "run_type_title":run_type_title,
+                "target_branch":intake.target_branch
+            },
+            "stages":stages,
+            "token_usage":{"total_tokens":0},
+            "lifecycle":{"running":true,"active_runtime_milliseconds":0}
+        });
+        let mut run = Self::from_snapshot(snapshot);
+        run.provisional_operation_id = Some(intake.operation_id.clone());
+        run
+    }
+
+    pub fn is_provisional(&self) -> bool {
+        self.provisional_operation_id.is_some()
+    }
+
+    pub fn token_breakdown(&self) -> RunTokenBreakdown {
+        token_breakdown_from_snapshot(&self.snapshot)
+    }
+
+    pub fn planning_budget_progress(&self) -> Option<PlanningBudgetProgress> {
+        let session = self.snapshot.get("planning_session")?.as_object()?;
+        let usage = session.get("usage")?;
+        let baseline = session.get("accounted_baseline").unwrap_or(&Value::Null);
+        let metric = session
+            .get("budget_metric")
+            .and_then(Value::as_str)
+            .unwrap_or("new_tokens");
+        let (field, metric) = if metric == "processed_tokens" {
+            ("total_tokens", PlanningBudgetMetric::Processed)
+        } else {
+            ("new_tokens", PlanningBudgetMetric::New)
+        };
+        Some(PlanningBudgetProgress {
+            used: usage
+                .get(field)
+                .and_then(Value::as_u64)
+                .unwrap_or_default()
+                .saturating_sub(
+                    baseline
+                        .get(field)
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default(),
+                ),
+            limit: session.get("budget_limit")?.as_u64()?,
+            synthesis_reserve: session
+                .get("synthesis_reserve")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            synthesis_forced: session
+                .get("synthesis_forced")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            metric,
+        })
     }
 
     pub fn pending_questions(&self) -> Vec<&Value> {
@@ -403,7 +626,7 @@ impl RunData {
                         .get("status")
                         .or_else(|| agent.get("state"))
                         .and_then(Value::as_str),
-                    Some("starting" | "running" | "resuming")
+                    Some("starting" | "running" | "active" | "waiting" | "resuming")
                 )
         })
     }
@@ -415,9 +638,13 @@ impl RunData {
             group: usize,
             order: usize,
             title: String,
+            ticket_id: Option<String>,
+            ticket_title: Option<String>,
+            persona: String,
             status: String,
             live: bool,
             updated_at: String,
+            transcript: Option<AgentTranscriptSource>,
         }
 
         let stage_metadata = self
@@ -449,6 +676,14 @@ impl RunData {
         let mut candidates = Vec::new();
         let mut live_ticket_ids = BTreeSet::new();
         let mut recorded_ticket_steps = BTreeSet::new();
+        let has_semantic_lead = self.agents.iter().any(|agent| {
+            agent.get("persona").and_then(Value::as_str) == Some("lead")
+                && agent.get("ticket_id").is_none_or(Value::is_null)
+                && agent
+                    .get("stage_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|stage| !stage.is_empty())
+        });
 
         for (agent_index, agent) in self.agents.iter().enumerate() {
             let status = agent
@@ -458,6 +693,21 @@ impl RunData {
                 .unwrap_or_default();
             let stage_id = agent.get("stage_id").and_then(Value::as_str);
             let ticket_id = agent.get("ticket_id").and_then(Value::as_str);
+            let persona_id = agent.get("persona").and_then(Value::as_str);
+            let semantic_lead = persona_id == Some("lead")
+                && ticket_id.is_none()
+                && stage_id.is_some_and(|stage| !stage.is_empty());
+            // Every fresh Lead slice has a raw process record, while the
+            // orchestration stage owns one stable semantic record. Project
+            // only that stable row so it keeps the same identity between
+            // slices instead of disappearing into raw Lead process history.
+            if has_semantic_lead
+                && persona_id == Some("lead")
+                && ticket_id.is_none()
+                && stage_id.is_none()
+            {
+                continue;
+            }
             if let (Some(ticket_id), Some(stage_id), Some(persona)) = (
                 ticket_id,
                 stage_id,
@@ -488,25 +738,34 @@ impl RunData {
                 || ticket.map_or((2, agent_index), |(index, _)| (1, *index)),
                 |(index, _)| (0, *index),
             );
-            let key = agent
-                .get("process_identity")
-                .and_then(|identity| identity.get("pid"))
-                .or_else(|| agent.get("pid"))
-                .and_then(Value::as_u64)
-                .map_or_else(
-                    || {
-                        agent.get("id").and_then(Value::as_str).map_or_else(
-                            || format!("stage:{}:{agent_index}", stage_id.unwrap_or_default()),
-                            |id| format!("agent:{id}"),
-                        )
-                    },
-                    |pid| format!("process:{pid}"),
-                );
+            let stable_key = || {
+                agent.get("id").and_then(Value::as_str).map_or_else(
+                    || format!("stage:{}:{agent_index}", stage_id.unwrap_or_default()),
+                    |id| format!("agent:{id}"),
+                )
+            };
+            let key = if semantic_lead {
+                stable_key()
+            } else {
+                agent
+                    .get("process_identity")
+                    .and_then(|identity| identity.get("pid"))
+                    .or_else(|| agent.get("pid"))
+                    .and_then(Value::as_u64)
+                    .map_or_else(stable_key, |pid| format!("process:{pid}"))
+            };
             candidates.push(Candidate {
                 key,
                 group,
                 order,
                 title: concise_work_title(&title),
+                ticket_id: ticket_id.map(ToOwned::to_owned),
+                ticket_title: ticket
+                    .and_then(|(_, ticket)| friendly_ticket_title(ticket))
+                    .map(|title| concise_work_title(&title)),
+                persona: persona_id
+                    .map(humanize_identifier)
+                    .unwrap_or_else(|| "Agent".to_owned()),
                 status: if status.is_empty() {
                     "recorded".to_owned()
                 } else {
@@ -520,6 +779,27 @@ impl RunData {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned(),
+                transcript: agent
+                    .get("stdout_path")
+                    .and_then(Value::as_str)
+                    .filter(|path| !path.trim().is_empty())
+                    .map(|path| AgentTranscriptSource {
+                        path: PathBuf::from(path),
+                        prompt_path: agent
+                            .get("prompt_path")
+                            .and_then(Value::as_str)
+                            .filter(|path| !path.trim().is_empty())
+                            .map(PathBuf::from),
+                        output_path: agent
+                            .get("output_path")
+                            .and_then(Value::as_str)
+                            .filter(|path| !path.trim().is_empty())
+                            .map(PathBuf::from),
+                        codex_session_id: agent
+                            .get("codex_session_id")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned),
+                    }),
             });
         }
 
@@ -568,9 +848,17 @@ impl RunData {
                 group: 1,
                 order: ticket_index,
                 title: concise_work_title(&title),
+                ticket_id: Some(ticket_id.to_owned()),
+                ticket_title: friendly_ticket_title(ticket).map(|title| concise_work_title(&title)),
+                persona: step
+                    .and_then(|step| step.get("persona"))
+                    .and_then(Value::as_str)
+                    .map(humanize_identifier)
+                    .unwrap_or_else(|| "Agent".to_owned()),
                 status: "running".to_owned(),
                 live: true,
                 updated_at: String::new(),
+                transcript: None,
             });
         }
 
@@ -625,6 +913,15 @@ impl RunData {
                         .saturating_mul(1_000)
                         .saturating_add(output_index),
                     title: concise_work_title(&title),
+                    ticket_id: Some(ticket_id.to_owned()),
+                    ticket_title: friendly_ticket_title(ticket)
+                        .map(|title| concise_work_title(&title)),
+                    persona: output_persona
+                        .or_else(|| {
+                            step.and_then(|step| step.get("persona").and_then(Value::as_str))
+                        })
+                        .map(humanize_identifier)
+                        .unwrap_or_else(|| "Agent".to_owned()),
                     status: "completed".to_owned(),
                     live: false,
                     updated_at: output
@@ -632,6 +929,7 @@ impl RunData {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_owned(),
+                    transcript: None,
                 });
             }
         }
@@ -656,9 +954,14 @@ impl RunData {
             .into_iter()
             .filter(|candidate| seen.insert(candidate.key.clone()))
             .map(|candidate| AgentSummary {
+                key: candidate.key,
                 title: candidate.title,
+                ticket_id: candidate.ticket_id,
+                ticket_title: candidate.ticket_title,
+                persona: candidate.persona,
                 status: candidate.status,
                 live: candidate.live,
+                transcript: candidate.transcript,
             })
             .collect()
     }
@@ -703,6 +1006,25 @@ pub struct ConfigDocument {
 impl ConfigDocument {
     pub fn dirty(&self) -> bool {
         self.text != self.original
+    }
+
+    pub(crate) fn dirty_at(&self, locator: &[FormPathToken]) -> bool {
+        if self.is_new {
+            return true;
+        }
+        if !self.dirty() {
+            return false;
+        }
+        if locator.is_empty() {
+            return true;
+        }
+        let Some(current) = config_document_text_value(self, &self.text) else {
+            return true;
+        };
+        let Some(published) = config_document_text_value(self, &self.original) else {
+            return true;
+        };
+        value_at_locator(&current, locator) != value_at_locator(&published, locator)
     }
 
     pub fn validate(&mut self) -> bool {
@@ -1180,17 +1502,47 @@ fn guided_form_rows(
 }
 
 fn config_document_value(document: &ConfigDocument) -> Option<Value> {
+    config_document_text_value(document, &document.text)
+}
+
+fn config_document_text_value(document: &ConfigDocument, text: &str) -> Option<Value> {
     let extension = document
         .source_path
         .extension()
         .and_then(|extension| extension.to_str());
     match extension {
         Some("md") => None,
-        Some("toml") => toml::from_str::<toml::Value>(&document.text)
+        Some("toml") => toml::from_str::<toml::Value>(text)
             .ok()
             .and_then(|value| serde_json::to_value(value).ok()),
-        _ => serde_yaml::from_str::<Value>(&document.text).ok(),
+        _ => serde_yaml::from_str::<Value>(text).ok(),
     }
+}
+
+fn published_graph_options(config: &ConfigState) -> Option<Value> {
+    config.documents.iter().find_map(|document| {
+        if document.original.trim().is_empty() {
+            return None;
+        }
+        let path = document.relative_path.to_string_lossy();
+        if !path.starts_with("cockpit/") && !path.ends_with("cockpit.yaml") {
+            return None;
+        }
+        let value = serde_yaml::from_str::<Value>(&document.original).ok()?;
+        value
+            .get("views")?
+            .as_array()?
+            .iter()
+            .find(|view| {
+                matches!(
+                    view.get("kind").and_then(Value::as_str),
+                    Some("graph" | "typed_tree")
+                )
+            })?
+            .get("options")
+            .cloned()
+            .filter(|options| options.is_object())
+    })
 }
 
 #[derive(Debug)]
@@ -1208,11 +1560,27 @@ pub struct ControlCenterModel {
     pub selected_run: usize,
     pub selected_ticket: usize,
     pub selected_question: usize,
+    /// Choice highlighted inside the currently selected pending question.
+    /// This cursor is shared with the answer modal.
+    pub selected_question_option: usize,
     pub selected_agent: usize,
+    /// Whether the Details panel is currently projecting the selected agent transcript.
+    pub agent_chat_open: bool,
+    /// Lines held above the live tail. Zero means follow new output automatically.
+    pub agent_chat_scroll_from_bottom: usize,
+    /// When present, history navigation is anchored to the start of the rendered
+    /// conversation. Keeping this separate from the live-tail distance avoids an
+    /// `usize::MAX` sentinel that could jump to the beginning but could not page
+    /// forward again.
+    pub agent_chat_scroll_from_top: Option<usize>,
+    pub activity_scroll: usize,
     pub run_scroll: usize,
     pub ticket_scroll: usize,
     pub graph_scroll: usize,
     pub detail_scroll: usize,
+    /// Compatibility cursor retained for older input/state projections. The
+    /// current run Overview is one vertically scrollable composed document.
+    pub detail_section: usize,
     pub activity_tick: u64,
     pub config: ConfigState,
     pub status: String,
@@ -1222,6 +1590,11 @@ pub struct ControlCenterModel {
     pub dialog: Option<Dialog>,
     suspended_dialog: Option<Dialog>,
     pub run_types: Vec<RunTypeOption>,
+    /// Published project-level graph presentation. This is intentionally
+    /// independent from a run's pinned compiler profile: changing the
+    /// cockpit layout may redraw old runs, but can never change their graph,
+    /// tickets, agents, or compiler behavior.
+    project_graph_options: Option<Value>,
     /// Models and model-specific reasoning levels exposed by the installed Codex CLI.
     pub(crate) codex_models: CodexModelCatalog,
     pub default_run_type: String,
@@ -1229,6 +1602,7 @@ pub struct ControlCenterModel {
     pub catalog_error: Option<String>,
     /// The compatibility catalog is readable, but conversion is always an explicit staged edit.
     pub legacy_migration_available: bool,
+    agent_chat_cache: RefCell<AgentChatCache>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1272,6 +1646,7 @@ pub enum Dialog {
     RunTypeWizard(RunTypeWizardDraft),
     LegacyMigration(LegacyMigrationDraft),
     DeleteRun(DeleteRunDraft),
+    MergeRun(MergeRunDraft),
 }
 
 #[derive(Debug, Clone)]
@@ -1280,6 +1655,12 @@ pub struct DeleteRunDraft {
     /// Cancel, preserve branches, delete owned branches.
     pub selected: usize,
     pub confirm_owned_branches: bool,
+    pub submitted: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MergeRunDraft {
+    pub preview: RunPromotionPreview,
     pub submitted: bool,
 }
 
@@ -1326,14 +1707,131 @@ pub struct NewRunDraft {
     pub operation_id: String,
     pub run_type: String,
     pub goal: String,
-    pub base_ref: String,
+    /// Character offset within `goal`, never a byte offset.
+    pub objective_cursor: usize,
+    pub target_branch: String,
+    pub target_branches: Vec<LocalBranchCandidate>,
     pub question_policy: String,
     pub max_parallel: usize,
     pub agent_roles: BTreeMap<String, RunAgentSetting>,
     pub overridden_fields: BTreeSet<String>,
     pub active_field: usize,
+    /// First rendered pipeline row shown in the bounded New Run preview.
+    ///
+    /// The stage list is informational rather than another form control, so
+    /// PageUp/PageDown move this viewport without disturbing `active_field`.
+    /// Rows, rather than stage indices, keep every continuation of a wrapped
+    /// custom stage title reachable at compact terminal sizes.
+    pub stage_scroll: usize,
     pub intake_fields: Vec<IntakeFieldDraft>,
     pub submitted: bool,
+}
+
+impl NewRunDraft {
+    pub fn move_objective_cursor_left(&mut self) {
+        self.clamp_objective_cursor();
+        self.objective_cursor = self.objective_cursor.saturating_sub(1);
+    }
+
+    pub fn move_objective_cursor_right(&mut self) {
+        self.clamp_objective_cursor();
+        self.objective_cursor = self
+            .objective_cursor
+            .saturating_add(1)
+            .min(self.goal.chars().count());
+    }
+
+    pub fn move_objective_cursor_home(&mut self) {
+        self.clamp_objective_cursor();
+        let characters = self.goal.chars().collect::<Vec<_>>();
+        self.objective_cursor = characters[..self.objective_cursor]
+            .iter()
+            .rposition(|character| *character == '\n')
+            .map_or(0, |newline| newline + 1);
+    }
+
+    pub fn move_objective_cursor_end(&mut self) {
+        self.clamp_objective_cursor();
+        let characters = self.goal.chars().collect::<Vec<_>>();
+        self.objective_cursor = characters[self.objective_cursor..]
+            .iter()
+            .position(|character| *character == '\n')
+            .map_or(characters.len(), |newline| self.objective_cursor + newline);
+    }
+
+    pub fn move_objective_cursor_up(&mut self) {
+        self.clamp_objective_cursor();
+        let characters = self.goal.chars().collect::<Vec<_>>();
+        let current_start = characters[..self.objective_cursor]
+            .iter()
+            .rposition(|character| *character == '\n')
+            .map_or(0, |newline| newline + 1);
+        if current_start == 0 {
+            return;
+        }
+        let column = self.objective_cursor - current_start;
+        let previous_end = current_start - 1;
+        let previous_start = characters[..previous_end]
+            .iter()
+            .rposition(|character| *character == '\n')
+            .map_or(0, |newline| newline + 1);
+        self.objective_cursor = previous_start + column.min(previous_end - previous_start);
+    }
+
+    pub fn move_objective_cursor_down(&mut self) {
+        self.clamp_objective_cursor();
+        let characters = self.goal.chars().collect::<Vec<_>>();
+        let current_start = characters[..self.objective_cursor]
+            .iter()
+            .rposition(|character| *character == '\n')
+            .map_or(0, |newline| newline + 1);
+        let current_end = characters[self.objective_cursor..]
+            .iter()
+            .position(|character| *character == '\n')
+            .map_or(characters.len(), |newline| self.objective_cursor + newline);
+        if current_end == characters.len() {
+            return;
+        }
+        let column = self.objective_cursor - current_start;
+        let next_start = current_end + 1;
+        let next_end = characters[next_start..]
+            .iter()
+            .position(|character| *character == '\n')
+            .map_or(characters.len(), |newline| next_start + newline);
+        self.objective_cursor = next_start + column.min(next_end - next_start);
+    }
+
+    pub fn insert_objective_text(&mut self, text: &str) {
+        self.clamp_objective_cursor();
+        let byte_offset = char_offset_to_byte(&self.goal, self.objective_cursor);
+        self.goal.insert_str(byte_offset, text);
+        self.objective_cursor += text.chars().count();
+    }
+
+    pub fn backspace_objective(&mut self) {
+        self.clamp_objective_cursor();
+        if self.objective_cursor == 0 {
+            return;
+        }
+        let start = char_offset_to_byte(&self.goal, self.objective_cursor - 1);
+        let end = char_offset_to_byte(&self.goal, self.objective_cursor);
+        self.goal.replace_range(start..end, "");
+        self.objective_cursor -= 1;
+    }
+
+    pub fn delete_objective(&mut self) {
+        self.clamp_objective_cursor();
+        if self.objective_cursor == self.goal.chars().count() {
+            return;
+        }
+        let start = char_offset_to_byte(&self.goal, self.objective_cursor);
+        let end = char_offset_to_byte(&self.goal, self.objective_cursor + 1);
+        self.goal.replace_range(start..end, "");
+    }
+
+    fn clamp_objective_cursor(&mut self) {
+        self.objective_cursor = self.objective_cursor.min(self.goal.chars().count());
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1359,12 +1857,15 @@ impl Default for NewRunDraft {
             operation_id: new_operation_id(),
             run_type: "default".to_owned(),
             goal: String::new(),
-            base_ref: "HEAD".to_owned(),
+            objective_cursor: 0,
+            target_branch: "HEAD".to_owned(),
+            target_branches: Vec::new(),
             question_policy: "interactive".to_owned(),
             max_parallel: 1,
             agent_roles: BTreeMap::new(),
             overridden_fields: BTreeSet::new(),
             active_field: 0,
+            stage_scroll: 0,
             intake_fields: Vec::new(),
             submitted: false,
         }
@@ -1379,7 +1880,14 @@ pub struct ApprovalDraft {
     pub sections: Vec<ApprovalSection>,
     pub selected_section: usize,
     pub scroll: usize,
-    pub approve_focused: bool,
+    /// The one primary action owns Enter. Its label and command are derived
+    /// from whether the steering editor contains instructions.
+    pub action_focused: bool,
+    /// The multiline steering editor owns keyboard input.
+    pub revision_focused: bool,
+    pub revision: String,
+    /// Character offset within `revision`, never a byte offset.
+    pub revision_cursor: usize,
     pub approval_enabled: bool,
     pub blockers: Vec<String>,
     pub submitted: bool,
@@ -1405,12 +1913,119 @@ impl ApprovalDraft {
         self.selected_section = (self.selected_section as isize + delta)
             .rem_euclid(self.sections.len() as isize) as usize;
         self.scroll = 0;
-        self.approve_focused = false;
+        self.action_focused = false;
+        self.revision_focused = false;
     }
 
     pub fn scroll_by(&mut self, delta: isize) {
         self.scroll = self.scroll.saturating_add_signed(delta);
-        self.approve_focused = false;
+        self.action_focused = false;
+        self.revision_focused = false;
+    }
+
+    pub fn move_revision_cursor_left(&mut self) {
+        self.clamp_revision_cursor();
+        self.revision_cursor = self.revision_cursor.saturating_sub(1);
+    }
+
+    pub fn move_revision_cursor_right(&mut self) {
+        self.clamp_revision_cursor();
+        self.revision_cursor = self
+            .revision_cursor
+            .saturating_add(1)
+            .min(self.revision.chars().count());
+    }
+
+    pub fn move_revision_cursor_home(&mut self) {
+        self.clamp_revision_cursor();
+        let characters = self.revision.chars().collect::<Vec<_>>();
+        self.revision_cursor = characters[..self.revision_cursor]
+            .iter()
+            .rposition(|character| *character == '\n')
+            .map_or(0, |newline| newline + 1);
+    }
+
+    pub fn move_revision_cursor_end(&mut self) {
+        self.clamp_revision_cursor();
+        let characters = self.revision.chars().collect::<Vec<_>>();
+        self.revision_cursor = characters[self.revision_cursor..]
+            .iter()
+            .position(|character| *character == '\n')
+            .map_or(characters.len(), |newline| self.revision_cursor + newline);
+    }
+
+    pub fn move_revision_cursor_up(&mut self) {
+        self.clamp_revision_cursor();
+        let characters = self.revision.chars().collect::<Vec<_>>();
+        let current_start = characters[..self.revision_cursor]
+            .iter()
+            .rposition(|character| *character == '\n')
+            .map_or(0, |newline| newline + 1);
+        if current_start == 0 {
+            return;
+        }
+        let column = self.revision_cursor - current_start;
+        let previous_end = current_start - 1;
+        let previous_start = characters[..previous_end]
+            .iter()
+            .rposition(|character| *character == '\n')
+            .map_or(0, |newline| newline + 1);
+        self.revision_cursor = previous_start + column.min(previous_end - previous_start);
+    }
+
+    pub fn move_revision_cursor_down(&mut self) {
+        self.clamp_revision_cursor();
+        let characters = self.revision.chars().collect::<Vec<_>>();
+        let current_start = characters[..self.revision_cursor]
+            .iter()
+            .rposition(|character| *character == '\n')
+            .map_or(0, |newline| newline + 1);
+        let current_end = characters[self.revision_cursor..]
+            .iter()
+            .position(|character| *character == '\n')
+            .map_or(characters.len(), |newline| self.revision_cursor + newline);
+        if current_end == characters.len() {
+            return;
+        }
+        let column = self.revision_cursor - current_start;
+        let next_start = current_end + 1;
+        let next_end = characters[next_start..]
+            .iter()
+            .position(|character| *character == '\n')
+            .map_or(characters.len(), |newline| next_start + newline);
+        self.revision_cursor = next_start + column.min(next_end - next_start);
+    }
+
+    pub fn insert_revision_text(&mut self, text: &str) {
+        self.clamp_revision_cursor();
+        let byte_offset = char_offset_to_byte(&self.revision, self.revision_cursor);
+        self.revision.insert_str(byte_offset, text);
+        self.revision_cursor += text.chars().count();
+    }
+
+    pub fn backspace_revision(&mut self) {
+        self.clamp_revision_cursor();
+        if self.revision_cursor == 0 {
+            return;
+        }
+        let start = char_offset_to_byte(&self.revision, self.revision_cursor - 1);
+        let end = char_offset_to_byte(&self.revision, self.revision_cursor);
+        self.revision.replace_range(start..end, "");
+        self.revision_cursor -= 1;
+    }
+
+    pub fn delete_revision(&mut self) {
+        self.clamp_revision_cursor();
+        if self.revision_cursor == self.revision.chars().count() {
+            return;
+        }
+        let start = char_offset_to_byte(&self.revision, self.revision_cursor);
+        let end = char_offset_to_byte(&self.revision, self.revision_cursor + 1);
+        self.revision.replace_range(start..end, "");
+    }
+
+    fn clamp_revision_cursor(&mut self) {
+        self.revision_cursor = self.revision_cursor.min(self.revision.chars().count());
     }
 }
 
@@ -1564,6 +2179,22 @@ pub struct ActionFormDraft {
     pub submitted: bool,
 }
 
+impl ActionFormDraft {
+    pub fn is_agent_guidance(&self) -> bool {
+        self.action == "steer"
+            && self
+                .params
+                .iter()
+                .any(|param| param.id == "kind" && param.locked && param.value == "agent_chat")
+    }
+
+    pub fn select_agent_guidance_message(&mut self) {
+        if let Some(index) = self.params.iter().position(|param| param.id == "message") {
+            self.selected = index;
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ActionParamDraft {
     pub id: String,
@@ -1576,11 +2207,24 @@ pub struct ActionParamDraft {
     pub locked: bool,
 }
 
+fn provisional_matches_durable(provisional: &RunData, durable: &RunData) -> bool {
+    let Some(provisional) = provisional.summary.as_ref() else {
+        return false;
+    };
+    let Some(durable) = durable.summary.as_ref() else {
+        return false;
+    };
+    provisional.goal == durable.goal
+        && provisional.run_type == durable.run_type
+        && provisional.target_branch == durable.target_branch
+}
+
 impl ControlCenterModel {
     pub fn load(root: &Path) -> anyhow::Result<Self> {
         let launch_root = root.canonicalize()?;
         let root = canonical_project_root(&launch_root)?;
         let config = load_config_state(&root)?;
+        let project_graph_options = published_graph_options(&config);
         let (
             run_types,
             default_run_type,
@@ -1618,11 +2262,17 @@ impl ControlCenterModel {
             selected_run: 0,
             selected_ticket: 0,
             selected_question: 0,
+            selected_question_option: 0,
             selected_agent: 0,
+            agent_chat_open: false,
+            agent_chat_scroll_from_bottom: 0,
+            agent_chat_scroll_from_top: None,
+            activity_scroll: 0,
             run_scroll: 0,
             ticket_scroll: 0,
             graph_scroll: 0,
             detail_scroll: 0,
+            detail_section: DEFAULT_RUN_OVERVIEW_SECTION,
             activity_tick: 0,
             config,
             status: String::new(),
@@ -1632,13 +2282,16 @@ impl ControlCenterModel {
             dialog: None,
             suspended_dialog: None,
             run_types,
+            project_graph_options,
             codex_models: CodexModelCatalog::available(),
             default_run_type,
             run_type_intake,
             catalog_error,
             legacy_migration_available,
+            agent_chat_cache: RefCell::new(AgentChatCache::default()),
         };
         model.reload();
+        model.reset_selected_question_option();
         if let Some(error) = &model.catalog_error {
             model.status =
                 format!("catalog compilation failed: {error} · configuration remains editable");
@@ -1659,11 +2312,17 @@ impl ControlCenterModel {
             selected_run: 0,
             selected_ticket: 0,
             selected_question: 0,
+            selected_question_option: 0,
             selected_agent: 0,
+            agent_chat_open: false,
+            agent_chat_scroll_from_bottom: 0,
+            agent_chat_scroll_from_top: None,
+            activity_scroll: 0,
             run_scroll: 0,
             ticket_scroll: 0,
             graph_scroll: 0,
             detail_scroll: 0,
+            detail_section: DEFAULT_RUN_OVERVIEW_SECTION,
             activity_tick: 0,
             config: ConfigState::default(),
             status: String::new(),
@@ -1683,13 +2342,16 @@ impl ControlCenterModel {
                 stages: Vec::new(),
                 agents: BTreeMap::new(),
             }],
+            project_graph_options: None,
             codex_models: CodexModelCatalog::fallback(),
             default_run_type: "default".to_owned(),
             run_type_intake: BTreeMap::new(),
             catalog_error: None,
             legacy_migration_available: false,
+            agent_chat_cache: RefCell::new(AgentChatCache::default()),
         };
         model.normalize_selection();
+        model.reset_selected_question_option();
         model.sync_orchestration();
         model
     }
@@ -1725,8 +2387,68 @@ impl ControlCenterModel {
         self.sync_orchestration();
     }
 
+    pub fn insert_provisional_run(&mut self, intake: &NewRunDraft) {
+        if self.runs.iter().any(|run| {
+            run.provisional_operation_id.as_deref() == Some(intake.operation_id.as_str())
+        }) {
+            return;
+        }
+        let run_type = self
+            .run_types
+            .iter()
+            .find(|run_type| run_type.id == intake.run_type);
+        self.runs.push(RunData::provisional(intake, run_type));
+        self.selected_run = self.runs.len().saturating_sub(1);
+        self.selected_ticket = 0;
+        self.selected_question = 0;
+        self.selected_agent = 0;
+        self.overview_subject = OverviewSubject::Run;
+        self.focus = Focus::Runs;
+        self.detail_scroll = 0;
+    }
+
+    pub fn remove_provisional_run(&mut self, operation_id: &str) {
+        self.runs
+            .retain(|run| run.provisional_operation_id.as_deref() != Some(operation_id));
+        self.normalize_selection();
+    }
+
+    pub fn replace_runs_preserving_provisional(&mut self, snapshots: Vec<Value>) {
+        let provisional = self
+            .runs
+            .iter()
+            .filter(|run| run.is_provisional())
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut durable = snapshots
+            .into_iter()
+            .map(RunData::from_snapshot)
+            .collect::<Vec<_>>();
+        for pending in provisional {
+            if !durable
+                .iter()
+                .any(|candidate| provisional_matches_durable(&pending, candidate))
+            {
+                durable.push(pending);
+            }
+        }
+        self.runs = durable;
+    }
+
     pub fn selected_run_data(&self) -> Option<&RunData> {
         self.runs.get(self.selected_run)
+    }
+
+    /// Resolve presentation separately from the immutable run snapshot.
+    ///
+    /// Compiler inputs remain pinned per run, while a project owner can tune
+    /// graph layers, hierarchy, labels, and title visibility once and see the
+    /// same visual language across historical and current runs.
+    pub(crate) fn selected_graph_options(&self) -> Option<&Value> {
+        self.project_graph_options.as_ref().or_else(|| {
+            self.selected_run_data()
+                .and_then(|run| run.graph_options.as_ref())
+        })
     }
 
     pub fn selected_run_running(&self) -> bool {
@@ -1809,9 +2531,13 @@ impl ControlCenterModel {
         self.selected_run = self.selected_run.min(self.runs.len().saturating_sub(1));
         self.selected_ticket = 0;
         self.selected_question = 0;
+        self.selected_question_option = 0;
         self.selected_agent = 0;
+        self.close_agent_chat();
+        self.activity_scroll = 0;
         self.graph_scroll = 0;
         self.detail_scroll = 0;
+        self.detail_section = DEFAULT_RUN_OVERVIEW_SECTION;
         self.normalize_selection();
         self.sync_orchestration();
     }
@@ -1826,12 +2552,52 @@ impl ControlCenterModel {
         let count = self.selected_pending_questions().len();
         if count == 0 {
             self.selected_question = 0;
+            self.selected_question_option = 0;
             return;
         }
+        let previous = self.selected_question;
         self.selected_question = self
             .selected_question
             .saturating_add_signed(delta)
             .min(count - 1);
+        if self.selected_question != previous {
+            self.reset_selected_question_option();
+        }
+    }
+
+    pub fn select_next_question_option(&mut self, delta: isize) {
+        let questions = self.selected_pending_questions();
+        let Some(question) = questions.get(self.selected_question).copied() else {
+            self.selected_question_option = 0;
+            return;
+        };
+        let can_revise = question_answer_is_revisable_pending(question)
+            && question_batch_id(question).is_some_and(|batch_id| {
+                questions.iter().any(|candidate| {
+                    candidate.get("id") != question.get("id")
+                        && question_batch_id(candidate) == Some(batch_id)
+                        && question_accepts_answer(candidate)
+                })
+            });
+        if !question_accepts_answer(question) && !can_revise {
+            return;
+        }
+        let count = question_choice_count(question);
+        if count == 0 {
+            self.selected_question_option = 0;
+            return;
+        }
+        self.selected_question_option = self
+            .selected_question_option
+            .saturating_add_signed(delta)
+            .min(count - 1);
+    }
+
+    fn reset_selected_question_option(&mut self) {
+        self.selected_question_option = self
+            .selected_pending_questions()
+            .get(self.selected_question)
+            .map_or(0, |question| question_initial_choice(question));
     }
 
     pub fn select_next_open_question_after(&mut self, answered_question_id: &str) {
@@ -1847,26 +2613,243 @@ impl ControlCenterModel {
             question_accepts_answer(questions[index]).then_some(index)
         }) {
             self.selected_question = next;
+            self.reset_selected_question_option();
         }
     }
 
     pub fn select_next_agent(&mut self, delta: isize) {
-        let count = self
-            .selected_run_data()
-            .map(|run| run.agent_summaries().len())
-            .unwrap_or_default();
+        let count = self.selected_agent_summaries().len();
         if count == 0 {
             self.selected_agent = 0;
+            self.close_agent_chat();
             return;
         }
-        self.selected_agent = self
+        let selected = self
             .selected_agent
             .saturating_add_signed(delta)
             .min(count - 1);
+        if selected != self.selected_agent {
+            self.agent_chat_scroll_from_bottom = 0;
+            self.agent_chat_scroll_from_top = None;
+        }
+        self.selected_agent = selected;
+        self.agent_chat_open = true;
+    }
+
+    pub fn selected_agent_summaries(&self) -> Vec<AgentSummary> {
+        let Some(run) = self.selected_run_data() else {
+            return Vec::new();
+        };
+        let summaries = run.agent_summaries();
+        if self.overview_subject == OverviewSubject::Run {
+            return summaries;
+        }
+        let ticket_id = self
+            .selected_ticket_value()
+            .and_then(|ticket| ticket.get("id"))
+            .and_then(Value::as_str);
+        summaries
+            .into_iter()
+            .filter(|agent| agent.ticket_id.as_deref() == ticket_id)
+            .collect()
+    }
+
+    pub fn selected_agent_key(&self) -> Option<String> {
+        self.selected_agent_summaries()
+            .get(self.selected_agent)
+            .map(|agent| agent.key.clone())
+    }
+
+    pub fn restore_selected_agent(&mut self, key: Option<&str>) {
+        let agents = self.selected_agent_summaries();
+        if let Some(index) = key.and_then(|key| agents.iter().position(|agent| agent.key == key)) {
+            self.selected_agent = index;
+            return;
+        }
+        self.selected_agent = self.selected_agent.min(agents.len().saturating_sub(1));
+        if agents.is_empty() {
+            self.close_agent_chat();
+        }
+    }
+
+    pub fn focus_agents(&mut self) {
+        self.focus = Focus::Agents;
+        if self.selected_agent_summaries().is_empty() {
+            self.close_agent_chat();
+        } else {
+            self.agent_chat_open = true;
+            self.agent_chat_scroll_from_bottom = 0;
+            self.agent_chat_scroll_from_top = None;
+        }
+    }
+
+    pub fn close_agent_chat(&mut self) {
+        self.agent_chat_open = false;
+        self.agent_chat_scroll_from_bottom = 0;
+        self.agent_chat_scroll_from_top = None;
+    }
+
+    pub fn agent_chat_is_open(&self) -> bool {
+        self.agent_chat_open
+            && self
+                .selected_agent_summaries()
+                .get(self.selected_agent)
+                .is_some()
+    }
+
+    pub fn scroll_agent_chat(&mut self, delta: isize) {
+        if let Some(from_top) = self.agent_chat_scroll_from_top.as_mut() {
+            *from_top = from_top.saturating_add_signed(delta);
+            return;
+        }
+        if delta < 0 {
+            self.agent_chat_scroll_from_bottom = self
+                .agent_chat_scroll_from_bottom
+                .saturating_add(delta.unsigned_abs());
+        } else {
+            self.agent_chat_scroll_from_bottom = self
+                .agent_chat_scroll_from_bottom
+                .saturating_sub(delta.unsigned_abs());
+        }
+    }
+
+    pub fn scroll_agent_chat_to_start(&mut self) {
+        self.agent_chat_scroll_from_top = Some(0);
+        self.agent_chat_scroll_from_bottom = 0;
+    }
+
+    pub fn scroll_agent_chat_to_end(&mut self) {
+        self.agent_chat_scroll_from_top = None;
+        self.agent_chat_scroll_from_bottom = 0;
+    }
+
+    pub(crate) fn selected_agent_chat_render(&self, width: u16) -> Option<AgentChatRender> {
+        let agent = self
+            .selected_agent_summaries()
+            .get(self.selected_agent)
+            .cloned()?;
+        let guidance = self
+            .selected_run_data()
+            .into_iter()
+            .flat_map(|run| run.events.iter())
+            .filter(|event| {
+                event.get("type").and_then(Value::as_str) == Some("compiler.steering.recorded")
+                    && event
+                        .get("data")
+                        .and_then(|data| data.get("kind"))
+                        .and_then(Value::as_str)
+                        == Some("agent_chat")
+            })
+            .filter(|event| {
+                let ticket = event
+                    .get("ticket_id")
+                    .or_else(|| event.get("data").and_then(|data| data.get("ticket_id")))
+                    .and_then(Value::as_str)
+                    .filter(|ticket| !ticket.trim().is_empty());
+                ticket == agent.ticket_id.as_deref()
+            })
+            .filter_map(|event| {
+                event
+                    .get("data")
+                    .and_then(|data| data.get("message"))
+                    .and_then(Value::as_str)
+                    .filter(|message| !message.trim().is_empty())
+                    .map(ToOwned::to_owned)
+            })
+            .collect::<Vec<_>>();
+        let request = AgentChatRequest {
+            key: agent.key,
+            // Agent records intentionally keep artifact paths relative to the compiler-owned run
+            // root (`.git/koni/runs/<run>`), not the product checkout. Resolve that ownership
+            // boundary before the renderer performs its canonical containment check.
+            root: self.selected_agent_artifact_root(),
+            transcript_path: agent.transcript.as_ref().map(|source| source.path.clone()),
+            prompt_path: agent
+                .transcript
+                .as_ref()
+                .and_then(|source| source.prompt_path.clone()),
+            output_path: agent
+                .transcript
+                .as_ref()
+                .and_then(|source| source.output_path.clone()),
+            codex_session_id: agent
+                .transcript
+                .as_ref()
+                .and_then(|source| source.codex_session_id.clone()),
+            guidance,
+            live: agent.live,
+        };
+        Some(self.agent_chat_cache.borrow_mut().render(&request, width))
+    }
+
+    fn selected_agent_artifact_root(&self) -> PathBuf {
+        let Some(run_id) = self.selected_run_id() else {
+            return self.root.clone();
+        };
+        GitBackend::discover(&self.root)
+            .and_then(|git| git.sidecar_path(PathBuf::from("runs").join(run_id)))
+            .ok()
+            .filter(|root| root.is_dir())
+            .unwrap_or_else(|| self.root.clone())
+    }
+
+    /// Build the friendly Agent-chat composer on top of the configured
+    /// compiler-mediated steering action. A one-shot Codex worker cannot be
+    /// mutated behind the broker's back, so this records durable guidance for
+    /// the selected ticket (or run-level Lead) and the compiler projects it
+    /// into the next authorized context boundary.
+    pub fn agent_guidance_form(&self) -> Option<ActionFormDraft> {
+        let agent = self
+            .selected_agent_summaries()
+            .get(self.selected_agent)
+            .filter(|agent| agent.live)?
+            .clone();
+        let mut form = self.action_form("steer")?;
+        for param in &mut form.params {
+            match param.id.as_str() {
+                "kind" => {
+                    param.value = "agent_chat".to_owned();
+                    param.locked = true;
+                }
+                "message" => {
+                    param.value.clear();
+                    param.locked = false;
+                }
+                "ticket" | "ticket_id" => {
+                    param.value = agent.ticket_id.clone().unwrap_or_default();
+                    param.locked = true;
+                }
+                "target_nodes" => {
+                    param.value = "[]".to_owned();
+                    param.locked = true;
+                }
+                "priority" => {
+                    param.value = "normal".to_owned();
+                    param.locked = true;
+                }
+                _ => param.locked = true,
+            }
+        }
+        form.select_agent_guidance_message();
+        Some(form)
     }
 
     pub fn advance_activity_animation(&mut self) {
         self.activity_tick = self.activity_tick.wrapping_add(1);
+    }
+
+    /// Whether the current projection contains a cue that represents active
+    /// model work. Generic run status and pending tickets are deliberately not
+    /// enough: animating those would imply token spend while a run is merely
+    /// waiting or paused.
+    pub fn has_live_activity_cue(&self) -> bool {
+        self.runs.iter().any(|run| {
+            run.provisional_operation_id.is_some()
+                || run
+                    .summary
+                    .as_ref()
+                    .is_some_and(|summary| summary.active_agents > 0)
+        })
     }
 
     pub fn visible_tickets(&self) -> Vec<&Value> {
@@ -1888,6 +2871,9 @@ impl ControlCenterModel {
         let Some(run) = self.selected_run_data() else {
             return &[];
         };
+        if self.overview_subject == OverviewSubject::Run {
+            return run.graph.as_slice();
+        }
         let projected = self
             .selected_ticket_value()
             .and_then(|ticket| ticket.get("id"))
@@ -1900,6 +2886,9 @@ impl ControlCenterModel {
         let Some(run) = self.selected_run_data() else {
             return false;
         };
+        if self.overview_subject == OverviewSubject::Run {
+            return false;
+        }
         self.selected_ticket_value()
             .and_then(|ticket| ticket.get("id"))
             .and_then(Value::as_str)
@@ -1908,6 +2897,7 @@ impl ControlCenterModel {
 
     pub fn select_next_run(&mut self, delta: isize) {
         self.overview_subject = OverviewSubject::Run;
+        self.close_agent_chat();
         if self.runs.is_empty() {
             return;
         }
@@ -1917,15 +2907,20 @@ impl ControlCenterModel {
             .min(self.runs.len() - 1);
         self.selected_ticket = 0;
         self.selected_question = 0;
+        self.reset_selected_question_option();
         self.selected_agent = 0;
+        self.activity_scroll = 0;
         self.graph_scroll = 0;
         self.detail_scroll = 0;
+        self.detail_section = DEFAULT_RUN_OVERVIEW_SECTION;
         self.normalize_conditional_focus();
         self.sync_orchestration();
     }
 
     pub fn select_next_ticket(&mut self, delta: isize) {
         self.overview_subject = OverviewSubject::Ticket;
+        self.selected_agent = 0;
+        self.close_agent_chat();
         let count = self.visible_tickets().len();
         if count == 0 {
             self.selected_ticket = 0;
@@ -1941,6 +2936,8 @@ impl ControlCenterModel {
 
     pub fn cycle_ticket_tab(&mut self, delta: isize) {
         self.overview_subject = OverviewSubject::Ticket;
+        self.selected_agent = 0;
+        self.close_agent_chat();
         let current = TicketTab::ALL
             .iter()
             .position(|candidate| *candidate == self.ticket_tab)
@@ -1952,11 +2949,44 @@ impl ControlCenterModel {
     }
 
     pub fn cycle_detail_panel(&mut self, delta: isize) {
+        if self.agent_chat_is_open() {
+            return;
+        }
         let current = Panel::ALL
             .iter()
             .position(|candidate| *candidate == self.detail_panel)
             .unwrap_or(0);
-        self.detail_panel = Panel::ALL[wrap_index(current, delta, Panel::ALL.len())];
+        self.select_detail_panel(Panel::ALL[wrap_index(current, delta, Panel::ALL.len())]);
+    }
+
+    pub fn select_detail_panel(&mut self, panel: Panel) {
+        if self.agent_chat_is_open() {
+            return;
+        }
+        self.detail_panel = panel;
+        self.detail_scroll = 0;
+        self.detail_section =
+            if panel == Panel::Overview && self.overview_subject == OverviewSubject::Run {
+                DEFAULT_RUN_OVERVIEW_SECTION
+            } else {
+                0
+            };
+    }
+
+    pub fn run_overview_section_navigation(&self) -> bool {
+        self.mode == Mode::Operate
+            && self.focus == Focus::Details
+            && !self.agent_chat_is_open()
+            && self.detail_panel == Panel::Overview
+            && self.overview_subject == OverviewSubject::Run
+    }
+
+    pub fn select_next_detail_section(&mut self, delta: isize) {
+        const SECTION_COUNT: usize = 3;
+        self.detail_section = self
+            .detail_section
+            .saturating_add_signed(delta)
+            .min(SECTION_COUNT - 1);
         self.detail_scroll = 0;
     }
 
@@ -1964,16 +2994,18 @@ impl ControlCenterModel {
         let operate = [
             Focus::Runs,
             Focus::Tickets,
-            Focus::Details,
             Focus::Agents,
+            Focus::Details,
+            Focus::Activity,
             Focus::Graph,
         ];
         let operate_with_questions = [
             Focus::Runs,
             Focus::Tickets,
+            Focus::Agents,
             Focus::Details,
             Focus::Questions,
-            Focus::Agents,
+            Focus::Activity,
             Focus::Graph,
         ];
         let configure = [Focus::ConfigTree, Focus::ConfigForm, Focus::Yaml];
@@ -2000,22 +3032,45 @@ impl ControlCenterModel {
             });
         self.focus = choices[wrap_index(current, if backwards { -1 } else { 1 }, choices.len())];
         self.sync_overview_subject_to_focus();
+        if self.focus == Focus::Agents {
+            self.focus_agents();
+        }
     }
 
     pub fn focus_runs(&mut self) {
         self.focus = Focus::Runs;
         self.overview_subject = OverviewSubject::Run;
+        self.detail_section = DEFAULT_RUN_OVERVIEW_SECTION;
+        self.selected_agent = 0;
+        self.close_agent_chat();
     }
 
     pub fn focus_tickets(&mut self) {
         self.focus = Focus::Tickets;
         self.overview_subject = OverviewSubject::Ticket;
+        self.detail_section = 0;
+        self.selected_agent = 0;
+        self.close_agent_chat();
     }
 
     fn sync_overview_subject_to_focus(&mut self) {
         match self.focus {
-            Focus::Runs => self.overview_subject = OverviewSubject::Run,
-            Focus::Tickets => self.overview_subject = OverviewSubject::Ticket,
+            Focus::Runs => {
+                if self.overview_subject != OverviewSubject::Run {
+                    self.selected_agent = 0;
+                    self.detail_section = DEFAULT_RUN_OVERVIEW_SECTION;
+                }
+                self.overview_subject = OverviewSubject::Run;
+                self.close_agent_chat();
+            }
+            Focus::Tickets => {
+                if self.overview_subject != OverviewSubject::Ticket {
+                    self.selected_agent = 0;
+                    self.detail_section = 0;
+                }
+                self.overview_subject = OverviewSubject::Ticket;
+                self.close_agent_chat();
+            }
             _ => {}
         }
     }
@@ -2030,6 +3085,7 @@ impl ControlCenterModel {
             Mode::Operate => Focus::Runs,
             Mode::Configure => Focus::ConfigTree,
         };
+        self.close_agent_chat();
         self.sync_overview_subject_to_focus();
     }
 
@@ -2042,6 +3098,19 @@ impl ControlCenterModel {
             return;
         }
         let mut draft = NewRunDraft::default();
+        draft.target_branches = match Engine::recent_target_branches(&self.root) {
+            Ok(branches) if !branches.is_empty() => branches,
+            Ok(_) => {
+                self.status =
+                    "no user-owned local branches are available for a run target".to_owned();
+                return;
+            }
+            Err(error) => {
+                self.status = format!("cannot discover run target branches: {error}");
+                return;
+            }
+        };
+        draft.target_branch = draft.target_branches[0].reference.clone();
         draft.run_type.clone_from(&self.default_run_type);
         if let Some(run_type) = self
             .run_types
@@ -2096,6 +3165,9 @@ impl ControlCenterModel {
         if matches!(self.dialog, Some(Dialog::Help(_))) {
             self.dialog = self.suspended_dialog.take();
         } else {
+            if let Some(Dialog::AnswerQuestion(answer)) = &self.dialog {
+                self.selected_question_option = answer.selected;
+            }
             self.dialog = None;
             self.suspended_dialog = None;
         }
@@ -2120,6 +3192,22 @@ impl ControlCenterModel {
             summary,
             run_type_title,
         )));
+    }
+
+    pub fn open_selected_run_merge(&mut self) {
+        let Some(run_id) = self.selected_run_id().map(ToOwned::to_owned) else {
+            self.status = "no run selected".to_owned();
+            return;
+        };
+        match Engine::preview_run_promotion(&self.root, &run_id) {
+            Ok(preview) => {
+                self.dialog = Some(Dialog::MergeRun(MergeRunDraft {
+                    preview,
+                    submitted: false,
+                }));
+            }
+            Err(error) => self.status = format!("merge unavailable: {error}"),
+        }
     }
 
     pub fn open_form_editor(&mut self) {
@@ -2160,7 +3248,7 @@ impl ControlCenterModel {
     pub fn open_run_type_wizard(&mut self) {
         if self.legacy_migration_available {
             self.status =
-                "convert the Legacy configuration first · press L in Configure".to_owned();
+                "convert the Legacy configuration first · press l in Configure".to_owned();
             return;
         }
         let catalog = match self.compile_draft_catalog_preview() {
@@ -2385,7 +3473,7 @@ impl ControlCenterModel {
             relative_path.display()
         );
         anyhow::ensure!(
-            !self.root.join(".codex/koni").join(relative_path).exists(),
+            !active_config_root(&self.root).join(relative_path).exists(),
             "configuration document already exists: {}",
             relative_path.display()
         );
@@ -2397,7 +3485,7 @@ impl ControlCenterModel {
         relative_path: &Path,
         text: String,
     ) -> anyhow::Result<ConfigDocument> {
-        let source_path = self.root.join(".codex/koni").join(relative_path);
+        let source_path = active_config_root(&self.root).join(relative_path);
         let draft_path = config_draft_root(&self.root).join(relative_path);
         let mut document = ConfigDocument {
             relative_path: relative_path.to_path_buf(),
@@ -2517,7 +3605,7 @@ impl ControlCenterModel {
         if !self.config.pending_deletes.remove(&original) {
             self.config.pending_deletes.insert(original.clone());
             self.status = format!(
-                "deletion staged for {} (press D to undo, Ctrl-P to publish)",
+                "deletion staged for {} (press d to undo, Ctrl-P to publish)",
                 original.display()
             );
         } else {
@@ -2538,6 +3626,7 @@ impl ControlCenterModel {
 
     pub fn create_config_document(&mut self, raw_path: &str) -> anyhow::Result<()> {
         let relative_path = PathBuf::from(raw_path.trim());
+        let schema2 = active_config_root_relative(&self.root) == Path::new(".koni");
         anyhow::ensure!(
             !relative_path.as_os_str().is_empty()
                 && !relative_path.is_absolute()
@@ -2548,6 +3637,10 @@ impl ControlCenterModel {
                     || relative_path.starts_with(Path::new(".agents")))
                     || native_config_relative_path(&relative_path)),
             "configuration path must be a contained relative path"
+        );
+        anyhow::ensure!(
+            !schema2 || !codex_native_config_relative_path(&relative_path),
+            "schema-2 Configure does not edit project Codex configuration or custom agents"
         );
         anyhow::ensure!(
             matches!(
@@ -2578,7 +3671,8 @@ impl ControlCenterModel {
             .join("koni/config-drafts");
         let text = match relative_path.extension().and_then(|value| value.to_str()) {
             Some("md") => "# New instructions\n".to_owned(),
-            Some("toml") => "# New Codex project resource\n".to_owned(),
+            Some("toml") => "# New configuration resource\n".to_owned(),
+            _ if schema2 => "schema_version: \"2.0\"\n".to_owned(),
             _ => "schema_version: \"1.0\"\n".to_owned(),
         };
         let mut document = ConfigDocument {
@@ -2836,6 +3930,8 @@ impl ControlCenterModel {
     }
 
     pub fn open_pending_question(&mut self, index: usize) {
+        let panel_selected =
+            (self.selected_question == index).then_some(self.selected_question_option);
         let Some(question) = self
             .selected_run_data()
             .and_then(|run| run.pending_questions().get(index).copied())
@@ -2845,35 +3941,8 @@ impl ControlCenterModel {
             return;
         };
         self.selected_question = index;
-        let options = question
-            .get("options")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .map(|option| {
-                (
-                    option
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned(),
-                    option
-                        .get("label")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned(),
-                    option
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned(),
-                    option
-                        .get("recommended")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                )
-            })
-            .collect::<Vec<_>>();
+        let options = question_options(&question);
+        let allow_custom = question_allows_custom(&question);
         let batch_position = question_batch_position(&question);
         let unanswered_batch_members = question_batch_id(&question).map_or(0, |batch_id| {
             self.selected_run_data().map_or(0, |run| {
@@ -2895,16 +3964,29 @@ impl ControlCenterModel {
             .get("answer")
             .and_then(|answer| answer.get("custom"))
             .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        let selected = stored_option
-            .and_then(|stored| options.iter().position(|(id, _, _, _)| id == stored))
+            .map(ToOwned::to_owned);
+        let stored_notes = question
+            .get("answer")
+            .and_then(|answer| answer.get("notes"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let choice_count = options.len() + usize::from(allow_custom);
+        let selected = panel_selected
+            .filter(|selected| *selected < choice_count)
             .or_else(|| {
-                options
-                    .iter()
-                    .position(|(_, _, _, recommended)| *recommended)
+                stored_option
+                    .and_then(|stored| options.iter().position(|(id, _, _, _)| id == stored))
             })
-            .unwrap_or(0);
+            .or_else(|| {
+                stored_custom
+                    .as_ref()
+                    .filter(|_| allow_custom)
+                    .map(|_| options.len())
+            })
+            .unwrap_or_else(|| question_initial_choice(&question));
+        self.selected_question_option = selected;
+        let custom_active = stored_custom.is_some() && selected == options.len();
+        let custom = stored_custom.or(stored_notes).unwrap_or_default();
         self.dialog = Some(Dialog::AnswerQuestion(AnswerDraft {
             operation_id: new_operation_id(),
             run_id: self
@@ -2929,14 +4011,11 @@ impl ControlCenterModel {
                 .to_owned(),
             options,
             selected,
-            custom_active: !stored_custom.is_empty(),
-            custom: stored_custom,
-            allow_custom: question
-                .get("allow_custom_answer")
-                .and_then(Value::as_bool)
-                .unwrap_or(true),
+            custom_active,
+            custom,
+            allow_custom,
             pending_resume,
-            waiting_for_batch: pending_resume
+            waiting_for_batch: question_answer_is_revisable_pending(&question)
                 && batch_position.is_some()
                 && unanswered_batch_members > 0,
             remaining_batch_questions: unanswered_batch_members,
@@ -3012,6 +4091,102 @@ impl ControlCenterModel {
         Ok(pending.len())
     }
 
+    pub fn unpublished_config_change_count(&self) -> usize {
+        self.config
+            .documents
+            .iter()
+            .filter(|document| document.dirty() || document.is_new)
+            .count()
+            + self.config.pending_deletes.len()
+            + self.config.pending_renames.len()
+    }
+
+    /// Discard the complete project draft set and reload only published configuration.
+    ///
+    /// Publication is project-wide because files and semantic resources can reference one
+    /// another. Discard follows the same boundary: reverting one projected card could otherwise
+    /// erase unrelated edits in a shared YAML document or leave a linked persona prompt dangling.
+    pub fn discard_all_config_drafts(&mut self) -> anyhow::Result<usize> {
+        let changes = self.unpublished_config_change_count();
+        if changes == 0 {
+            self.status = "no unpublished configuration changes to discard".to_owned();
+            return Ok(0);
+        }
+
+        let selected = self.config.selected_resource().cloned();
+        let selected_domain = self.config.selected_domain();
+        let draft_root = config_draft_root(&self.root);
+        let backup_root = draft_root.with_file_name(format!(
+            "config-drafts-discard-{}-{}",
+            std::process::id(),
+            NEXT_OPERATION_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        if backup_root.exists() {
+            fs::remove_dir_all(&backup_root)?;
+        }
+        if draft_root.exists() {
+            fs::rename(&draft_root, &backup_root)?;
+        }
+
+        let reload = (|| -> anyhow::Result<_> {
+            let mut config = load_config_state(&self.root)?;
+            if let Some(resource) = &selected {
+                config.select_resource_for(resource.domain, &resource.document_path, resource.kind);
+            } else {
+                config.select_domain_index(selected_domain.index());
+            }
+            let project_graph_options = published_graph_options(&config);
+            let catalog_state = match ProjectCatalogCompiler::compile(&self.root) {
+                Ok(catalog) => {
+                    let legacy =
+                        matches!(catalog.source, ProjectCatalogSource::LegacyKoniToml { .. });
+                    (
+                        run_type_options(&catalog),
+                        catalog.document.default_run_type.clone(),
+                        run_type_intake_schemas(&catalog),
+                        None,
+                        legacy,
+                    )
+                }
+                Err(error) => (
+                    Vec::new(),
+                    String::new(),
+                    BTreeMap::new(),
+                    Some(error.to_string()),
+                    false,
+                ),
+            };
+            Ok((config, project_graph_options, catalog_state))
+        })();
+
+        let (config, project_graph_options, catalog_state) = match reload {
+            Ok(reloaded) => reloaded,
+            Err(error) => {
+                if backup_root.exists() {
+                    if draft_root.exists() {
+                        let _ = fs::remove_dir_all(&draft_root);
+                    }
+                    let _ = fs::rename(&backup_root, &draft_root);
+                }
+                return Err(error).context("could not reload published configuration");
+            }
+        };
+
+        self.config = config;
+        self.project_graph_options = project_graph_options;
+        self.run_types = catalog_state.0;
+        self.default_run_type = catalog_state.1;
+        self.run_type_intake = catalog_state.2;
+        self.catalog_error = catalog_state.3;
+        self.legacy_migration_available = catalog_state.4;
+        let _ = fs::remove_dir_all(&backup_root);
+        self.status = format!(
+            "discarded {changes} unpublished configuration change{}",
+            if changes == 1 { "" } else { "s" }
+        );
+        Ok(changes)
+    }
+
     fn save_config_operations(&self) -> anyhow::Result<()> {
         let path = config_draft_root(&self.root).join(".operations.json");
         if self.config.pending_deletes.is_empty() && self.config.pending_renames.is_empty() {
@@ -3033,13 +4208,16 @@ impl ControlCenterModel {
         if validation_root.exists() {
             fs::remove_dir_all(validation_root)?;
         }
-        let config_root = self.root.join(".codex/koni");
-        let staged_config_root = validation_root.join(".codex/koni");
+        let config_relative = active_config_root_relative(&self.root);
+        let config_root = self.root.join(config_relative);
+        let staged_config_root = validation_root.join(config_relative);
         copy_tree(&config_root, &staged_config_root)?;
-        copy_tree(
-            &self.root.join(".codex/agents"),
-            &validation_root.join(".codex/agents"),
-        )?;
+        if config_relative != Path::new(".koni") {
+            copy_tree(
+                &self.root.join(".codex/agents"),
+                &validation_root.join(".codex/agents"),
+            )?;
+        }
         copy_tree(
             &self.root.join(".agents/skills"),
             &validation_root.join(".agents/skills"),
@@ -3087,7 +4265,7 @@ impl ControlCenterModel {
                 );
             }
         }
-        let config_root = self.root.join(".codex/koni");
+        let config_root = active_config_root(&self.root);
         let draft_root = config_draft_root(&self.root);
         let validation_root = draft_root.join(format!("validation-{}", std::process::id()));
         self.stage_config_candidate(&validation_root)?;
@@ -3162,6 +4340,7 @@ impl ControlCenterModel {
         self.run_types = run_type_options(&catalog);
         self.default_run_type = catalog.document.default_run_type.clone();
         self.run_type_intake = run_type_intake_schemas(&catalog);
+        self.project_graph_options = published_graph_options(&self.config);
         self.catalog_error = None;
         self.legacy_migration_available = false;
         self.config.linked_document_editor = None;
@@ -3181,12 +4360,17 @@ impl ControlCenterModel {
         self.selected_question = self
             .selected_question
             .min(self.selected_pending_questions().len().saturating_sub(1));
-        self.selected_agent = self.selected_agent.min(
-            self.selected_run_data()
-                .map(|run| run.agent_summaries().len())
-                .unwrap_or_default()
+        self.selected_question_option = self.selected_question_option.min(
+            self.selected_pending_questions()
+                .get(self.selected_question)
+                .map_or(0, |question| question_choice_count(question))
                 .saturating_sub(1),
         );
+        let agent_count = self.selected_agent_summaries().len();
+        self.selected_agent = self.selected_agent.min(agent_count.saturating_sub(1));
+        if agent_count == 0 {
+            self.close_agent_chat();
+        }
         self.normalize_conditional_focus();
     }
 
@@ -3260,6 +4444,7 @@ fn cockpit_view_matches(view: &Value, focus: Focus, detail_panel: Panel) -> bool
         }
         Focus::Graph => matches!(kind, "graph" | "typed_tree"),
         Focus::Agents => kind == "status_overlay" || id.contains("agent"),
+        Focus::Activity => matches!(kind, "summary" | "nested_detail") || id.contains("status"),
         Focus::Questions => kind == "nested_detail" || id.contains("question"),
         Focus::Details => match detail_panel {
             Panel::Overview => {
@@ -3388,7 +4573,7 @@ fn template_from_resolved(run_type: &ResolvedRunType) -> RunTypeTemplateDraft {
 
 fn standalone_run_type_document(run_type: &ResolvedRunType) -> RunTypeDocument {
     RunTypeDocument {
-        schema_version: "1.0".to_owned(),
+        schema_version: run_type.schema_version.clone(),
         id: run_type.id.clone(),
         title: run_type.title.clone(),
         description: run_type.description.clone(),
@@ -3403,6 +4588,8 @@ fn standalone_run_type_document(run_type: &ResolvedRunType) -> RunTypeDocument {
         run_card: Some(run_type.run_card.clone()),
         agents: run_type.agents.clone(),
         orchestration: run_type.orchestration.clone(),
+        promotion: run_type.promotion.clone(),
+        planning: run_type.planning.clone(),
         instructions: run_type.instructions.clone(),
         overrides: Vec::new(),
     }
@@ -3494,9 +4681,8 @@ fn run_type_options(catalog: &CompiledProjectCatalog) -> Vec<RunTypeOption> {
                         continue;
                     };
                     let setting = settings
-                        .reasoning_effort
-                        .as_ref()
-                        .map_or_else(|| model.to_owned(), |effort| format!("{model}/{effort}"));
+                        .effective_thinking_level()
+                        .map_or_else(|| model.to_owned(), |level| format!("{model}/{level}"));
                     let role = run_type_role_label(role);
                     if let Some((_, roles)) = groups
                         .iter_mut()
@@ -3553,7 +4739,9 @@ fn run_type_options(catalog: &CompiledProjectCatalog) -> Vec<RunTypeOption> {
                                     profile_setting.and_then(|persona| persona.model.clone())
                                 }),
                             reasoning_effort: run_setting
-                                .and_then(|setting| setting.reasoning_effort.clone())
+                                .and_then(|setting| {
+                                    setting.effective_thinking_level().map(str::to_owned)
+                                })
                                 .or_else(|| {
                                     profile_setting
                                         .and_then(|persona| persona.reasoning_effort.clone())
@@ -3587,8 +4775,231 @@ fn run_type_role_label(role: &str) -> String {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DurableEntryKind {
+    Missing,
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DurableEntryFingerprint {
+    root_index: usize,
+    relative_path: PathBuf,
+    kind: DurableEntryKind,
+    len: u64,
+    readonly: bool,
+    modified: Option<SystemTime>,
+    created: Option<SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    mode: u32,
+    #[cfg(unix)]
+    modified_seconds: i64,
+    #[cfg(unix)]
+    modified_nanoseconds: i64,
+    #[cfg(unix)]
+    changed_seconds: i64,
+    #[cfg(unix)]
+    changed_nanoseconds: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DurableRunFingerprint(Vec<DurableEntryFingerprint>);
+
+impl DurableRunFingerprint {
+    /// Capture every durable compiler input beneath the supplied roots without parsing it.
+    ///
+    /// Koni publishes semantic state with atomic replacement or append+sync. Path identity,
+    /// type, size, mtime, and (on Unix) inode/ctime therefore form a conservative generation
+    /// boundary that is much cheaper than rebuilding graphs, tickets, receipts, reports, and
+    /// transcripts. Only the top-level `locks` directory is omitted: it is transient process
+    /// coordination state and is not consumed by `cockpit_snapshot`.
+    fn capture(roots: &[PathBuf]) -> Option<Self> {
+        let mut entries = Vec::new();
+        for (root_index, root) in roots.iter().enumerate() {
+            capture_durable_tree(root, root, root_index, &mut entries)?;
+        }
+        Some(Self(entries))
+    }
+}
+
+fn capture_durable_tree(
+    root: &Path,
+    path: &Path,
+    root_index: usize,
+    output: &mut Vec<DurableEntryFingerprint>,
+) -> Option<()> {
+    let relative_path = path.strip_prefix(root).ok()?.to_path_buf();
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && relative_path.as_os_str().is_empty() =>
+        {
+            output.push(missing_durable_entry(root_index));
+            return Some(());
+        }
+        Err(_) => return None,
+    };
+    let kind = if metadata.file_type().is_symlink() {
+        DurableEntryKind::Symlink
+    } else if metadata.is_file() {
+        DurableEntryKind::File
+    } else if metadata.is_dir() {
+        DurableEntryKind::Directory
+    } else {
+        DurableEntryKind::Other
+    };
+    output.push(durable_entry_fingerprint(
+        root_index,
+        relative_path.clone(),
+        kind,
+        &metadata,
+    ));
+    if kind != DurableEntryKind::Directory {
+        return Some(());
+    }
+
+    let mut children = fs::read_dir(path)
+        .ok()?
+        .map(|entry| entry.ok().map(|entry| entry.path()))
+        .collect::<Option<Vec<_>>>()?;
+    children.sort();
+    for child in children {
+        let child_relative = child.strip_prefix(root).ok()?;
+        if child_relative.components().count() == 1
+            && child.file_name().is_some_and(|name| name == "locks")
+            && fs::symlink_metadata(&child).ok()?.is_dir()
+        {
+            continue;
+        }
+        capture_durable_tree(root, &child, root_index, output)?;
+    }
+    Some(())
+}
+
+fn missing_durable_entry(root_index: usize) -> DurableEntryFingerprint {
+    DurableEntryFingerprint {
+        root_index,
+        relative_path: PathBuf::new(),
+        kind: DurableEntryKind::Missing,
+        len: 0,
+        readonly: false,
+        modified: None,
+        created: None,
+        #[cfg(unix)]
+        device: 0,
+        #[cfg(unix)]
+        inode: 0,
+        #[cfg(unix)]
+        mode: 0,
+        #[cfg(unix)]
+        modified_seconds: 0,
+        #[cfg(unix)]
+        modified_nanoseconds: 0,
+        #[cfg(unix)]
+        changed_seconds: 0,
+        #[cfg(unix)]
+        changed_nanoseconds: 0,
+    }
+}
+
+fn durable_entry_fingerprint(
+    root_index: usize,
+    relative_path: PathBuf,
+    kind: DurableEntryKind,
+    metadata: &fs::Metadata,
+) -> DurableEntryFingerprint {
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+
+    DurableEntryFingerprint {
+        root_index,
+        relative_path,
+        kind,
+        len: metadata.len(),
+        readonly: metadata.permissions().readonly(),
+        modified: metadata.modified().ok(),
+        created: metadata.created().ok(),
+        #[cfg(unix)]
+        device: metadata.dev(),
+        #[cfg(unix)]
+        inode: metadata.ino(),
+        #[cfg(unix)]
+        mode: metadata.mode(),
+        #[cfg(unix)]
+        modified_seconds: metadata.mtime(),
+        #[cfg(unix)]
+        modified_nanoseconds: metadata.mtime_nsec(),
+        #[cfg(unix)]
+        changed_seconds: metadata.ctime(),
+        #[cfg(unix)]
+        changed_nanoseconds: metadata.ctime_nsec(),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CachedProjectSnapshot {
+    registration: RunRegistration,
+    watch_roots: Vec<PathBuf>,
+    fingerprint: DurableRunFingerprint,
+    snapshot: Value,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ProjectSnapshotCache {
+    entries: BTreeMap<String, CachedProjectSnapshot>,
+}
+
+#[derive(Debug)]
+struct RegisteredSnapshotLoad {
+    snapshot: Value,
+    cacheable: bool,
+}
+
+impl RegisteredSnapshotLoad {
+    fn valid(snapshot: Value) -> Self {
+        Self {
+            snapshot,
+            cacheable: true,
+        }
+    }
+
+    fn invalid(snapshot: Value) -> Self {
+        Self {
+            snapshot,
+            cacheable: false,
+        }
+    }
+}
+
 pub(crate) fn project_snapshots(root: &Path) -> koni_core::Result<Vec<Value>> {
+    project_snapshots_internal(root, None, None)
+}
+
+pub(crate) fn project_snapshots_cached(
+    root: &Path,
+    selected_run_id: Option<&str>,
+    cache: &mut ProjectSnapshotCache,
+) -> koni_core::Result<Vec<Value>> {
+    project_snapshots_internal(root, selected_run_id, Some(cache))
+}
+
+fn project_snapshots_internal(
+    root: &Path,
+    selected_run_id: Option<&str>,
+    mut cache: Option<&mut ProjectSnapshotCache>,
+) -> koni_core::Result<Vec<Value>> {
     let Some(common_dir) = git_common_dir(root) else {
+        if let Some(cache) = cache.as_deref_mut() {
+            cache.entries.clear();
+        }
         // Installation is intentionally configuration-only. A brand-new directory therefore
         // has no Git repository until the user submits the first run, at which point the engine
         // creates the baseline commit. Opening the control center before that remains read-only.
@@ -3596,6 +5007,9 @@ pub(crate) fn project_snapshots(root: &Path) -> koni_core::Result<Vec<Value>> {
     };
     let registry_exists = common_dir.join("koni/project.yaml").exists();
     if !registry_exists {
+        if let Some(cache) = cache.as_deref_mut() {
+            cache.entries.clear();
+        }
         return match Engine::open(root) {
             Ok(engine) => engine.cockpit_snapshot().map(|snapshot| vec![snapshot]),
             Err(KoniError::NotFound(missing)) if missing == "active Koni run" => {
@@ -3608,31 +5022,211 @@ pub(crate) fn project_snapshots(root: &Path) -> koni_core::Result<Vec<Value>> {
     }
 
     let registry = Engine::project_registry(root)?;
-    let mut snapshots = registry
+    let mut snapshots = if let Some(cache) = cache {
+        cached_registered_snapshots(
+            root,
+            &common_dir,
+            &registry,
+            selected_run_id,
+            cache,
+            |run_id, registration| load_registered_snapshot(root, run_id, registration),
+        )
+    } else {
+        registry
+            .runs
+            .iter()
+            .map(|(run_id, registration)| {
+                load_registered_snapshot(root, run_id, registration).snapshot
+            })
+            .collect::<Vec<_>>()
+    };
+    sort_project_snapshots(&mut snapshots);
+    Ok(snapshots)
+}
+
+fn cached_registered_snapshots<F>(
+    _root: &Path,
+    common_dir: &Path,
+    registry: &ProjectRegistry,
+    selected_run_id: Option<&str>,
+    cache: &mut ProjectSnapshotCache,
+    mut load: F,
+) -> Vec<Value>
+where
+    F: FnMut(&str, &RunRegistration) -> RegisteredSnapshotLoad,
+{
+    cache
+        .entries
+        .retain(|run_id, _| registry.runs.contains_key(run_id));
+    registry
         .runs
         .iter()
         .map(|(run_id, registration)| {
-            Engine::open_run(root, run_id)
-                .and_then(|engine| engine.cockpit_snapshot())
-                .unwrap_or_else(|error| {
-                    let run = serde_json::to_value(registration).unwrap_or(Value::Null);
-                    serde_json::json!({
-                        "schema_version": "1.0",
-                        "project_root": root,
-                        "run": run,
-                        "graph": [],
-                        "tickets": [],
-                        "questions": [],
-                        "stages": [],
-                        "agents": [],
-                        "external_loops": [],
-                        "external_repairs": [],
-                        "planning_transcript": [],
-                        "validation_errors": [error.to_string()],
-                    })
-                })
+            let live = registration_status_is_live(&registration.status);
+            let selected = selected_run_id == Some(run_id.as_str());
+            if live {
+                cache.entries.remove(run_id);
+                return load(run_id, registration).snapshot;
+            }
+
+            let watch_roots = cache
+                .entries
+                .get(run_id)
+                .filter(|entry| entry.registration == *registration)
+                .map(|entry| entry.watch_roots.clone())
+                .unwrap_or_else(|| {
+                    registered_snapshot_watch_roots(common_dir, run_id, registration)
+                });
+            let before = DurableRunFingerprint::capture(&watch_roots);
+            if !selected
+                && let (Some(before), Some(entry)) = (before.as_ref(), cache.entries.get(run_id))
+                && entry.registration == *registration
+                && entry.watch_roots == watch_roots
+                && &entry.fingerprint == before
+            {
+                return entry.snapshot.clone();
+            }
+
+            let loaded = load(run_id, registration);
+            let after = DurableRunFingerprint::capture(&watch_roots);
+            if loaded.cacheable
+                && !snapshot_has_live_activity(&loaded.snapshot)
+                && before.is_some()
+                && before == after
+                && let Some(fingerprint) = after
+            {
+                cache.entries.insert(
+                    run_id.clone(),
+                    CachedProjectSnapshot {
+                        registration: registration.clone(),
+                        watch_roots,
+                        fingerprint,
+                        snapshot: loaded.snapshot.clone(),
+                    },
+                );
+            } else {
+                cache.entries.remove(run_id);
+            }
+            loaded.snapshot
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn snapshot_has_live_activity(snapshot: &Value) -> bool {
+    snapshot
+        .get("lifecycle")
+        .and_then(|lifecycle| lifecycle.get("running"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || snapshot
+            .get("lifecycle")
+            .and_then(|lifecycle| lifecycle.get("active_agents"))
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count > 0)
+        || snapshot
+            .get("lifecycle")
+            .and_then(|lifecycle| lifecycle.get("draining"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || snapshot
+            .get("agents")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|agent| {
+                matches!(
+                    agent
+                        .get("status")
+                        .or_else(|| agent.get("state"))
+                        .and_then(Value::as_str),
+                    Some("starting" | "running" | "resuming")
+                )
+            })
+}
+
+fn registration_status_is_live(status: &RunRegistrationStatus) -> bool {
+    matches!(
+        status,
+        RunRegistrationStatus::Planning
+            | RunRegistrationStatus::Approved
+            | RunRegistrationStatus::Active
+            | RunRegistrationStatus::Paused
+    )
+}
+
+fn registered_snapshot_watch_roots(
+    common_dir: &Path,
+    run_id: &str,
+    registration: &RunRegistration,
+) -> Vec<PathBuf> {
+    let run_root = common_dir.join("koni/runs").join(run_id);
+    let mut roots = vec![run_root.clone()];
+    let Some(integration_worktree) = registration.integration_worktree.as_ref() else {
+        return roots;
+    };
+    let snapshot_root = run_root.join(&registration.config_snapshot_path);
+    let Ok(catalog) = ProjectCatalogCompiler::compile(&snapshot_root) else {
+        return roots;
+    };
+    let run_type = registration
+        .run_type_id
+        .as_deref()
+        .and_then(|id| catalog.run_type(id))
+        .unwrap_or_else(|| catalog.default_run_type());
+    let Ok(profile) = ProfileCompiler::compile(&run_type.profile.resolved_path) else {
+        return roots;
+    };
+    if profile.manifest.storage.backend == StorageBackend::Tracked {
+        let state_parent = profile
+            .manifest
+            .storage
+            .state_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        roots.push(integration_worktree.join(state_parent));
+    }
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn load_registered_snapshot(
+    root: &Path,
+    run_id: &str,
+    registration: &RunRegistration,
+) -> RegisteredSnapshotLoad {
+    match Engine::open_run(root, run_id).and_then(|engine| engine.cockpit_snapshot()) {
+        Ok(snapshot) => RegisteredSnapshotLoad::valid(snapshot),
+        Err(error) => {
+            RegisteredSnapshotLoad::invalid(invalid_registered_snapshot(root, registration, &error))
+        }
+    }
+}
+
+fn invalid_registered_snapshot(
+    root: &Path,
+    registration: &RunRegistration,
+    error: &KoniError,
+) -> Value {
+    let run = serde_json::to_value(registration).unwrap_or(Value::Null);
+    serde_json::json!({
+        "schema_version": "1.0",
+        "project_root": root,
+        "run": run,
+        "graph": [],
+        "tickets": [],
+        "questions": [],
+        "stages": [],
+        "agents": [],
+        "external_loops": [],
+        "external_repairs": [],
+        "planning_transcript": [],
+        "validation_errors": [error.to_string()],
+    })
+}
+
+fn sort_project_snapshots(snapshots: &mut [Value]) {
     snapshots.sort_by(|left, right| {
         let left = left
             .get("run")
@@ -3646,12 +5240,17 @@ pub(crate) fn project_snapshots(root: &Path) -> koni_core::Result<Vec<Value>> {
             .unwrap_or_default();
         right.cmp(left)
     });
-    Ok(snapshots)
 }
 
 fn canonical_project_root(root: &Path) -> anyhow::Result<PathBuf> {
     let root = root.canonicalize()?;
     let repository = git2_discover_root(&root).unwrap_or(root);
+    if repository.join(".koni/project.yaml").is_file()
+        || repository.join(".codex/koni/project.yaml").is_file()
+        || repository.join("koni.toml").is_file()
+    {
+        return Ok(repository);
+    }
     if let Some(common) = git_common_dir(&repository) {
         let registry = common.join("koni/project.yaml");
         if registry.exists() {
@@ -3678,7 +5277,8 @@ fn git2_discover_root(root: &Path) -> Option<PathBuf> {
 }
 
 fn load_config_state(root: &Path) -> anyhow::Result<ConfigState> {
-    let config_root = root.join(".codex/koni");
+    let config_root = active_config_root(root);
+    let schema2 = config_root.ends_with(".koni");
     let draft_root = config_draft_root(root);
     let operations_path = draft_root.join(".operations.json");
     let operations = fs::read_to_string(&operations_path)
@@ -3691,11 +5291,13 @@ fn load_config_state(root: &Path) -> anyhow::Result<ConfigState> {
     if legacy.exists() {
         paths.push(legacy);
     }
-    let codex_project_config = root.join(".codex/config.toml");
-    if codex_project_config.exists() {
-        paths.push(codex_project_config);
+    if !schema2 {
+        let codex_project_config = root.join(".codex/config.toml");
+        if codex_project_config.exists() {
+            paths.push(codex_project_config);
+        }
+        collect_config_files(&root.join(".codex/agents"), &mut paths)?;
     }
-    collect_config_files(&root.join(".codex/agents"), &mut paths)?;
     collect_config_files(&root.join(".agents/skills"), &mut paths)?;
     let mut draft_paths = Vec::new();
     collect_config_files(&draft_root, &mut draft_paths)?;
@@ -3703,6 +5305,9 @@ fn load_config_state(root: &Path) -> anyhow::Result<ConfigState> {
         let Ok(relative_path) = draft_path.strip_prefix(&draft_root) else {
             continue;
         };
+        if schema2 && codex_native_config_relative_path(relative_path) {
+            continue;
+        }
         if relative_path
             .components()
             .next()
@@ -3725,9 +5330,10 @@ fn load_config_state(root: &Path) -> anyhow::Result<ConfigState> {
     paths.dedup();
     paths.retain(|source_path| {
         source_path.starts_with(&config_root)
-            || source_path
-                .strip_prefix(root)
-                .is_ok_and(native_config_relative_path)
+            || source_path.strip_prefix(root).is_ok_and(|relative| {
+                repository_skill_relative_path(relative)
+                    || (!schema2 && codex_native_config_relative_path(relative))
+            })
     });
     let mut documents = paths
         .into_iter()
@@ -3792,23 +5398,45 @@ fn load_config_state(root: &Path) -> anyhow::Result<ConfigState> {
 fn config_draft_root(root: &Path) -> PathBuf {
     git_common_dir(root)
         .unwrap_or_else(|| root.join(".git"))
-        .join("koni/config-drafts")
+        .join(if active_config_root_relative(root) == Path::new(".koni") {
+            "koni/config-drafts-v2"
+        } else {
+            "koni/config-drafts"
+        })
 }
 
 fn native_config_relative_path(path: &Path) -> bool {
+    codex_native_config_relative_path(path) || repository_skill_relative_path(path)
+}
+
+fn codex_native_config_relative_path(path: &Path) -> bool {
     path == Path::new(".codex/config.toml")
         || (path.parent() == Some(Path::new(".codex/agents"))
             && path.extension().and_then(|extension| extension.to_str()) == Some("toml"))
-        || path
-            .strip_prefix(Path::new(".agents/skills"))
-            .is_ok_and(|relative| relative.components().count() >= 2)
+}
+
+fn repository_skill_relative_path(path: &Path) -> bool {
+    path.strip_prefix(Path::new(".agents/skills"))
+        .is_ok_and(|relative| relative.components().count() >= 2)
+}
+
+fn active_config_root_relative(root: &Path) -> &'static Path {
+    if root.join(".koni").exists() {
+        Path::new(".koni")
+    } else {
+        Path::new(".codex/koni")
+    }
+}
+
+fn active_config_root(root: &Path) -> PathBuf {
+    root.join(active_config_root_relative(root))
 }
 
 fn config_document_source_path(root: &Path, relative_path: &Path) -> PathBuf {
     if native_config_relative_path(relative_path) {
         root.join(relative_path)
     } else {
-        root.join(".codex/koni").join(relative_path)
+        active_config_root(root).join(relative_path)
     }
 }
 
@@ -3816,7 +5444,7 @@ fn staged_config_document_path(validation_root: &Path, relative_path: &Path) -> 
     if native_config_relative_path(relative_path) {
         validation_root.join(relative_path)
     } else {
-        validation_root.join(".codex/koni").join(relative_path)
+        active_config_root(validation_root).join(relative_path)
     }
 }
 
@@ -4035,6 +5663,7 @@ fn guided_internal_locator(locator: &[FormPathToken]) -> bool {
     last == "schema_version"
         || last == "id"
         || last == "codex_agent"
+        || last == "agent"
         || keys.first().copied() == Some("module")
         || (last == "prompt" && keys.first().copied() == Some("personas"))
         || (last == "path" && keys.first().copied() == Some("run_types"))
@@ -4203,8 +5832,34 @@ struct ApprovalPlanningPass {
     title: String,
     kind: ApprovalPlanKind,
     body: Option<String>,
+    review: Option<ApprovalPlanningReview>,
     required: bool,
     succeeded: bool,
+}
+
+#[derive(Default)]
+struct ApprovalPlanningReview {
+    architecture: Option<Vec<ApprovalReviewItem>>,
+    risk: Option<Vec<ApprovalReviewItem>>,
+    verification: Option<Vec<ApprovalReviewItem>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ApprovalReviewItem {
+    heading: String,
+    description: String,
+}
+
+impl ApprovalPlanningReview {
+    fn for_kind(&self, kind: ApprovalPlanKind) -> Option<&[ApprovalReviewItem]> {
+        match kind {
+            ApprovalPlanKind::Architecture => self.architecture.as_deref(),
+            ApprovalPlanKind::Risk => self.risk.as_deref(),
+            ApprovalPlanKind::Verification => self.verification.as_deref(),
+            ApprovalPlanKind::Combined | ApprovalPlanKind::Other => None,
+        }
+        .filter(|items| !items.is_empty())
+    }
 }
 
 #[derive(Default)]
@@ -4252,8 +5907,17 @@ impl ApprovalBodyRedactions {
     }
 }
 
-fn approval_draft(run: &RunData, summary: &RunSummary, run_type_title: String) -> ApprovalDraft {
+pub(crate) fn approval_draft(
+    run: &RunData,
+    summary: &RunSummary,
+    run_type_title: String,
+) -> ApprovalDraft {
     let passes = approval_planning_passes(run);
+    // Approval is a deliberately small operator projection. The complete
+    // durable planning artifact remains untouched for compilation and agent
+    // execution; older runs without a dedicated review field are condensed
+    // deterministically below.
+    let redactions = approval_body_redactions(run, summary);
     let mut blockers = passes
         .iter()
         .filter(|pass| pass.required && (!pass.succeeded || pass.body.is_none()))
@@ -4263,44 +5927,47 @@ fn approval_draft(run: &RunData, summary: &RunSummary, run_type_title: String) -
         blockers.push("Planning decisions still need attention".to_owned());
     }
 
-    let mut sections = vec![ApprovalSection {
-        title: "Resolved decisions".to_owned(),
-        body: resolved_decisions_body(&run.questions),
-    }];
+    let mut sections = Vec::new();
     for (title, kind, empty_copy) in [
         (
-            "Architecture plan",
+            "Architecture",
             ApprovalPlanKind::Architecture,
             "No separate architecture planning pass is required for this run type.",
         ),
         (
-            "Risk plan",
+            "Risk",
             ApprovalPlanKind::Risk,
             "No separate risk planning pass is required for this run type.",
         ),
         (
-            "Verification plan",
+            "Verification",
             ApprovalPlanKind::Verification,
             "No separate verification planning pass is required for this run type.",
         ),
     ] {
+        let review_body = approval_plan_body(&passes, kind, empty_copy, &redactions);
         sections.push(ApprovalSection {
             title: title.to_owned(),
-            body: approval_plan_body(&passes, kind, empty_copy),
+            body: review_body,
         });
     }
-    sections.extend(
-        passes
-            .iter()
-            .filter(|pass| pass.kind == ApprovalPlanKind::Other)
-            .map(|pass| ApprovalSection {
-                title: pass.title.clone(),
-                body: pass.body.clone().unwrap_or_else(|| {
-                    "This planning pass has not produced durable review text yet.".to_owned()
-                }),
-            }),
-    );
-    let redactions = approval_body_redactions(run, summary);
+    let additional = passes
+        .iter()
+        .filter(|pass| pass.kind == ApprovalPlanKind::Other)
+        .filter_map(|pass| pass.body.as_deref())
+        .map(|body| concise_approval_plan(&redactions.apply(body), ApprovalPlanKind::Other))
+        .collect::<Vec<_>>();
+    if !additional.is_empty()
+        && let Some(architecture) = sections.first_mut()
+    {
+        architecture.body.push_str("\n\nAdditional planning\n");
+        architecture.body.push_str(&additional.join("\n"));
+    }
+    if let Some(graph_seed) = graph_seed_approval_section(run) {
+        sections.push(graph_seed);
+    }
+    // Keep a final defense in depth for headings or fallback copy assembled
+    // after the individual plan bodies were projected.
     for section in &mut sections {
         section.body = redactions.apply(&section.body);
     }
@@ -4312,11 +5979,39 @@ fn approval_draft(run: &RunData, summary: &RunSummary, run_type_title: String) -
         sections,
         selected_section: 0,
         scroll: 0,
-        approve_focused: false,
+        action_focused: false,
+        revision_focused: false,
+        revision: String::new(),
+        revision_cursor: 0,
         approval_enabled: blockers.is_empty(),
         blockers,
         submitted: false,
     }
+}
+
+/// Return the durable, unabridged planning artifacts for the post-approval
+/// Plan panel. This is intentionally separate from `approval_draft`: approval
+/// uses the planner-authored concise review, while the permanent run record
+/// preserves the full human-readable plan that execution consumes.
+pub(crate) fn durable_approved_plan_sections(
+    run: &RunData,
+    summary: &RunSummary,
+) -> Vec<ApprovalSection> {
+    let redactions = approval_body_redactions(run, summary);
+    let mut sections = approval_planning_passes(run)
+        .into_iter()
+        .filter(|pass| pass.succeeded)
+        .filter_map(|pass| {
+            pass.body.map(|body| ApprovalSection {
+                title: pass.title,
+                body: redactions.apply(&body),
+            })
+        })
+        .collect::<Vec<_>>();
+    if let Some(graph_seed) = graph_seed_approval_section(run) {
+        sections.push(graph_seed);
+    }
+    sections
 }
 
 fn approval_body_redactions(run: &RunData, summary: &RunSummary) -> ApprovalBodyRedactions {
@@ -4364,6 +6059,7 @@ fn collect_approval_control_metadata(value: &Value, redactions: &mut ApprovalBod
     for (field, value) in fields {
         let replacement = match field.as_str() {
             "run_id" => Some("the current run"),
+            "base_commit" => Some("the pinned base commit"),
             "question_id" => Some("the planning question"),
             "batch_id" => Some("the question batch"),
             "session_id" | "codex_session_id" => Some("the Codex session"),
@@ -4439,6 +6135,8 @@ fn approval_planning_passes(run: &RunData) -> Vec<ApprovalPlanningPass> {
                 let succeeded = status == "succeeded";
                 let body =
                     planning_stage_output(stage, stage_id, &run.agents, &run.planning_transcript);
+                let review =
+                    planning_stage_review(stage, stage_id, &run.agents, &run.planning_transcript);
                 let identity_classifier = format!("{} {}", stage_id, title).to_lowercase();
                 let mut kind = classify_approval_plan(&identity_classifier);
                 if kind == ApprovalPlanKind::Other {
@@ -4454,6 +6152,7 @@ fn approval_planning_passes(run: &RunData) -> Vec<ApprovalPlanningPass> {
                     title,
                     kind,
                     body,
+                    review,
                     required: definition
                         .get("required")
                         .and_then(Value::as_bool)
@@ -4557,6 +6256,530 @@ fn planning_stage_output(
         .map(ToOwned::to_owned)
 }
 
+fn planning_stage_review(
+    stage: &Value,
+    stage_id: &str,
+    agents: &[Value],
+    transcript: &[Value],
+) -> Option<ApprovalPlanningReview> {
+    if let Some(review) = stage.get("output").and_then(planning_payload_review) {
+        return Some(review);
+    }
+    let linked_agents = agents
+        .iter()
+        .filter(|agent| agent.get("stage_id").and_then(Value::as_str) == Some(stage_id))
+        .collect::<Vec<_>>();
+    if let Some(review) = linked_agents
+        .iter()
+        .rev()
+        .find_map(|agent| agent.get("result").and_then(planning_payload_review))
+    {
+        return Some(review);
+    }
+    let linked_agent_ids = linked_agents
+        .iter()
+        .filter_map(|agent| agent.get("id").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    transcript
+        .iter()
+        .rev()
+        .filter(|event| event.get("type").and_then(Value::as_str) == Some("planning.output"))
+        .find(|event| {
+            event.get("stage_id").and_then(Value::as_str) == Some(stage_id)
+                || event
+                    .get("agent_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|agent_id| linked_agent_ids.contains(&agent_id))
+        })
+        .and_then(|event| event.get("output"))
+        .and_then(planning_payload_review)
+}
+
+fn planning_payload_review(value: &Value) -> Option<ApprovalPlanningReview> {
+    if let Some(review) = value.get("review").and_then(Value::as_object) {
+        let review = ApprovalPlanningReview {
+            architecture: review.get("architecture").and_then(approval_review_items),
+            risk: review.get("risk").and_then(approval_review_items),
+            verification: review.get("verification").and_then(approval_review_items),
+        };
+        if review.architecture.is_some() || review.risk.is_some() || review.verification.is_some() {
+            return Some(review);
+        }
+    }
+    for field in ["output", "result", "payload"] {
+        if let Some(review) = value.get(field).and_then(planning_payload_review) {
+            return Some(review);
+        }
+    }
+    None
+}
+
+const GRAPH_SEED_ROOT_FACT_LIMIT: usize = 6;
+const GRAPH_SEED_NODE_LIMIT: usize = 12;
+const GRAPH_SEED_RELATIONSHIP_LIMIT: usize = 16;
+const GRAPH_SEED_TEXT_LIMIT: usize = 160;
+const GRAPH_SEED_PURPOSE_KEYS: [&str; 7] = [
+    "purpose",
+    "summary",
+    "intent",
+    "goal",
+    "description",
+    "rationale",
+    "question",
+];
+
+fn graph_seed_approval_section(run: &RunData) -> Option<ApprovalSection> {
+    let seed = planning_graph_seed(run)?;
+    Some(ApprovalSection {
+        title: "Graph Seed".to_owned(),
+        body: graph_seed_approval_body(seed),
+    })
+}
+
+fn planning_graph_seed(run: &RunData) -> Option<&Value> {
+    for stage in run
+        .stages
+        .iter()
+        .rev()
+        .filter(|stage| stage.get("status").and_then(Value::as_str) == Some("succeeded"))
+        .filter(|stage| {
+            let definition = stage.get("definition").unwrap_or(stage);
+            let stage_id = definition
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            approval_stage_is_planning(definition, stage_id, &run.agents)
+        })
+    {
+        let definition = stage.get("definition").unwrap_or(stage);
+        let stage_id = definition
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if let Some(seed) = stage.get("output").and_then(planning_payload_graph_seed) {
+            return Some(seed);
+        }
+        let linked_agents = run
+            .agents
+            .iter()
+            .filter(|agent| agent.get("stage_id").and_then(Value::as_str) == Some(stage_id))
+            .collect::<Vec<_>>();
+        if let Some(seed) = linked_agents
+            .iter()
+            .rev()
+            .find_map(|agent| agent.get("result").and_then(planning_payload_graph_seed))
+        {
+            return Some(seed);
+        }
+        let linked_agent_ids = linked_agents
+            .iter()
+            .filter_map(|agent| agent.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        if let Some(seed) = run
+            .planning_transcript
+            .iter()
+            .rev()
+            .filter(|event| {
+                matches!(
+                    event.get("type").and_then(Value::as_str),
+                    Some("planning.output" | "planning.output.recovered")
+                )
+            })
+            .find(|event| {
+                event.get("stage_id").and_then(Value::as_str) == Some(stage_id)
+                    || event
+                        .get("agent_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|agent_id| linked_agent_ids.contains(&agent_id))
+            })
+            .and_then(|event| event.get("output"))
+            .and_then(planning_payload_graph_seed)
+        {
+            return Some(seed);
+        }
+    }
+    None
+}
+
+fn planning_payload_graph_seed(value: &Value) -> Option<&Value> {
+    if let Some(seed) = value.get("graph_seed").filter(|seed| {
+        seed.get("root_spec").is_some_and(Value::is_object)
+            && seed.get("nodes").is_some_and(Value::is_array)
+            && seed.get("edges").is_some_and(Value::is_array)
+    }) {
+        return Some(seed);
+    }
+    for field in ["output", "result", "payload"] {
+        if let Some(seed) = value.get(field).and_then(planning_payload_graph_seed) {
+            return Some(seed);
+        }
+    }
+    None
+}
+
+fn graph_seed_approval_body(seed: &Value) -> String {
+    let root_spec = seed
+        .get("root_spec")
+        .and_then(Value::as_object)
+        .expect("planning graph seed root_spec was checked above");
+    let nodes = seed
+        .get("nodes")
+        .and_then(Value::as_array)
+        .expect("planning graph seed nodes were checked above");
+    let edges = seed
+        .get("edges")
+        .and_then(Value::as_array)
+        .expect("planning graph seed edges were checked above");
+    let mut local_keys = nodes
+        .iter()
+        .filter_map(|node| node.get("key").and_then(Value::as_str))
+        .filter(|key| !key.is_empty())
+        .collect::<Vec<_>>();
+    local_keys.sort_by_key(|key| std::cmp::Reverse(key.len()));
+    let mut lines = vec![format!(
+        "{} root fact{} · {} semantic node{} · {} relationship{}",
+        root_spec.len(),
+        graph_seed_plural(root_spec.len()),
+        nodes.len(),
+        graph_seed_plural(nodes.len()),
+        edges.len(),
+        graph_seed_plural(edges.len()),
+    )];
+
+    let root_facts = root_spec
+        .iter()
+        .filter_map(|(key, value)| graph_seed_root_fact(key, value, &local_keys))
+        .take(GRAPH_SEED_ROOT_FACT_LIMIT)
+        .collect::<Vec<_>>();
+    if !root_facts.is_empty() {
+        lines.push(String::new());
+        lines.push("### Root enrichment".to_owned());
+        lines.extend(root_facts.iter().map(|fact| format!("- {fact}")));
+    }
+
+    let projected_nodes = nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| {
+            let key = node.get("key").and_then(Value::as_str)?;
+            let title = node
+                .get("title")
+                .and_then(Value::as_str)
+                .and_then(|title| graph_seed_safe_text(title, &local_keys))
+                .unwrap_or_else(|| format!("Semantic node {}", index + 1));
+            let node_type = node
+                .get("type")
+                .and_then(Value::as_str)
+                .and_then(|node_type| graph_seed_safe_identifier(node_type, &local_keys))
+                .map(|value| humanize_identifier(&value))
+                .unwrap_or_else(|| "Node".to_owned());
+            let purpose =
+                graph_seed_node_purpose(node, &local_keys).filter(|purpose| purpose != &title);
+            Some((key.to_owned(), node_type, title, purpose))
+        })
+        .collect::<Vec<_>>();
+    let titles_by_key = projected_nodes
+        .iter()
+        .take(GRAPH_SEED_NODE_LIMIT)
+        .map(|(key, _, title, _)| (key.clone(), title.clone()))
+        .collect::<BTreeMap<_, _>>();
+    if !projected_nodes.is_empty() {
+        lines.push(String::new());
+        lines.push("### Semantic nodes".to_owned());
+        for (_, node_type, title, purpose) in projected_nodes.iter().take(GRAPH_SEED_NODE_LIMIT) {
+            lines.push(format!("- {node_type} · {title}"));
+            if let Some(purpose) = purpose {
+                lines.push(format!("  {purpose}"));
+            }
+        }
+    }
+
+    let projected_relationships = edges
+        .iter()
+        .filter_map(|edge| {
+            let source = graph_seed_endpoint_title(edge.get("source")?, &titles_by_key)?;
+            let target = graph_seed_endpoint_title(edge.get("target")?, &titles_by_key)?;
+            let relation = edge
+                .get("relation")
+                .and_then(Value::as_str)
+                .and_then(|relation| graph_seed_safe_identifier(relation, &local_keys))
+                .map(|value| humanize_identifier(&value).to_lowercase())?;
+            Some(format!("{source} → {relation} → {target}"))
+        })
+        .collect::<Vec<_>>();
+    if !projected_relationships.is_empty() {
+        lines.push(String::new());
+        lines.push("### Relationships".to_owned());
+        lines.extend(
+            projected_relationships
+                .iter()
+                .take(GRAPH_SEED_RELATIONSHIP_LIMIT)
+                .map(|relationship| format!("- {relationship}")),
+        );
+    }
+
+    let omitted_root_facts = root_spec.len().saturating_sub(root_facts.len());
+    let omitted_nodes = nodes
+        .len()
+        .saturating_sub(projected_nodes.len().min(GRAPH_SEED_NODE_LIMIT));
+    let omitted_relationships = edges.len().saturating_sub(
+        projected_relationships
+            .len()
+            .min(GRAPH_SEED_RELATIONSHIP_LIMIT),
+    );
+    lines.push(String::new());
+    lines.push("### Omitted from this view".to_owned());
+    lines.push(format!(
+        "- {omitted_root_facts} root fact{} · {omitted_nodes} node{} · {omitted_relationships} relationship{}",
+        graph_seed_plural(omitted_root_facts),
+        graph_seed_plural(omitted_nodes),
+        graph_seed_plural(omitted_relationships),
+    ));
+    lines.join("\n")
+}
+
+fn graph_seed_root_fact(key: &str, value: &Value, local_keys: &[&str]) -> Option<String> {
+    if graph_seed_metadata_key(key) || local_keys.contains(&key) {
+        return None;
+    }
+    let value = graph_seed_scalar_summary(value, local_keys)?;
+    Some(format!("{}: {value}", humanize_identifier(key)))
+}
+
+fn graph_seed_node_purpose(node: &Value, local_keys: &[&str]) -> Option<String> {
+    let spec = node.get("spec").and_then(Value::as_object)?;
+    GRAPH_SEED_PURPOSE_KEYS.iter().find_map(|key| {
+        spec.get(*key)
+            .and_then(|value| graph_seed_direct_scalar(value, local_keys))
+    })
+}
+
+fn graph_seed_endpoint_title(
+    value: &Value,
+    titles_by_key: &BTreeMap<String, String>,
+) -> Option<String> {
+    let key = value.as_str()?;
+    if key == "$root" {
+        return Some("Objective".to_owned());
+    }
+    titles_by_key.get(key).cloned()
+}
+
+fn graph_seed_scalar_summary(value: &Value, local_keys: &[&str]) -> Option<String> {
+    match value {
+        Value::String(_) | Value::Number(_) | Value::Bool(_) => {
+            graph_seed_direct_scalar(value, local_keys)
+        }
+        Value::Array(values) => {
+            let items = values
+                .iter()
+                .filter_map(|value| graph_seed_direct_scalar(value, local_keys))
+                .take(3)
+                .collect::<Vec<_>>();
+            (!items.is_empty()).then(|| bounded_graph_seed_text(&items.join("; ")))
+        }
+        Value::Object(_) | Value::Null => None,
+    }
+}
+
+fn graph_seed_direct_scalar(value: &Value, local_keys: &[&str]) -> Option<String> {
+    match value {
+        Value::String(value) => graph_seed_safe_text(value, local_keys),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(if *value { "Yes" } else { "No" }.to_owned()),
+        Value::Null | Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
+fn graph_seed_safe_identifier(value: &str, local_keys: &[&str]) -> Option<String> {
+    if local_keys.contains(&value) {
+        return None;
+    }
+    let value = graph_seed_safe_text(value, local_keys)?;
+    value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.'))
+        .then_some(value)
+}
+
+fn graph_seed_safe_text(value: &str, local_keys: &[&str]) -> Option<String> {
+    let value = value.trim();
+    let normalized = value.to_ascii_lowercase();
+    if local_keys
+        .iter()
+        .any(|key| !key.is_empty() && normalized.contains(key.to_ascii_lowercase().as_str()))
+    {
+        return None;
+    }
+    let value = value.replace("$root", "Objective");
+    if value.is_empty()
+        || graph_seed_contains_machine_identifier(&value)
+        || value.split_whitespace().any(graph_seed_sensitive_token)
+    {
+        return None;
+    }
+    Some(bounded_graph_seed_text(&value))
+}
+
+fn bounded_graph_seed_text(value: &str) -> String {
+    let mut characters = value.chars();
+    let visible = characters
+        .by_ref()
+        .take(GRAPH_SEED_TEXT_LIMIT)
+        .collect::<String>();
+    if characters.next().is_some() {
+        format!("{visible}…")
+    } else {
+        visible
+    }
+}
+
+fn graph_seed_metadata_key(key: &str) -> bool {
+    let camel_case_metadata = ["Id", "Ids", "ID", "IDs", "Key", "Keys"]
+        .iter()
+        .any(|suffix| key.ends_with(suffix));
+    let normalized = key.to_ascii_lowercase();
+    let sensitive_fragments = [
+        "hash",
+        "digest",
+        "checksum",
+        "path",
+        "storage",
+        "worktree",
+        "directory",
+        "commit",
+        "schema",
+        "spec",
+    ];
+    camel_case_metadata
+        || sensitive_fragments
+            .iter()
+            .any(|fragment| normalized.contains(fragment))
+        || normalized.starts_with("sha")
+        || normalized.ends_with("sha")
+        || key
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|token| {
+                matches!(
+                    token.to_ascii_lowercase().as_str(),
+                    "id" | "ids"
+                        | "hash"
+                        | "hashes"
+                        | "digest"
+                        | "checksum"
+                        | "path"
+                        | "paths"
+                        | "storage"
+                        | "worktree"
+                        | "directory"
+                        | "directories"
+                        | "commit"
+                        | "sha"
+                        | "key"
+                        | "keys"
+                        | "schema"
+                        | "schemas"
+                        | "spec"
+                        | "specs"
+                )
+            })
+}
+
+fn graph_seed_contains_machine_identifier(value: &str) -> bool {
+    let mut hexadecimal_run = 0usize;
+    for byte in value.bytes() {
+        if byte.is_ascii_hexdigit() {
+            hexadecimal_run += 1;
+            if hexadecimal_run >= 24 {
+                return true;
+            }
+        } else {
+            hexadecimal_run = 0;
+        }
+    }
+    value.as_bytes().windows(36).any(|candidate| {
+        candidate.iter().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+    })
+}
+
+fn graph_seed_sensitive_token(token: &str) -> bool {
+    let token = token.trim_matches(|character: char| {
+        matches!(
+            character,
+            ',' | '.' | ';' | ':' | '(' | ')' | '[' | ']' | '{' | '}'
+        )
+    });
+    token.starts_with('/')
+        || token.starts_with("./")
+        || token.starts_with("../")
+        || token.starts_with("~/")
+        || token.contains('\\')
+        || (token.contains('/') && !token.contains(char::is_whitespace))
+        || (token.len() >= 24 && token.chars().all(|character| character.is_ascii_hexdigit()))
+        || (token.len() == 36
+            && token.chars().enumerate().all(|(index, character)| {
+                if matches!(index, 8 | 13 | 18 | 23) {
+                    character == '-'
+                } else {
+                    character.is_ascii_hexdigit()
+                }
+            }))
+}
+
+fn graph_seed_plural(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
+}
+
+fn approval_review_items(value: &Value) -> Option<Vec<ApprovalReviewItem>> {
+    if let Some(items) = value.as_array() {
+        let items = items
+            .iter()
+            .filter_map(|item| {
+                let heading = item
+                    .get("heading")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|heading| !heading.is_empty())?;
+                let description = item
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|description| !description.is_empty())?;
+                Some(ApprovalReviewItem {
+                    heading: heading.to_owned(),
+                    description: description.to_owned(),
+                })
+            })
+            .collect::<Vec<_>>();
+        return (!items.is_empty()).then_some(items);
+    }
+    value
+        .as_str()
+        .map(legacy_review_items)
+        .filter(|items| !items.is_empty())
+}
+
+fn legacy_review_items(summary: &str) -> Vec<ApprovalReviewItem> {
+    let descriptions = summary
+        .lines()
+        .filter_map(|line| approval_brief_item(line.trim()))
+        .take(APPROVAL_BRIEF_MAX_ITEMS)
+        .collect::<Vec<_>>();
+    if descriptions.is_empty() {
+        return Vec::new();
+    }
+    vec![ApprovalReviewItem {
+        heading: "Legacy planner summary".to_owned(),
+        description: descriptions.join("\n"),
+    }]
+}
+
 fn planning_payload_text(value: &Value) -> Option<&str> {
     if let Some(text) = value.as_str().filter(|text| !text.trim().is_empty()) {
         return Some(text);
@@ -4573,12 +6796,27 @@ fn approval_plan_body(
     passes: &[ApprovalPlanningPass],
     kind: ApprovalPlanKind,
     empty_copy: &str,
+    redactions: &ApprovalBodyRedactions,
 ) -> String {
+    // A planner-authored structured review is already classified by domain.
+    // Prefer that explicit contract over inference from the stage id/title so
+    // focused or combined planning passes can populate every review tab.
+    let reviewed = passes
+        .iter()
+        .filter(|pass| {
+            pass.review
+                .as_ref()
+                .and_then(|review| review.for_kind(kind))
+                .is_some()
+        })
+        .collect::<Vec<_>>();
     let direct = passes
         .iter()
         .filter(|pass| pass.kind == kind)
         .collect::<Vec<_>>();
-    let selected = if direct.is_empty() {
+    let selected = if !reviewed.is_empty() {
+        reviewed
+    } else if direct.is_empty() {
         passes
             .iter()
             .filter(|pass| pass.kind == ApprovalPlanKind::Combined)
@@ -4592,22 +6830,176 @@ fn approval_plan_body(
     selected
         .into_iter()
         .map(|pass| {
+            if let Some(review) = pass
+                .review
+                .as_ref()
+                .and_then(|review| review.for_kind(kind))
+            {
+                return approval_review_items_markdown(review, redactions);
+            }
             pass.body.as_ref().map_or_else(
                 || format!("{} has not produced durable review text yet.", pass.title),
-                |body| format!("{}\n\n{body}", pass.title),
+                |body| concise_approval_plan(&redactions.apply(body), kind),
             )
         })
         .collect::<Vec<_>>()
         .join("\n\n")
 }
 
+fn approval_review_items_markdown(
+    items: &[ApprovalReviewItem],
+    redactions: &ApprovalBodyRedactions,
+) -> String {
+    items
+        .iter()
+        .map(|item| {
+            let heading = redactions.apply(&item.heading);
+            let description = redactions.apply(&item.description);
+            format!("### {heading}\n\n{description}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+const APPROVAL_BRIEF_MAX_ITEMS: usize = 7;
+const APPROVAL_BRIEF_ITEM_CHARS: usize = 180;
+
+/// Build a bounded operator summary for planning artifacts created before the
+/// structured `review` projection existed. This never replaces or mutates the
+/// complete durable artifact.
+fn concise_approval_plan(body: &str, kind: ApprovalPlanKind) -> String {
+    let mut all = Vec::new();
+    let mut matching = Vec::new();
+    let mut seen_all = BTreeSet::new();
+    let mut seen_matching = BTreeSet::new();
+    let mut matching_heading = kind == ApprovalPlanKind::Other;
+    let mut in_code = false;
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code || trimmed.is_empty() {
+            continue;
+        }
+        if let Some(heading) = trimmed.strip_prefix('#').map(str::trim) {
+            matching_heading = approval_heading_matches_kind(heading, kind);
+            continue;
+        }
+        let Some(item) = approval_brief_item(trimmed) else {
+            continue;
+        };
+        if seen_all.insert(item.clone()) {
+            all.push(item.clone());
+        }
+        if matching_heading && seen_matching.insert(item.clone()) {
+            matching.push(item);
+        }
+    }
+
+    let candidates = if matching.is_empty() { all } else { matching };
+    if candidates.is_empty() {
+        return "The completed plan has no concise review text.".to_owned();
+    }
+    let descriptions = candidates
+        .into_iter()
+        .take(APPROVAL_BRIEF_MAX_ITEMS)
+        .collect::<Vec<_>>();
+    let label = match kind {
+        ApprovalPlanKind::Architecture => "Legacy architecture excerpt",
+        ApprovalPlanKind::Risk => "Legacy risk excerpt",
+        ApprovalPlanKind::Verification => "Legacy verification excerpt",
+        ApprovalPlanKind::Combined | ApprovalPlanKind::Other => "Legacy plan excerpt",
+    };
+    format!("### {label}\n\n{}", descriptions.join("\n"))
+}
+
+fn approval_heading_matches_kind(heading: &str, kind: ApprovalPlanKind) -> bool {
+    let heading = heading.to_lowercase();
+    let contains_any = |needles: &[&str]| needles.iter().any(|needle| heading.contains(needle));
+    match kind {
+        ApprovalPlanKind::Architecture => contains_any(&[
+            "architecture",
+            "implementation",
+            "design",
+            "resolved behavior",
+            "scope",
+            "dependency",
+            "migration",
+            "contract",
+        ]),
+        ApprovalPlanKind::Risk => contains_any(&[
+            "risk",
+            "hazard",
+            "failure",
+            "mitigation",
+            "rollback",
+            "safety",
+        ]),
+        ApprovalPlanKind::Verification => contains_any(&[
+            "verification",
+            "validation",
+            "test",
+            "evidence",
+            "acceptance",
+            "quality",
+            "type 3",
+        ]),
+        ApprovalPlanKind::Combined | ApprovalPlanKind::Other => true,
+    }
+}
+
+fn approval_brief_item(line: &str) -> Option<String> {
+    let compact = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lowercase = compact.to_lowercase();
+    if compact.is_empty()
+        || (compact.starts_with('|') && compact.ends_with('|'))
+        || compact.ends_with(':')
+        || lowercase.starts_with("no approval decisions remain")
+        || compact
+            .chars()
+            .all(|character| matches!(character, '-' | '|' | ':' | ' '))
+    {
+        return None;
+    }
+    let compact = compact
+        .strip_prefix("- ")
+        .or_else(|| compact.strip_prefix("* "))
+        .or_else(|| compact.strip_prefix("+ "))
+        .unwrap_or(&compact);
+    let compact = strip_ordered_approval_prefix(compact);
+    let mut shortened = compact
+        .chars()
+        .take(APPROVAL_BRIEF_ITEM_CHARS)
+        .collect::<String>();
+    if compact.chars().count() > APPROVAL_BRIEF_ITEM_CHARS {
+        shortened.pop();
+        shortened.push('…');
+    }
+    (!shortened.trim().is_empty()).then(|| shortened.trim().to_owned())
+}
+
+fn strip_ordered_approval_prefix(value: &str) -> &str {
+    let Some((prefix, remainder)) = value.split_once(' ') else {
+        return value;
+    };
+    let number = prefix.trim_end_matches(['.', ')']);
+    if number.len() < prefix.len() && number.chars().all(|character| character.is_ascii_digit()) {
+        remainder
+    } else {
+        value
+    }
+}
+
+#[allow(dead_code)]
 fn resolved_decisions_body(questions: &[Value]) -> String {
-    let mut decisions = questions
+    let decisions = questions
         .iter()
         .enumerate()
         .filter(|(_, question)| question.get("answer").is_some_and(Value::is_object))
         .collect::<Vec<_>>();
-    sort_question_rows(&mut decisions);
     let decisions = decisions
         .into_iter()
         .filter_map(|(_, question)| {
@@ -4617,27 +7009,39 @@ fn resolved_decisions_body(questions: &[Value]) -> String {
                 .map(str::trim)
                 .filter(|prompt| !prompt.is_empty())?;
             let answer = question.get("answer")?;
-            let selected = answer
+            let option_id = answer.get("option_id").and_then(Value::as_str);
+            let option_label = option_id.and_then(|option_id| {
+                question
+                    .get("options")
+                    .and_then(Value::as_array)?
+                    .iter()
+                    .find(|option| option.get("id").and_then(Value::as_str) == Some(option_id))?
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|label| !label.is_empty())
+                    .map(ToOwned::to_owned)
+            });
+            let custom = answer
                 .get("custom")
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|answer| !answer.is_empty())
-                .map(ToOwned::to_owned)
-                .or_else(|| {
-                    let option_id = answer.get("option_id").and_then(Value::as_str)?;
-                    question
-                        .get("options")
-                        .and_then(Value::as_array)?
-                        .iter()
-                        .find(|option| option.get("id").and_then(Value::as_str) == Some(option_id))?
-                        .get("label")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|label| !label.is_empty())
-                        .map(ToOwned::to_owned)
-                })
+                .map(ToOwned::to_owned);
+            let selected = option_label
+                .clone()
+                .or_else(|| custom.clone())
                 .unwrap_or_else(|| "Recorded response".to_owned());
-            Some((prompt.to_owned(), selected))
+            let notes = answer
+                .get("notes")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|notes| !notes.is_empty())
+                .map(ToOwned::to_owned)
+                // Compatibility for early option-plus-note answers that used
+                // `custom` before the dedicated notes field existed.
+                .or_else(|| option_label.is_some().then_some(custom).flatten());
+            Some((prompt.to_owned(), selected, notes))
         })
         .collect::<Vec<_>>();
     if decisions.is_empty() {
@@ -4646,11 +7050,18 @@ fn resolved_decisions_body(questions: &[Value]) -> String {
     decisions
         .into_iter()
         .enumerate()
-        .map(|(index, (prompt, answer))| format!("{}. {prompt}\n   Decision: {answer}", index + 1))
+        .map(|(index, (prompt, answer, notes))| {
+            let notes = notes.map_or_else(String::new, |notes| format!("\n\nNotes: {notes}"));
+            format!(
+                "## Question {}\n\n{prompt}\n\nDecision: {answer}{notes}",
+                index + 1
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n\n")
 }
 
+#[allow(dead_code)]
 fn sort_question_rows(rows: &mut [(usize, &Value)]) {
     let mut batch_first = BTreeMap::new();
     for (index, question) in rows.iter() {
@@ -4675,10 +7086,85 @@ pub(crate) fn question_accepts_answer(question: &Value) -> bool {
     )
 }
 
+pub(crate) fn question_options(question: &Value) -> Vec<(String, String, String, bool)> {
+    question
+        .get("options")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|option| {
+            (
+                option
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                option
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .filter(|label| !label.trim().is_empty())
+                    .unwrap_or("Option")
+                    .to_owned(),
+                option
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                option
+                    .get("recommended")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )
+        })
+        .collect()
+}
+
+pub(crate) fn question_allows_custom(question: &Value) -> bool {
+    question
+        .get("allow_custom_answer")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+pub(crate) fn question_choice_count(question: &Value) -> usize {
+    question_options(question).len() + usize::from(question_allows_custom(question))
+}
+
+pub(crate) fn question_initial_choice(question: &Value) -> usize {
+    let options = question_options(question);
+    let answer = question.get("answer");
+    if let Some(option_id) = answer
+        .and_then(|answer| answer.get("option_id"))
+        .and_then(Value::as_str)
+        && let Some(index) = options.iter().position(|(id, _, _, _)| id == option_id)
+    {
+        return index;
+    }
+    if answer
+        .and_then(|answer| answer.get("custom"))
+        .and_then(Value::as_str)
+        .is_some_and(|custom| !custom.trim().is_empty())
+        && question_allows_custom(question)
+    {
+        return options.len();
+    }
+    options
+        .iter()
+        .position(|(_, _, _, recommended)| *recommended)
+        .unwrap_or(0)
+}
+
 pub(crate) fn question_answer_is_pending_resume(question: &Value) -> bool {
     matches!(
         question.get("status").and_then(Value::as_str),
         Some("resume_pending" | "answered_pending_resume" | "auto_resolved_pending_resume")
+    )
+}
+
+fn question_answer_is_revisable_pending(question: &Value) -> bool {
+    matches!(
+        question.get("status").and_then(Value::as_str),
+        Some("resume_pending" | "answered_pending_resume")
     )
 }
 
@@ -4755,6 +7241,7 @@ fn wrap_index(current: usize, delta: isize, len: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use koni_core::state::ConfigSnapshot;
     use serde_json::json;
     use tempfile::TempDir;
@@ -4762,7 +7249,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn run_summary_projects_explicit_fallback_and_missing_token_totals() {
+    fn run_summary_keeps_provider_total_separate_from_cache_excluding_usage() {
         let summary = |token_usage: Value| {
             RunData::from_snapshot(json!({
                 "run": {"id": "run-1", "goal": "Test", "status": "active"},
@@ -4770,15 +7257,148 @@ mod tests {
             }))
             .summary
             .unwrap()
-            .total_tokens
         };
 
-        assert_eq!(summary(json!({"total_tokens": 123})), 123);
-        assert_eq!(
-            summary(json!({"input_tokens": 20, "output_tokens": 10})),
-            30
+        let explicit = summary(json!({
+            "input_tokens": 1_000,
+            "cached_input_tokens": 800,
+            "output_tokens": 100,
+            "total_tokens": 1_100,
+            "new_tokens": 300
+        }));
+        assert_eq!(explicit.total_tokens, 1_100);
+        assert_eq!(explicit.new_tokens, 300);
+
+        let derived = summary(json!({
+            "input_tokens": 20,
+            "cached_input_tokens": 12,
+            "output_tokens": 10
+        }));
+        assert_eq!(derived.total_tokens, 30);
+        assert_eq!(derived.new_tokens, 18);
+
+        let legacy_total_only = summary(json!({"total_tokens": 123}));
+        assert_eq!(legacy_total_only.total_tokens, 123);
+        assert_eq!(legacy_total_only.new_tokens, 123);
+
+        let provider_total_with_cache = summary(json!({
+            "total_tokens": 123,
+            "cached_input_tokens": 23
+        }));
+        assert_eq!(provider_total_with_cache.total_tokens, 123);
+        assert_eq!(provider_total_with_cache.new_tokens, 100);
+
+        let missing = summary(Value::Null);
+        assert_eq!(missing.total_tokens, 0);
+        assert_eq!(missing.new_tokens, 0);
+    }
+
+    #[test]
+    fn planning_budget_progress_preserves_its_configured_metric() {
+        let progress = |metric: &str| {
+            RunData::from_snapshot(json!({
+                "run": {"id": "run-1", "goal": "Test", "status": "planning"},
+                "planning_session": {
+                    "budget_metric": metric,
+                    "budget_limit": 2_000,
+                    "synthesis_reserve": 500,
+                    "usage": {"total_tokens": 1_100, "new_tokens": 300},
+                    "accounted_baseline": {"total_tokens": 100, "new_tokens": 50}
+                }
+            }))
+            .planning_budget_progress()
+            .unwrap()
+        };
+
+        let new = progress("new_tokens");
+        assert_eq!(new.used, 250);
+        assert_eq!(new.metric, PlanningBudgetMetric::New);
+        assert_eq!(new.metric.label(), "new");
+
+        let processed = progress("processed_tokens");
+        assert_eq!(processed.used, 1_000);
+        assert_eq!(processed.metric, PlanningBudgetMetric::Processed);
+        assert_eq!(processed.metric.label(), "processed");
+    }
+
+    #[test]
+    fn refreshed_run_status_respects_durable_pause_intent() {
+        let paused = RunData::from_snapshot(json!({
+            "run": {"id": "run-1", "goal": "Test", "status": "active"},
+            "lifecycle": {"running": false, "draining": false},
+            "orchestration": {"running": false, "max_parallel": 3}
+        }));
+        assert_eq!(paused.summary.as_ref().unwrap().status, "paused");
+
+        let draining = RunData::from_snapshot(json!({
+            "run": {"id": "run-2", "goal": "Test", "status": "active"},
+            "lifecycle": {"running": false, "draining": true},
+            "orchestration": {"running": false, "max_parallel": 3}
+        }));
+        assert_eq!(draining.summary.as_ref().unwrap().status, "pausing");
+
+        let running = RunData::from_snapshot(json!({
+            "run": {"id": "run-3", "goal": "Test", "status": "active"},
+            "lifecycle": {"running": true, "draining": false},
+            "orchestration": {"running": true, "max_parallel": 3}
+        }));
+        assert_eq!(running.summary.as_ref().unwrap().status, "active");
+    }
+
+    #[test]
+    fn agent_chat_resolves_relative_artifacts_from_the_compiler_run_root() {
+        let fixture = TempDir::new().unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(fixture.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let run_id = "run-artifact-root";
+        let attempt = fixture
+            .path()
+            .join(".git/koni/runs")
+            .join(run_id)
+            .join("agents/planner/attempt-1");
+        fs::create_dir_all(&attempt).unwrap();
+        fs::write(attempt.join("prompt.md"), "Inspect the project boundary.").unwrap();
+        fs::write(
+            attempt.join("stdout.jsonl"),
+            concat!(
+                "{\"type\":\"thread.started\",\"thread_id\":\"session-one\"}\n",
+                "{\"type\":\"item.completed\",\"item\":{\"id\":\"message\",\"type\":\"agent_message\",\"text\":\"Artifact transcript loaded.\"}}\n"
+            ),
+        )
+        .unwrap();
+        let mut model = ControlCenterModel::from_snapshot(
+            fixture.path().to_path_buf(),
+            json!({
+                "run":{"id":run_id,"goal":"Verify transcript","status":"planning"},
+                "agents":[{
+                    "id":"planner",
+                    "persona":"planner",
+                    "status":"completed",
+                    "stdout_path":"agents/planner/attempt-1/stdout.jsonl",
+                    "prompt_path":"agents/planner/attempt-1/prompt.md",
+                    "codex_session_id":"session-one"
+                }]
+            }),
         );
-        assert_eq!(summary(Value::Null), 0);
+        model.focus_agents();
+
+        let rendered = model.selected_agent_chat_render(80).unwrap();
+        let text = rendered
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("Inspect the project boundary."), "{text}");
+        assert!(text.contains("Artifact transcript loaded."), "{text}");
+        assert!(!text.contains("unavailable"), "{text}");
+        assert!(!text.contains("No such file"), "{text}");
     }
 
     #[test]
@@ -4955,6 +7575,64 @@ node_types:
             panic!("run-type wizard did not open: {}", model.status);
         };
         draft.clone()
+    }
+
+    #[test]
+    fn discard_all_config_drafts_restores_the_published_project_atomically() {
+        let fixture = publication_fixture();
+        let mut model = publication_model(fixture.path());
+        let published_profile =
+            fs::read_to_string(fixture.path().join(".codex/koni/profile.yaml")).unwrap();
+
+        replace_and_save(
+            &mut model,
+            "profile.yaml",
+            "description: Original profile",
+            "description: Unpublished profile",
+        );
+        model
+            .create_config_document("modules/unpublished.yaml")
+            .unwrap();
+        model.save_config_draft().unwrap();
+        model.config.selected = config_document_index(&model, "modules/nodes.yaml");
+        model
+            .rename_config_document("modules/entities.yaml")
+            .unwrap();
+        model.config.selected = config_document_index(&model, "run-types/fast.yaml");
+        model.toggle_delete_config_document().unwrap();
+        model.save_all_config_drafts().unwrap();
+
+        assert_eq!(model.unpublished_config_change_count(), 4);
+        assert!(config_draft_root(fixture.path()).exists());
+
+        let discarded = model.discard_all_config_drafts().unwrap();
+
+        assert_eq!(discarded, 4);
+        assert_eq!(model.unpublished_config_change_count(), 0);
+        assert!(model.config.pending_deletes.is_empty());
+        assert!(model.config.pending_renames.is_empty());
+        assert!(!model.config.documents.iter().any(|document| {
+            document.relative_path == Path::new("modules/unpublished.yaml")
+                || document.relative_path == Path::new("modules/entities.yaml")
+        }));
+        assert!(
+            model
+                .config
+                .documents
+                .iter()
+                .any(|document| { document.relative_path == Path::new("modules/nodes.yaml") })
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.path().join(".codex/koni/profile.yaml")).unwrap(),
+            published_profile
+        );
+        assert!(!config_draft_root(fixture.path()).exists());
+        assert_eq!(model.run_types.len(), 2);
+        assert!(model.catalog_error.is_none());
+        assert_eq!(
+            model.status,
+            "discarded 4 unpublished configuration changes"
+        );
     }
 
     #[test]
@@ -5195,42 +7873,142 @@ node_types:
             data.agent_summaries(),
             vec![
                 AgentSummary {
+                    key: "agent:planner-secret".to_owned(),
                     title: "Plan risk controls".to_owned(),
+                    ticket_id: None,
+                    ticket_title: None,
+                    persona: "Planner".to_owned(),
                     status: "running".to_owned(),
                     live: true,
+                    transcript: None,
                 },
                 AgentSummary {
+                    key: "agent:worker-secret".to_owned(),
                     title: "Notes editor".to_owned(),
+                    ticket_id: Some("ticket-live-019f".to_owned()),
+                    ticket_title: Some("Notes editor".to_owned()),
+                    persona: "Implementer".to_owned(),
                     status: "starting".to_owned(),
                     live: true,
+                    transcript: None,
                 },
                 AgentSummary {
+                    key: "output:ticket-history-019f:history-output-secret-019f".to_owned(),
                     title: "Research outline".to_owned(),
+                    ticket_id: Some("ticket-history-019f".to_owned()),
+                    ticket_title: Some("Research outline".to_owned()),
+                    persona: "Writer".to_owned(),
                     status: "completed".to_owned(),
                     live: false,
+                    transcript: None,
                 },
                 AgentSummary {
+                    key: "output:ticket-live-019f:output-secret-019f".to_owned(),
                     title: "Notes editor".to_owned(),
+                    ticket_id: Some("ticket-live-019f".to_owned()),
+                    ticket_title: Some("Notes editor".to_owned()),
+                    persona: "Implementer".to_owned(),
                     status: "completed".to_owned(),
                     live: false,
+                    transcript: None,
                 },
                 AgentSummary {
+                    key: "agent:waiting-secret".to_owned(),
                     title: "Waiting stage".to_owned(),
+                    ticket_id: None,
+                    ticket_title: None,
+                    persona: "Planner".to_owned(),
                     status: "waiting".to_owned(),
                     live: false,
+                    transcript: None,
                 },
                 AgentSummary {
+                    key: "agent:closed-worker-secret".to_owned(),
                     title: "Closed work".to_owned(),
+                    ticket_id: Some("ticket-closed-019f".to_owned()),
+                    ticket_title: Some("Closed work".to_owned()),
+                    persona: "Implementer".to_owned(),
                     status: "running".to_owned(),
                     live: false,
+                    transcript: None,
                 },
                 AgentSummary {
+                    key: "agent:broad-active-secret".to_owned(),
                     title: "Reviewer".to_owned(),
+                    ticket_id: None,
+                    ticket_title: None,
+                    persona: "Reviewer".to_owned(),
                     status: "active".to_owned(),
                     live: false,
+                    transcript: None,
                 },
             ]
         );
+    }
+
+    #[test]
+    fn semantic_lead_row_survives_between_slices_without_raw_lead_duplicates() {
+        let mut data = RunData::from_snapshot(json!({
+            "run":{"id":"run-secret","goal":"Build safely","status":"active"},
+            "stages":[{
+                "status":"working",
+                "definition":{"id":"orchestrate","title":"Execute compiled work","kind":"orchestration"}
+            }],
+            "agents":[
+                {
+                    "id":"orchestration-orchestrate",
+                    "stage_id":"orchestrate",
+                    "persona":"lead",
+                    "status":"between_slices",
+                    "stdout_path":"/tmp/latest-lead.jsonl",
+                    "updated_at":"2026-07-14T12:03:00Z"
+                },
+                {
+                    "id":"raw-lead-slice-one",
+                    "persona":"lead",
+                    "status":"completed",
+                    "pid":41,
+                    "stdout_path":"/tmp/old-lead.jsonl",
+                    "updated_at":"2026-07-14T12:02:00Z"
+                },
+                {
+                    "id":"ticket-integrator",
+                    "ticket_id":"ticket-one",
+                    "stage_id":"integrate",
+                    "persona":"integrator",
+                    "status":"completed",
+                    "updated_at":"2026-07-14T12:01:00Z"
+                }
+            ]
+        }));
+
+        let inactive = data.agent_summaries();
+        let leads = inactive
+            .iter()
+            .filter(|agent| agent.persona == "Lead")
+            .collect::<Vec<_>>();
+        assert_eq!(leads.len(), 1, "{inactive:#?}");
+        assert_eq!(leads[0].key, "agent:orchestration-orchestrate");
+        assert!(!leads[0].live);
+        assert_eq!(
+            leads[0]
+                .transcript
+                .as_ref()
+                .map(|source| source.path.as_path()),
+            Some(Path::new("/tmp/latest-lead.jsonl"))
+        );
+        assert!(inactive.iter().any(|agent| agent.persona == "Integrator"));
+
+        data.agents[0]["status"] = Value::String("running".to_owned());
+        data.agents[0]["pid"] = Value::from(42);
+        let active = data.agent_summaries();
+        let leads = active
+            .iter()
+            .filter(|agent| agent.persona == "Lead")
+            .collect::<Vec<_>>();
+        assert_eq!(leads.len(), 1, "{active:#?}");
+        assert_eq!(leads[0].key, "agent:orchestration-orchestrate");
+        assert!(leads[0].live);
     }
 
     #[test]
@@ -5470,6 +8248,13 @@ enabled = false
         let fixture = legacy_fixture(false);
         let mut model = ControlCenterModel::load(fixture.path()).unwrap();
         assert!(model.legacy_migration_available);
+        model.open_run_type_wizard();
+        assert!(
+            model.status.contains("press l in Configure"),
+            "{}",
+            model.status
+        );
+        assert!(!model.status.contains("press L"), "{}", model.status);
         model.open_legacy_migration();
         assert!(matches!(model.dialog, Some(Dialog::LegacyMigration(_))));
 
@@ -5543,8 +8328,9 @@ enabled = false
 
         for (expected_focus, expected_subject) in [
             (Focus::Tickets, OverviewSubject::Ticket),
-            (Focus::Details, OverviewSubject::Ticket),
             (Focus::Agents, OverviewSubject::Ticket),
+            (Focus::Details, OverviewSubject::Ticket),
+            (Focus::Activity, OverviewSubject::Ticket),
             (Focus::Graph, OverviewSubject::Ticket),
             (Focus::Runs, OverviewSubject::Run),
         ] {
@@ -5576,7 +8362,7 @@ enabled = false
         model.cycle_focus(false);
         assert_eq!(model.focus, Focus::Questions);
         model.cycle_focus(false);
-        assert_eq!(model.focus, Focus::Agents);
+        assert_eq!(model.focus, Focus::Activity);
         model.cycle_focus(true);
         assert_eq!(model.focus, Focus::Questions);
 
@@ -5584,21 +8370,18 @@ enabled = false
         model.normalize_conditional_focus();
         assert_eq!(model.focus, Focus::Details);
         model.cycle_focus(false);
-        assert_eq!(model.focus, Focus::Agents);
+        assert_eq!(model.focus, Focus::Activity);
         model.cycle_focus(true);
         assert_eq!(model.focus, Focus::Details);
         model.cycle_focus(true);
-        assert_eq!(model.focus, Focus::Tickets);
+        assert_eq!(model.focus, Focus::Agents);
     }
 
     #[test]
     fn details_cycle_contains_only_overview_planning_and_stages() {
         let mut model =
             ControlCenterModel::from_snapshot(PathBuf::from("/tmp/project"), Value::Null);
-        assert_eq!(
-            Panel::ALL.map(Panel::label),
-            ["overview", "planning", "stages"]
-        );
+        assert_eq!(Panel::ALL.map(Panel::label), ["overview", "plan", "stages"]);
 
         for expected in [Panel::Planning, Panel::Stages, Panel::Overview] {
             model.cycle_detail_panel(1);
@@ -5665,6 +8448,34 @@ enabled = false
         );
         assert_eq!(model.selected_run_data().unwrap().graph[0]["id"], "n2");
         assert_eq!(model.selected_agent, 0);
+    }
+
+    #[test]
+    fn graph_scope_follows_the_last_run_or_ticket_selection() {
+        let mut model = ControlCenterModel::from_snapshot(
+            PathBuf::from("/tmp/project"),
+            json!({
+                "run":{"id":"run","goal":"Demo","status":"active"},
+                "graph":[{"id":"integration-node","type":"task","title":"Integrated"}],
+                "tickets":[{"id":"ticket","title":"Scoped work","status":"in_progress"}],
+                "ticket_graphs":{"ticket":{"graph":[
+                    {"id":"checkout-node","type":"task","title":"Checkout"}
+                ]}}
+            }),
+        );
+
+        model.focus_runs();
+        assert_eq!(model.selected_graph_values()[0]["id"], "integration-node");
+        assert!(!model.selected_graph_is_ticket_projection());
+
+        model.focus_tickets();
+        assert_eq!(model.selected_graph_values()[0]["id"], "checkout-node");
+        assert!(model.selected_graph_is_ticket_projection());
+
+        model.focus = Focus::Graph;
+        assert_eq!(model.selected_graph_values()[0]["id"], "checkout-node");
+        model.focus_runs();
+        assert_eq!(model.selected_graph_values()[0]["id"], "integration-node");
     }
 
     #[test]
@@ -5737,7 +8548,12 @@ enabled = false
                             "agent_id":agent_id,
                             "session_id":session_id,
                             "planning_worktree":worktree,
-                            "output":architecture_body
+                            "output":architecture_body,
+                            "review":{
+                                "architecture":"- Architecture research plan body\n- Keep C1 and G2 visible.",
+                                "risk":null,
+                                "verification":null
+                            }
                         }}
                     },
                     {
@@ -5749,7 +8565,11 @@ enabled = false
                             "required":true,
                             "config":{"persona":"run-planner","prompt":"Identify validity threats and hazards."}
                         },
-                        "output":{"output":{"agent_id":"planning-risk-plan","output":"Risk research plan body"}}
+                        "output":{"output":{
+                            "agent_id":"planning-risk-plan",
+                            "output":"Risk full agent plan body",
+                            "review":{"architecture":null,"risk":"- Risk research plan body","verification":null}
+                        }}
                     },
                     {
                         "status":"succeeded",
@@ -5760,7 +8580,11 @@ enabled = false
                             "required":true,
                             "config":{"persona":"run-planner","prompt":"Define receipts, evidence, and acceptance criteria."}
                         },
-                        "output":{"output":{"agent_id":"planning-verification-plan","output":"Verification research plan body"}}
+                        "output":{"output":{
+                            "agent_id":"planning-verification-plan",
+                            "output":"Verification full agent plan body",
+                            "review":{"architecture":null,"risk":null,"verification":"- Verification research plan body"}
+                        }}
                     }
                 ],
                 "agents":[{
@@ -5782,15 +8606,36 @@ enabled = false
         let Some(Dialog::Approval(approval)) = &model.dialog else {
             panic!("approval review did not open");
         };
-        for (section, (title, body)) in approval.sections.iter().skip(1).zip([
-            ("Architecture plan", "Architecture research plan body"),
-            ("Risk plan", "Risk research plan body"),
-            ("Verification plan", "Verification research plan body"),
-        ]) {
+        for (title, body) in [
+            ("Architecture", "Architecture research plan body"),
+            ("Risk", "Risk research plan body"),
+            ("Verification", "Verification research plan body"),
+        ] {
+            let section = approval
+                .sections
+                .iter()
+                .find(|section| section.title == title)
+                .expect("approval section should exist");
             assert_eq!(section.title, title);
             assert!(section.body.contains(body), "{}", section.body);
+            assert!(
+                section.body.contains("### Legacy planner summary"),
+                "{}",
+                section.body
+            );
+            assert!(
+                !section.body.contains(&format!("### {body}")),
+                "legacy text must not be promoted into a fabricated heading: {}",
+                section.body
+            );
             assert!(!section.body.contains("No separate"), "{}", section.body);
         }
+        assert!(
+            approval
+                .sections
+                .iter()
+                .all(|section| section.title != "Decisions")
+        );
         assert!(approval.approval_enabled);
         assert!(approval.blockers.is_empty());
         let rendered = approval
@@ -5810,15 +8655,13 @@ enabled = false
             stdout_path,
             stderr_path,
             output_path,
+            base_commit,
         ] {
             assert!(!rendered.contains(secret), "approval leaked {secret}");
         }
         assert!(!rendered.contains(&format!("PID {pid}")), "{rendered}");
-        assert!(rendered.contains("the current run"));
-        assert!(rendered.contains("the planning checkout"));
-        assert!(rendered.contains(base_commit));
-        assert!(rendered.contains("C1"));
-        assert!(rendered.contains("G2"));
+        assert!(rendered.contains("C1"), "{rendered}");
+        assert!(rendered.contains("G2"), "{rendered}");
         assert_eq!(
             model.runs[model.selected_run].stages[1]["output"]["output"]["output"],
             architecture_body,
@@ -5866,12 +8709,595 @@ enabled = false
         let Some(Dialog::Approval(approval)) = &model.dialog else {
             panic!("approval review did not open");
         };
-        assert!(approval.sections[1].body.contains("Legacy planning body"));
+        assert!(approval.sections[0].body.contains("Legacy planning body"));
         assert!(approval.approval_enabled);
     }
 
     #[test]
-    fn approval_review_projects_decisions_and_each_durable_planning_fallback_without_ids() {
+    fn approval_review_prefers_the_human_summary_without_mutating_the_complete_plan() {
+        let full_plan = (1..=18)
+            .map(|index| {
+                format!(
+                    "- Implementation detail {index}: update src/feature_{index}.rs with the complete acceptance contract and verification notes."
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut model = ControlCenterModel::from_snapshot(
+            PathBuf::from("/tmp/project"),
+            json!({
+                "run":{"id":"run-full-plan","goal":"Review everything","status":"planning"},
+                "stages":[{
+                    "status":"succeeded",
+                    "definition":{
+                        "id":"architecture-plan",
+                        "title":"Plan architecture",
+                        "kind":"planning",
+                        "required":true
+                    },
+                    "output":{"output":{
+                        "output":full_plan,
+                        "review":{
+                            "architecture":[
+                                {"heading":"Shared feature contract","description":"Update the shared feature contract."},
+                                {"heading":"Regression coverage","description":"Preserve focused regression coverage."}
+                            ],
+                            "risk":null,
+                            "verification":null
+                        }
+                    }}
+                }]
+            }),
+        );
+
+        model.open_selected_run_approval();
+        let Some(Dialog::Approval(approval)) = &model.dialog else {
+            panic!("approval review did not open");
+        };
+        let body = &approval.sections[0].body;
+        assert!(body.contains("### Shared feature contract"), "{body}");
+        assert!(
+            body.contains("Update the shared feature contract."),
+            "{body}"
+        );
+        assert!(body.contains("### Regression coverage"), "{body}");
+        assert!(
+            body.contains("Preserve focused regression coverage."),
+            "{body}"
+        );
+        assert!(!body.contains("Implementation detail 1:"), "{body}");
+        assert!(!body.contains("src/feature_18.rs"), "{body}");
+        assert_eq!(
+            model.runs[model.selected_run].stages[0]["output"]["output"]["output"], full_plan,
+            "the operator projection must never replace the execution artifact"
+        );
+    }
+
+    #[test]
+    fn approval_graph_seed_is_bounded_semantic_and_hides_compiler_metadata() {
+        let nodes = (1..=14)
+            .map(|index| {
+                json!({
+                    "key":format!("seed-key-secret-{index}"),
+                    "type":if index == 1 { "change" } else { "proof" },
+                    "title":format!("Semantic plan node {index}"),
+                    "spec":{
+                        "purpose":format!("Explain approved semantic purpose {index}"),
+                        "path":format!("src/private-{index}.rs"),
+                        "unprojected_detail":format!("Raw spec detail {index}")
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let edges = (1..=18)
+            .map(|index| {
+                json!({
+                    "source":"$root",
+                    "relation":format!("approved_relation_{index}"),
+                    "target":"seed-key-secret-1"
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut model = ControlCenterModel::from_snapshot(
+            PathBuf::from("/tmp/project"),
+            json!({
+                "run":{"id":"run-private","goal":"Review semantic authority","status":"planning"},
+                "stages":[{
+                    "status":"succeeded",
+                    "definition":{"id":"final-plan","title":"Finalize plan","kind":"planning","required":true},
+                    "output":{"output":{
+                        "output":"Complete compiler plan",
+                        "review":{"architecture":[{
+                            "heading":"Shared contract",
+                            "description":"Keep the approved behavior coherent."
+                        }]},
+                        "graph_seed":{
+                            "root_spec":{
+                                "acceptance_intent":"Acceptance intent is explicit",
+                                "compatibility":"seed-key-secret-1 remains connected to $root",
+                                "evidence":"Focused proof is required",
+                                "operator_authority":"Approval remains human-owned",
+                                "requested_scope":"Requested scope is bounded",
+                                "rollout":"Delivery remains reversible",
+                                "source_path":"/tmp/private-root-path",
+                                "graph_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                            },
+                            "nodes":nodes,
+                            "edges":edges
+                        }
+                    }}
+                }]
+            }),
+        );
+
+        model.open_selected_run_approval();
+        let Some(Dialog::Approval(approval)) = &model.dialog else {
+            panic!("approval review did not open");
+        };
+        let graph_seed = approval
+            .sections
+            .iter()
+            .find(|section| section.title == "Graph Seed")
+            .expect("the approved semantic seed must be inspectable before approval");
+        let body = &graph_seed.body;
+
+        for expected in [
+            "8 root facts · 14 semantic nodes · 18 relationships",
+            "### Root enrichment",
+            "Acceptance intent: Acceptance intent is explicit",
+            "### Semantic nodes",
+            "Change · Semantic plan node 1",
+            "Explain approved semantic purpose 1",
+            "### Relationships",
+            "Objective → approved relation 1 → Semantic plan node 1",
+            "### Omitted from this view",
+            "3 root facts · 2 nodes · 2 relationships",
+        ] {
+            assert!(body.contains(expected), "missing {expected}: {body}");
+        }
+        for hidden in [
+            "seed-key-secret",
+            "$root",
+            "private-root-path",
+            "private-1.rs",
+            "0123456789abcdef",
+            "Raw spec detail",
+            "Semantic plan node 13",
+            "approved relation 17",
+        ] {
+            assert!(!body.contains(hidden), "Graph Seed leaked {hidden}: {body}");
+        }
+        assert_eq!(
+            model.runs[model.selected_run].stages[0]["output"]["output"]["graph_seed"]["nodes"][0]
+                ["key"],
+            "seed-key-secret-1",
+            "the display projection must not mutate the compiler-owned seed"
+        );
+    }
+
+    #[test]
+    fn graph_seed_relationships_never_reveal_nodes_outside_projection_limit() {
+        let nodes = (1..=14)
+            .map(|index| {
+                json!({
+                    "key":format!("bounded-node-{index}"),
+                    "type":"change",
+                    "title":format!("Bounded semantic node {index}"),
+                    "spec":{"purpose":format!("Describe bounded node {index}")}
+                })
+            })
+            .collect::<Vec<_>>();
+        let body = graph_seed_approval_body(&json!({
+            "root_spec":{"intent":"Keep the operator projection bounded"},
+            "nodes":nodes,
+            "edges":[{
+                "source":"$root",
+                "relation":"includes",
+                "target":"bounded-node-13"
+            }]
+        }));
+
+        assert!(body.contains("Bounded semantic node 12"), "{body}");
+        assert!(!body.contains("Bounded semantic node 13"), "{body}");
+        assert!(!body.contains("Bounded semantic node 14"), "{body}");
+        assert!(
+            body.contains("0 root facts · 2 nodes · 1 relationship"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn graph_seed_projection_rejects_scalar_raw_spec_and_schema_fields() {
+        let body = graph_seed_approval_body(&json!({
+            "root_spec":{
+                "semantic_intent":"Keep one safe semantic fact",
+                "spec":"raw-spec-sentinel",
+                "raw_spec":"raw-specification-sentinel",
+                "schema":"schema-sentinel",
+                "node_key":"private-local-key"
+            },
+            "nodes":[{
+                "key":"private-local-key",
+                "type":"change",
+                "title":"Visible semantic change",
+                "spec":{"purpose":"Explain the visible semantic change"}
+            }],
+            "edges":[]
+        }));
+
+        assert!(
+            body.contains("Semantic intent: Keep one safe semantic fact"),
+            "{body}"
+        );
+        for hidden in [
+            "raw-spec-sentinel",
+            "raw-specification-sentinel",
+            "schema-sentinel",
+            "private-local-key",
+            "Raw spec:",
+            "Schema:",
+            "Node key:",
+        ] {
+            assert!(!body.contains(hidden), "Graph Seed leaked {hidden}: {body}");
+        }
+        assert!(
+            body.contains("4 root facts · 0 nodes · 0 relationships"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn graph_seed_projection_rejects_markdown_wrapped_and_prefixed_identifiers() {
+        let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let body = graph_seed_approval_body(&json!({
+            "root_spec":{
+                "semantic_intent":"Keep safe surrounding meaning",
+                "risk_summary":format!("`{hash}`"),
+                "rollout_summary":format!("sha256:{hash}"),
+                "verification_summary":format!("**{uuid}**")
+            },
+            "nodes":[{
+                "key":"identifier-test-node",
+                "type":"proof",
+                "title":format!("Identifier id:{uuid}"),
+                "spec":{"purpose":format!("Never expose __{hash}__")}
+            }],
+            "edges":[]
+        }));
+
+        assert!(
+            body.contains("Semantic intent: Keep safe surrounding meaning"),
+            "{body}"
+        );
+        assert!(body.contains("Proof · Semantic node 1"), "{body}");
+        assert!(!body.contains(hash), "{body}");
+        assert!(!body.contains(uuid), "{body}");
+    }
+
+    #[test]
+    fn graph_seed_projection_never_exposes_embedded_local_key_substrings() {
+        let local_key = "seed-key-secret";
+        let body = graph_seed_approval_body(&json!({
+            "root_spec":{
+                "intent":format!("prefix{local_key}_suffix")
+            },
+            "nodes":[{
+                "key":local_key,
+                "type":format!("change_{local_key}_suffix"),
+                "title":format!("prefix{local_key}"),
+                "spec":{"purpose":format!("Keep {local_key}Suffix private")}
+            }],
+            "edges":[{
+                "source":"$root",
+                "relation":format!("connects_{local_key}_suffix"),
+                "target":local_key
+            }]
+        }));
+
+        assert!(!body.contains(local_key), "{body}");
+        assert!(body.contains("Node · Semantic node 1"), "{body}");
+        assert!(
+            body.contains("1 root fact · 0 nodes · 1 relationship"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn approval_graph_seed_prefers_the_durable_stage_then_agent_then_transcript() {
+        let seed = |title: &str| {
+            json!({
+                "root_spec":{"intent":"Keep approval inspectable"},
+                "nodes":[{
+                    "key":"local-secret-key",
+                    "type":"change",
+                    "title":title,
+                    "spec":{"purpose":"Explain the semantic change"}
+                }],
+                "edges":[{
+                    "source":"$root",
+                    "relation":"decomposes_into",
+                    "target":"local-secret-key"
+                }]
+            })
+        };
+        let mut run = RunData::from_snapshot(json!({
+            "run":{"id":"run","goal":"Review the seed","status":"planning"},
+            "stages":[
+                {
+                    "status":"succeeded",
+                    "definition":{"id":"seed-plan","kind":"planning","title":"Seed plan"},
+                    "output":{"output":{"output":"Complete plan","graph_seed":seed("Stage seed")}}
+                },
+                {
+                    "status":"failed",
+                    "definition":{"id":"failed-plan","kind":"planning","title":"Failed plan"},
+                    "output":{"output":{"graph_seed":seed("Failed stale seed")}}
+                }
+            ],
+            "agents":[{
+                "id":"planning-seed-plan",
+                "stage_id":"seed-plan",
+                "result":{"graph_seed":seed("Agent seed")}
+            }],
+            "planning_transcript":[{
+                "type":"planning.output",
+                "stage_id":"seed-plan",
+                "agent_id":"planning-seed-plan",
+                "output":{"graph_seed":seed("Transcript seed")}
+            }]
+        }));
+        let title = |run: &RunData| {
+            planning_graph_seed(run)
+                .and_then(|seed| seed.get("nodes"))
+                .and_then(Value::as_array)
+                .and_then(|nodes| nodes.first())
+                .and_then(|node| node.get("title"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        };
+
+        assert_eq!(title(&run).as_deref(), Some("Stage seed"));
+        run.stages[0]["output"]["output"]
+            .as_object_mut()
+            .unwrap()
+            .remove("graph_seed");
+        assert_eq!(title(&run).as_deref(), Some("Agent seed"));
+        run.agents[0]["result"]
+            .as_object_mut()
+            .unwrap()
+            .remove("graph_seed");
+        assert_eq!(title(&run).as_deref(), Some("Transcript seed"));
+    }
+
+    #[test]
+    fn approved_plan_ignores_graph_seed_shaped_outputs_from_post_approval_stages() {
+        let seed = |title: &str| {
+            json!({
+                "root_spec":{"intent":"Keep the approved seed immutable"},
+                "nodes":[{
+                    "key":"approved-seed-node",
+                    "type":"change",
+                    "title":title,
+                    "spec":{"purpose":"Describe the approved semantic change"}
+                }],
+                "edges":[]
+            })
+        };
+        let run = RunData::from_snapshot(json!({
+            "run":{"id":"run","goal":"Keep approval authoritative","status":"active"},
+            "stages":[
+                {
+                    "status":"succeeded",
+                    "definition":{"id":"seed-plan","kind":"planning","title":"Seed plan"},
+                    "output":{"output":{"graph_seed":seed("Approved planning seed")}}
+                },
+                {
+                    "status":"succeeded",
+                    "definition":{"id":"explicit-approval","kind":"approval","title":"Approve"}
+                },
+                {
+                    "status":"succeeded",
+                    "definition":{"id":"compile-report","kind":"report","title":"Compile report"},
+                    "output":{"output":{"graph_seed":seed("Unreviewed later seed")}}
+                }
+            ]
+        }));
+
+        let selected =
+            planning_graph_seed(&run).expect("the approved planning seed remains visible");
+        assert_eq!(selected["nodes"][0]["title"], "Approved planning seed");
+        assert_ne!(selected["nodes"][0]["title"], "Unreviewed later seed");
+    }
+
+    #[test]
+    fn approval_review_uses_authored_domains_from_one_focused_planning_pass() {
+        let full_plan = "Complete focused execution plan retained for the compiler.";
+        let mut model = ControlCenterModel::from_snapshot(
+            PathBuf::from("/tmp/project"),
+            json!({
+                "run":{"id":"run-focused-plan","goal":"Plan a focused change","status":"planning"},
+                "stages":[{
+                    "status":"succeeded",
+                    "definition":{
+                        "id":"focused-plan",
+                        "title":"Focused plan",
+                        "kind":"action",
+                        "required":true,
+                        "config":{"persona":"run-planner","prompt":"Produce one focused implementation plan."}
+                    },
+                    "output":{"output":{
+                        "output":full_plan,
+                        "review":{
+                            "architecture":[{
+                                "heading":"Thread-backed SPICED cards",
+                                "description":"Use five independent thread-backed inputs."
+                            }],
+                            "risk":[{
+                                "heading":"Legacy data preserved",
+                                "description":"Keep the existing Sales Notes thread intact."
+                            }],
+                            "verification":[{
+                                "heading":"Red-to-green contract",
+                                "description":"Prove the definition with a focused test."
+                            }]
+                        }
+                    }}
+                }]
+            }),
+        );
+
+        model.open_selected_run_approval();
+        let Some(Dialog::Approval(approval)) = &model.dialog else {
+            panic!("approval review did not open");
+        };
+        for (section_title, heading, description) in [
+            (
+                "Architecture",
+                "Thread-backed SPICED cards",
+                "Use five independent thread-backed inputs.",
+            ),
+            (
+                "Risk",
+                "Legacy data preserved",
+                "Keep the existing Sales Notes thread intact.",
+            ),
+            (
+                "Verification",
+                "Red-to-green contract",
+                "Prove the definition with a focused test.",
+            ),
+        ] {
+            let section = approval
+                .sections
+                .iter()
+                .find(|section| section.title == section_title)
+                .expect("review section should exist");
+            assert!(
+                section.body.contains(&format!("### {heading}")),
+                "{}",
+                section.body
+            );
+            assert!(section.body.contains(description), "{}", section.body);
+            assert!(!section.body.contains("No separate"), "{}", section.body);
+            assert!(
+                !section.body.contains(full_plan),
+                "the approval modal must show the authored concise review, not the durable compiler plan: {}",
+                section.body
+            );
+        }
+        assert_eq!(
+            model.runs[model.selected_run].stages[0]["output"]["output"]["output"], full_plan,
+            "the structured review must not replace the full compiler plan"
+        );
+    }
+
+    #[test]
+    fn approval_decisions_render_questions_answers_and_notes_as_separate_scan_lines() {
+        let body = resolved_decisions_body(&[
+            json!({
+                "prompt":"Should the proposal page change too?",
+                "options":[{"id":"both","label":"Update both surfaces"}],
+                "answer":{
+                    "option_id":"both",
+                    "notes":"Keep legacy Sales Notes data under General."
+                }
+            }),
+            json!({
+                "prompt":"How strict should the migration be?",
+                "answer":{"custom":"Keep every SPICED field optional"}
+            }),
+        ]);
+
+        assert!(body.contains("## Question 1"), "{body}");
+        assert!(
+            body.contains("Should the proposal page change too?"),
+            "{body}"
+        );
+        assert!(body.contains("Decision: Update both surfaces"), "{body}");
+        assert!(
+            body.contains("Notes: Keep legacy Sales Notes data under General."),
+            "{body}"
+        );
+        assert!(body.contains("## Question 2"), "{body}");
+        assert!(
+            body.contains("Decision: Keep every SPICED field optional"),
+            "{body}"
+        );
+        assert!(!body.contains("   - Decision"), "{body}");
+    }
+
+    #[test]
+    fn approval_review_condenses_legacy_combined_plans_by_operator_domain() {
+        let full_plan = "## Resolved behavior\n- Preserve existing notes.\n\n| UI field | Stored key |\n| --- | --- |\n| General | salesNotes |\n\n## Implementation architecture\n1. Add the shared storage contract.\n2. Wire both application surfaces.\n\n## Principal risks\n- Existing notes could become detached from their legacy key.\n- Roll back if compatibility checks fail.\n\nNo approval decisions remain.\n\n## Deterministic verification\n- Run focused storage and rendering tests.\n- Reload both surfaces and compare persisted values.";
+        let mut model = ControlCenterModel::from_snapshot(
+            PathBuf::from("/tmp/project"),
+            json!({
+                "run":{"id":"run-legacy-combined","goal":"Review briefly","status":"planning"},
+                "stages":[{
+                    "status":"succeeded",
+                    "definition":{
+                        "id":"combined-plan",
+                        "title":"Plan implementation, architecture, and risk",
+                        "kind":"planning",
+                        "required":true
+                    },
+                    "output":{"output":full_plan}
+                }]
+            }),
+        );
+
+        model.open_selected_run_approval();
+        let Some(Dialog::Approval(approval)) = &model.dialog else {
+            panic!("approval review did not open");
+        };
+        let architecture = &approval.sections[0].body;
+        let risk = &approval.sections[1].body;
+        let verification = &approval.sections[2].body;
+        assert!(
+            architecture.contains("### Legacy architecture excerpt"),
+            "{architecture}"
+        );
+        assert!(
+            !architecture.contains("### Preserve existing notes"),
+            "legacy content must not be converted into inferred headings: {architecture}"
+        );
+        assert!(risk.contains("### Legacy risk excerpt"), "{risk}");
+        assert!(
+            verification.contains("### Legacy verification excerpt"),
+            "{verification}"
+        );
+        assert!(
+            architecture.contains("Preserve existing notes"),
+            "{architecture}"
+        );
+        assert!(
+            architecture.contains("shared storage contract"),
+            "{architecture}"
+        );
+        assert!(
+            !architecture.contains("compatibility checks fail"),
+            "{architecture}"
+        );
+        assert!(!architecture.contains("UI field"), "{architecture}");
+        assert!(risk.contains("legacy key"), "{risk}");
+        assert!(risk.contains("Roll back"), "{risk}");
+        assert!(!risk.contains("shared storage contract"), "{risk}");
+        assert!(!risk.contains("approval decisions"), "{risk}");
+        assert!(verification.contains("focused storage"), "{verification}");
+        assert!(
+            verification.contains("compare persisted values"),
+            "{verification}"
+        );
+        assert!(!verification.contains("legacy key"), "{verification}");
+        assert_eq!(
+            model.runs[model.selected_run].stages[0]["output"]["output"], full_plan,
+            "legacy condensation must remain a read-only projection"
+        );
+    }
+
+    #[test]
+    fn approval_review_projects_only_semantic_plans_without_ids() {
         let mut model = ControlCenterModel::from_snapshot(
             PathBuf::from("/tmp/project-secret"),
             json!({
@@ -5941,26 +9367,17 @@ enabled = false
                 .iter()
                 .map(|section| section.title.as_str())
                 .collect::<Vec<_>>(),
-            [
-                "Resolved decisions",
-                "Architecture plan",
-                "Risk plan",
-                "Verification plan"
-            ]
+            ["Architecture", "Risk", "Verification"]
         );
         assert!(
-            approval.sections[0]
-                .body
-                .contains("How should invalid inputs be rejected?")
+            approval
+                .sections
+                .iter()
+                .all(|section| !section.body.contains("Decision: Raise TypeError"))
         );
-        assert!(
-            approval.sections[0]
-                .body
-                .contains("Decision: Raise TypeError")
-        );
-        assert!(approval.sections[1].body.contains("Architecture full text"));
-        assert!(approval.sections[2].body.contains("Risk full text"));
-        assert!(approval.sections[3].body.contains("Verification full text"));
+        assert!(approval.sections[0].body.contains("Architecture full text"));
+        assert!(approval.sections[1].body.contains("Risk full text"));
+        assert!(approval.sections[2].body.contains("Verification full text"));
         assert!(approval.approval_enabled);
         let rendered_source = approval
             .sections
@@ -6001,7 +9418,7 @@ enabled = false
         assert!(!approval.approval_enabled);
         assert_eq!(approval.blockers, ["Plan risk controls is incomplete"]);
         assert!(
-            approval.sections[2]
+            approval.sections[1]
                 .body
                 .contains("has not produced durable review text")
         );
@@ -6110,6 +9527,53 @@ enabled = false
         });
         let model = ControlCenterModel::from_snapshot(PathBuf::from("/tmp/project"), snapshot);
         assert!(model.visible_tickets().is_empty());
+    }
+
+    #[test]
+    fn published_project_graph_presentation_overrides_a_pinned_run_layout() {
+        let snapshot = json!({
+            "run":{"id":"one","goal":"First","status":"active","profile_id":"a"},
+            "views":[{
+                "id":"graph",
+                "kind":"typed_tree",
+                "options":{"layout":"nested","show_titles":false}
+            }]
+        });
+        let mut model = ControlCenterModel::from_snapshot(PathBuf::from("/tmp/project"), snapshot);
+        let published = r#"views:
+  - id: graph
+    kind: typed_tree
+    options:
+      layout: layered
+      layers:
+        - [hypothesis]
+        - [literature, claim]
+      repeat_semantic_types: [gate]
+      show_titles: true
+"#;
+        let config = ConfigState {
+            documents: vec![ConfigDocument {
+                relative_path: PathBuf::from("cockpit/research.yaml"),
+                source_path: PathBuf::from("/tmp/project/.codex/koni/cockpit/research.yaml"),
+                draft_path: PathBuf::from(
+                    "/tmp/project/.git/koni/config-drafts/cockpit/research.yaml",
+                ),
+                original: published.to_owned(),
+                text: published.to_owned(),
+                diagnostics: Vec::new(),
+                cursor_line: 0,
+                cursor_column: 0,
+                is_new: false,
+            }],
+            ..ConfigState::default()
+        };
+        model.project_graph_options = published_graph_options(&config);
+
+        let options = model.selected_graph_options().unwrap();
+        assert_eq!(options["layout"], "layered");
+        assert_eq!(options["layers"][1], json!(["literature", "claim"]));
+        assert_eq!(options["repeat_semantic_types"], json!(["gate"]));
+        assert_eq!(options["show_titles"], true);
     }
 
     #[test]
@@ -6381,7 +9845,7 @@ enabled = false
     fn guided_form_edits_literal_keys_containing_path_syntax() {
         let text = concat!(
             "reverse_display_edges:\n",
-            "  experiment.target_claims: tests\n",
+            "  experiment.tests: tested-by\n",
             "  'metric[primary]/$name': score\n",
         );
         let document = ConfigDocument {
@@ -6406,14 +9870,14 @@ enabled = false
             .config
             .form_rows
             .iter()
-            .find(|row| row.path.ends_with("experiment.target_claims"))
+            .find(|row| row.path.ends_with("experiment.tests"))
             .unwrap()
             .clone();
         assert_eq!(
             dotted.locator,
             vec![
                 FormPathToken::Key("reverse_display_edges".to_owned()),
-                FormPathToken::Key("experiment.target_claims".to_owned()),
+                FormPathToken::Key("experiment.tests".to_owned()),
             ]
         );
         let special = model
@@ -6446,7 +9910,7 @@ enabled = false
 
         let parsed: Value = serde_yaml::from_str(&model.config.documents[0].text).unwrap();
         assert_eq!(
-            parsed["reverse_display_edges"]["experiment.target_claims"],
+            parsed["reverse_display_edges"]["experiment.tests"],
             "validates"
         );
         assert_eq!(
@@ -6706,6 +10170,36 @@ agents:
     }
 
     #[test]
+    fn configured_checkout_wins_over_a_shared_registry_display_root() {
+        let fixture = publication_fixture();
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(fixture.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let historical_root = fixture.path().join("historical-primary");
+        fs::create_dir(&historical_root).unwrap();
+        let registry = git_common_dir(fixture.path())
+            .unwrap()
+            .join("koni/project.yaml");
+        fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        fs::write(
+            &registry,
+            format!(
+                "schema_version: '1.0'\nproject_id: test\nrepository_root: {}\ncreated_at: 2026-01-01T00:00:00Z\nupdated_at: 2026-01-01T00:00:00Z\nruns: {{}}\n",
+                historical_root.display()
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            canonical_project_root(fixture.path()).unwrap(),
+            fixture.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
     fn configured_git_project_without_a_run_loads_an_empty_control_center() {
         let fixture = TempDir::new().unwrap();
         let root = fixture.path().join("fresh-project");
@@ -6798,6 +10292,379 @@ agents:
             fs::read_to_string(&registry_path).unwrap(),
             "runs: [not valid\n",
             "failed discovery must not replace a malformed registry"
+        );
+    }
+
+    fn snapshot_cache_registration(id: &str, status: RunRegistrationStatus) -> RunRegistration {
+        let now = Utc::now();
+        RunRegistration {
+            id: id.to_owned(),
+            slug: id.to_owned(),
+            goal: format!("Exercise {id}"),
+            profile_id: "cache-profile".to_owned(),
+            profile_version: "1.0.0".to_owned(),
+            profile_hash: "sha256:cache-profile".to_owned(),
+            run_type_id: Some("base".to_owned()),
+            run_type_title: Some("Base run".to_owned()),
+            run_type_hash: Some("sha256:base".to_owned()),
+            question_policy: Some("interactive".to_owned()),
+            target_branch: Some("refs/heads/main".to_owned()),
+            base_commit: "0".repeat(40),
+            config_snapshot_hash: "sha256:config".to_owned(),
+            config_snapshot_path: PathBuf::from("config-snapshot"),
+            status,
+            planning_worktree: None,
+            planning_read_only: false,
+            integration_branch: Some(format!("refs/heads/koni/runs/{id}")),
+            integration_worktree: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn snapshot_cache_registry(runs: BTreeMap<String, RunRegistration>) -> ProjectRegistry {
+        let now = Utc::now();
+        ProjectRegistry {
+            schema_version: "1.0".to_owned(),
+            project_id: "cache-project".to_owned(),
+            repository_root: PathBuf::from("/tmp/cache-project"),
+            created_at: now,
+            updated_at: now,
+            selected_run: None,
+            runs,
+        }
+    }
+
+    fn write_snapshot_cache_marker(common_dir: &Path, run_id: &str, body: &str) {
+        let marker = common_dir
+            .join("koni/runs")
+            .join(run_id)
+            .join("events.jsonl");
+        fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        fs::write(marker, body).unwrap();
+    }
+
+    fn counting_cached_refresh(
+        root: &Path,
+        common_dir: &Path,
+        registry: &ProjectRegistry,
+        selected_run_id: Option<&str>,
+        cache: &mut ProjectSnapshotCache,
+        loads: &mut BTreeMap<String, usize>,
+    ) -> Vec<Value> {
+        cached_registered_snapshots(
+            root,
+            common_dir,
+            registry,
+            selected_run_id,
+            cache,
+            |run_id, _| {
+                let count = loads.entry(run_id.to_owned()).or_default();
+                *count += 1;
+                RegisteredSnapshotLoad::valid(json!({
+                    "run":{"id":run_id,"goal":run_id,"status":"recorded"},
+                    "board":{},
+                    "projection_generation":*count
+                }))
+            },
+        )
+    }
+
+    #[test]
+    fn many_inactive_snapshots_reuse_exact_generations_while_selected_and_live_runs_stay_eager() {
+        let fixture = TempDir::new().unwrap();
+        let common_dir = fixture.path().join("common");
+        let mut runs = BTreeMap::new();
+        for index in 0..32 {
+            let run_id = format!("inactive-{index:02}");
+            write_snapshot_cache_marker(&common_dir, &run_id, "terminal\n");
+            runs.insert(
+                run_id.clone(),
+                snapshot_cache_registration(&run_id, RunRegistrationStatus::Concluded),
+            );
+        }
+        for (run_id, status) in [
+            ("active", RunRegistrationStatus::Active),
+            ("paused-draining", RunRegistrationStatus::Paused),
+        ] {
+            write_snapshot_cache_marker(&common_dir, run_id, "live\n");
+            runs.insert(
+                run_id.to_owned(),
+                snapshot_cache_registration(run_id, status),
+            );
+        }
+        let mut registry = snapshot_cache_registry(runs);
+        let mut cache = ProjectSnapshotCache::default();
+        let mut loads = BTreeMap::<String, usize>::new();
+
+        let first = counting_cached_refresh(
+            fixture.path(),
+            &common_dir,
+            &registry,
+            None,
+            &mut cache,
+            &mut loads,
+        );
+        assert_eq!(first.len(), 34);
+        assert_eq!(loads.values().sum::<usize>(), 34);
+
+        counting_cached_refresh(
+            fixture.path(),
+            &common_dir,
+            &registry,
+            None,
+            &mut cache,
+            &mut loads,
+        );
+        assert_eq!(loads["inactive-00"], 1);
+        assert_eq!(loads["inactive-31"], 1);
+        assert_eq!(loads["active"], 2);
+        assert_eq!(loads["paused-draining"], 2);
+
+        counting_cached_refresh(
+            fixture.path(),
+            &common_dir,
+            &registry,
+            Some("inactive-00"),
+            &mut cache,
+            &mut loads,
+        );
+        assert_eq!(loads["inactive-00"], 2, "the selected row stays eager");
+        assert_eq!(loads["inactive-01"], 1);
+        assert_eq!(loads["active"], 3);
+        assert_eq!(loads["paused-draining"], 3);
+
+        write_snapshot_cache_marker(&common_dir, "inactive-01", "terminal changed\n");
+        counting_cached_refresh(
+            fixture.path(),
+            &common_dir,
+            &registry,
+            None,
+            &mut cache,
+            &mut loads,
+        );
+        assert_eq!(
+            loads["inactive-01"], 2,
+            "durable mutation invalidates one run"
+        );
+        assert_eq!(loads["inactive-02"], 1);
+
+        registry.runs.get_mut("inactive-02").unwrap().status = RunRegistrationStatus::Active;
+        counting_cached_refresh(
+            fixture.path(),
+            &common_dir,
+            &registry,
+            None,
+            &mut cache,
+            &mut loads,
+        );
+        counting_cached_refresh(
+            fixture.path(),
+            &common_dir,
+            &registry,
+            None,
+            &mut cache,
+            &mut loads,
+        );
+        assert_eq!(loads["inactive-02"], 3, "a newly live row is never reused");
+
+        registry.runs.remove("inactive-03");
+        counting_cached_refresh(
+            fixture.path(),
+            &common_dir,
+            &registry,
+            None,
+            &mut cache,
+            &mut loads,
+        );
+        assert!(!cache.entries.contains_key("inactive-03"));
+        assert_eq!(loads["inactive-03"], 1);
+
+        write_snapshot_cache_marker(&common_dir, "inactive-new", "new\n");
+        registry.runs.insert(
+            "inactive-new".to_owned(),
+            snapshot_cache_registration("inactive-new", RunRegistrationStatus::Stopped),
+        );
+        counting_cached_refresh(
+            fixture.path(),
+            &common_dir,
+            &registry,
+            None,
+            &mut cache,
+            &mut loads,
+        );
+        assert_eq!(loads["inactive-new"], 1);
+    }
+
+    #[test]
+    fn invalid_snapshot_fallbacks_never_poison_the_inactive_cache() {
+        let fixture = TempDir::new().unwrap();
+        let common_dir = fixture.path().join("common");
+        write_snapshot_cache_marker(&common_dir, "broken", "broken\n");
+        let registry = snapshot_cache_registry(BTreeMap::from([(
+            "broken".to_owned(),
+            snapshot_cache_registration("broken", RunRegistrationStatus::Failed),
+        )]));
+        let mut cache = ProjectSnapshotCache::default();
+        let mut loads = 0;
+
+        for _ in 0..2 {
+            let snapshots = cached_registered_snapshots(
+                fixture.path(),
+                &common_dir,
+                &registry,
+                None,
+                &mut cache,
+                |run_id, registration| {
+                    loads += 1;
+                    RegisteredSnapshotLoad::invalid(json!({
+                        "run":{"id":run_id,"goal":registration.goal,"status":"failed"},
+                        "validation_errors":["invalid run snapshot"]
+                    }))
+                },
+            );
+            assert_eq!(snapshots[0]["validation_errors"][0], "invalid run snapshot");
+        }
+        assert_eq!(loads, 2);
+        assert!(cache.entries.is_empty());
+
+        cached_registered_snapshots(
+            fixture.path(),
+            &common_dir,
+            &registry,
+            None,
+            &mut cache,
+            |run_id, _| {
+                loads += 1;
+                RegisteredSnapshotLoad::valid(json!({
+                    "run":{"id":run_id,"goal":run_id,"status":"failed"},
+                    "board":{}
+                }))
+            },
+        );
+        assert_eq!(loads, 3);
+        assert!(cache.entries.contains_key("broken"));
+
+        cached_registered_snapshots(
+            fixture.path(),
+            &common_dir,
+            &registry,
+            None,
+            &mut cache,
+            |_, _| {
+                loads += 1;
+                panic!("a stable valid fallback replacement should be reused")
+            },
+        );
+        assert_eq!(loads, 3);
+    }
+
+    #[test]
+    fn terminal_registration_with_a_live_or_draining_agent_remains_eager() {
+        let fixture = TempDir::new().unwrap();
+        let common_dir = fixture.path().join("common");
+        write_snapshot_cache_marker(&common_dir, "draining", "agent record\n");
+        let registry = snapshot_cache_registry(BTreeMap::from([(
+            "draining".to_owned(),
+            snapshot_cache_registration("draining", RunRegistrationStatus::Stopped),
+        )]));
+        let mut cache = ProjectSnapshotCache::default();
+        let mut loads = 0;
+
+        for _ in 0..2 {
+            cached_registered_snapshots(
+                fixture.path(),
+                &common_dir,
+                &registry,
+                None,
+                &mut cache,
+                |run_id, _| {
+                    loads += 1;
+                    RegisteredSnapshotLoad::valid(json!({
+                        "run":{"id":run_id,"goal":run_id,"status":"stopped"},
+                        "board":{},
+                        "lifecycle":{"active_agents":1,"draining":true},
+                        "agents":[{"id":"worker","status":"running"}]
+                    }))
+                },
+            );
+        }
+
+        assert_eq!(loads, 2);
+        assert!(cache.entries.is_empty());
+    }
+
+    #[test]
+    fn durable_fingerprint_covers_sidecar_and_tracked_state_but_ignores_lock_churn() {
+        let fixture = TempDir::new().unwrap();
+        let sidecar = fixture.path().join("sidecar-run");
+        let tracked = fixture.path().join("integration/program");
+        fs::create_dir_all(sidecar.join("locks")).unwrap();
+        fs::create_dir_all(tracked.join("locks")).unwrap();
+        write_fixture_file(
+            fixture.path(),
+            "sidecar-run/receipts/check.yaml",
+            "status: passed\n",
+        );
+        write_fixture_file(
+            fixture.path(),
+            "integration/program/graph/change.yaml",
+            "id: change\n",
+        );
+        let roots = vec![sidecar.clone(), tracked.clone()];
+        let initial = DurableRunFingerprint::capture(&roots).unwrap();
+
+        fs::write(sidecar.join("locks/reader.lock"), "transient").unwrap();
+        fs::write(tracked.join("locks/compiler.lock"), "transient").unwrap();
+        assert_eq!(DurableRunFingerprint::capture(&roots).unwrap(), initial);
+
+        fs::write(sidecar.join("receipts/check.yaml"), "status: stale\n").unwrap();
+        let sidecar_changed = DurableRunFingerprint::capture(&roots).unwrap();
+        assert_ne!(sidecar_changed, initial);
+
+        fs::write(tracked.join("graph/change.yaml"), "id: replacement\n").unwrap();
+        assert_ne!(
+            DurableRunFingerprint::capture(&roots).unwrap(),
+            sidecar_changed,
+            "tracked-backend graph state must share the same invalidation boundary"
+        );
+    }
+
+    #[test]
+    fn tracked_profile_snapshot_resolves_its_exact_compiler_state_root() {
+        let fixture = TempDir::new().unwrap();
+        let common_dir = fixture.path().join("common");
+        let run_root = common_dir.join("koni/runs/tracked-run");
+        let snapshot_root = run_root.join("config-snapshot");
+        write_fixture_file(&snapshot_root, ".codex/koni/project.yaml", PROJECT_CATALOG);
+        write_fixture_file(
+            &snapshot_root,
+            ".codex/koni/run-types/base.yaml",
+            BASE_RUN_TYPE,
+        );
+        write_fixture_file(
+            &snapshot_root,
+            ".codex/koni/run-types/fast.yaml",
+            FAST_RUN_TYPE,
+        );
+        write_fixture_file(&snapshot_root, ".codex/koni/profile.yaml", YAML_PROFILE);
+        write_fixture_file(
+            &snapshot_root,
+            ".codex/koni/modules/nodes.yaml",
+            NODE_MODULE,
+        );
+        let integration_worktree = fixture.path().join("integration");
+        fs::create_dir_all(integration_worktree.join("program")).unwrap();
+        let mut registration =
+            snapshot_cache_registration("tracked-run", RunRegistrationStatus::Concluded);
+        registration.integration_worktree = Some(integration_worktree.clone());
+
+        let roots = registered_snapshot_watch_roots(&common_dir, "tracked-run", &registration);
+
+        assert_eq!(
+            roots,
+            vec![run_root, integration_worktree.join("program")],
+            "tracked storage must watch the profile-defined state parent, not the whole repository"
         );
     }
 
@@ -7048,6 +10915,12 @@ agents:
         reloaded.publish_config().unwrap();
         reloaded.config.selected = config_document_index(&reloaded, "modules/unused.yaml");
         reloaded.toggle_delete_config_document().unwrap();
+        assert!(
+            reloaded.status.contains("press d to undo"),
+            "{}",
+            reloaded.status
+        );
+        assert!(!reloaded.status.contains("press D"), "{}", reloaded.status);
         reloaded.publish_config().unwrap();
         assert!(
             !fixture

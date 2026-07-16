@@ -18,7 +18,32 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+          cache-dependency-path: |
+            runtime/pi-host/package-lock.json
+            apps/docs/package-lock.json
+      - name: Pin runtime build tools
+        shell: bash
+        run: |
+          echo "KONI_PINNED_NODE_PATH=$(node -p 'require("fs").realpathSync(process.execPath)')" >> "$GITHUB_ENV"
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          echo "KONI_PINNED_BWRAP_PATH=$(readlink -f "$(command -v bwrap)")" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
+      - run: npm install --global npm@11.13.0
+      - run: npm ci
+        working-directory: runtime/pi-host
+      - run: npm run check
+        working-directory: runtime/pi-host
+      - name: Verify production dependency SBOM
+        shell: bash
+        working-directory: runtime/pi-host
+        run: |
+          npm sbom --omit=dev --sbom-format cyclonedx > dist/koni-pi-host.cdx.json
+          node -e 'const b=require("./dist/koni-pi-host.cdx.json"); if (b.bomFormat !== "CycloneDX" || !b.components?.some((c) => c.name === "@earendil-works/pi-agent-core" && c.version === "0.80.7") || !b.components?.some((c) => c.name === "@earendil-works/pi-ai" && c.version === "0.80.7")) process.exit(1)'
       - name: Verify tag matches Cargo version
         shell: bash
         run: |
@@ -31,11 +56,6 @@ jobs:
         with:
           command: check
       - run: ./scripts/check-brand.sh
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: apps/docs/package-lock.json
       - run: npm ci
         working-directory: apps/docs
       - run: npm run lint
@@ -66,14 +86,56 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+          cache-dependency-path: runtime/pi-host/package-lock.json
+      - name: Pin runtime build tools
+        shell: bash
+        run: |
+          echo "KONI_PINNED_NODE_PATH=$(node -p 'require("fs").realpathSync(process.execPath)')" >> "$GITHUB_ENV"
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y bubblewrap
+            echo "KONI_PINNED_BWRAP_PATH=$(readlink -f "$(command -v bwrap)")" >> "$GITHUB_ENV"
+          fi
+      - run: npm install --global npm@11.13.0
+      - run: npm ci
+        working-directory: runtime/pi-host
+      - run: npm run check
+        working-directory: runtime/pi-host
+      - name: Generate production dependency SBOM
+        shell: bash
+        working-directory: runtime/pi-host
+        run: |
+          npm sbom --omit=dev --sbom-format cyclonedx > dist/koni-pi-host.cdx.json
+          node -e 'const b=require("./dist/koni-pi-host.cdx.json"); if (b.bomFormat !== "CycloneDX" || !b.components?.some((c) => c.name === "@earendil-works/pi-agent-core" && c.version === "0.80.7") || !b.components?.some((c) => c.name === "@earendil-works/pi-ai" && c.version === "0.80.7")) process.exit(1)'
       - name: Build release binary
         run: cargo build --locked --release --package koni-cli
-      - name: Package binary
+      - name: Package verified Pi runtime
         id: package
         shell: bash
         run: |
           archive="koni-${GITHUB_REF_NAME}-${{ matrix.asset }}.tar.gz"
-          tar -C target/release -czf "$archive" koni
+          stage="$(mktemp -d)"
+          mkdir -p "$stage/bin" "$stage/libexec/koni/pi-host" "$stage/libexec/koni/pi-runtime" "$stage/share/doc/koni"
+          install -m 0755 target/release/koni "$stage/bin/koni"
+          install -m 0755 runtime/pi-host/dist/koni-pi-host.mjs "$stage/libexec/koni/pi-host/koni-pi-host.mjs"
+          install -m 0644 runtime/pi-host/dist/koni-pi-host.sha256 "$stage/libexec/koni/pi-host/koni-pi-host.sha256"
+          install -m 0644 runtime/pi-host/dist/koni-pi-host.cdx.json "$stage/libexec/koni/pi-host/koni-pi-host.cdx.json"
+          install -m 0755 "$KONI_PINNED_NODE_PATH" "$stage/libexec/koni/pi-runtime/node"
+          node_root="$(cd "$(dirname "$KONI_PINNED_NODE_PATH")/.." && pwd -P)"
+          install -m 0644 LICENSE "$stage/share/doc/koni/Koni-LICENSE"
+          install -m 0644 "$node_root/LICENSE" "$stage/share/doc/koni/Node-LICENSE"
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            install -m 0755 "$KONI_PINNED_BWRAP_PATH" "$stage/libexec/koni/pi-runtime/bwrap"
+          fi
+          tar -C "$stage" -czf "$archive" bin libexec share
+          smoke="$(mktemp -d)"
+          tar -C "$smoke" -xzf "$archive"
+          "$smoke/bin/koni" --version
+          "$smoke/bin/koni" models --json
           shasum -a 256 "$archive" > "$archive.sha256"
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
       - uses: actions/attest-build-provenance@v2

@@ -2,7 +2,7 @@ schema_version: "1.0"
 project:
   id: software
   title: Software project
-  description: Architecture-first software delivery with selectable run complexity.
+  description: Evidence-guided vertical software delivery with selectable complexity and intent presets.
 default_run_type: medium
 run_types:
   - id: small
@@ -11,3 +11,7 @@ run_types:
     path: run-types/medium.yaml
   - id: large
     path: run-types/large.yaml
+  - id: new-feature
+    path: run-types/new-feature.yaml
+  - id: bug-fix
+    path: run-types/bug-fix.yaml

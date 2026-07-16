@@ -159,7 +159,7 @@ fn no_code_architecture_ticket_closes_without_touching_product_git() -> Result<(
         .expect("initialization creates the objective node");
     assert_eq!(ticket.target_nodes, vec![objective.id.clone()]);
 
-    let system = Node::new(
+    let mut system = Node::new(
         "system",
         "Core package",
         json!({
@@ -170,9 +170,45 @@ fn no_code_architecture_ticket_closes_without_touching_product_git() -> Result<(
             "instructions": ["AGENTS.md"]
         }),
     );
+    let mut contract = Node::new(
+        "contract",
+        "Core behavior compatibility",
+        json!({
+            "invariant": "Existing core imports retain their public behavior.",
+            "enforcement_point": "packages/core/core.test.js",
+            "failure_meaning": "The mapped package boundary would break an existing consumer."
+        }),
+    );
+    contract
+        .edges
+        .insert("applies_to".to_owned(), vec![system.id.clone()]);
+    let mut flow = Node::new(
+        "flow",
+        "Exercise core behavior",
+        json!({
+            "intent": "Invoke and verify the fixture core behavior.",
+            "entrypoint": "packages/core/core.test.js",
+            "exit_condition": "The focused behavior assertion passes.",
+            "ordered_steps": ["Import core", "Invoke behavior", "Assert result"]
+        }),
+    );
+    flow.edges
+        .insert("participants".to_owned(), vec![system.id.clone()]);
+    system
+        .edges
+        .insert("owns".to_owned(), vec![contract.id.clone()]);
+    system
+        .edges
+        .insert("participates_in".to_owned(), vec![flow.id.clone()]);
     objective
         .edges
         .insert("systems".to_owned(), vec![system.id.clone()]);
+    objective
+        .edges
+        .insert("contracts".to_owned(), vec![contract.id.clone()]);
+    objective
+        .edges
+        .insert("flows".to_owned(), vec![flow.id.clone()]);
 
     let integration_output = json!({
         "files_read": ["AGENTS.md", "packages/core/core.js", "packages/core/core.test.js"],
@@ -184,7 +220,9 @@ fn no_code_architecture_ticket_closes_without_touching_product_git() -> Result<(
         "graph_delta": {
             "upsert": [
                 serde_json::to_value(&objective)?,
-                serde_json::to_value(&system)?
+                serde_json::to_value(&system)?,
+                serde_json::to_value(&contract)?,
+                serde_json::to_value(&flow)?
             ],
             "delete": []
         }
@@ -228,12 +266,41 @@ fn no_code_architecture_ticket_closes_without_touching_product_git() -> Result<(
         "failed review reopens the configured integration boundary"
     );
 
+    let mut interface = Node::new(
+        "interface",
+        "Core package API",
+        json!({
+            "kind": "library",
+            "surface": "packages/core/core.js",
+            "compatibility": "Existing imports keep their public behavior.",
+            "consumers": ["fixture tests"]
+        }),
+    );
+    interface
+        .edges
+        .insert("produced_by".to_owned(), vec![system.id.clone()]);
+    let rework_output = json!({
+        "files_read": ["packages/core/core.js", "packages/core/core.test.js"],
+        "files_written": [],
+        "findings": ["The reviewed system now exposes its concrete library boundary."],
+        "risks": [],
+        "patch_proposal": "",
+        "recommended_next_step": "Review the corrected architecture transition.",
+        "graph_delta": {
+            "add_nodes": [serde_json::to_value(&interface)?],
+            "add_edges": [{
+                "source": system.id,
+                "relation": "exposes",
+                "target": interface.id
+            }]
+        }
+    });
     record_output(
         &mut ticket_engine,
         &ticket_id,
         "integrate",
         "integrator",
-        integration_output,
+        rework_output,
     )?;
     let reviewer = StaticReviewLauncher::passing(
         "Architecture mapping is repository-grounded and internally consistent.",
@@ -297,6 +364,39 @@ fn no_code_architecture_ticket_closes_without_touching_product_git() -> Result<(
         .and_then(|review| review.agent_binding.as_ref())
         .expect("passed review has compiler-owned provenance")
         .clone();
+    assert!(
+        binding.input_binding.is_some(),
+        "a configured no-effect review persists its agent-authenticated input components"
+    );
+    assert!(binding.review_effects.is_none());
+    let mut tampered_input_ticket = reviewed.clone();
+    tampered_input_ticket
+        .reviews
+        .last_mut()
+        .and_then(|review| review.agent_binding.as_mut())
+        .and_then(|binding| binding.input_binding.as_mut())
+        .and_then(Value::as_object_mut)
+        .expect("review input binding is an object")
+        .insert(
+            "raw_receipt_set_hash".to_owned(),
+            Value::String("sha256:forged-receipt-set".to_owned()),
+        );
+    store.write_ticket(&tampered_input_ticket)?;
+    let stale_input = engine
+        .execute_action(
+            "finish",
+            string_params([
+                ("ticket", ticket_id.as_str()),
+                ("message", "must not integrate a forged review input"),
+            ]),
+        )
+        .expect_err("tampered no-effect reviewer input must fail closed");
+    assert!(
+        stale_input
+            .to_string()
+            .contains("stale or incomplete provenance")
+    );
+    store.write_ticket(&reviewed)?;
     let project_git = GitBackend::discover(&root)?;
     let control = RunControlStore::new(project_git.sidecar_path(format!("runs/{run_id}"))?);
     let mut reviewer_record = control
@@ -378,6 +478,15 @@ fn no_code_architecture_ticket_closes_without_touching_product_git() -> Result<(
         Some(&vec![system.id.clone()])
     );
     assert!(final_graph.node(&system.id).is_some());
+    assert!(final_graph.node(&contract.id).is_some());
+    assert!(final_graph.node(&flow.id).is_some());
+    assert!(final_graph.node(&interface.id).is_some());
+    assert_eq!(
+        final_graph
+            .node(&system.id)
+            .and_then(|node| node.edges.get("exposes")),
+        Some(&vec![interface.id.clone()])
+    );
 
     assert_eq!(head_oid(&repository)?, product_head);
     assert!(product_status(&repository)?.is_empty());
@@ -509,11 +618,12 @@ impl StaticReviewLauncher {
     fn passing(summary: &str) -> Self {
         Self {
             output: serde_json::to_string(&json!({
-                "schema_version": "1.0",
+                "schema_version": "1.1",
                 "verdict": "passed",
+                "failure_domain": "none",
                 "summary": summary,
                 "findings": ["No blocking findings remain at the configured boundary."],
-                "evidence_pointers": ["ticket outputs and scoped verification receipts"]
+                "evidence_pointers": ["packet://review/acceptance"]
             }))
             .expect("review result serializes"),
             requests: RefCell::new(Vec::new()),
@@ -523,11 +633,12 @@ impl StaticReviewLauncher {
     fn failed(summary: &str) -> Self {
         Self {
             output: serde_json::to_string(&json!({
-                "schema_version": "1.0",
+                "schema_version": "1.1",
                 "verdict": "failed",
+                "failure_domain": "ticket_rework",
                 "summary": summary,
                 "findings": ["The configured integration output must be revised."],
-                "evidence_pointers": ["ticket integrate output"]
+                "evidence_pointers": ["packet://review/acceptance"]
             }))
             .expect("review result serializes"),
             requests: RefCell::new(Vec::new()),

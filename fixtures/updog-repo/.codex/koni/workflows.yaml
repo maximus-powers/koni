@@ -7,7 +7,7 @@ workflows:
     applies_to: [map-architecture]
     steps:
       - {id: inspect-repository, persona: architecture-mapper, expected_output: Systems and owned paths grounded in repository evidence}
-      - {id: map-boundaries, persona: architecture-mapper, depends_on: [inspect-repository], expected_output: Interfaces, data models, contracts, and flows}
+      - {id: map-boundaries, persona: architecture-mapper, depends_on: [inspect-repository], expected_output: "Interfaces, data models, contracts, flows, exact owned paths, and shared boundary identities"}
       - {id: integrate, kind: integration, persona: integrator, depends_on: [map-boundaries], expected_output: Coherent linked architecture graph}
       - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: Architecture validity review, validation_action: review}
   - id: contract-design
@@ -23,7 +23,7 @@ workflows:
     applies_to: [plan-change]
     steps:
       - {id: analyze-impact, persona: change-designer, expected_output: Current-to-target deltas and affected architecture}
-      - {id: model-risk, persona: risk-analyst, depends_on: [analyze-impact], expected_output: Regression risks, migrations, and required proof}
+      - {id: model-risk, persona: risk-analyst, depends_on: [analyze-impact], expected_output: "Regression risks, migrations, and required proof"}
       - {id: integrate, kind: integration, persona: integrator, depends_on: [model-risk], expected_output: Dependency-ordered bounded change plan}
       - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: Plan feasibility and completeness review, validation_action: review}
   - id: decision-resolution
@@ -31,7 +31,7 @@ workflows:
     applies_to: [resolve-decision]
     steps:
       - {id: evaluate-options, persona: change-designer, expected_output: Evidence-backed option comparison}
-      - {id: integrate, kind: integration, persona: integrator, depends_on: [evaluate-options], expected_output: Choice, rationale, and reversibility}
+      - {id: integrate, kind: integration, persona: integrator, depends_on: [evaluate-options], expected_output: "Choice, rationale, and reversibility"}
       - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: Decision review, validation_action: review}
   - id: bounded-implementation
     version: 1.0.0
@@ -41,7 +41,7 @@ workflows:
       - {id: implement, persona: implementer, depends_on: [characterize], expected_output: Scoped patch inside declared owned paths, checks: [focused-test]}
       - {id: verify, persona: verifier, depends_on: [implement], expected_output: Focused tests and typecheck receipts, checks: [focused-test, package-typecheck]}
       - {id: integrate, kind: integration, persona: integrator, depends_on: [verify], expected_output: Coherent ticket delta}
-      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: Correctness, scope, regression, and elegance review, validation_action: review}
+      - {id: review, kind: review, persona: reviewer, depends_on: [integrate], expected_output: "Correctness, scope, regression, and elegance review", validation_action: review}
   - id: proof-execution
     version: 1.0.0
     applies_to: [establish-proof]

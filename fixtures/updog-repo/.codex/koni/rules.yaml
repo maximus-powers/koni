@@ -7,9 +7,13 @@ rules:
     priority: 100
     for_each: objectives
     bind: target
-    when: {op: edge_count, subject: $target, relation: systems, exact: 0}
+    when:
+      any:
+        - {op: edge_count, subject: $target, relation: systems, exact: 0}
+        - {op: edge_count, subject: $target, relation: contracts, exact: 0}
+        - {op: edge_count, subject: $target, relation: flows, exact: 0}
     derive:
-      - {kind: obligation, key: objective.architecture, severity: blocking, reason: Objective has no mapped system boundary}
+      - {kind: obligation, key: objective.architecture, severity: blocking, reason: Objective lacks a complete system, contract, and end-to-end flow map}
     emit:
       operation: map-architecture
       source_state: objective-without-architecture

@@ -1,0 +1,106 @@
+{
+  "schema_version": "1.0",
+  "owner": "koni",
+  "resources": [
+    {
+      "path": ".agents/skills/configure-koni/SKILL.md",
+      "sha256": "1ecbe6d9ef645c769377288bf92514f3624e44d5a6cda081a073887356010525"
+    },
+    {
+      "path": ".agents/skills/configure-koni/agents/openai.yaml",
+      "sha256": "7261d4097e63f80838c5ce31f99fb8857e9a6f4fe07d10132cfb2e96d76d3c4f"
+    },
+    {
+      "path": ".agents/skills/configure-koni/references/agents-and-skills.md",
+      "sha256": "f628e6373ea6b8b49a5f9415783f6d4f7ab801fc9462c7a50a000c478e5a09b3"
+    },
+    {
+      "path": ".agents/skills/configure-koni/references/configuration-layers.md",
+      "sha256": "3dd33f4e577355f1277fcb242caf3d49078aa2ea96efd0c0fc4659316eaf7b2a"
+    },
+    {
+      "path": ".agents/skills/configure-koni/references/run-types.md",
+      "sha256": "478dd6d43e9803544ccfba8a4680b254b9632c0d27eafa1ab38e2b36e54b5ecc"
+    },
+    {
+      "path": ".agents/skills/model-koni-work/SKILL.md",
+      "sha256": "a52b107b8ef1423052019a9ebadbabc455116e0e1a2907aeecb46854412abc2b"
+    },
+    {
+      "path": ".agents/skills/model-koni-work/agents/openai.yaml",
+      "sha256": "4d85f6a5a639164c50cd10ae3ed7efb2ef96ccdccd279683679291672b935316"
+    },
+    {
+      "path": ".agents/skills/model-koni-work/references/execution-contracts.md",
+      "sha256": "c0a7ee3e1c5c3ee9f86185993a8dddadcbbd0ab46946a1989a1c5e03e9c94613"
+    },
+    {
+      "path": ".agents/skills/model-koni-work/references/graph-model.md",
+      "sha256": "bfe603aa37810404c4a63685408b0ac682e35b8ab1d82827666ca06e4baac86b"
+    },
+    {
+      "path": ".agents/skills/model-koni-work/references/rules-and-tickets.md",
+      "sha256": "a42ff199c5ce8b59316a432922c58a903e92c6a6358e628528683bd1b4e3b713"
+    },
+    {
+      "path": ".agents/skills/operate-koni/SKILL.md",
+      "sha256": "e0faa7234b2ef4f5705bcf6f96af8362d8b62b459c4ac9e5d25926e23813ecb6"
+    },
+    {
+      "path": ".agents/skills/operate-koni/agents/openai.yaml",
+      "sha256": "8a178defbf524583d0e373081070a35a748c41d0c89a99bc97d00374981663b6"
+    },
+    {
+      "path": ".agents/skills/operate-koni/references/operator-surfaces.md",
+      "sha256": "21718460ec3777791be6a93e26badd7d9f7ebf3d4dd6f62e33abcb9e43378347"
+    },
+    {
+      "path": ".agents/skills/operate-koni/references/recovery.md",
+      "sha256": "33536213abdefb8b14c7784cc4e5dfefbea218735248a132262743eb62544183"
+    },
+    {
+      "path": ".agents/skills/operate-koni/references/run-lifecycle.md",
+      "sha256": "566e7e992e147984643ab6bcd23fbfccb143f64fcdf4deb14f230f980832096d"
+    },
+    {
+      "path": ".codex/agents/architecture-mapper.toml",
+      "sha256": "6c2802f4278e85cf1883c31f3ad892318936c52129c730ce03b27af41b14cd31"
+    },
+    {
+      "path": ".codex/agents/change-designer.toml",
+      "sha256": "44fb1996026f539b0002f02a4be0a5d81b3dd69f24cf52b8b74dd84a79fe5315"
+    },
+    {
+      "path": ".codex/agents/contract-designer.toml",
+      "sha256": "6e7b627675820099bc5db774ae3779642b59ef73b56fae9f13b9454c0d0d921d"
+    },
+    {
+      "path": ".codex/agents/implementer.toml",
+      "sha256": "ce02c93de51d4a78f1bbd8705525d23fcd1f57f5b2c22d888d22bef8ae8775e0"
+    },
+    {
+      "path": ".codex/agents/integrator.toml",
+      "sha256": "bc692936d003e08b960795b2516005596979e90d1a6c9a4bd6b240e613f98c19"
+    },
+    {
+      "path": ".codex/agents/lead.toml",
+      "sha256": "0b2f5612bf40355cb6abfaaac441e58707164f89da96315ec912ddff41df4e96"
+    },
+    {
+      "path": ".codex/agents/reviewer.toml",
+      "sha256": "a6d78b85b85b37dadc957f5039f6ecb94fad2113fadb6e3f95e0028daf89e9bd"
+    },
+    {
+      "path": ".codex/agents/risk-analyst.toml",
+      "sha256": "5b4188f480ffbe607dd8fcfa0dc3c5d13727784d47b6f097c2ea2f2a4f368afa"
+    },
+    {
+      "path": ".codex/agents/run-planner.toml",
+      "sha256": "2a1ebc3a3a77fd9c93c371b88d16bc9f17250c7be5bf79106f9d12c77e6e7636"
+    },
+    {
+      "path": ".codex/agents/verifier.toml",
+      "sha256": "8dacac049bfd978804daf43d7435a98cb81cc40fc31cf97b52e5fa2b7c0fd5cb"
+    }
+  ]
+}

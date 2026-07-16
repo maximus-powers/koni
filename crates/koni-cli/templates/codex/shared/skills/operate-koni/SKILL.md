@@ -10,8 +10,8 @@ Operate the compiler-owned lifecycle through Köni commands and durable boundari
 ## Start safely
 
 1. Run `koni init --dry-run` when initialization, replacement, or legacy migration may be involved.
-2. Run `koni init` from the project when `.codex/koni` is absent. Use `--target <path>` only to initialize an exact directory; use `--replace` only for resources Köni already owns.
-3. Confirm `.codex/koni/project.yaml`, `.codex/koni/profile.yaml`, native agents, and repository skills exist. Initialization configures the project but does not create or approve a run.
+2. Treat current `.koni/project.yaml` as initialized. Run `koni init` only when neither that catalog nor legacy `.codex/koni/project.yaml` exists; preview and follow the migration path when only the legacy catalog exists. Use `--target <path>` only to initialize an exact directory and `--replace` only for resources Köni already owns.
+3. For schema 2, confirm `.koni/project.yaml`, every resolved `profile.source`, referenced `.koni/agents`, and repository skills exist. For schema 1, inspect the `.codex/koni` catalog and its historical resources without mixing layouts. Initialization configures the project but does not create or approve a run.
 4. Open the control center with `koni`, or use explicit CLI commands for automation.
 
 Read [run-lifecycle.md](references/run-lifecycle.md) before crossing plan, approval, execution, or integration boundaries. Read [operator-surfaces.md](references/operator-surfaces.md) for TUI and CLI selection. Read [recovery.md](references/recovery.md) before retrying, deleting, or repairing durable work.
@@ -30,14 +30,14 @@ Read [run-lifecycle.md](references/run-lifecycle.md) before crossing plan, appro
 
 - Use `koni runs --root .` to orient across runs, then pass global `--run <run-id>` to run-specific automation.
 - Use `koni inspect --root .` and `koni cockpit . --json` for deterministic state projections.
-- Use `koni validate --root .` before and after recovery. Use `koni validate-profile .codex/koni/profile.yaml` for live configuration changes intended for future runs.
+- Use `koni validate --root .` before and after recovery. Use `koni validate-profile <resolved-profile-source>` for live configuration changes intended for future runs; the normal schema-2 path is `.koni/profile.yaml`, while `.codex/koni/profile.yaml` is legacy-only.
 - Inspect the current pipeline stage, ticket status, blockers, questions, agent attempts, check receipts, review, events, and Git/worktree state before choosing a command.
 - Prefer the configured action interface over manual edits to graph, tickets, receipts, run records, refs, or worktrees.
 - Distinguish waiting from failure. Waiting for input, approval, a worker boundary, or an external provider is not corruption.
 
 ## Preserve pinned execution
 
-- Operate an active run from its verified configuration snapshot. Never substitute later live `.codex/koni` edits into it.
+- Operate an active run from its verified configuration snapshot. Never substitute later live `.koni` or legacy `.codex/koni` edits into it.
 - Preserve run IDs, ticket IDs, branch ownership, context hashes, output hashes, check freshness, and receipt chains.
 - Do not edit compiler-owned state or delete worktrees and refs manually.
 - Do not force a ticket closed, forge a receipt, skip required review, or replay an irreversible effect outside its action journal.

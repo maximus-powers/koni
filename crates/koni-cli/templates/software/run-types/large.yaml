@@ -1,16 +1,38 @@
 schema_version: "1.0"
 id: large
 title: Large
-description: A high-complexity change with separate architecture, risk, and verification plans plus independent review.
+description: A cross-domain or high-risk change with shared staged planning, explicit controls, composed verification, and independent run review.
 instructions:
   planning: |
-    Across the planning passes, actively identify roughly three to six
-    decision-bearing questions whose answers would shape the implementation.
-    When two or three related decisions are already visible together, return
-    them in one compiler-owned structured question batch instead of splitting
-    them across turns. A batch may contain one to three questions; give each two
-    to four choices, one recommendation, and the consequences of each choice.
-    Avoid repeating questions answered by prior passes.
+    Treat all three planning stages as one shared planning session. In the
+    architecture stage, begin with a lightweight decision scan. Ask only
+    repository-unanswerable questions whose answers materially change outcome,
+    architecture, safety, rollout, user experience, or verification; there is
+    no target or minimum question count. Group already visible related choices
+    into batches of at most three, with one recommendation and concrete
+    consequences. Maintain one compact repository investigation ledger for the
+    run. Risk and verification stages must reuse it, inspect only newly
+    identified gaps, and never repeat answered questions or broad discovery.
+    The final verification-plan stage emits the complete plan and smallest
+    sufficient root-connected semantic graph seed. It must classify
+    objective.work_kind, use repository-native boundaries, preserve explicit
+    approved decisions, order cohesive vertical slices, assign evidence-based
+    risk tiers and dispositions, bind at least one primary focused proof to each implementation
+    claim, add another only for a distinct uncovered evidence gap, and attach required boundary proof through the material risk it proves.
+    Every proof must include structured oracle cases binding its conditions to
+    callable production seams and exact seam paths already present in read-only
+    covered paths; linked system ownership never supplies implicit proof scope.
+    It must not seed status, tickets, receipts, transient notes, or
+    compiler-owned fields.
+planning:
+  session_scope: run
+  graph_seed_stage: verification-plan
+  max_repository_tool_calls: 48
+  token_budget:
+    metric: new_tokens
+    limit: 480000
+    synthesis_reserve: 120000
+    on_exhausted: force_synthesis
 profile:
   source: .codex/koni/profile.yaml
 intake:
@@ -32,19 +54,47 @@ pipeline:
       title: Plan architecture
       config:
         persona: run-planner
-        prompt: Map the affected architecture, contracts, dependencies, and implementation boundaries.
+        prompt: >-
+          Establish the shared repository baseline and produce the outcome, non-goal,
+          architecture, and decision portion of the plan. Classify objective.work_kind; identify
+          the smallest affected repository-native systems and only material interfaces, data,
+          flows, contracts, migrations, and consequential approval choices. Define cohesive
+          vertical-slice seams and real dependencies without turning every graph node or layer into
+          a ticket. Do not expand into detailed risk or proof prose yet.
     risk-plan:
       kind: planning
       title: Plan risk controls
       config:
         persona: run-planner
-        prompt: Identify failure modes, compatibility risks, mitigations, and escalation boundaries.
+        prompt: >-
+          Using the architecture and repository ledger already in this thread, produce the risk plan:
+          classify every planned change as routine, elevated, or critical from concrete factors;
+          model only plausible material failure scenarios; choose structural mitigation or
+          approval-bound acceptance; and specify recovery, compatibility, rollout, observability,
+          and escalation controls when warranted. Acceptance must come from an already explicit
+          human-approved decision, never from agent convenience. Inspect only specific evidence
+          gaps and do not manufacture risks to justify the Large label.
     verification-plan:
       kind: planning
       title: Plan verification
       config:
         persona: run-planner
-        prompt: Define the evidence, checks, regressions, and acceptance criteria required for completion.
+        prompt: >-
+          Using the existing architecture, decisions, risks, and repository ledger, produce the
+          verification plan and final smallest sufficient root-connected graph seed. Give every
+          change or migration a primary focused proof that verifies exactly that implementation subject;
+          add another only when it closes a distinct remaining evidence gap.
+          For elevated and critical work, introduce the material risk and give that risk a
+          genuinely distinct boundary proof; do not make one proof directly certify both change
+          and risk. Record exact project-native argv,
+          strategy-appropriate pre-change baselines, conditions, expected signals, non-claims,
+          and structured oracle_cases binding every condition/claim to its callable production
+          seam, exact seam_paths, action, assertions, and material environment/recipe, plus
+          regression coverage, observability, and completion criteria. Every seam path must resolve
+          to the same normalized project-relative identity present in read-only covered_paths; do
+          not inherit other system paths. Use canonical edges and
+          exact paths. Do not repeat discovery, fake proof independence, manufacture expected-red
+          failures, or seed compiler-owned status, tickets, receipts, or progress.
     approval:
       kind: approval
       title: Approve the plans
@@ -54,34 +104,42 @@ pipeline:
     orchestrate:
       kind: orchestration
       title: Execute compiled work
+    target-sync:
+      kind: target_sync
+      title: Synchronize the target branch
+    verification:
+      kind: checkpoint
+      title: Verify the completed run
+      config: {checkpoint: verification}
     independent-review:
       kind: agent_review
       title: Independently review the run
       config:
         persona: reviewer
-        prompt: Independently review the completed run against its goal, evidence, checks, and unresolved risks.
-    verification:
-      kind: checkpoint
-      title: Verify the completed run
-      config: {checkpoint: verification}
+        prompt: Independently review the exact composed run for behavioral correctness, acceptance alignment, regressions, security, data and compatibility hazards, proof currentness and independence, scope discipline, recovery controls, and unresolved risks. Return only evidence-backed actionable findings; block when critical domain expertise is unavailable, and do not demand taste-driven perfection.
     report:
       kind: action
       title: Compile final report
       config: {action: report, automatic: true}
-  order: [intake, architecture-plan, risk-plan, verification-plan, approval, initialize, orchestrate, independent-review, verification, report]
+    promotion:
+      kind: promotion
+      title: Merge the completed run
+  order: [intake, architecture-plan, risk-plan, verification-plan, approval, initialize, orchestrate, target-sync, verification, independent-review, report, promotion]
 questions:
   policy: interactive
   default_scope: run
 git:
   branch_template: "koni/runs/{{ run.slug }}-{{ run.short_id }}"
   ticket_branch_template: "koni/runs/{{ run.id }}/tickets/{{ ticket.id }}"
+promotion:
+  conflict_operation: resolve-target-integration
 run_card:
   sections: [goal, pipeline, graph, tickets, checks, report]
 agents:
   roles:
     planner: {model: gpt-5.6-sol, reasoning_effort: ultra}
     lead: {model: gpt-5.6-sol, reasoning_effort: ultra}
-    ticket_worker: {model: gpt-5.6-terra, reasoning_effort: xhigh}
+    ticket_worker: {model: gpt-5.6-sol, reasoning_effort: xhigh}
     reviewer: {model: gpt-5.6-sol, reasoning_effort: ultra}
   personas: {}
 orchestration:
