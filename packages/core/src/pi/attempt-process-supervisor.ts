@@ -633,7 +633,7 @@ export class SupervisedPiAttemptProcess {
       if (process.platform === "win32") this.#child.kill(signal);
       else process.kill(-pid, signal);
     } catch (error) {
-      if (!isNoSuchProcess(error)) throw error;
+      if (!isNoSuchProcess(error) && !(this.#closed && isPermissionDenied(error))) throw error;
     }
   }
 
@@ -645,6 +645,10 @@ export class SupervisedPiAttemptProcess {
       return true;
     } catch (error) {
       if (isNoSuchProcess(error)) return false;
+      // All admitted descendants run as this authority's uid. Once the group leader is reaped,
+      // EPERM can only identify a recycled foreign PGID; treating it as ours could signal an
+      // unrelated process group and makes deletion nondeterministically fail under PID pressure.
+      if (this.#closed && isPermissionDenied(error)) return false;
       throw error;
     }
   }
@@ -917,7 +921,15 @@ function delay(milliseconds: number): Promise<void> {
 }
 
 function isNoSuchProcess(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH";
+  return hasErrorCode(error, "ESRCH");
+}
+
+function isPermissionDenied(error: unknown): boolean {
+  return hasErrorCode(error, "EPERM");
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
 }
 
 function errorText(error: unknown): string {
