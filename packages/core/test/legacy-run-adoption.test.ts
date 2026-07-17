@@ -1,10 +1,11 @@
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { appendFile, cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { AuthorityClient } from "../src/authority/client.js";
 import {
   RunAuthorityEngine,
@@ -19,13 +20,18 @@ import type { AgentLaunchSpec } from "../src/pi/launch-spec.js";
 import { ManagedSessionSupervisor } from "../src/pi/supervisor.js";
 import {
   adoptProjectLegacyRun,
+  ensureProjectAuthority,
   previewProjectLegacyRunAdoption,
   resumeProjectRun,
+  type EnsureAuthorityOptions,
+  type LegacyRunOperatorDependencies,
 } from "../src/operator/authority-bootstrap.js";
 import {
   applyLegacyProjectMigration,
   planLegacyProjectMigration,
+  type LegacyProjectMigrationPlan,
   type LegacyRunBarrierEvidence,
+  type LegacyRunCompatibilityIndex,
   type LegacyRunMigrationAuthority,
 } from "../src/profile/migration.js";
 import {
@@ -33,7 +39,12 @@ import {
   assessLegacyRunAdoption,
 } from "../src/profile/run-adoption.js";
 import { canonicalHash } from "../src/shared/canonical.js";
-import { KONI_PI_PACKAGE_ROOT_ENV } from "../src/runtime/pi-peer-runtime.js";
+import {
+  KONI_PI_PACKAGE_ROOT_ENV,
+  SUPPORTED_PI_RUNTIME_VERSION,
+  SUPPORTED_TYPEBOX_VERSION,
+  type PiPeerRuntime,
+} from "../src/runtime/pi-peer-runtime.js";
 import { fixtureLaunchSpec, fixtureTool, TERMINAL_TOOL_NAME } from "./pi-managed-fixtures.js";
 
 const exec = promisify(execFile);
@@ -41,21 +52,16 @@ const repositoryRoot = path.resolve(import.meta.dirname, "../../..");
 const codingProfile = path.join(repositoryRoot, "packages", "coding-profile");
 const roots: string[] = [];
 const engines: RunAuthorityEngine[] = [];
-let priorPiPackageRoot: string | undefined;
-
-beforeEach(async () => {
-  priorPiPackageRoot = process.env[KONI_PI_PACKAGE_ROOT_ENV];
-  process.env[KONI_PI_PACKAGE_ROOT_ENV] = await realpath(path.join(
-    repositoryRoot,
-    "node_modules/@earendil-works/pi-coding-agent",
-  ));
-});
+const operatorDependencies: LegacyRunOperatorDependencies = {
+  ensure: async (options: EnsureAuthorityOptions) => ensureProjectAuthority({
+    ...options,
+    resolvePiRuntime: authenticateTestPiRuntime,
+  }),
+};
 
 afterEach(async () => {
   await Promise.all(engines.splice(0).map((engine) => engine.stop().catch(() => undefined)));
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-  if (priorPiPackageRoot === undefined) delete process.env[KONI_PI_PACKAGE_ROOT_ENV];
-  else process.env[KONI_PI_PACKAGE_ROOT_ENV] = priorPiPackageRoot;
 }, 30_000);
 
 describe("production Rust-era run adoption", () => {
@@ -70,7 +76,7 @@ describe("production Rust-era run adoption", () => {
       projectRoot: fixture.project,
       version: "1.0.0",
       migrationId: fixture.migrationId,
-    });
+    }, operatorDependencies);
     expect(preview.runs).toContainEqual(expect.objectContaining({
       runId: "legacy-active",
       sourceStatus: "active",
@@ -87,7 +93,7 @@ describe("production Rust-era run adoption", () => {
       version: "1.0.0",
       migrationId: fixture.migrationId,
       runId: "legacy-active",
-    });
+    }, operatorDependencies);
     expect(adopted.status).toBe("adopted_paused");
     expect(adopted.successorRunId).not.toBe("legacy-active");
     const successor = await engine.store.getRun(adopted.successorRunId);
@@ -127,7 +133,7 @@ describe("production Rust-era run adoption", () => {
       projectRoot: fixture.project,
       version: "1.0.0",
       runId: adopted.successorRunId,
-    });
+    }, operatorDependencies);
     client = await AuthorityClient.connect({ projectRoot: fixture.project, client: "tui", version: "1.0.0" });
     try {
       await waitFor(async () => {
@@ -220,12 +226,113 @@ describe("production Rust-era run adoption", () => {
     expect((await receiptEngine.store.getRun(receiptAdopted.successorRunId)).lifecycle.phase).toBe("paused");
     receiptClient.close();
   }, 90_000);
+
+  it("rejects live registry-byte drift before adoption and again before first-resume provider work", async () => {
+    const beforeAdoption = await migratedLegacyProject();
+    const adoptionHarness = new PlanningHarness();
+    const adoptionEngine = await openEngine(beforeAdoption.project, adoptionHarness);
+    await appendFile(beforeAdoption.registryPath, "\n# byte-only drift before adoption\n");
+    await expect(adoptProjectLegacyRun({
+      projectRoot: beforeAdoption.project,
+      version: "1.0.0",
+      migrationId: beforeAdoption.migrationId,
+      runId: "legacy-active",
+    }, operatorDependencies)).rejects.toMatchObject({ code: "legacy_adoption_blocked" });
+    expect(await adoptionEngine.store.listRuns({ includeDeleted: true })).toEqual([]);
+    expect(adoptionHarness.promptCalls).toBe(0);
+
+    const beforeResume = await migratedLegacyProject();
+    const resumeHarness = new PlanningHarness();
+    const resumeEngine = await openEngine(beforeResume.project, resumeHarness);
+    const adopted = await adoptProjectLegacyRun({
+      projectRoot: beforeResume.project,
+      version: "1.0.0",
+      migrationId: beforeResume.migrationId,
+      runId: "legacy-active",
+    }, operatorDependencies);
+    await appendFile(beforeResume.registryPath, "\n# byte-only drift before resume\n");
+    await expect(resumeProjectRun({
+      projectRoot: beforeResume.project,
+      version: "1.0.0",
+      runId: adopted.successorRunId,
+    }, operatorDependencies)).rejects.toMatchObject({ code: "legacy_resume_blocked" });
+    expect(resumeHarness.promptCalls).toBe(0);
+    expect((await resumeEngine.store.getRun(adopted.successorRunId)).lifecycle.phase).toBe("paused");
+  }, 90_000);
+
+  it("rejects self-consistent archived path redirection before opening a legacy source root", async () => {
+    const fixture = await migratedLegacyProject();
+    const artifactRoot = path.join(
+      fixture.project,
+      ".koni",
+      ".managed",
+      "migrations",
+      fixture.migrationId,
+    );
+    const paths = {
+      plan: path.join(artifactRoot, "plan.json"),
+      compatibility: path.join(artifactRoot, "legacy-runs.json"),
+      receipt: path.join(artifactRoot, "receipt.json"),
+    };
+    const originals = {
+      plan: await readFile(paths.plan),
+      compatibility: await readFile(paths.compatibility),
+      receipt: await readFile(paths.receipt),
+    };
+    const outside = `${fixture.project}-untrusted-legacy-source`;
+    const cases: Array<{
+      label: string;
+      mutate(plan: LegacyProjectMigrationPlan): void;
+    }> = [
+      { label: "common directory", mutate: (plan) => { plan.runs.commonDirectory = outside; } },
+      { label: "state root", mutate: (plan) => { plan.runs.stateRoot = outside; } },
+      { label: "registry path", mutate: (plan) => { plan.runs.registryPath = path.join(outside, "project.yaml"); } },
+      {
+        label: "run source root",
+        mutate: (plan) => { plan.runs.runs[0]!.sourceRoot = path.join(outside, "runs", plan.runs.runs[0]!.id); },
+      },
+    ];
+
+    try {
+      for (const testCase of cases) {
+        const plan = JSON.parse(originals.plan.toString("utf8")) as LegacyProjectMigrationPlan;
+        const compatibility = JSON.parse(
+          originals.compatibility.toString("utf8"),
+        ) as LegacyRunCompatibilityIndex;
+        const receipt = JSON.parse(originals.receipt.toString("utf8")) as {
+          planSha256: string;
+          runSnapshotSha256: string;
+        };
+        testCase.mutate(plan);
+        compatibility.runs = structuredClone(plan.runs.runs);
+        const { snapshotSha256: _snapshotSha256, ...runMaterial } = plan.runs;
+        plan.runs.snapshotSha256 = canonicalHash(runMaterial);
+        const { createdAt: _createdAt, planSha256: _planSha256, ...planMaterial } = plan;
+        plan.planSha256 = canonicalHash(planMaterial);
+        receipt.planSha256 = plan.planSha256;
+        receipt.runSnapshotSha256 = plan.runs.snapshotSha256;
+        await writeFile(paths.plan, `${JSON.stringify(plan, null, 2)}\n`);
+        await writeFile(paths.compatibility, `${JSON.stringify(compatibility, null, 2)}\n`);
+        await writeFile(paths.receipt, `${JSON.stringify(receipt, null, 2)}\n`);
+        await expect(loadLegacyRunMigrationEvidence(
+          fixture.project,
+          fixture.migrationId,
+        ), testCase.label).rejects.toMatchObject({ code: "migration_evidence_path_mismatch" });
+      }
+    } finally {
+      await writeFile(paths.plan, originals.plan);
+      await writeFile(paths.compatibility, originals.compatibility);
+      await writeFile(paths.receipt, originals.receipt);
+    }
+    await expect(lstat(outside)).rejects.toMatchObject({ code: "ENOENT" });
+  }, 60_000);
 });
 
 interface LegacyFixture {
   project: string;
   migrationId: string;
   sourceRunRoot: string;
+  registryPath: string;
   integrationWorktree: string;
   integrationHead: string;
 }
@@ -261,7 +368,8 @@ async function migratedLegacyProject(): Promise<LegacyFixture> {
   await git(integrationWorktree, "commit", "-m", "legacy implementation");
   const integrationHead = await gitOutput(integrationWorktree, "rev-parse", "HEAD");
 
-  await writeFile(path.join(stateRoot, "project.yaml"), `
+  const registryPath = path.join(stateRoot, "project.yaml");
+  await writeFile(registryPath, `
 selected_run: legacy-active
 runs:
   legacy-active:
@@ -300,7 +408,44 @@ runs:
     profilePackageRoot: codingProfile,
     runAuthority: barrierAuthority(),
   });
-  return { project, migrationId, sourceRunRoot, integrationWorktree, integrationHead };
+  return { project, migrationId, sourceRunRoot, registryPath, integrationWorktree, integrationHead };
+}
+
+async function authenticateTestPiRuntime(): Promise<PiPeerRuntime> {
+  const packageRoot = await realpath(path.join(
+    repositoryRoot,
+    "node_modules/@earendil-works/pi-coding-agent",
+  ));
+  const typeboxRoot = await realpath(path.join(packageRoot, "node_modules/typebox"));
+  const piManifest = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8")) as {
+    name?: string;
+    version?: string;
+  };
+  const typeboxManifest = JSON.parse(await readFile(path.join(typeboxRoot, "package.json"), "utf8")) as {
+    name?: string;
+    version?: string;
+  };
+  if (
+    piManifest.name !== "@earendil-works/pi-coding-agent" ||
+    piManifest.version !== SUPPORTED_PI_RUNTIME_VERSION ||
+    typeboxManifest.name !== "typebox" ||
+    typeboxManifest.version !== SUPPORTED_TYPEBOX_VERSION
+  ) {
+    throw new Error("test Pi peer runtime does not match Core's exact supported closure");
+  }
+  const preloadPath = await realpath(path.join(repositoryRoot, "packages/core/bin/pi-peer-register.js"));
+  const preloadMetadata = await lstat(preloadPath);
+  if (!preloadMetadata.isFile() || preloadMetadata.isSymbolicLink()) {
+    throw new Error("test Core Pi peer preload is unsafe");
+  }
+  const preloadUrl = pathToFileURL(preloadPath).href;
+  return {
+    packageRoot,
+    preloadPath,
+    preloadUrl,
+    nodeArguments: [`--import=${preloadUrl}`],
+    environment: { [KONI_PI_PACKAGE_ROOT_ENV]: packageRoot },
+  };
 }
 
 function barrierAuthority(): LegacyRunMigrationAuthority {

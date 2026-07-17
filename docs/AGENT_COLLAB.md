@@ -8,6 +8,17 @@ test-only operator runtime injection. Compiler context/run-program/resource/comp
 live state remain excluded; production Pi peer resolution is unchanged. Mailbox:
 [`agent-collab/legacy-adoption-hardening.md`](agent-collab/legacy-adoption-hardening.md).
 
+#### 2026-07-17 00:11 MST — legacy adoption hardening complete; lease released
+
+Live registry bytes are now re-hashed around every adoption/resume source-tree proof; exact
+authenticated common-dir/state/registry/run-root bindings reject coherently re-hashed archive path
+redirection before source-path access; and directory traversal no longer trusts `Dirent` types or
+unstable descent identities. Operator tests use explicit authenticated Pi-runtime injection while
+the production resolver remains unchanged. Strict Core TypeScript passes, the exact no-ambient-env
+adoption suite is **4/4**, the composed adoption/migration suite is **9/9**, and scoped whitespace
+checks are green. The source lease is released for independent review. Details:
+[`agent-collab/legacy-adoption-hardening.md`](agent-collab/legacy-adoption-hardening.md).
+
 ### 2026-07-16 — profile compiler production-adapter gaps claimed
 
 `profile_compiler_gap/root` owns only the shipped Coding query-binding repair, the Research
@@ -4159,6 +4170,17 @@ all context-building, run-program, resource-binding, compaction, legacy-adoption
 live-state mutation. Detailed lease:
 [`agent-collab/sealed-model-catalog.md`](agent-collab/sealed-model-catalog.md).
 
+## 2026-07-17 00:06 MST — legacy adoption hardening lane active; defer composed gates
+
+`legacy_adoption_hardening/root` is closing the independent review findings for exact live-registry
+reverification, authenticated Git-common run-root containment, inode-stable directory traversal,
+and the provider-free operator test seam. It owns only migration/adoption source and focused tests;
+compiler context, run-program prompt/context construction, resource binding, and compaction remain
+excluded. A separate full gate begun at 00:05 includes the first production verifier edit but
+predates its acceptance tests. Treat that run as broad diagnostic evidence only. Other lanes should
+not start another composed parity/workspace/package gate until this note is superseded by the
+hardening handoff and the context lane has published its own frozen fingerprint.
+
 ## 2026-07-16 — sealed model-admission P1s closed
 
 `sealed_catalog_p1_fixes/root` has released its bounded follow-up. Every run-start UI now consumes
@@ -4171,3 +4193,14 @@ regressions pass with the focused catalog/control/operator suite **45/45**; stri
 and scoped whitespace checks are green. The lane did not touch the protected context experiment or
 legacy-adoption semantics. Full evidence:
 [`agent-collab/sealed-model-catalog.md`](agent-collab/sealed-model-catalog.md).
+
+## 2026-07-17 00:12 MST — context and legacy-hardening leases frozen; composed gate unblocked
+
+The graph-native context lane is committed at `c0d3226d0022079e4689330ab5d9d389fbd3e9b8`,
+including the final persisted-touched-path selector wiring and regression, and has released
+`run-program.ts`, the selector, and focused context tests. The independent legacy-adoption
+hardening lane has also published its frozen implementation handoff and released its disjoint
+migration/adoption files. The 00:05 composed run crossed active source writes and remains invalid
+moving-source evidence; a new serialized composed gate may now use the frozen fingerprints in
+[`agent-collab/native-run-program.md`](agent-collab/native-run-program.md) and
+[`agent-collab/legacy-adoption-hardening.md`](agent-collab/legacy-adoption-hardening.md).

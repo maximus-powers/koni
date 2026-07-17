@@ -1,4 +1,4 @@
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -84,8 +84,11 @@ describe("guarded Rust-era project and run migration", () => {
     await run("git", ["init", "-q"], { cwd: project });
     const stateRoot = path.join(project, ".git", "koni");
     const runRoot = path.join(stateRoot, "runs", "active-run");
-    await mkdir(runRoot, { recursive: true });
+    const nestedRunDirectory = path.join(runRoot, "nested");
+    await mkdir(nestedRunDirectory, { recursive: true });
+    const canonicalNestedRunDirectory = await realpath(nestedRunDirectory);
     await writeFile(path.join(runRoot, "state.yaml"), "stage: execute\n");
+    await writeFile(path.join(nestedRunDirectory, "evidence.txt"), "stable nested evidence\n");
     await writeFile(path.join(stateRoot, "project.yaml"), `
 selected_run: active-run
 runs:
@@ -138,6 +141,27 @@ runs:
     expect(held).toBe(false);
     const index = JSON.parse(await readFile(path.join(project, applied.compatibilityPath), "utf8")) as LegacyRunCompatibilityIndex;
     expect((await verifyLegacyRunCompatibility(index, "active-run")).resumeDisposition).toBe("execution_paused");
+
+    const outsideRunTree = path.join(stateRoot, "outside-run-tree");
+    const retainedNestedDirectory = path.join(runRoot, "nested-retained-after-race");
+    await mkdir(outsideRunTree, { recursive: true });
+    await writeFile(path.join(outsideRunTree, "evidence.txt"), "redirected evidence\n");
+    let injectedRace = false;
+    try {
+      await expect(verifyLegacyRunCompatibility(index, "active-run", {
+        async afterDirectoryIdentity({ directory }) {
+          if (directory !== canonicalNestedRunDirectory || injectedRace) return;
+          injectedRace = true;
+          await rename(nestedRunDirectory, retainedNestedDirectory);
+          await symlink(outsideRunTree, nestedRunDirectory);
+        },
+      })).rejects.toMatchObject({ code: "legacy_symlink" } satisfies Partial<LegacyProjectMigrationError>);
+      expect(injectedRace).toBe(true);
+    } finally {
+      await unlink(nestedRunDirectory).catch(() => undefined);
+      await rename(retainedNestedDirectory, nestedRunDirectory).catch(() => undefined);
+    }
+
     await writeFile(path.join(runRoot, "state.yaml"), "stage: changed-after-migration\n");
     await expect(verifyLegacyRunCompatibility(index, "active-run")).rejects.toMatchObject({
       code: "legacy_run_changed",

@@ -1,5 +1,5 @@
-import { constants } from "node:fs";
-import { lstat, open, realpath } from "node:fs/promises";
+import { constants, type Stats } from "node:fs";
+import { lstat, open, realpath, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { GitClient } from "../git/client.js";
 import {
@@ -23,6 +23,7 @@ import {
 } from "./migration.js";
 
 const MAX_MIGRATION_ARTIFACT_BYTES = 32 * 1024 * 1024;
+const MAX_LEGACY_REGISTRY_BYTES = 32 * 1024 * 1024;
 
 export const LEGACY_RUN_ADOPTION_PREVIEW_PROTOCOL =
   "koni.legacy-run-adoption-preview.v1" as const;
@@ -31,6 +32,7 @@ export interface LegacyRunAdoptionBlocker {
   code:
     | "legacy_run_missing"
     | "legacy_run_changed"
+    | "legacy_registry_changed"
     | "terminal_history_only"
     | "migration_barrier_missing"
     | "run_type_missing"
@@ -168,6 +170,11 @@ export async function loadLegacyRunMigrationEvidence(
     );
   }
 
+  // Authenticate every archived source pathname against Git before reading the barrier or allowing
+  // any caller to open a run.sourceRoot. Coherently re-hashed archive tampering therefore cannot
+  // redirect adoption to an attacker-selected tree.
+  await authenticateLegacyRunPaths(project, plan, compatibility);
+
   let barrier: LegacyRunBarrierEvidence | undefined;
   if (plan.runs.requiresBarrier) {
     if (compatibility.barrierEvidenceSha256 === undefined) {
@@ -226,6 +233,23 @@ export async function assessLegacyRunAdoption(
       resumeDisposition: "failed",
     }, blocker("legacy_run_missing", `legacy run is not indexed: ${runId}`));
   }
+
+  let identity: Awaited<ReturnType<typeof GitClient.discover>>;
+  let registryBefore: Sha256Digest;
+  try {
+    identity = await authenticateLegacyRunPaths(
+      evidence.projectRoot,
+      evidence.plan,
+      evidence.compatibility,
+    );
+    registryBefore = await verifyLiveLegacyRegistry(evidence, identity);
+  } catch (error) {
+    return blockedAssessment(
+      evidence.migrationId,
+      indexed,
+      blockerForLiveEvidence(error),
+    );
+  }
   let run: LegacyRunSnapshot;
   try {
     run = await verifyLegacyRunCompatibility(evidence.compatibility, runId);
@@ -240,6 +264,26 @@ export async function assessLegacyRunAdoption(
         code === "legacy_run_missing" ? "legacy_run_missing" : "legacy_run_changed",
         errorMessage(error),
       ),
+    );
+  }
+
+  try {
+    const registryAfter = await verifyLiveLegacyRegistry(evidence, identity);
+    if (registryAfter !== registryBefore) {
+      return blockedAssessment(
+        evidence.migrationId,
+        indexed,
+        blocker(
+          "legacy_registry_changed",
+          "legacy run registry changed while the source run tree was being verified",
+        ),
+      );
+    }
+  } catch (error) {
+    return blockedAssessment(
+      evidence.migrationId,
+      indexed,
+      blockerForLiveEvidence(error),
     );
   }
 
@@ -277,24 +321,6 @@ export async function assessLegacyRunAdoption(
     return assessment(evidence.migrationId, run, blockers, undefined);
   }
 
-  let identity: Awaited<ReturnType<typeof GitClient.discover>>;
-  try {
-    identity = await GitClient.discover(evidence.projectRoot);
-  } catch (error) {
-    return assessment(evidence.migrationId, run, [blocker(
-      "project_identity_mismatch",
-      `cannot discover the migration repository: ${errorMessage(error)}`,
-    )], undefined);
-  }
-  if (
-    identity.worktreeRoot !== evidence.projectRoot ||
-    evidence.plan.runs.commonDirectory !== identity.commonDirectory
-  ) {
-    return assessment(evidence.migrationId, run, [blocker(
-      "project_identity_mismatch",
-      "legacy migration belongs to a different Git common directory",
-    )], undefined);
-  }
   const repository = new GitClient(identity.worktreeRoot);
   const [targetOid, baseOid] = await Promise.all([
     repository.tryResolveRef(run.targetBranch),
@@ -499,6 +525,219 @@ function blocker(
   message: string,
 ): LegacyRunAdoptionBlocker {
   return { code, message };
+}
+
+function blockerForLiveEvidence(error: unknown): LegacyRunAdoptionBlocker {
+  if (error instanceof LegacyRunAdoptionError && error.code === "legacy_registry_changed") {
+    return blocker("legacy_registry_changed", error.message);
+  }
+  return blocker(
+    "project_identity_mismatch",
+    `legacy migration no longer matches the authenticated repository: ${errorMessage(error)}`,
+  );
+}
+
+async function authenticateLegacyRunPaths(
+  projectRoot: string,
+  plan: LegacyProjectMigrationPlan,
+  compatibility: LegacyRunCompatibilityIndex,
+): Promise<Awaited<ReturnType<typeof GitClient.discover>>> {
+  let identity: Awaited<ReturnType<typeof GitClient.discover>>;
+  try {
+    identity = await GitClient.discover(projectRoot);
+  } catch (error) {
+    throw new LegacyRunAdoptionError(
+      "project_identity_mismatch",
+      `cannot discover the migration repository: ${errorMessage(error)}`,
+    );
+  }
+  const expectedStateRoot = path.join(identity.commonDirectory, "koni");
+  const expectedRegistryPath = path.join(expectedStateRoot, "project.yaml");
+  const hasArchivedNamespace = plan.runs.commonDirectory !== undefined ||
+    plan.runs.stateRoot !== undefined ||
+    plan.runs.registryPath !== undefined ||
+    plan.runs.runs.length > 0 ||
+    compatibility.runs.length > 0;
+  if (identity.worktreeRoot !== projectRoot) {
+    throw new LegacyRunAdoptionError(
+      "project_identity_mismatch",
+      "legacy migration belongs to a different Git worktree",
+    );
+  }
+  if (!hasArchivedNamespace) return identity;
+
+  // Compare all untrusted archived strings before canonicalizing or opening any of them.
+  if (
+    plan.runs.commonDirectory !== identity.commonDirectory ||
+    plan.runs.stateRoot !== expectedStateRoot ||
+    plan.runs.registryPath !== expectedRegistryPath
+  ) {
+    throw new LegacyRunAdoptionError(
+      "migration_evidence_path_mismatch",
+      "legacy migration state paths do not match the authenticated Git common directory",
+    );
+  }
+  for (const collection of [plan.runs.runs, compatibility.runs]) {
+    for (const run of collection) {
+      const expectedSourceRoot = path.join(expectedStateRoot, "runs", run.id);
+      if (run.sourceRoot !== expectedSourceRoot) {
+        throw new LegacyRunAdoptionError(
+          "migration_evidence_path_mismatch",
+          `legacy run ${run.id} source root does not match its authenticated run namespace`,
+        );
+      }
+    }
+  }
+
+  if (
+    plan.runs.runs.length > 0 ||
+    plan.runs.registrySha256 !== null ||
+    plan.runs.requiresBarrier
+  ) {
+    const canonicalStateRoot = await canonicalDirectory(
+      expectedStateRoot,
+      "migration_evidence_path_mismatch",
+    );
+    if (canonicalStateRoot !== expectedStateRoot) {
+      throw new LegacyRunAdoptionError(
+        "migration_evidence_path_mismatch",
+        "legacy migration state root is redirected outside the authenticated Git common directory",
+      );
+    }
+  }
+  return identity;
+}
+
+async function verifyLiveLegacyRegistry(
+  evidence: LoadedLegacyRunMigrationEvidence,
+  identity: Awaited<ReturnType<typeof GitClient.discover>>,
+): Promise<Sha256Digest> {
+  const expected = evidence.compatibility.sourceRegistrySha256;
+  if (expected === null) {
+    throw new LegacyRunAdoptionError(
+      "legacy_registry_changed",
+      "legacy run migration does not bind a source registry",
+    );
+  }
+  const stateRoot = path.join(identity.commonDirectory, "koni");
+  const registryPath = path.join(stateRoot, "project.yaml");
+  const stateIdentity = await stableDirectoryIdentity(stateRoot, "legacy_registry_changed");
+  const bytes = await readStableLegacyRegistry(registryPath);
+  await assertDirectoryIdentityCurrent(stateRoot, stateIdentity, "legacy_registry_changed");
+  const actual = rawSha256(bytes);
+  if (actual !== expected) {
+    throw new LegacyRunAdoptionError(
+      "legacy_registry_changed",
+      "live legacy run registry bytes differ from the migration binding",
+    );
+  }
+  return actual;
+}
+
+interface StableDirectoryIdentity {
+  canonicalPath: string;
+  dev: number;
+  ino: number;
+  mode: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+}
+
+async function stableDirectoryIdentity(
+  directory: string,
+  code: string,
+): Promise<StableDirectoryIdentity> {
+  let before: Stats;
+  let after: Stats;
+  let canonicalPath: string;
+  try {
+    before = await lstat(directory);
+    if (before.isSymbolicLink() || !before.isDirectory()) throw new Error("not a real directory");
+    canonicalPath = await realpath(directory);
+    after = await lstat(directory);
+  } catch (error) {
+    throw new LegacyRunAdoptionError(
+      code,
+      `legacy state directory is unavailable or unsafe: ${directory}: ${errorMessage(error)}`,
+    );
+  }
+  if (
+    canonicalPath !== directory ||
+    after.isSymbolicLink() ||
+    !after.isDirectory() ||
+    !sameIdentity(before, after)
+  ) {
+    throw new LegacyRunAdoptionError(
+      code,
+      `legacy state directory changed or was redirected: ${directory}`,
+    );
+  }
+  return {
+    canonicalPath,
+    dev: before.dev,
+    ino: before.ino,
+    mode: before.mode,
+    size: before.size,
+    mtimeMs: before.mtimeMs,
+    ctimeMs: before.ctimeMs,
+  };
+}
+
+async function assertDirectoryIdentityCurrent(
+  directory: string,
+  expected: StableDirectoryIdentity,
+  code: string,
+): Promise<void> {
+  const actual = await stableDirectoryIdentity(directory, code);
+  if (
+    actual.canonicalPath !== expected.canonicalPath ||
+    actual.dev !== expected.dev ||
+    actual.ino !== expected.ino ||
+    actual.mode !== expected.mode ||
+    actual.size !== expected.size ||
+    actual.mtimeMs !== expected.mtimeMs ||
+    actual.ctimeMs !== expected.ctimeMs
+  ) {
+    throw new LegacyRunAdoptionError(
+      code,
+      `legacy state directory changed while reading its registry: ${directory}`,
+    );
+  }
+}
+
+async function readStableLegacyRegistry(file: string): Promise<Buffer> {
+  const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(file, constants.O_RDONLY | noFollow);
+    const before = await handle.stat();
+    if (!before.isFile() || before.size < 1 || before.size > MAX_LEGACY_REGISTRY_BYTES) {
+      throw new Error("registry is empty or oversized");
+    }
+    const bytes = await handle.readFile();
+    const after = await handle.stat();
+    if (!sameIdentity(before, after) || bytes.byteLength !== before.size) {
+      throw new Error("registry changed while reading");
+    }
+    return bytes;
+  } catch (error) {
+    throw new LegacyRunAdoptionError(
+      "legacy_registry_changed",
+      `live legacy run registry is unavailable or unstable: ${file}: ${errorMessage(error)}`,
+    );
+  } finally {
+    await handle?.close();
+  }
+}
+
+function sameIdentity(left: Stats, right: Stats): boolean {
+  return left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mode === right.mode &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs;
 }
 
 async function readStableJson(file: string): Promise<{ value: unknown; bytes: Buffer }> {

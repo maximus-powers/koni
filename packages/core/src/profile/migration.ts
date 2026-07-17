@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants, createReadStream, type Stats } from "node:fs";
-import { lstat, open, readFile, readdir, realpath } from "node:fs/promises";
+import { lstat, open, readFile, readdir, realpath, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
 import type { ProfileBaselineFile } from "../contracts/profile-package.js";
@@ -1027,6 +1027,7 @@ interface LegacyDirectoryIdentity {
   dev: number;
   ino: number;
   mode: number;
+  size: number;
   mtimeMs: number;
   ctimeMs: number;
 }
@@ -1074,6 +1075,7 @@ async function stableDirectoryIdentity(directory: string): Promise<LegacyDirecto
     dev: before.dev,
     ino: before.ino,
     mode: before.mode,
+    size: before.size,
     mtimeMs: before.mtimeMs,
     ctimeMs: before.ctimeMs,
   };
@@ -1089,6 +1091,7 @@ async function assertDirectoryIdentityCurrent(
     actual.dev !== expected.dev ||
     actual.ino !== expected.ino ||
     actual.mode !== expected.mode ||
+    actual.size !== expected.size ||
     actual.mtimeMs !== expected.mtimeMs ||
     actual.ctimeMs !== expected.ctimeMs
   ) {
@@ -1161,7 +1164,7 @@ async function readStableLegacyFile(
   code: string,
 ): Promise<Buffer> {
   const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
-  let handle;
+  let handle: FileHandle | undefined;
   try {
     handle = await open(filePath, constants.O_RDONLY | noFollow);
     const before = await handle.stat();

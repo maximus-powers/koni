@@ -448,14 +448,19 @@ export interface LegacyRunAdoptionResult {
   sourceRetained: true;
 }
 
+export interface LegacyRunOperatorDependencies {
+  /** Provider-free tests may inject `ensureProjectAuthority` with an authenticated Pi fixture. */
+  ensure?: typeof ensureProjectAuthority;
+}
+
 /** Preview exact legacy evidence without mutating source, Git, or authority state. */
 export async function previewProjectLegacyRunAdoption(options: {
   projectRoot: string;
   version: string;
   migrationId: string;
   runId?: string;
-}): Promise<LegacyRunAdoptionCatalog> {
-  const client = await ensureProjectAuthority({
+}, dependencies: LegacyRunOperatorDependencies = {}): Promise<LegacyRunAdoptionCatalog> {
+  const client = await (dependencies.ensure ?? ensureProjectAuthority)({
     projectRoot: options.projectRoot,
     version: options.version,
     client: "cli",
@@ -477,8 +482,8 @@ export async function adoptProjectLegacyRun(options: {
   version: string;
   migrationId: string;
   runId: string;
-}): Promise<LegacyRunAdoptionResult> {
-  const client = await ensureProjectAuthority({
+}, dependencies: LegacyRunOperatorDependencies = {}): Promise<LegacyRunAdoptionResult> {
+  const client = await (dependencies.ensure ?? ensureProjectAuthority)({
     projectRoot: options.projectRoot,
     version: options.version,
     client: "cli",
@@ -503,8 +508,8 @@ export async function resumeProjectRun(options: {
   projectRoot: string;
   version: string;
   runId: string;
-}): Promise<{ runId: string; status: string }> {
-  const client = await ensureProjectAuthority({
+}, dependencies: LegacyRunOperatorDependencies = {}): Promise<{ runId: string; status: string }> {
+  const client = await (dependencies.ensure ?? ensureProjectAuthority)({
     projectRoot: options.projectRoot,
     version: options.version,
     client: "cli",

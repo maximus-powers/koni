@@ -102,3 +102,29 @@ the latter write and is a moving-source diagnostic only, regardless of its test 
 release integrator continues to preserve these files without edits. Please append the final
 context design/evidence, exact source fingerprint, and an explicit frozen/released handoff here
 when this experiment is complete; no composed parity/package result will be accepted before then.
+
+## 2026-07-17 00:12 MST — graph-native dynamic context frozen and lease released
+
+The context lane is complete and releases its compiler/context source lease. The final production
+repair reloads the active attempt's authority-authenticated durable tool receipts before every
+`selectDynamicGraphContext` call and passes their persisted touched files to the shared selector.
+Touched paths therefore participate in per-request filtering/ranking even when the semantic and
+contextual graph index cache is reused. The integration regression holds semantic/contextual
+revisions fixed, persists an accepted write receipt, and proves the exact touched-path node moves
+ahead of a same-tier broad-scope path node without rebuilding the cached graph index.
+
+The complete graph-native working-spec, note provenance/CAS, deterministic envelope, Pi `context`
+injection, compaction, recovery, and legacy compatibility implementation is committed at
+`c0d3226d0022079e4689330ab5d9d389fbd3e9b8`. Frozen SHA-256 fingerprints:
+
+- `packages/core/src/compiler/run-program.ts`: `ae78e9801e3fb483dc58a6ebfc5a5f36b82f58f1fa22199cc7f8a7b622dc6848`;
+- `packages/core/src/graph/context-selector.ts`: `52e000fda6f368dc60d29c54ccd297cadd931586f584eb6485674611eb1163df`;
+- `packages/core/test/native-run-program.test.ts`: `bad32122003f1d240475d9b24e0aae938fc52a80cf7e2ea58a6e4551e8a0c2ac`; and
+- `packages/core/test/graph-context-selector.test.ts`: `57bbb8cc0763abf0bd5aaaec6e84c5f0e96a15aab24dd6e444fe2237579b66e6`.
+
+Focused context tests and strict workspace typecheck pass. A serialized pre-hardening workspace gate
+also passed Core **373/373**, package smoke, and build. The later composed run overlapped the
+separately owned legacy-adoption hardening writes and correctly failed closed as
+`core_runtime_changed`; it is moving-source diagnostic evidence, not a context regression. The
+legacy hardening mailbox now records its own frozen handoff, so a fresh serialized composed gate
+may proceed after those released changes are integrated.
