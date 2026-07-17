@@ -68,7 +68,21 @@ describe("Pi session transcript", () => {
       {
         code: "truncated_tail",
         line: 3,
-        message: "Ignored an incomplete final Pi session record",
+        message: "Ignored an unterminated final Pi session record",
+      },
+    ]);
+  });
+
+  it("treats valid JSON without its commit newline as an uncommitted tail", () => {
+    const parsed = parsePiSession(`${jsonl(header, first)}${JSON.stringify(second)}`, {
+      allowTruncatedTail: true,
+    });
+    expect(parsed.entries).toEqual([first]);
+    expect(parsed.diagnostics).toEqual([
+      {
+        code: "truncated_tail",
+        line: 3,
+        message: "Ignored an unterminated final Pi session record",
       },
     ]);
   });

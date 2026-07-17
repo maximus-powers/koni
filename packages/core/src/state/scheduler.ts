@@ -15,6 +15,10 @@ export interface SchedulerProjection {
   availableSlots: number;
 }
 
+export interface AssignmentFinishResult {
+  disposition: "advanced" | "ticket_completed" | "review_rework" | "blocked";
+}
+
 export function deriveReadyAssignments(run: RunRecord, maxParallel: number): SchedulerProjection {
   if (!Number.isSafeInteger(maxParallel) || maxParallel < 1) {
     throw new Error("max parallel assignments must be a positive safe integer");
@@ -97,7 +101,7 @@ export function finishAssignment(
   assignment: ReadyAssignment,
   outcome: { status: "completed"; summary: string } | { status: "failed"; blocker: string },
   at: string,
-): void {
+): AssignmentFinishResult {
   const { ticket, step } = resolveAssignment(run, assignment);
   if (step.status !== "running") {
     throw new Error(`step is not running: ${ticket.id}/${step.id}`);
@@ -105,10 +109,13 @@ export function finishAssignment(
   step.completedAt = at;
   ticket.updatedAt = at;
   if (outcome.status === "failed") {
+    if (reopenAfterReviewFailure(ticket, step, outcome.blocker, at)) {
+      return { disposition: "review_rework" };
+    }
     step.status = "failed";
     ticket.status = "blocked";
     ticket.blocker = outcome.blocker;
-    return;
+    return { disposition: "blocked" };
   }
   step.status = "completed";
   step.summary = outcome.summary;
@@ -116,6 +123,51 @@ export function finishAssignment(
   ticket.status = ticket.steps.every((candidate) =>
     candidate.status === "completed" || candidate.status === "skipped"
   ) ? "completed" : "ready";
+  return {
+    disposition: ticket.status === "completed" ? "ticket_completed" : "advanced",
+  };
+}
+
+function reopenAfterReviewFailure(
+  ticket: TicketRecord,
+  failedStep: TicketStepRecord,
+  blocker: string,
+  at: string,
+): boolean {
+  const reopenFrom = ticket.reviewFailureReopenFrom;
+  const limit = ticket.reviewReworkLimit;
+  const count = ticket.reviewReworkCount;
+  if (
+    failedStep.kind !== "review" ||
+    reopenFrom === undefined ||
+    limit === undefined ||
+    count === undefined ||
+    count >= limit
+  ) return false;
+  const anchor = ticket.steps.findIndex((step) => step.id === reopenFrom);
+  const review = ticket.steps.indexOf(failedStep);
+  if (anchor < 0 || review <= anchor) return false;
+  const failedReviewAttemptId = failedStep.attemptIds.at(-1);
+  if (failedReviewAttemptId === undefined) return false;
+
+  for (const step of ticket.steps.slice(anchor)) {
+    step.status = "pending";
+    step.summary = undefined;
+    step.startedAt = undefined;
+    step.completedAt = undefined;
+  }
+  ticket.reviewReworkCount = count + 1;
+  ticket.reviewReworks ??= [];
+  ticket.reviewReworks.push({
+    ordinal: count + 1,
+    failedReviewAttemptId,
+    reopenFromStepId: reopenFrom,
+    blocker,
+    openedAt: at,
+  });
+  ticket.status = "ready";
+  ticket.blocker = blocker;
+  return true;
 }
 
 function resolveAssignment(

@@ -69,6 +69,21 @@ and report stages. A terminal stage failure requires an explicit retry.
 > Neither circuit invents completion or discards the failed evidence; operator recovery remains
 > explicit.
 
+> **Pi-native review-rework projection — evolved 2026-07-16.** The TypeScript compiler now carries
+> each profile's `review_failure_reopen_from` (including the equivalent structured reopen route)
+> into the immutable derived ticket and durable run record. The authority records the failed
+> reviewer attempt ID and blocker, reopens the configured owner plus its subsequent workflow once,
+> and issues fresh attempt/session identities for both correction and review. Stale review output
+> cannot satisfy the reset step; a second failure takes the original explicit-blocker path. Legacy
+> tickets without the projection remain readable and retain their prior fail-closed behavior.
+
+> **Current configured-check closure — evolved 2026-07-16.** A configured check being present in
+> an agent's grant no longer implies it ran. Before a successful terminal assignment may compile,
+> every `validation_checks` member must have an authority-recorded result for that exact attempt
+> with both protocol acceptance and semantic pass. Older check records without the new pass bit
+> remain valid history but cannot close current work; failed terminal submissions may still stop
+> honestly without fabricating checks.
+
 > **Process-exit and passive-wait refinement — evolved 2026-07-16.** A process that was already
 > compiler-owned may publish its exact diagnostic exit while a live run is paused or awaiting a
 > question, but only after an action-length run-authority wait and an under-lock recheck of the
@@ -207,6 +222,26 @@ mismatched HEAD fails closed.
 Multiple approved runs may coexist because their namespaces are disjoint. A
 shared Git-common-dir lock serializes project-wide topology mutations; run
 authority locks serialize transitions for one run.
+
+> **Pi-native legacy-worktree transition — 2026-07-16 (`legacy_git_relocation/root`):** The
+> topology above remains the current-run contract. A pre-isolation TypeScript run may instead
+> arrive with its registered integration checkout at the namespace root itself. Startup does not
+> reinterpret that old path as a valid new-layout checkout. It blocks admission, preserves the
+> canonical legacy object and hash, and—only for one clean, exact ref/HEAD/repository proof—journals
+> a two-hop Git worktree move through a proof-owned staging path into `integration`. Recovery
+> identifies the authoritative hop from Git registration, re-proves the immutable intent, applies
+> the compiler lock, clears obsolete ticket path projections, and restores only the recorded prior
+> lifecycle phase. Dirty, redirected, ambiguously registered, moved-ref, occupied, or foreign-lock
+> evidence remains preserved and token-idle.
+
+> **Legacy planner-resume clarification — 2026-07-16 (`legacy_git_relocation/root`):** The
+> temporary detached planning checkout above remains mandatory for every native run. The sole
+> compatibility exception is a run whose hash-bound legacy relocation intent has already settled
+> with status `relocated`: when its restored lifecycle schedules a replacement planning attempt,
+> that attempt uses the proven, compiler-locked canonical `integration` checkout because the old
+> runtime had already planned in that permanent checkout. This includes a paused run whose recorded
+> resume phase is planning. A merely retired or missing planning checkout does not activate this
+> exception and still fails closed.
 
 ## Ticket lifecycle
 
@@ -687,6 +722,15 @@ Deletion is preflighted, journaled, idempotent, and resumable:
 
 The safe mode preserves committed branches. Köni never deletes an artifact it
 cannot prove it owns.
+
+> **Legacy deletion transition — 2026-07-16 (`legacy_git_relocation/root`):** The rule above also
+> applies before legacy relocation. An unrelocated compatibility run is never passed to ordinary
+> new-layout cleanup. Explicit or already-durable deletion uses a separate source-hash-bound Git
+> intent, proves exactly one clean checkout at an allowed legacy/staging/destination path, removes
+> that registered checkout, then deletes only the exact Koni run ref by compare-and-swap. The user
+> target ref is not a cleanup input. A crash after checkout retirement resumes at ref retirement;
+> dirty or ambiguous data is left readable and the run record is deleted only with an explicit
+> preservation audit.
 
 ## Final Pi projection boundaries — 2026-07-14
 

@@ -4,6 +4,11 @@
   "private": true,
   "type": "module",
   "description": "Koni's Pi-native compiler-authoritative agent harness",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maximus-powers/koni.git"
+  },
   "workspaces": [
     "packages/*"
   ],
@@ -13,18 +18,28 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run test:profiles && npm run test:parity-ledger && npm run test --workspaces --if-present",
+    "test": "npm run test:profiles && npm run test:parity-ledger && npm run test:parity-runner && npm run test:parity-capture && npm run test --workspaces --if-present && npm run test:pi-package",
     "test:profiles": "node --test scripts/profile-bundles.test.mjs",
+    "test:pi-host-boundary": "node --test scripts/pi-host-boundary.test.mjs",
     "test:parity-ledger": "node --test scripts/parity-ledger.test.mjs",
-    "check": "npm run parity:validate && npm run test:profiles && npm run test:parity-ledger && npm run check --workspaces --if-present",
-    "parity:validate": "node scripts/parity-ledger.mjs validate",
+    "test:parity-runner": "node --test scripts/parity-runner.test.mjs",
+    "test:parity-capture": "node --test scripts/capture-rust-oracle.test.mjs",
+    "test:pi-package": "npm run build --workspace @koni/core && node --test scripts/pi-package-smoke.test.mjs",
+    "check": "npm run parity:gate && npm run test:profiles && npm run test:pi-host-boundary && npm run test:parity-ledger && npm run test:parity-runner && npm run test:parity-capture && npm run check --workspaces --if-present && node --test scripts/pi-package-smoke.test.mjs",
+    "parity:capture-rust": "node scripts/capture-rust-oracle.mjs",
+    "parity:validate": "node scripts/parity-runner.mjs validate",
+    "parity:gate": "node scripts/parity-runner.mjs gate",
     "parity:plan": "node scripts/parity-ledger.mjs plan",
     "profiles:capture": "node scripts/capture-profile-bundles.mjs"
   },
   "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.80.10",
+    "@earendil-works/pi-ai": "0.80.10",
     "@earendil-works/pi-coding-agent": "0.80.10",
+    "@earendil-works/pi-tui": "0.80.10",
     "@types/node": "24.12.4",
     "@types/semver": "7.7.1",
+    "typebox": "1.1.38",
     "typescript": "5.9.3",
     "vitest": "4.1.10"
   },

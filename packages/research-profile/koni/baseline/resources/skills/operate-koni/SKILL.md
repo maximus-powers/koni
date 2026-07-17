@@ -1,6 +1,6 @@
 ---
 name: operate-koni
-description: Initialize, validate, run, inspect, pause, resume, recover, and safely remove Köni project workflows. Use when Codex needs to run `koni init`, use the Köni TUI or automation CLI, plan and approve runs, answer structured questions, supervise stages and tickets, inspect receipts or pinned state, diagnose blocked or interrupted work, drive an external review loop, or recover without bypassing compiler and Git safety boundaries.
+description: Initialize, validate, run, inspect, pause, resume, recover, and safely remove Köni project workflows. Use when a Pi agent needs to use `/koni`, `koni tui`, or the bounded Köni CLI; plan and approve runs; answer structured questions; inspect receipts or pinned state; diagnose blocked or interrupted work; or recover without bypassing compiler and Git safety boundaries.
 ---
 
 # Operate Köni
@@ -9,10 +9,10 @@ Operate the compiler-owned lifecycle through Köni commands and durable boundari
 
 ## Start safely
 
-1. Run `koni init --dry-run` when initialization, replacement, or legacy migration may be involved.
-2. Treat current `.koni/project.yaml` as initialized. Run `koni init` only when neither that catalog nor legacy `.codex/koni/project.yaml` exists; preview and follow the migration path when only the legacy catalog exists. Use `--target <path>` only to initialize an exact directory and `--replace` only for resources Köni already owns.
-3. For schema 2, confirm `.koni/project.yaml`, every resolved `profile.source`, referenced `.koni/agents`, and repository skills exist. For schema 1, inspect the `.codex/koni` catalog and its historical resources without mixing layouts. Initialization configures the project but does not create or approve a run.
-4. Open the control center with `koni`, or use explicit CLI commands for automation.
+1. Run `koni status --root . --json` and `koni config validate --root . --json` before changing an existing project.
+2. Treat current `.koni/project.yaml` as initialized. From an uninitialized Git project, use `koni init coding --root .` or `koni init research --root .`. If only legacy `.codex/koni` state exists, use the guarded migration surfaced by Core rather than copying or rewriting it manually.
+3. Confirm `.koni/project.yaml`, every referenced profile/run type/agent resource, and repository skills exist. Initialization installs a verified profile baseline plus the project-owned overlay; it does not create or approve a run.
+4. Open the control center with `/koni` inside ordinary Pi, or run `koni tui --root .` in the terminal where the standalone dashboard should appear. Koni never opens a pane itself.
 
 Read [run-lifecycle.md](references/run-lifecycle.md) before crossing plan, approval, execution, or integration boundaries. Read [operator-surfaces.md](references/operator-surfaces.md) for TUI and CLI selection. Read [recovery.md](references/recovery.md) before retrying, deleting, or repairing durable work.
 
@@ -28,9 +28,9 @@ Read [run-lifecycle.md](references/run-lifecycle.md) before crossing plan, appro
 
 ## Diagnose from durable evidence
 
-- Use `koni runs --root .` to orient across runs, then pass global `--run <run-id>` to run-specific automation.
-- Use `koni inspect --root .` and `koni cockpit . --json` for deterministic state projections.
-- Use `koni validate --root .` before and after recovery. Use `koni validate-profile <resolved-profile-source>` for live configuration changes intended for future runs; the normal schema-2 path is `.koni/profile.yaml`, while `.codex/koni/profile.yaml` is legacy-only.
+- Use `/koni` or `koni tui --root .` to orient across runs, tickets, agents, questions, graph changes, reports, and Git readiness. Selecting a run is read-only.
+- Use `koni status --root . --json` for a scriptable authority/profile projection and `koni config validate --root . --json` before and after recovery or configuration publication.
+- Use the control center's guided Configure surface for future-run configuration. It publishes only after whole-candidate compilation and source-CAS validation; active runs continue using their pinned snapshots.
 - Inspect the current pipeline stage, ticket status, blockers, questions, agent attempts, check receipts, review, events, and Git/worktree state before choosing a command.
 - Prefer the configured action interface over manual edits to graph, tickets, receipts, run records, refs, or worktrees.
 - Distinguish waiting from failure. Waiting for input, approval, a worker boundary, or an external provider is not corruption.

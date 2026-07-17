@@ -1,0 +1,97 @@
+{
+  "cases": [
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "21fdb2ff1957ff4bfea2e03ac2e4995ff9ae7897e7ba48e66b8efc7999252bae",
+          "id": "A01-roomy-layout",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "operate_layout_keeps_graph_and_metadata_separate",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "renders equal wide columns and the requested overview, activity, agents, questions, and graph semantics"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "88a990c7e788116ca523584a08dfc07a9019211e32b6fd505385e8639c5a13b0",
+          "id": "A02-semantic-graph",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "bundled_cockpits_use_the_autoresearch_relationship_outline",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "draws relationship lines first and overlays concise node markers and titles"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-specification-contract",
+          "contract_sha256": "3626ae8090f1034defdf6c5f7189276b50854f259e3ac6e7ebf5c8df2a6d5565",
+          "id": "A03-work-titles",
+          "oracle": null,
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "keeps active and historical agents with concise ticket-aware work titles"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "5031ebccc4ad5c3b528004d99dd27f776a3f589e873001e5fb19577a330be9fd",
+          "id": "A04-compact-usable",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "compact_operate_dashboard_shows_friendly_live_work_and_pending_question_without_ids",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "keeps Start and the footer visible while every compact New Run stage is reachable"
+            },
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "renders equal wide columns and the requested overview, activity, agents, questions, and graph semantics"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-TUI-0001",
+      "outcome": "passing"
+    }
+  ],
+  "isolation": {
+    "live_projects": false,
+    "provider_calls": 0,
+    "temporary_pi_homes": true,
+    "temporary_projects": true
+  },
+  "normalization": "koni.parity-normalization.v2",
+  "oracle": {
+    "commit": "fcc425e51114bcedb9aeae44d6e8c8418a525e6b",
+    "semantic_suite_sha256": "a675ad85b1834a113c98a4f33740c77f9bfa0f119a5873e324931ded2bb4c46a"
+  },
+  "protocol": "koni.typescript-parity-capture.v1",
+  "schema_version": "1.0",
+  "capture_sha256": "707f5787ae39cafa128722ee22bbb32270a63a6b82b09883ea7ab160d62d1b11"
+}

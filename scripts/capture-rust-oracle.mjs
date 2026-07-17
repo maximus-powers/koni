@@ -2,7 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, relative, resolve, sep } from "node:path";
 
@@ -164,7 +164,27 @@ function scanSecrets(value) {
   return patterns.flatMap((pattern) => text.match(pattern) ?? []);
 }
 
-export function captureOracle({ repoRoot, oracleWorktree, binary, sandboxRoot, projectRoot, homeRoot }) {
+function focusedContractTest(oracleWorktree, targetDir, env, id, integrationTarget, testName) {
+  const args = ["test", "--locked", "-p", "koni-core", "--test", integrationTarget, testName, "--", "--exact"];
+  const result = spawnSync("cargo", args, {
+    cwd: oracleWorktree,
+    env: { ...env, CARGO_TARGET_DIR: targetDir },
+    encoding: "utf8",
+    timeout: 300_000,
+    maxBuffer: 64 * 1024 * 1024
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`${id} failed (${result.status}): ${result.stderr}\n${result.stdout}`);
+  return {
+    id,
+    argv: ["cargo", ...args],
+    exit_code: 0,
+    stdout: { test: testName, passed: true },
+    stderr: ""
+  };
+}
+
+export function captureOracle({ repoRoot, oracleWorktree, binary, targetDir, sandboxRoot, projectRoot, homeRoot }) {
   const fingerprint = JSON.parse(readFileSync(join(repoRoot, "reference/parity/oracle/rust-oracle-baseline/fingerprint.json"), "utf8"));
   assertSafeOracleSource(repoRoot, oracleWorktree, fingerprint);
   if (!resolve(projectRoot).startsWith(`${resolve(sandboxRoot)}${sep}`)) throw new Error("project root must be inside the disposable sandbox");
@@ -203,6 +223,8 @@ export function captureOracle({ repoRoot, oracleWorktree, binary, sandboxRoot, p
   commands.push(command(binary, "pause-unknown-run", ["pause-run", absentRunId, "--root", projectRoot], env, normalize, { allowFailure: true }));
   commands.push(command(binary, "play-unknown-run", ["play-run", absentRunId, "--root", projectRoot], env, normalize, { allowFailure: true }));
   commands.push(command(binary, "cockpit-unknown-run", ["--run", absentRunId, "cockpit", projectRoot, "--json"], env, normalize, { allowFailure: true }));
+  commands.push(focusedContractTest(oracleWorktree, targetDir, env, "compile-ticket-contract", "graph_check_set", "selected_proof_that_is_also_a_ticket_target_compiles_once_deterministically"));
+  commands.push(focusedContractTest(oracleWorktree, targetDir, env, "positive-run-control-contract", "run_lifecycle", "selected_run_play_pause_is_durable_across_planning_and_active_phases"));
 
   const capture = stableJson({
     schema_version: "1.0",
@@ -230,20 +252,16 @@ function main(argv) {
   const targetDir = resolve(options.targetDir ?? join(repoRoot, "target/parity-rust-oracle"));
   let attached = false;
   try {
-    execFileSync("git", ["-C", repoRoot, "worktree", "add", "--detach", oracleWorktree, fingerprint.tag.name], { stdio: "inherit" });
+    execFileSync("git", ["-C", repoRoot, "worktree", "add", "--detach", oracleWorktree, fingerprint.tag.name], { stdio: ["ignore", "ignore", "inherit"] });
     attached = true;
     assertSafeOracleSource(repoRoot, oracleWorktree, fingerprint);
     execFileSync("cargo", ["build", "--locked", "-p", "koni-cli", "--bin", "koni"], {
       cwd: oracleWorktree,
       env: { ...process.env, CARGO_TARGET_DIR: targetDir },
-      stdio: "inherit"
+      stdio: ["ignore", "ignore", "inherit"]
     });
     const binary = join(targetDir, "debug", process.platform === "win32" ? "koni.exe" : "koni");
-    const bundledHost = join(targetDir, "debug", "koni-pi-host");
-    mkdirSync(bundledHost, { recursive: true });
-    copyFileSync(join(oracleWorktree, "runtime/pi-host/dist/koni-pi-host.mjs"), join(bundledHost, "koni-pi-host.mjs"));
-    copyFileSync(join(oracleWorktree, "runtime/pi-host/dist/koni-pi-host.sha256"), join(bundledHost, "koni-pi-host.sha256"));
-    const capture = captureOracle({ repoRoot, oracleWorktree, binary, sandboxRoot, projectRoot, homeRoot });
+    const capture = captureOracle({ repoRoot, oracleWorktree, binary, targetDir, sandboxRoot, projectRoot, homeRoot });
     const output = `${JSON.stringify(capture, null, 2)}\n`;
     if (options.output) writeFileSync(resolve(options.output), output, "utf8");
     else process.stdout.write(output);

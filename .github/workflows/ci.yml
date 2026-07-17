@@ -9,7 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  rust:
+  pi-native:
+    name: Pi-native / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -17,62 +18,43 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.19.0
-      - name: Pin runtime build tools
-        shell: bash
-        run: |
-          echo "KONI_PINNED_NODE_PATH=$(node -p 'require("fs").realpathSync(process.execPath)')" >> "$GITHUB_ENV"
-          if [ "${{ runner.os }}" = "Linux" ]; then
-            sudo apt-get update
-            sudo apt-get install -y bubblewrap
-            echo "KONI_PINNED_BWRAP_PATH=$(readlink -f "$(command -v bwrap)")" >> "$GITHUB_ENV"
-          fi
-      - uses: Swatinem/rust-cache@v2
-      - name: Formatting
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo fmt --all --check
-      - name: Clippy
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Tests
-        if: matrix.os == 'macos-latest'
-        env:
-          RUST_TEST_THREADS: 1
-        run: cargo test --workspace --locked
-      - name: Unsupported-platform safety
-        if: matrix.os == 'ubuntu-latest'
-        run: >-
-          cargo test -p koni-core --test research_profile
-          automatic_gate_compile_fails_closed_without_supported_os_sandbox --locked
-      - name: Brand audit
-        if: matrix.os == 'ubuntu-latest'
-        run: ./scripts/check-brand.sh
-
-  pi-host:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: runtime/pi-host
-    steps:
-      - uses: actions/checkout@v4
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22.19.0
           cache: npm
-          cache-dependency-path: runtime/pi-host/package-lock.json
       - run: npm install --global npm@11.13.0
+      - name: Install Linux containment boundary
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - run: npm ci
       - run: npm run check
-      - name: Verify production dependency SBOM
-        shell: bash
+      - name: Verify the three public package payloads
+        if: runner.os == 'Linux'
         run: |
-          npm sbom --omit=dev --sbom-format cyclonedx > dist/koni-pi-host.cdx.json
-          node -e 'const b=require("./dist/koni-pi-host.cdx.json"); if (b.bomFormat !== "CycloneDX" || !b.components?.some((c) => c.name === "@earendil-works/pi-agent-core" && c.version === "0.80.7") || !b.components?.some((c) => c.name === "@earendil-works/pi-ai" && c.version === "0.80.7")) process.exit(1)'
+          npm pack --dry-run --json --workspace @koni/core > /tmp/koni-core-pack.json
+          npm pack --dry-run --json --workspace @koni/coding-profile > /tmp/koni-coding-pack.json
+          npm pack --dry-run --json --workspace @koni/research-profile > /tmp/koni-research-pack.json
+          node - <<'NODE'
+          const expected = new Map([
+            ["/tmp/koni-core-pack.json", "@koni/core"],
+            ["/tmp/koni-coding-pack.json", "@koni/coding-profile"],
+            ["/tmp/koni-research-pack.json", "@koni/research-profile"],
+          ]);
+          for (const [path, name] of expected) {
+            const packed = require(path);
+            if (packed.length !== 1 || packed[0].name !== name || !packed[0].files?.length) {
+              throw new Error(`invalid package inventory for ${name}`);
+            }
+            for (const file of packed[0].files) {
+              if (/^(?:crates|runtime\/pi-host|target)\//u.test(file.path)) {
+                throw new Error(`${name} ships historical implementation path ${file.path}`);
+              }
+            }
+          }
+          NODE
+      - run: ./scripts/check-brand.sh
 
   docs:
     runs-on: ubuntu-latest
@@ -90,18 +72,24 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run build
-      - run: npm audit --audit-level=moderate
+      - run: npm audit --audit-level=high
 
-  supply-chain:
+  frozen-oracle:
+    name: Frozen Rust oracle metadata
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          command: check
-
-  homebrew:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: brew style packaging/homebrew/koni.rb
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - run: npm install --global npm@11.13.0
+      - run: npm ci
+      - run: npm run parity:gate
+      - run: node --test scripts/parity-ledger.test.mjs scripts/parity-runner.test.mjs scripts/capture-rust-oracle.test.mjs
+      - name: Enforce non-shipping oracle boundary
+        run: |
+          node -e 'const p=require("./package.json"); if (JSON.stringify(p.workspaces).includes("crates") || JSON.stringify(p.workspaces).includes("runtime/pi-host")) process.exit(1)'
+          ! grep -R 'crates/\|runtime/pi-host' packages/*/package.json

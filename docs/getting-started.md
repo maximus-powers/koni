@@ -3,13 +3,35 @@
 This guide takes a repository from no Köni configuration to an approved,
 inspectable run.
 
+> **Current Pi-native guide — 2026-07-16 (`pi-native-port`):** Historical Cargo, bundled-host,
+> Koni-owned-auth, `.codex/koni`, and Homebrew passages below are retained to explain earlier
+> migrations. A new installation uses the three Pi/npm packages and ordinary Pi authentication.
+> Koni never copies credentials or edits the user's Pi settings/resources. Projects use `.koni`,
+> and `koni init coding|research` materializes a verified package baseline plus project overlay.
+
+> **Pi-package registration correction — 2026-07-16:** “Never edits” above is too broad for an
+> installation guide. Koni never reads or copies Pi credentials and never rewrites unrelated
+> settings or resources. Installing through Pi necessarily adds Pi's own Koni package entries;
+> the source installer transactionally replaces only Koni-owned package entries and rolls that
+> change back together with its launcher if activation fails.
+
 ## Prerequisites
+
+Current prerequisites are Node 22.19+, npm 11.13.0 for source/npm installs, Git 2.x, and an
+ordinary working Pi 0.80.10 setup for agent-backed work. macOS Seatbelt or Linux bubblewrap is
+required for contained command effects. Rust is needed only to recapture the frozen oracle, never
+to install or run Koni.
 
 - Git 2.x
 - Codex installed and authenticated for agent-backed stages
 - A terminal at least 82 columns wide for the interactive control center
 - Rust 1.96 or newer only when building Köni from source. Development through
   rustup uses the newer toolchain pinned by this repository.
+
+> **Current prerequisite correction — 2026-07-16:** The Codex and Rust bullets immediately above
+> belong to the retained Rust-oracle workflow. Shipping Pi-native Koni needs neither Codex nor a
+> Rust toolchain. Authenticate ordinary Pi only when a chosen provider-backed run requires it;
+> Rust 1.96 is required solely for intentionally rebuilding or recapturing the frozen oracle.
 
 > **Pi/schema 2 transition in progress — 2026-07-14 (`pi_product_docs_transition`):** Codex
 > authentication remains the executable prerequisite for the schema-1 product described by this
@@ -33,7 +55,52 @@ Köni can configure a directory that is not yet a Git repository. It does not
 initialize Git during `koni init`; Git initialization and the baseline commit
 happen at the first run boundary that requires them.
 
+> **Pi-native Git-root correction — 2026-07-16:** The paragraph above records the frozen Rust
+> initializer. Current Core stores authority state in the Git common directory and therefore
+> requires an existing Git worktree even for profile installation. In a brand-new directory, run
+> `git init` before `koni init coding|research`; initialization still creates no run or commit.
+
 ## Install
+
+Current package installation:
+
+```sh
+pi install npm:@koni/core
+pi install npm:@koni/coding-profile
+pi install npm:@koni/research-profile   # optional research domain
+
+# Expose the standalone command from that same Pi-managed package closure:
+export PATH="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/npm/node_modules/.bin:$PATH"
+```
+
+From a source checkout, `./scripts/install-dev.sh` checks, packs, and installs these same three
+payloads beneath `${KONI_INSTALL_PREFIX:-$HOME/.local}`. It registers only those three versioned
+local package sources in one locked Pi-settings update, retains older bytes for running
+authorities, and preserves authentication plus every unrelated package/resource setting.
+
+> **Single-runtime packaging correction — 2026-07-16:** The former global command without
+> `--legacy-peer-deps` is unsafe because ordinary npm may install its own Pi SDK and a TypeBox
+> version different from the active Pi runtime. A second global Koni copy is no longer part of the
+> install flow: Pi's managed `.bin/koni` and `/koni` load the same exact Core/profile bytes. Koni's
+> launcher resolves and verifies the user's Pi 0.80.10 installation; no Koni closure may contain Pi
+> or TypeBox below itself.
+
+For upgrades, first run `koni stop --root /path/to/project`, then update only the installed Koni
+sources: `pi update npm:@koni/coding-profile`, optional
+`pi update npm:@koni/research-profile`, and finally `pi update npm:@koni/core`. Do not use the broad
+`pi update --extensions`, which also replaces unrelated community packages. Close/reopen Pi or run
+`/reload` in every already-open Pi session before `koni start --root /path/to/project`; a stopped
+authority cannot unload old extension code already in Pi memory. Stop durably pauses runs and
+aborts contained sessions before the bytes change; start uses the new Core and leaves those runs
+paused for an explicit resume. If `pi list` reports a second Koni origin, remove the exact older
+source with `pi remove <source>` (or `pi remove <source> --local` when it is project-local) before
+opening Koni again.
+
+> **Source-checkout upgrade path — 2026-07-16:** When Koni was installed with
+> `./scripts/install-dev.sh`, keep the same stop → reload → start → explicit-resume sequence, but
+> rerun `./scripts/install-dev.sh` instead of any `pi update npm:@koni/*` command. That installer
+> atomically switches the three registered local sources to one new retained bundle. Do not mix
+> local and npm update paths; duplicate Core origins fail closed.
 
 Until the Homebrew formula is published, install from a source checkout:
 
@@ -43,6 +110,12 @@ cd koni
 cargo install --path crates/koni-cli
 koni --version
 ```
+
+> **Current source-install command — 2026-07-16:** The Cargo block immediately above is retained
+> only as Rust-era history and is not a complete Pi-native installation. From the current source
+> checkout run `./scripts/install-dev.sh`, prepend the printed
+> `${KONI_INSTALL_PREFIX:-$HOME/.local}/bin` path when instructed, then verify `koni --version`.
+> The installer registers the same three coarse packages without shipping the frozen Rust oracle.
 
 The eventual Homebrew interface is `brew install koni`. No tap or core formula
 is published yet.
@@ -118,7 +191,34 @@ is published yet.
 > build-pinned `bubblewrap`. Binary-only `cargo install` remains historical because it cannot
 > install this verified runtime closure.
 
+> **Pure Pi-package source install — 2026-07-16:** The bundled Node/host and Koni-owned auth/model
+> commands above are now historical. Current source uses the ordinary Node/npm already required by
+> Pi: run `./scripts/install-dev.sh`, then `koni --version`. Provider login and model discovery stay
+> in Pi; current Core exposes `init`, `update`, `start`, `status`, `config validate`, `run`, and
+> `tui`, and installs no second credential store or runtime host.
+
 ## Initialize a project
+
+The current explicit commands are `koni init coding` and `koni init research`. Run one inside an
+existing Git project, then invoke `/koni` from Pi or `koni tui` in the terminal you chose. Koni does
+not open a terminal pane itself.
+
+```sh
+cd /path/to/project
+git init                        # only for a brand-new directory
+koni init coding --root .       # or: koni init research --root .
+koni config validate --root .
+
+# Then type /koni in an ordinary Pi session, or explicitly run:
+koni tui --root .
+```
+
+> **Historical initializer interface:** The unannotated `koni init`, `--target`, `--profile`,
+> `--from`, `--replace`, `--dry-run`, and `--open` examples retained below describe the frozen Rust
+> initializer. They are preserved as migration history, not aliases in the Pi-native CLI. Current
+> Core accepts the explicit package profile (`coding` or `research`), `--profile-package` for a
+> reviewed package path, and `--root` for project discovery; guided configuration and run control
+> live in the shared control center.
 
 From the project or any directory beneath it:
 

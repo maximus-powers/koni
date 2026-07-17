@@ -1,10 +1,26 @@
-import { mkdir, rm } from "node:fs/promises";
+import { lstat, mkdir, realpath } from "node:fs/promises";
 import path from "node:path";
-import type { RunGitRecord } from "../state/run-record.js";
 import { GitClient } from "./client.js";
 
+/**
+ * Compatibility shape used only by the pre-lifecycle RunGitManager facade.
+ * New authority state uses RunGitLifecycleRecord from lifecycle.ts.
+ */
+export interface LegacyRunGitRecord {
+  targetRef: string;
+  targetBaseOid: string;
+  runBranch: string;
+  runWorktree: string;
+  candidateOid: string | undefined;
+  promotionTargetOid: string | undefined;
+  mergeReadyAt: string | undefined;
+  mergedOid: string | undefined;
+  namespaceStatus?: "planned" | "ready" | "cleaned";
+  materializedAt?: string;
+}
+
 export interface RunGitNamespace {
-  git: RunGitRecord;
+  git: LegacyRunGitRecord;
   projectRoot: string;
 }
 
@@ -28,7 +44,8 @@ export class RunGitManager {
     }));
   }
 
-  public async createNamespace(runId: string, targetRef: string): Promise<RunGitNamespace> {
+  /** Resolve and name a run namespace without creating a branch or worktree. */
+  public async planNamespace(runId: string, targetRef: string): Promise<RunGitNamespace> {
     assertRunId(runId);
     assertTargetRef(targetRef);
     const identity = await GitClient.discover(this.#projectRoot);
@@ -36,9 +53,6 @@ export class RunGitManager {
     const targetBaseOid = await client.resolveRef(targetRef);
     const runBranch = `koni/runs/${runId}`;
     const runWorktree = path.join(identity.commonDirectory, "koni", "worktrees", "runs", runId);
-    await mkdir(path.dirname(runWorktree), { recursive: true, mode: 0o700 });
-    await rm(runWorktree, { recursive: true, force: true });
-    await client.createWorktree(runWorktree, runBranch, targetBaseOid);
     return {
       projectRoot: identity.worktreeRoot,
       git: {
@@ -54,7 +68,57 @@ export class RunGitManager {
     };
   }
 
-  public async preparePromotion(git: RunGitRecord, message: string): Promise<IntegrationResult> {
+  /** Idempotently materialize a previously persisted namespace plan. */
+  public async materializeNamespace(namespace: RunGitNamespace): Promise<void> {
+    const { git } = namespace;
+    const identity = await GitClient.discover(this.#projectRoot);
+    if (namespace.projectRoot !== identity.worktreeRoot) {
+      throw new Error("run Git namespace belongs to a different repository");
+    }
+    const repository = new GitClient(identity.worktreeRoot);
+    const targetBase = await repository.resolveRef(git.targetRef);
+    if (targetBase !== git.targetBaseOid) {
+      // The run intentionally starts from the exact target snapshot selected during intake.
+      // Later target movement is handled by promotion merge-tree, not by silently rebasing here.
+      const objectStillExists = await repository.tryResolveRef(git.targetBaseOid);
+      if (objectStillExists !== git.targetBaseOid) {
+        throw new Error("persisted run base commit no longer resolves");
+      }
+    }
+
+    if (await pathExists(git.runWorktree)) {
+      const worktreeIdentity = await GitClient.discover(git.runWorktree);
+      const worktree = new GitClient(worktreeIdentity.worktreeRoot);
+      const head = await worktree.resolveRef("HEAD");
+      const branchHead = await repository.tryResolveRef(`refs/heads/${git.runBranch}`);
+      if (
+        worktreeIdentity.commonDirectory === identity.commonDirectory &&
+        branchHead !== undefined &&
+        head === branchHead
+      ) return;
+      throw new Error("existing run worktree does not match the persisted namespace");
+    }
+
+    await mkdir(path.dirname(git.runWorktree), { recursive: true, mode: 0o700 });
+    const branchRef = `refs/heads/${git.runBranch}`;
+    const existing = await repository.tryResolveRef(branchRef);
+    if (existing === undefined) {
+      await repository.createWorktree(git.runWorktree, git.runBranch, git.targetBaseOid);
+      return;
+    }
+    if (existing !== git.targetBaseOid) {
+      throw new Error("persisted run branch already exists at an unexpected commit");
+    }
+    await repository.addExistingBranchWorktree(git.runWorktree, git.runBranch);
+  }
+
+  public async createNamespace(runId: string, targetRef: string): Promise<RunGitNamespace> {
+    const namespace = await this.planNamespace(runId, targetRef);
+    await this.materializeNamespace(namespace);
+    return namespace;
+  }
+
+  public async preparePromotion(git: LegacyRunGitRecord, message: string): Promise<IntegrationResult> {
     assertTargetRef(git.targetRef);
     const repository = new GitClient(this.#projectRoot);
     const worktree = new GitClient(git.runWorktree);
@@ -79,7 +143,7 @@ export class RunGitManager {
     return { status: "ready", candidateOid, targetOid };
   }
 
-  public async publishPromotion(git: RunGitRecord): Promise<string> {
+  public async publishPromotion(git: LegacyRunGitRecord): Promise<string> {
     if (git.candidateOid === undefined || git.promotionTargetOid === undefined) {
       throw new Error("run does not have a prepared promotion candidate");
     }
@@ -88,13 +152,65 @@ export class RunGitManager {
     return git.candidateOid;
   }
 
-  public async cleanup(git: RunGitRecord): Promise<void> {
+  public async cleanup(git: LegacyRunGitRecord): Promise<void> {
     const repository = new GitClient(this.#projectRoot);
-    try {
-      await repository.removeWorktree(git.runWorktree);
-    } catch {
-      await rm(git.runWorktree, { recursive: true, force: true });
+    if (!git.runBranch.startsWith("koni/runs/")) {
+      throw new Error("refusing to clean a non-Koni run branch");
     }
+    const branchRef = `refs/heads/${git.runBranch}`;
+    const branchOid = await repository.tryResolveRef(branchRef);
+    const targetOid = await repository.resolveRef(git.targetRef);
+    if (branchOid !== undefined && !(await repository.isAncestor(branchOid, targetOid))) {
+      throw new Error("refusing to clean a run branch that is not integrated into its target");
+    }
+    const identity = await GitClient.discover(this.#projectRoot);
+    const expected = path.join(
+      identity.commonDirectory,
+      "koni",
+      "worktrees",
+      "runs",
+      git.runBranch.slice("koni/runs/".length),
+    );
+    if (path.resolve(git.runWorktree) !== expected) {
+      throw new Error("refusing to clean a run worktree outside its compiler-owned namespace");
+    }
+    const registered = (await repository.worktrees()).find(
+      (entry) => path.resolve(entry.path) === path.resolve(git.runWorktree),
+    );
+    if (registered !== undefined) {
+      if (registered.branch !== branchRef || registered.head !== branchOid) {
+        throw new Error("run worktree identity no longer matches its compiler-owned branch");
+      }
+      const worktreeIdentity = await GitClient.discover(git.runWorktree);
+      if (
+        await realpath(worktreeIdentity.commonDirectory) !==
+        await realpath(identity.commonDirectory)
+      ) {
+        throw new Error("run worktree belongs to another repository");
+      }
+      if ((await new GitClient(git.runWorktree).statusEntries()).length !== 0) {
+        throw new Error("refusing to clean a dirty run worktree");
+      }
+      await repository.unlockWorktree(git.runWorktree);
+      await repository.removeWorktree(git.runWorktree);
+    } else if (await pathExists(git.runWorktree)) {
+      throw new Error("unregistered data occupies the recorded run worktree path");
+    }
+    if (branchOid !== undefined) {
+      await repository.deleteRef(branchRef, branchOid);
+    }
+  }
+}
+
+async function pathExists(target: string): Promise<boolean> {
+  try {
+    await lstat(target);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      return false;
+    }
+    throw error;
   }
 }
 

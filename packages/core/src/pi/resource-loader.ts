@@ -1,4 +1,5 @@
-import { chmod, mkdir, open, realpath } from "node:fs/promises";
+import { constants, type Stats } from "node:fs";
+import { lstat, mkdir, open, realpath } from "node:fs/promises";
 import path from "node:path";
 import {
   DefaultResourceLoader,
@@ -7,6 +8,7 @@ import {
   type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentLaunchSpec, LaunchResource } from "./launch-spec.js";
+import { createFileAtomicallyNoReplace } from "./atomic-file.js";
 
 const INLINE_EXTENSION_NAME = "koni-managed-session";
 
@@ -33,27 +35,51 @@ export class ContainedResourceError extends Error {
 export async function createContainedResourceLoader(options: {
   spec: Readonly<AgentLaunchSpec>;
   extension: InlineExtension;
+  mode?: "fresh" | "recover";
 }): Promise<ContainedResourceLoaderResult> {
   const { spec } = options;
+  const mode = options.mode ?? "fresh";
   await mkdir(spec.workspace.sessionDirectory, { recursive: true, mode: 0o700 });
   const sessionDirectory = await realpath(spec.workspace.sessionDirectory);
-  const resourceRoot = path.join(sessionDirectory, `resources-${spec.specHash.slice("sha256:".length, 22)}`);
-  try {
-    await mkdir(resourceRoot, { mode: 0o700 });
-  } catch (error) {
-    if (isCode(error, "EEXIST")) {
-      throw new ContainedResourceError(
-        "resource_replay",
-        `resource directory already exists for attempt ${spec.identity.attemptId}`,
-      );
+  const resourceRoot = path.join(sessionDirectory, `resources-${spec.specHash.slice("sha256:".length)}`);
+  if (mode === "fresh") {
+    try {
+      await mkdir(resourceRoot, { mode: 0o700 });
+    } catch (error) {
+      if (isCode(error, "EEXIST")) {
+        throw new ContainedResourceError(
+          "resource_replay",
+          `resource directory already exists for attempt ${spec.identity.attemptId}`,
+        );
+      }
+      throw error;
     }
-    throw error;
+  } else {
+    let resourceRootStat = await lstat(resourceRoot).catch(() => undefined);
+    if (resourceRootStat === undefined) {
+      try {
+        await mkdir(resourceRoot, { mode: 0o700 });
+      } catch (error) {
+        if (!isCode(error, "EEXIST")) throw error;
+      }
+      resourceRootStat = await lstat(resourceRoot).catch(() => undefined);
+    }
+    if (
+      resourceRootStat === undefined ||
+      !resourceRootStat.isDirectory() ||
+      resourceRootStat.isSymbolicLink() ||
+      (resourceRootStat.mode & 0o077) !== 0
+    ) {
+      throw new ContainedResourceError("resource_recovery", "recovered resource root is missing or unsafe");
+    }
   }
 
   const materialized = new Map<string, string>();
   try {
     for (const resource of spec.resources.entries) {
-      const destination = await materializeResource(resourceRoot, resource);
+      const destination = mode === "fresh"
+        ? await materializeResource(resourceRoot, resource)
+        : await recoverMaterializedResource(resourceRoot, resource);
       materialized.set(resource.id, destination);
     }
   } catch (error) {
@@ -62,10 +88,18 @@ export async function createContainedResourceLoader(options: {
       : new ContainedResourceError("materialization", error instanceof Error ? error.message : String(error));
   }
 
-  const skillPaths = pathsForKind(spec.resources.entries, materialized, "skill");
+  // A pinned skill closure can contain references, scripts, and assets. Only SKILL.md is a Pi
+  // discovery entry point; closure members remain available through `koni_read_resource`.
+  const skillPaths = pathsForKind(spec.resources.entries, materialized, "skill")
+    .filter((entry) => path.basename(entry) === "SKILL.md");
   const promptPaths = pathsForKind(spec.resources.entries, materialized, "prompt");
-  const contexts = spec.resources.entries
-    .filter((resource) => resource.kind === "context")
+  // Pi only advertises skills when a literal built-in `read` tool is active. Contained Koni
+  // sessions intentionally never grant that ambient filesystem capability, so compiler-selected
+  // skill bodies must enter the model through the sealed system context instead of becoming dead
+  // loader metadata. Static `context` resources are materialized/hash-checked for audit, but are
+  // not injected here: the managed extension is their single authoritative, refreshable channel.
+  const embeddedSkills = spec.resources.entries
+    .filter((resource) => resource.kind === "skill" && path.posix.basename(resource.relativePath) === "SKILL.md")
     .map((resource) => ({ path: materialized.get(resource.id)!, content: resource.content }));
   const appendSystemPrompt = spec.resources.entries
     .filter((resource) => resource.kind === "append_system_prompt")
@@ -79,7 +113,7 @@ export async function createContainedResourceLoader(options: {
     enableSkillCommands: false,
   }, { projectTrusted: false });
   const isolatedAgentDir = path.join(resourceRoot, ".pi-agent");
-  await mkdir(isolatedAgentDir, { mode: 0o700 });
+  await mkdir(isolatedAgentDir, { recursive: mode === "recover", mode: 0o700 });
   const namedExtension: InlineExtension = typeof options.extension === "function"
     ? { name: INLINE_EXTENSION_NAME, factory: options.extension }
     : options.extension.name === INLINE_EXTENSION_NAME
@@ -99,11 +133,11 @@ export async function createContainedResourceLoader(options: {
     additionalPromptTemplatePaths: promptPaths,
     systemPrompt: spec.persona.systemPrompt,
     appendSystemPrompt,
-    agentsFilesOverride: () => ({ agentsFiles: contexts }),
+    agentsFilesOverride: () => ({ agentsFiles: embeddedSkills }),
     themesOverride: () => ({ themes: [], diagnostics: [] }),
   });
   await delegate.reload();
-  assertContained(delegate, spec, skillPaths.length, promptPaths.length, contexts.length);
+  assertContained(delegate, spec, skillPaths.length, promptPaths.length, embeddedSkills.length);
 
   return {
     loader: new SealedResourceLoader(delegate),
@@ -168,15 +202,115 @@ async function materializeResource(root: string, resource: LaunchResource): Prom
     throw new ContainedResourceError("resource_escape", `resource ${resource.id} escapes its attempt root`);
   }
   await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
-  const handle = await open(destination, "wx", 0o400);
+  if (!await createFileAtomicallyNoReplace(destination, resource.content, 0o400)) {
+    throw new ContainedResourceError("resource_replay", `resource ${resource.id} already exists`);
+  }
+  return destination;
+}
+
+async function recoverMaterializedResource(root: string, resource: LaunchResource): Promise<string> {
+  const destination = path.join(root, resource.relativePath);
+  if (!isWithin(root, destination)) {
+    throw new ContainedResourceError("resource_escape", `resource ${resource.id} escapes its attempt root`);
+  }
+  const existing = await lstat(destination).catch(() => undefined);
+  if (existing !== undefined) return verifyMaterializedResource(root, resource);
+
+  await ensurePrivateRecoveryParents(root, path.dirname(destination), resource.id);
+  await createFileAtomicallyNoReplace(destination, resource.content, 0o400);
+  return verifyMaterializedResource(root, resource);
+}
+
+async function ensurePrivateRecoveryParents(root: string, parent: string, resourceId: string): Promise<void> {
+  const relative = path.relative(root, parent);
+  if (relative === "") return;
+  let current = root;
+  for (const segment of relative.split(path.sep)) {
+    current = path.join(current, segment);
+    let metadata = await lstat(current).catch(() => undefined);
+    if (metadata === undefined) {
+      try {
+        await mkdir(current, { mode: 0o700 });
+      } catch (error) {
+        if (!isCode(error, "EEXIST")) throw error;
+      }
+      metadata = await lstat(current).catch(() => undefined);
+    }
+    if (
+      metadata === undefined ||
+      metadata.isSymbolicLink() ||
+      !metadata.isDirectory() ||
+      (metadata.mode & 0o077) !== 0
+    ) {
+      throw new ContainedResourceError("resource_recovery", `resource ${resourceId} traverses an unsafe path`);
+    }
+  }
+}
+
+async function verifyMaterializedResource(root: string, resource: LaunchResource): Promise<string> {
+  const destination = path.join(root, resource.relativePath);
+  if (!isWithin(root, destination)) {
+    throw new ContainedResourceError("resource_escape", `resource ${resource.id} escapes its attempt root`);
+  }
+  await assertPrivateRealPath(root, destination, resource.id);
+  let handle;
   try {
-    await handle.writeFile(resource.content, "utf8");
-    await handle.sync();
+    handle = await open(destination, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    throw new ContainedResourceError("resource_recovery", `resource ${resource.id} is missing or unsafe`);
+  }
+  let metadata: Stats;
+  let bytes: Buffer;
+  try {
+    metadata = await handle.stat();
+    if (!metadata.isFile() || (metadata.mode & 0o222) !== 0) {
+      throw new ContainedResourceError("resource_recovery", `resource ${resource.id} is missing or unsafe`);
+    }
+    bytes = await handle.readFile();
   } finally {
     await handle.close();
   }
-  await chmod(destination, 0o400);
+  const after = await lstat(destination).catch(() => undefined);
+  if (
+    after === undefined ||
+    after.isSymbolicLink() ||
+    after.dev !== metadata.dev ||
+    after.ino !== metadata.ino
+  ) {
+    throw new ContainedResourceError("resource_recovery", `resource ${resource.id} changed during verification`);
+  }
+  if (bytes.byteLength !== resource.sizeBytes || bytes.toString("utf8") !== resource.content) {
+    throw new ContainedResourceError("resource_drift", `resource ${resource.id} changed after its launch was issued`);
+  }
   return destination;
+}
+
+async function assertPrivateRealPath(root: string, destination: string, resourceId: string): Promise<void> {
+  const resolvedRoot = await realpath(root).catch(() => undefined);
+  const resolvedDestination = await realpath(destination).catch(() => undefined);
+  if (
+    resolvedRoot === undefined ||
+    resolvedDestination === undefined ||
+    resolvedRoot !== root ||
+    resolvedDestination !== destination ||
+    !isWithin(resolvedRoot, resolvedDestination)
+  ) {
+    throw new ContainedResourceError("resource_recovery", `resource ${resourceId} traverses an unsafe path`);
+  }
+  const relative = path.relative(root, destination);
+  let current = root;
+  for (const segment of relative.split(path.sep)) {
+    current = path.join(current, segment);
+    const metadata = await lstat(current).catch(() => undefined);
+    const isLeaf = current === destination;
+    if (
+      metadata === undefined ||
+      metadata.isSymbolicLink() ||
+      (!isLeaf && (!metadata.isDirectory() || (metadata.mode & 0o077) !== 0))
+    ) {
+      throw new ContainedResourceError("resource_recovery", `resource ${resourceId} traverses an unsafe path`);
+    }
+  }
 }
 
 function assertContained(

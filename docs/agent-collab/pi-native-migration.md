@@ -59,6 +59,12 @@ in [Pi-native session, resource, and authentication migration](../pi-native-migr
 - `SessionManager` is an append-only `id`/`parentId` tree. Its exact branch/tree/fork/custom-entry
   APIs support native history, but Pi's leaf is not an authorization primitive.
 
+> **Current implementation supersession — 2026-07-16:** the branch-epoch design audited below is
+> historical. Autonomous Koni attempts now use fresh linear Pi sessions. Positive-epoch retry,
+> rework, review, recovery, and integration attempts carry authenticated parent-attempt and logical
+> parent-session lineage in the immutable launch spec and mapping, without navigating/forking an
+> earlier Pi tree or populating Pi's path-valued `parentSession` header.
+
 ### Boundary decisions
 
 - Pi owns session/model/resource/extension/native-chat/authentication mechanics; Rust remains the
@@ -116,3 +122,14 @@ compaction accounting/context reissue, package/native compatibility, and determi
 3. Pi-session transcript projection, steering/cancellation/compaction/branch parity.
 4. Pi-owned atomic auth backend/service and guarded single-writer credential migration.
 5. Deterministic Rust scheduling and only then legacy-host/MCP/credential/Lead deletion gates.
+
+### 2026-07-16 — coarse-package TypeScript authority supersession
+
+The implementation lane accepted after this docs audit supersedes the proposed separate
+`@koni/pi`/Rust bridge without erasing its threat model. Public packaging is exactly
+`@koni/core`, `@koni/coding-profile`, and `@koni/research-profile`. Core owns the complete
+TypeScript compiler/authority/runtime plus both Pi and standalone interfaces; profile packages
+only announce verified immutable behavior bundles. Pi 0.80.10 remains canonical for sessions,
+models, and credentials. Rust is frozen and non-shipping until executable parity proves it safe to
+delete. Autonomous attempts retain the audit's zero-ambient, attempt-linear session, immutable
+grant/resource, and post-terminal revocation requirements.

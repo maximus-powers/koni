@@ -9,8 +9,10 @@
     "protocol",
     "release_mode",
     "oracle_fingerprint",
+    "oracle_captures",
     "normalization",
     "issue_registry",
+    "proof_manifest",
     "cases"
   ],
   "properties": {
@@ -18,12 +20,18 @@
     "protocol": { "const": "koni.parity-ledger.v1" },
     "release_mode": { "enum": ["development", "release"] },
     "oracle_fingerprint": { "$ref": "#/$defs/file" },
+    "oracle_captures": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/file" }
+    },
     "normalization": {
       "type": "array",
       "minItems": 1,
       "items": { "$ref": "#/$defs/file" }
     },
     "issue_registry": { "$ref": "#/$defs/file" },
+    "proof_manifest": { "$ref": "#/$defs/file" },
     "cases": {
       "type": "array",
       "minItems": 1,
@@ -37,7 +45,8 @@
           "tier": { "enum": ["P0", "P1", "P2"] },
           "status": { "enum": ["specified", "captured", "passing", "blocked"] },
           "case": { "$ref": "#/$defs/file" },
-          "actions": { "$ref": "#/$defs/file" }
+          "actions": { "$ref": "#/$defs/file" },
+          "target_capture": { "$ref": "#/$defs/file" }
         }
       }
     }

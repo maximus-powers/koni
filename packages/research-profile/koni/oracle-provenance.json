@@ -1,11 +1,17 @@
 {
   "oracle_tag": "rust-oracle-baseline",
   "oracle_commit": "fcc425e51114bcedb9aeae44d6e8c8418a525e6b",
-  "capture_kind": "fresh-schema2-install",
+  "capture_kind": "pi-native-profile-evolution",
   "captured_profile": {
     "id": "research",
-    "version": "1.0.10"
+    "version": "1.0.11"
   },
+  "evolution": [
+    "Preserve the frozen schema-2 oracle baseline while adding an opt-in, non-installing Pi community resource catalog.",
+    "Expose explicit empty skill, prompt, and tool selectors so the guided editor can configure exact resources before enablement.",
+    "Replace removed Rust-era operator commands in shared skills with the shipping Pi /koni, koni tui, status, config validate, run, and guarded overlay lifecycle surfaces.",
+    "Correct the remaining initializer, recovery, deletion, rollback, and Research validation guidance so native Pi skills invoke only shipping Core surfaces."
+  ],
   "excluded_generated_paths": [
     "migration-receipt.json",
     "resource-manifest.json"

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { ExtensionAPI, InlineExtension } from "@earendil-works/pi-coding-agent";
+import { DynamicGraphContextSelector } from "../src/graph/context-selector.js";
+import { GraphSchema, TypedGraph, createGraphContextualState } from "../src/graph/model.js";
+import { canonicalHash } from "../src/shared/canonical.js";
 import {
   createKoniManagedExtension,
   renderCompactionSummary,
@@ -63,6 +66,7 @@ describe("Koni Pi compaction extension", () => {
     expect(compacted.compaction.summary).toContain("## Files read or modified");
     expect(compacted.compaction.details).toMatchObject({
       protocol: "koni.compaction.v1",
+      authorizationId: "authorization-one",
       contextReissueRequired: true,
       contextHash: spec.authority.authoritativeContextHash,
     });
@@ -76,6 +80,75 @@ describe("Koni Pi compaction extension", () => {
       "linear_navigation_denied",
       "linear_navigation_denied",
     ]);
+  });
+
+  it("injects a separately hashed freshly selected graph envelope on every context event", async () => {
+    const spec = fixtureLaunchSpec({
+      cwd: "/tmp/koni-workspace",
+      sessionDirectory: "/tmp/koni-sessions/attempt-dynamic-context",
+    });
+    const graph = new TypedGraph(new GraphSchema({ nodeTypes: [], edgeTypes: [] }));
+    const contextual = createGraphContextualState("run-root-dynamic");
+    const selector = new DynamicGraphContextSelector();
+    const dynamic = selector.select({
+      cacheKey: canonicalHash([0, graph.hash, contextual.hash]),
+      identity: {
+        ...spec.identity,
+        personaId: spec.persona.id,
+        grantHash: spec.authority.grantHash,
+        launchSpecHash: spec.specHash,
+        generation: spec.authority.generation,
+      },
+      objective: "Inject only transient graph context.",
+      runUpdatedAt: "2026-01-01T00:00:00.000Z",
+      semanticRevision: 0,
+      semanticHash: graph.hash,
+      contextual,
+      graph,
+      nodePaths: {},
+      ticketTargetIds: [],
+      stepTargetIds: [],
+      scopedPaths: ["."],
+      compatibleAttemptIds: new Set([spec.identity.attemptId]),
+      abandonedAttemptIds: new Set(),
+      maxInputTokens: spec.budgets.tokens.maxInput,
+    });
+    const provider = fixtureContextProvider(spec, snapshot);
+    let selections = 0;
+    provider.loadDynamicGraphContext = async () => {
+      selections += 1;
+      return dynamic;
+    };
+    const handlers = await loadHandlers(createKoniManagedExtension({ spec, contextProvider: provider }));
+
+    const first = await handlers.get("context")!({ type: "context", messages: [] }, {});
+    const second = await handlers.get("context")!({ type: "context", messages: [] }, {});
+    expect(selections).toBe(2);
+    expect(first.messages).toHaveLength(2);
+    expect(first.messages[0].content[0].text).toContain(`<koni_authoritative_context`);
+    expect(first.messages[1].content[0].text).toContain(`<koni_dynamic_graph_context`);
+    expect(first.messages[1].content[0].text).toContain(`envelope_hash="${dynamic.envelopeHash}"`);
+    expect(second.messages[1].content[0].text).toContain(dynamic.content);
+
+    await handlers.get("session_before_compact")!({
+      type: "session_before_compact",
+      reason: "threshold",
+      willRetry: false,
+      signal: new AbortController().signal,
+      branchEntries: [],
+      preparation: {
+        firstKeptEntryId: "entry-dynamic",
+        messagesToSummarize: [],
+        turnPrefixMessages: [],
+        isSplitTurn: false,
+        tokensBefore: 1_000,
+        fileOps: { read: [], modified: [] },
+        settings: { enabled: true, reserveTokens: 100, keepRecentTokens: 100 },
+      },
+    }, {});
+    const postCompaction = await handlers.get("context")!({ type: "context", messages: [] }, {});
+    expect(selections).toBe(3);
+    expect(postCompaction.messages[1].content[0].text).toContain(dynamic.content);
   });
 
   it("fails closed when authoritative context or compaction metadata drifts", async () => {
@@ -103,6 +176,28 @@ describe("Koni Pi compaction extension", () => {
     expect(compacted).toEqual({ cancel: true });
   });
 
+  it("runs the pre-provider guard before every authoritative context projection", async () => {
+    const spec = fixtureLaunchSpec({
+      cwd: "/tmp/koni-workspace",
+      sessionDirectory: "/tmp/koni-sessions/attempt-provider-guard",
+    });
+    let guards = 0;
+    const handlers = await loadHandlers(createKoniManagedExtension({
+      spec,
+      contextProvider: fixtureContextProvider(spec, snapshot),
+      beforeProviderRequest() {
+        guards += 1;
+        if (guards === 2) throw new Error("attempt budget exhausted before provider request");
+      },
+    }));
+
+    await expect(handlers.get("context")!({ type: "context", messages: [] }, {})).resolves.toBeDefined();
+    await expect(handlers.get("context")!({ type: "context", messages: [] }, {})).rejects.toThrow(
+      "attempt budget exhausted before provider request",
+    );
+    expect(guards).toBe(2);
+  });
+
   it("renders explicit human-readable plan domains and durable reference classes", () => {
     const spec = fixtureLaunchSpec({
       cwd: "/tmp/koni-workspace",
@@ -110,12 +205,26 @@ describe("Koni Pi compaction extension", () => {
     });
     const rendered = renderCompactionSummary(spec, snapshot);
     expect(rendered).toContain("### Architecture");
+    expect(rendered).toContain("- Branch: initial (epoch 0)");
     expect(rendered).toContain("### Decisions");
     expect(rendered).toContain("### Risk");
     expect(rendered).toContain("### Verification");
     expect(rendered).toContain("## Receipts");
     expect(rendered).toContain("## Checks");
     expect(rendered).toContain("## Unresolved questions");
+  });
+
+  it("bounds the complete structured checkpoint rather than only each field", () => {
+    const spec = fixtureLaunchSpec({
+      cwd: "/tmp/koni-workspace",
+      sessionDirectory: "/tmp/koni-sessions/attempt-one",
+    });
+    const largeItem = "x".repeat(64 * 1024);
+    const oversized: KoniCompactionSnapshot = {
+      ...snapshot,
+      graphRefs: Array.from({ length: 70 }, () => largeItem),
+    };
+    expect(() => renderCompactionSummary(spec, oversized)).toThrow("structured compaction exceeds");
   });
 });
 
@@ -155,6 +264,30 @@ function fixtureContextProvider(
     },
     async loadCompactionSnapshot() {
       return compact;
+    },
+    async authorizeCompaction() {
+      return { authorizationId: "authorization-one" };
+    },
+    async acquireRecoveryClaim() {
+      return {
+        protocol: "koni.attempt-recovery-claim.v1",
+        claimId: `claim-${spec.identity.attemptId}`,
+        state: {
+          protocol: "koni.attempt-recovery.v1",
+          specHash: spec.specHash,
+          ...spec.identity,
+          grantHash: spec.authority.grantHash,
+          generation: spec.authority.generation,
+          epoch: spec.authority.epoch,
+          stateHash: spec.authority.expectedStateHash,
+          status: "continue",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, newTokens: 0, allTokens: 0 },
+          authorizedMessages: [],
+          authorizedToolResults: [],
+          authorizedCompactions: [],
+        },
+        async release() {},
+      };
     },
   };
 }

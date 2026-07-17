@@ -1,0 +1,1436 @@
+{
+  "cases": [
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "944b8b7bd47c21715481d144a3b25ad78f7d08831433be99c55adcdde39eae1a",
+          "id": "A01-valid-once",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "broker_receipt_matrix_covers_worker_and_lead_replay_boundaries",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/grants.test.ts",
+              "outcome": "passed",
+              "title": "returns the exact durable result for an idempotent replay"
+            },
+            {
+              "file": "packages/core/test/grants.test.ts",
+              "outcome": "passed",
+              "title": "allows a session to chain later calls from authority-returned CAS state"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "8605dca1295cfa97f2f54006ed935fd1df2e323996b21cf74f7f9812dd59f2fa",
+          "id": "A02-invalid-no-effect",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "compiled_member_definition_drift_and_unsafe_replay_fail_closed",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/grants.test.ts",
+              "outcome": "passed",
+              "title": "rejects reuse of a call id with different arguments"
+            },
+            {
+              "file": "packages/core/test/grants.test.ts",
+              "outcome": "passed",
+              "title": "rejects cross-session and out-of-scope calls"
+            },
+            {
+              "file": "packages/core/test/path-policy.test.ts",
+              "outcome": "passed",
+              "title": "rejects stale writes, symlinks, escapes, and compiler-owned paths"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "7db11583fbca8cdea233e856df8d4f67fd07d7b59e224efa2fb24f47e0f22bdb",
+          "id": "A03-terminal-closed",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "broker_revocation_marks_in_flight_pending_and_never_waits_on_operation_lock",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "scripts/parity-fixtures.test.ts",
+              "outcome": "passed",
+              "title": "rejects the exact grant and call replay after terminal revocation"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-BRK-0001",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "bcd494222107ec1a3334f1ffeee0f30b82f1efcdc6c162eaac828898577ef149",
+          "id": "A01-profile-valid",
+          "oracle": {
+            "kind": "command-capture",
+            "name": "install-software",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/profile-install.test.ts",
+              "outcome": "passed",
+              "title": "materializes a verified profile without changing Pi settings"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-specification-contract",
+          "contract_sha256": "96352afeeec0c967a0c7e1d9abe5ed28b210d799cc9ae9457b1c023b04a491c7",
+          "id": "A02-pi-preserved",
+          "oracle": null,
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/profile-install.test.ts",
+              "outcome": "passed",
+              "title": "materializes a verified profile without changing Pi settings"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-CFG-0001",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "d851858e34eac13c92a2504556aebda7b4fb885802e35f0b38feb7e4bfc88312",
+          "id": "A01-profile-valid",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "bundled_research_inventory_enforces_empirical_experiment_ontology",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/rule-compiler.test.ts",
+              "outcome": "passed",
+              "title": "projects both frozen profile registries into directly consumable graph schemas"
+            },
+            {
+              "file": "packages/research-profile/test/profile.test.ts",
+              "outcome": "passed",
+              "title": "defines every node for agents with a nonempty semantic description"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "8da800d4a03904b1b88d4feb027fe95fd8b23f8eca5ef6c7c42e40530aeb8074",
+          "id": "A02-reciprocal-edges",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "bidirectional_edge_uses_one_canonical_declaration_and_inverse_alias",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/research-profile/test/profile.test.ts",
+              "outcome": "passed",
+              "title": "stores each reciprocal research fact once through canonical bidirectional edges"
+            },
+            {
+              "file": "packages/core/test/typed-graph.test.ts",
+              "outcome": "passed",
+              "title": "stores one canonical edge while traversing both directions"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-CFG-0002",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-specification-contract",
+          "contract_sha256": "4c1bc6f734ca73b5560305ca95d39b1939259816ccdc3e94987b1254be9cbcff",
+          "id": "A01-overlay-preserved",
+          "oracle": null,
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/profile-install.test.ts",
+              "outcome": "passed",
+              "title": "three-way merges changed defaults while preserving edits, deletions, and additions"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-specification-contract",
+          "contract_sha256": "63e4f807a3c06f7f679499d90f4f102bb41658f8e153abc78f6894d7c438bcaf",
+          "id": "A02-state-preserved",
+          "oracle": null,
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "scripts/parity-fixtures.test.ts",
+              "outcome": "passed",
+              "title": "preserves authority run state byte-for-byte across a signed baseline upgrade"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-CFG-0003",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "d708577d7bba922a6e8dfc36e5e464291f52e89e11c8d1e1e699d77e9bc43843",
+          "id": "A01-no-auto-merge",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "promotion_rejects_a_run_ref_advance_after_preflight",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/isolated-git-lifecycle.test.ts",
+              "outcome": "passed",
+              "title": "keeps target promotion explicit, rejects target movement, and never overwrites a dirty target checkout"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "bad7ddc97fe836a3ceb75cb2a3fefee8b8f8299532e324585b004f80f8597833",
+          "id": "A02-explicit-merge",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "approval_creates_first_permanent_run_ref_and_removes_planning_checkout",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/isolated-git-lifecycle.test.ts",
+              "outcome": "passed",
+              "title": "keeps target promotion explicit, rejects target movement, and never overwrites a dirty target checkout"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-GIT-0001",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "a59ebf3d31163179915fedb24d2f68b76e74ec41f8d91758307181c7f025551c",
+          "id": "A01-history-preserved",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "conflicting_squash_reports_all_sides_without_touching_integration",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/isolated-git-lifecycle.test.ts",
+              "outcome": "passed",
+              "title": "turns target merge conflicts into integration work without changing the target"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "35346752b149d705639e9ec68b17a718dae61f9d4b2743c16d72a93a8827eb76",
+          "id": "A02-one-resolver",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "terminal_recovery_dispatch_suppresses_resolver_chains",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-authority-engine.test.ts",
+              "outcome": "passed",
+              "title": "creates one bounded integration ticket for a target conflict without resolver chains"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-GIT-0002",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "059b6d342312dd21751c05c98752b7ef338023332526670eae41ba8c0c4c1395",
+          "id": "A01-pause-durable",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "lifecycle_play_pause_intent_round_trips_independently_of_orchestration",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-lifecycle.test.ts",
+              "outcome": "passed",
+              "title": "persists pause intent and resumes only explicitly"
+            },
+            {
+              "file": "packages/core/test/pi-managed-session.test.ts",
+              "outcome": "passed",
+              "title": "keeps pause admission closed until an explicit resume"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "3d0571f9e7362144a5213e8de1f57100268fe0111b54e4fe0c4b058a3018091e",
+          "id": "A02-zero-paused-usage",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "planning_pause_wins_while_launcher_runs_without_semantic_completion",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-authority-engine.test.ts",
+              "outcome": "passed",
+              "title": "keeps paused usage at zero across restart and creates only one resume successor"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "857278ccade722fa8870aa684aabbcdb174e6e26af939aa09b971bddcc809b91",
+          "id": "A03-resume-once",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "selected_run_play_pause_is_durable_across_planning_and_active_phases",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-authority-engine.test.ts",
+              "outcome": "passed",
+              "title": "keeps paused usage at zero across restart and creates only one resume successor"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-LIF-0001",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "eddacd5bc5678d2a028c4dafddb95648ce34c33b0befca7e0d0233b69c352d06",
+          "id": "A01-all-aborted",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "direct_pi_exit_refuses_deleted_unregistered_concluded_or_missing_control_state",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/pi-attempt-process.test.ts",
+              "outcome": "passed",
+              "title": "run deletion cannot leave any concurrently active attempt process alive"
+            },
+            {
+              "file": "packages/core/test/pi-attempt-process.test.ts",
+              "outcome": "passed",
+              "title": "kills descendants in the same attempt process group"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "5907bbf48560d4f3087129a4604474b6b7f5172c2bbea7f358549cb01a4c51c5",
+          "id": "A02-no-late-effects",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "deletion_that_wins_before_dispatch_rejects_a_stale_engine_without_recreating_authority",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-authority-engine.test.ts",
+              "outcome": "passed",
+              "title": "rejects every late effect and cached token after active deletion"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-specification-contract",
+          "contract_sha256": "a07681121b0cd5c9f6beac169b2ee9dca0412943342e79726c10359d00a23fbd",
+          "id": "A03-no-late-tokens",
+          "oracle": null,
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-authority-engine.test.ts",
+              "outcome": "passed",
+              "title": "rejects every late effect and cached token after active deletion"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-LIF-0002",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "8ae88464bb293457e6876260e0f616ee900edfb6351771b03dd9573dda5bb372",
+          "id": "A01-answers-bound",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "approval_review_uses_authored_domains_from_one_focused_planning_pass",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/native-run-program.test.ts",
+              "outcome": "passed",
+              "title": "pins coding resolution, injects answered questions once, and recovers the immutable Pi attempt"
+            },
+            {
+              "file": "packages/core/test/native-run-program.test.ts",
+              "outcome": "passed",
+              "title": "compiles a coding plan into deterministic tickets and validates a scoped graph mutation"
+            },
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "reviews agent-authored mini plans with one adaptive Approve or Revise action"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "24eefb79da551fe874306362938201b44f263adeac9b73f6bc5ffe5b8e3e2306",
+          "id": "A02-explicit-approval",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "incomplete_required_plan_refuses_approval_but_keeps_resume_available",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-authority-engine.test.ts",
+              "outcome": "passed",
+              "title": "moves a run from provisional creation through approval to explicit publication"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-specification-contract",
+          "contract_sha256": "08ea1fbc4108888bc80c7c71723e6d7ef63af0a013dbea963ec00fc3616f9221",
+          "id": "A03-planning-budget",
+          "oracle": null,
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/native-run-program.test.ts",
+              "outcome": "passed",
+              "title": "pins coding resolution, injects answered questions once, and recovers the immutable Pi attempt"
+            },
+            {
+              "file": "packages/core/test/pi-launch-spec.test.ts",
+              "outcome": "passed",
+              "title": "hash-binds a positive repository-call budget when the compiler issues one"
+            },
+            {
+              "file": "packages/core/test/pi-managed-session.test.ts",
+              "outcome": "passed",
+              "title": "aborts on the immutable new-token ceiling before the cache-inclusive ceiling"
+            },
+            {
+              "file": "packages/core/test/run-authority-tools.test.ts",
+              "outcome": "passed",
+              "title": "enforces the planning repository-call ceiling while a durable question waits without provider turns"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-PLN-0001",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "632e854743992aab1e00dbfd6cf1ed4c8f5736e89352eff68422e2da42673ec4",
+          "id": "A01-history-preserved",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "approval_review_can_send_explicit_revision_steering",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-authority-engine.test.ts",
+              "outcome": "passed",
+              "title": "moves a run from provisional creation through approval to explicit publication"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-specification-contract",
+          "contract_sha256": "144232ea036372fd24558051ecdc1c3bc663a144ec0f3ca5ceb7f80909911ba8",
+          "id": "A02-successor-session",
+          "oracle": null,
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-authority-engine.test.ts",
+              "outcome": "passed",
+              "title": "moves a run from provisional creation through approval to explicit publication"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-PLN-0002",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "4ca1b9f08e822e13323f15fe84221edccbf428e725778ef9f3febc88c500a340",
+          "id": "A01-exactly-once",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "every_fsynced_publication_boundary_recovers_and_retries_idempotently",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/file-journal.test.ts",
+              "outcome": "passed",
+              "title": "publishes a prepared multi-file transaction and replays commit idempotently"
+            },
+            {
+              "file": "packages/core/test/isolated-git-lifecycle.test.ts",
+              "outcome": "passed",
+              "title": "recovers crash-forward approval and publication intents from exact state"
+            },
+            {
+              "file": "packages/core/test/isolated-git-lifecycle.test.ts",
+              "outcome": "passed",
+              "title": "records failed publication compensation as a forward commit and recovers it exactly once"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "d4a954397521668ce8fac496b1941a28b6b7797d70ac3a9cca89af2e00007481",
+          "id": "A02-forward-rollback",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "catalog_forward_rollback_archives_causal_work_and_preserves_later_unrelated_state",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/isolated-git-lifecycle.test.ts",
+              "outcome": "passed",
+              "title": "records failed publication compensation as a forward commit and recovers it exactly once"
+            },
+            {
+              "file": "packages/core/test/isolated-git-lifecycle.test.ts",
+              "outcome": "passed",
+              "title": "preserves ambiguous work added after a publication crash instead of resetting it"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-RCV-0001",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "4c7b1dc10c4584fa98f1ce71036b37de11d40ab5b2bcda49f339e3cc79233a63",
+          "id": "A01-typed-formulation",
+          "oracle": {
+            "kind": "command-capture",
+            "name": "compile-ticket-contract",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/rule-compiler.test.ts",
+              "outcome": "passed",
+              "title": "compiles the research formulation ticket once and independently of graph input order"
+            },
+            {
+              "file": "packages/core/test/native-run-program.test.ts",
+              "outcome": "passed",
+              "title": "uses the same native compiler program for the research profile"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "1daf081d7be020e4c3a45f9e586d167881eda7f651886af570d28be07f5dac7a",
+          "id": "A02-gate-first",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "current_receipt_is_exact_between_connected_gate_nodes",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/domain-flow-parity.test.ts",
+              "outcome": "passed",
+              "title": "keeps expected-red research gates blocked until a typed passing verifier receipt exists"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "fcd1f4d558600f295e8c725c301abe62a6875d17f87d794118ae3c77553aa0ed",
+          "id": "A03-one-bidirectional-edge",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "bidirectional_edge_uses_one_canonical_declaration_and_inverse_alias",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/research-profile/test/profile.test.ts",
+              "outcome": "passed",
+              "title": "stores each reciprocal research fact once through canonical bidirectional edges"
+            },
+            {
+              "file": "packages/core/test/typed-graph.test.ts",
+              "outcome": "passed",
+              "title": "rejects redundant inverse storage and stale deltas"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-RES-0001",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "b776e67dba46577cd36c53db8a45b63308e3af85b21cd1762f22b38245d0fe49",
+          "id": "A01-exact-prerequisites",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "engine::tests::scientific_measurements_artifacts_and_receipt_integrity_are_bound",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/native-run-program.test.ts",
+              "outcome": "passed",
+              "title": "uses the same native compiler program for the research profile"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "98bf845ae896b57c07ca6ef671d000f2c0d36aedc2719c2e4800c08b4b33be61",
+          "id": "A02-reviewed-promotion",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "configured_review_effects_own_promotion_and_bind_it_to_the_exact_pass",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/domain-flow-parity.test.ts",
+              "outcome": "passed",
+              "title": "lets only an authenticated passing review promote the authored research evidence candidate"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "da329539a963a9c638cc1fce114ccb4d18fee7511f2e2c2c6d0887192903153e",
+          "id": "A03-deterministic-report",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "report_publication_is_deterministic_and_stops_when_current",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/report-compiler.test.ts",
+              "outcome": "passed",
+              "title": "publishes byte-stable JSON and Markdown ledgers from graph and ticket state"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "45a0071ae6dbeed94c4ebaead769aba9542c1107e7d207b101a4eccb30ab58f8",
+          "id": "A04-supported-conclusion",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "conclusion_review_rejects_every_missing_or_extra_exact_coverage_dimension",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/domain-flow-parity.test.ts",
+              "outcome": "passed",
+              "title": "accepts research conclusions only with exact current citations, dispositions, and limitations"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-RES-0002",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "90e5157bc68184834955f30c94f8032042b6a28c93419ddb936bfb76ac623cec",
+          "id": "A01-target-bound",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "planning_worktree_is_detached_at_base_without_creating_a_reference",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/isolated-git-lifecycle.test.ts",
+              "outcome": "passed",
+              "title": "keeps planning detached and creates the first permanent run ref only on approval"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-specification-contract",
+          "contract_sha256": "1bc04b71727d0877e54f088177535faf2a91e91b1f17005d8271fb6a41321816",
+          "id": "A02-worktree-isolated",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "planning_worktree_is_detached_at_base_without_creating_a_reference",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/isolated-git-lifecycle.test.ts",
+              "outcome": "passed",
+              "title": "keeps planning detached and creates the first permanent run ref only on approval"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-RUN-0001",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "3b1c4377a5eeed77da15b0d1a7f259e25e3ed7972698d3139589f21eceeeddb3",
+          "id": "A01-ready-only",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "eligible_tickets_are_a_deterministic_maximal_disjoint_set",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-store-scheduler.test.ts",
+              "outcome": "passed",
+              "title": "admits only dependency-ready work under exact parallelism"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "13831a47951b92eca089a54282473071146a115ae8f4b342979c08b7ee9a4954",
+          "id": "A02-parallel-bound",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "bounded_dispatch_truncates_the_already_ranked_order",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-store-scheduler.test.ts",
+              "outcome": "passed",
+              "title": "admits only dependency-ready work under exact parallelism"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-SCH-0001",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "05fff4cd6b19ca0a99eccd4200d05b231f30572d2bd9ce1524b3ef6cf2ce0161",
+          "id": "A01-exactly-once",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "automatic_supervision_enqueue_is_deduplicated_per_run",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-store-scheduler.test.ts",
+              "outcome": "passed",
+              "title": "advances steps and makes dependents ready without a Lead scheduling loop"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-specification-contract",
+          "contract_sha256": "70f86f90b105f330c54a931c4969b66e47ff108621f49209ad3d2b4471a6eab7",
+          "id": "A02-zero-relay",
+          "oracle": null,
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-store-scheduler.test.ts",
+              "outcome": "passed",
+              "title": "dispatches and reconciles with zero Lead or supervisor model calls and tokens"
+            },
+            {
+              "file": "packages/core/test/run-authority-engine.test.ts",
+              "outcome": "passed",
+              "title": "moves a run from provisional creation through approval to explicit publication"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-SCH-0002",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-specification-contract",
+          "contract_sha256": "d3c3b672ab704c75e09b19dfed1dbd0228cac46fa3a68aa1fdd85e0162c71716",
+          "id": "A01-full-transcript",
+          "oracle": null,
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/session-transcript.test.ts",
+              "outcome": "passed",
+              "title": "preserves complete entries and follows the selected path"
+            },
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "renders the complete native Pi transcript and sends composer text through agent authority"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-specification-contract",
+          "contract_sha256": "df52e5aeb1a63db19480f668b8b1a86cdddde0f1657084c8b0917c6281e58951",
+          "id": "A02-usage-complete",
+          "oracle": null,
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/session-transcript.test.ts",
+              "outcome": "passed",
+              "title": "keeps cache-inclusive and new-token totals separate"
+            },
+            {
+              "file": "packages/core/test/pi-managed-session.test.ts",
+              "outcome": "passed",
+              "title": "persists the full attempt mapping and accounts for cached and new tokens separately"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-specification-contract",
+          "contract_sha256": "05aa77734c1e8ce6c8d492db1dd516127304bc24458f135b6df3174682847689",
+          "id": "A03-authority-reissued",
+          "oracle": null,
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/pi-compaction.test.ts",
+              "outcome": "passed",
+              "title": "creates structured checkpoints and reissues exact authoritative context"
+            },
+            {
+              "file": "packages/core/test/pi-production-session.test.ts",
+              "outcome": "passed",
+              "title": "authenticates a launch-bound structured compaction as a safe continuation boundary"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-specification-contract",
+          "contract_sha256": "b15ec1824473615cf776cf30b4a97403724c25ba17df12cede362a24c0e6b365",
+          "id": "A04-linear-attempt",
+          "oracle": null,
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/pi-production-session.test.ts",
+              "outcome": "passed",
+              "title": "creates a fresh persisted linear session without making a provider call"
+            },
+            {
+              "file": "packages/core/test/pi-launch-spec.test.ts",
+              "outcome": "passed",
+              "title": "hash-binds a parent attempt/session/entry branch without enabling ambient Pi branching"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-SES-0001",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "53484112b86b4649f2aa21a6080ed596c5ac3ed20bd0e2a903c1e1204848c5b9",
+          "id": "A01-diagnosis-first",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "software_prompt_conforming_unresolved_bug_fix_seed_compiles_without_a_speculative_change",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/domain-flow-parity.test.ts",
+              "outcome": "passed",
+              "title": "emits software implementation only after symptom, causal diagnosis, and expected-red proof"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "645e80eb3224f5904c588b76d537449b612cee71409b7fa5048283757397b3a8",
+          "id": "A02-regression-proof",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "software_adverse_proof_receipt_fails_closed_without_fabricating_semantic_status",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/domain-flow-parity.test.ts",
+              "outcome": "passed",
+              "title": "keeps software closure blocked until regression, broader checks, and exact review coverage are current"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "7056df0ade01a0b1c7bad8de0edf807a1839fe0d0bc6c6ab1eb9cc1fd463a7a4",
+          "id": "A03-delivery-explicit",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "target_sync_creates_a_two_parent_commit_and_promotion_updates_the_clean_target",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-authority-engine.test.ts",
+              "outcome": "passed",
+              "title": "moves a run from provisional creation through approval to explicit publication"
+            },
+            {
+              "file": "packages/core/test/run-lifecycle.test.ts",
+              "outcome": "passed",
+              "title": "requires explicit merge authorization after verification"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-SWF-0001",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "c23a2bd041aa10eec2f16c0c012f5433a032089515dc3a4f0ab8404e61a2775a",
+          "id": "A01-plan-complete",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "engine::tests::planning_output_keeps_the_full_plan_separate_from_the_operator_review",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/native-run-program.test.ts",
+              "outcome": "passed",
+              "title": "compiles a coding plan into deterministic tickets and validates a scoped graph mutation"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "0706613d36aee75ea3a57f561877ba2e093fd55a6c5478651bb73c100bbacf63",
+          "id": "A02-dag-bounded",
+          "oracle": {
+            "kind": "command-capture",
+            "name": "compile-ticket-contract",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/native-run-program.test.ts",
+              "outcome": "passed",
+              "title": "compiles a coding plan into deterministic tickets and validates a scoped graph mutation"
+            },
+            {
+              "file": "packages/core/test/run-store-scheduler.test.ts",
+              "outcome": "passed",
+              "title": "admits only dependency-ready work under exact parallelism"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "a9cacb893bed108aace46af64d32df136cf56c847b8efb727692d8b74d190093",
+          "id": "A03-proof-complete",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "software_adverse_proof_receipt_fails_closed_without_fabricating_semantic_status",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/domain-flow-parity.test.ts",
+              "outcome": "passed",
+              "title": "keeps software closure blocked until regression, broader checks, and exact review coverage are current"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-SWF-0002",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "bd848f3c4427ff0f53ea0c9cf3bf475c4e0be533f8a0feb1457f8f7dd4efa457",
+          "id": "A01-failure-reopens",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "review_rework_circuit_allows_one_revision_then_preserves_the_second_candidate",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-store-scheduler.test.ts",
+              "outcome": "passed",
+              "title": "reopens one failed review and accepts only a fresh passing successor"
+            },
+            {
+              "file": "packages/core/test/run-authority-engine.test.ts",
+              "outcome": "passed",
+              "title": "executes exactly one review rework before closing on a fresh passing review"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "3aa232f39393afb1917a33689175da6b405e6dceecee60bc03e1a3cee88775fd",
+          "id": "A02-current-pass-closes",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "terminal_board_requires_current_workflow_evidence_for_every_closed_ticket",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/native-run-program.test.ts",
+              "outcome": "passed",
+              "title": "compiles a coding plan into deterministic tickets and validates a scoped graph mutation"
+            },
+            {
+              "file": "packages/core/test/native-run-program.test.ts",
+              "outcome": "passed",
+              "title": "uses the same native compiler program for the research profile"
+            },
+            {
+              "file": "packages/core/test/run-authority-engine.test.ts",
+              "outcome": "passed",
+              "title": "executes exactly one review rework before closing on a fresh passing review"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "de25b4dad2bb0d5287d8c6f5b12b2ccb134ad26e4d8315b5db3524a1e9906c6f",
+          "id": "A03-one-transaction",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "catalog_formulation_ticket_squash_integrates_from_ticket_worktree",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-authority-engine.test.ts",
+              "outcome": "passed",
+              "title": "executes exactly one review rework before closing on a fresh passing review"
+            },
+            {
+              "file": "packages/core/test/isolated-git-lifecycle.test.ts",
+              "outcome": "passed",
+              "title": "shares one checkout across a ticket cycle and publishes one scoped squash commit"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-TKT-0001",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "21fdb2ff1957ff4bfea2e03ac2e4995ff9ae7897e7ba48e66b8efc7999252bae",
+          "id": "A01-roomy-layout",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "operate_layout_keeps_graph_and_metadata_separate",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "renders equal wide columns and the requested overview, activity, agents, questions, and graph semantics"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "88a990c7e788116ca523584a08dfc07a9019211e32b6fd505385e8639c5a13b0",
+          "id": "A02-semantic-graph",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "bundled_cockpits_use_the_autoresearch_relationship_outline",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "draws relationship lines first and overlays concise node markers and titles"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-specification-contract",
+          "contract_sha256": "3626ae8090f1034defdf6c5f7189276b50854f259e3ac6e7ebf5c8df2a6d5565",
+          "id": "A03-work-titles",
+          "oracle": null,
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "keeps active and historical agents with concise ticket-aware work titles"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "5031ebccc4ad5c3b528004d99dd27f776a3f589e873001e5fb19577a330be9fd",
+          "id": "A04-compact-usable",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "compact_operate_dashboard_shows_friendly_live_work_and_pending_question_without_ids",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "keeps Start and the footer visible while every compact New Run stage is reachable"
+            },
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "renders equal wide columns and the requested overview, activity, agents, questions, and graph semantics"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-TUI-0001",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "7a59a90807eb029ca7967f7de8c4ca87b11ef0f1689e1867c1caa3658e26071c",
+          "id": "A01-panel-complete",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "batched_questions_render_as_a_horizontal_carousel_with_labeled_options",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "renders equal wide columns and the requested overview, activity, agents, questions, and graph semantics"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "d8fb6d84d9fea76608d055fb3de4c75a189f54a9a6824fd2212ec2a6266ba218",
+          "id": "A02-modal-equivalent",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "questions_panel_and_modal_share_the_same_choice_cursor",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "answers None of these with free-form notes from the conditional question panel"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "d0c7ae29c442e116f6487c4307bad7e77d66281752b26ceefce5064ab06a19a4",
+          "id": "A03-answer-durable",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "final_question_submission_closes_before_the_worker_event_returns",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "answers None of these with free-form notes from the conditional question panel"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-TUI-0002",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-specification-contract",
+          "contract_sha256": "172e7813ebf958555f528032dcb2e5e119b8ed4f4f5d8df71e6d62443843e7da",
+          "id": "A01-authored-mini-plans",
+          "oracle": null,
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "reviews agent-authored mini plans with one adaptive Approve or Revise action"
+            },
+            {
+              "file": "packages/core/test/native-run-program.test.ts",
+              "outcome": "passed",
+              "title": "compiles a coding plan into deterministic tickets and validates a scoped graph mutation"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-specification-contract",
+          "contract_sha256": "c4c4da853123402a4051204a85d8a9e80d6c730b4cdee75fa66c460e84dad5dd",
+          "id": "A02-one-adaptive-action",
+          "oracle": null,
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "reviews agent-authored mini plans with one adaptive Approve or Revise action"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "f3b941535f58e1bd77d18b8b7f47d30f89315e11d70b3943c57d6439d6f94868",
+          "id": "A03-multiline-revision",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "approval_revision_editor_wraps_steering_and_shows_one_adaptive_action",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "submits multiline plan steering and returns review to visible planning without approval"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-TUI-0003",
+      "outcome": "passing"
+    },
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "a4c811b541b12e5a5f849baee56b9f17eb869bce4b1f93b8dfcd6970b84fd697",
+          "id": "A01-guided-resources",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "configure_layout_is_domain_first_and_excludes_the_run_graph",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "edits semantic configuration as an in-memory draft and publishes it with hidden CAS"
+            },
+            {
+              "file": "packages/core/test/profile-config-edit.test.ts",
+              "outcome": "passed",
+              "title": "catalogs semantic YAML domains without exposing compiler or ambient Pi state"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "a9fb0f388201bac31846f5011248ff3495f3826180741ed35dd6e8ac9338c9f5",
+          "id": "A02-complete-launch",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "new_run_agent_model_and_reasoning_cycle_independently",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "opens the complete guided New Run form and inserts a provisional row before authority answers"
+            },
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "keeps Start and the footer visible while every compact New Run stage is reachable"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "8b03520fa55b472c81eb63b8ad66724e628819a57c612f712d58530239bc2a16",
+          "id": "A03-provisional-row",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "new_run_enter_submits_only_from_the_start_button_and_closes_on_acceptance",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "opens the complete guided New Run form and inserts a provisional row before authority answers"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-TUI-0004",
+      "outcome": "passing"
+    }
+  ],
+  "isolation": {
+    "live_projects": false,
+    "provider_calls": 0,
+    "temporary_pi_homes": true,
+    "temporary_projects": true
+  },
+  "normalization": "koni.parity-normalization.v2",
+  "oracle": {
+    "commit": "fcc425e51114bcedb9aeae44d6e8c8418a525e6b",
+    "semantic_suite_sha256": "a675ad85b1834a113c98a4f33740c77f9bfa0f119a5873e324931ded2bb4c46a"
+  },
+  "protocol": "koni.typescript-parity-capture.v1",
+  "schema_version": "1.0",
+  "capture_sha256": "fa8a2cf061e95c12bd161e8c415e5c7347b5a572e52b0959e4a439d79dfd458d"
+}

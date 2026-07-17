@@ -1,0 +1,94 @@
+{
+  "cases": [
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "8ae88464bb293457e6876260e0f616ee900edfb6351771b03dd9573dda5bb372",
+          "id": "A01-answers-bound",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "approval_review_uses_authored_domains_from_one_focused_planning_pass",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/native-run-program.test.ts",
+              "outcome": "passed",
+              "title": "pins coding resolution, injects answered questions once, and recovers the immutable Pi attempt"
+            },
+            {
+              "file": "packages/core/test/native-run-program.test.ts",
+              "outcome": "passed",
+              "title": "compiles a coding plan into deterministic tickets and validates a scoped graph mutation"
+            },
+            {
+              "file": "packages/core/test/control-center-surfaces.test.ts",
+              "outcome": "passed",
+              "title": "reviews agent-authored mini plans with one adaptive Approve or Revise action"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "24eefb79da551fe874306362938201b44f263adeac9b73f6bc5ffe5b8e3e2306",
+          "id": "A02-explicit-approval",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "incomplete_required_plan_refuses_approval_but_keeps_resume_available",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-authority-engine.test.ts",
+              "outcome": "passed",
+              "title": "moves a run from provisional creation through approval to explicit publication"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-specification-contract",
+          "contract_sha256": "08ea1fbc4108888bc80c7c71723e6d7ef63af0a013dbea963ec00fc3616f9221",
+          "id": "A03-planning-budget",
+          "oracle": null,
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/native-run-program.test.ts",
+              "outcome": "passed",
+              "title": "pins coding resolution, injects answered questions once, and recovers the immutable Pi attempt"
+            },
+            {
+              "file": "packages/core/test/pi-launch-spec.test.ts",
+              "outcome": "passed",
+              "title": "hash-binds a positive repository-call budget when the compiler issues one"
+            },
+            {
+              "file": "packages/core/test/run-authority-tools.test.ts",
+              "outcome": "passed",
+              "title": "enforces the planning repository-call ceiling while a durable question waits without provider turns"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-PLN-0001",
+      "outcome": "passing"
+    }
+  ],
+  "isolation": {
+    "live_projects": false,
+    "provider_calls": 0,
+    "temporary_pi_homes": true,
+    "temporary_projects": true
+  },
+  "normalization": "koni.parity-normalization.v2",
+  "oracle": {
+    "commit": "fcc425e51114bcedb9aeae44d6e8c8418a525e6b",
+    "semantic_suite_sha256": "a675ad85b1834a113c98a4f33740c77f9bfa0f119a5873e324931ded2bb4c46a"
+  },
+  "protocol": "koni.typescript-parity-capture.v1",
+  "schema_version": "1.0",
+  "capture_sha256": "cea46f9680fbda250986b4d80c473bfb62ca0ea6408062b1f68ec411efffcb39"
+}

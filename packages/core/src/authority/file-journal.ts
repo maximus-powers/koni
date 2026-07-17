@@ -216,16 +216,31 @@ export class FileTransactionStore {
         await this.commit(id);
         recovered.push(id);
       }
+      // A crash after the durable committed marker but before ordinary cleanup
+      // must not leave an ambiguous transaction forever. Once commit has been
+      // replayed (or was already complete), retirement is safe and recoverable.
+      await this.cleanupCommitted(id);
     }
     return recovered;
   }
 
   public async cleanupCommitted(id: string): Promise<void> {
-    const journal = await readJournal(path.join(this.#transactionDirectory(id), "journal.json"));
+    const transactionDirectory = this.#transactionDirectory(id);
+    let metadata;
+    try {
+      metadata = await lstat(transactionDirectory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new FileJournalError("transaction_type", `transaction path is not a real directory: ${id}`);
+    }
+    const journal = await readJournal(path.join(transactionDirectory, "journal.json"));
     if (journal.status !== "committed") {
       throw new FileJournalError("transaction_active", `transaction is not committed: ${id}`);
     }
-    await rm(this.#transactionDirectory(id), { recursive: true, force: true });
+    await rm(transactionDirectory, { recursive: true, force: true });
     await syncDirectory(this.#transactionRoot);
   }
 

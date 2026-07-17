@@ -7,9 +7,10 @@ Status: active on branch `pi-native-port`.
 ## Lease
 
 This lane owns `reference/parity/**`, `scripts/parity-ledger.mjs`,
-`scripts/parity-ledger.test.mjs`, and append-only coordination notes. It does
-not own Rust behavior, `packages/**`, root package/workspace files, live
-projects, credentials, installed binaries, runs, models, terminals, or cmux.
+`scripts/parity-ledger.test.mjs`, `scripts/capture-rust-oracle*.mjs`, and
+append-only coordination notes. It does not own Rust behavior, `packages/**`,
+root package/workspace files, live projects, credentials, installed binaries,
+runs, models, terminals, or cmux.
 
 ## Frozen boundary
 
@@ -46,3 +47,50 @@ Next work is the first no-model oracle capture adapter for deterministic
 install, validate, compile, and run-control projections. Capture generation is
 not permitted to use the mutable port checkout as the oracle or to touch a
 user project/Pi home.
+
+## 2026-07-16 — deterministic command capture green and reproducible
+
+The first executable oracle artifact is checked in at
+`reference/parity/oracle/rust-oracle-baseline/deterministic-command-surfaces.json`.
+It was independently regenerated twice from detached tag `rust-oracle-baseline`;
+both complete normalized files have SHA-256
+`04c01423ebf329331f5d7f3a663d411df841c9bc9d6693fb91904fa85eb716c8`.
+
+The driver captures the fresh Software install tree, successful profile
+compiler output, initialized compatibility-run validation, the empty registry
+projection, and exact fail-closed unknown-run pause/play/cockpit errors. All
+but one installed resource use raw byte digests. The sole exception is
+`.koni/migration-receipt.json`, whose generated migration UUID/path is
+narrowly normalized; repeat testing showed every other installed byte was
+identical.
+
+Positive behavior is also executable without a provider: the capture runs the
+tagged exact Core contracts
+`selected_proof_that_is_also_a_ticket_target_compiles_once_deterministically`
+and `selected_run_play_pause_is_durable_across_planning_and_active_phases` and
+records only their semantic pass results, excluding build/timing noise.
+
+An attempted use of `plan-run` was rejected from the capture design because
+the frozen CLI crosses into planning-agent/Pi-host execution after durable
+setup. It is not acceptable to risk a provider call merely to seed a positive
+control fixture. The final driver statically forbids planning, spawn, approval,
+resume-planning, and supervision commands; positive CLI lifecycle projections
+remain specified by `KPAR-LIF-*` until a no-provider fixture adapter can expose
+them, while the underlying positive Rust contract is already executable.
+
+Evidence:
+
+- Two isolated generation passes: byte-identical capture digest above.
+- `node --test scripts/capture-rust-oracle.test.mjs`: 5/5 green.
+- `node --test scripts/parity-ledger.test.mjs`: 9/9 green, including capture
+  provenance/isolation rejection tests.
+- `node scripts/parity-ledger.mjs validate --json`: green.
+- `npm run check`: green; Core 108/108, both profile packages, manifest tests,
+  parity validation, and ledger tests.
+
+**Concurrent-state note:** a later composed check after the managed-session
+lane began requiring `KoniContextProvider.loadRecoveryState` is temporarily
+red in three mocks owned by that lane (`pi-compaction`, `pi-managed-session`,
+and `pi-production-session`). The owner and primary integrator were notified;
+no package source or test was changed from this parity lease. All parity-only
+validation and 14 tests remain green.

@@ -1,0 +1,61 @@
+{
+  "cases": [
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "05fff4cd6b19ca0a99eccd4200d05b231f30572d2bd9ce1524b3ef6cf2ce0161",
+          "id": "A01-exactly-once",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "automatic_supervision_enqueue_is_deduplicated_per_run",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-store-scheduler.test.ts",
+              "outcome": "passed",
+              "title": "advances steps and makes dependents ready without a Lead scheduling loop"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-specification-contract",
+          "contract_sha256": "70f86f90b105f330c54a931c4969b66e47ff108621f49209ad3d2b4471a6eab7",
+          "id": "A02-zero-relay",
+          "oracle": null,
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-store-scheduler.test.ts",
+              "outcome": "passed",
+              "title": "dispatches and reconciles with zero Lead or supervisor model calls and tokens"
+            },
+            {
+              "file": "packages/core/test/run-authority-engine.test.ts",
+              "outcome": "passed",
+              "title": "moves a run from provisional creation through approval to explicit publication"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-SCH-0002",
+      "outcome": "passing"
+    }
+  ],
+  "isolation": {
+    "live_projects": false,
+    "provider_calls": 0,
+    "temporary_pi_homes": true,
+    "temporary_projects": true
+  },
+  "normalization": "koni.parity-normalization.v2",
+  "oracle": {
+    "commit": "fcc425e51114bcedb9aeae44d6e8c8418a525e6b",
+    "semantic_suite_sha256": "a675ad85b1834a113c98a4f33740c77f9bfa0f119a5873e324931ded2bb4c46a"
+  },
+  "protocol": "koni.typescript-parity-capture.v1",
+  "schema_version": "1.0",
+  "capture_sha256": "bf5196e516ff76194c15d078159dba32203109913d549cc6001e733e976577f8"
+}

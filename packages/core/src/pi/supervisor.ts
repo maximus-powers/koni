@@ -1,4 +1,5 @@
 import type { AgentLaunchSpec } from "./launch-spec.js";
+import type { KoniAuthorizedMessage } from "./compaction.js";
 import {
   ManagedPiSession,
   type ManagedPiSessionFactory,
@@ -41,6 +42,7 @@ export class ManagedSessionSupervisor {
     runId: string;
     specHash: string;
     epoch: number;
+    mode: "fresh" | "recover";
     promise: Promise<ManagedSessionHandle>;
   }>();
   readonly #runEpochs = new Map<string, number>();
@@ -58,6 +60,22 @@ export class ManagedSessionSupervisor {
     spec: AgentLaunchSpec,
     options: ManagedPiSessionFactoryOptions & { factory?: ManagedPiSessionFactory },
   ): Promise<ManagedSessionHandle> {
+    return this.#admit(spec, options, "fresh");
+  }
+
+  /** Reattach one durable attempt after a process restart without replaying completed work. */
+  public recover(
+    spec: AgentLaunchSpec,
+    options: ManagedPiSessionFactoryOptions & { factory?: ManagedPiSessionFactory },
+  ): Promise<ManagedSessionHandle> {
+    return this.#admit(spec, options, "recover");
+  }
+
+  #admit(
+    spec: AgentLaunchSpec,
+    options: ManagedPiSessionFactoryOptions & { factory?: ManagedPiSessionFactory },
+    mode: "fresh" | "recover",
+  ): Promise<ManagedSessionHandle> {
     const { runId, attemptId } = spec.identity;
     this.#assertRunMayLaunch(runId);
     const existing = this.#sessions.get(attemptId);
@@ -69,15 +87,15 @@ export class ManagedSessionSupervisor {
     }
     const pending = this.#pending.get(attemptId);
     if (pending !== undefined) {
-      if (pending.specHash !== spec.specHash || pending.runId !== runId) {
+      if (pending.specHash !== spec.specHash || pending.runId !== runId || pending.mode !== mode) {
         return Promise.reject(new SessionSupervisorError("attempt_reuse", `pending attempt ${attemptId} was rebound`));
       }
       return pending.promise;
     }
 
     const epoch = this.#runEpoch(runId);
-    const promise = this.#createAndStart(spec, options, epoch);
-    this.#pending.set(attemptId, { runId, specHash: spec.specHash, epoch, promise });
+    const promise = this.#createAndStart(spec, options, epoch, mode);
+    this.#pending.set(attemptId, { runId, specHash: spec.specHash, epoch, mode, promise });
     void promise.finally(() => {
       if (this.#pending.get(attemptId)?.promise === promise) {
         this.#pending.delete(attemptId);
@@ -97,14 +115,14 @@ export class ManagedSessionSupervisor {
       : sessions.filter((entry) => entry.session.spec.identity.runId === runId);
   }
 
-  public async steer(attemptId: string, text: string): Promise<void> {
+  public async steer(attemptId: string, message: KoniAuthorizedMessage): Promise<void> {
     const session = this.#requiredLiveAttempt(attemptId);
-    await session.steer(text);
+    await session.steer(message);
   }
 
-  public async followUp(attemptId: string, text: string): Promise<void> {
+  public async followUp(attemptId: string, message: KoniAuthorizedMessage): Promise<void> {
     const session = this.#requiredLiveAttempt(attemptId);
-    await session.followUp(text);
+    await session.followUp(message);
   }
 
   /** Pause admission and idempotently abort every in-flight or currently creating attempt. */
@@ -154,26 +172,52 @@ export class ManagedSessionSupervisor {
     for (const pending of this.#pending.values()) {
       runIds.add(pending.runId);
     }
-    await Promise.all([...runIds].map((runId) => this.abortByRun(runId, "supervisor disposed")));
-    await Promise.all([...this.#sessions.values()].map(async (entry) => entry.session.dispose()));
+    const aborted = await Promise.allSettled(
+      [...runIds].map((runId) => this.abortByRun(runId, "supervisor disposed")),
+    );
+    const disposed = await Promise.allSettled(
+      [...this.#sessions.values()].map(async (entry) => entry.session.dispose()),
+    );
     this.#sessions.clear();
     this.#listeners.clear();
+    const failure = [...aborted, ...disposed].find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failure !== undefined) throw failure.reason;
   }
 
   async #createAndStart(
     spec: AgentLaunchSpec,
     options: ManagedPiSessionFactoryOptions & { factory?: ManagedPiSessionFactory },
     launchEpoch: number,
+    mode: "fresh" | "recover",
   ): Promise<ManagedSessionHandle> {
-    const session = await ManagedPiSession.create(spec, options);
+    const session = mode === "fresh"
+      ? await ManagedPiSession.create(spec, options)
+      : await ManagedPiSession.recover(spec, options);
     const { runId, attemptId } = spec.identity;
     if (
       this.#deletedRuns.has(runId) ||
       this.#suspendedRuns.has(runId) ||
       this.#runEpoch(runId) !== launchEpoch
     ) {
-      await session.abort(this.#deletedRuns.has(runId) ? "run deleted" : "run launch revoked");
-      await session.dispose();
+      let cleanupError: unknown;
+      try {
+        await session.abort(this.#deletedRuns.has(runId) ? "run deleted" : "run launch revoked");
+      } catch (error) {
+        cleanupError = error;
+      }
+      try {
+        await session.dispose();
+      } catch (error) {
+        cleanupError ??= error;
+      }
+      if (cleanupError !== undefined) {
+        throw new SessionSupervisorError(
+          "cleanup_failed",
+          `run ${runId} revoked ${attemptId}, but its Pi session cleanup failed: ${errorText(cleanupError)}`,
+        );
+      }
       throw new SessionSupervisorError(
         this.#deletedRuns.has(runId) ? "run_deleted" : "launch_revoked",
         `run ${runId} stopped admitting attempts while ${attemptId} was being created`,
@@ -186,6 +230,13 @@ export class ManagedSessionSupervisor {
     session.subscribe((event) => this.#emit(session, event));
     const handle: ManagedSessionHandle = { session, outcome: session.start() };
     this.#sessions.set(attemptId, handle);
+    void handle.outcome.finally(() => {
+      if (this.#sessions.get(attemptId) === handle) {
+        // Durable attempt/history state belongs to authority. Retaining settled provider/session
+        // objects here only leaks memory and makes a dead attempt look live to control callers.
+        this.#sessions.delete(attemptId);
+      }
+    }).catch(() => undefined);
     return handle;
   }
 
@@ -199,11 +250,22 @@ export class ManagedSessionSupervisor {
     const entries = [...this.#sessions.entries()]
       .filter(([, entry]) => entry.session.spec.identity.runId === runId);
     await Promise.all(entries.map(async ([attemptId, entry]) => {
-      await entry.session.abort(reason);
-      if (dispose) {
-        await entry.session.dispose();
-        this.#sessions.delete(attemptId);
+      let cleanupError: unknown;
+      try {
+        await entry.session.abort(reason);
+      } catch (error) {
+        cleanupError = error;
       }
+      if (dispose) {
+        try {
+          await entry.session.dispose();
+        } catch (error) {
+          cleanupError ??= error;
+        } finally {
+          this.#sessions.delete(attemptId);
+        }
+      }
+      if (cleanupError !== undefined) throw cleanupError;
     }));
   }
 
@@ -235,7 +297,11 @@ export class ManagedSessionSupervisor {
     const identity = session.spec.identity;
     const envelope: SupervisorEvent = { ...identity, event };
     for (const listener of this.#listeners) {
-      listener(envelope);
+      try {
+        listener(envelope);
+      } catch {
+        // A TUI/telemetry observer cannot enter the authority or session lifecycle.
+      }
     }
   }
 
@@ -246,4 +312,8 @@ export class ManagedSessionSupervisor {
   #bumpRunEpoch(runId: string): void {
     this.#runEpochs.set(runId, this.#runEpoch(runId) + 1);
   }
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

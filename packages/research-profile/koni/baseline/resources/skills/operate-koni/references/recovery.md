@@ -6,21 +6,26 @@ Recover from the narrowest durable boundary. Inspect evidence first and never er
 
 | Condition | Action |
 | --- | --- |
-| Planning pass interrupted, incomplete, or timed out | Run `koni resume-planning <run-id> --root .`; preserve the captured session when valid |
+| Planning pass interrupted, incomplete, or timed out | In `/koni` or `koni tui`, select the run, inspect its activity and agent transcript, then use Space to pause/resume through the durable recovery boundary |
 | Run waiting for a structured answer | Answer the open question, then allow the bound session/stage to resume |
-| Operator needs to stop new dispatch | Run `koni pause-run <run-id> --root .`; allow active agents to reach a durable boundary |
-| Paused run may continue | Run `koni play-run <run-id> --root .` after validating its state |
-| Automatic stage failed or blocked | Address its recorded cause, then run `koni retry-supervised-stage <run-id> <stage-id> --root .` |
-| Ticket/action has a configured recovery path | Invoke the configured `recover` or recovery action; retain its journal and compensation receipts |
+| Operator needs to stop new dispatch | Select the run and press Space; wait until its row is durably paused |
+| Paused run may continue | Validate its state, select it, and press Space to resume through a fresh authorized successor attempt |
+| Automatic stage failed or blocked | Inspect the recorded cause and configured recovery evidence. Use only a specific action surfaced by the control center; if none is offered, keep the run paused and report the blocker rather than inventing a retry command |
+| Ticket/action has a configured recovery path | Allow Core to execute the compiler-owned recovery/forward-compensation boundary and retain its journal and receipts; never invoke profile action IDs as shell commands |
 | External provider loop is waiting | Inspect its exact phase and published commit, then drive one transition |
-| Run may be removed | Preview first with `koni delete-run <run-id> --root . --preview` |
-| Semantic change must be reversed | Use the configured forward-reversal action with an exact target and nonempty reason; do not rewrite history |
+| Run may be removed | Select the run, press `d`, read the confirmation, and confirm only when its agents and work should be stopped and deleted |
+| Semantic change must be reversed | Pause and use only a compiler-surfaced forward-compensation action with exact evidence; current Core exposes no generic rollback CLI and never rewrites history |
 
 > **Recovery/retry clarification — 2026-07-15.** Recovery repairs ticket, journal, and runtime
 > state; it never silently retries a terminal supervised stage. When its JSON result reports
 > `recovery_advisory.retry_required: true`, invoke the named `action` for the reported `stage_id`
 > (or run the included command). This second explicit boundary revalidates recovery and the pinned
 > stage input before dispatch resumes.
+
+> **Pi-native command supersession — 2026-07-16:** Historical Rust releases exposed
+> `resume-planning`, `pause-run`, `play-run`, `retry-supervised-stage`, and `delete-run` commands.
+> Current Core intentionally does not expose those CLI names. The control center calls the
+> versioned authority methods directly; do not reconstruct the removed commands from this history.
 
 ## Validate the diagnosis
 
@@ -36,7 +41,7 @@ Check:
 8. action journal and compensation/recovery status;
 9. external-loop commit binding and provider evidence when applicable.
 
-Run `koni validate --root .` after corrective action. If validation fails, stop before retrying an effect.
+Run `koni config validate --root . --json` after corrective action. If validation fails, stop before retrying an effect.
 
 ## Never repair by hand
 

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://koni.dev/parity/rust-semantic-suite.schema.json",
+  "title": "Frozen Rust semantic test-suite capture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "protocol", "oracle", "isolation", "build_command", "command", "outcome", "passed_tests", "secret_scan"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "protocol": {"const": "koni.rust-semantic-suite.v1"},
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tag", "commit", "tree"],
+      "properties": {
+        "tag": {"type": "string", "minLength": 1},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      }
+    },
+    "isolation": {"type": "object"},
+    "build_command": {"type": "array", "items": {"type": "string"}},
+    "command": {"type": "array", "items": {"type": "string"}},
+    "outcome": {"type": "object"},
+    "passed_tests": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "secret_scan": {"type": "object"}
+  }
+}

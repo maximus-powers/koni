@@ -3,11 +3,22 @@
   "version": "1.0.0",
   "description": "Compiler-authoritative Koni runtime and control center for Pi",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maximus-powers/koni.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/maximus-powers/koni#readme",
+  "bugs": "https://github.com/maximus-powers/koni/issues",
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=22.19.0"
   },
   "bin": {
-    "koni": "./dist/cli.js"
+    "koni": "./bin/koni.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -18,6 +29,7 @@
     }
   },
   "files": [
+    "bin",
     "dist",
     "README.md",
     "LICENSE"
@@ -30,6 +42,9 @@
   "pi": {
     "extensions": [
       "./dist/extension.js"
+    ],
+    "skills": [
+      "./dist/skills"
     ]
   },
   "koni": {
@@ -38,10 +53,10 @@
     "authority_protocol": "koni.authority.v1",
     "profile_package_protocol": "koni.profile-package.v1",
     "profile_schema_range": ">=2.0.0 <3.0.0",
-    "pi_range": ">=0.80.10 <0.81.0"
+    "pi_range": "0.80.10"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node ../../scripts/copy-core-skills.mjs && node ../../scripts/embed-core-build-identity.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "check": "npm run typecheck && npm run test && npm run build"
@@ -56,5 +71,12 @@
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-agent-core": { "optional": true },
+    "@earendil-works/pi-ai": { "optional": true },
+    "@earendil-works/pi-coding-agent": { "optional": true },
+    "@earendil-works/pi-tui": { "optional": true },
+    "typebox": { "optional": true }
   }
 }

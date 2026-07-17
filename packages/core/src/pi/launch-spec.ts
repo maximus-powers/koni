@@ -1,4 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import path from "node:path";
 import { canonicalHash, isSha256Digest, rawSha256, type Sha256Digest } from "../shared/canonical.js";
 
 export const AGENT_LAUNCH_SPEC_PROTOCOL = "koni.agent-launch-spec.v1" as const;
@@ -8,6 +9,10 @@ const MAX_ID_BYTES = 256;
 const MAX_PROMPT_BYTES = 4 * 1024 * 1024;
 const MAX_RESOURCE_BYTES = 4 * 1024 * 1024;
 const MAX_RESOURCE_COUNT = 256;
+const MIN_TRANSCRIPT_BYTES = 1024 * 1024;
+const MAX_TRANSCRIPT_BYTES = 512 * 1024 * 1024;
+const MIN_TOOL_RESULT_BYTES = 4 * 1024;
+const MAX_TOOL_RESULT_BYTES = 16 * 1024 * 1024;
 
 export type LaunchResourceKind = "skill" | "prompt" | "context" | "append_system_prompt";
 
@@ -24,6 +29,24 @@ export interface LaunchToolBinding {
   name: string;
   schemaHash: Sha256Digest;
   executionMode: "sequential" | "parallel";
+  /** Maximum canonical Pi result payload bytes reserved before this tool may execute. */
+  maxResultBytes: number;
+}
+
+export type AgentBranchReason =
+  | "initial"
+  | "retry"
+  | "rework"
+  | "review"
+  | "recovery"
+  | "integration";
+
+export interface AgentAttemptLineage {
+  branchEpoch: number;
+  reason: AgentBranchReason;
+  parentAttemptId?: string;
+  parentSessionId?: string;
+  parentEntryId?: string;
 }
 
 export interface AgentLaunchSpec {
@@ -37,6 +60,7 @@ export interface AgentLaunchSpec {
     attemptId: string;
     sessionId: string;
   };
+  lineage: AgentAttemptLineage;
   authority: {
     grantId: string;
     grantHash: Sha256Digest;
@@ -79,6 +103,16 @@ export interface AgentLaunchSpec {
     retries: {
       maxProviderRetries: number;
       baseDelayMs: number;
+    };
+    transcript: {
+      maxBytes: number;
+    };
+    /**
+     * Durable authority-side ceiling for repository discovery calls. Optional only
+     * so launch specifications issued before this budget existed remain resumable.
+     */
+    repositoryCalls?: {
+      max: number;
     };
   };
   terminal: {
@@ -151,6 +185,7 @@ function validateDraft(draft: AgentLaunchSpecDraft): void {
   validateId(draft.identity.stepId, "/identity/stepId");
   validateId(draft.identity.attemptId, "/identity/attemptId");
   validateSessionId(draft.identity.sessionId, "/identity/sessionId");
+  validateLineage(draft);
   validateId(draft.authority.grantId, "/authority/grantId");
   validateDigest(draft.authority.grantHash, "/authority/grantHash");
   validatePositiveInt(draft.authority.generation, "/authority/generation", true);
@@ -172,7 +207,7 @@ function validateDraft(draft: AgentLaunchSpecDraft): void {
     fail("content_hash", "/persona/initialPromptHash", "initial prompt does not match its hash");
   }
   validateId(draft.model.provider, "/model/provider");
-  validateId(draft.model.id, "/model/id");
+  validateModelId(draft.model.id, "/model/id");
   if (!isThinkingLevel(draft.model.thinkingLevel)) {
     fail("thinking_level", "/model/thinkingLevel", "unsupported Pi thinking level");
   }
@@ -186,6 +221,14 @@ function validateDraft(draft: AgentLaunchSpecDraft): void {
     if (tool.executionMode !== "sequential" && tool.executionMode !== "parallel") {
       fail("execution_mode", `/tools/${index}/executionMode`, "invalid tool execution mode");
     }
+    validatePositiveInt(tool.maxResultBytes, `/tools/${index}/maxResultBytes`, false);
+    if (tool.maxResultBytes < MIN_TOOL_RESULT_BYTES || tool.maxResultBytes > MAX_TOOL_RESULT_BYTES) {
+      fail(
+        "tool_result_budget",
+        `/tools/${index}/maxResultBytes`,
+        `tool result budget must be between ${MIN_TOOL_RESULT_BYTES} and ${MAX_TOOL_RESULT_BYTES} bytes`,
+      );
+    }
     if (toolNames.has(tool.name)) {
       fail("duplicate_tool", `/tools/${index}/name`, `duplicate tool ${tool.name}`);
     }
@@ -198,9 +241,26 @@ function validateDraft(draft: AgentLaunchSpecDraft): void {
   validateTokenBudgets(draft.budgets.tokens);
   validatePositiveInt(draft.budgets.retries.maxProviderRetries, "/budgets/retries/maxProviderRetries", true);
   validatePositiveInt(draft.budgets.retries.baseDelayMs, "/budgets/retries/baseDelayMs", true);
+  validatePositiveInt(draft.budgets.transcript.maxBytes, "/budgets/transcript/maxBytes", false);
+  if (
+    draft.budgets.transcript.maxBytes < MIN_TRANSCRIPT_BYTES ||
+    draft.budgets.transcript.maxBytes > MAX_TRANSCRIPT_BYTES
+  ) {
+    fail(
+      "transcript_budget",
+      "/budgets/transcript/maxBytes",
+      `transcript budget must be between ${MIN_TRANSCRIPT_BYTES} and ${MAX_TRANSCRIPT_BYTES} bytes`,
+    );
+  }
+  if (draft.budgets.repositoryCalls !== undefined) {
+    validatePositiveInt(draft.budgets.repositoryCalls.max, "/budgets/repositoryCalls/max", false);
+  }
   validateId(draft.terminal.toolName, "/terminal/toolName");
   if (!toolNames.has(draft.terminal.toolName)) {
     fail("terminal_tool", "/terminal/toolName", "terminal tool is not present in the exact tool inventory");
+  }
+  if (draft.tools.find((tool) => tool.name === draft.terminal.toolName)?.executionMode !== "sequential") {
+    fail("terminal_tool", "/terminal/toolName", "terminal tool must execute sequentially");
   }
   validateDigest(draft.terminal.outputSchemaHash, "/terminal/outputSchemaHash");
   validatePositiveInt(draft.terminal.maxOutputBytes, "/terminal/maxOutputBytes", false);
@@ -268,6 +328,67 @@ function validateSessionId(value: string, pointer: string): void {
   }
 }
 
+function validateLineage(draft: AgentLaunchSpecDraft): void {
+  const lineage = draft.lineage;
+  if (lineage === null || typeof lineage !== "object" || Array.isArray(lineage)) {
+    fail("lineage", "/lineage", "attempt lineage must be an object");
+  }
+  if (!Number.isSafeInteger(lineage.branchEpoch) || lineage.branchEpoch < 0) {
+    fail("lineage_epoch", "/lineage/branchEpoch", "branch epoch must be a non-negative safe integer");
+  }
+  if (!["initial", "retry", "rework", "review", "recovery", "integration"].includes(lineage.reason)) {
+    fail("lineage_reason", "/lineage/reason", "branch reason is unsupported");
+  }
+  const hasParentAttempt = lineage.parentAttemptId !== undefined;
+  const hasParentSession = lineage.parentSessionId !== undefined;
+  if (hasParentAttempt !== hasParentSession) {
+    fail(
+      "lineage_parent",
+      "/lineage",
+      "parent attempt and parent session identities must be supplied together",
+    );
+  }
+  if (lineage.parentAttemptId !== undefined) {
+    validateId(lineage.parentAttemptId, "/lineage/parentAttemptId");
+    validateSessionId(lineage.parentSessionId!, "/lineage/parentSessionId");
+    if (
+      lineage.parentAttemptId === draft.identity.attemptId ||
+      lineage.parentSessionId === draft.identity.sessionId
+    ) {
+      fail("lineage_cycle", "/lineage", "an attempt cannot be its own lineage parent");
+    }
+  }
+  if (lineage.parentEntryId !== undefined) {
+    if (!hasParentAttempt) {
+      fail("lineage_entry", "/lineage/parentEntryId", "parent entry requires a parent attempt and session");
+    }
+    validateSessionEntryId(lineage.parentEntryId, "/lineage/parentEntryId");
+  }
+  if (lineage.reason === "initial") {
+    if (hasParentAttempt || lineage.branchEpoch !== 0) {
+      fail("lineage_initial", "/lineage", "initial attempts must be root epoch zero");
+    }
+  } else if (lineage.reason === "recovery" && !hasParentAttempt) {
+    // A migrated run deliberately starts a new authenticated Pi lineage: retained Rust transport
+    // logs are evidence, not a Pi SessionManager parent that could safely be resumed or branched.
+    if (lineage.branchEpoch !== 0) {
+      fail("lineage_recovery", "/lineage", "root recovery attempts must use epoch zero");
+    }
+  } else if (!hasParentAttempt || lineage.branchEpoch === 0) {
+    fail("lineage_parent", "/lineage", "branched attempts require a parent and positive branch epoch");
+  }
+}
+
+function validateSessionEntryId(value: string, pointer: string): void {
+  if (
+    Buffer.byteLength(value, "utf8") === 0 ||
+    Buffer.byteLength(value, "utf8") > 128 ||
+    /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    fail("lineage_entry", pointer, "parent entry identity is empty, oversized, or contains control characters");
+  }
+}
+
 function validateDigest(value: string, pointer: string): asserts value is Sha256Digest {
   if (!isSha256Digest(value)) {
     fail("digest", pointer, "value must be a lowercase sha256 digest");
@@ -288,8 +409,18 @@ function validateBoundedText(value: string, pointer: string, maximum: number): v
 }
 
 function validateAbsolutePath(value: string, pointer: string): void {
-  if (!value.startsWith("/") || value.includes("\u0000")) {
-    fail("absolute_path", pointer, "path must be an absolute NUL-free POSIX path");
+  if (!path.isAbsolute(value) || path.normalize(value) !== value || value.includes("\u0000")) {
+    fail("absolute_path", pointer, "path must be normalized, absolute, and NUL-free");
+  }
+}
+
+function validateModelId(value: string, pointer: string): void {
+  if (
+    Buffer.byteLength(value, "utf8") === 0 ||
+    Buffer.byteLength(value, "utf8") > 512 ||
+    /[\u0000-\u001f\u007f]/.test(value)
+  ) {
+    fail("model_id", pointer, "model id is empty, too long, or contains control characters");
   }
 }
 

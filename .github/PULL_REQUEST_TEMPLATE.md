@@ -12,10 +12,16 @@
 
 ## Validation
 
+- [ ] `npm run check`
+- [ ] `npm run build`
+- [ ] Exact packed Pi/package smoke was run when shipping/install/session behavior changed
 - [ ] `cargo fmt --all -- --check`
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo test --workspace`
 - [ ] Affected profiles or docs site were validated
+
+> The Cargo checks above are retained for changes to the frozen Rust parity oracle. Shipping
+> Pi/TypeScript changes are gated by the npm checks and executable parity capture/proofs.
 
 ## Safety checklist
 

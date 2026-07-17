@@ -15,148 +15,177 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22.19.0
           cache: npm
-          cache-dependency-path: |
-            runtime/pi-host/package-lock.json
-            apps/docs/package-lock.json
-      - name: Pin runtime build tools
-        shell: bash
-        run: |
-          echo "KONI_PINNED_NODE_PATH=$(node -p 'require("fs").realpathSync(process.execPath)')" >> "$GITHUB_ENV"
-          sudo apt-get update
-          sudo apt-get install -y bubblewrap
-          echo "KONI_PINNED_BWRAP_PATH=$(readlink -f "$(command -v bwrap)")" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
       - run: npm install --global npm@11.13.0
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - run: npm ci
-        working-directory: runtime/pi-host
+      - name: Verify tag matches Core
+        run: node -e 'const v=require("./packages/core/package.json").version; if (process.env.GITHUB_REF_NAME !== `v${v}`) process.exit(1)'
       - run: npm run check
-        working-directory: runtime/pi-host
-      - name: Verify production dependency SBOM
-        shell: bash
-        working-directory: runtime/pi-host
-        run: |
-          npm sbom --omit=dev --sbom-format cyclonedx > dist/koni-pi-host.cdx.json
-          node -e 'const b=require("./dist/koni-pi-host.cdx.json"); if (b.bomFormat !== "CycloneDX" || !b.components?.some((c) => c.name === "@earendil-works/pi-agent-core" && c.version === "0.80.7") || !b.components?.some((c) => c.name === "@earendil-works/pi-ai" && c.version === "0.80.7")) process.exit(1)'
-      - name: Verify tag matches Cargo version
-        shell: bash
-        run: |
-          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "koni-cli") | .version')"
-          test "$GITHUB_REF_NAME" = "v$version"
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
       - run: ./scripts/check-brand.sh
-      - run: npm ci
-        working-directory: apps/docs
-      - run: npm run lint
-        working-directory: apps/docs
-      - run: npm run typecheck
-        working-directory: apps/docs
-      - run: npm run build
-        working-directory: apps/docs
-      - run: npm audit --audit-level=moderate
-        working-directory: apps/docs
-
-  build:
-    needs: validate
-    name: ${{ matrix.asset }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            asset: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
-            asset: aarch64-unknown-linux-gnu
-          - os: macos-13
-            asset: x86_64-apple-darwin
-          - os: macos-14
-            asset: aarch64-apple-darwin
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.19.0
-          cache: npm
-          cache-dependency-path: runtime/pi-host/package-lock.json
-      - name: Pin runtime build tools
-        shell: bash
+      - name: Build and audit the tested Pi host boundary
         run: |
-          echo "KONI_PINNED_NODE_PATH=$(node -p 'require("fs").realpathSync(process.execPath)')" >> "$GITHUB_ENV"
-          if [ "${{ runner.os }}" = "Linux" ]; then
-            sudo apt-get update
-            sudo apt-get install -y bubblewrap
-            echo "KONI_PINNED_BWRAP_PATH=$(readlink -f "$(command -v bwrap)")" >> "$GITHUB_ENV"
-          fi
-      - run: npm install --global npm@11.13.0
-      - run: npm ci
-        working-directory: runtime/pi-host
-      - run: npm run check
-        working-directory: runtime/pi-host
-      - name: Generate production dependency SBOM
-        shell: bash
-        working-directory: runtime/pi-host
-        run: |
-          npm sbom --omit=dev --sbom-format cyclonedx > dist/koni-pi-host.cdx.json
-          node -e 'const b=require("./dist/koni-pi-host.cdx.json"); if (b.bomFormat !== "CycloneDX" || !b.components?.some((c) => c.name === "@earendil-works/pi-agent-core" && c.version === "0.80.7") || !b.components?.some((c) => c.name === "@earendil-works/pi-ai" && c.version === "0.80.7")) process.exit(1)'
-      - name: Build release binary
-        run: cargo build --locked --release --package koni-cli
-      - name: Package verified Pi runtime
-        id: package
-        shell: bash
-        run: |
-          archive="koni-${GITHUB_REF_NAME}-${{ matrix.asset }}.tar.gz"
-          stage="$(mktemp -d)"
-          mkdir -p "$stage/bin" "$stage/libexec/koni/pi-host" "$stage/libexec/koni/pi-runtime" "$stage/share/doc/koni"
-          install -m 0755 target/release/koni "$stage/bin/koni"
-          install -m 0755 runtime/pi-host/dist/koni-pi-host.mjs "$stage/libexec/koni/pi-host/koni-pi-host.mjs"
-          install -m 0644 runtime/pi-host/dist/koni-pi-host.sha256 "$stage/libexec/koni/pi-host/koni-pi-host.sha256"
-          install -m 0644 runtime/pi-host/dist/koni-pi-host.cdx.json "$stage/libexec/koni/pi-host/koni-pi-host.cdx.json"
-          install -m 0755 "$KONI_PINNED_NODE_PATH" "$stage/libexec/koni/pi-runtime/node"
-          node_root="$(cd "$(dirname "$KONI_PINNED_NODE_PATH")/.." && pwd -P)"
-          install -m 0644 LICENSE "$stage/share/doc/koni/Koni-LICENSE"
-          install -m 0644 "$node_root/LICENSE" "$stage/share/doc/koni/Node-LICENSE"
-          if [ "${{ runner.os }}" = "Linux" ]; then
-            install -m 0755 "$KONI_PINNED_BWRAP_PATH" "$stage/libexec/koni/pi-runtime/bwrap"
-          fi
-          tar -C "$stage" -czf "$archive" bin libexec share
-          smoke="$(mktemp -d)"
-          tar -C "$smoke" -xzf "$archive"
-          "$smoke/bin/koni" --version
-          "$smoke/bin/koni" models --json
-          shasum -a 256 "$archive" > "$archive.sha256"
-          echo "archive=$archive" >> "$GITHUB_OUTPUT"
-      - uses: actions/attest-build-provenance@v2
-        with:
-          subject-path: ${{ steps.package.outputs.archive }}
+          npm run build
+          npm audit --omit=dev --audit-level=high
+          node --test scripts/pi-host-boundary.test.mjs
+          node scripts/check-pi-host-boundary.mjs --output koni-pi-host-compatibility.json
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset }}
-          path: |
-            koni-*.tar.gz
-            koni-*.sha256
+          name: validated-source
+          path: koni-pi-host-compatibility.json
 
-  publish:
-    needs: build
+  package:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - run: npm install --global npm@11.13.0
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - run: npm ci
+      - run: npm run build
+      - name: Pack the coarse Pi package system
+        run: |
+          mkdir -p release
+          npm pack --workspace @koni/coding-profile --pack-destination release
+          npm pack --workspace @koni/research-profile --pack-destination release
+          npm pack --workspace @koni/core --pack-destination release
+          cp LICENSE release/Koni-LICENSE
+          test "$(find release -maxdepth 1 -name '*.tgz' | wc -l)" -eq 3
+      - name: Smoke the exact archives through disposable stock Pi
+        env:
+          KONI_PACKAGE_ARCHIVES_DIR: ${{ github.workspace }}/release
+        run: node --test scripts/pi-package-smoke.test.mjs
+      - name: Generate the exact Koni-owned shipping SBOM
+        run: |
+          closure="$(mktemp -d)"
+          node -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify({name:"koni-shipping-closure",version:"1.0.0",private:true})+"\n")' "$closure/package.json"
+          npm install --prefix "$closure" --save-exact --legacy-peer-deps --ignore-scripts --no-audit --no-fund release/*.tgz
+          npm sbom --prefix "$closure" --omit=dev --sbom-format cyclonedx > release/koni-shipping.cdx.json
+          node - <<'NODE'
+          const bom = require("./release/koni-shipping.cdx.json");
+          const identity = (component) => component.group
+            ? `${component.group.startsWith("@") ? "" : "@"}${component.group}/${component.name}`
+            : component.name;
+          const actual = new Map((bom.components ?? []).map((component) => [identity(component), component.version]));
+          const expected = new Map([
+            ["@koni/core", require("./packages/core/package.json").version],
+            ["@koni/coding-profile", require("./packages/coding-profile/package.json").version],
+            ["@koni/research-profile", require("./packages/research-profile/package.json").version],
+            ["semver", "7.8.5"],
+            ["yaml", "2.9.0"],
+          ]);
+          if (bom.bomFormat !== "CycloneDX" || actual.size !== expected.size) throw new Error("unexpected shipping SBOM closure");
+          for (const [name, version] of expected) {
+            if (actual.get(name) !== version) throw new Error(`shipping SBOM has ${name}@${actual.get(name) ?? "missing"}; expected ${version}`);
+          }
+          for (const name of actual.keys()) {
+            if (name.startsWith("@earendil-works/pi-") || name === "typebox") throw new Error(`shipping SBOM contains host peer ${name}`);
+          }
+          NODE
+          node -e 'require("node:fs").writeFileSync("release/koni-pi-host-compatibility.json", JSON.stringify({protocol:"koni.pi-host-compatibility.v1",pi:"0.80.10",typebox:"1.1.38",core_api:require("./packages/core/package.json").version},null,2)+"\n")'
+          (cd release && sha256sum -- *.tgz *.json > SHA256SUMS)
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            release/*.tgz
+            release/*.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pi-packages
+          path: release/*
+
+  publish-npm:
+    needs: package
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          registry-url: https://registry.npmjs.org
+      - run: npm install --global npm@11.13.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: pi-packages
+          path: release
+      - name: Publish the exact attested package archives with provenance
+        shell: bash
+        run: |
+          publish_exact() {
+            local archive="$1"
+            local manifest name version local_integrity registry_integrity
+            manifest="$(tar -xOf "$archive" package/package.json)"
+            name="$(node -e 'const value=JSON.parse(process.argv[1]); process.stdout.write(value.name)' "$manifest")"
+            version="$(node -e 'const value=JSON.parse(process.argv[1]); process.stdout.write(value.version)' "$manifest")"
+            local_integrity="sha512-$(openssl dgst -sha512 -binary "$archive" | openssl base64 -A)"
+            if registry_integrity="$(npm view "${name}@${version}" dist.integrity 2>/dev/null)"; then
+              if [[ -z "$registry_integrity" || "$registry_integrity" != "$local_integrity" ]]; then
+                echo "Registry payload mismatch for immutable ${name}@${version}." >&2
+                echo "expected ${local_integrity}" >&2
+                echo "found    ${registry_integrity:-<missing integrity>}" >&2
+                exit 1
+              fi
+              echo "Verified existing ${name}@${version} against the attested archive."
+            else
+              npm publish "$archive" --access public --provenance
+            fi
+          }
+          shopt -s nullglob
+          archives=(release/*.tgz)
+          test "${#archives[@]}" -eq 3
+          core_archive=""
+          coding_archive=""
+          research_archive=""
+          for archive in "${archives[@]}"; do
+            manifest="$(tar -xOf "$archive" package/package.json)"
+            name="$(node -e 'const value=JSON.parse(process.argv[1]); process.stdout.write(value.name)' "$manifest")"
+            case "$name" in
+              @koni/core)
+                test -z "$core_archive"
+                core_archive="$archive"
+                ;;
+              @koni/coding-profile)
+                test -z "$coding_archive"
+                coding_archive="$archive"
+                ;;
+              @koni/research-profile)
+                test -z "$research_archive"
+                research_archive="$archive"
+                ;;
+              *)
+                echo "Unexpected release package identity: $name" >&2
+                exit 1
+                ;;
+            esac
+          done
+          test -n "$core_archive" && test -n "$coding_archive" && test -n "$research_archive"
+          # Profiles first, then Core as the activation package. A retry is safe because
+          # publish_exact authenticates any already-present immutable registry payload.
+          for archive in "$coding_archive" "$research_archive" "$core_archive"; do
+            publish_exact "$archive"
+          done
+
+  github-release:
+    needs: [package, publish-npm]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
-      - name: Publish GitHub release
+      - name: Publish package archives and SBOM
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" artifacts/* --generate-notes --verify-tag --repo "$GITHUB_REPOSITORY"

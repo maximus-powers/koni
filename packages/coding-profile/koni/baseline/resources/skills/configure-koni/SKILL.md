@@ -1,6 +1,6 @@
 ---
 name: configure-koni
-description: Inspect a repository and configure, customize, or extend its installed Köni project from natural-language requirements. Use when Codex needs to adapt a default Software or Research profile to the project's real architecture or empirical method; design graph structure, compiler rules, tickets, proof, or run behavior; edit current `.koni` configuration, provider-neutral agents, repository skills, or a detected legacy `.codex/koni` profile; tune models, capabilities, orchestration, storage, or Git policy; or diagnose a configuration validation failure.
+description: Inspect a repository and configure, customize, or extend its installed Köni project from natural-language requirements. Use when a Pi agent needs to adapt a default Coding or Research profile to the project's real architecture or empirical method; design graph structure, compiler rules, tickets, proof, or run behavior; edit current `.koni` configuration, provider-neutral agents, repository skills, or a detected legacy `.codex/koni` profile; tune models, capabilities, orchestration, storage, or Git policy; or diagnose a configuration validation failure.
 ---
 
 # Configure Köni
@@ -9,13 +9,13 @@ Adapt the project's installed profile so the graph makes important work unavoida
 
 ## Follow the customization protocol
 
-1. Find the repository root and identify exactly one active configuration root. Prefer current schema 2 at `.koni/project.yaml`; use `.codex/koni/project.yaml` only when no `.koni` catalog exists and the project is still on schema 1. If both live roots exist, stop and request reconciliation instead of guessing. Resolve every cataloged run type's `profile.source`, then read that manifest and all imports. Treat the installed Software, Research, or already-customized profile as the baseline. Do not reinitialize it or invent a second overlay.
+1. Find the repository root and identify exactly one active configuration root. Prefer current schema 2 at `.koni/project.yaml`; use `.codex/koni/project.yaml` only when no `.koni` catalog exists and the project is still on schema 1. If both live roots exist, stop and request reconciliation instead of guessing. Resolve every cataloged run type's profile and imports. Treat Koni's immutable installed baseline plus the current project overlay as the only configuration lineage; never edit `.koni/.managed`, create a second overlay, or substitute live changes into a pinned run.
 2. Read [discovery-and-approval.md](references/discovery-and-approval.md) completely. Inspect repository instructions, manifests, CI, tests, architecture, and domain artifacts before asking questions.
 3. Apply the sufficiency rubric. Separate facts observed in the repository from reasonable inferences and unresolved high-impact choices. Ask only the smallest question batch that could materially change ontology, ticket boundaries, authority, proof, or promotion.
 4. Use `$model-koni-work` to prepare an ontology/rules/tickets/proof proposal based on the current profile. Choose the owning layer with [configuration-layers.md](references/configuration-layers.md).
 5. Present the complete proposal and explicitly request approval. Stop before writing configuration. A general request to customize is not approval of the proposed design.
-6. After approval, edit the installed profile and project resources directly. Preserve useful baseline IDs, semantics, paths, module boundaries, and unrelated settings; change them only when the approved model requires it.
-7. Validate every cross-reference and path with `koni validate-profile <resolved-profile-source>`; for the normal schema-2 layout this is `koni validate-profile .koni/profile.yaml`. If initialized state exists, also run `koni validate --root .`. Exercise positive, satisfied, and malformed states through the repository's existing fixture harness or an isolated temporary profile copy; add a permanent project harness only when the approved scope justifies it.
+6. After approval, use `/koni` or `koni tui --root .` and its guided Configure surface whenever the domain is exposed there. For an approved source-level extension not yet represented by a guided field, edit only the project-owned semantic source and preserve useful IDs, paths, module boundaries, and unrelated settings.
+7. Validate the whole effective candidate with `koni config validate --root . --json`. Exercise positive, satisfied, and malformed states through the repository's existing fixture harness or an isolated temporary profile copy; add a permanent project harness only when the approved scope justifies it.
 8. Report the approved behavior, changed files, validation and test results, assumptions, and any future-run migration concern. Do not start, approve, resume, or promote a run unless separately requested.
 
 For a read-only explanation or diagnosis, inspect the same evidence but stop after the explanation; do not force an approval ceremony when no write is proposed.
@@ -46,7 +46,7 @@ Read [run-types.md](references/run-types.md) before changing intake, planning pa
 
 Read [agents-and-skills.md](references/agents-and-skills.md) before changing agent bindings or permissions.
 
-- In schema 2, define provider-neutral agent instructions in `.koni/agents/*.yaml`, bind them from profile personas with `agent`, use `thinking_level`, and express compiler-enforced authority through `capabilities`. The provider remains the pinned `openai-codex`; do not recreate `.codex/config.toml` or `.codex/agents` as an execution fallback.
+- In schema 2, define provider-neutral agent instructions in `.koni/agents/*.yaml`, bind them from profile personas with `agent`, use `thinking_level`, and express compiler-enforced authority through `capabilities`. Select models/providers only from Pi's available model catalog; do not recreate `.codex/config.toml` or `.codex/agents` as an execution fallback.
 - In a detected schema-1 project only, preserve its historical `.codex/agents/*.toml`, `codex_agent`, `reasoning_effort`, and `sandbox` vocabulary until an explicit migration. Never mix current and legacy fields in one profile.
 - Keep worktree-specific capability narrowing on the Köni persona. Grant the least network, command, and filesystem access that the role needs.
 - Keep reusable repository skills in `.agents/skills/<skill>/`; reference installed skill names explicitly when a persona requires them.
@@ -58,4 +58,4 @@ Read [agents-and-skills.md](references/agents-and-skills.md) before changing age
 - Do not grant broad graph or filesystem scope to compensate for a missing operation contract.
 - Do not publish a configuration with unresolved IDs, escaping paths, duplicated imports, ambiguous run types, or an action whose irreversible effect precedes validation.
 - Do not silently rewrite an existing semantic language when a focused run type or module change satisfies the request.
-- Do not replace the installed default with a generated profile from memory, create a baseline/overlay upgrade scheme, or imply that edits mutate an active run's pinned snapshot.
+- Do not replace the installed default with a generated profile from memory, edit immutable baseline history, or imply that project-overlay edits mutate an active run's pinned snapshot.

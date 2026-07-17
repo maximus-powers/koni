@@ -32,6 +32,11 @@ const SURFACES = new Set([
 ]);
 const SPEC_DISPOSITIONS = new Set(["oracle_defect", "superseded", "legacy_reader", "oracle_gap", "platform_variant", "quarantine"]);
 const ISSUE_REQUIRED = new Set(["oracle_defect", "superseded", "legacy_reader", "platform_variant", "quarantine"]);
+const REQUIRED_ORACLE_COMMANDS = new Map([
+  ["install-software", 0], ["compile-profile", 0], ["initialize-run", 0], ["list-runs-before", 0], ["validate-run", 0],
+  ["pause-unknown-run", 1], ["play-unknown-run", 1], ["cockpit-unknown-run", 1],
+  ["compile-ticket-contract", 0], ["positive-run-control-contract", 0]
+]);
 
 function parseJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
@@ -43,6 +48,14 @@ function digestBytes(bytes) {
 
 function digestFile(path) {
   return digestBytes(readFileSync(path));
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right))).map((key) => [key, canonicalJson(value[key])]));
+  }
+  return value;
 }
 
 function pathAt(root, value) {
@@ -76,23 +89,54 @@ export function findParityRoot(start = process.cwd()) {
 export function loadParityRepository(root = findParityRoot()) {
   const ledger = parseJson(join(root, "reference/parity/ledger.json"));
   const fingerprint = parseJson(pathAt(root, ledger.oracle_fingerprint.path));
+  const oracleCaptures = (ledger.oracle_captures ?? []).map((entry) => ({ entry, capture: parseJson(pathAt(root, entry.path)) }));
   const issues = parseJson(pathAt(root, ledger.issue_registry.path));
   const bundles = ledger.cases.map((entry) => ({
     entry,
     case: parseJson(pathAt(root, entry.case.path)),
-    actions: parseJson(pathAt(root, entry.actions.path))
+    actions: parseJson(pathAt(root, entry.actions.path)),
+    targetCapture: entry.target_capture ? parseJson(pathAt(root, entry.target_capture.path)) : undefined,
   }));
-  return { root, ledger, fingerprint, issues, bundles };
+  return { root, ledger, fingerprint, oracleCaptures, issues, bundles };
 }
 
 export function validateParityModel(model) {
-  const { ledger, fingerprint, issues, bundles } = model;
+  const { ledger, fingerprint, oracleCaptures, issues, bundles } = model;
   const errors = [];
 
   if (ledger?.protocol !== "koni.parity-ledger.v1") errors.push("ledger: protocol must be koni.parity-ledger.v1");
   if (!['development', 'release'].includes(ledger?.release_mode)) errors.push("ledger: release_mode must be development or release");
   if (fingerprint?.protocol !== "koni.rust-oracle-fingerprint.v1") errors.push("fingerprint: invalid protocol");
   if (issues?.protocol !== "koni.parity-issues.v1") errors.push("issues: invalid protocol");
+  if (!ledger?.proof_manifest?.path || !ledger?.proof_manifest?.sha256) errors.push("ledger: hash-pinned proof_manifest is required");
+  if (!Array.isArray(oracleCaptures) || oracleCaptures.length === 0) errors.push("ledger: at least one executable oracle capture is required");
+  for (const { entry, capture } of oracleCaptures ?? []) {
+    if (capture?.protocol !== "koni.oracle-command-capture.v1") errors.push(`${entry.path}: invalid oracle capture protocol`);
+    if (capture?.oracle?.commit !== fingerprint?.tag?.commit || capture?.oracle?.tree !== fingerprint?.tag?.tree) errors.push(`${entry.path}: capture provenance differs from fingerprint`);
+    if (capture?.isolation?.detached_oracle_worktree !== true || capture?.isolation?.temporary_project !== true || capture?.isolation?.temporary_home !== true || capture?.isolation?.provider_calls !== 0 || capture?.isolation?.live_project_mutations !== 0) errors.push(`${entry.path}: capture isolation contract is not closed`);
+    if (capture?.secret_scan?.passed !== true || (capture?.secret_scan?.matches?.length ?? 0) !== 0) errors.push(`${entry.path}: secret scan did not pass cleanly`);
+    const installPaths = new Set();
+    if (!Array.isArray(capture?.install_tree) || capture.install_tree.length === 0) errors.push(`${entry.path}: install tree must be nonempty`);
+    for (const file of capture?.install_tree ?? []) {
+      if (installPaths.has(file.path)) errors.push(`${entry.path}: duplicate install path ${file.path}`);
+      installPaths.add(file.path);
+      if (typeof file.path !== "string" || file.path.includes("..") || (!file.path.startsWith(".koni/") && !file.path.startsWith(".agents/"))) errors.push(`${entry.path}: unsafe install path ${file.path}`);
+      if (!Number.isInteger(file.bytes) || file.bytes < 0 || !SHA256.test(file.sha256 ?? "")) errors.push(`${entry.path}/${file.path}: invalid install digest metadata`);
+      if (!new Set(["raw", "migration-receipt-v1"]).has(file.normalization)) errors.push(`${entry.path}/${file.path}: unknown install normalization ${file.normalization}`);
+    }
+    const commandIds = new Set();
+    for (const command of capture?.commands ?? []) {
+      if (commandIds.has(command.id)) errors.push(`${entry.path}: duplicate command id ${command.id}`);
+      commandIds.add(command.id);
+      if (!Number.isInteger(command.exit_code)) errors.push(`${entry.path}/${command.id}: exit_code must be an integer`);
+    }
+    for (const [id, exitCode] of REQUIRED_ORACLE_COMMANDS) {
+      const command = (capture?.commands ?? []).find((candidate) => candidate.id === id);
+      if (!command) errors.push(`${entry.path}: required command ${id} is missing`);
+      else if (command.exit_code !== exitCode) errors.push(`${entry.path}/${id}: expected exit ${exitCode}, got ${command.exit_code}`);
+    }
+    if (/\/(?:Users|home|tmp)\/|\/private\/var\/folders\//.test(JSON.stringify(capture))) errors.push(`${entry.path}: capture leaks an absolute environment path`);
+  }
 
   const issueMap = new Map();
   for (const issue of issues?.issues ?? []) {
@@ -123,6 +167,7 @@ export function validateParityModel(model) {
     const entry = bundle.entry;
     const testCase = bundle.case;
     const actions = bundle.actions;
+    const targetCapture = bundle.targetCapture;
     requirePattern(errors, entry?.id, CASE_ID, "ledger case id");
     addUnique(errors, caseMap, entry?.id, "ledger cases");
     if (testCase?.protocol !== "koni.parity-case.v1") errors.push(`${entry?.id}: invalid case protocol`);
@@ -135,6 +180,23 @@ export function validateParityModel(model) {
       errors.push(`${entry?.id}: action script must isolate project/Pi home and forbid live projects`);
     }
     if (!new Set(["disabled", "fixture_only"]).has(actions?.isolation?.network)) errors.push(`${entry?.id}: network must be disabled or fixture_only`);
+    if (new Set(["captured", "passing"]).has(entry.status)) {
+      if (!entry.target_capture || !targetCapture) errors.push(`${entry.id}: ${entry.status} requires a target_capture`);
+      else {
+        if (targetCapture.protocol !== "koni.typescript-parity-capture.v1") errors.push(`${entry.id}: invalid target capture protocol`);
+        if (targetCapture.oracle?.commit !== fingerprint.tag.commit) errors.push(`${entry.id}: target capture oracle commit drift`);
+        if (targetCapture.isolation?.live_projects !== false || targetCapture.isolation?.provider_calls !== 0 || targetCapture.isolation?.temporary_projects !== true || targetCapture.isolation?.temporary_pi_homes !== true) errors.push(`${entry.id}: target capture isolation contract is not closed`);
+        if (/\/(?:Users|home|tmp)\/|\/private\/var\/folders\//u.test(JSON.stringify(targetCapture))) errors.push(`${entry.id}: target capture leaks an absolute environment path`);
+        const capturedCase = targetCapture.cases?.find((candidate) => candidate.id === entry.id);
+        if (!capturedCase) errors.push(`${entry.id}: target capture does not contain the case`);
+        else if (entry.status === "passing" && (capturedCase.outcome !== "passing" || capturedCase.assertions?.some((assertion) => assertion.outcome !== "passed"))) errors.push(`${entry.id}: passing capture contains a non-passing assertion`);
+        const { capture_sha256: recordedCaptureSha256, ...captureMaterial } = targetCapture;
+        const actualCaptureSha256 = digestBytes(JSON.stringify(canonicalJson(captureMaterial)));
+        if (recordedCaptureSha256 !== actualCaptureSha256) errors.push(`${entry.id}: target capture canonical hash drift`);
+      }
+    } else if (entry.target_capture !== undefined) {
+      errors.push(`${entry.id}: ${entry.status} cannot publish a target_capture`);
+    }
 
     const actionIds = new Set();
     for (const action of actions?.actions ?? []) {
@@ -265,6 +327,32 @@ export function validateFingerprintAgainstRepository(model) {
       errors.push(`ledger: cannot hash ${file.path}: ${error.message}`);
     }
   }
+  for (const file of ledger.oracle_captures ?? []) {
+    try {
+      if (!file.sha256 || digestFile(pathAt(root, file.path)) !== file.sha256) errors.push(`ledger: oracle capture digest drift for ${file.path}`);
+    } catch (error) {
+      errors.push(`ledger: cannot hash ${file.path}: ${error.message}`);
+    }
+  }
+  for (const entry of ledger.cases ?? []) {
+    if (!entry.target_capture) continue;
+    try {
+      if (!entry.target_capture.sha256 || digestFile(pathAt(root, entry.target_capture.path)) !== entry.target_capture.sha256) {
+        errors.push(`ledger: target capture digest drift for ${entry.id}`);
+      }
+    } catch (error) {
+      errors.push(`ledger: cannot hash target capture for ${entry.id}: ${error.message}`);
+    }
+  }
+  if (ledger.proof_manifest) {
+    try {
+      if (!ledger.proof_manifest.sha256 || digestFile(pathAt(root, ledger.proof_manifest.path)) !== ledger.proof_manifest.sha256) {
+        errors.push(`ledger: proof manifest digest drift for ${ledger.proof_manifest.path}`);
+      }
+    } catch (error) {
+      errors.push(`ledger: cannot hash ${ledger.proof_manifest.path}: ${error.message}`);
+    }
+  }
   return errors;
 }
 
@@ -277,7 +365,7 @@ export function validateParityRepository(root = findParityRoot()) {
   }
   const result = validateParityModel(model);
   const errors = [...result.errors, ...validateFingerprintAgainstRepository(model)];
-  for (const schema of ["ledger", "case", "actions", "capture", "issues"]) {
+  for (const schema of ["ledger", "case", "actions", "capture", "oracle-command-capture", "issues", "proofs", "rust-semantic-suite", "typescript-parity-capture"]) {
     const path = join(root, `reference/parity/schemas/${schema}.schema.json`);
     try { parseJson(path); } catch (error) { errors.push(`schema ${schema}: ${error.message}`); }
   }

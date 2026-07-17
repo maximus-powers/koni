@@ -1,35 +1,70 @@
 import { Type } from "typebox";
-import { rawSha256 } from "../src/shared/canonical.js";
+import { canonicalHash, rawSha256 } from "../src/shared/canonical.js";
 import {
   AGENT_LAUNCH_SPEC_PROTOCOL,
   computeLaunchResourceSetHash,
   createAgentLaunchSpec,
   type AgentLaunchSpec,
+  type AgentAttemptLineage,
   type LaunchResource,
 } from "../src/pi/launch-spec.js";
 import type { AuthorityBackedTool } from "../src/pi/managed-session.js";
+import {
+  KONI_TOOL_RECEIPT_PROTOCOL,
+  koniToolMaxResultBytes,
+  renderKoniToolReceipt,
+  type KoniToolReceipt,
+} from "../src/pi/tool-catalog.js";
 
 export const TERMINAL_TOOL_NAME = "koni_submit_output";
-export const TOOL_SCHEMA_HASH = rawSha256("terminal-input-schema-v1");
-export const OUTPUT_SCHEMA_HASH = rawSha256("terminal-output-schema-v1");
+export const TERMINAL_OUTPUT_SCHEMA = Type.Object(
+  { result: Type.String() },
+  { additionalProperties: false },
+);
+export const TOOL_SCHEMA_HASH = canonicalHash(TERMINAL_OUTPUT_SCHEMA);
+export const OUTPUT_SCHEMA_HASH = canonicalHash(TERMINAL_OUTPUT_SCHEMA);
 
 export function fixtureTool(): AuthorityBackedTool {
+  const acceptedReceipt = (): KoniToolReceipt => ({
+    protocol: KONI_TOOL_RECEIPT_PROTOCOL,
+    receiptId: "fixture-receipt",
+    outcome: "accepted",
+    summary: "submitted",
+  });
+  const execute: AuthorityBackedTool["execute"] = async () => ({
+    content: [{ type: "text", text: renderKoniToolReceipt(acceptedReceipt()) }],
+    details: acceptedReceipt(),
+    terminate: true,
+  });
+  const reject: AuthorityBackedTool["reject"] = async (_callId, _args, rejection) => {
+    const receipt: KoniToolReceipt = {
+      protocol: KONI_TOOL_RECEIPT_PROTOCOL,
+      receiptId: "fixture-rejection",
+      outcome: "rejected",
+      code: rejection.code,
+      summary: rejection.summary,
+    };
+    return {
+      content: [{ type: "text", text: renderKoniToolReceipt(receipt) }],
+      details: receipt,
+    };
+  };
   return {
     name: TERMINAL_TOOL_NAME,
     schemaHash: TOOL_SCHEMA_HASH,
+    maxResultBytes: koniToolMaxResultBytes("koni_submit_output"),
+    terminalOutputSchema: TERMINAL_OUTPUT_SCHEMA,
     terminalOutputSchemaHash: OUTPUT_SCHEMA_HASH,
+    execute,
+    reject,
     definition: {
       name: TERMINAL_TOOL_NAME,
       label: "Submit output",
       description: "Submit the terminal structured output to Koni authority",
-      parameters: Type.Object({ result: Type.String() }),
+      parameters: TERMINAL_OUTPUT_SCHEMA,
       executionMode: "sequential",
       async execute() {
-        return {
-          content: [{ type: "text", text: "submitted" }],
-          details: { accepted: true },
-          terminate: true,
-        };
+        return execute("fixture-call", {});
       },
     },
   };
@@ -45,6 +80,7 @@ export function fixtureLaunchSpec(options: {
   sessionId?: string;
   resources?: readonly LaunchResource[];
   maxAllTokens?: number;
+  lineage?: AgentAttemptLineage;
 }): Readonly<AgentLaunchSpec> {
   const resources = options.resources ?? [];
   const systemPrompt = "You are a contained Koni worker. Use only issued tools and context.";
@@ -59,6 +95,7 @@ export function fixtureLaunchSpec(options: {
       attemptId: options.attemptId ?? "attempt-one",
       sessionId: options.sessionId ?? "session-one",
     },
+    lineage: options.lineage ?? { branchEpoch: 0, reason: "initial" },
     authority: {
       grantId: "grant-one",
       grantHash: rawSha256("grant"),
@@ -84,7 +121,12 @@ export function fixtureLaunchSpec(options: {
       id: "gpt-5.6-terra",
       thinkingLevel: "high",
     },
-    tools: [{ name: TERMINAL_TOOL_NAME, schemaHash: TOOL_SCHEMA_HASH, executionMode: "sequential" }],
+    tools: [{
+      name: TERMINAL_TOOL_NAME,
+      schemaHash: TOOL_SCHEMA_HASH,
+      executionMode: "sequential",
+      maxResultBytes: koniToolMaxResultBytes("koni_submit_output"),
+    }],
     resources: {
       setHash: computeLaunchResourceSetHash(resources),
       entries: resources,
@@ -99,6 +141,7 @@ export function fixtureLaunchSpec(options: {
         maxAll: options.maxAllTokens ?? 10_000,
       },
       retries: { maxProviderRetries: 2, baseDelayMs: 1 },
+      transcript: { maxBytes: 64 * 1024 * 1024 },
     },
     terminal: {
       toolName: TERMINAL_TOOL_NAME,

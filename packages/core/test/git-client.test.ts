@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -27,6 +27,7 @@ describe("Git client", () => {
   it("discovers the common directory and lists recent local branches", async () => {
     const root = await repository();
     await git(root, "branch", "feature");
+    await git(root, "branch", "koni/runs/internal");
     const identity = await GitClient.discover(root);
     expect(identity.worktreeRoot).toBe(await realpath(root));
     expect(identity.commonDirectory).toBe(await realpath(path.join(root, ".git")));
@@ -59,6 +60,23 @@ describe("Git client", () => {
     roots.push(worktree);
     await client.createWorktree(worktree, "koni/run-one", oid);
     expect(await new GitClient(worktree).resolveRef("HEAD")).toBe(oid);
+  });
+
+  it("does not follow a PATH substitution after the Git executable is pinned", async () => {
+    const root = await repository();
+    const fakeBin = await mkdtemp(path.join(tmpdir(), "koni-fake-git-"));
+    roots.push(fakeBin);
+    const fakeGit = path.join(fakeBin, "git");
+    await writeFile(fakeGit, "#!/bin/sh\nexit 91\n", "utf8");
+    await chmod(fakeGit, 0o700);
+    const originalPath = process.env.PATH;
+    try {
+      process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
+      await expect(new GitClient(root).version()).resolves.toMatch(/^git version /u);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
   });
 });
 

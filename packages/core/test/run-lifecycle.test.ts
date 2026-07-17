@@ -18,20 +18,21 @@ describe("run lifecycle", () => {
       newRunLifecycle("run-one"),
       { type: "planning_started", atMs: 10 },
       { type: "plan_submitted", atMs: 20 },
+      { type: "plan_approval_requested", atMs: 30 },
       { type: "plan_approved", atMs: 30 },
       { type: "pause_requested", atMs: 50 },
       { type: "pause_settled", atMs: 60 },
     );
     expect(state.phase).toBe("paused");
     expect(state.runningIntent).toBe(false);
-    expect(activeRuntimeMs(state, 100)).toBe(30);
+    expect(activeRuntimeMs(state, 100)).toBe(20);
 
     const reduction = reduceRunLifecycle(state, { type: "resume_requested", atMs: 100 });
     state = reduction.state;
     expect(state.phase).toBe("executing");
     expect(state.runningIntent).toBe(true);
     expect(reduction.effects).toContainEqual({ type: "admit_ready_work" });
-    expect(activeRuntimeMs(state, 120)).toBe(50);
+    expect(activeRuntimeMs(state, 120)).toBe(40);
   });
 
   it("answers all pending questions before resuming the attempt", () => {
@@ -74,6 +75,7 @@ describe("run lifecycle", () => {
       newRunLifecycle("run-one"),
       { type: "planning_started", atMs: 1 },
       { type: "plan_submitted", atMs: 2 },
+      { type: "plan_approval_requested", atMs: 3 },
       { type: "plan_approved", atMs: 3 },
       { type: "verification_started", atMs: 4 },
       { type: "verification_passed", atMs: 5 },

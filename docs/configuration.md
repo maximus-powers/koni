@@ -1,5 +1,21 @@
 # Configuration reference
 
+> **Pi-native lifecycle evolution — 2026-07-16 (`profile_lifecycle_migration`):** The schema-1
+> paths and historical transition notes below remain valuable migration context. Current
+> TypeScript Core installs one verified immutable profile baseline beneath `.koni`, treats the
+> materialized project tree as an upgrade-safe overlay, and exposes source-SHA-CAS structured YAML
+> edits to the shared control center. It never edits Pi's settings, credentials, or ambient
+> resources. See [Pi-native profile lifecycle](profile-lifecycle.md) and
+> [Pi community resource bindings](pi-community-resource-bindings.md).
+
+> **Community-resource compiler binding — 2026-07-16 (`community_resource_integration`):**
+> `resources/pi-packages.yaml` is now part of the authenticated compiled configuration rather than
+> a side catalog. Enabled autonomous entries require exact `select.skills`, `select.prompts`, or
+> Koni-owned `select.tools` values plus stage/persona eligibility. Selected bytes are copied and
+> hash-bound per run and per launch; ambient Pi files and extension code are never inherited.
+> Existing Pi settings and package state are read-only and remain user-owned. See the linked
+> binding reference for the fail-closed modes and network rule.
+
 A Köni project has three configuration layers:
 
 1. the **project catalog** lists selectable run types;

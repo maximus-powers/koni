@@ -8,8 +8,10 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue
 
 export interface ProtocolHandshake {
   protocol: typeof AUTHORITY_PROTOCOL;
-  client: "cli" | "pi-extension" | "managed-session" | "tui";
+  /** `compat-control` is restricted to the stable quiesce method. */
+  client: "cli" | "pi-extension" | "managed-session" | "tui" | "compat-control";
   clientVersion: string;
+  clientBuildSha256: string;
   projectRoot: string;
   nonce: string;
 }

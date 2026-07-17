@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -43,6 +43,34 @@ describe("worktree path authority", () => {
     await expect(policy.read("../outside")).rejects.toMatchObject({ code: "path_escape" });
     await expect(WorktreePathAuthority.create(root, { readPaths: [], writePaths: [".git/config"] }))
       .rejects.toMatchObject({ code: "compiler_owned" });
+  });
+
+  it("lists and searches only bounded regular files inside the read grant", async () => {
+    const root = await temporary();
+    const outside = await temporary();
+    await mkdir(path.join(root, "src", "nested"), { recursive: true });
+    await writeFile(path.join(root, "src", "one.ts"), "export const needle = 1;\n");
+    await writeFile(path.join(root, "src", "nested", "two.ts"), "// Needle again\n");
+    await writeFile(path.join(root, "secret.txt"), "needle secret\n");
+    await writeFile(path.join(outside, "outside.ts"), "needle outside\n");
+    await symlink(outside, path.join(root, "src", "redirect"));
+    const policy = await WorktreePathAuthority.create(root, {
+      readPaths: ["src"],
+      writePaths: [],
+    });
+
+    expect(await policy.list("src", { recursive: true })).toEqual([
+      { path: "src/nested", kind: "directory", sizeBytes: 0 },
+      { path: "src/one.ts", kind: "file", sizeBytes: 25 },
+      { path: "src/nested/two.ts", kind: "file", sizeBytes: 16 },
+    ]);
+    expect(await policy.search("needle", { roots: ["src"], caseSensitive: false })).toEqual([
+      { path: "src/nested/two.ts", line: 1, column: 4, preview: "// Needle again" },
+      { path: "src/one.ts", line: 1, column: 14, preview: "export const needle = 1;" },
+    ]);
+    await expect(policy.list(".")).rejects.toMatchObject({ code: "read_scope" });
+    await expect(policy.search("needle", { roots: ["secret.txt"] }))
+      .rejects.toMatchObject({ code: "read_scope" });
   });
 });
 

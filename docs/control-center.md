@@ -272,6 +272,13 @@ Press `n` to open the run form. It contains:
 - maximum parallel agents;
 - model and reasoning selectors for Planner, Lead, Worker, and Reviewer.
 
+> **Contained model-catalog clarification — 2026-07-16:** selectable models come from a fresh
+> offline Pi `ModelRuntime` using the operator's normal Pi credentials, `models.json`, and cached
+> model inventory—the same substrate a contained attempt constructs. In `/koni`, models supplied
+> only by another ambient extension are shown as unavailable diagnostics rather than selectable;
+> Koni does not copy that extension's provider functions into autonomous sessions. Standalone
+> `koni tui` applies the same executable-catalog rule.
+
 > **Naming history — superseded 2026-07-14.** The prior form requirement called the first item
 > “the goal and profile-defined intake fields.” The user later required the visible product term
 > `Objective` everywhere in the TUI, so `goal` remains only the compatible CLI flag name.

@@ -11,6 +11,11 @@ export interface AuthorityGrant {
   allowedTools: readonly string[];
   readPaths: readonly string[];
   writePaths: readonly string[];
+  configuredChecks?: {
+    ids: readonly string[];
+    networkAccess: boolean;
+    maxTimeoutMs: number;
+  };
   expectedRevision: number;
   expectedStateHash: string;
   expiresAtMs?: number;
@@ -89,9 +94,13 @@ export class GrantLedger<Result> {
       throw new GrantRejectedError("stale_epoch", "the assignment epoch is no longer active");
     }
     if (
-      snapshot.revision !== grant.expectedRevision ||
+      call.expectedRevision < grant.expectedRevision ||
+      (call.expectedRevision === grant.expectedRevision && call.expectedStateHash !== grant.expectedStateHash)
+    ) {
+      throw new GrantRejectedError("grant_anchor", "the call predates its immutable grant anchor");
+    }
+    if (
       snapshot.revision !== call.expectedRevision ||
-      snapshot.stateHash !== grant.expectedStateHash ||
       snapshot.stateHash !== call.expectedStateHash
     ) {
       throw new GrantRejectedError("state_cas", "the expected workflow state is no longer current");

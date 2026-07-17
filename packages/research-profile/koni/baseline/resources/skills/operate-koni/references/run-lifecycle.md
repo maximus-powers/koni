@@ -4,20 +4,29 @@ Keep planning, approval, execution, and integration as distinct trust boundaries
 
 ## Initialize the project
 
-`koni init` discovers the project root, asks an interactive user to choose the bundled Software or Research profile before writing, and publishes current schema-2 `.koni` configuration plus repository skills. A detected schema-1 `.codex/koni` project follows the explicit migration path rather than becoming a second live layout. Non-interactive callers must pass `--profile` or `--from` for a fresh or replacement install. Use:
+From an existing Git repository, choose one installed broad profile explicitly and validate the
+result:
 
 ```sh
-koni init --dry-run
-koni init
-koni init --profile software
-koni init --profile research
-koni init --from /path/to/profile
-koni init --target /path/to/project
-koni init --replace
-koni init --open
+koni init coding --root .       # or: koni init research --root .
+koni config validate --root . --json
 ```
 
-Initialization validates staged resources before publication, preserves unrelated `.codex` and `.agents` content, and creates no run. A repeated compatible initialization should be idempotent. Treat an ownership conflict, mixed legacy/current layout, modified owned resource, escaping path, or symlink rejection as a condition to inspect rather than bypass.
+Use `--profile-package /reviewed/package/directory` only for an explicit local package source. In
+an ordinary interactive Pi session, `/koni init` may present the installed Coding and Research
+packages for selection. Use `koni update --root .` or `/koni update` for a later verified baseline
+upgrade; it preserves project-owned overlay changes and stages unresolved upstream changes for
+review.
+
+Initialization validates package identity and the effective candidate before publication,
+preserves unrelated `.codex`, Pi, and repository content, and creates no run. Treat an ownership
+conflict, mixed legacy/current layout, modified managed resource, escaping path, or symlink
+rejection as a condition to inspect rather than bypass.
+
+> **Pi-native command supersession — 2026-07-16:** The frozen Rust initializer accepted bare
+> `koni init`, `--profile`, `--from`, `--target`, `--replace`, `--open`, and `--dry-run`. Those names
+> are retained here as migration history and are not aliases in current Core. Do not try them when
+> operating the Pi package line.
 
 ## Plan
 

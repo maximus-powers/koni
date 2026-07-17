@@ -13,11 +13,19 @@ import {
   type RpcSuccess,
 } from "./protocol.js";
 import { discoverAuthorityEndpoint } from "./endpoint.js";
+import {
+  assertExecutingCoreRuntimeCurrent,
+  executingCoreRuntimeIdentity,
+} from "../runtime/identity.js";
 
 export interface AuthorityClientOptions {
   projectRoot: string;
   client: ProtocolHandshake["client"];
   version: string;
+  /** Exact test/embedding override; normal clients hash their executing Core tree. */
+  buildSha256?: string;
+  /** Stable local control path used only to quiesce an older/newer Core build. */
+  compatibilityControl?: boolean;
   connectTimeoutMs?: number;
 }
 
@@ -65,6 +73,14 @@ export class AuthorityClient {
 
   public static async connect(options: AuthorityClientOptions): Promise<AuthorityClient> {
     const target = await discoverAuthorityEndpoint(options.projectRoot);
+    let buildSha256 = options.buildSha256;
+    if (buildSha256 === undefined) {
+      const executing = await executingCoreRuntimeIdentity();
+      // Compatibility control is intentionally able to quiesce an old authority after an
+      // in-place update. Every ordinary operation requires the loaded JS and disk to agree.
+      if (options.compatibilityControl !== true) await assertExecutingCoreRuntimeCurrent();
+      buildSha256 = executing.buildSha256;
+    }
     const socket = net.createConnection(target.endpoint);
     socket.setNoDelay(true);
     const client = new AuthorityClient(socket);
@@ -90,23 +106,54 @@ export class AuthorityClient {
       }, options.connectTimeoutMs ?? 5_000);
       timer.unref();
       const unsubscribe = client.onEvent((event) => {
-        if (event.topic === "authority.ready") {
+        if (event.topic === "authority.compatibility_control_ready") {
+          if (options.compatibilityControl !== true) return;
           clearTimeout(timer);
           unsubscribe();
           resolve();
+        } else if (event.topic === "authority.ready") {
+          clearTimeout(timer);
+          unsubscribe();
+          if (
+            !isRecord(event.payload) ||
+            event.payload.version !== options.version ||
+            event.payload.buildSha256 !== buildSha256
+          ) {
+            reject(new AuthorityClientError(
+              "runtime_mismatch",
+              "running Koni authority does not match this Core version/build; preserve or pause runs, restart the authority, then reconnect",
+              isRecord(event.payload) ? { details: event.payload } : {},
+            ));
+          } else {
+            resolve();
+          }
+        } else if (event.topic === "authority.incompatible") {
+          clearTimeout(timer);
+          unsubscribe();
+          reject(new AuthorityClientError(
+            "runtime_mismatch",
+            "running Koni authority does not match this Core version/build; preserve or pause runs, restart the authority, then reconnect",
+            isRecord(event.payload) ? { details: event.payload } : {},
+          ));
         }
       });
     });
     const handshake: ProtocolHandshake = {
       protocol: AUTHORITY_PROTOCOL,
-      client: options.client,
+      client: options.compatibilityControl === true ? "compat-control" : options.client,
       clientVersion: options.version,
+      clientBuildSha256: buildSha256,
       projectRoot: target.identity.worktreeRoot,
       nonce: randomBytes(24).toString("base64url"),
     };
     socket.write(encodeFrame(handshake));
-    await ready;
-    return client;
+    try {
+      await ready;
+      return client;
+    } catch (error) {
+      client.close();
+      throw error;
+    }
   }
 
   public onEvent(listener: (event: RpcEvent) => void): () => void {
@@ -203,4 +250,8 @@ function isEvent(value: RpcEnvelope): value is RpcEvent {
 
 function isResponse(value: RpcEnvelope): value is RpcSuccess | RpcFailure {
   return "type" in value && value.type === "response";
+}
+
+function isRecord(value: unknown): value is Record<string, JsonValue> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

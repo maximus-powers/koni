@@ -1,6 +1,6 @@
 ---
 name: model-koni-work
-description: Design or revise Köni's graph-compiled work model from a repository's actual domain. Use when Codex needs to define project ontology, node and edge types, queries, structured rules, ticket emission, operations, workflows, checks, actions, receipts, reports, cockpit views, or lifecycle policy under current `.koni` configuration or a detected legacy `.codex/koni` profile; specialize the Software profile around code domains, interfaces, and adaptive proof; specialize the empirical Research profile around claims, metrics, baselines, ablations, gates, and evidence; translate a real-world process into graph gaps and executable tickets; or debug missing, duplicated, blocked, stale, or over-authorized work.
+description: Design or revise Köni's graph-compiled work model from a repository's actual domain. Use when a Pi agent needs to define project ontology, node and edge types, queries, structured rules, ticket emission, operations, workflows, checks, actions, receipts, reports, views, or lifecycle policy under current `.koni` configuration or a detected legacy `.codex/koni` profile; specialize the Coding profile around code domains, interfaces, and adaptive proof; specialize the empirical Research profile around claims, metrics, baselines, ablations, gates, and evidence; translate a real-world process into graph gaps and executable tickets; or debug missing, duplicated, blocked, stale, or over-authorized work.
 ---
 
 # Model Köni Work
@@ -16,7 +16,7 @@ Model desired outcomes and their missing semantic obligations as a graph, then c
 5. Give each actionable gap one public operation, a narrow authority contract, and a dependency-aware workflow.
 6. Attach checks, receipts, and review that prove completion. For Git-enabled delivery, add target synchronization and explicit promotion boundaries.
 7. Add reports or cockpit views only after the underlying graph and ticket data are authoritative.
-8. Validate with `koni validate-profile <resolved-profile-source>`—normally `.koni/profile.yaml` for schema 2—and exercise at least one positive, one already-satisfied, and one malformed state through existing fixtures or an isolated temporary profile copy. Never mix schema-2 `agent`/`thinking_level`/`capabilities` fields with schema-1 `codex_agent`/`reasoning_effort`/`sandbox` fields.
+8. Validate the complete effective configuration with `koni config validate --root . --json`, and exercise at least one positive, one already-satisfied, and one malformed state through existing fixtures or an isolated temporary profile copy. Never mix schema-2 `agent`/`thinking_level`/`capabilities` fields with schema-1 `codex_agent`/`reasoning_effort`/`sandbox` fields.
 
 Read [graph-model.md](references/graph-model.md) when defining ontology. Read [rules-and-tickets.md](references/rules-and-tickets.md) when compiling gaps. Read [execution-contracts.md](references/execution-contracts.md) when granting authority or defining workflow effects.
 

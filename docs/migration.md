@@ -1,5 +1,21 @@
 # Migration
 
+> **Pi-native lifecycle evolution — 2026-07-16 (`profile_lifecycle_migration`):** The Rust-era
+> migration transactions below remain implementation history. Current TypeScript Core adds a
+> previewed, hash-bound `.codex/koni`/unmanaged-`.koni` adapter that preserves exact source bytes,
+> requires the owning run authority to hold a pause/quiescence barrier when legacy run state
+> exists, archives compatibility receipts atomically, and re-hashes a run before compatibility
+> resume. It never treats legacy state as implicit execution permission. See
+> [Pi-native profile lifecycle](profile-lifecycle.md).
+
+> **Pure TypeScript/Pi runtime supersession — 2026-07-16 (`pi-native-port`):** New runs are executed
+> only by `@koni/core` and Pi 0.80.10 sessions. Existing schema-2 project overlays are adopted
+> without rewriting project configuration. Persisted Rust-era runs pass an exact discriminator,
+> graph/config/Git proof, and compatibility adapter: terminal history is preserved; a clean active
+> legacy worktree receives a journaled two-hop relocation before it can resume; dirty, moved, or
+> ambiguous state remains blocked and untouched. There is no automatic credential migration—Pi's
+> existing authentication stays canonical—and no fallback to the old runtime.
+
 Köni includes a one-time migration for projects configured by its predecessor.
 The old name appears in this document only where it identifies a literal path
 or namespace that the migration must recognize.
@@ -213,3 +229,39 @@ requires the final whole-workspace and packaged-runtime matrix described in
 > user installation or live migration occurred during that proof. Apply only as a separate guarded
 > operator action in an authorized project; never reinterpret the protected forensic Updog runs as
 > migration authority.
+
+## Pi-native Rust-run successor adoption — 2026-07-16
+
+> **Transition note (`legacy_run_adoption/root`):** This adds a guarded successor path beside the
+> historical “forensic history only” rule above; it does not erase or weaken the original archive.
+> A legacy run is never resumed in place and its Rust transport log is never passed off as a Pi
+> session.
+
+After a successful `planLegacyProjectMigration()` / `applyLegacyProjectMigration()` transaction,
+operators can inspect the archived run catalog without writing:
+
+```sh
+koni adopt --migration <migration-id>
+```
+
+Only `planning`, `approved`, `active`, and `paused` entries with complete barrier, run-type, Git,
+and immutable-source evidence can be adopted. Create one distinct paused successor explicitly,
+then cross the separately verified resume boundary:
+
+```sh
+koni adopt --migration <migration-id> --run <legacy-run-id> --apply
+koni resume --run <successor-run-id>
+```
+
+The adoption transaction writes current authority state only. It does not create a worktree,
+launch Pi, mutate the legacy run tree, or move its branch. It binds the exact archived plan,
+compatibility index, receipt bytes, registry, run tree, barrier, base/target commits, and source
+checkout. First resume re-verifies those bindings before materializing a new detached planning
+checkout. A clean committed legacy integration HEAD becomes the new planning base for
+approved/active/paused work; a planning run uses its pinned base commit. The first model attempt
+is a fresh authenticated Pi recovery root, not a fabricated branch of Rust transport events.
+
+Unsupported terminal history and missing, dirty, redirected, ambiguous, changed, incompatible,
+or history-rewritten sources remain untouched and return typed blockers. Repeating apply returns
+the already registered successor, including after authority restart; it cannot create duplicate
+current runs for one migration/source binding.

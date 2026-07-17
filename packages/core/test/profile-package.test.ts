@@ -19,15 +19,15 @@ describe("profile package manifests", () => {
       "coding",
       "packages/coding-profile/koni/profile-manifest.json",
       "packages/coding-profile/koni/baseline",
-      "sha256:850aedcdd53edeff41be7fcc8599b159b3516ac3772d5d8d3e22998d04ccade9",
-      45,
+      "sha256:2d686e082bbd72a7d866472e979578370dc2d9fe2e5bc1f7a711eeeeacb3a856",
+      46,
     ],
     [
       "research",
       "packages/research-profile/koni/profile-manifest.json",
       "packages/research-profile/koni/baseline",
-      "sha256:516ca34e79916431d44dd130201a4c84659df2bbf6f3dfd76b3d2c7d69f581f2",
-      48,
+      "sha256:596591fd6123dd773100297276deb6c1ea938bf9f9629ef432f4572c26a6fe95",
+      49,
     ],
   ])("validates and byte-verifies the frozen %s profile bundle", (_name, manifestPath, baselinePath, digest, count) => {
     const parsed = parseProfilePackageManifest(

@@ -2,12 +2,12 @@
   "protocol": "koni.profile-package.v1",
   "package": {
     "name": "@koni/research-profile",
-    "version": "1.0.10"
+    "version": "1.0.11"
   },
   "profile": {
     "id": "research",
     "display_name": "Research",
-    "version": "1.0.10",
+    "version": "1.0.11",
     "lineage": "koni.research"
   },
   "compatibility": {
@@ -20,8 +20,8 @@
     "files": [
       {
         "path": "README.md",
-        "sha256": "sha256:3669a422b51c00f75d601f36c0d85c29370540b5373c6095b38e3dca003b81b6",
-        "size_bytes": 8515,
+        "sha256": "sha256:f3c91fc974f9504f3de236f8fbf27b254ff8e105a3caca24a15d4cdfb00460e3",
+        "size_bytes": 9259,
         "kind": "other"
       },
       {
@@ -146,7 +146,7 @@
       },
       {
         "path": "profile.yaml",
-        "sha256": "sha256:f276b64f68dcc8e11906c8e827be6383cd1970dff0011a9feb285daae1235340",
+        "sha256": "sha256:319ecdab13c1345a6f78754d0e373c3149912b7614152deba29d2d3aba17c23d",
         "size_bytes": 1906,
         "kind": "config"
       },
@@ -163,8 +163,14 @@
         "kind": "config"
       },
       {
+        "path": "resources/pi-packages.yaml",
+        "sha256": "sha256:f62f72746871594d5d28247af8340a32d45663884d41a6ac6d0994d126024e50",
+        "size_bytes": 2263,
+        "kind": "config"
+      },
+      {
         "path": "resources/skills/configure-koni/SKILL.md",
-        "sha256": "sha256:cedb6d1b73a6900146e1e4deb4bfaf2b43f4a1ea1d3df1bf34845187d98fef94",
+        "sha256": "sha256:06e8023a18ba7b9dadfb34d12b7d7f16776e3fd2eeecc814c7144157efd58335",
         "size_bytes": 7788,
         "kind": "skill"
       },
@@ -182,8 +188,8 @@
       },
       {
         "path": "resources/skills/configure-koni/references/configuration-layers.md",
-        "sha256": "sha256:5bbda44529611fc6e899899e7d5e137e40ff7df64419a6403d1c95418b49e19d",
-        "size_bytes": 8033,
+        "sha256": "sha256:d2d158c31ba3cc0200fb6248c4ffc5a0bea7d9af13cfe6a771080efcf84d261c",
+        "size_bytes": 8130,
         "kind": "skill"
       },
       {
@@ -200,8 +206,8 @@
       },
       {
         "path": "resources/skills/model-koni-work/SKILL.md",
-        "sha256": "sha256:4de20edaccf230f1391df27ac53552eacd7beeafb9bed09e4aa61f6ecbd9abe4",
-        "size_bytes": 6501,
+        "sha256": "sha256:4e252e69cf1c80052a5dfbe801f672cb2f654302e92b984e77c39cccaa246697",
+        "size_bytes": 6476,
         "kind": "skill"
       },
       {
@@ -242,8 +248,8 @@
       },
       {
         "path": "resources/skills/operate-koni/SKILL.md",
-        "sha256": "sha256:33e62b94e063b8d2c845132045f45af528b6791e42d83d8a6a5ab5c0bbb231f4",
-        "size_bytes": 4424,
+        "sha256": "sha256:e364660d36d5a4e8e399edaf3f437fc05709ad9e4069284c94bc85915e220912",
+        "size_bytes": 4427,
         "kind": "skill"
       },
       {
@@ -254,20 +260,20 @@
       },
       {
         "path": "resources/skills/operate-koni/references/operator-surfaces.md",
-        "sha256": "sha256:21718460ec3777791be6a93e26badd7d9f7ebf3d4dd6f62e33abcb9e43378347",
-        "size_bytes": 2551,
+        "sha256": "sha256:e492a5640e7f692362733dc96980ef2a8d53e2b6a4bd22d1b4ae4a47a8cdda51",
+        "size_bytes": 1908,
         "kind": "skill"
       },
       {
         "path": "resources/skills/operate-koni/references/recovery.md",
-        "sha256": "sha256:27ebbfd5bfa6061a0fdea1e98989700d76308579b4ba1a553a21ac2883a3df70",
-        "size_bytes": 3376,
+        "sha256": "sha256:e45635acdc06bba503ea21db32cd12b81b2e705d4c43844620890a50fbd8801a",
+        "size_bytes": 4155,
         "kind": "skill"
       },
       {
         "path": "resources/skills/operate-koni/references/run-lifecycle.md",
-        "sha256": "sha256:41e6f7438f77c4ba7ad79828c177378af69943ad85f4c0bf80f46f1822c46da2",
-        "size_bytes": 3402,
+        "sha256": "sha256:0c295fa0c0e2e6268236a6371d4b8ce307b47f550ec8473dd79f2eec99a4bca2",
+        "size_bytes": 3688,
         "kind": "skill"
       },
       {
@@ -308,5 +314,5 @@
       }
     ]
   },
-  "bundle_sha256": "sha256:516ca34e79916431d44dd130201a4c84659df2bbf6f3dfd76b3d2c7d69f581f2"
+  "bundle_sha256": "sha256:596591fd6123dd773100297276deb6c1ea938bf9f9629ef432f4572c26a6fe95"
 }

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -24,12 +24,14 @@ describe("contained Pi resource loader", () => {
       "utf8",
     );
     const skill = "---\nname: issued-skill\ndescription: Compiler-issued procedure\n---\nFollow the ticket exactly.";
+    const skillReference = "# Reference\n\nUse the compiler-issued invariant.";
     const prompt = "---\ndescription: Compiler-issued operator prompt\n---\nDo the issued step.";
     const spec = fixtureLaunchSpec({
       cwd,
       sessionDirectory: path.join(root, "sessions", "attempt-one"),
       resources: [
         fixtureResource("skill", "issued-skill", "skills/issued-skill/SKILL.md", skill),
+        fixtureResource("skill", "issued-skill-reference", "skills/issued-skill/references/invariant.md", skillReference),
         fixtureResource("prompt", "issued-prompt", "prompts/issued-prompt.md", prompt),
         fixtureResource("context", "issued-context", "context/ticket.md", "Authoritative ticket context."),
         fixtureResource("append_system_prompt", "issued-append", "prompts/append.md", "Preserve receipts."),
@@ -47,10 +49,17 @@ describe("contained Pi resource loader", () => {
     expect(result.loader.getPrompts().prompts.map((entry) => entry.name)).toEqual(["issued-prompt"]);
     expect(result.loader.getThemes().themes).toEqual([]);
     expect(result.loader.getAgentsFiles().agentsFiles).toEqual([
-      expect.objectContaining({ content: "Authoritative ticket context." }),
+      expect.objectContaining({ content: skill }),
     ]);
+    expect(result.loader.getAgentsFiles().agentsFiles).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ content: "Authoritative ticket context." }),
+    ]));
     expect(result.loader.getAppendSystemPrompt()).toEqual(["Preserve receipts."]);
     expect(result.loader.getSystemPrompt()).toBe(spec.persona.systemPrompt);
+    expect(await readFile(
+      path.join(result.resourceRoot, "skills/issued-skill/references/invariant.md"),
+      "utf8",
+    )).toBe(skillReference);
     expect(() => result.loader.extendResources({ skillPaths: [] })).toThrowError(
       expect.objectContaining({ code: "resource_extension_denied" }),
     );
@@ -76,5 +85,78 @@ describe("contained Pi resource loader", () => {
       spec,
       extension: { name: "koni-managed-session", factory() {} },
     })).rejects.toEqual(expect.objectContaining({ code: "resource_replay" }));
+  });
+
+  it("recovers only when every previously materialized resource still matches its launch bytes", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "koni-contained-recovery-"));
+    temporary.push(root);
+    const cwd = path.join(root, "worktree");
+    await mkdir(cwd);
+    const resource = fixtureResource("context", "ticket", "context/ticket.md", "Bound ticket context.");
+    const spec = fixtureLaunchSpec({
+      cwd,
+      sessionDirectory: path.join(root, "sessions", "attempt-recovery"),
+      resources: [resource],
+    });
+    const extension = { name: "koni-managed-session", factory() {} } as const;
+    const fresh = await createContainedResourceLoader({ spec, extension });
+
+    await expect(createContainedResourceLoader({ spec, extension, mode: "recover" })).resolves.toEqual(
+      expect.objectContaining({ resourceRoot: fresh.resourceRoot }),
+    );
+
+    const materialized = path.join(fresh.resourceRoot, resource.relativePath);
+    await chmod(materialized, 0o600);
+    await writeFile(materialized, "drifted", "utf8");
+    await chmod(materialized, 0o400);
+    await expect(createContainedResourceLoader({ spec, extension, mode: "recover" })).rejects.toEqual(
+      expect.objectContaining({ code: "resource_drift" }),
+    );
+  });
+
+  it("recreates a missing partial resource from the immutable launch bundle during recovery", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "koni-contained-partial-resource-"));
+    temporary.push(root);
+    const cwd = path.join(root, "worktree");
+    await mkdir(cwd);
+    const resource = fixtureResource("context", "ticket", "context/nested/ticket.md", "Bound ticket context.");
+    const spec = fixtureLaunchSpec({
+      cwd,
+      sessionDirectory: path.join(root, "sessions", "attempt-partial-resource"),
+      resources: [resource],
+    });
+    const extension = { name: "koni-managed-session", factory() {} } as const;
+    const fresh = await createContainedResourceLoader({ spec, extension });
+    const materialized = path.join(fresh.resourceRoot, resource.relativePath);
+    await rm(path.dirname(materialized), { recursive: true });
+
+    const recovered = await createContainedResourceLoader({ spec, extension, mode: "recover" });
+    expect(recovered.resourceRoot).toBe(fresh.resourceRoot);
+    expect(await readFile(materialized, "utf8")).toBe(resource.content);
+  });
+
+  it("rejects a nested symlink even when its target contains the expected resource bytes", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "koni-contained-symlink-"));
+    temporary.push(root);
+    const cwd = path.join(root, "worktree");
+    await mkdir(cwd);
+    const resource = fixtureResource("context", "ticket", "context/ticket.md", "Bound ticket context.");
+    const spec = fixtureLaunchSpec({
+      cwd,
+      sessionDirectory: path.join(root, "sessions", "attempt-symlink"),
+      resources: [resource],
+    });
+    const extension = { name: "koni-managed-session", factory() {} } as const;
+    const fresh = await createContainedResourceLoader({ spec, extension });
+    const nested = path.join(fresh.resourceRoot, "context");
+    const external = path.join(root, "external-context");
+    await mkdir(external);
+    await writeFile(path.join(external, "ticket.md"), resource.content, { mode: 0o400 });
+    await rm(nested, { recursive: true });
+    await symlink(external, nested, "dir");
+
+    await expect(createContainedResourceLoader({ spec, extension, mode: "recover" })).rejects.toEqual(
+      expect.objectContaining({ code: "resource_recovery" }),
+    );
   });
 });

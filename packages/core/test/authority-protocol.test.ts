@@ -47,6 +47,7 @@ describe("authority framing", () => {
           protocol: AUTHORITY_PROTOCOL,
           client: "tui",
           clientVersion: "0.1.0",
+          clientBuildSha256: `sha256:${"a".repeat(64)}`,
           projectRoot: "/tmp/project",
           nonce: "nonce",
         }),

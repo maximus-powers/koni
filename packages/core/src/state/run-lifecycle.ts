@@ -3,6 +3,7 @@ export type RunPhase =
   | "planning"
   | "awaiting_questions"
   | "awaiting_approval"
+  | "approving"
   | "executing"
   | "pausing"
   | "paused"
@@ -56,10 +57,12 @@ export type RunLifecycleEvent =
   | { type: "question_answered"; atMs: number; questionId: string; answer: string; notes?: string }
   | { type: "plan_submitted"; atMs: number }
   | { type: "plan_revision_requested"; atMs: number }
+  | { type: "plan_approval_requested"; atMs: number }
   | { type: "plan_approved"; atMs: number }
   | { type: "execution_started"; atMs: number }
   | { type: "verification_started"; atMs: number }
   | { type: "verification_passed"; atMs: number }
+  | { type: "integration_required"; atMs: number; reason: string }
   | { type: "merge_started"; atMs: number }
   | { type: "merge_completed"; atMs: number }
   | { type: "pause_requested"; atMs: number }
@@ -194,8 +197,17 @@ export function reduceRunLifecycle(
       state.activeSinceMs = event.atMs;
       effects.push({ type: "request_plan_revision", planRevision: state.planRevision });
       break;
-    case "plan_approved":
+    case "plan_approval_requested":
       requirePhase(current, event, ["awaiting_approval"]);
+      state.phase = "approving";
+      state.runningIntent = true;
+      state.blocker = undefined;
+      state.approvedAtMs ??= event.atMs;
+      state.accumulatedActiveMs = 0;
+      state.activeSinceMs = event.atMs;
+      break;
+    case "plan_approved":
+      requirePhase(current, event, ["approving"]);
       state.phase = "executing";
       state.approvedAtMs ??= event.atMs;
       state.activeSinceMs = event.atMs;
@@ -215,6 +227,14 @@ export function reduceRunLifecycle(
       state.phase = "merge_ready";
       closeActiveInterval(state, event.atMs);
       break;
+    case "integration_required":
+      requirePhase(current, event, ["verifying", "merge_ready", "merging"]);
+      state.phase = "executing";
+      state.blocker = event.reason;
+      state.runningIntent = true;
+      if (state.activeSinceMs === undefined) state.activeSinceMs = event.atMs;
+      effects.push({ type: "admit_ready_work" });
+      break;
     case "merge_started":
       requirePhase(current, event, ["merge_ready"]);
       state.phase = "merging";
@@ -228,7 +248,15 @@ export function reduceRunLifecycle(
       closeActiveInterval(state, event.atMs);
       break;
     case "pause_requested":
-      requirePhase(current, event, ["planning", "executing", "verifying"]);
+      requirePhase(current, event, [
+        "planning",
+        "awaiting_questions",
+        "awaiting_approval",
+        "approving",
+        "executing",
+        "verifying",
+        "merge_ready",
+      ]);
       state.resumePhase = current.phase as ResumableRunPhase;
       state.phase = "pausing";
       state.runningIntent = false;
@@ -244,19 +272,24 @@ export function reduceRunLifecycle(
       state.phase = state.resumePhase ?? "executing";
       state.resumePhase = undefined;
       state.runningIntent = true;
-      state.activeSinceMs = event.atMs;
-      effects.push(
-        state.phase === "planning"
-          ? { type: "launch_planner", planRevision: state.planRevision }
-          : { type: "admit_ready_work" },
-      );
+      if (new Set<RunPhase>(["planning", "executing", "verifying"]).has(state.phase)) {
+        state.activeSinceMs = event.atMs;
+      }
+      if (state.phase === "planning") {
+        effects.push({ type: "launch_planner", planRevision: state.planRevision });
+      } else if (state.phase === "executing" || state.phase === "verifying") {
+        effects.push({ type: "admit_ready_work" });
+      }
       break;
     case "blocked":
       requirePhase(current, event, [
+        "draft",
         "planning",
         "awaiting_approval",
+        "approving",
         "executing",
         "verifying",
+        "merge_ready",
         "merging",
       ]);
       state.resumePhase = current.phase as ResumableRunPhase;
@@ -276,7 +309,9 @@ export function reduceRunLifecycle(
       effects.push(
         event.phase === "planning"
           ? { type: "launch_planner", planRevision: state.planRevision }
-          : { type: "admit_ready_work" },
+          : event.phase === "executing" || event.phase === "verifying"
+            ? { type: "admit_ready_work" }
+            : { type: "stop_admission" },
       );
       break;
     case "failed":

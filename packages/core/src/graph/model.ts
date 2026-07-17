@@ -1,5 +1,5 @@
 import type { JsonValue } from "../authority/protocol.js";
-import { canonicalHash, type Sha256Digest } from "../shared/canonical.js";
+import { canonicalHash, isSha256Digest, type Sha256Digest } from "../shared/canonical.js";
 
 export interface GraphNode {
   schema_version: "1.0";
@@ -89,6 +89,250 @@ export interface AppliedGraphDelta {
   }[];
 }
 
+export const GRAPH_CONTEXTUAL_STATE_PROTOCOL = "koni.graph-contextual-state.v1" as const;
+export const WORKING_SPEC_PROTOCOL = "koni.working-spec.v1" as const;
+export const GRAPH_CHANGE_NOTE_PROTOCOL = "koni.graph-note.v2" as const;
+
+export interface ContextualRecordProvenance {
+  runId: string;
+  generation: number;
+  ticketId?: string;
+  stepId?: string;
+  attemptId?: string;
+  sessionId?: string;
+  personaId: string;
+  authorityGrantHash?: Sha256Digest;
+  launchSpecHash?: Sha256Digest;
+  authoritativeContextHash?: Sha256Digest;
+  semanticRevision: number;
+  semanticHash: Sha256Digest;
+  /** The durable contextual state on which this append/update was based. */
+  contextualRevision: number;
+  contextualHash: Sha256Digest;
+  lineage?: {
+    branchEpoch: number;
+    reason: string;
+    parentAttemptId?: string;
+    parentSessionId?: string;
+    parentEntryId?: string;
+  };
+  recordedAt: string;
+}
+
+export interface WorkingSpecBaseline {
+  objective: string;
+  intake: Record<string, string>;
+  acceptedPlan: {
+    architecture: string;
+    decisions: string;
+    risk: string;
+    verification: string;
+  } | null;
+  resolvedDecisions: string;
+  verificationIntent: string;
+  source: {
+    kind: "approved_plan" | "direct_approval";
+    artifactPath: string;
+    artifactSha256: Sha256Digest;
+    planRevision: number;
+    attemptId?: string;
+  };
+}
+
+export interface WorkingSpecVersionRecord {
+  protocol: typeof WORKING_SPEC_PROTOCOL;
+  recordType: "working_spec";
+  id: string;
+  runId: string;
+  generation: number;
+  ownerPersonaId: string;
+  version: number;
+  digest: Sha256Digest;
+  baselineDigest: Sha256Digest;
+  baseline: WorkingSpecBaseline;
+  guidance: string;
+  affectedNodeIds: string[];
+  repositoryPaths: string[];
+  supersedes?: string;
+  provenance: ContextualRecordProvenance & { kind: "baseline" | "owner_update" };
+}
+
+export interface GraphChangeNoteRecord {
+  protocol: typeof GRAPH_CHANGE_NOTE_PROTOCOL;
+  recordType: "change_note";
+  id: string;
+  runId: string;
+  generation: number;
+  subject: {
+    kind: "run_root" | "semantic_node";
+    id: string;
+  };
+  kind: "observation" | "implementation_detail" | "rationale" | "nit" | "open_question";
+  body: string;
+  repositoryPaths: string[];
+  targetNodeHashes: Record<string, Sha256Digest>;
+  supersedes?: string;
+  provenance: ContextualRecordProvenance & { kind: "change_note" };
+}
+
+export type GraphContextualRecord = WorkingSpecVersionRecord | GraphChangeNoteRecord;
+
+export interface GraphContextualLink {
+  sourceId: string;
+  relation: "context_for" | "affects" | "references_path" | "supersedes";
+  targetKind: "run_root" | "semantic_node" | "repository_path" | "context_record";
+  targetId: string;
+}
+
+/**
+ * Contextual state is embedded in the durable run-graph artifact but deliberately excluded from
+ * `TypedGraph.hash`. Its own CAS epoch lets notes/specification guidance advance without making a
+ * prepared semantic `GraphDelta` stale.
+ */
+export interface GraphContextualState {
+  protocol: typeof GRAPH_CONTEXTUAL_STATE_PROTOCOL;
+  revision: number;
+  hash: Sha256Digest;
+  runRootId: string;
+  ownerPersonaId?: string;
+  canonicalWorkingSpecId?: string;
+  records: Record<string, GraphContextualRecord>;
+  links: GraphContextualLink[];
+}
+
+export function workingSpecDigest(input: Pick<
+  WorkingSpecVersionRecord,
+  "baselineDigest" | "guidance" | "affectedNodeIds" | "repositoryPaths"
+>): Sha256Digest {
+  return canonicalHash({
+    baselineDigest: input.baselineDigest,
+    guidance: input.guidance,
+    affectedNodeIds: [...input.affectedNodeIds],
+    repositoryPaths: [...input.repositoryPaths],
+  });
+}
+
+export function graphContextualStateHash(
+  state: Omit<GraphContextualState, "hash">,
+): Sha256Digest {
+  return canonicalHash(state);
+}
+
+export function createGraphContextualState(
+  runRootId: string,
+  ownerPersonaId?: string,
+): GraphContextualState {
+  const draft: Omit<GraphContextualState, "hash"> = {
+    protocol: GRAPH_CONTEXTUAL_STATE_PROTOCOL,
+    revision: 0,
+    runRootId,
+    ...(ownerPersonaId === undefined ? {} : { ownerPersonaId }),
+    records: Object.create(null) as Record<string, GraphContextualRecord>,
+    links: [],
+  };
+  return { ...draft, hash: graphContextualStateHash(draft) };
+}
+
+export function sealGraphContextualState(
+  state: Omit<GraphContextualState, "hash">,
+): GraphContextualState {
+  const cloned = structuredClone(state);
+  const sealed = { ...cloned, hash: graphContextualStateHash(cloned) };
+  validateGraphContextualState(sealed);
+  return sealed;
+}
+
+export function validateGraphContextualState(state: GraphContextualState): void {
+  const diagnostics: string[] = [];
+  if (state.protocol !== GRAPH_CONTEXTUAL_STATE_PROTOCOL) diagnostics.push("unsupported contextual graph protocol");
+  if (!Number.isSafeInteger(state.revision) || state.revision < 0) diagnostics.push("invalid contextual revision");
+  if (!isIdentifier(state.runRootId)) diagnostics.push("invalid contextual run-root identity");
+  if (state.ownerPersonaId !== undefined && !isIdentifier(state.ownerPersonaId)) diagnostics.push("invalid working-spec owner");
+  if (state.canonicalWorkingSpecId !== undefined && !isIdentifier(state.canonicalWorkingSpecId)) {
+    diagnostics.push("invalid canonical working-spec identity");
+  }
+  if (graphContextualStateHash(withoutContextualHash(state)) !== state.hash) {
+    diagnostics.push("contextual graph hash does not match its records");
+  }
+  const canonical = state.canonicalWorkingSpecId === undefined
+    ? undefined
+    : state.records[state.canonicalWorkingSpecId];
+  if (
+    state.canonicalWorkingSpecId !== undefined &&
+    (canonical === undefined || canonical.recordType !== "working_spec" || canonical.ownerPersonaId !== state.ownerPersonaId)
+  ) diagnostics.push("canonical working-spec identity does not name an owner-bound working specification");
+  const successorCounts = new Map<string, number>();
+  for (const [id, record] of Object.entries(state.records)) {
+    if (record.id !== id || !isIdentifier(id) || !isIdentifier(record.runId)) {
+      diagnostics.push(`invalid contextual record identity: ${id}`);
+      continue;
+    }
+    if (!Number.isSafeInteger(record.generation) || record.generation < 0) {
+      diagnostics.push(`invalid contextual record generation: ${id}`);
+    }
+    validateContextualProvenance(record, diagnostics);
+    if (record.supersedes !== undefined) {
+      if (!isIdentifier(record.supersedes) || record.supersedes === record.id) {
+        diagnostics.push(`invalid contextual supersession: ${id}`);
+      }
+      successorCounts.set(record.supersedes, (successorCounts.get(record.supersedes) ?? 0) + 1);
+    }
+    if (record.recordType === "working_spec") {
+      if (
+        record.protocol !== WORKING_SPEC_PROTOCOL ||
+        !isIdentifier(record.ownerPersonaId) ||
+        !Number.isSafeInteger(record.version) ||
+        record.version < 1 ||
+        !isSha256Digest(record.baselineDigest) ||
+        !isSha256Digest(record.digest) ||
+        canonicalHash(record.baseline) !== record.baselineDigest ||
+        workingSpecDigest(record) !== record.digest ||
+        record.guidance.length === 0 ||
+        record.guidance.includes("\u0000") ||
+        new Set(record.affectedNodeIds).size !== record.affectedNodeIds.length ||
+        record.affectedNodeIds.some((nodeId) => !isIdentifier(nodeId)) ||
+        !validRepositoryPathList(record.repositoryPaths) ||
+        !isSafeArtifactPath(record.baseline.source.artifactPath) ||
+        !isSha256Digest(record.baseline.source.artifactSha256) ||
+        !Number.isSafeInteger(record.baseline.source.planRevision) ||
+        record.baseline.source.planRevision < 0
+      ) diagnostics.push(`invalid working-spec record: ${id}`);
+    } else if (
+      record.protocol !== GRAPH_CHANGE_NOTE_PROTOCOL ||
+      !isIdentifier(record.subject.id) ||
+      (record.subject.kind !== "run_root" && record.subject.kind !== "semantic_node") ||
+      record.body.length === 0 ||
+      record.body.includes("\u0000") ||
+      Buffer.byteLength(record.body, "utf8") > 1024 * 1024 ||
+      !validRepositoryPathList(record.repositoryPaths) ||
+      Object.entries(record.targetNodeHashes).some(([nodeId, hash]) => !isIdentifier(nodeId) || !isSha256Digest(hash)) ||
+      (record.subject.kind === "run_root" && Object.keys(record.targetNodeHashes).length !== 0) ||
+      (record.subject.kind === "semantic_node" &&
+        (Object.keys(record.targetNodeHashes).length !== 1 || record.targetNodeHashes[record.subject.id] === undefined))
+    ) diagnostics.push(`invalid graph-note record: ${id}`);
+  }
+  for (const [id, count] of successorCounts) {
+    if (count > 1) diagnostics.push(`contextual record ${id} has more than one successor`);
+  }
+  const linkKeys = new Set<string>();
+  for (const link of state.links) {
+    const key = `${link.sourceId}\0${link.relation}\0${link.targetKind}\0${link.targetId}`;
+    if (
+      linkKeys.has(key) ||
+      state.records[link.sourceId] === undefined ||
+      !["context_for", "affects", "references_path", "supersedes"].includes(link.relation) ||
+      !["run_root", "semantic_node", "repository_path", "context_record"].includes(link.targetKind) ||
+      link.targetId.length === 0 ||
+      (link.targetKind === "repository_path" && !isSafeProjectPath(link.targetId)) ||
+      (link.targetKind !== "repository_path" && !isIdentifier(link.targetId))
+    ) {
+      diagnostics.push(`invalid or duplicate contextual link: ${link.sourceId}.${link.relation}`);
+    }
+    linkKeys.add(key);
+  }
+  if (diagnostics.length > 0) throw new GraphValidationError([...new Set(diagnostics)].sort());
+}
+
 export class GraphValidationError extends Error {
   public readonly diagnostics: readonly string[];
 
@@ -140,6 +384,16 @@ export class GraphSchema {
     }
     this.nodeTypes = nodeTypes;
     this.edgeTypes = definition.edgeTypes.map((edge) => structuredClone(edge));
+  }
+
+  public repositoryPaths(node: GraphNode): string[] {
+    const definition = this.nodeTypes.get(node.type);
+    if (definition === undefined) return [];
+    const paths = new Set<string>();
+    for (const [field, fieldDefinition] of Object.entries(definition.fields)) {
+      collectRepositoryPaths(node.spec[field], fieldDefinition, paths);
+    }
+    return [...paths].sort();
   }
 
   public resolveEdge(sourceType: string, relation: string, targetType: string): {
@@ -198,6 +452,11 @@ export class TypedGraph {
     return [...this.#nodes.values()]
       .sort((left, right) => left.id.localeCompare(right.id))
       .map((node) => structuredClone(node));
+  }
+
+  public repositoryPaths(id: string): string[] {
+    const node = this.#nodes.get(id);
+    return node === undefined ? [] : this.#schema.repositoryPaths(node);
   }
 
   public edges(): GraphEdge[] {
@@ -452,6 +711,27 @@ function validateField(
   }
 }
 
+function collectRepositoryPaths(
+  value: JsonValue | undefined,
+  definition: GraphFieldDefinition,
+  output: Set<string>,
+): void {
+  if (value === undefined) return;
+  if (definition.type === "path" && typeof value === "string") {
+    output.add(value);
+    return;
+  }
+  if (definition.type === "list" && Array.isArray(value) && definition.items !== undefined) {
+    for (const item of value) collectRepositoryPaths(item, definition.items, output);
+    return;
+  }
+  if (definition.type === "object" && isRecord(value) && definition.properties !== undefined) {
+    for (const [field, child] of Object.entries(definition.properties)) {
+      collectRepositoryPaths(value[field], child, output);
+    }
+  }
+}
+
 function validateAcyclic(
   nodes: ReadonlyMap<string, GraphNode>,
   definition: GraphEdgeTypeDefinition,
@@ -486,6 +766,49 @@ function isSafeProjectPath(value: string): boolean {
 
 function isIdentifier(value: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value);
+}
+
+function validateContextualProvenance(
+  record: GraphContextualRecord,
+  diagnostics: string[],
+): void {
+  const provenance = record.provenance;
+  const update = record.recordType === "working_spec" && provenance.kind === "owner_update";
+  const note = record.recordType === "change_note";
+  if (
+    provenance.runId !== record.runId ||
+    provenance.generation !== record.generation ||
+    !isIdentifier(provenance.personaId) ||
+    !Number.isSafeInteger(provenance.semanticRevision) || provenance.semanticRevision < 0 ||
+    !isSha256Digest(provenance.semanticHash) ||
+    !Number.isSafeInteger(provenance.contextualRevision) || provenance.contextualRevision < 0 ||
+    !isSha256Digest(provenance.contextualHash) ||
+    !Number.isFinite(Date.parse(provenance.recordedAt)) ||
+    ((update || note) && (
+      provenance.ticketId === undefined || !isIdentifier(provenance.ticketId) ||
+      provenance.stepId === undefined || !isIdentifier(provenance.stepId) ||
+      provenance.attemptId === undefined || !isIdentifier(provenance.attemptId) ||
+      provenance.sessionId === undefined || !isIdentifier(provenance.sessionId) ||
+      !isSha256Digest(provenance.authorityGrantHash) ||
+      !isSha256Digest(provenance.launchSpecHash) ||
+      !isSha256Digest(provenance.authoritativeContextHash) ||
+      provenance.lineage === undefined ||
+      !Number.isSafeInteger(provenance.lineage.branchEpoch) || provenance.lineage.branchEpoch < 0
+    ))
+  ) diagnostics.push(`invalid contextual provenance: ${record.id}`);
+}
+
+function validRepositoryPathList(values: readonly string[]): boolean {
+  return new Set(values).size === values.length && values.every(isSafeProjectPath);
+}
+
+function isSafeArtifactPath(value: string): boolean {
+  return value.length > 0 && value !== "." && isSafeProjectPath(value);
+}
+
+function withoutContextualHash(state: GraphContextualState): Omit<GraphContextualState, "hash"> {
+  const { hash: _hash, ...material } = state;
+  return material;
 }
 
 function isRecord(value: unknown): value is Record<string, JsonValue> {

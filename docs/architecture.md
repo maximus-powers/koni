@@ -1,5 +1,22 @@
 # Architecture
 
+> **Pi-native package-boundary evolution — 2026-07-16 (`profile_lifecycle_migration`):** The
+> Rust/control-plane diagrams below remain the causal history of Koni's authority design. The
+> current port expresses that boundary natively in the Pi ecosystem as one broad `@koni/core`
+> package plus broad domain packages such as `@koni/coding-profile` and
+> `@koni/research-profile`; runtime adapters and run types are internal domains, not separate
+> micro-packages. Profile registrars are passive discovery surfaces, while TypeScript Core remains
+> the compiler/state/effect authority. See [Pi-native profile lifecycle](profile-lifecycle.md).
+
+> **Full Pi-native authority supersession — 2026-07-16 (`pi-native-port`):** “TypeScript Core” is
+> now literal, not a presentation layer over the Rust implementation. `@koni/core` contains the
+> graph/config compiler, deterministic scheduler, grants, receipts, project authority, Git
+> transactions, contained `AgentSession` runner, and the shared `/koni`/`koni tui` control center.
+> Pi owns provider credentials, model execution, session JSONL, compaction primitives, and ordinary
+> interactive resources. The two profile packages contribute immutable passive baselines. Rust and
+> `runtime/pi-host` remain only as a detached, non-shipping parity oracle until every executable
+> deletion gate passes; no release artifact or runtime path may fall back to them.
+
 Köni separates a reusable control plane, a deterministic execution kernel, and
 a project-owned semantic plane. The engine understands graphs, rules, tickets,
 workflows, receipts, and Git transactions; profiles supply the domain.
@@ -56,6 +73,11 @@ The three workspace crates follow that split:
 
 The TUI and CLI are clients of the same core APIs. A UI action cannot bypass a
 compiler or runtime invariant.
+
+> **Current package mapping — 2026-07-16:** The three Rust-crate bullets above remain the historical
+> responsibility split. Today those responsibilities are internal domains of one
+> `@koni/core` package, not separately installed packages. Both operator surfaces use the same
+> versioned local authority protocol and durable Git-common-dir state.
 
 ## Configuration resolution
 
@@ -310,3 +332,13 @@ repository checks succeed.
 
 For paths, branches, recovery, and storage modes, continue with
 [Runtime, state, and Git](runtime-and-git.md).
+
+> **Pi community-resource authority transition — 2026-07-16
+> (`community_resource_integration`):** Optional community packages do not create another runtime
+> authority. Core may inspect Pi's already-resolved package metadata without mutation, but it
+> copies only exact compiler-selected text resources into immutable run state. Contained sessions
+> receive those copied bytes through the normal launch-resource hash and sealed loader. Executable
+> package extensions remain outside autonomous sessions; an `explicit_tools` binding can select
+> only a Koni-owned authority adapter, with network effects restricted to an already-granted
+> configured check. This note supersedes any implication above that a Pi package itself can gain
+> compiler, filesystem, network, Git, or scheduling authority.

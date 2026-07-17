@@ -15,6 +15,7 @@ import {
   type ConfigurationValue,
   type ProfileImportCategory,
 } from "../contracts/configuration.js";
+import type { PiResourceBindingCatalog } from "../contracts/pi-resources.js";
 import type { ProfileBaselineFile } from "../contracts/profile-package.js";
 import {
   canonicalHash,
@@ -39,6 +40,10 @@ import {
   verifyProfileBaseline,
   type VerifiedProfileBaseline,
 } from "./profile-package.js";
+import {
+  parsePiResourceBindingValue,
+  PiResourceBindingError,
+} from "../profile/resource-bindings.js";
 
 const REQUIRED_IMPORT_CATEGORIES: readonly ProfileImportCategory[] = [
   "graph",
@@ -78,6 +83,7 @@ const RUN_BEHAVIOR_FIELDS = [
   "promotion",
   "planning",
   "instructions",
+  "working_spec",
 ] as const;
 const RUN_SOURCE_FIELDS = [...RUN_IDENTITY_FIELDS, ...RUN_BEHAVIOR_FIELDS, "extends", "overrides"];
 
@@ -237,6 +243,22 @@ export function compileProjectConfiguration(
   const modules = loadProfileModules(profile, loader, registryState, bag);
   const agents = loadAgentResources(projectSource, filesByPath, loader, registryState, bag);
   const runTypes = loadRunTypes(project, loader, bag);
+  let piResourceBindings: PiResourceBindingCatalog | undefined;
+  if (filesByPath.has("resources/pi-packages.yaml")) {
+    const resourceFile = loader("resources/pi-packages.yaml", "config");
+    if (resourceFile !== undefined) {
+      try {
+        piResourceBindings = parsePiResourceBindingValue(resourceFile.document);
+      } catch (error) {
+        const message = error instanceof PiResourceBindingError ? error.message : String(error);
+        bag.error(
+          "configuration.pi_resource_bindings",
+          fileRoot("resources/pi-packages.yaml"),
+          message,
+        );
+      }
+    }
+  }
 
   if (modules === undefined || agents === undefined || runTypes === undefined) {
     return validationFailure(bag.sorted());
@@ -284,6 +306,7 @@ export function compileProjectConfiguration(
     run_type_order: [...project.runTypeOrder],
     run_types: runTypeRecord,
     agents: agentRecord,
+    ...(piResourceBindings === undefined ? {} : { pi_resource_bindings: piResourceBindings }),
     edge_types: registryState.edgeTypes,
     registries: materializeRegistries(registryState.records),
   };
@@ -1382,6 +1405,10 @@ function validateSimpleRunRecords(
     const promotion = exactRecord(behavior.promotion, `${rootPath}/promotion`, ["conflict_operation"], bag);
     requiredString(promotion, "conflict_operation", `${rootPath}/promotion`, bag);
   }
+  if (behavior.working_spec !== undefined) {
+    const workingSpec = exactRecord(behavior.working_spec, `${rootPath}/working_spec`, ["owner"], bag);
+    requiredIdentifier(workingSpec, "owner", `${rootPath}/working_spec`, bag);
+  }
   if (behavior.orchestration !== undefined) {
     exactRecord(
       behavior.orchestration,
@@ -1559,6 +1586,19 @@ function validateCrossReferences(
   }
 
   for (const runType of runTypes.values()) {
+    const workingSpec = runType.document.working_spec === undefined
+      ? undefined
+      : expectRecord(runType.document.working_spec, pointer(pointer("/run_types", runType.id), "working_spec"), bag);
+    const owner = workingSpec === undefined
+      ? undefined
+      : requiredIdentifier(workingSpec, "owner", pointer(pointer("/run_types", runType.id), "working_spec"), bag);
+    if (owner !== undefined && !registries.personas.has(owner)) {
+      bag.error(
+        "configuration.working_spec_owner",
+        pointer(pointer(pointer("/run_types", runType.id), "working_spec"), "owner"),
+        `working-spec owner persona ${owner} is not configured`,
+      );
+    }
     validateRunTypeCrossReferences(runType, state, operationAliases, actionAliases, bag);
   }
 }

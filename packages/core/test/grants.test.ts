@@ -69,6 +69,25 @@ describe("grant ledger", () => {
     ).toThrowError(GrantRejectedError);
   });
 
+  it("allows a session to chain later calls from authority-returned CAS state", () => {
+    const ledger = new GrantLedger<string>();
+    const nextCall = {
+      ...call,
+      callId: "call-two",
+      requestHash: "request-two",
+      expectedRevision: 8,
+      expectedStateHash: "state-eight",
+    };
+    expect(ledger.authorize(grant, nextCall, {
+      ...snapshot,
+      revision: 8,
+      stateHash: "state-eight",
+    }, 2)).toEqual({
+      kind: "accepted",
+      replayKey: "grant-one\u00002\u00003\u0000call-two",
+    });
+  });
+
   it.each([
     [{ ...snapshot, activeEpoch: 3 }, "stale_epoch"],
     [{ ...snapshot, generation: 4 }, "stale_generation"],

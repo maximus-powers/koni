@@ -5,6 +5,15 @@ updates:
     directory: "/"
     schedule:
       interval: monthly
+    # Frozen parity-oracle dependencies move only through an explicit oracle recapture.
+    open-pull-requests-limit: 0
+    ignore:
+      - dependency-name: "*"
+
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: monthly
     open-pull-requests-limit: 5
 
   - package-ecosystem: npm

@@ -4,6 +4,14 @@ Köni is an active pre-1.0 project. Its core graph, run, receipt, process, TUI,
 and libgit2 boundaries are implemented and covered by Rust tests, but the
 configuration schema and recovery surface are still evolving.
 
+> **Pi-native 1.0 maturity supersession — 2026-07-16 (`pi-native-port`):** The paragraph above and
+> capability table below describe the frozen Rust product line. The current shipping candidate is
+> `@koni/core@1.0.0` plus the Coding and Research profile packages, all implemented in TypeScript
+> on Pi 0.80.10. Rust/libgit2 are non-shipping oracle dependencies only. Release remains
+> fail-closed until the executable parity ledger has no blockers; after that gate, versioned
+> package/profile protocols, guarded legacy migration, and baseline/overlay upgrades—not the old
+> pre-1.0 caveat—define compatibility.
+
 Use it today for evaluation, profile development, and supervised work on
 repositories with good backups and review discipline. Do not treat the current
 release as an unattended production scheduler or a security boundary for

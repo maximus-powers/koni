@@ -3,6 +3,17 @@
   "protocol": "koni.parity-issues.v1",
   "issues": [
     {
+      "id": "KBUG-GIT-0001",
+      "title": "Eager permanent run refs are superseded by detached planning",
+      "classification": "superseded",
+      "state": "superseded",
+      "evidence": ["docs/architecture.md", "packages/core/src/git/lifecycle.ts", "packages/core/test/isolated-git-lifecycle.test.ts"],
+      "observed": "The Rust-era run-creation contract eagerly created a permanent run branch/worktree before the operator approved the plan.",
+      "desired": "Planning uses a detached checkout pinned to the selected target commit; exact approval creates the first permanent Koni ref/worktree.",
+      "scope": {"case_ids": ["KPAR-RUN-0001"], "assertion_ids": ["A02-worktree-isolated"], "paths": ["git.planning", "git.run"]},
+      "closure_proof": "KPAR-RUN-0001 proves the target remains unchanged, planning HEAD is detached, no permanent run ref exists before approval, and approval creates that ref from the bound target commit."
+    },
+    {
       "id": "KBUG-CFG-0001",
       "title": "Whole-profile replacement can overwrite project configuration",
       "classification": "oracle_defect",

@@ -1,18 +1,59 @@
-import { lstat, mkdir, readdir, readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { constants } from "node:fs";
+import {
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  realpath,
+  rename,
+  rm,
+} from "node:fs/promises";
 import path from "node:path";
-import { FileTransactionStore, type TransactionDelete, type TransactionWrite } from "../authority/file-journal.js";
+import { compare, valid } from "semver";
+import {
+  FileTransactionStore,
+  type TransactionDelete,
+  type TransactionWrite,
+} from "../authority/file-journal.js";
 import type { ProfileBaselineFile, ProfilePackageManifest } from "../contracts/profile-package.js";
 import {
+  isNormalizedSafeRelativePath,
   parseProfilePackageManifest,
+  validateProfilePackageManifest,
   verifyProfileBaseline,
   type VerifiedProfileBaseline,
 } from "../compiler/profile-package.js";
-import { rawSha256, type Sha256Digest } from "../shared/canonical.js";
+import { canonicalHash, compareUtf8, isSha256Digest, rawSha256, type Sha256Digest } from "../shared/canonical.js";
 
 const INSTALL_PROTOCOL = "koni.profile-install.v1" as const;
+const LIFECYCLE_PROTOCOL = "koni.profile-lifecycle.v1" as const;
 const INSTALL_METADATA_PATH = ".managed/install.json";
+const LIFECYCLE_METADATA_PATH = ".managed/lifecycle.json";
+const PROFILE_LOCK_PATH = ".managed/profile-lifecycle.lock";
+const profileLifecycleContext = new AsyncLocalStorage<{
+  configRoot: string;
+  nonce: string;
+}>();
+const MAX_PROFILE_FILES = 16_384;
+// Installation writes both the materialized tree and its immutable archive in
+// one 64 MiB journal, leaving room for metadata and guarded migration evidence.
+const MAX_PROFILE_BYTES = 16 * 1024 * 1024;
 
-interface InstalledProfileMetadata {
+export type PendingUpstreamReason = "modified" | "deleted" | "orphaned";
+
+export interface PendingUpstreamChange {
+  path: string;
+  proposedPath: string;
+  reason: PendingUpstreamReason;
+  oldBaselineSha256?: Sha256Digest;
+  newBaselineSha256?: Sha256Digest;
+  projectSha256?: Sha256Digest | null;
+}
+
+/** Compatibility record consumed by the authenticated project-directory compiler. */
+export interface InstalledProfileMetadata {
   protocol: typeof INSTALL_PROTOCOL;
   package: ProfilePackageManifest["package"];
   profile: ProfilePackageManifest["profile"];
@@ -21,19 +62,83 @@ interface InstalledProfileMetadata {
   installedAt: string;
   baselineFiles: ProfileBaselineFile[];
   projectOverrides: Record<string, Sha256Digest | null>;
-  pendingUpstream: { path: string; proposedPath: string; reason: "modified" | "deleted" | "orphaned" }[];
+  pendingUpstream: Array<Pick<PendingUpstreamChange, "path" | "proposedPath" | "reason">>;
 }
 
-export interface ProfileInstallResult {
+export interface ProjectOverlayEntry {
+  path: string;
+  disposition: "added" | "modified" | "deleted" | "orphaned";
+  projectSha256: Sha256Digest | null;
+  baselineSha256?: Sha256Digest;
+}
+
+export interface ProfileLifecycleMetadata {
+  protocol: typeof LIFECYCLE_PROTOCOL;
+  generation: number;
+  lineage: string;
+  installedBundleSha256: Sha256Digest;
+  installedProfileVersion: string;
+  immutableBaselines: Array<{
+    bundleSha256: Sha256Digest;
+    profileVersion: string;
+    storedAt: string;
+    root: string;
+  }>;
+  overlay: ProjectOverlayEntry[];
+  pendingUpstream: PendingUpstreamChange[];
+  upstreamResolutions: Array<{
+    path: string;
+    bundleSha256: Sha256Digest;
+    resolution: "keep_project" | "accept_upstream";
+    resolvedAt: string;
+    projectSha256: Sha256Digest | null;
+  }>;
+  migrations: Array<{
+    id: string;
+    appliedAt: string;
+    artifactRoot: string;
+  }>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProfileInstallPreview {
   projectConfigRoot: string;
   packageName: string;
   profileVersion: string;
   bundleSha256: Sha256Digest;
+  generation: number;
   added: string[];
   updated: string[];
   deleted: string[];
+  unchanged: string[];
   preserved: string[];
-  pendingUpstream: InstalledProfileMetadata["pendingUpstream"];
+  overlay: ProjectOverlayEntry[];
+  pendingUpstream: PendingUpstreamChange[];
+  previewSha256: Sha256Digest;
+}
+
+export interface ProfileInstallResult extends ProfileInstallPreview {
+  transactionId: string;
+}
+
+export interface ProfileInstallOptions {
+  /** Explicit escape hatch for a guarded rollback; normal upgrades are monotonic. */
+  allowDowngrade?: boolean;
+  /** Internal migration overlay. Every entry replaces or deletes one baseline path atomically. */
+  migrationOverlay?: ReadonlyMap<string, Uint8Array | null>;
+  /** Required when `migrationOverlay` is present and included in lifecycle provenance. */
+  migrationId?: string;
+  /** Hash-pinned migration evidence archived beneath this migration's managed namespace. */
+  migrationArtifacts?: ReadonlyMap<string, Uint8Array>;
+}
+
+interface MaterializationPlan {
+  preview: ProfileInstallPreview;
+  writes: TransactionWrite[];
+  deletes: TransactionDelete[];
+  installMetadata: InstalledProfileMetadata;
+  lifecycleMetadata: ProfileLifecycleMetadata;
 }
 
 export class ProfileInstallError extends Error {
@@ -47,16 +152,21 @@ export class ProfileInstallError extends Error {
 }
 
 export async function loadProfilePackage(packageRoot: string): Promise<VerifiedProfileBaseline> {
-  const manifestPath = path.join(packageRoot, "koni", "profile-manifest.json");
-  const parsed = parseProfilePackageManifest(await readFile(manifestPath, "utf8"));
+  const canonicalPackageRoot = await canonicalRealDirectory(packageRoot, "profile_package_root");
+  const manifestPath = path.join(canonicalPackageRoot, "koni", "profile-manifest.json");
+  const parsed = parseProfilePackageManifest((await readStableRegularFile(manifestPath)).toString("utf8"));
   if (!parsed.ok) {
     throw new ProfileInstallError(
       "manifest_invalid",
       parsed.diagnostics.map((diagnostic) => `${diagnostic.path}: ${diagnostic.message}`).join("\n"),
     );
   }
-  const baselineRoot = path.join(packageRoot, "koni", "baseline");
-  const files = await readAllRegularFiles(baselineRoot);
+  const baselineRoot = path.join(canonicalPackageRoot, "koni", "baseline");
+  const canonicalBaselineRoot = await canonicalRealDirectory(baselineRoot, "profile_baseline_root");
+  if (canonicalBaselineRoot !== baselineRoot || !isWithin(canonicalPackageRoot, canonicalBaselineRoot)) {
+    throw new ProfileInstallError("baseline_escape", "profile baseline escapes its package root");
+  }
+  const files = await readAllRegularFiles(canonicalBaselineRoot);
   const verified = verifyProfileBaseline(parsed.value, files);
   if (!verified.ok) {
     throw new ProfileInstallError(
@@ -67,31 +177,121 @@ export async function loadProfilePackage(packageRoot: string): Promise<VerifiedP
   return verified.value;
 }
 
+/** Read-only three-way preview. It never creates `.koni`, locks, or transaction files. */
+export async function previewProfileInstall(
+  projectRoot: string,
+  profilePackageRoot: string,
+  options: ProfileInstallOptions = {},
+): Promise<ProfileInstallPreview> {
+  const project = await canonicalRealDirectory(projectRoot, "project_root");
+  const baseline = await loadProfilePackage(profilePackageRoot);
+  const configRoot = path.join(project, ".koni");
+  await assertOptionalRealConfigRoot(configRoot);
+  // Building the full transaction is still read-only; it gives the preview the
+  // exact same projected tree and digest that an apply would use.
+  const plan = await buildMaterializationPlan(configRoot, baseline, options, true);
+  return structuredClone(plan.preview);
+}
+
+/**
+ * Install or upgrade one verified profile as a crash-forward materialized overlay.
+ * The only project namespace this function can mutate is `.koni`.
+ */
 export async function installProfile(
   projectRoot: string,
   profilePackageRoot: string,
+  options: ProfileInstallOptions = {},
 ): Promise<ProfileInstallResult> {
-  const packageBaseline = await loadProfilePackage(profilePackageRoot);
-  const configRoot = path.join(projectRoot, ".koni");
+  const project = await canonicalRealDirectory(projectRoot, "project_root");
+  const baseline = await loadProfilePackage(profilePackageRoot);
+  const configRoot = path.join(project, ".koni");
+  await assertOptionalRealConfigRoot(configRoot);
   await mkdir(configRoot, { recursive: true, mode: 0o700 });
-  const store = await FileTransactionStore.open(configRoot);
+  if (await realpath(configRoot) !== configRoot) {
+    throw new ProfileInstallError("config_escape", ".koni is not a canonical project directory");
+  }
+
+  return withProfileLifecycleLock(configRoot, async () => {
+    const store = await FileTransactionStore.open(configRoot);
+    await store.recoverPrepared();
+    const plan = await buildMaterializationPlan(configRoot, baseline, options, true);
+    const transactionId = `profile-${plan.preview.generation}-${randomUUID()}`;
+    await store.prepare(transactionId, plan.writes, plan.deletes);
+    await store.commit(transactionId);
+    await store.cleanupCommitted(transactionId);
+    return { ...structuredClone(plan.preview), transactionId };
+  });
+}
+
+/** Return lifecycle metadata without trusting it as package authority. */
+export async function readProfileLifecycle(projectRoot: string): Promise<ProfileLifecycleMetadata | undefined> {
+  const project = await canonicalRealDirectory(projectRoot, "project_root");
+  const configRoot = path.join(project, ".koni");
+  await assertOptionalRealConfigRoot(configRoot);
+  return readLifecycleMetadata(configRoot);
+}
+
+async function buildMaterializationPlan(
+  configRoot: string,
+  packageBaseline: VerifiedProfileBaseline,
+  options: ProfileInstallOptions,
+  includeWrites: boolean,
+): Promise<MaterializationPlan> {
+  if (
+    (options.migrationOverlay === undefined && options.migrationArtifacts === undefined) !==
+    (options.migrationId === undefined)
+  ) {
+    throw new ProfileInstallError("migration_binding", "migration material and migration id must be supplied together");
+  }
+  if (options.migrationId !== undefined && !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u.test(options.migrationId)) {
+    throw new ProfileInstallError("migration_id", "migration id is not safe");
+  }
   const installed = await readInstalledMetadata(configRoot);
+  const lifecycle = await readLifecycleMetadata(configRoot);
   if (installed !== undefined && installed.profile.lineage !== packageBaseline.manifest.profile.lineage) {
     throw new ProfileInstallError(
       "lineage_mismatch",
       `project uses ${installed.profile.lineage}; cannot upgrade it with ${packageBaseline.manifest.profile.lineage}`,
     );
   }
-  if (installed === undefined) {
-    const unmanaged = (await listProjectFiles(configRoot)).filter(
-      (file) => file !== ".transactions" && !file.startsWith(".transactions/"),
+  if (
+    installed !== undefined &&
+    options.allowDowngrade !== true &&
+    valid(installed.profile.version) !== null &&
+    compare(packageBaseline.manifest.profile.version, installed.profile.version) < 0
+  ) {
+    throw new ProfileInstallError(
+      "profile_downgrade",
+      `refusing profile downgrade ${installed.profile.version} -> ${packageBaseline.manifest.profile.version}`,
     );
-    if (unmanaged.length > 0) {
+  }
+  if (installed === undefined && await directoryExists(configRoot)) {
+    const unmanaged = (await listProjectFiles(configRoot)).filter((file) => !isCompilerOwned(file));
+    if (unmanaged.length > 0 && options.migrationOverlay === undefined) {
       throw new ProfileInstallError(
         "unmanaged_project",
         ".koni already contains files but has no Koni profile install record",
       );
     }
+    if (
+      unmanaged.length > 0 &&
+      unmanaged.some((relative) => !options.migrationOverlay!.has(relative))
+    ) {
+      throw new ProfileInstallError(
+        "unmanaged_migration_incomplete",
+        "migration overlay does not account for every unmanaged .koni file",
+      );
+    }
+  }
+  if (lifecycle !== undefined && installed === undefined) {
+    throw new ProfileInstallError("lifecycle_orphaned", "profile lifecycle exists without its install provenance");
+  }
+  if (
+    lifecycle !== undefined &&
+    installed !== undefined &&
+    (lifecycle.lineage !== installed.profile.lineage || lifecycle.installedBundleSha256 !== installed.bundleSha256)
+  ) {
+    throw new ProfileInstallError("lifecycle_mismatch", "profile lifecycle and install provenance disagree");
   }
 
   const oldFiles = new Map(installed?.baselineFiles.map((file) => [file.path, file]) ?? []);
@@ -101,114 +301,260 @@ export async function installProfile(
   const added: string[] = [];
   const updated: string[] = [];
   const deleted: string[] = [];
-  const preserved: string[] = [];
-  const pendingUpstream: InstalledProfileMetadata["pendingUpstream"] = [];
-  const overrides: Record<string, Sha256Digest | null> = Object.create(null) as Record<
-    string,
-    Sha256Digest | null
-  >;
+  const unchanged: string[] = [];
+  const preserved = new Set<string>();
+  const pendingUpstream: PendingUpstreamChange[] = [];
+  const overrides: Record<string, Sha256Digest | null> = Object.create(null) as Record<string, Sha256Digest | null>;
+  const migrationOverlay = options.migrationOverlay ?? new Map<string, Uint8Array | null>();
+  for (const overlayPath of migrationOverlay.keys()) {
+    if (!isNormalizedSafeRelativePath(overlayPath) || isCompilerOwned(overlayPath)) {
+      throw new ProfileInstallError("migration_overlay_path", `migration overlay path is unsafe: ${overlayPath}`);
+    }
+  }
 
   for (const descriptor of packageBaseline.manifest.baseline.files) {
-    const bytes = packageBaseline.files.get(descriptor.path)!;
+    const upstreamBytes = packageBaseline.files.get(descriptor.path)!;
+    const desired = migrationOverlay.has(descriptor.path)
+      ? migrationOverlay.get(descriptor.path)
+      : undefined;
     const current = await readOptionalFile(path.join(configRoot, descriptor.path));
     const old = oldFiles.get(descriptor.path);
+
+    if (desired !== undefined) {
+      if (desired === null) {
+        overrides[descriptor.path] = null;
+        preserved.add(descriptor.path);
+        if (current !== undefined && includeWrites) {
+          deletes.push({ path: descriptor.path, expectedSha256: rawSha256(current) });
+          deleted.push(descriptor.path);
+        }
+        continue;
+      }
+      const desiredHash = rawSha256(desired);
+      if (desiredHash !== descriptor.sha256) {
+        overrides[descriptor.path] = desiredHash;
+        preserved.add(descriptor.path);
+      }
+      if (current === undefined) {
+        if (includeWrites) writes.push({ path: descriptor.path, bytes: desired, expectedSha256: null });
+        added.push(descriptor.path);
+      } else if (rawSha256(current) !== desiredHash) {
+        if (includeWrites) writes.push({ path: descriptor.path, bytes: desired, expectedSha256: rawSha256(current) });
+        updated.push(descriptor.path);
+      } else {
+        unchanged.push(descriptor.path);
+      }
+      continue;
+    }
+
     if (current === undefined) {
       if (old === undefined) {
-        writes.push({ path: descriptor.path, bytes, expectedSha256: null });
+        if (includeWrites) writes.push({ path: descriptor.path, bytes: upstreamBytes, expectedSha256: null });
         added.push(descriptor.path);
       } else {
         overrides[descriptor.path] = null;
-        preserved.push(descriptor.path);
-        await addUpstreamProposal(
-          configRoot,
-          packageBaseline.manifest,
-          descriptor.path,
-          bytes,
-          "deleted",
-          writes,
-          pendingUpstream,
-        );
+        preserved.add(descriptor.path);
+        if (old.sha256 !== descriptor.sha256) {
+          await addUpstreamProposal(
+            configRoot,
+            packageBaseline.manifest,
+            descriptor.path,
+            upstreamBytes,
+            "deleted",
+            writes,
+            pendingUpstream,
+            includeWrites,
+            old.sha256,
+            descriptor.sha256,
+            null,
+          );
+        }
       }
       continue;
     }
     const currentHash = rawSha256(current);
-    if (currentHash === descriptor.sha256) {
+    if (old !== undefined && currentHash === old.sha256) {
+      if (currentHash === descriptor.sha256) {
+        unchanged.push(descriptor.path);
+      } else {
+        if (includeWrites) writes.push({ path: descriptor.path, bytes: upstreamBytes, expectedSha256: currentHash });
+        updated.push(descriptor.path);
+      }
       continue;
     }
-    if (old !== undefined && currentHash === old.sha256) {
-      writes.push({ path: descriptor.path, bytes, expectedSha256: currentHash });
-      updated.push(descriptor.path);
+    if (old === undefined && currentHash === descriptor.sha256) {
+      unchanged.push(descriptor.path);
       continue;
     }
     overrides[descriptor.path] = currentHash;
-    preserved.push(descriptor.path);
-    await addUpstreamProposal(
-      configRoot,
-      packageBaseline.manifest,
-      descriptor.path,
-      bytes,
-      "modified",
-      writes,
-      pendingUpstream,
-    );
+    preserved.add(descriptor.path);
+    if (old !== undefined && old.sha256 !== descriptor.sha256) {
+      await addUpstreamProposal(
+        configRoot,
+        packageBaseline.manifest,
+        descriptor.path,
+        upstreamBytes,
+        "modified",
+        writes,
+        pendingUpstream,
+        includeWrites,
+        old.sha256,
+        descriptor.sha256,
+        currentHash,
+      );
+    }
+  }
+
+  for (const [overlayPath, desired] of migrationOverlay) {
+    if (newFiles.has(overlayPath)) continue;
+    const current = await readOptionalFile(path.join(configRoot, overlayPath));
+    if (desired === null) {
+      if (current !== undefined && includeWrites) {
+        deletes.push({ path: overlayPath, expectedSha256: rawSha256(current) });
+        deleted.push(overlayPath);
+      }
+      continue;
+    }
+    const desiredHash = rawSha256(desired);
+    if (current === undefined) {
+      if (includeWrites) writes.push({ path: overlayPath, bytes: desired, expectedSha256: null });
+      added.push(overlayPath);
+    } else if (rawSha256(current) !== desiredHash) {
+      if (includeWrites) writes.push({ path: overlayPath, bytes: desired, expectedSha256: rawSha256(current) });
+      updated.push(overlayPath);
+    } else {
+      unchanged.push(overlayPath);
+    }
+    preserved.add(overlayPath);
   }
 
   for (const old of oldFiles.values()) {
-    if (newFiles.has(old.path)) {
-      continue;
-    }
+    if (newFiles.has(old.path) || migrationOverlay.has(old.path)) continue;
     const current = await readOptionalFile(path.join(configRoot, old.path));
-    if (current === undefined) {
-      continue;
-    }
+    if (current === undefined) continue;
     const currentHash = rawSha256(current);
     if (currentHash === old.sha256) {
-      deletes.push({ path: old.path, expectedSha256: currentHash });
+      if (includeWrites) deletes.push({ path: old.path, expectedSha256: currentHash });
       deleted.push(old.path);
     } else {
       overrides[old.path] = currentHash;
-      preserved.push(old.path);
+      preserved.add(old.path);
       pendingUpstream.push({
         path: old.path,
         proposedPath: "",
         reason: "orphaned",
+        oldBaselineSha256: old.sha256,
+        projectSha256: currentHash,
       });
     }
   }
 
-  const metadata: InstalledProfileMetadata = {
-    protocol: INSTALL_PROTOCOL,
-    package: packageBaseline.manifest.package,
-    profile: packageBaseline.manifest.profile,
-    compatibility: packageBaseline.manifest.compatibility,
-    bundleSha256: packageBaseline.manifest.bundle_sha256,
-    installedAt: new Date().toISOString(),
-    baselineFiles: [...packageBaseline.manifest.baseline.files],
-    projectOverrides: overrides,
-    pendingUpstream,
-  };
-  const priorMetadata = await readOptionalFile(path.join(configRoot, INSTALL_METADATA_PATH));
-  writes.push({
-    path: INSTALL_METADATA_PATH,
-    bytes: Buffer.from(`${JSON.stringify(metadata, null, 2)}\n`, "utf8"),
-    expectedSha256: priorMetadata === undefined ? null : rawSha256(priorMetadata),
-  });
+  const effectiveFiles = await projectedProjectFiles(configRoot, writes, deletes);
+  const overlay = computeOverlay(packageBaseline.manifest.baseline.files, effectiveFiles);
+  for (const entry of overlay) if (entry.disposition !== "deleted") preserved.add(entry.path);
+  for (const prior of lifecycle?.pendingUpstream ?? []) {
+    if (pendingUpstream.some((candidate) => candidate.path === prior.path)) continue;
+    const projectSha256 = effectiveFiles.get(prior.path) ?? null;
+    const baselineFile = newFiles.get(prior.path);
+    const remainsUnresolved = baselineFile === undefined
+      ? projectSha256 !== null
+      : projectSha256 !== baselineFile.sha256;
+    if (!remainsUnresolved) continue;
+    const proposal = prior.proposedPath === ""
+      ? undefined
+      : await readOptionalFile(path.join(configRoot, prior.proposedPath));
+    if (prior.proposedPath !== "" && proposal === undefined) {
+      throw new ProfileInstallError("proposal_missing", `pending upstream proposal is missing: ${prior.proposedPath}`);
+    }
+    pendingUpstream.push({
+      ...prior,
+      projectSha256,
+      ...(baselineFile === undefined ? {} : { newBaselineSha256: baselineFile.sha256 }),
+    });
+  }
 
-  const transactionId = `profile-${Date.now()}-${process.pid}`;
-  await store.prepare(transactionId, writes, deletes);
-  await store.commit(transactionId);
-  await store.cleanupCommitted(transactionId);
-  return {
-    projectConfigRoot: configRoot,
+  const now = new Date().toISOString();
+  const compactPending = pendingUpstream
+    .map(({ path, proposedPath, reason }) => ({ path, proposedPath, reason }))
+    .sort((left, right) => compareUtf8(left.path, right.path));
+  const installMetadata: InstalledProfileMetadata = {
+    protocol: INSTALL_PROTOCOL,
+    package: structuredClone(packageBaseline.manifest.package),
+    profile: structuredClone(packageBaseline.manifest.profile),
+    compatibility: structuredClone(packageBaseline.manifest.compatibility),
+    bundleSha256: packageBaseline.manifest.bundle_sha256,
+    installedAt: now,
+    baselineFiles: structuredClone([...packageBaseline.manifest.baseline.files]),
+    projectOverrides: sortRecord(overrides),
+    pendingUpstream: compactPending,
+  };
+  const baselineRoot = baselineStorageRoot(packageBaseline.manifest.bundle_sha256);
+  const immutableBaselines = [
+    ...(lifecycle?.immutableBaselines ?? []),
+    {
+      bundleSha256: packageBaseline.manifest.bundle_sha256,
+      profileVersion: packageBaseline.manifest.profile.version,
+      storedAt: now,
+      root: baselineRoot,
+    },
+  ].filter((entry, index, all) => all.findIndex((candidate) => candidate.bundleSha256 === entry.bundleSha256) === index)
+    .sort((left, right) => compareUtf8(left.bundleSha256, right.bundleSha256));
+  const lifecycleMetadata: ProfileLifecycleMetadata = {
+    protocol: LIFECYCLE_PROTOCOL,
+    generation: (lifecycle?.generation ?? 0) + 1,
+    lineage: packageBaseline.manifest.profile.lineage,
+    installedBundleSha256: packageBaseline.manifest.bundle_sha256,
+    installedProfileVersion: packageBaseline.manifest.profile.version,
+    immutableBaselines,
+    overlay,
+    pendingUpstream: [...pendingUpstream].sort((left, right) => compareUtf8(left.path, right.path)),
+    upstreamResolutions: [...(lifecycle?.upstreamResolutions ?? [])],
+    migrations: [
+      ...(lifecycle?.migrations ?? []),
+      ...(options.migrationId === undefined
+        ? []
+        : [{
+          id: options.migrationId,
+          appliedAt: now,
+          artifactRoot: `.managed/migrations/${options.migrationId}`,
+        }]),
+    ].filter((entry, index, all) => all.findIndex((candidate) => candidate.id === entry.id) === index),
+    createdAt: lifecycle?.createdAt ?? now,
+    updatedAt: now,
+  };
+
+  if (includeWrites) {
+    await addImmutableBaselineWrites(configRoot, packageBaseline, baselineRoot, writes);
+    for (const [relative, bytes] of options.migrationArtifacts ?? []) {
+      const requiredPrefix = `.managed/migrations/${options.migrationId}/`;
+      if (!isNormalizedSafeRelativePath(relative) || !relative.startsWith(requiredPrefix)) {
+        throw new ProfileInstallError("migration_artifact_path", `migration artifact path is outside ${requiredPrefix}`);
+      }
+      await addImmutableWrite(configRoot, relative, bytes, writes);
+    }
+    await addMetadataWrite(configRoot, INSTALL_METADATA_PATH, installMetadata, writes);
+    await addMetadataWrite(configRoot, LIFECYCLE_METADATA_PATH, lifecycleMetadata, writes);
+  }
+
+  const previewMaterial = {
     packageName: packageBaseline.manifest.package.name,
     profileVersion: packageBaseline.manifest.profile.version,
     bundleSha256: packageBaseline.manifest.bundle_sha256,
-    added: added.sort(),
-    updated: updated.sort(),
-    deleted: deleted.sort(),
-    preserved: preserved.sort(),
-    pendingUpstream: [...pendingUpstream].sort((left, right) => left.path.localeCompare(right.path)),
+    generation: lifecycleMetadata.generation,
+    added: [...new Set(added)].sort(compareUtf8),
+    updated: [...new Set(updated)].sort(compareUtf8),
+    deleted: [...new Set(deleted)].sort(compareUtf8),
+    unchanged: [...new Set(unchanged)].sort(compareUtf8),
+    preserved: [...preserved].sort(compareUtf8),
+    overlay,
+    pendingUpstream: lifecycleMetadata.pendingUpstream,
   };
+  const preview: ProfileInstallPreview = {
+    projectConfigRoot: configRoot,
+    ...previewMaterial,
+    previewSha256: canonicalHash(previewMaterial),
+  };
+  return { preview, writes, deletes, installMetadata, lifecycleMetadata };
 }
 
 async function addUpstreamProposal(
@@ -218,90 +564,553 @@ async function addUpstreamProposal(
   bytes: Uint8Array,
   reason: "modified" | "deleted",
   writes: TransactionWrite[],
-  pending: InstalledProfileMetadata["pendingUpstream"],
+  pending: PendingUpstreamChange[],
+  includeWrites: boolean,
+  oldBaselineSha256: Sha256Digest | undefined,
+  newBaselineSha256: Sha256Digest,
+  projectSha256: Sha256Digest | null,
 ): Promise<void> {
-  const bundleSuffix = manifest.bundle_sha256.slice("sha256:".length, "sha256:".length + 12);
+  const bundleSuffix = manifest.bundle_sha256.slice("sha256:".length, "sha256:".length + 16);
   const proposedPath = `.managed/upstream/${manifest.profile.version}-${bundleSuffix}/${sourcePath}`;
   const current = await readOptionalFile(path.join(configRoot, proposedPath));
   if (current === undefined) {
-    writes.push({ path: proposedPath, bytes, expectedSha256: null });
+    if (includeWrites) writes.push({ path: proposedPath, bytes, expectedSha256: null });
   } else if (rawSha256(current) !== rawSha256(bytes)) {
     throw new ProfileInstallError("proposal_collision", `upstream proposal changed unexpectedly: ${proposedPath}`);
   }
-  pending.push({ path: sourcePath, proposedPath, reason });
+  pending.push({
+    path: sourcePath,
+    proposedPath,
+    reason,
+    ...(oldBaselineSha256 === undefined ? {} : { oldBaselineSha256 }),
+    newBaselineSha256,
+    projectSha256,
+  });
+}
+
+async function addImmutableBaselineWrites(
+  configRoot: string,
+  baseline: VerifiedProfileBaseline,
+  storageRoot: string,
+  writes: TransactionWrite[],
+): Promise<void> {
+  const manifestBytes = Buffer.from(`${JSON.stringify(baseline.manifest, null, 2)}\n`, "utf8");
+  await addImmutableWrite(configRoot, `${storageRoot}/profile-manifest.json`, manifestBytes, writes);
+  for (const descriptor of baseline.manifest.baseline.files) {
+    await addImmutableWrite(
+      configRoot,
+      `${storageRoot}/files/${descriptor.path}`,
+      baseline.files.get(descriptor.path)!,
+      writes,
+    );
+  }
+}
+
+async function addImmutableWrite(
+  configRoot: string,
+  relative: string,
+  bytes: Uint8Array,
+  writes: TransactionWrite[],
+): Promise<void> {
+  const current = await readOptionalFile(path.join(configRoot, relative));
+  if (current === undefined) {
+    writes.push({ path: relative, bytes, expectedSha256: null });
+  } else if (rawSha256(current) !== rawSha256(bytes)) {
+    throw new ProfileInstallError("baseline_store_corrupt", `immutable baseline bytes changed: ${relative}`);
+  }
+}
+
+async function addMetadataWrite(
+  configRoot: string,
+  relative: string,
+  value: unknown,
+  writes: TransactionWrite[],
+): Promise<void> {
+  const existing = writes.find((write) => write.path === relative);
+  if (existing !== undefined) throw new ProfileInstallError("duplicate_metadata", `duplicate write: ${relative}`);
+  const current = await readOptionalFile(path.join(configRoot, relative));
+  writes.push({
+    path: relative,
+    bytes: Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8"),
+    expectedSha256: current === undefined ? null : rawSha256(current),
+  });
+}
+
+function computeOverlay(
+  baselineFiles: readonly ProfileBaselineFile[],
+  effective: ReadonlyMap<string, Sha256Digest>,
+): ProjectOverlayEntry[] {
+  const baseline = new Map(baselineFiles.map((file) => [file.path, file] as const));
+  const entries: ProjectOverlayEntry[] = [];
+  for (const descriptor of baselineFiles) {
+    const current = effective.get(descriptor.path);
+    if (current === undefined) {
+      entries.push({ path: descriptor.path, disposition: "deleted", projectSha256: null, baselineSha256: descriptor.sha256 });
+    } else if (current !== descriptor.sha256) {
+      entries.push({ path: descriptor.path, disposition: "modified", projectSha256: current, baselineSha256: descriptor.sha256 });
+    }
+  }
+  for (const [relative, digest] of effective) {
+    if (!baseline.has(relative)) entries.push({ path: relative, disposition: "added", projectSha256: digest });
+  }
+  return entries.sort((left, right) => compareUtf8(left.path, right.path));
+}
+
+async function projectedProjectFiles(
+  configRoot: string,
+  writes: readonly TransactionWrite[],
+  deletes: readonly TransactionDelete[],
+): Promise<Map<string, Sha256Digest>> {
+  const projected = new Map<string, Sha256Digest>();
+  if (await directoryExists(configRoot)) {
+    for (const relative of await listProjectFiles(configRoot)) {
+      if (isCompilerOwned(relative)) continue;
+      const bytes = await readOptionalFile(path.join(configRoot, relative));
+      if (bytes !== undefined) projected.set(relative, rawSha256(bytes));
+    }
+  }
+  for (const entry of deletes) if (!isCompilerOwned(entry.path)) projected.delete(entry.path);
+  for (const write of writes) if (!isCompilerOwned(write.path)) projected.set(write.path, rawSha256(write.bytes));
+  return projected;
 }
 
 async function readInstalledMetadata(configRoot: string): Promise<InstalledProfileMetadata | undefined> {
   const bytes = await readOptionalFile(path.join(configRoot, INSTALL_METADATA_PATH));
-  if (bytes === undefined) {
-    return undefined;
-  }
-  let value: unknown;
-  try {
-    value = JSON.parse(bytes.toString("utf8"));
-  } catch {
-    throw new ProfileInstallError("install_record_invalid", "profile install record is not valid JSON");
-  }
-  if (
-    !isRecord(value) ||
-    value.protocol !== INSTALL_PROTOCOL ||
-    !isRecord(value.profile) ||
-    typeof value.profile.lineage !== "string" ||
-    !Array.isArray(value.baselineFiles)
-  ) {
+  if (bytes === undefined) return undefined;
+  const value = parseJsonRecord(bytes, "install_record_invalid", "profile install record");
+  rejectUnknownFields(
+    value,
+    ["protocol", "package", "profile", "compatibility", "bundleSha256", "installedAt", "baselineFiles", "projectOverrides", "pendingUpstream"],
+    "install_record_invalid",
+    "profile install record",
+  );
+  if (value.protocol !== INSTALL_PROTOCOL || typeof value.installedAt !== "string" || value.installedAt.length === 0 || !isRecord(value.projectOverrides) || !Array.isArray(value.pendingUpstream)) {
     throw new ProfileInstallError("install_record_invalid", "profile install record has an invalid shape");
   }
-  return value as unknown as InstalledProfileMetadata;
+  const manifest = validateProfilePackageManifest({
+    protocol: "koni.profile-package.v1",
+    package: value.package,
+    profile: value.profile,
+    compatibility: value.compatibility,
+    baseline: { root: "./baseline", files: value.baselineFiles },
+    bundle_sha256: value.bundleSha256,
+  });
+  if (!manifest.ok) {
+    throw new ProfileInstallError(
+      "install_record_invalid",
+      manifest.diagnostics.map((diagnostic) => `${diagnostic.path}: ${diagnostic.message}`).join("\n"),
+    );
+  }
+  const projectOverrides: Record<string, Sha256Digest | null> = Object.create(null) as Record<string, Sha256Digest | null>;
+  for (const [relative, digest] of Object.entries(value.projectOverrides)) {
+    if (!isAuthoredPath(relative) || (digest !== null && (typeof digest !== "string" || !isSha256Digest(digest)))) {
+      throw new ProfileInstallError("install_record_invalid", `profile override is invalid: ${relative}`);
+    }
+    projectOverrides[relative] = digest as Sha256Digest | null;
+  }
+  const pendingUpstream = value.pendingUpstream.map((entry) => parseCompactPending(entry));
+  assertUniquePaths(pendingUpstream, "install_record_invalid", "pending upstream changes");
+  return {
+    protocol: INSTALL_PROTOCOL,
+    package: manifest.value.package,
+    profile: manifest.value.profile,
+    compatibility: manifest.value.compatibility,
+    bundleSha256: manifest.value.bundle_sha256,
+    installedAt: value.installedAt,
+    baselineFiles: [...manifest.value.baseline.files],
+    projectOverrides: sortRecord(projectOverrides),
+    pendingUpstream,
+  };
+}
+
+async function readLifecycleMetadata(configRoot: string): Promise<ProfileLifecycleMetadata | undefined> {
+  const bytes = await readOptionalFile(path.join(configRoot, LIFECYCLE_METADATA_PATH));
+  if (bytes === undefined) return undefined;
+  const value = parseJsonRecord(bytes, "lifecycle_invalid", "profile lifecycle record");
+  rejectUnknownFields(
+    value,
+    ["protocol", "generation", "lineage", "installedBundleSha256", "installedProfileVersion", "immutableBaselines", "overlay", "pendingUpstream", "upstreamResolutions", "migrations", "createdAt", "updatedAt"],
+    "lifecycle_invalid",
+    "profile lifecycle record",
+  );
+  if (value.protocol !== LIFECYCLE_PROTOCOL || !Number.isSafeInteger(value.generation) || (value.generation as number) < 1 || typeof value.lineage !== "string" || value.lineage.length === 0 || typeof value.installedBundleSha256 !== "string" || !isSha256Digest(value.installedBundleSha256) || typeof value.installedProfileVersion !== "string" || valid(value.installedProfileVersion) === null || !Array.isArray(value.immutableBaselines) || !Array.isArray(value.overlay) || !Array.isArray(value.pendingUpstream) || (value.upstreamResolutions !== undefined && !Array.isArray(value.upstreamResolutions)) || (value.migrations !== undefined && !Array.isArray(value.migrations)) || typeof value.createdAt !== "string" || typeof value.updatedAt !== "string") {
+    throw new ProfileInstallError("lifecycle_invalid", "profile lifecycle record has an invalid shape");
+  }
+  const immutableBaselines = value.immutableBaselines.map((entry) => {
+    if (!isRecord(entry)) throw new ProfileInstallError("lifecycle_invalid", "immutable baseline entry is not an object");
+    rejectUnknownFields(entry, ["bundleSha256", "profileVersion", "storedAt", "root"], "lifecycle_invalid", "immutable baseline entry");
+    if (typeof entry.bundleSha256 !== "string" || !isSha256Digest(entry.bundleSha256) || typeof entry.profileVersion !== "string" || valid(entry.profileVersion) === null || typeof entry.storedAt !== "string" || entry.root !== baselineStorageRoot(entry.bundleSha256)) {
+      throw new ProfileInstallError("lifecycle_invalid", "immutable baseline entry has an invalid shape");
+    }
+    return { bundleSha256: entry.bundleSha256, profileVersion: entry.profileVersion, storedAt: entry.storedAt, root: entry.root as string };
+  });
+  if (!immutableBaselines.some((entry) => entry.bundleSha256 === value.installedBundleSha256)) {
+    throw new ProfileInstallError("lifecycle_invalid", "installed bundle is absent from immutable baseline history");
+  }
+  assertUnique(immutableBaselines.map((entry) => entry.bundleSha256), "lifecycle_invalid", "immutable baseline digest");
+  const overlay = value.overlay.map((entry) => parseOverlayEntry(entry));
+  assertUniquePaths(overlay, "lifecycle_invalid", "overlay entries");
+  const pendingUpstream = value.pendingUpstream.map((entry) => parsePending(entry));
+  assertUniquePaths(pendingUpstream, "lifecycle_invalid", "pending upstream changes");
+  const upstreamResolutions = (Array.isArray(value.upstreamResolutions) ? value.upstreamResolutions : []).map((entry: unknown) => {
+    if (!isRecord(entry)) throw new ProfileInstallError("lifecycle_invalid", "upstream resolution is not an object");
+    rejectUnknownFields(entry, ["path", "bundleSha256", "resolution", "resolvedAt", "projectSha256"], "lifecycle_invalid", "upstream resolution");
+    if (typeof entry.path !== "string" || !isAuthoredPath(entry.path) || typeof entry.bundleSha256 !== "string" || !isSha256Digest(entry.bundleSha256) || !["keep_project", "accept_upstream"].includes(String(entry.resolution)) || typeof entry.resolvedAt !== "string" || (entry.projectSha256 !== null && (typeof entry.projectSha256 !== "string" || !isSha256Digest(entry.projectSha256)))) {
+      throw new ProfileInstallError("lifecycle_invalid", "upstream resolution has an invalid shape");
+    }
+    return {
+      path: entry.path,
+      bundleSha256: entry.bundleSha256,
+      resolution: entry.resolution as "keep_project" | "accept_upstream",
+      resolvedAt: entry.resolvedAt,
+      projectSha256: entry.projectSha256 as Sha256Digest | null,
+    };
+  });
+  const migrations = (value.migrations ?? []).map((entry: unknown) => {
+    if (!isRecord(entry)) throw new ProfileInstallError("lifecycle_invalid", "migration entry is not an object");
+    rejectUnknownFields(entry, ["id", "appliedAt", "artifactRoot"], "lifecycle_invalid", "migration entry");
+    if (typeof entry.id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u.test(entry.id) || typeof entry.appliedAt !== "string" || entry.artifactRoot !== `.managed/migrations/${entry.id}`) {
+      throw new ProfileInstallError("lifecycle_invalid", "migration entry has an invalid shape");
+    }
+    return { id: entry.id, appliedAt: entry.appliedAt, artifactRoot: entry.artifactRoot as string };
+  });
+  assertUnique(migrations.map((entry) => entry.id), "lifecycle_invalid", "migration id");
+  return {
+    protocol: LIFECYCLE_PROTOCOL,
+    generation: value.generation as number,
+    lineage: value.lineage,
+    installedBundleSha256: value.installedBundleSha256,
+    installedProfileVersion: value.installedProfileVersion,
+    immutableBaselines,
+    overlay,
+    pendingUpstream,
+    upstreamResolutions,
+    migrations,
+    createdAt: value.createdAt,
+    updatedAt: value.updatedAt,
+  };
+}
+
+function parseCompactPending(value: unknown): InstalledProfileMetadata["pendingUpstream"][number] {
+  if (!isRecord(value)) throw new ProfileInstallError("install_record_invalid", "pending upstream entry is not an object");
+  rejectUnknownFields(value, ["path", "proposedPath", "reason"], "install_record_invalid", "pending upstream entry");
+  validatePendingCore(value, "install_record_invalid");
+  return {
+    path: value.path as string,
+    proposedPath: value.proposedPath as string,
+    reason: value.reason as PendingUpstreamReason,
+  };
+}
+
+function parsePending(value: unknown): PendingUpstreamChange {
+  if (!isRecord(value)) throw new ProfileInstallError("lifecycle_invalid", "pending upstream entry is not an object");
+  rejectUnknownFields(value, ["path", "proposedPath", "reason", "oldBaselineSha256", "newBaselineSha256", "projectSha256"], "lifecycle_invalid", "pending upstream entry");
+  validatePendingCore(value, "lifecycle_invalid");
+  for (const field of ["oldBaselineSha256", "newBaselineSha256"] as const) {
+    if (value[field] !== undefined && (typeof value[field] !== "string" || !isSha256Digest(value[field]))) {
+      throw new ProfileInstallError("lifecycle_invalid", `pending upstream ${field} is invalid`);
+    }
+  }
+  if (value.projectSha256 !== undefined && value.projectSha256 !== null && (typeof value.projectSha256 !== "string" || !isSha256Digest(value.projectSha256))) {
+    throw new ProfileInstallError("lifecycle_invalid", "pending upstream project digest is invalid");
+  }
+  return {
+    path: value.path as string,
+    proposedPath: value.proposedPath as string,
+    reason: value.reason as PendingUpstreamReason,
+    ...(value.oldBaselineSha256 === undefined ? {} : { oldBaselineSha256: value.oldBaselineSha256 as Sha256Digest }),
+    ...(value.newBaselineSha256 === undefined ? {} : { newBaselineSha256: value.newBaselineSha256 as Sha256Digest }),
+    ...(value.projectSha256 === undefined ? {} : { projectSha256: value.projectSha256 as Sha256Digest | null }),
+  };
+}
+
+function validatePendingCore(value: Record<string, unknown>, code: string): void {
+  if (typeof value.path !== "string" || !isAuthoredPath(value.path) || !["modified", "deleted", "orphaned"].includes(String(value.reason)) || typeof value.proposedPath !== "string") {
+    throw new ProfileInstallError(code, "pending upstream entry has an invalid shape");
+  }
+  if (value.reason === "orphaned") {
+    if (value.proposedPath !== "") throw new ProfileInstallError(code, "orphaned upstream entry must not name proposal bytes");
+  } else if (!value.proposedPath.startsWith(".managed/upstream/") || !isNormalizedSafeRelativePath(value.proposedPath)) {
+    throw new ProfileInstallError(code, "pending upstream proposal path is unsafe");
+  }
+}
+
+function parseOverlayEntry(value: unknown): ProjectOverlayEntry {
+  if (!isRecord(value)) throw new ProfileInstallError("lifecycle_invalid", "overlay entry is not an object");
+  rejectUnknownFields(value, ["path", "disposition", "projectSha256", "baselineSha256"], "lifecycle_invalid", "overlay entry");
+  if (typeof value.path !== "string" || !isAuthoredPath(value.path) || !["added", "modified", "deleted", "orphaned"].includes(String(value.disposition)) || (value.projectSha256 !== null && (typeof value.projectSha256 !== "string" || !isSha256Digest(value.projectSha256))) || (value.baselineSha256 !== undefined && (typeof value.baselineSha256 !== "string" || !isSha256Digest(value.baselineSha256)))) {
+    throw new ProfileInstallError("lifecycle_invalid", "overlay entry has an invalid shape");
+  }
+  if (value.disposition === "deleted" && value.projectSha256 !== null) throw new ProfileInstallError("lifecycle_invalid", "deleted overlay entry must have a null project digest");
+  if (value.disposition !== "deleted" && value.projectSha256 === null) throw new ProfileInstallError("lifecycle_invalid", "materialized overlay entry must have a project digest");
+  return {
+    path: value.path,
+    disposition: value.disposition as ProjectOverlayEntry["disposition"],
+    projectSha256: value.projectSha256 as Sha256Digest | null,
+    ...(value.baselineSha256 === undefined ? {} : { baselineSha256: value.baselineSha256 as Sha256Digest }),
+  };
+}
+
+function rejectUnknownFields(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  code: string,
+  label: string,
+): void {
+  const unexpected = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unexpected.length > 0) throw new ProfileInstallError(code, `${label} has unknown fields: ${unexpected.join(", ")}`);
+}
+
+function assertUniquePaths(
+  values: readonly { path: string }[],
+  code: string,
+  label: string,
+): void {
+  assertUnique(values.map((value) => value.path), code, label);
+}
+
+function assertUnique(values: readonly string[], code: string, label: string): void {
+  if (new Set(values).size !== values.length) throw new ProfileInstallError(code, `${label} contains duplicates`);
+}
+
+function isAuthoredPath(relative: string): boolean {
+  return isNormalizedSafeRelativePath(relative) && !isCompilerOwned(relative);
+}
+
+/**
+ * Serialize lifecycle-owned profile effects. Callers must pass the canonical
+ * `<project>/.koni` root and still use compare-and-swap writes for every
+ * affected file. This is exported only so sibling profile authority modules
+ * share the installer's lock domain.
+ */
+export async function withProfileLifecycleLock<T>(
+  configRoot: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const lockPath = path.join(configRoot, PROFILE_LOCK_PATH);
+  await mkdir(path.dirname(lockPath), { recursive: true, mode: 0o700 });
+  const nonce = randomUUID();
+  const handle = await acquireProfileLock(lockPath, nonce);
+  try {
+    return await profileLifecycleContext.run({ configRoot, nonce }, operation);
+  } finally {
+    await handle.close();
+    const current = await readOptionalFile(lockPath);
+    if (current !== undefined) {
+      const value = parseJsonRecord(current, "profile_lock_changed", "profile lifecycle lock");
+      if (value.nonce !== nonce || value.pid !== process.pid) {
+        throw new ProfileInstallError("profile_lock_changed", "profile lifecycle lock ownership changed during the operation");
+      }
+      await rm(lockPath, { force: true });
+    }
+  }
+}
+
+/**
+ * True only inside the async operation that owns this exact profile lock.
+ *
+ * The compiler uses this to distinguish internal candidate validation from an
+ * unrelated run creation racing in the same process. A PID check cannot make
+ * that distinction because independent async operations share a PID.
+ */
+export function currentContextOwnsProfileLifecycleLock(configRoot: string): boolean {
+  return profileLifecycleContext.getStore()?.configRoot === configRoot;
+}
+
+async function acquireProfileLock(lockPath: string, nonce: string): Promise<Awaited<ReturnType<typeof open>>> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      handle = await open(lockPath, "wx", 0o600);
+    } catch (error) {
+      if (!isCode(error, "EEXIST")) throw error;
+      const staleBytes = await readOptionalFile(lockPath);
+      if (staleBytes === undefined) continue;
+      const stale = parseJsonRecord(staleBytes, "profile_lock_invalid", "profile lifecycle lock");
+      if (stale.protocol !== "koni.profile-lock.v1" || !Number.isSafeInteger(stale.pid) || typeof stale.nonce !== "string") {
+        throw new ProfileInstallError("profile_lock_invalid", "profile lifecycle lock is malformed");
+      }
+      if (processIsAlive(stale.pid as number)) {
+        throw new ProfileInstallError("profile_locked", "another profile lifecycle operation is active");
+      }
+      const quarantine = `${lockPath}.stale-${randomUUID()}`;
+      try { await rename(lockPath, quarantine); }
+      catch (renameError) {
+        if (isCode(renameError, "ENOENT")) continue;
+        throw renameError;
+      }
+      const quarantined = await readStableRegularFile(quarantine);
+      if (rawSha256(quarantined) !== rawSha256(staleBytes)) {
+        throw new ProfileInstallError("profile_lock_race", "profile lifecycle lock changed during stale-lock recovery");
+      }
+      await rm(quarantine, { force: true });
+      continue;
+    }
+    try {
+      await handle.writeFile(`${JSON.stringify({
+        protocol: "koni.profile-lock.v1",
+        pid: process.pid,
+        nonce,
+        createdAt: new Date().toISOString(),
+      })}\n`);
+      await handle.sync();
+      return handle;
+    } catch (error) {
+      await handle.close();
+      await rm(lockPath, { force: true });
+      throw error;
+    }
+  }
+  throw new ProfileInstallError("profile_locked", "could not acquire the profile lifecycle lock");
+}
+
+function processIsAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (isCode(error, "ESRCH")) return false;
+    return true;
+  }
 }
 
 async function readAllRegularFiles(root: string): Promise<Map<string, Uint8Array>> {
   const files = new Map<string, Uint8Array>();
-  const walk = async (directory: string, prefix: string): Promise<void> => {
-    for (const entry of (await readdir(directory, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+  let totalBytes = 0;
+  const walk = async (directory: string, prefix: string, depth: number): Promise<void> => {
+    if (depth > 128) throw new ProfileInstallError("package_depth", "profile baseline exceeds directory depth bound");
+    for (const entry of (await readdir(directory, { withFileTypes: true })).sort((a, b) => compareUtf8(a.name, b.name))) {
       const relative = prefix.length === 0 ? entry.name : `${prefix}/${entry.name}`;
       const absolute = path.join(directory, entry.name);
-      if (entry.isSymbolicLink()) {
-        throw new ProfileInstallError("package_symlink", `profile baseline contains a symlink: ${relative}`);
-      }
-      if (entry.isDirectory()) {
-        await walk(absolute, relative);
-      } else if (entry.isFile()) {
-        files.set(relative, await readFile(absolute));
-      } else {
-        throw new ProfileInstallError("package_file_type", `profile baseline has an unsupported file: ${relative}`);
-      }
+      if (!isNormalizedSafeRelativePath(relative)) throw new ProfileInstallError("package_path", `unsafe profile path: ${relative}`);
+      if (entry.isSymbolicLink()) throw new ProfileInstallError("package_symlink", `profile baseline contains a symlink: ${relative}`);
+      if (entry.isDirectory()) await walk(absolute, relative, depth + 1);
+      else if (entry.isFile()) {
+        if (files.size >= MAX_PROFILE_FILES) throw new ProfileInstallError("package_count", "profile baseline contains too many files");
+        const bytes = await readStableRegularFile(absolute);
+        totalBytes += bytes.byteLength;
+        if (totalBytes > MAX_PROFILE_BYTES) throw new ProfileInstallError("package_size", "profile baseline is too large");
+        files.set(relative, bytes);
+      } else throw new ProfileInstallError("package_file_type", `profile baseline has an unsupported file: ${relative}`);
     }
   };
-  await walk(root, "");
+  await walk(root, "", 0);
   return files;
 }
 
 async function listProjectFiles(root: string): Promise<string[]> {
+  if (!await directoryExists(root)) return [];
   const files: string[] = [];
-  const walk = async (directory: string, prefix: string): Promise<void> => {
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
+  const walk = async (directory: string, prefix: string, depth: number): Promise<void> => {
+    if (depth > 128) throw new ProfileInstallError("project_depth", ".koni exceeds directory depth bound");
+    for (const entry of (await readdir(directory, { withFileTypes: true })).sort((a, b) => compareUtf8(a.name, b.name))) {
       const relative = prefix.length === 0 ? entry.name : `${prefix}/${entry.name}`;
-      if (entry.isDirectory()) await walk(path.join(directory, entry.name), relative);
-      else files.push(relative);
+      const absolute = path.join(directory, entry.name);
+      if (entry.isSymbolicLink()) throw new ProfileInstallError("unsafe_project_file", `project config contains a symlink: ${relative}`);
+      if (entry.isDirectory()) await walk(absolute, relative, depth + 1);
+      else if (entry.isFile()) files.push(relative);
+      else throw new ProfileInstallError("unsafe_project_file", `project config contains an unsupported file: ${relative}`);
     }
   };
-  await walk(root, "");
+  await walk(root, "", 0);
   return files;
 }
 
 async function readOptionalFile(filePath: string): Promise<Buffer | undefined> {
   try {
-    const metadata = await lstat(filePath);
-    if (metadata.isSymbolicLink() || !metadata.isFile()) {
-      throw new ProfileInstallError("unsafe_project_file", `project config path is not a regular file: ${filePath}`);
-    }
-    return await readFile(filePath);
+    return await readStableRegularFile(filePath);
   } catch (error) {
-    if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
-      return undefined;
-    }
+    if (isCode(error, "ENOENT")) return undefined;
     throw error;
   }
+}
+
+async function readStableRegularFile(filePath: string): Promise<Buffer> {
+  const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+  let handle;
+  try {
+    handle = await open(filePath, constants.O_RDONLY | noFollow);
+    const before = await handle.stat();
+    if (!before.isFile()) throw new ProfileInstallError("unsafe_project_file", `path is not a regular file: ${filePath}`);
+    const bytes = await handle.readFile();
+    const after = await handle.stat();
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+      throw new ProfileInstallError("project_file_changed", `file changed while it was read: ${filePath}`);
+    }
+    return bytes;
+  } finally {
+    await handle?.close();
+  }
+}
+
+async function assertOptionalRealConfigRoot(configRoot: string): Promise<void> {
+  try {
+    const metadata = await lstat(configRoot);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new ProfileInstallError("unsafe_config_root", ".koni must be a real directory");
+    }
+    if (await realpath(configRoot) !== configRoot) {
+      throw new ProfileInstallError("config_escape", ".koni escapes the canonical project root");
+    }
+  } catch (error) {
+    if (!isCode(error, "ENOENT")) throw error;
+  }
+}
+
+async function canonicalRealDirectory(input: string, code: string): Promise<string> {
+  const absolute = path.resolve(input);
+  let canonical: string;
+  try {
+    canonical = await realpath(absolute);
+    const metadata = await lstat(canonical);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error("not a real directory");
+  } catch (error) {
+    throw new ProfileInstallError(code, `directory is unavailable or unsafe: ${absolute}: ${String(error)}`);
+  }
+  return canonical;
+}
+
+function baselineStorageRoot(digest: Sha256Digest): string {
+  return `.managed/baselines/${digest.slice("sha256:".length)}`;
+}
+
+function isCompilerOwned(relative: string): boolean {
+  const root = relative.split("/", 1)[0];
+  return root === ".managed" || root === ".transactions" || root === "runs" || relative === PROFILE_LOCK_PATH;
+}
+
+function parseJsonRecord(bytes: Uint8Array, code: string, label: string): Record<string, unknown> {
+  let value: unknown;
+  try {
+    value = JSON.parse(Buffer.from(bytes).toString("utf8"));
+  } catch {
+    throw new ProfileInstallError(code, `${label} is not valid JSON`);
+  }
+  if (!isRecord(value)) throw new ProfileInstallError(code, `${label} is not an object`);
+  return value;
+}
+
+function sortRecord<T>(input: Record<string, T>): Record<string, T> {
+  return Object.fromEntries(Object.entries(input).sort(([left], [right]) => compareUtf8(left, right)));
+}
+
+async function directoryExists(input: string): Promise<boolean> {
+  try {
+    const metadata = await lstat(input);
+    return metadata.isDirectory() && !metadata.isSymbolicLink();
+  } catch (error) {
+    if (isCode(error, "ENOENT")) return false;
+    throw error;
+  }
+}
+
+function isWithin(root: string, candidate: string): boolean {
+  return candidate === root || candidate.startsWith(`${root}${path.sep}`);
+}
+
+function isCode(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

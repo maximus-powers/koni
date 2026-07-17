@@ -1,28 +1,70 @@
-import { mkdir, open } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, realpath } from "node:fs/promises";
 import path from "node:path";
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 import {
   CURRENT_SESSION_VERSION,
   ModelRuntime,
   SessionManager,
+  VERSION as PI_CODING_AGENT_VERSION,
   createAgentSession,
   type AgentSessionEvent,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { Model } from "@earendil-works/pi-ai/compat";
-import type { Sha256Digest } from "../shared/canonical.js";
+import type { TSchema } from "typebox";
+import { Compile } from "typebox/compile";
+import { canonicalEncode, canonicalHash, isSha256Digest, rawSha256, type Sha256Digest } from "../shared/canonical.js";
 import {
   createKoniManagedExtension,
   type CompactionLifecycleNotice,
+  type KoniAuthorizedMessage,
+  type KoniAttemptRecoveryClaim,
+  type KoniAttemptRecoveryState,
   type KoniContextProvider,
 } from "./compaction.js";
 import { type AgentLaunchSpec, validateAgentLaunchSpec } from "./launch-spec.js";
 import { createContainedResourceLoader } from "./resource-loader.js";
+import { parsePiSession, summarizeUsage, type ParsedPiSession, type PiSessionEntry } from "./session-transcript.js";
+import { createFileAtomicallyNoReplace } from "./atomic-file.js";
+import {
+  koniToolResultPayloadBytes,
+  renderKoniToolReceipt,
+  validateKoniToolReceipt,
+  type KoniRuntimeToolRejection,
+  type KoniToolReceipt,
+} from "./tool-catalog.js";
+
+const ABORT_ACK_TIMEOUT_MS = 5_000;
+const MAX_RECOVERY_SINGLE_ENTRY_OVERSHOOT_BYTES = 24 * 1024 * 1024;
+const PINNED_PI_CODING_AGENT_VERSION = "0.80.10";
+const TRANSCRIPT_TOOL_RESULT_OVERHEAD_BYTES = 4 * 1024;
+const RUNTIME_REJECTION_RESULT_BYTES = 64 * 1024;
 
 export interface AuthorityBackedTool {
   name: string;
   schemaHash: Sha256Digest;
+  maxResultBytes: number;
+  /**
+   * Context-free authority invocation used both by Pi and crash recovery. Keeping this
+   * separate from Pi's presentation-oriented ToolDefinition prevents recovery from
+   * fabricating an ExtensionContext merely to replay an idempotent broker call.
+   */
+  execute(
+    toolCallId: string,
+    parameters: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<AgentToolResult<unknown>>;
+  /** Durably record a runtime-originated no-effect denial through the same authority ledger. */
+  reject(
+    toolCallId: string,
+    parameters: Record<string, unknown>,
+    rejection: KoniRuntimeToolRejection,
+    signal?: AbortSignal,
+  ): Promise<AgentToolResult<unknown>>;
   definition: ToolDefinition;
+  terminalOutputSchema?: TSchema;
   terminalOutputSchemaHash?: Sha256Digest;
 }
 
@@ -59,14 +101,56 @@ export type ManagedSessionOutcome =
 export interface PiSessionAdapter {
   readonly sessionId: string;
   readonly sessionFile: string;
+  readonly recovery?: RecoveredSessionState | undefined;
+  readonly mappingPersisted?: boolean;
   getActiveToolNames(): readonly string[];
   appendMapping(data: unknown): void;
   subscribe(listener: (event: AgentSessionEvent) => void): () => void;
+  subscribeNotices?(listener: (notice: CompactionLifecycleNotice) => void): () => void;
   prompt(text: string): Promise<void>;
-  steer(text: string): Promise<void>;
-  followUp(text: string): Promise<void>;
+  continue(): Promise<void>;
+  steer(message: KoniAuthorizedMessage): Promise<void>;
+  followUp(message: KoniAuthorizedMessage): Promise<void>;
   abort(): Promise<void>;
-  dispose(): void;
+  dispose(): void | Promise<void>;
+}
+
+export interface RecoveredSessionState {
+  usage: ManagedTokenUsage;
+  pendingMessages?: readonly PendingRecoveredMessage[];
+  pendingToolActions?: readonly PendingRecoveredToolAction[];
+  disposition:
+    | { kind: "prompt" }
+    | { kind: "continue" }
+    | { kind: "complete"; terminalOutput: unknown }
+    | { kind: "blocked"; reason: string }
+    | { kind: "revoked"; reason: string };
+}
+
+interface PendingRecoveredMessage {
+  message: KoniAuthorizedMessage;
+  mappingPersisted: boolean;
+}
+
+interface PendingRecoveredToolActionBase {
+  order: number;
+  callId: string;
+  toolName: string;
+  arguments: Record<string, unknown>;
+}
+
+type PendingRecoveredToolAction = PendingRecoveredToolActionBase & (
+  | {
+      kind: "append_receipt";
+      authorizedResult: KoniAttemptRecoveryState["authorizedToolResults"][number];
+    }
+  | { kind: "execute" }
+  | { kind: "append_pi_error"; errorText: string }
+);
+
+interface AuthenticatedRecovery {
+  projection: RecoveredSessionState;
+  release(): Promise<void>;
 }
 
 export type ManagedPiSessionFactory = (
@@ -98,38 +182,60 @@ export class ManagedPiSession {
   readonly #usage: ManagedTokenUsage = emptyUsage();
   #status: ManagedSessionStatus = "created";
   #unsubscribe: (() => void) | undefined;
+  #unsubscribeNotices: (() => void) | undefined;
   #startPromise: Promise<ManagedSessionOutcome> | undefined;
   #abortPromise: Promise<void> | undefined;
+  #releasePromise: Promise<void> | undefined;
+  #disposePromise: Promise<void> | undefined;
   #abortReason = "aborted by authority";
+  #abortAsFailure = false;
   #terminalCount = 0;
   #terminalOutput: unknown;
+  readonly #terminalOutputSchema: TSchema;
+  readonly #terminalArguments = new Map<string, unknown>();
+  readonly #terminalArgumentErrors = new Map<string, string>();
   #failure: string | undefined;
+  readonly #recovery: RecoveredSessionState | undefined;
 
-  private constructor(spec: Readonly<AgentLaunchSpec>, adapter: PiSessionAdapter) {
+  private constructor(
+    spec: Readonly<AgentLaunchSpec>,
+    adapter: PiSessionAdapter,
+    appendMapping: boolean,
+    terminalTool: AuthorityBackedTool,
+  ) {
     this.spec = spec;
     this.#adapter = adapter;
+    this.#terminalOutputSchema = structuredClone(terminalTool.terminalOutputSchema!);
+    const recovery = adapter.recovery;
+    this.#recovery = recovery?.disposition.kind === "complete"
+      ? {
+          usage: { ...recovery.usage },
+          disposition: {
+            kind: "complete",
+            terminalOutput: validateTerminalPayload(
+              spec,
+              this.#terminalOutputSchema,
+              recovery.disposition.terminalOutput,
+              "accepted terminal output",
+            ),
+          },
+        }
+      : recovery;
+    if (this.#recovery !== undefined) {
+      validateManagedUsage(this.#recovery.usage);
+      Object.assign(this.#usage, this.#recovery.usage);
+    }
     assertExactToolInventory(spec, adapter.getActiveToolNames());
     if (adapter.sessionId !== spec.identity.sessionId) {
       throw new ManagedSessionError("session_identity", "Pi created a different session identity than authorized");
     }
-    adapter.appendMapping({
-      protocol: "koni.attempt-session-map.v1",
-      specHash: spec.specHash,
-      runId: spec.identity.runId,
-      ticketId: spec.identity.ticketId,
-      stepId: spec.identity.stepId,
-      attemptId: spec.identity.attemptId,
-      sessionId: spec.identity.sessionId,
-      grantId: spec.authority.grantId,
-      grantHash: spec.authority.grantHash,
-      generation: spec.authority.generation,
-      epoch: spec.authority.epoch,
-      stateHash: spec.authority.expectedStateHash,
-      resourceSetHash: spec.resources.setHash,
-      model: spec.model,
-      sessionFile: adapter.sessionFile,
-    });
+    if (appendMapping && adapter.mappingPersisted !== true) {
+      adapter.appendMapping(attemptSessionMapping(spec, adapter.sessionFile));
+    }
     this.#unsubscribe = adapter.subscribe((event) => this.#onPiEvent(event));
+    this.#unsubscribeNotices = adapter.subscribeNotices?.((notice) => {
+      this.#emit({ type: "compaction", notice });
+    });
   }
 
   public static async create(
@@ -139,7 +245,38 @@ export class ManagedPiSession {
     const spec = validateAgentLaunchSpec(specValue);
     validateToolBindings(spec, options.tools);
     const adapter = await (options.factory ?? createManagedPiSession)(spec, options);
-    return new ManagedPiSession(spec, adapter);
+    try {
+      const terminalTool = validateToolBindings(spec, options.tools);
+      return new ManagedPiSession(spec, adapter, true, terminalTool);
+    } catch (error) {
+      await disposeRejectedAdapter(adapter);
+      throw error;
+    }
+  }
+
+  public static async recover(
+    specValue: AgentLaunchSpec,
+    options: ManagedPiSessionFactoryOptions & { factory?: ManagedPiSessionFactory },
+  ): Promise<ManagedPiSession> {
+    const spec = validateAgentLaunchSpec(specValue);
+    validateToolBindings(spec, options.tools);
+    const adapter = await (options.factory ?? recoverManagedPiSession)(spec, options);
+    if (adapter.recovery === undefined) {
+      await disposeRejectedAdapter(adapter);
+      throw new ManagedSessionError("recovery_projection", "recovery factory did not authenticate a durable session");
+    }
+    if (adapter.recovery.disposition.kind === "blocked") {
+      const reason = adapter.recovery.disposition.reason;
+      await disposeRejectedAdapter(adapter);
+      throw new ManagedSessionError("recovery_blocked", reason);
+    }
+    try {
+      const terminalTool = validateToolBindings(spec, options.tools);
+      return new ManagedPiSession(spec, adapter, false, terminalTool);
+    } catch (error) {
+      await disposeRejectedAdapter(adapter);
+      throw error;
+    }
   }
 
   public get status(): ManagedSessionStatus {
@@ -166,18 +303,18 @@ export class ManagedPiSession {
     if (this.#status !== "created") {
       return Promise.reject(new ManagedSessionError("start_state", `cannot start a ${this.#status} session`));
     }
-    this.#startPromise = this.#run();
+    this.#startPromise = this.#runAndRelease();
     return this.#startPromise;
   }
 
-  public async steer(text: string): Promise<void> {
-    this.#assertCanMessage("steer", text);
-    await this.#adapter.steer(text);
+  public async steer(message: KoniAuthorizedMessage): Promise<void> {
+    this.#assertCanMessage("steer", message);
+    await this.#adapter.steer(message);
   }
 
-  public async followUp(text: string): Promise<void> {
-    this.#assertCanMessage("follow up", text);
-    await this.#adapter.followUp(text);
+  public async followUp(message: KoniAuthorizedMessage): Promise<void> {
+    this.#assertCanMessage("follow_up", message);
+    await this.#adapter.followUp(message);
   }
 
   public abort(reason = "aborted by authority"): Promise<void> {
@@ -190,7 +327,11 @@ export class ManagedPiSession {
     this.#abortReason = sanitizeText(reason);
     this.#setStatus("aborting", this.#abortReason);
     this.#abortPromise = (async () => {
-      await this.#adapter.abort();
+      await withTimeout(
+        this.#adapter.abort(),
+        ABORT_ACK_TIMEOUT_MS,
+        `Pi session did not acknowledge abort within ${ABORT_ACK_TIMEOUT_MS}ms`,
+      );
       if (this.#status === "aborting") {
         this.#setStatus("aborted", this.#abortReason);
       }
@@ -198,34 +339,110 @@ export class ManagedPiSession {
     return this.#abortPromise;
   }
 
-  public async dispose(): Promise<void> {
-    if (this.#status === "disposed") {
-      return;
+  public dispose(): Promise<void> {
+    this.#disposePromise ??= this.#disposeOnce();
+    return this.#disposePromise;
+  }
+
+  /** Release provider/extension resources while preserving the durable transcript and outcome state. */
+  public releaseRuntime(): Promise<void> {
+    this.#releasePromise ??= this.#releaseRuntimeOnce();
+    return this.#releasePromise;
+  }
+
+  async #disposeOnce(): Promise<void> {
+    let firstError: unknown;
+    try {
+      await this.abort("session disposed");
+    } catch (error) {
+      firstError = error;
     }
-    await this.abort("session disposed");
-    this.#unsubscribe?.();
-    this.#unsubscribe = undefined;
-    this.#adapter.dispose();
+    try {
+      await this.releaseRuntime();
+    } catch (error) {
+      firstError ??= error;
+    }
     this.#setStatus("disposed");
     this.#listeners.clear();
+    if (firstError !== undefined) throw firstError;
+  }
+
+  async #releaseRuntimeOnce(): Promise<void> {
+    this.#unsubscribe?.();
+    this.#unsubscribe = undefined;
+    this.#unsubscribeNotices?.();
+    this.#unsubscribeNotices = undefined;
+    await this.#adapter.dispose();
+  }
+
+  async #runAndRelease(): Promise<ManagedSessionOutcome> {
+    let outcome: ManagedSessionOutcome;
+    try {
+      outcome = await this.#run();
+    } catch (error) {
+      try {
+        await this.releaseRuntime();
+      } catch {
+        // Preserve the primary execution exception.
+      }
+      throw error;
+    }
+    try {
+      await this.releaseRuntime();
+      return outcome;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      if (outcome.status === "completed") {
+        // The terminal tool's resolved receipt means the authority effect is durably accepted.
+        // Pi cleanup cannot roll that transaction back or turn it into replayable failed work.
+        this.#setStatus("completed", `Pi cleanup warning after terminal acceptance: ${detail}`);
+        return outcome;
+      }
+      const failure = `Pi session runtime cleanup failed: ${detail}`;
+      this.#failure = failure;
+      this.#setStatus("failed", failure);
+      return { status: "failed", error: failure, usage: this.usage };
+    }
   }
 
   async #run(): Promise<ManagedSessionOutcome> {
     this.#setStatus("running");
-    try {
-      await this.#adapter.prompt(this.spec.persona.initialPrompt);
-    } catch (error) {
-      if (this.#status === "aborting" || this.#status === "aborted") {
-        this.#setStatus("aborted", this.#abortReason);
-        return { status: "aborted", reason: this.#abortReason, usage: this.usage };
-      }
-      this.#failure = error instanceof Error ? error.message : String(error);
+    if (this.#recovery?.disposition.kind === "complete") {
+      this.#terminalCount = 1;
+      this.#terminalOutput = this.#recovery.disposition.terminalOutput;
+      this.#emit({ type: "terminal", toolName: this.spec.terminal.toolName, output: this.#terminalOutput });
+      this.#setStatus("completed", "recovered accepted terminal receipt");
+      return { status: "completed", terminalOutput: this.#terminalOutput, usage: this.usage };
     }
-
-    if (this.#status === "aborting" || this.#status === "aborted") {
+    if (this.#recovery?.disposition.kind === "blocked") {
+      this.#setStatus("failed", this.#recovery.disposition.reason);
+      return { status: "failed", error: this.#recovery.disposition.reason, usage: this.usage };
+    }
+    if (this.#recovery?.disposition.kind === "revoked") {
+      this.#abortReason = this.#recovery.disposition.reason;
       this.#setStatus("aborted", this.#abortReason);
       return { status: "aborted", reason: this.#abortReason, usage: this.usage };
     }
+    const recoveryBudgetViolation = tokenBudgetViolation(this.spec, this.#usage)
+      ?? (this.#recovery === undefined ? undefined : tokenBudgetExhaustion(this.spec, this.#usage));
+    if (this.#recovery !== undefined && recoveryBudgetViolation !== undefined) {
+      await this.abort(recoveryBudgetViolation);
+      return { status: "aborted", reason: recoveryBudgetViolation, usage: this.usage };
+    }
+    try {
+      if (this.#recovery?.disposition.kind === "continue") {
+        await this.#adapter.continue();
+      } else {
+        await this.#adapter.prompt(this.spec.persona.initialPrompt);
+      }
+    } catch (error) {
+      if (this.#status !== "aborting" && this.#status !== "aborted") {
+        this.#failure = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    const aborted = await this.#settleAbortOutcome();
+    if (aborted !== undefined) return aborted;
     if (this.#failure !== undefined) {
       this.#setStatus("failed", this.#failure);
       return { status: "failed", error: this.#failure, usage: this.usage };
@@ -245,60 +462,147 @@ export class ManagedPiSession {
     this.#emit({ type: "pi_lifecycle", eventType: event.type });
     if (event.type === "message_end" && event.message.role === "assistant") {
       const usage = event.message.usage;
-      addUsage(this.#usage, usage.input, usage.output, usage.cacheRead, usage.cacheWrite);
+      try {
+        addUsage(this.#usage, usage.input, usage.output, usage.cacheRead, usage.cacheWrite);
+      } catch (error) {
+        this.#failure = error instanceof Error ? error.message : String(error);
+        this.#requestAbort(this.#failure, true);
+        return;
+      }
       this.#emit({ type: "usage", usage: this.usage });
       const violation = tokenBudgetViolation(this.spec, this.#usage);
       if (violation !== undefined && this.#failure === undefined) {
         this.#failure = violation;
-        void this.abort(violation);
+        this.#requestAbort(violation);
+      }
+      const toolCalls = event.message.content.filter((block) => block.type === "toolCall");
+      const terminalCalls = toolCalls.filter((block) => block.name === this.spec.terminal.toolName);
+      if (terminalCalls.length > 0 && (terminalCalls.length !== 1 || toolCalls.length !== 1)) {
+        this.#failure = `terminal tool ${this.spec.terminal.toolName} must be the only call in its assistant batch`;
+        this.#requestAbort(this.#failure, true);
+      }
+    }
+    if (event.type === "tool_execution_start" && event.toolName === this.spec.terminal.toolName) {
+      if (this.#terminalCount > 0) {
+        this.#failure = `terminal tool ${event.toolName} was called after an accepted terminal result`;
+        this.#requestAbort(this.#failure, true);
+        return;
+      }
+      try {
+        this.#terminalArguments.set(
+          event.toolCallId,
+          validateTerminalPayload(
+            this.spec,
+            this.#terminalOutputSchema,
+            event.args,
+            "terminal tool arguments",
+          ),
+        );
+      } catch (error) {
+        // Pi's pinned argument validator will surface the malformed submission as a normal
+        // non-effect error result. A later terminal retry remains valid.
+        this.#terminalArgumentErrors.set(
+          event.toolCallId,
+          error instanceof Error ? error.message : String(error),
+        );
       }
     }
     if (event.type === "tool_execution_end" && event.toolName === this.spec.terminal.toolName) {
+      if (this.#failure !== undefined) {
+        this.#requestAbort(this.#failure, this.#abortAsFailure);
+        return;
+      }
+      const payload = this.#terminalArguments.get(event.toolCallId);
+      const argumentError = this.#terminalArgumentErrors.get(event.toolCallId);
+      this.#terminalArguments.delete(event.toolCallId);
+      this.#terminalArgumentErrors.delete(event.toolCallId);
       if (event.isError) {
-        this.#failure = `terminal tool ${event.toolName} failed`;
+        // Schema errors and durable authority rejections are model-visible, recoverable attempts;
+        // neither is an accepted terminal boundary.
+        return;
+      }
+      if (argumentError !== undefined) {
+        this.#failure = argumentError;
+        this.#requestAbort(this.#failure, true);
         return;
       }
       this.#terminalCount += 1;
       if (this.#terminalCount > 1) {
         this.#failure = `terminal tool ${event.toolName} was called more than once`;
-        void this.abort(this.#failure);
+        this.#requestAbort(this.#failure, true);
         return;
       }
-      let bytes: number;
-      try {
-        bytes = Buffer.byteLength(JSON.stringify(event.result), "utf8");
-      } catch {
-        this.#failure = "terminal output is not JSON serializable";
-        void this.abort(this.#failure);
+      if (payload === undefined) {
+        this.#failure = "terminal tool completed without an authenticated argument payload";
+        this.#requestAbort(this.#failure, true);
         return;
       }
-      if (bytes > this.spec.terminal.maxOutputBytes) {
-        this.#failure = "terminal output exceeds the compiler-issued byte budget";
-        void this.abort(this.#failure);
+      if (!isRecord(event.result) || event.result.terminate !== true) {
+        this.#failure = "terminal authority receipt did not terminate the Pi tool batch";
+        this.#requestAbort(this.#failure, true);
         return;
       }
-      this.#terminalOutput = structuredClone(event.result);
+      this.#terminalOutput = payload;
       this.#emit({ type: "terminal", toolName: event.toolName, output: this.#terminalOutput });
     }
   }
 
-  #assertCanMessage(operation: string, text: string): void {
-    if (this.#status !== "running") {
+  #requestAbort(reason: string, asFailure = false): void {
+    this.#abortAsFailure ||= asFailure;
+    void this.abort(reason).catch(() => {
+      // #run awaits the same memoized promise and turns a failed abort into a failed outcome.
+    });
+  }
+
+  async #settleAbortOutcome(): Promise<ManagedSessionOutcome | undefined> {
+    if (this.#status !== "aborting" && this.#status !== "aborted") return undefined;
+    try {
+      await this.#abortPromise;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const failure = `Pi session abort failed: ${detail}`;
+      this.#failure = failure;
+      this.#setStatus("failed", failure);
+      return { status: "failed", error: failure, usage: this.usage };
+    }
+    if (this.#abortAsFailure && this.#failure !== undefined) {
+      this.#setStatus("failed", this.#failure);
+      return { status: "failed", error: this.#failure, usage: this.usage };
+    }
+    if (this.#status !== "aborted") this.#setStatus("aborted", this.#abortReason);
+    return { status: "aborted", reason: this.#abortReason, usage: this.usage };
+  }
+
+  #assertCanMessage(operation: KoniAuthorizedMessage["mode"], message: KoniAuthorizedMessage): void {
+    if (
+      this.#status !== "running" ||
+      this.#failure !== undefined ||
+      this.#terminalCount > 0 ||
+      this.#terminalArguments.size > 0 ||
+      this.#terminalArgumentErrors.size > 0 ||
+      this.#abortPromise !== undefined
+    ) {
       throw new ManagedSessionError("message_state", `cannot ${operation} a ${this.#status} session`);
     }
-    if (Buffer.byteLength(text, "utf8") === 0 || Buffer.byteLength(text, "utf8") > 1024 * 1024 || text.includes("\u0000")) {
-      throw new ManagedSessionError("message_size", `${operation} text is empty, oversized, or contains NUL`);
+    validateAuthorizedMessageRecord(message, "message_size");
+    if (message.mode !== operation) {
+      throw new ManagedSessionError("message_mode", `${operation} received a ${message.mode} authority record`);
     }
   }
 
   #setStatus(status: ManagedSessionStatus, detail?: string): void {
+    if (this.#status === "disposed" && status !== "disposed") return;
     this.#status = status;
     this.#emit({ type: "status", status, ...(detail === undefined ? {} : { detail }) });
   }
 
   #emit(event: ManagedSessionEvent): void {
     for (const listener of this.#listeners) {
-      listener(event);
+      try {
+        listener(event);
+      } catch {
+        // Observers are presentation/audit clients, never part of Pi persistence or control flow.
+      }
     }
   }
 }
@@ -308,48 +612,225 @@ export async function createManagedPiSession(
   spec: Readonly<AgentLaunchSpec>,
   options: ManagedPiSessionFactoryOptions,
 ): Promise<PiSessionAdapter> {
-  const extension = createKoniManagedExtension({
-    spec,
-    contextProvider: options.contextProvider,
-    ...(options.onCompactionNotice === undefined ? {} : { onNotice: options.onCompactionNotice }),
-  });
-  const contained = await createContainedResourceLoader({ spec, extension });
-  contained.settingsManager.applyOverrides({
-    defaultProvider: spec.model.provider,
-    defaultModel: spec.model.id,
-    defaultThinkingLevel: spec.model.thinkingLevel,
-    compaction: { enabled: true },
-    retry: {
-      enabled: spec.budgets.retries.maxProviderRetries > 0,
-      maxRetries: spec.budgets.retries.maxProviderRetries,
-      baseDelayMs: spec.budgets.retries.baseDelayMs,
-      provider: { maxRetries: 0 },
-    },
-    images: { blockImages: true, autoResize: false },
-  });
-  const modelRuntime = options.modelRuntime ?? await ModelRuntime.create();
-  const model = modelRuntime.getModel(spec.model.provider, spec.model.id);
-  if (model === undefined) {
-    throw new ManagedSessionError(
-      "model_missing",
-      `Pi's normal model runtime does not contain ${spec.model.provider}/${spec.model.id}`,
-    );
-  }
-  const sessionManager = await createFreshSessionManager(spec);
-  const result = await createAgentSession({
-    cwd: spec.workspace.cwd,
-    agentDir: path.join(contained.resourceRoot, ".pi-agent"),
-    modelRuntime,
-    model,
-    thinkingLevel: spec.model.thinkingLevel,
-    noTools: "all",
-    tools: spec.tools.map((tool) => tool.name),
-    customTools: options.tools.map((tool) => tool.definition),
-    resourceLoader: contained.loader,
-    sessionManager,
-    settingsManager: contained.settingsManager,
-    sessionStartEvent: { type: "session_start", reason: "startup" },
-  });
+  return createProductionPiSession(spec, options, "fresh");
+}
+
+/** Reopen one authenticated, compiler-authorized linear Pi session. */
+export async function recoverManagedPiSession(
+  spec: Readonly<AgentLaunchSpec>,
+  options: ManagedPiSessionFactoryOptions,
+): Promise<PiSessionAdapter> {
+  return createProductionPiSession(spec, options, "recover");
+}
+
+async function createProductionPiSession(
+  spec: Readonly<AgentLaunchSpec>,
+  options: ManagedPiSessionFactoryOptions,
+  mode: "fresh" | "recover",
+): Promise<PiSessionAdapter> {
+  assertSupportedPiRuntimeVersion();
+  const boundTools = snapshotToolBindings(options.tools);
+  const terminalTool = validateToolBindings(spec, boundTools);
+  // Authenticate a recovery before resource/model/extension construction. No provider-capable
+  // object exists until the persisted attempt and durable authority view agree byte-for-byte.
+  const authenticatedRecovery = mode === "recover"
+    ? await inspectRecoveredSession(
+        spec,
+        options.contextProvider,
+        terminalTool.terminalOutputSchema!,
+        boundTools,
+      )
+    : undefined;
+  const recovery = authenticatedRecovery?.projection;
+  let adapterOwnsRecoveryClaim = false;
+  try {
+    if (
+      recovery !== undefined &&
+      recovery.disposition.kind !== "prompt" &&
+      recovery.disposition.kind !== "continue"
+    ) {
+      await authenticatedRecovery!.release();
+      const adapter = createPassiveRecoveryAdapter(spec, recovery);
+      adapterOwnsRecoveryClaim = true;
+      return adapter;
+    }
+    // Persist the immutable header+attempt mapping before materializing resources. If this process
+    // dies at any later construction boundary, recovery has an authenticated session anchor and
+    // can safely recreate only missing resources from the hash-bound launch spec.
+    const sessionManager = mode === "fresh"
+      ? await createFreshSessionManager(spec)
+      : SessionManager.open(expectedSessionFile(spec), spec.workspace.sessionDirectory, spec.workspace.cwd);
+    const resultBudget = new TranscriptToolResultBudget(spec, sessionManager);
+    let replayedTerminalOutput: unknown;
+    for (const action of recovery?.pendingToolActions ?? []) {
+      if (action.kind === "append_pi_error") {
+        const errorResult = {
+          content: [{ type: "text" as const, text: action.errorText }],
+          details: {},
+        };
+        await resultBudget.reserveExact(koniToolResultPayloadBytes(errorResult));
+        await appendRecoveredToolResult(
+          sessionManager,
+          action.callId,
+          action.toolName,
+          errorResult,
+          true,
+        );
+        continue;
+      }
+      if (action.kind === "append_receipt") {
+        const receipt = action.authorizedResult.receipt;
+        if (!isRecord(receipt)) {
+          throw new ManagedSessionError("recovery_tool", "authority repair receipt is malformed");
+        }
+        validateKoniToolReceipt(receipt);
+        const repaired = {
+          content: [{ type: "text" as const, text: renderKoniToolReceipt(receipt) }],
+          details: structuredClone(receipt),
+        };
+        await resultBudget.reserveExact(koniToolResultPayloadBytes(repaired));
+        await appendRecoveredToolResult(
+          sessionManager,
+          action.callId,
+          action.toolName,
+          repaired,
+          receipt.outcome === "rejected",
+        );
+        continue;
+      }
+      const tool = boundTools.find((candidate) => candidate.name === action.toolName);
+      if (tool === undefined) {
+        throw new ManagedSessionError("recovery_tool", `recovery tool ${action.toolName} is unavailable`);
+      }
+      const signal = new AbortController().signal;
+      const budgetDisposition = await resultBudget.reserve(tool.maxResultBytes);
+      const result = budgetDisposition === "execute"
+        ? await tool.execute(action.callId, structuredClone(action.arguments), signal)
+        : await tool.reject(
+            action.callId,
+            structuredClone(action.arguments),
+            transcriptBudgetRejection(spec),
+            signal,
+          );
+      const receipt = validatedReceiptFromResult(result, tool.maxResultBytes);
+      if (action.toolName !== spec.terminal.toolName && result.terminate === true) {
+        throw new ManagedSessionError("recovery_tool", "non-terminal authority tool attempted to terminate recovery");
+      }
+      await appendRecoveredToolResult(
+        sessionManager,
+        action.callId,
+        action.toolName,
+        result,
+        receipt.outcome === "rejected",
+      );
+      if (action.toolName === spec.terminal.toolName && receipt.outcome === "accepted") {
+        if (result.terminate !== true) {
+          throw new ManagedSessionError("recovery_terminal", "replayed terminal authority receipt did not terminate");
+        }
+        replayedTerminalOutput = validateTerminalPayload(
+          spec,
+          terminalTool.terminalOutputSchema!,
+          action.arguments,
+          "replayed terminal output",
+        );
+      }
+    }
+    if (replayedTerminalOutput !== undefined) {
+      await authenticatedRecovery?.release();
+      const adapter = createPassiveRecoveryAdapter(spec, {
+        usage: recovery?.usage ?? emptyUsage(),
+        disposition: { kind: "complete", terminalOutput: replayedTerminalOutput },
+      });
+      adapterOwnsRecoveryClaim = true;
+      return adapter;
+    }
+    let beforeProviderRequest = async (): Promise<void> => undefined;
+    const noticeListeners = new Set<(notice: CompactionLifecycleNotice) => void>();
+    const extension = createKoniManagedExtension({
+      spec,
+      contextProvider: options.contextProvider,
+      beforeProviderRequest: () => beforeProviderRequest(),
+      onNotice: (notice) => {
+        try {
+          options.onCompactionNotice?.(notice);
+        } catch {
+          // Audit/TUI observers cannot interrupt the contained session.
+        }
+        for (const listener of noticeListeners) {
+          try {
+            listener(notice);
+          } catch {
+            // Compaction observers are not part of the persistence/control path.
+          }
+        }
+      },
+      onTurnStart: () => resultBudget.reset(),
+    });
+    const contained = await createContainedResourceLoader({ spec, extension, mode });
+    contained.settingsManager.applyOverrides({
+      defaultProvider: spec.model.provider,
+      defaultModel: spec.model.id,
+      defaultThinkingLevel: spec.model.thinkingLevel,
+      compaction: { enabled: true },
+      retry: {
+        enabled: spec.budgets.retries.maxProviderRetries > 0,
+        maxRetries: spec.budgets.retries.maxProviderRetries,
+        baseDelayMs: spec.budgets.retries.baseDelayMs,
+        provider: { maxRetries: 0 },
+      },
+      images: { blockImages: true, autoResize: false },
+    });
+    const modelRuntime = options.modelRuntime ?? await ModelRuntime.create();
+    const unboundedModel = modelRuntime.getModel(spec.model.provider, spec.model.id);
+    if (unboundedModel === undefined) {
+      throw new ManagedSessionError(
+        "model_missing",
+        `Pi's normal model runtime does not contain ${spec.model.provider}/${spec.model.id}`,
+      );
+    }
+    const outputLimit = providerOutputLimit(spec, recovery?.usage);
+    const model = {
+      ...unboundedModel,
+      maxTokens: Math.min(unboundedModel.maxTokens, outputLimit),
+    };
+    beforeProviderRequest = async () => {
+      const currentSessionFile = sessionManager.getSessionFile();
+      if (currentSessionFile === undefined) {
+        throw new ManagedSessionError("session_persistence", "provider turn has no durable Pi session file");
+      }
+      const transcript = await lstat(currentSessionFile);
+      if (!transcript.isFile() || transcript.size >= spec.budgets.transcript.maxBytes) {
+        throw new ManagedSessionError(
+          "transcript_budget",
+          `Pi transcript reached its ${spec.budgets.transcript.maxBytes}-byte attempt budget`,
+        );
+      }
+      // A provider must never observe conversation state that exists only in process memory.
+      // This also makes the preceding authority receipt repair a committed recovery boundary.
+      await syncSessionFile(currentSessionFile);
+      const persistedUsage = recoveryUsage(
+        sessionManager.getEntries() as unknown as readonly PiSessionEntry[],
+      );
+      const violation = tokenBudgetViolation(spec, persistedUsage);
+      if (violation !== undefined) throw new ManagedSessionError("token_budget", violation);
+      const exhausted = tokenBudgetExhaustion(spec, persistedUsage);
+      if (exhausted !== undefined) throw new ManagedSessionError("token_budget", exhausted);
+      model.maxTokens = Math.min(unboundedModel.maxTokens, providerOutputLimit(spec, persistedUsage));
+    };
+    const result = await createAgentSession({
+      cwd: spec.workspace.cwd,
+      agentDir: path.join(contained.resourceRoot, ".pi-agent"),
+      modelRuntime,
+      model,
+      thinkingLevel: spec.model.thinkingLevel,
+      noTools: "all",
+      tools: spec.tools.map((tool) => tool.name),
+      customTools: runtimeToolDefinitions(spec, boundTools, sessionManager, resultBudget),
+      resourceLoader: contained.loader,
+      sessionManager,
+      settingsManager: contained.settingsManager,
+      sessionStartEvent: { type: "session_start", reason: mode === "fresh" ? "startup" : "resume" },
+    });
   if (
     result.session.model?.provider !== spec.model.provider ||
     result.session.model?.id !== spec.model.id ||
@@ -361,37 +842,244 @@ export async function createManagedPiSession(
       "Pi could not honor the exact compiler-issued model and thinking level",
     );
   }
-  await result.session.bindExtensions({ mode: "rpc" });
+  try {
+    await result.session.bindExtensions({ mode: "rpc" });
+  } catch (error) {
+    await shutdownAgentSession(result.session);
+    throw error;
+  }
   const sessionFile = result.session.sessionFile;
   if (sessionFile === undefined) {
     result.session.dispose();
     throw new ManagedSessionError("session_persistence", "contained Pi session is not persisted");
   }
-  return {
+    if (recovery?.disposition.kind === "continue") {
+      continuationLifecycle(result.session);
+    }
+    const adapter: PiSessionAdapter = {
     sessionId: result.session.sessionId,
     sessionFile,
+    mappingPersisted: true,
+    ...(recovery === undefined ? {} : { recovery }),
     getActiveToolNames: () => result.session.getActiveToolNames(),
-    appendMapping: (data) => { result.session.sessionManager.appendCustomEntry("koni.attempt-session-map", data); },
+    appendMapping: () => {
+      throw new ManagedSessionError("session_mapping", "production Pi sessions persist their mapping atomically");
+    },
     subscribe: (listener) => result.session.subscribe(listener),
+    subscribeNotices: (listener) => {
+      noticeListeners.add(listener);
+      return () => noticeListeners.delete(listener);
+    },
+    // Compiler output is already fully expanded and hash-bound. Slash-like bytes remain literal so
+    // the persisted initial user message is exactly the launch-spec message authenticated later.
     prompt: (text) => result.session.prompt(text, { expandPromptTemplates: false, source: "rpc" }),
-    steer: (text) => result.session.prompt(text, {
-      expandPromptTemplates: false,
-      streamingBehavior: "steer",
-      source: "rpc",
-    }),
-    followUp: (text) => result.session.prompt(text, {
-      expandPromptTemplates: false,
-      streamingBehavior: "followUp",
-      source: "rpc",
-    }),
+    continue: async () => {
+      for (const pending of recovery?.pendingMessages ?? []) {
+        const message = pending.message;
+        if (!pending.mappingPersisted) {
+          await appendAuthorizedMessageMapping(sessionManager, spec, message);
+        }
+        const queued = {
+          role: "user" as const,
+          content: [{ type: "text" as const, text: message.content }],
+          timestamp: Date.now(),
+        };
+        if (message.mode === "steer") result.session.agent.steer(queued);
+        else result.session.agent.followUp(queued);
+      }
+      await continueThroughAgentSession(result.session);
+    },
+    steer: async (message) => {
+      await appendAuthorizedMessageMapping(sessionManager, spec, message);
+      await result.session.prompt(message.content, {
+        expandPromptTemplates: false,
+        streamingBehavior: "steer",
+        source: "rpc",
+      });
+    },
+    followUp: async (message) => {
+      await appendAuthorizedMessageMapping(sessionManager, spec, message);
+      await result.session.prompt(message.content, {
+        expandPromptTemplates: false,
+        streamingBehavior: "followUp",
+        source: "rpc",
+      });
+    },
     abort: () => result.session.abort(),
-    dispose: () => result.session.dispose(),
+    dispose: async () => {
+      try {
+        await shutdownAgentSession(result.session);
+      } finally {
+        await authenticatedRecovery?.release();
+      }
+    },
   };
+    adapterOwnsRecoveryClaim = true;
+    return adapter;
+  } finally {
+    if (!adapterOwnsRecoveryClaim) {
+      await authenticatedRecovery?.release().catch(() => undefined);
+    }
+  }
+}
+
+export function assertSupportedPiRuntimeVersion(version = PI_CODING_AGENT_VERSION): void {
+  if (version !== PINNED_PI_CODING_AGENT_VERSION) {
+    throw new ManagedSessionError(
+      "pi_runtime_version",
+      `contained sessions require exact Pi ${PINNED_PI_CODING_AGENT_VERSION}; loaded ${version}`,
+    );
+  }
+}
+
+/**
+ * Pi 0.80.10 does not expose a public no-new-message AgentSession continuation. Its private
+ * `_runAgentPrompt([])` is the exact high-level lifecycle path used by `prompt()`: it owns
+ * isStreaming/idle, retry, compaction, queue draining, agent-settled events, persistence, and
+ * abort waiting. Calling the public low-level `session.agent.continue()` would bypass all of that.
+ * Keep this compatibility check pinned and fail before spending tokens if Pi changes the surface.
+ */
+function continueThroughAgentSession(
+  session: Awaited<ReturnType<typeof createAgentSession>>["session"],
+): Promise<void> {
+  return continuationLifecycle(session).call(session, []);
+}
+
+function continuationLifecycle(
+  session: Awaited<ReturnType<typeof createAgentSession>>["session"],
+): (messages: unknown[]) => Promise<void> {
+  const lifecycle = session as unknown as {
+    _runAgentPrompt?: (messages: unknown[]) => Promise<void>;
+  };
+  if (typeof lifecycle._runAgentPrompt !== "function") {
+    throw new ManagedSessionError(
+      "pi_continuation_api",
+      "pinned Pi AgentSession continuation lifecycle is unavailable",
+    );
+  }
+  return lifecycle._runAgentPrompt;
+}
+
+function createPassiveRecoveryAdapter(
+  spec: Readonly<AgentLaunchSpec>,
+  recovery: RecoveredSessionState,
+): PiSessionAdapter {
+  const inactive = async (): Promise<never> => {
+    throw new ManagedSessionError("recovery_inactive", "recovered attempt does not require an active Pi model session");
+  };
+  return {
+    sessionId: spec.identity.sessionId,
+    sessionFile: expectedSessionFile(spec),
+    recovery,
+    mappingPersisted: true,
+    getActiveToolNames: () => spec.tools.map((tool) => tool.name),
+    appendMapping: () => {
+      throw new ManagedSessionError("recovery_mapping", "recovery cannot append another attempt mapping");
+    },
+    subscribe: () => () => undefined,
+    subscribeNotices: () => () => undefined,
+    prompt: inactive,
+    continue: inactive,
+    steer: inactive,
+    followUp: inactive,
+    abort: async () => undefined,
+    dispose: async () => undefined,
+  };
+}
+
+async function appendRecoveredToolResult(
+  sessionManager: SessionManager,
+  callId: string,
+  toolName: string,
+  result: Pick<AgentToolResult<unknown>, "content" | "details">,
+  isError: boolean,
+): Promise<void> {
+  sessionManager.appendMessage({
+    role: "toolResult",
+    toolCallId: callId,
+    toolName,
+    content: structuredClone(result.content),
+    details: structuredClone(result.details),
+    isError,
+    timestamp: Date.now(),
+  });
+  const sessionFile = sessionManager.getSessionFile();
+  if (sessionFile === undefined) {
+    throw new ManagedSessionError("session_persistence", "recovered tool receipt has no durable session file");
+  }
+  await syncSessionFile(sessionFile);
+}
+
+async function appendAuthorizedMessageMapping(
+  sessionManager: SessionManager,
+  spec: Readonly<AgentLaunchSpec>,
+  message: KoniAuthorizedMessage,
+): Promise<void> {
+  validateAuthorizedMessageRecord(message, "message_size");
+  sessionManager.appendCustomEntry(
+    "koni.authorized-message-map",
+    authorizedMessageMapping(spec, message),
+  );
+  const sessionFile = sessionManager.getSessionFile();
+  if (sessionFile === undefined) {
+    throw new ManagedSessionError("session_persistence", "authorized message map has no durable session file");
+  }
+  // Commit the mode/hash binding before Pi can enqueue or persist the associated user text.
+  await syncSessionFile(sessionFile);
+}
+
+function authorizedMessageMapping(
+  spec: Readonly<AgentLaunchSpec>,
+  message: KoniAuthorizedMessage,
+): Readonly<Record<string, unknown>> {
+  return {
+    protocol: "koni.authorized-message-map.v1",
+    specHash: spec.specHash,
+    runId: spec.identity.runId,
+    attemptId: spec.identity.attemptId,
+    sequence: message.sequence,
+    mode: message.mode,
+    sha256: message.sha256,
+    sizeBytes: message.sizeBytes,
+    content: message.content,
+  };
+}
+
+async function syncSessionFile(sessionFile: string): Promise<void> {
+  let handle;
+  try {
+    handle = await open(sessionFile, constants.O_RDWR | constants.O_NOFOLLOW);
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) {
+      throw new ManagedSessionError("session_persistence", "Pi session path is not a regular file");
+    }
+    await handle.sync();
+  } catch (error) {
+    if (error instanceof ManagedSessionError) throw error;
+    throw new ManagedSessionError(
+      "session_persistence",
+      `Pi session could not be committed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function shutdownAgentSession(
+  session: Awaited<ReturnType<typeof createAgentSession>>["session"],
+): Promise<void> {
+  try {
+    if (session.extensionRunner.hasHandlers("session_shutdown")) {
+      await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+    }
+  } finally {
+    session.dispose();
+  }
 }
 
 async function createFreshSessionManager(spec: Readonly<AgentLaunchSpec>): Promise<SessionManager> {
   await mkdir(spec.workspace.sessionDirectory, { recursive: true, mode: 0o700 });
-  const sessionFile = path.join(spec.workspace.sessionDirectory, `${spec.identity.sessionId}.jsonl`);
+  const sessionFile = expectedSessionFile(spec);
   const header = {
     type: "session",
     version: CURRENT_SESSION_VERSION,
@@ -399,25 +1087,1079 @@ async function createFreshSessionManager(spec: Readonly<AgentLaunchSpec>): Promi
     timestamp: new Date().toISOString(),
     cwd: spec.workspace.cwd,
   };
-  let handle;
-  try {
-    handle = await open(sessionFile, "wx", 0o600);
-  } catch (error) {
-    if (isCode(error, "EEXIST")) {
-      throw new ManagedSessionError("session_replay", `Pi session ${spec.identity.sessionId} already exists`);
-    }
-    throw error;
-  }
-  try {
-    await handle.writeFile(`${JSON.stringify(header)}\n`, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
+  const mapping = {
+    type: "custom",
+    id: randomUUID(),
+    parentId: null,
+    timestamp: new Date().toISOString(),
+    customType: "koni.attempt-session-map",
+    data: attemptSessionMapping(spec, sessionFile),
+  };
+  if (!await createFileAtomicallyNoReplace(
+    sessionFile,
+    `${JSON.stringify(header)}\n${JSON.stringify(mapping)}\n`,
+    0o600,
+  )) {
+    throw new ManagedSessionError("session_replay", `Pi session ${spec.identity.sessionId} already exists`);
   }
   return SessionManager.open(sessionFile, spec.workspace.sessionDirectory, spec.workspace.cwd);
 }
 
-function validateToolBindings(spec: Readonly<AgentLaunchSpec>, tools: readonly AuthorityBackedTool[]): void {
+function expectedSessionFile(spec: Readonly<AgentLaunchSpec>): string {
+  return path.join(spec.workspace.sessionDirectory, `${spec.identity.sessionId}.jsonl`);
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+function attemptSessionMapping(
+  spec: Readonly<AgentLaunchSpec>,
+  sessionFile: string,
+): Readonly<Record<string, unknown>> {
+  return {
+    protocol: "koni.attempt-session-map.v1",
+    specHash: spec.specHash,
+    runId: spec.identity.runId,
+    ticketId: spec.identity.ticketId,
+    stepId: spec.identity.stepId,
+    attemptId: spec.identity.attemptId,
+    sessionId: spec.identity.sessionId,
+    grantId: spec.authority.grantId,
+    grantHash: spec.authority.grantHash,
+    generation: spec.authority.generation,
+    epoch: spec.authority.epoch,
+    stateHash: spec.authority.expectedStateHash,
+    resourceSetHash: spec.resources.setHash,
+    model: spec.model,
+    lineage: spec.lineage,
+    sessionFile,
+  };
+}
+
+async function inspectRecoveredSession(
+  spec: Readonly<AgentLaunchSpec>,
+  contextProvider: KoniContextProvider,
+  terminalOutputSchema: TSchema,
+  tools: readonly AuthorityBackedTool[],
+): Promise<AuthenticatedRecovery> {
+  const sessionFile = expectedSessionFile(spec);
+  const claim = await contextProvider.acquireRecoveryClaim(spec);
+  const release = typeof claim.release === "function"
+    ? onceAsync(claim.release.bind(claim))
+    : async () => undefined;
+  try {
+    validateRecoveryClaim(spec, claim);
+    const recoveryState = claim.state;
+    validateRecoveryAuthority(spec, recoveryState);
+
+    if (recoveryState.status === "terminal_accepted") {
+      return {
+        projection: {
+          usage: authorityRecoveryUsage(recoveryState),
+          disposition: {
+            kind: "complete",
+            terminalOutput: validateTerminalPayload(
+              spec,
+              terminalOutputSchema,
+              recoveryState.terminalOutput,
+              "accepted terminal output",
+            ),
+          },
+        },
+        release,
+      };
+    }
+    if (recoveryState.status === "revoked") {
+      return {
+        projection: {
+          usage: authorityRecoveryUsage(recoveryState),
+          disposition: {
+            kind: "revoked",
+            reason: recoveryReason(recoveryState.reason, "attempt revoked by authority"),
+          },
+        },
+        release,
+      };
+    }
+    if (recoveryState.status === "terminal_inflight") {
+      return {
+        projection: {
+          usage: authorityRecoveryUsage(recoveryState),
+          disposition: {
+            kind: "blocked",
+            reason: recoveryReason(
+              recoveryState.reason,
+              "terminal submission is in flight; authority reconciliation is required before recovery",
+            ),
+          },
+        },
+        release,
+      };
+    }
+
+    let parsed: ParsedPiSession;
+    let handle;
+    try {
+      handle = await open(sessionFile, constants.O_RDWR | constants.O_NOFOLLOW);
+      const metadata = await handle.stat();
+      const sessionRoot = await realpath(spec.workspace.sessionDirectory);
+      const resolvedFile = await realpath(sessionFile);
+      if (
+        !metadata.isFile() ||
+        (metadata.mode & 0o077) !== 0 ||
+        metadata.size > spec.budgets.transcript.maxBytes + MAX_RECOVERY_SINGLE_ENTRY_OVERSHOOT_BYTES ||
+        !isPathWithin(sessionRoot, resolvedFile)
+      ) {
+        throw new ManagedSessionError("recovery_session_file", "durable Pi session file is missing, oversized, or unsafe");
+      }
+      const bytes = await handle.readFile();
+      const after = await lstat(sessionFile);
+      if (after.isSymbolicLink() || after.dev !== metadata.dev || after.ino !== metadata.ino) {
+        throw new ManagedSessionError("recovery_session_file", "durable Pi session changed during authentication");
+      }
+      parsed = parsePiSession(bytes, {
+        allowTruncatedTail: true,
+        maxBytes: spec.budgets.transcript.maxBytes + MAX_RECOVERY_SINGLE_ENTRY_OVERSHOOT_BYTES,
+      });
+      if (parsed.diagnostics.some((entry) => entry.code === "truncated_tail")) {
+        const lastCommittedLf = bytes.lastIndexOf(0x0a);
+        if (lastCommittedLf < 0) {
+          throw new ManagedSessionError("recovery_transcript", "Pi session has no committed header record");
+        }
+        await handle.truncate(lastCommittedLf + 1);
+        await handle.sync();
+      }
+    } catch (error) {
+      if (error instanceof ManagedSessionError) throw error;
+      throw new ManagedSessionError(
+        "recovery_transcript",
+        `durable Pi session cannot be authenticated: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+    if (parsed.header.id !== spec.identity.sessionId || parsed.header.cwd !== spec.workspace.cwd) {
+      throw new ManagedSessionError("recovery_header", "Pi session header does not match its launch binding");
+    }
+    assertExactAttemptMapping(spec, sessionFile, parsed.entries);
+    const usage = mergeRecoveryUsage(authorityRecoveryUsage(recoveryState), recoveryUsage(parsed.entries));
+    assertLinearTranscript(parsed);
+    const transcript = inspectTranscript(spec, parsed.entries, recoveryState, tools);
+    assertExactPersistedRuntime(spec, parsed.entries, transcript.hasInitialPrompt);
+    const replayableTerminal = transcript.terminalResults === 0 &&
+      transcript.pendingToolActions.some(
+        (action) => action.kind === "execute" && action.toolName === spec.terminal.toolName,
+      );
+    if (transcript.terminalResults > 0 && !replayableTerminal) {
+      return {
+        projection: {
+          usage,
+          disposition: {
+            kind: "blocked",
+            reason: "Pi transcript contains a terminal submission that durable authority has not accepted",
+          },
+        },
+        release,
+      };
+    }
+    if (!transcript.hasInitialPrompt) {
+      if (transcript.pendingMessages.length > 0) {
+        throw new ManagedSessionError(
+          "recovery_message",
+          "authority accepted steering before the compiler-issued initial prompt was persisted",
+        );
+      }
+      return { projection: { usage, disposition: { kind: "prompt" } }, release };
+    }
+    if (transcript.mayContinue) {
+      return {
+        projection: {
+          usage,
+          disposition: { kind: "continue" },
+          ...(transcript.pendingMessages.length === 0
+            ? {}
+            : { pendingMessages: transcript.pendingMessages }),
+          ...(transcript.pendingToolActions.length === 0
+            ? {}
+            : { pendingToolActions: transcript.pendingToolActions }),
+        },
+        release,
+      };
+    }
+    return {
+      projection: {
+        usage,
+        disposition: {
+          kind: "blocked",
+          reason: "Pi transcript does not end at a provably safe continuation boundary",
+        },
+      },
+      release,
+    };
+  } catch (error) {
+    await release().catch(() => undefined);
+    throw error;
+  }
+}
+
+function validateRecoveryClaim(
+  spec: Readonly<AgentLaunchSpec>,
+  claim: KoniAttemptRecoveryClaim,
+): void {
+  if (
+    claim.protocol !== "koni.attempt-recovery-claim.v1" ||
+    typeof claim.claimId !== "string" ||
+    claim.claimId.length === 0 ||
+    claim.claimId.length > 256 ||
+    /[\u0000-\u001f\u007f]/u.test(claim.claimId) ||
+    typeof claim.release !== "function" ||
+    claim.state.specHash !== spec.specHash ||
+    claim.state.attemptId !== spec.identity.attemptId ||
+    claim.state.sessionId !== spec.identity.sessionId
+  ) {
+    throw new ManagedSessionError("recovery_claim", "authority returned an invalid or mismatched recovery claim");
+  }
+}
+
+function assertExactPersistedRuntime(
+  spec: Readonly<AgentLaunchSpec>,
+  entries: readonly PiSessionEntry[],
+  hasStarted: boolean,
+): void {
+  const modelChanges = entries.filter((entry) => entry.type === "model_change");
+  const thinkingChanges = entries.filter((entry) => entry.type === "thinking_level_change");
+  if (
+    modelChanges.some(
+      (entry) => entry.provider !== spec.model.provider || entry.modelId !== spec.model.id,
+    ) ||
+    thinkingChanges.some((entry) => entry.thinkingLevel !== spec.model.thinkingLevel) ||
+    (hasStarted && (modelChanges.length === 0 || thinkingChanges.length === 0))
+  ) {
+    throw new ManagedSessionError(
+      "recovery_model",
+      "persisted Pi model or thinking history does not match the immutable launch binding",
+    );
+  }
+}
+
+function assertLinearTranscript(parsed: ParsedPiSession): void {
+  let expectedParent: string | null = null;
+  for (const entry of parsed.entries) {
+    if (entry.parentId !== expectedParent) {
+      throw new ManagedSessionError(
+        "recovery_branch",
+        "contained Pi attempt contains a branch or non-linear parent chain",
+      );
+    }
+    expectedParent = entry.id;
+  }
+}
+
+function assertExactAttemptMapping(
+  spec: Readonly<AgentLaunchSpec>,
+  sessionFile: string,
+  entries: readonly PiSessionEntry[],
+): void {
+  const mappings = entries.filter(
+    (entry) => entry.type === "custom" && entry.customType === "koni.attempt-session-map",
+  );
+  if (mappings.length !== 1) {
+    throw new ManagedSessionError(
+      "recovery_mapping_count",
+      "Pi session must contain exactly one immutable Koni attempt mapping",
+    );
+  }
+  const data = mappings[0]?.data;
+  if (!isRecord(data)) {
+    throw new ManagedSessionError("recovery_mapping", "Pi session attempt mapping is malformed");
+  }
+  const expected = attemptSessionMapping(spec, sessionFile);
+  const actualKeys = Object.keys(data).sort();
+  const expectedKeys = Object.keys(expected).sort();
+  if (
+    actualKeys.length !== expectedKeys.length ||
+    actualKeys.some((key, index) => key !== expectedKeys[index]) ||
+    expectedKeys.some((key) => !jsonEqual(data[key], expected[key]))
+  ) {
+    throw new ManagedSessionError("recovery_mapping", "Pi session attempt mapping does not match the launch spec");
+  }
+}
+
+function inspectTranscript(
+  spec: Readonly<AgentLaunchSpec>,
+  entries: readonly PiSessionEntry[],
+  authority: KoniAttemptRecoveryState,
+  tools: readonly AuthorityBackedTool[],
+): {
+  hasInitialPrompt: boolean;
+  mayContinue: boolean;
+  terminalCalls: number;
+  terminalResults: number;
+  pendingMessages: readonly PendingRecoveredMessage[];
+  pendingToolActions: readonly PendingRecoveredToolAction[];
+} {
+  const toolCalls = new Map<string, {
+    name: string;
+    arguments: Record<string, unknown>;
+    expectedPiError?: string;
+    order: number;
+    resolved: boolean;
+  }>();
+  const toolBindings = new Map(tools.map((tool) => [tool.name, tool] as const));
+  const allowedTools = new Set(spec.tools.map((tool) => tool.name));
+  const seenEntryIds = new Set<string>();
+  let hasInitialPrompt = false;
+  let lastBoundary: "user" | "assistant" | "toolResult" | "compaction" | "messageMap" | undefined;
+  let terminalCalls = 0;
+  let terminalResults = 0;
+  let toolCallOrder = 0;
+  const authorizedMessages = new Map(
+    authority.authorizedMessages.map((message) => [message.sequence, message] as const),
+  );
+  const mappedMessageSequences = new Set<number>();
+  const consumedMessageSequences = new Set<number>();
+  const outstandingMessageMappings: KoniAuthorizedMessage[] = [];
+  const authorizedToolResults = new Map(
+    authority.authorizedToolResults.map((record) => [record.callId, record] as const),
+  );
+  const seenAuthorizedToolResults = new Set<string>();
+  if (authorizedToolResults.size !== authority.authorizedToolResults.length) {
+    throw new ManagedSessionError("recovery_authority", "authority returned duplicate tool receipt identities");
+  }
+  const authorizedCompactions = new Map(
+    authority.authorizedCompactions.map((record) => [record.authorizationId, record] as const),
+  );
+  const seenAuthorizedCompactions = new Set<string>();
+  for (const entry of entries) {
+    if (entry.type === "custom") {
+      if (entry.customType === "koni.authorized-message-map") {
+        if (!hasInitialPrompt || !isRecord(entry.data)) {
+          throw new ManagedSessionError("recovery_message", "authorized message map is misplaced or malformed");
+        }
+        const sequence = entry.data.sequence;
+        const authorized = typeof sequence === "number" ? authorizedMessages.get(sequence) : undefined;
+        if (
+          authorized === undefined ||
+          mappedMessageSequences.has(authorized.sequence) ||
+          !jsonEqual(entry.data, authorizedMessageMapping(spec, authorized))
+        ) {
+          throw new ManagedSessionError(
+            "recovery_message",
+            "Pi authorized message map does not match the durable authority ledger",
+          );
+        }
+        mappedMessageSequences.add(authorized.sequence);
+        outstandingMessageMappings.push(authorized);
+        lastBoundary = "messageMap";
+        seenEntryIds.add(entry.id);
+        continue;
+      }
+      if (entry.customType !== "koni.attempt-session-map") {
+        throw new ManagedSessionError("recovery_entry", "Pi session contains an unauthorized custom entry");
+      }
+      seenEntryIds.add(entry.id);
+      continue;
+    }
+    if (entry.type === "model_change" || entry.type === "thinking_level_change") {
+      seenEntryIds.add(entry.id);
+      continue;
+    }
+    if (entry.type === "compaction") {
+      if (!hasInitialPrompt) {
+        throw new ManagedSessionError("recovery_compaction", "Pi compacted before the initial prompt boundary");
+      }
+      const authorizationId = isRecord(entry.details) && typeof entry.details.authorizationId === "string"
+        ? entry.details.authorizationId
+        : undefined;
+      const authorized = authorizationId === undefined
+        ? undefined
+        : authorizedCompactions.get(authorizationId);
+      if (authorized === undefined || seenAuthorizedCompactions.has(authorized.authorizationId)) {
+        throw new ManagedSessionError("recovery_compaction", "Pi compaction has no durable authority authorization");
+      }
+      validatePersistedCompaction(spec, entry, seenEntryIds, authorized);
+      seenAuthorizedCompactions.add(authorized.authorizationId);
+      lastBoundary = "compaction";
+      seenEntryIds.add(entry.id);
+      continue;
+    }
+    if (entry.type !== "message" || !isRecord(entry.message)) {
+      throw new ManagedSessionError(
+        "recovery_entry",
+        `Pi session contains unauthorized context-bearing entry type ${entry.type}`,
+      );
+    }
+    const message = entry.message;
+    if (message.role !== "user" && message.role !== "assistant" && message.role !== "toolResult") {
+      throw new ManagedSessionError("recovery_message", "Pi session contains an unsupported persisted message role");
+    }
+    if (message.role === "user") {
+      const text = userText(message.content);
+      if (
+        text === undefined ||
+        text.length === 0 ||
+        Buffer.byteLength(text, "utf8") > 1024 * 1024 ||
+        text.includes("\u0000")
+      ) {
+        throw new ManagedSessionError("recovery_message", "Pi user message is malformed or exceeds its bound");
+      }
+      if (!hasInitialPrompt) {
+        if (text !== spec.persona.initialPrompt) {
+          throw new ManagedSessionError(
+            "recovery_initial_prompt",
+            "Pi session does not start with the exact compiler-issued initial prompt",
+          );
+        }
+        hasInitialPrompt = true;
+      } else {
+        const authorized = nextMappedMessageForPiDelivery(outstandingMessageMappings);
+        if (authorized === undefined || !authorizedMessageMatches(authorized, text)) {
+          throw new ManagedSessionError(
+            "recovery_message",
+            "Pi user message has no exact preceding authority message map",
+          );
+        }
+        outstandingMessageMappings.splice(outstandingMessageMappings.indexOf(authorized), 1);
+        consumedMessageSequences.add(authorized.sequence);
+      }
+      lastBoundary = "user";
+      seenEntryIds.add(entry.id);
+      continue;
+    }
+    if (message.role === "assistant") {
+      if (!Array.isArray(message.content)) {
+        throw new ManagedSessionError("recovery_message", "Pi assistant message content is malformed");
+      }
+      const batchCalls: Array<{ id: string; name: string }> = [];
+      for (const block of message.content) {
+        if (!isRecord(block) || !["text", "thinking", "toolCall"].includes(String(block.type))) {
+          throw new ManagedSessionError("recovery_message", "Pi assistant content contains an unsupported block");
+        }
+        if (block.type !== "toolCall") continue;
+        if (
+          typeof block.id !== "string" ||
+          block.id.length === 0 ||
+          block.id.length > 256 ||
+          typeof block.name !== "string" ||
+          !allowedTools.has(block.name) ||
+          toolCalls.has(block.id)
+        ) {
+          throw new ManagedSessionError("recovery_tool", "Pi tool call is unauthorized, malformed, or duplicated");
+        }
+        const binding = toolBindings.get(block.name);
+        if (binding === undefined || !isRecord(block.arguments)) {
+          throw new ManagedSessionError("recovery_tool", "Pi tool call has no exact compiler binding or arguments");
+        }
+        let validatedArguments: Record<string, unknown>;
+        let expectedPiError: string | undefined;
+        if (message.stopReason === "length") {
+          validatedArguments = structuredClone(block.arguments);
+          expectedPiError = truncatedToolCallError(block.name);
+        } else {
+          try {
+            const value = validateToolArguments(binding.definition, {
+              type: "toolCall",
+              id: block.id,
+              name: block.name,
+              arguments: structuredClone(block.arguments),
+            });
+            if (!isRecord(value)) throw new Error("validated arguments are not an object");
+            validatedArguments = structuredClone(value);
+          } catch (error) {
+            validatedArguments = structuredClone(block.arguments);
+            expectedPiError = error instanceof Error ? error.message : String(error);
+          }
+        }
+        let encodedArguments: string;
+        try {
+          encodedArguments = canonicalEncode(validatedArguments);
+        } catch {
+          throw new ManagedSessionError("recovery_tool", "Pi tool call arguments are not canonical JSON data");
+        }
+        if (Buffer.byteLength(encodedArguments, "utf8") > 16 * 1024 * 1024) {
+          throw new ManagedSessionError("recovery_tool", "Pi tool call arguments exceed the recovery bound");
+        }
+        toolCalls.set(block.id, {
+          name: block.name,
+          arguments: validatedArguments,
+          ...(expectedPiError === undefined ? {} : { expectedPiError }),
+          order: toolCallOrder,
+          resolved: false,
+        });
+        toolCallOrder += 1;
+        batchCalls.push({ id: block.id, name: block.name });
+      }
+      if (
+        batchCalls.some((call) => call.name === spec.terminal.toolName) &&
+        batchCalls.some((call) => call.name !== spec.terminal.toolName)
+      ) {
+        throw new ManagedSessionError("recovery_terminal", "terminal tool must be the only tool in its assistant batch");
+      }
+      terminalCalls += batchCalls.filter((call) => call.name === spec.terminal.toolName).length;
+      lastBoundary = "assistant";
+      seenEntryIds.add(entry.id);
+      continue;
+    }
+    if (
+      typeof message.toolCallId !== "string" ||
+      typeof message.toolName !== "string" ||
+      typeof message.isError !== "boolean"
+    ) {
+      throw new ManagedSessionError("recovery_tool", "Pi tool result is malformed");
+    }
+    const call = toolCalls.get(message.toolCallId);
+    if (call === undefined || call.name !== message.toolName || call.resolved) {
+      throw new ManagedSessionError("recovery_tool", "Pi tool result has no unique matching tool call");
+    }
+    call.resolved = true;
+    const authorizedResult = authorizedToolResults.get(message.toolCallId);
+    if (call.expectedPiError !== undefined) {
+      if (
+        authorizedResult !== undefined ||
+        message.isError !== true ||
+        !isRecord(message.details) ||
+        Object.keys(message.details).length !== 0 ||
+        userText(message.content) !== call.expectedPiError
+      ) {
+        throw new ManagedSessionError("recovery_tool", "Pi validation error differs from the pinned runtime outcome");
+      }
+      lastBoundary = "toolResult";
+      seenEntryIds.add(entry.id);
+      continue;
+    }
+    if (authorizedResult === undefined || seenAuthorizedToolResults.has(message.toolCallId)) {
+      throw new ManagedSessionError("recovery_tool", "Pi tool result has no durable authority receipt");
+    }
+    const receipt = validateAuthorizedToolResult(message, authorizedResult, call.arguments);
+    seenAuthorizedToolResults.add(message.toolCallId);
+    if (message.toolName === spec.terminal.toolName) {
+      if (receipt.outcome === "accepted") terminalResults += 1;
+    }
+    lastBoundary = "toolResult";
+    seenEntryIds.add(entry.id);
+  }
+  const pendingToolActions: PendingRecoveredToolAction[] = [];
+  for (const [callId, call] of toolCalls) {
+    if (call.resolved) continue;
+    if (call.expectedPiError !== undefined) {
+      pendingToolActions.push({
+        order: call.order,
+        kind: "append_pi_error",
+        callId,
+        toolName: call.name,
+        arguments: structuredClone(call.arguments),
+        errorText: call.expectedPiError,
+      });
+      continue;
+    }
+    const authorized = authorizedToolResults.get(callId);
+    if (authorized !== undefined) {
+      validateAuthorizedToolArguments(authorized, callId, call.name, call.arguments);
+      pendingToolActions.push({
+        order: call.order,
+        kind: "append_receipt",
+        callId,
+        toolName: call.name,
+        arguments: structuredClone(call.arguments),
+        authorizedResult: authorized,
+      });
+    } else {
+      pendingToolActions.push({
+        order: call.order,
+        kind: "execute",
+        callId,
+        toolName: call.name,
+        arguments: structuredClone(call.arguments),
+      });
+    }
+  }
+  for (const authorized of authority.authorizedToolResults) {
+    const call = toolCalls.get(authorized.callId);
+    if (call === undefined || call.expectedPiError !== undefined) {
+      throw new ManagedSessionError(
+        "recovery_tool",
+        "authority receipt has no committed matching Pi tool call",
+      );
+    }
+  }
+  pendingToolActions.sort((left, right) => left.order - right.order);
+  const outstandingCalls = [...toolCalls.values()].filter((call) => !call.resolved).length;
+  if (terminalResults > 1 || terminalResults > terminalCalls) {
+    throw new ManagedSessionError("recovery_terminal", "Pi session contains repeated terminal submissions");
+  }
+  return {
+    hasInitialPrompt,
+    mayContinue:
+      hasInitialPrompt &&
+      outstandingCalls === pendingToolActions.length &&
+      (
+        lastBoundary === "user" ||
+        lastBoundary === "toolResult" ||
+        lastBoundary === "compaction" ||
+        (lastBoundary === "messageMap" && outstandingMessageMappings.length > 0) ||
+        (lastBoundary === "assistant" && pendingToolActions.length > 0)
+      ),
+    terminalCalls,
+    terminalResults,
+    pendingMessages: authority.authorizedMessages
+      .filter((message) => !consumedMessageSequences.has(message.sequence))
+      .map((message) => ({
+        message,
+        mappingPersisted: mappedMessageSequences.has(message.sequence),
+      })),
+    pendingToolActions,
+  };
+}
+
+function validatePersistedCompaction(
+  spec: Readonly<AgentLaunchSpec>,
+  entry: PiSessionEntry,
+  seenEntryIds: ReadonlySet<string>,
+  authorized: KoniAttemptRecoveryState["authorizedCompactions"][number],
+): void {
+  const details = entry.details;
+  if (
+    typeof entry.summary !== "string" ||
+    Buffer.byteLength(entry.summary, "utf8") > 4 * 1024 * 1024 ||
+    typeof entry.firstKeptEntryId !== "string" ||
+    !seenEntryIds.has(entry.firstKeptEntryId) ||
+    !Number.isSafeInteger(entry.tokensBefore) ||
+    Number(entry.tokensBefore) < 0 ||
+    entry.fromHook !== true ||
+    !isRecord(details)
+  ) {
+    throw new ManagedSessionError("recovery_compaction", "Pi compaction entry is malformed or unauthorized");
+  }
+  const expected = {
+    protocol: "koni.compaction.v1",
+    specHash: spec.specHash,
+    runId: spec.identity.runId,
+    ticketId: spec.identity.ticketId,
+    stepId: spec.identity.stepId,
+    attemptId: spec.identity.attemptId,
+    grantHash: spec.authority.grantHash,
+    stateHash: spec.authority.expectedStateHash,
+    contextHash: spec.authority.authoritativeContextHash,
+    summaryHash: rawSha256(entry.summary),
+    summaryBytes: Buffer.byteLength(entry.summary, "utf8"),
+    authorizationId: authorized.authorizationId,
+    contextReissueRequired: true,
+  } as const;
+  const actualKeys = Object.keys(details).sort();
+  const expectedKeys = Object.keys(expected).sort();
+  if (
+    actualKeys.length !== expectedKeys.length ||
+    actualKeys.some((key, index) => key !== expectedKeys[index]) ||
+    expectedKeys.some((key) => details[key] !== expected[key as keyof typeof expected])
+  ) {
+    throw new ManagedSessionError("recovery_compaction", "Pi compaction does not match its launch-bound digest");
+  }
+  if (
+    authorized.summaryHash !== expected.summaryHash ||
+    authorized.summaryBytes !== expected.summaryBytes ||
+    authorized.firstKeptEntryId !== entry.firstKeptEntryId ||
+    authorized.tokensBefore !== entry.tokensBefore
+  ) {
+    throw new ManagedSessionError("recovery_compaction", "Pi compaction does not match durable authority");
+  }
+}
+
+function authorizedMessageMatches(message: KoniAuthorizedMessage, text: string): boolean {
+  return message.content === text &&
+    message.sizeBytes === Buffer.byteLength(text, "utf8") &&
+    message.sha256 === rawSha256(text);
+}
+
+function nextMappedMessageForPiDelivery(
+  outstanding: readonly KoniAuthorizedMessage[],
+): KoniAuthorizedMessage | undefined {
+  // Pi drains steering FIFO before it considers queued follow-ups. Iterating the JSONL in order
+  // means only maps durably present before this user entry participate, so a later steer cannot
+  // retroactively preempt an already-persisted follow-up.
+  return outstanding.find((message) => message.mode === "steer")
+    ?? outstanding.find((message) => message.mode === "follow_up");
+}
+
+function truncatedToolCallError(toolName: string): string {
+  return `Tool call "${toolName}" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.`;
+}
+
+function validateAuthorizedToolResult(
+  message: Record<string, unknown>,
+  authorized: KoniAttemptRecoveryState["authorizedToolResults"][number],
+  callArguments: Record<string, unknown>,
+): KoniToolReceipt {
+  validateAuthorizedToolArguments(
+    authorized,
+    String(message.toolCallId),
+    String(message.toolName),
+    callArguments,
+  );
+  if (
+    message.toolCallId !== authorized.callId ||
+    message.toolName !== authorized.toolName ||
+    !isRecord(message.details)
+  ) {
+    throw new ManagedSessionError("recovery_tool", "Pi tool result does not match its authority receipt identity");
+  }
+  const encoded = canonicalEncode(message.details);
+  if (
+    canonicalHash(message.details) !== authorized.receiptSha256 ||
+    Buffer.byteLength(encoded, "utf8") !== authorized.receiptSizeBytes
+  ) {
+    throw new ManagedSessionError("recovery_tool", "Pi tool receipt details do not match durable authority");
+  }
+  if (!jsonEqual(message.details, authorized.receipt)) {
+    throw new ManagedSessionError("recovery_tool", "Pi tool receipt object differs from durable authority");
+  }
+  validateKoniToolReceipt(message.details);
+  if (
+    authorized.outcome !== message.details.outcome ||
+    message.isError !== (message.details.outcome === "rejected")
+  ) {
+    throw new ManagedSessionError("recovery_tool", "Pi tool error status differs from durable authority outcome");
+  }
+  const receiptText = userText(message.content);
+  const expectedText = renderKoniToolReceipt(message.details);
+  if (receiptText !== expectedText) {
+    throw new ManagedSessionError("recovery_tool", "Pi tool result text does not match its authority receipt details");
+  }
+  return message.details;
+}
+
+function validateAuthorizedToolArguments(
+  authorized: KoniAttemptRecoveryState["authorizedToolResults"][number],
+  callId: string,
+  toolName: string,
+  callArguments: Record<string, unknown>,
+): void {
+  const encoded = canonicalEncode(callArguments);
+  if (
+    authorized.callId !== callId ||
+    authorized.toolName !== toolName ||
+    authorized.argumentsSha256 !== canonicalHash(callArguments) ||
+    authorized.argumentsSizeBytes !== Buffer.byteLength(encoded, "utf8")
+  ) {
+    throw new ManagedSessionError("recovery_tool", "Pi tool call arguments do not match durable authority");
+  }
+}
+
+function validateRecoveryAuthority(
+  spec: Readonly<AgentLaunchSpec>,
+  state: KoniAttemptRecoveryState,
+): void {
+  const expected = {
+    protocol: "koni.attempt-recovery.v1",
+    specHash: spec.specHash,
+    runId: spec.identity.runId,
+    ticketId: spec.identity.ticketId,
+    stepId: spec.identity.stepId,
+    attemptId: spec.identity.attemptId,
+    sessionId: spec.identity.sessionId,
+    grantHash: spec.authority.grantHash,
+    generation: spec.authority.generation,
+    epoch: spec.authority.epoch,
+    stateHash: spec.authority.expectedStateHash,
+  } as const;
+  for (const [key, value] of Object.entries(expected)) {
+    if (state[key as keyof typeof expected] !== value) {
+      throw new ManagedSessionError(
+        "recovery_authority",
+        `durable authority ${key} does not match the immutable launch binding`,
+      );
+    }
+  }
+  if (!["continue", "terminal_accepted", "terminal_inflight", "revoked"].includes(state.status)) {
+    throw new ManagedSessionError("recovery_authority", "durable authority returned an unsupported recovery status");
+  }
+  validateAuthorizedMessages(state.authorizedMessages);
+  validateAuthorizedToolResults(spec, state.authorizedToolResults);
+  validateAuthorizedCompactions(state.authorizedCompactions);
+}
+
+function validateAuthorizedMessages(messages: readonly KoniAuthorizedMessage[]): void {
+  if (!Array.isArray(messages)) {
+    throw new ManagedSessionError("recovery_authority", "authority steering ledger is missing");
+  }
+  validateAuthoritySequences(messages);
+  for (const message of messages) {
+    validateAuthorizedMessageRecord(message, "recovery_authority");
+  }
+}
+
+function validateAuthorizedMessageRecord(
+  value: unknown,
+  code: string,
+): asserts value is KoniAuthorizedMessage {
+  if (!isRecord(value)) {
+    throw new ManagedSessionError(code, "authority message record is malformed");
+  }
+  const keys = Object.keys(value).sort();
+  const expectedKeys = ["content", "mode", "sequence", "sha256", "sizeBytes"].sort();
+  const content = value.content;
+  if (
+    keys.length !== expectedKeys.length ||
+    keys.some((key, index) => key !== expectedKeys[index]) ||
+    !Number.isSafeInteger(value.sequence) ||
+    Number(value.sequence) <= 0 ||
+    (value.mode !== "steer" && value.mode !== "follow_up") ||
+    typeof content !== "string" ||
+    content.length === 0 ||
+    content.includes("\u0000") ||
+    Buffer.byteLength(content, "utf8") > 1024 * 1024 ||
+    value.sizeBytes !== Buffer.byteLength(content, "utf8") ||
+    value.sha256 !== rawSha256(content)
+  ) {
+    throw new ManagedSessionError(code, "authority message record is malformed or hash-drifted");
+  }
+}
+
+function validateAuthorizedToolResults(
+  spec: Readonly<AgentLaunchSpec>,
+  results: readonly KoniAttemptRecoveryState["authorizedToolResults"][number][],
+): void {
+  if (!Array.isArray(results)) {
+    throw new ManagedSessionError("recovery_authority", "authority tool receipt ledger is missing");
+  }
+  validateAuthoritySequences(results);
+  const allowedTools = new Set(spec.tools.map((tool) => tool.name));
+  const calls = new Set<string>();
+  for (const result of results) {
+    const toolBinding = spec.tools.find((tool) => tool.name === result.toolName);
+    let encodedReceipt: string;
+    try {
+      if (!isRecord(result.receipt)) throw new Error("receipt is not an object");
+      encodedReceipt = canonicalEncode(result.receipt);
+      validateKoniToolReceipt(result.receipt);
+      renderKoniToolReceipt(result.receipt);
+    } catch {
+      throw new ManagedSessionError("recovery_authority", "authority tool receipt object is malformed");
+    }
+    if (
+      !safeTranscriptIdentity(result.callId, 256) ||
+      !allowedTools.has(result.toolName) ||
+      toolBinding === undefined ||
+      (result.outcome !== "accepted" && result.outcome !== "rejected") ||
+      result.outcome !== result.receipt.outcome ||
+      calls.has(result.callId) ||
+      !isSha256Digest(result.receiptSha256) ||
+      !isSha256Digest(result.argumentsSha256) ||
+      !Number.isSafeInteger(result.argumentsSizeBytes) ||
+      result.argumentsSizeBytes <= 0 ||
+      result.argumentsSizeBytes > 16 * 1024 * 1024 ||
+      !Number.isSafeInteger(result.receiptSizeBytes) ||
+      result.receiptSizeBytes <= 0 ||
+      result.receiptSizeBytes > 16 * 1024 * 1024 ||
+      result.receiptSha256 !== canonicalHash(result.receipt) ||
+      result.receiptSizeBytes !== Buffer.byteLength(encodedReceipt, "utf8") ||
+      koniToolResultPayloadBytes({
+        content: [{ type: "text", text: renderKoniToolReceipt(result.receipt) }],
+        details: result.receipt,
+        ...(result.toolName === spec.terminal.toolName && result.outcome === "accepted"
+          ? { terminate: true }
+          : {}),
+      }) > toolBinding.maxResultBytes
+    ) {
+      throw new ManagedSessionError("recovery_authority", "authority tool receipt ledger is malformed");
+    }
+    calls.add(result.callId);
+  }
+}
+
+function validateAuthorizedCompactions(
+  compactions: readonly KoniAttemptRecoveryState["authorizedCompactions"][number][],
+): void {
+  if (!Array.isArray(compactions)) {
+    throw new ManagedSessionError("recovery_authority", "authority compaction ledger is missing");
+  }
+  validateAuthoritySequences(compactions);
+  const ids = new Set<string>();
+  for (const compaction of compactions) {
+    if (
+      !safeTranscriptIdentity(compaction.authorizationId, 256) ||
+      ids.has(compaction.authorizationId) ||
+      !isSha256Digest(compaction.summaryHash) ||
+      !Number.isSafeInteger(compaction.summaryBytes) ||
+      compaction.summaryBytes <= 0 ||
+      compaction.summaryBytes > 4 * 1024 * 1024 ||
+      !safeTranscriptIdentity(compaction.firstKeptEntryId, 128) ||
+      !Number.isSafeInteger(compaction.tokensBefore) ||
+      compaction.tokensBefore < 0
+    ) {
+      throw new ManagedSessionError("recovery_authority", "authority compaction ledger is malformed");
+    }
+    ids.add(compaction.authorizationId);
+  }
+}
+
+function validateAuthoritySequences(records: readonly unknown[]): void {
+  let expected = 1;
+  for (const record of records) {
+    if (!isRecord(record) || !Number.isSafeInteger(record.sequence) || record.sequence !== expected) {
+      throw new ManagedSessionError("recovery_authority", "authority ledger sequence is invalid");
+    }
+    expected += 1;
+  }
+}
+
+function safeTranscriptIdentity(value: unknown, maximum: number): value is string {
+  return typeof value === "string" &&
+    Buffer.byteLength(value, "utf8") > 0 &&
+    Buffer.byteLength(value, "utf8") <= maximum &&
+    !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function validateTerminalPayload(
+  spec: Readonly<AgentLaunchSpec>,
+  schema: TSchema,
+  output: unknown,
+  description: string,
+): unknown {
+  let serialized: string;
+  try {
+    const encoded = JSON.stringify(output);
+    if (encoded === undefined) throw new Error("undefined output");
+    serialized = encoded;
+  } catch {
+    throw new ManagedSessionError("terminal_output", `${description} is not JSON serializable`);
+  }
+  if (Buffer.byteLength(serialized, "utf8") > spec.terminal.maxOutputBytes) {
+    throw new ManagedSessionError("terminal_output", `${description} exceeds its launch byte budget`);
+  }
+  const clone = JSON.parse(serialized) as unknown;
+  let valid: boolean;
+  try {
+    valid = Compile(schema).Check(clone);
+  } catch (error) {
+    throw new ManagedSessionError(
+      "terminal_schema",
+      `terminal output schema cannot be compiled: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!valid) {
+    throw new ManagedSessionError("terminal_output", `${description} does not match the compiler-issued schema`);
+  }
+  return clone;
+}
+
+function recoveryUsage(entries: readonly PiSessionEntry[]): ManagedTokenUsage {
+  const totals = summarizeUsage(entries);
+  return {
+    input: safeUsageNumber(totals.input, "input"),
+    output: safeUsageNumber(totals.output, "output"),
+    cacheRead: safeUsageNumber(totals.cacheRead, "cacheRead"),
+    cacheWrite: safeUsageNumber(totals.cacheWrite, "cacheWrite"),
+    newTokens: safeUsageNumber(totals.newTokens, "newTokens"),
+    allTokens: safeUsageNumber(totals.allTokens, "allTokens"),
+  };
+}
+
+function authorityRecoveryUsage(state: KoniAttemptRecoveryState): ManagedTokenUsage {
+  const usage = { ...state.usage };
+  validateManagedUsage(usage);
+  return usage;
+}
+
+function mergeRecoveryUsage(
+  authority: ManagedTokenUsage,
+  transcript: ManagedTokenUsage,
+): ManagedTokenUsage {
+  const input = Math.max(authority.input, transcript.input);
+  const output = Math.max(authority.output, transcript.output);
+  const cacheRead = Math.max(authority.cacheRead, transcript.cacheRead);
+  const cacheWrite = Math.max(authority.cacheWrite, transcript.cacheWrite);
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    newTokens: safeUsageSum(input, output),
+    allTokens: safeUsageSum(input, output, cacheRead, cacheWrite),
+  };
+}
+
+function safeUsageNumber(value: bigint, field: string): number {
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new ManagedSessionError("recovery_usage", `persisted ${field} usage exceeds safe accounting range`);
+  }
+  return Number(value);
+}
+
+function userText(content: unknown): string | undefined {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return undefined;
+  const parts: string[] = [];
+  for (const item of content) {
+    if (!isRecord(item) || item.type !== "text" || typeof item.text !== "string") return undefined;
+    parts.push(item.text);
+  }
+  return parts.join("");
+}
+
+function recoveryReason(value: string | undefined, fallback: string): string {
+  if (value === undefined) return fallback;
+  const clean = value.replaceAll("\u0000", "").trim();
+  return clean.length === 0 ? fallback : clean.slice(0, 4_096);
+}
+
+function jsonEqual(left: unknown, right: unknown): boolean {
+  try {
+    return JSON.stringify(left) === JSON.stringify(right);
+  } catch {
+    return false;
+  }
+}
+
+function onceAsync(operation: () => Promise<void>): () => Promise<void> {
+  let promise: Promise<void> | undefined;
+  return () => {
+    promise ??= Promise.resolve().then(operation);
+    return promise;
+  };
+}
+
+async function withTimeout<Value>(
+  operation: Promise<Value>,
+  timeoutMs: number,
+  message: string,
+): Promise<Value> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function disposeRejectedAdapter(adapter: PiSessionAdapter): Promise<void> {
+  try {
+    await adapter.abort();
+  } catch {
+    // Constructor validation failure remains the primary error.
+  }
+  try {
+    await adapter.dispose();
+  } catch {
+    // Best-effort cleanup cannot replace the validation failure.
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function validateToolBindings(
+  spec: Readonly<AgentLaunchSpec>,
+  tools: readonly AuthorityBackedTool[],
+): AuthorityBackedTool {
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
   if (byName.size !== tools.length || tools.length !== spec.tools.length) {
     throw new ManagedSessionError("tool_inventory", "authority tool bindings do not exactly match the launch inventory");
@@ -428,15 +2170,224 @@ function validateToolBindings(spec: Readonly<AgentLaunchSpec>, tools: readonly A
       actual === undefined ||
       actual.definition.name !== expected.name ||
       actual.schemaHash !== expected.schemaHash ||
-      (actual.definition.executionMode ?? "parallel") !== expected.executionMode
+      actual.maxResultBytes !== expected.maxResultBytes ||
+      canonicalHash(actual.definition.parameters) !== expected.schemaHash ||
+      (actual.definition.executionMode ?? "parallel") !== expected.executionMode ||
+      actual.definition.prepareArguments !== undefined
     ) {
       throw new ManagedSessionError("tool_binding", `authority tool ${expected.name} does not match its launch binding`);
     }
   }
   const terminal = byName.get(spec.terminal.toolName);
-  if (terminal?.terminalOutputSchemaHash !== spec.terminal.outputSchemaHash) {
+  if (
+    terminal === undefined ||
+    terminal.definition.executionMode !== "sequential" ||
+    terminal.terminalOutputSchema === undefined ||
+    terminal.terminalOutputSchemaHash !== spec.terminal.outputSchemaHash ||
+    canonicalHash(terminal.terminalOutputSchema) !== spec.terminal.outputSchemaHash
+  ) {
     throw new ManagedSessionError("terminal_schema", "terminal tool output schema does not match its launch binding");
   }
+  try {
+    Compile(terminal.terminalOutputSchema);
+  } catch (error) {
+    throw new ManagedSessionError(
+      "terminal_schema",
+      `terminal output schema cannot be compiled: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  for (const tool of tools) {
+    if (
+      tool.name !== spec.terminal.toolName &&
+      (tool.terminalOutputSchema !== undefined || tool.terminalOutputSchemaHash !== undefined)
+    ) {
+      throw new ManagedSessionError("terminal_schema", `non-terminal tool ${tool.name} declares a terminal schema`);
+    }
+  }
+  return terminal;
+}
+
+function runtimeToolDefinitions(
+  spec: Readonly<AgentLaunchSpec>,
+  tools: readonly AuthorityBackedTool[],
+  sessionManager: SessionManager,
+  resultBudget: TranscriptToolResultBudget,
+): ToolDefinition[] {
+  return tools.map((tool) => {
+    const definition = tool.definition;
+    return {
+      ...definition,
+      ...(tool.name === spec.terminal.toolName ? { executionMode: "sequential" as const } : {}),
+      async execute(toolCallId, params, signal, onUpdate, context) {
+        const sessionFile = sessionManager.getSessionFile();
+        if (sessionFile === undefined) {
+          throw new ManagedSessionError("session_persistence", "authority tool call has no durable Pi session file");
+        }
+        // Pi persists the assistant tool-call entry before invoking a tool. Commit that entry
+        // before any authority-backed effect so recovery can always authenticate the call.
+        await syncSessionFile(sessionFile);
+        const argumentsRecord = params as Record<string, unknown>;
+        const budgetDisposition = await resultBudget.reserve(tool.maxResultBytes);
+        const result = budgetDisposition === "execute"
+          ? await tool.execute(toolCallId, argumentsRecord, signal)
+          : await tool.reject(
+              toolCallId,
+              argumentsRecord,
+              transcriptBudgetRejection(spec),
+              signal,
+            );
+        const receipt = validatedReceiptFromResult(result, tool.maxResultBytes);
+        if (tool.name !== spec.terminal.toolName && result.terminate === true) {
+          throw new ManagedSessionError("tool_result", "non-terminal authority tool attempted to terminate");
+        }
+        return tool.name === spec.terminal.toolName && receipt.outcome === "accepted"
+          ? { ...result, terminate: true }
+          : result;
+      },
+    };
+  });
+}
+
+/**
+ * Reserve transcript space before an authority effect. Pi may execute a parallel tool batch, so
+ * reservations are serialized and retained through the whole turn; no result can borrow bytes
+ * another in-flight result has already been promised.
+ */
+class TranscriptToolResultBudget {
+  readonly #spec: Readonly<AgentLaunchSpec>;
+  readonly #sessionManager: SessionManager;
+  #baseBytes: number | undefined;
+  #reservedBytes = 0;
+  #lock: Promise<void> = Promise.resolve();
+
+  public constructor(spec: Readonly<AgentLaunchSpec>, sessionManager: SessionManager) {
+    this.#spec = spec;
+    this.#sessionManager = sessionManager;
+  }
+
+  public reset(): void {
+    this.#baseBytes = undefined;
+    this.#reservedBytes = 0;
+  }
+
+  public reserve(maxResultBytes: number): Promise<"execute" | "reject"> {
+    return this.#serialized(async () => {
+      validatePositiveResultBound(maxResultBytes);
+      const executeBytes = maxResultBytes + TRANSCRIPT_TOOL_RESULT_OVERHEAD_BYTES;
+      if (await this.#canReserve(executeBytes)) {
+        this.#reservedBytes += executeBytes;
+        return "execute" as const;
+      }
+      const rejectionBytes = RUNTIME_REJECTION_RESULT_BYTES + TRANSCRIPT_TOOL_RESULT_OVERHEAD_BYTES;
+      if (await this.#canReserve(rejectionBytes)) {
+        this.#reservedBytes += rejectionBytes;
+        return "reject" as const;
+      }
+      throw new ManagedSessionError(
+        "transcript_budget",
+        `Pi transcript cannot safely persist even a bounded rejection within its ${this.#spec.budgets.transcript.maxBytes}-byte attempt budget`,
+      );
+    });
+  }
+
+  public reserveExact(resultBytes: number): Promise<void> {
+    return this.#serialized(async () => {
+      validatePositiveResultBound(resultBytes);
+      const reservation = resultBytes + TRANSCRIPT_TOOL_RESULT_OVERHEAD_BYTES;
+      if (!(await this.#canReserve(reservation))) {
+        throw new ManagedSessionError(
+          "transcript_budget",
+          `Pi transcript cannot persist an authenticated recovery result within its ${this.#spec.budgets.transcript.maxBytes}-byte attempt budget`,
+        );
+      }
+      this.#reservedBytes += reservation;
+    });
+  }
+
+  async #canReserve(bytes: number): Promise<boolean> {
+    if (this.#baseBytes === undefined) {
+      const sessionFile = this.#sessionManager.getSessionFile();
+      if (sessionFile === undefined) {
+        throw new ManagedSessionError("session_persistence", "tool-result reservation has no durable Pi session file");
+      }
+      this.#baseBytes = await safeRegularFileSize(sessionFile);
+    }
+    return this.#baseBytes + this.#reservedBytes + bytes <= this.#spec.budgets.transcript.maxBytes;
+  }
+
+  #serialized<Value>(operation: () => Promise<Value>): Promise<Value> {
+    const result = this.#lock.then(operation, operation);
+    this.#lock = result.then(() => undefined, () => undefined);
+    return result;
+  }
+}
+
+async function safeRegularFileSize(file: string): Promise<number> {
+  let handle;
+  try {
+    handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) {
+      throw new ManagedSessionError("session_persistence", "Pi session path is not a regular file");
+    }
+    return metadata.size;
+  } catch (error) {
+    if (error instanceof ManagedSessionError) throw error;
+    throw new ManagedSessionError(
+      "session_persistence",
+      `Pi session size cannot be authenticated: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+function validatePositiveResultBound(value: number): void {
+  if (!Number.isSafeInteger(value) || value <= 0 || value > 16 * 1024 * 1024) {
+    throw new ManagedSessionError("tool_result", "tool result byte bound is invalid");
+  }
+}
+
+function transcriptBudgetRejection(spec: Readonly<AgentLaunchSpec>): KoniRuntimeToolRejection {
+  return {
+    code: "transcript_result_budget",
+    summary: `Tool was not executed because its worst-case result would exceed this attempt's ${spec.budgets.transcript.maxBytes}-byte transcript budget.`,
+  };
+}
+
+function validatedReceiptFromResult(
+  result: AgentToolResult<unknown>,
+  maxResultBytes: number,
+): KoniToolReceipt {
+  validateKoniToolReceipt(result.details);
+  if (
+    koniToolResultPayloadBytes(result) > maxResultBytes ||
+    result.content.length !== 1 ||
+    result.content[0]?.type !== "text" ||
+    result.content[0].text !== renderKoniToolReceipt(result.details)
+  ) {
+    throw new ManagedSessionError("tool_result", "authority tool result exceeds its bound or is not canonical");
+  }
+  if (result.details.outcome === "rejected" && result.terminate === true) {
+    throw new ManagedSessionError("tool_result", "a rejected authority tool result cannot terminate an attempt");
+  }
+  return result.details;
+}
+
+function snapshotToolBindings(tools: readonly AuthorityBackedTool[]): AuthorityBackedTool[] {
+  return tools.map((tool) => ({
+    ...tool,
+    definition: {
+      ...tool.definition,
+      parameters: structuredClone(tool.definition.parameters),
+      ...(tool.definition.promptGuidelines === undefined
+        ? {}
+        : { promptGuidelines: [...tool.definition.promptGuidelines] }),
+    },
+    ...(tool.terminalOutputSchema === undefined
+      ? {}
+      : { terminalOutputSchema: structuredClone(tool.terminalOutputSchema) }),
+  }));
 }
 
 function assertExactToolInventory(spec: Readonly<AgentLaunchSpec>, active: readonly string[]): void {
@@ -459,12 +2410,34 @@ function addUsage(
       throw new ManagedSessionError("usage", `Pi reported invalid ${name} token usage`);
     }
   }
-  total.input += input;
-  total.output += output;
-  total.cacheRead += cacheRead;
-  total.cacheWrite += cacheWrite;
-  total.newTokens = total.input + total.output;
-  total.allTokens = total.newTokens + total.cacheRead + total.cacheWrite;
+  total.input = safeUsageSum(total.input, input);
+  total.output = safeUsageSum(total.output, output);
+  total.cacheRead = safeUsageSum(total.cacheRead, cacheRead);
+  total.cacheWrite = safeUsageSum(total.cacheWrite, cacheWrite);
+  total.newTokens = safeUsageSum(total.input, total.output);
+  total.allTokens = safeUsageSum(total.newTokens, total.cacheRead, total.cacheWrite);
+}
+
+function validateManagedUsage(usage: ManagedTokenUsage): void {
+  for (const [name, value] of Object.entries(usage)) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new ManagedSessionError("recovery_usage", `recovered ${name} usage is invalid`);
+    }
+  }
+  if (
+    usage.newTokens !== usage.input + usage.output ||
+    usage.allTokens !== usage.newTokens + usage.cacheRead + usage.cacheWrite
+  ) {
+    throw new ManagedSessionError("recovery_usage", "recovered token aggregates are inconsistent");
+  }
+}
+
+function safeUsageSum(...values: number[]): number {
+  const result = values.reduce((sum, value) => sum + value, 0);
+  if (!Number.isSafeInteger(result)) {
+    throw new ManagedSessionError("usage", "Pi token usage exceeds safe accounting range");
+  }
+  return result;
 }
 
 function tokenBudgetViolation(
@@ -482,6 +2455,36 @@ function tokenBudgetViolation(
   ];
   return checks.find(([actual, allowed]) => actual > allowed)?.[2]
     .concat(" token budget exceeded");
+}
+
+function tokenBudgetExhaustion(
+  spec: Readonly<AgentLaunchSpec>,
+  usage: ManagedTokenUsage,
+): string | undefined {
+  const maximum = spec.budgets.tokens;
+  const checks: Array<[number, number, string]> = [
+    [usage.input, maximum.maxInput, "input"],
+    [usage.output, maximum.maxOutput, "output"],
+    [usage.cacheRead, maximum.maxCacheRead, "cache-read"],
+    [usage.cacheWrite, maximum.maxCacheWrite, "cache-write"],
+    [usage.newTokens, maximum.maxNew, "new-token"],
+    [usage.allTokens, maximum.maxAll, "cache-inclusive"],
+  ];
+  return checks.find(([actual, allowed]) => actual >= allowed)?.[2]
+    .concat(" token budget exhausted");
+}
+
+function providerOutputLimit(
+  spec: Readonly<AgentLaunchSpec>,
+  recoveredUsage: ManagedTokenUsage | undefined,
+): number {
+  const usage = recoveredUsage ?? emptyUsage();
+  const maximum = spec.budgets.tokens;
+  return Math.max(1, Math.min(
+    maximum.maxOutput - usage.output,
+    maximum.maxNew - usage.newTokens,
+    maximum.maxAll - usage.allTokens,
+  ));
 }
 
 function emptyUsage(): ManagedTokenUsage {

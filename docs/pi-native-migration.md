@@ -4,6 +4,16 @@ Status: accepted target architecture; implementation is staged and compatibility
 
 Decision date: 2026-07-16.
 
+> **Pure Pi-package supersession — 2026-07-16 (`pi-native-port`):** The Rust-bridge and separate
+> `@koni/pi` topology below records the first accepted migration direction. The shipping target is
+> now the coarser three-package system requested after that audit: `@koni/core` contains the full
+> TypeScript compiler, authority, workflow runtime, Pi extension, and standalone control center;
+> `@koni/coding-profile` and `@koni/research-profile` contain independently versioned domain
+> behavior. Rust is a frozen non-shipping executable oracle until all parity/deletion gates pass,
+> not a runtime dependency. Pi 0.80.10 owns provider credentials and sessions through its ordinary
+> community setup. The historical matrix and security reasoning remain useful, but every phrase
+> below assigning production authority to Rust or proposing `@koni/pi` is superseded by this note.
+
 This decision evolves the direct-Pi architecture documented in
 [Direct Pi runtime](pi-runtime.md). It does not erase that implementation history. The current
 host deliberately uses the low-level Pi `Agent` and a Koni-owned event/session/auth layer. The
@@ -401,6 +411,13 @@ context hook reissues current authoritative context from Rust. Compaction token 
 like any other provider use, and compaction may not silently alter a grant or expected-state hash.
 
 ## Session trees, branches, and attempt authority
+
+> **Current implementation supersession — 2026-07-16:** the branch-capability design below is
+> retained as migration history, not current autonomous behavior. Koni now creates one fresh,
+> linear Pi session for every immutable attempt. Retry, rework, review, recovery, and integration
+> each receive a new session whose authenticated Koni launch/mapping lineage names the parent
+> attempt and logical parent session. Autonomous attempts do not call Pi's in-session tree
+> navigation/fork APIs, and the path-valued Pi `parentSession` header remains unset.
 
 Pinned Pi 0.80.7 represents one session as an append-only tree. Every entry has `id` and
 `parentId`; `SessionManager` tracks one current leaf. Its exact APIs include `getTree()`,

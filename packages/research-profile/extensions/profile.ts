@@ -15,6 +15,7 @@ export default function registerResearchProfile(pi: ExtensionAPI): void {
     pi.events.emit(KONI_PROFILE_AVAILABLE_EVENT, PROFILE_DESCRIPTOR);
   };
 
-  pi.events.on(KONI_PROFILE_DISCOVER_EVENT, announce);
+  const unsubscribe = pi.events.on(KONI_PROFILE_DISCOVER_EVENT, announce);
   pi.on("session_start", announce);
+  pi.on("session_shutdown", unsubscribe);
 }

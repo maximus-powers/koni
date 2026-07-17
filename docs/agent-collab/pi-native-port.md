@@ -18,6 +18,11 @@ Status: active on branch `pi-native-port`.
   silently installed and cannot issue Koni receipts.
 - Both `/koni` and `koni tui` remain required and share one view model/component system.
 
+> Transition note (2026-07-16): the operator host is being wired as a thin authority client in
+> [`pi-operator-surface.md`](pi-operator-surface.md). Profile bytes are hash-cached beneath the Git
+> authority root so daemon recovery never turns editable install metadata into trust. Pi startup,
+> credentials, settings, and ambient resources remain owned by Pi and are not modified by Koni.
+
 ## Current gate
 
 1. Preserve the exact shared worktree (`86c2ba5`, `pre-pi-native-wip-2026-07-16`).
@@ -50,6 +55,33 @@ surface, preserve Pi's normal credential/auth source, and make no provider calls
 not own manifests, `extension.ts`, authority/state/compiler/Git modules, Rust, live runs, installed
 binaries, or terminal surfaces. Mailbox:
 [`pi-managed-sessions.md`](pi-managed-sessions.md).
+
+### 2026-07-16 — shared control-center surfaces lease
+
+`control-center-surfaces/root` owns only the new Pi-native presentation/controller modules under
+`packages/core/src/control-center/{controller,component,standalone,markdown,input}.ts` and focused
+tests. The lane consumes the canonical control-center view model and communicates through
+`AuthorityClient` RPC only, so the installed Pi `/koni` surface and manually invoked `koni tui`
+can share interaction and rendering semantics. It does not own authority/state/compiler/Git,
+`extension.ts`, package manifests, live runs, installed binaries, or terminal-pane management.
+Mailbox: [`control-center-surfaces.md`](control-center-surfaces.md).
+
+### 2026-07-16 — shared Pi-native control-center surface ready for integration
+
+`control-center-surfaces/root` implemented one authority-client controller and one Pi TUI component
+tree for both `/koni` and manually invoked `koni tui`. The surface has exact peer-width wide
+columns and a focused compact layout; Details with inline Overview/Plan/Stages tabs; vertically
+stacked Objective/Goal/Run/Evidence; live-planning versus durable Markdown-plan presentation;
+conditional option-and-notes Questions; all-attempt Agents; timestamped, active-duration Activity;
+and a concise line-first graph whose marker/title overlays replace relationship cells. Pause,
+resume, guarded deletion, manual merge, question answer, help, scrolling, and selection are shared
+semantic actions. Every effect uses revisioned, idempotent authority RPC.
+
+The explicit standalone constructor is inert until its caller invokes `start()` and never opens a
+pane. Focused surface/view-model evidence is 10/10 green. Root integration must expose a read-only
+`run.graph` projection, export/mount the modules, and feed complete native Pi transcripts into the
+selected-agent Chat seam. Full implementation notes are in
+[`control-center-surfaces.md`](control-center-surfaces.md).
 
 ## 2026-07-16 — coarse Pi package scaffold lease
 
@@ -120,6 +152,17 @@ Agents must preserve coherent changes they do not recognize, claim file scope be
 avoid live runs and installed binaries, and report decisions here. Existing architecture prose is
 updated with dated supersession notes rather than silently rewritten.
 
+### 2026-07-16 — native run compiler-program lease
+
+`native-run-program/root` owns only the new concrete compiler bridge at
+`packages/core/src/compiler/run-program.ts`, its focused provider-free test, and append-only
+coordination notes. It authenticates the editable project through an installed Pi profile
+package's verified baseline; validates planner-authored full and concise plan artifacts plus the
+typed graph seed; derives tickets through the graph/rule compiler; resolves exact run types,
+personas, models, thinking, resources, tools, and path grants; and emits immutable launch specs.
+It never implements effects or recovery claims: those remain authority-owned. Mailbox:
+[`native-run-program.md`](native-run-program.md).
+
 ## 2026-07-16 — native authority/state/Git foundation
 
 `pi-native-port/root` added the first executable pure-TypeScript authority slice under
@@ -137,3 +180,258 @@ The authority service deliberately remains the only mutation serializer. Pi exte
 TUI clients use the same protocol and never become authorization boundaries. No live Koni run,
 installed binary, credential file, Pi setting, or terminal process was touched while establishing
 this slice.
+
+## 2026-07-16 — contained Pi session runtime ready for integration
+
+`pi_managed_sessions/root` completed the high-level Pi 0.80.10 autonomous-session boundary. Core
+now has immutable, hash-checked `AgentLaunchSpec`s; a sealed zero-ambient Pi resource loader; real
+persisted linear `AgentSession`s; structured compaction with authoritative context reissue; and a
+run supervisor with deterministic admission, steering/follow-up, pause, deletion, and disposal.
+The runtime uses Pi's normal `ModelRuntime` credential path and never reads or modifies user Pi
+configuration itself.
+
+Crash recovery is explicitly distinct from fresh launch. It authenticates the exact JSONL header,
+linear topology, single attempt mapping, launch/grant/state/resource/model identities, materialized
+resource bytes, transcript terminal cardinality, usage totals, and a fresh durable authority
+recovery projection before a provider-capable session is constructed. It then prompts once,
+continues natively, projects an accepted terminal receipt without model work, or fails closed as
+the durable state requires. Full details and the authority-provider integration contract are in
+[`pi-managed-sessions.md`](pi-managed-sessions.md).
+
+Handoff evidence is focused Pi **26/26**, complete Core **122/122**, strict Core TypeScript green,
+Core build green, and whitespace green. Tests use real Pi persistence with network-disabled,
+isolated model runtimes and no provider calls. No live run, credential, Pi setting, installed
+binary, terminal, or product repository was changed.
+
+### 2026-07-16 — contained-session handoff superseded after independent review
+
+The 26/26 handoff above is retained as historical evidence but is superseded by the stronger
+recovery/terminal boundary in [`pi-managed-sessions.md`](pi-managed-sessions.md). Focused evidence
+is now **45/45**. Notable corrections are atomic header+mapping persistence, authority recovery
+claims, high-level AgentSession continuation rather than low-level `agent.continue()`, strict
+transcript/compaction authentication, torn-tail terminal projection, schema-validated terminal
+arguments distinct from authority receipts, enforced single sequential terminating terminal
+batches, proactive provider-output bounds, awaited abort, immediate runtime/claim release, observer
+isolation, and symlink/inode hardening. Authority tool catalogs must throw on rejected terminal
+submissions; every resolved terminal `AgentToolResult` denotes acceptance and is forced to
+terminate the Pi batch.
+
+The same boundary now hash-binds explicit attempt lineage. Initial attempts are epoch-zero roots;
+retry/rework/review/recovery/integration attempts carry a positive epoch and paired parent
+attempt/session identities, optionally pinned to one parent Pi entry. This metadata is preserved in
+the atomic mapping and compaction context. Pi's `parentSession` session-header field remains unset
+because it requires a source JSONL file path rather than Koni's logical parent session ID.
+
+### 2026-07-16 — authority/session execution seam integrated
+
+`pi-native-port/root` changed the production run engine to use
+`PiAttemptProcessSupervisor` by default. Every autonomous attempt therefore runs in a killable
+child process group; the older in-process `ManagedSessionSupervisor` is now an explicit test seam.
+Full committed steering records, accepted/rejected tool receipts, per-tool transcript-result
+budgets, context/compaction/recovery RPC, usage, terminal outcomes, pause, and deletion all cross
+the same parent authority boundary.
+
+Configured checks are no longer an ambient shell capability. `koni_run_check` resolves one exact
+graph/command/composite plan through the compiler, persists an intent, snapshots declared paths,
+executes exact argv in Seatbelt/bubblewrap with compiler-bound network/effect limits, captures
+structured stdout/file results and produced-file hashes, and atomically commits compiler evidence,
+audit artifacts, graph/ticket reconciliation, and the Pi receipt. Read-only mutation and dynamic
+result/artifact contract violations fail closed. Interrupted external checks remain explicit
+reconciliation blockers and are never blindly replayed.
+
+Focused process/authority/compiler/managed evidence is green, and the combined Core suite reached
+**214/214** before the concurrently edited profile lifecycle lane began regenerating its bundle.
+No live project, credential, installed runtime, terminal pane, or existing run was changed.
+
+The next Git parity gate is explicit: the initial TypeScript scaffold still materializes the
+permanent run namespace during planning and shares the run checkout across ticket work. This is
+not accepted as final behavior. The port must restore the documented detached planning checkout,
+post-approval permanent run namespace, compiler-owned ticket branch/worktree per ticket cycle,
+scope-checked squash integration, conflict tickets, and crash-safe retirement before parity can be
+claimed.
+
+### 2026-07-16 19:48 MST — Pi-native packaging boundary claimed
+
+`pi-native-port/root` is replacing the historical Cargo/bundled-host developer install and release
+pipeline with the same three coarse packages used by Pi: `@koni/core`,
+`@koni/coding-profile`, and `@koni/research-profile`. The new source installer builds, checks,
+packs, installs, and smoke-tests those npm payloads without reading or mutating the user's Pi
+authentication, settings, extensions, skills, prompts, themes, or package registry. CI treats the
+Rust tree only as a detached checked-in parity oracle; release jobs build and attest no Rust binary
+or `runtime/pi-host` artifact. Profile Pi peer ranges are exact `0.80.10` rather than wildcards.
+
+> **Pi package-convention correction — 2026-07-16:** The exact-peer sentence above is retained as
+> the packaging checkpoint that was reviewed. Official Pi package loading supplies
+> `pi-agent-core`, `pi-ai`, `pi-coding-agent`, `pi-tui`, and `typebox` from the user's Pi runtime;
+> shipping packages therefore declare those peers as `"*"` and never bundle a second copy. Koni's
+> own development lock and executable compatibility suite remain pinned to Pi `0.80.10` (and that
+> runtime's `typebox@1.1.38`) so widening the package peer does not weaken the tested runtime gate.
+
+> **Installer-state correction — 2026-07-16:** The “without reading or mutating … settings or
+> package registry” sentence above describes the earlier target, not the final registrar. The
+> developer installer deliberately reads and atomically replaces only Koni-owned entries in Pi's
+> global package settings so stock Pi discovers the three packages. It preserves credentials and
+> every unrelated package, extension, skill, prompt, theme, project-local source, and setting. Its
+> publication and rollback behavior remain subject to the crash/concurrency gates in
+> [`pi-managed-packaging.md`](pi-managed-packaging.md) and
+> [`pi-release-audit.md`](pi-release-audit.md).
+
+This is an active packaging/docs lease over `scripts/install-dev.sh`, `.github/workflows/{ci,release}.yml`,
+the three package manifests/lockfile, and adjacent dated transition notes. It does not install a
+binary, publish a package, open a terminal, touch a live project, or alter credentials. The release
+workflow publishes immutable package versions with npm provenance and attaches the exact three
+archives/SBOM/checksums to the GitHub release. Frozen-oracle deletion remains gated on executable
+parity; non-shipping historical files are not being removed prematurely.
+
+### 2026-07-16 — direct-approval parity and control-center completion gate
+
+`pi-native-port/root` added an explicit compiler-owned `agent | direct` planning mode. A run type
+with no planning stage (currently Research Small) now creates a reviewable root-only graph and
+approval artifact without constructing a synthetic planner or spending a provider turn. Approval
+recompiles that exact root under the pinned schema and derives the normal ticket board. This
+matches the Rust oracle's empty approved-planning-context behavior; an absent graph seed is accepted
+only when the pinned run type genuinely has no planning stage.
+
+The first shared control-center component is a useful dashboard foundation, not final parity. A
+dedicated completion pass still owns: the complete New Run editor and provisional row; target-ref
+selection; guided project configuration; structured plan review/revision; native transcript chat
+and steering; direct-approval presentation; and every previously smoke-tested interaction recorded
+in `docs/tui-cleanup-backlog.md` and `docs/control-center.md`. These are release gates, not deferred
+ideas. They must remain one component/controller system shared by Pi `/koni` and manual `koni tui`.
+
+#### 2026-07-16 20:28 MST — guided collection controls narrowed to semantic resources
+
+The shared configuration catalog now exposes Add/Duplicate/Delete only for independently named
+compiler resources: run-type and agent documents, `id`-bearing collection entries, and graph edge
+types identified by `relation`. YAML-shaped implementation arrays such as expression clauses,
+action recipe primitives, run-type patch operations, and the managed `project.yaml` run-type index
+remain editable through their owning fields but no longer masquerade as creatable resources. The
+run-type index continues to move atomically with its run-type document. This is a UI-semantic
+boundary, not a schema change; every mutation still recompiles the complete candidate tree under
+CAS before publication.
+
+### 2026-07-16 20:31 MST — final TUI parity and packaged executable lease
+
+This lane now owns `KPAR-TUI-0001/A03-work-titles` and
+`KPAR-TUI-0003/A03-multiline-revision`. It will add exact provider-free interaction evidence and
+then hand only the target-test mapping to the parity-runner owner. The npm-bin symlink behavior is
+also an explicit packaging invariant: a fresh three-tarball install must print Core's exact version
+and a real Usage page. This work remains isolated from user Pi state and live Koni projects.
+
+#### 2026-07-16 20:25 MST — TUI proof handoff complete
+
+The two owned control-center assertions now pass in the real shared controller/component suite:
+all-attempt phase/ticket-aware titles (including the inactive Lead) and a multiline revision that
+returns visibly to planning without approval. Focused surface evidence is **24/24** and strict Core
+typechecking is green. The parity owner has the exact test identities; this lane made no competing
+proof-manifest edit.
+
+### 2026-07-16 21:12 MST — native Pi skill publication
+
+`@koni/core` now publishes the three shared general-purpose Koni skills through its native Pi
+package manifest: `configure-koni`, `model-koni-work`, and `operate-koni`. The build verifies that
+the coding and research profile copies remain byte-identical before copying the exact 18-file tree
+into the Core package. This intentionally does not expose either profile's complete resource bundle
+to autonomous sessions: controlled attempts continue to receive only compiler-selected resources
+bound by identity and content hash. Interactive Pi discovery therefore works normally without
+turning ambient user or project resources into attempt authority.
+
+### 2026-07-16 21:24 MST — final release-boundary lease; context lane excluded
+
+The remaining implementation lease is deliberately narrow: authority/client protocol identity,
+authority-daemon bootstrap compatibility, complete contained-child executable-closure pinning,
+immutable cached profile publication, exact tarball-through-stock-Pi smoke coverage, release
+workflow integration, and dated corrections to current-facing product docs. The concurrent
+context-building experiment owns its own design surface; this lane will not edit compiler context
+assembly, run-program prompt/context construction, resource binding, or compaction. Any overlap
+question will be left in that lane's mailbox before source changes.
+
+### 2026-07-16 21:38 MST — transaction-stable configuration snapshots
+
+New-run compilation now authenticates the absence of an outside profile lifecycle owner and of
+any unretired file transaction before, between, and after its double filesystem snapshot. The
+guided editor remains valid because ownership is tracked by async context rather than the process
+PID; a different request in the same daemon cannot borrow that authority. Crash recovery commits
+and retires every journal before compilation resumes. The race and crash-pending regressions pass
+alongside profile/config editing, authority identity, and contained-process tests (**45/45**).
+
+This is deliberately a source-publication consistency fix, not a context-building change. The
+concurrent context experiment retains ownership of prompt/context/resource/compaction semantics.
+
+### 2026-07-16 — renewed context-lane exclusion
+
+The user explicitly confirmed that a separate agent is trying context-building designs in this
+same worktree. This lane therefore treats compiler/run-program context and prompt construction,
+resource selection/binding, and Pi compaction as read-only integration inputs. I will check the
+collaboration registry before any potentially overlapping edit and leave questions in the context
+owner's mailbox rather than modifying that work. Current implementation remains confined to
+executable identity/containment, authority lifecycle, packaging integration, and release gates.
+
+### 2026-07-16 — embedded build identity and executable invocation authority
+
+The previously recorded closure described authenticated executable bytes but did not yet force all
+effects to invoke them. That gap is now closed. The compiled Core identity module carries a
+deterministic post-build SHA in its loaded JavaScript; disk hashing normalizes only that marker and
+acts as a freshness guard, so old in-memory code cannot adopt a newer on-disk identity. Shipped
+placeholder builds refuse startup. Ordinary clients require loaded/disk agreement, while the
+cross-build compatibility client can only quiesce and stop an authority before Pi is reloaded.
+
+Authority startup captures the closure before Git discovery, pins the exact absolute Git identity,
+passes the exact root-owned sandbox identity into configured effects, checks the full closure just
+before each high-level effect, and rechecks Git/sandbox identity at spawn. New Git and check
+receipts retain closure/executable hashes; older records remain readable. Pi's event bus makes two
+current Core instances refuse `/koni`; the stronger `session_start` gate uses Pi 0.80.10's pinned
+`getCommands()` and canonical `sourceInfo` to detect guard-unaware legacy copies as well. It prints
+user/project/temporary-scope removal guidance and shuts Pi down before any renamed `koni:<n>`
+command can start work. Focused provider-free evidence is **38/38**, the dedicated operator suite
+is **11/11**, the Core build embeds and self-verifies its normalized SHA, and strict TypeScript is
+green. Compiler context/prompt/resource/compaction files remained untouched.
+
+### 2026-07-16 — durable two-phase Pi attempt admission
+
+Production contained attempts no longer begin a provider turn merely because the child can create
+a Pi session. The exact child first validates its immutable launch, constructs the real
+`ManagedPiSession`, persists Pi's session header and Koni attempt mapping, and reports the exact
+session file. The authority commits that path into the durable attempt record and attaches the
+outcome observer before sending an ordered, attempt-bound `activate` control. Pause, deletion,
+disconnect, or invalid framing releases the pre-activation wait only into abort/cleanup, so a
+session that was never durably admitted cannot spend tokens.
+
+The shipped authority always enables this boundary. A programmatic provider-free release probe may
+withhold only the final activation after the production child is admitted; it grants no extra
+authority and must pause/delete the disposable run. This lets the exact packed `run.create` →
+compiler/scheduler → production child → Pi JSONL path be proven without a provider request.
+Protocol/process/pool evidence is **16/16**. Compiler context, prompt construction, resource
+selection, and compaction remain owned by the concurrent context lane and were not edited.
+
+> **Admission guarantee clarification — 2026-07-16:** “pre-activation” means no provider turn and
+> therefore no provider-token spend. Before reporting ready, Pi may perform its own local runtime
+> initialization: reading ordinary credential/model configuration, checking local availability,
+> loading cached model metadata, and refreshing a credential only where Pi's own offline/runtime
+> rules permit it. The boundary does not claim zero credential activity; it claims that authority
+> activation is mandatory before the model receives a prompt or starts a billed provider turn.
+
+### 2026-07-16 — repository authority startup is one atomic transaction
+
+Stale authority recovery is now serialized by a same-filesystem startup directory published only
+after its complete owner record exists. A dead owner is atomically moved to a unique quarantine,
+so only one contender can reclaim it. The winner retains this mutex while it authenticates and
+removes a stale main lease, clears a stale socket, atomically publishes a complete lease record,
+binds the listener, and applies socket permissions. Only then is endpoint admission reopened.
+Consequently, a delayed second reclaimer can no longer delete a newly live lease or listener.
+
+Startup-lock retirement is ownership-checked and retryable across partial cleanup; failed listener
+startup destroys any early clients before releasing the lease. A focused stale-lock/stale-lease
+concurrency regression proves one winner and one `authority_running` loser. Strict Core typecheck
+and the composed authority/attempt-process set are green (**24/24**).
+
+### 2026-07-16 23:18 MST — parity runner policy correction
+
+The executable proof runner was starting Vitest at the repository root without naming Core's
+checked-in config, so healthy Git/profile/process proofs inherited Vitest's five-second default and
+were misreported as generic `STACK_TRACE_ERROR` plus teardown `ENOTEMPTY`/`EPERM` failures. The
+runner now passes `--config=packages/core/vitest.config.ts`; a focused argument-construction test
+prevents regression. The full mapped corpus passes **209/209** with normal file isolation and
+parallelism under that policy. Reviewed captures and semantic contracts are unchanged. Later
+`core_runtime_changed` results came only from concurrent `run-program.ts` writes and remain
+discarded moving-source diagnostics pending the context owner's frozen handoff.

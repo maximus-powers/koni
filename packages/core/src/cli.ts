@@ -1,12 +1,404 @@
 #!/usr/bin/env node
 
-import { KONI_CORE_API_VERSION } from "./index.js";
+import { realpathSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { KONI_CORE_API_VERSION } from "./contracts/profile-package.js";
+import { discoverAuthorityEndpoint } from "./authority/endpoint.js";
+import { GitClient } from "./git/client.js";
+import { runStandaloneControlCenter } from "./control-center/standalone.js";
+import {
+  adoptProjectLegacyRun,
+  createProjectRun,
+  ensureProjectAuthority,
+  inspectProjectAuthority,
+  previewProjectLegacyRunAdoption,
+  resumeProjectRun,
+  serveProjectAuthority,
+  stopProjectAuthority,
+  validateProjectConfiguration,
+} from "./operator/authority-bootstrap.js";
+import {
+  installAndCacheProfile,
+  readInstalledProfileReference,
+  resolveProfilePackageRoot,
+} from "./operator/profile-source.js";
 
-if (process.argv.includes("--version") || process.argv.includes("-V")) {
-  process.stdout.write(`${KONI_CORE_API_VERSION}\n`);
-} else {
-  process.stderr.write(
-    "Koni Core is installed, but this development build has not linked the control-center command surface yet.\n",
+export interface KoniCliIO {
+  stdout(text: string): void;
+  stderr(text: string): void;
+  stdinIsTTY: boolean;
+  stdoutIsTTY: boolean;
+}
+
+export interface KoniCliDependencies {
+  ensure: typeof ensureProjectAuthority;
+  inspect: typeof inspectProjectAuthority;
+  serve: typeof serveProjectAuthority;
+  stop: typeof stopProjectAuthority;
+  validate: typeof validateProjectConfiguration;
+  install: typeof installAndCacheProfile;
+  resolveProfile: typeof resolveProfilePackageRoot;
+  readInstalled: typeof readInstalledProfileReference;
+  run: typeof createProjectRun;
+  previewLegacyRuns: typeof previewProjectLegacyRunAdoption;
+  adoptLegacyRun: typeof adoptProjectLegacyRun;
+  resumeRun: typeof resumeProjectRun;
+  standalone: typeof runStandaloneControlCenter;
+}
+
+const DEFAULT_IO: KoniCliIO = {
+  stdout: (text) => process.stdout.write(text),
+  stderr: (text) => process.stderr.write(text),
+  stdinIsTTY: process.stdin.isTTY === true,
+  stdoutIsTTY: process.stdout.isTTY === true,
+};
+
+const DEFAULT_DEPENDENCIES: KoniCliDependencies = {
+  ensure: ensureProjectAuthority,
+  inspect: inspectProjectAuthority,
+  serve: serveProjectAuthority,
+  stop: stopProjectAuthority,
+  validate: validateProjectConfiguration,
+  install: installAndCacheProfile,
+  resolveProfile: resolveProfilePackageRoot,
+  readInstalled: readInstalledProfileReference,
+  run: createProjectRun,
+  previewLegacyRuns: previewProjectLegacyRunAdoption,
+  adoptLegacyRun: adoptProjectLegacyRun,
+  resumeRun: resumeProjectRun,
+  standalone: runStandaloneControlCenter,
+};
+
+export async function runKoniCli(
+  argv: readonly string[],
+  io: KoniCliIO = DEFAULT_IO,
+  dependencies: KoniCliDependencies = DEFAULT_DEPENDENCIES,
+): Promise<number> {
+  const parsed = parseCli(argv);
+  if (parsed.version) {
+    io.stdout(`${KONI_CORE_API_VERSION}\n`);
+    return 0;
+  }
+  if (parsed.help || parsed.command === undefined) {
+    io.stdout(helpText());
+    return 0;
+  }
+  const projectRoot = path.resolve(parsed.root ?? process.cwd());
+  switch (parsed.command) {
+    case "init": {
+      const endpoint = await discoverAuthorityEndpoint(projectRoot);
+      const selector = parsed.profilePackage ?? parsed.positionals[0] ?? "coding";
+      const packageRoot = await dependencies.resolveProfile(selector);
+      const result = await dependencies.install({
+        projectRoot: endpoint.identity.worktreeRoot,
+        profilePackageRoot: packageRoot,
+      });
+      print(io, parsed.json, result, [
+        `Installed ${result.packageName}@${result.profileVersion}`,
+        `Project: ${result.projectConfigRoot}`,
+        `Added ${result.added.length}, updated ${result.updated.length}, preserved ${result.preserved.length}`,
+        ...(result.pendingUpstream.length === 0
+          ? []
+          : [`${result.pendingUpstream.length} upstream change(s) staged for review`]),
+      ]);
+      return 0;
+    }
+    case "update": {
+      const endpoint = await discoverAuthorityEndpoint(projectRoot);
+      const installed = await dependencies.readInstalled(endpoint.identity.worktreeRoot);
+      const selector = parsed.profilePackage ?? parsed.positionals[0] ?? installed.packageName;
+      const packageRoot = await dependencies.resolveProfile(selector);
+      const result = await dependencies.install({
+        projectRoot: endpoint.identity.worktreeRoot,
+        profilePackageRoot: packageRoot,
+      });
+      print(io, parsed.json, result, [
+        `Updated ${result.packageName}@${result.profileVersion}`,
+        `Updated ${result.updated.length}, added ${result.added.length}, preserved ${result.preserved.length}`,
+        ...(result.pendingUpstream.length === 0
+          ? []
+          : [`${result.pendingUpstream.length} upstream change(s) staged under .koni/.managed/upstream`]),
+      ]);
+      return 0;
+    }
+    case "start": {
+      const client = await dependencies.ensure({
+        projectRoot,
+        version: KONI_CORE_API_VERSION,
+        client: "cli",
+      });
+      const response = await client.request("project.status");
+      client.close();
+      print(io, parsed.json, response.result ?? {}, ["Koni authority is running."]);
+      return 0;
+    }
+    case "stop": {
+      const result = await dependencies.stop({
+        projectRoot,
+        version: KONI_CORE_API_VERSION,
+      });
+      print(io, parsed.json, result, [
+        result.wasRunning ? "Koni authority stopped." : "Koni authority was already stopped.",
+        ...(result.pausedRunIds.length === 0
+          ? []
+          : [`Paused ${result.pausedRunIds.length} active run(s) before shutdown.`]),
+      ]);
+      return 0;
+    }
+    case "restart": {
+      const stopped = await dependencies.stop({
+        projectRoot,
+        version: KONI_CORE_API_VERSION,
+      });
+      const client = await dependencies.ensure({
+        projectRoot,
+        version: KONI_CORE_API_VERSION,
+        client: "cli",
+      });
+      const response = await client.request("project.status");
+      client.close();
+      print(io, parsed.json, { stopped, authority: response.result ?? {} }, [
+        "Koni authority restarted on the current Core build.",
+        ...(stopped.pausedRunIds.length === 0
+          ? []
+          : [`${stopped.pausedRunIds.length} run(s) remain paused; resume them explicitly when ready.`]),
+      ]);
+      return 0;
+    }
+    case "status": {
+      const status = await dependencies.inspect({ projectRoot, version: KONI_CORE_API_VERSION });
+      print(io, parsed.json, status, [
+        `Authority: ${status.running ? "running" : "stopped"}`,
+        `Project: ${status.projectRoot}`,
+        `Git common dir: ${status.commonDirectory}`,
+        `Profile: ${status.profile === undefined
+          ? "not installed"
+          : `${status.profile.packageName}@${status.profile.profileVersion}`}`,
+        ...(status.authority === undefined
+          ? []
+          : [`Revision: ${status.authority.revision}`, `Runs: ${status.authority.runCount}`]),
+      ]);
+      return status.profile === undefined ? 2 : 0;
+    }
+    case "config": {
+      const action = parsed.positionals[0] ?? "validate";
+      if (action !== "validate" && action !== "status") {
+        throw new CliUsageError(`unknown config action: ${action}`);
+      }
+      const status = await dependencies.validate(projectRoot);
+      print(io, parsed.json, status, status.ok && status.configuration !== undefined
+        ? [
+          `Valid ${status.profile.packageName}@${status.profile.profileVersion} configuration`,
+          `Run types: ${status.configuration.runTypes.join(", ")}`,
+          `Agents: ${status.configuration.agents.join(", ")}`,
+          `Configuration: ${status.configuration.sha256}`,
+        ]
+        : [
+          "Configuration is invalid:",
+          ...status.diagnostics.map((diagnostic) =>
+            `  ${diagnostic.code} ${diagnostic.path}: ${diagnostic.message}`),
+        ]);
+      return status.ok ? 0 : 2;
+    }
+    case "tui": {
+      if (!io.stdinIsTTY || !io.stdoutIsTTY) {
+        throw new CliUsageError("koni tui requires an interactive terminal");
+      }
+      const client = await dependencies.ensure({
+        projectRoot,
+        version: KONI_CORE_API_VERSION,
+        client: "tui",
+      });
+      try {
+        const endpoint = await discoverAuthorityEndpoint(projectRoot);
+        await dependencies.standalone({
+          projectRoot: endpoint.identity.worktreeRoot,
+          version: KONI_CORE_API_VERSION,
+          client,
+        });
+      } finally {
+        client.close();
+      }
+      return 0;
+    }
+    case "run": {
+      const objective = parsed.goal ?? parsed.positionals.join(" ").trim();
+      if (objective.length === 0) throw new CliUsageError("run requires --goal <text>");
+      const runTypeId = parsed.runType ?? "small";
+      const targetRef = parsed.target ?? await defaultTargetBranch(projectRoot);
+      const result = await dependencies.run({
+        projectRoot,
+        version: KONI_CORE_API_VERSION,
+        objective,
+        runTypeId,
+        targetRef,
+      });
+      print(io, parsed.json, result, [`Started ${runTypeId} run ${result.runId} on ${targetRef}.`]);
+      return 0;
+    }
+    case "adopt": {
+      if (parsed.migrationId === undefined) {
+        throw new CliUsageError("adopt requires --migration <migration-id>");
+      }
+      if (!parsed.apply) {
+        const catalog = await dependencies.previewLegacyRuns({
+          projectRoot,
+          version: KONI_CORE_API_VERSION,
+          migrationId: parsed.migrationId,
+          ...(parsed.runId === undefined ? {} : { runId: parsed.runId }),
+        });
+        const ready = catalog.runs.filter((run) => run.disposition === "ready").length;
+        const blocked = catalog.runs.filter((run) => run.disposition === "blocked").length;
+        const adopted = catalog.runs.filter((run) => run.disposition === "adopted").length;
+        print(io, parsed.json, catalog, [
+          `Legacy migration ${catalog.migrationId}: ${catalog.runs.length} run(s)`,
+          `Ready ${ready}, blocked ${blocked}, already adopted ${adopted}`,
+          "Preview only. Add --apply --run <legacy-run-id> to create one paused successor.",
+        ]);
+        return 0;
+      }
+      if (parsed.runId === undefined) {
+        throw new CliUsageError("adopt --apply requires --run <legacy-run-id>");
+      }
+      const result = await dependencies.adoptLegacyRun({
+        projectRoot,
+        version: KONI_CORE_API_VERSION,
+        migrationId: parsed.migrationId,
+        runId: parsed.runId,
+      });
+      print(io, parsed.json, result, [
+        `${result.status === "already_adopted" ? "Found" : "Created"} paused successor ${result.successorRunId}`,
+        `Legacy source ${result.sourceRunId} remains immutable.`,
+        `Resume explicitly with: koni resume --run ${result.successorRunId}`,
+      ]);
+      return 0;
+    }
+    case "resume": {
+      const runId = parsed.runId ?? parsed.positionals[0];
+      if (runId === undefined) throw new CliUsageError("resume requires --run <run-id>");
+      const result = await dependencies.resumeRun({
+        projectRoot,
+        version: KONI_CORE_API_VERSION,
+        runId,
+      });
+      print(io, parsed.json, result, [`Resumed run ${result.runId} into ${result.status}.`]);
+      return 0;
+    }
+    case "authority": {
+      if (parsed.positionals[0] !== "serve") {
+        throw new CliUsageError("authority is an internal command; expected `authority serve`");
+      }
+      await dependencies.serve({ projectRoot, version: KONI_CORE_API_VERSION });
+      return 0;
+    }
+  }
+}
+
+interface ParsedCli {
+  command?: "init" | "update" | "start" | "stop" | "restart" | "status" | "config" | "tui" | "run" | "adopt" | "resume" | "authority";
+  positionals: string[];
+  root?: string;
+  profilePackage?: string;
+  runType?: string;
+  target?: string;
+  goal?: string;
+  migrationId?: string;
+  runId?: string;
+  apply: boolean;
+  json: boolean;
+  help: boolean;
+  version: boolean;
+}
+
+function parseCli(argv: readonly string[]): ParsedCli {
+  const result: ParsedCli = { positionals: [], apply: false, json: false, help: false, version: false };
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index]!;
+    if (argument === "--help" || argument === "-h") result.help = true;
+    else if (argument === "--version" || argument === "-V") result.version = true;
+    else if (argument === "--json") result.json = true;
+    else if (argument === "--root") result.root = requireOptionValue(argv, ++index, argument);
+    else if (argument === "--profile-package") result.profilePackage = requireOptionValue(argv, ++index, argument);
+    else if (argument === "--type" || argument === "--run-type") result.runType = requireOptionValue(argv, ++index, argument);
+    else if (argument === "--target") result.target = requireOptionValue(argv, ++index, argument);
+    else if (argument === "--goal") result.goal = requireOptionValue(argv, ++index, argument);
+    else if (argument === "--migration") result.migrationId = requireOptionValue(argv, ++index, argument);
+    else if (argument === "--run") result.runId = requireOptionValue(argv, ++index, argument);
+    else if (argument === "--apply") result.apply = true;
+    else if (argument.startsWith("-")) throw new CliUsageError(`unknown option: ${argument}`);
+    else if (result.command === undefined) {
+      if (!isCommand(argument)) throw new CliUsageError(`unknown command: ${argument}`);
+      result.command = argument;
+    } else result.positionals.push(argument);
+  }
+  return result;
+}
+
+function requireOptionValue(argv: readonly string[], index: number, option: string): string {
+  const value = argv[index];
+  if (value === undefined || value.startsWith("-")) throw new CliUsageError(`${option} requires a value`);
+  return value;
+}
+
+function isCommand(value: string): value is NonNullable<ParsedCli["command"]> {
+  return new Set(["init", "update", "start", "stop", "restart", "status", "config", "tui", "run", "adopt", "resume", "authority"]).has(value);
+}
+
+async function defaultTargetBranch(projectRoot: string): Promise<string> {
+  const identity = await GitClient.discover(projectRoot);
+  const branches = await new GitClient(identity.worktreeRoot).recentBranches(1);
+  const branch = branches[0];
+  if (branch === undefined) throw new CliUsageError("repository has no local branch; pass --target after creating one");
+  return branch.name;
+}
+
+function print(io: KoniCliIO, json: boolean, value: unknown, lines: readonly string[]): void {
+  io.stdout(json ? `${JSON.stringify(value, null, 2)}\n` : `${lines.join("\n")}\n`);
+}
+
+function helpText(): string {
+  return `Koni ${KONI_CORE_API_VERSION}\n\n` +
+    "Usage:\n" +
+    "  koni init [coding|research] [--profile-package PATH] [--root PATH]\n" +
+    "  koni update [--profile-package PATH] [--root PATH]\n" +
+    "  koni start [--root PATH]\n" +
+    "  koni stop [--root PATH]\n" +
+    "  koni restart [--root PATH]\n" +
+    "  koni status [--root PATH] [--json]\n" +
+    "  koni config validate [--root PATH] [--json]\n" +
+    "  koni run --goal TEXT [--type small|medium|large] [--target BRANCH]\n" +
+    "  koni adopt --migration ID [--run LEGACY_RUN] [--apply] [--root PATH]\n" +
+    "  koni resume --run RUN_ID [--root PATH]\n" +
+    "  koni tui [--root PATH]\n\n" +
+    "The TUI opens only in the terminal where `koni tui` is invoked; Koni never creates panes.\n";
+}
+
+export class CliUsageError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = "CliUsageError";
+  }
+}
+
+if (isDirectInvocation()) {
+  runKoniCli(process.argv.slice(2)).then(
+    (code) => { process.exitCode = code; },
+    (error: unknown) => {
+      process.stderr.write(`koni: ${error instanceof Error ? error.message : String(error)}\n`);
+      process.exitCode = error instanceof CliUsageError ? 2 : 1;
+    },
   );
-  process.exitCode = 1;
+}
+
+export function isDirectInvocation(
+  invoked: string | undefined = process.argv[1],
+  modulePath: string = fileURLToPath(import.meta.url),
+): boolean {
+  if (invoked === undefined) return false;
+  try {
+    return realpathSync(path.resolve(invoked)) === realpathSync(modulePath);
+  } catch {
+    return false;
+  }
 }

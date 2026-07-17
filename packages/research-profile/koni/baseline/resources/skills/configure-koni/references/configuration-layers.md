@@ -27,7 +27,11 @@ For a detected schema-1 project, substitute `.codex/koni` for the first three ro
 `.codex/agents/*.toml` resources until explicit migration. Do not author new `.codex` runtime
 resources for schema 2.
 
-The installed profile is the semantic baseline. Extend it in place after approval: retain useful default ontology, compiler rules, proof boundaries, and run types, then specialize only what repository evidence justifies. Do not regenerate the profile from memory or create a baseline-plus-overlay upgrade system. A future upgrade mechanism is a separate product concern.
+The verified package profile is the immutable semantic baseline. The project-owned `.koni` sources
+are its managed overlay: after approval, retain useful default ontology, compiler rules, proof
+boundaries, and run types, then specialize only what repository evidence justifies. Never edit
+`.koni/.managed` baseline history or create a parallel overlay. `koni update` performs the guarded
+three-way baseline/overlay upgrade and preserves explicit conflicts for review.
 
 Choose by responsibility:
 

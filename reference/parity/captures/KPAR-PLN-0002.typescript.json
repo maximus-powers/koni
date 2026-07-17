@@ -1,0 +1,56 @@
+{
+  "cases": [
+    {
+      "assertions": [
+        {
+          "comparison": "semantic-oracle-contract",
+          "contract_sha256": "632e854743992aab1e00dbfd6cf1ed4c8f5736e89352eff68422e2da42673ec4",
+          "id": "A01-history-preserved",
+          "oracle": {
+            "kind": "rust-test",
+            "name": "approval_review_can_send_explicit_revision_steering",
+            "outcome": "passed"
+          },
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-authority-engine.test.ts",
+              "outcome": "passed",
+              "title": "moves a run from provisional creation through approval to explicit publication"
+            }
+          ]
+        },
+        {
+          "comparison": "semantic-specification-contract",
+          "contract_sha256": "144232ea036372fd24558051ecdc1c3bc663a144ec0f3ca5ceb7f80909911ba8",
+          "id": "A02-successor-session",
+          "oracle": null,
+          "outcome": "passed",
+          "target": [
+            {
+              "file": "packages/core/test/run-authority-engine.test.ts",
+              "outcome": "passed",
+              "title": "moves a run from provisional creation through approval to explicit publication"
+            }
+          ]
+        }
+      ],
+      "id": "KPAR-PLN-0002",
+      "outcome": "passing"
+    }
+  ],
+  "isolation": {
+    "live_projects": false,
+    "provider_calls": 0,
+    "temporary_pi_homes": true,
+    "temporary_projects": true
+  },
+  "normalization": "koni.parity-normalization.v2",
+  "oracle": {
+    "commit": "fcc425e51114bcedb9aeae44d6e8c8418a525e6b",
+    "semantic_suite_sha256": "a675ad85b1834a113c98a4f33740c77f9bfa0f119a5873e324931ded2bb4c46a"
+  },
+  "protocol": "koni.typescript-parity-capture.v1",
+  "schema_version": "1.0",
+  "capture_sha256": "4aaf94efa1e3c0b5c517a8c129b2a7dc5a7646d554096491add590b0e59d252f"
+}

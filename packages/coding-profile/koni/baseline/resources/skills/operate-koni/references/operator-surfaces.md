@@ -1,63 +1,39 @@
 # Operator surfaces
 
-Choose the TUI for interactive understanding and the CLI for explicit, scriptable transitions.
+Choose the shared control center for interactive understanding and the bounded CLI for initialization,
+validation, status, and non-interactive run creation.
 
 ## Control center
 
-Run `koni` in an initialized project. Use the control center to:
+Run `/koni` inside ordinary Pi, or invoke `koni tui --root .` in the terminal where you want the
+standalone dashboard. Both connect to the same per-project authority and durable state. Use the
+control center to:
 
 - view every planning, active, paused, blocked, failed, or concluded run;
 - inspect the selected run's tickets, graph, pipeline, questions, agents, health, and reports;
 - create a run, review planning output, and approve it;
 - answer pending structured decisions;
-- invoke configured actions and drive the current explicit stage;
-- pause, resume, preview deletion, or retry failed supervised work;
+- observe the current explicit stage and its compiler-owned next boundary;
+- pause, resume, or request guarded deletion;
 - edit future project configuration through the validated Configure surface.
 
 Treat every panel as a projection of durable records. Select the intended run before acting; changing selection does not pause or mutate other runs. Use contextual help in the interface when a key or action is unclear.
 
-## Automation orientation
+## Bounded automation surface
 
 ```sh
-koni runs --root .
-koni --run <run-id> inspect --root .
-koni --run <run-id> cockpit . --json
-koni validate --root .
+koni status --root . --json
+koni config validate --root . --json
+koni run --root . --goal "Deliver the requested outcome" --type medium --target main
 ```
 
-Use global `--run <run-id>` wherever a command can otherwise fall back to a compatibility-selected run.
-
-## Planned-run commands
-
-```sh
-koni plan-run --root . --run-type medium --goal "Deliver the requested outcome"
-koni resume-planning <run-id> --root .
-koni approve-run <run-id> --root .
-koni supervise-run <run-id> --root .
-```
-
-Read the JSON returned by `plan-run`; do not infer approval readiness from a process exit when a planning agent is incomplete or awaiting input.
-
-## Questions and stages
-
-```sh
-koni answer-question <question-id> --option <option-id> --root .
-koni answer-question <question-id> --custom "answer" --root .
-koni resolve-questions --root .
-koni --run <run-id> drive-stage <stage-id> --root .
-```
-
-Supply exactly one option or custom answer. Drive only the current matching stage. Do not use internal question-record ingress as a human-facing shortcut.
-
-## External review loops
-
-```sh
-koni --run <run-id> start-external-loop <stage-id> --root .
-koni --run <run-id> drive-external-loop <loop-id> --root .
-```
-
-Each drive performs at most one durable provider transition. Re-run after inspecting the persisted result; do not wrap it in an unbounded foreground polling loop.
+`koni run` creates a durable provisional/planning run, but it does not approve a plan or merge a
+completed branch. Use the control center for questions, plan approval or revision, pause/resume,
+deletion, ticket inspection, agent steering, and explicit target-branch merge. These actions are
+revisioned authority operations rather than hidden CLI fallbacks.
 
 ## Configured actions
 
-Prefer `koni action <action-id> ...` and the TUI action palette for profile-defined work. Actions validate typed parameters, legal ticket state, checkout requirements, effect order, journals, compensation, and recovery. Do not replace them with ad hoc edits or Git commands.
+Profile-defined actions are compiler inputs for autonomous attempts and checks, not an ambient
+operator shell. Inspect their receipts in the control center. Do not replace them with ad hoc graph,
+receipt, run-record, ref, or worktree edits.

@@ -11,6 +11,13 @@ provide judgment only where the project configuration asks for it.
 > configuration compatibility is not yet guaranteed between minor releases.
 > See [Maturity](docs/maturity.md) before using it on critical repositories.
 
+> **Pi-native 1.0 supersession — 2026-07-16:** The pre-1.0 warning above describes the frozen Rust
+> implementation retained as the parity oracle. The shipping package line begins at
+> `@koni/core@1.0.0`; its public profile/package protocols are versioned, profile upgrades preserve
+> project overlays, and active legacy state moves only through guarded migration. The release is
+> still intentionally conservative for critical repositories until every executable parity proof
+> in `reference/parity/` is green.
+
 ## Why Köni?
 
 Most agent harnesses begin with a prompt and hope the resulting sequence of
@@ -29,6 +36,11 @@ goal → semantic graph → missing obligations → tickets → isolated work
 - **Receipts and gates** make completion an auditable state transition.
 - **One control center** covers planning, configuration, questions, agents, and
   recovery.
+
+> **Current project boundary — 2026-07-16:** The `.codex/koni` phrase above is historical. The
+> Pi-native packages keep canonical project configuration under `.koni/` and authority/run state
+> under the repository Git common directory. They preserve the user’s existing Pi and `.codex`
+> resources rather than making either a second Koni configuration authority.
 
 The name comes from the Königsberg bridge problem: the useful abstraction is
 the topology—what connects to what—not a prematurely chosen route through it.
@@ -51,6 +63,61 @@ cargo install --path crates/koni-cli
 > complete closure under `${KONI_INSTALL_PREFIX:-$HOME/.local}`. Tagged release archives carry the
 > same `bin/` + `libexec/koni/` layout and signed build provenance.
 
+> **Superseded by the Pi-native package port — 2026-07-16:** The Cargo binary and bundled second
+> Pi host above are retained only as migration history. Koni now ships as three coarse Pi/npm
+> packages: `@koni/core`, `@koni/coding-profile`, and `@koni/research-profile`. Install the Core
+> packages through Pi for both `/koni` and the standalone `koni` command. A source checkout uses `./scripts/install-dev.sh`. That script builds and
+> installs the same package payloads, registers only those three package sources, and preserves Pi
+> authentication and every unrelated setting, package, extension, skill, prompt, and theme. The Rust tree is a frozen, non-shipping parity oracle
+> until its executable deletion gate is complete.
+>
+> ```sh
+> pi install npm:@koni/core
+> pi install npm:@koni/coding-profile
+> # optional second domain:
+> pi install npm:@koni/research-profile
+> # The same Pi-managed Core exposes the standalone command:
+> export PATH="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/npm/node_modules/.bin:$PATH"
+> ```
+
+> **Single-Pi-runtime correction — 2026-07-16:** The earlier global command without
+> `--legacy-peer-deps` let npm solve Core's host-provided peers itself and could install a second Pi
+> SDK plus an incompatible TypeBox. Global Koni installation is now superseded entirely: Pi's
+> managed npm closure supplies both the extension and its `.bin/koni` link. The launcher locates the user's active Pi 0.80.10 package, verifies it, and
+> propagates that exact peer bridge into authority and attempt children. The source installer uses
+> versioned, retained package roots and one locked Pi-settings update so unrelated resources and
+> already-running authority bytes are not overwritten.
+
+To update the one managed closure without interrupting work, quiesce each active project before
+the package update, then start it with the new Core. Quiescing durably pauses runs and aborts
+contained sessions; it never discards run state.
+
+```sh
+koni stop --root /path/to/project
+# Update only Koni-owned sources; profiles publish before Core activation.
+pi update npm:@koni/coding-profile
+pi update npm:@koni/research-profile   # only when installed
+pi update npm:@koni/core
+# Then close/reopen Pi, or run /reload in every already-open Pi session.
+koni start --root /path/to/project
+# Explicitly resume each run that should continue.
+```
+
+For a source-checkout installation, use the same stop → reload → start → explicit-resume sequence,
+but rerun `./scripts/install-dev.sh` in place of all three `pi update` commands. The source installer
+atomically activates a new retained local bundle; mixing the local-source and npm update paths would
+create duplicate Koni origins and is rejected.
+
+If `pi list` shows an older Koni source as well as the intended `npm:@koni/*` entries, remove the
+exact older source before continuing: `pi remove <old-source>` for user scope or
+`pi remove <old-source> --local` for project scope. Koni fails closed on duplicate Core origins;
+it never chooses one by load order.
+
+> **Duplicate-origin guard status — 2026-07-16:** The sentence immediately above states the
+> release requirement. Until the packed legacy-plus-current guard is green, treat `pi list` as a
+> required preflight and remove every older Koni source before loading the new Core. Pi 0.80.10
+> otherwise renames duplicate commands to `koni:1`/`koni:2` and removes plain `/koni`.
+
 Homebrew packaging is being prepared, but no formula is published yet. Once it
 is available, installation will be:
 
@@ -68,6 +135,17 @@ ChatGPT subscription path; API keys are neither required nor accepted by this ru
 > present a device-code interaction if the runtime/provider supplies one, but it is not the normal
 > local flow. The ChatGPT-subscription and no-API-key boundaries remain unchanged; network-enabled
 > login and inference are still fail-closed on Linux pending the documented egress broker.
+
+> **Superseded by ordinary Pi authentication — 2026-07-16:** Koni no longer implements a second
+> credential store or login command. Interactive and autonomous sessions use the credentials and
+> provider setup that Pi already owns. Koni stores only non-secret model/provider selections in a
+> compiled run and does not import, export, migrate, or rewrite the user's Pi authentication.
+
+> **Current Core CLI correction — 2026-07-16:** The `models`, `auth`, and `migrate-pi` command
+> sentence above describes the retired Rust host and is not a current interface. Pi owns models
+> and authentication. The shipping `koni` command exposes `init`, `update`, `start`, `status`,
+> `config validate`, `run`, and `tui`; incompatible legacy state is handled only through Core's
+> guarded compatibility path, never by reconstructing those removed shell commands.
 
 Initialize Köni from anywhere inside a project:
 
@@ -148,6 +226,13 @@ depend on a Köni source checkout.
 > Existing schema-1 projects reach this layout only through `koni migrate-pi --apply`; unrelated
 > `.codex` files remain project-owned and untouched.
 
+> **Current profile command — 2026-07-16:** Use `koni init coding` or `koni init research` from the
+> Git project. The selected verified package is materialized under `.koni`; later `koni update`
+> performs an explicit three-way baseline/overlay upgrade. Existing project configuration and all
+> unrelated Pi/Codex resources remain project-owned. Type `/koni` in the user's ordinary Pi
+> session, or run `koni tui --root .` explicitly in the terminal that should host the standalone
+> dashboard; bare `koni` prints command help and never opens a pane.
+
 ## Documentation
 
 - [Getting started](docs/getting-started.md)
@@ -183,6 +268,12 @@ cargo run -p koni-cli -- init --target . --dry-run
 
 Contributions are welcome. Start with [Contributing](CONTRIBUTING.md), and
 please report security issues according to [Security](SECURITY.md).
+
+> **Current Pi-native development commands — 2026-07-16:** The Cargo commands above exercise only
+> the frozen historical oracle. Production development runs `npm ci`, `npm run check`, and
+> `npm run build` at the repository root. `npm pack --workspace @koni/core` (and the two profile
+> workspaces) produces the exact release artifacts; no Rust executable or legacy `runtime/pi-host`
+> artifact is included.
 
 ## License
 

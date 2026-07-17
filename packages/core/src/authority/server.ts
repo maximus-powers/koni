@@ -17,6 +17,11 @@ import {
   discoverAuthorityEndpoint,
   type AuthorityEndpoint,
 } from "./endpoint.js";
+import { authorityRequestHash } from "./project-store.js";
+import {
+  assertExecutingCoreRuntimeCurrent,
+  executingCoreRuntimeIdentity,
+} from "../runtime/identity.js";
 
 const MAX_CLIENTS = 128;
 const MAX_IDEMPOTENCY_ENTRIES = 10_000;
@@ -31,6 +36,10 @@ export interface AuthorityMethodResult {
   result?: JsonValue;
   revision?: number;
   events?: readonly { topic: string; payload?: JsonValue }[];
+  /** Invoked only after the successful response bytes have flushed to the client. */
+  afterResponse?: () => void;
+  /** Permanently close request/internal-mutation admission before responding. */
+  beginQuiesce?: boolean;
 }
 
 export interface AuthorityMethod {
@@ -38,16 +47,33 @@ export interface AuthorityMethod {
   handle(context: AuthorityRequestContext): Promise<AuthorityMethodResult> | AuthorityMethodResult;
 }
 
+export interface AuthorityInternalMutationContext {
+  revision: number;
+}
+
 export interface AuthorityServerOptions {
   projectRoot: string;
   version: string;
+  /** Exact test/embedding override; production hashes the executing Core tree before listening. */
+  buildSha256?: string;
   initialRevision?: number;
+  /** Durable replay lookup performed before revision CAS, so retries survive authority restart. */
+  lookupIdempotent?: (request: RpcRequest) => Promise<{
+    revision: number;
+    result?: JsonValue;
+  } | undefined>;
+}
+
+interface MemoryIdempotencyEntry {
+  requestHash: string;
+  response: RpcSuccess | RpcFailure;
 }
 
 interface ClientState {
   socket: Socket;
   decoder: FrameDecoder;
   handshake: ProtocolHandshake | undefined;
+  compatibilityOnly: boolean;
 }
 
 export class AuthorityRpcError extends Error {
@@ -72,7 +98,7 @@ export class AuthorityServer {
   readonly #options: AuthorityServerOptions;
   readonly #methods = new Map<string, AuthorityMethod>();
   readonly #clients = new Set<ClientState>();
-  readonly #idempotency = new Map<string, RpcSuccess | RpcFailure>();
+  readonly #idempotency = new Map<string, MemoryIdempotencyEntry>();
   #endpoint: AuthorityEndpoint | undefined;
   #lease: AuthorityLease | undefined;
   #server: Server | undefined;
@@ -80,6 +106,8 @@ export class AuthorityServer {
   #sequence = 0;
   #mutationTail: Promise<void> = Promise.resolve();
   #stopping = false;
+  #quiescing = false;
+  #buildSha256: string | undefined;
 
   public constructor(options: AuthorityServerOptions) {
     this.#options = options;
@@ -90,6 +118,7 @@ export class AuthorityServer {
         result: {
           protocol: AUTHORITY_PROTOCOL,
           version: this.#options.version,
+          buildSha256: this.#buildSha256 ?? this.#options.buildSha256 ?? "starting",
           revision: this.#revision,
         },
       }),
@@ -118,11 +147,15 @@ export class AuthorityServer {
     if (this.#server !== undefined) {
       throw new Error("authority server is already started");
     }
+    this.#quiescing = false;
+    if (this.#options.buildSha256 === undefined) {
+      await assertExecutingCoreRuntimeCurrent();
+      this.#buildSha256 = (await executingCoreRuntimeIdentity()).buildSha256;
+    } else {
+      this.#buildSha256 = this.#options.buildSha256;
+    }
     const endpoint = await discoverAuthorityEndpoint(this.#options.projectRoot);
     const lease = await AuthorityLease.acquire(endpoint);
-    if (process.platform !== "win32") {
-      await rm(endpoint.endpoint, { force: true });
-    }
     const server = net.createServer((socket) => this.#accept(socket));
     server.maxConnections = MAX_CLIENTS;
     try {
@@ -142,8 +175,13 @@ export class AuthorityServer {
       if (process.platform !== "win32") {
         await chmod(endpoint.endpoint, 0o600);
       }
+      // Keep the cross-process startup transaction through socket bind and permissions. Only now
+      // may another starter observe the live lease/listener pair and fail as a duplicate.
+      await lease.completeStartup();
     } catch (error) {
-      server.close();
+      for (const client of this.#clients) client.socket.destroy();
+      this.#clients.clear();
+      await closeServer(server);
       await lease.release();
       throw error;
     }
@@ -170,6 +208,34 @@ export class AuthorityServer {
     }
   }
 
+  /**
+   * Serialize a scheduler/session/recovery mutation through the same revision lane as RPC work.
+   * The callback must durably commit its returned revision before it resolves.
+   */
+  public mutateInternal(
+    handle: (context: AuthorityInternalMutationContext) => Promise<AuthorityMethodResult> | AuthorityMethodResult,
+  ): Promise<AuthorityMethodResult> {
+    const execute = async (): Promise<AuthorityMethodResult> => {
+      if (this.#quiescing) {
+        throw new AuthorityRpcError("authority_quiescing", "authority is quiescing for restart");
+      }
+      const result = await handle({ revision: this.#revision });
+      const nextRevision = result.revision ?? this.#revision + 1;
+      if (!Number.isSafeInteger(nextRevision) || nextRevision < this.#revision) {
+        throw new AuthorityRpcError("invalid_revision", "internal mutation moved authority revision backwards");
+      }
+      if (nextRevision === this.#revision && (result.events?.length ?? 0) > 0) {
+        throw new AuthorityRpcError("invalid_revision", "internal no-op attempted to publish mutation events");
+      }
+      this.#revision = nextRevision;
+      for (const event of result.events ?? []) this.publish(event.topic, event.payload);
+      return result;
+    };
+    const pending = this.#mutationTail.then(execute, execute);
+    this.#mutationTail = pending.then(() => undefined, () => undefined);
+    return pending;
+  }
+
   public async stop(): Promise<void> {
     if (this.#stopping) {
       return;
@@ -181,6 +247,7 @@ export class AuthorityServer {
       client.socket.destroy();
     }
     this.#clients.clear();
+    await this.#mutationTail;
     if (server !== undefined) {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
@@ -198,7 +265,12 @@ export class AuthorityServer {
   #accept(socket: Socket): void {
     socket.setNoDelay(true);
     socket.setTimeout(60_000);
-    const client: ClientState = { socket, decoder: new FrameDecoder(), handshake: undefined };
+    const client: ClientState = {
+      socket,
+      decoder: new FrameDecoder(),
+      handshake: undefined,
+      compatibilityOnly: false,
+    };
     this.#clients.add(client);
     socket.on("timeout", () => socket.destroy());
     socket.on("data", (chunk: Buffer) => {
@@ -228,6 +300,41 @@ export class AuthorityServer {
     if (expectedRoot === undefined || envelope.projectRoot !== expectedRoot) {
       throw new AuthorityProtocolError("project_mismatch", "client connected for a different project root");
     }
+    if (envelope.client === "compat-control") {
+      client.handshake = envelope;
+      client.compatibilityOnly = true;
+      this.#sequence += 1;
+      client.socket.write(encodeFrame({
+        type: "event",
+        sequence: this.#sequence,
+        revision: this.#revision,
+        topic: "authority.compatibility_control_ready",
+        payload: {
+          version: this.#options.version,
+          buildSha256: this.#buildSha256 ?? "unavailable",
+        },
+      }));
+      return;
+    }
+    if (
+      envelope.clientVersion !== this.#options.version ||
+      envelope.clientBuildSha256 !== this.#buildSha256
+    ) {
+      this.#sequence += 1;
+      client.socket.end(encodeFrame({
+        type: "event",
+        sequence: this.#sequence,
+        revision: this.#revision,
+        topic: "authority.incompatible",
+        payload: {
+          version: this.#options.version,
+          buildSha256: this.#buildSha256 ?? "unavailable",
+          clientVersion: envelope.clientVersion,
+          clientBuildSha256: envelope.clientBuildSha256,
+        },
+      }));
+      return;
+    }
     client.handshake = envelope;
     this.#sequence += 1;
     client.socket.write(
@@ -236,26 +343,103 @@ export class AuthorityServer {
         sequence: this.#sequence,
         revision: this.#revision,
         topic: "authority.ready",
-        payload: { version: this.#options.version },
+        payload: { version: this.#options.version, buildSha256: this.#buildSha256! },
       }),
     );
   }
 
   async #dispatch(client: ClientState, request: RpcRequest): Promise<void> {
+    if (client.compatibilityOnly && request.method !== "authority.quiesce") {
+      this.#writeFailure(
+        client,
+        request.id,
+        "compatibility_control_only",
+        "cross-build control clients may only quiesce the running authority",
+        false,
+      );
+      return;
+    }
     const method = this.#methods.get(request.method);
     if (method === undefined) {
       this.#writeFailure(client, request.id, "method_not_found", `unknown method: ${request.method}`, false);
       return;
     }
     const execute = async () => {
+      if (this.#quiescing && request.method !== "authority.quiesce") {
+        this.#writeFailure(
+          client,
+          request.id,
+          "authority_quiescing",
+          "authority is quiescing for restart and accepts no further work",
+          true,
+        );
+        return;
+      }
+      const requestHash = authorityRequestHash(request.method, request.params);
       const cached = request.idempotencyKey === undefined
         ? undefined
         : this.#idempotency.get(`${request.method}\0${request.idempotencyKey}`);
       if (cached !== undefined) {
-        client.socket.write(encodeFrame({ ...cached, id: request.id }));
+        if (cached.requestHash !== requestHash) {
+          this.#writeFailure(
+            client,
+            request.id,
+            "idempotency_reuse",
+            "idempotency key was already used with a different request",
+            false,
+          );
+          return;
+        }
+        client.socket.write(encodeFrame({ ...cached.response, id: request.id, revision: this.#revision }));
         return;
       }
-      if (method.mutating && request.expectedRevision !== this.#revision) {
+      if (request.idempotencyKey !== undefined && this.#options.lookupIdempotent !== undefined) {
+        try {
+          const durable = await this.#options.lookupIdempotent(request);
+          if (durable !== undefined) {
+            if (durable.revision > this.#revision) {
+              throw new AuthorityRpcError(
+                "revision_desync",
+                "durable replay is newer than the running authority revision",
+              );
+            }
+            const response: RpcSuccess = {
+              type: "response",
+              id: request.id,
+              ok: true,
+              revision: this.#revision,
+              ...(durable.result === undefined ? {} : { result: durable.result }),
+            };
+            this.#remember(request, response);
+            client.socket.write(encodeFrame(response));
+            return;
+          }
+        } catch (error) {
+          const rpcError = error instanceof AuthorityRpcError
+            ? error
+            : new AuthorityRpcError(
+              error instanceof Error && "code" in error && typeof error.code === "string"
+                ? error.code
+                : "idempotency_lookup",
+              error instanceof Error ? error.message : String(error),
+            );
+          this.#writeFailure(
+            client,
+            request.id,
+            rpcError.code,
+            rpcError.message,
+            rpcError.retryable,
+            rpcError.details,
+          );
+          return;
+        }
+      }
+      // Quiesce is the emergency compatibility mutation: a provider may be
+      // emitting usage while a new build connects, so requiring a client-side
+      // revision snapshot could starve shutdown forever. It still executes in
+      // this serialized lane and receives the exact current revision.
+      if (method.mutating && request.method !== "authority.quiesce" &&
+          request.expectedRevision !== this.#revision) {
         this.#writeFailure(
           client,
           request.id,
@@ -280,6 +464,7 @@ export class AuthorityServer {
         } else if (result.revision !== undefined && result.revision !== this.#revision) {
           throw new AuthorityRpcError("invalid_revision", "read-only method attempted to change revision");
         }
+        if (result.beginQuiesce === true) this.#quiescing = true;
         const response: RpcSuccess = {
           type: "response",
           id: request.id,
@@ -288,7 +473,7 @@ export class AuthorityServer {
           ...(result.result === undefined ? {} : { result: result.result }),
         };
         this.#remember(request, response);
-        client.socket.write(encodeFrame(response));
+        client.socket.write(encodeFrame(response), () => result.afterResponse?.());
         for (const event of result.events ?? []) {
           this.publish(event.topic, event.payload);
         }
@@ -299,13 +484,10 @@ export class AuthorityServer {
         this.#writeFailure(client, request.id, rpcError.code, rpcError.message, rpcError.retryable, rpcError.details, request);
       }
     };
-    if (method.mutating) {
-      const pending = this.#mutationTail.then(execute, execute);
-      this.#mutationTail = pending.then(() => undefined, () => undefined);
-      await pending;
-    } else {
-      await execute();
-    }
+    // Reads share the same lane so their revision and projected bytes cannot straddle a commit.
+    const pending = this.#mutationTail.then(execute, execute);
+    this.#mutationTail = pending.then(() => undefined, () => undefined);
+    await pending;
   }
 
   #writeFailure(
@@ -340,8 +522,26 @@ export class AuthorityServer {
         this.#idempotency.delete(oldest);
       }
     }
-    this.#idempotency.set(`${request.method}\0${request.idempotencyKey}`, response);
+    this.#idempotency.set(`${request.method}\0${request.idempotencyKey}`, {
+      requestHash: authorityRequestHash(request.method, request.params),
+      response,
+    });
   }
+}
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise((resolve) => {
+    if (!server.listening) {
+      try {
+        server.close();
+      } catch {
+        // A listen failure may leave an unstarted Server that has nothing to close.
+      }
+      resolve();
+      return;
+    }
+    server.close(() => resolve());
+  });
 }
 
 function isHandshake(value: unknown): value is ProtocolHandshake {
@@ -350,8 +550,10 @@ function isHandshake(value: unknown): value is ProtocolHandshake {
   }
   return (
     value.protocol === AUTHORITY_PROTOCOL &&
-    new Set(["cli", "pi-extension", "managed-session", "tui"]).has(String(value.client)) &&
+    new Set(["cli", "pi-extension", "managed-session", "tui", "compat-control"]).has(String(value.client)) &&
     typeof value.clientVersion === "string" &&
+    typeof value.clientBuildSha256 === "string" &&
+    /^sha256:[0-9a-f]{64}$/u.test(value.clientBuildSha256) &&
     typeof value.projectRoot === "string" &&
     typeof value.nonce === "string" &&
     value.nonce.length >= 8

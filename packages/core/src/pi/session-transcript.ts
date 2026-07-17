@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
 
-const MAX_SESSION_BYTES = 64 * 1024 * 1024;
+const DEFAULT_MAX_SESSION_BYTES = 64 * 1024 * 1024;
 const MAX_SESSION_LINES = 200_000;
-const MAX_SESSION_LINE_BYTES = 8 * 1024 * 1024;
+const MAX_SESSION_LINE_BYTES = 24 * 1024 * 1024;
 
 export interface PiSessionHeader {
   type: "session";
@@ -59,7 +59,7 @@ export class SessionTranscriptError extends Error {
 
 export async function readPiSession(
   filePath: string,
-  options: { allowTruncatedTail?: boolean } = {},
+  options: { allowTruncatedTail?: boolean; maxBytes?: number } = {},
 ): Promise<ParsedPiSession> {
   const bytes = await readFile(filePath);
   return parsePiSession(bytes, options);
@@ -67,13 +67,17 @@ export async function readPiSession(
 
 export function parsePiSession(
   input: Uint8Array | string,
-  options: { allowTruncatedTail?: boolean } = {},
+  options: { allowTruncatedTail?: boolean; maxBytes?: number } = {},
 ): ParsedPiSession {
   const bytes = typeof input === "string" ? Buffer.from(input, "utf8") : Buffer.from(input);
-  if (bytes.byteLength > MAX_SESSION_BYTES) {
+  const maximumBytes = options.maxBytes ?? DEFAULT_MAX_SESSION_BYTES;
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0) {
+    throw new SessionTranscriptError("session_size", "Pi session byte limit is invalid");
+  }
+  if (bytes.byteLength > maximumBytes) {
     throw new SessionTranscriptError(
       "session_size",
-      `Pi session exceeds ${MAX_SESSION_BYTES} bytes`,
+      `Pi session exceeds ${maximumBytes} bytes`,
     );
   }
   const hasFinalLf = bytes.byteLength === 0 || bytes.at(-1) === 0x0a;
@@ -92,6 +96,7 @@ export function parsePiSession(
   const values: unknown[] = [];
   for (const [index, line] of rawLines.entries()) {
     const lineNumber = index + 1;
+    const isUnterminatedTail = index === rawLines.length - 1 && !hasFinalLf;
     if (Buffer.byteLength(line, "utf8") > MAX_SESSION_LINE_BYTES) {
       throw new SessionTranscriptError(
         "line_size",
@@ -102,10 +107,21 @@ export function parsePiSession(
     if (line.length === 0) {
       throw new SessionTranscriptError("blank_line", "Pi session contains a blank record", lineNumber);
     }
+    // Pi appends `JSON + LF` and does not prepend a separator. Even syntactically complete JSON
+    // without its commit LF is therefore uncommitted: reopening and appending would concatenate
+    // the next record onto it. Ignore/block that tail under crash-tolerant recovery.
+    if (isUnterminatedTail && options.allowTruncatedTail === true) {
+      diagnostics.push({
+        code: "truncated_tail",
+        line: lineNumber,
+        message: "Ignored an unterminated final Pi session record",
+      });
+      break;
+    }
     try {
       values.push(JSON.parse(line));
     } catch {
-      const isTail = index === rawLines.length - 1 && !hasFinalLf;
+      const isTail = isUnterminatedTail;
       if (isTail && options.allowTruncatedTail === true) {
         diagnostics.push({
           code: "truncated_tail",

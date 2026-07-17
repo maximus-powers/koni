@@ -65,3 +65,65 @@ question overlaps this source. No live state, binary, runtime bundle, cmux surfa
 acceptance repository, Git ref, or installed tool was touched.
 
 Status: `ready_for_integration`; source lease released to `primary-integrator/root`.
+
+## 2026-07-16 — Pi-native compiler lease (`check_runner_containment_fix/root`)
+
+This later lease is independent of the historical Rust check-runner work above. Scope is limited
+to `packages/core/src/{compiler,contracts}/**`, focused tests, and this append-only handoff. It
+implements the schema-2 rule/ticket compiler and authenticated editable-project source boundary
+without editing the root-owned graph model, authority runtime, public package barrel, installed
+profile, binary, cockpit, cmux surface, Updog checkout, or live/forensic run state.
+
+The released compiler boundary now provides:
+
+- `GraphExpressionEvaluator` over a minimal `CompilerGraphProjection`, with frozen graph snapshots,
+  named queries, traversal/inverse edges, set algebra, quantified predicates, bounded recursion,
+  pure field/count/coverage/acyclic/semver/obligation predicates, and an explicit fail-closed
+  `RuleDomainAdapter` for dynamic receipt/check/gate/path/filesystem policy;
+- `evaluateConfiguredRules`, which applies deterministic derivations before ticket evaluation,
+  resolves configured operation/workflow/step contracts, validates DAG dependencies and literal or
+  graph-projected scope, and derives stable ticket IDs from rule + sorted targets + source-state key
+  + effective configuration hash;
+- `resolveCompiledRunType` and `resolveCompiledPersona`, including default-run selection and the
+  documented stage > run-type persona > run-type role > persona > agent precedence;
+- `projectGraphSchemaDefinition(configuration)`, a direct validated projection into the existing
+  `GraphSchemaDefinition` boundary without duplicating or modifying graph runtime ownership;
+- `compileProjectDirectory(projectRoot, packageBaseline, options?)`, where `packageBaseline` is a
+  mandatory `VerifiedProfileBaseline` from a trusted package resolver. The function reverifies the
+  package bytes, requires `.koni/.managed/install.json` to match that exact package/profile/
+  compatibility/baseline provenance, reads the current editable tree twice through no-follow
+  containment checks, hashes exact current bytes, classifies newly authored YAML/agent/skill/prompt
+  resources, rejects symlinks/special files/path escapes/unknown file kinds, ignores only
+  `.managed`, `.transactions`, and reserved legacy `runs` state, and feeds the authenticated snapshot
+  to `compileProjectConfiguration`. Managed install metadata alone cannot produce an
+  execution-authorized configuration. Current authority run state lives under the Git common-dir
+  `koni/runs`, outside `.koni`, and therefore never enters the configuration hash.
+
+Focused evidence on the composed shared tree is **16/16 green**:
+
+```text
+npx vitest run packages/core/test/project-directory.test.ts packages/core/test/rule-compiler.test.ts --reporter=verbose
+```
+
+This covers both frozen profile graph schemas, deterministic Coding and Research tickets,
+derivation-to-ticket sequencing, inverse edges/set algebra/vacuous quantifiers/query recursion,
+explicit domain adapters, safe projected paths, operation ambiguity, semantic graph-schema
+rejection, baseline/editable project compilation, all four authored resource classifications,
+compiler-state exclusion, trusted-package and forged-managed-provenance rejection, symlink
+rejection, and untracked-kind rejection. The full Core typecheck is green on the final composed
+source. During the lease it briefly observed expected mid-patch errors from concurrent non-lease
+work in `control-center/input.ts` and `pi/managed-session.ts`; both owners reconciled their own lanes
+and no foreign changes were reverted. The production Core TypeScript build is also green. A final
+full Core test run passed **145/146**; the sole failure is the concurrently owned
+`run-authority-engine.test.ts` timing out at its exact five-second bound, reproducible alone and
+reported to root. Compiler-focused evidence is unaffected and no foreign lane was edited.
+
+One frozen Research-profile discovery remains deliberately unmodified outside this lease:
+`run-plan-targets` tests `readiness.state` without an explicit `subject: $node`. Query-candidate
+filtering binds `$node`, while a leaf defaults to `$target`, so the shipped query likely selects no
+ready experiments/ablations. The sequencing regression uses a cloned corrected query to prove the
+generic compiler behavior. The Research profile owner should add the explicit subject and recapture
+its package manifest rather than baking a special-case default into the compiler.
+
+Status: `ready_for_integration`; compiler lease released to `pi-native-port/root`. Root owns the
+public `packages/core/src/index.ts` barrel export.

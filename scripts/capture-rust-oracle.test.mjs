@@ -22,11 +22,19 @@ test("oracle capture hard-isolates project, home, providers, and live projects",
     "provider_calls: 0",
     "live_project_mutations: 0"
   ]) assert.ok(source.includes(required), `missing ${required}`);
+  assert.equal(source.includes("koni-pi-host.mjs"), false, "capture driver must not provision the provider host");
 });
 
 test("capture uses only deterministic non-agent command surfaces", () => {
   for (const required of ["install-software", "compile-profile", "validate-run", "pause-unknown-run", "play-unknown-run", "cockpit-unknown-run"]) assert.ok(source.includes(required));
   for (const forbidden of ["plan-run", "spawn-lead", "spawn-worker", "resume-planning", "approve-run", "supervise-run"]) assert.equal(source.includes(`\"${forbidden}\"`), false, forbidden);
+});
+
+test("positive compile and run controls are proved by exact no-provider oracle tests", () => {
+  assert.ok(source.includes("selected_proof_that_is_also_a_ticket_target_compiles_once_deterministically"));
+  assert.ok(source.includes("selected_run_play_pause_is_durable_across_planning_and_active_phases"));
+  assert.ok(source.includes("CARGO_TARGET_DIR"));
+  assert.ok(source.includes("--exact"));
 });
 
 test("oracle fingerprint itself is present and immutable-looking", () => {

@@ -2,12 +2,12 @@
   "protocol": "koni.profile-package.v1",
   "package": {
     "name": "@koni/coding-profile",
-    "version": "0.6.0"
+    "version": "0.7.0"
   },
   "profile": {
     "id": "software",
     "display_name": "Coding",
-    "version": "0.6.0",
+    "version": "0.7.0",
     "lineage": "koni.software"
   },
   "compatibility": {
@@ -122,7 +122,7 @@
       },
       {
         "path": "profile.yaml",
-        "sha256": "sha256:dd18a5be5417375f11bad5e912dedb1efba3da6b477b676b8ef7d3a84731aac9",
+        "sha256": "sha256:00e3e37cf4f547f2fa42fa16fe8ab50ecf934acdd6bf88d9d6a5dfdc37826ab3",
         "size_bytes": 1507,
         "kind": "config"
       },
@@ -139,8 +139,14 @@
         "kind": "config"
       },
       {
+        "path": "resources/pi-packages.yaml",
+        "sha256": "sha256:cf997bb9000172b53f0fb290cdf6193a5712c145bd8ea326b0f2c8fa8205ca87",
+        "size_bytes": 3155,
+        "kind": "config"
+      },
+      {
         "path": "resources/skills/configure-koni/SKILL.md",
-        "sha256": "sha256:cedb6d1b73a6900146e1e4deb4bfaf2b43f4a1ea1d3df1bf34845187d98fef94",
+        "sha256": "sha256:06e8023a18ba7b9dadfb34d12b7d7f16776e3fd2eeecc814c7144157efd58335",
         "size_bytes": 7788,
         "kind": "skill"
       },
@@ -158,8 +164,8 @@
       },
       {
         "path": "resources/skills/configure-koni/references/configuration-layers.md",
-        "sha256": "sha256:5bbda44529611fc6e899899e7d5e137e40ff7df64419a6403d1c95418b49e19d",
-        "size_bytes": 8033,
+        "sha256": "sha256:d2d158c31ba3cc0200fb6248c4ffc5a0bea7d9af13cfe6a771080efcf84d261c",
+        "size_bytes": 8130,
         "kind": "skill"
       },
       {
@@ -176,8 +182,8 @@
       },
       {
         "path": "resources/skills/model-koni-work/SKILL.md",
-        "sha256": "sha256:4de20edaccf230f1391df27ac53552eacd7beeafb9bed09e4aa61f6ecbd9abe4",
-        "size_bytes": 6501,
+        "sha256": "sha256:4e252e69cf1c80052a5dfbe801f672cb2f654302e92b984e77c39cccaa246697",
+        "size_bytes": 6476,
         "kind": "skill"
       },
       {
@@ -218,8 +224,8 @@
       },
       {
         "path": "resources/skills/operate-koni/SKILL.md",
-        "sha256": "sha256:33e62b94e063b8d2c845132045f45af528b6791e42d83d8a6a5ab5c0bbb231f4",
-        "size_bytes": 4424,
+        "sha256": "sha256:e364660d36d5a4e8e399edaf3f437fc05709ad9e4069284c94bc85915e220912",
+        "size_bytes": 4427,
         "kind": "skill"
       },
       {
@@ -230,20 +236,20 @@
       },
       {
         "path": "resources/skills/operate-koni/references/operator-surfaces.md",
-        "sha256": "sha256:21718460ec3777791be6a93e26badd7d9f7ebf3d4dd6f62e33abcb9e43378347",
-        "size_bytes": 2551,
+        "sha256": "sha256:e492a5640e7f692362733dc96980ef2a8d53e2b6a4bd22d1b4ae4a47a8cdda51",
+        "size_bytes": 1908,
         "kind": "skill"
       },
       {
         "path": "resources/skills/operate-koni/references/recovery.md",
-        "sha256": "sha256:27ebbfd5bfa6061a0fdea1e98989700d76308579b4ba1a553a21ac2883a3df70",
-        "size_bytes": 3376,
+        "sha256": "sha256:e45635acdc06bba503ea21db32cd12b81b2e705d4c43844620890a50fbd8801a",
+        "size_bytes": 4155,
         "kind": "skill"
       },
       {
         "path": "resources/skills/operate-koni/references/run-lifecycle.md",
-        "sha256": "sha256:41e6f7438f77c4ba7ad79828c177378af69943ad85f4c0bf80f46f1822c46da2",
-        "size_bytes": 3402,
+        "sha256": "sha256:0c295fa0c0e2e6268236a6371d4b8ce307b47f550ec8473dd79f2eec99a4bca2",
+        "size_bytes": 3688,
         "kind": "skill"
       },
       {
@@ -290,5 +296,5 @@
       }
     ]
   },
-  "bundle_sha256": "sha256:850aedcdd53edeff41be7fcc8599b159b3516ac3772d5d8d3e22998d04ccade9"
+  "bundle_sha256": "sha256:2d686e082bbd72a7d866472e979578370dc2d9fe2e5bc1f7a711eeeeacb3a856"
 }

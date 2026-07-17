@@ -3,122 +3,185 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 prefix="${KONI_INSTALL_PREFIX:-${HOME}/.local}"
+required_node="22.19.0"
+required_npm="11.13.0"
 
-node_version="22.19.0"
-npm_version="11.13.0"
-case "$(uname -s):$(uname -m)" in
-  Darwin:arm64)
-    node_platform="darwin-arm64"
-    node_sha256="1c3a9e78da501bbc1f0c99fbbb69bb7c722bc7a9bf30128b21ea502f3905892a"
-    ;;
-  Darwin:x86_64)
-    node_platform="darwin-x64"
-    node_sha256="41796082f45db51738d1902cae84fa4f699ff6d2550321361424e8bfe6ea1939"
-    ;;
-  Linux:aarch64|Linux:arm64)
-    node_platform="linux-arm64"
-    node_sha256="0b2d9f564b6594222a62c82e1df2efe119dd4a4aff29644f4dd325bf360b6bcc"
-    ;;
-  Linux:x86_64|Linux:amd64)
-    node_platform="linux-x64"
-    node_sha256="c0649af18e6a24f6fe5535a3e86b341dd49a8e71117c8b68bde973ef834f16f2"
-    ;;
-  *)
-    echo "Köni has no pinned Pi runtime for $(uname -s)/$(uname -m)." >&2
-    exit 1
-    ;;
-esac
-
-if ! command -v curl >/dev/null || ! command -v tar >/dev/null; then
-  echo "Köni requires curl and tar to fetch the verified standalone Node runtime." >&2
+if ! command -v node >/dev/null || ! command -v npm >/dev/null || ! command -v pi >/dev/null; then
+  echo "Koni requires the user's existing Pi 0.80.10, Node ${required_node}+, and npm ${required_npm}." >&2
   exit 1
 fi
 
-sha256_file() {
-  if command -v sha256sum >/dev/null; then
-    sha256sum "$1" | awk '{print $1}'
-  elif command -v shasum >/dev/null; then
-    shasum -a 256 "$1" | awk '{print $1}'
-  else
-    echo "Köni requires sha256sum or shasum to verify runtime downloads." >&2
-    return 1
-  fi
+node -e '
+  const [actual, minimum] = [process.versions.node, process.argv[1]].map((value) => value.split(".").map(Number));
+  for (let index = 0; index < 3; index += 1) {
+    if (actual[index] > minimum[index]) process.exit(0);
+    if (actual[index] < minimum[index]) process.exit(1);
+  }
+' "$required_node" || {
+  echo "Koni requires Node ${required_node}+; found $(node --version)." >&2
+  exit 1
 }
 
-runtime_tmp="$(mktemp -d "${TMPDIR:-/tmp}/koni-node-runtime.XXXXXX")"
-trap 'rm -rf -- "$runtime_tmp"' EXIT
-node_name="node-v${node_version}-${node_platform}"
-node_archive="$runtime_tmp/${node_name}.tar.xz"
-npm_archive="$runtime_tmp/npm-${npm_version}.tgz"
-curl --fail --location --silent --show-error --retry 3 --retry-all-errors \
-  "https://nodejs.org/dist/v${node_version}/${node_name}.tar.xz" -o "$node_archive"
-curl --fail --location --silent --show-error --retry 3 --retry-all-errors \
-  "https://registry.npmjs.org/npm/-/npm-${npm_version}.tgz" -o "$npm_archive"
-if [[ "$(sha256_file "$node_archive")" != "$node_sha256" ]]; then
-  echo "The downloaded Node ${node_version} archive failed SHA-256 verification." >&2
+if [[ "$(npm --version)" != "$required_npm" ]]; then
+  echo "Koni development installs require npm ${required_npm}; found $(npm --version)." >&2
   exit 1
 fi
-if [[ "$(sha256_file "$npm_archive")" != "a4ffa1de3bf1c7f9d5e3dd24fe2921970bdb1589d647f4083eaaaab3be974b7e" ]]; then
-  echo "The downloaded npm ${npm_version} archive failed SHA-256 verification." >&2
-  exit 1
-fi
-tar -xJf "$node_archive" -C "$runtime_tmp"
-tar -xzf "$npm_archive" -C "$runtime_tmp"
-node_root="$runtime_tmp/$node_name"
-node_path="$node_root/bin/node"
-npm_cli="$runtime_tmp/package/bin/npm-cli.js"
-[[ "$("$node_path" --version)" == "v${node_version}" ]]
-[[ "$("$node_path" "$npm_cli" --version)" == "$npm_version" ]]
-export KONI_PINNED_NODE_PATH="$node_path"
 
-if [[ "$(uname -s)" == "Linux" ]]; then
-  bwrap_candidate="${KONI_PINNED_BWRAP_PATH:-$(command -v bwrap || true)}"
-  if [[ -z "$bwrap_candidate" ]]; then
-    echo "Köni requires bubblewrap to build/install the Linux Pi runtime." >&2
+if [[ "$(pi --version)" != "0.80.10" ]]; then
+  echo "Koni requires the active Pi executable to be 0.80.10; found $(pi --version)." >&2
+  exit 1
+fi
+
+package_tmp=""
+install_lock=""
+activation_journal=""
+staged_version=""
+cleanup() {
+  status=$?
+  if [[ "$status" -ne 0 && -n "$activation_journal" && -f "$activation_journal" ]]; then
+    node "$repo_root/scripts/register-dev-packages.mjs" \
+      rollback "$activation_journal" "$prefix/bin/koni" || \
+      echo "Koni activation rollback needs attention: $activation_journal" >&2
+  fi
+  if [[ -n "$staged_version" ]]; then rm -rf -- "$staged_version"; fi
+  if [[ -n "$install_lock" ]]; then
+    rm -f -- "$install_lock/owner.pid"
+    rmdir "$install_lock" 2>/dev/null || true
+  fi
+  if [[ -n "$package_tmp" ]]; then rm -rf -- "$package_tmp"; fi
+  return "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
+
+# Serialize before touching the shared checkout's node_modules/dist as well as the destination.
+# A dead PID record is recoverable; an active or malformed/symlinked lock fails closed.
+share_root="$prefix/share/koni"
+versions_root="$share_root/versions"
+mkdir -p "$prefix/bin" "$versions_root"
+lock_path="$share_root/.install.lock"
+if ! mkdir "$lock_path" 2>/dev/null; then
+  if [[ -d "$lock_path" && ! -L "$lock_path" && -f "$lock_path/owner.pid" && ! -L "$lock_path/owner.pid" ]]; then
+    lock_pid="$(tr -d '\r\n' < "$lock_path/owner.pid")"
+    if [[ "$lock_pid" =~ ^[1-9][0-9]*$ ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
+      stale_lock="$share_root/.install.lock.stale.$$"
+      mv "$lock_path" "$stale_lock"
+      rm -rf -- "$stale_lock"
+      mkdir "$lock_path"
+    else
+      echo "Another Koni install is active, or its PID record needs review: $lock_path" >&2
+      exit 1
+    fi
+  else
+    echo "Koni install lock is malformed or symlinked and needs review: $lock_path" >&2
     exit 1
   fi
-  export KONI_PINNED_BWRAP_PATH
-  KONI_PINNED_BWRAP_PATH="$("$node_path" -e 'console.log(require("fs").realpathSync(process.argv[1]))' "$bwrap_candidate")"
+fi
+printf '%s\n' "$$" > "$lock_path/owner.pid"
+install_lock="$lock_path"
+activation_journal="$share_root/activation-journal.json"
+if [[ -e "$activation_journal" || -L "$activation_journal" ]]; then
+  echo "Recovering the previous interrupted Koni activation." >&2
+  node "$repo_root/scripts/register-dev-packages.mjs" rollback "$activation_journal" "$prefix/bin/koni"
 fi
 
-(
-  cd "$repo_root/runtime/pi-host"
-  "$node_path" "$npm_cli" ci
-  "$node_path" "$npm_cli" run check
-  "$node_path" "$npm_cli" sbom --omit=dev --sbom-format cyclonedx > dist/koni-pi-host.cdx.json
-  "$node_path" -e 'const b=require("./dist/koni-pi-host.cdx.json"); if (b.bomFormat !== "CycloneDX" || !b.components?.some((c) => c.name === "@earendil-works/pi-agent-core" && c.version === "0.80.7") || !b.components?.some((c) => c.name === "@earendil-works/pi-ai" && c.version === "0.80.7")) process.exit(1)'
-)
+package_tmp="$(mktemp -d "${TMPDIR:-/tmp}/koni-packages.XXXXXX")"
+
 (
   cd "$repo_root"
-  cargo build --locked --release --package koni-cli
+  npm ci
+  npm run check
+  npm run build
+  npm pack --workspace @koni/coding-profile --pack-destination "$package_tmp" >/dev/null
+  npm pack --workspace @koni/research-profile --pack-destination "$package_tmp" >/dev/null
+  npm pack --workspace @koni/core --pack-destination "$package_tmp" >/dev/null
 )
 
-target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
-if [[ "$target_dir" != /* ]]; then
-  target_dir="$repo_root/$target_dir"
-fi
-install -d \
-  "$prefix/bin" \
-  "$prefix/libexec/koni/pi-host" \
-  "$prefix/libexec/koni/pi-runtime" \
-  "$prefix/share/doc/koni"
-install -m 0755 "$target_dir/release/koni" "$prefix/bin/koni"
-install -m 0755 \
-  "$repo_root/runtime/pi-host/dist/koni-pi-host.mjs" \
-  "$prefix/libexec/koni/pi-host/koni-pi-host.mjs"
-install -m 0644 \
-  "$repo_root/runtime/pi-host/dist/koni-pi-host.sha256" \
-  "$prefix/libexec/koni/pi-host/koni-pi-host.sha256"
-install -m 0644 \
-  "$repo_root/runtime/pi-host/dist/koni-pi-host.cdx.json" \
-  "$prefix/libexec/koni/pi-host/koni-pi-host.cdx.json"
-install -m 0755 "$KONI_PINNED_NODE_PATH" "$prefix/libexec/koni/pi-runtime/node"
-install -m 0644 "$repo_root/LICENSE" "$prefix/share/doc/koni/Koni-LICENSE"
-install -m 0644 "$node_root/LICENSE" "$prefix/share/doc/koni/Node-LICENSE"
-if [[ "$(uname -s)" == "Linux" ]]; then
-  install -m 0755 "$KONI_PINNED_BWRAP_PATH" "$prefix/libexec/koni/pi-runtime/bwrap"
+packages=()
+while IFS= read -r package; do
+  packages+=("$package")
+done < <(find "$package_tmp" -maxdepth 1 -type f -name '*.tgz' -print | sort)
+if [[ "${#packages[@]}" -ne 3 ]]; then
+  echo "Expected exactly the Core, Coding, and Research package archives." >&2
+  exit 1
 fi
 
-"$prefix/bin/koni" --version
-"$prefix/bin/koni" models --json >/dev/null
-echo "Installed Köni and its verified Pi runtime under $prefix"
+bundle_id="$(node -e '
+  const { createHash } = require("node:crypto");
+  const { readFileSync } = require("node:fs");
+  const hash = createHash("sha256");
+  for (const file of process.argv.slice(1).sort()) hash.update(readFileSync(file));
+  process.stdout.write(hash.digest("hex"));
+' "${packages[@]}")"
+version_root="$versions_root/$bundle_id"
+package_root="$version_root/package-root"
+if [[ -e "$version_root" || -L "$version_root" ]]; then
+  if [[ -L "$version_root" ]]; then
+    echo "Refusing a symlinked Koni version root: $version_root" >&2
+    exit 1
+  fi
+  node "$repo_root/scripts/dev-package-bundle.mjs" verify "$package_root" "$bundle_id"
+else
+  staged_version="$(mktemp -d "$versions_root/.${bundle_id}.stage.XXXXXX")"
+  staged_root="$staged_version/package-root"
+  mkdir "$staged_root"
+
+  # Materialize only Koni and its ordinary runtime dependencies. Pi's package loader supplies all
+  # @earendil-works/pi-* and TypeBox peers from the user's active Pi installation.
+  npm install \
+    --prefix "$staged_root" \
+    --no-package-lock \
+    --no-audit \
+    --no-fund \
+    --ignore-scripts \
+    --omit=dev \
+    --legacy-peer-deps \
+    "${packages[@]}" >/dev/null
+
+  # npm-created command links are not part of the runtime closure and would make the sealed tree
+  # depend on symlink behavior. The explicit prefix/bin launcher is activated separately below.
+  rm -rf -- "$staged_root/node_modules/.bin"
+  node "$repo_root/scripts/dev-package-bundle.mjs" seal "$staged_root" "$bundle_id"
+  node "$repo_root/scripts/dev-package-bundle.mjs" verify "$staged_root" "$bundle_id"
+  node -e 'require("node:fs").renameSync(process.argv[1], process.argv[2])' "$staged_version" "$version_root"
+  staged_version=""
+  node "$repo_root/scripts/dev-package-bundle.mjs" verify "$package_root" "$bundle_id"
+fi
+
+package_roots=()
+for package_path in core coding-profile research-profile; do
+  package_roots+=("$package_root/node_modules/@koni/$package_path")
+done
+
+# Prove the sealed closure and launcher before changing either Pi settings or prefix/bin/koni.
+candidate_launcher="$package_root/node_modules/@koni/core/bin/koni.js"
+test "$("$candidate_launcher" --version)" = "$(node -p 'require(process.argv[1]).version' "$repo_root/packages/core/package.json")"
+"$candidate_launcher" --help | grep -q '^Usage:'
+preflight_project="$package_tmp/preflight-project"
+mkdir "$preflight_project"
+git -C "$preflight_project" init -q
+"$candidate_launcher" init coding --root "$preflight_project" >/dev/null
+"$candidate_launcher" config validate --root "$preflight_project" --json >/dev/null
+
+# Activation is recoverable across both ordinary failures and process crashes. The journal stores
+# only Koni-owned package entries plus an authenticated launcher snapshot; old versioned package
+# bytes are deliberately retained for already-running authorities.
+node "$repo_root/scripts/register-dev-packages.mjs" \
+  activate "$activation_journal" "$prefix/bin/koni" "$candidate_launcher" "${package_roots[@]}"
+launcher="$prefix/bin/.koni.$$.new"
+ln -s "$candidate_launcher" "$launcher"
+mv -f "$launcher" "$prefix/bin/koni"
+
+test "$("$prefix/bin/koni" --version)" = "$(node -p 'require(process.argv[1]).version' "$repo_root/packages/core/package.json")"
+"$prefix/bin/koni" --help | grep -q '^Usage:'
+smoke_project="$package_tmp/project-smoke"
+mkdir "$smoke_project"
+git -C "$smoke_project" init -q
+"$prefix/bin/koni" init coding --root "$smoke_project" >/dev/null
+"$prefix/bin/koni" config validate --root "$smoke_project" --json >/dev/null
+test -f "$smoke_project/.koni/project.yaml"
+node "$repo_root/scripts/register-dev-packages.mjs" commit "$activation_journal" "$prefix/bin/koni"
+
+echo "Installed @koni/core, @koni/coding-profile, and @koni/research-profile under $prefix"
+echo "Registered the three Koni packages with Pi; existing authentication, settings, and resources were preserved."
+bash "$repo_root/scripts/report-koni-path.sh" "$prefix"

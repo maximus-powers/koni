@@ -131,20 +131,31 @@ report, rollback, cockpit
 The CLI may expose compatibility aliases, but project workflows should store
 the canonical action ID in events and journals.
 
-The research `rollback` action is one compiler-owned
-`rollback.forward_reversal` transaction. It is available only for paused,
-clean tracked runs and should always be previewed first with
-`koni rollback <commit-or-ticket> --reason <reason> --dry-run`. It
-archives causal graph/ticket/worktree state and publishes a new forward commit;
-it never rewinds the integration ref or erases receipts and reports.
+The research `rollback` action remains the semantic ID for one compiler-owned
+`rollback.forward_reversal` transaction. It is available only when the current
+runtime surfaces that exact recovery for a paused, clean tracked run. Current
+Core has no generic `koni rollback` CLI: pause the run, inspect its durable
+evidence, and use only an exact forward-compensation action presented by the
+control center. The transaction archives causal graph/ticket/worktree state
+and publishes a new forward commit; it never rewinds the integration ref or
+erases receipts and reports.
+
+> **Pi-native command supersession — 2026-07-16:** The frozen Rust profile advised previewing
+> `koni rollback <commit-or-ticket> --reason <reason> --dry-run`. That command is retained here as
+> migration history, not a current alias; do not invoke it against the Pi package line.
 
 ## Validation and parity
 
 Validate the immutable profile IR with:
 
 ```sh
-cargo run -p koni-cli -- validate-profile profiles/research
+koni config validate --root . --json
 ```
+
+> **Pi-native validation supersession — 2026-07-16:** The frozen Rust source tree used
+> `cargo run -p koni-cli -- validate-profile profiles/research`. Installed projects validate the
+> complete authenticated effective profile through the current command above; the Cargo form is
+> retained only as oracle history.
 
 The differential corpus in `reference/parity/` defines normalization and seven
 behavior strata. A change to this profile is compatible only when those

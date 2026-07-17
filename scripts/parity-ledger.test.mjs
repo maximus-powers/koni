@@ -30,6 +30,39 @@ test("oracle fingerprint rejects locked-input digest drift", () => {
   assert.ok(errors.some((error) => error.includes("digest drift for Cargo.lock")), errors.join("\n"));
 });
 
+test("oracle capture provenance and isolation are mandatory", () => {
+  const model = clone(loadParityRepository(root));
+  model.oracleCaptures[0].capture.isolation.provider_calls = 1;
+  model.oracleCaptures[0].capture.oracle.commit = "0".repeat(40);
+  const result = validateParityModel(model);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((error) => error.includes("capture provenance differs")), result.errors.join("\n"));
+  assert.ok(result.errors.some((error) => error.includes("capture isolation contract is not closed")), result.errors.join("\n"));
+});
+
+test("oracle capture cannot drop command contracts or smuggle unsafe install paths", () => {
+  const model = clone(loadParityRepository(root));
+  model.oracleCaptures[0].capture.commands = model.oracleCaptures[0].capture.commands.filter((command) => command.id !== "compile-ticket-contract");
+  model.oracleCaptures[0].capture.install_tree[0].path = "../live-project/secret";
+  const result = validateParityModel(model);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((error) => error.includes("required command compile-ticket-contract is missing")), result.errors.join("\n"));
+  assert.ok(result.errors.some((error) => error.includes("unsafe install path")), result.errors.join("\n"));
+});
+
+test("a passing TypeScript case requires a canonical isolated all-pass capture", () => {
+  const model = clone(loadParityRepository(root));
+  const bundle = model.bundles.find((candidate) => candidate.entry.id === "KPAR-SES-0001");
+  const capturedCase = bundle.targetCapture.cases.find((candidate) => candidate.id === bundle.entry.id);
+  capturedCase.assertions[0].outcome = "failed";
+  bundle.targetCapture.isolation.provider_calls = 1;
+  const result = validateParityModel(model);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((error) => error.includes("isolation contract is not closed")), result.errors.join("\n"));
+  assert.ok(result.errors.some((error) => error.includes("non-passing assertion")), result.errors.join("\n"));
+  assert.ok(result.errors.some((error) => error.includes("canonical hash drift")), result.errors.join("\n"));
+});
+
 test("unknown action operation fails closed", () => {
   const model = clone(loadParityRepository(root));
   model.bundles[0].actions.actions[0].op = "shell.run-anything";
