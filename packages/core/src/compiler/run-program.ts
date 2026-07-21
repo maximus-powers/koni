@@ -9141,18 +9141,17 @@ async function resolveCommandCheck(
     const inputPaths = [...new Set([...(member?.inputPaths ?? []), ...boundInputPaths])]
       .map((value) => normalizeCheckPath(value, `${checkId} input path`))
       .sort(compareText);
-    for (const value of inputPaths) {
-      // A proof check inherently reads its toolchain manifests — the package manifest, the pnpm
-      // workspace/lockfile, and tsconfig — to resolve and run (`pnpm exec vitest` cannot start
-      // otherwise). These are shared repository infrastructure, not ticket-owned source, so they
-      // can never be expressed in a ticket's covered_paths; requiring it deadlocked every
-      // implementation proof (observed live across both Sonnet and Opus planners). Exempt them from
-      // the read-scope containment — they remain normalized, compiler-validated project files — while
-      // every other declared input must stay inside the attempt's granted read scope.
-      if (!isToolchainManifestPath(value)) {
-        assertPathInScopes(value, input.descriptor.readPaths, `${checkId} input path`);
-      }
-    }
+    // A proof check reads not only the ticket-owned production seams (the attempt's covered read
+    // grant) but also its declared support files — the test files it runs, the vitest/tsconfig
+    // config, and the package manifest `pnpm exec vitest` needs to resolve. The compiler already
+    // lists those support files in the check's source manifest and the ticket's runtime read grant,
+    // so they are readable at run time; validating check inputs against the narrow per-step covered
+    // scope alone rejected every support file as "outside path scope" and deadlocked every
+    // implementation proof (observed live across both Sonnet and Opus planners). Validate against the
+    // union of the granted read scope and the check's own declared source/support paths; other
+    // inputs still stay bounded to the attempt's read grant.
+    const checkReadScope = [...input.descriptor.readPaths, ...(member?.sourcePaths ?? [])];
+    for (const value of inputPaths) assertPathInScopes(value, checkReadScope, `${checkId} input path`);
     const dynamicResult = optionalRecord(definition.dynamic_result);
     const resultPath = resolveDynamicResultPath(dynamicResult, binding.root, binding.variables, checkId);
     if (resultPath !== undefined) assertPathInScopes(resultPath, input.descriptor.writePaths, `${checkId} result path`);
@@ -9358,21 +9357,6 @@ function normalizeCheckPath(value: string, label: string): string {
     trimmed.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
   ) fail("check_path", `${label} must be a normalized project-relative path`);
   return trimmed;
-}
-
-/**
- * Shared toolchain manifests a proof check must read to resolve and run. These are repository
- * infrastructure rather than ticket-owned source, so they are exempt from a check input's
- * covered-path containment (see the caller). The value is an already-normalized project-relative
- * path.
- */
-function isToolchainManifestPath(value: string): boolean {
-  const base = value.split("/").at(-1) ?? value;
-  return base === "package.json" ||
-    base === "pnpm-workspace.yaml" ||
-    base === "pnpm-lock.yaml" ||
-    base === "tsconfig.json" ||
-    /^tsconfig\..+\.json$/u.test(base);
 }
 
 function assertPathInScopes(value: string, scopes: readonly string[], label: string): void {
