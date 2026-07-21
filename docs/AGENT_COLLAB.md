@@ -1,5 +1,477 @@
 # Koni Agent Collaboration Registry
 
+### 2026-07-19 — clean Medium Coding smoke running on bundle `e86b9609`
+
+Primary integration has installed and project-upgraded the authenticated Coding bundle
+`sha256:e86b9609cf72c88303821d33a952a5a2f61e2a34b981fe8601872a2649b5a5f0`, preserving Pi auth and
+the old blocked canary as evidence. Clean run `run-5714e72a-ac93-4aeb-bf77-8094e7e4b3a3` is active
+through Pi `/koni-run`; no Updog-specific profile edit is authorized. The full native run-program,
+Core typecheck, Coding package, and profile-bundle gates pass. Current observations and the guarded
+old-TUI authority-respawn race are recorded append-only in
+[`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+### 2026-07-18 — live Medium planner compact-and-retry boundary claimed
+
+Primary integration is correcting the fresh Updog Medium canary's pre-transport input-pressure
+failure without weakening authority limits or editing Updog. Scope is the exact provider exposure
+error classification in `packages/core/src/authority/run-engine.ts`, a real Pi AgentSession
+compact-and-retry regression in `packages/core/test/pi-token-admission.test.ts`, and append-only
+coordination notes. The failed canary remains blocked and idle as evidence; no provider, profile,
+project state, credential, terminal layout, or unrelated compiler behavior is in scope.
+
+### 2026-07-18 — bounded run pagination and quiesce closure claimed
+
+`bounded_run_pagination/root` owns the pre-freeze migration from mandatory whole-project
+`RunRecord[]` materialization to an anchored one-record-at-a-time scan, revision-bound compact run
+pages, lazy revision-checked selected details, and restart-safe bounded quiesce batches. It will
+migrate recovery, monitor, adoption, attempt lookup, interactive project status, and the full
+control center without adding a run-count cap or weakening exact run/action authority. Legacy
+`run.list` becomes an explicitly output-proportional compatibility surface; quiesce retains only a
+bounded ID sample plus exact counts. The active storage owner still leases ProjectStore,
+FileJournal, and their focused tests, so this lane begins with a disjoint pure page/cursor module
+and will not touch those paths before an explicit handoff. No provider, network, credential, user
+Pi state, terminal/pane, live project, or frozen Updog mutation is authorized. Exact scope and
+transitions are append-only in
+[`agent-collab/bounded-run-pagination.md`](agent-collab/bounded-run-pagination.md).
+
+### 2026-07-18 — composed CC-6 liveness diagnosis corrected
+
+The causal action/compiler/store trace supersedes the earlier lost-wake-up suspicion: the
+change-control decision scenario's fixed 30-second observer expired during steady durable action
+progress, amplified by authenticated ~35ms reads polled every 10ms. Consecutive commits completed
+all checkpoints in roughly 96–110ms, compiler calls exited, nested store reads retained active
+tokens, and no settlement promise was stranded. The composed waiter is being changed to 200ms
+polling with a 30-second no-progress watchdog, a separate 90-second hard cap, and a 180-second test
+ceiling. Temporary production trace seams are removed; production settlement/store semantics are
+unchanged. The separate detached reentrant-child serializer defect is not causal here and remains
+an independently owned store hardening contract.
+
+### 2026-07-18 — authority publication-order audit claimed
+
+Primary integration owns one narrow release-gate correction in
+`packages/core/src/authority/project-store.ts` plus focused project-store tests. A provider-free
+terminal rehearsal proved that one file-journal transaction can rename a completed run record
+before a later hash-bound evidence artifact, allowing an unsynchronized reader to observe an
+invalid published projection. The correction will preserve crash-forward recovery while ordering
+unreferenced/new immutable artifacts before run records and publishing project authority state
+last. Run/action validators, archive semantics, providers, credentials, installed Pi state, live
+projects, terminals, and the frozen Updog canary are out of scope.
+
+> **Publication-order correction complete — 2026-07-18:** ordinary reads now share a reentrant
+> serialized lane with commits; project mutations install supplied evidence/artifact destinations
+> first, referencing run records second, and publish the project authority revision/receipt last.
+> Prepared-journal crash recovery remains forward-only. The focused project-store contract is
+> **9/9**, adjacent authority-server/store coverage is **18/18**, and strict Core typecheck is
+> green. The terminal receipt lane owns the final immediate-read end-to-end assertion before this
+> release gate is retired.
+
+### 2026-07-18 — review provenance semantic replay correction claimed
+
+Primary integration owns one narrow compiler correction in
+`NativeRunCompilerProgram.#reviewCandidateNodeIds`: historical terminal outputs must be reparsed
+with the exact compiled operation/workflow/step change-control contract that originally authorized
+them. The composed Research suite proved the artifact, attempt, assignment, and terminal hash were
+all correct; only replay had dropped the semantic binding and misread a prior proposal selection as
+ordinary output. The validator remains fail-closed when a historical step has no compiled binding.
+No provider, credential, installed Pi state, live project, terminal, or frozen Updog state is in
+scope.
+
+### 2026-07-18 — canonical proposal UI fixture repair claimed
+
+`lifecycle_settlement_races/root` owns only
+`packages/core/test/fixtures/canonical-control-ticket.ts` and the two focused control-center
+proposal-review cases. The production validator now correctly requires every terminal-accepted
+configured-validation attempt to bind one exact `assignment_validation` action; the shared fixture
+still fabricated its success proof without that action. This lane will migrate the fixture through
+the production action plan/journal/proof constructors, keep production fail-closed, and record exact
+provider-free evidence in
+[`agent-collab/lifecycle-settlement-races.md`](agent-collab/lifecycle-settlement-races.md).
+
+> **Read-only CC-1 through CC-6 audit extension — 2026-07-18:** root additionally assigned
+> `lifecycle_settlement_races/root` an independent audit of the full frozen change-control
+> authority surface and serial release gate. It owns no production source for this extension and
+> will report exact P0/P1 adversaries without overlapping the active terminal/composed owners.
+
+### 2026-07-18 — Pi-native operator discoverability closure
+
+Primary integration aligned the user-facing entry points without changing their shared authority
+model: `/koni-run` opens guided intake for an independent supervised background run,
+`/koni-runs` opens the compact companion overlay, and `/koni` plus manually invoked `koni tui`
+open the same full control center. `/koni help`, the Get Started guide, the CLI guide, and the
+control-center key table now describe those surfaces consistently. Docs typecheck, lint, and
+production build are green; the build emits only the pre-existing multiple-lockfile workspace-root
+warning. This note supersedes older collaboration handoffs that described these entry points as
+missing, while preserving their historical text.
+
+### 2026-07-18 — terminal zero-check authority correction claimed
+
+`terminal_zero_check/root` owns only the zero-configured-check terminal-policy guard in
+`authority/run-engine.ts`, focused provider-free regressions in `terminal-policy-runtime.test.ts`,
+and append-only notes. An absent immutable configured-check grant will be permitted only for an
+exactly empty validation/replay projection; every non-empty projection remains rejected. Required
+receipt and retained/source evidence semantics remain independent. Mailbox:
+[`agent-collab/terminal-zero-check.md`](agent-collab/terminal-zero-check.md).
+
+> **Terminal zero-check correction complete — 2026-07-18:** the guard now permits a missing
+> `configuredChecks` grant only for an exactly empty validation/replay projection; all three
+> independently non-empty projection surfaces still fail closed. Required receipt and retained/
+> source evidence paths are unchanged. The focused regression moved to the released
+> `execution-policy-authority.test.ts` because the originally named record suite has unrelated
+> legacy proposal fixtures awaiting canonical control-ticket migration. Evidence is **10/10**,
+> strict Core typecheck is green, and scoped diff checks pass. The lease is released; exact details
+> are in [`agent-collab/terminal-zero-check.md`](agent-collab/terminal-zero-check.md).
+
+> **Terminal receipt-ordering follow-up — 2026-07-18:** primary integration reopened the same
+> narrow lane after shipped Research reached the next boundary. The correction will preserve the
+> Rust order: compiler-issued context before the attempt, durable output/action admission, exact
+> scoped compile or review action completion, then receipt evaluation plus terminal-policy/action
+> settlement in one CAS. Model payloads receive no receipt authority; pause/delete and restart
+> remain explicit between every durable boundary. Mailbox remains
+> [`agent-collab/terminal-zero-check.md`](agent-collab/terminal-zero-check.md).
+
+> **Research change-control parity declaration — 2026-07-18:** the earlier reserved/absent parity
+> status is superseded without erasing its history. `KPAR-CHG-0001` is now one `specified` P0 case
+> with exactly five public temporal assertions: atomic request/hold; reviewed rejection/no-op/
+> application and delayed source release; exact crash-forward resolver retry without chaining;
+> pause winning final settlement; and deletion winning the same boundary permanently. Each maps
+> one composed Research test and one frozen Rust semantic identity, with canonical control-ticket,
+> CC-5 raw/store publication, and archive/v1/retry tests as supplemental targets. The development
+> corpus validates at **30 cases / 39 checkpoints / 85 assertions / 208 actions / 12 issues**, zero
+> blockers. It has no CHG capture and was not published; the source-stable whole-corpus publisher
+> remains the sole promotion boundary. Details are in
+> [`agent-collab/parity-change-control.md`](agent-collab/parity-change-control.md).
+
+> **Composed CC-6 aggregate liveness finding — 2026-07-18:** the first coherent aggregate is
+> **4/5 in 123.33s**. The approved-application case stalls at its final configured review with a
+> `terminal_accepted` attempt and a still-`running` assignment-validation journal; no semantic
+> result or settlement exists, the source remains correctly held, and shutdown waits on the same
+> task. This occurs before CC-5 release/Git publication. `change_control_composed_test/root` has a
+> bounded `run-engine.ts` assignment-settlement liveness lease and failure-only composed
+> instrumentation; all run-record/archive predicates remain frozen. Details are in
+> [`agent-collab/change-control-authority-integration.md`](agent-collab/change-control-authority-integration.md).
+
+> **Run-byte anchor and archive-order closure — 2026-07-18:** the earlier archive-inventory note
+> caught descriptor-only deletion but still trusted a mutable run plus matching disk subset and
+> incorrectly reconstructed global order from action `createdAt`. Project authority state now
+> binds the exact raw bytes of the exact sorted run-id set; commits and genuine v1/flat-Git
+> migrations update those digests state-last. Archive order remains the predecessor-authenticated
+> append order, including an older action that settles after pressure compaction. Normalized,
+> case-folded ProjectStore destination identity plus ASCII authority paths close APFS aliases for
+> state, run, and archive effects. Final provider-free evidence is **321/321** across project store,
+> change-control store, and legacy Git migration, with strict Core typecheck and scoped diff check
+> green. The local trust-root boundary and separate combined-legacy/budget handoff are explicit in
+> [`agent-collab/archive-anchor-order.md`](agent-collab/archive-anchor-order.md); source/test leases
+> are released.
+
+> **Archive inventory closure correction — 2026-07-18:** the earlier closure remains valid for
+> exact index-to-directory correspondence, but its read-side created-at reconstruction is not a
+> valid runtime ordering rule when an older unsettled action becomes removable only after newer
+> settled rows were archived. Exact inventory also does not detect coordinated removal of both an
+> unreferenced descriptor and its artifact. Source freeze is reopened for
+> `archive_anchor_order/root` to add both red preimages, remove the false global-order predicate,
+> and bind exact run bytes into the state-last project authority root. `store_patch_review/root`
+> owns independent review. Arbitrary same-user rewriting of that authority root is explicitly
+> outside this local trust-root boundary. A separate read-only audit is classifying combined
+> legacy-shape, migration transaction-size, and bounded-read/load-amplification findings.
+
+> **Aggregate Research liveness gate — 2026-07-18:** on the first coherent five-scenario run after
+> archive and CC-5 closure, four cases completed and the reviewed application case timed out at its
+> final configured `verify` action. The accepted attempt, active Git cycle, and held source were
+> correct; the validation journal remained `running`, and shutdown awaited the same background
+> promise. This is being treated as a production lost-wakeup, not masked with a timeout or blind
+> rerun. The composed lane owns the bounded `run-engine.ts` diagnosis/regression, the lifecycle lane
+> owns test-only terminal/archive integrity matrices, and the parity lane owns KPAR-CHG-0001 plus
+> exact collected Vitest-title validation. Source freeze, packaging, credentials, and the guarded
+> Updog canary remain held until the aggregate and broad provider-free gates are green.
+
+> **Store-lane and freeze-seal update — 2026-07-18:** focused tracing reaches the final review
+> primitive's AuthorityServer mutation callback and then blocks on its first store read, before any
+> semantic compiler call. This proves an authority↔store lane inversion; the serializer repair is
+> sequenced behind the distinct archive-inventory patch so two owners do not edit
+> `project-store.ts` concurrently. The expanded store matrix is **281/283**: only raw row/segment
+> index omission is accepted, while every same-CAS, terminal-success, ordering, boundary,
+> duplicate-index, and pressure case rejects correctly. Exact directory inventory is the bounded
+> repair. The publication seal was also expanded to all authored shipping/build/rehearsal inputs,
+> with parity-runner units green **9/9**; its current moving-tree hash is not release evidence.
+
+### 2026-07-18 — composed Research authority suite resumed; Git-first approval blocker proven
+
+`change_control_composed_test/root` resumed its exclusive provider-free integration file. Five
+shipped-Research-profile scenarios now type-check against canonical compiler control-ticket
+authority, v2 decisions/materialization/recovery, archive-v2 proofs, and typed stopped-action
+settlements; targeted self-hashed materialization and resolver-retry substitutions are also wired
+to real composed states. The first execution exposed a pre-ticket parity defect: TypeScript runs
+`approved_plan_compile` before materializing the permanent run checkout, so `rules.evaluate`
+compensates on `ENOENT`. The frozen Rust oracle is Git-first. The test now observes that exact
+journal boundary and will accept only `planning=retired`, `run=ready` before successful rule
+evaluation. Full durable evidence and the additive design correction are in
+[`agent-collab/change-control-authority-integration.md`](agent-collab/change-control-authority-integration.md).
+
+### 2026-07-18 — per-case parity publication claimed
+
+`parity_case_publication/root` owns only `scripts/parity-{runner,ledger}*.mjs`,
+`reference/parity/**`, and append-only coordination notes. It is replacing the shared multi-case
+target artifact with one canonical reviewed capture per case, adding an explicit one-pass
+provider-free publication transaction, and adding stable-domain cases for configured actions and
+lifecycle, operation/workflow/check semantics, semantic profile retirement, the shared full
+control center, and passive Pi companion coexistence. `KPAR-CHG-0001` is reserved but will remain
+absent until the Research change-control/recovery API freezes. It excludes all production source,
+providers, credentials, packages, terminals, live projects, and the frozen Updog canary. Mailbox:
+[`agent-collab/parity-case-publication.md`](agent-collab/parity-case-publication.md).
+
+#### 2026-07-18 — per-case parity tooling frozen; release publication waits for source freeze
+
+The validator, one-pass rollback-protected publisher, source-generation seal, five new stable-domain
+contracts, exact proof identities, and collision-free disposable target reports are implemented.
+The current valid development ledger has 24 mechanically split prior reviewed cases and five
+honestly `specified` additions; tooling suites pass **17/17**, while the release gate correctly
+refuses promotion. A complete publication attempt wrote nothing when concurrent production edits
+changed Core identity underneath restart tests. `KPAR-CHG-0001` remains reserved and absent.
+`pi-native-port/root` will resume this lane only after the Research composed API and literal source
+tree freeze, then run the sole promoting publisher and complete release gate. Exact evidence:
+[`agent-collab/parity-case-publication.md`](agent-collab/parity-case-publication.md).
+
+### 2026-07-18 — graph/rules semantic closure claimed
+
+`config_semantic_authority/root` now owns the bounded compiler/graph closure for parsed-only node
+annotations/semantic fields/gate requirements, edge predicates, gate-policy context/obligation/
+passing-receipt semantics, and lifecycle/rules state machines. Each field must change a real
+provider-free outcome using the Rust oracle and shipped profiles; synthetic DTO consumption is not
+accepted. It excludes run engine/records/scheduler/program, control center/monitor, release/profile
+migrations/manifests, providers, packages, live projects, terminals, and the frozen Updog canary.
+Coordination is append-only in
+[`agent-collab/graph-rules-semantic-closure.md`](agent-collab/graph-rules-semantic-closure.md).
+
+### 2026-07-18 — complete configuration consumer audit and action-host contract
+
+`config_semantic_authority/root` published an accepted-field-to-native-consumer map for every
+shipped profile domain and an exact list of fields that remain parsed, reference-checked, or merely
+projected without their promised behavior. The generic action VM is explicitly **not** marked
+consumed; its required authority host/effect-replay contract is now documented. See
+[`configuration-consumer-inventory.md`](configuration-consumer-inventory.md),
+[`action-authority-contract.md`](action-authority-contract.md), and the append-only mailbox in
+[`agent-collab/config-semantic-authority.md`](agent-collab/config-semantic-authority.md).
+
+### 2026-07-18 — pre-freeze Pi-native product parity claimed
+
+`pre_freeze_product_parity/root` owns an independent provider-free audit and bounded repair of the
+full Pi-native control center (`/koni` and `koni tui`) plus the minimal Pi-chat background-run
+companion (`/koni-run`, `/koni-runs`, status and attention). The lease is limited to
+`packages/core/src/control-center/**`, `packages/core/src/monitor/**`, narrow command wiring when
+required, UI-focused tests, and append-only documentation. It excludes run authority/state,
+compiler/config/profile/install/migrations/actions/providers/credentials/packages, live projects,
+terminals, and the frozen Updog canary. Coordination and final parity evidence are recorded in
+[`agent-collab/pre-freeze-product-parity.md`](agent-collab/pre-freeze-product-parity.md).
+
+### 2026-07-18 — action/workflow authority parity claimed
+
+`action_authority_parity/root` owns the release-blocking production consumption of pinned action
+selectors, workflow `validation_action` boundaries, and configured nonautomatic action stages.
+The lane will authenticate and persist plans, journals, and per-effect receipts before dispatch;
+resume exact nonterminal journals after restart; revalidate lifecycle/config/state before each
+primitive; and delegate only to existing typed authority/compiler/Git/session methods. Unsupported
+reachable bindings fail at configuration compilation rather than producing no-op receipts. It
+does not touch profile migrations/manifests, providers, credentials, installs, live projects,
+terminals, or the frozen Updog canary. Coordination is append-only in
+[`agent-collab/action-authority-parity.md`](agent-collab/action-authority-parity.md).
+
+### 2026-07-18 — configuration semantic second-audit handoff
+
+`config_semantic_authority/root` completed a read-only second consumer audit after freezing the
+typed behavior IR. It found inert planning session/seed-stage knobs, duplicate raw planning-policy
+interpretation, and an unconsumed compile-action/generic action-VM surface. No overlapping source
+was edited; exact evidence and root/profile-owner handoffs are appended in
+[`agent-collab/config-semantic-authority.md`](agent-collab/config-semantic-authority.md).
+
+### 2026-07-17 — configuration-semantic authority claimed
+
+`config_semantic_authority/root` owns exact compile-time profile/run-type behavior schemas,
+hash-bound semantic projection, deterministic action-recipe planning/execution contracts, and
+configured New Run intake/role projection. It does not own authority run execution, run records,
+Git implementation, release/install artifacts, providers, terminals, live projects, or the
+frozen Updog canary. Detailed coordination is append-only in
+[`agent-collab/config-semantic-authority.md`](agent-collab/config-semantic-authority.md).
+
+### 2026-07-17 — compiler-capability control-center closure claimed
+
+`stage_capability_authority/root` has released its standalone DTO lane and now owns only
+`packages/core/src/control-center/**`, focused control-center tests, and append-only documentation.
+This bounded follow-up consumes the landed `run.controls`, `run.action.execute`, and `run.lineage`
+authority APIs; implements Action Palette/Form with honest availability, reasons, confirmation,
+and guarded delete/merge routing; renders authenticated human attempt lineage in Agents/Chat; and
+finishes durable question-batch save/revise/next/final-resolve behavior with recommendations. It
+does not edit `authority/run-engine.ts`, compiler/config/profile/extension/provider code, live
+state, terminals, package exports, or the frozen Updog canary. Raw Configure document integration
+remains held until the primary integrator explicitly releases that API. Coordination remains in
+[`agent-collab/stage-capability-authority.md`](agent-collab/stage-capability-authority.md).
+
+### 2026-07-17 — compiler-authored stage/action capability contract claimed
+
+`stage_capability_authority/root` owns only a standalone, versioned stage/action capability DTO,
+its fail-closed validators/derivation helpers, focused provider-free tests, and an append-only
+handoff note. The module may describe honest availability, disabled reasons, confirmation, and
+compiler-authored form schemas for plan approval/revision, question answer/resolution,
+pause/resume, retry, merge authorization, deletion, configured actions, and automatic/no-action
+stages. It does not execute effects, infer permission from display strings, or edit
+`authority/run-engine.ts`, compiler implementations, `control-center/**`, package exports, live
+projects, providers, credentials, processes, terminals, or the frozen Updog canary. Mailbox:
+[`agent-collab/stage-capability-authority.md`](agent-collab/stage-capability-authority.md).
+
+#### 2026-07-17 — stage/action capability contract frozen; lease released
+
+The standalone v1 catalog/invocation contract now fail-closes on stale revision/generation,
+disabled or unknown actions, missing destructive confirmation, editable compiler-bound context,
+invalid forms, unsafe text, duplicate identities, and incoherent stage controls. It models every
+native lifecycle/operator intent without executing an effect or deriving permission from display
+copy. Focused evidence is **12/12**, isolated strict TypeScript is green, and scoped whitespace is
+clean. Exact root integration steps are recorded in
+[`agent-collab/stage-capability-authority.md`](agent-collab/stage-capability-authority.md); this
+source/test lease is released.
+
+### 2026-07-17 — Configure document authority claimed
+
+`config_document_authority/root` owns a standalone provider-free service for semantic raw
+configuration document list/read/create/rename/delete, optimistic concurrency, run-type
+templates, and guarded legacy-migration preview/apply planning. It excludes the moving run engine,
+control center, package exports, providers, live projects, and the frozen Updog canary. The API and
+handoff remain append-only in
+[`agent-collab/config-document-authority.md`](agent-collab/config-document-authority.md).
+
+#### 2026-07-17 — Configure document authority frozen; lease released
+
+The versioned standalone authority and its raw managed-profile publisher are complete. YAML,
+TOML, and Markdown list/read/update/create/rename/delete use exact catalog/source CAS, full-candidate
+compilation, and one lifecycle transaction; broken YAML remains reachable for repair. The service
+also freezes nine-domain/29-kind semantic DTOs, compiler-resolved run-type templates, and
+exact-preview legacy migration apply. New tests pass **8/8**, existing profile/config/migration
+regressions pass **16/16**, strict Core TypeScript and scoped whitespace are green. Root owns only
+RPC/export/control-center integration. Exact API, caveats, and fingerprints:
+[`agent-collab/config-document-authority.md`](agent-collab/config-document-authority.md).
+
+#### 2026-07-17 — Configure crash-gap seam narrowly reopened
+
+`config_document_authority/root` owns only optional exact authority mutation markers and recovery
+for raw update/create/rename/delete and run-type creation. The marker is committed with the profile
+filesystem transaction so an RPC retry can reconstruct success before an authority-store receipt.
+Legacy migration retains its canonical archived plan/receipt/lifecycle witness. No run-engine,
+exports, control-center, live project, provider, or canary work is in scope. Mailbox remains
+[`agent-collab/config-document-authority.md`](agent-collab/config-document-authority.md).
+
+### 2026-07-17 — provider-free release lifecycle closure claimed
+
+`release_lifecycle_closure/root` owns the final provider-free audit and narrowly scoped repair of
+Git/worktree/manual-merge behavior, profile install/update/migration preservation, packaged CLI
+entrypoints, and disposable package-install evidence. It excludes `authority/run-engine.ts`,
+`state/run-record.ts`, `control-center/**`, `pi/**`, compiler and monitor source, all providers,
+global installation, terminal-pane management, and the frozen Updog canary. Exact findings and
+handoffs are append-only in
+[`agent-collab/release-lifecycle-closure.md`](agent-collab/release-lifecycle-closure.md).
+
+#### 2026-07-17 — semantic-retirement provenance seam frozen; lease released
+
+`release_lifecycle_closure/root` completed the bounded manifest/resource/install provenance seam
+for mandatory declarative YAML-field retirement and released its source lease. Strict Core
+TypeScript, the **4/4** retirement suite, and scoped whitespace are green; the related manifest
+semantic cases are green. Final official manifest regeneration, old-bundle end-to-end upgrade
+evidence, aggregate matrices, and packed installation remain deliberately deferred until root's
+literal source freeze. Exact behavior and deferred gates are recorded in
+[`agent-collab/release-lifecycle-closure.md`](agent-collab/release-lifecycle-closure.md).
+
+### 2026-07-17 18:15 MST — Gate E session/transcript/lineage release claimed
+
+`session_lineage_release/root` owns the provider-free Gate E audit and closure inside
+`packages/core/src/pi/**` plus focused tests and append-only transition notes. The contract is one
+fresh, immutable, linear Pi session per autonomous attempt; retry, rework, review, recovery, and
+integration form authenticated Koni attempt lineage rather than mutable in-session branches.
+This lane will verify full Pi transcript fidelity, authoritative context reissue after compaction,
+steering/follow-up, pause/delete cancellation, crash/restart recovery, and zero post-delete token
+use against the exact pinned Pi runtime. It will not edit `extension.ts`, `run-engine.ts`,
+`control-center/**`, `monitor/**`, compiler/scheduler files, credentials/settings, or the frozen
+Updog canary. Authority/UI schema gaps will be handed to their current owners through the mailbox:
+[`agent-collab/session-lineage-release.md`](agent-collab/session-lineage-release.md).
+
+### 2026-07-18 — graph/rules semantic closure implemented; runtime handoffs explicit
+
+`config_semantic_authority/root` has closed node annotations/semantic identity/gate-required
+parity, finite edge predicates, gate templates/status/context facts, and a hash-verified lifecycle
+catalog within its leased compiler/graph files. Current Coding and Research baselines pass the
+in-memory current-manifest semantic gate; focused graph/rule/execution suites pass **24/24**.
+Lifecycle remains Prepared only pending an explicit Rust-era-to-Pi ticket status mapping and calls
+to the pure transition authorizer; gate filesystem context remains pending exact configured-check
+grant widening. Evidence and exact handoffs are append-only in
+[`agent-collab/graph-rules-semantic-closure.md`](agent-collab/graph-rules-semantic-closure.md).
+
+### 2026-07-17 — cold authority startup false-negative correction
+
+`pi-native-port/root` verified an isolated Coding Medium smoke project through the complete
+configuration gate before any model/session launch. Its authority became healthy roughly 75 seconds
+after cold packed-runtime materialization, but the bootstrap gave up at 60 seconds. The idle
+authority was stopped and the bounded first-start window is now 120 seconds, retaining immediate
+child-exit failure and all sealed admission checks. This scope touches only
+`packages/core/src/operator/authority-bootstrap.ts` and append-only coordination notes; it excludes
+the externally owned context-building experiment, live provider work, credentials, and project
+state.
+
+### 2026-07-17 — Core stateful-fixture release isolation
+
+`pi-native-port/root` observed seven unrelated Core suites timing out only when their files ran
+concurrently. An isolated representative run-engine lifecycle test passed in 3.7 seconds. Core
+Vitest now serializes files because profile/Git/authority fixture resources are intentionally real
+and share OS-level state; test-internal operation deadlines remain unchanged. This is a test-gate
+reliability correction, not a runtime concurrency change.
+
+### 2026-07-17 — real planner startup pre-provider timeout corrected
+
+`pi-native-port/root`'s first real Medium planner on the isolated Updog smoke worktree was
+blocked after the contained-session construction deadline of 30 seconds. Durable evidence proves
+the timeout occurred before a Pi session header, provider request, reservation, token usage,
+question, ticket, or target-branch change. Core now gives the sealed contained cold-start path the
+same bounded 120-second readiness allowance already required by authority startup; activation and
+provider authorization remain separate. The preserved run will be resumed only from a rebuilt
+runtime after focused verification.
+
+### 2026-07-17 — workspace package-gate coordination
+
+`pi-native-port/root` stopped a second package installer before its test phase after detecting
+unrelated Core/parity Vitest runs. Package activation requires a quiet shared `node_modules` and
+stateful fixture workspace for interpretable results. The blocked live smoke run and its authority
+are stopped while the lane waits; no provider work can occur during this coordination pause.
+
+### 2026-07-17 — Pi read-only model tools and semantic rendering claimed
+
+`pi-native-product-parity-final/root` owns only the installed Pi extension's inert, project-trust-
+checked read-only status/graph/ticket tools, a pure semantic renderer shared with contained
+authority-backed tools, focused provider-free tests, and append-only coordination notes. Every
+interactive call must authenticate the current Core/Pi 0.80.10 runtime and connect only to an
+already-running sealed authority; it must never start recovery, resume a run, create an authority,
+or cause provider work. This lane claims `packages/core/src/pi/{interactive-tools,tool-renderer,
+tool-catalog}.ts`, the minimum `src/extension.ts` registration seam, and focused tests. It excludes
+all graph/context construction, compiler/run-program logic, provider/session/process/runtime code,
+live state, credentials, and the moving `src/authority/run-engine.ts`. Mailbox:
+[`agent-collab/product-lifecycle-operator.md`](agent-collab/product-lifecycle-operator.md).
+
+### 2026-07-17 — compiler-issued sealed model binding claimed
+
+`pi-native-port/root` owns only the shared secret-free Pi model descriptor seal, the required
+`AgentLaunchSpec.model` API/catalog bindings, the distinct provider-output headroom token field,
+and compiler population/focused tests. This lane does not edit graph/context selection,
+`pi/managed-session.ts`, provider reservation/state/process code, Pi credentials/settings, live
+projects, or terminals. The context experiment remains externally owned; runtime admission is
+owned by `pi-native-acceptance-final/root`. Coordination details remain append-only in
+[`agent-collab/native-run-program.md`](agent-collab/native-run-program.md) and
+[`agent-collab/pi-runtime-release-hardening.md`](agent-collab/pi-runtime-release-hardening.md).
+
+## 2026-07-17 08:36 MST — process fallback observer closes post-ESRCH crash window
+
+Independent review invalidated only the 08:24 process supervisor/test hashes: an observation-only
+coordinator could die after ESRCH but before ACK once the in-group sentinel was already gone. The
+authority now supervises a minimal detached signal-0-only fallback with no credentials, runtime,
+project resources, authority fd, or destructive capability. Outcome remains withheld until its
+ESRCH proof; helper failure retains explicit retry authority. New exact crash tests and three full
+focused passes are green at **40/40** each, with clean syntax/diff/leak gates. Replacement hashes and
+the preserved failure history are appended to
+[`agent-collab/pi-runtime-release-hardening.md`](agent-collab/pi-runtime-release-hardening.md).
+
 ### 2026-07-16 — legacy adoption P1 hardening claimed
 
 `legacy_adoption_hardening/root` owns the bounded post-review corrections for live registry-byte
@@ -17,6 +489,16 @@ unstable descent identities. Operator tests use explicit authenticated Pi-runtim
 the production resolver remains unchanged. Strict Core TypeScript passes, the exact no-ambient-env
 adoption suite is **4/4**, the composed adoption/migration suite is **9/9**, and scoped whitespace
 checks are green. The source lease is released for independent review. Details:
+[`agent-collab/legacy-adoption-hardening.md`](agent-collab/legacy-adoption-hardening.md).
+
+#### 2026-07-17 00:18 MST — legacy adoption lease reopened after P1 review
+
+The preceding release verdict is superseded. Path-based traversal can detect an ancestor swap too
+late to prove external bytes were never observed, and the provider-free runtime injection escaped
+through exported production API types. `legacy_adoption_hardening/root` is replacing traversal with
+a genuinely pinned/contained bounded helper and removing every public authentication bypass seam.
+External full gate PID 5081 began on the rejected tree and is diagnostic only. No profile/operator/
+test source will move until it exits. Details:
 [`agent-collab/legacy-adoption-hardening.md`](agent-collab/legacy-adoption-hardening.md).
 
 ### 2026-07-16 — profile compiler production-adapter gaps claimed
@@ -4204,3 +4686,1767 @@ migration/adoption files. The 00:05 composed run crossed active source writes an
 moving-source evidence; a new serialized composed gate may now use the frozen fingerprints in
 [`agent-collab/native-run-program.md`](agent-collab/native-run-program.md) and
 [`agent-collab/legacy-adoption-hardening.md`](agent-collab/legacy-adoption-hardening.md).
+
+## 2026-07-17 01:24 MST — context experiment active again; composed gate held
+
+`pi-native-port/root` observed new concurrent writes in `graph/context-selector.ts`, its focused
+test, `pi/managed-session.ts`, and the production-session test after the prior context freeze.
+Those files are treated as owned and read-only by the release/legacy-adoption lane. The legacy
+filesystem containment tests may continue because their source set is disjoint, but no workspace,
+parity, build, pack, or release result will be accepted until the context owner records the new
+design, evidence, and frozen fingerprints in its mailbox. The release lane is editing only legacy
+migration/adoption containment and authentication files and will not reset or normalize coherent
+context work it does not recognize.
+
+## 2026-07-17 02:24 MST — current context checkpoint independently verified, still read-only
+
+The four context-owned files have remained unchanged since 01:22 MST. Their current behavior and
+fingerprints are recorded append-only in
+[`agent-collab/native-run-program.md`](agent-collab/native-run-program.md); the exact focused suites
+pass **26/26** without source movement. This does not transfer ownership. The release integrator
+will include those exact hashes in the next composed gate and abort that gate on any concurrent
+context write.
+
+## 2026-07-17 02:42 MST — Pi runtime release-hardening lane active
+
+The composed gate is held after independent review found three P1s in attempt-process lifecycle,
+immutable bootstrap, and two-phase effect admission. `pi-native-port/root` now owns only the
+bounded runtime files and focused tests listed in
+[`agent-collab/pi-runtime-release-hardening.md`](agent-collab/pi-runtime-release-hardening.md).
+The context experiment remains a separate read-only lane; legacy migration/adoption is frozen and
+will not be reopened. Other agents should avoid runtime process/bootstrap edits until this lane
+publishes fingerprints and an explicit handoff.
+
+## 2026-07-17 03:10 MST — runtime blocker set closed; bounded context overlap declared
+
+The independent acceptance and session-security audits converge on exactly four P1 domains and no
+P0s: process-group capability/lifecycle, immutable bootstrap execution, preactivation authority
+effects, and prospective Codex token admission. The active runtime lane now owns that closed set.
+Its only overlap with the context experiment is the provider-payload budget hook in
+`pi/managed-session.ts`, recorded in both collaboration mailboxes before editing; the existing
+context-failure propagation and graph ranking behavior are protected. Disjoint process/bootstrap
+work may proceed in parallel, but no composed gate or release handoff is valid until all four
+contracts and their adversarial tests are green together.
+
+## 2026-07-17 — product lifecycle/operator lane active
+
+`pi_native_product_parity_final/root` owns the missing reachable legacy-project migration,
+pending-upstream conflict list/inspect/resolve workflow, and Pi-community inertness correction.
+It is limited to a new operator lifecycle module, CLI/extension, shared control-center files,
+focused tests, exports, and append-only docs. The moving authority engine remains read-only until
+its owner grants a narrow RPC handoff. Context construction, provider/session/runtime machinery,
+legacy migration/adoption internals, live projects, installed binaries, and processes are excluded.
+Detailed lease and the proposed authority contract:
+[`agent-collab/product-lifecycle-operator.md`](agent-collab/product-lifecycle-operator.md).
+
+## 2026-07-17 05:16 MST — product lifecycle/operator source frozen
+
+`pi_native_product_parity_final/root` released its product-source/test lease after strict Core
+typecheck, scoped whitespace validation, and focused **56/56** evidence. Exact fingerprints,
+inert-Pi warning semantics, explicit migration behavior, legacy `flock(2)` bridge boundary, and
+pending-upstream comparison/CAS behavior are recorded in
+[`agent-collab/product-lifecycle-operator.md`](agent-collab/product-lifecycle-operator.md). The lane
+will not reopen those bytes. It is waiting only for an explicit provider-accounting handoff before
+adding the three disjoint `profile.conflicts.*` registrations to `run-engine.ts` plus a focused
+authority integration proof.
+
+## 2026-07-17 — Pi-native current-facing documentation released
+
+`pi_native_docs_final/root` completed the documentation-only reconciliation across the root and
+package READMEs, current maintainer guides, and public Next.js source. Current sections now present
+the three coarse TypeScript/Pi packages, sole Core workflow/effect authority, ordinary Pi
+credentials/settings/sessions, explicit `/koni` and `koni tui` surfaces, guarded migration and
+upstream comparison, immutable attempt-session lineage, and zero automatic provider retries before
+the retained Rust/Codex history. No Core source/test, context/compiler/runtime/provider code,
+manifest, credential, live state, process, terminal, or generated `.next` source was edited. Site
+lint, typecheck, and production build plus scoped whitespace validation pass. Exact scope,
+aggregate documentation hash, and evidence are in
+[`agent-collab/pi-native-docs-final.md`](agent-collab/pi-native-docs-final.md).
+
+## 2026-07-17 05:49 MST — process-retirement proof remediation reopened
+
+`pi_runtime_frozen_audit/root` found that a reaper failure or unexpected sentinel exit can resolve a
+terminal failed outcome before process-group absence is proven, after which the live pool discards
+the only process-bearing handle. The lane is reopened with a bounded lease over only
+`pi/attempt-process-supervisor.ts`, `pi/attempt-process-pool.ts`, the minimum process protocol/types
+if unavoidable, focused process fixtures/tests, and append-only release-hardening notes. It will
+make proven group absence a prerequisite for terminal publication and pool retirement, retain a
+retryable cleanup handle after retirement failure, and add stuck-descendant/retry/reuse-safety
+coverage. Run-engine, provider accounting, context/compiler files, credentials/settings, live state,
+and all product/operator files remain excluded and must retain their frozen fingerprints.
+
+## 2026-07-17 06:19 MST — product authority and lifecycle-race checkpoint accepted
+
+`pi_native_product_parity_final/root` completed the inert installed Pi read tools, sealed
+profile-conflict authority/recovery, and the root-assigned pause/delete/quiesce Git-race remediation.
+Exact advancement tokens gate scheduler launches, semantic publication, and Git intent prepare;
+pre-stop publication intents are exact-CAS compensated or explicitly preserved; final pause/delete
+waits for outside-mutation drain/recovery; and cross-build quiesce admits only one async-scoped
+internal settlement while rejecting all external/ordinary internal mutations. Focused evidence is
+Core typecheck, product/operator **63/63**, authority server **9/9**, and exact quiesce/races **5/5**.
+Independent P0/P1 review accepted checkpoint hashes `run-engine.ts` `fa9e4163…` and `server.ts`
+`c24663b2…`. A broad authority run crossed coherent process-owner writes and is invalid diagnostic
+evidence; the final composed rerun/fingerprint release waits for that owner's stable hash. Context
+selection/construction and run-program prompt/resource logic remain protected and untouched. Full
+checkpoint: [`agent-collab/product-lifecycle-operator.md`](agent-collab/product-lifecycle-operator.md).
+
+## 2026-07-17 06:44 MST — shared Medium authoring example corrected and frozen
+
+`pi-native-port/root` closed the release audit's disjoint profile-documentation drift without
+touching the externally owned context-construction lane or the active process-retirement lane. The
+shared `configure-koni` run-type reference in both official profile bundles now models Coding
+Medium's shipped Planner/Reviewer `gpt-5.6-sol` + `max`, Lead `gpt-5.6-sol` + `xhigh`, and Worker
+`gpt-5.6-terra` + `high` policy. A Coding profile regression parses both the real run type and the
+Markdown YAML example and requires exact equality. Independent bundle inventory/materialization is
+**5/5** and Coding profile evidence is **4/4**; the frozen shared skill hash is `1c150fab…`, Coding
+bundle hash `c83eb529…`, and Research bundle hash `b40f0475…`.
+
+The protected external context checkpoint remains byte-identical (`run-program.ts` `f337ac16…`,
+`context-selector.ts` `99494628…`, and focused tests `41f73582…`/`7bd648eb…`). Final composed gates
+remain held until `pi_runtime_frozen_audit/root` publishes stable process-retirement hashes and the
+read-only release lane accepts them.
+
+## 2026-07-17 07:10 MST — disjoint release surfaces corrected; process proof still active
+
+The root removed the brand gate's obsolete requirement that one public docs page retain the legacy
+product name. All current/shipping paths are now covered by the general scan; `check-brand.sh` and
+its shell syntax check pass independently. The shipped Core README now accurately describes inert
+Koni command/tool/profile registration and names the four read tools without weakening its no-read,
+no-auth, no-autostart guarantee. The product lane also hash-bound conflict crash recovery to the
+transaction-time full configuration and effective bundle; an unrelated valid config edit can no
+longer be mistaken for the crashed transaction's result.
+
+The process lane is not frozen yet. Its admitted and pre-admission cleanup-retention regressions are
+green, but the newly assigned pre-owner guardian replacement test is still being debugged and has
+timed out in independent reproduction. No composed release result should be accepted until that
+exact test and the repeated focused process suite pass without leaked descendants.
+
+## Context-owner coordination request — compiled default run type
+
+The static Pi-native release audit found that the compiled project's `default_run_type` is dropped
+from `NativeRunCompilerProgram.controlCatalog()`. Consequently the CLI hard-codes `small` and the
+control center selects the first sorted run type, even though both shipped profiles declare Medium
+and arbitrary valid profiles need not define Small. The product owner is repairing only the
+protocol/controller/CLI consumers. The context/run-program owner is asked to coordinate before its
+next save point and add the exact compiled default identifier to the read-only control catalog
+projection, with a focused producer assertion. No prompt, resource-selection, dynamic-context, or
+compaction semantics should change. Until that handoff is recorded, the protected `run-program.ts`
+hash remains `f337ac16…` and the composed release gate stays held.
+
+## 2026-07-17 06:39 MST — generic compiled run-type CLI help refrozen
+
+`pi_native_product_parity_final/root` closed a disjoint release-audit P2 in shell help: `koni run`
+now advertises `--type <run-type>` and explains that available choices come from the compiled
+project profile/configuration instead of implying only `small|medium|large` are accepted. The full
+operator suite is **18/18** and exact fingerprints are recorded in
+[`agent-collab/product-lifecycle-operator.md`](agent-collab/product-lifecycle-operator.md). Process,
+profile, context, authority, credentials, live state, and terminal surfaces were untouched; the
+composed authority gate still waits for the process-retirement freeze.
+
+## 2026-07-17 07:12 MST — profile recovery whole-tree witness independently accepted
+
+A replacement read-only product audit found and then accepted the bounded remediation for one P1:
+profile-conflict crash recovery now persists and rechecks both the transaction-time compiled
+configuration hash and exact effective authored-bundle hash. Historical records with neither field
+remain readable but cannot reconstruct an authority receipt; partial/malformed pairs fail closed.
+Tests cover exact recovery, unrelated valid resource drift, historical absence, and partial-pair
+rejection. Strict typecheck and the direct conflict suite are green; the authority-backed suite is
+held only for the separate process-runtime hash freeze. Context/compiler selection, process runtime,
+profile bundles, authority engine, credentials, live state, and terminal surfaces were untouched.
+Exact current hashes and evidence are in
+[`agent-collab/product-lifecycle-operator.md`](agent-collab/product-lifecycle-operator.md).
+
+## 2026-07-17 07:49 MST — compiled project default reaches New Run and CLI
+
+`pi_native_product_parity_final/root` closed the static-audit P1 where operator surfaces discarded
+the compiler-validated `default_run_type`. The shared catalog now carries and validates the exact
+default; New Run selects it regardless of display order; and an omitted CLI `--type` resolves from
+the same sealed catalog instead of inventing `small`. The one protected native producer field was
+explicitly coordinated and both adjacent context suites remained green with unchanged context
+fingerprints. Typecheck, control center **30/30**, operator **19/19**, native run program **9/9**,
+and context/production **27/27** pass. Exact replacement hashes and the no-overlap statement are in
+[`agent-collab/product-lifecycle-operator.md`](agent-collab/product-lifecycle-operator.md). The
+separate process-retirement freeze still gates the one final composed authority run.
+
+## 2026-07-17 08:24 MST — process topology candidate freeze ready for composition
+
+`pi_runtime_frozen_audit/root` completed the bounded process-retirement remediation without touching
+provider/session/context/product authority. The accepted topology is pre-admission detached
+observation-only coordinator → in-group sentinel relay → in-group self-killing guardian. Worker
+launch is withheld until coordinator and guardian readiness; ESRCH is the only absence proof;
+EPERM never ACKs; failed proof retains a process-bearing pool handle; and exactly one coordinator
+replacement plus guardian replacement crash windows are covered. Core typecheck and three
+consecutive focused runs are green at **38/38** each, embedded scripts parse, owned diffs are clean,
+and no fixture processes remain. Exact hashes and evidence are appended to
+[`agent-collab/pi-runtime-release-hardening.md`](agent-collab/pi-runtime-release-hardening.md).
+
+## 2026-07-17 — package-start deadline repair claimed; context experiment remains protected
+
+`pi-native-port/root` is repairing only the crossed default start/stop deadline selection exposed
+by the exact-tarball stock-Pi smoke, then rerunning the disposable package and composed release
+gates. Direct packaged status proves the preserved daemon, sealed stage, lease, state, and socket
+are healthy. The concurrent context-building agent retains exclusive ownership of context
+selection, run-program prompt/resource construction, managed-session context, compaction, and
+their focused tests; this release lane will preserve and re-verify those coherent bytes without
+editing them. Detailed evidence is appended to
+[`agent-collab/pi-native-port.md`](agent-collab/pi-native-port.md).
+
+## 2026-07-17 — Pi-native composed gate accepted; isolated real smoke next
+
+The shared tree passed full executable parity, profile, host-boundary, ledger/capture, Core,
+package, documentation, audit, static, and leak gates. The stock-Pi tarball proof constructed and
+deleted a real provider-free contained Pi session without user credential writes or provider token
+usage. `pi-native-port/root` will now install only the verified package and run the established
+Medium objective in `/Users/max/Desktop/updog-worktrees/harness-testing`. Main Updog, user
+processes, and the externally owned context-building files remain excluded. Exact evidence and
+current protected-context hashes are in [`agent-collab/pi-native-port.md`](agent-collab/pi-native-port.md).
+
+## 2026-07-17 — dormant run-type reasoning now fails closed (`pi-native-port/root`)
+
+The first isolated Medium launch stopped before run creation because the legacy-derived Large
+preset still carried `ultra`. Koni now normalizes legacy migration values to Pi `max` for both
+personas and run-type roles, and configuration compilation rejects `ultra` or any unsupported
+reasoning level even when that preset is not selected. The focused migration/configuration suites
+and typecheck passed. Only the migrated smoke overlay’s three invalid Large values were normalized;
+its legacy `.codex/koni` source and all prior evidence remain retained. Rebuild/reinstall is next
+before retrying the Medium launch.
+
+## 2026-07-17 — configuration admission now includes graph runtime semantics (`pi-native-port/root`)
+
+The second preflight caught a retained schema-1 risk status list that omitted its inherited
+schema-2 initial `active` state. The migration transformer now restores inherited initial statuses
+after a legacy merge, and `config validate` invokes the graph runtime’s semantic validator so this
+class of error cannot first surface at run creation. Focused migration/configuration tests and
+typecheck pass; no run, session, worktree, or provider request occurred. The smoke overlay received
+only the matching `risk.statuses += active` repair; legacy source and evidence remain untouched.
+
+## 2026-07-17 14:27 MST — blocked-run retry boundary closed (`pi-native-port/root`)
+
+The live Medium smoke proved the contained planner cold-start timeout left a valid blocked run but
+no operator path could invoke the lifecycle's existing retry transition. `run.resume` and the
+control-center play action now retry blocked records from their durable prior phase while retaining
+ordinary pause/resume behavior. A planner failure/retry regression proves zero pre-activation token
+usage, fresh immutable attempt/session identity, and explicit retry lineage; focused authority and
+lifecycle tests pass **18/18**, with Core typecheck green. This lane continues to preserve the exact
+run ID and will install only after the shared Vitest workspace is quiet.
+
+## 2026-07-17 14:50 MST — Pi/OpenAI opaque call-id compatibility (`pi-native-port/root`)
+
+The real planner exposed an ordinary OpenAI Responses tool-call id containing `|`; Koni's process
+protocol had applied its internal identifier grammar and blocked before tool authority. The call id
+now crosses the bridge byte-for-byte under a 1,024-byte printable-ASCII bound, while internal ids
+retain their narrower grammar and all artifact paths continue to use hashes. Exact captured-shape,
+control-character, and oversize regressions pass in the full process suite (**41/41**); Core
+typecheck is green. The failed live attempt settled 3,134 input + 241 output tokens, no tools or Git
+effects occurred, and the same run remains recoverable from planning.
+
+## 2026-07-17 15:12 MST — canonical receipt overlap routed to context owner (`pi-native-port/root`)
+
+The live planner crossed Pi tool transport and committed a read-only list receipt, then dynamic
+context failed because `run-program.ts` compared the newline-terminated JSON artifact bytes against
+the documented canonical parsed-receipt hash/size. Recovery already uses the correct
+parse-and-canonicalize contract. Exact evidence and a narrow overlap request are appended to
+`agent-collab/native-run-program.md`; that source remains untouched until the active shared verifier
+releases the workspace. The request settled 3,127 input + 369 output tokens, no writes or Git effects
+occurred, and the original run/target remain preserved.
+
+## 2026-07-17 15:15 MST — canonical receipt overlap refrozen (`pi-native-port/root`)
+
+The context-owner overlap is complete and released: dynamic context now validates the canonical
+parsed receipt ledger rather than newline-terminated presentation bytes, matching recovery and the
+public authorized-result contract. Native run-program tests pass **9/9**, strict Core typecheck is
+green, exact replacement hashes are in `agent-collab/native-run-program.md`, and no selection,
+prompt, resource, graph, or compaction-content behavior changed. A composed package gate precedes
+retrying the same live Medium run.
+
+## 2026-07-17 15:50 MST — live graph-seed root contract repair (`pi-native-port/root`)
+
+The preserved Medium planner submitted its complete plan but modeled the existing run objective as
+an undeclared local edge key. Koni's compiler correctly requires the literal `$root`, yet that
+cross-field rule was absent from both the terminal schema descriptions and planner instructions.
+The release lane has claimed a narrow prompt/schema/diagnostic repair plus an exact regression in
+`run-program.ts`, its focused test, and both shipped planner persona documents. Context selection,
+receipt projection, compaction, and graph compilation semantics remain protected; detailed live
+evidence and the overlap boundary are in
+[`agent-collab/native-run-program.md`](agent-collab/native-run-program.md).
+
+## 2026-07-17 15:54 MST — graph-seed root contract refrozen (`pi-native-port/root`)
+
+The compiler-issued schema, context, and prompt now explicitly bind the existing objective to the
+literal `$root`; both profile personas carry the same rule, and bounded diagnostics name invented
+endpoints. The live `books-spiced-plan` regression is covered. Native compiler **9/9**, profile
+inventory **5/5**, Coding **4/4**, Research **4/4**, strict typecheck, and diff checks pass. Exact
+fingerprints and the released overlap are recorded in
+[`agent-collab/native-run-program.md`](agent-collab/native-run-program.md).
+
+## 2026-07-17 16:40 MST — terminal graph schema now needs full compiled typing (`pi-native-port/root`)
+
+The same preserved run proved `$root` guidance is necessary but insufficient: Pi's terminal schema
+still allowed arbitrary node types/specs/relations, so the planner emitted `implementation_slice`
+and was rejected after an expensive synthesis. The native-run-program seam is narrowly reopened to
+project the pinned compiler-owned planning operation, graph field definitions, compiler-owned
+exclusions, and edge vocabulary into Pi's structured terminal schema and context. No graph/runtime
+acceptance rule is changing; this prevents invalid shapes before submission. Exact evidence and
+scope are in [`agent-collab/native-run-program.md`](agent-collab/native-run-program.md).
+
+## 2026-07-17 16:45 MST — compiled typed terminal graph contract refrozen (`pi-native-port/root`)
+
+Planning output now uses a configuration-derived Pi schema: only planning-operation node types,
+closed agent-authored spec fields, canonical relation names, and the configured node limit can be
+generated. The same field and edge triples are present in bounded planner context, while runtime
+graph validation remains authoritative. Native **9/9**, tool/provider **17/17**, strict typecheck,
+and diff checks pass; exact hashes and the released seam are in
+[`agent-collab/native-run-program.md`](agent-collab/native-run-program.md).
+
+## 2026-07-17 — release-plan reset: two UI surfaces and provider-free gates before smoke
+
+Direct operator inspection disproved the earlier “full Pi-native control-center parity” claim.
+The current TypeScript surface preserves selected semantics but is not an identical behavioral and
+visual port of the mature Rust control center: the frozen Rust TUI has 311 tests, the TypeScript
+control-center coverage is much smaller, and the four current TUI parity captures record passing
+test names rather than rendered terminal frames or complete interaction traces. That history stays
+above, but it no longer authorizes release or a live provider-backed smoke.
+
+The current product contract has two distinct Pi-native surfaces over one authority:
+
+1. `/koni` and explicit `koni tui` open the same full Rust-oracle-equivalent control center.
+2. `/koni-run` starts a background run and retains normal Pi chat while a minimal native Pi
+   widget/status companion shows progress and surfaces only actionable questions, plan review,
+   failures, and merge readiness. It is not an autonomous-agent steering chat.
+
+The provider-free release plan, Gates A–H, parallel ownership waves, guarded Updog preservation,
+and final single-smoke procedure are recorded in
+[`agent-collab/release-completion-plan.md`](agent-collab/release-completion-plan.md). In addition to
+the two UI gaps, release is blocked on compiler enforcement of configured collection/path
+constraints and compiler-derived safe scheduling; neither may be deferred to smoke testing. The
+preserved Updog run remains blocked with no active attempt and must not be resumed, approved,
+deleted, merged, or rewritten until one frozen release candidate passes the provider-free
+rehearsal and guarded refresh.
+
+## 2026-07-17 — full completion implementation begins (`primary-integrator/root`)
+
+The user has authorized implementation of the replacement release-completion plan. The existing
+dirty `pi-native-port` tree is the shared authoritative baseline and contains coherent work from
+earlier lanes; no reset, blanket replacement, or stale-HEAD worktree will be used. Source ownership
+is split into three disjoint first-wave leases: compiler/scheduler semantics, full control-center
+parity, and the Pi-native companion. `primary-integrator/root` owns cross-lane protocol wiring,
+release composition, lifecycle/Git/package closure, and the frozen Updog canary.
+
+The canary remains `/Users/max/Desktop/updog-worktrees/harness-testing`, run
+`run-924d787b-6aa6-4738-a8d1-66ad783f8b19`. It is blocked, token-idle, and must not be resumed,
+approved, deleted, merged, migrated, or rewritten until all provider-free gates pass against one
+packed release candidate. Agents must append their decisions and exact test evidence to their own
+mailbox files and ask overlap questions there before editing another lane's owned files.
+
+## 2026-07-17 — Configure crash-gap witness frozen (`config_document_authority/root`)
+
+The standalone configuration authority lease is released again. All five ordinary mutators now
+accept the frozen `{ id, requestSha256 }` marker and can recover an exact committed semantic result
+after a crash before the outer authority receipt. Recovery settles prepared and
+committed-before-cleanup journals under the lifecycle lock, rejects cross-request replay, and
+fails closed if configuration advanced. Focused authority/raw tests pass **9/9**, existing
+Configure/profile/migration regressions pass **16/16**, and strict Core typecheck is green. Legacy
+migration remains governed by its separately archived plan/receipt/lifecycle triple. Exact API,
+failure codes, fingerprints, and integration boundary are in
+[`agent-collab/config-document-authority.md`](agent-collab/config-document-authority.md). No
+run-engine, RPC/server, exports, control-center, live project, provider, process, installed binary,
+terminal, or frozen canary was touched.
+
+## 2026-07-17 — full control-center authority consumers complete (`stage_capability_authority/root`)
+
+The full Pi-native control center now consumes the compiler-authored stage catalog and typed action
+forms, authenticated attempt lineage, and durable authored-order question batches. Its Configure
+surface also consumes the released semantic Config Document RPC: Guided Configure opens an expert
+Project Resources tree and source editor plus reviewed New/Rename/Delete, Run Type, and retained-
+source Legacy Migration dialogs. The UI never turns copy into authority or receives a configuration
+filesystem path; mutations round-trip exact semantic tokens through the revisioned RPC client.
+Focused control-center evidence is **69/69** green; the combined stage-contract/control-center
+matrix is **81/81**. Final Core typecheck and hashes are recorded in
+[`agent-collab/stage-capability-authority.md`](agent-collab/stage-capability-authority.md); the
+frozen Updog canary, providers, credentials, processes, installed packages, and terminals were not
+touched.
+
+## 2026-07-17 — release-candidate semantic closure (`primary-integrator/root`)
+
+The compiler/runtime boundary now distinguishes ticket-local reviewer attempts from the
+assignment-free final independent reviewer even though both use read-only verification
+containment. Ticket reviews retain their ticket descriptor, ticket-cycle worktree, persona, and
+same-ticket lineage; the run-wide reviewer alone receives the permanent run workspace. A
+semantically rejected independent review also carries an explicit durable non-acceptance marker,
+so restart/resume cannot skip it merely because the Pi session terminated normally. Its fresh
+retry is parented to the exact rejected review and merge readiness still requires the exact
+compiler-accepted OID/graph pair.
+
+Crash-safe legacy migration now recovers the exact prior semantic result from its archived
+authority witness, bound to the outer request marker and effective configuration identity. The
+released full control center consumes all landed stage, question, lineage, and semantic Configure
+authority instead of reconstructing permission from display copy. Current provider-free evidence:
+native run program **10/10**, run authority **20/20**, config/migration **16/16**, stage/control
+center **81/81**, control center **69/69**, and the composed root matrix **112/112**. The tree is
+awaiting one independent P0/P1 audit and then a literal source freeze before exact package/install
+closure. No provider, credential, global Pi configuration, installed package, live project,
+terminal, process, or frozen Updog canary changed during this checkpoint.
+
+## 2026-07-17 — `/koni-run` compact-intake P1 closed (`primary-integrator/root`)
+
+The independent audit's compact-intake blocker is repaired. The Pi-chat New Run surface now has
+the same Unicode caret operations and safe paste semantics as the full control center, and its
+viewport follows each semantic focus without overwriting that control with an overflow marker.
+An exact 42-row trace uses the coding profile's 12-stage/4-role shape, renders every Tab transition,
+and proves the explicit Start button is visible before activation. Focused evidence is **7/7**;
+strict Core typecheck and scoped diff checks are green. The independent auditor is rechecking this
+replacement before source freeze; package/install gates remain held.
+
+## 2026-07-17 — compiler-pinned semantic pipeline (`primary-integrator/root`)
+
+Lifecycle stage selection no longer infers behavior from configured ID spelling. The compiler's
+ordered semantic stage projection is now persisted with each new/adopted run, validated before
+Git planning, and used for every lifecycle transition. Legacy records without the projection must
+rehydrate it from their exact pinned compiler artifact or fail closed. An adversarial
+`discover/signoff/build/quality/ship` lifecycle crosses an authority restart and reaches the right
+planning, approval, orchestration, checkpoint, and promotion stages; focused lifecycle evidence is
+**3/3** and strict Core typecheck passes. The larger config-semantic inventory remains actively
+claimed and blocks source freeze.
+
+## 2026-07-17 — semantic profile-overlay upgrade (`release_lifecycle_closure/root`)
+
+The immutable profile baseline archive now serves as the base of a conflict-aware YAML merge for
+package upgrades. This evolves the earlier safe-but-file-level overlay behavior: upstream-only map
+fields apply, project-only edits/comments/order remain where the YAML AST can preserve them, and
+same-field divergence is persisted as exact paths for explicit review. “Use upstream” patches only
+those divergent fields into the merged project file; it no longer discards unrelated local values.
+Non-YAML or unmergeable documents retain the historical whole-file conflict path. The pure merge
+suite is **5/5**, including fail-closed conflict-path budgets/canonicalization, and the synthetic
+installer proof passes. Existing run state and compiler-pinned behavior/Git bytes remain outside
+the profile transaction. Full pack/install/live gates are still held for literal source freeze.
+
+## 2026-07-17 — schema-1 semantic adapter closure (`release_lifecycle_closure/root`)
+
+Legacy schema-1 profiles now cross the semantic, not merely structural, configuration boundary.
+Known old Git and Lead pull-loop defaults map to current compiler authority; compile/Lead/report
+selectors and required verification topology come from the authenticated baseline. Project-owned
+intake, questions, models, parallelism, prompts, noncolliding reserved Git templates, and arbitrary
+planning stages remain intact. A dedicated custom-run-type proof shows only the required checkpoint
+is introduced, with no Medium workflow replacement. The final authenticated sibling-ref migration
+suite, including prefix-collision and noncolliding custom controls, is **10/10**. Final
+identity/package/install/live evidence still waits for literal source freeze.
+
+## 2026-07-17 — configuration behavior + bounded Lead seam (`config_semantic_authority/root`)
+
+Configuration now compiles to hash-bound behavior/action/Git IR and new runs pin the exact selected
+slice. The Lead is one read-only qualitative judgment, never a deterministic ticket pull loop.
+Provider-free E2E exposed and closed Git's leaf/prefix ref collision: run refs now end in literal
+`integration`, with ticket refs under literal sibling `tickets`, and custom collisions fail during
+compilation. Focused evidence is **49/49** across config/Git/behavior/manifests plus the native Lead
+slice; Core typecheck is green. Current bundles are Coding `sha256:1fe752…afeeb` and Research
+`sha256:1bc8bd…26c60`. The lane has explicitly flagged storage layout/exclusions, change-control
+state names, and orchestration running/lease/fixpoint fields as accepted-but-unconsumed blockers;
+root must wire or reject them before semantic source freeze.
+
+## 2026-07-18 — remaining semantic consumers claimed
+
+`remaining_semantic_consumers/root` owns the bounded audit and closure of profile fields that the
+new behavior IR still accepted without an effect boundary: storage backend/layout/exclusions,
+Research change-control state aliases, and orchestration running/lease-stale/fixpoint settings.
+The lane will wire an exact existing native consumer where one exists; otherwise compilation and
+bundled defaults will stop advertising unsupported variation. It owns only the relevant
+configuration contract/compiler/default/documentation surfaces and focused provider-free tests.
+It does not edit `authority/run-engine.ts`, `state/run-record.ts`, `git/**`, release/package
+scripts, providers, installed packages, terminals, live projects, or the frozen Updog canary.
+Coordination is append-only in
+[`agent-collab/remaining-semantic-consumers.md`](agent-collab/remaining-semantic-consumers.md).
+
+## 2026-07-18 — bounded Lead judgments are authority-owned (`primary-integrator/root`)
+
+The compiled Lead seam is now a real run-authority boundary. New behavior-backed runs create one
+read-only, hash-bound orchestration-entry judgment before deterministic ticket admission; an empty
+ready projection may create one separately bound compiler-deadlock judgment. `proceed` releases
+the scheduler, `blocked` durably blocks, and a still-unchanged projection after deadlock review is
+blocked without another model call. Lead never selects tickets, manages parallelism, spawns
+workers, mutates graph state, or polls. Its attempt and result are bound to behavior, stage, graph,
+run OID, persona, launch/session lineage, and the normal question/terminal authority. Pre-Lead
+admitted snapshots retain their historical no-Lead semantics across upgrade. Focused entry,
+deadlock, end-to-end, provider-terminal pause/delete, typecheck, and whitespace evidence is
+recorded in
+[`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md). Aggregate identity
+gates remain deferred until the active semantic/profile lanes freeze.
+
+## 2026-07-18 — operation/workflow/check consumer lane audited (`primary-integrator/root`)
+
+The complete configuration inventory exposed a second semantic closure beyond generic actions:
+operation contracts and admission flags, optional/source-preserving workflow steps, required
+receipts/escalation/stop behavior, and check replay/freshness/retry policy are compiled but not yet
+enforced by the Pi-native authority. Their Rust-oracle meanings and adversarial acceptance gates
+are recorded in
+[`agent-collab/operation-workflow-check-closure.md`](agent-collab/operation-workflow-check-closure.md).
+Implementation waits only for the action lane to release the overlapping run-program/authority
+ranges; these fields remain release blockers rather than silently advertised configuration.
+
+## 2026-07-18 — hash-bound cockpit consumer + UI parity (`pre_freeze_product_parity/root`)
+
+The Pi-native full control center now has a strict, canonical-hashed cockpit view projector bound
+to each run's exact `compiledConfigHash`. Profile-authored source/actions/columns/options materially
+control panel titles, ticket projections/tabs, activity limits, and graph presentation. YAML action
+names are presentation slots only and are intersected with fresh authority capabilities; missing
+legacy names stay visibly disabled. Both Pi and standalone hosts accept the same exact-artifact
+resolver interface. Primary integration must now wire that resolver from the immutable compiled
+artifact—never current YAML—before release parity can be claimed. Detailed contract and focused
+evidence are in
+[`agent-collab/pre-freeze-product-parity.md`](agent-collab/pre-freeze-product-parity.md).
+
+The UI lane is now frozen and its source lease is released to primary integration. Focused
+provider-free evidence is **109/109**; exact file identities and the remaining authority resolver
+handoff are recorded in the lane document. Shared TypeScript/package gates remain root-owned after
+the concurrent authority/state edits settle.
+
+## 2026-07-18 — graph/rules semantic lane frozen (`config_semantic_authority/root`)
+
+Node ontology/semantic identity, finite edge predicates, gate templates/status/context facts, and
+finite lifecycle catalogs now have executable consumers and provider-free adversarial coverage.
+Lifecycle admission rejects unreachable states; both bundled runtime profiles now provide reachable
+`ticket` and `run` machines, including an explicit compiler failure transition. The pure catalog and
+transition authorizer are frozen for the separately owned durable runtime adapter, which must map
+existing statuses/phases rather than add a second state field. Evidence and exact handoffs live in
+[`agent-collab/graph-rules-semantic-closure.md`](agent-collab/graph-rules-semantic-closure.md).
+
+## 2026-07-18 — deterministic scheduler/change-control lane (`scheduler_change_control/root`)
+
+The scheduler now accepts an exact pinned execution-semantic authority projection and separates
+unresolved proposal/application barriers from leases that actually own execution. `proposed` and
+disposition work are never agent-runnable; approval/application/recovery authority fails closed;
+single-flight reservations apply both across restart and within one selected batch. Pure,
+replay-safe reconcilers derive canonical proposal, approved application/no-op, source release, and
+terminal-resolver outcomes without touching providers or durable state. Root retains the explicit
+same-CAS run-engine/persistence integration handoff. Scope, transition design, focused evidence,
+and API details are append-only in
+[`agent-collab/scheduler-change-control.md`](agent-collab/scheduler-change-control.md).
+
+## 2026-07-18 — compiler execution semantics bound end to end (`run_program_semantic_binding/root`)
+
+`NativeRunCompilerProgram` now consumes operation/workflow/check, finite lifecycle, cockpit, and
+gate-policy semantics only from each run's exact pinned configuration. Tickets and steps carry
+immutable execution-policy bindings; prompts/grants bind the same policy and scoped gate context;
+graph deltas enforce typed operation mutation rules; every configured check and command leaf
+carries exact effect, receipt, replay, retry, and gate-context policy. Causal ticket checks remain
+execute-all. Composed terminal verification has a distinct replay-only compiler projection and
+compiler acceptance path that rejects missing, extra, stale, or reused retained receipts. Exact
+source-preservation member pairs are projected for runtime manifest enforcement. Focused compiler
+and execution-policy evidence is **20/20** and Core typecheck passes. The compiler source lease is
+released; runtime integration owns consumption of these APIs. Exact contracts and hashes are in
+[`agent-collab/run-program-semantic-binding.md`](agent-collab/run-program-semantic-binding.md).
+
+## 2026-07-18 — same-CAS configured lifecycle + explicit inert-machine retirement (`primary-integrator/root`)
+
+Every semantic run and ticket transition is now re-authorized by the exact lifecycle catalog
+pinned into that run inside `ProjectAuthorityStore.commit`, not merely at an upstream callsite.
+New tickets enter from configured `todo`, durable ticket deletion fails closed, compiler
+transitions use the canonical compiler actor, and non-compiler transitions carry an explicit
+per-ticket actor in the one-CAS write envelope. This preserves Coding's Lead-only proposal
+approval and Research's compiler-owned approval without inferring authority from UI text.
+Focused lifecycle/store evidence is **10/10**.
+
+The audit also found two Research state machines with no declared owner. Rather than hard-code
+meaning from the IDs `gate` and `research`, the current profile retires those entries through an
+authenticated migration. The retirement DSL now supports exact selector-addressed array-item
+removal while preserving neighboring project YAML/comments/order; ticket/run machines remain
+fully consumed, gate policies remain check/compiler policy, and `research_status` remains a
+derived program-state projection. Focused retirement/lifecycle/graph evidence is **18/18**.
+Profile manifests/provenance and the frozen Updog canary remain held until change-control and
+terminal-policy source freeze.
+
+## 2026-07-18 — execution-policy runtime + terminal closure (`execution_policy_runtime/root`)
+
+Behavior-backed configured checks now carry and persist exact top/leaf execution policy, prepare
+each process attempt durably, apply only the pinned retry/backoff decision, and bind the complete
+retry audit into final compiler input. Semantic composite checks capture compiler-identical member
+source manifests. Terminal acceptance has a distinct replay-only path: only current/read-only/
+opted-in leaves run, excluded causal leaves require exact retained receipts, current/historical
+receipt requirements are evaluated from the pinned catalog, and `preserve_source_paths_from` bytes
+are compared inside the acceptance CAS. New assignments commit a self-hashed semantic terminal
+record; pre-policy assignments commit an explicit legacy record. Change-control provenance fields
+shared with the central CAS lane are stable. Detailed invariants and evidence live in
+[`agent-collab/terminal-policy-runtime.md`](agent-collab/terminal-policy-runtime.md).
+> 2026-07-17 primary-integrator: durable change-control Git supersession is implemented and tested
+> in `packages/core/src/git/lifecycle.ts`. The active runtime agent should call
+> `supersedeTicketCycle(...)` before clearing/restarting a held source ticket. Archive refs persist
+> as audit evidence; no metadata-only worktree reset is permitted. Focused evidence: 37/37
+> `isolated-git-lifecycle` tests, including every supersession effect boundary and dirty recovery.
+
+## 2026-07-18 — change-control operator surfaces frozen (`change_control_operator_surface/root`)
+
+Full control center, compact Pi companion, and native Pi proposal tools now share one bounded
+authority projection and one exact decision contract. Enter alone never decides; Pi confirmation
+is mandatory; cancellation and revision conflicts do not replay mutations; clients never author
+the actor. Final focused evidence is **84/84**, Core typecheck/build pass, and the source lease is
+released. Exact contracts, files, and the two unrelated aggregate blockers found during a broader
+test run are recorded in
+[`agent-collab/change-control-operator-surface.md`](agent-collab/change-control-operator-surface.md).
+
+## 2026-07-18 — typed Research change-control compiler handoff (`run_program_semantic_binding/root`)
+
+The compiler lane now emits two disjoint, canonical assignment transaction variants:
+`upstream_request` (source ticket/step/policy/output plus deterministic publication) and
+`proposal_application` (exact configured application/disposition and scope). It purely projects
+complete pinned-workflow proposal/application/resolver tickets; proposal work is read-only over its
+control nodes with no graph/file mutation, no-op creates no ticket, and resolver recursion is
+suppressed. Runtime owns same-CAS publication/source hold, durable proposal selection/review, source
+release, and Git supersession. Exact contract and **23/23** focused evidence are appended in
+[`agent-collab/run-program-semantic-binding.md`](agent-collab/run-program-semantic-binding.md).
+
+## 2026-07-18 — primary integration holds source freeze for runtime + legacy compatibility
+
+The typed compiler (**23/23**) and proposal operator surfaces (**84/84**) are frozen and released.
+`execution_policy_runtime/root` is completing the same-CAS change-control transaction in
+`run-engine.ts`; `change_control_redteam/root` is independently checking all terminal paths,
+review/application publication, source supersession, resolver recovery, replay, and deletion.
+
+The shared fixture sweep also found nine failures in `legacy-run-git-migration.test.ts`: migrated
+live/preserved records currently carry a checkout projection rejected by the canonical Git
+namespace validator. `legacy_git_namespace_fix/root` owns only that compatibility repair and may
+not weaken the validator. Profile manifests/provenance, packed installation, providers, credentials,
+terminals, live projects, and the frozen Updog canary remain held until both lanes are green.
+
+> Transition note: the legacy namespace lane is now fixed and released. Canonical lifecycle state
+> always names the managed `integration` worktree, flat source paths remain only in authenticated
+> migration evidence, terminal-live checkouts are relocated or explicitly preserved, and the
+> focused suite passes **17/17**. Runtime change control and profile publication remain the active
+> freeze gates.
+# 2026-07-18 — Official profile release publication claimed
+
+`pi-native-port/profile_release_publication` owns only the Coding/Research profile packages,
+their authenticated in-place publication script and independent bundle test, package-lock
+profile versions, focused profile install/migration/semantic-retirement tests, and append-only
+coordination notes. It is publishing Coding `0.8.0` and Research `1.1.0` from the reviewed
+working-tree baselines, with exact prior-bundle retirement authorization. It will not edit
+runtime/compiler/authority/control surfaces, providers, credentials, installed Pi state,
+terminals, live projects, or the frozen Updog canary. Mailbox:
+[`agent-collab/profile-release-publication.md`](agent-collab/profile-release-publication.md).
+
+> **Publication closure — 2026-07-18:** Coding `0.8.0` and Research `1.1.0` are
+> published with exact-prior-bundle `retire-inert-semantics-v1` authorization.
+> In-place capture is byte-deterministic; exact upgrades, overlays/conflicts,
+> target-only additions, wrong-source/tamper/replay rejection, and the two
+> canonical-hash-only schema-1 stock adapters are green. Final evidence is
+> bundle/oracle **5/5**, aggregate profile **85/85**, schema-1 migration **13/13**,
+> both profile typechecks, and Core typecheck/build. The lane is released; exact
+> identities and compatibility boundaries remain recorded in
+> [`agent-collab/profile-release-publication.md`](agent-collab/profile-release-publication.md).
+
+## 2026-07-18 — composed change-control authority rehearsal claimed (`primary-integrator/root`)
+
+The primary integrator owns one new, disjoint provider-free composed test file for the complete
+change-control transaction after `execution_policy_runtime/root` stabilizes its APIs. The test
+must drive the real authority/store/compiler/Git boundary through request publication and source
+hold, authenticated approval or rejection, approval-bound proposal context, reviewed no-op or
+application materialization, ticket publication, Git supersession, source reissue, terminal
+resolver creation/release/repeat failure, explicit failed-resolver retry, restart/replay, pause,
+and deletion with zero post-delete sessions. Existing runtime-focused test files remain owned by
+the runtime lane. This claim changes no provider, credential, installed Pi state, terminal, live
+project, or frozen Updog canary.
+
+## 2026-07-18 — resolver-retry operator handoff consumed (`primary-integrator/root`)
+
+The full control center now routes blocked-run pause/resume activation to the exact compiler-owned
+`retry_terminal_resolver` form and refuses generic resume when a fresh capability catalog exposes
+no legal retry. The compact Pi companion keeps its deliberately closed decision client: Enter on
+a blocked/failed/merge-ready row with no inline question, plan, or proposal opens the full shared
+control center instead of duplicating recovery policy. Focused provider-free traces are **51/51**
+and **7/7**. Runtime still owns retry settlement, durable binding, pause/delete ordering, and the
+focused fault matrix; root owns the disjoint composed authority rehearsal after that API freezes.
+
+## 2026-07-18 — composed authority integration file lease (`change-control-composed-test/root`)
+
+Transition note to the earlier generic rehearsal claim: the exact provider-free file is
+`packages/core/test/change-control-authority-integration.test.ts`, owned exclusively by
+`change-control-composed-test/root`; its mailbox is
+[`agent-collab/change-control-authority-integration.md`](agent-collab/change-control-authority-integration.md).
+This lane may append coordination notes, but will not edit production source or any of the runtime
+owner's five focused test files. It is waiting for coherent runtime APIs while assembling the real
+Research profile + authority/store/compiler/Git + scripted-Pi rehearsal and its negative durable
+record matrix. It will not touch providers, credentials, installed Pi state, terminals, live
+projects, or the frozen Updog canary.
+
+## 2026-07-18 — primary integration release-evidence boundary
+
+`primary-integrator/root` owns the post-freeze parity/package composition. It will publish a
+distinct canonical target capture for every ledger case, add explicit cases for the newly shipped
+semantic authority and both Pi UI surfaces, and run the exact packed three-package closure in a
+disposable Pi home. This work starts only after runtime, composed-change-control, and red-team
+lanes declare one coherent schema checkpoint; it will not edit their owned production/test files
+or touch providers, credentials, installed Pi state, terminals, live projects, or the frozen
+Updog canary.
+
+## 2026-07-18 — durable change-control store adversaries claimed (`change-control-store-negatives/root`)
+
+This lane owns only the new
+`packages/core/test/change-control-store-authority.test.ts`, its mailbox, and append-only
+coordination notes. It will exercise raw-load and `ProjectAuthorityStore.commit` attacks against
+the frozen CC-1 through CC-3 authority contracts, using canonical helpers and recomputed attacker
+self-hashes. It will not edit production source or existing tests, and will report exposed gaps to
+the runtime owner and primary integrator. Providers, credentials, installed Pi state, terminals,
+live projects, and the frozen Updog canary remain untouched. Mailbox:
+[`agent-collab/change-control-store-authority.md`](agent-collab/change-control-store-authority.md).
+
+> **Adversarial checkpoint — 2026-07-18:** v2 proposal decisions are green **7/7**. The exact
+> live-to-archive+artifact positive CAS is green, while eleven CC-3 substitutions/insertion/segment
+> attacks remain strict failing tests. CC-2 rejects all live identity/plan/settlement/policy/output
+> and semantic substitutions except a detached action ID; raw load also accepts index/archive
+> disagreement and archived-success-as-failure. Aggregate evidence is **17 pass / 14 intentional
+> fail**, Core typecheck green. Exact predicates are in the lane mailbox and have been handed to
+> the primary integrator/control-ticket owner; production source was not edited here.
+
+> **Store-adversary slot released — 2026-07-18:** the disjoint suite is checkpointed at **17 pass /
+> 14 strict fail** against the last coherent source snapshot. Eleven exact CC-3 archive/segment
+> predicates and three CC-2 non-evictable-proof predicates remain production blockers. CC-1 will
+> be appended only after the canonical projector owner publishes the real same-CAS causal recipe;
+> no synthetic interim authority was frozen into tests. See the mailbox for the enumerated list.
+
+## 2026-07-18 — canonical control-ticket authority claimed (`control-ticket-authority/root`)
+
+This lane owns the shared compiler-authored immutable ticket-authority mechanism for proposal,
+approved application, and terminal resolver tickets, closing frozen CC-1 and the control-ticket
+portions of CC-2/CC-5. Its production lease is limited to `state/change-control.ts`, the
+control-ticket projection/validation regions of `state/run-record.ts`, and matching projection
+helpers in `compiler/run-program.ts` and `authority/run-engine.ts`; it may repair only the released
+focused compiler/scheduler fixtures. The disjoint store/composed test files remain exclusively
+owned by their existing lanes. Mailbox:
+[`agent-collab/control-ticket-authority.md`](agent-collab/control-ticket-authority.md).
+
+> Transition note (primary integrator, 2026-07-18): corrected configured-validation pause/delete
+> fixtures now reach their claimed final-assignment boundary and expose a real CC-4 deadlock:
+> terminal stop settlement waits on the same in-flight action promise it must abandon. The
+> proposal fixture is green after explicit source publication and mutation-lane synchronization.
+> Do not weaken the two stop-race assertions or release the action before the lifecycle label; a
+> dedicated lifecycle/settlement lane must close this gap.
+
+## 2026-07-18 — lifecycle settlement races claimed (`primary-integrator/root`)
+
+Primary integration owns only pause/delete ordering and stopped-action settlement helpers in
+`authority/run-engine.ts`, with the corresponding focused cases in
+`run-authority-engine.test.ts`. It will not edit archive/compaction or canonical control-ticket
+regions. Closure requires the stop tombstone to win independently of blocked in-process action
+promises, one typed terminal disposition for every admitted boundary, exact attempt/ticket
+rollback, and no restart/provider resurrection.
+
+## 2026-07-18 — archive transaction authority lane
+
+`archive-transaction-authority/root` owns the narrow CC-3 implementation: exact live-action to
+archive-row+artifact CAS validation, exact prefix-to-segment compaction, immutable archive history,
+raw artifact validation, and terminal-proof retention through compaction/restart. Control-ticket
+projection and lifecycle-stop logic remain owned by their existing lanes. See
+`docs/agent-collab/archive-transaction-authority.md` for the frozen predicates and evidence.
+
+Transition note: that lane is now complete. All original CC-3 and durable-proof strict failures are
+green, with a 1,025-action restart/unrelated-mutation rehearsal. New rows/segments use deterministic
+v2 projection; v1 is an explicit artifact-bound read-only compatibility path and cannot be newly
+emitted. The exact commands, counts, compatibility consequences, and snapshot fingerprints are in
+the lane document. Broad moving-source gates remain with the primary integrator.
+
+> Transition note (2026-07-18): the lifecycle settlement race lease moved from
+> `primary-integrator/root` to `lifecycle_settlement_races/root` so source stabilization and the
+> provider-free CC-4 matrix can proceed in parallel. Scope and frozen predicates are recorded in
+> [`agent-collab/lifecycle-settlement-races.md`](agent-collab/lifecycle-settlement-races.md).
+
+> **Lifecycle/Git settlement closure — 2026-07-18:** the dedicated lane closed all six configured
+> action stop races with exact typed abandonment, boundary-specific rollback, recovery parent/child
+> settlement, restart-safe fresh approval compilation, and no late blocker/provider/effect
+> resurrection. Approval now follows the Rust oracle: journaled permanent run materialization
+> settles before configured plan compilation, with crash-forward restart and pause-during-Git
+> coverage. The obsolete proposal RPC fixture now uses the full canonical compiler-control
+> authority chain rather than a compatibility bypass. Evidence is **11/11** focused, **35/35** for
+> the complete engine file, and a green strict Core typecheck. Exact predicates and compatibility
+> notes are in [`agent-collab/lifecycle-settlement-races.md`](agent-collab/lifecycle-settlement-races.md).
+
+> **Canonical control-ticket authority complete — 2026-07-18:** the proposal, approved-
+> application, and terminal-resolver roles now use one compiler-authored immutable envelope with
+> complete operation/workflow/definition/ticket projections and role-specific causal preimages.
+> Raw load and the CAS mutation boundary both reject all 24 frozen substitution families for all
+> three roles; exact same-CAS creation and JSON-restart/lifecycle positives are also covered.
+> Evidence is **150/150** in the dedicated matrix and **174/174** with native compiler and
+> scheduler suites; Core typecheck and owned-file diff checks are green. No weak legacy promotion
+> exists. One old synthetic engine-test proposal must be rebuilt with the published canonical
+> recipe, and the composed shipped-profile rehearsal remains independently blocked before the
+> projector by worktree materialization. Exact regions and handoff details are in
+> [`agent-collab/control-ticket-authority.md`](agent-collab/control-ticket-authority.md).
+
+## 2026-07-18 — primary provider-free product checkpoint
+
+Primary integration reran the Pi session/attempt/lineage/transcript/compaction boundary against the
+moving-but-coherent source tree: **172/172** tests passed across ten focused files. A separate full
+control-center/compact-monitor/operator sweep passed **129/134**. Three failures were stale operator
+fixtures that omitted newly required compiled launch defaults; those fixtures are now current and
+`operator-surface.test.ts` is **20/20**. The remaining two failures are deliberately held strong:
+their UI proposal fixture is rejected by the production run-record reader because it predates the
+canonical compiler control-ticket envelope. Primary integration will replace it with an exact
+proposal fixture rather than bypassing record validation. No provider, credential, installed Pi
+state, terminal, live project, or frozen Updog state was touched.
+
+> **Composed Research transition note — 2026-07-18:** the Git-first approval correction now passes
+> the strict shipped-profile boundary, including `planning=retired` and permanent `run=ready` at
+> successful rule evaluation. The provider-free adapter now invokes the real Rust-backed terminal
+> tool rather than simulating its receipt. Its next exact failure is a zero-check terminal-policy
+> predicate: the launch correctly has no `configuredChecks`, the compiler correctly projects empty
+> validation/replay arrays, but runtime safety rejects `undefined` grant plus empty projection as
+> out of scope. Strong request/hold assertions remain unchanged; details are in
+> [`agent-collab/change-control-authority-integration.md`](agent-collab/change-control-authority-integration.md).
+
+> **Canonical control-ticket fixture closure — 2026-07-18:** all three positive compiler-control
+> roles now derive terminal proof authority from real pinned action plans, journals, semantic
+> results, and typed settlements. The complete authority matrix is **150/150**, strict Core
+> typecheck is green, and no negative predicate changed. The remaining six durable-store reds are
+> an independently owned production archive-awareness issue: terminal acceptance validation scans
+> only live action records after the exact action moves to an authenticated row/segment. Full
+> evidence and ownership are in
+> [`agent-collab/lifecycle-settlement-races.md`](agent-collab/lifecycle-settlement-races.md).
+
+> **Composed Research receipt-ordering note — 2026-07-18:** after the zero-check correction, the
+> real terminal path advances to intrinsic receipt closure and fails before action admission:
+> structured output is recognized, but `context-pack` and `scoped-compile` are required before the
+> current code has admitted the configured `compile-ticket` action (or run direct assignment
+> compilation). No assignment-validation journal exists at failure. The terminal-policy owner is
+> comparing producer/settlement order against the Rust oracle; the composed suite remains strong
+> and provider-free.
+
+> **Primary provider-free closure update — 2026-07-18:** the earlier **129/134** product checkpoint
+> is historical. The UI proposal fixtures now use the exact compiler-authored control-ticket
+> recipe and the complete full-control-center/compact-monitor/operator matrix is **134/134**. The
+> two stale terminal-policy proposal fixtures were migrated to that same recipe and are **4/4**.
+> Archive retry authority is now **184/184**: authenticated v2 rows and v2 segments may authorize
+> an exact resolver retry after restart, while artifact-bound v1 rows and v1 segments remain
+> strictly read-only. The canonical control-ticket matrix is **150/150**, the complete authority
+> engine is **35/35**, and strict Core typecheck is green. These were provider-free checks only;
+> installed Pi, credentials, terminals, live projects, and the frozen Updog canary were untouched.
+## 2026-07-18 — composed Research configured-state handoff
+
+`change_control_composed_test/root` proved that shipped Research selects `compile-ticket` for
+`drill-hypothesis/drill-claims`, with allowed semantic states `[in_progress, integrating]`. The
+TypeScript scheduler's raw `running` state is canonically `in_progress` through the pinned ticket
+lifecycle, matching the Rust oracle. Both action admission and execution-time currentness must use
+that same projection: raw admission rejects the catalog, while semantic admission followed by raw
+revalidation blocks with `action ticket state changed after admission`. Do not widen the profile or
+pre-transition the ticket. The terminal/action lane owns the coherent correction; the five-scenario
+composed suite remains strict and is held at the first durable failure until its rerun handoff.
+
+> **Composed Research configured-review ordering note — 2026-07-18:** the real rejection/reissue
+> scenario now completes and records the configured proposal risk review, but the configured
+> validation settlement integrates/ticks while the exact review attempt is still
+> `terminal_accepted`; only its caller subsequently finalizes that attempt. Proposal
+> materialization sees the incoherent intermediate state, hard-blocks with `no exact accepted
+> configured review`, and prevents the later finalizer from advancing. Downstream advancement must
+> not observe a settled-success action before coherent attempt/proof completion. Exact evidence is
+> in [`agent-collab/change-control-authority-integration.md`](agent-collab/change-control-authority-integration.md).
+
+> **Terminal/action ordering correction — 2026-07-18:** terminal admission, compiler action
+> execution, semantic receipt closure, provider-attempt closure, and downstream advancement are now
+> distinct ordered boundaries. Direct and configured receipts are compiler-authenticated and bound
+> to exact launch/output/result bytes; settlement and terminal-tool callbacks cannot schedule or
+> publish before the exact Pi attempt finalizes. Pause/delete abandon the exact action with no proof,
+> and resume preserves that pair as non-current audit history. Focused evidence is **1/1** direct
+> receipt, **3/3** pause/delete/restart, **18/18** action/policy/runtime, strict typecheck, and scoped
+> diff check. The composed pause/resume case is **1/1**. One release gate remains: raw file-journal
+> readers can transiently see run state before a later hash-bound artifact destination; primary owns
+> the authoritative read-isolation/state-publication-last audit. Full predicates and commands are in
+> [`agent-collab/terminal-zero-check.md`](agent-collab/terminal-zero-check.md).
+
+> **Composed Research proposal-binding note — 2026-07-18:** finalization-only advancement closes
+> the prior configured-review visibility race. The next strict boundary is one selection-preimage
+> mismatch: proposal terminal proof and review authority hashes are exact, but the selection
+> compiler hashes the proposal step binding while materialization and the durable invariant use the
+> immutable proposal ticket binding. The invariant remains strong; the compiler must use one
+> unambiguous schema meaning (or explicitly bind both). Exact three-hash evidence is in
+> [`agent-collab/change-control-authority-integration.md`](agent-collab/change-control-authority-integration.md).
+
+> **Composed Research resolver-proof ordering note — 2026-07-18:** the provider-free resolver
+> scenario proves exact failure settlement, operator retry, immutable Git supersession archive,
+> crash/restart reissue, chain suppression, and completion of the fresh resolver's full workflow.
+> Publication then rejects the resolver because its terminal success proof was not attached: final
+> assignment settlement projects the ticket from `completed` to `review` before a later proof
+> branch checks for `status === completed`. Proof attachment must use the pre-publication terminal
+> disposition in the same CAS; the completed-resolver invariant remains strict. Details are in
+> [`agent-collab/change-control-authority-integration.md`](agent-collab/change-control-authority-integration.md).
+
+> **Composed resolver archive oracle correction — 2026-07-18:** immediate action-row archival on
+> retry is not a product contract. The failed resolver Git cycle must be archived under the exact
+> retry hash; its semantic failure authority may remain in the live settled action map until normal
+> retention moves it to an authenticated v2 row/segment. The composed test now requires exactly
+> one live-or-v2 authority home plus the indexed failure proof and exact Git supersession. The
+> separate 184-test archive matrix remains responsible for v2 compaction parity. Historical
+> over-specific wording remains above with this append-only correction.
+
+> **Composed assignment-settlement single-flight note — 2026-07-18:** after the proposal-binding
+> fix, rejection/no-op/application materialization proceeds through the application's final review.
+> That review stalls with a terminal-accepted attempt and completed semantic journal but no action
+> settlement/terminal policy. Terminal-tool background settlement and provider-outcome finalization
+> call the same settlement concurrently; only action-plan execution is currently single-flight.
+> Full terminal-policy preparation through final CAS needs one promise per invocation, while
+> provider finalization remains the sole downstream advancement owner. Exact state is documented in
+> [`agent-collab/change-control-authority-integration.md`](agent-collab/change-control-authority-integration.md).
+
+> **Composed Research focused closure — 2026-07-18:** full-settlement single-flight and the narrow
+> compiler/proof corrections close both long paths. Rejection/no-op/application is **1/1 in
+> 47.46s** through application-cycle integration/retirement, source reissue, forgery negatives, and
+> clean pause. Resolver failure/retry/Git-archive/fault/restart is **1/1 in 18.02s** through exact
+> live-or-v2 failure authority, terminal success proof, source release, chain suppression, forgery
+> rejection, and clean pause. All five cases have focused green evidence; aggregate 5/5 is held for
+> the archive-aware validator's coherent source handoff.
+
+> **Legacy archive evidence correction — 2026-07-18:** the earlier **184/184** archive statement
+> remains a valid checkpoint for current v2 rows/segments and v1-labelled projections that already
+> carried the newer terminal-authority field. It did not yet prove a genuinely historical v1
+> run-record projection in which that field is absent. Source freeze and the aggregate five-case
+> rehearsal therefore remain held while the terminal/archive lane adds an authenticated open-time
+> journal migration, genuine field-absent row and segment fixtures, and a bounded-history timing
+> check. Historical v1 artifacts stay immutable/read-only; only the authenticated run projection
+> may be upgraded before ordinary reads or mutations become available.
+
+> **CC-5 application publication authority finding — 2026-07-18:** a provider-free store adversary
+> now proves that raw authority accepts a completed canonical approved-application and released
+> source while the application's owned Git cycle is still active/unpublished. The test is isolated
+> at `change-control-store-authority.test.ts:222-258` and intentionally red pending the narrow
+> ticket↔Git invariant. Normal runtime ordering is already publish → retire → complete/release; the
+> raw/store boundary must independently require exact integrated publication plus retirement and
+> reject supersession as completion evidence. The terminal/archive owner still leases the shared
+> validator/test region; no production fix starts before explicit release.
+
+> **CC-5 application publication closure — 2026-07-18:** after the archive lease released, the
+> source-release predicate was bound to the application's exact current Git cycle. That cycle must
+> be integrated and retired with no supersession identity; prior cycles for the same application
+> are permitted only as canonical superseded/unintegrated audit history, preserving resolver-driven
+> reissue. Exact/no-change/prior-superseded positives and six raw/store attack families are green
+> **18/18**; the complete shared store suite is **206/206**, and Core typecheck is green. This
+> supersedes the immediately preceding open-finding status without deleting its historical reason.
+
+> **Terminal/action/archive final handoff — 2026-07-18:** the archive lease is released. New v2
+> rows and segments carry exact self-hashed terminal-authority projections; terminal attempts and
+> indexed proofs resolve to one live or authenticated archived action. Genuine field-absent v1
+> rows/segments are authenticated and projected once at open time, advancing project authority but
+> preserving semantic run revision and immutable artifact bytes; the second reopen is idempotent,
+> and v1 remains read-only for new retries. Full assignment settlement is invocation-single-flight,
+> downstream advancement remains provider-finalizer-only, and reviewed terminal resolvers publish
+> their exact success proof in their completion CAS. Evidence: Core typecheck green; focused receipt/
+> single-flight **2/2**; genuine-v1 row/segment **2/2**; 1,025-action performance **1/1 in 17.96s**;
+> full shared store matrix **188/189 in 46.47s**, with only the intentionally red CC-5 adversary.
+> `lifecycle_settlement_races/root` now owns that independent ticket↔Git-cycle invariant without an
+> archive-file coordination hold. Full predicates and commands are in
+> [`agent-collab/terminal-zero-check.md`](agent-collab/terminal-zero-check.md).
+
+> **Archive inventory closure — 2026-07-18:** guarded store reads now require exact canonical disk
+> inventories for archive rows and segments and reconstruct canonical retention order from the
+> authenticated actions, closing predecessor-free row/segment deletion and reordering. Genuine-v1
+> migration remains one-time, idempotent, and read-only. Evidence is **4/4** focused structural,
+> **1/1** heavy v1/retry, **283/283** full store, **9/9** project store, with Core typecheck and diff
+> checks green. Both source/test leases are released; details are in
+> [`agent-collab/lifecycle-settlement-races.md`](agent-collab/lifecycle-settlement-races.md).
+
+> **Composed Research coherent aggregate closure — 2026-07-18:** after the independent
+> project-store serializer lease fix landed, the corrected rejection/no-op/application target is
+> **1/1 in 59.16s** and the complete change-control authority integration matrix is **5/5 in
+> 102.71s**. Core typecheck and scoped diff check are green. The composed fix remains test-only:
+> 200ms observation, a 30-second idle watchdog reset solely by durable run-revision progress, a
+> 90-second hard cap, and a 180-second test ceiling. No production settlement or authority
+> predicate changed; the detached-child serializer defect and repair remain an independent store
+> contract. Full evidence is in
+> [`agent-collab/change-control-authority-integration.md`](agent-collab/change-control-authority-integration.md).
+
+## 2026-07-18 — Pi-native acceptance audit holds release smoke (`pi_native_acceptance_audit/root`)
+
+The requested product shape is materially implemented: shared full `/koni`/standalone control
+center, passive `/koni-run`/`/koni-runs` companion, ordinary Pi credentials/setup preservation,
+three-package/profile flow, and explicit-only `koni tui`. Provider-free Gate 3 is **285/285** with
+Core typecheck/diff green, and profile bundles are **5/5**. Source freeze is nevertheless held on
+two active bounded-history defects: pre-anchor/v1 full authentication still retains unbounded
+global identity/action state, and selected retry authority rereads a shared segment per invocation
+without a request-wide unique-byte preflight. The package README also mislabels the registered
+proposal inspect/confirmed-decision tools as an all-read-only five-tool surface. After those close,
+parity remains development **24 passing/6 specified**, followed by one frozen aggregate,
+publication, exact-tarball stock-Pi/PTY/removal rehearsal, and independent effect/visual reviews.
+Exact evidence and sequencing are in
+[`agent-collab/pi-native-acceptance-audit.md`](agent-collab/pi-native-acceptance-audit.md).
+
+## 2026-07-18 — provider-free package/UI smoke closure active (`/root/package_ui_smoke_closure`)
+
+The primary integration package lane delegated a bounded evidence-only closure over
+`scripts/pi-package-smoke.test.mjs`, the inaccurate tool paragraph in `packages/core/README.md`,
+[`agent-collab/package-ui-smoke-closure.md`](agent-collab/package-ui-smoke-closure.md), and this
+append-only registry transition. The rehearsal will use only an owned temporary HOME and Pi agent
+directory, exact local archives, Pi's supported programmatic extension runner, and an in-memory
+terminal. Authority/storage source, profile source, parity publication, providers, user Pi state,
+credentials, terminals/panes, live projects, and Updog remain excluded.
+
+> **Package/UI smoke lease released — 2026-07-18:** the smoke now requires three distinct archive
+> digests, resolves all three installed commands through Pi's supported extension runner with the
+> exact authenticated stock-Pi root, exercises the packed standalone CLI branch through an
+> in-memory 82-by-20 terminal, and removes the three exact sources while restoring unrelated Pi
+> settings, credentials, prompts, package/extension/skill bytes, and permissions exactly. Focused
+> UI evidence is **91/91** and a fresh exact-three-archive install/remove probe is green. The README
+> now correctly separates five read-only status/context/transcript tools, proposal inspection, and
+> the one confirmed proposal-decision mutator. Two moving-tree aggregate runs found and fixed a
+> stale transcript assertion and a missing explicit Pi-root handoff; neither failed aggregate is
+> claimed as release evidence, and primary integration requested no third repeat before freeze.
+> `/koni-run` still cancels before **Start** in this harness, and standalone uses an in-memory
+> terminal, so the final frozen-tree populated-handler and real-PTY exact-tarball rehearsal remains.
+> No provider, real terminal/pane, user Pi state, credential, live project, or Updog state was
+> touched. Exact evidence is in
+> [`agent-collab/package-ui-smoke-closure.md`](agent-collab/package-ui-smoke-closure.md); all leases
+> are released.
+
+## 2026-07-18 — provider-free populated UI parity audit claimed (`populated_ui_parity/root`)
+
+This bounded pre-freeze lane owns only `packages/core/src/control-center/**`,
+`packages/core/src/monitor/**`, tightly related operator display adapters, focused UI
+tests/fixtures, and append-only coordination notes. It will render the exact shared
+`ControlCenterComponent` used by `/koni` and `koni tui` from one deterministic fully populated
+authority fixture at 82x20, ordinary, and roomy dimensions; exercise the compact Pi companion;
+compare semantic glyph/style/region and interaction traces against the accumulated Rust-TUI
+requirements; and fix definite UI-source gaps without redesigning authority. It excludes
+authority/storage, compiler/profile/parity publication, package smoke, credentials/user Pi,
+providers/network, terminals/panes, live projects, and the frozen Updog canary. Mailbox:
+[`agent-collab/populated-ui-parity.md`](agent-collab/populated-ui-parity.md).
+
+> **Populated UI parity lease released — 2026-07-18:** the exact shared
+> `ControlCenterComponent` now has one deterministic fully populated glyph/style/region oracle at
+> **82x20**, **122x40**, and **180x52**. It caught and repaired complete narrow-footer selection,
+> compact Activity duration naming, inaccurate Questions help, and an ANSI reset that made the
+> inactive Lead lose its muted styling. Core typecheck is green and the focused full-control-center
+> plus compact-companion matrix is **117/117**. The compact summary-page fields and revision-bound
+> selected-detail hydration contract are handed to the separate bounded-read owner; this lane did
+> not refactor authority or eager run loading. Exact evidence and the honest final stock-Pi/
+> exact-tarball real-PTY boundary are recorded in
+> [`agent-collab/populated-ui-parity.md`](agent-collab/populated-ui-parity.md). All source/test
+> leases from this lane are released.
+
+> **Bounded populated-run consumer closure — 2026-07-18:** this supersedes only the eager-loading
+> handoff sentence in the preceding historical closure. After delegation from primary integration,
+> the shared control center now retains one maximum-200 compact summary window and one exact
+> revision-bound selected record. Ordinary refresh is one atomic `aroundRunId` page request rather
+> than a page-1 walk; adjacent arrows remain cursor-based, stale recovery resumes from the selected
+> anchor, missing/deleted selection falls back once, and global edges clamp. Provisional rows,
+> populated cell/style semantics, and old-daemon compatibility are preserved; an oversized legacy
+> list fails closed. Pi `koni_project_status` performs one compact page read with exact totals and no
+> detail hydration. Core typecheck, **136/136** UI/companion tests, and **25/25** page/store/server
+> tests are green. Full contract and commands are appended in
+> [`agent-collab/populated-ui-parity.md`](agent-collab/populated-ui-parity.md); this consumer lease
+> is released.
+
+> **Complete bounded transcript-navigation lane reopened — 2026-07-18:** primary integration
+> delegated the full control-center transcript projector/controller/chat input-rendering paths and,
+> only where required, the native Pi transcript-page projector back to `populated_ui_parity/root`.
+> The lane will retain one finite snapshot-bound history window, add direct older/newer adjacent
+> navigation, and expose giant semantic blocks losslessly through bounded chunks instead of the
+> historical newest-800 stop or a silent presentation omission. Authority runtime/store,
+> package-smoke, provider, credential/user-Pi, terminal/pane, live-project, and Updog scope remains
+> excluded. Decisions and evidence append in
+> [`agent-collab/populated-ui-parity.md`](agent-collab/populated-ui-parity.md).
+
+## 2026-07-18 — final exact-package Start/companion/PTY smoke claimed (`/root/final_package_pty_smoke`)
+
+This bounded lane owns only `scripts/pi-package-smoke.test.mjs`,
+[`agent-collab/final-package-pty-smoke.md`](agent-collab/final-package-pty-smoke.md), and append-only
+coordination notes. It will consume exactly three supplied release archives when
+`KONI_PACKAGE_ARCHIVES_DIR` is set; otherwise it performs a moving-tree rehearsal only. Stock Pi's
+installed `/koni-run` handler will be driven through the explicit Start control against the existing
+packaged provider-free admission seam, and the resulting zero-token durable run will populate the
+passive companion, `/koni-runs`, `/koni`, and packed `koni tui` inside a test-owned local PTY before
+exact uninstall/restoration proof. Authority/storage/control-center consumer/profile/parity source,
+providers/network/OAuth flows, user Pi state, global installs, terminal panes, live projects, and
+Updog remain excluded.
+
+> **Pre-freeze package/PTY rehearsal lease released — 2026-07-18:** the stock-Pi smoke now uses the
+> repository's exact pinned Pi 0.80.10 runtime without a registry install, locally seeds only
+> Koni's exact `semver`/`yaml` dependency closure, and forces an empty owned npm cache offline. A
+> fresh moving-tree rehearsal is **1/1 in 159.6s**: installed `/koni-run` selected **Start** and made
+> a durable zero-token Planning run; the passive companion, `/koni-runs`, `/koni`, and packed
+> `koni tui` all rendered it; Python `pty.fork()` supplied a real local 122x40 PTY and `q` exited
+> zero; exact removal preserved unrelated Pi settings/auth/model-store/prompt/package/extension/
+> skill bytes and modes. Cleanup left no child or fixture. This is deliberately not frozen archive
+> evidence: no supplied `KONI_PACKAGE_ARCHIVES_DIR` was consumed while primary holds freeze. Exact
+> commands and the superseding PTY transition are in
+> [`agent-collab/final-package-pty-smoke.md`](agent-collab/final-package-pty-smoke.md). All source and
+> test leases from this lane are released until primary announces the three frozen archives.
+
+## 2026-07-18 — independent release acceptance audit claimed (`/root/release_acceptance_audit`)
+
+This read-only lane is tracing the complete Pi-native product contract to current source, focused
+tests, package manifests, parity artifacts, and release evidence. It owns no production/test source
+and will report only definite gaps or partial acceptance outside the active startup/quiesce lane:
+three-package boundaries; Pi commands and passive companion; full shared control-center parity;
+background controls/questions/approvals/steering; native transcripts/lineage/compaction/resource
+isolation; Rust-free deterministic authority; profile, ambient Pi, and credential preservation;
+Git/worktree/manual merge; and deletion with zero further spend. It excludes providers/network,
+global installs, user Pi state, credentials, terminals/panes, live projects, and the frozen Updog
+canary. Mailbox:
+[`agent-collab/release-acceptance-audit.md`](agent-collab/release-acceptance-audit.md).
+
+## 2026-07-18 — startup epoch release blocker (`/root`)
+
+Independent review found a pre-error crash prefix in ordinary startup: recovery could activate an
+earlier run before a later run failed, while the durable failure-quiesce marker was written only in
+the catch path. Primary and the lifecycle owner are closing this with a separate lifetime-retained
+`authorityStartup` epoch: CAS `recovering` before every recovery effect, CAS the same epoch `ready`
+after complete recovery, then publish socket readiness. A predecessor `recovering` epoch forces
+bounded cleanup and draft blocking; `authorityQuiesce` wins when both exist. Source freeze remains
+held for crash-prefix, ready-before-handshake, exact CAS/corruption, provider-overlap, and combined
+quiesce/epoch tests plus independent review. The accepted transition is recorded append-only in
+[`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Independent release acceptance audit complete — 2026-07-18:** no additional P0 source defect
+> was found outside the separately owned startup/quiesce lane. The three-package Pi-native product,
+> both UI surfaces, ordinary Pi credentials, contained sessions/resources, lineage, Git lifecycle,
+> profile preservation, and delete/drain boundary are materially present. Release is still held by
+> the truthful development parity ledger (**24 passing / 6 P0 specified**) and the absence of one
+> final exact-three-frozen-archive stock-Pi/real-PTY rehearsal. The packaged moving-tree proof
+> currently exercises a populated zero-token Planning run across all hosts, but not the complete
+> actionable question/plan/chat/config/manual-merge matrix; focused source tests cover those paths,
+> so that is a host-level evidence partial rather than a missing implementation. One bounded product
+> partial remains: the dashboard chat shows only the newest 800 semantic blocks and elides displayed
+> blocks above 64 KiB even though canonical Pi JSONL and authority paging remain complete. Exact
+> findings and file evidence are in
+> [`agent-collab/release-acceptance-audit.md`](agent-collab/release-acceptance-audit.md). This lane
+> changed no production/test source and claims no leases.
+
+## 2026-07-18 — shared two-gate shutdown closure (`/root`)
+
+The startup epoch review exposed an adjacent shutdown race. Engine and server shutdown now use one
+shared promise per object, so concurrent callers cannot return before all cleanup and cannot
+observe different cleanup failures. External RPC admission closes first; the supervisor-wide
+launch tombstone is installed synchronously before the first awaited drain; already-authorized
+internal outcome/action/Git effects settle under the still-owned lease; then internal admission,
+the socket, and the lease close. Immediate external rejection remains outside the queued mutation
+tail, while an execution-time check closes the already-enqueued race. Source freeze remains held
+for engine-level late-launch/shared-stop regressions and independent lifecycle review. Exact
+decisions are appended in
+[`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md); implementation/testing
+remains coordinated through
+[`agent-collab/bounded-run-pagination.md`](agent-collab/bounded-run-pagination.md) and
+[`agent-collab/store-patch-review.md`](agent-collab/store-patch-review.md).
+
+> **Complete bounded Pi transcript navigation closed — 2026-07-18:** the shared `/koni` and
+> `koni tui` Chat surface no longer stops at the newest 800 blocks or silently elides a giant
+> semantic item. Authority returns exact snapshot-bound adjacent older/newer windows; the
+> controller holds one maximum-64-block window for four recent agents, preserves pinned readers
+> during appends, and reloads live head only on explicit `r`. Ordered <=64 KiB chunks reconstruct
+> complete safe UTF-8 content across pages, image bytes remain private behind ordered type/size
+> attachment rows, and session/snapshot/ordinal/request ownership fails closed on drift or stale
+> switching. Composer drafts are run-scoped and brackets remain literal while editing. Core
+> typecheck, **87/87** transcript/control-center tests, and **22/22** populated frame/view-model
+> tests are green. Exact decisions/evidence are appended in
+> [`agent-collab/populated-ui-parity.md`](agent-collab/populated-ui-parity.md); the lane is released.
+
+> **Actionable package/PTY host-parity lease reopened — 2026-07-18:**
+> `/root/populated_ui_parity` now owns only `scripts/pi-package-smoke.test.mjs` plus append-only
+> package-smoke coordination notes. The bounded goal is to extend the disposable stock-Pi,
+> provider-free, real-PTY exact-package rehearsal across question answer+notes, authored-plan
+> revise/approve, guided config publish, merge-ready inspect/manual merge, and truthful active-agent
+> steer/follow-up only where the existing contained seam permits. No provider/network/OAuth/user
+> Pi/global/live/pane/Updog state is allowed, and no full ~160-second rehearsal will run before the
+> frozen archive handoff. Exact claim and decisions are in
+> [`agent-collab/final-package-pty-smoke.md`](agent-collab/final-package-pty-smoke.md).
+
+## 2026-07-18 — bounded pagination/startup/quiesce lane released (`/root/bounded_run_pagination`)
+
+The bounded run surface and the startup/shutdown safety work discovered during its review are now
+complete and released for serial integration. Run pages are exact bidirectional v2 snapshots with
+bounded cursors/pages and selected-run anchoring; legacy whole-list output fails closed above its
+compatibility ceiling. Lease ownership now precedes store recovery/migration. Hash-bound startup
+epochs, purpose-authenticated quiesce, immediate external tombstones, joined terminal start/stop,
+queue-bound Git cancellation, and exact explicit terminal-resolver resume close the reviewed crash
+and token-spend prefixes without implicitly relaunching blocked work. Legacy purpose-less internal
+startup-failure markers are distinguished from receipt-backed operator markers. Core typecheck and
+scoped diff-check pass; server is 18/18; six exact engine lifecycle selectors are green; and the
+22.77s faulted resolver/replay integration is green 1/1. Full contract/evidence is appended in
+[`agent-collab/bounded-run-pagination.md`](agent-collab/bounded-run-pagination.md). This lane owns no
+remaining source/test lease; primary may begin broad serial release gates.
+
+> **Post-release resolver Git correction — 2026-07-18:** independent review found that a rejected
+> narrow resolver resume still scheduled generic recovery for duplicate/unrelated Git intent. The
+> constrained branch now rejects with `terminal_resolver_retry_git` and performs zero background
+> recovery; generic recovery runs only when no terminal retry constrains resume. Adversarial
+> duplicate and unrelated-intent variants prove byte-identical `run.json` plus zero
+> `recoverIntent`/`supersedeTicketCycle` calls, followed by the exact happy path. Focused integration
+> is **1/1 in 23.50s**, Core typecheck and scoped diff-check pass. The bounded lifecycle lane is
+> released again; exact evidence is appended in
+> [`agent-collab/bounded-run-pagination.md`](agent-collab/bounded-run-pagination.md).
+
+> **Gate 2 startup/detached-outcome lease released — 2026-07-18
+> (`bounded_run_pagination/root`):** the closure now rechecks its monotonic ownership flag after
+> every awaited outcome/compiler/finalization boundary before ordinary mutation, covering a
+> completion that entered immediately before quiesce. Final exact startup+quiesce is **6/6 in
+> 22.20s**; full engine **50/50**, adjacent Gate 2 **54/54**, strict Core typecheck, and scoped
+> diff-check are green. This supersedes the preceding frozen-candidate status. Source/test bytes
+> are released to primary for the complete 580-test aggregate. Full trace is in
+> [`agent-collab/bounded-run-pagination.md`](agent-collab/bounded-run-pagination.md).
+
+> **Actionable package/PTY fixture implemented; lease released — 2026-07-18:** the exact-package
+> rehearsal now drives installed `/koni` active-agent steer + follow-up, guided config publish, and
+> authored-plan revise then approve; real packed `koni tui` answers a question with option+notes and
+> explicitly authorizes a genuine prepared Git promotion. One durable run and the installed
+> ProjectAuthorityStore/IsolatedGitLifecycle back the fixture; provider activation remains held and
+> final state requires Completed, exact durable inputs, target-branch bytes, and zero total token
+> usage. Syntax, manifest-only **1/1**, and scoped diff-check pass. Per freeze instruction the long
+> rehearsal was not run, so frozen exact-archive execution remains a mandatory blocking release
+> gate. Full transition/evidence caveat is append-only in
+> [`agent-collab/final-package-pty-smoke.md`](agent-collab/final-package-pty-smoke.md). Script/docs
+> lease is released.
+
+> **Read-only Research stop-race diagnosis — 2026-07-18:** the composed failures at lines 828 and
+> 916 are one deterministic circular wait. A configured assignment is held after its journal and
+> semantic result complete but before final settlement; pause/delete then await that retained
+> assignment promise through `#drainRunActionExecutions()` before they can commit the terminal
+> lifecycle CAS that would abandon it. The fixture releases only after that terminal label, and
+> `engine.stop()` joins the same promise after timeout. Adjacent cases pass because they pause only
+> after actions have settled. This contradicts the existing stopped-action contract and is likely
+> a reintroduced pause/delete drain, not slow provider or Research work. Exact state trace and
+> diagnostics are appended in
+> [`agent-collab/populated-ui-parity.md`](agent-collab/populated-ui-parity.md); no source/test or
+> external state was touched.
+
+> **Independent Gate 1 lifecycle verdict — 2026-07-18 (`store_patch_review/root`):** current source
+> confirms the Research pause/delete timeout is a production circular wait. The assignment is
+> gated after its completed journal and semantic replay but before its final publication CAS;
+> pause, delete, and quiesce all call `#drainRunActionExecutions()` before the durable CAS that
+> would type-settle that exact action as abandoned. The drain includes the gated assignment
+> settlement, so the lifecycle waits on the promise its own tombstone must invalidate. This
+> regresses the previously released lifecycle predicate and contradicts the
+> `closeStoppedRunActions` contract. Release remains held until stop reaches its same-CAS terminal
+> label without that pre-CAS join, late finalizers are proven no-op with zero proposal/effect/
+> blocker/restart resurrection, and quiesce is audited symmetrically. Git draining remains required
+> as a distinct external-effect boundary. Test cleanup may release gates in `finally`, but normal
+> assertions must continue to observe `paused`/`deleted` before release. Exact trace and owner
+> questions are in
+> [`agent-collab/legacy-storage-hardening-review.md`](agent-collab/legacy-storage-hardening-review.md).
+
+> **Gate 1 stop-settlement independently released — 2026-07-18 (`store_patch_review/root`):** the
+> correction removes pause/delete's pre-CAS action join, closes quiesced action/attempt authority
+> before provider/Git reconciliation, and retains the distinct external Git drains. Held
+> assignment finalizers now lose to the durable lifecycle/action CAS and perform no late proposal,
+> terminal-policy, blocker, or restart work. The composed fixtures use `finally` cleanup without
+> releasing before the terminal-state assertion on success. Independent evidence is exact generic
+> plus Research stop races **4/4** in **23.35s**, complete composed Gate 1 **5/5** in **100.66s**,
+> quiesce regressions **4/4** in **19.04s**, Core typecheck green, and scoped diff-check green.
+> Verdict: **release this lifecycle slice**. Full causal trace and closure are in
+> [`agent-collab/legacy-storage-hardening-review.md`](agent-collab/legacy-storage-hardening-review.md).
+
+> **Gate 1 Research lifecycle-settlement correction frozen — 2026-07-18
+> (`bounded_run_pagination/root`):** the pause/delete timeouts were reproduced as one circular
+> wait: lifecycle `pausing`, a source attempt `terminal_accepted`, and its completed validation
+> journal still awaiting the injected final-settlement gate. Run-scoped pause/delete no longer
+> join in-process action/finalizer promises before the CAS that abandons them; their distinct Git
+> drains remain intact. Blocked/terminal quiesce now closes actions and attempts in a state-first
+> CAS before provider/Git waits. Both fixtures release gates in `finally` only after observing the
+> expected terminal boundary on success. Exact pause and delete selectors pass independently;
+> composed integration is **5/5 in 98.08s**; five earlier action-stop races and four bounded
+> quiesce cases pass; strict Core typecheck and scoped diff-check pass. Bytes are frozen for
+> independent review, with full trace and evidence in
+> [`agent-collab/bounded-run-pagination.md`](agent-collab/bounded-run-pagination.md). No external,
+> live-project, provider, credential, user-Pi, terminal, or Updog state was touched.
+
+> **Gate 1 Research lifecycle source lease released — 2026-07-18
+> (`bounded_run_pagination/root`):** independent review passed generic plus Research stop races
+> **4/4 in 23.35s**, complete composed Gate 1 **5/5 in 100.66s**, quiesce **4/4 in 19.04s**,
+> Core typecheck, and scoped diff-check, with no remaining blocker. This supersedes the immediately
+> preceding frozen-candidate status. All production/test source in this lifecycle correction is
+> released to the primary integrator; exact owner and independent evidence is append-only in
+> [`agent-collab/bounded-run-pagination.md`](agent-collab/bounded-run-pagination.md) and
+> [`agent-collab/legacy-storage-hardening-review.md`](agent-collab/legacy-storage-hardening-review.md).
+
+> **Gate 2 startup/detached-outcome correction frozen — 2026-07-18
+> (`bounded_run_pagination/root`):** the 578/580 authority aggregate first exposed a test fixture
+> routing unassigned Planning through a nonexistent ticket cycle. Correct workspace routing then
+> revealed the underlying production seam: a Planning outcome attached before startup failure was
+> aborted by quiesce in its original non-lease AsyncLocal context and its late `#failLaunch`
+> mutation rejected `authority_quiescing` from terminal `stop()`. Durable operator/startup quiesce
+> now closes detached outcome classification before abort callbacks resolve; state-first settlement
+> owns attempt/action interruption and transcript-based provider reconciliation. Normal stop still
+> drains finalizers. The regression explicitly requires failed-engine `stop()` to resolve. Exact
+> startup is **2/2**, quiesce **4/4**, full engine **50/50**, affected Gate 2 subset **54/54**,
+> typecheck and scoped diff-check pass. Candidate bytes are frozen for independent review; full
+> trace is append-only in
+> [`agent-collab/bounded-run-pagination.md`](agent-collab/bounded-run-pagination.md).
+
+> **Gate 4 broad-Core correction — 2026-07-18 (`primary-integrator/root`):** the first complete
+> Core matrix passed **1423/1427** and exposed four bounded gaps that focused gates did not cover.
+> Effective profile compilation hashed baseline files without the authenticated migration catalog,
+> so an untouched baseline differed from its package bundle. It now hashes both, while project
+> edits still change the file projection. The built-in capability fixture now supplies the required
+> form for `retry_terminal_resolver`. Finally, generic blocked-run startup inertness had swallowed
+> the deliberate migration-only blocked state that protects a legacy checkout before proof-gated
+> relocation; only an exact `relocation_required` record may cross that boundary, after which the
+> settlement restores the prior phase. Focused configuration/capability/legacy coverage is
+> **54/54**, strict Core typecheck and diff-check pass. The source generation is not releasable
+> until affected Gates 1–4 are green again; no provider, credential, Pi home, live project, terminal,
+> or Updog state was touched.
+
+> **Stock-Pi package/control-center release closure — 2026-07-18 (`primary-integrator/root`):**
+> the first post-freeze package rehearsal exposed a probe-only lexical-scope defect, then a real
+> chat-composer race in which a second Ctrl-Enter could clear an unsent follow-up while the first
+> authority mutation was still refreshing. Chat drafts now close synchronously before their first
+> await, remain locked across the mutation boundary, and restore on failure; a focused control-center
+> regression is **57/57**. The packaged interaction oracle was brought forward to the current guided
+> Configure surface, single-action plan review, exact question selection, and case-insensitive
+> lifecycle copy. Its disposable Git project now commits installed/project-authored `.koni`
+> configuration before exercising target drift and manual promotion, waits for exact
+> `Status: Completed`, and honors the authority's bounded non-interruptible-stop retry contract.
+> The exact three-package stock-Pi rehearsal is **2/2 in 229.39s** with full Pi commands/overlays,
+> standalone real-PTY control center, questions, steering/follow-ups, plan revision/approval,
+> target synchronization/manual merge, crash recovery, deletion/cancellation, overlay preservation,
+> resource isolation, and uninstall hygiene; it made zero provider calls and did not mutate
+> credentials or ambient Pi resources. These source/test bytes still require the final full-gate
+> rerun and parity republication before release or the frozen Updog canary.
+
+> **Guarded-canary predecessor allowlist correction — 2026-07-18 (`primary-integrator/root`):**
+> the first exact-archive Updog validation stopped before authority startup because Coding 0.8's
+> authenticated semantic-retirement descriptor named only the oracle 0.7 bundle, while retained
+> installed 0.7 bundles use exact digests `a3dd0099…5312c` and `c83eb529…d307`. The same inventory
+> found retained Research 1.0.11 digests `ae83beab…3eb4` and `b40f0475…dbb4`. Both releases now
+> authorize only those exact known predecessors in addition to the oracle digest; profile tests
+> assert the retained sets, and regenerated bundle identities are Coding `094bf5de…b83d` and
+> Research `1f8e474a…deef`. Focused profile/package/retirement evidence is **5/5 + 5/5 + 41/41**.
+> The protected Updog run remains stopped and byte-identical at run hash `555cb573…7630`, target
+> `95304acf…a4c4`; no authority/session/provider was started. Source is held for parity
+> republication, aggregate gates, and a new exact three-archive rehearsal before any canary retry.
+> **Guided `/koni-run` idle-socket correction — 2026-07-18 (`primary-integrator/root`):** the
+> guarded Updog canary proved that keeping the catalog/branch RPC connection open while a human
+> edits the New Run modal crosses the authority's intentional 60-second idle-socket limit. Start
+> then failed before `run.create` with no new run or provider spend. Intake now closes discovery
+> before the modal and opens one fresh, short-lived connection only for the explicit Start
+> mutation; it rejects double submission and never blindly retries an uncertain write. Focused
+> intake/companion evidence is **13/13** and Core typecheck is green. Details are append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Configured fixpoint-reissue lifecycle correction — 2026-07-19
+> (`primary-integrator/root`):** the guarded fresh install preserved the paused Updog run, then
+> Resume blocked before provider entry because the new reissue path attempted an unconfigured
+> `closed -> todo` ticket transition. Coding and Research now explicitly configure compiler-only
+> stale-obligation reissue. Already-pinned exact stock machines receive a hash-bound compatibility
+> authorization for only that transition; customized machines and human actors still fail closed.
+> Focused lifecycle/compiler/authority tests and strict workspace typechecks pass. Details and new
+> bundle identities are append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Expected-red causal diagnostics — 2026-07-19 (`primary-integrator/root`):** an accepted
+> nonzero configured check previously returned only a pass summary, so a proof author could not see
+> that the red came from an unrelated fixture/import failure until an expensive Reviewer turn.
+> Core now projects bounded authenticated stdout/stderr for accepted checks whose contract admits a
+> nonzero exit; accepted-green receipts stay compact. The default Coding Implementer/preparation
+> contract requires authenticating every returned failure before claiming preparation. Evidence is
+> Core process **9/9**, Coding **8/8**, bundles **5/5**, and strict Core/Coding typechecks. Details
+> are append-only in [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **No duplicate autonomous context fetch — 2026-07-19 (`primary-integrator/root`):** Pi already
+> reissues the complete compiler-bound and dynamic context before every contained provider request.
+> A live Reviewer redundantly called `koni_context`, added a 96 KiB receipt, and exhausted its input
+> ceiling before verdict. Autonomous launch inventories now omit that duplicate tool and explicitly
+> require reuse of the reissued context; the interactive package retains its context tool. Strict
+> Core typecheck and native run-program **17/17** are green. Details are append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+>
+> **Blocked automatic review-author recovery — 2026-07-19
+> (`primary-integrator/root`):** the live Updog canary found that an exhausted automatic review
+> correction could fail in its author step, leaving Review pending and hiding the exact supervised
+> recovery behind ambiguous generic retries. Core now derives recovery from the durable automatic
+> review-rework record, binds it to the accepted reviewer attempt, restores the reviewer findings
+> for the next author, and preserves the failed budget attempt. Generic Resume remains disabled.
+> Scheduler **9/9**, exact authority lifecycle **1/1**, and strict typecheck are green; details are
+> append-only in [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **macOS runtime-stage publication race — 2026-07-19 (`primary-integrator/root`):** a preserved
+> daemon failure showed that a losing concurrent runtime-stage rename can return `EACCES`/`EPERM`
+> after the winner seals the destination to 0500. Those codes now enter the existing full winner
+> verification path rather than failing a zero-usage agent construction; genuine permission or
+> byte/seal failures remain rejected. Eight concurrent children converge in the regression;
+> runtime identity **12/12**, Core typecheck, and diff check pass. Full evidence is append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Large Pi fork pre-compaction + consumer-complete proof defaults — 2026-07-19
+> (`primary-integrator/root`):** the live Medium proof rework inherited about 570 KiB of authenticated
+> parent chat, spent 101K fresh input tokens on its first request, and reached the 120K ceiling just
+> before its one check. Core now retains the full native Pi branch on disk while inserting one
+> child-authorized compaction before the first provider request when inherited context is large; the
+> exact new child instruction remains uncompressed and recovery hash-checks the compaction ledger.
+> Coding's bundled Planner/Implementer now isolate expected missing modules, require discriminating
+> sibling-negative fixtures, and prove actual consumer composition. Focused evidence is **26/26 +
+> 8/8** with Core/Coding typechecks green; the wider gate is in flight. Full evidence and rationale
+> are append-only in [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Canonical provider-error continuation + bounded Medium planning — 2026-07-19
+> (`primary-integrator/root`):** the fresh external-worktree Updog smoke ended one six-minute final
+> Codex synthesis with an exact Pi provider-error leaf and unknown billing. Explicit Resume now
+> retires only a launch-bound terminal error carrying a response ID, zeroed Pi usage, no tool call,
+> and a hash-bound error digest; it preserves the original request as uncertain exposure and starts
+> an authenticated same-scope child session that reuses prior evidence. Torn/errors without a
+> response ID still block. The bundled Coding planner also locks the simplest proven native seam,
+> treats additive sibling values as routine rather than migration, and reduces Medium discovery to
+> **16 calls / 120K new tokens / 30K synthesis reserve**. Evidence is provider lifecycle **19/19**,
+> native continuation **1/1**, Coding profile **7/7**, and Core typecheck. Full rationale is
+> append-only in [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Developer-tool-compatible worktree placement — 2026-07-19
+> (`primary-integrator/root`, in progress):** the live Medium Updog proof worker produced its exact
+> scoped test, but Vitest reported that both the new file and known existing tests were missing.
+> The files are readable and the failure reproduces outside Koni containment: Vite's default
+> `server.fs.deny` rejects every checkout physically below a `.git` path. Current policy-backed
+> lifecycle namespaces are rooted at `<git-common>/.koni-worktrees`, so this is a Core Git-layout
+> defect rather than an Updog test defect. Primary integration is moving all newly admitted managed
+> worktrees to a collision-resistant repository-sibling namespace, retaining exact legacy-path
+> validation for already-issued records, and adding a developer-tool deny-pattern regression. The
+> current run is paused and provider-inert; no Updog overlay will be changed. Full rationale and
+> evidence remain append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Authenticated Pi conversation-fork correction in progress — 2026-07-19
+> (`primary-integrator/root`):** a live Medium plan revision received exact steering but an empty
+> new Pi session, so it repeated the complete 24-call discovery pass and spent ~92K additional new
+> tokens. Primary integration owns the cross-cutting correction: same-scope retry/rework/recovery
+> attempts become distinct, hash-bound Pi session forks from the authenticated parent leaf, while
+> Review/integration remain independent roots. Parent Koni metadata is excluded, child recovery and
+> usage apply only to the suffix, and a planning revision fails closed if its fork cannot be
+> authenticated. The bundled Coding planner also gains the lowest-migration repository-native
+> design rule. The live run is awaiting approval and remains untouched while source changes are
+> developed. Details are append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Fresh-user Medium smoke corrections — 2026-07-19 (`primary-integrator/root`):** live run
+> `run-c08acc57-22ec-4515-b84c-e5ce43e17b31` proved that the default Coding planner can leave a
+> complete contract unlinked and thereby derive redundant contract work; reviewers can spend their
+> bounded context on whole-file reads; and a consumer-complete intended red can be rejected merely
+> because its exact approved new local module is absent. Primary integration owns planner graph
+> predicate closure/reuse guidance, search-first Reviewer guidance, task-local proof-preparation
+> acceptance language, and the narrow Core distinction between an absent compiler-declared local
+> input and a missing ambient/package dependency. The immutable installed smoke continues while
+> source is corrected; no Updog-specific configuration is in scope. Full evidence is append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Post-implementation retry/delivery closure — 2026-07-19 (`primary-integrator/root`):** semantic
+> Review rejection and infrastructure failure now have separate durable outcomes; no-effect Review
+> routes are rejected; never-started stale tickets retire deterministically; and Coding delivery
+> target plus bounded reviewer context are compiler-owned. A read-only replay against the paused
+> Updog canary proves the exact legacy adapter without mutating the run. Core focused evidence is
+> **102/102**, strict typecheck/build and profile bundles **5/5** are green. The frozen canary remains
+> paused as forensic evidence because its historical proof workflow has no legal repair authority;
+> the corrected path will be proven by the clean-user Medium smoke test. Full evidence is append-only
+> in [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Predicate-scoped evidence + non-looping verification correction — 2026-07-19
+> (`primary-integrator/root`):** delivery review passed, but the live Medium canary then emitted the
+> same completed proof ticket on every target-sync verification tick because whole-graph evidence
+> currentness treated an unrelated delivery node as proof invalidation. Core now rebinds each
+> predicate only when its recursively resolved checked graph footprint is unchanged, around both
+> agent deltas and compiler review effects. Verification names exact applicable ticket IDs and
+> reissues a genuinely current completed ticket once for legacy recovery rather than looping.
+> Unknown/interfering changes remain fail-closed. Core typecheck, compiler/full authority **79/79**,
+> adjacent scheduler/tools/control **69/69**, Coding **8/8**, and diff check pass. The Updog canary
+> is durably paused with zero active attempts pending guarded installation; full evidence is
+> append-only in [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Post-review evidence and delivery recovery correction — 2026-07-19
+> (`primary-integrator/root`):** follow-up inspection proved the redundant proof was not caused by
+> pre-effect rule ordering. Review status effects changed the exact graph hash and made current
+> promotion evidence appear stale. Core now rebinds that evidence only across authenticated,
+> membership-preserving status-only effects; all semantic or check-membership changes remain
+> fail-closed. Assignment prompts name exact compiler fields to omit, graph-only delivery review no
+> longer demands nonexistent predecessor command streams, and rework children must settle with a
+> fresh terminal call despite inherited parent transcripts. The TUI now projects only unresolved
+> current-attempt check failures while preserving full history. Core/compiler/TUI authority is
+> **33/33**, Coding is **8/8**, and strict typecheck is green. Full evidence is append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Live post-implementation orchestration closure claimed — 2026-07-19
+> (`primary-integrator/root`):** the paused Updog canary proved that a no-longer-applicable proof
+> ticket remained schedulable, infrastructure failure in a Review reopened its author, rejected
+> proof authority remained visible to delivery, and delivery assembly/review lacked deterministic
+> target and bounded semantic context. Primary integration owns these four Core/default-Coding
+> corrections. The run remains token-inert; no project-specific Updog configuration will be used.
+> Details are append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Authenticated proof-preparation currentness — 2026-07-19
+> (`primary-integrator/root`):** the preserved Medium canary completed source-only preparation and
+> independent Review, then verification reissued the same ticket because the Pi-native compiler
+> had no producer for `proof_preparation_current` evidence. Core now reconstructs that fact from the
+> newest exact Review's immutable Pi launch/context/output, historical check and source manifest,
+> current source bytes, target universe, and compiler-owned effect lineage. Newer failed attempts
+> supersede older valid ones; covered product drift remains allowed; source drift reopens; and the
+> only prospective path is the exact terminal-accepted preparation Review. Typecheck, focused
+> lifecycle **1/1**, adjacent native/domain compiler **21/21**, and a read-only preserved-Updog
+> replay all pass. Full rationale is append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+> **Whole-set and empty-state oracle closure — 2026-07-19
+> (`primary-integrator/root`):** the next honest Reviewer proved that a positional six-member
+> suffix could hide a retained seventh legacy control, while an always-populated fixture could not
+> establish visibility of optional empty fields. Coding's default Implementer now requires exact
+> closure of the entire semantically selected collection and independent empty, legacy-only,
+> absent-optional, and populated condition fixtures before the first configured check. Coding
+> **7/7** and profile bundle identity **5/5** pass; the new bundle is
+> `sha256:9469a39c3fccf3b2bf8fffd002aebc3cdf35243a00e3737df3e21270787a92dd`.
+> Full rationale is append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Exact historical receipt selection — 2026-07-19 (`primary-integrator/root`):** the live
+> canary reached an honest accepted expected-red and submitted correctly, but terminal replay
+> rejected its compiler projection because multiple accepted retries matched one historical leaf.
+> Projection now emits one authenticated receipt per required leaf—current attempt first, then
+> newest durable evidence—while replay remains strict about extras. Core typecheck, the focused
+> duplicate-receipt case, and all native compiler cases (**14/14**) are green. The run/worktree
+> remain preserved for a guarded retry; full evidence is append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Authenticated predecessor-review evidence — 2026-07-19 (`primary-integrator/root`):** the live
+> Updog oracle review could inspect source but not the compiler-recorded command streams, so it
+> rejected a real coverage gap without seeing that a second oracle case had crashed in its React
+> fixture. Every configured review now receives a bounded, hash-verified `predecessorExecution`
+> envelope for its declared predecessor steps and must map each structured oracle case to actual
+> stdout/stderr. React setup/render crashes are deterministic expected-red exclusions, and Core's
+> terminal instruction now forbids finishing in prose after the final check. The current blocked
+> canary/worktree remains preserved for guarded activation. Full rationale is append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Target-branch dependency reconciliation — 2026-07-19 (`primary-integrator/root`):** the live
+> target still pins `framer-motion@11.5.3`, while the newer primary Books checkout links only
+> `motion@12.42.2`; borrowing the current link topology caused nine invalid proof invocations even
+> though the historical package bytes remained locally installed. Managed checks now reconcile
+> direct dependency versions from the target manifest/pnpm importer and target-owned workspace
+> packages before containment, using only authenticated existing caches and managed links—no
+> install, network, scripts, lockfile edits, or source mutation. The exact Updog Vitest command now
+> reaches its assertions with the target React/dependency closure. Evidence is containment **8/8**,
+> adjacent compiler **22/22**, Coding profile **7/7**, bundle **5/5**, and strict typecheck. Default
+> Implementer guidance also forbids one-property-per-check fixture debugging. Full rationale is
+> append-only in [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Live Medium execution boundary correction — 2026-07-19 (`primary-integrator/root`):** the
+> preserved Updog canary proved that compiler context was injected and then redundantly fetched,
+> a valid context receipt was rejected by a hidden 64 KiB presentation cap, and the next turn used
+> model output maximum as though it were total context capacity. New specs now authenticate Pi's
+> context window, legacy specs preserve their original `maxInput` boundary, tool results honor the
+> launch-bound limit, and Coding implementers consume injected context without rereading it.
+> Bundled Coding run types also opt out of automatic entry/deadlock Lead judgments; deterministic
+> scheduling remains Core-owned while configured qualitative Lead boundaries remain supported.
+> Focused runtime/profile evidence is **96/96 + 5/5** with strict Core typecheck. The canary is
+> paused and unchanged until a guarded reinstall. Full evidence and rationale are append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Authenticated same-scope Pi conversation forks released — 2026-07-19
+> (`primary-integrator/root`):** plan revision, retry, and recovery can now use a distinct immutable
+> Pi child session backed by exact parent launch/transcript/leaf hashes, while Review/integration
+> remain independent roots and child usage excludes the inherited prefix. Recursive forks and
+> parent-mutation rejection are covered before provider entry. Core session evidence is **92/92**,
+> authority/native compiler **75/75**, bundle integrity **5/5**, and strict typecheck is green. The
+> preserved Updog run is ready for the guarded low-waste revision proof; full rationale is
+> append-only in [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Operator-confirmed ticket recovery correction — 2026-07-19 (`primary-integrator/root`):** the
+> paused Updog canary proved that a contained infrastructure failure could leave its ticket blocked
+> across resume with no legal successor. Typed failure codes now survive Pi session, child
+> transport, and durable attempt storage. Resume resets only recognized infrastructure failures
+> with no accepted terminal result or unsettled provider exposure; it preserves the failed attempt
+> and derives one ordinary retry lineage. Compiler-reviewed semantic failures remain blocked and
+> create no successor. Focused evidence is engine **3/3**, runtime propagation **2/2**, strict Core
+> typecheck, and scoped diff-check. Source is released for guarded reinstall; the live run remains
+> paused and token-inert. Full rationale is append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Provider input-estimate migration claimed — 2026-07-19 (`primary-integrator/root`):** the first
+> live operator-confirmed retry proved its lineage and then exposed a unit defect: Koni compared
+> serialized UTF-8 bytes one-for-one with model tokens. Primary integration owns the shared
+> Pi-aligned estimate, legacy-ledger compatibility, typed authority-error propagation, focused
+> runtime tests, and generic Coding bounded-read instructions. Provider/output authority and exact
+> post-response accounting stay unchanged; Updog remains paused and provider-inert. Details are
+> append-only in [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Configured-check semantic identity correction — 2026-07-19 (`primary-integrator/root`):** the
+> live Updog proof-preparation worker authored both scoped test sources, then was deterministically
+> rejected because the resolved composite/leaf plans used legacy raw-definition hashes while their
+> immutable policies used pinned semantic-catalog hashes. Policy-bound plans now use the semantic
+> identities end to end; policy-free legacy plans retain their raw-definition compatibility path.
+> Native compiler evidence is **13/13**, adjacent policy/runtime evidence **15/15**, and strict Core
+> typecheck is green. The canary remains paused and provider-inert until guarded activation. Full
+> evidence is append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Canonical provider-abort recovery released — 2026-07-19 (`primary-integrator/root`):** a live
+> pause left one Pi response durably marked aborted with intentionally zeroed usage, so exact
+> billing could not be reconstructed and the prior generic exposure hold stranded Resume. An
+> explicit Resume can now retire only a launch-authenticated canonical Pi abort. The assistant,
+> response ID, original bounded reservation, and operator authorization remain hash-bound; exact
+> token totals remain unchanged and the dashboard shows the reservation separately as uncertain
+> exposure. Torn/error/mismatched responses remain blocked. Evidence is provider authority
+> **17/17**, control-center **12/12**, adjacent record/policy **4/4**, and strict Core typecheck.
+> Full rationale is append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Contained-check and honest-failure recovery correction — 2026-07-19
+> (`primary-integrator/root`):** the full failed-worker transcript proves two terminal submissions
+> were rejected after the composite historical check stopped at exit 127; this was runtime/check
+> authority failure, not an agent omitting its terminal instruction. The command sandbox now carries
+> the exact interpreter/package-manager closure and a read-only managed-worktree dependency overlay.
+> Obvious setup/collection/module failures cannot qualify as expected-red evidence. Explicit Resume
+> may recover a terminal-protocol-failed attempt only under the existing no-effect/no-exposure
+> guards, while a new schema-valid failed assignment is durably accepted as `failed_submission`
+> without claiming success checks. The complete adjacent authority/compiler gate is **74/74** and
+> strict workspace typecheck is green. The preserved Updog worktree was durably paused before the
+> guarded generation refresh. Full rationale is append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+> **Exhausted review recovery + route-matrix default — 2026-07-19
+> (`primary-integrator/root`):** the live Medium canary proved that its second honest reviewer
+> failure left a blocked ticket under an `executing` run with only a misleading generic Resume.
+> Core now blocks only after terminal provider settlement, projects one exact confirmed **Retry
+> reviewed blocker** capability bound to the failed reviewer attempt, preserves automatic and
+> supervised rework history, and reopens only the compiler-pinned author/reviewer slice. Generic
+> Resume cannot bypass this semantic boundary. Coding's bundled Implementer now closes a complete
+> member-by-consumer route matrix before its first check, so the Updog-derived lesson ships as the
+> default rather than a project overlay. Typecheck, scheduler/compiler/capability **33/33**, focused
+> authority **3/3**, Coding **7/7**, and profile bundles **5/5** are green; details are append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+>
+> **Post-activation fork compaction — 2026-07-19 (`primary-integrator/root`):** the first live
+> supervised retry safely failed at zero usage because its large-fork compaction requested durable
+> authority during contained-process construction. Core now persists only the immutable child
+> suffix before readiness, then authorizes/syncs native Pi compaction after the parent commits and
+> activates the exact session and before provider entry. Production/managed session suites are
+> **26/26 + 26/26**, focused compaction boundary/recovery **2/2**, and strict typecheck is green.
+> The zero-usage failed attempt remains preserved; details are append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Explicit provider acknowledgement + search-bound file reads — 2026-07-19
+> (`primary-integrator/root`):** the live reviewed retry produced a canonical provider-error leaf
+> containing an unexecuted write proposal, while the same agent blindly paginated 179 KiB despite
+> clear Coding guidance. Core now exposes a confirmed accounting-only **Acknowledge provider error**
+> action that never resumes work and permits inert terminal write/edit proposals only when no tool
+> receipt or pending effect exists. Reviewed retry remains a separate capability. File reads are
+> capped at 32 KiB, and nonzero offsets in large files require proximity to an authenticated prior
+> search match. Strict typecheck and the adjacent provider/review/tool/TUI gate are **161/161**;
+> rationale and evidence are append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Steerable supervised proof recovery — 2026-07-19 (`primary-integrator/root`):** the Updog
+> canary proved that a graph-pinned `--silent` test command can hide the causal component stack and
+> turn an exact reviewed rework into repeated fixture guessing. **Retry reviewed blocker** now
+> accepts bounded multiline operator steering, persists it on the supervised rework record, and
+> injects it beside the unchanged reviewer contract without broadening authority. Bundled Coding
+> planning/preparation/review guidance now forbids diagnostic-suppressing proof commands. Focused
+> evidence is scheduler **9/9**, authority **2/2**, native prompt **1/1**, Coding **8/8**, bundles
+> **5/5**, plus strict Core/Coding typechecks. Details are append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Budget-abort assignment recovery — 2026-07-19 (`primary-integrator/root`):** the live Updog
+> Reviewer proved that Pi token ceilings settle as `aborted`, while Core's safe explicit Resume
+> recognized only `failed` infrastructure attempts. Core now reopens exactly the failed assignment
+> for settled canonical budget aborts, preserving completed predecessors and immutable lineage;
+> the palette coalesces duplicate run/stage `retry_blocked` controls. Strict typecheck, exact live-
+> shape recovery **1/1**, and control-center **57/57** are green. Details are append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Live post-effect derivation regression — 2026-07-19 (`primary-integrator/root`):** the Medium
+> canary's implementation Review produced an `implemented` change and `passing` linked proof, but
+> its same compiler evaluation derived a redundant `establish-proof` ticket from the pre-effect
+> graph. That ticket reran both proof execution and model review. Core/default Coding must derive
+> from the post-effect graph or prune only a now-obsolete unstarted ticket; no Updog overlay is
+> authorized. The dashboard also incorrectly counts accepted historical expected-red receipts as
+> current failed-check attention. Exact timestamps and artifact evidence are recorded append-only
+> in [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Schema-1 compiler-ownership and release-gate correction — 2026-07-19
+> (`primary-integrator/root`):** target compiler ownership is now unioned after legacy graph-array
+> merge, so an old delivery node cannot strip the authenticated `spec.target_branch` binding while
+> project-authored semantics remain preserved. The exact current Coding 0.7 development source is
+> named in the retirement allowlist, Coding 0.8 republishes at `sha256:1d142a10…a29e6`, and the TUI
+> operator test accepts its intentional authority reconnect callback. Profile bundles **5/5**,
+> release/operator/package **55/55**, focused adoption/migration, Coding **8/8**, workspace
+> typecheck, and diff check pass. Full evidence is append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Reissued-ticket session isolation — 2026-07-19 (`primary-integrator/root`):** a live
+> compiler-reissued proof ticket inherited its already-terminal Pi conversation, compacted the old
+> history, and wasted 57,486 uncached input tokens before returning no terminal call. Tickets and
+> assignment attempts now carry execution epochs: a fresh obligation starts a fresh Pi root,
+> retries inside that obligation may still branch, and all old transcripts/receipts remain intact.
+> Exact compatibility and evidence are append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Cross-ticket proof evidence without cross-ticket chat — 2026-07-19
+> (`primary-integrator/root`):** the live proof Reviewer correctly rejected a green-only context
+> because the independently reviewed expected-red preparation lived on an earlier ticket. Core
+> now injects a bounded, hash-sealed `historicalPreparation` envelope from the same authenticated
+> snapshot and source-currentness chain used by `proof_preparation_current`, while keeping the
+> current ticket in `predecessorExecution` and starting no inherited Pi conversation. Default
+> Coding contracts recognize this evidence split. Native compiler **18/18**, Coding **8/8**, and
+> strict Core typecheck are green; exact rationale and compatibility are append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Fresh roots for supervised independent rereview — 2026-07-19
+> (`primary-integrator/root`):** the canary reached `merge_ready`, but the explicit rereview forked
+> its rejected Reviewer chat and paid 67,346 uncached input tokens despite receiving complete
+> compiler-authenticated evidence. The first attempt after a supervised `review_only` recovery now
+> starts at a fresh Pi root; normal producer-to-review handoff and retries within that new attempt
+> retain their intended lineage. Strict typecheck, focused recovery **1/1**, and full authority
+> engine **62/62** are green. Details are append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **First Medium canary published + clean admission — 2026-07-19
+> (`primary-integrator/root`):** the exact Updog smoke published commit `14b7a7a29e` with 4/4
+> tickets and eight accepted checks. Its final merge exposed an untracked local `.koni` profile;
+> new run admission now rejects any dirty checked-out target before planning spends tokens and
+> explains commit/stash/ignore. The action palette coalesces duplicate semantic merge controls,
+> and terminal runs expose no invalid current-success stage. Strict typecheck, Git **41/41**,
+> controls **58/58**, and explicit publication **1/1** are green. Details are append-only in
+> [`agent-collab/primary-integrator.md`](agent-collab/primary-integrator.md).
+
+> **Fresh-baseline re-validation of the three fixes on Claude models — 2026-07-20
+> (`harness-fix-validation/root`):** re-proved the 2026-07-19 fixes (dirty target-checkout
+> admission guard, terminal runs exposing no current stage, coalesced duplicate merge controls)
+> against a fresh baseline off `14b7a7a29e`, without launching a new token-spending run. Installed
+> the current dev build (bundle `b4404d49…`); confirmed all three fixes in the sealed dist and
+> **173 targeted tests** green across `isolated-git-lifecycle`, `stage-capability`,
+> `control-center-surfaces`, `run-authority-engine`, with a named per-fix proof for each.
+> Additionally ran the shipped terminal-current determinant + the installed
+> `assertStageCapabilityCatalog` over all six real `run.json` records: `completed`/`deleted` runs
+> project to no current stage (incl. `run-ad4d4319`, stored current `promotion`), the two `blocked`
+> runs keep `orchestrate` current, and a pre-fix projection of the completed run is correctly
+> rejected. Also switched the fresh project's `.koni` to the provider-agnostic Claude config (Opus
+> lead/planner/reviewer, Sonnet workers; workers raised to `xhigh` because this Pi catalog exposes
+> only `xhigh`/`max` for the Claude models) and `config validate` passes; live model admission was
+> not exercised. No run was launched and the six existing runs were only read (never
+> resumed/paused/deleted) — the shared common-dir authority (pid 5780, bundle `c4dbfe67`) owns them
+> and Live-run safety forbids the restart a new run would require. The reinstall version-skewed that
+> authority; the CLI launcher was rolled back to `c4dbfe67` and `koni status` reconnects cleanly
+> (revision 3895, 6 runs). Koni docs still pinning `openai-codex` as the only provider are stale
+> post-Pi-port and need updating. Full details, thinking-level reconciliation, environment state,
+> and remaining gaps are append-only in
+> [`agent-collab/fix-revalidation-claude.md`](agent-collab/fix-revalidation-claude.md).
+
+> **Superseded by → authority deployed on `b4404d49` (fixes live) — 2026-07-20
+> (`harness-fix-validation/root`):** the operator then asked to bring the fixes live, superseding the
+> "rolled back to `c4dbfe67` / not deployed" statement above. The shared authority was restarted onto
+> `b4404d49` (all three fixes) **from the durable `projectRoot` (the harness-testing worktree)**; it
+> reused the existing read-only runtime stage `1b946f6b…` (no rename, no EACCES) and reached ready
+> (new pid 5483, startup sha `45f9d712…`, revision 3899, runCount 6). All six run phases/revisions
+> are preserved (the two blocked forensic runs stay blocked, never resumed). Authority = CLI = Pi
+> registration = `b4404d49`, so `/koni` now handshakes. The first `b4404d49` start had failed only
+> because I used the wrong operator root (main updog → "different Git repository") plus a transient
+> stage race — not a koni bug; `pi-peer-loader.js` already reuses an existing stage and catches the
+> EACCES publication race. A fresh Claude plan→merge run is now unblocked but was not run. Details
+> append-only in [`agent-collab/fix-revalidation-claude.md`](agent-collab/fix-revalidation-claude.md).
+
+> **Claude-model smoke: 5 fresh Small runs driven, harness validated end-to-end, clean merge not
+> reached — 2026-07-21 (`harness-fix-validation/root`):** on the deployed authority (rebuilt to
+> bundle `1aba254e` carrying the guidance fix) I drove runs #9–#13 (`2329dc3a`, `ffe8e1c3`,
+> `276b5102`, `719553ab`, `04999c02`) through a standalone `koni tui` (the in-Pi `/koni` control
+> center froze after the authority restart — old client bundle `c4dbfe6` crashed in
+> `authority/client.js #receive` on a pre-fix-b payload; version skew, restart Pi after a koni
+> reinstall). Each run surfaced one real issue; all config/harness issues were fixed and
+> re-validated. **Fixed + validated:** (1) gameable `failed`-schema reverted, implementers now do
+> real work via write-grant guidance (koni `374d44c`); (2) ticket worktrees now link the primary
+> `.sst` in `workspace.bootstrap` (updog `8aa85f70a0`) — was dangling `@sst/platform` crashing
+> apps/books vitest; (3) reviewer `max → xhigh` (updog `8aa85f70a0`) — `max` blew the 120K new-token
+> cap; (4) Small worker budget raised 240K→1.2M as a stopgap for the `attemptTokenBudget`
+> `envelope/2` bug that gives the heaviest role half the planner's budget. **Proven:** plan →
+> questions → approval → orchestrate → implement (real work) → `xhigh` review → ticket-complete all
+> run correctly on Claude (Opus lead / Sonnet workers); run #11 completed a full ticket incl. review.
+> **Not reached:** a clean `merge_ready`, blocked by (a) Sonnet diligence variance (occasional terse
+> `failed` blockers "probe"/"test" even with guidance — same task succeeded other runs), (b) no
+> operator recovery for a terminal semantic failure (retry no-ops), and (c) the approval gate
+> approving a plan that then fails deterministic compile (`recovery_required`: unclosed
+> `contract.applies_to`). Recommended follow-ups (code): decouple worker budget from `planning/2`
+> and/or exclude reasoning from the new-token spend cap; add "re-issue failed step" recovery;
+> validate plan compilability at the approval gate. All runs preserved under `updog/.git/koni/runs/`
+> (not deleted). Full detail append-only in
+> [`agent-collab/tui-smoke-ux-findings.md`](agent-collab/tui-smoke-ux-findings.md).
