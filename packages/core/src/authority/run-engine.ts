@@ -10036,7 +10036,11 @@ export class RunAuthorityEngine {
       const run = await this.#store.getRun(runId);
       const pending = run.pendingChecks?.[intentId];
       if (pending === undefined) return this.#noOpInternal(revision);
-      if (canonicalHash(pending) !== canonicalHash(expected)) {
+      // Compare stable identity only: prepared/completed attempt audits legitimately accrue into
+      // the pending record during execution, so a full-record hash would spuriously reject the
+      // discard (the exact "changed during cleanup" wedge that stranded interrupted read-only
+      // checks). Identity equality still proves this is the same durable intent.
+      if (!samePendingCheckIdentity(pending, expected)) {
         throw new AuthorityRpcError("check_intent", "pending configured check changed during cleanup");
       }
       const draft = nextRun(run, this.#timestamp());
