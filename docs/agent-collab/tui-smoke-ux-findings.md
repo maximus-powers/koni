@@ -406,3 +406,61 @@ is doing its job.
   upstream by the guidance).
 - **Approval gate vs deterministic compile** (#3, still open) — a plan can pass review then fail
   `approved_plan_compile`/grants. Validating compilability at the approval gate would fail-fast.
+
+## 2026-07-21 (session 4) — agent-transcript waste audit (16 runs, 49 sessions) + fixes
+
+Operator ask: verify fixes are model-agnostic, and go beyond bugs — find waste, inefficiency, and
+poor outputs by reading the actual agent chats. Three parallel agents read all 49 session
+transcripts and cross-referenced launch specs. The findings converged hard; the fixes below are all
+provider-agnostic (they key on the compiled schema / normalized fields, never on a model identity).
+
+### The dominant waste: the `koni_submit_output` contract was not learnable from its errors
+Across the runs there were **~100+ failed `koni_submit_output` calls**, almost all brute-forcing the
+`status` literal, plus **≥2 attempts that drained their whole token budget guessing and submitted
+nothing** (one lost a correct reviewer REJECT verdict). Root causes:
+- The `status` const ("completed"/"failed") was never disclosed — the validation error was just
+  "must be equal to constant"/"does not match schema". Agents tried success/ok/prepared/accepted/
+  approved/green/done/true/<sha>/… one per turn (one reviewer made ~50 guesses over 76 turns,
+  5.58M cacheRead).
+- An object-typed field (`graphDelta`) was stringified by the provider tool-call transport →
+  "graphDelta must be object" → the change/boundary step class was **unsatisfiable via its success
+  branch**, so agents escaped through `blocker:"probe"/"test"`. Several "lazy bails" and "semantic
+  failures" earlier attributed to agent variance were actually this dead end.
+- `summary` over the 1024-char cap errored without the actual length → repeated overshoot trims.
+
+**Fixed (commit `f50e86c`, provider-agnostic):** terminal-schema fields now carry descriptions
+naming the exact literal status values + limits + blocker substance; the tool description states the
+shape up front; `validateKoniToolArguments` returns a self-describing error (what you sent vs the
+exact expected shape with allowed literals and char limits); and a stringified arguments object or
+object-typed field is un-stringified and re-validated once, accepted only if it then passes the
+exact compiled schema. This targets the single biggest token sink independent of model.
+
+### Secondary waste (fixed)
+- **Broad-search scan-cap errors were unactionable** — every planner wasted 2-4 turns hitting
+  "search exceeds N scanned bytes" (the scan includes dependency/build output) with no remedy. The
+  errors now instruct narrowing `roots` to a subdirectory (commit `e322642`). (The discovery-call
+  budget already only counts *accepted* calls, so failed searches do not consume it.)
+
+### Real waste identified but NOT yet fixed (ranked recommendations)
+1. **Recovery forks replay the entire doomed parent transcript** (3M–6.3M cacheRead each) and then
+   repeat the identical failure — nothing learned (a working status value, a scannable scope) is
+   distilled forward. Fix: fork with a compact summary of the parent (facts learned, files read,
+   exact failure cause), not the raw transcript; and if the parent failed on a harness/tool defect,
+   don't relaunch the same step unchanged.
+2. **Checks don't distinguish an environment failure from a test failure**, and any exit code in the
+   configured range counts as the intended "red" — so a sandbox `EPERM`/corepack/`spawn` error was
+   accepted as a valid baseline in one run. Fix: tag check results as env_error | collection_error
+   | assertion_failure | module_missing, match the expected red *signal* (not just an exit-code
+   range), and treat env errors as infra (retry/repair), never as proof. Also cap identical-error
+   check re-runs (observed 11 consecutive identical `koni_run_check` no-ops).
+3. **Oversized reasoning causes truncation deaths** — with a globally-high thinking tier, several
+   turns spent 20K–40K chars thinking and were cut off (`stop=length`) before emitting any tool
+   call, losing the whole turn. Fix: per-step thinking tiers (bounded synthesis/authoring/submit
+   steps do not need the top tier), reserve output headroom so a turn can't spend its entire budget
+   thinking, and route a tool-arg validation failure to a low-reasoning "fix the call" path.
+4. **Path grant + read scope are invisible until the agent hits an error** (repeated "outside the
+   compiled path grant", empty `{}` first submits). Fix: surface the granted read roots and the real
+   required submit fields in the launch context up front.
+
+Net: the submit-contract fix alone would have prevented both budget-abort losses and every
+placeholder submission across the 16 runs; items 1–2 are the next-largest compute recovery.
