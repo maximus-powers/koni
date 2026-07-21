@@ -1083,11 +1083,7 @@ class ScriptHarness {
       const action = this.sourcePlan[ordinal - 1];
       if (action === undefined) return undefined;
       if (action === "fail") {
-        return {
-          status: "failed",
-          blocker: `Bounded source failure ${ordinal} exhausted its verification budget`,
-          summary: `Source cycle ${ordinal} stopped on a bounded verification failure`,
-        };
+        return { status: "failed", blocker: `Bounded source failure ${ordinal}` };
       }
       if (action === "request") {
         return {
@@ -1124,11 +1120,7 @@ class ScriptHarness {
       const ordinal = (this.#resolverAttempts.get(key) ?? 0) + 1;
       this.#resolverAttempts.set(key, ordinal);
       if (stepId === "diagnose" && ordinal <= this.resolverFailures) {
-        return {
-          status: "failed",
-          blocker: `Resolver failure ${ordinal} requires operator retry`,
-          summary: `Resolver diagnose cycle ${ordinal} stopped for explicit operator retry`,
-        };
+        return { status: "failed", blocker: `Resolver failure ${ordinal} requires operator retry` };
       }
     }
     return this.validCompletedOutput(input, prepared, `Completed ${ticket?.operationId ?? ticketId}/${stepId}`);

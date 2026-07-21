@@ -3153,19 +3153,14 @@ describe("native compiler-authoritative run program", () => {
     const resolverFailureOutput = {
       status: "failed" as const,
       blocker: "The bounded resolver requires explicit operator recovery",
-      summary: "Resolver work stopped pending explicit operator recovery",
     };
-    // Placeholder-shaped failures must bounce at the schema; substantive ones pass.
-    expect(Value.Check(resolverPrepared.terminalOutputSchema!, { status: "failed", blocker: "probe" })).toBe(false);
     expect(Value.Check(resolverPrepared.terminalOutputSchema!, resolverFailureOutput)).toBe(true);
     await expect(program.compileAssignmentOutput({
       run,
       assignment: resolverAssignment,
       attemptId: resolverPrepared.spec.identity.attemptId,
       output: resolverFailureOutput,
-    })).resolves.toEqual({
-      outcome: { status: resolverFailureOutput.status, blocker: resolverFailureOutput.blocker },
-    });
+    })).resolves.toEqual({ outcome: resolverFailureOutput });
     const resolverReuse = deriveTerminalResolverReconciliation(executionCatalog, {
       runId: run.id,
       sourceTicketId: ticket.id,

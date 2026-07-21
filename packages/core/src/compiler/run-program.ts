@@ -1190,6 +1190,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       "You are executing one immutable compiler-issued Koni attempt. Use only the Koni tools present in this session. Never use ambient filesystem, shell, Git, network, extension, subagent, or lifecycle authority. The authority reissues your exact bound context before every provider request; observe and reuse it instead of refetching it through a tool. Stay inside the exact semantic and path grant, and finish with exactly one koni_submit_output call matching its schema.",
       "Your attempt is incomplete until koni_submit_output returns an accepted receipt. After the final check or edit, call it immediately as the only tool in that assistant turn. A plain final assistant message is discarded and fails the attempt.",
       "Read the koni_submit_output schema from its tool definition before calling it, and submit your real result on the first call. Never send placeholder, probing, or schema-discovery payloads: an accepted failed submission is terminal, cannot be retried, and permanently fails this assignment even if your actual work succeeded.",
+      ...(descriptor.writePaths.length === 0 ? [] : [
+        "This is an implementation attempt with a write grant. Reading alone does not satisfy it. Make the change with koni_write_file/koni_edit_file inside your write grant, then run the configured proof with koni_run_check before you submit. A failed submission is a genuine-impossibility last resort — reserve it for a blocker that survives an actual implementation attempt (missing capability, contradictory contract, grant that cannot express the change), never for difficulty, uncertainty, or investigation you have not yet turned into edits and a check run.",
+      ]),
       ...(repositoryCallBudget === undefined ? [] : [
         `Repository discovery is bounded to ${repositoryCallBudget} total koni_read_file, koni_list_files, and koni_search_files calls for this planning attempt. Reuse compiler context, prioritize high-value reads, and synthesize before the authority ceiling is exhausted.`,
         "Begin with the narrowest objective-derived source root (for example, the named app's src directory). Do not search `.` or broad monorepo/package roots when the objective identifies a narrower area; bounded broad scans can fail and still consume a discovery call.",
@@ -6659,15 +6662,9 @@ function assignmentTerminalSchema(
       }, { additionalProperties: false }),
     }, { additionalProperties: false }));
   }
-  // A failed submission is terminal and consumes the assignment: models discovering the schema
-  // through live probes must not be able to land one accidentally (observed live: an agent
-  // probing statuses got `{"status":"failed","blocker":"probe"}` accepted, semantically failing
-  // a step whose real work had already been noted). Substantive minimums keep the honest-failure
-  // path one short sentence away while making placeholder payloads bounce with a schema error.
   const failed = Type.Object({
     status: Type.Literal("failed"),
-    blocker: Type.String({ minLength: 24, maxLength: 64 * 1024 }),
-    summary: Type.String({ minLength: 24, maxLength: 1_024 }),
+    blocker: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
   }, { additionalProperties: false });
   return Type.Union([...complete, failed]);
 }
@@ -7332,10 +7329,7 @@ function parseAssignmentOutput(
 ): AssignmentOutput {
   const root = requiredRecord(value, "assignment output");
   if (root.status === "failed") {
-    // New submissions carry a substantive summary (enforced by the tool schema); durable
-    // pre-migration outputs stored only {status, blocker} and must keep parsing.
-    if (root.summary === undefined) assertExactFields(root, ["status", "blocker"], "failed assignment output");
-    else assertExactFields(root, ["status", "blocker", "summary"], "failed assignment output");
+    assertExactFields(root, ["status", "blocker"], "failed assignment output");
     return { status: "failed", blocker: boundedText(root.blocker, "assignment blocker", 64 * 1024) };
   }
   if (root.status !== "completed") fail("assignment_status", "assignment status must be completed or failed");
