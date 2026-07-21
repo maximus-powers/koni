@@ -282,3 +282,65 @@ koni's TUI reads raw stdin bytes: drive it with `cmux send --surface <s> '<liter
 terminal surfaces only get a PTY once their workspace is active; a full-width pane in the active
 workspace (`new-pane --type terminal --direction down`) is the reliable place to launch `koni tui`
 (needs ≥82×20).
+
+## 2026-07-21 (session 2, cont.) — drove 5 fresh Small runs to validate fixes; harness end-to-end proven, clean merge not reached
+
+Drove runs #9–#13 (`2329dc3a`, `ffe8e1c3`, `276b5102`, `719553ab`, `04999c02`) through the
+control center on the fixed engine. Each surfaced a distinct, real issue; all harness/config
+issues found were fixed and re-validated on a later run. The pipeline is proven to work through
+its hardest stages (run #11 completed a full ticket incl. `xhigh` review), but no single run
+reached `merge_ready` — the tail was blocked by agent non-determinism and one plan-compile edge.
+
+Fixes landed and validated this session:
+1. **Guidance beats a schema guard (committed `374d44c`, validated).** Run #9's implementer once
+   probe-failed; runs #10/#11 authored genuine work (a real 231-line proof test in #10) and
+   failed only on genuine blockers. The write-grant system-prompt line is doing its job.
+2. **Worktree SST provisioning (`.koni` bootstrap, validated).** Ticket worktrees lacked
+   `.sst/platform`, dangling `infra/node_modules/@sst/platform` and crashing apps/books vitest at
+   `vite-tsconfig-paths` load. Fixed by extending the run-type `workspace.bootstrap` to link the
+   primary checkout's `.sst`: `bash -c "pnpm install --prefer-offline && { s=$(dirname $(git
+   rev-parse --path-format=absolute --git-common-dir))/.sst; [ ! -e .sst ] && [ -e $s ] && ln -sfn
+   $s .sst; }"`. Verified both integration and cycle worktrees get the link before the check runs.
+   (The env-validated `@uplinq/api/client` import is a *test-design* issue the agent fixes itself
+   with the sibling test's `vi.mock("@uplinq/api/client")` — once it can run the check past `.sst`.)
+3. **Reviewer over-tiering (`.koni`, validated).** All three run types overrode reviewer to
+   `max` thinking, which blew the per-attempt `maxNew` cap (run #11 reviewer aborted at 120K after
+   10 turns). Every other role runs `xhigh` and the agent default is `xhigh`. Lowered reviewer
+   `max → xhigh` in small/medium/large; run #11's `xhigh` reviewer then completed within budget.
+4. **Worker token budget is structurally too small (`.koni` stopgap; needs a code fix).**
+   `attemptTokenBudget` sets non-planning `maxNew = floor(semanticEnvelope / 2)` — the ticket
+   worker (heaviest role) gets **half** the planner's budget (120K for Small). At Sonnet's
+   forced-minimum `xhigh` (the Pi catalog exposes no lower tier), reasoning alone exhausts 120K
+   before the worker writes anything (run #11 impl aborted after 8 read-only turns, 0 edits).
+   Stopgap: raised Small `planning.token_budget.limit 240K → 1.2M` (worker → 600K). **Proper fix
+   is code**: decouple the worker budget from `planning/2` (workers should get ≥ the planner, they
+   do the heavy lifting), and/or implement findings rec #1 — exclude reasoning tokens from the
+   new-token *spend cap* so a productively-thinking worker is not aborted. `run-program.ts`
+   `attemptTokenBudget` (~8440).
+
+Non-fixable-by-config issues that blocked a clean merge (open):
+5. **Agent diligence variance.** Even with guidance + adequate budget, Sonnet sometimes submits a
+   terse placeholder failure after minimal work: run #9 `blocker:"probe"`, run #12
+   `blocker:"test"` (4 chars) after 1 write + 1 check, run #10 a `completed` with `summary:"probe"`.
+   The same `author-historical-baseline` task *succeeded* in #10/#11 and *bailed* in #12 — pure
+   variance. A terse-blocker rejection is gameable and can't cleanly distinguish a lazy bail from a
+   genuine-but-terse one; the durable lever is stronger steering ("a `failed` blocker must name the
+   exact obstacle and what you tried; iterate on check failures before giving up") plus better
+   operator recovery (see #6).
+6. **No operator recovery for a terminal semantic failure.** `resetRetryableInfrastructureAssignments`
+   only resets aborted/failed attempts with *no* terminal output; a `{status:"failed"}` submission
+   (terminalAccepted) is deliberately terminal, so "Retry blocked work" is a no-op and the run
+   deadlocks with only delete as an exit. Consider an explicit "re-issue failed step" recovery that
+   spawns a fresh attempt of a semantically-failed production step.
+7. **Approval gate approves plans that fail deterministic compilation.** Run #13's plan passed
+   review/approval, then `approved_plan_compile` settled `recovery_required` (a `contract_required`
+   system whose `contract.applies_to` relation the planner left unclosed — 56 "contract" mentions,
+   1 `applies_to`). "Retry blocked work" re-fails identically. Either the planner must close every
+   configured required relation before submitting, or the approval gate should validate
+   compilability before letting the operator approve, or `recovery_required` needs a real operator
+   recovery path (re-plan with steering) instead of a dead-end block.
+
+Net: the Pi-native harness runs plan → questions → approval → orchestrate → implement (real work)
+→ `xhigh` review → ticket-complete correctly on Claude (Opus lead / Sonnet workers). Reaching a
+clean `merge_ready` on the SPICED objective needs items #4 (code), #5, #6, #7 addressed — and the
+SPICED objective is arguably Medium-sized, near the Small tier's budget/complexity ceiling.
