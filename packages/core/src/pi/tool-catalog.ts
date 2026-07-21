@@ -390,7 +390,7 @@ export function createKoniAuthorityTools(options: KoniToolCatalogOptions): Autho
       label: source.label,
       description: source.description,
       promptSnippet: source.description,
-      parameters: transportToolSchema(name, parameters),
+      parameters,
       executionMode: source.executionMode,
       async execute(callId, args, signal): Promise<AgentToolResult<unknown>> {
         return execute(callId, args as Record<string, unknown>, signal);
@@ -512,6 +512,7 @@ function transportToolSchema(name: KoniToolName, schema: TSchema): TSchema {
     merged[key] = slot.occurrences === branches.length ? single : Type.Optional(single);
   }
   return Type.Object(merged, {
+    additionalProperties: false,
     description: `Send exactly one of these shapes, omitting every other branch's fields: ${describeSchemaShape(schema)}`,
   });
 }
@@ -572,8 +573,13 @@ function resolveToolSchema(
   terminalOutputSchema?: TSchema,
   expectedSchemaHash?: Sha256Digest,
 ): TSchema {
+  // The submit tool's advertised parameters are the transport-representable view of the terminal
+  // union (see transportToolSchema); the exact union itself remains the terminal outcome contract,
+  // separately hash-bound via spec.terminal.outputSchemaHash and enforced by the compiler's
+  // assignment-output parse. Flattening here keeps the sealed binding consistent: the spec's
+  // schemaHash, the child's exposed definition, and argument validation all derive from one place.
   const current = name === "koni_submit_output" && terminalOutputSchema !== undefined
-    ? terminalOutputSchema
+    ? transportToolSchema(name, terminalOutputSchema)
     : CATALOG[name].schema;
   if (expectedSchemaHash === undefined || canonicalHash(current) === expectedSchemaHash) return current;
   if (name === "koni_record_note" && canonicalHash(legacyRecordNoteSchema) === expectedSchemaHash) {

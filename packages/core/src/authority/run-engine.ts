@@ -15391,6 +15391,10 @@ function isRetryableInfrastructureAttempt(attempt: AgentAttemptRecord): boolean 
     // reset's providerOutcomeAccountingIssue guard proves no request stays open) the step is safe
     // to re-issue at the explicit operator Resume boundary.
     /provider request (?:remains reserved|cannot be reconciled|remains unsettled)/iu,
+    // Sealed launch-binding mismatches (tool inventory/schema vs the issued spec) are pure harness
+    // versioning skew — an attempt issued around an engine deploy — never agent work product. A
+    // fresh attempt gets a consistent spec from the current authority.
+    /does not (?:exactly )?match (?:its|the) launch (?:binding|inventory)/iu,
   ].some((pattern) => pattern.test(error));
 }
 
