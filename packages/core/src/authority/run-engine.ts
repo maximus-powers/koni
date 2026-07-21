@@ -15692,12 +15692,28 @@ async function deriveCanonicalProviderExposureRetirement(
   }
   const message = assistant.message;
   if (!isRecord(message) || !isRecord(message.usage)) return undefined;
-  const responseId = typeof message.responseId === "string" &&
+  const usageIsZero = Number(message.usage.input) === 0 && Number(message.usage.output) === 0 &&
+    Number(message.usage.cacheRead) === 0 && Number(message.usage.cacheWrite) === 0;
+  const declaredResponseId = typeof message.responseId === "string" &&
     message.responseId.length > 0 &&
     message.responseId.length <= 512 &&
     !/[\u0000-\u001f\u007f]/u.test(message.responseId)
     ? message.responseId
     : undefined;
+  // A zero-usage provider error is provably unbilled with nothing to reconcile, and upstream 5xx
+  // terminals frequently carry no response id (observed live: an Anthropic `api_error` "Internal
+  // server error" with all-zero usage and no responseId, which otherwise wedged the run with an
+  // unreconcilable held reservation and no recovery action). Fall back to the durable assistant
+  // entry id — always present, unique, idempotent — so the error can still be retired and retried.
+  const responseId = declaredResponseId ?? (
+    usageIsZero &&
+    message.stopReason === "error" &&
+    typeof assistant.id === "string" &&
+    assistant.id.length > 0 &&
+    assistant.id.length <= 512
+      ? assistant.id
+      : undefined
+  );
   // Codex zeroes usage on abort/error terminals; anthropic-style adapters report the prompt
   // tokens the interrupted request actually consumed (observed live: a paused Claude planner
   // recorded 49K prompt tokens with "This operation was aborted"). Partial usage is equally

@@ -387,25 +387,33 @@ describe("run authority provider reservation lifecycle", () => {
     )).toBe(true);
   }, 60_000);
 
-  it("keeps a provider error without an authenticated response id blocked after resume", async () => {
+  it("retires a zero-usage provider error without a response id and recovers on resume", async () => {
+    // A transient upstream error (observed live: an Anthropic api_error "Internal server error")
+    // reports all-zero usage and frequently carries no response id. It is provably unbilled and its
+    // content is durably inert, so it has no worst-case exposure to hold; resume must recover it via
+    // the assistant-entry-id fallback rather than wedge the run with an unreconcilable reservation.
     const harness = await authorityHarness("uncanonical_provider_error");
     const runId = await createRun(harness.client);
     await waitFor(async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked");
-    const before = await harness.engine.store.getRun(runId);
 
     await harness.client.request("run.resume", { runId }, {
       expectedRevision: harness.client.revision,
-      idempotencyKey: "resume-after-uncanonical-provider-error",
+      idempotencyKey: "resume-after-zero-usage-provider-error",
     });
     await waitFor(async () => {
-      const current = await harness.engine.store.getRun(runId);
-      return current.lifecycle.phase === "blocked" && current.revision > before.revision;
+      const run = await harness.engine.store.getRun(runId);
+      return run.lifecycle.phase === "awaiting_approval" && Object.keys(run.attempts).length === 2;
     });
 
-    const held = await harness.engine.store.getRun(runId);
-    expect(Object.keys(held.attempts)).toHaveLength(1);
-    expect(onlyAttempt(held).authorityProviderRequests?.[0]?.retirement).toBeUndefined();
-    expect(held.lifecycle.blocker).toContain("worst-case exposure");
+    const recovered = await harness.engine.store.getRun(runId);
+    const attempts = Object.values(recovered.attempts).sort((left, right) =>
+      String(left.startedAt).localeCompare(String(right.startedAt))
+    );
+    expect(attempts[0]?.authorityProviderRequests?.[0]?.retirement).toMatchObject({
+      protocol: "koni.provider-exposure-retirement.v1",
+      disposition: "operator_acknowledged_provider_error",
+      responseId: "assistant",
+    });
   }, 60_000);
 
   it("retires only a canonical Pi abort under explicit resume and preserves exact usage totals", async () => {
