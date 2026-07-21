@@ -7913,22 +7913,33 @@ function reconcileTickets(
 }
 
 function assertTicketDefinitionStable(ticket: TicketRecord, definition: DerivedTicketDefinition): void {
-  if (
-    ticket.operationId !== definition.operation_registry_id ||
-    ticket.title !== definition.title ||
+  // A started ticket's issued workflow settles under the node scope it was issued with. Its own
+  // accepted graph effects legitimately change what the rules re-derive for the same deterministic
+  // id (observed live: a delivery-node graphDelta added the new node to its submitting ticket's
+  // derived node scope, and this guard rejected the whole delta as drift — making the assembly
+  // step unsatisfiable). Tolerate node-scope drift for started tickets; operation, title,
+  // workflow, and path drift remain fatal for every ticket.
+  const pinnedNodeScope = !ticketIsNeverStarted(ticket);
+  const nodeScopeDrift = !pinnedNodeScope && (
     canonicalHash(ticket.targetNodeIds) !== canonicalHash(definition.target_node_ids) ||
     (ticket.readNodeIds !== undefined &&
       canonicalHash(ticket.readNodeIds) !== canonicalHash(definition.scope.read_node_ids)) ||
     (ticket.writeNodeIds !== undefined &&
       canonicalHash(ticket.writeNodeIds) !== canonicalHash(definition.scope.write_node_ids)) ||
+    ticket.steps.some((step, index) =>
+      (step.readNodeIds !== undefined && canonicalHash(step.readNodeIds) !== canonicalHash(definition.workflow[index]!.read_node_ids ?? definition.scope.read_node_ids)) ||
+      (step.writeNodeIds !== undefined && canonicalHash(step.writeNodeIds) !== canonicalHash(definition.workflow[index]!.write_node_ids ?? definition.scope.write_node_ids)))
+  );
+  if (
+    nodeScopeDrift ||
+    ticket.operationId !== definition.operation_registry_id ||
+    ticket.title !== definition.title ||
     canonicalHash(ticket.readPaths) !== canonicalHash(definition.scope.read_paths) ||
     canonicalHash(ticket.writePaths) !== canonicalHash(definition.scope.write_paths) ||
     canonicalHash(ticket.steps.map((step) => [step.id, step.personaId])) !== canonicalHash(definition.workflow.map((step) => [step.id, step.persona_id])) ||
     ticket.steps.some((step, index) =>
       (step.kind !== undefined && step.kind !== definition.workflow[index]!.kind) ||
       (step.dependsOn !== undefined && canonicalHash(step.dependsOn) !== canonicalHash(definition.workflow[index]!.depends_on)) ||
-      (step.readNodeIds !== undefined && canonicalHash(step.readNodeIds) !== canonicalHash(definition.workflow[index]!.read_node_ids ?? definition.scope.read_node_ids)) ||
-      (step.writeNodeIds !== undefined && canonicalHash(step.writeNodeIds) !== canonicalHash(definition.workflow[index]!.write_node_ids ?? definition.scope.write_node_ids)) ||
       (step.readPaths !== undefined && canonicalHash(step.readPaths) !== canonicalHash(definition.workflow[index]!.read_paths ?? definition.scope.read_paths)) ||
       (step.writePaths !== undefined && canonicalHash(step.writePaths) !== canonicalHash(definition.workflow[index]!.write_paths ?? definition.scope.write_paths)) ||
       (step.validationAction !== undefined && step.validationAction !== definition.workflow[index]!.validation_action)) ||
