@@ -1115,7 +1115,11 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     );
     const runBehavior = pinnedRunTypeBehavior(input.run, pinned.configuration);
     const descriptor = await this.#attemptDescriptor(input, pinned.configuration, runType.document);
-    const initialPrompt = sameScopeContinuationPrompt(descriptor.initialPrompt, input.lineage);
+    const parentAttempt = input.lineage.parentAttemptId === undefined
+      ? undefined
+      : input.run.attempts[input.lineage.parentAttemptId];
+    const parentFailure = parentAttempt?.error?.slice(0, 400) ?? parentAttempt?.failureCode;
+    const initialPrompt = sameScopeContinuationPrompt(descriptor.initialPrompt, input.lineage, parentFailure);
     const persona = requireValidation(
       resolveCompiledPersona(pinned.configuration, descriptor.personaId, { runTypeId: input.run.runTypeId }),
       "persona_invalid",
@@ -1188,7 +1192,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const systemPrompt = [
       persona.instructions.trim(),
       "You are executing one immutable compiler-issued Koni attempt. Use only the Koni tools present in this session. Never use ambient filesystem, shell, Git, network, extension, subagent, or lifecycle authority. The authority reissues your exact bound context before every provider request; observe and reuse it instead of refetching it through a tool. Stay inside the exact semantic and path grant, and finish with exactly one koni_submit_output call matching its schema.",
+      renderPathGrant(descriptor.readPaths, descriptor.writePaths),
       "Your attempt is incomplete until koni_submit_output returns an accepted receipt. After the final check or edit, call it immediately as the only tool in that assistant turn. A plain final assistant message is discarded and fails the attempt.",
+      "Reason briefly, then act: once you have decided the next tool call, emit it in the same turn instead of continuing to deliberate. A turn that spends its whole output budget on reasoning is cut off before any tool call and the entire turn is lost. Never re-derive a conclusion you already reached in an earlier turn.",
       "Read the koni_submit_output schema from its tool definition before calling it, and submit your real result on the first call. Never send placeholder, probing, or schema-discovery payloads: an accepted failed submission is terminal, cannot be retried, and permanently fails this assignment even if your actual work succeeded.",
       "Do the concrete work this step requires before you submit — author the proof, make the edit and run the check, or assemble and verify the candidate as the step demands; do not submit failed with little or no tool use. A failed submission is a genuine-impossibility last resort, and its blocker must be a specific self-contained diagnosis: the exact obstacle, what you tried, and why nothing within your grant can resolve it. An accepted failed submission is terminal and strands the whole run for operator recovery, so a terse or placeholder blocker (for example \"test\", \"probe\", \"blocked\") is never acceptable — never submit one.",
       ...(descriptor.writePaths.length === 0 ? [] : [
@@ -3177,12 +3183,30 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       this.#projectRoot,
     );
     const definitions = ticketArtifact(input.run, input.run.graphRevision, evaluation, definitionsRead.value);
+    // A nonpassing run whose streams are byte-identical to an earlier run of the same check in
+    // this attempt is deterministic: re-running without changing any input is a no-op (observed
+    // live: many consecutive identical re-runs burning turns). Say so in the receipt the agent
+    // reads, so it iterates on the inputs or reports the blocker instead of retrying.
+    const deterministicRepeat = !passed && (input.run.checks ?? []).some((record) =>
+      record.attemptId === input.attempt.id &&
+      record.requestedCheckId === resolved.requestedCheckId &&
+      record.passed !== true &&
+      record.commands.length === compiled.length &&
+      record.commands.every((prior, index) => {
+        const next = compiled[index]!.evidence as Record<string, unknown>;
+        return prior.exitCode === next.exitCode &&
+          prior.stdoutSha256 === next.stdoutSha256 &&
+          prior.stderrSha256 === next.stderrSha256;
+      }));
+    const repeatNote = deterministicRepeat
+      ? " — byte-identical to a previous run of this check in this attempt; the failure is deterministic, so re-running without changing its inputs cannot change the result"
+      : "";
     return {
       accepted,
       passed,
-      summary: accepted
+      summary: (accepted
         ? `${resolved.requestedCheckId} ${passed ? "passed" : "recorded a nonpassing result"}`
-        : `${resolved.requestedCheckId} failed its configured result contract`,
+        : `${resolved.requestedCheckId} failed its configured result contract`) + repeatNote,
       value: {
         requestedCheckId: resolved.requestedCheckId,
         accepted,
@@ -4562,6 +4586,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
 function sameScopeContinuationPrompt(
   initialPrompt: string,
   lineage: Readonly<AgentLaunchSpec["lineage"]>,
+  parentFailure?: string,
 ): string {
   if (
     lineage.conversationFork === undefined ||
@@ -4571,6 +4596,12 @@ function sameScopeContinuationPrompt(
     initialPrompt,
     "This is an authenticated same-scope continuation. The inherited Pi conversation is the repository and execution ledger: reuse its successful reads, searches, checks, and decisions instead of repeating them.",
     "The parent terminal or provider-error turn was not accepted output. Discard any speculative reasoning from that failed turn, resolve the remaining action directly from the already-retained evidence and current objective, then submit the exact required terminal object. Perform another repository call only when one specific missing fact makes correct completion impossible.",
+    // The authority-classified cause of the parent's death is metadata the inherited transcript
+    // never contains — without it, forks re-derived the failure from scratch or repeated it
+    // (observed live: identical 40-turn loops across fork generations). Name it explicitly.
+    ...(parentFailure === undefined ? [] : [
+      `The parent attempt ended for this authority-recorded reason: ${parentFailure}. Account for it directly instead of re-deriving it: an exhausted budget means finish minimal remaining work and submit immediately; a transient provider failure means your prior work is intact, so proceed straight to submission; a tool-contract rejection means correct that exact call rather than retrying variations.`,
+    ]),
   ].join("\n\n");
 }
 
@@ -8515,6 +8546,27 @@ function assertCompilerModelBinding(
   }
 }
 
+/**
+ * State the exact compiled path grant in the launch prompt. Transcript audits showed every agent
+ * discovering its boundary by trial and error ("outside the compiled path grant" probes, searches
+ * rooted at a not-yet-existing file), wasting 2-4 calls per attempt; naming the grant up front
+ * removes the probing entirely. Lists are bounded so a wide integration grant cannot bloat the
+ * prompt.
+ */
+function renderPathGrant(readPaths: readonly string[], writePaths: readonly string[]): string {
+  const render = (label: string, paths: readonly string[]) => {
+    if (paths.length === 0) return `${label}: none`;
+    const shown = paths.slice(0, 24);
+    const more = paths.length > shown.length ? ` (+${paths.length - shown.length} more)` : "";
+    return `${label}: ${shown.join(", ")}${more}`;
+  };
+  return [
+    "Your exact compiled path grant — tool calls outside it are rejected, so do not probe beyond it, and root searches at one of these paths or a directory containing them:",
+    render("Readable", readPaths),
+    render("Writable", writePaths),
+  ].join("\n");
+}
+
 function attemptRepositoryCallBudget(
   runType: CompiledRunTypeBehavior,
   kind: "planning" | "lead" | "ticket" | "verification" | "integration",
@@ -9405,6 +9457,16 @@ export function commandInfrastructureFailure(
     cause = "the runtime could not resolve its working directory";
   } else if (contains("error: eperm:") && contains("operation not permitted")) {
     cause = "the runtime was denied a required sandbox resource";
+  } else if (
+    // A failed subprocess spawn or a package-manager-level exec error happens before the test
+    // runner loads, so it can never be a legitimate test result (observed live: a sandbox
+    // `spawn EPERM` surfaced as `ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL`, exit 1, which fell inside
+    // the configured exit-code range and was silently accepted as the intended red baseline).
+    contains("spawn eperm") || contains("spawn eacces") ||
+    contains("err_pnpm_") ||
+    (contains("corepack") && (contains("eperm") || contains("eacces") || contains("cannot create")))
+  ) {
+    cause = "the check runner failed to launch (package-manager or subprocess spawn error)";
   } else if (
     contains("startup error") || contains("getaddrinfo enotfound") || contains("getaddrinfo eai_")
   ) {
