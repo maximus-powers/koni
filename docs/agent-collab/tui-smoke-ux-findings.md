@@ -523,3 +523,27 @@ Operational kinks found while deploying mid-run (not yet fixed):
 - **cmux died mid-session**; replaced TUI driving with a Python pty harness (spawn `koni tui` on a
   pseudo-terminal, send keys, verify against durable run state) — worked first try for run #18's
   approval and is scriptable for merge authorization.
+
+## 2026-07-21 (session 5, cont. 2) — typed submit schema pays off: agent isolates a real compiler bug
+
+With the transport-representable submit schema live (run `c6e5d318`, #18), the assembly agent ran a
+**24-attempt controlled experimental protocol** against the now-targetable graphDelta contract and
+delivered a definitive compiler-bug isolation: `fulfills` alone validated, `includes` alone
+validated, reversed directions and forbidden node types produced their correct specific errors —
+but the only *valid* creation (one new delivery node + both mandatory edges in one delta, forced by
+maxNewNodes=1) was always rejected as "ticket changed under the same deterministic identity"
+(10+ byte-identical reproductions, graph revision verified frozen throughout). Root cause: the
+accepted delta adds the new node to the *submitting ticket's own* derived node scope, and
+`assertTicketDefinitionStable` treated that self-caused re-derivation as definition drift,
+rejecting the whole delta — the assembly step class was structurally unsatisfiable.
+
+**Fixed (`3febc6d`):** started tickets tolerate node-scope drift (targets, ticket/step node ids) —
+their issued workflow settles under its issued scope, matching the retainedDefinitions pinning
+philosophy — while operation/title/workflow/path drift stays fatal, and never-started tickets keep
+the fully strict guard. Run `b1697d74` (#19) is the first launch with the complete defect-free
+chain; runs #17/#18 are preserved as the forensic pair that produced the diagnosis.
+
+Also fixed en route (`bc45d8d`, `3b0b16e`, `094c798`): the sealed-binding triple split — exposed
+parameters + tools[].schemaHash carry the flattened transport view; terminal.outputSchemaHash and
+the tool's terminalOutputSchema carry the exact compiled union; legacy pre-flatten bindings stay
+recoverable, and binding mismatches are retryable infrastructure.
