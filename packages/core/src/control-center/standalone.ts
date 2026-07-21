@@ -12,6 +12,9 @@ import {
   ControlCenterController,
   type ControlCenterAuthorityClient,
 } from "./controller.js";
+import type { ControlCenterCockpitCatalogResolver } from "./cockpit-config.js";
+import { createAuthorityCockpitCatalogResolver } from "./authority-cockpit-resolver.js";
+import { ResilientControlCenterClient } from "./resilient-client.js";
 import type { ControlModelOption } from "./protocol.js";
 import {
   ansiKoniPalette,
@@ -22,10 +25,14 @@ export interface StandaloneControlCenterOptions {
   projectRoot: string;
   version: string;
   client?: ControlCenterAuthorityClient;
+  /** Reopen the same repository authority after an idle or process transport loss. */
+  reconnectClient?: () => Promise<ControlCenterAuthorityClient>;
   terminal?: Terminal;
   palette?: KoniPalette;
   /** Tests and embedding hosts may inject a frozen read-only Pi model projection. */
   models?: readonly ControlModelOption[];
+  /** Read-only exact-artifact resolver shared with the Pi-hosted surface. */
+  cockpitCatalogResolver?: ControlCenterCockpitCatalogResolver;
 }
 
 export interface StandaloneControlCenterHandle {
@@ -48,11 +55,14 @@ export async function createStandaloneControlCenter(
   options: StandaloneControlCenterOptions,
 ): Promise<StandaloneControlCenterHandle> {
   const ownsClient = options.client === undefined;
-  const client = options.client ?? await AuthorityClient.connect({
+  const initialClient = options.client ?? await AuthorityClient.connect({
     projectRoot: options.projectRoot,
     client: "tui",
     version: options.version,
   });
+  const client = options.reconnectClient === undefined
+    ? initialClient
+    : new ResilientControlCenterClient({ client: initialClient, reconnect: options.reconnectClient });
   const terminal = options.terminal ?? new ProcessTerminal();
   // Authority-client ownership is unrelated to Pi model discovery. The CLI deliberately injects
   // its already-leased authority client, but New Run must still see the ordinary Pi catalog.
@@ -80,7 +90,8 @@ export async function createStandaloneControlCenter(
     projectRoot: options.projectRoot,
     client,
     models,
-    closeClientOnDispose: ownsClient,
+    cockpitCatalogResolver: options.cockpitCatalogResolver ?? createAuthorityCockpitCatalogResolver(client),
+    closeClientOnDispose: ownsClient || options.reconnectClient !== undefined,
     onQuit: () => void stop(),
   });
   component = new ControlCenterComponent({

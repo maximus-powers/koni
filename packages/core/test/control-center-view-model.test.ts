@@ -23,6 +23,37 @@ describe("control center view model", () => {
     expect(view.selectedRun?.objective.preview.length).toBeLessThanOrEqual(4);
   });
 
+  it("shows operator-retired provider exposure separately from exact token totals", () => {
+    const run = fixtureRun();
+    run.attempts["attempt-worker"]!.authorityProviderRequests = [{
+      sequence: 1,
+      reservationId: "provider-reservation-one",
+      api: "openai-codex-responses",
+      modelId: "gpt-5.6-terra",
+      payloadSha256: `sha256:${"1".repeat(64)}`,
+      payloadSizeBytes: 1_024,
+      baselineEntryId: "baseline-entry",
+      prospectiveInputTokens: 12_000,
+      reservedOutputTokens: 8_000,
+      reservedAt: "2026-07-16T00:00:03.000Z",
+      retirement: {
+        protocol: "koni.provider-exposure-retirement.v1",
+        disposition: "operator_acknowledged_canonical_abort",
+        assistantEntryId: "assistant-aborted",
+        assistantEntrySha256: `sha256:${"2".repeat(64)}`,
+        responseId: "resp_aborted",
+        authorizationSha256: `sha256:${"3".repeat(64)}`,
+        retiredAt: "2026-07-16T00:00:04.000Z",
+        sha256: `sha256:${"4".repeat(64)}`,
+      },
+    }];
+
+    const view = viewFor(run);
+    expect(view.runs[0]).toMatchObject({ newTokens: "1.1K new tks", allTokens: "11.1K all" });
+    expect(view.selectedRun?.overviewSections.find((section) => section.title === "Run")?.lines)
+      .toContain("Uncertain exposure: ≤20K retired by operator");
+  });
+
   it("keeps inactive Lead attempts visible and filters agents only when a ticket is selected", () => {
     const run = fixtureRun();
     const all = buildControlCenterView({
@@ -42,6 +73,15 @@ describe("control center view model", () => {
     });
     expect(ticketOnly.selectedRun?.agents).toHaveLength(1);
     expect(ticketOnly.selectedRun?.agents[0]?.label).toBe("Implementer");
+  });
+
+  it("animates run work only for attempts that can presently spend tokens", () => {
+    const run = fixtureRun();
+    run.attempts["attempt-worker"]!.status = "waiting_question";
+    expect(viewFor(run).runs[0]?.activeAgentCount).toBe(0);
+
+    run.attempts["attempt-worker"]!.status = "running";
+    expect(viewFor(run).runs[0]?.activeAgentCount).toBe(1);
   });
 
   it("shows planning activity only while planning, then the approved human-readable plan", () => {
@@ -94,6 +134,20 @@ describe("control center view model", () => {
     expect(review?.sections[0]?.markdown).not.toContain("SECRET FULL AGENT PLAN");
   });
 
+  it("deduplicates semantic activity, drops generic agent noise, and contains internal labels", () => {
+    const run = fixtureRun();
+    run.activity = [
+      { id: "one", at: "2026-07-16T00:00:04.000Z", kind: "agent", message: "Planning agent event", ticketId: undefined, nodeId: undefined },
+      { id: "two", at: "2026-07-16T00:00:05.000Z", kind: "graph_added", message: "Cache boundary", ticketId: undefined, nodeId: undefined },
+      { id: "three", at: "2026-07-16T00:00:06.000Z", kind: "graph_added", message: "Cache boundary", ticketId: undefined, nodeId: undefined },
+      { id: "four", at: "2026-07-16T00:00:07.000Z", kind: "compiler", message: "retry_supervised_stage", ticketId: undefined, nodeId: undefined },
+    ];
+    expect(viewFor(run).selectedRun?.activity.map((event) => event.message)).toEqual([
+      "Compiler recorded an internal state transition",
+      "Added: Cache boundary ×2",
+    ]);
+  });
+
   it("marks every pipeline stage done after the run completes", () => {
     const completed = fixtureRun();
     completed.lifecycle.phase = "completed";
@@ -127,8 +181,64 @@ describe("control center view model", () => {
     proven.lifecycle.blocker = "Verification failed";
     expect(viewFor(proven).selectedRun?.overviewSections.at(-1)).toMatchObject({
       tone: "error",
-      lines: ["Attention", "Verification failed"],
+      lines: [
+        "Attention",
+        "Verification failed",
+        "Press [a] for recovery actions (retry, acknowledge, delete)",
+      ],
     });
+  });
+
+  it("does not present historical expected-red or repaired check receipts as unresolved", () => {
+    const run = fixtureRun();
+    const digest = `sha256:${"f".repeat(64)}` as const;
+    run.checks = [
+      {
+        id: "historical-red",
+        attemptId: "attempt-worker",
+        callId: "call-one",
+        requestedCheckId: "focused-proof",
+        definitionHash: digest,
+        kind: "command",
+        accepted: false,
+        passed: false,
+        summary: "Expected red baseline",
+        commands: [],
+        evidenceSha256: digest,
+        evidenceSizeBytes: 1,
+        evidenceArtifactPath: "/evidence/red.json",
+        recordedAt: "2026-07-16T00:00:03.100Z",
+      },
+      {
+        id: "repaired-green",
+        attemptId: "attempt-worker",
+        callId: "call-two",
+        requestedCheckId: "focused-proof",
+        definitionHash: digest,
+        kind: "command",
+        accepted: true,
+        passed: true,
+        summary: "Focused proof passed",
+        commands: [],
+        evidenceSha256: digest,
+        evidenceSizeBytes: 1,
+        evidenceArtifactPath: "/evidence/green.json",
+        recordedAt: "2026-07-16T00:00:03.200Z",
+      },
+    ];
+    expect(viewFor(run).selectedRun?.overviewSections.at(-1)).toMatchObject({
+      tone: "success",
+      lines: ["Evidence recorded", "1 accepted check"],
+    });
+
+    run.tickets["ticket-one"]!.status = "completed";
+    run.tickets["ticket-one"]!.steps[0]!.status = "completed";
+    run.checks.push({
+      ...run.checks[0]!,
+      id: "completed-ticket-red",
+      recordedAt: "2026-07-16T00:00:03.300Z",
+    });
+    expect(viewFor(run).selectedRun?.overviewSections.at(-1)?.lines).not.toContain("1 failed check");
   });
 
   it("keeps full approved plans distinct from a bounded semantic Graph Seed projection", () => {

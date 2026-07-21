@@ -1,5 +1,12 @@
 import type { GraphEdge, GraphNode } from "../graph/model.js";
+import {
+  projectRunSummary,
+  type RunSummary,
+} from "../authority/run-summary-page.js";
+import type { ConfigurationValue } from "../contracts/configuration.js";
 import { activeRuntimeMs } from "../state/run-lifecycle.js";
+import { projectQuestionBatchCapabilities } from "../state/question-batch.js";
+import type { StageCapabilityCatalog } from "../state/stage-capability.js";
 import type {
   AgentAttemptRecord,
   RunActivityRecord,
@@ -7,8 +14,17 @@ import type {
   RunRecord,
   TicketRecord,
 } from "../state/run-record.js";
+import type { ControlRunAttemptLineage } from "./protocol.js";
+import {
+  cockpitStringArrayOption,
+  cockpitStringOption,
+  cockpitView,
+  type CompiledCockpitViewCatalog,
+} from "./cockpit-config.js";
 
 export type DetailsTab = "overview" | "plan" | "stages" | "chat";
+export const TICKET_TABS = ["all", "active", "todo", "blocked", "proposed", "closed", "other"] as const;
+export type TicketTab = (typeof TICKET_TABS)[number];
 
 export interface ControlCenterSelection {
   runId?: string;
@@ -21,10 +37,25 @@ export interface ControlCenterSelection {
 export interface ControlCenterInput {
   projectRoot: string;
   authorityRevision: number;
-  runs: readonly RunRecord[];
+  /** Compact, revision-bound rows. They are presentation only and never authorize an effect. */
+  runSummaries?: readonly RunSummary[];
+  /** The one exact selected record hydrated against its compact row revision. */
+  selectedRun?: RunRecord;
+  /** Compatibility seam for pure view-model callers; production controllers use summaries. */
+  runs?: readonly RunRecord[];
+  runPage?: {
+    startIndex: number;
+    totalRuns: number;
+    hasPrevious: boolean;
+    hasNext: boolean;
+  };
   provisionalRuns?: readonly ProvisionalRunView[];
   selection: ControlCenterSelection;
   graph?: { nodes: readonly GraphNode[]; edges: readonly GraphEdge[] };
+  controls?: StageCapabilityCatalog;
+  lineage?: ControlRunAttemptLineage;
+  ticketTab?: TicketTab;
+  cockpit?: CompiledCockpitViewCatalog;
   nowMs?: number;
 }
 
@@ -38,12 +69,18 @@ export interface ProvisionalRunView {
 
 export interface RunRowView {
   id: string;
+  /** Short identity + creation time: same-goal retries render identical titles otherwise. */
+  shortId: string;
+  createdAt: string;
   title: string;
   runType: string;
   stage: string;
   targetBranch: string;
   state: string;
   ticketProgress: string;
+  questionCount: number;
+  proposalCount: number;
+  activeAgentCount: number;
   newTokens: string;
   allTokens: string;
   mergeReady: boolean;
@@ -58,6 +95,16 @@ export interface TicketRowView {
   status: string;
   progress: string;
   active: boolean;
+  rail: string;
+  currentPersona?: string;
+  recovery: boolean;
+  proposalAwaitingDecision: boolean;
+}
+
+export interface TicketTabView {
+  id: TicketTab;
+  title: string;
+  count: number;
 }
 
 export interface AgentRowView {
@@ -70,11 +117,28 @@ export interface AgentRowView {
   active: boolean;
   newTokens: string;
   allTokens: string;
+  lineage?: {
+    reason: string;
+    branch: string;
+    parent?: string;
+    children: readonly string[];
+    activeLeaf: boolean;
+  };
 }
 
 export interface QuestionView extends RunQuestionRecord {
   index: number;
   total: number;
+  batchVersion?: number;
+  batchStatus?: "pending_answers" | "pending_resume" | "resolved";
+  batchAnsweredCount?: number;
+  batchQuestionCount?: number;
+  answerSaved: boolean;
+  resolvesBatchOnSubmit: boolean;
+  batchPendingCount?: number;
+  batchReadyToResolve: boolean;
+  savedSelectedOptionId?: string;
+  savedNotes?: string;
 }
 
 export interface ActivityView {
@@ -95,7 +159,15 @@ export interface GraphNodeView {
 export interface ControlCenterViewModel {
   projectRoot: string;
   authorityRevision: number;
+  cockpit?: CompiledCockpitViewCatalog;
   runs: RunRowView[];
+  runPage: {
+    startIndex: number;
+    visibleRuns: number;
+    totalRuns: number;
+    hasPrevious: boolean;
+    hasNext: boolean;
+  };
   selectedRun?: {
     id: string;
     header: {
@@ -118,7 +190,16 @@ export interface ControlCenterViewModel {
       sections: { id: string; title: string; items: { title: string; description: string }[] }[];
       graphSeed: string[];
     };
-    stages: { id: string; title: string; state: "done" | "active" | "pending" }[];
+    stages: {
+      id: string;
+      title: string;
+      state: "done" | "active" | "pending";
+      kind?: string;
+      category?: string;
+      summary?: string;
+      interaction?: { mode: "none" | "automatic" | "operator"; reason: string };
+      actions: { id: string; title: string; available: boolean; reason: string }[];
+    }[];
     ticketDetails?: {
       title: string;
       status: string;
@@ -127,65 +208,110 @@ export interface ControlCenterViewModel {
       steps: { title: string; persona: string; status: string; summary?: string }[];
     };
     tickets: TicketRowView[];
+    ticketTabs: TicketTabView[];
+    ticketTab: TicketTab;
     agents: AgentRowView[];
     questions?: QuestionView[];
     activity: ActivityView[];
     activeDuration?: string;
     graph: { scope: "Run integration" | "Ticket checkout"; nodes: GraphNodeView[]; edges: GraphEdge[] };
+    /** Exact durable attempts that are currently capable of spending model tokens. */
+    spendingTokens: boolean;
   };
 }
 
 export function buildControlCenterView(input: ControlCenterInput): ControlCenterViewModel {
   const nowMs = input.nowMs ?? Date.now();
-  const runs = [...input.runs]
-    .filter((run) => run.lifecycle.phase !== "deleted")
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id));
+  const compatibilityRuns = input.runs ?? [];
+  const summaries = [...(input.runSummaries ?? compatibilityRuns.map(projectRunSummary))]
+    .filter((run) => run.phase !== "deleted")
+    .sort(summaryOrder);
   const provisionalRows = [...(input.provisionalRuns ?? [])]
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
     .map(provisionalRunRow);
   const selectedProvisional = provisionalRows.some((run) => run.id === input.selection.runId);
-  const selected = selectedProvisional
+  const selectedSummary = selectedProvisional
     ? undefined
-    : runs.find((run) => run.id === input.selection.runId) ?? runs[0];
+    : summaries.find((run) => run.id === input.selection.runId) ?? summaries[0];
+  const hydrated = input.selectedRun ?? compatibilityRuns.find((run) => run.id === selectedSummary?.id);
+  const selected = hydrated !== undefined && selectedSummary !== undefined &&
+      hydrated.id === selectedSummary.id && hydrated.revision === selectedSummary.runRevision
+    ? hydrated
+    : undefined;
   return {
     projectRoot: input.projectRoot,
     authorityRevision: input.authorityRevision,
-    runs: [...provisionalRows, ...runs.map(runRow)],
+    ...(input.cockpit === undefined ? {} : { cockpit: input.cockpit }),
+    runs: [...provisionalRows, ...summaries.map(runRow)],
+    runPage: {
+      startIndex: input.runPage?.startIndex ?? 0,
+      visibleRuns: summaries.length,
+      totalRuns: input.runPage?.totalRuns ?? summaries.length,
+      hasPrevious: input.runPage?.hasPrevious ?? false,
+      hasNext: input.runPage?.hasNext ?? false,
+    },
     ...(selected === undefined ? {} : {
-      selectedRun: selectedRunView(selected, input.selection, input.graph, nowMs),
+      selectedRun: selectedRunView(
+        selected,
+        input.selection,
+        input.graph,
+        input.controls,
+        input.lineage,
+        nowMs,
+        input.ticketTab ?? "all",
+        input.cockpit,
+      ),
     }),
   };
 }
 
-function runRow(run: RunRecord): RunRowView {
-  const tokens = runTokens(run);
-  const completed = Object.values(run.tickets).filter((ticket) => ticket.status === "completed").length;
+function runRow(run: RunSummary): RunRowView {
   return {
     id: run.id,
-    title: objectiveTitle(run.objective),
-    runType: titleCase(run.runTypeId),
-    stage: stageTitle(run.currentPipelineStageId, run.lifecycle.phase),
-    targetBranch: shortBranch(run.git.target.ref),
-    state: titleCase(run.lifecycle.phase),
-    ticketProgress: `${completed}/${Object.keys(run.tickets).length}`,
-    newTokens: `${formatTokens(tokens.newTokens)} new tks`,
-    allTokens: `${formatTokens(tokens.allTokens)} all`,
-    mergeReady: run.lifecycle.phase === "merge_ready" && run.git.promotion?.status === "ready" && run.git.promotion.candidateOid !== undefined,
-    awaitingApproval: run.lifecycle.phase === "awaiting_approval",
-    paused: run.lifecycle.phase === "paused" || run.lifecycle.phase === "pausing",
+    // Objectives repeat verbatim across retries of the same goal; the short id plus creation
+    // time are what let an operator tell same-titled runs apart.
+    shortId: run.id.replace(/^run-/u, "").slice(0, 8),
+    createdAt: run.createdAt,
+    title: run.objectiveTitle,
+    runType: run.runType,
+    stage: run.stage ?? titleCase(run.phase),
+    targetBranch: run.targetBranch,
+    state: titleCase(run.phase),
+    ticketProgress: `${run.tickets.completed}/${run.tickets.total}`,
+    questionCount: run.pendingQuestions,
+    proposalCount: run.pendingProposals,
+    // The run-row cog is a truthful token-spend indicator. Sessions waiting for an
+    // answer still participate in the lifecycle, but they are not presently working.
+    activeAgentCount: run.agents.spending,
+    newTokens: `${formatTokens(run.tokens.new)} new tks`,
+    allTokens: `${formatTokens(run.tokens.providerTotal)} all`,
+    mergeReady: run.mergeReady,
+    awaitingApproval: run.planApproval,
+    paused: run.paused,
     provisional: false,
   };
+}
+
+function summaryOrder(left: RunSummary, right: RunSummary): number {
+  if (left.createdAt !== right.createdAt) return left.createdAt > right.createdAt ? -1 : 1;
+  if (left.id === right.id) return 0;
+  return left.id < right.id ? -1 : 1;
 }
 
 function provisionalRunRow(run: ProvisionalRunView): RunRowView {
   return {
     id: run.id,
+    shortId: run.id.replace(/^run-/u, "").slice(0, 8),
+    createdAt: run.createdAt,
     title: objectiveTitle(run.objective),
     runType: run.runType,
     stage: "Starting",
     targetBranch: shortBranch(run.targetBranch),
     state: "Starting",
     ticketProgress: "0/0",
+    questionCount: 0,
+    proposalCount: 0,
+    activeAgentCount: 0,
     newTokens: "0 new tks",
     allTokens: "0 all",
     mergeReady: false,
@@ -199,7 +325,11 @@ function selectedRunView(
   run: RunRecord,
   selection: ControlCenterSelection,
   graph: ControlCenterInput["graph"],
+  controls: StageCapabilityCatalog | undefined,
+  lineage: ControlRunAttemptLineage | undefined,
   nowMs: number,
+  ticketTab: TicketTab,
+  cockpit: CompiledCockpitViewCatalog | undefined,
 ): NonNullable<ControlCenterViewModel["selectedRun"]> {
   const tokens = runTokens(run);
   const tickets = Object.values(run.tickets).sort(ticketOrder);
@@ -207,12 +337,38 @@ function selectedRunView(
   const objectiveLines = wrapPlain(run.objective, 78);
   const pendingQuestions = Object.values(run.questions)
     .filter((question) => question.answeredAt === undefined)
-    .sort((left, right) => left.askedAt.localeCompare(right.askedAt) || left.id.localeCompare(right.id));
+    .sort((left, right) => {
+      if (left.batchId !== undefined && left.batchId === right.batchId &&
+          left.batchPosition !== undefined && right.batchPosition !== undefined) {
+        return left.batchPosition - right.batchPosition;
+      }
+      return left.askedAt.localeCompare(right.askedAt) || left.id.localeCompare(right.id);
+    });
+  const lineageRows = lineage?.attempts ?? [];
+  const lineageByAttempt = new Map(lineageRows.map((attempt) => [attempt.attemptId, attempt]));
+  // The durable run record is the complete attempt inventory. Lineage is
+  // enrichment, never a filter: a partial lineage projection must not make an
+  // inactive Lead or historical worker disappear from the Agents panel.
   const agents = Object.values(run.attempts)
     .filter((attempt) => selectedTicket === undefined || attempt.ticketId === selectedTicket.id)
     .sort(agentOrder)
-    .map((attempt) => agentRow(run, attempt, selectedTicket === undefined));
+    .map((attempt) => agentRow(run, attempt, selectedTicket === undefined, lineageByAttempt));
   const approval = approvalView(run);
+  const configuredTicketView = cockpitView(cockpit, ["tabbed_table", "kanban"]);
+  const configuredTabs = cockpitStringArrayOption(configuredTicketView, "tabs")
+    ?.filter((tab): tab is TicketTab => (TICKET_TABS as readonly string[]).includes(tab));
+  const ticketTabs = configuredTabs !== undefined && configuredTabs.length > 0 ? configuredTabs : TICKET_TABS;
+  const defaultTab = cockpitStringOption(configuredTicketView, "default_tab") as TicketTab | undefined;
+  const effectiveTicketTab = ticketTabs.includes(ticketTab)
+    ? ticketTab
+    : defaultTab !== undefined && ticketTabs.includes(defaultTab) ? defaultTab : ticketTabs[0]!;
+  // This signal must describe the complete run, even while the Agents panel is
+  // narrowed to one ticket. Waiting-for-question and accepted-terminal states
+  // are intentionally excluded: neither is evidence of an in-flight provider
+  // request and neither may animate a token-spend cog.
+  const spendingTokens = Object.values(run.attempts).some((attempt) =>
+    attempt.status === "queued" || attempt.status === "running"
+  );
   return {
     id: run.id,
     header: {
@@ -232,20 +388,25 @@ function selectedRunView(
     overviewSections: overviewSections(run, selectedTicket),
     plan: planView(run),
     ...(approval === undefined ? {} : { approval }),
-    stages: stageViews(run),
+    stages: stageViews(run, controls),
     ...(selectedTicket === undefined ? {} : { ticketDetails: ticketDetails(selectedTicket) }),
-    tickets: tickets.map(ticketRow),
+    tickets: tickets.filter((ticket) => ticketInTab(ticket, effectiveTicketTab)).map(ticketRow),
+    ticketTabs: ticketTabs.map((id) => ({
+      id,
+      title: titleCase(id),
+      count: tickets.filter((ticket) => ticketInTab(ticket, id)).length,
+    })),
+    ticketTab: effectiveTicketTab,
     agents,
     ...(pendingQuestions.length === 0 ? {} : {
       questions: pendingQuestions.map((question, index) => ({
         ...structuredClone(question),
         index: index + 1,
         total: pendingQuestions.length,
+        ...questionBatchView(run, question),
       })),
     }),
-    activity: [...run.activity]
-      .sort((left, right) => right.at.localeCompare(left.at) || right.id.localeCompare(left.id))
-      .map(activityView),
+    activity: activityViews(run.activity),
     ...(run.lifecycle.approvedAtMs === undefined ? {} : {
       activeDuration: formatDuration(activeRuntimeMs(run.lifecycle, nowMs)),
     }),
@@ -253,6 +414,43 @@ function selectedRunView(
       scope: selectedTicket === undefined ? "Run integration" : "Ticket checkout",
       ...graphView(graph),
     },
+    spendingTokens,
+  };
+}
+
+function questionBatchView(
+  run: RunRecord,
+  question: RunQuestionRecord,
+): Pick<QuestionView,
+  "batchVersion" | "batchStatus" | "batchAnsweredCount" | "batchQuestionCount" |
+  "answerSaved" | "resolvesBatchOnSubmit" | "batchPendingCount" | "batchReadyToResolve" |
+  "savedSelectedOptionId" | "savedNotes"> {
+  const batch = question.batchId === undefined ? undefined : run.questionBatches?.[question.batchId];
+  if (batch === undefined) {
+    return {
+      answerSaved: question.answeredAt !== undefined,
+      resolvesBatchOnSubmit: true,
+      batchReadyToResolve: true,
+      ...(question.selectedOptionId === undefined ? {} : { savedSelectedOptionId: question.selectedOptionId }),
+      ...(question.notes === undefined ? {} : { savedNotes: question.notes }),
+    };
+  }
+  const capabilities = projectQuestionBatchCapabilities(batch);
+  const revision = batch.revisions.find((candidate) => candidate.revision === batch.currentRevision);
+  const answer = revision?.answers[question.id];
+  const saved = answer !== undefined || question.answerRevision !== undefined;
+  return {
+    batchVersion: batch.version,
+    batchStatus: batch.status,
+    batchAnsweredCount: capabilities.answeredCount,
+    batchQuestionCount: capabilities.totalCount,
+    answerSaved: saved,
+    batchPendingCount: capabilities.pendingQuestionIds.length,
+    batchReadyToResolve: capabilities.actions.queueResume.allowed,
+    resolvesBatchOnSubmit: batch.status === "pending_answers" &&
+      capabilities.pendingQuestionIds.every((id) => id === question.id),
+    ...(answer?.selectedOptionId === undefined ? {} : { savedSelectedOptionId: answer.selectedOptionId }),
+    ...(answer?.notes === undefined ? {} : { savedNotes: answer.notes }),
   };
 }
 
@@ -276,6 +474,9 @@ function overviewSections(
         `Tickets: ${completed}/${Object.keys(run.tickets).length}`,
         `Tokens: ${formatTokens(tokens.newTokens)} new · ${formatTokens(tokens.allTokens)} provider total`,
         `Cache: ${formatTokens(Math.max(0, tokens.allTokens - tokens.newTokens))} cached input/write`,
+        ...(tokens.uncertainProviderExposure === 0
+          ? []
+          : [`Uncertain exposure: ≤${formatTokens(tokens.uncertainProviderExposure)} retired by operator`]),
         ...(ticket === undefined ? [] : [`Selected ticket: ${ticket.title} · ${titleCase(ticket.status)}`]),
       ],
     },
@@ -291,7 +492,7 @@ function evidenceOverview(run: RunRecord): {
   tone: "neutral" | "success" | "error";
   lines: string[];
 } {
-  const failedChecks = (run.checks ?? []).filter((check) => !check.accepted).length;
+  const failedChecks = unresolvedFailedCheckCount(run);
   const failedTickets = Object.values(run.tickets).filter((ticket) => ticket.status === "failed").length;
   const blockedTickets = Object.values(run.tickets).filter((ticket) => ticket.status === "blocked").length;
   const failureLines: string[] = [];
@@ -304,12 +505,17 @@ function evidenceOverview(run: RunRecord): {
   if (run.git.promotion?.status === "integration_required" || run.git.promotion?.status === "preserved") {
     failureLines.push(safeOperatorText(run.git.promotion.blocker ?? "Target integration needs attention") ?? "Target integration needs attention");
   }
-  if (failureLines.length > 0) return { tone: "error", lines: ["Attention", ...failureLines] };
+  if (failureLines.length > 0) {
+    // A blocker without a next step strands the operator; the actions palette always carries the
+    // authority-projected recovery controls for the selected run.
+    if (run.lifecycle.phase === "blocked") failureLines.push("Press [a] for recovery actions (retry, acknowledge, delete)");
+    return { tone: "error", lines: ["Attention", ...failureLines] };
+  }
 
   const acceptedChecks = (run.checks ?? []).filter((check) => check.accepted).length;
   const completedTickets = Object.values(run.tickets).filter((ticket) => ticket.status === "completed").length;
   const acceptedOutputs = Object.values(run.attempts).filter((attempt) =>
-    attempt.kind !== "planning" && attempt.ticketId !== "run-planning" &&
+    attempt.kind !== "planning" && attempt.kind !== "lead" && attempt.ticketId !== "run-planning" &&
     (attempt.terminalOutputSha256 !== undefined || (attempt.status === "completed" && attempt.terminalSummary !== undefined))
   ).length;
   const verificationRecorded = new Set(["merge_ready", "merging", "completed"]).has(run.lifecycle.phase);
@@ -322,11 +528,52 @@ function evidenceOverview(run: RunRecord): {
   return { tone: "neutral", lines: ["No recorded issues", "Evidence pending"] };
 }
 
+/**
+ * Check receipts are an immutable audit trail, so expected-red baselines and
+ * repaired retries remain in `run.checks` after their work succeeds. The
+ * operator projection must only call a check unresolved when the latest
+ * receipt for the current attempt of unfinished work is still rejected.
+ */
+function unresolvedFailedCheckCount(run: RunRecord): number {
+  const currentAttemptIds = new Set<string>();
+  for (const ticket of Object.values(run.tickets)) {
+    if (ticket.status === "completed") continue;
+    for (const step of ticket.steps) {
+      if (step.status === "completed") continue;
+      const attemptId = step.attemptIds.at(-1);
+      if (attemptId !== undefined) currentAttemptIds.add(attemptId);
+    }
+  }
+
+  const latestByAttemptAndCheck = new Map<string, NonNullable<RunRecord["checks"]>[number]>();
+  for (const check of run.checks ?? []) {
+    if (!currentAttemptIds.has(check.attemptId)) continue;
+    const key = `${check.attemptId}\u0000${check.requestedCheckId}`;
+    const previous = latestByAttemptAndCheck.get(key);
+    if (previous === undefined || previous.recordedAt <= check.recordedAt) {
+      latestByAttemptAndCheck.set(key, check);
+    }
+  }
+  return [...latestByAttemptAndCheck.values()].filter((check) => !check.accepted).length;
+}
+
 function objectiveContext(run: RunRecord): string[] {
+  const objectiveFieldId = run.behavior?.runType.objectiveFieldId ?? "goal";
   const entries = Object.entries(run.intake)
-    .filter(([key, value]) => key !== "goal" && value.trim().length > 0)
-    .map(([key, value]) => `${titleCase(key)}: ${value}`);
+    .filter(([key, value]) => key !== objectiveFieldId && !emptyIntakeValue(value))
+    .map(([key, value]) => `${titleCase(key)}: ${displayIntakeValue(value)}`);
   return entries.length === 0 ? ["Scope follows the approved objective."] : entries;
+}
+
+function emptyIntakeValue(value: ConfigurationValue): boolean {
+  return value === null || value === "" || Array.isArray(value) && value.length === 0;
+}
+
+function displayIntakeValue(value: ConfigurationValue): string {
+  if (typeof value === "string") return value;
+  if (value === null) return "null";
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
 }
 
 function ticketDetails(ticket: TicketRecord): NonNullable<NonNullable<ControlCenterViewModel["selectedRun"]>["ticketDetails"]> {
@@ -458,7 +705,28 @@ function graphSeedReview(value: unknown): string[] {
   return lines;
 }
 
-function stageViews(run: RunRecord): NonNullable<ControlCenterViewModel["selectedRun"]>["stages"] {
+function stageViews(
+  run: RunRecord,
+  controls: StageCapabilityCatalog | undefined,
+): NonNullable<ControlCenterViewModel["selectedRun"]>["stages"] {
+  if (controls !== undefined) {
+    return controls.stages.map((stage) => ({
+      id: stage.id,
+      title: stage.title,
+      state: stage.status === "succeeded" || stage.status === "skipped" ? "done"
+        : stage.current ? "active" : "pending",
+      kind: stage.kind,
+      category: stage.category,
+      ...(stage.summary === undefined ? {} : { summary: stage.summary }),
+      interaction: { mode: stage.interaction.mode, reason: stage.interaction.reason },
+      actions: stage.actions.map((action) => ({
+        id: action.id,
+        title: action.title,
+        available: action.availability.state === "available",
+        reason: action.availability.reason,
+      })),
+    }));
+  }
   const activeIndex = run.currentPipelineStageId === undefined
     ? -1
     : run.pipelineStageIds.indexOf(run.currentPipelineStageId);
@@ -472,28 +740,66 @@ function stageViews(run: RunRecord): NonNullable<ControlCenterViewModel["selecte
       : index === activeIndex && !new Set(["completed", "deleted", "failed"]).has(run.lifecycle.phase)
         ? "active"
         : "pending",
+    actions: [],
   }));
 }
 
 function ticketRow(ticket: TicketRecord): TicketRowView {
   const done = ticket.steps.filter((step) => step.status === "completed" || step.status === "skipped").length;
+  const current = ticket.steps.find((step) => step.status === "running") ??
+    ticket.steps.find((step) => step.status !== "completed" && step.status !== "skipped");
+  const rail = ticket.steps.map((step) => {
+    if (step.status === "completed" || step.status === "skipped") return "●";
+    if (step.status === "running") return "◉";
+    if (step.status === "failed") return "!";
+    return "○";
+  }).join("─");
   return {
     id: ticket.id,
     title: ticket.title,
     status: titleCase(ticket.status),
     progress: `${done}/${ticket.steps.length}`,
     active: ticket.steps.some((step) => step.status === "running"),
+    rail,
+    ...(current === undefined ? {} : { currentPersona: titleCase(current.personaId) }),
+    recovery: ticket.status === "failed" || ticket.status === "blocked" ||
+      ticket.steps.some((step) => step.status === "failed"),
+    proposalAwaitingDecision: ticket.status === "proposed",
   };
 }
 
-function agentRow(run: RunRecord, attempt: AgentAttemptRecord, includeTicketPrefix: boolean): AgentRowView {
+function ticketInTab(ticket: TicketRecord, tab: TicketTab): boolean {
+  const status = ticket.status.toLocaleLowerCase("en-US");
+  const active = ticket.steps.some((step) => step.status === "running") ||
+    new Set(["active", "running", "in_progress"]).has(status);
+  if (tab === "all") return true;
+  if (tab === "active") return active;
+  if (tab === "todo") return !active && new Set(["pending", "ready", "todo", "open"]).has(status);
+  if (tab === "blocked") return status === "blocked";
+  if (tab === "proposed") return status === "proposed";
+  if (tab === "closed") return new Set(["completed", "closed", "cancelled", "superseded"]).has(status);
+  return !TICKET_TABS.slice(0, -1).some((candidate) => candidate !== "all" && ticketInTab(ticket, candidate));
+}
+
+function agentRow(
+  run: RunRecord,
+  attempt: AgentAttemptRecord,
+  includeTicketPrefix: boolean,
+  lineageByAttempt: ReadonlyMap<string, ControlRunAttemptLineage["attempts"][number]>,
+): AgentRowView {
   const ticket = run.tickets[attempt.ticketId];
-  const persona = titleCase(attempt.personaId);
-  const prefix = includeTicketPrefix && ticket !== undefined ? `${ticket.title} · ` : "";
+  const lineage = lineageByAttempt.get(attempt.id);
+  const persona = lineage?.persona ?? titleCase(attempt.personaId);
+  const ticketLabel = lineage?.ticket ?? ticket?.title;
+  const prefix = includeTicketPrefix && ticketLabel !== undefined && attempt.ticketId !== "run-planning"
+    ? `${ticketLabel} · ` : "";
   const step = ticket?.steps.find((candidate) => candidate.id === attempt.stepId);
-  const active = new Set(["queued", "running", "waiting_question", "terminal_accepted"]).has(attempt.status);
+  const active = attempt.status === "queued" || attempt.status === "running";
   const newTokens = attempt.inputTokens + attempt.outputTokens;
   const allTokens = newTokens + attempt.cacheReadTokens + attempt.cacheWriteTokens;
+  const parentLabel = lineage?.parentAttemptId === undefined
+    ? undefined
+    : lineageSemanticLabel(lineageByAttempt.get(lineage.parentAttemptId));
   return {
     id: attempt.id,
     label: `${prefix}${persona}`,
@@ -506,25 +812,86 @@ function agentRow(run: RunRecord, attempt: AgentAttemptRecord, includeTicketPref
     active,
     newTokens: formatTokens(newTokens),
     allTokens: formatTokens(allTokens),
+    ...(lineage === undefined ? {} : {
+      lineage: {
+        reason: lineageReasonLabel(lineage.reason),
+        branch: lineage.branchEpoch === 0 ? "Original attempt" : `Branch ${lineage.branchEpoch + 1}`,
+        ...(parentLabel === undefined ? {} : { parent: parentLabel }),
+        children: lineage.childAttemptIds
+          .map((id) => lineageSemanticLabel(lineageByAttempt.get(id)))
+          .filter((label): label is string => label !== undefined),
+        activeLeaf: lineage.activeLeaf,
+      },
+    }),
   };
 }
 
+function lineageSemanticLabel(
+  lineage: ControlRunAttemptLineage["attempts"][number] | undefined,
+): string | undefined {
+  if (lineage === undefined) return undefined;
+  return `${lineage.persona} · ${lineage.step}`;
+}
+
+function lineageReasonLabel(reason: ControlRunAttemptLineage["attempts"][number]["reason"]): string {
+  if (reason === "initial") return "Initial attempt";
+  if (reason === "retry") return "Retry";
+  if (reason === "rework") return "Rework";
+  if (reason === "review") return "Review branch";
+  if (reason === "recovery") return "Recovery";
+  return "Integration branch";
+}
+
 function attemptPhaseTitle(attempt: AgentAttemptRecord, hasTicket: boolean, active: boolean): string {
+  if (attempt.status === "waiting_question") return "Waiting for answer";
+  if (attempt.status === "terminal_accepted") return "Finishing attempt";
   const kind = attempt.kind ?? (attempt.ticketId === "run-planning" ? "planning" : hasTicket ? "ticket" : undefined);
   if (kind === "planning") return active ? "Planning run" : "Planned run";
+  if (kind === "lead") return active ? "Reviewing readiness" : "Readiness reviewed";
   if (kind === "verification") return active ? "Reviewing evidence" : "Reviewed evidence";
   if (kind === "integration") return active ? "Resolving integration" : "Integration finished";
   if (kind === "ticket") return active ? "Working ticket" : "Ticket work finished";
   return active ? "Working" : "Attempt finished";
 }
 
-function activityView(event: RunActivityRecord): ActivityView {
-  return {
+function activityViews(events: readonly RunActivityRecord[]): ActivityView[] {
+  const collapsed = new Map<string, { event: RunActivityRecord; message: string; count: number }>();
+  for (const event of [...events].sort((left, right) => right.at.localeCompare(left.at) || right.id.localeCompare(left.id))) {
+    const semantic = semanticActivityMessage(event);
+    if (semantic === undefined) continue;
+    const key = `${event.kind}\u0000${semantic.toLocaleLowerCase("en-US")}`;
+    const existing = collapsed.get(key);
+    if (existing === undefined) collapsed.set(key, { event, message: semantic, count: 1 });
+    else existing.count += 1;
+  }
+  return [...collapsed.values()].slice(0, 120).map(({ event, message, count }) => ({
     id: event.id,
     timestamp: formatTimestamp(event.at),
     kind: event.kind,
-    message: event.message,
-  };
+    message: count === 1 ? message : `${message} ×${count}`,
+  }));
+}
+
+function semanticActivityMessage(event: RunActivityRecord): string | undefined {
+  let message = event.message
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, "")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ")
+    .replace(/\b(?:sha256:)?[a-f0-9]{40,64}\b/giu, "[digest]")
+    .replace(/\b[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]*/gu, "[local checkout]")
+    .replace(/(^|[\s(])\/(?:[^\s/]+\/)*[^\s,;:)]*/gu, "$1[local checkout]")
+    .replace(/\b(run|ticket|attempt|session|question|claim|experiment|gate|node|step)[-_:][\p{L}\p{N}._:-]+\b/giu, (_match, kind: string) => `the ${kind.toLowerCase()}`)
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (message.length === 0) return undefined;
+  if (/^(?:(?:planning|compiler|agent)\s+)*(?:event|activity|working|active)[.!]?$/iu.test(message)) return undefined;
+  if (event.kind === "compiler" && /^[a-z0-9_.:-]+$/u.test(message) && /[_.:]/u.test(message)) {
+    message = "Compiler recorded an internal state transition";
+  }
+  if (event.kind === "graph_added" && !/\b(?:add|added|create|created)\b/iu.test(message)) message = `Added: ${message}`;
+  if (event.kind === "graph_modified" && !/\b(?:modify|modified|update|updated|change|changed)\b/iu.test(message)) message = `Modified: ${message}`;
+  if (event.kind === "graph_deleted" && !/\b(?:delete|deleted|remove|removed)\b/iu.test(message)) message = `Deleted: ${message}`;
+  const words = message.split(/\s+/u);
+  return words.length > 30 ? `${words.slice(0, 30).join(" ")}…` : message;
 }
 
 function graphView(graph: ControlCenterInput["graph"]): {
@@ -549,15 +916,25 @@ function graphView(graph: ControlCenterInput["graph"]): {
   };
 }
 
-function runTokens(run: RunRecord): { newTokens: number; allTokens: number } {
+function runTokens(run: RunRecord): {
+  newTokens: number;
+  allTokens: number;
+  uncertainProviderExposure: number;
+} {
   let newTokens = 0;
   let allTokens = 0;
+  let uncertainProviderExposure = 0;
   for (const attempt of Object.values(run.attempts)) {
     const attemptNew = attempt.inputTokens + attempt.outputTokens;
     newTokens += attemptNew;
     allTokens += attemptNew + attempt.cacheReadTokens + attempt.cacheWriteTokens;
+    for (const request of attempt.authorityProviderRequests ?? []) {
+      if (request.retirement !== undefined) {
+        uncertainProviderExposure += request.prospectiveInputTokens + request.reservedOutputTokens;
+      }
+    }
   }
-  return { newTokens, allTokens };
+  return { newTokens, allTokens, uncertainProviderExposure };
 }
 
 export function formatTokens(value: number): string {
