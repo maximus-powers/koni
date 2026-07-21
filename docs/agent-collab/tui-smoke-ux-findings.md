@@ -493,3 +493,33 @@ pi-tool-catalog):
 Deployed as bundle `6cbd4bbc`; validation run `ed339364` launched with the full fix stack
 (submit-contract self-description, grant visibility, check classification, fork distillation,
 compile-failure recovery, plus all session-3 engine fixes).
+
+## 2026-07-21 (session 5, cont.) — submit-schema transport fix landed through a 3-step binding saga
+
+Run `ed339364` (#17) validated the audit fixes dramatically: planner, implementer, and reviewer all
+submitted **first-call accepted** (`submit_calls=1, rejected=0` — the audit baseline was 10-50
+guesses each), and when its assembly step failed it produced a first-call substantive diagnosis that
+pinpointed the remaining defect: the union-rooted terminal schema flattens to
+`{properties: {}, required: []}` in provider tool transforms, so agents cannot target the contract
+and transports deliver object fields as strings.
+
+Fixing that took three rounds against the sealed-binding model (each verified by run `c6e5d318`):
+1. `a4d5806` flattened only the exposed tool definition → `validateToolBindings` correctly rejected
+   the exposure/spec hash mismatch ("does not match its launch binding").
+2. `094c798` moved the flatten inside `resolveToolSchema` (spec hash + exposure + validation agree)
+   and classified launch-binding mismatches as retryable infrastructure → but
+   `spec.terminal.outputSchemaHash` also flowed through the flattened hash while the outcome
+   contract stays strict → "launch context or terminal schema hash differs" on every fresh launch.
+3. `3b0b16e` split the two contracts explicitly: `tools[].schemaHash` + exposed parameters bind the
+   transport-flattened view (status becomes a required "completed"/"failed" enum, branch fields
+   optional, exact branch shapes in the description, additionalProperties false);
+   `terminal.outputSchemaHash` binds the exact compiled union; a legacy fallback accepts the
+   pre-flatten binding so in-flight attempts stay recoverable. All 64 affected tests green.
+
+Operational kinks found while deploying mid-run (not yet fixed):
+- **`koni stop` refuses a version-mismatched authority** — the CLI/authority version guard blocks
+  the very command needed to replace the old authority; every deploy needed a manual `kill` of the
+  stale process. `stop` should always be allowed (it preserves runs by design).
+- **cmux died mid-session**; replaced TUI driving with a Python pty harness (spawn `koni tui` on a
+  pseudo-terminal, send keys, verify against durable run state) — worked first try for run #18's
+  approval and is scriptable for merge authorization.
