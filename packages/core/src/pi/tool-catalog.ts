@@ -390,7 +390,7 @@ export function createKoniAuthorityTools(options: KoniToolCatalogOptions): Autho
       label: source.label,
       description: source.description,
       promptSnippet: source.description,
-      parameters,
+      parameters: transportToolSchema(name, parameters),
       executionMode: source.executionMode,
       async execute(callId, args, signal): Promise<AgentToolResult<unknown>> {
         return execute(callId, args as Record<string, unknown>, signal);
@@ -477,6 +477,43 @@ function coerceJsonObjectArguments(value: unknown): unknown {
   } catch {
     return value;
   }
+}
+
+/**
+ * Root-union tool schemas flatten to zero properties in provider tool transforms (observed live:
+ * the terminal submit tool advertised `{properties: {}, required: []}`, so agents could not target
+ * the contract and transports delivered object-typed fields as strings, making one step class
+ * unsatisfiable). Expose a merged single-object view — every union field present, shared fields
+ * union-typed and required, branch-specific fields optional, the exact branch shapes in the
+ * description — while the schema hash and authority-side validation keep the exact compiled union.
+ */
+function transportToolSchema(name: KoniToolName, schema: TSchema): TSchema {
+  if (name !== "koni_submit_output") return schema;
+  const branches = (schema as { anyOf?: TSchema[] }).anyOf;
+  if (!Array.isArray(branches) || branches.length === 0) return schema;
+  const byKey = new Map<string, { variants: TSchema[]; hashes: Set<string>; occurrences: number }>();
+  for (const branch of branches) {
+    const properties = (branch as { properties?: Record<string, TSchema> }).properties;
+    if (properties === undefined) return schema;
+    for (const [key, property] of Object.entries(properties)) {
+      const slot = byKey.get(key) ?? { variants: [], hashes: new Set<string>(), occurrences: 0 };
+      const hash = canonicalHash(property);
+      if (!slot.hashes.has(hash)) {
+        slot.hashes.add(hash);
+        slot.variants.push(structuredClone(property));
+      }
+      slot.occurrences += 1;
+      byKey.set(key, slot);
+    }
+  }
+  const merged: Record<string, TSchema> = {};
+  for (const [key, slot] of byKey) {
+    const single = slot.variants.length === 1 ? slot.variants[0]! : Type.Union(slot.variants);
+    merged[key] = slot.occurrences === branches.length ? single : Type.Optional(single);
+  }
+  return Type.Object(merged, {
+    description: `Send exactly one of these shapes, omitting every other branch's fields: ${describeSchemaShape(schema)}`,
+  });
 }
 
 /** Parse any top-level string field whose content is a JSON object/array (transport un-stringify). */
