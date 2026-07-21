@@ -211,3 +211,74 @@ Recommended harness changes (judgment calls left for the operator, not auto-appl
 3. **Tighten the architecture-mapper persona/budget** — its reasoning spend is disproportionate to
    a boundary-mapping deliverable; a verbosity/scope instruction or a lower per-role budget would
    recover a large fraction of worker tokens.
+
+## 2026-07-21 (session 2) — probe-failure root cause confirmed + control-center operational hazards
+
+Continuation after the earlier engine fixes. Re-verified the installed engine, restarted the
+authority onto the freshly built bundle, and drove a fresh Small run (`#2329dc3a`) through the
+control center to validate agent behavior end-to-end.
+
+### Confirmed: run `#811a7fcb` deadlock was a gameable-schema probe failure (now fixed)
+Read the failed attempt's terminal output directly:
+`{"status":"failed","blocker":"probe blocker text length padding to test schema requirements only",
+"summary":"probe summary text length padding to test schema requirements only"}`.
+The implementer padded blocker+summary to clear the prior `failed`-schema `minLength:24`+summary
+guard, submitting a placeholder instead of doing the work. The accepted terminal `failed` marked
+the production step `failed` (step `author-historical-baseline`), which is terminal and blocks the
+dependent `review` step → "Deterministic ticket orchestration remains deadlocked".
+
+- **Fix (commit `374d44c`)**: reverted the gameable `failed` schema back to `{status, blocker}`
+  (blocker `minLength:1`) and its parser to exact-fields; a substantive-minimum on a submit schema
+  is trivially gameable and does not measure work. Added a system-prompt line for attempts that
+  hold a write grant: reading alone does not satisfy an implementation attempt — make the edit
+  (koni_write_file/koni_edit_file) and run the configured proof (koni_run_check), and reserve
+  `failed` for a blocker that survives an actual implementation attempt.
+- **Rejected approach**: a hard authority-boundary rejection of a `failed` submission that made no
+  edit/check. `failed`-without-prior-work is a first-class, tested outcome (bounded source failure
+  and resolver `diagnose`→operator-retry drive the change-control supersession recovery); a guard
+  there deadlocks `change-control-authority-integration`. The decision belongs in agent steering,
+  not the terminal boundary.
+
+### Recovery gap: "Retry blocked work" is a deterministic no-op for a terminal semantic failure
+`resetRetryableInfrastructureAssignments` intentionally only resets failed steps whose attempt has
+**no** terminal-accepted output (true infrastructure crashes); a semantically-`failed` step
+(terminalAcceptedAt set) is deliberately left terminal. But the blocked-run recovery menu still
+offers "Retry blocked work", which re-enters executing and immediately re-hits the same deadlock
+(observed: "remains deadlocked ×2"). The action is misleading for this block class. Options:
+suppress/relabel "Retry blocked work" when the sole blocker is a terminal semantic step failure
+with nothing retryable, and steer the operator to Review deletion (or a future explicit
+"re-issue failed step" action) instead. Not auto-fixed this session; flagged for a decision.
+
+### Operational hazard: control-center client vs authority version skew
+The Pi-embedded `/koni` control center holds one authority-client bundle for the life of the Pi
+process. Reinstalling koni + restarting the authority onto a new bundle leaves the running Pi
+client on the old bundle. Observed failure: the old client threw in `authority/client.js #receive`
+(`$.stages[8].current: a terminal successful or skipped stage cannot be current`) on a state the
+old (pre-fix-b) authority had persisted, which **froze the whole control center** — navigation and
+action keys silently no-op, only the cmux status bar keeps updating. A fresh standalone
+`koni tui` on the matching bundle rendered the same run without error (the new authority projects
+the blocked run with `currentIndex=orchestrate`, a valid frame).
+
+- **Operational rule**: after `install-dev.sh` + authority restart, restart Pi (or relaunch the
+  control center on the new bundle) before using `/koni`; do not mix bundles.
+- **Hardening opportunity**: `#receive` should not let a single invalid frame kill the UI —
+  catch, surface a reconnect/error banner, and attempt a resync instead of wedging.
+
+### TUI intake friction (new-run flow the operator called "a pain")
+- **Selection state is ambiguous**: options render as `[Small] Medium [Large]`; the *unbracketed*
+  item is the selected one, which is the opposite of the intuitive reading. Same convention on the
+  questions toggle (`[ no ] some [ many ]`). Needs an unmistakable selected-state affordance
+  (highlight/`●`/`▶`), not bracket-by-absence.
+- **Too many tab stops to launch**: reaching `[ Start Planning ]` from the goal field walks the
+  run-type, target branch, stages nav, questions, max-parallel, and **every model row as two stops
+  each** (model + reasoning). ~15 stops. Add a direct submit accelerator (e.g. Ctrl-Enter) and/or
+  make the model matrix a single group, not 8 stops.
+- **`[q] close` does not close**: from the operate view `q` toggles view state rather than exiting
+  the control center; there is no obvious exit-to-chat. Relabel or make `q` actually close.
+
+### cmux driving note (for the next agent)
+koni's TUI reads raw stdin bytes: drive it with `cmux send --surface <s> '<literal>'` (letters and
+`$'\r'`/`$'\e'`/`$'\e[C'` escapes), **not** `cmux send-key <Name>` — named keys are ignored. New
+terminal surfaces only get a PTY once their workspace is active; a full-width pane in the active
+workspace (`new-pane --type terminal --direction down`) is the reliable place to launch `koni tui`
+(needs ≥82×20).
