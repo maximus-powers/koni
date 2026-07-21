@@ -15706,12 +15706,13 @@ async function deriveCanonicalProviderExposureRetirement(
     !/[\u0000-\u001f\u007f]/u.test(message.responseId)
     ? message.responseId
     : undefined;
-  // A zero-usage provider error or abort is provably unbilled with nothing to reconcile, and such
-  // terminals frequently carry no response id (observed live: an Anthropic `api_error` "Internal
-  // server error", and separately a zero-usage "Request was aborted." terminal, both with all-zero
-  // usage and no responseId, which otherwise wedged the run with an unreconcilable held reservation
-  // and no recovery action). Fall back to the durable assistant entry id — always present, unique,
-  // idempotent — so the terminal can still be retired and retried.
+  // A zero-usage error or abort terminal is provably unbilled with nothing to reconcile, and any
+  // provider can emit one without a response id (seen with an OpenAI-style abort and, separately, an
+  // Anthropic-style api_error; both reported all-zero usage and no responseId, which otherwise
+  // wedged the run with an unreconcilable held reservation and no recovery action). This branch is
+  // provider-agnostic — it keys only on the normalized stop reason and zero usage, not on any
+  // provider identity. Fall back to the durable assistant entry id (always present, unique,
+  // idempotent) so the terminal can still be retired and retried.
   const responseId = declaredResponseId ?? (
     usageIsZero &&
     (message.stopReason === "error" || message.stopReason === "aborted") &&

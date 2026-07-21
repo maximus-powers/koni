@@ -20,6 +20,8 @@ export interface AuthorizedSearchMatch {
   path: string;
   line: number;
   column: number;
+  /** UTF-8 byte offset accepted directly by koni_read_file's offset argument. */
+  byteOffset: number;
   preview: string;
 }
 
@@ -204,7 +206,10 @@ export class WorktreePathAuthority {
         }
       }
       if (files.size > MAX_SEARCH_FILES) {
-        throw new PathAuthorityError("search_files", `search exceeds ${MAX_SEARCH_FILES} files`);
+        throw new PathAuthorityError(
+          "search_files",
+          `search spans more than ${MAX_SEARCH_FILES} files. Narrow "roots" to a specific subdirectory (for example an app's src directory) rather than a package or repository root, which scans dependency and build output.`,
+        );
       }
     }
     const needle = options.caseSensitive === false ? query.toLocaleLowerCase("en-US") : query;
@@ -214,10 +219,16 @@ export class WorktreePathAuthority {
       const result = await this.read(file);
       scannedBytes += result.bytes.byteLength;
       if (scannedBytes > MAX_SEARCH_BYTES) {
-        throw new PathAuthorityError("search_bytes", `search exceeds ${MAX_SEARCH_BYTES} scanned bytes`);
+        throw new PathAuthorityError(
+          "search_bytes",
+          `search scanned more than ${MAX_SEARCH_BYTES} bytes before matching. Narrow "roots" to a specific subdirectory (for example an app's src directory); a package or repository root scans large dependency and build files.`,
+        );
       }
       if (result.bytes.includes(0)) continue;
-      const lines = result.bytes.toString("utf8").split(/\r?\n/u);
+      const text = result.bytes.toString("utf8");
+      const lines = text.split(/\r?\n/u);
+      let lineStartCharacter = 0;
+      let lineStartByte = 0;
       for (const [index, rawLine] of lines.entries()) {
         const haystack = options.caseSensitive === false ? rawLine.toLocaleLowerCase("en-US") : rawLine;
         let offset = 0;
@@ -228,11 +239,20 @@ export class WorktreePathAuthority {
             path: file,
             line: index + 1,
             column: found + 1,
+            byteOffset: lineStartByte + Buffer.byteLength(rawLine.slice(0, found), "utf8"),
             preview: boundedPreview(rawLine),
           });
           offset = found + Math.max(needle.length, 1);
         }
         if (matches.length >= limit) return matches;
+        const newlineStart = lineStartCharacter + rawLine.length;
+        const newlineCharacters = text.startsWith("\r\n", newlineStart)
+          ? 2
+          : text.startsWith("\n", newlineStart)
+          ? 1
+          : 0;
+        lineStartCharacter = newlineStart + newlineCharacters;
+        lineStartByte += Buffer.byteLength(rawLine, "utf8") + newlineCharacters;
       }
     }
     return matches;
