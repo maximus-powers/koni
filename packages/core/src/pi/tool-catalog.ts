@@ -3,6 +3,7 @@ import { Type, type TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { canonicalEncode, canonicalHash, type Sha256Digest } from "../shared/canonical.js";
 import type { AuthorityBackedTool } from "./managed-session.js";
+import { renderKoniToolCall, renderKoniToolResult } from "./tool-renderer.js";
 
 export const KONI_TOOL_NAMES = [
   "koni_context",
@@ -117,6 +118,61 @@ const currentRecordNoteSchema = Type.Object({
   supersedes: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
 }, { additionalProperties: false });
 
+/** Recovery-only schema for attempts issued before policy-aware recommendations were mandatory. */
+const legacyAskQuestionSchema = Type.Union([
+  Type.Object({
+    prompt: Type.String({ minLength: 1, maxLength: 1024 * 1024 }),
+    options: Type.Array(Type.Object({
+      id: Type.String({ minLength: 1, maxLength: 128 }),
+      label: Type.String({ minLength: 1, maxLength: 16 * 1024 }),
+      description: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
+    }, { additionalProperties: false }), { minItems: 2, maxItems: 8 }),
+    allowsNotes: Type.Optional(Type.Boolean()),
+    recommendedOptionId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+  }, { additionalProperties: false }),
+  Type.Object({
+    questions: Type.Array(Type.Object({
+      id: Type.String({ minLength: 1, maxLength: 128 }),
+      prompt: Type.String({ minLength: 1, maxLength: 1024 * 1024 }),
+      options: Type.Array(Type.Object({
+        id: Type.String({ minLength: 1, maxLength: 128 }),
+        label: Type.String({ minLength: 1, maxLength: 16 * 1024 }),
+        description: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
+      }, { additionalProperties: false }), { minItems: 2, maxItems: 8 }),
+      allowsNotes: Type.Optional(Type.Boolean()),
+      recommendedOptionId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+    }, { additionalProperties: false }), { minItems: 1, maxItems: 8 }),
+  }, { additionalProperties: false }),
+]);
+
+const currentAskQuestionSchema = Type.Union([
+  Type.Object({
+    prompt: Type.String({ minLength: 1, maxLength: 1024 * 1024 }),
+    options: Type.Array(Type.Object({
+      id: Type.String({ minLength: 1, maxLength: 128 }),
+      label: Type.String({ minLength: 1, maxLength: 16 * 1024 }),
+      description: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
+    }, { additionalProperties: false }), { minItems: 2, maxItems: 8 }),
+    allowsNotes: Type.Optional(Type.Boolean()),
+    recommendedOptionId: Type.String({ minLength: 1, maxLength: 128 }),
+    impact: Type.Union([Type.Literal("routine"), Type.Literal("high_impact")]),
+  }, { additionalProperties: false }),
+  Type.Object({
+    questions: Type.Array(Type.Object({
+      id: Type.String({ minLength: 1, maxLength: 128 }),
+      prompt: Type.String({ minLength: 1, maxLength: 1024 * 1024 }),
+      options: Type.Array(Type.Object({
+        id: Type.String({ minLength: 1, maxLength: 128 }),
+        label: Type.String({ minLength: 1, maxLength: 16 * 1024 }),
+        description: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
+      }, { additionalProperties: false }), { minItems: 2, maxItems: 8 }),
+      allowsNotes: Type.Optional(Type.Boolean()),
+      recommendedOptionId: Type.String({ minLength: 1, maxLength: 128 }),
+      impact: Type.Union([Type.Literal("routine"), Type.Literal("high_impact")]),
+    }, { additionalProperties: false }), { minItems: 1, maxItems: 8 }),
+  }, { additionalProperties: false }),
+]);
+
 const CATALOG: Readonly<Record<KoniToolName, Omit<CatalogEntry, "name">>> = {
   koni_context: {
     label: "Ticket context",
@@ -161,7 +217,7 @@ const CATALOG: Readonly<Record<KoniToolName, Omit<CatalogEntry, "name">>> = {
   },
   koni_read_file: {
     label: "Read",
-    description: "Read a bounded page of a regular file allowed by the compiled ticket grant.",
+    description: "Read at most 32 KiB from an allowed regular file. For a large file, search for a known symbol or literal before reading at a nonzero byte offset.",
     schema: Type.Object({
       path: pathField,
       offset: Type.Optional(Type.Integer({ minimum: 0 })),
@@ -185,7 +241,7 @@ const CATALOG: Readonly<Record<KoniToolName, Omit<CatalogEntry, "name">>> = {
   },
   koni_search_files: {
     label: "Search",
-    description: "Search literal UTF-8 text only in regular files allowed by the compiled ticket grant.",
+    description: "Search literal UTF-8 text in allowed regular files and return line, preview, and exact byte offsets for targeted reads.",
     schema: Type.Object({
       query: Type.String({ minLength: 1, maxLength: 4_096 }),
       roots: Type.Optional(Type.Array(pathField, { maxItems: 64, uniqueItems: true })),
@@ -256,23 +312,15 @@ const CATALOG: Readonly<Record<KoniToolName, Omit<CatalogEntry, "name">>> = {
   },
   koni_ask_question: {
     label: "Ask user",
-    description: "Open one durable compiler-bound question and suspend this attempt until it is answered.",
-    schema: Type.Object({
-      prompt: Type.String({ minLength: 1, maxLength: 1024 * 1024 }),
-      options: Type.Array(Type.Object({
-        id: Type.String({ minLength: 1, maxLength: 128 }),
-        label: Type.String({ minLength: 1, maxLength: 16 * 1024 }),
-        description: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
-      }, { additionalProperties: false }), { minItems: 2, maxItems: 8 }),
-      allowsNotes: Type.Optional(Type.Boolean()),
-    }, { additionalProperties: false }),
+    description: "Submit explicit recommendations and impact. The pinned run policy either records them automatically or pauses for operator input.",
+    schema: currentAskQuestionSchema,
     executionMode: "sequential",
     terminal: false,
     maxResultBytes: 2 * 1024 * 1024,
   },
   koni_submit_output: {
     label: "Submit output",
-    description: "Submit the one terminal structured result for compiler reconciliation and end this attempt.",
+    description: 'Submit the one terminal structured result and end this attempt. status is a literal string: exactly "completed" on success (with a one-sentence summary and any step-specific fields the schema requires) or exactly "failed" only when the objective is genuinely impossible (with a specific blocker diagnosis). Do not guess other status values or send placeholder/probe content. Send the arguments as a JSON object.',
     schema: jsonObject,
     executionMode: "sequential",
     terminal: true,
@@ -317,7 +365,11 @@ export function createKoniAuthorityTools(options: KoniToolCatalogOptions): Autho
         arguments: structuredClone(args),
         ...(signal === undefined ? {} : { signal }),
       });
-      return resultFromReceipt(receipt, Math.min(maxResultBytes, 64 * 1024));
+      // The immutable launch already authenticates this per-tool ceiling (4 KiB–16 MiB). Do not
+      // replace it with a hidden 64 KiB runtime cap: receipt details intentionally duplicate the
+      // semantic payload used by Pi renderers, so otherwise valid bounded context/file pages can
+      // fail after the authority has accepted and persisted them.
+      return resultFromReceipt(receipt, maxResultBytes);
     };
     const reject: AuthorityBackedTool["reject"] = async (callId, args, rejection, signal) => {
       validateRuntimeRejection(rejection);
@@ -342,6 +394,12 @@ export function createKoniAuthorityTools(options: KoniToolCatalogOptions): Autho
       executionMode: source.executionMode,
       async execute(callId, args, signal): Promise<AgentToolResult<unknown>> {
         return execute(callId, args as Record<string, unknown>, signal);
+      },
+      renderCall(args, theme, context) {
+        return renderKoniToolCall(name, source.label, args, theme, context.lastComponent);
+      },
+      renderResult(result, renderOptions, theme, context) {
+        return renderKoniToolResult(source.label, result, renderOptions, theme, context.lastComponent);
       },
     };
     return {
@@ -387,10 +445,89 @@ export function validateKoniToolArguments(
   expectedSchemaHash?: Sha256Digest,
 ): Record<string, unknown> {
   const schema = resolveToolSchema(name, terminalOutputSchema, expectedSchemaHash);
-  if (!Value.Check(schema, value) || typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(`arguments do not match the compiler-issued schema for ${name}`);
+  // Reject a JSON-serialized object once: some provider tool-call transports stringify structured
+  // arguments (observed live: `graphDelta` declared object but delivered as a string, making the
+  // success branch unsatisfiable). Parse-and-retry so a correct payload is not rejected for a
+  // transport artifact outside the agent's control.
+  const parsed = coerceJsonObjectArguments(value);
+  const accepts = (candidate: unknown): candidate is Record<string, unknown> =>
+    Value.Check(schema, candidate) && typeof candidate === "object" && candidate !== null && !Array.isArray(candidate);
+  if (accepts(parsed)) return structuredClone(parsed);
+  // Repair nested fields the transport stringified (e.g. an object-typed `graphDelta` delivered as
+  // a JSON string). Only accepted when the repaired payload passes the exact compiled schema, so a
+  // genuinely-invalid submission is never silently coerced into acceptance.
+  const repaired = repairStringifiedObjectFields(parsed);
+  if (repaired !== undefined && accepts(repaired)) return structuredClone(repaired);
+  // A bare validation failure ("arguments do not match the schema") forces the agent to brute-force
+  // the contract one field/const at a time (observed live: 100+ failed submit calls guessing the
+  // status value, whole token budgets drained). Return a self-describing error that names the
+  // allowed values, the actual-vs-max lengths, and the full expected shape, so the next call is
+  // correct. This is provider-agnostic — it derives everything from the compiled schema.
+  throw new Error(describeSchemaMismatch(name, schema, parsed));
+}
+
+/** Accept a JSON-string form of the arguments (a transport artifact) as if it were the object. */
+function coerceJsonObjectArguments(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{")) return value;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : value;
+  } catch {
+    return value;
   }
-  return structuredClone(value as Record<string, unknown>);
+}
+
+/** Parse any top-level string field whose content is a JSON object/array (transport un-stringify). */
+function repairStringifiedObjectFields(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  let changed = false;
+  const out: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(value)) {
+    if (typeof field === "string" && (field.trim().startsWith("{") || field.trim().startsWith("["))) {
+      try {
+        const parsed = JSON.parse(field.trim());
+        if (typeof parsed === "object" && parsed !== null) { out[key] = parsed; changed = true; continue; }
+      } catch { /* leave as-is */ }
+    }
+    out[key] = field;
+  }
+  return changed ? out : undefined;
+}
+
+/** Human-readable, agent-actionable description of why `value` failed `schema`, plus the shape. */
+function describeSchemaMismatch(name: KoniToolName, schema: TSchema, value: unknown): string {
+  const observed = isRecord(value)
+    ? Object.entries(value)
+        .map(([key, field]) => (typeof field === "string" ? `${key}(${field.length} chars)` : `${key}(${Array.isArray(field) ? "array" : typeof field})`))
+        .join(", ")
+    : typeof value;
+  return `arguments do not match the compiler-issued schema for ${name}. ` +
+    `You sent: { ${observed} }. Expected exactly one of: ${describeSchemaShape(schema)}. ` +
+    "Send status as the exact literal shown, include every listed field, and keep each string within its char limit.";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Compact rendering of the allowed shapes (union branches, required fields, consts, limits). */
+function describeSchemaShape(schema: TSchema): string {
+  const branches = Array.isArray((schema as { anyOf?: TSchema[] }).anyOf)
+    ? (schema as { anyOf: TSchema[] }).anyOf
+    : [schema];
+  const rendered = branches.map((branch) => {
+    const props = (branch as { properties?: Record<string, { const?: unknown; type?: string; maxLength?: number }> }).properties;
+    if (props === undefined) return "{…}";
+    const fields = Object.entries(props).map(([key, prop]) => {
+      if (prop && Object.hasOwn(prop, "const")) return `${key}: ${JSON.stringify(prop.const)}`;
+      const limit = prop?.maxLength === undefined ? "" : ` (≤${prop.maxLength} chars)`;
+      return `${key}: ${prop?.type ?? "value"}${limit}`;
+    });
+    return `{ ${fields.join(", ")} }`;
+  });
+  return rendered.join("  OR  ");
 }
 
 function resolveToolSchema(
@@ -404,6 +541,9 @@ function resolveToolSchema(
   if (expectedSchemaHash === undefined || canonicalHash(current) === expectedSchemaHash) return current;
   if (name === "koni_record_note" && canonicalHash(legacyRecordNoteSchema) === expectedSchemaHash) {
     return legacyRecordNoteSchema;
+  }
+  if (name === "koni_ask_question" && canonicalHash(legacyAskQuestionSchema) === expectedSchemaHash) {
+    return legacyAskQuestionSchema;
   }
   throw new Error(`unsupported historical schema hash for ${name}`);
 }

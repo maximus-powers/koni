@@ -6626,8 +6626,14 @@ function assignmentTerminalSchema(
     removeEdges: Type.Array(edgeSchema(), { maxItems: 4_096 }),
   }, { additionalProperties: false });
   const baseCompleteFields: Record<string, TSchema> = {
-    status: Type.Literal("completed"),
-    summary: Type.String({ minLength: 1, maxLength: 1_024 }),
+    status: Type.Literal("completed", {
+      description: 'Required. The exact literal string "completed" (not "success"/"done"/"ok"/a hash) — use it when the step succeeded.',
+    }),
+    summary: Type.String({
+      minLength: 1,
+      maxLength: 1_024,
+      description: "One concise sentence describing what this step accomplished. Plain text, at most 1024 characters.",
+    }),
   };
   const normalFields = { ...baseCompleteFields };
   if (policy === "required") normalFields.graphDelta = graphDelta;
@@ -6665,8 +6671,14 @@ function assignmentTerminalSchema(
     }, { additionalProperties: false }));
   }
   const failed = Type.Object({
-    status: Type.Literal("failed"),
-    blocker: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
+    status: Type.Literal("failed", {
+      description: 'Required. The exact literal string "failed" — use it only when the objective is genuinely impossible within this grant, not to probe the schema.',
+    }),
+    blocker: Type.String({
+      minLength: 1,
+      maxLength: 64 * 1024,
+      description: "A specific, self-contained diagnosis: the exact obstacle, what you tried (edits, checks and their output), and why nothing in your grant can resolve it. Never a placeholder such as \"test\" or \"probe\".",
+    }),
   }, { additionalProperties: false });
   return Type.Union([...complete, failed]);
 }
