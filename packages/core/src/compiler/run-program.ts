@@ -1192,6 +1192,8 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       "Read the koni_submit_output schema from its tool definition before calling it, and submit your real result on the first call. Never send placeholder, probing, or schema-discovery payloads: an accepted failed submission is terminal, cannot be retried, and permanently fails this assignment even if your actual work succeeded.",
       ...(descriptor.writePaths.length === 0 ? [] : [
         "This is an implementation attempt with a write grant. Reading alone does not satisfy it. Make the change with koni_write_file/koni_edit_file inside your write grant, then run the configured proof with koni_run_check before you submit. A failed submission is a genuine-impossibility last resort — reserve it for a blocker that survives an actual implementation attempt (missing capability, contradictory contract, grant that cannot express the change), never for difficulty, uncertainty, or investigation you have not yet turned into edits and a check run.",
+        "If the configured proof fails, that is normal iteration, not a blocker: read the failure, fix the edit, and run it again. Keep iterating until it passes or you have proven the objective is impossible within the grant. Do not stop after a single failing check.",
+        "If you must submit failed, the blocker must be a specific, self-contained diagnosis — the exact obstacle, what you tried (edits made, checks run and their output), and why no in-grant change can resolve it. An accepted failed submission is terminal and blocks the whole run for operator recovery, so a terse or placeholder blocker (for example \"test\", \"probe\", \"blocked\") strands the run with no actionable reason; never submit one.",
       ]),
       ...(repositoryCallBudget === undefined ? [] : [
         `Repository discovery is bounded to ${repositoryCallBudget} total koni_read_file, koni_list_files, and koni_search_files calls for this planning attempt. Reuse compiler context, prioritize high-value reads, and synthesize before the authority ceiling is exhausted.`,
@@ -8450,7 +8452,16 @@ function attemptTokenBudget(
   // Direct-approval run types use the fixed compatibility envelope until they define a distinct
   // execution budget field in a future schema.
   const semanticEnvelope = configured ?? 240_000;
-  const maxNew = kind === "planning" ? configured! : Math.max(32_000, Math.floor(semanticEnvelope / 2));
+  // The ticket worker performs the heaviest turn sequence of the run — read, reason, edit, then
+  // iterate against the configured proof — and at the model catalog's forced-minimum thinking
+  // tier extended reasoning dominates the new-token count. Halving the planning envelope for it
+  // (the previous `semanticEnvelope / 2`) exhausted the budget during discovery, aborting
+  // productive implementers before they could write a single edit. Give the worker the full
+  // planning envelope; the lighter non-planning roles (review, verification, integration) keep the
+  // halved envelope, which is ample for their bounded turn counts in practice.
+  const maxNew = kind === "planning" ? configured!
+    : kind === "ticket" ? Math.max(32_000, semanticEnvelope)
+    : Math.max(32_000, Math.floor(semanticEnvelope / 2));
   // The cache-inclusive ceiling is a worst-case exposure hold, not a spend target. Anthropic
   // usage reports re-read the entire cached prefix on every turn (observed live: a healthy
   // 14-turn implementer accumulated 905K cacheRead against 6.6K new tokens before crossing the
