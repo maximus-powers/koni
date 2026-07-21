@@ -15700,14 +15700,15 @@ async function deriveCanonicalProviderExposureRetirement(
     !/[\u0000-\u001f\u007f]/u.test(message.responseId)
     ? message.responseId
     : undefined;
-  // A zero-usage provider error is provably unbilled with nothing to reconcile, and upstream 5xx
+  // A zero-usage provider error or abort is provably unbilled with nothing to reconcile, and such
   // terminals frequently carry no response id (observed live: an Anthropic `api_error` "Internal
-  // server error" with all-zero usage and no responseId, which otherwise wedged the run with an
-  // unreconcilable held reservation and no recovery action). Fall back to the durable assistant
-  // entry id — always present, unique, idempotent — so the error can still be retired and retried.
+  // server error", and separately a zero-usage "Request was aborted." terminal, both with all-zero
+  // usage and no responseId, which otherwise wedged the run with an unreconcilable held reservation
+  // and no recovery action). Fall back to the durable assistant entry id — always present, unique,
+  // idempotent — so the terminal can still be retired and retried.
   const responseId = declaredResponseId ?? (
     usageIsZero &&
-    message.stopReason === "error" &&
+    (message.stopReason === "error" || message.stopReason === "aborted") &&
     typeof assistant.id === "string" &&
     assistant.id.length > 0 &&
     assistant.id.length <= 512
