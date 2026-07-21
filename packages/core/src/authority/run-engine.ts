@@ -9858,13 +9858,19 @@ export class RunAuthorityEngine {
         }
       }
     } catch (error) {
-      if (!externalCommandStarted) {
+      // A read-only check has no workspace or external effects to protect, so its interrupted
+      // intent is safely re-runnable and must not wedge the run. Observed live: a token-budget
+      // abort landing while a read-only baseline vitest command was in flight killed the check
+      // subprocess and left the run permanently blocked on "reconcile intent" with no
+      // reconciliation surface.
+      const sideEffectFree = check.commands.every((command) => command.effect === "read_only");
+      if (!externalCommandStarted || sideEffectFree) {
         await this.#discardPendingCheck(grant.runId, intent.id, intent);
       } else {
-        // Once a command has crossed the process boundary it may have produced workspace or
-        // external effects even when timeout, abort, result parsing, or output collection fails.
-        // Retain the exact intent and stop the run for explicit reconciliation; deleting it here
-        // would make a later replay indistinguishable from a duplicate side effect.
+        // Once a mutating command has crossed the process boundary it may have produced workspace
+        // or external effects even when timeout, abort, result parsing, or output collection
+        // fails. Retain the exact intent and stop the run for explicit reconciliation; deleting
+        // it here would make a later replay indistinguishable from a duplicate side effect.
         await this.#recordRunBlocker(
           grant.runId,
           `Configured check ${requestedCheckId} ended without an authenticated result; reconcile intent ${intent.id}`,
