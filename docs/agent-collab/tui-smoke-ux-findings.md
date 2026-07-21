@@ -167,3 +167,47 @@ Remaining open item from round 1: **budget economics vs forced-xhigh thinking (#
 (Small envelope 240K planning / 120K workers) but the deeper fix — cost-weighted budgets counting
 anthropic cacheRead at ~1/10, or lower Claude worker thinking tiers — is still worth doing. See
 the token-efficiency note below.
+
+## 2026-07-21 — token efficiency & agent-intelligence analysis (7-run session data)
+
+Per-attempt provider accounting from the durable session JSONL (output vs reasoning vs cacheRead):
+
+| persona | outcome | turns | output tok | reasoning tok | reads | cacheRead |
+|---|---|---|---|---|---|---|
+| run-planner | completed | 3–12 | 44–62K | 28–50K | 16–19 | 0.1–0.4M |
+| implementer | completed | 25 | 59K | 50K | 17 | 2.7M |
+| implementer | aborted (budget) | 11–16 | 6–60K | 3–127K | 27–32 | 0.9–1.8M |
+| architecture-mapper | aborted (budget) | 38 | 120K | 112K | 25 | 4.6M |
+| architecture-mapper | completed | 9 | 19K | **130K** | 25 | 1.7M |
+
+What's healthy (harness structure working as designed):
+- **Progression is correct**: every run walked plan → questions(auto) → approve → initialize →
+  orchestrate → checks in the expected order; planners reliably complete in a few turns; the
+  25-turn implementer completed a real vertical slice. Repository reads are bounded (16–32), so
+  agents are *not* dumbly re-scanning the tree — the discovery budget is doing its job.
+- Auto-question resolution under Medium/Small policy avoided needless operator round-trips.
+
+The real inefficiency (answering "are they wasting tokens?"):
+- **Reasoning tokens dominate and are charged against the new-token budget.** `newTokens = input +
+  output`, and extended-thinking reasoning is part of `output`. At the only tiers this Pi catalog
+  exposes for claude-sonnet-5/opus-4-8 (xhigh/max), reasoning frequently *equals or exceeds* the
+  visible output — the completed architecture-mapper spent **130K reasoning for 19K of actual
+  output** (~87% thinking). So a worker "spends" most of its budget thinking and aborts mid-work;
+  that is the dominant cause of the budget blocks, not looping or bad behavior.
+- **architecture-mapper is the outlier**: 38 turns / 120K out / 112K reasoning / 4.6M cacheRead in
+  one attempt — an order of magnitude heavier than the planner for a boundary-mapping step.
+- **cacheRead is enormous** (up to 4.6M) but ~10% cost; it confirms the x64 ceiling was right and
+  is the strongest argument for cost-weighted budgeting.
+
+Recommended harness changes (judgment calls left for the operator, not auto-applied mid-session):
+1. **Cost-weighted token budgets**: count anthropic `cacheRead` at ~1/10 toward `maxAll`, and
+   consider excluding (or separately budgeting) reasoning tokens from the new-token *spend cap* so
+   a productively-progressing worker is not aborted for thinking. This is the highest-leverage fix
+   and generalizes beyond this smoke.
+2. **Right-size Claude thinking tiers**: mechanical worker/mapper roles do not need `max`/`xhigh`.
+   Either expose lower thinking tiers for these models in the Pi catalog, or drop reviewer/mapper
+   from `max` → `xhigh` in the profile. (Not changed live to avoid perturbing the in-flight run;
+   updog Small currently: planner/lead/worker `xhigh`, reviewer `max`.)
+3. **Tighten the architecture-mapper persona/budget** — its reasoning spend is disproportionate to
+   a boundary-mapping deliverable; a verbosity/scope instruction or a lower per-role budget would
+   recover a large fraction of worker tokens.
