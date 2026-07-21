@@ -344,3 +344,65 @@ Net: the Pi-native harness runs plan → questions → approval → orchestrate 
 → `xhigh` review → ticket-complete correctly on Claude (Opus lead / Sonnet workers). Reaching a
 clean `merge_ready` on the SPICED objective needs items #4 (code), #5, #6, #7 addressed — and the
 SPICED objective is arguably Medium-sized, near the Small tier's budget/complexity ceiling.
+
+## 2026-07-21 (session 3) — seven harness fixes; pipeline validated end-to-end through implementation
+
+Operator pushback ("those are exactly the kinks I want you to fix") drove a focused fix pass. Each
+fix was committed, deployed, and validated by a live run advancing further than any prior run.
+All on `pi-native-port`.
+
+**Fixes landed + validated (koni unless noted):**
+1. `ecbec91` **worker token budget** — `attemptTokenBudget` gave every non-planning attempt
+   `envelope/2`, so the ticket worker (heaviest role) got half the planner's budget; at Sonnet's
+   forced-min `xhigh` tier reasoning alone exhausted 120K before any edit. Ticket kind now gets the
+   full envelope. Validated: the `implement` step completed with real edits + green check.
+2. `ecbec91` + `bs...` **anti-lazy-bail guidance** — implementers must iterate on failing checks and
+   never submit a placeholder blocker (`test`/`probe`/`blocked`); later made universal (applies to
+   every attempt, not just write-grant ones, after an assembly step bailed with `blocker:"test"`).
+3. updog `e1a82f1655` **Small planner → Opus** — Sonnet planner produced plans that passed review
+   but failed the strict compiler (unclosed `contract.applies_to`, ungranted proof paths). Opus
+   plans compile cleanly. (Medium/Large already used Opus.)
+4. `66cfb53` + `0805788` **transient provider recovery** — a zero-usage provider *error* or *abort*
+   with no responseId (observed live: Anthropic `api_error` "Internal server error", and separately
+   "Request was aborted.") is provably unbilled but was neither settleable nor retireable, wedging
+   the run with "cannot be reconciled" and no recovery action. Fall back to the durable assistant
+   entry id so it retires and retries. Validated: recovered a planning 500 and an assemble abort.
+5. `391e45d` **proof-check input scope** — proof checks read declared support files (test files,
+   config, `package.json`) beyond ticket-owned `covered_paths`; the input validation used only the
+   narrow per-step covered scope, rejecting every support file ("outside path scope") and
+   deadlocking every implementation proof. Validate against `readPaths ∪ member.sourcePaths`.
+6. `b815ff2` **provider-reservation = retryable infrastructure** — a step failed with "Provider
+   request remains reserved without a canonical assistant settlement" carried no failureCode and
+   matched no retryable pattern, so `resetRetryableInfrastructureAssignments` never re-issued it
+   even after the exposure was retired. Recognize the reservation-containment error class as
+   retryable infra (still gated on clean accounting + no terminal output). Validated: re-issued a
+   transiently-failed assemble step.
+
+**Pipeline proof (run `4b56d970`, Small/Opus-planner):** recovered a transient 500 → clean compile
+→ proof ticket ✓ → **full implementation ticket ✓** (`implement` step: real edits, green check,
+`xhigh` review) → final assembly ticket. This is the first live proof the Pi-native harness runs a
+real code change end-to-end through implementation on Claude.
+
+**Agent intelligence (definitive):** run `cdf2f8c6`'s implementer authored the proof test, ran the
+configured check twice, and produced a precise root-cause diagnosis (sandbox `EPERM` on `.npmrc` +
+`pnpm exec` spawn failure before vitest loads; `vitest.workspace.ts` scopes only `packages/*`, not
+`apps/books`; no root vitest binary), then failed honestly with an actionable recommendation and
+refused to fake a red. No probing, no lazy bail — genuine engineering judgment. The guidance work
+is doing its job.
+
+**Open blockers to a clean `merge_ready` (environment/variance, not harness logic):**
+- **Anthropic provider storm** — repeated zero-usage 500s/aborts during the session. Now
+  auto-recoverable (fix #4 + #6) via `koni resume`, but each needs a resume; a provider-dispatch
+  retry on 5xx/abort (before the terminal) would remove the manual step. Environmental.
+- **Sandbox `.npmrc` EPERM + check working-directory variance** — when the proof check runs from
+  the repo root (`cwd:"."`, an Opus-planner choice this run) `pnpm exec` cannot read `.npmrc`
+  (EPERM) and the root `vitest.workspace.ts` doesn't cover `apps/books`. Earlier planners used
+  `cwd:apps/books`, which worked. Needs either a sandbox `.npmrc`/root-toolchain read grant for
+  checks or planner steering to a package-scoped invocation. updog-repo-specific.
+- **Terminal semantic failure has no operator re-issue** — a genuine `{status:"failed"}` submission
+  (or a lazy one) is terminal by design (guarded test); `koni resume` deliberately won't retry it.
+  An explicit "re-issue failed step" operator action remains the clean escape hatch (deferred:
+  conflicts with the deliberate invariant, and the observed failures were either genuine or fixed
+  upstream by the guidance).
+- **Approval gate vs deterministic compile** (#3, still open) — a plan can pass review then fail
+  `approved_plan_compile`/grants. Validating compilability at the approval gate would fail-fast.
