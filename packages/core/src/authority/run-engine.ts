@@ -15379,6 +15379,12 @@ function isRetryableInfrastructureAttempt(attempt: AgentAttemptRecord): boolean 
     /authority tool result .* exceeds its .* launch bound/u,
     /simulated contained session cold-start timeout/u,
     /worker exited with code [0-9]+/u,
+    // Provider-reservation containment: a request was reserved but its terminal never reconciled
+    // (a transient upstream error or abort left the reservation held). This is Koni/Pi accounting
+    // containment, not a compiler-reviewed semantic outcome. Once the exposure is retired (the
+    // reset's providerOutcomeAccountingIssue guard proves no request stays open) the step is safe
+    // to re-issue at the explicit operator Resume boundary.
+    /provider request (?:remains reserved|cannot be reconciled|remains unsettled)/iu,
   ].some((pattern) => pattern.test(error));
 }
 
