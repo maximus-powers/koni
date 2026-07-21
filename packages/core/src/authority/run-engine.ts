@@ -3641,9 +3641,15 @@ export class RunAuthorityEngine {
           defineBuiltInStageAction({
             id: `stage:${stage.id}:revise`,
             intent: "revise_run_plan",
-            available: current && run.lifecycle.phase === "awaiting_approval",
+            // Also offered when the approved plan failed deterministic compilation and blocked the
+            // run at this boundary: retrying re-fails identically, so a steered revision is the
+            // only real recovery.
+            available: current && (run.lifecycle.phase === "awaiting_approval" ||
+              (run.lifecycle.phase === "blocked" && run.lifecycle.resumePhase === "approving")),
             reason: current && run.lifecycle.phase === "awaiting_approval"
               ? "Steering can request a fresh immutable planning attempt."
+              : current && run.lifecycle.phase === "blocked" && run.lifecycle.resumePhase === "approving"
+              ? "The approved plan failed deterministic compilation; steer a revised plan to recover."
               : "Plan revision is available only while this approval stage is waiting.",
             form: {
               title: "Revise plan",

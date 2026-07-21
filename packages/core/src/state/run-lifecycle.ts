@@ -61,6 +61,7 @@ export type RunLifecycleEvent =
   | { type: "plan_approved"; atMs: number }
   | { type: "execution_started"; atMs: number }
   | { type: "verification_started"; atMs: number }
+  | { type: "execution_required"; atMs: number }
   | { type: "verification_passed"; atMs: number }
   | { type: "integration_required"; atMs: number; reason: string }
   | { type: "merge_started"; atMs: number }
@@ -68,6 +69,7 @@ export type RunLifecycleEvent =
   | { type: "pause_requested"; atMs: number }
   | { type: "pause_settled"; atMs: number }
   | { type: "resume_requested"; atMs: number }
+  | { type: "questions_resume_requested"; atMs: number }
   | { type: "blocked"; atMs: number; reason: string }
   | { type: "retry_requested"; atMs: number; phase: ResumableRunPhase }
   | { type: "failed"; atMs: number; reason: string }
@@ -190,13 +192,22 @@ export function reduceRunLifecycle(
       state.phase = "awaiting_approval";
       closeActiveInterval(state, event.atMs);
       break;
-    case "plan_revision_requested":
-      requirePhase(current, event, ["awaiting_approval"]);
+    case "plan_revision_requested": {
+      // A run blocked at the approval/compile boundary (an approved plan that fails deterministic
+      // compilation) has no path forward except a revised plan: retry re-runs the identical compile
+      // and fails identically. Allow the operator to steer a fresh planning attempt directly from
+      // that block instead of dead-ending the run.
+      const blockedAtApproval = current.phase === "blocked" &&
+        (current.resumePhase === "approving" || current.resumePhase === "awaiting_approval");
+      if (!blockedAtApproval) requirePhase(current, event, ["awaiting_approval"]);
       state.phase = "planning";
       state.planRevision += 1;
+      state.blocker = undefined;
+      state.resumePhase = undefined;
       state.activeSinceMs = event.atMs;
       effects.push({ type: "request_plan_revision", planRevision: state.planRevision });
       break;
+    }
     case "plan_approval_requested":
       requirePhase(current, event, ["awaiting_approval"]);
       state.phase = "approving";
@@ -221,6 +232,14 @@ export function reduceRunLifecycle(
       requirePhase(current, event, ["executing"]);
       state.phase = "verifying";
       effects.push({ type: "start_verification" });
+      break;
+    case "execution_required":
+      requirePhase(current, event, ["verifying"]);
+      state.phase = "executing";
+      state.runningIntent = true;
+      state.blocker = undefined;
+      if (state.activeSinceMs === undefined) state.activeSinceMs = event.atMs;
+      effects.push({ type: "admit_ready_work" });
       break;
     case "verification_passed":
       requirePhase(current, event, ["verifying"]);
@@ -257,7 +276,12 @@ export function reduceRunLifecycle(
         "verifying",
         "merge_ready",
       ]);
-      state.resumePhase = current.phase as ResumableRunPhase;
+      // awaiting_questions is a presentation/wait boundary layered over the exact stage in
+      // resumePhase. Preserve that underlying stage across pause/restart instead of replacing it
+      // with awaiting_questions and losing whether planning, execution, or verification owned it.
+      state.resumePhase = current.phase === "awaiting_questions"
+        ? current.resumePhase ?? "planning"
+        : current.phase as ResumableRunPhase;
       state.phase = "pausing";
       state.runningIntent = false;
       closeActiveInterval(state, event.atMs);
@@ -280,6 +304,15 @@ export function reduceRunLifecycle(
       } else if (state.phase === "executing" || state.phase === "verifying") {
         effects.push({ type: "admit_ready_work" });
       }
+      break;
+    case "questions_resume_requested":
+      requirePhase(current, event, ["paused"]);
+      if (!state.pendingQuestions.some((question) => question.answeredAtMs === undefined)) {
+        throw new Error("cannot resume the question boundary without an unanswered question");
+      }
+      state.phase = "awaiting_questions";
+      state.runningIntent = true;
+      state.activeSinceMs = undefined;
       break;
     case "blocked":
       requirePhase(current, event, [
