@@ -132,3 +132,38 @@ Monitor/status:
   ceiling, or pause-abort.
 - Runs 0ab09757/5ffd091d/15bf289a/8318dfa5 deleted by operator (async cascade); 8f98b370 (check
   intent wedge) and da307a0d (step deadlock) retained as forensics.
+
+## 2026-07-21 (round 2) — "fix everything" pass: all open bugs fixed + TUI polish
+
+Committed on `pi-native-port` (each revertable; commit subjects in parens):
+
+1. **Step-reissue deadlock (open bug #7) — fixed.** `4e408c1` The failed-assignment submit
+   branch accepted `{status:"failed", blocker:"probe"}` (a model probing the schema), turning a
+   step whose work was already done into a terminal semantic failure that never reissued. The
+   branch now requires a substantive blocker + summary (min 24 chars each); pre-migration
+   `{status,blocker}` still parses; the attempt prompt states failed submissions are terminal and
+   probing is forbidden.
+2. **Mid-check abort intent wedge (open bug #6) — fixed.** `1c17f88` An attempt abort
+   landing while a **read-only** check subprocess was in flight left a durable "reconcile intent"
+   that no surface could clear. Read-only checks have no effects to protect, so their interrupted
+   intents are now discarded (mutating checks still fail closed).
+3. **`.koni` dirty-guard false positive — fixed.** `8d82a20` Run admission and target promotion
+   refused targets whose only uncommitted paths were Koni-materialized `.koni/**` (this is what
+   forced the earlier `info/exclude` hack and broke five research tests). Those paths are now
+   excluded from both dirty guards; promotion never merges them anyway.
+4. **Worktree bootstrap hook (product gap #3) — shipped.** `999c73c` Run types declare
+   `workspace.bootstrap.{argv,timeout_seconds}`, compiled into `CompiledRunTypeBehavior.workspace`
+   and run once by the authority after run-workspace approval and each ticket cycle
+   materialization. updog `.koni` now runs `pnpm install --prefer-offline`, so proof checks
+   resolve their toolchain with no manual install. Removes the biggest source of environment-only
+   check failures.
+5. **TUI legibility polish.** `2726119` Run rows lead with `#<shortid>` + relative age (kills the
+   identical-row confusion that caused wrong-run actions); pagination reads
+   `Runs 1–4 of 9 · ↑2 more · ↓3 more`; unmapped cockpit slots are hidden (no more 8 dead
+   placeholder rows); blocked runs append "Press [a] for recovery actions"; intake choosers use
+   distinct monochrome glyphs (`▸ focused ◂`, `[• selected ]`, `[ idle ]`).
+
+Remaining open item from round 1: **budget economics vs forced-xhigh thinking (#5)** is mitigated
+(Small envelope 240K planning / 120K workers) but the deeper fix — cost-weighted budgets counting
+anthropic cacheRead at ~1/10, or lower Claude worker thinking tiers — is still worth doing. See
+the token-efficiency note below.
