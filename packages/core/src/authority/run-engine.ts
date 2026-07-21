@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { TSchema } from "typebox";
@@ -7608,6 +7609,9 @@ export class RunAuthorityEngine {
         this.#git.approveRun(run.git, this.#gitJournal(runId, advancement)));
       run = await this.#store.getRun(runId);
       if (!this.#matchesAdvancement(run, advancement)) return;
+      await this.#bootstrapWorkspace(runId, run.git.namespace.runWorktree, "run workspace");
+      run = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(run, advancement)) return;
 
       if (compileInvocationId !== undefined) {
         await this.#adoptRunActionRevision(runId, compileInvocationId, advancement);
@@ -12158,6 +12162,56 @@ export class RunAuthorityEngine {
     }
   }
 
+  /**
+   * Run the operator-configured workspace bootstrap once inside a freshly materialized checkout,
+   * so configured proof commands can resolve their toolchain without manual preparation. The
+   * command is operator-authored project configuration executing in an operator-owned worktree;
+   * a non-zero exit is an infrastructure failure of the workspace, not agent work product.
+   */
+  async #bootstrapWorkspace(runId: string, worktree: string, label: string): Promise<void> {
+    const run = await this.#store.getRun(runId);
+    const bootstrap = run.behavior?.runType.workspace?.bootstrap;
+    if (bootstrap === undefined) return;
+    const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null; stderrTail: string }>(
+      (resolve, reject) => {
+        const child = spawn(bootstrap.argv[0]!, bootstrap.argv.slice(1), {
+          cwd: worktree,
+          stdio: ["ignore", "ignore", "pipe"],
+          timeout: bootstrap.timeoutMs,
+          killSignal: "SIGKILL",
+        });
+        let stderrTail = "";
+        child.stderr?.on("data", (chunk: Buffer) => {
+          stderrTail = (stderrTail + chunk.toString("utf8")).slice(-2_048);
+        });
+        child.on("error", reject);
+        child.on("close", (code, signal) => resolve({ code, signal, stderrTail }));
+      },
+    );
+    if (result.code !== 0) {
+      throw new AuthorityRpcError(
+        "workspace_bootstrap",
+        `workspace bootstrap '${bootstrap.argv.join(" ")}' exited ${result.signal ?? result.code} in ${label}: ${result.stderrTail.slice(-512)}`,
+        { retryable: true },
+      );
+    }
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const current = await this.#store.getRun(runId);
+      const draft = nextRun(current, this.#timestamp());
+      draft.activity.push(activity(
+        this.#createId("activity"),
+        draft.updatedAt,
+        "compiler",
+        `Bootstrapped ${label} ('${bootstrap.argv.join(" ")}')`,
+      ));
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: current.revision }],
+      });
+      return { revision: committed.state.revision };
+    });
+  }
+
   /** Reserve, recover, and materialize one durable ticket checkout before compiling an attempt. */
   async #ensureTicketCycle(
     runId: string,
@@ -12209,6 +12263,7 @@ export class RunAuthorityEngine {
     if (cycleId === undefined) throw new AuthorityRpcError("git_cycle", "ticket Git cycle was not reserved");
     run = await this.#store.getRun(runId);
     if (!this.#matchesAdvancement(run, advancement)) throw new RunAdvancementStoppedError();
+    const materializingCycle = run.git.ticketCycles[cycleId] === undefined;
     if (run.git.ticketCycles[cycleId] === undefined) {
       await this.#withGit(runId, async () => {
         const current = await this.#store.getRun(runId);
@@ -12236,6 +12291,12 @@ export class RunAuthorityEngine {
           this.#gitJournal(runId, advancement),
         );
       });
+    }
+    if (materializingCycle) {
+      const materialized = (await this.#store.getRun(runId)).git.ticketCycles[cycleId!];
+      if (materialized !== undefined) {
+        await this.#bootstrapWorkspace(runId, materialized.worktree, `ticket worktree ${ticketId}`);
+      }
     }
     await this.#server.mutateInternal(async ({ revision }) => {
       run = await this.#store.getRun(runId);

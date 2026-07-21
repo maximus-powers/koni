@@ -1,5 +1,5 @@
 import { TextDecoder } from "node:util";
-import { valid } from "semver";
+import { satisfies, valid, validRange } from "semver";
 import {
   COMPILED_CONFIGURATION_PROTOCOL,
   CONFIGURATION_REGISTRY_KINDS,
@@ -44,6 +44,14 @@ import {
   parsePiResourceBindingValue,
   PiResourceBindingError,
 } from "../profile/resource-bindings.js";
+import { projectGraphSchemaDefinition } from "./graph-schema.js";
+import { compileStateMachineCatalog } from "./rules.js";
+import {
+  compileExecutionSemanticCatalog,
+  ExecutionSemanticCompilationError,
+} from "./execution-semantics.js";
+import { compileActionCatalog } from "./action-recipes.js";
+import { compileConfigurationBehavior } from "./behavior.js";
 
 const REQUIRED_IMPORT_CATEGORIES: readonly ProfileImportCategory[] = [
   "graph",
@@ -57,12 +65,22 @@ const REQUIRED_IMPORT_CATEGORIES: readonly ProfileImportCategory[] = [
   "cockpit",
 ];
 
+const PI_THINKING_LEVELS = new Set([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+const CONFIGURATION_ENGINE_VERSION = "0.1.0";
+
 const PROFILE_TOP_LEVEL_FIELDS = [
   "schema_version",
   "engine",
   "profile",
   "initialization",
-  "storage",
   "git",
   "orchestration",
   "change_control",
@@ -84,6 +102,7 @@ const RUN_BEHAVIOR_FIELDS = [
   "planning",
   "instructions",
   "working_spec",
+  "workspace",
 ] as const;
 const RUN_SOURCE_FIELDS = [...RUN_IDENTITY_FIELDS, ...RUN_BEHAVIOR_FIELDS, "extends", "overrides"];
 
@@ -264,8 +283,31 @@ export function compileProjectConfiguration(
     return validationFailure(bag.sorted());
   }
 
+  const actionCatalog = compileActionCatalog(
+    [...registryState.records.actions.entries()].map(([id, document]) => ({
+      id,
+      path: locationOf(registryState, document, pointer("/registries/actions", id)),
+      document,
+    })),
+  );
+  bag.extend(actionCatalog.diagnostics);
   validateCrossReferences(profile.document, runTypes, registryState, bag);
+  const behavior = actionCatalog.ok
+    ? compileConfigurationBehavior({
+      profile: profile.document,
+      project: project.document,
+      runTypeOrder: project.runTypeOrder,
+      runTypes: [...runTypes.values()],
+      agents,
+      personas: registryState.records.personas,
+      actions: actionCatalog.value,
+    })
+    : undefined;
+  if (behavior !== undefined) bag.extend(behavior.diagnostics);
   if (bag.hasErrors()) {
+    return validationFailure(bag.sorted());
+  }
+  if (behavior === undefined || !behavior.ok) {
     return validationFailure(bag.sorted());
   }
 
@@ -299,7 +341,14 @@ export function compileProjectConfiguration(
       profile_lineage: manifest.value.profile.lineage,
     },
     baseline_bundle_sha256: manifest.value.bundle_sha256,
-    effective_bundle_sha256: computeProfileBundleSha256(effective.value.files),
+    // The package digest authenticates both the editable baseline inventory and the migration
+    // catalog that defines how older project overlays reach these bytes. An untouched effective
+    // baseline must therefore retain the exact package digest; local edits still change the file
+    // projection while remaining bound to the same migration catalog.
+    effective_bundle_sha256: computeProfileBundleSha256(
+      effective.value.files,
+      manifest.value.migrations,
+    ),
     profile: profile.document,
     project: project.document,
     modules: immutableModules,
@@ -309,11 +358,34 @@ export function compileProjectConfiguration(
     ...(piResourceBindings === undefined ? {} : { pi_resource_bindings: piResourceBindings }),
     edge_types: registryState.edgeTypes,
     registries: materializeRegistries(registryState.records),
+    behavior: behavior.value,
   };
   const configuration: CompiledConfiguration = {
     ...material,
     configuration_sha256: canonicalHash(material),
   };
+  // Configuration acceptance must mean every compiled run can instantiate its
+  // graph, including run types the operator has not selected yet. Keeping the
+  // graph runtime as the semantic authority avoids a second hand-written
+  // schema validator while surfacing its failures at the editable config seam.
+  const graphSchema = projectGraphSchemaDefinition(configuration);
+  bag.extend(graphSchema.diagnostics);
+  const stateMachines = compileStateMachineCatalog(configuration);
+  bag.extend(stateMachines.diagnostics);
+  try {
+    compileExecutionSemanticCatalog(configuration);
+  } catch (error) {
+    if (error instanceof ExecutionSemanticCompilationError) {
+      bag.error(error.code, error.path, error.message);
+    } else {
+      bag.error(
+        "execution.internal_failure",
+        "/registries",
+        "execution-semantics compilation failed at a non-diagnostic boundary",
+      );
+    }
+  }
+  if (bag.hasErrors()) return validationFailure(bag.sorted());
   return validationSuccess(deepFreeze(configuration), bag.sorted());
 }
 
@@ -529,7 +601,17 @@ function validateProfileDocument(
   if (schemaVersion !== undefined && schemaVersion !== PROFILE_CONFIGURATION_SCHEMA_VERSION) {
     bag.error("configuration.schema_version", pointer(rootPath, "schema_version"), "profile schema version is not supported");
   }
-  requiredString(root, "engine", rootPath, bag);
+  const engine = requiredString(root, "engine", rootPath, bag);
+  if (engine !== undefined) {
+    const normalizedRange = engine.replaceAll(",", " ");
+    if (validRange(normalizedRange) === null || !satisfies(CONFIGURATION_ENGINE_VERSION, normalizedRange)) {
+      bag.error(
+        "configuration.engine_range",
+        pointer(rootPath, "engine"),
+        `engine range must include native configuration engine ${CONFIGURATION_ENGINE_VERSION}`,
+      );
+    }
+  }
 
   const identity = requiredExactRecord(
     root,
@@ -554,7 +636,7 @@ function validateProfileDocument(
     bag.error("configuration.profile_version", `${rootPath}/profile/version`, "profile version does not match the package manifest");
   }
 
-  for (const field of ["initialization", "storage", "git", "orchestration"] as const) {
+  for (const field of ["initialization", "git", "orchestration"] as const) {
     requiredRecord(root, field, rootPath, bag);
   }
   for (const field of ["change_control", "reporting"] as const) {
@@ -905,7 +987,7 @@ function loadAgentResources(
     }
     requiredString(root, "provider", rootPath, bag);
     requiredString(root, "model", rootPath, bag);
-    requiredString(root, "thinking_level", rootPath, bag);
+    requiredThinkingLevel(root, "thinking_level", rootPath, bag);
     requiredRecord(root, "capabilities", rootPath, bag);
     if (id === undefined) {
       continue;
@@ -1279,7 +1361,7 @@ function validateRunBehavior(
 
   const intake = behavior.intake === undefined
     ? undefined
-    : exactRecord(behavior.intake, pointer(rootPath, "intake"), ["fields", "order"], bag);
+    : exactRecord(behavior.intake, pointer(rootPath, "intake"), ["fields", "order", "objective_field"], bag);
   if (intake !== undefined) {
     const fields = requiredRecord(intake, "fields", pointer(rootPath, "intake"), bag);
     const order = stringArray(intake.order, `${rootPath}/intake/order`, bag);
@@ -1397,7 +1479,7 @@ function validateSimpleRunRecords(
     exactRecord(
       behavior.planning,
       `${rootPath}/planning`,
-      ["session_scope", "graph_seed_stage", "max_repository_tool_calls", "token_budget"],
+      ["max_repository_tool_calls", "token_budget"],
       bag,
     );
   }
@@ -1413,7 +1495,7 @@ function validateSimpleRunRecords(
     exactRecord(
       behavior.orchestration,
       `${rootPath}/orchestration`,
-      ["auto_start", "max_parallel", "compile_action", "lead_action", "report_action"],
+      ["auto_start", "max_parallel", "compile_action", "lead_action", "lead_triggers", "report_action"],
       bag,
     );
   }
@@ -1428,7 +1510,7 @@ function validateSimpleRunRecords(
         }
         const role = exactRecord(value, rolePath, ["provider", "model", "thinking_level"], bag);
         requiredString(role, "model", rolePath, bag);
-        requiredString(role, "thinking_level", rolePath, bag);
+        requiredThinkingLevel(role, "thinking_level", rolePath, bag);
         if (role.provider !== undefined) {
           optionalString(role, "provider", rolePath, bag);
         }
@@ -1995,6 +2077,27 @@ function requiredString(
   if (typeof value !== "string" || value.trim().length === 0) {
     bag.error("configuration.required_string", pointer(parentPath, field), "required configuration field must be a nonempty string");
     return undefined;
+  }
+  return value;
+}
+
+/**
+ * Reasoning is a profile-wide invariant: a dormant preset must not be allowed to
+ * make an otherwise selected run fail only when the full run program compiles.
+ */
+function requiredThinkingLevel(
+  parent: MutableConfigurationObject,
+  field: string,
+  parentPath: string,
+  bag: DiagnosticBag,
+): string | undefined {
+  const value = requiredString(parent, field, parentPath, bag);
+  if (value === undefined) return undefined;
+  const fieldPath = pointer(parentPath, field);
+  if (value === "ultra") {
+    bag.error("configuration.legacy_thinking_level", fieldPath, "legacy ultra reasoning must be migrated to Pi max");
+  } else if (!PI_THINKING_LEVELS.has(value)) {
+    bag.error("configuration.thinking_level", fieldPath, `unsupported Pi thinking level ${value}`);
   }
   return value;
 }
