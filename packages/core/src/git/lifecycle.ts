@@ -12,6 +12,22 @@ import {
   type GitPathScope,
   type GitPathScopeInspection,
 } from "./path-scope.js";
+import {
+  assertGitBehaviorPolicy,
+  assertGitRunTemplateContext,
+  assertGitTicketTemplateContext,
+  renderConfiguredCommitTrailers,
+  renderRunRef,
+  renderTicketCommitSubject,
+  renderTicketRef,
+  resolveLegacyPolicyWorktreeRoot,
+  resolvePolicyWorktreeRoot,
+  resolveRepositoryWorktreeNamespaceRoot,
+  type GitBehaviorPolicy,
+  type GitRunAdmission,
+  type GitRunTemplateContext,
+  type GitTicketTemplateContext,
+} from "./behavior-policy.js";
 
 export const GIT_LIFECYCLE_PROTOCOL = "koni.git-lifecycle.v1" as const;
 export const GIT_INTENT_PROTOCOL = "koni.git-intent.v1" as const;
@@ -25,6 +41,10 @@ export interface RunGitLifecycleRecord {
     ref: string;
     selectedOid: string;
   };
+  /** Absent only on pre-policy lifecycle records, which retain the exact historical namespace. */
+  policy?: GitBehaviorPolicy;
+  /** Immutable values used to resolve this run's policy templates. */
+  runTemplate?: GitRunTemplateContext;
   namespace: {
     root: string;
     runRef: string;
@@ -51,6 +71,7 @@ export interface RunGitLifecycleRecord {
   };
   ticketCycles: Record<string, TicketGitCycleRecord>;
   ticketCycleOrder: string[];
+  targetSynchronization?: TargetSynchronizationRecord | undefined;
   promotion: TargetPromotionRecord | undefined;
 }
 
@@ -76,6 +97,21 @@ export interface TicketGitCycleRecord {
   integratedAt: string | undefined;
   retiredAt: string | undefined;
   blocker: string | undefined;
+  /** Exact immutable archive retained when change control supersedes this unintegrated cycle. */
+  archiveRef?: string;
+  supersessionSha256?: string;
+  supersededAt?: string;
+  /** Required on policy-backed records; absent on legacy cycles. */
+  templateContext?: GitTicketTemplateContext;
+}
+
+export interface TargetSynchronizationRecord {
+  status: "synchronized" | "integration_required" | "preserved";
+  priorRunOid: string;
+  targetOid: string;
+  runOid: string | undefined;
+  synchronizedAt: string;
+  blocker: string | undefined;
 }
 
 export interface GitConflictReport {
@@ -89,6 +125,18 @@ export interface GitConflictReport {
 export type TicketPublicationResult =
   | { status: "integrated"; lifecycle: RunGitLifecycleRecord; cycle: TicketGitCycleRecord }
   | { status: "conflict"; lifecycle: RunGitLifecycleRecord; conflict: GitConflictReport };
+
+export type TargetSynchronizationResult =
+  | {
+      status: "synchronized";
+      lifecycle: RunGitLifecycleRecord;
+      synchronization: TargetSynchronizationRecord;
+    }
+  | {
+      status: "integration_required";
+      lifecycle: RunGitLifecycleRecord;
+      conflict: GitConflictReport;
+    };
 
 export type TargetPromotionPreparation =
   | {
@@ -178,6 +226,7 @@ export type GitLifecycleIntent =
       baseRunOid: string;
       ticketRef: string;
       ticketWorktree: string;
+      templateContext?: GitTicketTemplateContext;
     })
   | (GitIntentBase & {
       kind: "ticket_checkpoint";
@@ -197,6 +246,14 @@ export type GitLifecycleIntent =
       runWorktree: string;
     })
   | (GitIntentBase & {
+      kind: "target_sync";
+      expectedRunOid: string;
+      observedTargetOid: string;
+      synchronizedRunOid: string;
+      runRef: string;
+      runWorktree: string;
+    })
+  | (GitIntentBase & {
       kind: "target_publish";
       expectedTargetOid: string;
       runOid: string;
@@ -207,12 +264,13 @@ export type GitLifecycleIntent =
   | (GitIntentBase & {
       kind: "forward_compensation";
       originalIntentId: string;
-      originalKind: "ticket_publish" | "target_publish";
+      originalKind: "ticket_publish" | "target_sync" | "target_publish";
       priorOid: string;
       candidateOid: string;
       reference: string;
       checkout: string | undefined;
       cycleId: string | undefined;
+      observedTargetOid?: string;
       repairError: string;
       identity: { name: string; email: string };
     })
@@ -222,6 +280,16 @@ export type GitLifecycleIntent =
       expectedTicketOid: string;
       ticketRef: string;
       ticketWorktree: string;
+    })
+  | (GitIntentBase & {
+      kind: "ticket_supersede";
+      cycleId: string;
+      ticketId: string;
+      expectedTicketOid: string;
+      ticketRef: string;
+      ticketWorktree: string;
+      archiveRef: string;
+      supersessionSha256: string;
     })
   | (GitIntentBase & {
       kind: "run_retire";
@@ -276,6 +344,68 @@ export type AbandonedRunRetirementResult =
   | { status: "retired"; lifecycle: RunGitLifecycleRecord }
   | { status: "preserved"; lifecycle: RunGitLifecycleRecord; reason: string };
 
+export const GIT_ABANDONED_RUN_INSPECTION_PROTOCOL =
+  "koni.git-abandoned-run-inspection.v1" as const;
+export const GIT_TARGET_REF_OBSERVATION_PROTOCOL =
+  "koni.git-target-ref-observation.v1" as const;
+
+export type AbandonedRunResourceKind = "planning" | "run" | "ticket";
+export type AbandonedRunRefState =
+  | "not_applicable"
+  | "absent"
+  | "matches"
+  | "moved"
+  | "unreadable";
+export type AbandonedRunWorktreeState =
+  | "absent"
+  | "owned_clean"
+  | "owned_dirty"
+  | "unregistered_present"
+  | "ownership_mismatch"
+  | "unreadable";
+
+/**
+ * One read-only retirement candidate. Paths are returned to the calling authority for operator
+ * review; they are never persisted as a new source of ownership authority.
+ */
+export interface AbandonedRunResourceInspection {
+  kind: AbandonedRunResourceKind;
+  id: string;
+  expectedOid: string;
+  ref: string | undefined;
+  worktree: string;
+  refState: AbandonedRunRefState;
+  observedRefOid: string | undefined;
+  worktreeState: AbandonedRunWorktreeState;
+  registered: boolean;
+  dirtyPaths: string[];
+  safeToDelete: boolean;
+  warnings: string[];
+}
+
+/** A deterministic, non-mutating preview of exactly what delete-owned would attempt to retire. */
+export interface AbandonedRunInspection {
+  protocol: typeof GIT_ABANDONED_RUN_INSPECTION_PROTOCOL;
+  runId: string;
+  target: {
+    ref: string;
+    selectedOid: string;
+  };
+  resources: AbandonedRunResourceInspection[];
+  deleteOwnedSafe: boolean;
+  warnings: string[];
+}
+
+/** Exact read-only target-ref evidence suitable for binding a guarded merge preview. */
+export interface TargetRefObservation {
+  protocol: typeof GIT_TARGET_REF_OBSERVATION_PROTOCOL;
+  runId: string;
+  ref: string;
+  selectedOid: string;
+  observedOid: string;
+  changedSinceSelection: boolean;
+}
+
 export function assertRunGitLifecycleRecord(
   value: unknown,
 ): asserts value is RunGitLifecycleRecord {
@@ -294,6 +424,17 @@ export function assertRunGitLifecycleRecord(
   }
   assertUserTargetRef(value.target.ref);
   assertOidValue(value.target.selectedOid, "selected target OID");
+  const policyBacked = value.policy !== undefined || value.runTemplate !== undefined;
+  if (policyBacked) {
+    if (value.policy === undefined || value.runTemplate === undefined) {
+      throw new Error("Git lifecycle policy and run template must be stored together");
+    }
+    assertGitBehaviorPolicy(value.policy);
+    assertGitRunTemplateContext(value.runTemplate);
+    if (value.runTemplate.id !== value.runId) throw new Error("Git lifecycle run template ID disagrees with the run");
+    // Rendering validates every persisted context field as well as the resulting ref.
+    renderRunRef(value.policy, value.runTemplate as unknown as GitRunTemplateContext);
+  }
   if (!isObject(value.namespace)) throw new Error("Git lifecycle namespace is invalid");
   for (const field of ["root", "planningWorktree", "runWorktree", "ticketRoot"] as const) {
     if (typeof value.namespace[field] !== "string" || !path.isAbsolute(value.namespace[field])) {
@@ -301,7 +442,21 @@ export function assertRunGitLifecycleRecord(
     }
   }
   const ticketRoot = value.namespace.ticketRoot as string;
-  if (value.namespace.runRef !== `refs/heads/koni/runs/${value.runId}`) {
+  const expectedNamespace = policyBacked
+    ? persistedPolicyRunNamespace(
+        value.commonDirectory as string,
+        value.policy as GitBehaviorPolicy,
+        value.runTemplate as unknown as GitRunTemplateContext,
+        value.namespace as unknown as RunGitNamespace,
+      )
+    : legacyRunNamespace(value.commonDirectory as string, value.runId);
+  if (
+    value.namespace.root !== expectedNamespace.root ||
+    value.namespace.runRef !== expectedNamespace.runRef ||
+    value.namespace.planningWorktree !== expectedNamespace.planningWorktree ||
+    value.namespace.runWorktree !== expectedNamespace.runWorktree ||
+    value.namespace.ticketRoot !== expectedNamespace.ticketRoot
+  ) {
     throw new Error("Git lifecycle run ref is outside its authority namespace");
   }
   if (!isObject(value.planning) || !isObject(value.run)) {
@@ -360,16 +515,77 @@ export function assertRunGitLifecycleRecord(
     if (unknownCycle.squashCommitOid !== undefined) {
       assertOidValue(unknownCycle.squashCommitOid, "squash commit OID");
     }
+    let expectedCycleRef: string | undefined;
+    let expectedCycleWorktree: string | undefined;
+    if (policyBacked) {
+      if (!isObject(unknownCycle.templateContext)) {
+        throw new Error(`policy-backed Git lifecycle ticket context is missing: ${id}`);
+      }
+      assertGitTicketTemplateContext(unknownCycle.templateContext);
+      const templateContext = unknownCycle.templateContext;
+      if (templateContext.id !== unknownCycle.ticketId || templateContext.cycleId !== id) {
+        throw new Error(`Git lifecycle ticket context disagrees with its cycle: ${id}`);
+      }
+      expectedCycleRef = renderTicketRef(
+        value.policy as GitBehaviorPolicy,
+        value.runTemplate as unknown as GitRunTemplateContext,
+        templateContext,
+      );
+      expectedCycleWorktree = policyTicketWorktree(ticketRoot, expectedCycleRef);
+    }
     if (
       typeof unknownCycle.branchRef !== "string" ||
-      !unknownCycle.branchRef.startsWith(`refs/heads/koni/tickets/${value.runId}/`) ||
+      (policyBacked
+        ? unknownCycle.branchRef !== expectedCycleRef || unknownCycle.worktree !== expectedCycleWorktree
+        : !unknownCycle.branchRef.startsWith(`refs/heads/koni/tickets/${value.runId}/`)) ||
       typeof unknownCycle.worktree !== "string" ||
       !isInside(ticketRoot, unknownCycle.worktree)
     ) {
       throw new Error(`Git lifecycle ticket cycle namespace is invalid: ${id}`);
     }
     if (typeof unknownCycle.createdAt !== "string") throw new Error(`ticket cycle creation time is invalid: ${id}`);
-    assertOptionalStrings(unknownCycle, ["integratedAt", "retiredAt", "blocker"]);
+    assertOptionalStrings(unknownCycle, [
+      "integratedAt", "retiredAt", "blocker", "archiveRef", "supersessionSha256", "supersededAt",
+    ]);
+    const hasSupersession = unknownCycle.archiveRef !== undefined ||
+      unknownCycle.supersessionSha256 !== undefined || unknownCycle.supersededAt !== undefined;
+    if (hasSupersession) {
+      if (
+        unknownCycle.status !== "retired" ||
+        typeof unknownCycle.archiveRef !== "string" ||
+        typeof unknownCycle.supersessionSha256 !== "string" ||
+        !isSha256Value(unknownCycle.supersessionSha256) ||
+        typeof unknownCycle.supersededAt !== "string" ||
+        unknownCycle.retiredAt !== unknownCycle.supersededAt ||
+        unknownCycle.integratedRunOid !== undefined ||
+        unknownCycle.archiveRef !== supersessionArchiveRef(
+          value.runId,
+          unknownCycle.ticketId,
+          id,
+          unknownCycle.supersessionSha256,
+        )
+      ) {
+        throw new Error(`Git lifecycle ticket supersession is invalid: ${id}`);
+      }
+    }
+  }
+  if (value.targetSynchronization !== undefined) {
+    if (!isObject(value.targetSynchronization)) throw new Error("target synchronization is invalid");
+    if (!new Set(["synchronized", "integration_required", "preserved"]).has(String(value.targetSynchronization.status))) {
+      throw new Error("target synchronization status is invalid");
+    }
+    assertOidValue(value.targetSynchronization.priorRunOid, "target synchronization prior run OID");
+    assertOidValue(value.targetSynchronization.targetOid, "target synchronization target OID");
+    if (value.targetSynchronization.runOid !== undefined) {
+      assertOidValue(value.targetSynchronization.runOid, "target synchronization run OID");
+    }
+    if (typeof value.targetSynchronization.synchronizedAt !== "string") {
+      throw new Error("target synchronization timestamp is invalid");
+    }
+    assertOptionalStrings(value.targetSynchronization, ["blocker"]);
+    if (value.targetSynchronization.status === "synchronized" && value.targetSynchronization.runOid === undefined) {
+      throw new Error("successful target synchronization has no run OID");
+    }
   }
   if (value.promotion !== undefined) {
     if (!isObject(value.promotion)) throw new Error("Git lifecycle promotion is invalid");
@@ -409,7 +625,8 @@ export function assertGitLifecycleIntent(value: unknown): asserts value is GitLi
   const kind = String(value.kind);
   const supported = new Set([
     "planning_create", "run_materialize", "ticket_materialize", "ticket_checkpoint",
-    "ticket_publish", "target_publish", "forward_compensation", "ticket_retire", "run_retire",
+    "ticket_publish", "target_sync", "target_publish", "forward_compensation", "ticket_retire",
+    "ticket_supersede", "run_retire",
     "abandoned_run_retire",
     "legacy_run_relocate", "legacy_run_retire",
   ]);
@@ -431,6 +648,9 @@ export function assertGitLifecycleIntent(value: unknown): asserts value is GitLi
     ticket_publish: [
       "cycleId", "expectedRunOid", "ticketOid", "squashCommitOid", "runRef", "runWorktree",
     ],
+    target_sync: [
+      "expectedRunOid", "observedTargetOid", "synchronizedRunOid", "runRef", "runWorktree",
+    ],
     target_publish: [
       "expectedTargetOid", "runOid", "candidateOid", "targetRef",
     ],
@@ -440,6 +660,10 @@ export function assertGitLifecycleIntent(value: unknown): asserts value is GitLi
     ],
     ticket_retire: [
       "cycleId", "expectedTicketOid", "ticketRef", "ticketWorktree",
+    ],
+    ticket_supersede: [
+      "cycleId", "ticketId", "expectedTicketOid", "ticketRef", "ticketWorktree", "archiveRef",
+      "supersessionSha256",
     ],
     run_retire: ["expectedRunOid", "runRef", "runWorktree"],
     abandoned_run_retire: ["tickets"],
@@ -478,18 +702,48 @@ export function assertGitLifecycleIntent(value: unknown): asserts value is GitLi
     }
   }
   if (kind === "forward_compensation") {
-    if (value.originalKind !== "ticket_publish" && value.originalKind !== "target_publish") {
+    if (
+      value.originalKind !== "ticket_publish" &&
+      value.originalKind !== "target_sync" &&
+      value.originalKind !== "target_publish"
+    ) {
       throw new Error("forward compensation original kind is invalid");
     }
     if (!isObject(value.identity) || typeof value.identity.name !== "string" ||
       typeof value.identity.email !== "string") {
       throw new Error("forward compensation identity is invalid");
     }
+    if (value.originalKind === "target_sync") {
+      assertOidValue(value.observedTargetOid, "forward compensation observed target OID");
+    }
     if (value.checkout !== undefined &&
       (typeof value.checkout !== "string" || !path.isAbsolute(value.checkout))) {
       throw new Error("forward compensation checkout must be absolute");
     }
     if (value.cycleId !== undefined) assertNamespaceId(String(value.cycleId), "ticket cycle ID");
+  }
+  if (kind === "ticket_supersede") {
+    if (!isSha256Value(value.supersessionSha256)) {
+      throw new Error("ticket supersession authority hash is invalid");
+    }
+    if (value.archiveRef !== supersessionArchiveRef(
+      value.runId as string,
+      value.ticketId as string,
+      value.cycleId as string,
+      value.supersessionSha256,
+    )) {
+      throw new Error("ticket supersession archive ref is invalid");
+    }
+    if (typeof value.archiveRef !== "string" || !value.archiveRef.startsWith("refs/koni/archive/")) {
+      throw new Error("ticket supersession archive ref is outside its authority namespace");
+    }
+  }
+  if (kind === "ticket_materialize" && value.templateContext !== undefined) {
+    assertGitTicketTemplateContext(value.templateContext);
+    const context = value.templateContext;
+    if (context.id !== value.ticketId || context.cycleId !== value.cycleId) {
+      throw new Error("ticket materialization context disagrees with its intent");
+    }
   }
   if (kind === "abandoned_run_retire") {
     for (const resource of value.tickets as unknown[]) {
@@ -591,11 +845,17 @@ export type GitEffectFaultPoint =
   | "after_run_publish_ref"
   | "before_run_checkout_repair"
   | "after_run_checkout"
+  | "after_target_sync_ref"
+  | "before_target_sync_checkout_repair"
+  | "after_target_sync_checkout"
   | "after_target_publish_ref"
   | "before_target_checkout_repair"
   | "after_target_checkout"
   | "after_forward_compensation_ref"
   | "after_forward_compensation_checkout"
+  | "after_ticket_supersession_archive"
+  | "after_ticket_supersession_worktree_retired"
+  | "after_ticket_supersession_ref_retired"
   | "after_ticket_worktree_retired"
   | "after_ticket_ref_retired"
   | "after_run_worktree_retired"
@@ -638,17 +898,109 @@ export class IsolatedGitLifecycle {
     }));
   }
 
+  /** Read the exact selected target ref without preparing a merge or writing a Git object. */
+  public async observeTargetRef(
+    lifecycle: RunGitLifecycleRecord,
+  ): Promise<TargetRefObservation> {
+    await this.#assertLifecycle(lifecycle);
+    const observedOid = await new GitClient(lifecycle.projectRoot).resolveRef(lifecycle.target.ref);
+    return {
+      protocol: GIT_TARGET_REF_OBSERVATION_PROTOCOL,
+      runId: lifecycle.runId,
+      ref: lifecycle.target.ref,
+      selectedOid: lifecycle.target.selectedOid,
+      observedOid,
+      changedSinceSelection: observedOid !== lifecycle.target.selectedOid,
+    };
+  }
+
+  /**
+   * Inspect the exact clean Koni-owned resources that `retireAbandonedRun` would remove. This is a
+   * preview only: it creates no intent, changes no ref, unlocks no worktree, and removes no path.
+   * Retirement performs the complete ownership/cleanliness proof again immediately before its
+   * first effect, so this projection is safe to bind into an operator confirmation token without
+   * becoming a time-of-check authorization bypass.
+   */
+  public async inspectAbandonedRun(
+    lifecycle: RunGitLifecycleRecord,
+  ): Promise<AbandonedRunInspection> {
+    await this.#assertLifecycle(lifecycle);
+    const resources = await this.#abandonedResources(lifecycle);
+    const inspections: AbandonedRunResourceInspection[] = [];
+    if (resources.planning !== undefined) {
+      inspections.push(await this.#inspectAbandonedResource(lifecycle, {
+        kind: "planning",
+        id: "planning",
+        expectedOid: resources.planning.baseOid,
+        ref: undefined,
+        worktree: resources.planning.worktree,
+      }));
+    }
+    if (resources.run !== undefined) {
+      inspections.push(await this.#inspectAbandonedResource(lifecycle, {
+        kind: "run",
+        id: "run",
+        expectedOid: resources.run.expectedOid,
+        ref: resources.run.ref,
+        worktree: resources.run.worktree,
+      }));
+    }
+    for (const ticket of resources.tickets) {
+      inspections.push(await this.#inspectAbandonedResource(lifecycle, {
+        kind: "ticket",
+        id: ticket.cycleId,
+        expectedOid: ticket.expectedOid,
+        ref: ticket.ref,
+        worktree: ticket.worktree,
+      }));
+    }
+    const warnings = inspections.flatMap((resource) =>
+      resource.warnings.map((warning) => `${resource.kind}:${resource.id}: ${warning}`)
+    );
+    return {
+      protocol: GIT_ABANDONED_RUN_INSPECTION_PROTOCOL,
+      runId: lifecycle.runId,
+      target: {
+        ref: lifecycle.target.ref,
+        selectedOid: lifecycle.target.selectedOid,
+      },
+      resources: inspections,
+      deleteOwnedSafe: inspections.every((resource) => resource.safeToDelete),
+      warnings,
+    };
+  }
+
   /** Pin the operator-selected user branch without creating any permanent Koni ref. */
-  public async planRun(runId: string, targetRef: string): Promise<RunGitLifecycleRecord> {
+  public async planRun(
+    runId: string,
+    targetRef: string,
+    admission?: GitRunAdmission,
+  ): Promise<RunGitLifecycleRecord> {
     assertNamespaceId(runId, "run ID");
     assertUserTargetRef(targetRef);
+    assertNewRunAdmission(admission, runId);
     const repository = await GitClient.discover(this.#projectRoot);
     const client = new GitClient(repository.worktreeRoot);
     const selectedOid = await client.resolveRef(targetRef);
-    const root = path.join(repository.commonDirectory, "koni", "worktrees", "runs", runId);
-    const runRef = `refs/heads/koni/runs/${runId}`;
-    if (await client.tryResolveRef(runRef) !== undefined) {
-      throw namespaceCollision(`run ref already exists before planning: ${runRef}`);
+    const namespace = policyRunNamespace(repository.commonDirectory, admission.policy, admission.run);
+    await assertNewRefNamespace(client, namespace.runRef, targetRef);
+    await assertNewWorktreeNamespace(repository, namespace.root);
+    const targetCheckout = await uniqueCheckoutForRef(client, targetRef);
+    if (targetCheckout !== undefined) {
+      // Koni's own project configuration and install bookkeeping are not operator work product:
+      // refusing a run because of `.koni/` bytes Koni itself materialized blocks first runs in
+      // repositories that have not committed the configuration, while promotion never merges
+      // those paths. Everything else in the target checkout stays protected.
+      const dirty = (await new GitClient(targetCheckout).statusEntries())
+        .filter((entry) => entry.path !== ".koni" && !entry.path.startsWith(".koni/"));
+      if (dirty.length > 0) {
+        const preview = dirty.slice(0, 3).map((entry) => entry.path).join(", ");
+        throw new GitLifecycleError(
+          "dirty_checkout",
+          `selected target checkout has uncommitted work (${preview}${dirty.length > 3 ? ", …" : ""}); commit, stash, or deliberately ignore it before starting a run`,
+          { worktree: targetCheckout, paths: dirty.slice(0, 32).map((entry) => entry.path) },
+        );
+      }
     }
     return {
       protocol: GIT_LIFECYCLE_PROTOCOL,
@@ -656,25 +1008,21 @@ export class IsolatedGitLifecycle {
       projectRoot: repository.worktreeRoot,
       commonDirectory: repository.commonDirectory,
       target: { ref: targetRef, selectedOid },
-      namespace: {
-        root,
-        runRef,
-        planningWorktree: path.join(root, "planning"),
-        runWorktree: path.join(root, "integration"),
-        ticketRoot: path.join(root, "tickets"),
-      },
+      policy: structuredClone(admission.policy),
+      runTemplate: structuredClone(admission.run),
+      namespace,
       planning: {
         status: "planned",
         baseOid: selectedOid,
-        worktree: path.join(root, "planning"),
+        worktree: namespace.planningWorktree,
         createdAt: undefined,
         retiredAt: undefined,
         blocker: undefined,
       },
       run: {
         status: "unmaterialized",
-        branchRef: runRef,
-        worktree: path.join(root, "integration"),
+        branchRef: namespace.runRef,
+        worktree: namespace.runWorktree,
         headOid: undefined,
         materializedAt: undefined,
         retiredAt: undefined,
@@ -682,6 +1030,7 @@ export class IsolatedGitLifecycle {
       },
       ticketCycles: {},
       ticketCycleOrder: [],
+      targetSynchronization: undefined,
       promotion: undefined,
     };
   }
@@ -699,11 +1048,13 @@ export class IsolatedGitLifecycle {
       targetSelectedOid: string;
       planningBaseOid: string;
     },
+    admission?: GitRunAdmission,
   ): Promise<RunGitLifecycleRecord> {
     assertNamespaceId(runId, "run ID");
     assertUserTargetRef(input.targetRef);
     assertOidValue(input.targetSelectedOid, "adopted target OID");
     assertOidValue(input.planningBaseOid, "adopted planning OID");
+    assertNewRunAdmission(admission, runId);
     const repository = await GitClient.discover(this.#projectRoot);
     const client = new GitClient(repository.worktreeRoot);
     const [currentTarget, selectedObject, planningObject] = await Promise.all([
@@ -720,36 +1071,30 @@ export class IsolatedGitLifecycle {
     if (!await client.isAncestor(input.targetSelectedOid, input.planningBaseOid)) {
       throw invalidState("adopted planning commit is not descended from the legacy base commit");
     }
-    const root = path.join(repository.commonDirectory, "koni", "worktrees", "runs", runId);
-    const runRef = `refs/heads/koni/runs/${runId}`;
-    if (await client.tryResolveRef(runRef) !== undefined) {
-      throw namespaceCollision(`run ref already exists before legacy adoption: ${runRef}`);
-    }
+    const namespace = policyRunNamespace(repository.commonDirectory, admission.policy, admission.run);
+    await assertNewRefNamespace(client, namespace.runRef, input.targetRef);
+    await assertNewWorktreeNamespace(repository, namespace.root);
     return {
       protocol: GIT_LIFECYCLE_PROTOCOL,
       runId,
       projectRoot: repository.worktreeRoot,
       commonDirectory: repository.commonDirectory,
       target: { ref: input.targetRef, selectedOid: input.targetSelectedOid },
-      namespace: {
-        root,
-        runRef,
-        planningWorktree: path.join(root, "planning"),
-        runWorktree: path.join(root, "integration"),
-        ticketRoot: path.join(root, "tickets"),
-      },
+      policy: structuredClone(admission.policy),
+      runTemplate: structuredClone(admission.run),
+      namespace,
       planning: {
         status: "planned",
         baseOid: input.planningBaseOid,
-        worktree: path.join(root, "planning"),
+        worktree: namespace.planningWorktree,
         createdAt: undefined,
         retiredAt: undefined,
         blocker: undefined,
       },
       run: {
         status: "unmaterialized",
-        branchRef: runRef,
-        worktree: path.join(root, "integration"),
+        branchRef: namespace.runRef,
+        worktree: namespace.runWorktree,
         headOid: undefined,
         materializedAt: undefined,
         retiredAt: undefined,
@@ -757,6 +1102,7 @@ export class IsolatedGitLifecycle {
       },
       ticketCycles: {},
       ticketCycleOrder: [],
+      targetSynchronization: undefined,
       promotion: undefined,
     };
   }
@@ -907,16 +1253,36 @@ export class IsolatedGitLifecycle {
   /** Allocate a fresh auditable Git cycle for one semantic ticket. */
   public async openTicketCycle(
     lifecycle: RunGitLifecycleRecord,
-    input: { ticketId: string; cycleId: string },
+    input: {
+      ticketId: string;
+      cycleId: string;
+      /** Required for policy-backed runs and persisted for commit/ref rendering. */
+      templateContext?: GitTicketTemplateContext;
+    },
     journal: GitIntentJournal,
   ): Promise<RunGitLifecycleRecord> {
     await this.#assertReadyRun(lifecycle);
     assertNamespaceId(input.ticketId, "ticket ID");
     assertNamespaceId(input.cycleId, "ticket cycle ID");
+    const policyBacked = lifecycle.policy !== undefined;
+    if (policyBacked) {
+      if (
+        input.templateContext === undefined ||
+        input.templateContext.id !== input.ticketId ||
+        input.templateContext.cycleId !== input.cycleId
+      ) {
+        throw invalidState("policy-backed ticket cycle requires matching immutable template context");
+      }
+      // Rendering validates the complete ticket context before any Git effect is journaled.
+      renderTicketRef(lifecycle.policy!, lifecycle.runTemplate!, input.templateContext);
+    }
     if (lifecycle.ticketCycles[input.cycleId] !== undefined) {
       const existing = lifecycle.ticketCycles[input.cycleId]!;
       if (existing.ticketId !== input.ticketId) {
         throw namespaceCollision(`cycle ${input.cycleId} belongs to another ticket`);
+      }
+      if (policyBacked && canonicalTemplateContext(existing.templateContext) !== canonicalTemplateContext(input.templateContext)) {
+        throw invalidState(`ticket cycle ${input.cycleId} template context changed after allocation`);
       }
       await this.#assertCheckout({
         lifecycle,
@@ -936,18 +1302,18 @@ export class IsolatedGitLifecycle {
     const ordinal = lifecycle.ticketCycleOrder
       .map((id) => lifecycle.ticketCycles[id]!)
       .filter((cycle) => cycle.ticketId === input.ticketId).length + 1;
-    // Ticket refs live beside—not below—the run ref. A loose run ref is a file,
-    // so nesting tickets underneath it would collide in `.git/refs`.
-    const branchRef = `refs/heads/koni/tickets/${lifecycle.runId}/${input.ticketId}/cycles/${input.cycleId}`;
-    const worktree = path.join(
-      lifecycle.namespace.ticketRoot,
-      input.ticketId,
-      "cycles",
-      input.cycleId,
+    const branchRef = policyBacked
+      ? renderTicketRef(lifecycle.policy!, lifecycle.runTemplate!, input.templateContext!)
+      : `refs/heads/koni/tickets/${lifecycle.runId}/${input.ticketId}/cycles/${input.cycleId}`;
+    const worktree = policyBacked
+      ? policyTicketWorktree(lifecycle.namespace.ticketRoot, branchRef)
+      : path.join(lifecycle.namespace.ticketRoot, input.ticketId, "cycles", input.cycleId);
+    await assertNewRefNamespace(repository, branchRef, lifecycle.target.ref);
+    await assertNewWorktreePath(
+      { worktreeRoot: lifecycle.projectRoot, commonDirectory: lifecycle.commonDirectory },
+      worktree,
+      lifecycle.namespace.root,
     );
-    if (await repository.tryResolveRef(branchRef) !== undefined) {
-      throw namespaceCollision(`ticket cycle ref already exists: ${branchRef}`);
-    }
     const intent: GitLifecycleIntent = {
       ...this.#intentBase(lifecycle),
       kind: "ticket_materialize",
@@ -956,6 +1322,9 @@ export class IsolatedGitLifecycle {
       baseRunOid: runHead,
       ticketRef: branchRef,
       ticketWorktree: worktree,
+      ...(input.templateContext === undefined
+        ? {}
+        : { templateContext: structuredClone(input.templateContext) }),
     };
     await journal.prepare(intent);
     await repository.createRef(branchRef, runHead);
@@ -987,6 +1356,9 @@ export class IsolatedGitLifecycle {
       integratedAt: undefined,
       retiredAt: undefined,
       blocker: undefined,
+      ...(input.templateContext === undefined
+        ? {}
+        : { templateContext: structuredClone(input.templateContext) }),
     };
     next.ticketCycleOrder.push(input.cycleId);
     await this.#settle(journal, intent, next);
@@ -1020,7 +1392,10 @@ export class IsolatedGitLifecycle {
     if (cycle.status !== "active" && cycle.status !== "candidate") {
       throw invalidState(`ticket cycle ${cycle.cycleId} is ${cycle.status}`);
     }
-    assertCommitSubject(input.subject);
+    const commitSubject = lifecycle.policy === undefined
+      ? input.subject
+      : renderTicketCommitSubject(lifecycle.policy, lifecycle.runTemplate!, cycle.templateContext!);
+    assertCommitSubject(commitSubject);
     const repository = new GitClient(lifecycle.projectRoot);
     const checkout = new GitClient(cycle.worktree);
     const actualTicketHead = await repository.resolveRef(cycle.branchRef);
@@ -1062,7 +1437,7 @@ export class IsolatedGitLifecycle {
     const candidateOid = await repository.commitTree(
       treeOid,
       [actualTicketHead],
-      commitMessage(input.subject, input.body, {
+      commitMessage(commitSubject, input.body, {
         "Koni-Run": lifecycle.runId,
         "Koni-Ticket": cycle.ticketId,
         "Koni-Cycle": cycle.cycleId,
@@ -1106,13 +1481,20 @@ export class IsolatedGitLifecycle {
   }
 
   /**
-   * Compose one ticket candidate into the current run tree and publish exactly
-   * one single-parent squash commit under CAS. `merge-tree` never writes
-   * conflict markers into either checkout.
+   * Compose one ticket candidate into the current run tree and publish one policy-shaped commit
+   * under CAS. Squash uses one parent; merge preserves run and ticket parents. `merge-tree` never
+   * writes conflict markers into either checkout.
    */
   public async publishTicketCandidate(
     lifecycle: RunGitLifecycleRecord,
-    input: { cycleId: string; scope: GitPathScope; subject: string; body?: string },
+    input: {
+      cycleId: string;
+      scope: GitPathScope;
+      subject: string;
+      body?: string;
+      /** Optional; a configured review.id trailer is omitted when no independent review exists. */
+      reviewId?: string;
+    },
     journal: GitIntentJournal,
   ): Promise<TicketPublicationResult> {
     await this.#assertReadyRun(lifecycle);
@@ -1123,7 +1505,13 @@ export class IsolatedGitLifecycle {
     if (cycle.status !== "candidate") {
       throw invalidState(`ticket cycle ${cycle.cycleId} must be checkpointed before publication`);
     }
-    assertCommitSubject(input.subject);
+    const ticketContext = lifecycle.policy === undefined
+      ? undefined
+      : { ...cycle.templateContext!, ...(input.reviewId === undefined ? {} : { reviewId: input.reviewId }) };
+    const commitSubject = lifecycle.policy === undefined
+      ? input.subject
+      : renderTicketCommitSubject(lifecycle.policy, lifecycle.runTemplate!, ticketContext!);
+    assertCommitSubject(commitSubject);
     const repository = new GitClient(lifecycle.projectRoot);
     const ticketCheckout = new GitClient(cycle.worktree);
     const runCheckout = new GitClient(lifecycle.run.worktree);
@@ -1178,10 +1566,14 @@ export class IsolatedGitLifecycle {
       return { status: "integrated", lifecycle: next, cycle: structuredClone(mutable) };
     }
     const timestamp = this.#timestamp();
+    const configuredTrailers = lifecycle.policy === undefined
+      ? {}
+      : renderConfiguredCommitTrailers(lifecycle.policy, lifecycle.runTemplate!, ticketContext!);
     const squashCommitOid = await repository.commitTree(
       merged.treeOid,
-      [runHead],
-      commitMessage(input.subject, input.body, {
+      lifecycle.policy?.integration.strategy === "merge" ? [runHead, ticketHead] : [runHead],
+      commitMessage(commitSubject, input.body, {
+        ...configuredTrailers,
         "Koni-Run": lifecycle.runId,
         "Koni-Ticket": cycle.ticketId,
         "Koni-Cycle": cycle.cycleId,
@@ -1227,6 +1619,8 @@ export class IsolatedGitLifecycle {
     this.#fault("after_run_checkout", intent);
     const next = cloneLifecycle(lifecycle);
     next.run.headOid = squashCommitOid;
+    next.targetSynchronization = undefined;
+    next.promotion = undefined;
     const mutable = next.ticketCycles[cycle.cycleId]!;
     mutable.status = "integrated";
     mutable.integratedRunOid = squashCommitOid;
@@ -1235,6 +1629,139 @@ export class IsolatedGitLifecycle {
     mutable.blocker = undefined;
     await this.#settle(journal, intent, next);
     return { status: "integrated", lifecycle: next, cycle: structuredClone(mutable) };
+  }
+
+  /**
+   * Compose the current operator-selected target into the owned run head before checkpoint/review.
+   * A conflict is reported from `merge-tree` without changing either ref or checkout. A successful
+   * ref advance is journaled and recovered under exact CAS just like ticket publication.
+   */
+  public async synchronizeTargetIntoRun(
+    lifecycle: RunGitLifecycleRecord,
+    input: { subject: string; body?: string },
+    journal: GitIntentJournal,
+  ): Promise<TargetSynchronizationResult> {
+    await this.#assertReadyRun(lifecycle);
+    assertCommitSubject(input.subject);
+    const repository = new GitClient(lifecycle.projectRoot);
+    const [runOid, targetOid] = await Promise.all([
+      repository.resolveRef(lifecycle.run.branchRef),
+      repository.resolveRef(lifecycle.target.ref),
+    ]);
+    if (runOid !== lifecycle.run.headOid) {
+      throw refMoved("run ref moved before target synchronization", lifecycle.run.headOid!, runOid);
+    }
+    const prior = lifecycle.targetSynchronization;
+    if (
+      prior?.status === "synchronized" &&
+      prior.targetOid === targetOid &&
+      prior.runOid === runOid
+    ) {
+      return {
+        status: "synchronized",
+        lifecycle: cloneLifecycle(lifecycle),
+        synchronization: structuredClone(prior),
+      };
+    }
+
+    let synchronizedRunOid = runOid;
+    if (runOid !== targetOid && !(await repository.isAncestor(targetOid, runOid))) {
+      if (await repository.isAncestor(runOid, targetOid)) {
+        synchronizedRunOid = targetOid;
+      } else {
+        const merged = await repository.mergeTreeDetailed(runOid, targetOid);
+        if (merged.conflictPaths.length > 0 || merged.treeOid === undefined) {
+          const conflict = await conflictReport(repository, runOid, targetOid, merged);
+          const next = cloneLifecycle(lifecycle);
+          next.targetSynchronization = {
+            status: "integration_required",
+            priorRunOid: runOid,
+            targetOid,
+            runOid: undefined,
+            synchronizedAt: this.#timestamp(),
+            blocker: conflict.message,
+          };
+          next.promotion = undefined;
+          return { status: "integration_required", lifecycle: next, conflict };
+        }
+        const timestamp = this.#timestamp();
+        synchronizedRunOid = await repository.commitTree(
+          merged.treeOid,
+          [runOid, targetOid],
+          commitMessage(input.subject, input.body, {
+            "Koni-Run": lifecycle.runId,
+            "Koni-Target": lifecycle.target.ref,
+            "Koni-Target-Oid": targetOid,
+          }),
+          { ...this.#identity, timestamp },
+        );
+      }
+    }
+
+    const synchronizedAt = this.#timestamp();
+    if (synchronizedRunOid === runOid) {
+      const next = cloneLifecycle(lifecycle);
+      next.targetSynchronization = {
+        status: "synchronized",
+        priorRunOid: runOid,
+        targetOid,
+        runOid,
+        synchronizedAt,
+        blocker: undefined,
+      };
+      next.promotion = undefined;
+      return {
+        status: "synchronized",
+        lifecycle: next,
+        synchronization: structuredClone(next.targetSynchronization),
+      };
+    }
+
+    const intent: Extract<GitLifecycleIntent, { kind: "target_sync" }> = {
+      ...this.#intentBase(lifecycle, synchronizedAt),
+      kind: "target_sync",
+      expectedRunOid: runOid,
+      observedTargetOid: targetOid,
+      synchronizedRunOid,
+      runRef: lifecycle.run.branchRef,
+      runWorktree: lifecycle.run.worktree,
+    };
+    await journal.prepare(intent);
+    try {
+      await repository.updateRef(intent.runRef, synchronizedRunOid, runOid);
+    } catch (error) {
+      throw translateCasError(error, "run ref moved while synchronizing target");
+    }
+    this.#fault("after_target_sync_ref", intent);
+    try {
+      this.#fault("before_target_sync_checkout_repair", intent);
+      await repairAdvancedCheckout(new GitClient(intent.runWorktree), runOid, synchronizedRunOid);
+    } catch (error) {
+      const compensation = await this.#forwardCompensatePublication(lifecycle, intent, journal, error);
+      throw new GitLifecycleError(
+        compensation.compensated ? "dirty_checkout" : "recovery_ambiguous",
+        compensation.reason,
+        compensation.compensationOid === undefined ? {} : { compensationOid: compensation.compensationOid },
+      );
+    }
+    this.#fault("after_target_sync_checkout", intent);
+    const next = cloneLifecycle(lifecycle);
+    next.run.headOid = synchronizedRunOid;
+    next.targetSynchronization = {
+      status: "synchronized",
+      priorRunOid: runOid,
+      targetOid,
+      runOid: synchronizedRunOid,
+      synchronizedAt,
+      blocker: undefined,
+    };
+    next.promotion = undefined;
+    await this.#settle(journal, intent, next);
+    return {
+      status: "synchronized",
+      lifecycle: next,
+      synchronization: structuredClone(next.targetSynchronization),
+    };
   }
 
   /** Build an immutable promotion candidate; this never updates the target ref. */
@@ -1252,9 +1779,36 @@ export class IsolatedGitLifecycle {
     if (runOid !== lifecycle.run.headOid) {
       throw refMoved("run ref moved before promotion preparation", lifecycle.run.headOid!, runOid);
     }
+    if (lifecycle.policy !== undefined) {
+      const synchronization = lifecycle.targetSynchronization;
+      if (
+        synchronization?.status !== "synchronized" ||
+        synchronization.runOid !== runOid
+      ) {
+        throw invalidState("target_sync must bind the exact run head before promotion");
+      }
+      if (synchronization.targetOid !== targetOid) {
+        throw invalidState("selected target advanced after target_sync; synchronize and verify the new head");
+      }
+    }
     const targetCheckout = await uniqueCheckoutForRef(repository, lifecycle.target.ref);
     let candidateOid: string;
-    if (runOid === targetOid || await repository.isAncestor(targetOid, runOid)) {
+    if (
+      lifecycle.policy?.integration.strategy === "squash" &&
+      runOid !== targetOid
+    ) {
+      const timestamp = this.#timestamp();
+      candidateOid = await repository.commitTree(
+        await repository.treeOfCommit(runOid),
+        [targetOid],
+        commitMessage(input.subject, input.body, {
+          "Koni-Run": lifecycle.runId,
+          "Koni-Target": lifecycle.target.ref,
+          "Koni-Synchronized-Target": lifecycle.targetSynchronization!.targetOid,
+        }),
+        { ...this.#identity, timestamp },
+      );
+    } else if (runOid === targetOid || await repository.isAncestor(targetOid, runOid)) {
       candidateOid = runOid;
     } else {
       const merged = await repository.mergeTreeDetailed(targetOid, runOid);
@@ -1344,7 +1898,11 @@ export class IsolatedGitLifecycle {
     const observedTarget = await repository.resolveRef(lifecycle.target.ref);
     if (currentCheckout !== undefined && observedTarget !== promotion.candidateOid) {
       const checkout = new GitClient(currentCheckout);
-      if ((await checkout.statusEntries()).length !== 0) {
+      // Same `.koni/` exclusion as run admission: Koni-materialized configuration is not operator
+      // work product, survives the checkout advance untouched, and must not veto the merge.
+      const dirty = (await checkout.statusEntries())
+        .filter((entry) => entry.path !== ".koni" && !entry.path.startsWith(".koni/"));
+      if (dirty.length !== 0) {
         throw dirtyCheckout("operator target checkout", currentCheckout);
       }
     }
@@ -1407,6 +1965,141 @@ export class IsolatedGitLifecycle {
       publishedAt: this.#timestamp(),
       blocker: undefined,
     };
+    await this.#settle(journal, intent, next);
+    return next;
+  }
+
+  /**
+   * Archive and retire one unintegrated ticket cycle after compiler-authorized change control.
+   *
+   * This is deliberately not a metadata reset. Any in-scope working bytes are checkpointed first,
+   * the exact resulting ticket head is retained under an immutable archive ref, and only then are
+   * the active worktree and branch removed. The journal makes every external boundary crash-forward
+   * so an approved upstream change can start a fresh cycle without losing or silently composing the
+   * superseded attempt.
+   */
+  public async supersedeTicketCycle(
+    lifecycle: RunGitLifecycleRecord,
+    input: {
+      cycleId: string;
+      scope: GitPathScope;
+      subject: string;
+      body?: string;
+      supersessionSha256: string;
+    },
+    journal: GitIntentJournal,
+  ): Promise<RunGitLifecycleRecord> {
+    await this.#assertReadyRun(lifecycle);
+    assertNamespaceId(input.cycleId, "ticket cycle ID");
+    if (!isSha256Value(input.supersessionSha256)) {
+      throw invalidState("ticket supersession requires an exact sha256 authority binding");
+    }
+    const original = requiredCycle(lifecycle, input.cycleId);
+    const archiveRef = supersessionArchiveRef(
+      lifecycle.runId,
+      original.ticketId,
+      original.cycleId,
+      input.supersessionSha256,
+    );
+    if (original.status === "retired") {
+      if (
+        original.archiveRef !== archiveRef ||
+        original.supersessionSha256 !== input.supersessionSha256 ||
+        original.supersededAt === undefined ||
+        original.retiredAt !== original.supersededAt
+      ) {
+        throw invalidState(`ticket cycle ${original.cycleId} was retired by another authority`);
+      }
+      const repository = new GitClient(lifecycle.projectRoot);
+      const [archivedOid, activeOid, registered] = await Promise.all([
+        repository.tryResolveRef(archiveRef),
+        repository.tryResolveRef(original.branchRef),
+        this.#registeredWorktree(repository, original.worktree),
+      ]);
+      if (
+        archivedOid !== original.ticketHeadOid ||
+        activeOid !== undefined ||
+        registered !== undefined ||
+        await pathExists(original.worktree)
+      ) {
+        throw new GitLifecycleError(
+          "ownership_mismatch",
+          `retired ticket cycle ${original.cycleId} no longer matches its supersession record`,
+        );
+      }
+      return cloneLifecycle(lifecycle);
+    }
+    if (original.status !== "active" && original.status !== "candidate") {
+      throw invalidState(`ticket cycle ${original.cycleId} is ${original.status}, not supersedable`);
+    }
+
+    const checkpointed = await this.commitTicketCandidate(
+      lifecycle,
+      {
+        cycleId: input.cycleId,
+        scope: input.scope,
+        subject: input.subject,
+        ...(input.body === undefined ? {} : { body: input.body }),
+      },
+      journal,
+    );
+    const cycle = requiredCycle(checkpointed, input.cycleId);
+    const repository = new GitClient(checkpointed.projectRoot);
+    const [ticketOid, existingArchive] = await Promise.all([
+      repository.resolveRef(cycle.branchRef),
+      repository.tryResolveRef(archiveRef),
+    ]);
+    if (ticketOid !== cycle.ticketHeadOid) {
+      throw refMoved(
+        `ticket ref moved before superseding ${cycle.cycleId}`,
+        cycle.ticketHeadOid,
+        ticketOid,
+      );
+    }
+    if (existingArchive !== undefined && existingArchive !== ticketOid) {
+      throw namespaceCollision(
+        `ticket supersession archive ${archiveRef} already points at ${existingArchive}`,
+      );
+    }
+    await this.#assertCheckout({
+      lifecycle: checkpointed,
+      worktree: cycle.worktree,
+      headOid: ticketOid,
+      branchRef: cycle.branchRef,
+      requireClean: true,
+      label: `ticket cycle ${cycle.cycleId}`,
+    });
+    const intent: Extract<GitLifecycleIntent, { kind: "ticket_supersede" }> = {
+      ...this.#intentBase(checkpointed),
+      kind: "ticket_supersede",
+      cycleId: cycle.cycleId,
+      ticketId: cycle.ticketId,
+      expectedTicketOid: ticketOid,
+      ticketRef: cycle.branchRef,
+      ticketWorktree: cycle.worktree,
+      archiveRef,
+      supersessionSha256: input.supersessionSha256,
+    };
+    await journal.prepare(intent);
+    if (existingArchive === undefined) {
+      try {
+        await repository.createRef(intent.archiveRef, intent.expectedTicketOid);
+      } catch (error) {
+        const racedArchive = await repository.tryResolveRef(intent.archiveRef);
+        if (racedArchive !== intent.expectedTicketOid) throw error;
+      }
+      this.#fault("after_ticket_supersession_archive", intent);
+    }
+    await repository.unlockWorktree(intent.ticketWorktree);
+    await repository.removeWorktree(intent.ticketWorktree);
+    this.#fault("after_ticket_supersession_worktree_retired", intent);
+    try {
+      await repository.deleteRef(intent.ticketRef, intent.expectedTicketOid);
+    } catch (error) {
+      throw translateCasError(error, `ticket ref moved while superseding ${cycle.cycleId}`);
+    }
+    this.#fault("after_ticket_supersession_ref_retired", intent);
+    const next = supersededTicketLifecycle(checkpointed, intent);
     await this.#settle(journal, intent, next);
     return next;
   }
@@ -1511,7 +2204,10 @@ export class IsolatedGitLifecycle {
       throw refMoved("target ref moved before run cleanup", lifecycle.promotion.candidateOid, targetHead);
     }
     const runHead = await repository.resolveRef(lifecycle.run.branchRef);
-    if (runHead !== lifecycle.run.headOid || !(await repository.isAncestor(runHead, targetHead))) {
+    const publishedContainsRun = lifecycle.policy?.integration.strategy === "squash"
+      ? await repository.treeOfCommit(runHead) === await repository.treeOfCommit(targetHead)
+      : await repository.isAncestor(runHead, targetHead);
+    if (runHead !== lifecycle.run.headOid || !publishedContainsRun) {
       throw new GitLifecycleError(
         "ownership_mismatch",
         "published target does not contain the exact recorded run head",
@@ -1710,6 +2406,9 @@ export class IsolatedGitLifecycle {
               integratedAt: undefined,
               retiredAt: undefined,
               blocker: undefined,
+              ...(intent.templateContext === undefined
+                ? {}
+                : { templateContext: structuredClone(intent.templateContext) }),
             };
             next.ticketCycleOrder.push(intent.cycleId);
           }
@@ -1774,6 +2473,8 @@ export class IsolatedGitLifecycle {
           }
           const next = cloneLifecycle(lifecycle);
           next.run.headOid = intent.squashCommitOid;
+          next.targetSynchronization = undefined;
+          next.promotion = undefined;
           const cycle = requiredCycle(next, intent.cycleId);
           cycle.status = "integrated";
           cycle.ticketHeadOid = intent.ticketOid;
@@ -1781,6 +2482,56 @@ export class IsolatedGitLifecycle {
           cycle.squashCommitOid = intent.squashCommitOid;
           cycle.integratedAt ??= this.#timestamp();
           cycle.blocker = undefined;
+          await this.#settle(journal, intent, next);
+          return { status: "completed", lifecycle: next };
+        }
+        case "target_sync": {
+          const repository = new GitClient(lifecycle.projectRoot);
+          const [target, current] = await Promise.all([
+            repository.resolveRef(lifecycle.target.ref),
+            repository.resolveRef(intent.runRef),
+          ]);
+          if (current === intent.expectedRunOid) {
+            if (target !== intent.observedTargetOid) {
+              // No ref effect happened yet. Settle the obsolete intent without inventing a sync;
+              // the stage driver will immediately issue a fresh sync against the new target OID.
+              await this.#settle(journal, intent, lifecycle);
+              return { status: "completed", lifecycle: cloneLifecycle(lifecycle) };
+            }
+            await this.#assertCheckout({
+              lifecycle,
+              worktree: intent.runWorktree,
+              headOid: current,
+              branchRef: intent.runRef,
+              requireClean: true,
+              label: "run checkout",
+            });
+            await repository.updateRef(intent.runRef, intent.synchronizedRunOid, intent.expectedRunOid);
+          } else if (current !== intent.synchronizedRunOid) {
+            return this.#preserveRecovery(lifecycle, intent, journal, "run ref moved during target synchronization");
+          }
+          try {
+            this.#fault("before_target_sync_checkout_repair", intent);
+            await repairAdvancedCheckout(
+              new GitClient(intent.runWorktree),
+              intent.expectedRunOid,
+              intent.synchronizedRunOid,
+            );
+          } catch (error) {
+            const compensation = await this.#forwardCompensatePublication(lifecycle, intent, journal, error);
+            return { status: "preserved", lifecycle: compensation.lifecycle, reason: compensation.reason };
+          }
+          const next = cloneLifecycle(lifecycle);
+          next.run.headOid = intent.synchronizedRunOid;
+          next.targetSynchronization = {
+            status: "synchronized",
+            priorRunOid: intent.expectedRunOid,
+            targetOid: intent.observedTargetOid,
+            runOid: intent.synchronizedRunOid,
+            synchronizedAt: intent.preparedAt,
+            blocker: undefined,
+          };
+          next.promotion = undefined;
           await this.#settle(journal, intent, next);
           return { status: "completed", lifecycle: next };
         }
@@ -1832,6 +2583,94 @@ export class IsolatedGitLifecycle {
         case "forward_compensation": {
           const next = await this.#applyForwardCompensation(lifecycle, intent, journal);
           return { status: "completed", lifecycle: next.lifecycle };
+        }
+        case "ticket_supersede": {
+          const cycle = requiredCycle(lifecycle, intent.cycleId);
+          if (
+            cycle.ticketId !== intent.ticketId ||
+            cycle.branchRef !== intent.ticketRef ||
+            cycle.worktree !== intent.ticketWorktree ||
+            cycle.ticketHeadOid !== intent.expectedTicketOid ||
+            intent.archiveRef !== supersessionArchiveRef(
+              lifecycle.runId,
+              cycle.ticketId,
+              cycle.cycleId,
+              intent.supersessionSha256,
+            )
+          ) {
+            return this.#preserveRecovery(
+              lifecycle,
+              intent,
+              journal,
+              "ticket supersession intent disagrees with its durable cycle",
+            );
+          }
+          const repository = new GitClient(lifecycle.projectRoot);
+          let archivedOid = await repository.tryResolveRef(intent.archiveRef);
+          let ticketOid = await repository.tryResolveRef(intent.ticketRef);
+          if (archivedOid === undefined) {
+            if (ticketOid !== intent.expectedTicketOid) {
+              return this.#preserveRecovery(
+                lifecycle,
+                intent,
+                journal,
+                "ticket supersession has neither its exact source ref nor its archive",
+              );
+            }
+            try {
+              await repository.createRef(intent.archiveRef, intent.expectedTicketOid);
+            } catch (error) {
+              archivedOid = await repository.tryResolveRef(intent.archiveRef);
+              if (archivedOid !== intent.expectedTicketOid) throw error;
+            }
+            archivedOid = intent.expectedTicketOid;
+          }
+          if (archivedOid !== intent.expectedTicketOid) {
+            return this.#preserveRecovery(
+              lifecycle,
+              intent,
+              journal,
+              "ticket supersession archive points at another object",
+            );
+          }
+          const registered = await this.#registeredWorktree(repository, intent.ticketWorktree);
+          if (registered !== undefined) {
+            try {
+              await this.#assertCheckout({
+                lifecycle,
+                worktree: intent.ticketWorktree,
+                headOid: intent.expectedTicketOid,
+                branchRef: intent.ticketRef,
+                requireClean: true,
+                label: `ticket cycle ${intent.cycleId}`,
+              });
+            } catch (error) {
+              return this.#preserveRecovery(lifecycle, intent, journal, errorMessage(error));
+            }
+            await repository.unlockWorktree(intent.ticketWorktree);
+            await repository.removeWorktree(intent.ticketWorktree);
+          } else if (await pathExists(intent.ticketWorktree)) {
+            return this.#preserveRecovery(
+              lifecycle,
+              intent,
+              journal,
+              "unregistered ticket data remains during supersession",
+            );
+          }
+          ticketOid = await repository.tryResolveRef(intent.ticketRef);
+          if (ticketOid === intent.expectedTicketOid) {
+            await repository.deleteRef(intent.ticketRef, ticketOid);
+          } else if (ticketOid !== undefined) {
+            return this.#preserveRecovery(
+              lifecycle,
+              intent,
+              journal,
+              "ticket ref moved before supersession retirement",
+            );
+          }
+          const next = supersededTicketLifecycle(lifecycle, intent);
+          await this.#settle(journal, intent, next);
+          return { status: "completed", lifecycle: next };
         }
         case "ticket_retire": {
           const repository = new GitClient(lifecycle.projectRoot);
@@ -1933,17 +2772,24 @@ export class IsolatedGitLifecycle {
     if (actualRoot !== expectedRoot || actualCommon !== expectedCommon) {
       throw new GitLifecycleError("ownership_mismatch", "Git lifecycle belongs to another repository");
     }
-    const expectedNamespace = path.join(actualCommon, "koni", "worktrees", "runs", lifecycle.runId);
+    const expected = lifecycle.policy === undefined
+      ? legacyRunNamespace(actualCommon, lifecycle.runId)
+      : persistedPolicyRunNamespace(
+          actualCommon,
+          lifecycle.policy,
+          lifecycle.runTemplate!,
+          lifecycle.namespace,
+        );
     if (
-      path.resolve(lifecycle.namespace.root) !== expectedNamespace ||
-      !isInside(expectedNamespace, lifecycle.planning.worktree) ||
-      !isInside(expectedNamespace, lifecycle.run.worktree) ||
-      !isInside(expectedNamespace, lifecycle.namespace.ticketRoot)
+      path.resolve(lifecycle.namespace.root) !== expected.root ||
+      !isInside(expected.root, lifecycle.planning.worktree) ||
+      !isInside(expected.root, lifecycle.run.worktree) ||
+      !isInside(expected.root, lifecycle.namespace.ticketRoot)
     ) {
       throw new GitLifecycleError("ownership_mismatch", "Git lifecycle paths escape the compiler namespace");
     }
     if (
-      lifecycle.namespace.runRef !== `refs/heads/koni/runs/${lifecycle.runId}` ||
+      lifecycle.namespace.runRef !== expected.runRef ||
       lifecycle.run.branchRef !== lifecycle.namespace.runRef
     ) {
       throw new GitLifecycleError("ownership_mismatch", "run ref is outside its compiler namespace");
@@ -2054,6 +2900,97 @@ export class IsolatedGitLifecycle {
           ref: cycle.branchRef,
           worktree: cycle.worktree,
         })),
+    };
+  }
+
+  async #inspectAbandonedResource(
+    lifecycle: RunGitLifecycleRecord,
+    input: {
+      kind: AbandonedRunResourceKind;
+      id: string;
+      expectedOid: string;
+      ref: string | undefined;
+      worktree: string;
+    },
+  ): Promise<AbandonedRunResourceInspection> {
+    const repository = new GitClient(lifecycle.projectRoot);
+    const warnings: string[] = [];
+    let observedRefOid: string | undefined;
+    let refState: AbandonedRunRefState = input.ref === undefined ? "not_applicable" : "unreadable";
+    if (input.ref !== undefined) {
+      try {
+        observedRefOid = await repository.tryResolveRef(input.ref);
+        refState = observedRefOid === undefined
+          ? "absent"
+          : observedRefOid === input.expectedOid
+            ? "matches"
+            : "moved";
+        if (refState === "moved") {
+          warnings.push("recorded ref no longer points at its compiler-issued OID");
+        }
+      } catch (error) {
+        warnings.push(`ref could not be inspected: ${errorMessage(error).slice(0, 1_024)}`);
+      }
+    }
+
+    let registered = false;
+    let worktreeState: AbandonedRunWorktreeState = "unreadable";
+    let dirtyPaths: string[] = [];
+    try {
+      const entry = await this.#registeredWorktree(repository, input.worktree);
+      registered = entry !== undefined;
+      if (entry === undefined) {
+        if (await pathExists(input.worktree)) {
+          worktreeState = "unregistered_present";
+          warnings.push("data exists at the recorded path but is not a registered Git worktree");
+        } else {
+          worktreeState = "absent";
+        }
+      } else if (input.ref !== undefined && refState !== "matches") {
+        worktreeState = "ownership_mismatch";
+        warnings.push("registered worktree does not have its matching recorded ref");
+      } else {
+        try {
+          await this.#assertCheckout({
+            lifecycle,
+            worktree: input.worktree,
+            headOid: input.expectedOid,
+            branchRef: input.ref,
+            requireClean: false,
+            label: `abandoned ${input.kind} ${input.id}`,
+          });
+          const statuses = await new GitClient(input.worktree).statusEntries();
+          dirtyPaths = [...new Set(statuses.flatMap((entry) =>
+            entry.originalPath === undefined ? [entry.path] : [entry.path, entry.originalPath]
+          ))].sort();
+          worktreeState = dirtyPaths.length === 0 ? "owned_clean" : "owned_dirty";
+          if (dirtyPaths.length > 0) warnings.push("worktree has uncommitted changes");
+        } catch (error) {
+          worktreeState = error instanceof GitLifecycleError && error.code === "dirty_checkout"
+            ? "owned_dirty"
+            : "ownership_mismatch";
+          warnings.push(`worktree ownership could not be proven: ${errorMessage(error).slice(0, 1_024)}`);
+        }
+      }
+    } catch (error) {
+      warnings.push(`worktree could not be inspected: ${errorMessage(error).slice(0, 1_024)}`);
+    }
+
+    const refSafe = refState === "not_applicable" || refState === "absent" || refState === "matches";
+    const worktreeSafe = worktreeState === "absent" || worktreeState === "owned_clean";
+    return {
+      kind: input.kind,
+      id: input.id,
+      expectedOid: input.expectedOid,
+      ref: input.ref,
+      worktree: input.worktree,
+      refState,
+      observedRefOid,
+      worktreeState,
+      registered,
+      dirtyPaths,
+      safeToDelete: refSafe && worktreeSafe,
+      warnings,
     };
   }
 
@@ -2183,7 +3120,7 @@ export class IsolatedGitLifecycle {
 
   async #forwardCompensatePublication(
     lifecycle: RunGitLifecycleRecord,
-    original: Extract<GitLifecycleIntent, { kind: "ticket_publish" | "target_publish" }>,
+    original: Extract<GitLifecycleIntent, { kind: "ticket_publish" | "target_sync" | "target_publish" }>,
     journal: GitIntentJournal,
     cause: unknown,
   ): Promise<{
@@ -2192,14 +3129,18 @@ export class IsolatedGitLifecycle {
     reason: string;
     compensationOid?: string;
   }> {
-    const priorOid = original.kind === "ticket_publish"
+    const priorOid = original.kind === "ticket_publish" || original.kind === "target_sync"
       ? original.expectedRunOid
       : original.expectedTargetOid;
     const candidateOid = original.kind === "ticket_publish"
       ? original.squashCommitOid
+      : original.kind === "target_sync"
+        ? original.synchronizedRunOid
       : original.candidateOid;
-    const reference = original.kind === "ticket_publish" ? original.runRef : original.targetRef;
-    const checkout = original.kind === "ticket_publish"
+    const reference = original.kind === "ticket_publish" || original.kind === "target_sync"
+      ? original.runRef
+      : original.targetRef;
+    const checkout = original.kind === "ticket_publish" || original.kind === "target_sync"
       ? original.runWorktree
       : original.targetCheckout;
     const repairError = errorMessage(cause).slice(0, 4_096);
@@ -2248,6 +3189,7 @@ export class IsolatedGitLifecycle {
       reference,
       checkout,
       cycleId: original.kind === "ticket_publish" ? original.cycleId : undefined,
+      ...(original.kind === "target_sync" ? { observedTargetOid: original.observedTargetOid } : {}),
       repairError,
       identity: { name: this.#identity.name, email: this.#identity.email },
     };
@@ -2404,6 +3346,17 @@ export class IsolatedGitLifecycle {
     } else if (intent.kind === "run_materialize" || intent.kind === "run_retire") {
       next.run.status = "preserved";
       next.run.blocker = reason;
+    } else if (intent.kind === "target_sync") {
+      next.run.status = "preserved";
+      next.run.blocker = reason;
+      next.targetSynchronization = {
+        status: "preserved",
+        priorRunOid: intent.expectedRunOid,
+        targetOid: intent.observedTargetOid,
+        runOid: intent.synchronizedRunOid,
+        synchronizedAt: intent.preparedAt,
+        blocker: reason,
+      };
     } else if (intent.kind === "target_publish" && next.promotion !== undefined) {
       next.promotion.status = "preserved";
       next.promotion.blocker = reason;
@@ -2432,8 +3385,43 @@ function cloneLifecycle(lifecycle: RunGitLifecycleRecord): RunGitLifecycleRecord
   return structuredClone(lifecycle);
 }
 
+function supersededTicketLifecycle(
+  lifecycle: RunGitLifecycleRecord,
+  intent: Extract<GitLifecycleIntent, { kind: "ticket_supersede" }>,
+): RunGitLifecycleRecord {
+  const next = cloneLifecycle(lifecycle);
+  const cycle = requiredCycle(next, intent.cycleId);
+  cycle.status = "retired";
+  cycle.ticketHeadOid = intent.expectedTicketOid;
+  cycle.retiredAt = intent.preparedAt;
+  cycle.blocker = undefined;
+  cycle.archiveRef = intent.archiveRef;
+  cycle.supersessionSha256 = intent.supersessionSha256;
+  cycle.supersededAt = intent.preparedAt;
+  return next;
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSha256Value(value: unknown): value is string {
+  return typeof value === "string" && /^sha256:[0-9a-f]{64}$/u.test(value);
+}
+
+function supersessionArchiveRef(
+  runId: string,
+  ticketId: string,
+  cycleId: string,
+  supersessionSha256: string,
+): string {
+  assertNamespaceId(runId, "run ID");
+  assertNamespaceId(ticketId, "ticket ID");
+  assertNamespaceId(cycleId, "ticket cycle ID");
+  if (!isSha256Value(supersessionSha256)) {
+    throw new Error("ticket supersession authority hash is invalid");
+  }
+  return `refs/koni/archive/${runId}/tickets/${ticketId}/cycles/${cycleId}/${supersessionSha256.slice("sha256:".length)}`;
 }
 
 function assertOidValue(value: unknown, label: string): asserts value is string {
@@ -2547,7 +3535,7 @@ async function conflictReport(
 
 function failedPublicationLifecycle(
   lifecycle: RunGitLifecycleRecord,
-  intent: Extract<GitLifecycleIntent, { kind: "ticket_publish" | "target_publish" }>,
+  intent: Extract<GitLifecycleIntent, { kind: "ticket_publish" | "target_sync" | "target_publish" }>,
   candidateOid: string,
   reason: string,
 ): RunGitLifecycleRecord {
@@ -2560,6 +3548,18 @@ function failedPublicationLifecycle(
     cycle.status = "preserved";
     cycle.squashCommitOid = candidateOid;
     cycle.blocker = reason;
+  } else if (intent.kind === "target_sync") {
+    next.run.status = "preserved";
+    next.run.headOid = candidateOid;
+    next.run.blocker = reason;
+    next.targetSynchronization = {
+      status: "preserved",
+      priorRunOid: intent.expectedRunOid,
+      targetOid: intent.observedTargetOid,
+      runOid: candidateOid,
+      synchronizedAt: intent.preparedAt,
+      blocker: reason,
+    };
   } else if (next.promotion !== undefined) {
     next.promotion.status = "preserved";
     next.promotion.blocker = reason;
@@ -2585,6 +3585,18 @@ function compensatedPublicationLifecycle(
     cycle.status = "preserved";
     cycle.squashCommitOid = intent.candidateOid;
     cycle.blocker = reason;
+  } else if (intent.originalKind === "target_sync") {
+    next.run.status = "preserved";
+    next.run.headOid = compensationOid;
+    next.run.blocker = reason;
+    next.targetSynchronization = {
+      status: "preserved",
+      priorRunOid: intent.priorOid,
+      targetOid: intent.observedTargetOid ?? lifecycle.targetSynchronization?.targetOid ?? intent.priorOid,
+      runOid: compensationOid,
+      synchronizedAt: intent.preparedAt,
+      blocker: reason,
+    };
   } else if (next.promotion !== undefined) {
     next.promotion.status = "preserved";
     next.promotion.blocker = reason;
@@ -2798,6 +3810,218 @@ function isInside(root: string, candidate: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+interface RunGitNamespace {
+  root: string;
+  runRef: string;
+  planningWorktree: string;
+  runWorktree: string;
+  ticketRoot: string;
+}
+
+function legacyRunNamespace(commonDirectory: string, runId: string): RunGitNamespace {
+  const root = path.join(commonDirectory, "koni", "worktrees", "runs", runId);
+  return {
+    root,
+    runRef: `refs/heads/koni/runs/${runId}`,
+    planningWorktree: path.join(root, "planning"),
+    runWorktree: path.join(root, "integration"),
+    ticketRoot: path.join(root, "tickets"),
+  };
+}
+
+function policyRunNamespace(
+  commonDirectory: string,
+  policy: GitBehaviorPolicy,
+  run: GitRunTemplateContext,
+): RunGitNamespace {
+  const runRef = renderRunRef(policy, run);
+  const branch = runRef.slice("refs/heads/".length);
+  const root = path.join(
+    resolvePolicyWorktreeRoot(commonDirectory, policy),
+    "runs",
+    ...branch.split("/"),
+  );
+  return {
+    root,
+    runRef,
+    planningWorktree: path.join(root, "planning"),
+    runWorktree: path.join(root, "integration"),
+    ticketRoot: path.join(root, "tickets"),
+  };
+}
+
+/** Exact former layout, used only to authenticate already-issued policy-backed records. */
+function legacyPolicyRunNamespace(
+  commonDirectory: string,
+  policy: GitBehaviorPolicy,
+  run: GitRunTemplateContext,
+): RunGitNamespace {
+  const runRef = renderRunRef(policy, run);
+  const branch = runRef.slice("refs/heads/".length);
+  const root = path.join(
+    resolveLegacyPolicyWorktreeRoot(commonDirectory, policy),
+    "runs",
+    ...branch.split("/"),
+  );
+  return {
+    root,
+    runRef,
+    planningWorktree: path.join(root, "planning"),
+    runWorktree: path.join(root, "integration"),
+    ticketRoot: path.join(root, "tickets"),
+  };
+}
+
+function persistedPolicyRunNamespace(
+  commonDirectory: string,
+  policy: GitBehaviorPolicy,
+  run: GitRunTemplateContext,
+  persisted: RunGitNamespace,
+): RunGitNamespace {
+  const current = policyRunNamespace(commonDirectory, policy, run);
+  if (sameRunNamespace(persisted, current)) return current;
+  const legacy = legacyPolicyRunNamespace(commonDirectory, policy, run);
+  if (sameRunNamespace(persisted, legacy)) return legacy;
+  throw new Error("Git lifecycle run ref is outside its authority namespace");
+}
+
+function sameRunNamespace(left: RunGitNamespace, right: RunGitNamespace): boolean {
+  return left.root === right.root &&
+    left.runRef === right.runRef &&
+    left.planningWorktree === right.planningWorktree &&
+    left.runWorktree === right.runWorktree &&
+    left.ticketRoot === right.ticketRoot;
+}
+
+function policyTicketWorktree(ticketRoot: string, ticketRef: string): string {
+  if (!ticketRef.startsWith("refs/heads/")) throw new Error("ticket ref is not a local branch");
+  return path.join(ticketRoot, ...ticketRef.slice("refs/heads/".length).split("/"));
+}
+
+function assertNewRunAdmission(
+  admission: GitRunAdmission | undefined,
+  runId: string,
+): asserts admission is GitRunAdmission {
+  if (admission === undefined) {
+    throw invalidState("new Git run admission requires a compiler-supplied immutable Git policy");
+  }
+  assertGitBehaviorPolicy(admission.policy);
+  if (admission.run.id !== runId) {
+    throw invalidState("Git run template context disagrees with the admitted run ID");
+  }
+  renderRunRef(admission.policy, admission.run);
+}
+
+async function assertNewRefNamespace(
+  repository: GitClient,
+  requested: string,
+  targetRef: string,
+): Promise<void> {
+  if (requested === targetRef) {
+    throw namespaceCollision(`compiler-owned ref collides with selected target: ${requested}`);
+  }
+  for (const existing of await repository.branchRefs()) {
+    if (
+      existing.ref === requested ||
+      existing.ref.startsWith(`${requested}/`) ||
+      requested.startsWith(`${existing.ref}/`)
+    ) {
+      throw namespaceCollision(`Git ref namespace collision: ${requested} conflicts with ${existing.ref}`);
+    }
+  }
+}
+
+async function assertNewWorktreeNamespace(
+  repository: { worktreeRoot: string; commonDirectory: string },
+  namespaceRoot: string,
+): Promise<void> {
+  const client = new GitClient(repository.worktreeRoot);
+  for (const worktree of await client.worktrees()) {
+    if (worktree.path.endsWith(`${path.sep}planning`) || worktree.path.endsWith(`${path.sep}integration`)) {
+      const existingNamespace = path.dirname(worktree.path);
+      if (isInside(namespaceRoot, existingNamespace) || isInside(existingNamespace, namespaceRoot)) {
+        throw namespaceCollision(
+          `owned run namespace collision: ${namespaceRoot} conflicts with ${existingNamespace}`,
+        );
+      }
+    }
+  }
+  await assertNewWorktreePath(repository, namespaceRoot, namespaceRoot);
+}
+
+async function assertNewWorktreePath(
+  repository: { worktreeRoot: string; commonDirectory: string },
+  candidate: string,
+  ownerRoot: string,
+): Promise<void> {
+  const common = await realpath(repository.commonDirectory);
+  const resolved = path.resolve(candidate);
+  const external = resolveRepositoryWorktreeNamespaceRoot(common);
+  const placementRoot = isInside(common, resolved)
+    ? common
+    : isInside(external, resolved)
+      ? external
+      : undefined;
+  if (placementRoot === undefined || !isInside(ownerRoot, resolved)) {
+    throw new GitLifecycleError("ownership_mismatch", `configured worktree path escapes its owned namespace: ${resolved}`);
+  }
+  await assertNoFollowExistingAncestors(
+    placementRoot === common ? common : path.dirname(path.dirname(external)),
+    resolved,
+  );
+  if (await pathExists(resolved)) {
+    throw namespaceCollision(`path occupies new worktree namespace: ${resolved}`);
+  }
+  const client = new GitClient(repository.worktreeRoot);
+  for (const worktree of await client.worktrees()) {
+    // The primary checkout necessarily contains its own `.git` common directory; that containment
+    // is not an overlap with a linked worktree rooted beneath the common-dir policy namespace.
+    // When Koni is invoked from a linked checkout, `repository.worktreeRoot` names that linked
+    // checkout rather than the primary one, so identify the primary checkout by its ownership of
+    // the common directory instead of assuming the caller is running there.
+    const worktreeRoot = path.resolve(worktree.path);
+    if (
+      worktreeRoot === path.resolve(repository.worktreeRoot) ||
+      isInside(worktreeRoot, common)
+    ) continue;
+    if (isInside(resolved, worktree.path) || isInside(worktree.path, resolved)) {
+      throw namespaceCollision(`worktree namespace collision: ${resolved} conflicts with ${worktree.path}`);
+    }
+  }
+}
+
+async function assertNoFollowExistingAncestors(common: string, candidate: string): Promise<void> {
+  const relative = path.relative(common, candidate);
+  let cursor = common;
+  for (const component of relative.split(path.sep).filter((item) => item.length > 0)) {
+    cursor = path.join(cursor, component);
+    let stat;
+    try {
+      stat = await lstat(cursor);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new GitLifecycleError("ownership_mismatch", `configured worktree ancestor is not a real directory: ${cursor}`);
+    }
+    if (!isInside(common, await realpath(cursor))) {
+      throw new GitLifecycleError("ownership_mismatch", `configured worktree ancestor escapes its ownership root: ${cursor}`);
+    }
+  }
+}
+
+function canonicalTemplateContext(value: GitTicketTemplateContext | undefined): string {
+  if (value === undefined) return "";
+  return JSON.stringify({
+    id: value.id,
+    cycleId: value.cycleId,
+    operation: value.operation,
+    title: value.title,
+    reviewId: value.reviewId ?? null,
+  });
+}
+
 async function pathExists(candidate: string): Promise<boolean> {
   try {
     await lstat(candidate);
@@ -2811,11 +4035,18 @@ async function pathExists(candidate: string): Promise<boolean> {
 async function ensureOwnedDirectory(candidate: string, commonDirectory: string): Promise<void> {
   const common = await realpath(commonDirectory);
   const target = path.resolve(candidate);
-  if (!isInside(common, target)) {
-    throw new GitLifecycleError("ownership_mismatch", `directory escapes Git common dir: ${target}`);
+  const external = resolveRepositoryWorktreeNamespaceRoot(common);
+  const placementRoot = isInside(common, target)
+    ? common
+    : isInside(external, target)
+      ? external
+      : undefined;
+  if (placementRoot === undefined) {
+    throw new GitLifecycleError("ownership_mismatch", `directory escapes its managed-worktree namespace: ${target}`);
   }
-  const relative = path.relative(common, target);
-  let cursor = common;
+  const traversalRoot = placementRoot === common ? common : path.dirname(path.dirname(external));
+  const relative = path.relative(traversalRoot, target);
+  let cursor = traversalRoot;
   for (const component of relative.split(path.sep).filter((part) => part.length > 0)) {
     cursor = path.join(cursor, component);
     try {
@@ -2830,10 +4061,10 @@ async function ensureOwnedDirectory(candidate: string, commonDirectory: string):
         `compiler namespace component is not a real directory: ${cursor}`,
       );
     }
-    if (!isInside(common, await realpath(cursor))) {
+    if (!isInside(traversalRoot, await realpath(cursor))) {
       throw new GitLifecycleError(
         "ownership_mismatch",
-        `compiler namespace component resolves outside Git common dir: ${cursor}`,
+        `compiler namespace component resolves outside its ownership root: ${cursor}`,
       );
     }
   }
