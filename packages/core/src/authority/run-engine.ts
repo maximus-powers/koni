@@ -3,6 +3,44 @@ import path from "node:path";
 import type { TSchema } from "typebox";
 import type { TransactionWrite } from "./file-journal.js";
 import type { JsonValue, RpcRequest } from "./protocol.js";
+import type { ConfigurationObject, ConfigurationValue } from "../contracts/configuration.js";
+import type { CompiledStateMachineCatalog } from "../contracts/rules.js";
+import type {
+  ActionExecutionJournal,
+  ActionPrimitiveHost,
+  CompiledActionDefinition,
+  CompiledRunStage,
+  LeadJudgmentTrigger,
+  LeadJudgmentOutput,
+} from "../contracts/behavior.js";
+import {
+  createActionExecutionJournal,
+  executeActionPlan,
+} from "../compiler/action-recipes.js";
+import type { CompiledExecutionSemanticCatalog } from "../compiler/execution-semantics.js";
+import {
+  assertRunActionCurrent,
+  createRunActionEffectReceipt,
+  prepareRunActionExecution,
+  replayRunActionEffect,
+  RunActionAuthorityError,
+  withRunActionJournal,
+  type RunActionPrimitiveInput,
+} from "./action-execution.js";
+import {
+  assertCheckExecutionPolicyBinding,
+  assertExecutionPolicyBindingIntegrity,
+  decideBoundCheckRetry,
+  evaluateRequiredExecutionReceipts,
+  type CheckExecutionPolicyBinding,
+  type ComposedReplaySelection,
+  type ExecutionPolicyBinding,
+  type ExecutionPolicyReceiptEvidence,
+  type GateAutoEvaluationContextBinding,
+} from "./execution-policy.js";
+import {
+  shouldIssueLeadJudgment,
+} from "../compiler/behavior.js";
 import {
   AuthorityRpcError,
   AuthorityServer,
@@ -10,9 +48,26 @@ import {
 } from "./server.js";
 import {
   authorityRequestHash,
+  createAuthorityQuiesceOperation,
+  createAuthorityStartupEpoch,
+  MAX_QUIESCE_ID_SAMPLE,
   ProjectAuthorityStore,
+  type DurableAuthorityReceipt,
+  type DurableAuthorityQuiesceOperation,
+  type DurableAuthorityStartupEpoch,
 } from "./project-store.js";
-import { discoverAuthorityEndpoint } from "./endpoint.js";
+import { AuthorityLease, discoverAuthorityEndpoint } from "./endpoint.js";
+import { registerMonitorAuthorityMethods } from "./monitor-methods.js";
+import { MAX_RUN_SUMMARY_PAGE_LIMIT } from "./run-summary-page.js";
+import {
+  CONFIG_DOCUMENT_DOMAINS,
+  CONFIG_RESOURCE_KINDS,
+  ConfigDocumentAuthority,
+  ConfigDocumentAuthorityError,
+  type ConfigAuthorityMutationMarker,
+  type ConfigDocumentDomain,
+  type ConfigResourceKind,
+} from "./config-documents.js";
 import {
   buildConfigSurfaceCatalog,
   buildConfigSurfaceSnapshot,
@@ -22,13 +77,27 @@ import {
   publishConfigSurfaceSnapshot,
   recoverConfigSurfaceResourceMutation,
 } from "./config-surface.js";
-import { canonicalEncode, canonicalHash, rawSha256, type Sha256Digest } from "../shared/canonical.js";
+import {
+  canonicalEncode,
+  canonicalHash,
+  isSha256Digest,
+  rawSha256,
+  type Sha256Digest,
+} from "../shared/canonical.js";
 import type { AuthorityGrant } from "./grants.js";
 import { WorktreePathAuthority } from "./path-policy.js";
-import { runContainedProcess, snapshotContainedPaths } from "./process-runner.js";
+import {
+  runContainedProcess,
+  snapshotContainedPaths,
+  type ContainedPathManifest,
+} from "./process-runner.js";
 import type { RuntimeExecutableIdentity } from "../runtime/executable.js";
 import {
+  GitClient,
+  GitLifecycleError,
   IsolatedGitLifecycle,
+  createGitRunTemplateContext,
+  createGitTicketTemplateContext,
   type GitIntentJournal,
   type GitLifecycleIntent,
   type GitPathScope,
@@ -38,6 +107,10 @@ import {
 import type { GraphEdge, GraphNode } from "../graph/model.js";
 import { DynamicGraphContextBudgetError } from "../graph/context-selector.js";
 import type { ControlCatalog } from "../control-center/protocol.js";
+import {
+  parseCompiledCockpitViewCatalog,
+  type CompiledCockpitViewCatalog,
+} from "../control-center/cockpit-config.js";
 import type {
   AuthorityBackedTool,
   ManagedPiSessionFactory,
@@ -58,13 +131,27 @@ import type {
   KoniAuthorizedMessage,
   KoniCompactionSnapshot,
   KoniContextProvider,
+  KoniProviderRequestReservationInput,
+  KoniProviderRequestSettlementInput,
+  KoniProviderRequestSettlement,
+  KoniAttemptUsage,
 } from "../pi/compaction.js";
 import {
+  validateAgentAttemptLineageForest,
   validateAgentLaunchSpec,
   type AgentAttemptLineage,
+  type AgentAttemptLineageBinding,
   type AgentLaunchSpec,
 } from "../pi/launch-spec.js";
-import { readPiSession } from "../pi/session-transcript.js";
+import { readPiSession, readPiSessionDurably, type ParsedPiSession } from "../pi/session-transcript.js";
+import { readAutonomousPiTranscriptPage } from "../pi/transcript-page.js";
+import {
+  deriveProviderSettlement,
+  isSupportedProviderOutputCap,
+  estimateProviderInputTokens,
+  providerApiHasSupportedOutputCap,
+} from "../pi/provider-request.js";
+
 import {
   ManagedSessionSupervisor,
   type ManagedSessionHandle,
@@ -83,11 +170,46 @@ import {
   type RunLifecycleEvent,
 } from "../state/run-lifecycle.js";
 import {
+  authorizeConfiguredRunTransition,
+  configuredTicketState,
+} from "./configured-lifecycle.js";
+import {
+  createQuestionBatch,
+  projectQuestionBatchCapabilities,
+  projectQuestionBatchResolution,
+  queueQuestionBatchResume,
+  resolveQuestionBatch,
+  reviseQuestionBatchAnswer,
+  saveQuestionBatchAnswer,
+  type QuestionBatchQuestionInput,
+  type QuestionBatchRecord,
+  type QuestionBatchResolution,
+} from "../state/question-batch.js";
+import {
+  questionPolicyDisposition,
+  type QuestionPolicy,
+} from "../state/question-policy.js";
+import {
   LegacyRunGitExecutor,
   type LegacyRunGitJournal,
   type LegacyRunGitSettlement,
 } from "../state/legacy-run-git-executor.js";
 import type { LegacyRunAdoptionRecord } from "../state/legacy-run-adoption.js";
+import {
+  deriveApprovedChangeMaterialization,
+  deriveProposalDecision,
+  PROPOSAL_DECISION_AUTHORITY_PROTOCOL,
+  deriveSourceReleaseDecision,
+  deriveTerminalResolverReconciliation,
+  deriveTerminalResolverRetryRequest,
+  MAX_TERMINAL_RESOLVER_RETRIES,
+  type SourceReleaseDecision,
+  type ApprovedChangeMaterialization,
+  type ChangeControlPublication,
+  type TerminalResolverReconciliation,
+  type TerminalResolverRetryRequest,
+} from "../state/change-control.js";
+import { projectControlProposalInspection } from "./monitor-projection.js";
 import {
   assessLegacyRunAdoption,
   legacyRunResumeVerificationSha256,
@@ -98,53 +220,166 @@ import {
 } from "../profile/run-adoption.js";
 import type {
   AgentAttemptRecord,
+  AgentTerminalPolicyRecord,
+  AgentProviderRequestRecord,
   AttemptStatus,
   PendingCheckIntentRecord,
   RunActivityRecord,
+  RunActionExecutionRecord,
+  RunActionSemanticResult,
   RunExecutionConfig,
   RunPlanRecord,
   RunQuestionRecord,
   RunCheckRecord,
+  RunCheckAttemptRecord,
+  RunCheckSourceManifestRecord,
   RunGitReceiptRecord,
   RunReportRecord,
   RunRecord,
+  RunBehaviorSnapshot,
+  RunPipelineStageRecord,
+  RunPostOrchestrationBinding,
+  RunPostOrchestrationRecord,
   TicketRecord,
   WorkspaceEffectIntentRecord,
 } from "../state/run-record.js";
 import {
+  assertRunRecord,
+  createRunActionSettlement,
+  createTerminalFailureSettlementProof,
+  createTerminalSuccessSettlementProof,
+  deriveRunActionExecutionArchive,
+  deriveRunActionExecutionArchiveSegment,
+  terminalFailureBindingsForTicket,
+  terminalFailureBindingFromProof,
+} from "../state/run-record.js";
+import {
+  authorizeBlockedReviewRetry,
   beginAssignment,
+  blockedIndependentReviewRetryCandidate,
+  blockedReviewRetryCandidate,
+  canRetryBlockedReviewOnly,
   deriveReadyAssignments,
   finishAssignment,
   type ReadyAssignment,
+  type SchedulerExecutionAuthority,
 } from "../state/scheduler.js";
+import {
+  defineBuiltInStageAction,
+  defineStageCapabilityCatalog,
+  defineStageInteraction,
+  validateStageActionInvocation,
+  type StageActionCapability,
+  type StageActionFieldSchema,
+  type StageActionInvocation,
+  type StageActionValue,
+  type StageCapability,
+  type StageCapabilityCatalog,
+} from "../state/stage-capability.js";
+import {
+  inspectProjectProfileConflict,
+  listProjectProfileConflicts,
+  ProductionLegacyRunMigrationAuthority,
+  recoverProjectProfileConflictResolution,
+  resolveProjectProfileConflict,
+} from "../operator/profile-lifecycle.js";
 
+const MAX_PROVIDER_RESPONSE_TRANSCRIPT_OVERSHOOT_BYTES = 24 * 1024 * 1024;
+const AGENT_FILE_READ_PAGE_BYTES = 32 * 1024;
 const REPOSITORY_DISCOVERY_TOOLS = new Set<KoniToolName>([
   "koni_read_file",
   "koni_list_files",
   "koni_search_files",
 ]);
 
+const RUN_DELETION_PREVIEW_PROTOCOL = "koni.run-deletion-preview.v1" as const;
+const RUN_MERGE_PREVIEW_PROTOCOL = "koni.run-merge-preview.v1" as const;
+const RUN_ATTEMPT_LINEAGE_PROTOCOL = "koni.run-attempt-lineage.v1" as const;
+const RECEIPT_PARAMS = Symbol("koni.authority.receipt-params");
+
+interface RunDeletionPreview {
+  protocol: typeof RUN_DELETION_PREVIEW_PROTOCOL;
+  runId: string;
+  objective: string;
+  phase: RunPhase;
+  targetRef: string;
+  ownedWorktrees: number;
+  ownedBranches: number;
+  liveAgents: number;
+  dirtyWorktreeWarnings: string[];
+  blockers: string[];
+  canPreserveBranches: boolean;
+  canDeleteOwnedBranches: boolean;
+  previewToken: Sha256Digest;
+}
+
+interface RunMergePreview {
+  protocol: typeof RUN_MERGE_PREVIEW_PROTOCOL;
+  runId: string;
+  objective: string;
+  phase: RunPhase;
+  targetRef: string;
+  expectedTargetOid: string | null;
+  observedTargetOid: string | null;
+  targetAdvanced: boolean;
+  resyncState: "current" | "required" | "unavailable";
+  completedTickets: number;
+  totalTickets: number;
+  blockers: string[];
+  canAuthorize: boolean;
+  previewToken: Sha256Digest;
+}
+
+interface RunAttemptLineageProjection {
+  protocol: typeof RUN_ATTEMPT_LINEAGE_PROTOCOL;
+  runId: string;
+  runRevision: number;
+  attempts: Array<{
+    attemptId: string;
+    persona: string;
+    ticket: string;
+    step: string;
+    status: AttemptStatus;
+    reason: AgentAttemptLineage["reason"];
+    branchEpoch: number;
+    parentAttemptId?: string;
+    childAttemptIds: string[];
+    activeLeaf: boolean;
+  }>;
+}
+
 export interface RunCreationRequest {
   runId: string;
   objective: string;
   runTypeId: string;
   targetRef: string;
-  intake: Record<string, string>;
+  intake: ConfigurationObject;
   overrides?: JsonValue;
 }
 
 export interface ResolvedRunDefinition {
   profile: RunRecord["profile"];
   compiledConfigHash: Sha256Digest;
+  /** Exact lifecycle catalog compiled from the same configuration and persisted with the run. */
+  /** Optional only for compatibility compiler seams admitted before lifecycle authority. */
+  lifecycleCatalog?: CompiledStateMachineCatalog;
   runTypeId: string;
+  /** Canonical values after the compiler applies typed defaults and exact intake validation. */
+  objective: string;
+  intake: ConfigurationObject;
+  /** Bounded executable behavior persisted before the first Git effect. */
+  behavior: RunBehaviorSnapshot;
   /** Exactly one managed persona, resolved and pinned before any run artifact is committed. */
   workingSpecOwnerId: string;
   /** Whether this run type requires a model planning pass before approval. */
   planningMode: "agent" | "direct";
   pipelineStageIds: string[];
+  pipelineStages: RunPipelineStageDefinition[];
   executionConfig: RunExecutionConfig;
   artifactWrites?: readonly TransactionWrite[];
 }
+
+export type RunPipelineStageDefinition = RunPipelineStageRecord;
 
 export interface PreparedManagedAttempt {
   spec: AgentLaunchSpec;
@@ -187,11 +422,56 @@ export interface AssignmentCompilation {
   tickets?: Record<string, TicketRecord>;
   activity?: RunActivityRecord[];
   artifactWrites?: readonly TransactionWrite[];
+  /** Authenticated predicate evidence rebound across a proven non-interfering graph transition. */
+  ruleAuthorityEvidence?: JsonValue | null;
+  /** Compiler-authored typed change-control transaction, never inferred from summary prose. */
+  changeControl?: RuntimeAssignmentChangeControlCompilation;
 }
+
+export type RuntimeAssignmentChangeControlCompilation =
+  | Readonly<{
+      protocol: "koni.assignment-change-control.v1";
+      kind: "upstream_request";
+      sourceTicketId: string;
+      sourceStepId: string;
+      sourceBindingSha256: Sha256Digest;
+      sourceOutputSha256: Sha256Digest;
+      targetNodeIds: readonly string[];
+      summary: string;
+      reason: string;
+      publication: ChangeControlPublication;
+      sha256: Sha256Digest;
+    }>
+  | Readonly<{
+      protocol: "koni.assignment-change-control.v1";
+      kind: "proposal_application";
+      configurationSha256: Sha256Digest;
+      catalogSha256: Sha256Digest;
+      proposalBindingSha256: Sha256Digest;
+      applicationBinding: ExecutionPolicyBinding;
+      proposalOutputSha256: Sha256Digest;
+      proposalTicketId: string;
+      proposalStepId: string;
+      applicationPublicOperation: string;
+      applicationOperationId: string;
+      targetNodeIds: readonly string[];
+      summary: string;
+      scope: Readonly<{
+        readNodeIds: readonly string[];
+        writeNodeIds: readonly string[];
+        readPaths: readonly string[];
+        writePaths: readonly string[];
+      }>;
+      sha256: Sha256Digest;
+    }>;
 
 export interface VerificationCompilation {
   ok: boolean;
   reason?: string;
+  /** Exact compiler projection when verification discovers newly applicable work. */
+  tickets?: Record<string, TicketRecord>;
+  /** Exact derived ticket identities whose predicates still hold at this verification epoch. */
+  applicableTicketIds?: readonly string[];
   report?: RunReportRecord;
   activity?: RunActivityRecord[];
   artifactWrites?: readonly TransactionWrite[];
@@ -209,6 +489,10 @@ export interface AgentToolCompilation {
 
 export interface ResolvedAgentCheckCommand {
   checkId: string;
+  /** Exact composite-member identity; absent for standalone and legacy command checks. */
+  memberNodeId?: string;
+  /** Exact source paths derived for that member; absent outside semantic composite checks. */
+  memberSourcePaths?: readonly string[];
   definitionHash: Sha256Digest;
   argv: string[];
   cwd: string;
@@ -230,6 +514,8 @@ export interface ResolvedAgentCheckCommand {
   };
   inputPaths: string[];
   outputPaths: string[];
+  /** Exact child-check policy; absent only on legacy compiler plans. */
+  executionPolicy?: CheckExecutionPolicyBinding;
 }
 
 /**
@@ -242,11 +528,20 @@ export interface ResolvedAgentCheck {
   definitionHash: Sha256Digest;
   kind: "command" | "graph" | "composite";
   commands: ResolvedAgentCheckCommand[];
+  /** Absent only for explicit pre-execution-semantics compatibility programs. */
+  executionPolicy?: ResolvedCheckExecutionPolicyBinding;
 }
+
+export type ResolvedGateAutoEvaluationContextBinding = GateAutoEvaluationContextBinding;
+export type ResolvedCheckExecutionPolicyBinding = CheckExecutionPolicyBinding;
 
 export interface AgentCheckExecution {
   checkId: string;
   definitionHash: Sha256Digest;
+  /** Final process attempt selected after compiler-bound retry handling. */
+  attemptNumber?: number;
+  /** Hash of the complete durable retry audit supplied to the final compiler pass. */
+  retryAuditSha256?: Sha256Digest;
   startedAt: string;
   completedAt: string;
   resolvedExecutable: string;
@@ -276,6 +571,110 @@ export interface AgentCheckExecution {
   outputFiles: Array<{ path: string; sha256: Sha256Digest; sizeBytes: number }>;
 }
 
+export interface RuntimeAssignmentTerminalPolicyRetainedReceipt {
+  readonly runCheckId: string;
+  readonly attemptId: string;
+  readonly stepId: string;
+  readonly requestedCheckId: string;
+  readonly commandIndex: number;
+  readonly checkId: string;
+  readonly executionPolicy: CheckExecutionPolicyBinding;
+}
+
+export interface RuntimeAssignmentTerminalPolicySourceCommand {
+  readonly stepId: string;
+  readonly checkId: string;
+  readonly memberNodeId: string;
+  readonly commandBindingSha256: Sha256Digest;
+  readonly sourcePaths: readonly string[];
+}
+
+export interface RuntimeAssignmentTerminalPolicySourceManifestPair {
+  readonly memberNodeId: string;
+  readonly current: RuntimeAssignmentTerminalPolicySourceCommand;
+  readonly source: RuntimeAssignmentTerminalPolicySourceCommand;
+  readonly retainedSourceReceipts: readonly RuntimeAssignmentTerminalPolicyRetainedReceipt[];
+  readonly sha256: Sha256Digest;
+}
+
+export interface RuntimeAssignmentTerminalValidationCheckPolicy {
+  readonly checkId: string;
+  readonly checkSha256: Sha256Digest;
+  readonly receiptType: string;
+  readonly receiptFreshness: "current" | "historical";
+  readonly resolvedCheck: ResolvedAgentCheck;
+  readonly causalResolvedCheckSha256: Sha256Digest;
+  readonly causalCommands: readonly ResolvedAgentCheckCommand[];
+  readonly retainedLeafPolicies: readonly Readonly<{
+    commandIndex: number;
+    checkId: string;
+    executionPolicy: CheckExecutionPolicyBinding;
+  }>[];
+  readonly replaySelection: ComposedReplaySelection;
+}
+
+export interface RuntimeAssignmentTerminalPolicyProjection {
+  readonly protocol: "koni.assignment-terminal-policy.v1";
+  readonly configurationSha256: Sha256Digest;
+  readonly catalogSha256: Sha256Digest;
+  readonly catalog: CompiledExecutionSemanticCatalog;
+  readonly executionPolicyBinding: ExecutionPolicyBinding;
+  readonly validationCheckIds: readonly string[];
+  readonly requiredReceiptTypes: readonly string[];
+  readonly preserveSourcePathsFrom?: string;
+  readonly validationChecks: readonly RuntimeAssignmentTerminalValidationCheckPolicy[];
+  readonly composedReplayCheckIds: readonly string[];
+  readonly retainedReceipts: readonly RuntimeAssignmentTerminalPolicyRetainedReceipt[];
+  readonly sourceManifestPairs: readonly RuntimeAssignmentTerminalPolicySourceManifestPair[];
+  readonly sha256: Sha256Digest;
+}
+
+export interface RuntimeAssignmentTerminalReplayCompilation {
+  readonly protocol: "koni.assignment-terminal-replay.v1";
+  readonly projectionSha256: Sha256Digest;
+  readonly accepted: boolean;
+  readonly passed: boolean;
+  readonly checks: readonly Readonly<{
+    checkId: string;
+    accepted: boolean;
+    passed: boolean;
+    replayedLeafCheckIds: readonly string[];
+    retainedLeafCheckIds: readonly string[];
+  }>[];
+  readonly evidence: JsonValue;
+  readonly sha256: Sha256Digest;
+}
+
+interface PreparedAssignmentTerminalPolicy {
+  readonly projection: RuntimeAssignmentTerminalPolicyProjection;
+  readonly executions: readonly Readonly<{
+    checkId: string;
+    executions: readonly AgentCheckExecution[];
+  }>[];
+  readonly retryAudits: readonly RunCheckAttemptRecord[];
+  /** Compiler-authenticated receipts that exist before terminal output is interpreted. */
+  readonly compilerReceipts: readonly CompilerTerminalReceiptAuthority[];
+  readonly artifactWrites: readonly TransactionWrite[];
+}
+
+interface CompilerTerminalReceiptAuthority {
+  readonly protocol: "koni.compiler-terminal-receipt.v1";
+  readonly source: "launch_context" | "configured_action" | "direct_compilation";
+  readonly receipt: ExecutionPolicyReceiptEvidence;
+  readonly provenance: JsonValue;
+  readonly sha256: Sha256Digest;
+}
+
+interface AssignmentTerminalPolicySettlement {
+  readonly record: AgentTerminalPolicyRecord;
+  readonly artifactWrites: readonly TransactionWrite[];
+}
+
+interface PreparedOutcomeTerminalPolicy {
+  readonly prepared: PreparedAssignmentTerminalPolicy | undefined;
+  readonly workspace: string;
+}
+
 export interface CompiledAgentCheckResult extends AgentToolCompilation {
   accepted: boolean;
   passed: boolean;
@@ -287,13 +686,20 @@ export interface CompiledAgentCheckResult extends AgentToolCompilation {
 export interface RunCompilerProgram {
   /** Future-run launch options projected from the current effective configuration. */
   controlCatalog?(): Promise<ControlCatalog>;
+  /** Bounded cockpit projection from the exact configuration artifact pinned by this run. */
+  projectCockpitCatalog?(run: RunRecord): Promise<CompiledCockpitViewCatalog>;
+  /** Exact lifecycle projection for guarded compatibility hydration of an admitted run. */
+  projectStateMachineCatalog?(run: RunRecord): Promise<CompiledStateMachineCatalog>;
+  /** Exact operation/workflow/check catalog from the run's pinned configuration artifact. */
+  projectExecutionSemanticCatalog?(run: RunRecord): Promise<CompiledExecutionSemanticCatalog>;
   resolveRun(request: RunCreationRequest): Promise<ResolvedRunDefinition>;
   /** Build the reviewable root-only plan for a run type with no planning stage. */
   initializeDirectApproval(run: RunRecord): Promise<PlanningCompilation>;
   prepareAttempt(input: {
-    kind: "planning" | "ticket" | "verification" | "integration";
+    kind: "planning" | "lead" | "ticket" | "verification" | "integration";
     run: RunRecord;
     assignment?: ReadyAssignment;
+    leadTrigger?: LeadJudgmentTrigger;
     attemptId: string;
     sessionId: string;
     nextAuthorityRevision: number;
@@ -320,10 +726,40 @@ export interface RunCompilerProgram {
     attemptId: string;
     output: unknown;
   }): Promise<PlanningCompilation>;
+  compileLeadJudgmentOutput?(input: {
+    run: RunRecord;
+    attemptId: string;
+    output: unknown;
+  }): Promise<LeadJudgmentOutput>;
   initializeApprovedPlan(run: RunRecord): Promise<ApprovedPlanCompilation>;
   compileAssignmentOutput(input: {
     run: RunRecord;
     assignment: ReadyAssignment;
+    attemptId: string;
+    output: unknown;
+  }): Promise<AssignmentCompilation>;
+  projectChangeControlProposalTicket?(input: {
+    run: RunRecord;
+    changeControl: Extract<RuntimeAssignmentChangeControlCompilation, { kind: "upstream_request" }>;
+    sourceTerminalProof: import("../state/run-record.js").TerminalSuccessSettlementProof;
+  }): Promise<TicketRecord>;
+  projectApprovedApplicationTicket?(input: {
+    run: RunRecord;
+    materialization: ApprovedChangeMaterialization;
+    selection: Extract<RuntimeAssignmentChangeControlCompilation, { kind: "proposal_application" }>;
+  }): Promise<TicketRecord | undefined>;
+  projectTerminalResolverTicket?(input: {
+    run: RunRecord;
+    reconciliation: TerminalResolverReconciliation;
+    sourceFailureProof: import("../state/run-record.js").TerminalFailureSettlementProof;
+  }): Promise<TicketRecord | undefined>;
+  /** Project the exact pipeline pinned into this durable run; never consult future overlay bytes. */
+  projectPipeline?(run: RunRecord): Promise<readonly RunPipelineStageDefinition[]>;
+  /** Whether this pinned run type contains a compiler-configured independent model review. */
+  requiresVerificationAttempt?(run: RunRecord): Promise<boolean>;
+  /** Compile the immutable independent-review terminal output without granting graph mutation. */
+  compileVerificationOutput?(input: {
+    run: RunRecord;
     attemptId: string;
     output: unknown;
   }): Promise<AssignmentCompilation>;
@@ -356,6 +792,24 @@ export interface RunCompilerProgram {
     check: ResolvedAgentCheck;
     executions: AgentCheckExecution[];
   }): Promise<CompiledAgentCheckResult>;
+  /** Exact compiler projection for behavior-backed terminal receipt/replay closure. */
+  projectAssignmentTerminalPolicy?(input: {
+    run: RunRecord;
+    assignment: ReadyAssignment;
+    attemptId: string;
+  }): Promise<RuntimeAssignmentTerminalPolicyProjection>;
+  /** Compile replay-only leaves plus exact authenticated retained receipt occurrences. */
+  compileAssignmentTerminalReplay?(input: {
+    run: RunRecord;
+    assignment: ReadyAssignment;
+    attemptId: string;
+    projectionSha256: Sha256Digest;
+    executions: readonly Readonly<{
+      checkId: string;
+      executions: readonly AgentCheckExecution[];
+    }>[];
+    retainedReceipts: readonly RuntimeAssignmentTerminalPolicyRetainedReceipt[];
+  }): Promise<RuntimeAssignmentTerminalReplayCompilation>;
 }
 
 export interface RunAuthorityEngineOptions {
@@ -391,6 +845,74 @@ export interface RunAuthorityEngineOptions {
     point: "after_prepare" | "after_apply",
     intent: Readonly<WorkspaceEffectIntentRecord>,
   ) => Promise<void> | void;
+  /** Provider-free lifecycle race gates used only by authority durability tests. */
+  lifecycleFault?: (
+    point:
+      | "before_ticket_cycle_open"
+      | "before_run_materialization_settle"
+      | "after_ticket_checkpoint"
+      | "before_publication_settle"
+      | "after_verification",
+    input: Readonly<{ runId: string; ticketId?: string }>,
+  ) => Promise<void> | void;
+  /** Provider-free crash injection after a primitive receipt but before its journal transition. */
+  actionFault?: (
+    point: "before_journal" | "before_assignment_settle",
+    input: Readonly<{
+      runId: string;
+      invocationId: string;
+      journal?: ActionExecutionJournal;
+      ticketId?: string;
+      attemptId?: string;
+    }>,
+  ) => Promise<void> | void;
+}
+
+interface RunAdvancementToken {
+  phase: RunPhase;
+  lifecycleRevision: number;
+  generation: number;
+}
+
+interface LeadActionAdmission {
+  invocationId: string;
+  attemptId: string;
+}
+
+interface TerminalFailureAuthority {
+  stepId: string;
+  attemptId: string;
+  launchSpecHash: Sha256Digest;
+  terminalPolicySha256: Sha256Digest;
+  terminalOutputSha256: Sha256Digest;
+  failureSettlementSha256: Sha256Digest;
+  failureProof: import("../state/run-record.js").TerminalFailureSettlementProof;
+  sha256: Sha256Digest;
+}
+
+interface TerminalResolverRetryCandidate {
+  catalog: CompiledExecutionSemanticCatalog;
+  resolver: TicketRecord;
+  source: TicketRecord;
+  resolverFailure: TerminalFailureAuthority;
+  sourceFailure: TerminalFailureAuthority;
+  pendingRequest?: TerminalResolverRetryRequest;
+}
+
+interface BehaviorPostOrchestrationPlan {
+  targetSync: CompiledRunStage;
+  checkpoint: CompiledRunStage;
+  review?: CompiledRunStage;
+  report: CompiledRunStage;
+  reportAction: CompiledActionDefinition;
+  promotion: CompiledRunStage;
+}
+
+class RunAdvancementStoppedError extends Error {
+  public constructor(public readonly startupCancellation = false) {
+    super("run lifecycle changed while deterministic work was in flight");
+    this.name = "RunAdvancementStoppedError";
+  }
 }
 
 /**
@@ -411,13 +933,18 @@ export class RunAuthorityEngine {
   readonly #now: () => Date;
   readonly #createId: NonNullable<RunAuthorityEngineOptions["createId"]>;
   readonly #effectFault: RunAuthorityEngineOptions["effectFault"];
+  readonly #lifecycleFault: RunAuthorityEngineOptions["lifecycleFault"];
+  readonly #actionFault: RunAuthorityEngineOptions["actionFault"];
   readonly #profilePackageRootLoader: RunAuthorityEngineOptions["profilePackageRootLoader"];
+  #configDocuments: { packageRoot: string; authority: ConfigDocumentAuthority } | undefined;
   readonly #runtimeGuard: RunAuthorityEngineOptions["runtimeGuard"];
   readonly #runtimeClosureSha256: RunAuthorityEngineOptions["runtimeClosureSha256"];
   readonly #gitExecutableSha256: RunAuthorityEngineOptions["gitExecutableSha256"];
   readonly #sandboxExecutable: RunAuthorityEngineOptions["sandboxExecutable"];
   readonly #requestAuthorityShutdown: () => void;
   readonly #attachedOutcomes = new Set<string>();
+  readonly #activeActionExecutions = new Map<string, Promise<ActionExecutionJournal>>();
+  readonly #activeAssignmentSettlements = new Map<string, Promise<void>>();
   readonly #backgroundTasks = new Set<Promise<unknown>>();
   readonly #gitTails = new Map<string, Promise<void>>();
   // The repository-wide AuthorityLease guarantees one production engine per Git common dir.
@@ -427,7 +954,20 @@ export class RunAuthorityEngine {
     resolve: (answer: { label: string; selectedOptionId?: string; notes?: string }) => void;
     reject: (error: Error) => void;
   }>();
+  readonly #questionBatchWaiters = new Map<string, {
+    resolve: (resolution: QuestionBatchResolution) => void;
+    reject: (error: Error) => void;
+  }>();
+  #startAttempted = false;
+  #startPromise: Promise<void> | undefined;
+  #startupRecoveryActive = false;
+  #stopRequested = false;
+  #stopPromise: Promise<void> | undefined;
   #unsubscribeSupervisor: (() => void) | undefined;
+  // Once quiesce owns session shutdown, detached outcomes created before its AsyncLocal lease
+  // must not race that lease with an ordinary mutation. Durable quiesce settlement closes their
+  // attempts/actions and reconciles any already-spent provider exposure instead.
+  #quiesceOutcomeSettlementClosed = false;
 
   private constructor(
     options: RunAuthorityEngineOptions & { stateRoot: string },
@@ -449,6 +989,8 @@ export class RunAuthorityEngine {
     this.#now = options.now ?? (() => new Date());
     this.#createId = options.createId ?? defaultId;
     this.#effectFault = options.effectFault;
+    this.#lifecycleFault = options.lifecycleFault;
+    this.#actionFault = options.actionFault;
     this.#profilePackageRootLoader = options.profilePackageRootLoader;
     this.#runtimeGuard = options.runtimeGuard;
     this.#runtimeClosureSha256 = options.runtimeClosureSha256;
@@ -466,30 +1008,60 @@ export class RunAuthorityEngine {
 
   public static async open(options: RunAuthorityEngineOptions): Promise<RunAuthorityEngine> {
     const endpoint = await discoverAuthorityEndpoint(options.projectRoot);
-    const store = await ProjectAuthorityStore.open({
-      stateRoot: endpoint.stateRoot,
-      projectRoot: endpoint.identity.worktreeRoot,
-      commonDirectory: endpoint.identity.commonDirectory,
-    });
-    const state = await store.state();
-    const server = new AuthorityServer({
-      projectRoot: endpoint.identity.worktreeRoot,
-      version: options.version,
-      initialRevision: state.revision,
-      lookupIdempotent: async (request) => {
-        if (request.idempotencyKey === undefined) return undefined;
-        return store.findReceipt(
-          request.method,
-          request.idempotencyKey,
-          authorityRequestHash(request.method, request.params),
+    // The startup lock/lease must cover file-journal recovery and legacy store migration, not
+    // merely socket bind. Otherwise two cold starters can both mutate durable authority before
+    // either is recognized as the winner.
+    const lease = await AuthorityLease.acquire(endpoint);
+    let transferred = false;
+    let failure: unknown;
+    try {
+      // Production supplies the exact sealed-runtime guard. It must run after ownership is won but
+      // before FileTransactionStore can recover or migrate any durable bytes.
+      await options.runtimeGuard?.();
+      const store = await ProjectAuthorityStore.open({
+        stateRoot: endpoint.stateRoot,
+        projectRoot: endpoint.identity.worktreeRoot,
+        commonDirectory: endpoint.identity.commonDirectory,
+      });
+      const state = await store.state();
+      const server = new AuthorityServer({
+        projectRoot: endpoint.identity.worktreeRoot,
+        version: options.version,
+        initialRevision: state.revision,
+        initialQuiescing: state.authorityQuiesce !== undefined ||
+          state.authorityStartup?.status === "recovering",
+        deferReadyUntilRecovery: true,
+        preacquiredAuthority: { endpoint, lease },
+        lookupIdempotent: async (request) => {
+          if (request.idempotencyKey === undefined) return undefined;
+          return store.findReceipt(
+            request.method,
+            request.idempotencyKey,
+            authorityRequestHash(request.method, request.params),
+          );
+        },
+      });
+      const engine = new RunAuthorityEngine(
+        { ...options, projectRoot: endpoint.identity.worktreeRoot, stateRoot: endpoint.stateRoot },
+        store,
+        server,
+      );
+      transferred = true;
+      return engine;
+    } catch (error) {
+      failure = error;
+    }
+    if (!transferred) {
+      try {
+        await lease.release();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [failure, cleanupError],
+          "Koni authority construction failed and its preacquired lease could not be released",
         );
-      },
-    });
-    return new RunAuthorityEngine(
-      { ...options, projectRoot: endpoint.identity.worktreeRoot, stateRoot: endpoint.stateRoot },
-      store,
-      server,
-    );
+      }
+    }
+    throw failure;
   }
 
   public get server(): AuthorityServer {
@@ -500,85 +1072,491 @@ export class RunAuthorityEngine {
     return this.#store;
   }
 
-  public async start(): Promise<void> {
-    await this.#server.start();
-    await this.recover();
+  public start(): Promise<void> {
+    if (this.#startAttempted || this.#stopPromise !== undefined) {
+      return Promise.reject(
+        new Error("run authority engine lifecycle is terminal after its first start or stop attempt"),
+      );
+    }
+    this.#startAttempted = true;
+    this.#startPromise = this.#settleStart();
+    return this.#startPromise;
   }
 
-  public async stop(): Promise<void> {
+  async #settleStart(): Promise<void> {
+    let serverBound = false;
+    this.#startupRecoveryActive = true;
+    try {
+      await this.#server.start();
+      serverBound = true;
+      this.#assertStartupMayContinue();
+      const state = await this.#store.state();
+      this.#assertStartupMayContinue();
+      const inheritedDirtyStartup = state.authorityStartup?.status === "recovering";
+      // Tests/embedders may perform guarded store setup between open and bind. Rebind from the
+      // fresh post-bind snapshot exactly once before admitting any recovery mutation or effect.
+      this.#server.configureStartupState(
+        state.revision,
+        state.authorityQuiesce !== undefined || inheritedDirtyStartup,
+      );
+      if (state.authorityQuiesce !== undefined || inheritedDirtyStartup) {
+        await this.#server.runQuiesceSettlement(async () => {
+          // This is a fresh process: no session recovery has run, and initialQuiescing closed every
+          // external/internal admission before socket bind. Settle without installing the runtime's
+          // irreversible live-daemon tombstone. Keep admission closed through ordinary recovery,
+          // then narrowly reopen this recovered server as the final privileged step.
+          const operation = state.authorityQuiesce ?? createAuthorityQuiesceOperation({
+            purpose: "dirty_startup_recovery",
+            requestHash: canonicalHash({
+              protocol: "koni.inherited-startup-recovery.v1",
+              epochSha256: state.authorityStartup!.sha256,
+            }),
+            idempotencyKey: `startup-recovery:${state.authorityStartup!.epochId}`,
+            requestedAt: this.#timestamp(),
+            totalRunCount: state.runIds.length,
+            targetRunCount: 0,
+            pausedRunIds: [],
+            pausedRunIdsTruncated: false,
+          });
+          await this.#finishAuthorityQuiesce(
+            operation,
+            true,
+            false,
+            false,
+            inheritedDirtyStartup || isStartupSafetyQuiesce(operation, state.receipts),
+          );
+          this.#assertStartupMayContinue();
+          const epoch = await this.#beginStartupEpoch(state.authorityStartup);
+          this.#assertStartupMayContinue();
+          await this.recover();
+          this.#assertStartupMayContinue();
+          await this.#markStartupEpochReady(epoch);
+          this.#assertStartupMayContinue();
+          if (state.authorityQuiesce !== undefined) {
+            await this.#clearAuthorityQuiesce(state.authorityQuiesce);
+            this.#assertStartupMayContinue();
+          }
+          this.#server.completeRecoveredQuiesce();
+        });
+        this.#startupRecoveryActive = false;
+        return;
+      }
+      // This dirty epoch is committed before the first run record is inspected or any Git,
+      // action, provider, or session effect is recovered. A process crash at every later prefix
+      // is therefore distinguishable from an ordinary steady-state restart.
+      const epoch = await this.#beginStartupEpoch(state.authorityStartup);
+      this.#assertStartupMayContinue();
+      await this.recover();
+      this.#assertStartupMayContinue();
+      await this.#markStartupEpochReady(epoch);
+      this.#assertStartupMayContinue();
+      this.#server.completeStartupRecovery();
+      this.#startupRecoveryActive = false;
+    } catch (error) {
+      this.#startupRecoveryActive = false;
+      // Recovery may already have admitted sessions for an earlier run. A server-only close would
+      // release the endpoint while those provider processes continue spending invisibly.
+      if (!this.#stopRequested && serverBound) {
+        await this.#settleStartupFailure().catch(() => undefined);
+      }
+      if (!this.#stopRequested) {
+        this.#stopRequested = true;
+        this.#stopPromise = this.#settleStop(false);
+        await this.#stopPromise.catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
+  #assertStartupMayContinue(): void {
+    if (this.#startupRecoveryActive && this.#stopRequested) {
+      throw new RunAdvancementStoppedError(true);
+    }
+  }
+
+  public stop(): Promise<void> {
+    if (this.#stopPromise !== undefined) return this.#stopPromise;
+    this.#stopRequested = true;
+    this.#stopPromise = this.#settleStop(true);
+    return this.#stopPromise;
+  }
+
+  async #settleStop(joinStart: boolean): Promise<void> {
     this.#unsubscribeSupervisor?.();
     this.#unsubscribeSupervisor = undefined;
-    await this.#supervisor.dispose();
-    while (this.#backgroundTasks.size > 0) {
-      await Promise.allSettled([...this.#backgroundTasks]);
+    // Reject operator work synchronously, then let already-authorized outcome/action/Git
+    // finalizers settle under the still-owned lease. Closing the internal lane before supervisor
+    // disposal would turn its terminal outcome microtasks into `authority_stopping` failures.
+    this.#server.closeExternalAdmission();
+    // Install the supervisor-wide launch tombstone before the first await. A pre-stop tick may
+    // already be past its engine flag, but it still cannot cross this provider boundary.
+    const suspended = this.#supervisor.suspendAll("authority stopping");
+    let failure: unknown;
+    if (joinStart && this.#startPromise !== undefined) {
+      // The start caller owns its recovery error. Shutdown owns joining that foreground work so
+      // it cannot continue Git/action/provider recovery after internal admission or lease release.
+      try { await this.#startPromise; }
+      catch { /* expected when the synchronous stop tombstone wins startup */ }
     }
-    await this.#server.stop();
+    try { await this.#server.drainMutationLane(); }
+    catch (error) { failure ??= error; }
+    try { await suspended; }
+    catch (error) { failure ??= error; }
+    try { await this.#supervisor.dispose(); }
+    catch (error) { failure ??= error; }
+    while (
+      this.#backgroundTasks.size > 0 ||
+      this.#activeActionExecutions.size > 0 ||
+      this.#activeAssignmentSettlements.size > 0 ||
+      this.#gitTails.size > 0
+    ) {
+      const task = (this.#backgroundTasks.values().next().value ??
+        this.#activeActionExecutions.values().next().value ??
+        this.#activeAssignmentSettlements.values().next().value ??
+        this.#gitTails.values().next().value) as Promise<unknown> | undefined;
+      if (task === undefined) break;
+      try { await task; }
+      catch (error) { failure ??= error; }
+    }
+    try { await this.#server.drainMutationLane(); }
+    catch (error) { failure ??= error; }
+    this.#server.closeInternalAdmission();
+    // Endpoint/lease release is unconditional even if process retirement or background cleanup
+    // failed, but it happens only after the old engine has lost every mutation capability.
+    try { await this.#server.stop(); }
+    catch (error) { failure ??= error; }
+    if (failure !== undefined) throw failure;
+  }
+
+  /**
+   * Recovery can fail after an earlier run has already admitted a provider session. Convert that
+   * unready startup into the same durable, bounded quiesce transaction before releasing its
+   * lease, so no live attempt is relaunched implicitly by the next authority.
+   */
+  async #settleStartupFailure(): Promise<void> {
+    // The recovering startup epoch is already the crash-forward durable tombstone. Close detached
+    // outcome settlement synchronously before making the server quiescing: abort callbacks were
+    // registered outside the quiesce AsyncLocal context and must be retired by durable settlement.
+    this.#quiesceOutcomeSettlementClosed = true;
+    this.#server.beginStartupFailureQuiesce();
+    await this.#server.runQuiesceSettlement(async () => {
+      let operation = (await this.#store.state()).authorityQuiesce;
+      if (operation === undefined) {
+        // The run whose recovery failed may also be unreadable. Publish the compact process-wide
+        // stop marker from authority metadata alone, before loading any run record. Exact progress
+        // is derived by #finishAuthorityQuiesce; a later read failure deliberately leaves this
+        // marker for inherited recovery instead of releasing an unprotected live predecessor.
+        const state = await this.#store.state();
+        operation = createAuthorityQuiesceOperation({
+          purpose: "startup_failure",
+          requestHash: canonicalHash({
+            protocol: "koni.startup-failure-quiesce.v1",
+            authorityRevision: state.revision,
+          }),
+          idempotencyKey: `startup-failure:${state.revision}`,
+          requestedAt: this.#timestamp(),
+          totalRunCount: state.runIds.length,
+          targetRunCount: 0,
+          pausedRunIds: [],
+          pausedRunIdsTruncated: false,
+        });
+        const admitted = operation;
+        await this.#server.mutateInternal(async ({ revision }) => {
+          const committed = await this.#store.commit({
+            expectedRevision: revision,
+            authorityQuiesce: { expectedSha256: null, value: admitted },
+          });
+          return { revision: committed.state.revision };
+        });
+      }
+      // suspendAll installs its in-memory admission tombstone synchronously. Await it only after
+      // the durable marker exists so a crash at any subsequent run-specific boundary is inherited.
+      const suspended = this.#supervisor.suspendAll("authority startup recovery failed");
+      await suspended;
+      await this.#finishAuthorityQuiesce(operation, true, false, false, true);
+      await this.#clearAuthorityQuiesce(operation);
+    });
+  }
+
+  async #beginStartupEpoch(
+    previous: DurableAuthorityStartupEpoch | undefined,
+  ): Promise<DurableAuthorityStartupEpoch> {
+    const state = await this.#store.state();
+    const expectedSha256 = previous?.sha256 ?? null;
+    if ((state.authorityStartup?.sha256 ?? null) !== expectedSha256) {
+      throw new AuthorityRpcError(
+        "authority_startup_conflict",
+        "durable startup predecessor changed before recovery admission",
+      );
+    }
+    const epoch = createAuthorityStartupEpoch({
+      epochId: `startup-${randomUUID()}`,
+      status: "recovering",
+      startedAt: this.#timestamp(),
+      startingRevision: state.revision,
+    });
+    await this.#server.mutateInternal(async ({ revision }) => {
+      await this.#store.replaceAuthorityStartup(expectedSha256, epoch);
+      return { revision };
+    });
+    return epoch;
+  }
+
+  async #markStartupEpochReady(
+    epoch: DurableAuthorityStartupEpoch,
+  ): Promise<DurableAuthorityStartupEpoch> {
+    const ready = createAuthorityStartupEpoch({
+      epochId: epoch.epochId,
+      status: "ready",
+      startedAt: epoch.startedAt,
+      startingRevision: epoch.startingRevision,
+      readyAt: this.#timestamp(),
+    });
+    await this.#server.mutateInternal(async ({ revision }) => {
+      await this.#store.replaceAuthorityStartup(epoch.sha256, ready);
+      return { revision };
+    });
+    return ready;
   }
 
   /** Resume every persisted two-phase intent without inventing new semantic state. */
   public async recover(): Promise<void> {
-    const runs = await this.#store.listRuns({ includeDeleted: true });
-    for (const persisted of runs) {
-      await this.#recoverGitIntents(persisted.id);
-      const compatibility = await this.#store.getRun(persisted.id);
-      if (
-        compatibility.legacyGitMigration?.status === "relocation_required" &&
-        compatibility.lifecycle.phase !== "deleting" &&
-        compatibility.lifecycle.phase !== "deleted"
-      ) {
-        await this.#relocateLegacyRun(compatibility.id);
-      }
-      await this.#recoverWorkspaceEffects(persisted.id);
-      await this.#recoverPendingChecks(persisted.id);
-      const run = await this.#store.getRun(persisted.id);
-      if (run.lifecycle.phase === "deleted") {
-        await this.#supervisor.deleteRun(run.id);
+    this.#assertStartupMayContinue();
+    const scan = await this.#store.runScanSnapshot();
+    this.#assertStartupMayContinue();
+    for (const runId of scan.runIds) {
+      this.#assertStartupMayContinue();
+      let observed: RunRecord | undefined = await scan.getRun(runId);
+      this.#assertStartupMayContinue();
+      const initialPhase = observed.lifecycle.phase;
+      const hasPendingGit = Object.keys(observed.pendingGitIntents ?? {}).length > 0;
+      let relocationRequired = observed.legacyGitMigration?.status === "relocation_required" &&
+        initialPhase !== "deleting" && initialPhase !== "deleted";
+      observed = undefined;
+      // Blocked is a durable human boundary, including an already-authorized terminal-resolver
+      // retry. Startup never replays Git, actions, provider settlement, scheduling, or launches
+      // for it; one explicit run.resume consumes the pending retry or performs the normal retry.
+      // Ordinary blocked work is an inert human boundary. A legacy relocation is the one narrow
+      // exception: migration deliberately blocks the old admission path before startup performs
+      // its proof-gated Git move, and the exact relocation settlement restores the prior phase.
+      if (initialPhase === "blocked" && !relocationRequired) continue;
+      if (initialPhase === "deleted") {
+        if (hasPendingGit) {
+          await this.#recoverGitIntents(runId);
+          this.#assertStartupMayContinue();
+        }
+        await this.#supervisor.deleteRun(runId);
+        this.#assertStartupMayContinue();
         continue;
       }
-      if (run.lifecycle.phase === "draft") {
-        await this.#initializeRun(run.id);
-      } else if (run.lifecycle.phase === "approving") {
-        await this.#settleApprove(run.id);
-      } else if (run.lifecycle.phase === "pausing") {
-        await this.#settlePause(run.id);
-      } else if (run.lifecycle.phase === "deleting") {
-        await this.#settleDelete(run.id);
-      } else if (run.lifecycle.phase === "merging") {
-        await this.#settleMerge(run.id);
-      } else if (run.lifecycle.phase === "planning") {
-        this.#supervisor.resumeRun(run.id);
-        await this.#recoverInFlight(run.id);
-        const current = await this.#store.getRun(run.id);
-        if (!hasLiveAttempt(current, "planning")) await this.#launchPlanning(run.id);
-      } else if (run.lifecycle.phase === "executing" || run.lifecycle.phase === "verifying") {
-        this.#supervisor.resumeRun(run.id);
-        await this.#recoverInFlight(run.id);
-        await this.#tick(run.id);
+      if (hasPendingGit) {
+        await this.#recoverGitIntents(runId);
+        this.#assertStartupMayContinue();
+        observed = await this.#store.getRun(runId);
+        this.#assertStartupMayContinue();
+        relocationRequired = observed.legacyGitMigration?.status === "relocation_required" &&
+          observed.lifecycle.phase !== "deleting" && observed.lifecycle.phase !== "deleted";
+        observed = undefined;
+      }
+      if (relocationRequired) {
+        await this.#relocateLegacyRun(runId);
+        this.#assertStartupMayContinue();
+      }
+      await this.#recoverWorkspaceEffects(runId);
+      this.#assertStartupMayContinue();
+      await this.#recoverPendingChecks(runId);
+      this.#assertStartupMayContinue();
+      await this.#recoverPendingQuestionBatches(runId);
+      this.#assertStartupMayContinue();
+      observed = await this.#store.getRun(runId);
+      this.#assertStartupMayContinue();
+      const phaseAfterEffects = observed.lifecycle.phase;
+      observed = undefined;
+      if (phaseAfterEffects === "deleted") {
+        await this.#supervisor.deleteRun(runId);
+        this.#assertStartupMayContinue();
+        continue;
+      }
+      // An active phase may become blocked while non-provider recovery settles. It becomes the
+      // same inert human boundary immediately, and inherited quiesce additionally documents why
+      // this check must precede every configured action/retry path.
+      if (phaseAfterEffects === "blocked") continue;
+      await this.#recoverConfiguredActions(runId);
+      this.#assertStartupMayContinue();
+      observed = await this.#store.getRun(runId);
+      this.#assertStartupMayContinue();
+      const recoveredPhase = observed.lifecycle.phase;
+      observed = undefined;
+      if (recoveredPhase === "draft") {
+        await this.#initializeRun(runId);
+        this.#assertStartupMayContinue();
+      } else if (recoveredPhase === "approving") {
+        await this.#settleApprove(runId);
+        this.#assertStartupMayContinue();
+      } else if (recoveredPhase === "pausing") {
+        await this.#settlePause(runId);
+        this.#assertStartupMayContinue();
+      } else if (recoveredPhase === "deleting") {
+        await this.#settleDelete(runId);
+        this.#assertStartupMayContinue();
+      } else if (recoveredPhase === "merging") {
+        await this.#settleMerge(runId);
+        this.#assertStartupMayContinue();
+      } else if (recoveredPhase === "planning") {
+        this.#assertStartupMayContinue();
+        this.#supervisor.resumeRun(runId);
+        await this.#recoverInFlight(runId);
+        this.#assertStartupMayContinue();
+        observed = await this.#store.getRun(runId);
+        this.#assertStartupMayContinue();
+        const needsPlanning = !hasLiveAttempt(observed, "planning");
+        observed = undefined;
+        if (needsPlanning) await this.#launchPlanning(runId);
+      } else if (recoveredPhase === "executing" || recoveredPhase === "verifying") {
+        this.#assertStartupMayContinue();
+        this.#supervisor.resumeRun(runId);
+        await this.#recoverInFlight(runId);
+        this.#assertStartupMayContinue();
+        await this.#tick(runId);
+        this.#assertStartupMayContinue();
       }
     }
   }
 
+  async #recoverConfiguredActions(runId: string): Promise<void> {
+    let run = await this.#store.getRun(runId);
+    if (run.behavior === undefined || new Set<RunPhase>([
+      "blocked", "completed", "failed", "pausing", "paused", "deleting", "deleted",
+    ]).has(run.lifecycle.phase)) {
+      return;
+    }
+    const actions = Object.values(run.actionExecutions ?? {})
+      .filter((record) => record.boundary.generation === run.generation)
+      .sort((left, right) => left.boundary.admittedRunRevision - right.boundary.admittedRunRevision ||
+        left.invocationId.localeCompare(right.invocationId));
+    for (const candidate of actions) {
+      run = await this.#store.getRun(runId);
+      this.#assertStartupMayContinue();
+      let current = run.actionExecutions?.[candidate.invocationId];
+      if (current === undefined || current.settledAt !== undefined) continue;
+      // Approval compilation has a stronger workspace precondition than generic action replay:
+      // #settleApprove must first recover/materialize the permanent run checkout.
+      if (current.boundary.kind === "approved_plan_compile") continue;
+      try {
+        if (!isTerminalActionJournal(current.journal)) {
+          if (current.expectedRunRevision !== run.revision) {
+            this.#assertStartupMayContinue();
+            await this.#adoptRunActionRevision(runId, current.invocationId);
+            run = await this.#store.getRun(runId);
+            current = run.actionExecutions?.[candidate.invocationId];
+            if (current === undefined || current.settledAt !== undefined) continue;
+          }
+          this.#assertStartupMayContinue();
+          await this.#executeRunAction(runId, current.invocationId);
+        }
+        let refreshed = requiredRunActionExecution(await this.#store.getRun(runId), current.invocationId);
+        if (refreshed.journal.status === "recovery_required" && refreshed.recoverySettledAt === undefined) {
+          this.#assertStartupMayContinue();
+          await this.#executeRunActionRecovery(runId, refreshed.invocationId);
+          refreshed = requiredRunActionExecution(await this.#store.getRun(runId), refreshed.invocationId);
+        }
+        if (refreshed.boundary.kind === "assignment_validation" && refreshed.journal.status === "completed") {
+          this.#assertStartupMayContinue();
+          await this.#settleAssignmentValidation(runId, refreshed.invocationId);
+        } else if (refreshed.boundary.kind === "configured_stage" && refreshed.journal.status === "completed") {
+          this.#assertStartupMayContinue();
+          await this.#settleConfiguredStageAction(runId, refreshed.invocationId);
+        }
+      } catch (error) {
+        if (error instanceof RunAdvancementStoppedError) throw error;
+        await this.#recordRunBlocker(runId, `Configured action recovery failed: ${errorMessage(error)}`);
+        return;
+      }
+    }
+  }
+
+  /**
+   * A sealed batch may outlive the Pi process that was waiting for it.  Recovery must never
+   * leave that run permanently suspended, nor pretend the old in-memory continuation still
+   * exists: resolve the durable hand-off and force a fresh, answer-linked attempt instead.
+   */
+  async #recoverPendingQuestionBatches(runId: string): Promise<void> {
+    const run = await this.#store.getRun(runId);
+    const pending = Object.values(run.questionBatches ?? {})
+      .filter((batch) => batch.status === "pending_resume")
+      .sort((left, right) => left.id.localeCompare(right.id));
+    for (const candidate of pending) {
+      this.#assertStartupMayContinue();
+      await this.#server.mutateInternal(async ({ revision }) => {
+        const current = await this.#store.getRun(runId);
+        const batch = current.questionBatches?.[candidate.id];
+        if (batch === undefined || batch.status !== "pending_resume") {
+          return { revision };
+        }
+        const resolution = projectQuestionBatchResolution(batch);
+        const draft = nextRun(current, this.#timestamp());
+        draft.questionBatches ??= {};
+        draft.questionBatches[batch.id] = resolveQuestionBatch(batch, {
+          expectedVersion: batch.version,
+          at: draft.updatedAt,
+        });
+        applyBatchResolutionToLegacyQuestions(draft, resolution, draft.updatedAt);
+        if (draft.lifecycle.pendingQuestions.some((question) => question.id === batch.id)) {
+          applyLifecycle(draft, {
+            type: "question_answered",
+            atMs: this.#now().getTime(),
+            questionId: batch.id,
+            answer: questionBatchAnswerSummary(resolution),
+          });
+        }
+        const attempt = draft.attempts[batch.attemptId];
+        if (attempt !== undefined && !isTerminalAttempt(attempt.status)) {
+          interruptAttemptForContinuation(draft, attempt, draft.updatedAt);
+        }
+        const committed = await this.#store.commit({
+          expectedRevision: revision,
+          runWrites: [{ record: draft, expectedRevision: current.revision }],
+        });
+        return {
+          revision: committed.state.revision,
+          events: [{
+            topic: "run.question.recovered",
+            payload: { runId, batchId: batch.id, attemptId: batch.attemptId },
+          }],
+        };
+      });
+    }
+  }
+
   /** Recover Git before workspace/session effects so every attempt sees its exact owned checkout. */
-  async #recoverGitIntents(runId: string): Promise<void> {
+  async #recoverGitIntents(runId: string, stopPublications = false): Promise<void> {
     let run = await this.#store.getRun(runId);
     for (const intentId of Object.keys(run.pendingGitIntents ?? {}).sort()) {
       run = await this.#store.getRun(runId);
+      this.#assertStartupMayContinue();
       const intent = run.pendingGitIntents?.[intentId];
       if (intent === undefined) continue;
       let recovered: { status: "completed" | "preserved"; reason?: string };
       if (intent.kind === "legacy_run_relocate" || intent.kind === "legacy_run_retire") {
+        this.#assertStartupMayContinue();
         const compatibility = await this.#withGit(runId, () =>
           this.#legacyGit.recover(run, intent, this.#legacyGitJournal(runId)));
         recovered = compatibility.status === "preserved"
           ? { status: "preserved", reason: compatibility.reason }
           : { status: "completed" };
+      } else if ((stopPublications || isStoppedPhase(run.lifecycle.phase)) && isPublicationIntent(intent)) {
+        this.#assertStartupMayContinue();
+        recovered = await this.#withGit(runId, () =>
+          this.#cancelStoppedPublication(run, intent));
       } else {
+        this.#assertStartupMayContinue();
         recovered = await this.#withGit(runId, () =>
           this.#git.recoverIntent(run.git, intent, this.#gitJournal(runId)));
       }
       if (
         recovered.status === "preserved" &&
-        !new Set(["blocked", "deleting", "deleted", "completed"]).has(run.lifecycle.phase)
+        !new Set(["blocked", "pausing", "paused", "deleting", "deleted", "completed"])
+          .has(run.lifecycle.phase)
       ) {
         await this.#recordRunBlocker(
           runId,
@@ -590,12 +1568,88 @@ export class RunAuthorityEngine {
   }
 
   /**
+   * A stop that wins after publication intent prepare but before settlement must not turn that
+   * external ref move into semantic completion. Roll it back only under exact candidate CAS and
+   * a clean owned checkout; otherwise preserve the ambiguity explicitly without touching the ref.
+   */
+  async #cancelStoppedPublication(
+    run: RunRecord,
+    intent: Extract<GitLifecycleIntent, { kind: "ticket_publish" | "target_publish" }>,
+  ): Promise<{ status: "completed" | "preserved"; reason?: string }> {
+    const repository = new GitClient(run.git.projectRoot);
+    const reference = intent.kind === "ticket_publish" ? intent.runRef : intent.targetRef;
+    const priorOid = intent.kind === "ticket_publish" ? intent.expectedRunOid : intent.expectedTargetOid;
+    const candidateOid = intent.kind === "ticket_publish" ? intent.squashCommitOid : intent.candidateOid;
+    const checkoutPath = intent.kind === "ticket_publish" ? intent.runWorktree : intent.targetCheckout;
+    const currentOid = await repository.tryResolveRef(reference);
+    let reason = "Stopped run cancelled its prepared Git publication before semantic settlement";
+    let preserved = false;
+
+    if (currentOid !== priorOid && currentOid !== candidateOid) {
+      preserved = true;
+      reason = `Stopped publication ref changed outside its exact CAS (${currentOid ?? "missing"})`;
+    } else {
+      let checkout: GitClient | undefined;
+      if (checkoutPath !== undefined) {
+        checkout = new GitClient(checkoutPath);
+        if ((await checkout.statusEntries()).length !== 0) {
+          preserved = true;
+          reason = "Stopped publication checkout is dirty; preserving it without destructive compensation";
+        }
+      }
+      if (!preserved) {
+        if (currentOid === candidateOid) {
+          await repository.updateRef(reference, priorOid, candidateOid);
+        }
+        if (checkout !== undefined) {
+          try {
+            await checkout.resetHard(priorOid);
+          } catch (error) {
+            preserved = true;
+            reason = `Stopped publication ref was compensated but checkout repair failed: ${errorMessage(error)}`;
+          }
+        }
+      }
+    }
+
+    const lifecycle = structuredClone(run.git);
+    if (preserved) {
+      if (intent.kind === "ticket_publish") {
+        lifecycle.run.status = "preserved";
+        lifecycle.run.blocker = reason;
+        const cycle = lifecycle.ticketCycles[intent.cycleId];
+        if (cycle !== undefined) {
+          cycle.status = "preserved";
+          cycle.blocker = reason;
+        }
+      } else if (lifecycle.promotion !== undefined) {
+        lifecycle.promotion.status = "preserved";
+        lifecycle.promotion.blocker = reason;
+      }
+    }
+    await this.#gitJournal(run.id, undefined, true).settle(intent.id, {
+      status: "blocked",
+      settledAt: this.#timestamp(),
+      lifecycle,
+      reason,
+      compensation: {
+        originalIntentId: intent.id,
+        priorOid,
+        candidateOid,
+      },
+    });
+    return preserved ? { status: "preserved", reason } : { status: "completed" };
+  }
+
+  /**
    * Quiesce the compatibility run before the first relocation effect. The
    * migrated lifecycle is already blocked, but aborting the supervisor and
    * durably interrupting any stale attempts closes the old admission path too.
    */
   async #relocateLegacyRun(runId: string): Promise<void> {
+    this.#assertStartupMayContinue();
     await this.#supervisor.abortByRun(runId, "legacy Git workspace relocation");
+    this.#assertStartupMayContinue();
     await this.#server.mutateInternal(async ({ revision }) => {
       const run = await this.#store.getRun(runId);
       if (run.legacyGitMigration?.status !== "relocation_required") {
@@ -615,6 +1669,7 @@ export class RunAuthorityEngine {
       });
       return { revision: committed.state.revision };
     });
+    this.#assertStartupMayContinue();
     const result = await this.#withGit(runId, async () => {
       const current = await this.#store.getRun(runId);
       return this.#legacyGit.relocate(current, this.#legacyGitJournal(runId));
@@ -679,15 +1734,40 @@ export class RunAuthorityEngine {
    * Each prepare and settle is serialized through the same authority lane as RPCs and sessions.
    * The external Git effect happens between those durable commits inside IsolatedGitLifecycle.
    */
-  #gitJournal(runId: string): GitIntentJournal {
+  #gitJournal(
+    runId: string,
+    advancement?: RunAdvancementToken,
+    allowStoppedPublicationSettlement = false,
+  ): GitIntentJournal {
     return {
       prepare: async (intent) => {
         await this.#server.mutateInternal(async ({ revision }) =>
-          this.#prepareGitIntent(runId, intent, revision));
+          this.#prepareGitIntent(runId, intent, revision, advancement));
       },
       settle: async (intentId, settlement) => {
+        if (advancement !== undefined) {
+          const run = await this.#store.getRun(runId);
+          const intent = run.pendingGitIntents?.[intentId];
+          if (intent?.kind === "run_materialize") {
+            await this.#lifecycleRacePoint("before_run_materialization_settle", runId);
+          } else if (intent !== undefined && isPublicationIntent(intent)) {
+            await this.#lifecycleRacePoint(
+              "before_publication_settle",
+              runId,
+              intent.kind === "ticket_publish"
+                ? run.git.ticketCycles[intent.cycleId]?.ticketId
+                : undefined,
+            );
+          }
+        }
         await this.#server.mutateInternal(async ({ revision }) =>
-          this.#settleGitIntent(runId, intentId, settlement, revision));
+          this.#settleGitIntent(
+            runId,
+            intentId,
+            settlement,
+            revision,
+            allowStoppedPublicationSettlement,
+          ));
       },
       supersedeWithCompensation: async (failedIntentId, failedSettlement, compensation) => {
         await this.#server.mutateInternal(async ({ revision }) =>
@@ -706,8 +1786,12 @@ export class RunAuthorityEngine {
     runId: string,
     intent: GitLifecycleIntent,
     revision: number,
+    advancement?: RunAdvancementToken,
   ): Promise<AuthorityMethodResult> {
     const run = await this.#store.getRun(runId);
+    if (advancement !== undefined && !this.#matchesAdvancement(run, advancement)) {
+      throw new RunAdvancementStoppedError();
+    }
     if (
       intent.runId !== run.id ||
       intent.projectRoot !== run.git.projectRoot ||
@@ -737,10 +1821,20 @@ export class RunAuthorityEngine {
     intentId: string,
     settlement: GitIntentSettlement,
     revision: number,
+    allowStoppedPublicationSettlement = false,
   ): Promise<AuthorityMethodResult> {
     const run = await this.#store.getRun(runId);
     const intent = run.pendingGitIntents?.[intentId];
     if (intent === undefined) return this.#noOpInternal(revision);
+    if (
+      !allowStoppedPublicationSettlement &&
+      isStoppedPhase(run.lifecycle.phase) &&
+      isPublicationIntent(intent)
+    ) {
+      // The ref may already have moved after this exact intent was durably prepared. Leave the
+      // intent intact so the stop-settlement lane can CAS-compensate or preserve it explicitly.
+      throw new RunAdvancementStoppedError();
+    }
     if (
       settlement.lifecycle.runId !== run.id ||
       settlement.lifecycle.projectRoot !== run.git.projectRoot ||
@@ -988,6 +2082,7 @@ export class RunAuthorityEngine {
 
   async #recoverPendingChecks(runId: string): Promise<void> {
     const run = await this.#store.getRun(runId);
+    this.#assertStartupMayContinue();
     const pending = Object.values(run.pendingChecks ?? {}).sort((left, right) => left.id.localeCompare(right.id));
     if (pending.length === 0 || run.lifecycle.phase === "deleting" || run.lifecycle.phase === "deleted") return;
     // External commands are deliberately never replayed from a mere intent: a prior process may
@@ -1004,6 +2099,7 @@ export class RunAuthorityEngine {
     const effectIds = Object.keys(run.pendingEffects ?? {}).sort();
     for (const effectId of effectIds) {
       run = await this.#store.getRun(runId);
+      this.#assertStartupMayContinue();
       const intent = run.pendingEffects?.[effectId];
       if (intent === undefined) continue;
       if (run.lifecycle.phase === "deleting" || run.lifecycle.phase === "deleted") continue;
@@ -1013,7 +2109,9 @@ export class RunAuthorityEngine {
         return;
       }
       try {
+        this.#assertStartupMayContinue();
         const spec = await this.#loadStoredLaunchSpec(run, attempt);
+        this.#assertStartupMayContinue();
         const prepared = await this.#program.recoverAttempt({ run, attempt, spec });
         assertRecoveredAuthorityPlan(prepared, spec, this.#projectRoot, this.#stateRoot);
         const grant = prepared.authorityGrant;
@@ -1031,6 +2129,7 @@ export class RunAuthorityEngine {
           intent.contentArtifactPath,
           Math.max(1, intent.contentSizeBytes + 1),
         );
+        this.#assertStartupMayContinue();
         if (bytes.byteLength !== intent.contentSizeBytes || rawSha256(bytes) !== intent.desiredSha256) {
           throw new AuthorityRpcError("effect_content", "pending workspace effect content changed");
         }
@@ -1038,9 +2137,12 @@ export class RunAuthorityEngine {
           readPaths: grant.readPaths,
           writePaths: grant.writePaths,
         });
+        this.#assertStartupMayContinue();
         await applyWorkspaceEffect(paths, intent, bytes);
+        this.#assertStartupMayContinue();
         await this.#finalizeRecoveredWorkspaceEffect(runId, effectId, intent);
       } catch (error) {
+        if (error instanceof RunAdvancementStoppedError) throw error;
         await this.#recordRunBlocker(
           runId,
           `Workspace effect ${effectId} requires reconciliation: ${errorMessage(error)}`,
@@ -1154,6 +2256,7 @@ export class RunAuthorityEngine {
   }
 
   #registerMethods(): void {
+    registerMonitorAuthorityMethods(this.#server, this.#store);
     this.#server.register("project.status", {
       mutating: false,
       handle: async () => {
@@ -1188,6 +2291,28 @@ export class RunAuthorityEngine {
         return { result: await this.#program.controlCatalog() as unknown as JsonValue };
       },
     });
+    this.#server.register("control.cockpit", {
+      mutating: false,
+      handle: async ({ request }) => {
+        assertExactParams(request.params, ["runId", "configurationSha256"]);
+        const run = await this.#store.getRun(requiredString(request.params, "runId"));
+        const expectedConfigurationSha256 = requiredSha256(request.params, "configurationSha256");
+        if (run.compiledConfigHash !== expectedConfigurationSha256) {
+          throw new AuthorityRpcError(
+            "cockpit_configuration_binding",
+            "cockpit request does not match the selected run's compiled configuration",
+          );
+        }
+        if (this.#program.projectCockpitCatalog === undefined) {
+          throw new AuthorityRpcError("cockpit_catalog_unavailable", "compiler does not expose cockpit configuration");
+        }
+        const catalog = parseCompiledCockpitViewCatalog(
+          await this.#program.projectCockpitCatalog(run),
+          expectedConfigurationSha256,
+        );
+        return { result: catalog as unknown as JsonValue };
+      },
+    });
     this.#server.register("config.catalog", {
       mutating: false,
       handle: async () => {
@@ -1216,15 +2341,226 @@ export class RunAuthorityEngine {
         handle: async ({ request, revision }) => this.#mutateConfigurationResource(request, revision, kind),
       });
     }
+    this.#server.register("config.documents.list", {
+      mutating: false,
+      handle: async ({ request }) => {
+        assertExactParams(request.params, []);
+        try {
+          return { result: await (await this.#configDocumentAuthority()).list() as unknown as JsonValue };
+        } catch (error) {
+          throw configDocumentRpcError(error, "config_document_catalog");
+        }
+      },
+    });
+    this.#server.register("config.documents.read", {
+      mutating: false,
+      handle: async ({ request }) => {
+        assertExactParams(request.params, ["catalogToken", "documentId"]);
+        try {
+          return {
+            result: await (await this.#configDocumentAuthority()).read({
+              documentId: requiredString(request.params, "documentId"),
+              catalogToken: requiredSha256(request.params, "catalogToken"),
+            }) as unknown as JsonValue,
+          };
+        } catch (error) {
+          throw configDocumentRpcError(error, "config_document_read");
+        }
+      },
+    });
+    this.#server.register("config.documents.update", {
+      mutating: true,
+      handle: async ({ request, revision }) => this.#updateConfigDocument(request, revision),
+    });
+    this.#server.register("config.documents.create", {
+      mutating: true,
+      handle: async ({ request, revision }) => this.#createConfigDocument(request, revision),
+    });
+    this.#server.register("config.documents.rename", {
+      mutating: true,
+      handle: async ({ request, revision }) => this.#renameConfigDocument(request, revision),
+    });
+    this.#server.register("config.documents.delete", {
+      mutating: true,
+      handle: async ({ request, revision }) => this.#deleteConfigDocument(request, revision),
+    });
+    this.#server.register("config.run-types.templates", {
+      mutating: false,
+      handle: async ({ request }) => {
+        assertExactParams(request.params, []);
+        try {
+          return {
+            result: await (await this.#configDocumentAuthority()).runTypeTemplates() as unknown as JsonValue,
+          };
+        } catch (error) {
+          throw configDocumentRpcError(error, "config_run_type_templates");
+        }
+      },
+    });
+    this.#server.register("config.run-types.create", {
+      mutating: true,
+      handle: async ({ request, revision }) => this.#createConfigRunType(request, revision),
+    });
+    this.#server.register("config.legacy-migration.preview", {
+      mutating: false,
+      handle: async ({ request }) => {
+        const params = request.params ?? {};
+        assertAllowedParams(params, ["inspectRuns", "migrationId"]);
+        const migrationId = optionalString(params, "migrationId");
+        const inspectRuns = optionalBoolean(params, "inspectRuns");
+        try {
+          return {
+            result: await (await this.#configDocumentAuthority()).previewLegacyMigration({
+              ...(migrationId === undefined ? {} : { migrationId }),
+              ...(inspectRuns === undefined ? {} : { inspectRuns }),
+            }) as unknown as JsonValue,
+          };
+        } catch (error) {
+          throw configDocumentRpcError(error, "config_legacy_migration_preview");
+        }
+      },
+    });
+    this.#server.register("config.legacy-migration.apply", {
+      mutating: true,
+      handle: async ({ request, revision }) => this.#applyConfigLegacyMigration(request, revision),
+    });
+    this.#server.register("profile.conflicts.list", {
+      mutating: false,
+      handle: async ({ request }) => {
+        assertExactParams(request.params, []);
+        const packageRoot = await this.#currentProfilePackageRoot();
+        try {
+          return {
+            result: await listProjectProfileConflicts(this.#projectRoot, packageRoot) as unknown as JsonValue,
+          };
+        } catch (error) {
+          throw profileConflictRpcError(error, "profile_conflicts_list");
+        }
+      },
+    });
+    this.#server.register("profile.conflicts.inspect", {
+      mutating: false,
+      handle: async ({ request }) => {
+        assertExactParams(request.params, ["path"]);
+        const packageRoot = await this.#currentProfilePackageRoot();
+        try {
+          return {
+            result: await inspectProjectProfileConflict(
+              this.#projectRoot,
+              packageRoot,
+              requiredString(request.params, "path"),
+            ) as unknown as JsonValue,
+          };
+        } catch (error) {
+          throw profileConflictRpcError(error, "profile_conflict_inspect");
+        }
+      },
+    });
+    this.#server.register("profile.conflicts.resolve", {
+      mutating: true,
+      handle: async ({ request, revision }) => this.#resolveProfileConflict(request, revision),
+    });
     this.#server.register("run.list", {
       mutating: false,
-      handle: async () => ({ result: await this.#store.listRuns() as unknown as JsonValue }),
+      handle: async () => {
+        try {
+          return { result: await this.#store.listRunsForLegacyFrame() as unknown as JsonValue };
+        } catch (error) {
+          throw projectStoreRpcError(error, "run_list");
+        }
+      },
+    });
+    this.#server.register("run.page", {
+      mutating: false,
+      handle: async ({ request }) => {
+        const params = request.params ?? {};
+        assertAllowedParams(params, ["limit", "cursor", "includeDeleted", "aroundRunId"]);
+        const limit = optionalPositiveInt(params, "limit", 50);
+        if (limit > MAX_RUN_SUMMARY_PAGE_LIMIT) {
+          throw new AuthorityRpcError(
+            "params",
+            `limit must not exceed ${MAX_RUN_SUMMARY_PAGE_LIMIT}`,
+          );
+        }
+        const cursor = optionalString(params, "cursor");
+        const aroundRunId = optionalString(params, "aroundRunId");
+        if (cursor !== undefined && aroundRunId !== undefined) {
+          throw new AuthorityRpcError("params", "cursor and aroundRunId are mutually exclusive");
+        }
+        try {
+          return {
+            result: await this.#store.runSummaryPage({
+              limit,
+              includeDeleted: optionalBoolean(params, "includeDeleted") === true,
+              ...(cursor === undefined ? {} : { cursor }),
+              ...(aroundRunId === undefined ? {} : { aroundRunId }),
+            }) as unknown as JsonValue,
+          };
+        } catch (error) {
+          throw projectStoreRpcError(error, "run_page");
+        }
+      },
     });
     this.#server.register("run.get", {
       mutating: false,
-      handle: async ({ request }) => ({
-        result: await this.#store.getRun(requiredString(request.params, "runId")) as unknown as JsonValue,
-      }),
+      handle: async ({ request }) => {
+        const params = request.params ?? {};
+        assertAllowedParams(params, ["runId", "authorityRevision", "runRevision"]);
+        const runId = requiredString(params, "runId");
+        const hasAuthorityRevision = Object.hasOwn(requiredObject(params), "authorityRevision");
+        const hasRunRevision = Object.hasOwn(requiredObject(params), "runRevision");
+        if (hasAuthorityRevision !== hasRunRevision) {
+          throw new AuthorityRpcError(
+            "params",
+            "revision-bound run.get requires both authorityRevision and runRevision",
+          );
+        }
+        try {
+          const run = hasAuthorityRevision
+            ? await this.#store.getRunAtRevision({
+                runId,
+                authorityRevision: requiredNonnegativeInt(params, "authorityRevision"),
+                runRevision: requiredNonnegativeInt(params, "runRevision"),
+              })
+            : await this.#store.getRun(runId);
+          return { result: run as unknown as JsonValue };
+        } catch (error) {
+          throw projectStoreRpcError(error, "run_get");
+        }
+      },
+    });
+    this.#server.register("proposal.inspect", {
+      mutating: false,
+      handle: async ({ request }) => {
+        assertExactParams(request.params, ["runId", "ticketId"]);
+        const run = await this.#store.getRun(requiredString(request.params, "runId"));
+        const ticketId = requiredString(request.params, "ticketId");
+        const ticket = run.tickets[ticketId];
+        if (ticket?.executionControl?.proposalRequest === undefined) {
+          throw new AuthorityRpcError("proposal_missing", "ticket is not a durable change proposal");
+        }
+        return { result: projectControlProposalInspection(run, ticket) as unknown as JsonValue };
+      },
+    });
+    this.#server.register("proposal.decide", {
+      mutating: true,
+      handle: async ({ request, revision }) => this.#decideProposal(request, revision),
+    });
+    this.#server.register("terminal-resolver.retry", {
+      mutating: true,
+      handle: async ({ request, revision }) => this.#requestTerminalResolverRetry(request, revision),
+      afterIdempotentReplay: ({ request }, response) => {
+        const runId = requiredString(request.params, "runId");
+        const replayResult = response.result;
+        if (!isRecord(replayResult) || replayResult.status !== "requested") return;
+        const resolverTicketId = replayResult.resolverTicketId;
+        const retryRequestSha256 = replayResult.retryRequestSha256;
+        if (typeof resolverTicketId !== "string" || !isSha256Digest(retryRequestSha256)) return;
+        this.#background(() => this.#continuePendingTerminalResolverRetry(runId, {
+          resolverTicketId,
+          retryRequestSha256,
+        }), runId);
+      },
     });
     this.#server.register("run.graph", {
       mutating: false,
@@ -1240,9 +2576,32 @@ export class RunAuthorityEngine {
         return { result: graph as unknown as JsonValue };
       },
     });
+    this.#server.register("run.lineage", {
+      mutating: false,
+      handle: async ({ request }) => {
+        assertAllowedParams(request.params, ["runId", "ticketId"]);
+        const run = await this.#store.getRun(requiredString(request.params, "runId"));
+        const ticketId = optionalString(request.params, "ticketId");
+        if (ticketId !== undefined && run.tickets[ticketId] === undefined) {
+          throw new AuthorityRpcError("ticket_missing", "lineage projection ticket does not exist");
+        }
+        return {
+          result: await this.#attemptLineageProjection(run, ticketId) as unknown as JsonValue,
+        };
+      },
+    });
+    this.#server.register("run.controls", {
+      mutating: false,
+      handle: async ({ request }) => {
+        assertExactParams(request.params, ["runId"]);
+        const run = await this.#store.getRun(requiredString(request.params, "runId"));
+        return { result: await this.#stageCapabilityCatalog(run) as unknown as JsonValue };
+      },
+    });
     this.#server.register("run.transcript", {
       mutating: false,
       handle: async ({ request }) => {
+        assertAllowedParams(request.params, ["runId", "attemptId", "cursor", "limit"]);
         const run = await this.#store.getRun(requiredString(request.params, "runId"));
         const attemptId = requiredString(request.params, "attemptId");
         const attempt = run.attempts[attemptId];
@@ -1254,17 +2613,24 @@ export class RunAuthorityEngine {
         if (path.resolve(attempt.sessionFile) !== path.resolve(expectedSessionFile)) {
           throw new AuthorityRpcError("transcript_path", "attempt transcript path differs from its launch spec");
         }
-        const session = await readPiSession(expectedSessionFile, { allowTruncatedTail: true });
-        if (session.header.id !== attempt.sessionId) {
-          throw new AuthorityRpcError("transcript_identity", "Pi transcript belongs to another session");
+        const cursor = optionalString(request.params, "cursor");
+        const limit = optionalPositiveInt(request.params, "limit", 24);
+        try {
+          const page = await readAutonomousPiTranscriptPage(expectedSessionFile, {
+            sessionId: attempt.sessionId,
+            cwd: spec.workspace.cwd,
+            ...(spec.lineage.conversationFork === undefined
+              ? {}
+              : { parentSession: conversationParentSessionFile(spec) }),
+          }, {
+            ...(cursor === undefined ? {} : { cursor }),
+            limit,
+            maxBytes: spec.budgets.transcript.maxBytes,
+          });
+          return { result: page as unknown as JsonValue };
+        } catch (error) {
+          throw new AuthorityRpcError(errorCode(error) ?? "transcript_invalid", errorMessage(error));
         }
-        return {
-          result: {
-            header: session.header,
-            entries: session.entries,
-            diagnostics: session.diagnostics,
-          } as unknown as JsonValue,
-        };
       },
     });
     this.#server.register("migration.legacy.preview", {
@@ -1288,6 +2654,31 @@ export class RunAuthorityEngine {
     this.#server.register("run.resume", {
       mutating: true,
       handle: async ({ request, revision }) => this.#resumeRun(request, revision),
+      afterIdempotentReplay: ({ request }, response) => {
+        const runId = requiredString(request.params, "runId");
+        const replayResult = response.result;
+        if (!isRecord(replayResult) || replayResult.status !== "retrying") return;
+        const resolverTicketId = replayResult.resolverTicketId;
+        const retryRequestSha256 = replayResult.retryRequestSha256;
+        if (typeof resolverTicketId !== "string" || !isSha256Digest(retryRequestSha256)) return;
+        this.#background(() => this.#continuePendingTerminalResolverRetry(runId, {
+          resolverTicketId,
+          retryRequestSha256,
+        }), runId);
+      },
+    });
+    this.#server.register("run.action.execute", {
+      mutating: true,
+      handle: async ({ request, revision }) => this.#executeStageAction(request, revision),
+    });
+    this.#server.register("run.deletion.inspect", {
+      mutating: false,
+      handle: async ({ request }) => {
+        assertExactParams(request.params, ["runId"]);
+        return {
+          result: await this.#deletionPreview(requiredString(request.params, "runId")) as unknown as JsonValue,
+        };
+      },
     });
     this.#server.register("run.delete", {
       mutating: true,
@@ -1304,6 +2695,37 @@ export class RunAuthorityEngine {
     this.#server.register("question.answer", {
       mutating: true,
       handle: async ({ request, revision }) => this.#answerQuestion(request, revision),
+    });
+    this.#server.register("question.batch.inspect", {
+      mutating: false,
+      handle: async ({ request }) => {
+        assertExactParams(request.params, ["runId", "batchId"]);
+        const run = await this.#store.getRun(requiredString(request.params, "runId"));
+        const batch = run.questionBatches?.[requiredString(request.params, "batchId")];
+        if (batch === undefined) throw new AuthorityRpcError("question_batch_missing", "question batch does not exist");
+        return { result: projectQuestionBatchCapabilities(batch) as unknown as JsonValue };
+      },
+    });
+    this.#server.register("question.revise", {
+      mutating: true,
+      handle: async ({ request, revision }) => this.#saveBatchAnswer(request, revision, true),
+    });
+    this.#server.register("question.resolve", {
+      mutating: true,
+      handle: async ({ request, revision }) => this.#resolveQuestionBatch(request, revision),
+    });
+    this.#server.register("run.merge.inspect", {
+      mutating: false,
+      handle: async ({ request }) => {
+        assertExactParams(request.params, ["runId"]);
+        return {
+          result: await this.#mergePreview(requiredString(request.params, "runId")) as unknown as JsonValue,
+        };
+      },
+    });
+    this.#server.register("run.merge.authorize", {
+      mutating: true,
+      handle: async ({ request, revision }) => this.#mergeRun(request, revision),
     });
     this.#server.register("run.merge", {
       mutating: true,
@@ -1343,12 +2765,10 @@ export class RunAuthorityEngine {
     if (selectedRunId !== undefined && indexed.length === 0) {
       throw new AuthorityRpcError("legacy_run_missing", `legacy run is not indexed: ${selectedRunId}`);
     }
-    const current = await this.#store.listRuns({ includeDeleted: true });
+    const current = await this.#store.legacyAdoptionIndex(migrationId);
     const runs: JsonValue[] = [];
     for (const source of indexed) {
-      const existing = current.find((run) =>
-        run.legacyRunAdoption?.migrationId === migrationId &&
-        run.legacyRunAdoption.sourceRunId === source.id);
+      const existing = current.get(source.id);
       if (existing !== undefined) {
         runs.push({
           protocol: "koni.legacy-run-adoption-preview.v1",
@@ -1357,8 +2777,8 @@ export class RunAuthorityEngine {
           sourceStatus: source.status,
           objective: source.goal,
           disposition: "adopted",
-          successorRunId: existing.id,
-          successorPhase: existing.lifecycle.phase,
+          successorRunId: existing.successorRunId,
+          successorPhase: existing.successorPhase,
         });
         continue;
       }
@@ -1394,6 +2814,7 @@ export class RunAuthorityEngine {
         targetRef: assessment.start.targetRef,
         intake: { goal: assessment.objective },
       });
+      assertResolvedPipeline(definition);
       if (definition.planningMode !== "agent") {
         blockers.push({
           code: "fresh_successor_unavailable",
@@ -1422,9 +2843,7 @@ export class RunAuthorityEngine {
     requireIdempotency(request);
     const migrationId = requiredString(request.params, "migrationId");
     const sourceRunId = requiredString(request.params, "runId");
-    const existing = (await this.#store.listRuns({ includeDeleted: true })).find((run) =>
-      run.legacyRunAdoption?.migrationId === migrationId &&
-      run.legacyRunAdoption.sourceRunId === sourceRunId);
+    const existing = await this.#store.findLegacyAdoption(migrationId, sourceRunId);
     if (existing !== undefined) {
       const result: JsonValue = {
         migrationId,
@@ -1499,6 +2918,19 @@ export class RunAuthorityEngine {
         "compiler did not resolve exactly one configured managed working-spec owner",
       );
     }
+    assertResolvedPipeline(definition);
+    const adoptedObjective = boundedText(definition.objective, "compiled objective", 4 * 1024 * 1024);
+    const gitAdmission = {
+      policy: definition.behavior.runType.git,
+      run: createGitRunTemplateContext({
+        id: successorRunId,
+        objective: adoptedObjective,
+        profileHash: definition.compiledConfigHash,
+      }),
+    };
+    if (gitAdmission.policy.policySha256 !== definition.behavior.gitPolicySha256) {
+      throw new AuthorityRpcError("git_policy_binding", "compiler run behavior and Git policy hashes differ");
+    }
     const git = await this.#withGit(successorRunId, () => this.#git.planAdoptedRun(
       successorRunId,
       {
@@ -1506,6 +2938,7 @@ export class RunAuthorityEngine {
         targetSelectedOid: assessed.start!.targetSelectedOid,
         planningBaseOid: assessed.start!.planningBaseOid,
       },
+      gitAdmission,
     ));
 
     // Re-hash and re-prove after current configuration/Git planning, immediately before the one
@@ -1514,6 +2947,7 @@ export class RunAuthorityEngine {
     if (
       finalAssessment.disposition !== "ready" ||
       finalAssessment.start === undefined ||
+      finalAssessment.objective !== assessed.objective ||
       canonicalHash(finalAssessment.start) !== canonicalHash(assessed.start)
     ) {
       const blockers = finalAssessment.blockers.length === 0
@@ -1565,16 +2999,21 @@ export class RunAuthorityEngine {
       projectRoot: git.projectRoot,
       profile: structuredClone(definition.profile),
       compiledConfigHash: definition.compiledConfigHash,
+      ...(definition.lifecycleCatalog === undefined
+        ? {}
+        : { lifecycleCatalog: structuredClone(definition.lifecycleCatalog) }),
       runTypeId: definition.runTypeId,
+      behavior: structuredClone(definition.behavior),
       workingSpecOwnerId: definition.workingSpecOwnerId,
       planningMode: definition.planningMode,
-      objective: assessed.objective,
-      intake: { goal: assessed.objective },
+      objective: adoptedObjective,
+      intake: structuredClone(definition.intake),
       executionConfig: structuredClone(definition.executionConfig),
       createdAt: now,
       updatedAt: now,
       lifecycle,
       pipelineStageIds: [...definition.pipelineStageIds],
+      pipelineStages: structuredClone(definition.pipelineStages),
       currentPipelineStageId: definition.pipelineStageIds[0],
       plan: undefined,
       graphRevision: 0,
@@ -1632,17 +3071,17 @@ export class RunAuthorityEngine {
   async #createRun(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
     requireIdempotency(request);
     const params = requiredObject(request.params);
-    const objective = boundedText(requiredString(params, "objective"), "objective", 4 * 1024 * 1024);
+    const requestedObjective = boundedText(requiredString(params, "objective"), "objective", 4 * 1024 * 1024);
     const runTypeId = requiredString(params, "runTypeId");
     const targetRef = requiredString(params, "targetRef");
-    const intake = stringRecord(params.intake ?? { goal: objective }, "intake");
+    const suppliedIntake = configurationRecord(params.intake ?? { goal: requestedObjective }, "intake");
     const runId = this.#createId("run");
     const definition = await this.#program.resolveRun({
       runId,
-      objective,
+      objective: requestedObjective,
       runTypeId,
       targetRef,
-      intake,
+      intake: suppliedIntake,
       ...(params.overrides === undefined ? {} : { overrides: params.overrides as JsonValue }),
     });
     if (
@@ -1654,7 +3093,21 @@ export class RunAuthorityEngine {
         "compiler did not resolve exactly one configured managed working-spec owner",
       );
     }
-    const git = await this.#withGit(runId, () => this.#git.planRun(runId, targetRef));
+    assertResolvedPipeline(definition);
+    const objective = boundedText(definition.objective, "compiled objective", 4 * 1024 * 1024);
+    const intake = structuredClone(definition.intake);
+    const gitAdmission = {
+      policy: definition.behavior.runType.git,
+      run: createGitRunTemplateContext({
+        id: runId,
+        objective,
+        profileHash: definition.compiledConfigHash,
+      }),
+    };
+    if (gitAdmission.policy.policySha256 !== definition.behavior.gitPolicySha256) {
+      throw new AuthorityRpcError("git_policy_binding", "compiler run behavior and Git policy hashes differ");
+    }
+    const git = await this.#withGit(runId, () => this.#git.planRun(runId, targetRef, gitAdmission));
     const now = this.#timestamp();
     const run: RunRecord = {
       protocol: "koni.run-record.v1",
@@ -1664,7 +3117,11 @@ export class RunAuthorityEngine {
       projectRoot: git.projectRoot,
       profile: structuredClone(definition.profile),
       compiledConfigHash: definition.compiledConfigHash,
+      ...(definition.lifecycleCatalog === undefined
+        ? {}
+        : { lifecycleCatalog: structuredClone(definition.lifecycleCatalog) }),
       runTypeId: definition.runTypeId,
+      behavior: structuredClone(definition.behavior),
       workingSpecOwnerId: definition.workingSpecOwnerId,
       objective,
       intake,
@@ -1674,6 +3131,7 @@ export class RunAuthorityEngine {
       updatedAt: now,
       lifecycle: newRunLifecycle(runId),
       pipelineStageIds: [...definition.pipelineStageIds],
+      pipelineStages: structuredClone(definition.pipelineStages),
       currentPipelineStageId: definition.pipelineStageIds[0],
       plan: undefined,
       graphRevision: 0,
@@ -1712,6 +3170,135 @@ export class RunAuthorityEngine {
       );
     }
     return this.#profilePackageRootLoader();
+  }
+
+  async #configDocumentAuthority(): Promise<ConfigDocumentAuthority> {
+    const packageRoot = await this.#currentProfilePackageRoot();
+    if (this.#configDocuments?.packageRoot !== packageRoot) {
+      this.#configDocuments = {
+        packageRoot,
+        authority: new ConfigDocumentAuthority({
+          projectRoot: this.#projectRoot,
+          profilePackageRoot: packageRoot,
+          legacyRunAuthority: new ProductionLegacyRunMigrationAuthority(),
+        }),
+      };
+    }
+    return this.#configDocuments.authority;
+  }
+
+  async #updateConfigDocument(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
+    assertExactParams(request.params, ["catalogToken", "documentId", "source", "sourceToken"]);
+    return this.#commitConfigDocumentMutation(request, revision, async (authority, mutationMarker) => authority.update({
+      documentId: requiredString(request.params, "documentId"),
+      catalogToken: requiredSha256(request.params, "catalogToken"),
+      sourceToken: requiredSha256(request.params, "sourceToken"),
+      source: requiredStringValue(request.params, "source"),
+      mutationMarker,
+    }));
+  }
+
+  async #createConfigDocument(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
+    assertAllowedParams(request.params, ["catalogToken", "domain", "format", "kind", "source", "title"]);
+    const source = optionalString(request.params, "source");
+    return this.#commitConfigDocumentMutation(request, revision, async (authority, mutationMarker) => authority.create({
+      catalogToken: requiredSha256(request.params, "catalogToken"),
+      domain: requiredConfigDocumentDomain(request.params, "domain"),
+      kind: requiredConfigResourceKind(request.params, "kind"),
+      format: requiredConfigDocumentFormat(request.params, "format"),
+      title: requiredString(request.params, "title"),
+      ...(source === undefined ? {} : { source }),
+      mutationMarker,
+    }));
+  }
+
+  async #renameConfigDocument(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
+    assertExactParams(request.params, ["catalogToken", "documentId", "sourceToken", "title"]);
+    return this.#commitConfigDocumentMutation(request, revision, async (authority, mutationMarker) => authority.rename({
+      documentId: requiredString(request.params, "documentId"),
+      catalogToken: requiredSha256(request.params, "catalogToken"),
+      sourceToken: requiredSha256(request.params, "sourceToken"),
+      title: requiredString(request.params, "title"),
+      mutationMarker,
+    }));
+  }
+
+  async #deleteConfigDocument(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
+    assertExactParams(request.params, ["catalogToken", "documentId", "sourceToken"]);
+    return this.#commitConfigDocumentMutation(request, revision, async (authority, mutationMarker) => authority.delete({
+      documentId: requiredString(request.params, "documentId"),
+      catalogToken: requiredSha256(request.params, "catalogToken"),
+      sourceToken: requiredSha256(request.params, "sourceToken"),
+      mutationMarker,
+    }));
+  }
+
+  async #createConfigRunType(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
+    assertAllowedParams(request.params, [
+      "catalogToken",
+      "description",
+      "makeDefault",
+      "slug",
+      "templateId",
+      "title",
+    ]);
+    const slug = optionalString(request.params, "slug");
+    const description = optionalString(request.params, "description");
+    return this.#commitConfigDocumentMutation(request, revision, async (authority, mutationMarker) => authority.createRunType({
+      catalogToken: requiredSha256(request.params, "catalogToken"),
+      templateId: requiredString(request.params, "templateId"),
+      title: requiredString(request.params, "title"),
+      ...(slug === undefined ? {} : { slug }),
+      ...(description === undefined ? {} : { description }),
+      makeDefault: requiredBoolean(request.params, "makeDefault"),
+      mutationMarker,
+    }));
+  }
+
+  async #applyConfigLegacyMigration(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
+    assertExactParams(request.params, ["previewToken"]);
+    return this.#commitConfigDocumentMutation(
+      request,
+      revision,
+      async (authority, mutationMarker) => authority.applyLegacyMigration({
+        previewToken: requiredSha256(request.params, "previewToken"),
+        mutationMarker,
+      }),
+      "config.migrated",
+    );
+  }
+
+  async #commitConfigDocumentMutation(
+    request: RpcRequest,
+    revision: number,
+    operation: (
+      authority: ConfigDocumentAuthority,
+      mutationMarker: ConfigAuthorityMutationMarker,
+    ) => Promise<unknown>,
+    topic = "config.updated",
+  ): Promise<AuthorityMethodResult> {
+    requireIdempotency(request);
+    const requestSha256 = authorityRequestHash(request.method, request.params);
+    const mutationMarker: ConfigAuthorityMutationMarker = {
+      id: requestSha256.slice("sha256:".length),
+      requestSha256,
+    };
+    let value: unknown;
+    try {
+      value = await operation(await this.#configDocumentAuthority(), mutationMarker);
+    } catch (error) {
+      throw configDocumentRpcError(error, "config_document_mutation");
+    }
+    const result = value as JsonValue;
+    const committed = await this.#store.commit({
+      expectedRevision: revision,
+      receipt: receiptFor(request, result),
+    });
+    return {
+      result,
+      revision: committed.state.revision,
+      events: [{ topic, payload: configMutationEventPayload(result) }],
+    };
   }
 
   async #updateConfiguration(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
@@ -1851,28 +3438,113 @@ export class RunAuthorityEngine {
     };
   }
 
+  async #resolveProfileConflict(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
+    requireIdempotency(request);
+    assertExactParams(request.params, [
+      "expectedLifecycleGeneration",
+      "expectedProjectSha256",
+      "path",
+      "resolution",
+    ]);
+    const path = requiredString(request.params, "path");
+    const expectedLifecycleGeneration = requiredPositiveInt(request.params, "expectedLifecycleGeneration");
+    const expectedProjectSha256 = requiredNullableSha256(request.params, "expectedProjectSha256");
+    const resolution = requiredProfileConflictResolution(request.params);
+    const packageRoot = await this.#currentProfilePackageRoot();
+    const requestSha256 = authorityRequestHash(request.method, request.params);
+    let recovered = false;
+    let resolved: Awaited<ReturnType<typeof resolveProjectProfileConflict>> |
+      Awaited<ReturnType<typeof recoverProjectProfileConflictResolution>>;
+    try {
+      resolved = await resolveProjectProfileConflict({
+        projectRoot: this.#projectRoot,
+        profilePackageRoot: packageRoot,
+        path,
+        expectedLifecycleGeneration,
+        expectedProjectSha256,
+        resolution,
+        authorityRequestSha256: requestSha256,
+      });
+    } catch (error) {
+      const code = errorCode(error);
+      if (code !== "lifecycle_changed" && code !== "conflict_missing") {
+        throw profileConflictRpcError(error, "profile_conflict_resolve");
+      }
+      try {
+        resolved = await recoverProjectProfileConflictResolution({
+          projectRoot: this.#projectRoot,
+          profilePackageRoot: packageRoot,
+          path,
+          expectedLifecycleGeneration,
+          expectedProjectSha256,
+          resolution,
+          authorityRequestSha256: requestSha256,
+        });
+        recovered = true;
+      } catch (recoveryError) {
+        throw profileConflictRpcError(recoveryError, "profile_conflict_recovery");
+      }
+    }
+    const result: JsonValue = {
+      protocol: "koni.profile-conflict-resolution-result.v1",
+      path: resolved.path,
+      resolution: resolved.resolution,
+      projectSha256: resolved.projectSha256,
+      lifecycleGeneration: resolved.lifecycleGeneration,
+      configurationSha256: resolved.configurationSha256,
+      effectiveBundleSha256: resolved.effectiveBundleSha256,
+      requestSha256,
+      recovered,
+    };
+    const committed = await this.#store.commit({
+      expectedRevision: revision,
+      receipt: receiptFor(request, result),
+    });
+    return {
+      result,
+      revision: committed.state.revision,
+      events: [
+        { topic: "profile.conflict.resolved", payload: { path, resolution, recovered } },
+        { topic: "config.updated", payload: { source: "profile_conflict", path } },
+      ],
+    };
+  }
+
   async #initializeRun(runId: string): Promise<void> {
     let run = await this.#store.getRun(runId);
-    if (run.lifecycle.phase !== "draft") return;
-    await this.#withGit(runId, () =>
-      this.#git.materializePlanning(run.git, this.#gitJournal(runId)));
+    this.#assertStartupMayContinue();
+    const advancement = this.#advancementToken(run, "draft");
+    if (advancement === undefined) return;
+    try {
+      this.#assertStartupMayContinue();
+      await this.#withGit(runId, () =>
+        this.#git.materializePlanning(run.git, this.#gitJournal(runId, advancement)));
+      this.#assertStartupMayContinue();
+    } catch (error) {
+      if (error instanceof RunAdvancementStoppedError) {
+        if (error.startupCancellation) throw error;
+        return;
+      }
+      throw error;
+    }
+    this.#assertStartupMayContinue();
     await this.#server.mutateInternal(async ({ revision }) => {
       run = await this.#store.getRun(runId);
-      if (run.lifecycle.phase !== "draft") return this.#noOpInternal(revision);
+      if (!this.#matchesAdvancement(run, advancement)) return this.#noOpInternal(revision);
       const direct = run.planningMode === "direct"
         ? await this.#program.initializeDirectApproval(run)
         : undefined;
       const draft = nextRun(run, this.#timestamp());
       applyLifecycle(draft, { type: "planning_started", atMs: this.#now().getTime() });
       if (direct === undefined) {
-        draft.currentPipelineStageId = firstPlanningStage(draft);
+        draft.currentPipelineStageId = await this.#stageForKinds(draft, ["planning"], "planning");
       } else {
         draft.plan = { ...structuredClone(direct.plan), status: "awaiting_approval" };
         if (direct.graphHash !== undefined) draft.graphHash = direct.graphHash;
         if (direct.graphRevision !== undefined) draft.graphRevision = direct.graphRevision;
         if (direct.tickets !== undefined) draft.tickets = structuredClone(direct.tickets);
         draft.activity.push(...structuredClone(direct.activity ?? []));
-        draft.currentPipelineStageId = approvalStage(draft);
+        draft.currentPipelineStageId = await this.#stageForKinds(draft, ["approval"], "approval");
         applyLifecycle(draft, { type: "plan_submitted", atMs: this.#now().getTime() });
       }
       const committed = await this.#store.commit({
@@ -1888,8 +3560,2798 @@ export class RunAuthorityEngine {
         }],
       };
     });
+    this.#assertStartupMayContinue();
     const initialized = await this.#store.getRun(runId);
+    this.#assertStartupMayContinue();
     if (initialized.lifecycle.phase === "planning") await this.#launchPlanning(runId);
+  }
+
+  async #stageCapabilityCatalog(run: RunRecord): Promise<StageCapabilityCatalog> {
+    const definitions = [...await this.#pipelineDefinitions(run)];
+    const terminalResolverRetries = run.lifecycle.phase === "blocked"
+      ? await this.#terminalResolverRetryCandidates(run)
+      : [];
+    const requiresTerminalResolverRetry = terminalResolverRetries.length > 0;
+    const hasPendingTerminalResolverRetry = terminalResolverRetries
+      .some((candidate) => candidate.pendingRequest !== undefined);
+    const supervisedReviewRetries = new Set<RunPhase>(["blocked", "executing", "paused"]).has(run.lifecycle.phase)
+      ? Object.values(run.tickets)
+          .map((ticket) => blockedReviewRetryCandidate(ticket))
+          .filter((candidate): candidate is NonNullable<typeof candidate> => {
+            if (candidate === undefined) return false;
+            const attempt = run.attempts[candidate.failedReviewAttemptId];
+            return attempt?.ticketId === candidate.ticketId &&
+              attempt.stepId === candidate.reviewStepId &&
+              attempt.status === "completed" &&
+              attempt.terminalAcceptedAt !== undefined &&
+              attempt.terminalOutputSha256 !== undefined &&
+              attempt.terminalPolicy !== undefined;
+          })
+          .sort((left, right) => left.ticketTitle.localeCompare(right.ticketTitle) || left.ticketId.localeCompare(right.ticketId))
+      : [];
+    const independentReviewRetries = new Set<RunPhase>(["blocked", "executing", "paused"]).has(run.lifecycle.phase)
+      ? Object.values(run.tickets)
+          .map((ticket) => blockedIndependentReviewRetryCandidate(ticket))
+          .filter((candidate): candidate is NonNullable<typeof candidate> => {
+            if (candidate === undefined || !canRetryBlockedReviewOnly(run, candidate)) return false;
+            const attempt = run.attempts[candidate.failedReviewAttemptId];
+            return attempt?.ticketId === candidate.ticketId &&
+              attempt.stepId === candidate.reviewStepId &&
+              attempt.status === "completed" &&
+              attempt.terminalAcceptedAt !== undefined &&
+              attempt.terminalOutputSha256 !== undefined &&
+              attempt.terminalPolicy !== undefined;
+          })
+          .sort((left, right) => left.ticketTitle.localeCompare(right.ticketTitle) || left.ticketId.localeCompare(right.ticketId))
+      : [];
+    const requiresSupervisedReviewRetry = supervisedReviewRetries.length > 0;
+    const providerExposureRetirementCandidates = new Set<RunPhase>(["blocked", "paused"])
+      .has(run.lifecycle.phase)
+      ? await this.#canonicalProviderExposureRetirements(
+          run,
+          canonicalHash({
+            protocol: "koni.provider-exposure-retirement-probe.v1",
+            runId: run.id,
+            revision: run.revision,
+            generation: run.generation,
+          }),
+          run.updatedAt,
+        )
+      : [];
+    const requiresProviderExposureRetirement = providerExposureRetirementCandidates.length > 0;
+    const terminalLifecycle = new Set<RunPhase>(["completed", "failed", "deleted"]).has(run.lifecycle.phase);
+    const currentIndex = terminalLifecycle || run.currentPipelineStageId === undefined
+      ? -1
+      : definitions.findIndex((stage) => stage.id === run.currentPipelineStageId);
+    const stages: StageCapability[] = definitions.map((stage, position) => {
+      const current = position === currentIndex;
+      const status = stageCapabilityStatus(run, position, currentIndex);
+      const actions: StageActionCapability[] = [];
+      if (stage.kind === "approval") {
+        actions.push(
+          defineBuiltInStageAction({
+            id: `stage:${stage.id}:approve`,
+            intent: "approve_run",
+            available: current && run.lifecycle.phase === "awaiting_approval",
+            reason: current && run.lifecycle.phase === "awaiting_approval"
+              ? "The current durable plan is ready for explicit approval."
+              : "Plan approval is available only while this approval stage is waiting.",
+          }),
+          defineBuiltInStageAction({
+            id: `stage:${stage.id}:revise`,
+            intent: "revise_run_plan",
+            available: current && run.lifecycle.phase === "awaiting_approval",
+            reason: current && run.lifecycle.phase === "awaiting_approval"
+              ? "Steering can request a fresh immutable planning attempt."
+              : "Plan revision is available only while this approval stage is waiting.",
+            form: {
+              title: "Revise plan",
+              description: "Describe the exact changes the next planning attempt should make.",
+              submitLabel: "Revise plan",
+              fields: [{
+                key: "instructions",
+                label: "Steering instructions",
+                description: "The planner receives this durable operator-authored steering.",
+                kind: "multiline",
+                required: true,
+                locked: false,
+                visibility: "shown",
+                maxBytes: 1024 * 1024,
+              }],
+            },
+          }),
+        );
+      } else if (stage.kind === "promotion") {
+        actions.push(defineBuiltInStageAction({
+          id: `stage:${stage.id}:merge-review`,
+          intent: "inspect_run_merge",
+          available: current && run.lifecycle.phase === "merge_ready",
+          reason: current && run.lifecycle.phase === "merge_ready"
+            ? "Compiler verification prepared a candidate for explicit merge review."
+            : "Merge review becomes available only after compiler verification reaches merge ready.",
+        }));
+      } else if (!stage.automatic && stage.kind === "action") {
+        actions.push(configuredStageActionCapability(run, stage, current));
+      } else if (
+        current && run.lifecycle.phase === "blocked" &&
+        !requiresTerminalResolverRetry && !requiresSupervisedReviewRetry
+      ) {
+        actions.push(defineBuiltInStageAction({
+          id: `stage:${stage.id}:retry`,
+          intent: "retry_blocked",
+          available: true,
+          reason: "The blocked compiler stage can be retried from its durable resume boundary.",
+        }));
+      }
+      const primary = actions.find((action) => action.availability.state === "available") ?? actions[0];
+      const interaction = actions.length > 0
+        ? defineStageInteraction({
+            mode: "operator",
+            reason: primary?.availability.reason ?? "This stage has compiler-authored operator controls.",
+            actions,
+            ...(primary === undefined ? {} : { primaryActionId: primary.id }),
+          })
+        : defineStageInteraction({
+            mode: stage.automatic && (current || status === "pending") ? "automatic" : "none",
+            reason: stage.automatic
+              ? "The authority advances this stage from compiler state; no manual action is required."
+              : "No compiler-authorized operator action is available for this stage.",
+            actions,
+          });
+      return {
+        id: stage.id,
+        title: stage.title,
+        kind: stage.kind,
+        category: stageCapabilityCategory(stage.kind),
+        position,
+        status,
+        current,
+        ...(current && run.lifecycle.blocker !== undefined ? { summary: run.lifecycle.blocker } : {}),
+        interaction,
+        actions,
+      };
+    });
+
+    const pausable = new Set<RunPhase>([
+      "planning", "awaiting_questions", "awaiting_approval", "approving", "executing", "verifying", "merge_ready",
+    ]).has(run.lifecycle.phase);
+    const runActions: StageActionCapability[] = [
+      defineBuiltInStageAction({
+        id: "run:pause",
+        intent: "pause_run",
+        available: pausable,
+        reason: pausable
+          ? "The run can stop new admission and drain its active Pi sessions."
+          : "Pause is unavailable in the current durable lifecycle phase.",
+      }),
+      defineBuiltInStageAction({
+        id: "run:resume",
+        intent: run.lifecycle.phase === "blocked" ? "retry_blocked" : "resume_run",
+        available: run.lifecycle.phase === "paused" ||
+          (run.lifecycle.phase === "blocked" &&
+            !requiresProviderExposureRetirement &&
+            !requiresSupervisedReviewRetry &&
+            (!requiresTerminalResolverRetry || hasPendingTerminalResolverRetry)),
+        reason: run.lifecycle.phase === "paused"
+          ? requiresProviderExposureRetirement
+            ? "Acknowledge the canonical provider error before resuming this run."
+            : "The paused run can resume from its recorded phase."
+          : run.lifecycle.phase === "blocked"
+            ? requiresProviderExposureRetirement
+              ? "Acknowledge the canonical provider error before choosing the exact retry."
+              : requiresSupervisedReviewRetry
+              ? "This run has an exhausted independent-review circuit; use its exact reviewed-blocker recovery."
+              : hasPendingTerminalResolverRetry
+              ? "Continue the exact terminal-resolver retry already authorized by the operator."
+              : requiresTerminalResolverRetry
+              ? "This run requires the exact terminal-resolver retry control; generic resume is disabled."
+              : "The blocked run can retry from its recorded compiler boundary."
+            : "Resume is available only for a paused or blocked run.",
+      }),
+      ...(!requiresProviderExposureRetirement ? [] : [defineBuiltInStageAction({
+        id: "run:retire-provider-exposure",
+        intent: "retire_provider_exposure",
+        title: "Acknowledge provider error",
+        description: `${providerExposureRetirementCandidates.length} canonical failed provider request${providerExposureRetirementCandidates.length === 1 ? "" : "s"} will remain recorded as uncertain worst-case exposure. No work will resume.`,
+        available: true,
+        reason: "A canonical provider error or abort is durably recorded; explicit acknowledgement can retire its reservation without reopening work.",
+        confirmation: {
+          required: true,
+          tone: "caution",
+          title: "Acknowledge provider error",
+          description: "Preserve the failed response and worst-case token reservation as uncertain exposure. This action does not retry or resume any work.",
+          confirmLabel: "Acknowledge provider error",
+        },
+      })]),
+      defineBuiltInStageAction({
+        id: "run:orchestration",
+        intent: "update_orchestration",
+        available: run.executionConfig !== undefined && !new Set<RunPhase>(["deleting", "deleted", "completed", "failed"]).has(run.lifecycle.phase),
+        reason: run.executionConfig === undefined
+          ? "This historical run has no mutable orchestration configuration."
+          : "The authority can update future admission parallelism without changing active grants.",
+        form: {
+          title: "Orchestration",
+          description: "Change only future compiler admissions for this run.",
+          submitLabel: "Update orchestration",
+          fields: [{
+            key: "maxParallel",
+            label: "Max parallel agents",
+            description: "A positive whole number; active work is never duplicated.",
+            kind: "integer",
+            required: true,
+            locked: false,
+            visibility: "shown",
+            defaultValue: run.executionConfig?.maxParallel ?? 1,
+            minimum: 1,
+            maximum: Number.MAX_SAFE_INTEGER,
+          }],
+        },
+      }),
+      defineBuiltInStageAction({
+        id: "run:delete-review",
+        intent: "inspect_run_deletion",
+        available: run.lifecycle.phase !== "deleting" && run.lifecycle.phase !== "deleted",
+        reason: run.lifecycle.phase === "deleting" || run.lifecycle.phase === "deleted"
+          ? "Deletion has already begun or completed."
+          : "Review live sessions and Koni-owned Git resources before choosing a deletion policy.",
+      }),
+      defineBuiltInStageAction({
+        id: "run:merge-review",
+        intent: "inspect_run_merge",
+        available: run.lifecycle.phase === "merge_ready",
+        reason: run.lifecycle.phase === "merge_ready"
+          ? "Review target drift and the verified candidate before authorizing merge."
+          : "Merge review is available only when the run is merge ready.",
+      }),
+      ...supervisedReviewRetries.map((candidate) => defineBuiltInStageAction({
+        id: `ticket:${candidate.ticketId}:retry-review:${candidate.failedReviewAttemptId}`,
+        intent: "retry_supervised_stage",
+        scope: "ticket",
+        surface: "action_form",
+        title: "Retry reviewed blocker",
+        description: `${candidate.ticketTitle}: ${candidate.blocker}`,
+        available: !requiresProviderExposureRetirement,
+        reason: requiresProviderExposureRetirement
+          ? "Acknowledge the canonical provider error first; reviewed recovery remains separate and cannot bypass unsettled exposure."
+          : "The automatic review-rework circuit is exhausted; one explicit retry can reopen only this reviewed author-to-review slice.",
+        confirmation: {
+          required: true,
+          tone: "caution",
+          title: "Retry reviewed blocker",
+          description: "Preserve the failed attempts and receipts, then reopen only the compiler-pinned author and review steps with the newest reviewer findings.",
+          confirmLabel: "Retry reviewed blocker",
+        },
+        form: {
+          title: "Retry reviewed blocker",
+          description: candidate.blocker,
+          submitLabel: "Retry reviewed blocker",
+          fields: [
+            lockedStageField("ticketId", "Ticket", candidate.ticketId, candidate.ticketTitle),
+            lockedStageField("reviewStepId", "Review step", candidate.reviewStepId, candidate.reviewStepId),
+            lockedStageField("retryScope", "Retry scope", "producer_and_review", "Producer and review"),
+            lockedStageField(
+              "failedReviewAttemptId",
+              "Failed review",
+              candidate.failedReviewAttemptId,
+              "Latest independent review",
+            ),
+            {
+              key: "steering",
+              label: "Recovery steering",
+              description: "Optional operator context for this exact retry; reviewer findings remain mandatory.",
+              kind: "multiline",
+              required: false,
+              locked: false,
+              visibility: "shown",
+              maxBytes: 64 * 1024,
+            },
+          ],
+        },
+      })),
+      ...independentReviewRetries
+        .map((candidate) => defineBuiltInStageAction({
+          id: `ticket:${candidate.ticketId}:retry-review-only:${candidate.failedReviewAttemptId}`,
+          intent: "retry_supervised_stage",
+          scope: "ticket",
+          surface: "action_form",
+          title: "Retry independent review",
+          description: `${candidate.ticketTitle}: preserve the last compiler-accepted producer result and reevaluate it under the current review contract.`,
+          available: !requiresProviderExposureRetirement,
+          reason: requiresProviderExposureRetirement
+            ? "Acknowledge the canonical provider error first; review recovery cannot bypass unsettled exposure."
+            : "A prior compiler-accepted producer result is still current; rerun only independent review without repeating producer work.",
+          confirmation: {
+            required: true,
+            tone: "caution",
+            title: "Retry independent review",
+            description: "Preserve all attempts and receipts, restore the last compiler-accepted producer result, and rerun independent review under the current contract.",
+            confirmLabel: "Retry independent review",
+          },
+          form: {
+            title: "Retry independent review",
+            description: candidate.blocker,
+            submitLabel: "Retry independent review",
+            fields: [
+              lockedStageField("ticketId", "Ticket", candidate.ticketId, candidate.ticketTitle),
+              lockedStageField("reviewStepId", "Review step", candidate.reviewStepId, candidate.reviewStepId),
+              lockedStageField("retryScope", "Retry scope", "review_only", "Independent review only"),
+              lockedStageField(
+                "failedReviewAttemptId",
+                "Failed review",
+                candidate.failedReviewAttemptId,
+                "Latest independent review",
+              ),
+              {
+                key: "steering",
+                label: "Review steering",
+                description: "Optional context for this rereview; the configured review contract remains authoritative.",
+                kind: "multiline",
+                required: false,
+                locked: false,
+                visibility: "shown",
+                maxBytes: 64 * 1024,
+              },
+            ],
+          },
+        })),
+    ];
+    for (const candidate of terminalResolverRetries) {
+      const retries = candidate.resolver.executionControl?.terminalResolverRetryRequests ?? [];
+      const pending = candidate.pendingRequest !== undefined;
+      const exhausted = retries.length >= MAX_TERMINAL_RESOLVER_RETRIES;
+      runActions.push(defineBuiltInStageAction({
+        id: `run:terminal-resolver:retry:${candidate.resolver.id}`,
+        intent: "retry_terminal_resolver",
+        available: !pending && !exhausted,
+        reason: pending
+          ? "The exact retry request is already settling its resolver Git cycle."
+          : exhausted
+            ? `The configured retry limit (${MAX_TERMINAL_RESOLVER_RETRIES}) has been reached.`
+            : "The failed configured resolver can be retried only through this exact compiler-bound control.",
+        form: {
+          title: "Retry terminal resolver",
+          description: "Archive the failed resolver cycle, preserve its audit trail, and issue a fresh cycle.",
+          submitLabel: "Retry resolver",
+          fields: [
+            lockedStageField(
+              "resolverTicketId",
+              "Resolver",
+              candidate.resolver.id,
+              candidate.resolver.title,
+            ),
+            lockedStageField(
+              "sourceTicketId",
+              "Failed source",
+              candidate.source.id,
+              candidate.source.title,
+            ),
+            lockedStageField(
+              "failedAttemptId",
+              "Failed attempt",
+              candidate.resolverFailure.attemptId,
+              "Exact accepted terminal failure",
+            ),
+            {
+              key: "message",
+              label: "Retry reason",
+              description: "Record why retrying this exact resolver failure is appropriate.",
+              kind: "multiline",
+              required: true,
+              locked: false,
+              visibility: "shown",
+              maxBytes: 64 * 1024,
+            },
+          ],
+        },
+      }));
+    }
+    const openBatch = Object.values(run.questionBatches ?? {})
+      .find((batch) => batch.status !== "resolved");
+    if (openBatch !== undefined) {
+      const capabilities = projectQuestionBatchCapabilities(openBatch);
+      runActions.push(defineBuiltInStageAction({
+        id: "run:questions:resolve",
+        intent: "resolve_questions",
+        available: capabilities.actions.queueResume.allowed,
+        reason: capabilities.actions.queueResume.reason,
+        form: {
+          title: "Submit answers",
+          description: "Seal the complete answer batch and resume its bound agent attempt.",
+          submitLabel: "Submit answers",
+          fields: [
+            lockedStageField("batchId", "Question batch", openBatch.id, "Current durable question batch"),
+            lockedStageField("expectedVersion", "Batch version", openBatch.version, "Current answer-set version"),
+          ],
+        },
+      }));
+    }
+    return defineStageCapabilityCatalog({
+      protocol: "koni.stage-capability-catalog.v1",
+      binding: {
+        runId: run.id,
+        runRevision: run.revision,
+        generation: run.generation,
+        phase: run.lifecycle.phase,
+      },
+      stages,
+      runActions,
+    });
+  }
+
+  async #pipelineDefinitions(run: RunRecord): Promise<readonly RunPipelineStageDefinition[]> {
+    if (run.pipelineStages !== undefined) return structuredClone(run.pipelineStages);
+    if (this.#program.projectPipeline === undefined) {
+      throw new AuthorityRpcError(
+        "pipeline_semantics_missing",
+        "legacy run has no pinned semantic pipeline projection and its compiler cannot rehydrate one",
+      );
+    }
+    const projected = [...await this.#program.projectPipeline(run)];
+    assertPipelineProjection(run.pipelineStageIds, projected);
+    return projected;
+  }
+
+  async #stageForKinds(
+    run: RunRecord,
+    kinds: readonly string[],
+    lifecycleName: string,
+  ): Promise<string> {
+    const definitions = await this.#pipelineDefinitions(run);
+    const stage = definitions.find((candidate) => kinds.includes(candidate.kind));
+    if (stage === undefined) {
+      throw new AuthorityRpcError(
+        "pipeline_stage_missing",
+        `pinned run pipeline has no semantic ${lifecycleName} stage (${kinds.join(" or ")})`,
+      );
+    }
+    return stage.id;
+  }
+
+  async #executeStageAction(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
+    requireIdempotency(request);
+    const invocation = request.params as unknown as StageActionInvocation;
+    const runId = requiredString(request.params, "runId");
+    const run = await this.#store.getRun(runId);
+    let validated;
+    try {
+      validated = validateStageActionInvocation(await this.#stageCapabilityCatalog(run), invocation);
+    } catch (error) {
+      throw new AuthorityRpcError(errorCode(error) ?? "stage_action_invalid", errorMessage(error));
+    }
+    const forward = (params: JsonValue): RpcRequest => ({
+      ...request,
+      params,
+      [RECEIPT_PARAMS]: request.params,
+    } as RpcRequest & { [RECEIPT_PARAMS]?: JsonValue });
+    switch (validated.capability.intent) {
+      case "approve_run":
+        return this.#approvePlan(forward({ runId }), revision);
+      case "revise_run_plan":
+        return this.#revisePlan(forward({ runId, instructions: stageStringValue(validated.values, "instructions") }), revision);
+      case "pause_run":
+        return this.#pauseRun(forward({ runId }), revision);
+      case "resume_run":
+      case "retry_blocked":
+      case "set_run_running":
+        return this.#resumeRun(forward({ runId }), revision);
+      case "retire_provider_exposure":
+        return this.#retireProviderExposure(forward({ runId }), revision);
+      case "retry_supervised_stage": {
+        const steering = stageOptionalStringValue(validated.values, "steering");
+        return this.#retrySupervisedReview(forward({
+          runId,
+          ticketId: stageStringValue(validated.values, "ticketId"),
+          reviewStepId: stageStringValue(validated.values, "reviewStepId"),
+          failedReviewAttemptId: stageStringValue(validated.values, "failedReviewAttemptId"),
+          retryScope: stageStringValue(validated.values, "retryScope"),
+          ...(steering === undefined ? {} : { steering }),
+        }), revision);
+      }
+      case "retry_terminal_resolver":
+        return this.#requestTerminalResolverRetry(forward({
+          runId,
+          resolverTicketId: stageStringValue(validated.values, "resolverTicketId"),
+          message: stageStringValue(validated.values, "message"),
+        }), revision);
+      case "resolve_questions":
+        return this.#resolveQuestionBatch(forward({
+          runId,
+          batchId: stageStringValue(validated.values, "batchId"),
+          expectedVersion: stageIntegerValue(validated.values, "expectedVersion"),
+        }), revision);
+      case "execute_action":
+        return this.#admitConfiguredStageAction(request, revision, run, validated.values);
+      case "update_orchestration": {
+        if (run.executionConfig === undefined) {
+          throw new AuthorityRpcError("orchestration_missing", "run has no orchestration configuration");
+        }
+        const maxParallel = stageIntegerValue(validated.values, "maxParallel");
+        const draft = nextRun(run, this.#timestamp());
+        draft.executionConfig!.maxParallel = maxParallel;
+        draft.activity.push(activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "compiler",
+          `Max parallel agents changed to ${maxParallel}`,
+        ));
+        const result: JsonValue = { runId, maxParallel, status: "updated" };
+        const committed = await this.#store.commit({
+          expectedRevision: revision,
+          runWrites: [{ record: draft, expectedRevision: run.revision }],
+          receipt: receiptFor(request, result),
+        });
+        this.#background(() => this.#tick(runId), runId);
+        return { result, revision: committed.state.revision };
+      }
+      case "inspect_run_deletion":
+      case "inspect_run_merge":
+        throw new AuthorityRpcError(
+          "stage_action_read_only",
+          "this capability opens its guarded read-only review surface before any mutation",
+        );
+      default:
+        throw new AuthorityRpcError(
+          "stage_action_unsupported",
+          `the pinned compiler did not provide an executor for ${validated.capability.intent}`,
+        );
+    }
+  }
+
+  async #admitConfiguredStageAction(
+    request: RpcRequest,
+    revision: number,
+    run: RunRecord,
+    values: Readonly<Record<string, StageActionValue>>,
+  ): Promise<AuthorityMethodResult> {
+    const stageId = requiredCurrentStageId(run, "configured stage action");
+    const stage = run.behavior?.runType.pipeline.find((candidate) => candidate.id === stageId);
+    if (stage?.config.kind !== "action" || stage.config.compilerOwned || stage.config.automatic) {
+      throw new AuthorityRpcError("stage_action_boundary", "current stage is not an operator-triggered configured action");
+    }
+    const action = selectedRunAction(run, stage.config.action);
+    const capability = configuredStageActionCapability(run, stage, true);
+    if (capability.availability.state !== "available") {
+      throw new AuthorityRpcError("stage_action_disabled", capability.availability.reason);
+    }
+    const parameters = configuredStageParameters(action, values);
+    const ticketParameter = action.parameters.find((parameter) => parameter.type === "ticket_id");
+    const ticketId = ticketParameter === undefined ? undefined : parameters[ticketParameter.id];
+    if (ticketId !== undefined && typeof ticketId !== "string") {
+      throw new AuthorityRpcError("stage_action_ticket", "configured ticket parameter is not a ticket identity");
+    }
+    const ticket = ticketId === undefined ? undefined : run.tickets[ticketId];
+    if (ticketId !== undefined && ticket === undefined) {
+      throw new AuthorityRpcError("stage_action_ticket", `configured ticket does not exist: ${ticketId}`);
+    }
+    const at = this.#timestamp();
+    const execution = prepareRunActionExecution(run, {
+      kind: "configured_stage",
+      stageId,
+      selector: stage.config.action,
+      checkout: action.checkout,
+      parameters,
+      ...(ticket === undefined ? {} : {
+        ticketId: ticket.id,
+        ticketState: configuredActionTicketState(run, ticket),
+        ...(ticket.gitCycleId === undefined ? {} : { cycleId: ticket.gitCycleId }),
+      }),
+      productSha256: canonicalHash({
+        stageId,
+        parameters,
+        graphHash: run.graphHash ?? null,
+        runOid: run.git.run.headOid ?? null,
+        ticketCycleId: ticket?.gitCycleId ?? null,
+      }),
+      at,
+    });
+    const draft = nextRun(run, at);
+    const archiveWrites = admitRunActionExecution(draft, execution);
+    const result: JsonValue = {
+      runId: run.id,
+      stageId,
+      actionId: action.id,
+      invocationId: execution.invocationId,
+      status: "running",
+    };
+    const committed = await this.#store.commit({
+      expectedRevision: revision,
+      runWrites: [{ record: draft, expectedRevision: run.revision }],
+      ...(archiveWrites.length === 0 ? {} : { writes: archiveWrites }),
+      receipt: receiptFor(request, result),
+    });
+    this.#background(() => this.#settleConfiguredStageAction(run.id, execution.invocationId), run.id);
+    return {
+      result,
+      revision: committed.state.revision,
+      events: [{ topic: "run.action.stage.admitted", payload: result }],
+    };
+  }
+
+  async #settleConfiguredStageAction(runId: string, invocationId: string): Promise<void> {
+    let run = await this.#store.getRun(runId);
+    let action = requiredRunActionExecution(run, invocationId);
+    if (!isTerminalActionJournal(action.journal)) await this.#executeRunAction(runId, invocationId);
+    let advanced = false;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      run = await this.#store.getRun(runId);
+      action = requiredRunActionExecution(run, invocationId);
+      if (action.settledAt !== undefined) return this.#noOpInternal(revision);
+      if (action.boundary.kind !== "configured_stage" || action.journal.status !== "completed" ||
+          run.currentPipelineStageId !== action.boundary.stageId) {
+        throw new AuthorityRpcError(
+          "stage_action_failed",
+          `configured stage action did not complete at its bound stage (${action.journal.status})`,
+        );
+      }
+      const order = run.pipelineStageIds;
+      const index = order.indexOf(action.boundary.stageId);
+      if (index < 0 || index + 1 >= order.length) {
+        throw new AuthorityRpcError("stage_action_pipeline", "configured stage action has no compiler successor stage");
+      }
+      const draft = nextRun(run, this.#timestamp());
+      const mutable = requiredRunActionExecution(draft, invocationId);
+      settleRunAction(mutable, "completed", "Configured stage completed", draft.updatedAt, draft.revision);
+      draft.currentPipelineStageId = order[index + 1]!;
+      draft.activity.push(activity(
+        this.#createId("activity"),
+        draft.updatedAt,
+        "compiler",
+        `Completed configured stage: ${action.plan.actionId}`,
+      ));
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+      });
+      advanced = true;
+      return {
+        revision: committed.state.revision,
+        events: [{ topic: "run.action.stage.completed", payload: { runId, invocationId, stageId: action.boundary.stageId } }],
+      };
+    });
+    if (advanced) await this.#tick(runId);
+  }
+
+  async #executeRunAction(runId: string, invocationId: string): Promise<ActionExecutionJournal> {
+    const key = `${runId}:${invocationId}`;
+    const existing = this.#activeActionExecutions.get(key);
+    if (existing !== undefined) return existing;
+    const pending = this.#executeRunActionOnce(runId, invocationId)
+      .finally(() => this.#activeActionExecutions.delete(key));
+    this.#activeActionExecutions.set(key, pending);
+    return pending;
+  }
+
+  /**
+   * Adopt one still-current configured action after an unrelated durable authority revision.
+   * The immutable boundary, generation, stage, and lifecycle preconditions remain unchanged;
+   * only the internal CAS cursor advances. This is required after journaled Git materialization
+   * and on restart before replaying an unfinished action effect.
+   */
+  async #adoptRunActionRevision(
+    runId: string,
+    invocationId: string,
+    advancement?: RunAdvancementToken,
+  ): Promise<void> {
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(runId);
+      if (advancement !== undefined && !this.#matchesAdvancement(run, advancement)) {
+        return this.#noOpInternal(revision);
+      }
+      const action = requiredRunActionExecution(run, invocationId);
+      if (action.settledAt !== undefined || action.expectedRunRevision === run.revision) {
+        return this.#noOpInternal(revision);
+      }
+      assertActionBoundaryCurrent(run, action);
+      const draft = nextRun(run, this.#timestamp());
+      const mutable = requiredRunActionExecution(draft, invocationId);
+      mutable.expectedRunRevision = draft.revision;
+      mutable.updatedAt = draft.updatedAt;
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+      });
+      return { revision: committed.state.revision };
+    });
+  }
+
+  async #executeRunActionOnce(runId: string, invocationId: string): Promise<ActionExecutionJournal> {
+    const observed = await this.#store.getRun(runId);
+    const record = requiredRunActionExecution(observed, invocationId);
+    if (record.settledAt !== undefined) {
+      throw new AuthorityRpcError(
+        "action_already_settled",
+        `configured action ${invocationId} cannot execute after ${record.settlement?.disposition ?? "legacy"} settlement`,
+      );
+    }
+    const host: ActionPrimitiveHost = {
+      execute: (input) => this.#executeRunActionPrimitive(runId, invocationId, input),
+    };
+    const journal = await executeActionPlan(record.plan, host, {
+      journal: record.journal,
+      persist: async (nextJournal) => {
+        await this.#actionFault?.("before_journal", {
+          runId,
+          invocationId,
+          journal: structuredClone(nextJournal),
+        });
+        await this.#persistRunActionJournal(runId, invocationId, nextJournal);
+      },
+    });
+    if (journal.status === "recovery_required") {
+      await this.#executeRunActionRecovery(runId, invocationId);
+    }
+    return journal;
+  }
+
+  async #persistRunActionJournal(
+    runId: string,
+    invocationId: string,
+    journal: ActionExecutionJournal,
+  ): Promise<void> {
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(runId);
+      const record = requiredRunActionExecution(run, invocationId);
+      const currentRecord = currentRunActionCursor(run, record);
+      const draft = nextRun(run, this.#timestamp());
+      draft.actionExecutions![invocationId] = withRunActionJournal(
+        currentRecord,
+        journal,
+        draft.revision,
+        draft.updatedAt,
+      );
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+      });
+      return { revision: committed.state.revision };
+    });
+  }
+
+  async #executeRunActionPrimitive(
+    runId: string,
+    invocationId: string,
+    input: RunActionPrimitiveInput,
+  ): Promise<ConfigurationValue> {
+    let output: ConfigurationValue | undefined;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(runId);
+      const record = requiredRunActionExecution(run, invocationId);
+      currentRunActionCursor(run, record);
+      const prior = record.effects[input.effectKey];
+      if (prior !== undefined) {
+        output = replayRunActionEffect(prior, input);
+        return this.#noOpInternal(revision);
+      }
+      const draft = nextRun(run, this.#timestamp());
+      const dispatched = await this.#dispatchRunActionPrimitive(run, draft, record, input);
+      output = dispatched.output;
+      const mutable = requiredRunActionExecution(draft, invocationId);
+      const receipt = createRunActionEffectReceipt(input, output, draft.updatedAt);
+      if (mutable.effects[input.effectKey] !== undefined) {
+        throw new AuthorityRpcError("action_effect_duplicate", "action primitive effect key was already recorded");
+      }
+      mutable.effects[input.effectKey] = receipt;
+      mutable.expectedRunRevision = draft.revision;
+      mutable.updatedAt = draft.updatedAt;
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+        ...(dispatched.writes === undefined || dispatched.writes.length === 0
+          ? {}
+          : { writes: dispatched.writes }),
+      });
+      return {
+        revision: committed.state.revision,
+        events: [{
+          topic: "run.action.effect",
+          payload: { runId, invocationId, primitive: input.step.primitive, stepId: input.step.id },
+        }],
+      };
+    });
+    if (output === undefined) {
+      throw new AuthorityRpcError("action_effect_output", "configured action primitive produced no canonical output");
+    }
+    return output;
+  }
+
+  async #dispatchRunActionPrimitive(
+    run: RunRecord,
+    draft: RunRecord,
+    record: RunActionExecutionRecord,
+    input: RunActionPrimitiveInput,
+  ): Promise<{ output: ConfigurationValue; writes?: readonly TransactionWrite[] }> {
+    const primitive = input.step.primitive;
+    const args = input.step.arguments;
+    let compilerWrites: readonly TransactionWrite[] | undefined;
+    if (isActionSemanticCompilerStep(record, input.step.id, primitive) && record.semanticResult === undefined) {
+      const compiled = await this.#compileRunActionSemanticEffect(run, draft, record);
+      compilerWrites = compiled.writes;
+    }
+    const current = requiredRunActionExecution(draft, record.invocationId);
+    const ticket = current.boundary.ticketId === undefined
+      ? undefined
+      : draft.tickets[current.boundary.ticketId];
+    const semantic = current.semanticResult;
+    const attachWrites = (output: ConfigurationValue) => ({
+      output,
+      ...(compilerWrites === undefined ? {} : { writes: compilerWrites }),
+    });
+
+    switch (primitive) {
+      case "lock.acquire":
+        return attachWrites({ acquired: true, authority: "project-mutation-lane" });
+      case "profile.validate":
+        return attachWrites({
+          valid: true,
+          compiledConfigHash: draft.compiledConfigHash,
+          behaviorSha256: draft.behavior!.sha256,
+        });
+      case "project.validate":
+      case "graph.validate": {
+        assertRunRecord(draft);
+        if (draft.graphRevision > 0 && draft.graphHash === undefined) {
+          throw new AuthorityRpcError("action_graph_identity", "configured action observed a graph revision without a graph hash");
+        }
+        return attachWrites({ valid: true, graphHash: draft.graphHash ?? null, graphRevision: draft.graphRevision });
+      }
+      case "ticket.validate":
+      case "scope.validate": {
+        if (ticket === undefined) throw new AuthorityRpcError("action_ticket", `${primitive} requires the compiler-bound ticket`);
+        assertActionTicketArguments(ticket.id, args);
+        if (primitive === "scope.validate" && current.plan.context.checkout === "ticket") {
+          if (ticket.gitCycleId === undefined || ticket.worktreePath === undefined || ticket.branch === undefined) {
+            throw new AuthorityRpcError("action_checkout", "ticket-scoped action has no current compiler-owned checkout");
+          }
+        }
+        return attachWrites({
+          valid: true,
+          ticket: ticket.id,
+          readNodes: ticket.readNodeIds?.length ?? 0,
+          writeNodes: ticket.writeNodeIds?.length ?? 0,
+          readPaths: ticket.readPaths.length,
+          writePaths: ticket.writePaths.length,
+        });
+      }
+      case "output.validate":
+      case "review.validate": {
+        if (ticket === undefined || current.boundary.attemptId === undefined) {
+          throw new AuthorityRpcError("action_validation_binding", `${primitive} requires an exact ticket attempt`);
+        }
+        assertActionTicketArguments(ticket.id, args);
+        if (semantic?.kind !== "assignment") {
+          throw new AuthorityRpcError("action_validation_result", `${primitive} did not compile a terminal assignment result`);
+        }
+        return attachWrites({ valid: true, ticket: ticket.id, status: semantic.status });
+      }
+      case "check.run": {
+        if (semantic?.kind !== "assignment" || ticket === undefined) {
+          throw new AuthorityRpcError("action_check_result", "configured check boundary has no compiler-accepted assignment result");
+        }
+        return attachWrites({
+          validated: true,
+          ticket: ticket.id,
+          check: typeof args.check === "string" ? args.check : "current-step-checks",
+          status: semantic.status,
+        });
+      }
+      case "rules.evaluate":
+      case "tickets.reconcile": {
+        if (semantic === undefined) {
+          throw new AuthorityRpcError("action_compiler_result", `${primitive} has no compiler-owned semantic result`);
+        }
+        return attachWrites({
+          compiled: true,
+          kind: semantic.kind,
+          graphHash: draft.graphHash ?? null,
+          graphRevision: draft.graphRevision,
+          ticketCount: Object.keys(draft.tickets).length,
+        });
+      }
+      case "review.record": {
+        if (ticket === undefined || semantic?.kind !== "assignment") {
+          throw new AuthorityRpcError("action_review_result", "review record has no compiler-owned assignment result");
+        }
+        const expectedStatus = semantic.status === "completed" ? "passed" : "failed";
+        const configuredStatus = args.status;
+        if (configuredStatus !== expectedStatus) {
+          throw new AuthorityRpcError("action_review_status", "configured review status differs from the compiler result");
+        }
+        draft.activity.push(activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "compiler",
+          `Configured review ${expectedStatus}: ${ticket.title}`,
+          ticket.id,
+        ));
+        return attachWrites({ ticket: ticket.id, status: expectedStatus, recorded: true });
+      }
+      case "event.append": {
+        const eventType = actionStringArgument(args, "type");
+        const eventTicket = actionOptionalStringArgument(args, "ticket") ?? ticket?.id;
+        draft.activity.push(activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "compiler",
+          eventType,
+          eventTicket,
+        ));
+        return attachWrites({ appended: true, type: eventType, ticket: eventTicket ?? null });
+      }
+      case "receipt.write":
+        return attachWrites({
+          recorded: true,
+          receiptType: actionOptionalStringArgument(args, "receipt_type") ?? "configured-action",
+          actionInvocationId: record.invocationId,
+        });
+      case "snapshot.write":
+        return attachWrites({
+          recorded: true,
+          reason: actionStringArgument(args, "reason"),
+          graphHash: draft.graphHash ?? null,
+          ticketsSha256: canonicalHash(draft.tickets),
+        });
+      case "board.render":
+      case "graph.inspect":
+      case "ticket.inspect":
+        return attachWrites({
+          phase: draft.lifecycle.phase,
+          graphHash: draft.graphHash ?? null,
+          tickets: Object.values(draft.tickets).map((item) => ({ id: item.id, status: item.status })),
+        });
+      case "integration.validate": {
+        if (ticket === undefined) throw new AuthorityRpcError("action_ticket", "integration validation requires a ticket");
+        if (!ticket.steps.every((step) => step.status === "completed" || step.status === "skipped")) {
+          throw new AuthorityRpcError("action_integration", "ticket still has unfinished configured steps");
+        }
+        return attachWrites({ valid: true, ticket: ticket.id });
+      }
+      case "report.render": {
+        if (semantic?.kind !== "report") {
+          throw new AuthorityRpcError("action_report_result", "report renderer produced no compiler-bound report");
+        }
+        return attachWrites({ reportId: semantic.reportId, bundleHash: semantic.bundleHash });
+      }
+      case "recovery.dispatch": {
+        const parent = current.boundary.parentInvocationId === undefined
+          ? current
+          : requiredRunActionExecution(draft, current.boundary.parentInvocationId);
+        const failedStep = [...parent.journal.steps].reverse().find((step) => step.status === "failed");
+        const disposition = parent.boundary.kind === "lead_launch" &&
+          (parent.boundary.attemptId === undefined || draft.attempts[parent.boundary.attemptId] === undefined)
+          ? "revoked_unlaunched_session"
+          : parent.semanticResult === undefined
+            ? "preserved_pre_semantic_state"
+            : "preserved_compiler_result_for_operator_review";
+        draft.activity.push(activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "compiler",
+          `Configured recovery ${disposition.replaceAll("_", " ")} after ${failedStep?.primitive ?? "action failure"}`,
+          ticket?.id,
+        ));
+        return attachWrites({
+          inspected: true,
+          bounded: true,
+          parentInvocationId: parent.invocationId,
+          failedStepId: failedStep?.stepId ?? null,
+          failedPrimitive: failedStep?.primitive ?? null,
+          disposition,
+        });
+      }
+      case "agent.spawn": {
+        if (current.boundary.kind !== "lead_launch" || current.boundary.attemptId === undefined) {
+          throw new AuthorityRpcError("action_primitive_boundary", "agent.spawn requires the named Lead launch boundary");
+        }
+        const configuredPersona = actionOptionalStringArgument(args, "persona");
+        const expectedPersona = draft.behavior?.runType.leadJudgment.personaId;
+        if (configuredPersona !== undefined && expectedPersona !== undefined && configuredPersona !== expectedPersona) {
+          throw new AuthorityRpcError("action_lead_persona", "Lead action persona differs from the pinned run type");
+        }
+        return attachWrites({ authorized: true, attemptId: current.boundary.attemptId, persona: expectedPersona ?? null });
+      }
+      case "agent.stop": {
+        if (current.boundary.kind !== "lead_launch" || input.phase !== "compensation") {
+          throw new AuthorityRpcError("action_primitive_boundary", "agent.stop is available only as Lead launch compensation");
+        }
+        return attachWrites({ authorizationRevoked: true, attemptId: current.boundary.attemptId ?? null });
+      }
+      case "lease.acquire":
+      case "lease.release":
+      case "worktree.create":
+      case "git.commit":
+      case "git.integrate_squash":
+      case "ticket.transition":
+      case "graph.apply_delta":
+      case "graph.write":
+      case "output.record":
+      case "context.compile":
+      case "rollback.forward_reversal":
+        throw new AuthorityRpcError(
+          "action_primitive_boundary",
+          `${primitive} is reserved to its named scheduler, Git, graph, or session authority boundary`,
+        );
+      default:
+        throw new AuthorityRpcError("action_primitive_unsupported", `configured primitive ${primitive} has no native authority adapter`);
+    }
+  }
+
+  async #compileRunActionSemanticEffect(
+    run: RunRecord,
+    draft: RunRecord,
+    record: RunActionExecutionRecord,
+  ): Promise<{ writes?: readonly TransactionWrite[] }> {
+    if (record.boundary.kind === "approved_plan_compile") {
+      const initialized = await this.#program.initializeApprovedPlan(run);
+      draft.graphHash = initialized.graphHash;
+      draft.graphRevision = initialized.graphRevision;
+      draft.tickets = structuredClone(initialized.tickets);
+      for (const ticket of Object.values(draft.tickets)) {
+        delete ticket.gitCycleId;
+        ticket.worktreePath = undefined;
+        ticket.branch = undefined;
+      }
+      draft.activity.push(...structuredClone(initialized.activity ?? []));
+      requiredRunActionExecution(draft, record.invocationId).semanticResult = {
+        kind: "approved_plan",
+        ticketCount: Object.keys(draft.tickets).length,
+        graphHash: initialized.graphHash,
+        graphRevision: initialized.graphRevision,
+      };
+      return initialized.artifactWrites === undefined ? {} : { writes: initialized.artifactWrites };
+    }
+    if (record.boundary.kind === "assignment_validation") {
+      const attemptId = record.boundary.attemptId;
+      if (attemptId === undefined) throw new AuthorityRpcError("action_attempt", "assignment action has no attempt identity");
+      const attempt = run.attempts[attemptId];
+      if (attempt === undefined || attempt.status !== "terminal_accepted") {
+        throw new AuthorityRpcError("action_attempt", "assignment action requires one terminal-accepted attempt");
+      }
+      const assignment = assignmentForAttempt(run, attempt);
+      if (assignment === undefined || assignment.ticketId !== record.boundary.ticketId || assignment.stepId !== record.boundary.stepId) {
+        throw new AuthorityRpcError("action_assignment", "assignment action lost its exact scheduler binding");
+      }
+      const bytes = await this.#store.readArtifact(terminalOutputPath(run.id, attemptId), 16 * 1024 * 1024);
+      if (attempt.terminalOutputSha256 === undefined || rawSha256(bytes) !== attempt.terminalOutputSha256) {
+        throw new AuthorityRpcError(
+          "action_terminal_hash",
+          "assignment action terminal artifact differs from its durably admitted output digest",
+        );
+      }
+      const expectedProductSha256 = canonicalHash({
+        terminalOutputSha256: attempt.terminalOutputSha256,
+        launchSpecHash: attempt.launchSpecHash,
+        ticketId: assignment.ticketId,
+        stepId: assignment.stepId,
+        cycleId: run.tickets[assignment.ticketId]?.gitCycleId ?? null,
+      });
+      if (record.boundary.productSha256 !== expectedProductSha256) {
+        throw new AuthorityRpcError(
+          "action_terminal_product",
+          "assignment action is not bound to its exact attempt output and ticket cycle",
+        );
+      }
+      let terminalOutput: unknown;
+      try {
+        terminalOutput = JSON.parse(bytes.toString("utf8"));
+      } catch {
+        throw new AuthorityRpcError("action_terminal_json", "assignment terminal output artifact is not JSON");
+      }
+      const compiled = await this.#program.compileAssignmentOutput({ run, assignment, attemptId, output: terminalOutput });
+      if (compiled.tickets !== undefined) {
+        draft.tickets = retainTicketAuthorityFields(run.tickets, structuredClone(compiled.tickets));
+      }
+      if (compiled.graphHash !== undefined) draft.graphHash = compiled.graphHash;
+      if (compiled.graphRevision !== undefined) draft.graphRevision = compiled.graphRevision;
+      applyAssignmentRuleAuthorityEvidence(draft, compiled.ruleAuthorityEvidence);
+      draft.activity.push(...structuredClone(compiled.activity ?? []));
+      requiredRunActionExecution(draft, record.invocationId).semanticResult = compiled.outcome.status === "completed"
+        ? {
+            kind: "assignment",
+            status: "completed",
+            summary: compiled.outcome.summary,
+            ...(compiled.changeControl === undefined ? {} : {
+              changeControlSha256: compiled.changeControl.sha256,
+            }),
+          }
+        : { kind: "assignment", status: "failed", blocker: compiled.outcome.blocker };
+      return compiled.artifactWrites === undefined ? {} : { writes: compiled.artifactWrites };
+    }
+    if (record.boundary.kind === "post_orchestration_report") {
+      const plan = this.#behaviorPostOrchestrationPlan(run);
+      const binding = requiredBehaviorProductBinding(run, plan.targetSync.id, this.#timestamp());
+      if (record.boundary.productSha256 !== behaviorProductSha256(binding) ||
+          !samePostProduct(run.postOrchestration?.checkpoint, binding) ||
+          (plan.review !== undefined && !samePostProduct(run.postOrchestration?.review, binding))) {
+        throw new AuthorityRpcError("action_report_binding", "report action product changed after admission");
+      }
+      const verification = await this.#program.verifyRun(run);
+      if (!verification.ok || verification.report === undefined) {
+        throw new AuthorityRpcError("action_report_compile", verification.reason ?? "configured report produced no report bundle");
+      }
+      const report = verification.report;
+      if (report.graphHash !== binding.graphHash ||
+          (run.behavior?.profile.reportingBundleKind !== undefined && report.bundleKind !== run.behavior.profile.reportingBundleKind)) {
+        throw new AuthorityRpcError("action_report_binding", "configured report differs from the checkpointed product or bundle kind");
+      }
+      appendReportPublication(draft, report);
+      draft.postOrchestration = {
+        ...structuredClone(run.postOrchestration!),
+        report: {
+          ...structuredClone(binding),
+          stageId: plan.report.id,
+          recordedAt: draft.updatedAt,
+          actionId: plan.reportAction.id,
+          actionSha256: plan.reportAction.sha256,
+          reportId: report.reportId,
+          bundleHash: report.bundleHash,
+        },
+      };
+      draft.activity.push(...structuredClone(verification.activity ?? []));
+      requiredRunActionExecution(draft, record.invocationId).semanticResult = {
+        kind: "report",
+        reportId: report.reportId,
+        bundleHash: report.bundleHash,
+      };
+      return verification.artifactWrites === undefined ? {} : { writes: verification.artifactWrites };
+    }
+    return {};
+  }
+
+  async #executeRunActionRecovery(runId: string, parentInvocationId: string): Promise<void> {
+    let recoveryInvocationId: string | undefined;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(runId);
+      const parent = requiredRunActionExecution(run, parentInvocationId);
+      if (parent.settledAt !== undefined ||
+          new Set<RunPhase>(["pausing", "paused", "deleting", "deleted"]).has(run.lifecycle.phase)) {
+        return this.#noOpInternal(revision);
+      }
+      if (parent.journal.status !== "recovery_required" || parent.journal.recoveryActionId === undefined) {
+        return this.#noOpInternal(revision);
+      }
+      if (parent.recoveryInvocationId !== undefined) {
+        recoveryInvocationId = parent.recoveryInvocationId;
+        return this.#noOpInternal(revision);
+      }
+      const action = run.behavior!.actions.actions[parent.journal.recoveryActionId];
+      if (action === undefined) throw new AuthorityRpcError("action_recovery_missing", "configured recovery action disappeared");
+      const recovery = prepareRunActionExecution(run, {
+        kind: "recovery",
+        stageId: parent.boundary.stageId,
+        selector: parent.journal.recoveryActionId,
+        checkout: action.checkout,
+        ...(parent.boundary.ticketId === undefined ? {} : { ticketId: parent.boundary.ticketId }),
+        ...(parent.boundary.stepId === undefined ? {} : { stepId: parent.boundary.stepId }),
+        ...(parent.boundary.attemptId === undefined ? {} : { attemptId: parent.boundary.attemptId }),
+        ...(parent.boundary.cycleId === undefined ? {} : { cycleId: parent.boundary.cycleId }),
+        parentInvocationId,
+        at: this.#timestamp(),
+      });
+      const draft = nextRun(run, recovery.createdAt);
+      const archiveWrites = admitRunActionExecution(draft, recovery);
+      requiredRunActionExecution(draft, parentInvocationId).recoveryInvocationId = recovery.invocationId;
+      recoveryInvocationId = recovery.invocationId;
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+        ...(archiveWrites.length === 0 ? {} : { writes: archiveWrites }),
+      });
+      return { revision: committed.state.revision };
+    });
+    if (recoveryInvocationId !== undefined) {
+      const beforeExecution = await this.#store.getRun(runId);
+      const parent = requiredRunActionExecution(beforeExecution, parentInvocationId);
+      const recovery = requiredRunActionExecution(beforeExecution, recoveryInvocationId);
+      if (parent.settledAt !== undefined || recovery.settledAt !== undefined ||
+          new Set<RunPhase>(["pausing", "paused", "deleting", "deleted"]).has(beforeExecution.lifecycle.phase)) {
+        return;
+      }
+      if (!isTerminalActionJournal(recovery.journal)) await this.#executeRunAction(runId, recoveryInvocationId);
+      let assignmentFailed = false;
+      let nonAssignmentFailure: string | undefined;
+      await this.#server.mutateInternal(async ({ revision }) => {
+        const run = await this.#store.getRun(runId);
+        const currentRecovery = requiredRunActionExecution(run, recoveryInvocationId!);
+        const parent = requiredRunActionExecution(run, parentInvocationId);
+        if (parent.settledAt !== undefined ||
+            new Set<RunPhase>(["pausing", "paused", "deleting", "deleted"]).has(run.lifecycle.phase)) {
+          return this.#noOpInternal(revision);
+        }
+        const assignmentRecovery = parent.boundary.kind === "assignment_validation";
+        if (!assignmentRecovery && currentRecovery.settledAt !== undefined && parent.recoverySettledAt !== undefined) {
+          return this.#noOpInternal(revision);
+        }
+        const draft = nextRun(run, this.#timestamp());
+        const mutableRecovery = requiredRunActionExecution(draft, recoveryInvocationId!);
+        if (mutableRecovery.settledAt === undefined) {
+          settleRunAction(
+            mutableRecovery,
+            currentRecovery.journal.status === "completed" ? "completed" : "failed",
+            currentRecovery.journal.status === "completed"
+              ? "Configured recovery recipe completed"
+              : `Configured recovery recipe terminated as ${currentRecovery.journal.status}`,
+            draft.updatedAt,
+            draft.revision,
+          );
+        }
+        const mutableParent = requiredRunActionExecution(draft, parentInvocationId);
+        mutableParent.recoverySettledAt = draft.updatedAt;
+        mutableParent.expectedRunRevision = draft.revision;
+        mutableParent.updatedAt = draft.updatedAt;
+        let recoveryBlocker: string | undefined;
+        if (assignmentRecovery) {
+          const attemptId = parent.boundary.attemptId;
+          const attempt = attemptId === undefined ? undefined : draft.attempts[attemptId];
+          const assignment = attempt === undefined ? undefined : assignmentForAttempt(draft, attempt);
+          if (attempt?.status !== "terminal_accepted" || assignment === undefined ||
+              assignment.ticketId !== parent.boundary.ticketId ||
+              assignment.stepId !== parent.boundary.stepId) {
+            throw new AuthorityRpcError(
+              "action_recovery_assignment",
+              "recovered validation lost its exact terminal-accepted assignment",
+            );
+          }
+          recoveryBlocker = currentRecovery.journal.status === "completed"
+            ? "Configured terminal validation required recovery; reissue from authenticated failure"
+            : `Configured terminal validation recovery did not complete (${currentRecovery.journal.status})`;
+          finishAssignment(
+            draft,
+            assignment,
+            { status: "failed", blocker: recoveryBlocker },
+            draft.updatedAt,
+          );
+          mutableParent.semanticResult = {
+            kind: "assignment",
+            status: "failed",
+            blocker: recoveryBlocker,
+          };
+          settleRunAction(mutableParent, "failed", recoveryBlocker, draft.updatedAt, draft.revision);
+          const failureProof = createTerminalFailureSettlementProof(draft, mutableParent);
+          if (failureProof === undefined) {
+            throw new AuthorityRpcError(
+              "action_recovery_failure_proof",
+              "recovered assignment failure lacks its exact semantic settlement proof",
+            );
+          }
+          draft.terminalFailureProofs ??= {};
+          draft.terminalFailureProofs[failureProof.sha256] = failureProof;
+          assignmentFailed = true;
+          draft.activity.push(activity(
+            this.#createId("activity"),
+            draft.updatedAt,
+            "compiler",
+            recoveryBlocker,
+            assignment.ticketId,
+          ));
+        } else {
+          nonAssignmentFailure = currentRecovery.journal.status === "completed"
+            ? `Configured ${parent.boundary.kind} action required recovery and cannot be treated as successful`
+            : `Configured ${parent.boundary.kind} recovery did not complete (${currentRecovery.journal.status})`;
+          settleRunAction(mutableParent, "failed", nonAssignmentFailure, draft.updatedAt, draft.revision);
+          draft.activity.push(activity(
+            this.#createId("activity"),
+            draft.updatedAt,
+            "compiler",
+            nonAssignmentFailure,
+            parent.boundary.ticketId,
+          ));
+        }
+        const committed = await this.#store.commit({
+          expectedRevision: revision,
+          runWrites: [{ record: draft, expectedRevision: run.revision }],
+        });
+        return {
+          revision: committed.state.revision,
+          events: [{
+            topic: assignmentRecovery
+              ? "run.action.assignment.recovery-settled"
+              : "run.action.recovery.completed",
+            payload: {
+              runId,
+              parentInvocationId,
+              recoveryInvocationId: currentRecovery.invocationId,
+              ...(recoveryBlocker === undefined ? {} : { blocker: recoveryBlocker }),
+            },
+          }],
+        };
+      });
+      if (assignmentFailed) await this.#tick(runId);
+      else if (nonAssignmentFailure !== undefined) {
+        await this.#recordRunBlocker(runId, nonAssignmentFailure);
+      }
+    }
+  }
+
+  async #admitAssignmentOutcomeForValidation(
+    runId: string,
+    attemptId: string,
+    expectedAssignment: Readonly<ReadyAssignment>,
+    terminalOutput: unknown,
+  ): Promise<string | undefined> {
+    const outputBytes = encodeJsonArtifact(terminalOutput);
+    let invocationId: string | undefined;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(runId);
+      const attempt = run.attempts[attemptId];
+      if (attempt === undefined || !new Set<AttemptStatus>(["queued", "running", "waiting_question"]).has(attempt.status) ||
+          new Set<RunPhase>(["pausing", "paused", "deleting", "deleted"]).has(run.lifecycle.phase)) {
+        return this.#noOpInternal(revision);
+      }
+      const assignment = assignmentForAttempt(run, attempt);
+      if (assignment === undefined || canonicalHash(assignment) !== canonicalHash(expectedAssignment)) {
+        throw new AuthorityRpcError("action_assignment", "completed attempt differs from its scheduler assignment");
+      }
+      const at = this.#timestamp();
+      const execution = prepareAssignmentValidationExecution(
+        run,
+        attempt,
+        assignment,
+        terminalOutput,
+        rawSha256(outputBytes),
+        at,
+      );
+      const draft = nextRun(run, at);
+      const archiveWrites = admitRunActionExecution(draft, execution);
+      const mutable = draft.attempts[attemptId]!;
+      mutable.status = "terminal_accepted";
+      mutable.terminalSummary = boundedText(terminalActionSummary(terminalOutput), "terminal summary", 64 * 1024);
+      mutable.terminalOutputSha256 = rawSha256(outputBytes);
+      mutable.terminalOutputSizeBytes = outputBytes.byteLength;
+      mutable.terminalAcceptedAt = draft.updatedAt;
+      invocationId = execution.invocationId;
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+        writes: [
+          ...archiveWrites,
+          {
+            path: terminalOutputPath(run.id, attempt.id),
+            bytes: outputBytes,
+            expectedSha256: null,
+          },
+        ],
+      });
+      return {
+        revision: committed.state.revision,
+        events: [{
+          topic: "agent.terminal.accepted",
+          payload: { runId, attemptId, actionInvocationId: execution.invocationId },
+        }],
+      };
+    });
+    return invocationId;
+  }
+
+  async #settleAssignmentValidation(runId: string, invocationId: string): Promise<void> {
+    const key = `${runId}\0${invocationId}`;
+    const active = this.#activeAssignmentSettlements.get(key);
+    if (active !== undefined) return active;
+    const pending = this.#settleAssignmentValidationOnce(runId, invocationId).finally(() => {
+      if (this.#activeAssignmentSettlements.get(key) === pending) {
+        this.#activeAssignmentSettlements.delete(key);
+      }
+    });
+    this.#activeAssignmentSettlements.set(key, pending);
+    return pending;
+  }
+
+  /**
+   * Settle one configured assignment exactly once in-process. The terminal tool and provider
+   * outcome can discover the same admitted action concurrently; both must await one terminal
+   * policy/replay/CAS owner rather than duplicating effects in the ticket worktree.
+   */
+  async #settleAssignmentValidationOnce(runId: string, invocationId: string): Promise<void> {
+    const observed = await this.#store.getRun(runId);
+    const observedAction = requiredRunActionExecution(observed, invocationId);
+    if (observedAction.settledAt !== undefined || observed.lifecycle.phase !== "executing") return;
+    if (!isTerminalActionJournal(observedAction.journal)) {
+      await this.#executeRunAction(runId, invocationId);
+    }
+    const compiledActionRun = await this.#store.getRun(runId);
+    const compiledAction = requiredRunActionExecution(compiledActionRun, invocationId);
+    const compiledAttemptId = compiledAction.boundary.attemptId;
+    const compiledAttempt = compiledAttemptId === undefined
+      ? undefined
+      : compiledActionRun.attempts[compiledAttemptId];
+    const compiledAssignment = compiledAttempt === undefined
+      ? undefined
+      : assignmentForAttempt(compiledActionRun, compiledAttempt);
+    if (
+      compiledAction.boundary.kind !== "assignment_validation" ||
+      compiledAction.journal.status !== "completed" ||
+      compiledAction.semanticResult?.kind !== "assignment" ||
+      compiledAttempt === undefined ||
+      compiledAttempt.status !== "terminal_accepted" ||
+      compiledAttempt.terminalAcceptedAt === undefined ||
+      compiledAssignment === undefined ||
+      compiledAssignment.ticketId !== compiledAction.boundary.ticketId ||
+      compiledAssignment.stepId !== compiledAction.boundary.stepId
+    ) {
+      throw new AuthorityRpcError(
+        "action_validation_failed",
+        `ticket validation action did not complete with its exact accepted assignment (${compiledAction.journal.status})`,
+      );
+    }
+    const outcomeTerminalPolicy = await this.#prepareOutcomeTerminalPolicy(
+      compiledActionRun,
+      compiledAttempt,
+      compiledAssignment,
+    );
+    let compiledChangeControl: RuntimeAssignmentChangeControlCompilation | undefined;
+    if (
+      compiledAction.semanticResult?.kind === "assignment" &&
+      compiledAction.semanticResult.changeControlSha256 !== undefined
+    ) {
+      const attemptId = compiledAction.boundary.attemptId;
+      const attempt = attemptId === undefined ? undefined : compiledActionRun.attempts[attemptId];
+      const assignment = attempt === undefined ? undefined : assignmentForAttempt(compiledActionRun, attempt);
+      if (attempt === undefined || assignment === undefined) {
+        throw new AuthorityRpcError(
+          "change_control_action_binding",
+          "configured change-control result lost its accepted assignment",
+        );
+      }
+      const outputBytes = await this.#store.readArtifact(
+        terminalOutputPath(compiledActionRun.id, attempt.id),
+        16 * 1024 * 1024,
+      );
+      let terminalOutput: unknown;
+      try {
+        terminalOutput = JSON.parse(outputBytes.toString("utf8"));
+      } catch {
+        throw new AuthorityRpcError(
+          "change_control_terminal_json",
+          "configured change-control terminal artifact is not JSON",
+        );
+      }
+      const replay = await this.#program.compileAssignmentOutput({
+        run: compiledActionRun,
+        assignment,
+        attemptId: attempt.id,
+        output: terminalOutput,
+      });
+      if (
+        replay.changeControl === undefined ||
+        replay.changeControl.sha256 !== compiledAction.semanticResult.changeControlSha256
+      ) {
+        throw new AuthorityRpcError(
+          "change_control_action_replay",
+          "configured change-control result differs from its accepted terminal artifact",
+        );
+      }
+      compiledChangeControl = replay.changeControl;
+    }
+    await this.#actionFault?.("before_assignment_settle", {
+      runId,
+      invocationId,
+      ...(compiledAction.boundary.ticketId === undefined ? {} : {
+        ticketId: compiledAction.boundary.ticketId,
+      }),
+      ...(compiledAction.boundary.attemptId === undefined ? {} : {
+        attemptId: compiledAction.boundary.attemptId,
+      }),
+    });
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(runId);
+      const action = requiredRunActionExecution(run, invocationId);
+      if (action.settledAt !== undefined) return this.#noOpInternal(revision);
+      // Pause/delete/block winning this serialized CAS abandons the accepted output. Their
+      // settlement lane closes the attempt and action journal without publishing late effects.
+      if (run.lifecycle.phase !== "executing") return this.#noOpInternal(revision);
+      if (action.boundary.kind !== "assignment_validation" || action.journal.status !== "completed" ||
+          action.semanticResult?.kind !== "assignment") {
+        throw new AuthorityRpcError(
+          "action_validation_failed",
+          `ticket validation action did not complete (${action.journal.status})`,
+        );
+      }
+      const attemptId = action.boundary.attemptId;
+      const attempt = attemptId === undefined ? undefined : run.attempts[attemptId];
+      const assignment = attempt === undefined ? undefined : assignmentForAttempt(run, attempt);
+      if (attempt === undefined || attempt.status !== "terminal_accepted" || assignment === undefined ||
+          attempt.terminalAcceptedAt === undefined ||
+          assignment.ticketId !== action.boundary.ticketId || assignment.stepId !== action.boundary.stepId) {
+        throw new AuthorityRpcError("action_validation_binding", "ticket validation settlement lost its terminal attempt");
+      }
+      const terminalCompilerReceipts = outcomeTerminalPolicy.prepared === undefined
+        ? []
+        : createConfiguredActionTerminalReceipts(
+            run,
+            attempt,
+            assignment,
+            action,
+            outcomeTerminalPolicy.prepared.projection,
+          );
+      const terminalSettlement = await this.#settleAssignmentTerminalPolicy(
+        run,
+        attempt,
+        assignment,
+        outcomeTerminalPolicy.prepared,
+        outcomeTerminalPolicy.workspace,
+        attempt.terminalAcceptedAt,
+        terminalCompilerReceipts,
+      );
+      const draft = nextRun(run, this.#timestamp());
+      draft.attempts[attempt.id]!.terminalPolicy = terminalSettlement.record;
+      const semantic = action.semanticResult;
+      const outcome = semantic.status === "completed"
+        ? { status: "completed" as const, summary: semantic.summary! }
+        : { status: "failed" as const, blocker: semantic.blocker! };
+      finishAssignment(draft, assignment, outcome, draft.updatedAt);
+      const mutable = requiredRunActionExecution(draft, invocationId);
+      settleRunAction(
+        mutable,
+        semantic.status === "completed" ? "completed" : "failed",
+        semantic.status === "completed" ? semantic.summary! : semantic.blocker!,
+        draft.updatedAt,
+        draft.revision,
+      );
+      const sourceTerminalProof = semantic.status === "completed"
+        ? createTerminalSuccessSettlementProof(draft, mutable)
+        : undefined;
+      if (sourceTerminalProof !== undefined) {
+        draft.terminalSuccessProofs ??= {};
+        const priorSuccess = draft.terminalSuccessProofs[sourceTerminalProof.sha256];
+        if (priorSuccess !== undefined &&
+            canonicalHash(priorSuccess) !== canonicalHash(sourceTerminalProof)) {
+          throw new AuthorityRpcError("terminal_success_collision", "terminal success proof identity collided");
+        }
+        draft.terminalSuccessProofs[sourceTerminalProof.sha256] = sourceTerminalProof;
+      }
+      const changeControlSettlement = semantic.status === "completed"
+        ? await this.#applyAssignmentChangeControl(
+            run,
+            draft,
+            assignment,
+            compiledChangeControl,
+            sourceTerminalProof,
+          )
+        : { sourceHeld: false };
+      const ticket = draft.tickets[assignment.ticketId];
+      if (semantic.status === "completed" && !changeControlSettlement.sourceHeld && ticket?.status === "completed") {
+        ticket.status = "review";
+      } else if (semantic.status === "failed") {
+        // Keep terminal failure ticket-local. The deterministic resolver reconciler below owns
+        // escalation and suppresses recursive resolver fan-out explicitly.
+      }
+      if (semantic.status === "failed") {
+        const proof = createTerminalFailureSettlementProof(draft, mutable);
+        if (proof === undefined) {
+          throw new AuthorityRpcError(
+            "terminal_failure_settlement",
+            "failed configured validation lacks its exact semantic settlement proof",
+          );
+        }
+        draft.terminalFailureProofs ??= {};
+        const prior = draft.terminalFailureProofs[proof.sha256];
+        if (prior !== undefined && canonicalHash(prior) !== canonicalHash(proof)) {
+          throw new AuthorityRpcError("terminal_failure_collision", "terminal failure proof identity collided");
+        }
+        draft.terminalFailureProofs[proof.sha256] = proof;
+      }
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+        writes: terminalSettlement.artifactWrites,
+      });
+      return {
+        revision: committed.state.revision,
+        events: [{
+          topic: semantic.status === "completed" ? "run.action.assignment.completed" : "run.action.assignment.failed",
+          payload: { runId, invocationId, attemptId: attempt.id, ticketId: assignment.ticketId, stepId: assignment.stepId },
+        }],
+      };
+    });
+    // The action and its compiler result are durable here, but the Pi provider attempt remains
+    // terminal_accepted until its exact outcome/usage ACK closes. Advancing tickets, change
+    // control, or Git from this method would let downstream authority consume an unfinished
+    // review. #finalizeAcceptedAttempt is the sole post-settlement advancement boundary.
+  }
+
+  /**
+   * Apply the transactional half of a compiler-emitted assignment change-control result. Typed
+   * proposal application choices are retained by their accepted terminal artifact and reconciled
+   * only after the configured review completes; upstream requests publish the proposal and source
+   * hold together in this assignment's terminal CAS.
+   */
+  async #applyAssignmentChangeControl(
+    current: Readonly<RunRecord>,
+    draft: RunRecord,
+    assignment: Readonly<ReadyAssignment>,
+    changeControl: RuntimeAssignmentChangeControlCompilation | undefined,
+    sourceTerminalProof?: import("../state/run-record.js").TerminalSuccessSettlementProof,
+  ): Promise<{ sourceHeld: boolean }> {
+    if (changeControl === undefined) return { sourceHeld: false };
+    if (changeControl.kind === "proposal_application") {
+      if (
+        changeControl.proposalTicketId !== assignment.ticketId ||
+        changeControl.proposalStepId !== assignment.stepId
+      ) {
+        throw new AuthorityRpcError(
+          "change_control_application_binding",
+          "proposal application differs from its exact scheduler assignment",
+        );
+      }
+      return { sourceHeld: false };
+    }
+    if (
+      changeControl.sourceTicketId !== assignment.ticketId ||
+      changeControl.sourceStepId !== assignment.stepId
+    ) {
+      throw new AuthorityRpcError(
+        "change_control_source_binding",
+        "upstream request differs from its exact assignment or lacks a proposal projector",
+      );
+    }
+    if (sourceTerminalProof === undefined) {
+      throw new AuthorityRpcError(
+        "change_control_source_terminal_proof",
+        "upstream proposal publication requires its exact configured source-action settlement",
+      );
+    }
+    const currentSource = current.tickets[assignment.ticketId];
+    const currentProposal = current.tickets[changeControl.publication.proposalTicketId];
+    const currentHold = currentSource?.executionControl?.sourceHold;
+    if (
+      currentSource !== undefined &&
+      currentHold !== undefined &&
+      currentProposal !== undefined &&
+      currentHold.proposalTicketId === currentProposal.id &&
+      currentHold.requestSha256 === changeControl.publication.requestSha256 &&
+      currentProposal?.executionControl?.proposalRequest?.requestSha256 ===
+        changeControl.publication.requestSha256
+    ) {
+      const source = draft.tickets[assignment.ticketId];
+      if (source === undefined || draft.tickets[currentProposal.id] === undefined) {
+        throw new AuthorityRpcError(
+          "change_control_replay_missing",
+          "durable proposal or source hold disappeared during configured settlement",
+        );
+      }
+      source.executionControl = structuredClone(currentSource.executionControl!);
+      source.status = "blocked";
+      source.blocker = `Awaiting upstream change proposal ${currentProposal.id}`;
+      source.updatedAt = draft.updatedAt;
+      return { sourceHeld: true };
+    }
+    if (this.#program.projectChangeControlProposalTicket === undefined) {
+      throw new AuthorityRpcError(
+        "change_control_source_binding",
+        "upstream request lacks a compiler proposal projector",
+      );
+    }
+    const proposal = await this.#program.projectChangeControlProposalTicket({
+      run: draft,
+      changeControl,
+      sourceTerminalProof,
+    });
+    const existing = draft.tickets[proposal.id];
+    if (existing !== undefined && canonicalHash(existing) !== canonicalHash(proposal)) {
+      throw new AuthorityRpcError(
+        "change_control_proposal_collision",
+        `proposal ${proposal.id} changed between compilation and publication`,
+      );
+    }
+    const source = draft.tickets[assignment.ticketId];
+    if (source === undefined) {
+      throw new AuthorityRpcError("change_control_source_missing", "upstream request source ticket disappeared");
+    }
+    const hold = source.executionControl?.sourceHold;
+    if (hold !== undefined && (
+      hold.proposalTicketId !== proposal.id ||
+      hold.requestSha256 !== changeControl.publication.requestSha256
+    )) {
+      throw new AuthorityRpcError(
+        "change_control_source_hold",
+        `source ticket ${source.id} is already held by another proposal`,
+      );
+    }
+    draft.tickets[proposal.id] = structuredClone(proposal);
+    source.executionControl = {
+      ...(source.executionControl ?? {}),
+      sourceHold: {
+        proposalTicketId: proposal.id,
+        requestSha256: changeControl.publication.requestSha256,
+      },
+    };
+    source.status = "blocked";
+    source.blocker = `Awaiting upstream change proposal ${proposal.id}`;
+    source.updatedAt = draft.updatedAt;
+    draft.activity.push(activity(
+      this.#createId("activity"),
+      draft.updatedAt,
+      "compiler",
+      `Opened change proposal and held source ticket: ${proposal.title}`,
+      proposal.id,
+    ));
+    return { sourceHeld: true };
+  }
+
+  /** Materialize one fully reviewed proposal into an exact application child or an agent-free no-op. */
+  async #materializeApprovedProposal(
+    runId: string,
+    advancement: RunAdvancementToken,
+  ): Promise<boolean> {
+    const run = await this.#store.getRun(runId);
+    if (!this.#matchesAdvancement(run, advancement) ||
+        hasUnfinalizedAcceptedAssignment(run) ||
+        this.#program.projectExecutionSemanticCatalog === undefined ||
+        this.#program.projectApprovedApplicationTicket === undefined) return false;
+    const proposal = Object.values(run.tickets)
+      .filter((ticket) =>
+        ticket.status === "completed" &&
+        ticket.executionControl?.proposalRequest !== undefined &&
+        ticket.executionControl.proposalApprovalSha256 !== undefined &&
+        ticket.executionControl.proposalDisposition?.kind === "approved")
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))[0];
+    if (proposal === undefined) return false;
+    const catalog = await this.#program.projectExecutionSemanticCatalog(run);
+    const operation = catalog.operations[proposal.operationId];
+    const proposalStepId = operation?.changeControl.role === "proposal"
+      ? operation.changeControl.proposalStep
+      : undefined;
+    const proposalStep = proposal.steps.find((step) => step.id === proposalStepId);
+    if (proposalStep === undefined || proposalStep.status !== "completed") {
+      throw new AuthorityRpcError(
+        "change_control_proposal_step",
+        `completed proposal ${proposal.id} lacks its configured application-selection step`,
+      );
+    }
+    const proposalAttemptId = proposalStep.attemptIds.at(-1);
+    const proposalAttempt = proposalAttemptId === undefined ? undefined : run.attempts[proposalAttemptId];
+    if (
+      proposalAttempt === undefined ||
+      proposalAttempt.ticketId !== proposal.id ||
+      proposalAttempt.stepId !== proposalStep.id ||
+      proposalAttempt.status !== "completed" ||
+      proposalAttempt.terminalOutputSha256 === undefined
+    ) {
+      throw new AuthorityRpcError(
+        "change_control_proposal_attempt",
+        `proposal ${proposal.id} has no exact accepted application-selection attempt`,
+      );
+    }
+    const reviewStep = proposal.steps.filter((step) => step.kind === "review").at(-1);
+    const reviewAttemptId = reviewStep?.attemptIds.at(-1);
+    const reviewAttempt = reviewAttemptId === undefined ? undefined : run.attempts[reviewAttemptId];
+    if (
+      reviewStep === undefined ||
+      reviewStep.status !== "completed" ||
+      reviewAttempt === undefined ||
+      reviewAttempt.ticketId !== proposal.id ||
+      reviewAttempt.stepId !== reviewStep.id ||
+      reviewAttempt.status !== "completed" ||
+      reviewAttempt.terminalOutputSha256 === undefined
+    ) {
+      throw new AuthorityRpcError(
+        "change_control_review_attempt",
+        `proposal ${proposal.id} has no exact accepted configured review`,
+      );
+    }
+    const terminalBytes = await this.#store.readArtifact(
+      terminalOutputPath(run.id, proposalAttempt.id),
+      16 * 1024 * 1024,
+    );
+    if (rawSha256(terminalBytes) !== proposalAttempt.terminalOutputSha256) {
+      throw new AuthorityRpcError(
+        "change_control_proposal_artifact",
+        `proposal ${proposal.id} terminal artifact differs from its accepted hash`,
+      );
+    }
+    let terminalOutput: unknown;
+    try {
+      terminalOutput = JSON.parse(terminalBytes.toString("utf8"));
+    } catch {
+      throw new AuthorityRpcError(
+        "change_control_proposal_artifact",
+        `proposal ${proposal.id} terminal artifact is not JSON`,
+      );
+    }
+    const assignment: ReadyAssignment = {
+      runId: run.id,
+      ticketId: proposal.id,
+      stepId: proposalStep.id,
+      personaId: proposalStep.personaId,
+      priority: proposal.priority,
+    };
+    const replay = await this.#program.compileAssignmentOutput({
+      run,
+      assignment,
+      attemptId: proposalAttempt.id,
+      output: terminalOutput,
+    });
+    const selection = replay.changeControl;
+    if (
+      replay.outcome.status !== "completed" ||
+      selection?.kind !== "proposal_application" ||
+      selection.proposalOutputSha256 === undefined
+    ) {
+      throw new AuthorityRpcError(
+        "change_control_proposal_replay",
+        `proposal ${proposal.id} terminal artifact did not reproduce its typed application choice`,
+      );
+    }
+    const control = proposal.executionControl!;
+    const existingChildren = Object.values(run.tickets).filter((ticket) =>
+      ticket.id !== proposal.id &&
+      ticket.executionControl?.sourceProposalTicketId === proposal.id &&
+      ticket.executionControl.approvedApplicationSha256 !== undefined);
+    if (existingChildren.length > 1) {
+      throw new AuthorityRpcError(
+        "change_control_application_ambiguous",
+        `proposal ${proposal.id} has multiple durable application children`,
+      );
+    }
+    const existingChild = existingChildren[0];
+    const reviewAuthoritySha256 = proposalReviewAuthoritySha256(
+      reviewAttempt,
+      control.proposalApprovalSha256!,
+    );
+    const proposalAction = findRunActionAtBoundary(run, "assignment_validation", {
+      ticketId: proposal.id,
+      stepId: proposalStep.id,
+      attemptId: proposalAttempt.id,
+    });
+    const reviewAction = findRunActionAtBoundary(run, "assignment_validation", {
+      ticketId: proposal.id,
+      stepId: reviewStep.id,
+      attemptId: reviewAttempt.id,
+    });
+    const proposalTerminalProof = proposalAction === undefined
+      ? undefined
+      : createTerminalSuccessSettlementProof(run, proposalAction);
+    const reviewTerminalProof = reviewAction === undefined
+      ? undefined
+      : createTerminalSuccessSettlementProof(run, reviewAction);
+    if (proposalTerminalProof === undefined || reviewTerminalProof === undefined) {
+      throw new AuthorityRpcError(
+        "change_control_materialization_proof",
+        `proposal ${proposal.id} lacks exact configured proposal/review settlement authority`,
+      );
+    }
+    const materialization = deriveApprovedChangeMaterialization(catalog, {
+      runId: run.id,
+      proposalTicketId: proposal.id,
+      proposalBinding: proposal.executionPolicyBinding!,
+      requestSha256: control.proposalRequest!.requestSha256,
+      approvalSha256: control.proposalApprovalSha256!,
+      proposalOutputSha256: selection.proposalOutputSha256,
+      proposalStepId: selection.proposalStepId,
+      proposalSelectionSha256: selection.sha256,
+      selectionSummary: selection.summary,
+      proposalTerminalProof,
+      reviewSha256: reviewAuthoritySha256,
+      reviewTerminalProof,
+      applicationPublicOperation: selection.applicationPublicOperation,
+      targetNodeIds: selection.targetNodeIds,
+      scope: selection.scope,
+      ...(existingChild === undefined ? {} : {
+        existingApplication: {
+          ticketId: existingChild.id,
+          sourceProposalTicketId: proposal.id,
+          applicationOperationId: existingChild.operationId,
+          authoritySha256: existingChild.executionControl!.approvedApplicationSha256!,
+        },
+      }),
+    });
+    const application = await this.#program.projectApprovedApplicationTicket({
+      run,
+      materialization,
+      selection,
+    });
+    let changed = false;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const current = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(current, advancement)) return this.#noOpInternal(revision);
+      const currentProposal = current.tickets[proposal.id];
+      const currentProposalAttempt = current.attempts[proposalAttempt.id];
+      const currentReviewAttempt = current.attempts[reviewAttempt.id];
+      if (
+        currentProposal?.status !== "completed" ||
+        currentProposal.executionControl?.proposalDisposition?.kind !== "approved" ||
+        currentProposal.executionControl.proposalApprovalSha256 !== control.proposalApprovalSha256 ||
+        currentProposalAttempt?.terminalOutputSha256 !== proposalAttempt.terminalOutputSha256 ||
+        currentReviewAttempt === undefined ||
+        proposalReviewAuthoritySha256(currentReviewAttempt, control.proposalApprovalSha256!) !==
+          reviewAuthoritySha256
+      ) return this.#noOpInternal(revision);
+      const draft = nextRun(current, this.#timestamp());
+      const mutableProposal = draft.tickets[proposal.id]!;
+      if (materialization.kind === "application") {
+        if (application === undefined || application.id !== materialization.applicationTicketId) {
+          throw new AuthorityRpcError(
+            "change_control_application_projection",
+            "compiler omitted or changed the exact approved application ticket",
+          );
+        }
+        const durable = draft.tickets[application.id];
+        if (durable !== undefined && canonicalHash(durable) !== canonicalHash(application)) {
+          throw new AuthorityRpcError(
+            "change_control_application_collision",
+            `approved application ${application.id} collided with durable work`,
+          );
+        }
+        draft.tickets[application.id] = structuredClone(application);
+        mutableProposal.executionControl!.proposalDisposition = {
+          kind: "application",
+          authoritySha256: materialization.authoritySha256,
+          applicationTicketId: application.id,
+        };
+        mutableProposal.executionControl!.approvedApplicationSha256 = materialization.authoritySha256;
+      } else {
+        if (application !== undefined) {
+          throw new AuthorityRpcError(
+            "change_control_no_op_projection",
+            "compiler materialized an application ticket for a reviewed no-op",
+          );
+        }
+        mutableProposal.executionControl!.proposalDisposition = {
+          kind: "no_op",
+          authoritySha256: materialization.authoritySha256,
+        };
+        mutableProposal.executionControl!.approvedApplicationSha256 = materialization.authoritySha256;
+      }
+      mutableProposal.executionControl!.approvedMaterialization = structuredClone(materialization);
+      mutableProposal.updatedAt = draft.updatedAt;
+      draft.activity.push(activity(
+        this.#createId("activity"),
+        draft.updatedAt,
+        "compiler",
+        materialization.kind === "application"
+          ? `Materialized approved application: ${application!.title}`
+          : `Recorded reviewed no-op: ${mutableProposal.title}`,
+        proposal.id,
+      ));
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: current.revision }],
+      });
+      changed = true;
+      return {
+        revision: committed.state.revision,
+        events: [{
+          topic: materialization.kind === "application"
+            ? "proposal.application.materialized"
+            : "proposal.no_op.materialized",
+          payload: {
+            runId,
+            proposalTicketId: proposal.id,
+            ...(application === undefined ? {} : { applicationTicketId: application.id }),
+          },
+        }],
+      };
+    });
+    return changed;
+  }
+
+  /** Archive one superseded source checkout and return the held ticket to a fresh execution cycle. */
+  async #releaseHeldSource(
+    runId: string,
+    advancement: RunAdvancementToken,
+  ): Promise<boolean> {
+    let run = await this.#store.getRun(runId);
+    if (!this.#matchesAdvancement(run, advancement) || hasUnfinalizedAcceptedAssignment(run)) return false;
+    const heldSources = Object.values(run.tickets)
+      .filter((ticket) => ticket.executionControl?.sourceHold !== undefined)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+    let selected: Readonly<{
+      source: TicketRecord;
+      hold: NonNullable<NonNullable<TicketRecord["executionControl"]>["sourceHold"]>;
+      proposal: TicketRecord;
+      release: SourceReleaseDecision;
+    }> | undefined;
+    for (const candidate of heldSources) {
+      const candidateHold = candidate.executionControl!.sourceHold!;
+      const candidateProposal = run.tickets[candidateHold.proposalTicketId];
+      if (
+        candidateProposal?.executionControl?.proposalRequest?.requestSha256 !== candidateHold.requestSha256 ||
+        candidateProposal.executionControl.proposalRequest.sourceTicketId !== candidate.id
+      ) {
+        throw new AuthorityRpcError(
+          "change_control_source_hold",
+          `source ${candidate.id} is held by a missing or mismatched proposal`,
+        );
+      }
+      const candidateRelease = runSourceReleaseDecision(run, candidate, candidateProposal);
+      if (candidateRelease.disposition === "release") {
+        selected = {
+          source: candidate,
+          hold: candidateHold,
+          proposal: candidateProposal,
+          release: candidateRelease,
+        };
+        break;
+      }
+    }
+    if (selected === undefined) return false;
+    const { source, hold, proposal, release } = selected;
+
+    const cycleId = source.gitCycleId;
+    if (cycleId !== undefined) {
+      const lifecycle = await this.#withGit(runId, async () => {
+        const current = await this.#store.getRun(runId);
+        if (!this.#matchesAdvancement(current, advancement)) throw new RunAdvancementStoppedError();
+        const currentSource = current.tickets[source.id];
+        const currentHold = currentSource?.executionControl?.sourceHold;
+        if (
+          currentSource?.gitCycleId !== cycleId ||
+          currentHold?.proposalTicketId !== proposal.id ||
+          currentHold.requestSha256 !== hold.requestSha256
+        ) {
+          throw new RunAdvancementStoppedError();
+        }
+        const currentProposal = current.tickets[proposal.id];
+        if (currentProposal === undefined ||
+            runSourceReleaseDecision(current, currentSource, currentProposal).sha256 !== release.sha256) {
+          throw new RunAdvancementStoppedError();
+        }
+        return this.#git.supersedeTicketCycle(current.git, {
+          cycleId,
+          scope: ticketGitScope(currentSource),
+          subject: `Archive superseded Koni ticket: ${currentSource.title}`,
+          body: `Run ${current.id}\nTicket ${currentSource.id}\nProposal ${proposal.id}`,
+          // The archive witnesses the exact request that invalidated this source execution.
+          supersessionSha256: currentHold.requestSha256,
+        }, this.#gitJournal(runId, advancement));
+      });
+      await this.#persistGitLifecycle(runId, lifecycle, advancement);
+      run = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(run, advancement)) return false;
+    } else if (source.worktreePath !== undefined || source.branch !== undefined) {
+      throw new AuthorityRpcError(
+        "change_control_source_git",
+        `held source ${source.id} has checkout metadata without an owned Git cycle`,
+      );
+    }
+
+    let changed = false;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const current = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(current, advancement)) return this.#noOpInternal(revision);
+      const currentSource = current.tickets[source.id];
+      const currentHold = currentSource?.executionControl?.sourceHold;
+      if (
+        currentSource === undefined ||
+        currentHold?.proposalTicketId !== proposal.id ||
+        currentHold.requestSha256 !== hold.requestSha256
+      ) return this.#noOpInternal(revision);
+      if (cycleId !== undefined) {
+        const cycle = current.git.ticketCycles[cycleId];
+        if (
+          cycle?.status !== "retired" ||
+          cycle.supersessionSha256 !== currentHold.requestSha256 ||
+          cycle.archiveRef === undefined
+        ) {
+          throw new AuthorityRpcError(
+            "change_control_source_git",
+            `source ${source.id} cannot release before its exact Git supersession settles`,
+          );
+        }
+      }
+      const currentProposal = current.tickets[proposal.id];
+      if (currentProposal === undefined) return this.#noOpInternal(revision);
+      const currentRelease = runSourceReleaseDecision(current, currentSource, currentProposal);
+      if (currentRelease.sha256 !== release.sha256 || currentRelease.disposition !== "release") {
+        return this.#noOpInternal(revision);
+      }
+      const draft = nextRun(current, this.#timestamp());
+      const mutable = draft.tickets[source.id]!;
+      resetTicketForFreshCycle(
+        mutable,
+        draft.updatedAt,
+        currentTicketExecutionEpoch(current, currentSource),
+      );
+      delete mutable.executionControl!.sourceHold;
+      if (Object.keys(mutable.executionControl!).length === 0) delete mutable.executionControl;
+      draft.activity.push(activity(
+        this.#createId("activity"),
+        draft.updatedAt,
+        "compiler",
+        `Released source ticket after ${currentRelease.reason.replaceAll("_", " ")}: ${mutable.title}`,
+        mutable.id,
+      ));
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: current.revision }],
+      });
+      changed = true;
+      return {
+        revision: committed.state.revision,
+        events: [{ topic: "proposal.source.released", payload: {
+          runId,
+          sourceTicketId: source.id,
+          proposalTicketId: proposal.id,
+          reason: currentRelease.reason,
+        } }],
+      };
+    });
+    return changed;
+  }
+
+  /** Resolve every exact failed configured resolver that may be retried by an operator. */
+  async #terminalResolverRetryCandidates(
+    run: RunRecord,
+  ): Promise<TerminalResolverRetryCandidate[]> {
+    if (this.#program.projectExecutionSemanticCatalog === undefined) return [];
+    const catalog = await this.#program.projectExecutionSemanticCatalog(run);
+    if (catalog.terminalResolverOperationId === undefined) return [];
+    const candidates: TerminalResolverRetryCandidate[] = [];
+    for (const resolver of Object.values(run.tickets)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))) {
+      const recovery = resolver.executionControl?.terminalRecovery;
+      if (
+        recovery === undefined ||
+        resolver.executionPolicyBinding === undefined ||
+        resolver.operationId !== catalog.terminalResolverOperationId ||
+        (resolver.status !== "blocked" && resolver.status !== "failed") ||
+        recovery.failureBindingSha256s.length !== 1
+      ) continue;
+      const source = run.tickets[recovery.sourceTicketId];
+      const sourceFailure = source === undefined ? undefined : terminalFailureBindingFromProof(
+        run,
+        source,
+        recovery.sourceFailureProof,
+      );
+      const latestRetry = resolver.executionControl?.terminalResolverRetryRequests?.at(-1);
+      const resolverFailure = terminalFailureBinding(run, resolver) ??
+        (latestRetry === undefined
+          ? undefined
+          : terminalFailureBindingFromProof(run, resolver, latestRetry.failureProof));
+      if (
+        source === undefined ||
+        (source.status !== "blocked" && source.status !== "failed") ||
+        sourceFailure === undefined ||
+        sourceFailure.sha256 !== recovery.failureBindingSha256s[0] ||
+        resolverFailure === undefined
+      ) continue;
+      const pendingRequest = resolver.executionControl?.terminalResolverRetryRequests
+        ?.find((request) =>
+          request.sourceFailureBindingSha256 === sourceFailure.sha256 &&
+          request.resolverFailureBindingSha256 === resolverFailure.sha256);
+      candidates.push({
+        catalog,
+        resolver,
+        source,
+        resolverFailure,
+        sourceFailure,
+        ...(pendingRequest === undefined ? {} : { pendingRequest }),
+      });
+    }
+    return candidates;
+  }
+
+  /** Admit one immutable operator request; Git settlement occurs after the response/restart. */
+  async #requestTerminalResolverRetry(
+    request: RpcRequest,
+    revision: number,
+  ): Promise<AuthorityMethodResult> {
+    requireIdempotency(request);
+    assertExactParams(request.params, ["runId", "resolverTicketId", "message"]);
+    const runId = requiredString(request.params, "runId");
+    const resolverTicketId = requiredString(request.params, "resolverTicketId");
+    const message = requiredString(request.params, "message");
+    const run = await this.#store.getRun(runId);
+    if (run.lifecycle.phase === "deleting" || run.lifecycle.phase === "deleted") {
+      throw new AuthorityRpcError("terminal_resolver_retry_deleted", "deleted runs refuse resolver retry authority");
+    }
+    if (run.lifecycle.phase !== "blocked") {
+      throw new AuthorityRpcError(
+        "terminal_resolver_retry_phase",
+        "terminal resolver retry is available only for the exact chain-suppressed blocked run",
+      );
+    }
+    const candidate = (await this.#terminalResolverRetryCandidates(run))
+      .find((item) => item.resolver.id === resolverTicketId);
+    if (candidate === undefined) {
+      throw new AuthorityRpcError(
+        "terminal_resolver_retry_missing",
+        "resolver is not the current exact chain-suppressed failure",
+      );
+    }
+    if (candidate.pendingRequest !== undefined) {
+      throw new AuthorityRpcError(
+        "terminal_resolver_retry_pending",
+        "this exact resolver failure already has a retry request in settlement",
+        { retryable: true },
+      );
+    }
+    const priorRetries = candidate.resolver.executionControl?.terminalResolverRetryRequests ?? [];
+    let retry: TerminalResolverRetryRequest;
+    try {
+      retry = deriveTerminalResolverRetryRequest(candidate.catalog, {
+        runId,
+        resolverTicketId,
+        resolverBinding: candidate.resolver.executionPolicyBinding!,
+        sourceTicketId: candidate.source.id,
+        sourceFailureBindingSha256: candidate.sourceFailure.sha256,
+        resolverFailure: {
+          sha256: candidate.resolverFailure.sha256,
+          attemptId: candidate.resolverFailure.attemptId,
+          launchSpecHash: candidate.resolverFailure.launchSpecHash,
+          terminalPolicySha256: candidate.resolverFailure.terminalPolicySha256,
+          terminalOutputSha256: candidate.resolverFailure.terminalOutputSha256,
+          failureSettlementSha256: candidate.resolverFailure.failureSettlementSha256,
+          failureProof: candidate.resolverFailure.failureProof,
+        },
+        priorRetries,
+        event: {
+          eventId: this.#createId("activity"),
+          actor: "operator",
+          message,
+          recordedAt: this.#timestamp(),
+        },
+      });
+    } catch (error) {
+      throw new AuthorityRpcError(errorCode(error) ?? "terminal_resolver_retry", errorMessage(error));
+    }
+    const draft = nextRun(run, retry.recordedAt);
+    const mutable = draft.tickets[resolverTicketId]!;
+    mutable.executionControl!.terminalResolverRetryRequests = [
+      ...(mutable.executionControl!.terminalResolverRetryRequests ?? []),
+      structuredClone(retry),
+    ];
+    draft.activity.push(activity(
+      this.#createId("activity"),
+      draft.updatedAt,
+      "compiler",
+      `Requested terminal resolver retry: ${mutable.title}`,
+      mutable.id,
+    ));
+    const result: JsonValue = {
+      runId,
+      resolverTicketId,
+      sourceTicketId: candidate.source.id,
+      retryRequestSha256: retry.sha256,
+      status: "requested",
+    };
+    const committed = await this.#store.commit({
+      expectedRevision: revision,
+      runWrites: [{ record: draft, expectedRevision: run.revision }],
+      receipt: receiptFor(request, result),
+    });
+    return {
+      result,
+      revision: committed.state.revision,
+      events: [{ topic: "ticket.terminal-resolver.retry-requested", payload: result }],
+      afterResponse: () => this.#background(async () => {
+        if (await this.#settleTerminalResolverRetry(runId, {
+          resolverTicketId,
+          retryRequestSha256: retry.sha256,
+        })) await this.#tick(runId);
+      }, runId),
+    };
+  }
+
+  /** Retire the exact failed resolver cycle, then atomically reissue it and resume the run. */
+  async #settleTerminalResolverRetry(
+    runId: string,
+    expected?: { resolverTicketId: string; retryRequestSha256: Sha256Digest },
+  ): Promise<boolean> {
+    let run = await this.#store.getRun(runId);
+    if (run.lifecycle.phase !== "blocked") return false;
+    const candidate = (await this.#terminalResolverRetryCandidates(run))
+      .find((item) => item.pendingRequest !== undefined &&
+        (expected === undefined || (item.resolver.id === expected.resolverTicketId &&
+          item.pendingRequest.sha256 === expected.retryRequestSha256)));
+    if (candidate?.pendingRequest === undefined) return false;
+    const retry = candidate.pendingRequest;
+    const blockedAdvancement = this.#advancementToken(run, "blocked")!;
+    const cycleId = candidate.resolver.gitCycleId;
+    if (cycleId !== undefined) {
+      const lifecycle = await this.#withGit(runId, async () => {
+        const current = await this.#store.getRun(runId);
+        if (!this.#matchesAdvancement(current, blockedAdvancement)) {
+          throw new RunAdvancementStoppedError();
+        }
+        const currentCandidate = (await this.#terminalResolverRetryCandidates(current))
+          .find((item) => item.resolver.id === candidate.resolver.id &&
+            item.pendingRequest?.sha256 === retry.sha256);
+        if (currentCandidate?.resolver.gitCycleId !== cycleId) throw new RunAdvancementStoppedError();
+        return this.#git.supersedeTicketCycle(current.git, {
+          cycleId,
+          scope: ticketGitScope(currentCandidate.resolver),
+          subject: `Archive retried Koni resolver: ${currentCandidate.resolver.title}`,
+          body: `Run ${current.id}\nResolver ${currentCandidate.resolver.id}\nRetry ${retry.eventId}`,
+          supersessionSha256: retry.sha256,
+        }, this.#gitJournal(runId, blockedAdvancement));
+      });
+      await this.#persistGitLifecycle(runId, lifecycle, blockedAdvancement);
+      run = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(run, blockedAdvancement)) return false;
+    } else if (candidate.resolver.worktreePath !== undefined || candidate.resolver.branch !== undefined) {
+      throw new AuthorityRpcError(
+        "terminal_resolver_retry_git",
+        `resolver ${candidate.resolver.id} has checkout metadata without an owned Git cycle`,
+      );
+    }
+    let changed = false;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const current = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(current, blockedAdvancement)) return this.#noOpInternal(revision);
+      const exact = (await this.#terminalResolverRetryCandidates(current))
+        .find((item) => item.resolver.id === candidate.resolver.id &&
+          item.pendingRequest?.sha256 === retry.sha256);
+      if (exact === undefined) return this.#noOpInternal(revision);
+      if (cycleId !== undefined) {
+        const cycle = current.git.ticketCycles[cycleId];
+        if (cycle?.status !== "retired" || cycle.supersessionSha256 !== retry.sha256 ||
+            cycle.archiveRef === undefined) {
+          throw new AuthorityRpcError(
+            "terminal_resolver_retry_git",
+            `resolver ${candidate.resolver.id} cannot reissue before exact Git supersession settles`,
+          );
+        }
+      }
+      const draft = nextRun(current, this.#timestamp());
+      const mutable = draft.tickets[candidate.resolver.id]!;
+      resetTicketForFreshCycle(
+        mutable,
+        draft.updatedAt,
+        currentTicketExecutionEpoch(current, exact.resolver),
+      );
+      applyLifecycle(draft, {
+        type: "retry_requested",
+        atMs: this.#now().getTime(),
+        phase: current.lifecycle.resumePhase ?? "executing",
+      });
+      draft.activity.push(activity(
+        this.#createId("activity"),
+        draft.updatedAt,
+        "compiler",
+        `Reissued terminal resolver after operator retry: ${mutable.title}`,
+        mutable.id,
+      ));
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: current.revision }],
+      });
+      changed = true;
+      return {
+        revision: committed.state.revision,
+        events: [{ topic: "ticket.terminal-resolver.reissued", payload: {
+          runId,
+          resolverTicketId: mutable.id,
+          retryRequestSha256: retry.sha256,
+        } }],
+      };
+    });
+    if (changed) this.#supervisor.resumeRun(runId);
+    return changed;
+  }
+
+  /** A completed configured resolver retires the failed source checkout and reissues fresh work. */
+  async #releaseResolvedTerminalSource(
+    runId: string,
+    advancement: RunAdvancementToken,
+  ): Promise<boolean> {
+    let run = await this.#store.getRun(runId);
+    if (!this.#matchesAdvancement(run, advancement) || hasUnfinalizedAcceptedAssignment(run)) return false;
+    const resolver = Object.values(run.tickets)
+      .filter((ticket) =>
+        ticket.status === "completed" &&
+        ticket.executionControl?.terminalRecovery !== undefined &&
+        (() => {
+          const source = run.tickets[ticket.executionControl!.terminalRecovery!.sourceTicketId];
+          const failure = source === undefined ? undefined : terminalFailureBindingFromProof(
+            run,
+            source,
+            ticket.executionControl!.terminalRecovery!.sourceFailureProof,
+          );
+          return (source?.status === "blocked" || source?.status === "failed") &&
+            failure !== undefined &&
+            ticket.executionControl!.terminalRecovery!.failureBindingSha256s.includes(failure.sha256);
+        })())
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))[0];
+    if (resolver === undefined) return false;
+    const recovery = resolver.executionControl!.terminalRecovery!;
+    const source = run.tickets[recovery.sourceTicketId];
+    if (source === undefined || (source.status !== "blocked" && source.status !== "failed")) return false;
+    const supersessionSha256 = canonicalHash({
+      protocol: "koni.terminal-resolver-source-release.v1",
+      resolverTicketId: resolver.id,
+      sourceTicketId: source.id,
+      failureBindingSha256s: recovery.failureBindingSha256s,
+      recoveryAuthoritySha256: recovery.sha256,
+      resolverTerminalProofSha256: resolver.executionControl!.terminalResolverTerminalProof!.sha256,
+      resolverTerminalAuthoritySha256: terminalTicketAuthoritySha256(resolver),
+    });
+    const cycleId = source.gitCycleId;
+    if (cycleId !== undefined) {
+      const lifecycle = await this.#withGit(runId, async () => {
+        const current = await this.#store.getRun(runId);
+        if (!this.#matchesAdvancement(current, advancement)) throw new RunAdvancementStoppedError();
+        const currentResolver = current.tickets[resolver.id];
+        const currentSource = current.tickets[source.id];
+        const currentFailure = currentSource === undefined ? undefined : terminalFailureBindingFromProof(
+          current,
+          currentSource,
+          recovery.sourceFailureProof,
+        );
+        if (
+          currentResolver?.status !== "completed" ||
+          currentSource?.gitCycleId !== cycleId ||
+          currentFailure === undefined ||
+          !recovery.failureBindingSha256s.includes(currentFailure.sha256) ||
+          canonicalHash(currentResolver.executionControl) !== canonicalHash(resolver.executionControl) ||
+          terminalTicketAuthoritySha256(currentResolver) !== terminalTicketAuthoritySha256(resolver)
+        ) throw new RunAdvancementStoppedError();
+        return this.#git.supersedeTicketCycle(current.git, {
+          cycleId,
+          scope: ticketGitScope(currentSource),
+          subject: `Archive recovered Koni ticket: ${currentSource.title}`,
+          body: `Run ${current.id}\nTicket ${currentSource.id}\nResolver ${resolver.id}`,
+          supersessionSha256,
+        }, this.#gitJournal(runId, advancement));
+      });
+      await this.#persistGitLifecycle(runId, lifecycle, advancement);
+      run = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(run, advancement)) return false;
+    } else if (source.worktreePath !== undefined || source.branch !== undefined) {
+      throw new AuthorityRpcError(
+        "terminal_resolver_source_git",
+        `resolver source ${source.id} has checkout metadata without an owned Git cycle`,
+      );
+    }
+    let changed = false;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const current = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(current, advancement)) return this.#noOpInternal(revision);
+      const currentResolver = current.tickets[resolver.id];
+      const currentSource = current.tickets[source.id];
+      const currentFailure = currentSource === undefined ? undefined : terminalFailureBindingFromProof(
+        current,
+        currentSource,
+        recovery.sourceFailureProof,
+      );
+      if (
+        currentResolver?.status !== "completed" ||
+        currentSource === undefined ||
+        (currentSource.status !== "blocked" && currentSource.status !== "failed") ||
+        currentFailure === undefined ||
+        !recovery.failureBindingSha256s.includes(currentFailure.sha256) ||
+        canonicalHash(currentResolver.executionControl) !== canonicalHash(resolver.executionControl) ||
+        terminalTicketAuthoritySha256(currentResolver) !== terminalTicketAuthoritySha256(resolver)
+      ) return this.#noOpInternal(revision);
+      if (cycleId !== undefined) {
+        const cycle = current.git.ticketCycles[cycleId];
+        if (
+          cycle?.status !== "retired" ||
+          cycle.supersessionSha256 !== supersessionSha256 ||
+          cycle.archiveRef === undefined
+        ) {
+          throw new AuthorityRpcError(
+            "terminal_resolver_source_git",
+            `resolver source ${source.id} cannot reissue before Git supersession settles`,
+          );
+        }
+      }
+      const draft = nextRun(current, this.#timestamp());
+      const mutable = draft.tickets[source.id]!;
+      resetTicketForFreshCycle(
+        mutable,
+        draft.updatedAt,
+        currentTicketExecutionEpoch(current, currentSource),
+      );
+      draft.activity.push(activity(
+        this.#createId("activity"),
+        draft.updatedAt,
+        "compiler",
+        `Resolver completed; reissued source ticket: ${mutable.title}`,
+        mutable.id,
+      ));
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: current.revision }],
+      });
+      changed = true;
+      return {
+        revision: committed.state.revision,
+        events: [{ topic: "ticket.terminal-recovery.completed", payload: {
+          runId,
+          sourceTicketId: source.id,
+          resolverTicketId: resolver.id,
+        } }],
+      };
+    });
+    return changed;
+  }
+
+  /** Create one deterministic configured resolver for the next unreconciled terminal failure. */
+  async #reconcileTerminalFailure(
+    runId: string,
+    advancement: RunAdvancementToken,
+  ): Promise<boolean> {
+    const run = await this.#store.getRun(runId);
+    if (!this.#matchesAdvancement(run, advancement) ||
+        hasUnfinalizedAcceptedAssignment(run) ||
+        this.#program.projectExecutionSemanticCatalog === undefined ||
+        this.#program.projectTerminalResolverTicket === undefined) return false;
+    const catalog = await this.#program.projectExecutionSemanticCatalog(run);
+    if (catalog.terminalResolverOperationId === undefined) return false;
+    const candidates = Object.values(run.tickets)
+      .filter((ticket) =>
+        ticket.status === "blocked" &&
+        ticket.executionControl?.sourceHold === undefined &&
+        ticket.executionPolicyBinding !== undefined &&
+        ticket.steps.some((step) => step.status === "failed"))
+      .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt) || left.id.localeCompare(right.id));
+    for (const source of candidates) {
+      const failure = terminalFailureBinding(run, source);
+      if (failure === undefined) continue;
+      const existingResolvers = Object.values(run.tickets)
+        .filter((ticket) => ticket.executionControl?.terminalRecovery?.sourceTicketId === source.id)
+        .map((ticket) => ({
+          ticketId: ticket.id,
+          sourceTicketId: source.id,
+          resolverOperationId: ticket.operationId,
+          configurationSha256: catalog.configurationSha256,
+          catalogSha256: catalog.sha256,
+          failureBindingSha256s: ticket.executionControl!.terminalRecovery!.failureBindingSha256s,
+          terminal: ticket.status === "completed" || ticket.status === "failed" || ticket.status === "cancelled",
+        }));
+      if (existingResolvers.some((resolver) => resolver.failureBindingSha256s.includes(failure.sha256))) {
+        continue;
+      }
+      const reconciliation = deriveTerminalResolverReconciliation(catalog, {
+        runId: run.id,
+        sourceTicketId: source.id,
+        sourceBinding: source.executionPolicyBinding!,
+        failureBindingSha256: failure.sha256,
+        existingResolvers,
+      });
+      const resolver = await this.#program.projectTerminalResolverTicket({
+        run,
+        reconciliation,
+        sourceFailureProof: failure.failureProof,
+      });
+      let changed = false;
+      await this.#server.mutateInternal(async ({ revision }) => {
+        const current = await this.#store.getRun(runId);
+        if (!this.#matchesAdvancement(current, advancement)) return this.#noOpInternal(revision);
+        const currentSource = current.tickets[source.id];
+        const currentFailure = currentSource === undefined ? undefined : terminalFailureBinding(current, currentSource);
+        if (
+          currentSource?.status !== "blocked" ||
+          currentFailure?.sha256 !== failure.sha256
+        ) return this.#noOpInternal(revision);
+        const draft = nextRun(current, this.#timestamp());
+        const mutableSource = draft.tickets[source.id]!;
+        if (reconciliation.chainSuppressed) {
+          mutableSource.blocker = "Configured terminal resolver failed; operator recovery is required";
+          mutableSource.updatedAt = draft.updatedAt;
+          draft.activity.push(activity(
+            this.#createId("activity"),
+            draft.updatedAt,
+            "compiler",
+            `Suppressed recursive terminal resolver for: ${mutableSource.title}`,
+            mutableSource.id,
+          ));
+          applyLifecycle(draft, {
+            type: "blocked",
+            atMs: this.#now().getTime(),
+            reason: mutableSource.blocker,
+          });
+        } else {
+          if (resolver === undefined || resolver.id !== reconciliation.resolverTicketId) {
+            throw new AuthorityRpcError(
+              "terminal_resolver_projection",
+              "compiler omitted or changed the deterministic terminal resolver",
+            );
+          }
+          const durable = draft.tickets[resolver.id];
+          if (durable !== undefined && canonicalHash(durable) !== canonicalHash(resolver)) {
+            throw new AuthorityRpcError(
+              "terminal_resolver_collision",
+              `terminal resolver ${resolver.id} collided with durable work`,
+            );
+          }
+          draft.tickets[resolver.id] = structuredClone(resolver);
+          mutableSource.updatedAt = draft.updatedAt;
+          draft.activity.push(activity(
+            this.#createId("activity"),
+            draft.updatedAt,
+            "compiler",
+            `Created terminal resolver: ${resolver.title}`,
+            resolver.id,
+          ));
+        }
+        const committed = await this.#store.commit({
+          expectedRevision: revision,
+          runWrites: [{ record: draft, expectedRevision: current.revision }],
+        });
+        changed = true;
+        return {
+          revision: committed.state.revision,
+          events: [{
+            topic: reconciliation.chainSuppressed
+              ? "ticket.terminal-recovery.operator-required"
+              : "ticket.terminal-recovery.created",
+            payload: {
+              runId,
+              sourceTicketId: source.id,
+              ...(resolver === undefined ? {} : { resolverTicketId: resolver.id }),
+            },
+          }],
+        };
+      });
+      return changed;
+    }
+    return false;
+  }
+
+  async #decideProposal(
+    request: RpcRequest,
+    revision: number,
+  ): Promise<AuthorityMethodResult> {
+    requireIdempotency(request);
+    assertAllowedParams(request.params, ["runId", "ticketId", "decision", "message"]);
+    const runId = requiredString(request.params, "runId");
+    const ticketId = requiredString(request.params, "ticketId");
+    const decisionValue = requiredString(request.params, "decision");
+    if (decisionValue !== "approval" && decisionValue !== "rejection") {
+      throw new AuthorityRpcError("proposal_decision", "decision must be approval or rejection");
+    }
+    const proposalDecision: "approval" | "rejection" = decisionValue;
+    const suppliedMessage = optionalString(request.params, "message");
+    const recordedAt = this.#timestamp();
+    const message = boundedText(
+      suppliedMessage === undefined || suppliedMessage.trim().length === 0
+        ? decisionValue === "approval"
+          ? "Approved by the operator"
+          : "Rejected by the operator"
+        : suppliedMessage,
+      "proposal decision message",
+      8_000,
+    );
+    const eventId = `proposal-decision-${randomUUID()}`;
+    const run = await this.#store.getRun(runId);
+    if (run.lifecycle.phase === "deleting" || run.lifecycle.phase === "deleted") {
+      throw new AuthorityRpcError(
+        "proposal_run_deleted",
+        "deleting or deleted runs refuse proposal decisions",
+      );
+    }
+    const ticket = run.tickets[ticketId];
+    if (ticket?.executionControl?.proposalRequest === undefined) {
+      throw new AuthorityRpcError("proposal_missing", "ticket is not a durable change proposal");
+    }
+    const control = ticket.executionControl!;
+    const proposalRequest = control.proposalRequest!;
+    const authorityMaterial = {
+      protocol: PROPOSAL_DECISION_AUTHORITY_PROTOCOL,
+      runId,
+      proposalTicketId: ticketId,
+      requestSha256: proposalRequest.requestSha256,
+      eventId,
+      decision: proposalDecision,
+      actor: "operator" as const,
+      recordedAt,
+      message,
+    };
+    const authority = {
+      ...authorityMaterial,
+      sha256: canonicalHash(authorityMaterial),
+    };
+    const decision = deriveProposalDecision({
+      runId,
+      proposalTicketId: ticket.id,
+      requestSha256: proposalRequest.requestSha256,
+      status: ticket.status,
+      decision: proposalDecision,
+      authority,
+      ...(control.proposalApprovalSha256 === undefined ? {} : {
+        currentApprovalSha256: control.proposalApprovalSha256,
+      }),
+      ownsExecutionAuthority:
+        control.proposalApprovalSha256 !== undefined && ticket.status !== "proposed" ||
+        ticket.steps.some((step) => step.status === "running"),
+    });
+    const draft = nextRun(run, recordedAt);
+    const mutable = draft.tickets[ticketId]!;
+    const mutableControl = mutable.executionControl!;
+    mutableControl.proposalDecisionHistory = [
+      ...(mutableControl.proposalDecisionHistory ??
+        (mutableControl.proposalDecision === undefined ? [] : [structuredClone(mutableControl.proposalDecision)])),
+      {
+        protocol: authority.protocol,
+        runId: authority.runId,
+        proposalTicketId: authority.proposalTicketId,
+        requestSha256: authority.requestSha256,
+        eventId: authority.eventId,
+        decision: authority.decision,
+        actor: authority.actor,
+        message: authority.message,
+        recordedAt: authority.recordedAt,
+        sha256: authority.sha256,
+      },
+    ];
+    let lifecycleActor: string | undefined;
+    if (decision.disposition === "approve") {
+      if (decision.transition === undefined || decision.approvalSha256 !== authority.sha256) {
+        throw new AuthorityRpcError("proposal_decision", "proposal approval omitted its exact transition authority");
+      }
+      lifecycleActor = proposalLifecycleActor(run, ticket.status, "ready", "approval");
+      mutable.status = "ready";
+      mutable.blocker = undefined;
+      mutable.updatedAt = recordedAt;
+      mutableControl.proposalDecision = {
+        protocol: authority.protocol,
+        runId: authority.runId,
+        proposalTicketId: authority.proposalTicketId,
+        requestSha256: authority.requestSha256,
+        eventId: authority.eventId,
+        decision: "approval",
+        actor: authority.actor,
+        message: authority.message,
+        recordedAt: authority.recordedAt,
+        sha256: authority.sha256,
+      };
+      mutableControl.proposalApprovalSha256 = authority.sha256;
+      mutableControl.proposalDisposition = {
+        kind: "approved",
+        authoritySha256: authority.sha256,
+      };
+    } else if (decision.disposition === "reject") {
+      if (decision.transition === undefined) {
+        throw new AuthorityRpcError("proposal_decision", "proposal rejection omitted its exact transition authority");
+      }
+      lifecycleActor = proposalLifecycleActor(run, ticket.status, "completed", "rejection");
+      mutable.status = "completed";
+      mutable.blocker = undefined;
+      mutable.updatedAt = recordedAt;
+      for (const step of mutable.steps) {
+        if (step.status === "pending") {
+          step.status = "skipped";
+          step.completedAt = recordedAt;
+          step.summary = "Skipped after operator rejection";
+        }
+      }
+      mutableControl.proposalDecision = {
+        protocol: authority.protocol,
+        runId: authority.runId,
+        proposalTicketId: authority.proposalTicketId,
+        requestSha256: authority.requestSha256,
+        eventId: authority.eventId,
+        decision: "rejection",
+        actor: authority.actor,
+        message: authority.message,
+        recordedAt: authority.recordedAt,
+        sha256: authority.sha256,
+      };
+      delete mutableControl.proposalApprovalSha256;
+      mutableControl.proposalDisposition = {
+        kind: "rejected",
+        authoritySha256: authority.sha256,
+      };
+    }
+    // preserve_active_approval and audit_only are durable audit actions only. In particular, a
+    // later rejection cannot overwrite approval provenance while its execution authority lives.
+    draft.activity.push(activity(
+      this.#createId("activity"),
+      recordedAt,
+      "compiler",
+      decision.disposition === "approve"
+        ? `Approved change proposal: ${ticket.title}`
+        : decision.disposition === "reject"
+          ? `Rejected change proposal: ${ticket.title}`
+          : `Recorded ${decisionValue} audit for change proposal: ${ticket.title}`,
+      ticket.id,
+    ));
+    const result = projectControlProposalInspection(draft, mutable) as unknown as JsonValue;
+    const committed = await this.#store.commit({
+      expectedRevision: revision,
+      runWrites: [{
+        record: draft,
+        expectedRevision: run.revision,
+        ...(lifecycleActor === undefined ? {} : {
+          lifecycleActors: { tickets: { [ticket.id]: lifecycleActor } },
+        }),
+      }],
+      receipt: receiptFor(request, result),
+    });
+    this.#background(() => this.#tick(runId), runId);
+    return { result, revision: committed.state.revision };
   }
 
   async #pauseRun(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
@@ -1921,24 +6383,22 @@ export class RunAuthorityEngine {
    */
   async #quiesceAuthority(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
     requireIdempotency(request);
-    const runs = await this.#store.listRuns({ includeDeleted: true });
-    const busy = runs.filter((run) =>
-      new Set<RunPhase>(["draft", "merging", "deleting"]).has(run.lifecycle.phase)
-    );
-    if (busy.length > 0) {
+    const state = await this.#store.state();
+    if (state.revision !== revision) {
+      throw new AuthorityRpcError("revision_conflict", "authority changed before quiesce preflight", {
+        retryable: true,
+      });
+    }
+    if (state.authorityQuiesce !== undefined) {
       throw new AuthorityRpcError(
-        "authority_quiesce_busy",
-        "authority is settling a non-interruptible lifecycle transition; retry restart shortly",
-        {
-          retryable: true,
-          details: {
-            runs: busy.map((run) => ({ runId: run.id, phase: run.lifecycle.phase })),
-          },
-        },
+        "authority_quiesce_in_progress",
+        "authority is already completing a durable quiesce operation",
+        { retryable: true },
       );
     }
 
-    const pausable = new Set<RunPhase>([
+    const busyPhases = new Set<RunPhase>(["draft", "merging", "deleting"]);
+    const pausablePhases = new Set<RunPhase>([
       "planning",
       "awaiting_questions",
       "awaiting_approval",
@@ -1947,72 +6407,259 @@ export class RunAuthorityEngine {
       "verifying",
       "merge_ready",
     ]);
-    const newlyPaused = runs.filter((run) => pausable.has(run.lifecycle.phase));
-    const settlingIds = [...new Set([
-      ...newlyPaused.map((run) => run.id),
-      ...runs.filter((run) => run.lifecycle.phase === "pausing").map((run) => run.id),
-    ])].sort();
-
-    let currentRevision = revision;
-    if (newlyPaused.length > 0) {
-      const atMs = this.#now().getTime();
-      const at = this.#timestamp();
-      const first = await this.#store.commit({
-        expectedRevision: currentRevision,
-        runWrites: newlyPaused.map((run) => {
-          const draft = nextRun(run, at);
-          applyLifecycle(draft, { type: "pause_requested", atMs });
-          draft.activity.push(activity(
-            this.#createId("activity"),
-            at,
-            "compiler",
-            "Pausing for authority restart",
-          ));
-          return { record: draft, expectedRevision: run.revision };
-        }),
+    let busyRunCount = 0;
+    const busyRuns: Array<{ runId: string; phase: RunPhase }> = [];
+    let targetRunCount = 0;
+    const targetSample: string[] = [];
+    const scan = await this.#store.runScanSnapshot();
+    if (scan.revision !== revision) {
+      throw new AuthorityRpcError("revision_conflict", "authority changed before quiesce scan", {
+        retryable: true,
       });
-      currentRevision = first.state.revision;
     }
-
-    await Promise.all(settlingIds.map((runId) =>
-      this.#supervisor.abortByRun(runId, "authority restart")));
-
-    const settledAtMs = this.#now().getTime();
-    const settledAt = this.#timestamp();
-    const settledWrites = [];
-    for (const runId of settlingIds) {
-      const run = await this.#store.getRun(runId);
-      if (run.lifecycle.phase !== "pausing") continue;
-      const draft = nextRun(run, settledAt);
-      interruptRunningAttempts(draft, "Interrupted for authority restart", settledAt);
-      applyLifecycle(draft, { type: "pause_settled", atMs: settledAtMs });
-      settledWrites.push({ record: draft, expectedRevision: run.revision });
+    for (const runId of scan.runIds) {
+      const run = await scan.getRun(runId);
+      if (busyPhases.has(run.lifecycle.phase)) {
+        busyRunCount += 1;
+        if (busyRuns.length < MAX_QUIESCE_ID_SAMPLE) busyRuns.push({ runId, phase: run.lifecycle.phase });
+      }
+      if (pausablePhases.has(run.lifecycle.phase) || run.lifecycle.phase === "pausing") {
+        targetRunCount += 1;
+        if (targetSample.length < MAX_QUIESCE_ID_SAMPLE) targetSample.push(runId);
+      }
     }
+    if (busyRunCount > 0) {
+      throw new AuthorityRpcError(
+        "authority_quiesce_busy",
+        "authority is settling a non-interruptible lifecycle transition; retry restart shortly",
+        {
+          retryable: true,
+          details: {
+            busyRunCount,
+            runs: busyRuns,
+            truncated: busyRunCount > busyRuns.length,
+          },
+        },
+      );
+    }
+    targetSample.sort();
     const result: JsonValue = {
-      status: "quiesced",
-      pausedRunIds: settlingIds,
-      runCount: runs.length,
+      status: targetRunCount === 0 ? "quiesced" : "quiescing",
+      pausedRunIds: targetSample,
+      pausedRunCount: targetRunCount,
+      pausedRunIdsTruncated: targetRunCount > targetSample.length,
+      runCount: scan.runIds.length,
     };
+    // Even a project with no pausable lifecycle can contain a stale accepted attempt or an
+    // unsettled configured action. Always persist the compact restart cursor so the post-response
+    // scan/cleanup cannot be skipped or lost to a daemon crash.
+    const operation = createAuthorityQuiesceOperation({
+      purpose: "operator_restart",
+      requestHash: authorityRequestHash(request.method, request.params),
+      idempotencyKey: request.idempotencyKey!,
+      requestedAt: this.#timestamp(),
+      totalRunCount: scan.runIds.length,
+      targetRunCount,
+      pausedRunIds: targetSample,
+      pausedRunIdsTruncated: targetRunCount > targetSample.length,
+    });
     const committed = await this.#store.commit({
-      expectedRevision: currentRevision,
-      runWrites: settledWrites,
+      expectedRevision: revision,
+      authorityQuiesce: { expectedSha256: null, value: operation },
       receipt: receiptFor(request, result),
     });
+    // The compact durable tombstone now owns every live session. Close detached outcome mutation
+    // before suspendAll synchronously resolves aborted provider promises outside the lease below.
+    this.#quiesceOutcomeSettlementClosed = true;
+    // `suspendAll` installs one process-wide admission tombstone before returning its promise and
+    // allocates abort work only for actually live sessions—not every historical run.
+    const suspended = this.#supervisor.suspendAll("authority restart");
     return {
       result,
       revision: committed.state.revision,
       beginQuiesce: true,
-      afterResponse: this.#requestAuthorityShutdown,
+      afterResponse: () => this.#background(async () => {
+        try {
+          await this.#server.runQuiesceSettlement(async () => {
+            await suspended;
+            await this.#finishAuthorityQuiesce(operation, true);
+          });
+        } catch (error) {
+          // Settlement is restartable from the compact durable tombstone. Never leave a live
+          // quiescing daemon that can neither admit work nor make progress: request bounded
+          // process shutdown so the next ordinary start resumes the remaining per-run batches.
+          this.#requestAuthorityShutdown();
+          throw error;
+        }
+      }),
     };
   }
 
-  async #settlePause(runId: string): Promise<void> {
-    await this.#supervisor.abortByRun(runId, "run paused by operator");
+  /** Resume one durable quiesce intent through one run/state transaction at a time. */
+  async #finishAuthorityQuiesce(
+    operation: DurableAuthorityQuiesceOperation,
+    supervisorAlreadySuspended = false,
+    shutdownAfterSettlement = true,
+    clearOperation = true,
+    blockDraftRuns = false,
+  ): Promise<void> {
+    if (!supervisorAlreadySuspended) await this.#supervisor.suspendAll("authority restart recovery");
+    const pausable = new Set<RunPhase>([
+      "planning", "awaiting_questions", "awaiting_approval", "approving", "executing",
+      "verifying", "merge_ready",
+    ]);
+    const scan = await this.#store.runScanSnapshot();
+    for (const runId of scan.runIds) {
+      let run = await scan.getRun(runId);
+      if (blockDraftRuns && run.lifecycle.phase === "draft") {
+        await this.#server.mutateInternal(async ({ revision }) => {
+          const current = await this.#store.getRun(runId);
+          if (current.lifecycle.phase !== "draft") return this.#noOpInternal(revision);
+          const draft = nextRun(current, this.#timestamp());
+          applyLifecycle(draft, {
+            type: "blocked",
+            atMs: this.#now().getTime(),
+            reason: "Authority startup failed while initializing this run; resume to retry initialization",
+          });
+          draft.activity.push(activity(
+            this.#createId("activity"),
+            draft.updatedAt,
+            "compiler",
+            "Startup recovery stopped before run initialization completed",
+          ));
+          const committed = await this.#store.commit({
+            expectedRevision: revision,
+            runWrites: [{ record: draft, expectedRevision: current.revision }],
+          });
+          return { revision: committed.state.revision };
+        });
+        run = await this.#store.getRun(runId);
+      }
+      if (pausable.has(run.lifecycle.phase)) {
+        await this.#server.mutateInternal(async ({ revision }) => {
+          const current = await this.#store.getRun(runId);
+          if (!pausable.has(current.lifecycle.phase)) return this.#noOpInternal(revision);
+          const draft = nextRun(current, this.#timestamp());
+          applyLifecycle(draft, { type: "pause_requested", atMs: this.#now().getTime() });
+          const committed = await this.#store.commit({
+            expectedRevision: revision,
+            runWrites: [{ record: draft, expectedRevision: current.revision }],
+          });
+          return {
+            revision: committed.state.revision,
+            events: [{ topic: "run.pause_requested", payload: { runId, reason: "authority_restart" } }],
+          };
+        });
+        run = await this.#store.getRun(runId);
+      }
+      if (run.lifecycle.phase === "pausing") await this.#settlePause(runId, true);
+      else await this.#settleQuiescedRunState(runId);
+    }
+
+    // Do not clear the durable admission tombstone until a fresh anchored scan proves that every
+    // interruptible lifecycle has reached a non-spending state. This is deliberately a second
+    // one-record-at-a-time scan: the first snapshot's run anchors became stale as runs were paused.
+    const verification = await this.#store.runScanSnapshot();
+    let unsettled: { runId: string; reason: string } | undefined;
+    for (const runId of verification.runIds) {
+      const run = await verification.getRun(runId);
+      if (pausable.has(run.lifecycle.phase) || run.lifecycle.phase === "pausing") {
+        unsettled = { runId, reason: `lifecycle ${run.lifecycle.phase}` };
+        break;
+      }
+      if (blockDraftRuns && run.lifecycle.phase === "draft") {
+        unsettled = { runId, reason: "startup-failed draft lifecycle" };
+        break;
+      }
+      if (Object.values(run.attempts).some((attempt) =>
+        new Set<AttemptStatus>(["queued", "running", "waiting_question", "terminal_accepted"])
+          .has(attempt.status))) {
+        unsettled = { runId, reason: "live durable attempt" };
+        break;
+      }
+      if (Object.values(run.actionExecutions ?? {}).some((action) =>
+        action.boundary.generation === run.generation && action.settledAt === undefined)) {
+        unsettled = { runId, reason: "recoverable configured action" };
+        break;
+      }
+    }
+    if (unsettled !== undefined) {
+      throw new AuthorityRpcError(
+        "authority_quiesce_unsettled",
+        `run ${unsettled.runId} retains ${unsettled.reason} after quiesce settlement`,
+        { retryable: true },
+      );
+    }
+    if (clearOperation) await this.#clearAuthorityQuiesce(operation);
+    if (shutdownAfterSettlement) this.#requestAuthorityShutdown();
+  }
+
+  async #clearAuthorityQuiesce(operation: DurableAuthorityQuiesceOperation): Promise<void> {
+    const current = await this.#store.state();
+    if (current.authorityQuiesce?.sha256 !== operation.sha256) {
+      throw new AuthorityRpcError(
+        "authority_quiesce_conflict",
+        "durable quiesce identity changed during bounded settlement",
+      );
+    }
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        authorityQuiesce: { expectedSha256: operation.sha256, value: null },
+      });
+      return { revision: committed.state.revision };
+    });
+  }
+
+  /** Reconcile stale durable spending state without changing a blocked/terminal lifecycle. */
+  async #settleQuiescedRunState(runId: string): Promise<void> {
+    // Unlike pausing/deleting, a blocked or terminal lifecycle is not itself a universal action
+    // primitive tombstone. Close admitted actions first so no in-process continuation can publish
+    // while provider/Git cleanup is waiting on external work.
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(runId);
+      const hasLiveAttempt = Object.values(run.attempts).some((attempt) =>
+        new Set<AttemptStatus>(["queued", "running", "waiting_question", "terminal_accepted"])
+          .has(attempt.status));
+      const hasUnsettledAction = Object.values(run.actionExecutions ?? {})
+        .some((action) => action.boundary.generation === run.generation && action.settledAt === undefined);
+      if (!hasLiveAttempt && !hasUnsettledAction) return this.#noOpInternal(revision);
+      const draft = nextRun(run, this.#timestamp());
+      closeStoppedRunActions(draft, "Authority quiesced before configured action settlement", draft.updatedAt);
+      interruptStoppedAttempts(draft, "Authority quiesced", draft.updatedAt);
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+      });
+      return { revision: committed.state.revision };
+    });
+    await this.#reconcileAllProviderExposureAfterStop(runId);
+    await this.#drainRunGit(runId);
+    // Quiesce is itself a process-wide stop boundary. A blocked or terminal run does not carry a
+    // paused lifecycle label, but its prepared publication must still be compensated/preserved;
+    // completing it forward here would publish new refs while the authority is stopping.
+    await this.#recoverGitIntents(runId, true);
+    await this.#drainRunGit(runId);
+  }
+
+  async #settlePause(runId: string, authoritySuspended = false): Promise<void> {
+    if (!authoritySuspended) await this.#supervisor.abortByRun(runId, "run paused by operator");
+    // The accepted `pausing` lifecycle is already the action-primitive tombstone. Do not await
+    // in-process action/finalizer promises: this settlement CAS must durably abandon them, and
+    // every continuation observes the stopped lifecycle or settled journal and exits fail-closed.
+    await this.#reconcileAllProviderExposureAfterStop(runId);
+    // Never publish the final paused label while a pre-stop Git operation is still in flight.
+    // This runs outside the authority mutation lane, so the operation's journal settlement can
+    // acquire that lane without deadlocking the pause request.
+    await this.#drainRunGit(runId);
+    await this.#recoverGitIntents(runId);
+    await this.#drainRunGit(runId);
     await this.#server.mutateInternal(async ({ revision }) => {
       const run = await this.#store.getRun(runId);
       if (run.lifecycle.phase !== "pausing") return this.#noOpInternal(revision);
       const draft = nextRun(run, this.#timestamp());
-      interruptRunningAttempts(draft, "Run paused", draft.updatedAt);
+      closeStoppedRunActions(draft, "Run paused before configured action settlement", draft.updatedAt);
+      interruptStoppedAttempts(draft, "Run paused", draft.updatedAt);
       applyLifecycle(draft, { type: "pause_settled", atMs: this.#now().getTime() });
       const committed = await this.#store.commit({
         expectedRevision: revision,
@@ -2025,17 +6672,363 @@ export class RunAuthorityEngine {
     });
   }
 
+  async #retrySupervisedReview(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
+    requireIdempotency(request);
+    const runId = requiredString(request.params, "runId");
+    const ticketId = requiredString(request.params, "ticketId");
+    const reviewStepId = requiredString(request.params, "reviewStepId");
+    const failedReviewAttemptId = requiredString(request.params, "failedReviewAttemptId");
+    const retryScope = requiredString(request.params, "retryScope");
+    if (retryScope !== "producer_and_review" && retryScope !== "review_only") {
+      throw new AuthorityRpcError("review_retry_scope", `unsupported reviewed-blocker recovery scope ${retryScope}`);
+    }
+    const steering = optionalBoundedString(request.params, "steering", 64 * 1024);
+    const run = await this.#store.getRun(runId);
+    if (!new Set<RunPhase>(["blocked", "executing", "paused"]).has(run.lifecycle.phase)) {
+      throw new AuthorityRpcError(
+        "review_retry_phase",
+        `reviewed-blocker recovery is unavailable while the run is ${run.lifecycle.phase}`,
+      );
+    }
+    if (Object.values(run.attempts).some((attempt) =>
+      new Set<AttemptStatus>(["queued", "running", "waiting_question", "terminal_accepted"]).has(attempt.status))) {
+      throw new AuthorityRpcError(
+        "review_retry_live_attempt",
+        "reviewed-blocker recovery requires every prior attempt to be durably settled",
+      );
+    }
+    const retriedAt = this.#timestamp();
+    const draft = nextRun(run, retriedAt);
+    let recovery;
+    try {
+      recovery = authorizeBlockedReviewRetry(draft, {
+        ticketId,
+        reviewStepId,
+        failedReviewAttemptId,
+      }, retriedAt, steering, retryScope);
+    } catch (error) {
+      throw new AuthorityRpcError(errorCode(error) ?? "review_retry_invalid", errorMessage(error));
+    }
+    if (draft.lifecycle.phase === "blocked") {
+      applyLifecycle(draft, {
+        type: "retry_requested",
+        atMs: this.#now().getTime(),
+        phase: draft.lifecycle.resumePhase ?? "executing",
+      });
+    } else if (draft.lifecycle.phase === "paused") {
+      applyLifecycle(draft, { type: "resume_requested", atMs: this.#now().getTime() });
+    }
+    if (draft.lifecycle.phase !== "executing") {
+      throw new AuthorityRpcError(
+        "review_retry_resume_phase",
+        `reviewed-blocker recovery resolved to ${draft.lifecycle.phase}, not executing`,
+      );
+    }
+    draft.activity.push(activity(
+      this.#createId("activity"),
+      retriedAt,
+      "compiler",
+      retryScope === "review_only"
+        ? `Operator authorized independent rereview: ${recovery.ticketTitle}`
+        : `Operator authorized reviewed-blocker rework: ${recovery.ticketTitle}`,
+      recovery.ticketId,
+    ));
+    const result: JsonValue = {
+      runId,
+      ticketId,
+      reviewStepId,
+      failedReviewAttemptId,
+      retryScope,
+      ...(steering === undefined ? {} : { steering }),
+      status: "retrying_reviewed_blocker",
+    };
+    const committed = await this.#store.commit({
+      expectedRevision: revision,
+      runWrites: [{ record: draft, expectedRevision: run.revision }],
+      receipt: receiptFor(request, result),
+    });
+    this.#supervisor.resumeRun(runId);
+    return {
+      result,
+      revision: committed.state.revision,
+      events: [{ topic: "ticket.review-rework.retry-requested", payload: result }],
+      afterResponse: () => this.#background(() => this.#tick(runId), runId),
+    };
+  }
+
+  async #retireProviderExposure(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
+    requireIdempotency(request);
+    const runId = requiredString(request.params, "runId");
+    const run = await this.#store.getRun(runId);
+    if (!new Set<RunPhase>(["blocked", "paused"]).has(run.lifecycle.phase)) {
+      throw new AuthorityRpcError(
+        "provider_retirement_phase",
+        `provider-error acknowledgement is unavailable while the run is ${run.lifecycle.phase}`,
+      );
+    }
+    const retiredAt = this.#timestamp();
+    const candidates = await this.#canonicalProviderExposureRetirements(
+      run,
+      authorityRequestHash(request.method, request.params),
+      retiredAt,
+    );
+    if (candidates.length === 0) {
+      throw new AuthorityRpcError(
+        "provider_retirement_unavailable",
+        "no canonical provider error or abort is available for explicit acknowledgement",
+      );
+    }
+    const draft = nextRun(run, retiredAt);
+    let retainedTokens = 0;
+    for (const candidate of candidates) {
+      const mutable = draft.attempts[candidate.attemptId];
+      const requestRecord = mutable?.authorityProviderRequests?.at(-1);
+      if (mutable === undefined || requestRecord === undefined || !isOpenProviderRequest(requestRecord)) {
+        throw new AuthorityRpcError(
+          "provider_retirement_conflict",
+          "provider exposure changed before operator-authorized acknowledgement",
+        );
+      }
+      requestRecord.retirement = structuredClone(candidate.retirement);
+      const exposure = requestRecord.prospectiveInputTokens + requestRecord.reservedOutputTokens;
+      retainedTokens = checkedProviderSum(retainedTokens, exposure);
+      const terminalKind = candidate.retirement.disposition === "operator_acknowledged_provider_error"
+        ? "provider error"
+        : "Pi abort";
+      draft.activity.push(activity(
+        this.#createId("activity"),
+        retiredAt,
+        "compiler",
+        `Operator acknowledged a canonical ${terminalKind}; retained up to ${exposure} tokens of uncertain provider exposure without resuming work`,
+        mutable.ticketId,
+      ));
+    }
+    const result: JsonValue = {
+      runId,
+      status: "provider_exposure_retired",
+      attemptIds: candidates.map((candidate) => candidate.attemptId),
+      retainedUncertainTokens: retainedTokens,
+      resumed: false,
+    };
+    const committed = await this.#store.commit({
+      expectedRevision: revision,
+      runWrites: [{ record: draft, expectedRevision: run.revision }],
+      receipt: receiptFor(request, result),
+    });
+    return {
+      result,
+      revision: committed.state.revision,
+      events: [{ topic: "run.provider-exposure.acknowledged", payload: result }],
+    };
+  }
+
   async #resumeRun(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
     requireIdempotency(request);
     const runId = requiredString(request.params, "runId");
     const run = await this.#store.getRun(runId);
+    const terminalResolverCandidates = run.lifecycle.phase === "blocked"
+      ? await this.#terminalResolverRetryCandidates(run)
+      : [];
+    const pendingTerminalResolverRetry = terminalResolverCandidates
+      .find((candidate) => candidate.pendingRequest !== undefined);
+    if (run.lifecycle.phase === "blocked" && terminalResolverCandidates.length > 0 &&
+        pendingTerminalResolverRetry === undefined) {
+      throw new AuthorityRpcError(
+        "terminal_resolver_retry_required",
+        "generic resume cannot bypass a chain-suppressed terminal resolver; use terminal-resolver.retry",
+      );
+    }
+    const exactResolverGitRecovery = pendingTerminalResolverRetry !== undefined &&
+      this.#hasOnlyExactResolverRetryGitIntents(run, pendingTerminalResolverRetry);
+    const gitRecoveryPending = Object.keys(run.pendingGitIntents ?? {}).length > 0 ||
+      this.#gitTails.has(runId);
+    if (gitRecoveryPending && pendingTerminalResolverRetry !== undefined &&
+        !exactResolverGitRecovery) {
+      // This blocked retry binds resume to one exact supersession. Generic recovery here would
+      // execute duplicate or unrelated Git authority even though the narrow resume is rejected.
+      throw new AuthorityRpcError(
+        "terminal_resolver_retry_git",
+        "authorized resolver retry has duplicate, unrelated, or unidentifiable pending Git work",
+      );
+    }
+    if (gitRecoveryPending && pendingTerminalResolverRetry === undefined) {
+      // Recovery cannot run inside this mutating RPC lane because Git intent settlement itself
+      // needs the lane. Schedule it after this response fails closed; a retry can then resume.
+      this.#background(async () => {
+        await this.#drainRunGit(runId);
+        await this.#recoverGitIntents(runId);
+        await this.#drainRunGit(runId);
+      }, runId);
+      throw new AuthorityRpcError(
+        "run_git_recovery_pending",
+        "run Git recovery is still settling; retry resume after the paused state is fully reconciled",
+        { retryable: true },
+      );
+    }
+    if (run.lifecycle.phase === "blocked" && pendingTerminalResolverRetry !== undefined) {
+      const resumedAt = this.#timestamp();
+      const draft = nextRun(run, resumedAt);
+      draft.activity.push(activity(
+        this.#createId("activity"),
+        resumedAt,
+        "compiler",
+        `Resuming authorized terminal resolver retry: ${pendingTerminalResolverRetry.resolver.title}`,
+        pendingTerminalResolverRetry.resolver.id,
+      ));
+      const result: JsonValue = {
+        runId,
+        status: "retrying",
+        resolverTicketId: pendingTerminalResolverRetry.resolver.id,
+        retryRequestSha256: pendingTerminalResolverRetry.pendingRequest!.sha256,
+      };
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+        receipt: receiptFor(request, result),
+      });
+      this.#supervisor.resumeRun(runId);
+      return {
+        result,
+        revision: committed.state.revision,
+        events: [{ topic: "ticket.terminal-resolver.resume-requested", payload: result }],
+        afterResponse: () => this.#background(
+          () => this.#continuePendingTerminalResolverRetry(runId, {
+            resolverTicketId: pendingTerminalResolverRetry.resolver.id,
+            retryRequestSha256: pendingTerminalResolverRetry.pendingRequest!.sha256,
+          }),
+          runId,
+        ),
+      };
+    }
     const resumedAt = this.#timestamp();
+    const retryingBlockedRun = run.lifecycle.phase === "blocked";
+    const compilerValidationRetries = retryingBlockedRun
+      ? await this.#prepareCompilerValidationRetries(run, resumedAt)
+      : [];
+    const providerExposureRetirements = retryingBlockedRun || run.lifecycle.phase === "paused"
+      ? await this.#canonicalProviderExposureRetirements(
+          run,
+          authorityRequestHash(request.method, request.params),
+          resumedAt,
+        )
+      : [];
     let adoptionVerificationSha256: Sha256Digest | undefined;
     if (run.legacyRunAdoption !== undefined && run.legacyRunAdoption.resumeVerifiedAt === undefined) {
       adoptionVerificationSha256 = await this.#verifyLegacySuccessorResume(run, resumedAt);
     }
     const draft = nextRun(run, resumedAt);
-    applyLifecycle(draft, { type: "resume_requested", atMs: this.#now().getTime() });
+    let resumeActionArchiveWrites: TransactionWrite[] = [];
+    for (const retry of compilerValidationRetries) {
+      const failed = draft.actionExecutions?.[retry.failedInvocationId];
+      if (failed === undefined || failed.settledAt !== undefined || failed.journal.status !== "failed") {
+        throw new AuthorityRpcError(
+          "action_validation_retry_conflict",
+          "compiler validation changed before its explicit retry was admitted",
+        );
+      }
+      const retryMaterial = {
+        protocol: "koni.run-action-compiler-retry.v1" as const,
+        journal: structuredClone(failed.journal),
+        reason: "Operator authorized replay of the exact accepted terminal output after a first-step compiler failure",
+        retriedAt: resumedAt,
+      };
+      failed.compilerRetryHistory = [
+        ...(failed.compilerRetryHistory ?? []),
+        { ...retryMaterial, sha256: canonicalHash(retryMaterial) },
+      ];
+      failed.journal = createActionExecutionJournal(failed.plan);
+      failed.expectedRunRevision = draft.revision;
+      failed.updatedAt = resumedAt;
+      draft.activity.push(activity(
+        this.#createId("activity"),
+        resumedAt,
+        "compiler",
+        `Retrying compiler validation from accepted output: ${retry.ticketTitle}`,
+        retry.ticketId,
+      ));
+    }
+    for (const candidate of providerExposureRetirements) {
+      const mutable = draft.attempts[candidate.attemptId];
+      const requestRecord = mutable?.authorityProviderRequests?.at(-1);
+      if (mutable === undefined || requestRecord === undefined || !isOpenProviderRequest(requestRecord)) {
+        throw new AuthorityRpcError(
+          "provider_retirement_conflict",
+          "provider exposure changed before operator-authorized retirement",
+        );
+      }
+      requestRecord.retirement = structuredClone(candidate.retirement);
+      const terminalKind = candidate.retirement.disposition === "operator_acknowledged_provider_error"
+        ? "provider error"
+        : "Pi abort";
+      draft.activity.push(activity(
+        this.#createId("activity"),
+        resumedAt,
+        "compiler",
+        `Operator resumed after a canonical ${terminalKind}; retained up to ${requestRecord.prospectiveInputTokens + requestRecord.reservedOutputTokens} tokens of uncertain provider exposure`,
+        mutable.ticketId,
+      ));
+    }
+    if (retryingBlockedRun) {
+      applyLifecycle(draft, {
+        type: "retry_requested",
+        atMs: this.#now().getTime(),
+        // Historical blocked records may predate the durable resume-phase field. Executing is
+        // the conservative compatibility fallback already used by legacy lifecycle recovery.
+        phase: run.lifecycle.resumePhase ?? "executing",
+      });
+      draft.activity.push(activity(
+        this.#createId("activity"),
+        resumedAt,
+        "compiler",
+        `Retrying blocked run from ${draft.lifecycle.phase}`,
+      ));
+    } else if (
+      run.lifecycle.phase === "paused" &&
+      run.lifecycle.pendingQuestions.some((question) => question.answeredAtMs === undefined)
+    ) {
+      applyLifecycle(draft, { type: "questions_resume_requested", atMs: this.#now().getTime() });
+    } else {
+      applyLifecycle(draft, { type: "resume_requested", atMs: this.#now().getTime() });
+    }
+    if (draft.lifecycle.phase === "executing") {
+      for (const retried of resetRetryableInfrastructureAssignments(draft, resumedAt)) {
+        draft.activity.push(activity(
+          this.#createId("activity"),
+          resumedAt,
+          "compiler",
+          `Retrying ${retried.ticketTitle} after operator-confirmed runtime recovery`,
+          retried.ticketId,
+        ));
+      }
+    }
+    const compiledBehavior = draft.behavior;
+    if (draft.lifecycle.phase === "approving" && compiledBehavior !== undefined) {
+      const priorCompile = findRunActionAtBoundary(run, "approved_plan_compile", {
+        stageId: requiredCurrentStageId(run, "plan approval resume"),
+      });
+      if (priorCompile?.settlement?.disposition === "abandoned") {
+        const actionDefinition = selectedRunAction(run, compiledBehavior.runType.actionSelectors.compile);
+        const replacement = prepareRunActionExecution(run, {
+          kind: "approved_plan_compile",
+          stageId: requiredCurrentStageId(run, "plan approval resume"),
+          selector: compiledBehavior.runType.actionSelectors.compile,
+          checkout: actionDefinition.checkout,
+          productSha256: canonicalHash({
+            planRevision: run.plan?.revision ?? null,
+            graphSeed: run.plan?.graphSeed ?? null,
+            targetOid: run.git.target.selectedOid,
+          }),
+          at: resumedAt,
+        });
+        resumeActionArchiveWrites = admitRunActionExecution(draft, replacement);
+        draft.activity.push(activity(
+          this.#createId("activity"),
+          resumedAt,
+          "compiler",
+          "Re-admitted approved-plan compilation after paused action abandonment",
+        ));
+      }
+    }
     if (adoptionVerificationSha256 !== undefined && draft.legacyRunAdoption !== undefined) {
       draft.legacyRunAdoption.resumeVerifiedAt = resumedAt;
       draft.legacyRunAdoption.resumeVerificationSha256 = adoptionVerificationSha256;
@@ -2046,10 +7039,17 @@ export class RunAuthorityEngine {
         "Reverified immutable legacy source before fresh Pi recovery",
       ));
     }
+    for (const action of Object.values(draft.actionExecutions ?? {})) {
+      if (action.settledAt !== undefined || action.boundary.generation !== draft.generation ||
+          action.boundary.stageId !== draft.currentPipelineStageId) continue;
+      action.expectedRunRevision = draft.revision;
+      action.updatedAt = draft.updatedAt;
+    }
     const result: JsonValue = { runId, status: draft.lifecycle.phase };
     const committed = await this.#store.commit({
       expectedRevision: revision,
       runWrites: [{ record: draft, expectedRevision: run.revision }],
+      ...(resumeActionArchiveWrites.length === 0 ? {} : { writes: resumeActionArchiveWrites }),
       receipt: receiptFor(request, result),
     });
     this.#supervisor.resumeRun(runId);
@@ -2060,9 +7060,212 @@ export class RunAuthorityEngine {
     } else if (draft.lifecycle.phase === "approving") {
       this.#background(() => this.#settleApprove(runId), runId);
     } else if (draft.lifecycle.phase === "executing" || draft.lifecycle.phase === "verifying") {
-      this.#background(() => this.#tick(runId), runId);
+      this.#background(async () => {
+        await this.#recoverConfiguredActions(runId);
+        for (const retry of compilerValidationRetries) {
+          await this.#finalizeAcceptedAttempt(runId, retry.attemptId, {
+            status: "completed",
+            terminalOutput: retry.terminalOutput,
+            usage: retry.usage,
+          });
+        }
+        await this.#tick(runId);
+      }, runId);
+    } else if (draft.lifecycle.phase === "merging") {
+      this.#background(() => this.#settleMerge(runId), runId);
     }
     return { result, revision: committed.state.revision };
+  }
+
+  /**
+   * Re-admit only a first-step, compiler-owned validation that failed before any effect receipt.
+   *
+   * The model's terminal output is already durable and provider-settled. Replaying those exact
+   * bytes after an explicit operator Resume is both safer and cheaper than interrupting the
+   * accepted attempt and launching another model. Any completed primitive, effect receipt,
+   * semantic result, artifact mismatch, or assignment drift keeps the run blocked.
+   */
+  async #prepareCompilerValidationRetries(
+    run: Readonly<RunRecord>,
+    at: string,
+  ): Promise<Array<{
+    failedInvocationId: string;
+    attemptId: string;
+    terminalOutput: unknown;
+    usage: {
+      input: number;
+      output: number;
+      cacheRead: number;
+      cacheWrite: number;
+      newTokens: number;
+      allTokens: number;
+    };
+    ticketId: string;
+    ticketTitle: string;
+  }>> {
+    if (!run.lifecycle.blocker?.startsWith(
+      "ticket validation action did not complete with its exact accepted assignment (failed)",
+    )) return [];
+    const retries: Array<{
+      failedInvocationId: string;
+      attemptId: string;
+      terminalOutput: unknown;
+      usage: {
+        input: number;
+        output: number;
+        cacheRead: number;
+        cacheWrite: number;
+        newTokens: number;
+        allTokens: number;
+      };
+      ticketId: string;
+      ticketTitle: string;
+    }> = [];
+    const candidates = Object.values(run.actionExecutions ?? {})
+      .filter((action) => retryableCompilerValidationAction(run, action))
+      .sort((left, right) =>
+        left.boundary.admittedRunRevision - right.boundary.admittedRunRevision ||
+        left.invocationId.localeCompare(right.invocationId));
+    for (const action of candidates) {
+      const attemptId = action.boundary.attemptId!;
+      const attempt = run.attempts[attemptId]!;
+      const assignment = assignmentForAttempt(run, attempt);
+      const ticket = assignment === undefined ? undefined : run.tickets[assignment.ticketId];
+      if (
+        assignment === undefined ||
+        ticket === undefined ||
+        assignment.ticketId !== action.boundary.ticketId ||
+        assignment.stepId !== action.boundary.stepId ||
+        attempt.terminalOutputSha256 === undefined ||
+        attempt.terminalOutputSizeBytes === undefined
+      ) {
+        throw new AuthorityRpcError(
+          "action_validation_retry_binding",
+          "failed compiler validation lost its exact accepted assignment or terminal identity",
+        );
+      }
+      const accountingIssue = providerOutcomeAccountingIssue(attempt, undefined, false);
+      if (accountingIssue !== undefined) {
+        throw new AuthorityRpcError(
+          "action_validation_retry_accounting",
+          `accepted terminal output cannot be replayed before provider accounting settles: ${accountingIssue}`,
+        );
+      }
+      const bytes = await this.#store.readArtifact(terminalOutputPath(run.id, attempt.id), 16 * 1024 * 1024);
+      if (bytes.byteLength !== attempt.terminalOutputSizeBytes || rawSha256(bytes) !== attempt.terminalOutputSha256) {
+        throw new AuthorityRpcError(
+          "action_validation_retry_artifact",
+          "accepted terminal output differs from its durable retry identity",
+        );
+      }
+      let terminalOutput: unknown;
+      try {
+        terminalOutput = JSON.parse(bytes.toString("utf8"));
+      } catch {
+        throw new AuthorityRpcError(
+          "action_validation_retry_artifact",
+          "accepted terminal output is no longer valid JSON",
+        );
+      }
+      const replay = prepareAssignmentValidationExecution(
+        run,
+        attempt,
+        assignment,
+        terminalOutput,
+        attempt.terminalOutputSha256,
+        at,
+      );
+      if (
+        replay.plan.actionId !== action.plan.actionId ||
+        replay.boundary.productSha256 !== action.boundary.productSha256 ||
+        replay.boundary.ticketId !== action.boundary.ticketId ||
+        replay.boundary.stepId !== action.boundary.stepId ||
+        replay.boundary.attemptId !== action.boundary.attemptId
+      ) {
+        throw new AuthorityRpcError(
+          "action_validation_retry_binding",
+          "recompiled validation differs from the accepted terminal action boundary",
+        );
+      }
+      retries.push({
+        failedInvocationId: action.invocationId,
+        attemptId: attempt.id,
+        terminalOutput,
+        usage: {
+          input: attempt.inputTokens,
+          output: attempt.outputTokens,
+          cacheRead: attempt.cacheReadTokens,
+          cacheWrite: attempt.cacheWriteTokens,
+          newTokens: checkedProviderSum(attempt.inputTokens, attempt.outputTokens),
+          allTokens: checkedProviderSum(
+            checkedProviderSum(attempt.inputTokens, attempt.outputTokens),
+            checkedProviderSum(attempt.cacheReadTokens, attempt.cacheWriteTokens),
+          ),
+        },
+        ticketId: ticket.id,
+        ticketTitle: ticket.title,
+      });
+    }
+    return retries;
+  }
+
+  /** Join—but never recreate—the exact immutable resolver retry already authorized in state. */
+  async #continuePendingTerminalResolverRetry(
+    runId: string,
+    expected: { resolverTicketId: string; retryRequestSha256: Sha256Digest },
+  ): Promise<void> {
+    let run = await this.#store.getRun(runId);
+    if (run.lifecycle.phase !== "blocked") return;
+    let pending = (await this.#terminalResolverRetryCandidates(run))
+      .find((candidate) => candidate.resolver.id === expected.resolverTicketId &&
+        candidate.pendingRequest?.sha256 === expected.retryRequestSha256);
+    if (pending?.pendingRequest === undefined) return;
+
+    // A prior exact supersession may have crashed after journal prepare. The explicit resume/replay
+    // is the operator boundary that authorizes joining it; startup itself stays inert. Drain an
+    // already-entered effect, reject any unrelated Git intent, then recover the exact retry intent
+    // before revalidating the resolver/request pair for the final CAS.
+    await this.#drainRunGit(runId);
+    run = await this.#store.getRun(runId);
+    if (run.lifecycle.phase !== "blocked") return;
+    pending = (await this.#terminalResolverRetryCandidates(run))
+      .find((candidate) => candidate.resolver.id === expected.resolverTicketId &&
+        candidate.pendingRequest?.sha256 === expected.retryRequestSha256);
+    if (pending?.pendingRequest === undefined) return;
+    const pendingGit = Object.values(run.pendingGitIntents ?? {});
+    if (pendingGit.length > 0) {
+      if (!this.#hasOnlyExactResolverRetryGitIntents(run, pending)) {
+        throw new AuthorityRpcError(
+          "terminal_resolver_retry_git",
+          "authorized resolver retry cannot join unrelated pending Git effects",
+        );
+      }
+      await this.#recoverGitIntents(runId);
+      await this.#drainRunGit(runId);
+      run = await this.#store.getRun(runId);
+      if (run.lifecycle.phase !== "blocked") return;
+      pending = (await this.#terminalResolverRetryCandidates(run))
+        .find((candidate) => candidate.resolver.id === expected.resolverTicketId &&
+          candidate.pendingRequest?.sha256 === expected.retryRequestSha256);
+      if (pending?.pendingRequest === undefined) return;
+    }
+    this.#supervisor.resumeRun(runId);
+    if (await this.#settleTerminalResolverRetry(runId, expected)) await this.#tick(runId);
+  }
+
+  #hasOnlyExactResolverRetryGitIntents(
+    run: Readonly<RunRecord>,
+    candidate: Readonly<TerminalResolverRetryCandidate>,
+  ): boolean {
+    const retry = candidate.pendingRequest;
+    const cycleId = candidate.resolver.gitCycleId;
+    const intents = Object.values(run.pendingGitIntents ?? {});
+    return retry !== undefined && cycleId !== undefined && intents.length === 1 && intents.every((intent) =>
+      intent.kind === "ticket_supersede" &&
+      intent.cycleId === cycleId &&
+      intent.ticketId === candidate.resolver.id &&
+      intent.supersessionSha256 === retry.sha256
+    );
   }
 
   async #verifyLegacySuccessorResume(
@@ -2121,14 +7324,123 @@ export class RunAuthorityEngine {
     return legacyRunResumeVerificationSha256(evidence, assessed, verifiedAt);
   }
 
+  async #deletionPreview(runId: string): Promise<RunDeletionPreview> {
+    const run = await this.#store.getRun(runId);
+    const liveAgents = Object.values(run.attempts).filter((attempt) =>
+      new Set<AttemptStatus>(["queued", "running", "waiting_question", "terminal_accepted"])
+        .has(attempt.status)
+    ).length;
+    let inspection: Awaited<ReturnType<IsolatedGitLifecycle["inspectAbandonedRun"]>> | undefined;
+    let inspectionFailure: string | undefined;
+    try {
+      // This is deliberately not queued behind the Git effect lane. A delete preview must remain
+      // available while an in-flight publication is stopped/compensated, and inspection itself is
+      // read-only. Retirement repeats the complete proof after all intents are drained.
+      inspection = await this.#git.inspectAbandonedRun(run.git);
+    } catch (error) {
+      inspectionFailure = `Owned Git resources could not be inspected safely: ${errorMessage(error)}`;
+    }
+    const warnings = uniqueStrings([
+      ...deletionGitWarnings(run),
+      ...(inspection?.warnings ?? []),
+      ...(inspectionFailure === undefined ? [] : [inspectionFailure]),
+    ]);
+    const ownedResources = inspection?.resources ?? [];
+    const blockers: string[] = [];
+    if (run.lifecycle.phase === "deleting") blockers.push("Deletion is already settling");
+    if (run.lifecycle.phase === "deleted") blockers.push("Run is already deleted");
+    if (run.legacyGitMigration?.status === "relocation_required") {
+      blockers.push("Legacy Git ownership has not been relocated; preserve its branches and worktrees");
+    }
+    const core = {
+      protocol: RUN_DELETION_PREVIEW_PROTOCOL,
+      runId: run.id,
+      runRevision: run.revision,
+      generation: run.generation,
+      objective: run.objective,
+      phase: run.lifecycle.phase,
+      targetRef: run.git.target.ref,
+      gitSha256: canonicalHash(run.git),
+      pendingGitSha256: canonicalHash(run.pendingGitIntents ?? {}),
+      activeAttemptSha256: canonicalHash(Object.values(run.attempts)
+        .map((attempt) => ({ id: attempt.id, sessionId: attempt.sessionId, status: attempt.status }))
+        .sort((left, right) => left.id.localeCompare(right.id))),
+      inspectionSha256: inspection === undefined ? null : canonicalHash({
+        protocol: inspection.protocol,
+        runId: inspection.runId,
+        target: inspection.target,
+        deleteOwnedSafe: inspection.deleteOwnedSafe,
+        warnings: inspection.warnings,
+        resources: inspection.resources.map((resource) => ({
+          kind: resource.kind,
+          id: resource.id,
+          expectedOid: resource.expectedOid,
+          ref: resource.ref ?? null,
+          worktree: resource.worktree,
+          refState: resource.refState,
+          observedRefOid: resource.observedRefOid ?? null,
+          worktreeState: resource.worktreeState,
+          registered: resource.registered,
+          dirtyPaths: resource.dirtyPaths,
+          safeToDelete: resource.safeToDelete,
+          warnings: resource.warnings,
+        })),
+      }),
+      ownedWorktrees: ownedResources.filter((resource) => resource.worktreeState !== "absent").length,
+      ownedBranches: ownedResources.filter((resource) =>
+        resource.ref !== undefined && resource.refState !== "absent"
+      ).length,
+      liveAgents,
+      dirtyWorktreeWarnings: warnings,
+      blockers,
+      canPreserveBranches: blockers.length === 0,
+      // This means Koni may attempt guarded retirement, not that every resource is guaranteed to
+      // disappear. Dirty/moved/ambiguous resources are always preserved by the effect-time proof.
+      canDeleteOwnedBranches: blockers.length === 0,
+    };
+    const { runRevision: _runRevision, generation: _generation, gitSha256: _gitSha256,
+      pendingGitSha256: _pendingGitSha256, activeAttemptSha256: _activeAttemptSha256,
+      inspectionSha256: _inspectionSha256,
+      ...projection } = core;
+    return { ...projection, previewToken: canonicalHash(core) };
+  }
+
   async #deleteRun(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
     requireIdempotency(request);
+    assertExactParams(request.params, ["runId", "mode", "previewToken"]);
     const runId = requiredString(request.params, "runId");
+    const mode = requiredDeletionMode(request.params);
+    const previewToken = requiredSha256(request.params, "previewToken");
+    const preview = await this.#deletionPreview(runId);
+    if (preview.previewToken !== previewToken) {
+      throw new AuthorityRpcError("preview_stale", "run deletion state changed; review the refreshed preview", {
+        retryable: true,
+        details: preview as unknown as JsonValue,
+      });
+    }
+    if (
+      (mode === "preserve_branches" && !preview.canPreserveBranches) ||
+      (mode === "delete_owned_branches" && !preview.canDeleteOwnedBranches)
+    ) {
+      throw new AuthorityRpcError(
+        "delete_blocked",
+        mode === "preserve_branches"
+          ? "run cannot enter deletion from its current state"
+          : "owned Git resources are not proven safe to delete; preserve them instead",
+        { details: preview as unknown as JsonValue },
+      );
+    }
     const run = await this.#store.getRun(runId);
     const draft = nextRun(run, this.#timestamp());
     applyLifecycle(draft, { type: "delete_requested", atMs: this.#now().getTime() });
     draft.generation = draft.lifecycle.generation;
-    const result: JsonValue = { runId, status: "deleting" };
+    draft.deletion = {
+      protocol: "koni.run-deletion.v1",
+      mode,
+      previewToken,
+      requestedAt: draft.updatedAt,
+    };
+    const result: JsonValue = { runId, status: "deleting", mode };
     const committed = await this.#store.commit({
       expectedRevision: revision,
       runWrites: [{ record: draft, expectedRevision: run.revision }],
@@ -2143,10 +7455,27 @@ export class RunAuthorityEngine {
 
   async #settleDelete(runId: string): Promise<void> {
     await this.#supervisor.deleteRun(runId);
+    // The accepted `deleting` lifecycle denies every later action primitive/finalization CAS.
+    // Waiting for those promises here would invert authority: deletion owns abandoning them.
+    await this.#reconcileAllProviderExposureAfterStop(runId);
+    await this.#drainRunGit(runId);
+    await this.#recoverGitIntents(runId);
+    await this.#drainRunGit(runId);
+    const deletion = (await this.#store.getRun(runId)).deletion;
+    const preserveBranches = deletion?.mode === "preserve_branches";
     const retired = await this.#withGit(runId, async () => {
       // Read under the Git lane. A relocation accepted just before deletion
       // must not let cleanup act on the stale pre-relocation path projection.
       const current = await this.#store.getRun(runId);
+      if (preserveBranches) {
+        return {
+          legacy: current.legacyGitMigration !== undefined,
+          status: "preserved" as const,
+          lifecycle: preservedGitLifecycle(current.git, "Operator selected branch preservation during deletion"),
+          reason: "Operator selected branch preservation during deletion",
+          settledWithoutIntent: false,
+        };
+      }
       if (
         current.legacyGitMigration?.status === "relocation_required" ||
         current.legacyGitMigration?.status === "preserved"
@@ -2163,7 +7492,7 @@ export class RunAuthorityEngine {
       const result = await this.#git.retireAbandonedRun(current.git, this.#gitJournal(runId));
       return { legacy: false as const, ...result, settledWithoutIntent: false };
     });
-    if (!retired.legacy) await this.#persistGitLifecycle(runId, retired.lifecycle);
+    if (!retired.legacy || preserveBranches) await this.#persistGitLifecycle(runId, retired.lifecycle);
     if (retired.legacy && retired.settledWithoutIntent && retired.reason !== undefined) {
       await this.#preserveLegacyMigration(runId, retired.reason);
     }
@@ -2171,7 +7500,8 @@ export class RunAuthorityEngine {
       const run = await this.#store.getRun(runId);
       if (run.lifecycle.phase !== "deleting") return this.#noOpInternal(revision);
       const draft = nextRun(run, this.#timestamp());
-      interruptRunningAttempts(draft, "Run deleted", draft.updatedAt);
+      closeStoppedRunActions(draft, "Run deleted before configured action settlement", draft.updatedAt);
+      interruptStoppedAttempts(draft, "Run deleted", draft.updatedAt);
       if (retired.status === "preserved") {
         draft.activity.push(activity(
           this.#createId("activity"),
@@ -2199,24 +7529,55 @@ export class RunAuthorityEngine {
     if (run.plan === undefined || run.plan.status !== "awaiting_approval") {
       throw new AuthorityRpcError("plan_state", "run does not have an approval-ready plan");
     }
-    const initialized = await this.#program.initializeApprovedPlan(run);
-    const draft = nextRun(run, this.#timestamp());
+    const at = this.#timestamp();
+    const initialized = run.behavior === undefined
+      ? await this.#program.initializeApprovedPlan(run)
+      : undefined;
+    const actionDefinition = run.behavior === undefined
+      ? undefined
+      : selectedRunAction(run, run.behavior.runType.actionSelectors.compile);
+    const actionExecution = actionDefinition === undefined
+      ? undefined
+      : prepareRunActionExecution(run, {
+          kind: "approved_plan_compile",
+          stageId: requiredCurrentStageId(run, "plan approval"),
+          selector: run.behavior!.runType.actionSelectors.compile,
+          checkout: actionDefinition.checkout,
+          productSha256: canonicalHash({
+            planRevision: run.plan.revision,
+            graphSeed: run.plan.graphSeed ?? null,
+            targetOid: run.git.target.selectedOid,
+          }),
+          at,
+        });
+    const draft = nextRun(run, at);
+    let actionArchiveWrites: TransactionWrite[] = [];
     draft.plan = { ...draft.plan!, status: "approving" };
-    draft.graphHash = initialized.graphHash;
-    draft.graphRevision = initialized.graphRevision;
-    draft.tickets = structuredClone(initialized.tickets);
-    draft.activity.push(...structuredClone(initialized.activity ?? []));
-    for (const ticket of Object.values(draft.tickets)) {
-      delete ticket.gitCycleId;
-      ticket.worktreePath = undefined;
-      ticket.branch = undefined;
+    if (initialized !== undefined) {
+      draft.graphHash = initialized.graphHash;
+      draft.graphRevision = initialized.graphRevision;
+      draft.tickets = structuredClone(initialized.tickets);
+      draft.activity.push(...structuredClone(initialized.activity ?? []));
+      for (const ticket of Object.values(draft.tickets)) {
+        delete ticket.gitCycleId;
+        ticket.worktreePath = undefined;
+        ticket.branch = undefined;
+      }
+    } else {
+      actionArchiveWrites = admitRunActionExecution(draft, actionExecution!);
     }
     applyLifecycle(draft, { type: "plan_approval_requested", atMs: this.#now().getTime() });
-    const result: JsonValue = { runId, status: "approving", ticketCount: Object.keys(draft.tickets).length };
+    const result: JsonValue = {
+      runId,
+      status: "approving",
+      ...(initialized === undefined ? {} : { ticketCount: Object.keys(draft.tickets).length }),
+    };
     const committed = await this.#store.commit({
       expectedRevision: revision,
       runWrites: [{ record: draft, expectedRevision: run.revision }],
-      ...(initialized.artifactWrites === undefined ? {} : { writes: initialized.artifactWrites }),
+      ...((initialized?.artifactWrites?.length ?? 0) + actionArchiveWrites.length === 0
+        ? {}
+        : { writes: [...(initialized?.artifactWrites ?? []), ...actionArchiveWrites] }),
       receipt: receiptFor(request, result),
     });
     this.#background(() => this.#settleApprove(runId), runId);
@@ -2225,27 +7586,90 @@ export class RunAuthorityEngine {
 
   async #settleApprove(runId: string): Promise<void> {
     let run = await this.#store.getRun(runId);
-    if (run.lifecycle.phase !== "approving") return;
+    const advancement = this.#advancementToken(run, "approving");
+    if (advancement === undefined) return;
+    let compileInvocationId: string | undefined;
     try {
-      await this.#withGit(runId, () => this.#git.approveRun(run.git, this.#gitJournal(runId)));
+      if (run.behavior !== undefined) {
+        const action = findRunActionAtBoundary(run, "approved_plan_compile", {
+          stageId: requiredCurrentStageId(run, "plan approval"),
+        });
+        if (action === undefined) {
+          throw new AuthorityRpcError("action_compile_missing", "approved native run has no durable compile action");
+        }
+        compileInvocationId = action.invocationId;
+      }
+
+      // The compiler's plan may read or validate project files. Materialize the permanent run
+      // checkout first so every configured compile primitive observes the exact workspace that
+      // later ticket execution will mutate. The journal makes ref/worktree creation crash-forward;
+      // ordinary Git prepare/settle revisions do not alter the lifecycle advancement token.
+      await this.#withGit(runId, () =>
+        this.#git.approveRun(run.git, this.#gitJournal(runId, advancement)));
+      run = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(run, advancement)) return;
+
+      if (compileInvocationId !== undefined) {
+        await this.#adoptRunActionRevision(runId, compileInvocationId, advancement);
+        run = await this.#store.getRun(runId);
+        if (!this.#matchesAdvancement(run, advancement)) return;
+        const action = requiredRunActionExecution(run, compileInvocationId);
+        if (!isTerminalActionJournal(action.journal)) {
+          await this.#executeRunAction(runId, action.invocationId);
+        }
+        run = await this.#store.getRun(runId);
+        const settled = requiredRunActionExecution(run, action.invocationId);
+        if (settled.journal.status !== "completed" || settled.semanticResult?.kind !== "approved_plan") {
+          throw new AuthorityRpcError(
+            "action_compile_failed",
+            `configured compile action settled as ${settled.journal.status}`,
+          );
+        }
+      }
       await this.#server.mutateInternal(async ({ revision }) => {
         run = await this.#store.getRun(runId);
-        if (run.lifecycle.phase !== "approving") return this.#noOpInternal(revision);
+        if (!this.#matchesAdvancement(run, advancement)) return this.#noOpInternal(revision);
         const draft = nextRun(run, this.#timestamp());
+        if (compileInvocationId !== undefined) {
+          const action = requiredRunActionExecution(draft, compileInvocationId);
+          if (action.settledAt === undefined) {
+            settleRunAction(action, "completed", "Approved plan compiled", draft.updatedAt, draft.revision);
+          }
+        }
+        const autoStart = draft.behavior?.runType.autoStart !== false;
         draft.plan = draft.plan === undefined ? undefined : { ...draft.plan, status: "approved" };
-        draft.currentPipelineStageId = orchestrationStage(draft);
+        draft.currentPipelineStageId = await this.#stageForKinds(draft, ["orchestration"], "orchestration");
         applyLifecycle(draft, { type: "plan_approved", atMs: this.#now().getTime() });
+        if (!autoStart) {
+          applyLifecycle(draft, { type: "pause_requested", atMs: this.#now().getTime() });
+          draft.activity.push(activity(
+            this.#createId("activity"),
+            draft.updatedAt,
+            "compiler",
+            "Plan approved; execution is paused by the selected run type",
+          ));
+        }
         const committed = await this.#store.commit({
           expectedRevision: revision,
           runWrites: [{ record: draft, expectedRevision: run.revision }],
         });
         return {
           revision: committed.state.revision,
-          events: [{ topic: "run.execution.started", payload: { runId } }],
+          events: [{
+            topic: autoStart ? "run.execution.started" : "run.execution.pause_requested",
+            payload: { runId },
+          }],
         };
       });
-      await this.#tick(runId);
+      const approved = await this.#store.getRun(runId);
+      if (approved.lifecycle.phase === "pausing") {
+        await this.#settlePause(runId);
+        return;
+      }
+      const execution = this.#advancementToken(approved, "executing");
+      if (execution !== undefined) await this.#tick(runId, execution);
     } catch (error) {
+      if (error instanceof RunAdvancementStoppedError) return;
       await this.#recordRunBlocker(runId, `Run workspace approval failed: ${errorMessage(error)}`);
     }
   }
@@ -2297,17 +7721,24 @@ export class RunAuthorityEngine {
           await handle.session.abort("plan revision moved to a fresh immutable attempt");
         }
       }
+      await this.#reconcileAllProviderExposureAfterStop(runId);
       await this.#launchPlanning(runId);
     }, runId);
     return { result, revision: committed.state.revision };
   }
 
   async #answerQuestion(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
+    if (isRecord(request.params) && typeof request.params.batchId === "string") {
+      return this.#saveBatchAnswer(request, revision, false);
+    }
     requireIdempotency(request);
     const runId = requiredString(request.params, "runId");
     const questionId = requiredString(request.params, "questionId");
     const selectedOptionId = optionalString(request.params, "selectedOptionId");
-    const notes = optionalString(request.params, "notes");
+    const suppliedNotes = optionalString(request.params, "notes");
+    const notes = suppliedNotes === undefined || suppliedNotes.trim().length === 0
+      ? undefined
+      : boundedText(suppliedNotes, "question notes", 64 * 1024);
     const run = await this.#store.getRun(runId);
     const question = run.questions[questionId];
     if (question === undefined || question.answeredAt !== undefined) {
@@ -2317,6 +7748,9 @@ export class RunAuthorityEngine {
       selectedOptionId !== undefined &&
       !question.options.some((option) => option.id === selectedOptionId)
     ) throw new AuthorityRpcError("question_option", "selected question option does not exist");
+    if (notes !== undefined && !question.allowsNotes) {
+      throw new AuthorityRpcError("question_notes", "this question does not accept notes");
+    }
     if (selectedOptionId === undefined && (notes === undefined || notes.trim().length === 0)) {
       throw new AuthorityRpcError("question_answer", "choose an option or provide notes");
     }
@@ -2368,9 +7802,211 @@ export class RunAuthorityEngine {
     return { result, revision: committed.state.revision };
   }
 
+  async #saveBatchAnswer(
+    request: RpcRequest,
+    revision: number,
+    revise: boolean,
+  ): Promise<AuthorityMethodResult> {
+    requireIdempotency(request);
+    assertAllowedParams(request.params, [
+      "runId", "batchId", "questionId", "expectedVersion", "selectedOptionId", "notes",
+    ]);
+    const runId = requiredString(request.params, "runId");
+    const batchId = requiredString(request.params, "batchId");
+    const questionId = requiredString(request.params, "questionId");
+    const expectedVersion = requiredNonnegativeInt(request.params, "expectedVersion");
+    const selectedOptionId = optionalString(request.params, "selectedOptionId");
+    const suppliedNotes = optionalString(request.params, "notes");
+    const notes = suppliedNotes === undefined || suppliedNotes.trim().length === 0
+      ? undefined
+      : boundedText(suppliedNotes, "question notes", 64 * 1024);
+    const run = await this.#store.getRun(runId);
+    const batch = run.questionBatches?.[batchId];
+    if (batch === undefined) throw new AuthorityRpcError("question_batch_missing", "question batch does not exist");
+    let updated;
+    try {
+      const input = {
+        expectedVersion,
+        questionId,
+        ...(selectedOptionId === undefined ? {} : { selectedOptionId }),
+        ...(notes === undefined ? {} : { notes }),
+        savedAt: this.#timestamp(),
+      };
+      updated = revise
+        ? reviseQuestionBatchAnswer(batch, input)
+        : saveQuestionBatchAnswer(batch, input);
+    } catch (error) {
+      throw questionBatchRpcError(error);
+    }
+    const draft = nextRun(run, updated.updatedAt);
+    draft.questionBatches ??= {};
+    draft.questionBatches[batchId] = updated;
+    const projection = draft.questions[questionId];
+    const answer = updated.revisions.at(-1)?.answers[questionId];
+    if (projection !== undefined && answer !== undefined) {
+      projection.selectedOptionId = answer.selectedOptionId;
+      projection.notes = answer.notes;
+      projection.answerRevision = answer.revision;
+    }
+    const capabilities = projectQuestionBatchCapabilities(updated);
+    const result: JsonValue = {
+      runId,
+      batchId,
+      questionId,
+      status: revise ? "revised" : "saved",
+      batchVersion: updated.version,
+      capabilities: capabilities as unknown as JsonValue,
+    };
+    const committed = await this.#store.commit({
+      expectedRevision: revision,
+      runWrites: [{ record: draft, expectedRevision: run.revision }],
+      receipt: receiptFor(request, result),
+    });
+    return { result, revision: committed.state.revision };
+  }
+
+  async #resolveQuestionBatch(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
+    requireIdempotency(request);
+    assertExactParams(request.params, ["runId", "batchId", "expectedVersion"]);
+    const runId = requiredString(request.params, "runId");
+    const batchId = requiredString(request.params, "batchId");
+    const expectedVersion = requiredNonnegativeInt(request.params, "expectedVersion");
+    const run = await this.#store.getRun(runId);
+    const batch = run.questionBatches?.[batchId];
+    if (batch === undefined) throw new AuthorityRpcError("question_batch_missing", "question batch does not exist");
+    let queued;
+    try {
+      queued = queueQuestionBatchResume(batch, { expectedVersion, at: this.#timestamp() });
+    } catch (error) {
+      throw questionBatchRpcError(error);
+    }
+    const resolution = projectQuestionBatchResolution(queued);
+    const liveWaiter = this.#questionBatchWaiters.get(batchId);
+    const draft = nextRun(run, queued.updatedAt);
+    draft.questionBatches ??= {};
+    let status: "pending_resume" | "resolved" = "pending_resume";
+    if (liveWaiter === undefined) {
+      const resolved = resolveQuestionBatch(queued, { expectedVersion: queued.version, at: draft.updatedAt });
+      draft.questionBatches[batchId] = resolved;
+      applyBatchResolutionToLegacyQuestions(draft, resolution, draft.updatedAt);
+      applyLifecycle(draft, {
+        type: "question_answered",
+        atMs: this.#now().getTime(),
+        questionId: batchId,
+        answer: `${resolution.answers.length} question${resolution.answers.length === 1 ? "" : "s"} answered`,
+      });
+      const attempt = draft.attempts[batch.attemptId];
+      if (attempt !== undefined && attempt.status === "waiting_question") {
+        interruptAttemptForContinuation(draft, attempt, draft.updatedAt);
+      }
+      status = "resolved";
+    } else {
+      draft.questionBatches[batchId] = queued;
+      applyBatchResolutionToLegacyQuestions(draft, resolution, draft.updatedAt);
+      applyLifecycle(draft, {
+        type: "question_answered",
+        atMs: this.#now().getTime(),
+        questionId: batchId,
+        answer: questionBatchAnswerSummary(resolution),
+      });
+      const attempt = draft.attempts[batch.attemptId];
+      if (attempt === undefined || attempt.status !== "waiting_question") {
+        throw new AuthorityRpcError(
+          "question_attempt",
+          "the question batch no longer owns its waiting attempt",
+        );
+      }
+      attempt.status = "running";
+    }
+    const result: JsonValue = {
+      runId,
+      batchId,
+      status,
+      batchVersion: draft.questionBatches[batchId]!.version,
+    };
+    const committed = await this.#store.commit({
+      expectedRevision: revision,
+      runWrites: [{ record: draft, expectedRevision: run.revision }],
+      receipt: receiptFor(request, result),
+    });
+    if (liveWaiter !== undefined) {
+      liveWaiter.resolve(resolution);
+    } else {
+      this.#background(async () => {
+        const handle = this.#supervisor.get(batch.attemptId);
+        if (handle !== undefined) await handle.session.abort("question continuation moved to a fresh attempt");
+        const current = await this.#store.getRun(runId);
+        if (current.lifecycle.phase === "planning") await this.#launchPlanning(runId);
+        else if (current.lifecycle.phase === "executing" || current.lifecycle.phase === "verifying") await this.#tick(runId);
+      }, runId);
+    }
+    return { result, revision: committed.state.revision };
+  }
+
+  async #mergePreview(runId: string): Promise<RunMergePreview> {
+    const run = await this.#store.getRun(runId);
+    const promotion = run.git.promotion;
+    let observedTargetOid: string | null = null;
+    const blockers: string[] = [];
+    try {
+      observedTargetOid = (await this.#withGit(runId, () => this.#git.observeTargetRef(run.git))).observedOid;
+    } catch (error) {
+      blockers.push(`Target branch could not be inspected: ${errorMessage(error)}`);
+    }
+    const expectedTargetOid = promotion?.expectedTargetOid ?? null;
+    const targetAdvanced = expectedTargetOid !== null && observedTargetOid !== expectedTargetOid;
+    if (run.lifecycle.phase !== "merge_ready") blockers.push("Compiler verification has not prepared this run for merge");
+    if (promotion?.status !== "ready" || promotion.candidateOid === undefined) {
+      blockers.push(promotion?.blocker ?? "No verified target-promotion candidate is prepared");
+    }
+    if (targetAdvanced) blockers.push("Target branch advanced after verification; a bounded integration pass is required");
+    if (Object.keys(run.pendingGitIntents ?? {}).length > 0) blockers.push("A Git effect is still settling");
+    const tickets = Object.values(run.tickets);
+    const core = {
+      protocol: RUN_MERGE_PREVIEW_PROTOCOL,
+      runId: run.id,
+      runRevision: run.revision,
+      generation: run.generation,
+      objective: run.objective,
+      phase: run.lifecycle.phase,
+      targetRef: run.git.target.ref,
+      expectedTargetOid,
+      observedTargetOid,
+      candidateOid: promotion?.candidateOid ?? null,
+      promotionStatus: promotion?.status ?? null,
+      targetAdvanced,
+      resyncState: (observedTargetOid === null
+        ? "unavailable"
+        : targetAdvanced || promotion?.status === "integration_required"
+          ? "required"
+          : "current") as RunMergePreview["resyncState"],
+      completedTickets: tickets.filter((ticket) => ticket.status === "completed").length,
+      totalTickets: tickets.length,
+      blockers: uniqueStrings(blockers),
+    };
+    const canAuthorize = core.blockers.length === 0;
+    const { runRevision: _runRevision, generation: _generation, candidateOid: _candidateOid,
+      promotionStatus: _promotionStatus, ...projection } = core;
+    return { ...projection, canAuthorize, previewToken: canonicalHash(core) };
+  }
+
   async #mergeRun(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
     requireIdempotency(request);
+    assertExactParams(request.params, ["runId", "previewToken"]);
     const runId = requiredString(request.params, "runId");
+    const previewToken = requiredSha256(request.params, "previewToken");
+    const preview = await this.#mergePreview(runId);
+    if (preview.previewToken !== previewToken) {
+      throw new AuthorityRpcError("preview_stale", "merge target or run state changed; review the refreshed preview", {
+        retryable: true,
+        details: preview as unknown as JsonValue,
+      });
+    }
+    if (!preview.canAuthorize) {
+      throw new AuthorityRpcError("merge_blocked", "run is not safe to merge", {
+        details: preview as unknown as JsonValue,
+      });
+    }
     const run = await this.#store.getRun(runId);
     const draft = nextRun(run, this.#timestamp());
     applyLifecycle(draft, { type: "merge_started", atMs: this.#now().getTime() });
@@ -2384,24 +8020,35 @@ export class RunAuthorityEngine {
     return { result, revision: committed.state.revision };
   }
 
-  async #settleMerge(runId: string, retry = 0): Promise<void> {
+  async #settleMerge(
+    runId: string,
+    retry = 0,
+    expected?: RunAdvancementToken,
+  ): Promise<void> {
     const run = await this.#store.getRun(runId);
-    if (run.lifecycle.phase !== "merging") return;
+    const advancement = expected ?? this.#advancementToken(run, "merging");
+    if (advancement === undefined || !this.#matchesAdvancement(run, advancement)) return;
     try {
       const { published, cleanup } = await this.#withGit(runId, async () => {
-        await this.#git.publishTargetPromotion(run.git, this.#gitJournal(runId));
+        await this.#git.publishTargetPromotion(run.git, this.#gitJournal(runId, advancement));
+        if (!(await this.#advancementIsCurrent(runId, advancement))) {
+          throw new RunAdvancementStoppedError();
+        }
         const durable = await this.#store.getRun(runId);
-        const retired = await this.#git.retireAbandonedRun(durable.git, this.#gitJournal(runId));
+        const retired = await this.#git.retireAbandonedRun(
+          durable.git,
+          this.#gitJournal(runId, advancement),
+        );
         return { published: durable, cleanup: retired };
       });
       const mergedOid = published.git.promotion?.candidateOid;
       if (mergedOid === undefined || published.git.promotion?.status !== "published") {
         throw new AuthorityRpcError("git_promotion", "target publication did not settle durably");
       }
-      await this.#persistGitLifecycle(runId, cleanup.lifecycle);
+      await this.#persistGitLifecycle(runId, cleanup.lifecycle, advancement);
       await this.#server.mutateInternal(async ({ revision }) => {
         const current = await this.#store.getRun(runId);
-        if (current.lifecycle.phase !== "merging") return this.#noOpInternal(revision);
+        if (!this.#matchesAdvancement(current, advancement)) return this.#noOpInternal(revision);
         const draft = nextRun(current, this.#timestamp());
         applyLifecycle(draft, { type: "merge_completed", atMs: this.#now().getTime() });
         const committed = await this.#store.commit({
@@ -2414,10 +8061,15 @@ export class RunAuthorityEngine {
         };
       });
     } catch (error) {
+      if (error instanceof RunAdvancementStoppedError) return;
       if (retry >= 1) {
-        await this.#recordRunBlocker(runId, `Target publication failed: ${errorMessage(error)}`);
+        await this.#recordRunBlocker(
+          runId,
+          `Target publication failed: ${errorMessage(error)}`,
+          advancement,
+        );
       } else {
-        await this.#preparePromotion(runId, true);
+        await this.#preparePromotion(runId, true, undefined, advancement);
       }
     }
   }
@@ -2474,15 +8126,19 @@ export class RunAuthorityEngine {
   }
 
   async #findAttempt(attemptId: string): Promise<{ run: RunRecord; attempt: AgentAttemptRecord }> {
-    const matches = (await this.#store.listRuns({ includeDeleted: true }))
-      .flatMap((run) => run.attempts[attemptId] === undefined ? [] : [{ run, attempt: run.attempts[attemptId]! }]);
-    if (matches.length !== 1) {
+    let match: Awaited<ReturnType<ProjectAuthorityStore["findAttempt"]>>;
+    try {
+      match = await this.#store.findAttempt(attemptId);
+    } catch (error) {
+      throw projectStoreRpcError(error, "attempt_identity");
+    }
+    if (match === undefined) {
       throw new AuthorityRpcError(
-        matches.length === 0 ? "attempt_missing" : "attempt_identity",
-        matches.length === 0 ? "agent attempt does not exist" : "agent attempt id is not project-unique",
+        "attempt_missing",
+        "agent attempt does not exist",
       );
     }
-    return matches[0]!;
+    return match;
   }
 
   async #commitReceiptOnly(request: RpcRequest, revision: number, result: JsonValue): Promise<void> {
@@ -2495,64 +8151,134 @@ export class RunAuthorityEngine {
 
   async #launchPlanning(runId: string): Promise<void> {
     const run = await this.#store.getRun(runId);
-    if (run.lifecycle.phase !== "planning" || hasLiveAttempt(run, "planning")) return;
-    await this.#launchAttempt(run, "planning");
+    const advancement = this.#advancementToken(run, "planning");
+    if (advancement === undefined || hasLiveAttempt(run, "planning")) return;
+    await this.#launchAttempt(run, "planning", undefined, advancement);
   }
 
-  async #launchAssignment(run: RunRecord, assignment: ReadyAssignment): Promise<void> {
+  async #launchAssignment(
+    run: RunRecord,
+    assignment: ReadyAssignment,
+    advancement: RunAdvancementToken,
+  ): Promise<void> {
     const ticket = run.tickets[assignment.ticketId];
-    const kind = ticket?.integrationForTicketId !== undefined || ticket?.id.startsWith("TK-integration-") === true
+    const step = ticket?.steps.find((candidate) => candidate.id === assignment.stepId);
+    const kind = ticket?.integrationForTicketId !== undefined ||
+      ticket?.id.startsWith("TK-integration-") === true || step?.kind === "integration"
       ? "integration"
-      : "ticket";
-    await this.#launchAttempt(run, kind, assignment);
+      : step?.kind === "review"
+        ? "verification"
+        : "ticket";
+    await this.#launchAttempt(run, kind, assignment, advancement);
   }
 
   async #launchAttempt(
     run: RunRecord,
-    kind: "planning" | "ticket" | "verification" | "integration",
+    kind: "planning" | "lead" | "ticket" | "verification" | "integration",
     assignment?: ReadyAssignment,
+    advancement?: RunAdvancementToken,
+    leadTrigger?: LeadJudgmentTrigger,
+    leadActionAdmission?: Readonly<LeadActionAdmission>,
   ): Promise<void> {
+    if (kind === "lead" && (leadTrigger === undefined || leadActionAdmission === undefined)) {
+      throw new AuthorityRpcError("lead_trigger", "Lead launch requires an exact compiler trigger and configured action authorization");
+    }
+    if (kind !== "lead" && leadActionAdmission !== undefined) {
+      throw new AuthorityRpcError("lead_trigger", "only a Lead launch may consume a Lead action authorization");
+    }
+    const admission = advancement ?? this.#advancementToken(
+      run,
+      kind === "planning" ? "planning" : "executing",
+    );
+    if (admission === undefined || !this.#matchesAdvancement(run, admission)) return;
     if (this.#runtimeGuard !== undefined) {
       try {
         await this.#runtimeGuard();
       } catch (error) {
-        await this.#recordRunBlocker(run.id, errorMessage(error));
+        await this.#recordRunBlocker(run.id, errorMessage(error), admission);
         return;
       }
     }
-    const attemptId = this.#createId("attempt");
+    if (!(await this.#advancementIsCurrent(run.id, admission))) return;
+    const providerExposureIssue = await this.#reconcileTerminalProviderExposureBeforeLaunch(run.id);
+    if (providerExposureIssue !== undefined) {
+      await this.#recordRunBlocker(run.id, providerExposureIssue, admission);
+      return;
+    }
+    const attemptId = leadActionAdmission?.attemptId ?? this.#createId("attempt");
     const sessionId = this.#createId("session");
     let prepared: PreparedManagedAttempt | undefined;
+    let providerHoldDetected = false;
     await this.#server.mutateInternal(async ({ revision }) => {
       const current = await this.#store.getRun(run.id);
-      if (current.generation !== run.generation) {
-        throw new AuthorityRpcError("launch_generation", "run generation changed before attempt admission");
+      if (!this.#matchesAdvancement(current, admission)) return this.#noOpInternal(revision);
+      let leadAction: RunActionExecutionRecord | undefined;
+      if (kind === "lead") {
+        leadAction = requiredRunActionExecution(current, leadActionAdmission!.invocationId);
+        assertRunActionCurrent(current, leadAction);
+        assertActionBoundaryCurrent(current, leadAction);
+        if (leadAction.boundary.kind !== "lead_launch" || leadAction.boundary.attemptId !== attemptId ||
+            leadAction.boundary.stepId !== leadJudgmentStepId(leadTrigger!) ||
+            leadAction.journal.status !== "completed" || leadAction.settledAt !== undefined ||
+            leadAction.boundary.productSha256 !== leadActionProductSha256(current, leadTrigger!)) {
+          throw new AuthorityRpcError("lead_action_binding", "Lead launch differs from its exact completed action authorization");
+        }
+      }
+      if (Object.values(current.attempts).some((attempt) =>
+        isProviderPredecessor(attempt.status) && hasUnsettledProviderRequest(attempt)
+      )) {
+        providerHoldDetected = true;
+        return this.#noOpInternal(revision);
       }
       if (assignment !== undefined) {
-        const ready = deriveReadyAssignments(current, current.executionConfig?.maxParallel ?? 1).ready.some(
+        const executionAuthority = await this.#schedulerExecutionAuthority(current);
+        const ready = deriveReadyAssignments(
+          current,
+          current.executionConfig?.maxParallel ?? 1,
+          executionAuthority,
+        ).ready.some(
           (candidate) => candidate.ticketId === assignment?.ticketId && candidate.stepId === assignment?.stepId,
         );
         if (!ready) return this.#noOpInternal(revision);
       }
+      const assignmentExecutionEpoch = assignment === undefined
+        ? undefined
+        : currentTicketExecutionEpoch(current, current.tickets[assignment.ticketId]!);
       const nextRevision = revision + 1;
-      const lineage = await this.#deriveAttemptLineage(current, kind, assignment);
+      const lineage = await this.#deriveAttemptLineage(current, kind, assignment, leadTrigger);
+      if (
+        kind === "planning" &&
+        current.plan?.steeringHistory.length !== undefined &&
+        current.plan.steeringHistory.length > 0 &&
+        lineage.conversationFork === undefined
+      ) {
+        throw new AuthorityRpcError(
+          "planning_revision_context",
+          "plan revision cannot authenticate the prior Pi conversation; refusing a wasteful empty-session replan",
+        );
+      }
       prepared = await this.#program.prepareAttempt({
         kind,
         run: current,
         ...(assignment === undefined ? {} : { assignment }),
+        ...(kind === "lead" ? { leadTrigger: leadTrigger! } : {}),
         attemptId,
         sessionId,
         nextAuthorityRevision: nextRevision,
         expectedAuthorityStateHash: authorityRevisionStateHash(this.#projectRoot, nextRevision),
         lineage,
       });
-      assertPreparedIdentity(prepared, current.id, attemptId, sessionId, assignment);
+      assertPreparedIdentity(prepared, current.id, attemptId, sessionId, assignment, kind, leadTrigger);
       if (canonicalHash(prepared.spec.lineage) !== canonicalHash(lineage)) {
         throw new AuthorityRpcError("launch_lineage", "compiler changed the authority-issued attempt lineage");
       }
       assertPreparedAuthorityPlan(prepared, nextRevision, this.#projectRoot, this.#stateRoot);
       const draft = nextRun(current, this.#timestamp());
-      if (assignment !== undefined) beginAssignment(draft, assignment, attemptId, draft.updatedAt);
+      if (assignment !== undefined) {
+        const executionAuthority = await this.#schedulerExecutionAuthority(draft);
+        beginAssignment(draft, assignment, attemptId, draft.updatedAt, executionAuthority);
+        draft.tickets[assignment.ticketId]!.executionEpoch = assignmentExecutionEpoch!;
+      }
       const attempt: AgentAttemptRecord = {
         id: attemptId,
         sessionId,
@@ -2572,13 +8298,37 @@ export class RunAuthorityEngine {
         outputTokens: 0,
         cacheReadTokens: 0,
         cacheWriteTokens: 0,
+        ...(assignmentExecutionEpoch === undefined ? {} : {
+          ticketExecutionEpoch: assignmentExecutionEpoch,
+        }),
         lineage: structuredClone(lineage),
         authorityMessages: [],
         authorityToolResults: [],
         authorityCompactions: [],
+        ...(leadActionAdmission === undefined ? {} : { launchActionInvocationId: leadActionAdmission.invocationId }),
+        ...(kind !== "verification" || current.git.run.headOid === undefined
+          ? {}
+          : { reviewedRunOid: current.git.run.headOid }),
+        ...(kind !== "verification" || current.git.targetSynchronization?.status !== "synchronized"
+          ? {}
+          : { reviewedTargetOid: current.git.targetSynchronization.targetOid }),
+        ...(kind !== "verification" || current.graphHash === undefined
+          ? {}
+          : { reviewedGraphHash: current.graphHash }),
+        ...(this.#supervisor instanceof PiAttemptProcessSupervisor
+          ? { authorityProviderRequests: [] }
+          : {}),
         kind,
       };
+      await this.#validateAttemptLineageForest(current, attempt);
       draft.attempts[attemptId] = attempt;
+      if (leadAction !== undefined) {
+        const mutableAction = requiredRunActionExecution(draft, leadAction.invocationId);
+        settleRunAction(mutableAction, "completed", "Lead launch admitted", draft.updatedAt, draft.revision);
+      }
+      if (kind === "verification" && assignment === undefined) {
+        draft.currentPipelineStageId = await this.#stageForKinds(draft, ["agent_review"], "independent review");
+      }
       const launchBytes = Buffer.from(`${JSON.stringify(prepared.spec)}\n`, "utf8");
       const writes: TransactionWrite[] = [
         ...(prepared.artifactWrites ?? []),
@@ -2598,6 +8348,14 @@ export class RunAuthorityEngine {
         events: [{ topic: "agent.queued", payload: { runId: run.id, attemptId, kind } }],
       };
     });
+    if (providerHoldDetected) {
+      await this.#recordRunBlocker(
+        run.id,
+        "A prior provider request remains unsettled; its worst-case exposure blocks a successor attempt",
+        admission,
+      );
+      return;
+    }
     if (prepared === undefined) return;
     try {
       const handle = await this.#launchPreparedSession(prepared, "fresh");
@@ -2605,14 +8363,43 @@ export class RunAuthorityEngine {
       this.#attachOutcome(run.id, attemptId, assignment, handle);
       await this.#activatePreparedSession(handle);
     } catch (error) {
+      if (this.#stopRequested || error instanceof RunAdvancementStoppedError) {
+        await this.#interruptStoppedLaunch(run.id, attemptId, assignment);
+        return;
+      }
       await this.#failLaunch(run.id, attemptId, assignment, errorMessage(error));
     }
+  }
+
+  async #interruptStoppedLaunch(
+    runId: string,
+    attemptId: string,
+    assignment: ReadyAssignment | undefined,
+  ): Promise<void> {
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(runId);
+      const attempt = run.attempts[attemptId];
+      if (attempt === undefined || isTerminalAttempt(attempt.status)) return this.#noOpInternal(revision);
+      const draft = nextRun(run, this.#timestamp());
+      const mutable = draft.attempts[attemptId]!;
+      mutable.status = "interrupted";
+      mutable.error = "Authority stopped before provider activation";
+      mutable.endedAt = draft.updatedAt;
+      mutable.terminalSummary = "Interrupted before provider activation";
+      if (assignment !== undefined) resetAssignmentAfterInterruption(draft, assignment, draft.updatedAt);
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+      });
+      return { revision: committed.state.revision };
+    });
   }
 
   async #launchPreparedSession(
     prepared: PreparedManagedAttempt,
     mode: "fresh" | "recover",
   ): Promise<ManagedSessionHandle | PiAttemptProcessHandle> {
+    if (this.#stopRequested) throw new RunAdvancementStoppedError();
     const contextProvider = prepared.contextProvider ?? this.#createContextProvider(prepared);
     if (this.#supervisor instanceof PiAttemptProcessSupervisor) {
       if (prepared.terminalOutputSchema === undefined) {
@@ -2655,20 +8442,103 @@ export class RunAuthorityEngine {
 
   async #deriveAttemptLineage(
     run: RunRecord,
-    kind: "planning" | "ticket" | "verification" | "integration",
+    kind: "planning" | "lead" | "ticket" | "verification" | "integration",
     assignment: ReadyAssignment | undefined,
+    leadTrigger?: LeadJudgmentTrigger,
   ): Promise<AgentAttemptLineage> {
-    const candidates = Object.values(run.attempts)
-      .filter((attempt) => {
-        if (attempt.kind !== kind) return false;
-        if (kind === "planning") return true;
-        return attempt.ticketId === assignment?.ticketId && attempt.stepId === assignment?.stepId;
-      })
-      .sort((left, right) =>
-        (right.startedAt ?? right.endedAt ?? "").localeCompare(left.startedAt ?? left.endedAt ?? "") ||
-        right.id.localeCompare(left.id)
-      );
-    const parent = candidates[0];
+    const newest = (values: AgentAttemptRecord[]): AgentAttemptRecord | undefined => values.sort((left, right) =>
+      (right.startedAt ?? right.endedAt ?? "").localeCompare(left.startedAt ?? left.endedAt ?? "") ||
+      right.id.localeCompare(left.id)
+    )[0];
+    const all = Object.values(run.attempts);
+    const assignmentTicket = assignment === undefined ? undefined : run.tickets[assignment.ticketId];
+    const assignmentEpoch = assignmentTicket === undefined
+      ? undefined
+      : currentTicketExecutionEpoch(run, assignmentTicket);
+    const belongsToAssignmentEpoch = (attempt: AgentAttemptRecord): boolean =>
+      assignmentTicket === undefined || assignmentEpoch === undefined ||
+      attemptTicketExecutionEpoch(run, assignmentTicket, attempt) === assignmentEpoch;
+    const belongsToCurrentTicketEpoch = (attempt: AgentAttemptRecord): boolean => {
+      const ticket = run.tickets[attempt.ticketId];
+      return ticket === undefined ||
+        attemptTicketExecutionEpoch(run, ticket, attempt) === currentTicketExecutionEpoch(run, ticket);
+    };
+    const sameScope = all.filter((attempt) => {
+      if (attempt.kind !== kind) return false;
+      if (kind === "planning") return true;
+      if (kind === "lead") {
+        return leadTrigger !== undefined && attempt.stepId === leadJudgmentStepId(leadTrigger);
+      }
+      if (kind === "verification" && assignment === undefined) {
+        return run.tickets[attempt.ticketId] === undefined;
+      }
+      return attempt.ticketId === assignment?.ticketId &&
+        attempt.stepId === assignment?.stepId &&
+        belongsToAssignmentEpoch(attempt);
+    });
+    const assignmentStep = assignmentTicket?.steps.find((step) => step.id === assignment?.stepId);
+    const latestReviewRework = assignmentTicket?.reviewReworks?.at(-1);
+    const beginsIndependentRereview = kind === "verification" &&
+      assignment !== undefined &&
+      assignmentStep?.kind === "review" &&
+      latestReviewRework?.mode === "supervised" &&
+      latestReviewRework.scope === "review_only" &&
+      latestReviewRework.reopenFromStepId === assignment.stepId &&
+      assignmentStep.attemptIds.at(-1) === latestReviewRework.failedReviewAttemptId;
+    // An explicit review-only recovery is a new judgment over compiler-authenticated evidence,
+    // not a continuation of the failed review conversation. Starting its first attempt at a
+    // fresh Pi root avoids paying to replay or compact the rejected transcript. If this new root
+    // itself needs an infrastructure retry, its newly appended attempt becomes the normal parent.
+    let parent = beginsIndependentRereview ? undefined : newest(sameScope);
+    let firstEdgeReason: AgentAttemptLineage["reason"] | undefined;
+
+    if (parent === undefined && kind === "verification" && !beginsIndependentRereview) {
+      if (assignment !== undefined) {
+        const ticket = run.tickets[assignment.ticketId];
+        const reviewIndex = ticket?.steps.findIndex((step) => step.id === assignment.stepId) ?? -1;
+        const reviewStep = reviewIndex < 0 ? undefined : ticket?.steps[reviewIndex];
+        const predecessorStepIds = new Set(
+          reviewStep?.dependsOn !== undefined && reviewStep.dependsOn.length > 0
+            ? reviewStep.dependsOn
+            : ticket?.steps.slice(0, Math.max(0, reviewIndex)).map((step) => step.id) ?? [],
+        );
+        parent = newest(all.filter((attempt) =>
+          attempt.ticketId === assignment.ticketId &&
+          predecessorStepIds.has(attempt.stepId) &&
+          belongsToAssignmentEpoch(attempt) &&
+          isTerminalAttempt(attempt.status)
+        ));
+      }
+      if (parent !== undefined) firstEdgeReason = "review";
+    }
+
+    if (parent === undefined && kind === "integration" && assignment !== undefined) {
+      const ticket = run.tickets[assignment.ticketId];
+      const predecessorTicketId = ticket?.integrationForTicketId;
+      parent = predecessorTicketId === undefined
+        ? newest(all.filter((attempt) =>
+          isTerminalAttempt(attempt.status) &&
+          attempt.ticketId === assignment.ticketId &&
+          attempt.stepId !== assignment.stepId &&
+          belongsToAssignmentEpoch(attempt)
+        )) ?? newest(all.filter((attempt) =>
+          isTerminalAttempt(attempt.status) &&
+          attempt.kind === "verification" &&
+          run.tickets[attempt.ticketId] === undefined
+        )) ?? newest(all.filter((attempt) =>
+          isTerminalAttempt(attempt.status) &&
+          attempt.kind !== "integration" &&
+          attempt.ticketId !== assignment.ticketId &&
+          belongsToCurrentTicketEpoch(attempt)
+        ))
+        : newest(all.filter((attempt) =>
+          isTerminalAttempt(attempt.status) &&
+          attempt.ticketId === predecessorTicketId &&
+          belongsToCurrentTicketEpoch(attempt)
+        ));
+      if (parent !== undefined) firstEdgeReason = "integration";
+    }
+
     if (parent === undefined) {
       return {
         branchEpoch: 0,
@@ -2678,26 +8548,37 @@ export class RunAuthorityEngine {
       };
     }
 
-    const reason: AgentAttemptLineage["reason"] = kind === "integration"
-      ? "integration"
-      : parent.status === "failed"
-        ? "retry"
-        : parent.status === "interrupted" || parent.status === "aborted"
-          ? "recovery"
-          : kind === "planning"
-            ? "rework"
-            : "rework";
-    const parentEntryId = await this.#lastAttemptEntry(run, parent);
+    const reason: AgentAttemptLineage["reason"] = firstEdgeReason ?? (parent.status === "failed"
+      ? "retry"
+      : parent.status === "interrupted" || parent.status === "aborted"
+        ? "recovery"
+        : kind === "planning"
+          ? "rework"
+          : "rework");
+    const parentAnchor = await this.#attemptTranscriptAnchor(run, parent);
+    const mayForkConversation = ["retry", "rework", "recovery"].includes(reason);
     return {
-      branchEpoch: (parent.lineage?.branchEpoch ?? Math.max(0, candidates.length - 1)) + 1,
+      branchEpoch: (parent.lineage?.branchEpoch ?? Math.max(0, sameScope.length - 1)) + 1,
       reason,
       parentAttemptId: parent.id,
       parentSessionId: parent.sessionId,
-      ...(parentEntryId === undefined ? {} : { parentEntryId }),
+      ...(parentAnchor === undefined ? {} : {
+        parentEntryId: parentAnchor.leafEntryId,
+        ...(mayForkConversation ? {
+          conversationFork: {
+            parentLaunchSpecHash: parentAnchor.launchSpecHash,
+            parentTranscriptSha256: parentAnchor.snapshotSha256,
+          },
+        } : {}),
+      }),
     };
   }
 
-  async #lastAttemptEntry(run: RunRecord, attempt: AgentAttemptRecord): Promise<string | undefined> {
+  async #attemptTranscriptAnchor(run: RunRecord, attempt: AgentAttemptRecord): Promise<{
+    leafEntryId: string;
+    launchSpecHash: Sha256Digest;
+    snapshotSha256: Sha256Digest;
+  } | undefined> {
     if (attempt.sessionFile === undefined) return undefined;
     try {
       const launchBytes = await this.#store.readArtifact(
@@ -2712,14 +8593,118 @@ export class RunAuthorityEngine {
         spec.identity.sessionId !== attempt.sessionId ||
         path.resolve(attempt.sessionFile) !== path.resolve(expected)
       ) return undefined;
-      const transcript = await readPiSession(expected, { allowTruncatedTail: true });
-      if (transcript.header.id !== attempt.sessionId || transcript.header.cwd !== spec.workspace.cwd) return undefined;
-      return transcript.lastEntryId;
+      const transcript = await readAutonomousPiTranscriptPage(expected, {
+        sessionId: attempt.sessionId,
+        cwd: spec.workspace.cwd,
+        ...(spec.lineage.conversationFork === undefined
+          ? {}
+          : { parentSession: conversationParentSessionFile(spec) }),
+      }, { limit: 1, maxBytes: spec.budgets.transcript.maxBytes });
+      return transcript.snapshot.lastEntryId === undefined ? undefined : {
+        leafEntryId: transcript.snapshot.lastEntryId,
+        launchSpecHash: spec.specHash,
+        snapshotSha256: transcript.snapshot.sha256,
+      };
     } catch {
       // Parent-entry anchoring is optional. Attempt/session identity remains hash-bound even when a
       // legacy or torn transcript cannot safely supply a leaf entry.
       return undefined;
     }
+  }
+
+  async #validateAttemptLineageForest(
+    run: RunRecord,
+    pending: AgentAttemptRecord,
+  ): Promise<void> {
+    await this.#validateLineageBindings(run, [...Object.values(run.attempts), pending], pending.id);
+  }
+
+  async #validateLineageBindings(
+    run: RunRecord,
+    attempts: AgentAttemptRecord[],
+    pendingAttemptId?: string,
+  ): Promise<void> {
+    const parentsNeedingLeaves = new Set(attempts.flatMap((attempt) =>
+      attempt.lineage?.parentEntryId === undefined || attempt.lineage.parentAttemptId === undefined
+        ? []
+        : [attempt.lineage.parentAttemptId]
+    ));
+    const anchors = new Map<string, {
+      leafEntryId: string;
+      launchSpecHash: Sha256Digest;
+      snapshotSha256: Sha256Digest;
+    }>();
+    for (const parentId of [...parentsNeedingLeaves].sort()) {
+      const parent = attempts.find((attempt) => attempt.id === parentId);
+      if (parent === undefined || parent.id === pendingAttemptId) continue;
+      const anchor = await this.#attemptTranscriptAnchor(run, parent);
+      if (anchor !== undefined) anchors.set(parent.id, anchor);
+    }
+    const bindings: AgentAttemptLineageBinding[] = attempts.map((attempt) => ({
+      runId: run.id,
+      ticketId: attempt.ticketId,
+      stepId: attempt.stepId,
+      attemptId: attempt.id,
+      sessionId: attempt.sessionId,
+      ...(anchors.get(attempt.id) === undefined ? {} : {
+        sessionLeafEntryId: anchors.get(attempt.id)!.leafEntryId,
+        launchSpecHash: anchors.get(attempt.id)!.launchSpecHash,
+        sessionSnapshotSha256: anchors.get(attempt.id)!.snapshotSha256,
+      }),
+      lineage: structuredClone(attempt.lineage ?? { branchEpoch: 0, reason: "initial" }),
+    }));
+    try {
+      validateAgentAttemptLineageForest(bindings);
+    } catch (error) {
+      throw new AuthorityRpcError("launch_lineage_forest", errorMessage(error));
+    }
+  }
+
+  async #attemptLineageProjection(
+    run: RunRecord,
+    ticketId?: string,
+  ): Promise<RunAttemptLineageProjection> {
+    const all = Object.values(run.attempts);
+    await this.#validateLineageBindings(run, all);
+    const children = new Map<string, string[]>();
+    for (const attempt of all) {
+      const parent = attempt.lineage?.parentAttemptId;
+      if (parent === undefined) continue;
+      const values = children.get(parent) ?? [];
+      values.push(attempt.id);
+      children.set(parent, values);
+    }
+    const visible = all
+      .filter((attempt) => ticketId === undefined || attempt.ticketId === ticketId)
+      .sort((left, right) =>
+        (left.startedAt ?? left.endedAt ?? "").localeCompare(right.startedAt ?? right.endedAt ?? "") ||
+        left.id.localeCompare(right.id));
+    return {
+      protocol: RUN_ATTEMPT_LINEAGE_PROTOCOL,
+      runId: run.id,
+      runRevision: run.revision,
+      attempts: visible.map((attempt) => {
+        const ticket = run.tickets[attempt.ticketId];
+        const step = ticket?.steps.find((candidate) => candidate.id === attempt.stepId);
+        const childAttemptIds = [...(children.get(attempt.id) ?? [])].sort();
+        return {
+          attemptId: attempt.id,
+          persona: humanizeIdentifier(attempt.personaId),
+          ticket: ticket?.title ?? attemptKindTitle(attempt.kind),
+          step: step?.title ?? humanizeIdentifier(attempt.stepId),
+          status: attempt.status,
+          reason: attempt.lineage?.reason ?? "initial",
+          branchEpoch: attempt.lineage?.branchEpoch ?? 0,
+          ...(attempt.lineage?.parentAttemptId === undefined
+            ? {}
+            : { parentAttemptId: attempt.lineage.parentAttemptId }),
+          childAttemptIds,
+          activeLeaf: childAttemptIds.length === 0 &&
+            new Set<AttemptStatus>(["queued", "running", "waiting_question", "terminal_accepted"])
+              .has(attempt.status),
+        };
+      }),
+    };
   }
 
   async #loadStoredLaunchSpec(
@@ -2748,6 +8733,272 @@ export class RunAuthorityEngine {
     return spec;
   }
 
+  async #reserveProviderRequest(
+    spec: Readonly<AgentLaunchSpec>,
+    request: KoniProviderRequestReservationInput,
+  ): Promise<{
+    protocol: "koni.provider-request-reservation.v1";
+    sequence: number;
+    reservationId: string;
+    baselineEntryId: string;
+  }> {
+    validateProviderReservationForSpec(spec, request);
+    let response: {
+      protocol: "koni.provider-request-reservation.v1";
+      sequence: number;
+      reservationId: string;
+      baselineEntryId: string;
+    } | undefined;
+    let rejectionAfterSynthesisTransition: AuthorityRpcError | undefined;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(spec.identity.runId);
+      const attempt = assertLiveAttempt(run, spec);
+      const records = attempt.authorityProviderRequests ?? [];
+      if (records.some(isOpenProviderRequest)) {
+        throw new AuthorityRpcError(
+          "provider_reservation_unsettled",
+          "the prior provider request has no canonical assistant settlement",
+        );
+      }
+      if (request.sequence !== records.length + 1) {
+        throw new AuthorityRpcError("provider_reservation_sequence", "provider reservation sequence is not next");
+      }
+      try {
+        assertProviderExposureBudget(spec, attempt, request);
+      } catch (error) {
+        if (
+          !(error instanceof AuthorityRpcError) ||
+          (error.code !== "provider_input_exposure" && error.code !== "provider_token_exposure")
+        ) throw error;
+        const synthesis = createPlanningSynthesisTransition(run, attempt, this.#timestamp(), {
+          forceReason: "provider_input_pressure",
+        });
+        if (synthesis === undefined) throw error;
+        const draft = nextRun(run, synthesis.record.triggeredAt);
+        draft.attempts[attempt.id]!.planningSynthesis = synthesis.record;
+        draft.activity.push(activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "compiler",
+          "Provider input pressure closed planning exploration; compact and synthesize now",
+        ));
+        const committed = await this.#store.commit({
+          expectedRevision: revision,
+          runWrites: [{ record: draft, expectedRevision: run.revision }],
+          writes: [synthesis.write],
+        });
+        rejectionAfterSynthesisTransition = error;
+        return {
+          revision: committed.state.revision,
+          events: [{
+            topic: "agent.planning.synthesis_required",
+            payload: { runId: run.id, attemptId: attempt.id, reason: "provider_input_pressure" },
+          }],
+        };
+      }
+      const transcript = await readDurableAttemptTranscript(spec, attempt);
+      const baselineEntryId = transcript.lastEntryId;
+      if (baselineEntryId === undefined) {
+        throw new AuthorityRpcError("provider_transcript", "Pi transcript has no durable admission baseline");
+      }
+      const reservationId = `provider-${canonicalHash({
+        specHash: spec.specHash,
+        sequence: request.sequence,
+        payloadSha256: request.payloadSha256,
+        baselineEntryId,
+      }).slice(7)}`;
+      const draft = nextRun(run, this.#timestamp());
+      const mutable = draft.attempts[attempt.id]!;
+      if (mutable.authorityProviderRequests === undefined && (
+        mutable.inputTokens !== 0 ||
+        mutable.outputTokens !== 0 ||
+        mutable.cacheReadTokens !== 0 ||
+        mutable.cacheWriteTokens !== 0
+      )) {
+        mutable.authorityProviderUsageBaseline = {
+          inputTokens: mutable.inputTokens,
+          outputTokens: mutable.outputTokens,
+          cacheReadTokens: mutable.cacheReadTokens,
+          cacheWriteTokens: mutable.cacheWriteTokens,
+          recordedAt: draft.updatedAt,
+        };
+      }
+      mutable.authorityProviderRequests ??= [];
+      mutable.authorityProviderRequests.push({
+        ...structuredClone(request),
+        reservationId,
+        baselineEntryId,
+        reservedAt: draft.updatedAt,
+      });
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+      });
+      response = {
+        protocol: "koni.provider-request-reservation.v1",
+        sequence: request.sequence,
+        reservationId,
+        baselineEntryId,
+      };
+      return {
+        revision: committed.state.revision,
+        events: [{
+          topic: "agent.provider.reserved",
+          payload: { runId: run.id, attemptId: attempt.id, sequence: request.sequence },
+        }],
+      };
+    });
+    if (rejectionAfterSynthesisTransition !== undefined) {
+      throw rejectionAfterSynthesisTransition;
+    }
+    return response!;
+  }
+
+  async #reconcileProviderRequest(
+    spec: Readonly<AgentLaunchSpec>,
+    expected: KoniProviderRequestSettlementInput,
+  ): Promise<KoniProviderRequestSettlement> {
+    let response: KoniProviderRequestSettlement | undefined;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(spec.identity.runId);
+      const attempt = assertProviderSettlementAttempt(run, spec);
+      const settled = await settleProviderRequestFromTranscript(spec, attempt, expected);
+      response = providerSettlementResponse(settled);
+      const draft = nextRun(run, this.#timestamp());
+      const mutable = draft.attempts[attempt.id]!;
+      if (!settled.alreadySettled) applyProviderSettlement(mutable, settled, draft.updatedAt);
+      const writes: TransactionWrite[] = [];
+      const synthesis = createPlanningSynthesisTransition(run, mutable, draft.updatedAt);
+      if (synthesis !== undefined) {
+        mutable.planningSynthesis = synthesis.record;
+        writes.push(synthesis.write);
+        draft.activity.push(activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "compiler",
+          "Planning exploration budget reached; synthesis is now required",
+        ));
+      }
+      if (settled.alreadySettled && synthesis === undefined) return this.#noOpInternal(revision);
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+        ...(writes.length === 0 ? {} : { writes }),
+      });
+      return {
+        revision: committed.state.revision,
+        events: [{
+          topic: "agent.usage",
+          payload: { runId: run.id, attemptId: attempt.id, sequence: settled.record.sequence },
+        }],
+      };
+    });
+    return response!;
+  }
+
+  /**
+   * Make one final, authority-owned attempt to consume already-spent provider exposure before a
+   * process outcome is classified. This remains legal after interruption/cancellation because it
+   * changes only accounting derived from the exact immutable launch and fsynced Pi JSONL.
+   */
+  async #reconcileProviderExposureBeforeFailure(runId: string, attemptId: string): Promise<void> {
+    const observed = await this.#store.getRun(runId);
+    const observedAttempt = observed.attempts[attemptId];
+    const observedRecord = observedAttempt?.authorityProviderRequests?.at(-1);
+    if (
+      observedAttempt === undefined ||
+      observedRecord === undefined ||
+      !isOpenProviderRequest(observedRecord)
+    ) return;
+    const spec = await this.#loadStoredLaunchSpec(observed, observedAttempt);
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(runId);
+      const attempt = run.attempts[attemptId];
+      if (attempt === undefined || attempt.launchSpecHash !== spec.specHash) {
+        throw new AuthorityRpcError("provider_settlement_identity", "provider attempt identity changed");
+      }
+      const unresolved = attempt.authorityProviderRequests?.at(-1);
+      if (unresolved === undefined || !isOpenProviderRequest(unresolved)) {
+        return this.#noOpInternal(revision);
+      }
+      const settled = await settleProviderRequestFromTranscript(spec, attempt);
+      const draft = nextRun(run, this.#timestamp());
+      applyProviderSettlement(draft.attempts[attemptId]!, settled, draft.updatedAt);
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+      });
+      return {
+        revision: committed.state.revision,
+        events: [{
+          topic: "agent.usage",
+          payload: { runId, attemptId, sequence: settled.record.sequence },
+        }],
+      };
+    });
+  }
+
+  async #reconcileTerminalProviderExposureBeforeLaunch(runId: string): Promise<string | undefined> {
+    const observed = await this.#store.getRun(runId);
+    const candidates = Object.values(observed.attempts).filter((attempt) =>
+      isProviderPredecessor(attempt.status) && hasUnsettledProviderRequest(attempt)
+    );
+    for (const attempt of candidates) {
+      try {
+        await this.#reconcileProviderExposureBeforeFailure(runId, attempt.id);
+      } catch {
+        return "A prior provider request cannot be reconciled; its worst-case exposure remains held";
+      }
+    }
+    const refreshed = await this.#store.getRun(runId);
+    if (Object.values(refreshed.attempts).some((attempt) =>
+      isProviderPredecessor(attempt.status) && hasUnsettledProviderRequest(attempt)
+    )) {
+      return "A prior provider request remains unsettled; its worst-case exposure blocks a successor attempt";
+    }
+    return undefined;
+  }
+
+  async #reconcileAllProviderExposureAfterStop(runId: string): Promise<void> {
+    const observed = await this.#store.getRun(runId);
+    const attempts = Object.values(observed.attempts).filter(hasUnsettledProviderRequest);
+    for (const attempt of attempts) {
+      try {
+        await this.#reconcileProviderExposureBeforeFailure(runId, attempt.id);
+      } catch {
+        // A stopped run may still pause/delete. The unresolved record durably retains its
+        // worst-case exposure and successor admission remains closed until it can be proven.
+      }
+    }
+  }
+
+  async #canonicalProviderExposureRetirements(
+    run: Readonly<RunRecord>,
+    authorizationSha256: Sha256Digest,
+    retiredAt: string,
+  ): Promise<Array<{
+    attemptId: string;
+    retirement: NonNullable<AgentProviderRequestRecord["retirement"]>;
+  }>> {
+    const retirements: Array<{
+      attemptId: string;
+      retirement: NonNullable<AgentProviderRequestRecord["retirement"]>;
+    }> = [];
+    for (const attempt of Object.values(run.attempts)) {
+      if (!isProviderPredecessor(attempt.status) || !hasUnsettledProviderRequest(attempt)) continue;
+      const spec = await this.#loadStoredLaunchSpec(run as RunRecord, attempt);
+      const retirement = await deriveCanonicalProviderExposureRetirement(
+        spec,
+        run,
+        attempt,
+        authorizationSha256,
+        retiredAt,
+      );
+      if (retirement !== undefined) retirements.push({ attemptId: attempt.id, retirement });
+    }
+    return retirements;
+  }
+
   #createContextProvider(prepared: PreparedManagedAttempt): KoniContextProvider {
     const content = prepared.contextContent;
     const snapshot = prepared.compactionSnapshot;
@@ -2764,41 +9015,79 @@ export class RunAuthorityEngine {
     return {
       loadBoundContext: async (requested) => {
         assertSameLaunchSpec(spec, requested);
-        const run = await this.#store.getRun(spec.identity.runId);
-        assertLiveAttempt(run, spec);
-        return {
-          ...spec.identity,
-          grantId: spec.authority.grantId,
-          generation: spec.authority.generation,
-          epoch: spec.authority.epoch,
-          stateHash: spec.authority.expectedStateHash,
-          contextHash: spec.authority.authoritativeContextHash,
-          content,
-        };
+        return this.#store.readConsistently(async () => {
+          const run = await this.#store.getRun(spec.identity.runId);
+          const attempt = assertLiveAttempt(run, spec);
+          let runtimePolicy: Awaited<ReturnType<KoniContextProvider["loadBoundContext"]>>["runtimePolicy"];
+          if (attempt.planningSynthesis !== undefined) {
+            const synthesis = attempt.planningSynthesis;
+            const bytes = await this.#store.readArtifact(
+              synthesis.instructionArtifactPath,
+              synthesis.instructionSizeBytes + 1,
+            );
+            if (
+              bytes.byteLength !== synthesis.instructionSizeBytes ||
+              rawSha256(bytes) !== synthesis.instructionSha256
+            ) {
+              throw new AuthorityRpcError(
+                "planning_synthesis_context",
+                "planning synthesis instruction changed after its durable transition",
+              );
+            }
+            const runtimeContent = bytes.toString("utf8");
+            if (!Buffer.from(runtimeContent, "utf8").equals(bytes)) {
+              throw new AuthorityRpcError(
+                "planning_synthesis_context",
+                "planning synthesis instruction is not exact UTF-8",
+              );
+            }
+            runtimePolicy = {
+              protocol: "koni.runtime-policy-context.v1",
+              kind: "planning_synthesis",
+              sha256: synthesis.instructionSha256,
+              sizeBytes: synthesis.instructionSizeBytes,
+              content: runtimeContent,
+            };
+          }
+          return {
+            ...spec.identity,
+            grantId: spec.authority.grantId,
+            generation: spec.authority.generation,
+            epoch: spec.authority.epoch,
+            stateHash: spec.authority.expectedStateHash,
+            contextHash: spec.authority.authoritativeContextHash,
+            content,
+            ...(runtimePolicy === undefined ? {} : { runtimePolicy }),
+          };
+        });
       },
       loadDynamicGraphContext: async (requested) => {
         assertSameLaunchSpec(spec, requested);
-        const run = await this.#store.getRun(spec.identity.runId);
-        const attempt = assertLiveAttempt(run, spec);
-        if (this.#program.selectDynamicGraphContext === undefined) {
-          throw new AuthorityRpcError("dynamic_context_unavailable", "profile compiler does not implement dynamic graph context");
-        }
-        try {
-          return await this.#program.selectDynamicGraphContext({ run, attempt, spec });
-        } catch (error) {
-          if (error instanceof DynamicGraphContextBudgetError) {
-            throw new AuthorityRpcError("dynamic_context_budget", error.message);
+        return this.#store.readConsistently(async () => {
+          const run = await this.#store.getRun(spec.identity.runId);
+          const attempt = assertLiveAttempt(run, spec);
+          if (this.#program.selectDynamicGraphContext === undefined) {
+            throw new AuthorityRpcError("dynamic_context_unavailable", "profile compiler does not implement dynamic graph context");
           }
-          throw error;
-        }
+          try {
+            return await this.#program.selectDynamicGraphContext({ run, attempt, spec });
+          } catch (error) {
+            if (error instanceof DynamicGraphContextBudgetError) {
+              throw new AuthorityRpcError("dynamic_context_budget", error.message);
+            }
+            throw error;
+          }
+        });
       },
       loadCompactionSnapshot: async (requested) => {
         assertSameLaunchSpec(spec, requested);
-        const run = await this.#store.getRun(spec.identity.runId);
-        const attempt = assertLiveAttempt(run, spec);
-        return this.#program.refreshCompactionSnapshot === undefined
-          ? structuredClone(snapshot)
-          : this.#program.refreshCompactionSnapshot({ run, attempt, spec });
+        return this.#store.readConsistently(async () => {
+          const run = await this.#store.getRun(spec.identity.runId);
+          const attempt = assertLiveAttempt(run, spec);
+          return this.#program.refreshCompactionSnapshot === undefined
+            ? structuredClone(snapshot)
+            : this.#program.refreshCompactionSnapshot({ run, attempt, spec });
+        });
       },
       authorizeCompaction: async (requested, record) => {
         assertSameLaunchSpec(spec, requested);
@@ -2826,6 +9115,14 @@ export class RunAuthorityEngine {
         });
         return { authorizationId };
       },
+      reserveProviderRequest: async (requested, request) => {
+        assertSameLaunchSpec(spec, requested);
+        return this.#reserveProviderRequest(spec, request);
+      },
+      reconcileProviderRequest: async (requested, settlement) => {
+        assertSameLaunchSpec(spec, requested);
+        return this.#reconcileProviderRequest(spec, settlement);
+      },
       acquireRecoveryClaim: async (requested) => {
         assertSameLaunchSpec(spec, requested);
         const claimId = `recovery-${randomUUID()}`;
@@ -2834,16 +9131,84 @@ export class RunAuthorityEngine {
           if (this.#recoveryClaims.has(spec.identity.attemptId)) {
             throw new AuthorityRpcError("recovery_claimed", "attempt already has an active recovery owner");
           }
-          const run = await this.#store.getRun(spec.identity.runId);
-          const attempt = run.attempts[spec.identity.attemptId];
+          let run = await this.#store.getRun(spec.identity.runId);
+          let attempt = run.attempts[spec.identity.attemptId];
           if (attempt === undefined || attempt.launchSpecHash !== spec.specHash) {
             throw new AuthorityRpcError("recovery_identity", "durable attempt does not match launch spec");
           }
-          this.#recoveryClaims.set(spec.identity.attemptId, claimId);
+          let authorityRevision = revision;
+          const recoveryEvents: Array<{ topic: string; payload: JsonValue }> = [];
+          const unresolved = attempt.authorityProviderRequests?.at(-1);
+          if (unresolved !== undefined && isOpenProviderRequest(unresolved)) {
+            let settled: SettledProviderRequest | undefined;
+            try {
+              settled = await settleProviderRequestFromTranscript(spec, attempt);
+            } catch (error) {
+              if (!(error instanceof AuthorityRpcError) || error.code !== "provider_settlement_pending") {
+                throw error;
+              }
+            }
+            if (settled !== undefined) {
+              const draft = nextRun(run, this.#timestamp());
+              const mutable = draft.attempts[attempt.id]!;
+              applyProviderSettlement(mutable, settled, draft.updatedAt);
+              const synthesis = createPlanningSynthesisTransition(run, mutable, draft.updatedAt);
+              if (synthesis !== undefined) {
+                mutable.planningSynthesis = synthesis.record;
+                draft.activity.push(activity(
+                  this.#createId("activity"),
+                  draft.updatedAt,
+                  "compiler",
+                  "Planning exploration budget reached during recovery; synthesis is now required",
+                ));
+              }
+              const committed = await this.#store.commit({
+                expectedRevision: revision,
+                runWrites: [{ record: draft, expectedRevision: run.revision }],
+                ...(synthesis === undefined ? {} : { writes: [synthesis.write] }),
+              });
+              authorityRevision = committed.state.revision;
+              run = draft;
+              attempt = draft.attempts[attempt.id]!;
+              recoveryEvents.push({
+                topic: "agent.usage",
+                payload: { runId: run.id, attemptId: attempt.id, sequence: settled.record.sequence },
+              });
+            }
+          }
+          const recoveredSynthesis = createPlanningSynthesisTransition(run, attempt, this.#timestamp());
+          if (recoveredSynthesis !== undefined) {
+            const draft = nextRun(run, recoveredSynthesis.record.triggeredAt);
+            draft.attempts[attempt.id]!.planningSynthesis = recoveredSynthesis.record;
+            draft.activity.push(activity(
+              this.#createId("activity"),
+              draft.updatedAt,
+              "compiler",
+              "Recovered the planning synthesis threshold transition",
+            ));
+            const committed = await this.#store.commit({
+              expectedRevision: authorityRevision,
+              runWrites: [{ record: draft, expectedRevision: run.revision }],
+              writes: [recoveredSynthesis.write],
+            });
+            authorityRevision = committed.state.revision;
+            run = draft;
+            attempt = draft.attempts[attempt.id]!;
+            recoveryEvents.push({
+              topic: "agent.planning.synthesis_required",
+              payload: { runId: run.id, attemptId: attempt.id },
+            });
+          }
           const active = new Set(["queued", "running", "waiting_question"]).has(attempt.status) &&
             !new Set(["pausing", "paused", "deleting", "deleted", "failed", "completed"]).has(run.lifecycle.phase);
           const acceptedTerminal = await this.#readTerminalOutput(spec, attempt);
           const authorizedMessages = await this.#loadAuthorizedMessages(attempt);
+          const usage = providerUsage(
+            attempt.inputTokens,
+            attempt.outputTokens,
+            attempt.cacheReadTokens,
+            attempt.cacheWriteTokens,
+          );
           state = {
             protocol: "koni.attempt-recovery.v1",
             specHash: spec.specHash,
@@ -2852,15 +9217,7 @@ export class RunAuthorityEngine {
             generation: spec.authority.generation,
             epoch: spec.authority.epoch,
             stateHash: spec.authority.expectedStateHash,
-            usage: {
-              input: attempt.inputTokens,
-              output: attempt.outputTokens,
-              cacheRead: attempt.cacheReadTokens,
-              cacheWrite: attempt.cacheWriteTokens,
-              newTokens: attempt.inputTokens + attempt.outputTokens,
-              allTokens: attempt.inputTokens + attempt.outputTokens +
-                attempt.cacheReadTokens + attempt.cacheWriteTokens,
-            },
+            usage,
             status: acceptedTerminal === undefined
               ? active ? "continue" : "revoked"
               : "terminal_accepted",
@@ -2874,10 +9231,22 @@ export class RunAuthorityEngine {
               firstKeptEntryId: record.firstKeptEntryId,
               tokensBefore: record.tokensBefore,
             })),
+            ...(attempt.authorityProviderRequests === undefined ? {} : {
+              providerRequests: attempt.authorityProviderRequests.map(providerRequestRecoveryRecord),
+            }),
+            ...(attempt.authorityProviderUsageBaseline === undefined ? {} : {
+              providerUsageBaseline: providerUsage(
+                attempt.authorityProviderUsageBaseline.inputTokens,
+                attempt.authorityProviderUsageBaseline.outputTokens,
+                attempt.authorityProviderUsageBaseline.cacheReadTokens,
+                attempt.authorityProviderUsageBaseline.cacheWriteTokens,
+              ),
+            }),
             ...(acceptedTerminal === undefined ? {} : { terminalOutput: acceptedTerminal }),
             ...(active ? {} : { reason: `attempt is ${attempt.status} while run is ${run.lifecycle.phase}` }),
           };
-          return this.#noOpInternal(revision);
+          this.#recoveryClaims.set(spec.identity.attemptId, claimId);
+          return { revision: authorityRevision, ...(recoveryEvents.length === 0 ? {} : { events: recoveryEvents }) };
         });
         return {
           protocol: "koni.attempt-recovery-claim.v1",
@@ -2970,6 +9339,47 @@ export class RunAuthorityEngine {
       });
     }
     return output;
+  }
+
+  async #hasAuthorizedTargetedRead(
+    attempt: AgentAttemptRecord,
+    targetPath: string,
+    offset: number,
+  ): Promise<boolean> {
+    for (const record of attempt.authorityToolResults ?? []) {
+      if (record.toolName !== "koni_search_files" || record.outcome !== "accepted") continue;
+      const bytes = await this.#store.readArtifact(record.artifactPath, 16 * 1024 * 1024 + 1);
+      let receipt: unknown;
+      try {
+        receipt = JSON.parse(bytes.toString("utf8"));
+      } catch {
+        throw new AuthorityRpcError("read_search_receipt", "authorized search receipt is not JSON");
+      }
+      if (!isKoniToolReceipt(receipt) || receipt.outcome !== "accepted" || !isRecord(receipt.value)) {
+        throw new AuthorityRpcError("read_search_receipt", "authorized search receipt is malformed");
+      }
+      const canonical = canonicalEncode(receipt);
+      if (
+        Buffer.byteLength(canonical, "utf8") !== record.receiptSizeBytes ||
+        rawSha256(canonical) !== record.receiptSha256
+      ) {
+        throw new AuthorityRpcError(
+          "read_search_receipt",
+          "authorized search receipt changed before a targeted file read",
+        );
+      }
+      const matches = receipt.value.matches;
+      if (!Array.isArray(matches)) continue;
+      if (matches.some((match) =>
+        isRecord(match) &&
+        match.path === targetPath &&
+        typeof match.byteOffset === "number" &&
+        Number.isSafeInteger(match.byteOffset) &&
+        match.byteOffset >= 0 &&
+        Math.abs(offset - match.byteOffset) <= AGENT_FILE_READ_PAGE_BYTES
+      )) return true;
+    }
+    return false;
   }
 
   async #readTerminalOutput(
@@ -3208,11 +9618,18 @@ export class RunAuthorityEngine {
 
     let check!: ResolvedAgentCheck;
     let intent!: PendingCheckIntentRecord;
+    let executionBinding: ExecutionPolicyBinding | undefined;
     await this.#server.mutateInternal(async ({ revision }) => {
       const run = await this.#store.getRun(grant.runId);
       const attempt = validateAgentToolGrant(run, prepared.spec, grant, call, revision, this.#projectRoot);
       check = await this.#program.resolveAgentCheck!({ run, attempt, checkId: requestedCheckId });
-      assertResolvedAgentCheck(check, requestedCheckId, configured);
+      executionBinding = executionPolicyBindingForAttempt(run, attempt);
+      assertResolvedAgentCheck(
+        check,
+        requestedCheckId,
+        configured,
+        executionBinding,
+      );
       const serialized = canonicalEncode(check);
       const argumentsCanonical = canonicalEncode(call.arguments);
       const id = configuredCheckIntentId(grant, call.callId);
@@ -3230,6 +9647,7 @@ export class RunAuthorityEngine {
         requestedCheckId,
         resolvedCheckSha256: rawSha256(serialized),
         resolvedCheck: JSON.parse(serialized) as JsonValue,
+        ...(executionBinding === undefined ? {} : { attempts: [] }),
         preparedAt: this.#timestamp(),
       };
       const draft = nextRun(run, intent.preparedAt);
@@ -3252,7 +9670,9 @@ export class RunAuthorityEngine {
     });
 
     const executions: AgentCheckExecution[] = [];
-    const commandArtifacts: TransactionWrite[] = [];
+    const legacyCommandArtifacts: TransactionWrite[] = [];
+    const commandAudits: RunCheckAttemptRecord[][] = [];
+    const sourceManifests: Array<RunCheckSourceManifestRecord | undefined> = [];
     let externalCommandStarted = false;
     try {
       for (const [index, command] of check.commands.entries()) {
@@ -3260,79 +9680,182 @@ export class RunAuthorityEngine {
           throw new AuthorityRpcError("check_aborted", "configured check was aborted before execution");
         }
         const manifestRoots = [...new Set([...command.inputPaths, ...command.outputPaths])].sort();
-        const pre = await snapshotContainedPaths(prepared.spec.workspace.cwd, manifestRoots);
-        const startedAt = this.#timestamp();
-        await this.#assertRuntimeCurrent();
-        externalCommandStarted = true;
-        const processResult = await runContainedProcess({
-          projectRoot: prepared.spec.workspace.cwd,
-          stateRoot: this.#stateRoot,
-          check: command,
-          readPaths: grant.readPaths,
-          writePaths: grant.writePaths,
-          ...(this.#sandboxExecutable === undefined
-            ? {}
-            : { sandboxExecutable: this.#sandboxExecutable }),
-          ...(call.signal === undefined ? {} : { signal: call.signal }),
-        });
-        const completedAt = this.#timestamp();
-        const post = await snapshotContainedPaths(prepared.spec.workspace.cwd, manifestRoots);
-        const resultSource = await readConfiguredCheckResult(
-          prepared.spec.workspace.cwd,
-          grant,
-          command,
-          processResult.stdout,
-        );
-        const stdoutText = exactUtf8CheckStream(processResult.stdout, "stdout");
-        const stderrText = exactUtf8CheckStream(processResult.stderr, "stderr");
-        const outputFiles = await readConfiguredOutputFiles(
-          prepared.spec.workspace.cwd,
-          grant,
-          command,
-          resultSource.value,
-        );
-        const stdoutArtifactPath = configuredCheckStreamPath(
-          grant.runId,
-          grant.attemptId,
-          call.callId,
-          index,
-          "stdout",
-        );
-        const stderrArtifactPath = configuredCheckStreamPath(
-          grant.runId,
-          grant.attemptId,
-          call.callId,
-          index,
-          "stderr",
-        );
-        commandArtifacts.push(
-          { path: stdoutArtifactPath, bytes: processResult.stdout, expectedSha256: null },
-          { path: stderrArtifactPath, bytes: processResult.stderr, expectedSha256: null },
-        );
-        executions.push({
-          checkId: command.checkId,
-          definitionHash: command.definitionHash,
-          startedAt,
-          completedAt,
-          resolvedExecutable: processResult.resolvedExecutable,
-          argv: [...processResult.argv],
-          environmentSha256: processResult.environmentSha256,
-          exitCode: processResult.exitCode,
-          signal: processResult.signal,
-          stdout: stdoutText,
-          stderr: stderrText,
-          stdoutSha256: rawSha256(processResult.stdout),
-          stdoutSizeBytes: processResult.stdout.byteLength,
-          stderrSha256: rawSha256(processResult.stderr),
-          stderrSizeBytes: processResult.stderr.byteLength,
-          preManifestSha256: pre.manifestSha256,
-          postManifestSha256: post.manifestSha256,
-          sandboxKind: processResult.sandbox.kind,
-          sandboxProfileSha256: processResult.sandbox.profileSha256,
-          sandboxExecutableSha256: processResult.sandbox.executableSha256,
-          resultSource,
-          outputFiles,
-        });
+        const policy = command.executionPolicy;
+        const sourceSnapshot = policy !== undefined && executionBinding !== undefined &&
+            command.memberNodeId !== undefined && command.memberSourcePaths !== undefined
+          ? await snapshotContainedPaths(prepared.spec.workspace.cwd, command.memberSourcePaths)
+          : undefined;
+        const sourceManifest = sourceSnapshot === undefined || policy === undefined || executionBinding === undefined
+          ? undefined
+          : createRunCheckSourceManifest(
+              executionBinding,
+              policy,
+              command,
+              sourceSnapshot,
+              this.#timestamp(),
+            );
+        sourceManifests[index] = sourceManifest;
+        const audits: RunCheckAttemptRecord[] = [];
+        commandAudits[index] = audits;
+        let attemptNumber = 1;
+        let aggregateElapsedSeconds = 0;
+        while (true) {
+          const pre = await snapshotContainedPaths(prepared.spec.workspace.cwd, manifestRoots);
+          const startedAt = this.#timestamp();
+          const startedAtMs = this.#now().getTime();
+          let preparedAudit: RunCheckAttemptRecord | undefined;
+          if (policy !== undefined) {
+            preparedAudit = createRunCheckAttemptRecord({
+              protocol: "koni.run-check-attempt.v1",
+              commandIndex: index,
+              attemptNumber,
+              checkId: command.checkId,
+              definitionHash: command.definitionHash,
+              executionPolicy: structuredClone(policy),
+              status: "prepared",
+              startedAt,
+              preManifestSha256: pre.manifestSha256,
+            });
+            await this.#recordPreparedCheckAttempt(grant.runId, intent.id, preparedAudit);
+          }
+          await this.#assertRuntimeCurrent();
+          externalCommandStarted = true;
+          const processResult = await runContainedProcess({
+            projectRoot: prepared.spec.workspace.cwd,
+            stateRoot: this.#stateRoot,
+            check: command,
+            readPaths: grant.readPaths,
+            writePaths: grant.writePaths,
+            ...(this.#sandboxExecutable === undefined
+              ? {}
+              : { sandboxExecutable: this.#sandboxExecutable }),
+            ...(call.signal === undefined ? {} : { signal: call.signal }),
+          });
+          const completedAt = this.#timestamp();
+          aggregateElapsedSeconds += Math.max(
+            0,
+            Math.ceil((this.#now().getTime() - startedAtMs) / 1_000),
+          );
+          const post = await snapshotContainedPaths(prepared.spec.workspace.cwd, manifestRoots);
+          const stdoutArtifactPath = configuredCheckStreamPath(
+            grant.runId,
+            grant.attemptId,
+            call.callId,
+            index,
+            attemptNumber,
+            "stdout",
+          );
+          const stderrArtifactPath = configuredCheckStreamPath(
+            grant.runId,
+            grant.attemptId,
+            call.callId,
+            index,
+            attemptNumber,
+            "stderr",
+          );
+          const passedExit = processResult.exitCode !== null &&
+            command.expectedExitCodes.includes(processResult.exitCode);
+          const retryDecision = policy !== undefined && !passedExit && processResult.exitCode !== null &&
+              processResult.exitCode >= 0 && processResult.exitCode <= 255
+            ? decideBoundCheckRetry(policy, {
+                attemptNumber,
+                exitCode: processResult.exitCode,
+                aggregateElapsedSeconds,
+              })
+            : undefined;
+          if (preparedAudit !== undefined) {
+            const completedAudit = createRunCheckAttemptRecord({
+              protocol: "koni.run-check-attempt.v1",
+              commandIndex: index,
+              attemptNumber,
+              checkId: command.checkId,
+              definitionHash: command.definitionHash,
+              executionPolicy: structuredClone(policy!),
+              status: "completed",
+              startedAt,
+              preManifestSha256: pre.manifestSha256,
+              completedAt,
+              aggregateElapsedSeconds,
+              postManifestSha256: post.manifestSha256,
+              exitCode: processResult.exitCode,
+              signal: processResult.signal,
+              stdoutSha256: rawSha256(processResult.stdout),
+              stdoutSizeBytes: processResult.stdout.byteLength,
+              stdoutArtifactPath,
+              stderrSha256: rawSha256(processResult.stderr),
+              stderrSizeBytes: processResult.stderr.byteLength,
+              stderrArtifactPath,
+              ...(retryDecision === undefined ? {} : { retryDecision }),
+            });
+            await this.#recordCompletedCheckAttempt(
+              grant.runId,
+              intent.id,
+              preparedAudit.sha256,
+              completedAudit,
+              [
+                { path: stdoutArtifactPath, bytes: processResult.stdout, expectedSha256: null },
+                { path: stderrArtifactPath, bytes: processResult.stderr, expectedSha256: null },
+              ],
+            );
+            audits.push(completedAudit);
+          } else {
+            legacyCommandArtifacts.push(
+              { path: stdoutArtifactPath, bytes: processResult.stdout, expectedSha256: null },
+              { path: stderrArtifactPath, bytes: processResult.stderr, expectedSha256: null },
+            );
+          }
+          if (retryDecision?.disposition === "retry") {
+            await waitForConfiguredRetry(retryDecision.backoffSeconds, call.signal);
+            attemptNumber = retryDecision.nextAttemptNumber!;
+            continue;
+          }
+          const resultSource = await readConfiguredCheckResult(
+            prepared.spec.workspace.cwd,
+            grant,
+            command,
+            processResult.stdout,
+            !passedExit,
+          );
+          const stdoutText = exactUtf8CheckStream(processResult.stdout, "stdout");
+          const stderrText = exactUtf8CheckStream(processResult.stderr, "stderr");
+          const outputFiles = passedExit
+            ? await readConfiguredOutputFiles(
+                prepared.spec.workspace.cwd,
+                grant,
+                command,
+                resultSource.value,
+              )
+            : [];
+          executions.push({
+            checkId: command.checkId,
+            definitionHash: command.definitionHash,
+            ...(policy === undefined ? {} : {
+              attemptNumber,
+              retryAuditSha256: canonicalHash(audits),
+            }),
+            startedAt,
+            completedAt,
+            resolvedExecutable: processResult.resolvedExecutable,
+            argv: [...processResult.argv],
+            environmentSha256: processResult.environmentSha256,
+            exitCode: processResult.exitCode,
+            signal: processResult.signal,
+            stdout: stdoutText,
+            stderr: stderrText,
+            stdoutSha256: rawSha256(processResult.stdout),
+            stdoutSizeBytes: processResult.stdout.byteLength,
+            stderrSha256: rawSha256(processResult.stderr),
+            stderrSizeBytes: processResult.stderr.byteLength,
+            preManifestSha256: pre.manifestSha256,
+            postManifestSha256: post.manifestSha256,
+            sandboxKind: processResult.sandbox.kind,
+            sandboxProfileSha256: processResult.sandbox.profileSha256,
+            sandboxExecutableSha256: processResult.sandbox.executableSha256,
+            resultSource,
+            outputFiles,
+          });
+          break;
+        }
       }
     } catch (error) {
       if (!externalCommandStarted) {
@@ -3354,7 +9877,7 @@ export class RunAuthorityEngine {
     await this.#server.mutateInternal(async ({ revision }) => {
       const run = await this.#store.getRun(grant.runId);
       const pending = run.pendingChecks?.[intent.id];
-      if (pending === undefined || canonicalHash(pending) !== canonicalHash(intent)) {
+      if (pending === undefined || !samePendingCheckIdentity(pending, intent)) {
         throw new AuthorityRpcError("check_intent", "durable configured check intent changed before finalization");
       }
       const attempt = validateAgentToolGrant(run, prepared.spec, grant, call, revision, this.#projectRoot);
@@ -3368,12 +9891,24 @@ export class RunAuthorityEngine {
         requestedCheckId,
         definitionHash: check.definitionHash,
         kind: check.kind,
+        ...(check.executionPolicy === undefined
+          ? {}
+          : { executionPolicy: structuredClone(check.executionPolicy) }),
         accepted: compiled.accepted,
         passed: compiled.passed,
         summary: boundedText(compiled.summary, "configured check summary", 64 * 1024),
         commands: executions.map((execution, index) => ({
           checkId: execution.checkId,
           definitionHash: execution.definitionHash,
+          ...(check.commands[index]?.executionPolicy === undefined
+            ? {}
+            : { executionPolicy: structuredClone(check.commands[index]!.executionPolicy!) }),
+          ...(commandAudits[index] === undefined || commandAudits[index]!.length === 0
+            ? {}
+            : { attempts: structuredClone(commandAudits[index]!) }),
+          ...(sourceManifests[index] === undefined
+            ? {}
+            : { sourceManifest: structuredClone(sourceManifests[index]!) }),
           startedAt: execution.startedAt,
           completedAt: execution.completedAt,
           resolvedExecutable: execution.resolvedExecutable,
@@ -3383,10 +9918,24 @@ export class RunAuthorityEngine {
           signal: execution.signal,
           stdoutSha256: execution.stdoutSha256,
           stdoutSizeBytes: execution.stdoutSizeBytes,
-          stdoutArtifactPath: configuredCheckStreamPath(run.id, attempt.id, call.callId, index, "stdout"),
+          stdoutArtifactPath: configuredCheckStreamPath(
+            run.id,
+            attempt.id,
+            call.callId,
+            index,
+            execution.attemptNumber ?? 1,
+            "stdout",
+          ),
           stderrSha256: execution.stderrSha256,
           stderrSizeBytes: execution.stderrSizeBytes,
-          stderrArtifactPath: configuredCheckStreamPath(run.id, attempt.id, call.callId, index, "stderr"),
+          stderrArtifactPath: configuredCheckStreamPath(
+            run.id,
+            attempt.id,
+            call.callId,
+            index,
+            execution.attemptNumber ?? 1,
+            "stderr",
+          ),
           preManifestSha256: execution.preManifestSha256,
           postManifestSha256: execution.postManifestSha256,
           sandboxKind: execution.sandboxKind,
@@ -3412,8 +9961,8 @@ export class RunAuthorityEngine {
       draft.checks.push(checkRecord);
       if (compiled.ruleAuthorityEvidence !== undefined) {
         draft.ruleAuthorityEvidence = structuredClone(compiled.ruleAuthorityEvidence);
-      }
-      if (compiled.graphHash !== undefined) draft.graphHash = compiled.graphHash;
+        }
+        if (compiled.graphHash !== undefined) draft.graphHash = compiled.graphHash;
       if (compiled.graphRevision !== undefined) draft.graphRevision = compiled.graphRevision;
       if (compiled.tickets !== undefined) draft.tickets = structuredClone(compiled.tickets);
       draft.activity.push(...structuredClone(compiled.activity ?? []));
@@ -3427,6 +9976,9 @@ export class RunAuthorityEngine {
           checkId: requestedCheckId,
           accepted: compiled.accepted,
           evidenceSha256: checkRecord.evidenceSha256,
+          ...(shouldProjectConfiguredCheckDiagnostics(check, compiled.accepted)
+            ? { diagnostics: configuredCheckFailureDiagnostics(check, executions) }
+            : {}),
         },
       };
       const receiptPath = toolReceiptPath(run.id, attempt.id, call.callId);
@@ -3436,7 +9988,7 @@ export class RunAuthorityEngine {
         expectedRevision: revision,
         runWrites: [{ record: draft, expectedRevision: run.revision }],
         writes: [
-          ...commandArtifacts,
+          ...legacyCommandArtifacts,
           ...(compiled.artifactWrites ?? []),
           { path: evidenceArtifactPath, bytes: evidenceBytes, expectedSha256: null },
           { path: receiptPath, bytes: receiptBytes, expectedSha256: null },
@@ -3482,6 +10034,65 @@ export class RunAuthorityEngine {
       const committed = await this.#store.commit({
         expectedRevision: revision,
         runWrites: [{ record: draft, expectedRevision: run.revision }],
+      });
+      return { revision: committed.state.revision };
+    });
+  }
+
+  async #recordPreparedCheckAttempt(
+    runId: string,
+    intentId: string,
+    record: RunCheckAttemptRecord,
+  ): Promise<void> {
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(runId);
+      const pending = run.pendingChecks?.[intentId];
+      if (pending === undefined) {
+        throw new AuthorityRpcError("check_intent", "configured check intent disappeared before execution");
+      }
+      if (new Set<RunPhase>(["pausing", "paused", "deleting", "deleted"]).has(run.lifecycle.phase)) {
+        throw new AuthorityRpcError("check_aborted", "configured check cannot start while the run is stopped");
+      }
+      const attempts = pending.attempts ?? [];
+      if (attempts.at(-1)?.status === "prepared") {
+        throw new AuthorityRpcError("check_attempt", "configured check already has an in-flight process attempt");
+      }
+      const draft = nextRun(run, record.startedAt);
+      draft.pendingChecks![intentId]!.attempts = [...attempts, structuredClone(record)];
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+      });
+      return { revision: committed.state.revision };
+    });
+  }
+
+  async #recordCompletedCheckAttempt(
+    runId: string,
+    intentId: string,
+    preparedSha256: Sha256Digest,
+    record: RunCheckAttemptRecord,
+    writes: readonly TransactionWrite[],
+  ): Promise<void> {
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(runId);
+      const pending = run.pendingChecks?.[intentId];
+      const attempts = pending?.attempts ?? [];
+      const final = attempts.at(-1);
+      if (pending === undefined || final?.status !== "prepared" || final.sha256 !== preparedSha256 ||
+          record.status !== "completed" || record.commandIndex !== final.commandIndex ||
+          record.attemptNumber !== final.attemptNumber) {
+        throw new AuthorityRpcError("check_attempt", "configured check attempt changed before settlement");
+      }
+      const draft = nextRun(run, record.completedAt!);
+      draft.pendingChecks![intentId]!.attempts = [
+        ...attempts.slice(0, -1),
+        structuredClone(record),
+      ];
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+        ...(writes.length === 0 ? {} : { writes }),
       });
       return { revision: committed.state.revision };
     });
@@ -3600,6 +10211,335 @@ export class RunAuthorityEngine {
     return receipt!;
   }
 
+  async #prepareAssignmentTerminalPolicy(
+    run: RunRecord,
+    attempt: AgentAttemptRecord,
+    assignment: ReadyAssignment,
+    prepared: PreparedManagedAttempt,
+    grant: AuthorityGrant,
+    signal: AbortSignal | undefined,
+  ): Promise<PreparedAssignmentTerminalPolicy | undefined> {
+    const binding = executionPolicyBindingForAttempt(run, attempt);
+    if (binding === undefined) return undefined;
+    if (this.#program.projectAssignmentTerminalPolicy === undefined ||
+        this.#program.compileAssignmentTerminalReplay === undefined) {
+      throw new AuthorityRpcError(
+        "terminal_policy_unsupported",
+        "behavior-backed assignment requires compiler terminal-policy projection and replay",
+      );
+    }
+    const projection = await this.#program.projectAssignmentTerminalPolicy({
+      run,
+      assignment,
+      attemptId: attempt.id,
+    });
+    assertTerminalPolicyProjectionSafety(projection, binding, grant);
+    const executionSets: Array<{ checkId: string; executions: AgentCheckExecution[] }> = [];
+    const retryAudits: RunCheckAttemptRecord[] = [];
+    const artifactWrites: TransactionWrite[] = [];
+    for (const [checkIndex, policy] of projection.validationChecks.entries()) {
+      const executions: AgentCheckExecution[] = [];
+      for (const [commandIndex, command] of policy.resolvedCheck.commands.entries()) {
+        const commandPolicy = command.executionPolicy!;
+        const manifestRoots = [...new Set([...command.inputPaths, ...command.outputPaths])].sort();
+        const audits: RunCheckAttemptRecord[] = [];
+        let attemptNumber = 1;
+        let aggregateElapsedSeconds = 0;
+        while (true) {
+          if (signal?.aborted === true) {
+            throw new AuthorityRpcError("terminal_replay_aborted", "terminal validation replay was aborted");
+          }
+          const pre = await snapshotContainedPaths(prepared.spec.workspace.cwd, manifestRoots);
+          const startedAt = this.#timestamp();
+          const startedAtMs = this.#now().getTime();
+          await this.#assertRuntimeCurrent();
+          const processResult = await runContainedProcess({
+            projectRoot: prepared.spec.workspace.cwd,
+            stateRoot: this.#stateRoot,
+            check: command,
+            readPaths: grant.readPaths,
+            writePaths: grant.writePaths,
+            ...(this.#sandboxExecutable === undefined
+              ? {}
+              : { sandboxExecutable: this.#sandboxExecutable }),
+            ...(signal === undefined ? {} : { signal }),
+          });
+          const completedAt = this.#timestamp();
+          aggregateElapsedSeconds += Math.max(
+            0,
+            Math.ceil((this.#now().getTime() - startedAtMs) / 1_000),
+          );
+          const post = await snapshotContainedPaths(prepared.spec.workspace.cwd, manifestRoots);
+          const passedExit = processResult.exitCode !== null &&
+            command.expectedExitCodes.includes(processResult.exitCode);
+          const retryDecision = !passedExit && processResult.exitCode !== null &&
+              processResult.exitCode >= 0 && processResult.exitCode <= 255
+            ? decideBoundCheckRetry(commandPolicy, {
+                attemptNumber,
+                exitCode: processResult.exitCode,
+                aggregateElapsedSeconds,
+              })
+            : undefined;
+          const stdoutArtifactPath = configuredTerminalReplayStreamPath(
+            run.id,
+            attempt.id,
+            projection.sha256,
+            checkIndex,
+            commandIndex,
+            attemptNumber,
+            "stdout",
+          );
+          const stderrArtifactPath = configuredTerminalReplayStreamPath(
+            run.id,
+            attempt.id,
+            projection.sha256,
+            checkIndex,
+            commandIndex,
+            attemptNumber,
+            "stderr",
+          );
+          const audit = createRunCheckAttemptRecord({
+            protocol: "koni.run-check-attempt.v1",
+            commandIndex,
+            attemptNumber,
+            checkId: command.checkId,
+            definitionHash: command.definitionHash,
+            executionPolicy: structuredClone(commandPolicy),
+            status: "completed",
+            startedAt,
+            preManifestSha256: pre.manifestSha256,
+            completedAt,
+            aggregateElapsedSeconds,
+            postManifestSha256: post.manifestSha256,
+            exitCode: processResult.exitCode,
+            signal: processResult.signal,
+            stdoutSha256: rawSha256(processResult.stdout),
+            stdoutSizeBytes: processResult.stdout.byteLength,
+            stdoutArtifactPath,
+            stderrSha256: rawSha256(processResult.stderr),
+            stderrSizeBytes: processResult.stderr.byteLength,
+            stderrArtifactPath,
+            ...(retryDecision === undefined ? {} : { retryDecision }),
+          });
+          audits.push(audit);
+          retryAudits.push(audit);
+          artifactWrites.push(
+            { path: stdoutArtifactPath, bytes: processResult.stdout, expectedSha256: null },
+            { path: stderrArtifactPath, bytes: processResult.stderr, expectedSha256: null },
+          );
+          if (retryDecision?.disposition === "retry") {
+            await waitForConfiguredRetry(retryDecision.backoffSeconds, signal);
+            attemptNumber = retryDecision.nextAttemptNumber!;
+            continue;
+          }
+          const resultSource = await readConfiguredCheckResult(
+            prepared.spec.workspace.cwd,
+            grant,
+            command,
+            processResult.stdout,
+            !passedExit,
+          );
+          const outputFiles = passedExit
+            ? await readConfiguredOutputFiles(
+                prepared.spec.workspace.cwd,
+                grant,
+                command,
+                resultSource.value,
+              )
+            : [];
+          executions.push({
+            checkId: command.checkId,
+            definitionHash: command.definitionHash,
+            attemptNumber,
+            retryAuditSha256: canonicalHash(audits),
+            startedAt,
+            completedAt,
+            resolvedExecutable: processResult.resolvedExecutable,
+            argv: [...processResult.argv],
+            environmentSha256: processResult.environmentSha256,
+            exitCode: processResult.exitCode,
+            signal: processResult.signal,
+            stdout: exactUtf8CheckStream(processResult.stdout, "stdout"),
+            stderr: exactUtf8CheckStream(processResult.stderr, "stderr"),
+            stdoutSha256: rawSha256(processResult.stdout),
+            stdoutSizeBytes: processResult.stdout.byteLength,
+            stderrSha256: rawSha256(processResult.stderr),
+            stderrSizeBytes: processResult.stderr.byteLength,
+            preManifestSha256: pre.manifestSha256,
+            postManifestSha256: post.manifestSha256,
+            sandboxKind: processResult.sandbox.kind,
+            sandboxProfileSha256: processResult.sandbox.profileSha256,
+            sandboxExecutableSha256: processResult.sandbox.executableSha256,
+            resultSource,
+            outputFiles,
+          });
+          break;
+        }
+      }
+      executionSets.push({ checkId: policy.checkId, executions });
+    }
+    const contextReceipt = createLaunchContextTerminalReceipt(
+      run,
+      attempt,
+      assignment,
+      prepared,
+      grant,
+      projection,
+    );
+    return {
+      projection,
+      executions: executionSets,
+      retryAudits,
+      compilerReceipts: contextReceipt === undefined ? [] : [contextReceipt],
+      artifactWrites,
+    };
+  }
+
+  async #settleAssignmentTerminalPolicy(
+    run: RunRecord,
+    attempt: AgentAttemptRecord,
+    assignment: ReadyAssignment,
+    prepared: PreparedAssignmentTerminalPolicy | undefined,
+    workspace: string,
+    acceptedAt: string,
+    terminalCompilerReceipts: readonly CompilerTerminalReceiptAuthority[] = [],
+  ): Promise<AssignmentTerminalPolicySettlement> {
+    const binding = executionPolicyBindingForAttempt(run, attempt);
+    if (binding === undefined) {
+      if (prepared !== undefined) {
+        throw new AuthorityRpcError("terminal_policy_legacy", "legacy terminal path received semantic replay evidence");
+      }
+      const material = {
+        protocol: "koni.agent-terminal-policy.v1" as const,
+        mode: "legacy_pre_execution_policy" as const,
+        acceptedAt,
+      };
+      return { record: { ...material, sha256: canonicalHash(material) }, artifactWrites: [] };
+    }
+    if (prepared === undefined || this.#program.projectAssignmentTerminalPolicy === undefined ||
+        this.#program.compileAssignmentTerminalReplay === undefined) {
+      throw new AuthorityRpcError("terminal_policy_missing", "semantic terminal closure has no prepared replay evidence");
+    }
+    const projection = await this.#program.projectAssignmentTerminalPolicy({
+      run,
+      assignment,
+      attemptId: attempt.id,
+    });
+    const { sha256: projectionSha256, ...projectionMaterial } = projection;
+    if (projectionSha256 !== prepared.projection.sha256 ||
+        canonicalHash(projectionMaterial) !== projectionSha256) {
+      throw new AuthorityRpcError("terminal_policy_stale", "terminal policy changed before acceptance CAS");
+    }
+    const replay = await this.#program.compileAssignmentTerminalReplay({
+      run,
+      assignment,
+      attemptId: attempt.id,
+      projectionSha256: projection.sha256,
+      executions: prepared.executions,
+      retainedReceipts: projection.retainedReceipts,
+    });
+    if (!replay.accepted || !replay.passed) {
+      throw new AuthorityRpcError("terminal_replay_failed", "compiler terminal validation replay did not pass");
+    }
+    const compilerReceipts = [...prepared.compilerReceipts, ...terminalCompilerReceipts];
+    const receiptEvaluation = evaluateRequiredExecutionReceipts(
+      projection.catalog,
+      projection.executionPolicyBinding,
+      {
+        receipts: terminalReceiptEvidence(run, attempt, projection, replay, compilerReceipts),
+        structuredOutputAccepted: true,
+        commandRan: projection.validationChecks.some((policy) => policy.causalCommands.length > 0),
+      },
+    );
+    if (receiptEvaluation.missing.length > 0) {
+      throw new AuthorityRpcError(
+        "terminal_receipts_missing",
+        `terminal closure is missing required receipt(s): ${receiptEvaluation.missing.join(", ")}`,
+      );
+    }
+    const sourcePreservationSha256s = await verifyTerminalSourcePreservation(
+      run,
+      attempt,
+      projection,
+      workspace,
+    );
+    const terminalMaterial = {
+      protocol: "koni.agent-terminal-policy.v1" as const,
+      mode: "semantic" as const,
+      projectionSha256: projection.sha256,
+      replayCompilationSha256: replay.sha256,
+      receiptEvaluationSha256: receiptEvaluation.sha256,
+      sourcePreservationSha256s,
+      acceptedAt,
+    };
+    const record: AgentTerminalPolicyRecord = {
+      ...terminalMaterial,
+      sha256: canonicalHash(terminalMaterial),
+    };
+    const evidence = {
+      protocol: "koni.assignment-terminal-policy-evidence.v1",
+      runId: run.id,
+      ticketId: assignment.ticketId,
+      stepId: assignment.stepId,
+      attemptId: attempt.id,
+      projectionSha256: projection.sha256,
+      replay,
+      receiptEvaluation,
+      sourcePreservationSha256s,
+      retryAudits: prepared.retryAudits,
+      compilerReceipts,
+      terminalPolicySha256: record.sha256,
+    };
+    const evidenceBytes = encodeJsonArtifact(evidence);
+    return {
+      record,
+      artifactWrites: [
+        ...prepared.artifactWrites,
+        {
+          path: terminalPolicyEvidencePath(run.id, attempt.id, record.sha256),
+          bytes: evidenceBytes,
+          expectedSha256: null,
+        },
+      ],
+    };
+  }
+
+  async #prepareOutcomeTerminalPolicy(
+    run: RunRecord,
+    attempt: AgentAttemptRecord,
+    assignment: ReadyAssignment,
+  ): Promise<PreparedOutcomeTerminalPolicy> {
+    if (executionPolicyBindingForAttempt(run, attempt) === undefined) {
+      return { prepared: undefined, workspace: "" };
+    }
+    if (this.#program.recoverAttempt === undefined) {
+      throw new AuthorityRpcError(
+        "terminal_policy_recovery",
+        "behavior-backed terminal outcome cannot recover its immutable authority plan",
+      );
+    }
+    const spec = await this.#loadStoredLaunchSpec(run, attempt);
+    const recovered = await this.#program.recoverAttempt({ run, attempt, spec });
+    assertRecoveredAuthorityPlan(recovered, spec, this.#projectRoot, this.#stateRoot);
+    if (recovered.authorityGrant === undefined) {
+      throw new AuthorityRpcError(
+        "terminal_policy_grant",
+        "behavior-backed terminal replay has no immutable configured-check grant",
+      );
+    }
+    return {
+      prepared: await this.#prepareAssignmentTerminalPolicy(
+        run,
+        attempt,
+        assignment,
+        recovered,
+        recovered.authorityGrant,
+        undefined,
+      ),
+      workspace: recovered.spec.workspace.cwd,
+    };
+  }
+
   async #invokeTerminalTool(
     prepared: PreparedManagedAttempt,
     grant: AuthorityGrant,
@@ -3609,6 +10549,35 @@ export class RunAuthorityEngine {
     requestHash: Sha256Digest,
   ): Promise<KoniToolReceipt> {
     let receipt: KoniToolReceipt | undefined;
+    let actionInvocationId: string | undefined;
+    let terminalPolicyPreparation: PreparedAssignmentTerminalPolicy | undefined;
+    let terminalPolicyAssignment: ReadyAssignment | undefined;
+    let terminalPolicyRun: RunRecord | undefined;
+    let terminalPolicyAttempt: AgentAttemptRecord | undefined;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(grant.runId);
+      const attempt = validateAgentToolGrant(run, prepared.spec, grant, call, revision, this.#projectRoot);
+      const assignment = assignmentForAttempt(run, attempt);
+      if (assignment !== undefined) {
+        terminalPolicyRun = structuredClone(run);
+        terminalPolicyAttempt = structuredClone(attempt);
+        terminalPolicyAssignment = structuredClone(assignment);
+      }
+      return this.#noOpInternal(revision);
+    });
+    if (terminalPolicyRun !== undefined && terminalPolicyAttempt !== undefined &&
+        terminalPolicyAssignment !== undefined &&
+        !assignmentUsesConfiguredValidation(terminalPolicyRun, terminalPolicyAssignment) &&
+        !terminalOutputReportsFailure(call.arguments)) {
+      terminalPolicyPreparation = await this.#prepareAssignmentTerminalPolicy(
+        terminalPolicyRun,
+        terminalPolicyAttempt,
+        terminalPolicyAssignment,
+        prepared,
+        grant,
+        call.signal,
+      );
+    }
     await this.#server.mutateInternal(async ({ revision }) => {
       const run = await this.#store.getRun(grant.runId);
       const attempt = validateAgentToolGrant(run, prepared.spec, grant, call, revision, this.#projectRoot);
@@ -3619,6 +10588,9 @@ export class RunAuthorityEngine {
 
       const draft = nextRun(run, this.#timestamp());
       let compilerWrites: readonly TransactionWrite[] = [];
+      let actionArchiveWrites: readonly TransactionWrite[] = [];
+      let terminalPolicyWrites: readonly TransactionWrite[] = [];
+      let terminalPolicyRecord: AgentTerminalPolicyRecord | undefined;
       let terminalSummary: string;
       if (attempt.kind === "planning") {
         const compiled = await this.#program.compilePlanningOutput({
@@ -3637,30 +10609,38 @@ export class RunAuthorityEngine {
         if (compiled.graphRevision !== undefined) draft.graphRevision = compiled.graphRevision;
         if (compiled.tickets !== undefined) draft.tickets = structuredClone(compiled.tickets);
         draft.activity.push(...structuredClone(compiled.activity ?? []));
-        draft.currentPipelineStageId = approvalStage(draft);
+        draft.currentPipelineStageId = await this.#stageForKinds(draft, ["approval"], "approval");
         applyLifecycle(draft, { type: "plan_submitted", atMs: this.#now().getTime() });
         compilerWrites = compiled.artifactWrites ?? [];
         terminalSummary = "Plan compiled";
-      } else {
-        const assignment = assignmentForAttempt(run, attempt);
-        if (assignment === undefined) {
-          throw new AuthorityRpcError("terminal_assignment", "work submission lost its compiler assignment");
+      } else if (attempt.kind === "lead") {
+        const compiled = await this.#compileLeadJudgment(run, attempt, call.arguments);
+        this.#applyLeadJudgment(run, draft, attempt, compiled);
+        terminalSummary = compiled.summary;
+      } else if (attempt.kind === "verification" && assignmentForAttempt(run, attempt) === undefined) {
+        if (this.#program.compileVerificationOutput === undefined) {
+          throw new AuthorityRpcError(
+            "terminal_verification",
+            "profile compiler cannot compile independent review output",
+          );
         }
-        const compiled = await this.#program.compileAssignmentOutput({
+        const compiled = await this.#program.compileVerificationOutput({
           run,
-          assignment,
           attemptId: attempt.id,
           output: call.arguments,
         });
-        if (compiled.tickets !== undefined) draft.tickets = structuredClone(compiled.tickets);
-        finishAssignment(draft, assignment, compiled.outcome, draft.updatedAt);
-        if (compiled.graphHash !== undefined) draft.graphHash = compiled.graphHash;
-        if (compiled.graphRevision !== undefined) draft.graphRevision = compiled.graphRevision;
-        draft.activity.push(...structuredClone(compiled.activity ?? []));
-        compilerWrites = compiled.artifactWrites ?? [];
+        draft.attempts[attempt.id]!.verificationAccepted = compiled.outcome.status === "completed";
         terminalSummary = compiled.outcome.status === "completed"
           ? compiled.outcome.summary
           : compiled.outcome.blocker;
+        draft.activity.push(activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "agent",
+          compiled.outcome.status === "completed"
+            ? `Independent review completed: ${compiled.outcome.summary}`
+            : `Independent review blocked the run: ${compiled.outcome.blocker}`,
+        ));
         if (compiled.outcome.status === "failed") {
           applyLifecycle(draft, {
             type: "blocked",
@@ -3668,14 +10648,106 @@ export class RunAuthorityEngine {
             reason: compiled.outcome.blocker,
           });
         }
+      } else {
+        const assignment = assignmentForAttempt(run, attempt);
+        if (assignment === undefined) {
+          throw new AuthorityRpcError("terminal_assignment", "work submission lost its compiler assignment");
+        }
+        if (terminalPolicyAssignment === undefined ||
+            canonicalHash(terminalPolicyAssignment) !== canonicalHash(assignment)) {
+          throw new AuthorityRpcError("terminal_policy_assignment", "terminal assignment changed during replay");
+        }
+        if (assignmentUsesConfiguredValidation(run, assignment)) {
+          const execution = prepareAssignmentValidationExecution(
+            run,
+            attempt,
+            assignment,
+            call.arguments,
+            rawSha256(outputBytes),
+            draft.updatedAt,
+          );
+          actionArchiveWrites = admitRunActionExecution(draft, execution);
+          actionInvocationId = execution.invocationId;
+          terminalSummary = terminalActionSummary(call.arguments);
+        } else {
+          const compiled = await this.#program.compileAssignmentOutput({
+            run,
+            assignment,
+            attemptId: attempt.id,
+            output: call.arguments,
+          });
+          if (compiled.outcome.status === "failed") {
+            // Reporting a compiler-valid blocker is not a claim that completion checks passed.
+            // Accept and bind the failure so the ticket can stop cleanly instead of forcing the
+            // Pi session into a synthetic terminal_protocol failure.
+            terminalPolicyRecord = failedSubmissionTerminalPolicy(draft.updatedAt);
+          } else {
+            const terminalCompilerReceipts = terminalPolicyPreparation === undefined
+              ? []
+              : createDirectCompilationTerminalReceipts(
+                  run,
+                  attempt,
+                  assignment,
+                  rawSha256(outputBytes),
+                  compiled,
+                  terminalPolicyPreparation.projection,
+                );
+            const terminalSettlement = await this.#settleAssignmentTerminalPolicy(
+              run,
+              attempt,
+              assignment,
+              terminalPolicyPreparation,
+              prepared.spec.workspace.cwd,
+              draft.updatedAt,
+              terminalCompilerReceipts,
+            );
+            terminalPolicyRecord = terminalSettlement.record;
+            terminalPolicyWrites = terminalSettlement.artifactWrites;
+          }
+          if (compiled.tickets !== undefined) {
+            draft.tickets = retainTicketAuthorityFields(run.tickets, structuredClone(compiled.tickets));
+          }
+          finishAssignment(draft, assignment, compiled.outcome, draft.updatedAt);
+          let sourceHeld = false;
+          if (compiled.outcome.status === "completed") {
+            sourceHeld = (await this.#applyAssignmentChangeControl(
+              run,
+              draft,
+              assignment,
+              compiled.changeControl,
+            )).sourceHeld;
+          }
+          const completedTicket = draft.tickets[assignment.ticketId];
+          if (compiled.outcome.status === "completed" && !sourceHeld && completedTicket?.status === "completed") {
+            completedTicket.status = "review";
+          }
+          if (compiled.graphHash !== undefined) draft.graphHash = compiled.graphHash;
+          if (compiled.graphRevision !== undefined) draft.graphRevision = compiled.graphRevision;
+          applyAssignmentRuleAuthorityEvidence(draft, compiled.ruleAuthorityEvidence);
+          draft.activity.push(...structuredClone(compiled.activity ?? []));
+          compilerWrites = compiled.artifactWrites ?? [];
+          terminalSummary = compiled.outcome.status === "completed"
+            ? compiled.outcome.summary
+            : compiled.outcome.blocker;
+          // Non-rework assignment failure remains local to the ticket; configured terminal
+          // resolver reconciliation runs after this accepted attempt settles.
+        }
       }
 
       receipt = {
         protocol: KONI_TOOL_RECEIPT_PROTOCOL,
         receiptId: canonicalHash({ method, idempotencyKey, requestHash }),
         outcome: "accepted",
-        summary: "Structured output compiled and accepted",
-        value: { accepted: true },
+        summary: actionInvocationId === undefined
+          ? "Structured output compiled and accepted"
+          : "Structured output durably accepted for configured validation",
+        value: {
+          accepted: true,
+          ...(terminalPolicyRecord === undefined
+            ? {}
+            : { terminalPolicySha256: terminalPolicyRecord.sha256 }),
+          ...(actionInvocationId === undefined ? {} : { actionInvocationId }),
+        },
       };
       const receiptPath = toolReceiptPath(run.id, attempt.id, call.callId);
       const receiptBytes = encodeJsonArtifact(receipt);
@@ -3686,6 +10758,7 @@ export class RunAuthorityEngine {
       mutable.terminalOutputSha256 = rawSha256(outputBytes);
       mutable.terminalOutputSizeBytes = outputBytes.byteLength;
       mutable.terminalAcceptedAt = draft.updatedAt;
+      if (terminalPolicyRecord !== undefined) mutable.terminalPolicy = terminalPolicyRecord;
 
       const pointer: JsonValue = {
         artifact: receiptPath,
@@ -3696,6 +10769,8 @@ export class RunAuthorityEngine {
         runWrites: [{ record: draft, expectedRevision: run.revision }],
         writes: [
           ...compilerWrites,
+          ...actionArchiveWrites,
+          ...terminalPolicyWrites,
           { path: receiptPath, bytes: receiptBytes, expectedSha256: null },
           {
             path: terminalOutputPath(run.id, attempt.id),
@@ -3713,7 +10788,81 @@ export class RunAuthorityEngine {
         }],
       };
     });
+    if (actionInvocationId !== undefined) {
+      this.#background(() => this.#settleAssignmentValidation(grant.runId, actionInvocationId!), grant.runId);
+    }
     return receipt!;
+  }
+
+  async #compileLeadJudgment(
+    run: RunRecord,
+    attempt: AgentAttemptRecord,
+    output: unknown,
+  ): Promise<LeadJudgmentOutput> {
+    if (run.behavior === undefined || attempt.kind !== "lead") {
+      throw new AuthorityRpcError("lead_authority", "Lead judgment is unavailable without pinned native behavior");
+    }
+    if (this.#program.compileLeadJudgmentOutput === undefined) {
+      throw new AuthorityRpcError(
+        "lead_authority",
+        "Pinned run behavior requires a Lead judgment, but its compiler cannot validate the result",
+      );
+    }
+    return this.#program.compileLeadJudgmentOutput({ run, attemptId: attempt.id, output });
+  }
+
+  #applyLeadJudgment(
+    run: RunRecord,
+    draft: RunRecord,
+    attempt: AgentAttemptRecord,
+    output: LeadJudgmentOutput,
+  ): void {
+    const behavior = run.behavior;
+    const graphHash = run.graphHash;
+    const runOid = run.git.run.headOid;
+    if (behavior === undefined || graphHash === undefined || runOid === undefined) {
+      throw new AuthorityRpcError(
+        "lead_binding",
+        "Lead judgment cannot bind before behavior, graph, and run Git identities are durable",
+      );
+    }
+    const stageId = behavior.runType.pipeline.find((stage) => stage.kind === "orchestration")?.id;
+    if (stageId === undefined || run.currentPipelineStageId !== stageId) {
+      throw new AuthorityRpcError("lead_binding", "Lead judgment is outside its pinned orchestration stage");
+    }
+    const trigger = leadJudgmentTriggerForAttempt(attempt);
+    const priorTriggers = (run.leadJudgments ?? []).map((judgment) => judgment.trigger);
+    if (!shouldIssueLeadJudgment(behavior.runType, trigger, priorTriggers)) {
+      throw new AuthorityRpcError("lead_replay", `Lead judgment trigger ${trigger} was already accepted`);
+    }
+    draft.leadJudgments ??= [];
+    draft.leadJudgments.push({
+      protocol: "koni.lead-judgment-record.v1",
+      trigger,
+      attemptId: attempt.id,
+      behaviorSha256: behavior.sha256,
+      stageId,
+      graphHash,
+      runOid,
+      disposition: output.disposition,
+      summary: output.summary,
+      recordedAt: draft.updatedAt,
+    });
+    draft.activity.push(activity(
+      this.#createId("activity"),
+      draft.updatedAt,
+      "agent",
+      output.disposition === "proceed"
+        ? `Lead judgment released deterministic orchestration: ${output.summary}`
+        : `Lead judgment blocked deterministic orchestration: ${output.summary}`,
+    ));
+    if (output.disposition === "blocked") {
+      applyLifecycle(draft, {
+        type: "blocked",
+        atMs: this.#now().getTime(),
+        reason: output.summary,
+      });
+    }
   }
 
   async #invokeQuestionTool(
@@ -3724,38 +10873,152 @@ export class RunAuthorityEngine {
     idempotencyKey: string,
     requestHash: Sha256Digest,
   ): Promise<KoniToolReceipt> {
-    const questionId = this.#createId("question");
-    let resolveAnswer!: (answer: { label: string; selectedOptionId?: string; notes?: string }) => void;
-    let rejectAnswer!: (error: Error) => void;
-    const answer = new Promise<{ label: string; selectedOptionId?: string; notes?: string }>((resolve, reject) => {
-      resolveAnswer = resolve;
-      rejectAnswer = reject;
+    const batchId = this.#createId("question");
+    const admittedRun = await this.#store.getRun(grant.runId);
+    const policy = semanticQuestionPolicyForRun(admittedRun);
+    const questions = questionBatchInputs(
+      call.arguments,
+      () => this.#createId("question"),
+      policy !== undefined,
+    );
+    const disposition = policy === undefined
+      ? undefined
+      : questionPolicyDisposition(policy, questions.map((question) => ({
+          id: question.id,
+          options: question.options,
+          recommendedOptionId: question.recommendedOptionId!,
+          impact: question.impact!,
+        })));
+
+    if (disposition !== undefined && !disposition.pausesAttempt) {
+      let receipt: KoniToolReceipt | undefined;
+      await this.#server.mutateInternal(async ({ revision }) => {
+        const run = await this.#store.getRun(grant.runId);
+        const attempt = validateAgentToolGrant(run, prepared.spec, grant, call, revision, this.#projectRoot);
+        const draft = nextRun(run, this.#timestamp());
+        const questionScope = questionScopeForAttempt(run, attempt);
+        let batch = createQuestionBatch({
+          id: batchId,
+          attemptId: attempt.id,
+          ...questionScope,
+          questions,
+          createdAt: draft.updatedAt,
+        });
+        batch = applyAutomaticQuestionAnswers(batch, disposition.automaticAnswers, draft.updatedAt);
+        batch = queueQuestionBatchResume(batch, { expectedVersion: batch.version, at: draft.updatedAt });
+        const resolution = projectQuestionBatchResolution(batch);
+        batch = resolveQuestionBatch(batch, { expectedVersion: batch.version, at: draft.updatedAt });
+        draft.questionBatches ??= {};
+        draft.questionBatches[batchId] = batch;
+        appendLegacyQuestionProjection(draft, batch, questions, resolution, draft.updatedAt);
+        receipt = {
+          protocol: KONI_TOOL_RECEIPT_PROTOCOL,
+          receiptId: canonicalHash({ method, idempotencyKey, requestHash }),
+          outcome: "accepted",
+          summary: questions.length === 1
+            ? "Question resolved from its configured recommendation"
+            : `${questions.length} questions resolved from configured recommendations`,
+          value: resolution,
+        };
+        const receiptPath = toolReceiptPath(run.id, attempt.id, call.callId);
+        const bytes = encodeJsonArtifact(receipt);
+        authorizeToolResult(draft.attempts[attempt.id]!, call, receipt!, receiptPath, draft.updatedAt);
+        draft.activity.push(activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "compiler",
+          receipt.summary,
+        ));
+        const committed = await this.#store.commit({
+          expectedRevision: revision,
+          runWrites: [{ record: draft, expectedRevision: run.revision }],
+          writes: [{ path: receiptPath, bytes, expectedSha256: null }],
+          receipt: {
+            method,
+            idempotencyKey,
+            requestHash,
+            result: { artifact: receiptPath, sha256: rawSha256(bytes) },
+          },
+        });
+        return {
+          revision: committed.state.revision,
+          events: [{
+            topic: "agent.question.auto_resolved",
+            payload: { runId: run.id, attemptId: attempt.id, batchId },
+          }],
+        };
+      });
+      return receipt!;
+    }
+
+    let resolveAnswers!: (resolution: QuestionBatchResolution) => void;
+    let rejectAnswers!: (error: Error) => void;
+    const answers = new Promise<QuestionBatchResolution>((resolve, reject) => {
+      resolveAnswers = resolve;
+      rejectAnswers = reject;
     });
-    if (this.#questionWaiters.has(questionId)) throw new Error(`duplicate question waiter ${questionId}`);
-    this.#questionWaiters.set(questionId, { resolve: resolveAnswer, reject: rejectAnswer });
-    const abort = () => rejectAnswer(new AuthorityRpcError("question_aborted", "question wait was aborted"));
+    if (this.#questionBatchWaiters.has(batchId)) throw new Error(`duplicate question batch waiter ${batchId}`);
+    this.#questionBatchWaiters.set(batchId, { resolve: resolveAnswers, reject: rejectAnswers });
+    const abort = () => rejectAnswers(new AuthorityRpcError("question_aborted", "question wait was aborted"));
     call.signal?.addEventListener("abort", abort, { once: true });
     try {
       await this.#server.mutateInternal(async ({ revision }) => {
         const run = await this.#store.getRun(grant.runId);
         const attempt = validateAgentToolGrant(run, prepared.spec, grant, call, revision, this.#projectRoot);
         const draft = nextRun(run, this.#timestamp());
-        const question: RunQuestionRecord = {
-          id: questionId,
+        const questionScope = questionScopeForAttempt(run, attempt);
+        let batch = createQuestionBatch({
+          id: batchId,
           attemptId: attempt.id,
-          prompt: toolString(call.arguments, "prompt"),
-          options: validateQuestionOptions(call.arguments.options as RunQuestionRecord["options"]),
-          allowsNotes: call.arguments.allowsNotes !== false,
-          askedAt: draft.updatedAt,
-          answeredAt: undefined,
-          selectedOptionId: undefined,
-          notes: undefined,
-        };
-        draft.questions[questionId] = question;
+          ...questionScope,
+          questions,
+          createdAt: draft.updatedAt,
+        });
+        if (disposition !== undefined) {
+          batch = applyAutomaticQuestionAnswers(batch, disposition.automaticAnswers, draft.updatedAt);
+        }
+        draft.questionBatches ??= {};
+        if (draft.questionBatches[batchId] !== undefined) {
+          throw new AuthorityRpcError("question_identity", "question batch identity already exists");
+        }
+        draft.questionBatches[batchId] = batch;
+        questions.forEach((question, index) => {
+          if (draft.questions[question.id] !== undefined) {
+            throw new AuthorityRpcError("question_identity", "question identity already exists");
+          }
+          draft.questions[question.id] = {
+            id: question.id,
+            attemptId: attempt.id,
+            ...questionScope,
+            prompt: question.prompt,
+            options: structuredClone(question.options),
+            allowsNotes: question.allowsNotes,
+            askedAt: draft.updatedAt,
+            answeredAt: undefined,
+            selectedOptionId: undefined,
+            notes: undefined,
+            batchId,
+            batchPosition: index + 1,
+            batchSize: questions.length,
+            ...(question.impact === undefined ? {} : { impact: question.impact }),
+            ...(question.recommendedOptionId === undefined
+              ? {}
+              : { recommendationOptionId: question.recommendedOptionId }),
+          };
+        });
+        if (disposition !== undefined) {
+          for (const answer of disposition.automaticAnswers) {
+            const projected = draft.questions[answer.questionId]!;
+            projected.selectedOptionId = answer.selectedOptionId;
+            projected.answerRevision = 1;
+            projected.answerSource = "configured_recommendation";
+            projected.answeredAt = draft.updatedAt;
+          }
+        }
         applyLifecycle(draft, {
           type: "question_opened",
           atMs: this.#now().getTime(),
-          question: { id: questionId, attemptId: attempt.id },
+          question: { id: batchId, attemptId: attempt.id },
         });
         draft.attempts[attempt.id]!.status = "waiting_question";
         const committed = await this.#store.commit({
@@ -3764,34 +11027,45 @@ export class RunAuthorityEngine {
         });
         return {
           revision: committed.state.revision,
-          events: [{ topic: "run.question.opened", payload: { runId: run.id, questionId } }],
+          events: [{
+            topic: "run.question.opened",
+            payload: {
+              runId: run.id,
+              batchId,
+              questionIds: questions.map((question) => question.id),
+            },
+          }],
         };
       });
 
-      const answered = await answer;
+      const resolution = await answers;
       let receipt: KoniToolReceipt | undefined;
       await this.#server.mutateInternal(async ({ revision }) => {
         const run = await this.#store.getRun(grant.runId);
         const attempt = validateAgentToolGrant(run, prepared.spec, grant, call, revision, this.#projectRoot);
-        const question = run.questions[questionId];
-        if (question?.answeredAt === undefined) {
-          throw new AuthorityRpcError("question_state", "question resumed without a durable answer");
+        const queued = run.questionBatches?.[batchId];
+        if (queued === undefined || queued.status !== "pending_resume") {
+          throw new AuthorityRpcError("question_state", "question batch resumed without sealed durable answers");
+        }
+        if (canonicalHash(projectQuestionBatchResolution(queued)) !== canonicalHash(resolution)) {
+          throw new AuthorityRpcError("question_state", "resumed question answers differ from durable authority state");
         }
         receipt = {
           protocol: KONI_TOOL_RECEIPT_PROTOCOL,
           receiptId: canonicalHash({ method, idempotencyKey, requestHash }),
           outcome: "accepted",
-          summary: "Question answered",
-          value: {
-            questionId,
-            label: answered.label,
-            ...(answered.selectedOptionId === undefined ? {} : { selectedOptionId: answered.selectedOptionId }),
-            ...(answered.notes === undefined ? {} : { notes: answered.notes }),
-          },
+          summary: questions.length === 1 ? "Question answered" : `${questions.length} questions answered`,
+          value: resolution,
         };
         const receiptPath = toolReceiptPath(run.id, attempt.id, call.callId);
         const bytes = encodeJsonArtifact(receipt);
         const draft = nextRun(run, this.#timestamp());
+        draft.questionBatches ??= {};
+        draft.questionBatches[batchId] = resolveQuestionBatch(queued, {
+          expectedVersion: queued.version,
+          at: draft.updatedAt,
+        });
+        applyBatchResolutionToLegacyQuestions(draft, resolution, draft.updatedAt);
         authorizeToolResult(draft.attempts[attempt.id]!, call, receipt!, receiptPath, draft.updatedAt);
         const committed = await this.#store.commit({
           expectedRevision: revision,
@@ -3806,13 +11080,16 @@ export class RunAuthorityEngine {
         });
         return {
           revision: committed.state.revision,
-          events: [{ topic: "agent.question.resumed", payload: { runId: run.id, attemptId: attempt.id, questionId } }],
+          events: [{
+            topic: "agent.question.resumed",
+            payload: { runId: run.id, attemptId: attempt.id, batchId },
+          }],
         };
       });
       return receipt!;
     } finally {
       call.signal?.removeEventListener("abort", abort);
-      this.#questionWaiters.delete(questionId);
+      this.#questionBatchWaiters.delete(batchId);
     }
   }
 
@@ -3906,14 +11183,32 @@ export class RunAuthorityEngine {
       const path = toolString(args, "path");
       const file = await paths.read(path);
       const offset = toolInteger(args, "offset", 0);
-      const maxBytes = toolInteger(args, "maxBytes", 1024 * 1024);
+      const maxBytes = toolInteger(args, "maxBytes", AGENT_FILE_READ_PAGE_BYTES);
+      if (maxBytes > AGENT_FILE_READ_PAGE_BYTES) {
+        throw new AuthorityRpcError(
+          "read_page_size",
+          `file reads are limited to ${AGENT_FILE_READ_PAGE_BYTES} bytes; search and read a targeted page instead`,
+        );
+      }
       if (offset > file.bytes.byteLength) throw new AuthorityRpcError("read_offset", "read offset exceeds file size");
+      if (
+        file.bytes.byteLength > AGENT_FILE_READ_PAGE_BYTES &&
+        offset > 0 &&
+        !await this.#hasAuthorizedTargetedRead(attempt, path, offset)
+      ) {
+        throw new AuthorityRpcError(
+          "read_search_required",
+          `blind pagination is disabled for ${path}; call koni_search_files for a known symbol or literal, then read near its returned byteOffset`,
+          { details: { path, offset, pageBytes: AGENT_FILE_READ_PAGE_BYTES } },
+        );
+      }
       const end = Math.min(file.bytes.byteLength, offset + maxBytes);
       return {
         summary: `Read ${path}`,
         value: {
           path,
           sha256: file.sha256,
+          sizeBytes: file.bytes.byteLength,
           offset,
           nextOffset: end,
           eof: end === file.bytes.byteLength,
@@ -4000,20 +11295,53 @@ export class RunAuthorityEngine {
     assignment: ReadyAssignment | undefined,
     outcome: ManagedSessionOutcome,
   ): Promise<void> {
+    if (this.#quiesceOutcomeSettlementClosed) return;
+    try {
+      await this.#reconcileProviderExposureBeforeFailure(runId, attemptId);
+    } catch {
+      // The exact accounting state is classified from the refreshed durable attempt below.
+    }
+    if (this.#quiesceOutcomeSettlementClosed) return;
     const observed = await this.#store.getRun(runId);
+    if (this.#quiesceOutcomeSettlementClosed) return;
     const observedAttempt = observed.attempts[attemptId];
     if (observedAttempt?.status === "terminal_accepted") {
+      const unresolved = providerOutcomeAccountingIssue(observedAttempt, undefined, false);
+      if (unresolved !== undefined) {
+        // An accepted authority effect cannot be rolled back or downgraded by a lost child ACK.
+        // Keep the attempt at terminal_accepted and block until its already-spent exposure can be
+        // authenticated rather than representing the effect as failed/replayable.
+        await this.#recordRunBlocker(runId, unresolved);
+        return;
+      }
+      const accepted = await this.#readTerminalOutput(
+        await this.#loadStoredLaunchSpec(observed, observedAttempt),
+        observedAttempt,
+      );
+      if (this.#quiesceOutcomeSettlementClosed) return;
       if (outcome.status === "completed") {
-        const accepted = await this.#readTerminalOutput(
-          await this.#loadStoredLaunchSpec(observed, observedAttempt),
-          observedAttempt,
-        );
         if (canonicalHash(accepted) !== canonicalHash(outcome.terminalOutput)) {
           await this.#recordRunBlocker(runId, "Pi terminal output differs from the authority-accepted artifact");
           return;
         }
       }
+      // The terminal authority transaction has durably admitted the exact output. Configured
+      // validation may still be completing its compiler action and terminal-policy settlement;
+      // finalizeAcceptedAttempt recovers that action before changing provider-attempt status.
       await this.#finalizeAcceptedAttempt(runId, attemptId, outcome);
+      return;
+    }
+    const providerAccountingIssue = observedAttempt === undefined || outcome.status !== "completed"
+      ? undefined
+      : providerOutcomeAccountingIssue(observedAttempt, outcome.usage);
+    if (providerAccountingIssue !== undefined) {
+      await this.#failLaunch(
+        runId,
+        attemptId,
+        assignment,
+        providerAccountingIssue,
+        outcome,
+      );
       return;
     }
     if (outcome.status !== "completed") {
@@ -4026,19 +11354,33 @@ export class RunAuthorityEngine {
       );
       return;
     }
+    if (new Set<RunPhase>(["pausing", "paused", "deleting", "deleted"]).has(observed.lifecycle.phase)) {
+      // Pause/delete owns the lifecycle boundary once committed. Provider settlement and an
+      // already-accepted terminal artifact remain durable, but a late child outcome must not
+      // compile that artifact into plan/ticket state after the operator stopped the run.
+      return;
+    }
     const run = observed;
     const attempt = run.attempts[attemptId];
-    if (attempt === undefined || !new Set(["queued", "running", "waiting_question"]).has(attempt.status)) return;
+    if (
+      attempt === undefined ||
+      !new Set(["queued", "running", "waiting_question"]).has(attempt.status)
+    ) return;
     if (attempt.kind === "planning") {
       const compiled = await this.#program.compilePlanningOutput({
         run,
         attemptId,
         output: outcome.terminalOutput,
       });
+      if (this.#quiesceOutcomeSettlementClosed) return;
       await this.#server.mutateInternal(async ({ revision }) => {
         const current = await this.#store.getRun(runId);
         const currentAttempt = current.attempts[attemptId];
-        if (currentAttempt === undefined || isTerminalAttempt(currentAttempt.status)) return this.#noOpInternal(revision);
+        if (
+          currentAttempt === undefined ||
+          isTerminalAttempt(currentAttempt.status) ||
+          new Set<RunPhase>(["pausing", "paused", "deleting", "deleted"]).has(current.lifecycle.phase)
+        ) return this.#noOpInternal(revision);
         const draft = nextRun(current, this.#timestamp());
         finishAttemptRecord(draft.attempts[attemptId]!, outcome, draft.updatedAt, "Plan compiled");
         draft.plan = {
@@ -4050,7 +11392,7 @@ export class RunAuthorityEngine {
         if (compiled.graphRevision !== undefined) draft.graphRevision = compiled.graphRevision;
         if (compiled.tickets !== undefined) draft.tickets = structuredClone(compiled.tickets);
         draft.activity.push(...structuredClone(compiled.activity ?? []));
-        draft.currentPipelineStageId = approvalStage(draft);
+        draft.currentPipelineStageId = await this.#stageForKinds(draft, ["approval"], "approval");
         applyLifecycle(draft, { type: "plan_submitted", atMs: this.#now().getTime() });
         const committed = await this.#store.commit({
           expectedRevision: revision,
@@ -4064,8 +11406,115 @@ export class RunAuthorityEngine {
       });
       return;
     }
+    if (attempt.kind === "lead") {
+      const compiled = await this.#compileLeadJudgment(run, attempt, outcome.terminalOutput);
+      if (this.#quiesceOutcomeSettlementClosed) return;
+      let proceed = false;
+      await this.#server.mutateInternal(async ({ revision }) => {
+        const current = await this.#store.getRun(runId);
+        const currentAttempt = current.attempts[attemptId];
+        if (
+          currentAttempt === undefined || currentAttempt.kind !== "lead" ||
+          isTerminalAttempt(currentAttempt.status) ||
+          new Set<RunPhase>(["pausing", "paused", "deleting", "deleted"]).has(current.lifecycle.phase)
+        ) return this.#noOpInternal(revision);
+        const draft = nextRun(current, this.#timestamp());
+        this.#applyLeadJudgment(current, draft, currentAttempt, compiled);
+        finishAttemptRecord(draft.attempts[attemptId]!, outcome, draft.updatedAt, compiled.summary);
+        proceed = compiled.disposition === "proceed";
+        const committed = await this.#store.commit({
+          expectedRevision: revision,
+          runWrites: [{ record: draft, expectedRevision: current.revision }],
+        });
+        return {
+          revision: committed.state.revision,
+          events: [{
+            topic: compiled.disposition === "proceed" ? "run.lead.proceeded" : "run.lead.blocked",
+            payload: { runId, attemptId, trigger: leadJudgmentTriggerForAttempt(currentAttempt) },
+          }],
+        };
+      });
+      if (proceed) await this.#tick(runId);
+      return;
+    }
+    // Ticket-level review steps intentionally use the verification persona/containment class,
+    // but they still own a scheduler assignment and must compile through ticket semantics.
+    // Only the assignment-free, run-scoped reviewer is the independent final verification pass.
+    if (attempt.kind === "verification" && assignment === undefined) {
+      if (this.#program.compileVerificationOutput === undefined) {
+        await this.#failLaunch(runId, attemptId, undefined, "profile compiler cannot compile independent review", outcome);
+        return;
+      }
+      const compiled = await this.#program.compileVerificationOutput({
+        run,
+        attemptId,
+        output: outcome.terminalOutput,
+      });
+      if (this.#quiesceOutcomeSettlementClosed) return;
+      let accepted = false;
+      await this.#server.mutateInternal(async ({ revision }) => {
+        const current = await this.#store.getRun(runId);
+        const currentAttempt = current.attempts[attemptId];
+        if (
+          currentAttempt === undefined || isTerminalAttempt(currentAttempt.status) ||
+          current.lifecycle.phase !== "verifying"
+        ) return this.#noOpInternal(revision);
+        const draft = nextRun(current, this.#timestamp());
+        finishAttemptRecord(
+          draft.attempts[attemptId]!,
+          outcome,
+          draft.updatedAt,
+          compiled.outcome.status === "completed" ? compiled.outcome.summary : compiled.outcome.blocker,
+        );
+        draft.attempts[attemptId]!.verificationAccepted = compiled.outcome.status === "completed";
+        draft.activity.push(activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "agent",
+          compiled.outcome.status === "completed"
+            ? `Independent review completed: ${compiled.outcome.summary}`
+            : `Independent review blocked the run: ${compiled.outcome.blocker}`,
+        ));
+        if (compiled.outcome.status === "failed") {
+          applyLifecycle(draft, {
+            type: "blocked",
+            atMs: this.#now().getTime(),
+            reason: compiled.outcome.blocker,
+          });
+        } else {
+          accepted = true;
+        }
+        const committed = await this.#store.commit({
+          expectedRevision: revision,
+          runWrites: [{ record: draft, expectedRevision: current.revision }],
+        });
+        return {
+          revision: committed.state.revision,
+          events: [{
+            topic: compiled.outcome.status === "completed" ? "run.review.completed" : "run.review.blocked",
+            payload: { runId, attemptId },
+          }],
+        };
+      });
+      if (accepted) await this.#tick(runId);
+      return;
+    }
     if (assignment === undefined) {
       await this.#failLaunch(runId, attemptId, undefined, "completed work attempt lost its assignment", outcome);
+      return;
+    }
+    if (assignmentUsesConfiguredValidation(run, assignment)) {
+      const invocationId = await this.#admitAssignmentOutcomeForValidation(
+        runId,
+        attemptId,
+        assignment,
+        outcome.terminalOutput,
+      );
+      if (this.#quiesceOutcomeSettlementClosed) return;
+      if (invocationId === undefined) return;
+      await this.#settleAssignmentValidation(runId, invocationId);
+      if (this.#quiesceOutcomeSettlementClosed) return;
+      await this.#finalizeAcceptedAttempt(runId, attemptId, outcome);
       return;
     }
     const compiled = await this.#program.compileAssignmentOutput({
@@ -4074,13 +11523,59 @@ export class RunAuthorityEngine {
       attemptId,
       output: outcome.terminalOutput,
     });
+    if (this.#quiesceOutcomeSettlementClosed) return;
+    const outcomeTerminalPolicy = compiled.outcome.status === "failed"
+      ? undefined
+      : await this.#prepareOutcomeTerminalPolicy(run, attempt, assignment);
+    if (this.#quiesceOutcomeSettlementClosed) return;
+    const outputBytes = encodeJsonArtifact(outcome.terminalOutput);
     let publishTicket = false;
+    let completionCommitted = false;
     let finishDisposition: ReturnType<typeof finishAssignment>["disposition"] | undefined;
     await this.#server.mutateInternal(async ({ revision }) => {
       const current = await this.#store.getRun(runId);
       const currentAttempt = current.attempts[attemptId];
-      if (currentAttempt === undefined || isTerminalAttempt(currentAttempt.status)) return this.#noOpInternal(revision);
-      const draft = nextRun(current, this.#timestamp());
+      if (
+        currentAttempt === undefined ||
+        isTerminalAttempt(currentAttempt.status) ||
+        new Set<RunPhase>(["pausing", "paused", "deleting", "deleted"]).has(current.lifecycle.phase)
+      ) return this.#noOpInternal(revision);
+      const currentAssignment = assignmentForAttempt(current, currentAttempt);
+      if (currentAssignment === undefined || canonicalHash(currentAssignment) !== canonicalHash(assignment)) {
+        throw new AuthorityRpcError("terminal_policy_assignment", "terminal assignment changed before acceptance");
+      }
+      const acceptedAt = this.#timestamp();
+      let terminalPolicyRecord: AgentTerminalPolicyRecord;
+      let terminalPolicyWrites: readonly TransactionWrite[] = [];
+      if (compiled.outcome.status === "failed") {
+        terminalPolicyRecord = failedSubmissionTerminalPolicy(acceptedAt);
+      } else {
+        if (outcomeTerminalPolicy === undefined) {
+          throw new AuthorityRpcError("terminal_policy_missing", "completed assignment lost its terminal policy");
+        }
+        const terminalCompilerReceipts = outcomeTerminalPolicy.prepared === undefined
+          ? []
+          : createDirectCompilationTerminalReceipts(
+              current,
+              currentAttempt,
+              currentAssignment,
+              rawSha256(outputBytes),
+              compiled,
+              outcomeTerminalPolicy.prepared.projection,
+            );
+        const terminalSettlement = await this.#settleAssignmentTerminalPolicy(
+          current,
+          currentAttempt,
+          currentAssignment,
+          outcomeTerminalPolicy.prepared,
+          outcomeTerminalPolicy.workspace,
+          acceptedAt,
+          terminalCompilerReceipts,
+        );
+        terminalPolicyRecord = terminalSettlement.record;
+        terminalPolicyWrites = terminalSettlement.artifactWrites;
+      }
+      const draft = nextRun(current, acceptedAt);
       if (compiled.tickets !== undefined) {
         draft.tickets = retainTicketAuthorityFields(current.tickets, structuredClone(compiled.tickets));
       }
@@ -4090,31 +11585,58 @@ export class RunAuthorityEngine {
         draft.updatedAt,
         compiled.outcome.status === "completed" ? compiled.outcome.summary : compiled.outcome.blocker,
       );
+      const mutableAttempt = draft.attempts[attemptId]!;
+      mutableAttempt.terminalOutputSha256 = rawSha256(outputBytes);
+      mutableAttempt.terminalOutputSizeBytes = outputBytes.byteLength;
+      mutableAttempt.terminalAcceptedAt = terminalPolicyRecord.acceptedAt;
+      mutableAttempt.terminalPolicy = terminalPolicyRecord;
       finishDisposition = finishAssignment(draft, assignment, compiled.outcome, draft.updatedAt).disposition;
+      const changeControlSettlement = compiled.outcome.status === "completed"
+        ? await this.#applyAssignmentChangeControl(current, draft, assignment, compiled.changeControl)
+        : { sourceHeld: false };
       const completedTicket = draft.tickets[assignment.ticketId];
-      if (compiled.outcome.status === "completed" && completedTicket?.status === "completed") {
+      if (
+        compiled.outcome.status === "completed" &&
+        !changeControlSettlement.sourceHeld &&
+        completedTicket?.status === "completed"
+      ) {
         completedTicket.status = "review";
         publishTicket = true;
       }
       if (compiled.graphHash !== undefined) draft.graphHash = compiled.graphHash;
       if (compiled.graphRevision !== undefined) draft.graphRevision = compiled.graphRevision;
+      applyAssignmentRuleAuthorityEvidence(draft, compiled.ruleAuthorityEvidence);
       draft.activity.push(...structuredClone(compiled.activity ?? []));
       const committed = await this.#store.commit({
         expectedRevision: revision,
         runWrites: [{ record: draft, expectedRevision: current.revision }],
-        ...(compiled.artifactWrites === undefined ? {} : { writes: compiled.artifactWrites }),
+        writes: [
+          ...(compiled.artifactWrites ?? []),
+          ...terminalPolicyWrites,
+          {
+            path: terminalOutputPath(current.id, currentAttempt.id),
+            bytes: outputBytes,
+            expectedSha256: null,
+          },
+        ],
       });
+      completionCommitted = true;
       return {
         revision: committed.state.revision,
         events: [{ topic: "agent.completed", payload: { runId, attemptId, ticketId: assignment.ticketId } }],
       };
     });
+    if (!completionCommitted) return;
     if (compiled.outcome.status === "failed") {
       if (finishDisposition === "review_rework") {
         await this.#tick(runId);
         return;
       }
-      await this.#recordRunBlocker(runId, compiled.outcome.blocker);
+      if (finishDisposition === "review_exhausted") {
+        await this.#recordRunBlocker(runId, compiled.outcome.blocker);
+        return;
+      }
+      await this.#tick(runId);
       return;
     }
     if (publishTicket) {
@@ -4129,6 +11651,28 @@ export class RunAuthorityEngine {
     attemptId: string,
     outcome: ManagedSessionOutcome,
   ): Promise<void> {
+    if (this.#quiesceOutcomeSettlementClosed) return;
+    let observed = await this.#store.getRun(runId);
+    if (this.#quiesceOutcomeSettlementClosed) return;
+    const observedAttempt = observed.attempts[attemptId];
+    const assignment = observedAttempt === undefined ? undefined : assignmentForAttempt(observed, observedAttempt);
+    if (assignment !== undefined && assignmentUsesConfiguredValidation(observed, assignment)) {
+      const action = findRunActionAtBoundary(observed, "assignment_validation", {
+        ticketId: assignment.ticketId,
+        stepId: assignment.stepId,
+        attemptId,
+      });
+      if (action === undefined) {
+        throw new AuthorityRpcError(
+          "action_validation_missing",
+          "behavior-backed terminal attempt has no durable configured validation action",
+        );
+      }
+      if (action.settledAt === undefined) await this.#settleAssignmentValidation(runId, action.invocationId);
+      if (this.#quiesceOutcomeSettlementClosed) return;
+      observed = await this.#store.getRun(runId);
+      if (this.#quiesceOutcomeSettlementClosed) return;
+    }
     let shouldTick = false;
     await this.#server.mutateInternal(async ({ revision }) => {
       const run = await this.#store.getRun(runId);
@@ -4136,12 +11680,37 @@ export class RunAuthorityEngine {
       if (attempt === undefined || attempt.status !== "terminal_accepted") {
         return this.#noOpInternal(revision);
       }
+      if (assignmentForAttempt(run, attempt) !== undefined && attempt.terminalPolicy === undefined) {
+        // Output admission is not semantic completion. A crash-forward configured action must
+        // attach its compiler-authenticated terminal policy before this provider attempt closes.
+        return this.#noOpInternal(revision);
+      }
       const draft = nextRun(run, this.#timestamp());
       const mutable = draft.attempts[attemptId]!;
       mutable.status = "completed";
       mutable.endedAt = draft.updatedAt;
-      applyUsage(mutable, outcome.usage);
-      shouldTick = draft.lifecycle.phase === "executing";
+      if (mutable.authorityProviderRequests === undefined) applyUsage(mutable, outcome.usage);
+      const exhaustedReview = assignment === undefined
+        ? undefined
+        : blockedReviewRetryCandidate(draft.tickets[assignment.ticketId]!);
+      if (
+        exhaustedReview?.failedReviewAttemptId === attemptId &&
+        new Set<RunPhase>(["executing", "verifying"]).has(draft.lifecycle.phase)
+      ) {
+        applyLifecycle(draft, {
+          type: "blocked",
+          atMs: this.#now().getTime(),
+          reason: exhaustedReview.blocker,
+        });
+        draft.activity.push(activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "compiler",
+          `Independent review exhausted automatic rework: ${exhaustedReview.ticketTitle}`,
+          exhaustedReview.ticketId,
+        ));
+      }
+      shouldTick = draft.lifecycle.phase === "executing" || draft.lifecycle.phase === "verifying";
       const committed = await this.#store.commit({
         expectedRevision: revision,
         runWrites: [{ record: draft, expectedRevision: run.revision }],
@@ -4161,26 +11730,106 @@ export class RunAuthorityEngine {
     error: string,
     outcome?: ManagedSessionOutcome,
   ): Promise<void> {
+    if (this.#quiesceOutcomeSettlementClosed) return;
+    try {
+      await this.#reconcileProviderExposureBeforeFailure(runId, attemptId);
+    } catch {
+      // Classification below retains the unresolved worst-case hold. A malformed or absent
+      // canonical assistant response must not leave a dead process represented as running.
+    }
+    if (this.#quiesceOutcomeSettlementClosed) return;
     await this.#server.mutateInternal(async ({ revision }) => {
       const run = await this.#store.getRun(runId);
       const attempt = run.attempts[attemptId];
       if (attempt === undefined || isTerminalAttempt(attempt.status)) return this.#noOpInternal(revision);
       const draft = nextRun(run, this.#timestamp());
       const mutable = draft.attempts[attemptId]!;
+      const accountingIssue = providerOutcomeAccountingIssue(mutable, outcome?.usage, false);
       mutable.status = outcome?.status === "aborted" ? "aborted" : "failed";
-      mutable.error = error;
+      mutable.error = accountingIssue ?? error;
+      if (outcome?.status === "failed" && outcome.code !== undefined) {
+        mutable.failureCode = outcome.code;
+      } else {
+        delete mutable.failureCode;
+      }
       mutable.endedAt = draft.updatedAt;
-      mutable.terminalSummary = error;
-      if (outcome !== undefined) applyUsage(mutable, outcome.usage);
+      mutable.terminalSummary = accountingIssue === undefined
+        ? error
+        : "Provider accounting requires reconciliation";
+      if (outcome !== undefined && mutable.authorityProviderRequests === undefined) {
+        applyUsage(mutable, outcome.usage);
+      }
       const lifecycleCancellation = new Set(["pausing", "paused", "deleting", "deleted"]).has(
         draft.lifecycle.phase,
       );
       if (assignment !== undefined && lifecycleCancellation) {
         resetAssignmentAfterInterruption(draft, assignment, draft.updatedAt);
       } else if (assignment !== undefined) {
-        finishAssignment(draft, assignment, { status: "failed", blocker: error }, draft.updatedAt);
-      } else if (draft.lifecycle.phase === "planning") {
+        finishAssignment(
+          draft,
+          assignment,
+          {
+            status: "failed",
+            blocker: accountingIssue ?? error,
+            failureKind: "infrastructure",
+          },
+          draft.updatedAt,
+        );
+        if (
+          accountingIssue === undefined &&
+          new Set<RunPhase>(["executing", "verifying"]).has(draft.lifecycle.phase)
+        ) {
+          applyLifecycle(draft, {
+            type: "blocked",
+            atMs: this.#now().getTime(),
+            reason: error,
+          });
+        }
+      } else if (draft.lifecycle.phase === "planning" && accountingIssue === undefined) {
         applyLifecycle(draft, { type: "blocked", atMs: this.#now().getTime(), reason: error });
+      } else if (attempt.kind === "lead" && draft.lifecycle.phase === "executing" && accountingIssue === undefined) {
+        applyLifecycle(draft, { type: "blocked", atMs: this.#now().getTime(), reason: error });
+      } else if (attempt.kind === "verification" && draft.lifecycle.phase === "verifying" && accountingIssue === undefined) {
+        applyLifecycle(draft, { type: "blocked", atMs: this.#now().getTime(), reason: error });
+      }
+      if (accountingIssue !== undefined) {
+        if (!new Set(["pausing", "paused", "deleting", "deleted"]).has(draft.lifecycle.phase)) {
+          if (new Set([
+            "draft",
+            "planning",
+            "awaiting_approval",
+            "approving",
+            "executing",
+            "verifying",
+            "merge_ready",
+            "merging",
+          ]).has(draft.lifecycle.phase)) {
+            applyLifecycle(draft, {
+              type: "blocked",
+              atMs: this.#now().getTime(),
+              reason: accountingIssue,
+            });
+          } else {
+            draft.lifecycle.blocker = accountingIssue;
+          }
+        }
+        draft.activity.push(activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "compiler",
+          accountingIssue,
+        ));
+        const committed = await this.#store.commit({
+          expectedRevision: revision,
+          runWrites: [{ record: draft, expectedRevision: run.revision }],
+        });
+        return {
+          revision: committed.state.revision,
+          events: [{
+            topic: "agent.provider.blocked",
+            payload: { runId, attemptId, error: accountingIssue },
+          }],
+        };
       }
       const committed = await this.#store.commit({
         expectedRevision: revision,
@@ -4191,33 +11840,266 @@ export class RunAuthorityEngine {
         events: [{ topic: "agent.failed", payload: { runId, attemptId, error } }],
       };
     });
+    if (assignment !== undefined) {
+      const current = await this.#store.getRun(runId);
+      if (current.lifecycle.phase === "executing") await this.#tick(runId);
+    }
   }
 
-  async #tick(runId: string): Promise<void> {
+  async #authorizeLeadLaunch(
+    run: RunRecord,
+    advancement: RunAdvancementToken,
+    trigger: LeadJudgmentTrigger,
+  ): Promise<LeadActionAdmission | undefined> {
+    const behavior = run.behavior;
+    if (behavior === undefined) return undefined;
+    const stageId = behavior.runType.pipeline.find((stage) => stage.kind === "orchestration")?.id;
+    if (stageId === undefined || run.currentPipelineStageId !== stageId || !this.#matchesAdvancement(run, advancement)) {
+      throw new AuthorityRpcError("lead_action_stage", "Lead action is outside deterministic orchestration");
+    }
+    const productSha256 = leadActionProductSha256(run, trigger);
+    const stepId = leadJudgmentStepId(trigger);
+    let action = Object.values(run.actionExecutions ?? {})
+      .filter((candidate) => candidate.boundary.kind === "lead_launch" &&
+        candidate.boundary.stageId === stageId && candidate.boundary.stepId === stepId &&
+        candidate.boundary.productSha256 === productSha256 && candidate.settledAt === undefined &&
+        candidate.expectedRunRevision === run.revision && candidate.boundary.generation === run.generation)
+      .sort((left, right) => right.boundary.admittedRunRevision - left.boundary.admittedRunRevision)[0];
+    if (action === undefined) {
+      const reservedAttemptId = this.#createId("attempt");
+      let admittedId: string | undefined;
+      await this.#server.mutateInternal(async ({ revision }) => {
+        const current = await this.#store.getRun(run.id);
+        if (!this.#matchesAdvancement(current, advancement) || current.currentPipelineStageId !== stageId ||
+            leadActionProductSha256(current, trigger) !== productSha256) {
+          return this.#noOpInternal(revision);
+        }
+        const existing = Object.values(current.actionExecutions ?? {})
+          .find((candidate) => candidate.boundary.kind === "lead_launch" &&
+            candidate.boundary.stageId === stageId && candidate.boundary.stepId === stepId &&
+            candidate.boundary.productSha256 === productSha256 && candidate.settledAt === undefined &&
+            candidate.expectedRunRevision === current.revision && candidate.boundary.generation === current.generation);
+        if (existing !== undefined) {
+          admittedId = existing.invocationId;
+          return this.#noOpInternal(revision);
+        }
+        const selected = selectedRunAction(current, current.behavior!.runType.actionSelectors.lead);
+        if (selected.actor !== "compiler") {
+          throw new AuthorityRpcError("lead_action_actor", "Lead launch action must be compiler-owned");
+        }
+        const execution = prepareRunActionExecution(current, {
+          kind: "lead_launch",
+          stageId,
+          selector: current.behavior!.runType.actionSelectors.lead,
+          checkout: selected.checkout,
+          ticketId: "run-orchestration",
+          stepId,
+          attemptId: reservedAttemptId,
+          productSha256,
+          values: { leadTrigger: trigger },
+          at: this.#timestamp(),
+        });
+        const draft = nextRun(current, execution.createdAt);
+        const archiveWrites = admitRunActionExecution(draft, execution);
+        admittedId = execution.invocationId;
+        const committed = await this.#store.commit({
+          expectedRevision: revision,
+          runWrites: [{ record: draft, expectedRevision: current.revision }],
+          ...(archiveWrites.length === 0 ? {} : { writes: archiveWrites }),
+        });
+        return {
+          revision: committed.state.revision,
+          events: [{ topic: "run.action.lead.admitted", payload: { runId: run.id, invocationId: execution.invocationId, trigger } }],
+        };
+      });
+      if (admittedId === undefined) return undefined;
+      action = requiredRunActionExecution(await this.#store.getRun(run.id), admittedId);
+    }
+    if (!isTerminalActionJournal(action.journal)) await this.#executeRunAction(run.id, action.invocationId);
+    const completed = requiredRunActionExecution(await this.#store.getRun(run.id), action.invocationId);
+    if (completed.journal.status !== "completed" || completed.boundary.attemptId === undefined) {
+      throw new AuthorityRpcError(
+        "lead_action_failed",
+        `configured Lead launch action did not complete (${completed.journal.status})`,
+      );
+    }
+    return { invocationId: completed.invocationId, attemptId: completed.boundary.attemptId };
+  }
+
+  async #ensureLeadJudgment(
+    run: RunRecord,
+    advancement: RunAdvancementToken,
+    trigger: LeadJudgmentTrigger,
+  ): Promise<"proceed" | "waiting" | "blocked"> {
+    const behavior = run.behavior;
+    // Pre-Lead behavior snapshots keep their exact historical execution semantics. New
+    // admissions always compile `leadJudgment`; an upgrade must never retroactively insert a
+    // provider boundary into an already-admitted run whose hash predates that field.
+    if (behavior === undefined || !("leadJudgment" in behavior.runType)) return "proceed";
+    if (!behavior.runType.leadJudgment.triggers.includes(trigger)) return "proceed";
+    const prior = run.leadJudgments ?? [];
+    const accepted = prior.find((judgment) => judgment.trigger === trigger);
+    if (accepted !== undefined) return accepted.disposition;
+    if (!shouldIssueLeadJudgment(behavior.runType, trigger, prior.map((judgment) => judgment.trigger))) {
+      throw new AuthorityRpcError("lead_replay", `Lead judgment trigger ${trigger} cannot be issued again`);
+    }
+    if (this.#program.compileLeadJudgmentOutput === undefined) {
+      await this.#recordRunBlocker(
+        run.id,
+        "Pinned run behavior requires a Lead judgment, but its compiler cannot validate the result",
+        advancement,
+      );
+      return "blocked";
+    }
+    if (hasLiveAttempt(run, "lead")) return "waiting";
+    const admission = await this.#authorizeLeadLaunch(run, advancement, trigger);
+    if (admission === undefined) return "waiting";
+    const authorized = await this.#store.getRun(run.id);
+    await this.#launchAttempt(authorized, "lead", undefined, advancement, trigger, admission);
+    return "waiting";
+  }
+
+  /**
+   * Reconstitute the scheduler's compiler-owned execution authority from the exact catalog pinned
+   * by this run and the authenticated control identities stored on each nonterminal ticket.
+   * Historical runs with no execution-policy bindings retain their legacy scheduler path; a
+   * partially bound run is rejected instead of silently dropping the stronger admission rules.
+   */
+  async #schedulerExecutionAuthority(
+    run: RunRecord,
+  ): Promise<SchedulerExecutionAuthority | undefined> {
+    const nonterminal = Object.values(run.tickets).filter((ticket) =>
+      ticket.status !== "completed" && ticket.status !== "failed" && ticket.status !== "cancelled");
+    const bound = nonterminal.filter((ticket) => ticket.executionPolicyBinding !== undefined);
+    if (bound.length === 0) return undefined;
+    if (bound.length !== nonterminal.length || this.#program.projectExecutionSemanticCatalog === undefined) {
+      throw new AuthorityRpcError(
+        "scheduler_execution_authority",
+        "run mixes compiler-bound tickets with tickets that lack exact execution-policy authority",
+      );
+    }
+    const catalog = await this.#program.projectExecutionSemanticCatalog(run);
+    const tickets: SchedulerExecutionAuthority["tickets"] = Object.fromEntries(
+      Object.values(run.tickets)
+        .filter((ticket) => ticket.executionPolicyBinding !== undefined)
+        .map((ticket) => {
+        const control = ticket.executionControl;
+        return [ticket.id, {
+          binding: structuredClone(ticket.executionPolicyBinding!),
+          ...(control?.changeControlScopeNodeIds === undefined ? {} : {
+            changeControlScopeNodeIds: [...control.changeControlScopeNodeIds],
+          }),
+          ...(control?.proposalApprovalSha256 === undefined ? {} : {
+            proposalApprovalSha256: control.proposalApprovalSha256,
+          }),
+          ...(control?.sourceProposalTicketId === undefined ? {} : {
+            sourceProposalTicketId: control.sourceProposalTicketId,
+          }),
+          ...(control?.approvedApplicationSha256 === undefined ? {} : {
+            approvedApplicationSha256: control.approvedApplicationSha256,
+          }),
+          ...(control?.terminalRecovery === undefined ? {} : {
+            terminalRecovery: {
+              sourceTicketId: control.terminalRecovery.sourceTicketId,
+              failureBindingSha256s: [...control.terminalRecovery.failureBindingSha256s],
+            },
+          }),
+        }];
+      }),
+    );
+    return { catalog, tickets };
+  }
+
+  async #tick(runId: string, expected?: RunAdvancementToken): Promise<void> {
+    if (this.#stopRequested) return;
     let run = await this.#store.getRun(runId);
+    if (expected !== undefined && !this.#matchesAdvancement(run, expected)) return;
     if (run.lifecycle.phase !== "executing" && run.lifecycle.phase !== "verifying") return;
+    // Compiler action primitives may durably stage semantic ticket/graph state before the Pi
+    // provider ACK closes the exact attempt. That state is recoverable, but it is not yet legal
+    // scheduler, change-control, or publication input. The attempt finalizer owns the one tick
+    // that makes the settled result consumable.
+    if (hasUnfinalizedAcceptedAssignment(run)) return;
     if (run.lifecycle.phase === "verifying") {
-      await this.#verify(runId);
+      const advancement = this.#advancementToken(run, "verifying")!;
+      if (run.behavior !== undefined) {
+        await this.#tickBehaviorPostOrchestration(runId, advancement);
+        return;
+      }
+      const modelReviewRequired = await this.#program.requiresVerificationAttempt?.(run) ?? false;
+      if (modelReviewRequired) {
+        if (this.#program.compileVerificationOutput === undefined) {
+          await this.#recordRunBlocker(
+            runId,
+            "Pinned run type requires independent review, but its compiler cannot compile the result",
+            advancement,
+          );
+          return;
+        }
+        if (hasLiveAttempt(run, "verification")) return;
+        const reviewed = Object.values(run.attempts).some((attempt) =>
+          attempt.kind === "verification" && attempt.status === "completed" &&
+          attempt.verificationAccepted === true &&
+          attempt.reviewedRunOid !== undefined && attempt.reviewedRunOid === run.git.run.headOid &&
+          attempt.reviewedGraphHash !== undefined && attempt.reviewedGraphHash === run.graphHash
+        );
+        if (!reviewed) {
+          await this.#launchAttempt(run, "verification", undefined, advancement);
+          return;
+        }
+      }
+      await this.#verify(runId, advancement);
       return;
     }
+    const advancement = this.#advancementToken(run, "executing")!;
+    if (await this.#materializeApprovedProposal(runId, advancement)) {
+      await this.#tick(runId, advancement);
+      return;
+    }
+    if (await this.#releaseHeldSource(runId, advancement)) {
+      await this.#tick(runId, advancement);
+      return;
+    }
+    if (await this.#releaseResolvedTerminalSource(runId, advancement)) {
+      await this.#tick(runId, advancement);
+      return;
+    }
+    if (await this.#reconcileTerminalFailure(runId, advancement)) {
+      await this.#tick(runId, advancement);
+      return;
+    }
+    run = await this.#store.getRun(runId);
+    if (!this.#matchesAdvancement(run, advancement)) return;
+    const entryJudgment = await this.#ensureLeadJudgment(run, advancement, "orchestration_entry");
+    if (entryJudgment !== "proceed") return;
     const awaitingPublication = Object.values(run.tickets)
       .filter((ticket) => ticket.status === "review")
       .sort((left, right) => left.priority - right.priority || left.id.localeCompare(right.id))[0];
     if (awaitingPublication !== undefined) {
-      await this.#integrateTicket(runId, awaitingPublication.id);
+      await this.#integrateTicket(runId, awaitingPublication.id, advancement);
       return;
     }
     const maxParallel = run.executionConfig?.maxParallel ?? 1;
-    const projection = deriveReadyAssignments(run, maxParallel);
+    let executionAuthority = await this.#schedulerExecutionAuthority(run);
+    const projection = deriveReadyAssignments(run, maxParallel, executionAuthority);
     for (const assignment of projection.ready) {
-      await this.#ensureTicketCycle(runId, assignment.ticketId);
+      if (!(await this.#advancementIsCurrent(runId, advancement))) return;
+      try {
+        await this.#ensureTicketCycle(runId, assignment.ticketId, advancement);
+      } catch (error) {
+        if (error instanceof RunAdvancementStoppedError) return;
+        throw error;
+      }
       run = await this.#store.getRun(runId);
-      const stillReady = deriveReadyAssignments(run, maxParallel).ready.find(
+      if (!this.#matchesAdvancement(run, advancement)) return;
+      executionAuthority = await this.#schedulerExecutionAuthority(run);
+      const stillReady = deriveReadyAssignments(run, maxParallel, executionAuthority).ready.find(
         (candidate) => candidate.ticketId === assignment.ticketId && candidate.stepId === assignment.stepId,
       );
-      if (stillReady !== undefined) await this.#launchAssignment(run, stillReady);
+      if (stillReady !== undefined) await this.#launchAssignment(run, stillReady, advancement);
     }
     run = await this.#store.getRun(runId);
+    if (!this.#matchesAdvancement(run, advancement)) return;
     if (
       Object.keys(run.tickets).length > 0 &&
       Object.values(run.tickets).every((ticket) => ticket.status === "completed") &&
@@ -4227,9 +12109,11 @@ export class RunAuthorityEngine {
     ) {
       await this.#server.mutateInternal(async ({ revision }) => {
         const current = await this.#store.getRun(runId);
-        if (current.lifecycle.phase !== "executing") return this.#noOpInternal(revision);
+        if (!this.#matchesAdvancement(current, advancement)) return this.#noOpInternal(revision);
         const draft = nextRun(current, this.#timestamp());
-        draft.currentPipelineStageId = verificationStage(draft);
+        draft.currentPipelineStageId = current.behavior === undefined
+          ? await this.#stageForKinds(draft, ["checkpoint"], "verification checkpoint")
+          : this.#behaviorPostOrchestrationPlan(current).targetSync.id;
         applyLifecycle(draft, { type: "verification_started", atMs: this.#now().getTime() });
         const committed = await this.#store.commit({
           expectedRevision: revision,
@@ -4237,13 +12121,45 @@ export class RunAuthorityEngine {
         });
         return { revision: committed.state.revision };
       });
-      await this.#verify(runId);
+      const verifying = await this.#store.getRun(runId);
+      if (this.#advancementToken(verifying, "verifying") !== undefined) await this.#tick(runId);
+      return;
+    }
+
+    const remaining = Object.keys(run.tickets).length === 0 ||
+      Object.values(run.tickets).some((ticket) => ticket.status !== "completed");
+    const live = Object.values(run.attempts).some((attempt) =>
+      new Set<AttemptStatus>(["queued", "running", "waiting_question", "terminal_accepted"]).has(attempt.status)
+    );
+    executionAuthority = await this.#schedulerExecutionAuthority(run);
+    const stalled = deriveReadyAssignments(run, maxParallel, executionAuthority);
+    if (remaining && !live && stalled.ready.length === 0) {
+      const deadlockJudgment = await this.#ensureLeadJudgment(run, advancement, "compiler_deadlock");
+      if (deadlockJudgment !== "proceed") return;
+      const configuredLeadReview = run.behavior?.runType.leadJudgment.triggers.includes("compiler_deadlock") === true;
+      const summary = configuredLeadReview
+        ? run.leadJudgments?.find((judgment) => judgment.trigger === "compiler_deadlock")?.summary
+        : undefined;
+      await this.#recordRunBlocker(
+        runId,
+        `Deterministic ticket orchestration remains deadlocked${
+          configuredLeadReview ? " after bounded Lead review" : ""
+        }${
+          summary === undefined ? "" : `: ${summary}`
+        }`,
+        advancement,
+      );
     }
   }
 
   /** Reserve, recover, and materialize one durable ticket checkout before compiling an attempt. */
-  async #ensureTicketCycle(runId: string, ticketId: string): Promise<void> {
+  async #ensureTicketCycle(
+    runId: string,
+    ticketId: string,
+    advancement: RunAdvancementToken,
+  ): Promise<void> {
     let run = await this.#store.getRun(runId);
+    if (!this.#matchesAdvancement(run, advancement)) throw new RunAdvancementStoppedError();
     const ticket = run.tickets[ticketId];
     if (ticket === undefined) throw new AuthorityRpcError("ticket_missing", `ticket does not exist: ${ticketId}`);
     let cycleId = ticket.gitCycleId;
@@ -4260,6 +12176,7 @@ export class RunAuthorityEngine {
       const allocated = `cycle-${randomUUID()}`;
       await this.#server.mutateInternal(async ({ revision }) => {
         run = await this.#store.getRun(runId);
+        if (!this.#matchesAdvancement(run, advancement)) throw new RunAdvancementStoppedError();
         const current = run.tickets[ticketId];
         if (current === undefined) throw new AuthorityRpcError("ticket_missing", `ticket does not exist: ${ticketId}`);
         const existing = current.gitCycleId;
@@ -4285,19 +12202,38 @@ export class RunAuthorityEngine {
     }
     if (cycleId === undefined) throw new AuthorityRpcError("git_cycle", "ticket Git cycle was not reserved");
     run = await this.#store.getRun(runId);
+    if (!this.#matchesAdvancement(run, advancement)) throw new RunAdvancementStoppedError();
     if (run.git.ticketCycles[cycleId] === undefined) {
       await this.#withGit(runId, async () => {
         const current = await this.#store.getRun(runId);
+        if (!this.#matchesAdvancement(current, advancement)) throw new RunAdvancementStoppedError();
         if (current.git.ticketCycles[cycleId!] !== undefined) return;
+        const currentTicket = current.tickets[ticketId];
+        if (currentTicket === undefined) throw new AuthorityRpcError("ticket_missing", `ticket does not exist: ${ticketId}`);
+        await this.#lifecycleRacePoint("before_ticket_cycle_open", runId, ticketId);
         await this.#git.openTicketCycle(
           current.git,
-          { ticketId, cycleId: cycleId! },
-          this.#gitJournal(runId),
+          {
+            ticketId,
+            cycleId: cycleId!,
+            ...(current.git.policy === undefined
+              ? {}
+              : {
+                  templateContext: createGitTicketTemplateContext({
+                    id: currentTicket.id,
+                    cycleId: cycleId!,
+                    operation: currentTicket.operationId,
+                    title: currentTicket.title,
+                  }),
+                }),
+          },
+          this.#gitJournal(runId, advancement),
         );
       });
     }
     await this.#server.mutateInternal(async ({ revision }) => {
       run = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(run, advancement)) return this.#noOpInternal(revision);
       const current = run.tickets[ticketId];
       const cycle = run.git.ticketCycles[cycleId!];
       if (current === undefined || cycle === undefined || cycle.ticketId !== ticketId) {
@@ -4322,13 +12258,26 @@ export class RunAuthorityEngine {
   }
 
   /** Scope-check, checkpoint, and compose one completed semantic ticket into the run branch. */
-  async #integrateTicket(runId: string, ticketId: string): Promise<void> {
-    await this.#withGit(runId, () => this.#integrateTicketLocked(runId, ticketId));
+  async #integrateTicket(
+    runId: string,
+    ticketId: string,
+    expected?: RunAdvancementToken,
+  ): Promise<void> {
+    const run = await this.#store.getRun(runId);
+    const advancement = expected ?? this.#advancementToken(run, "executing");
+    if (advancement === undefined || !this.#matchesAdvancement(run, advancement) ||
+        hasUnfinalizedAcceptedAssignment(run)) return;
+    await this.#withGit(runId, () => this.#integrateTicketLocked(runId, ticketId, advancement));
   }
 
-  async #integrateTicketLocked(runId: string, ticketId: string): Promise<void> {
+  async #integrateTicketLocked(
+    runId: string,
+    ticketId: string,
+    advancement: RunAdvancementToken,
+  ): Promise<void> {
     try {
       let run = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(run, advancement) || hasUnfinalizedAcceptedAssignment(run)) return;
       const ticket = run.tickets[ticketId];
       if (ticket === undefined || ticket.status !== "review") return;
       const cycleId = ticket.gitCycleId;
@@ -4343,24 +12292,30 @@ export class RunAuthorityEngine {
           scope,
           subject: `Koni ticket: ${ticket.title}`,
           body: `Run ${run.id}\nTicket ${ticket.id}`,
-        }, this.#gitJournal(runId));
-        await this.#persistGitLifecycle(runId, checkpointed);
+        }, this.#gitJournal(runId, advancement));
+        await this.#persistGitLifecycle(runId, checkpointed, advancement);
+        await this.#lifecycleRacePoint("after_ticket_checkpoint", runId, ticketId);
+        if (!(await this.#advancementIsCurrent(runId, advancement))) return;
         run = await this.#store.getRun(runId);
+        const reviewId = ticketReviewAttemptId(run, ticketId);
         const publication = await this.#git.publishTicketCandidate(run.git, {
           cycleId,
           scope,
           subject: `Integrate Koni ticket: ${ticket.title}`,
           body: `Run ${run.id}\nTicket ${ticket.id}`,
-        }, this.#gitJournal(runId));
-        await this.#persistGitLifecycle(runId, publication.lifecycle);
+          ...(reviewId === undefined ? {} : { reviewId }),
+        }, this.#gitJournal(runId, advancement));
+        await this.#persistGitLifecycle(runId, publication.lifecycle, advancement);
+        if (!(await this.#advancementIsCurrent(runId, advancement))) return;
         if (publication.status === "conflict") {
           await this.#createTicketIntegrationWork(
             runId,
             ticketId,
             publication.conflict.message,
             publication.conflict.candidateOid,
+            advancement,
           );
-          this.#background(() => this.#tick(runId), runId);
+          this.#background(() => this.#tick(runId, advancement), runId);
           return;
         }
         run = await this.#store.getRun(runId);
@@ -4373,25 +12328,60 @@ export class RunAuthorityEngine {
           ticketId,
           cycle.blocker ?? "Ticket candidate conflicts with the current run tree",
           cycle.ticketHeadOid,
+          advancement,
         );
-        this.#background(() => this.#tick(runId), runId);
+        this.#background(() => this.#tick(runId, advancement), runId);
         return;
       }
       if (cycle.status !== "integrated" && cycle.status !== "retired") {
         throw new AuthorityRpcError("git_cycle", `ticket cycle cannot settle from ${cycle.status}`);
       }
       if (cycle.status === "integrated") {
-        const retired = await this.#git.retireTicketCycle(run.git, cycleId, this.#gitJournal(runId));
-        await this.#persistGitLifecycle(runId, retired);
+        if (!(await this.#advancementIsCurrent(runId, advancement))) return;
+        const retired = await this.#git.retireTicketCycle(
+          run.git,
+          cycleId,
+          this.#gitJournal(runId, advancement),
+        );
+        await this.#persistGitLifecycle(runId, retired, advancement);
       }
       await this.#server.mutateInternal(async ({ revision }) => {
         const current = await this.#store.getRun(runId);
+        if (!this.#matchesAdvancement(current, advancement)) return this.#noOpInternal(revision);
         const currentTicket = current.tickets[ticketId];
         if (currentTicket === undefined || currentTicket.status !== "review") {
           return this.#noOpInternal(revision);
         }
         const draft = nextRun(current, this.#timestamp());
         const mutable = draft.tickets[ticketId]!;
+        if (mutable.executionControl?.terminalRecovery !== undefined) {
+          const terminalStep = mutable.steps.at(-1);
+          const terminalAttemptId = terminalStep?.attemptIds.at(-1);
+          const terminalAction = terminalStep === undefined || terminalAttemptId === undefined
+            ? undefined
+            : findRunActionAtBoundary(current, "assignment_validation", {
+                ticketId,
+                stepId: terminalStep.id,
+                attemptId: terminalAttemptId,
+              });
+          const terminalProof = terminalAction === undefined
+            ? undefined
+            : createTerminalSuccessSettlementProof(current, terminalAction);
+          const indexedProof = terminalProof === undefined
+            ? undefined
+            : current.terminalSuccessProofs?.[terminalProof.sha256];
+          if (terminalProof === undefined || indexedProof === undefined ||
+              canonicalHash(indexedProof) !== canonicalHash(terminalProof)) {
+            throw new AuthorityRpcError(
+              "terminal_resolver_settlement",
+              "completed terminal resolver lacks its exact configured validation proof",
+            );
+          }
+          // A successful configured action records this proof before provider finalization, but
+          // resolver finality is not published until its reviewed Git candidate integrates.
+          // Attach the exact durable proof in the same CAS that makes the resolver terminal.
+          mutable.executionControl.terminalResolverTerminalProof = terminalProof;
+        }
         mutable.status = "completed";
         mutable.blocker = undefined;
         mutable.updatedAt = draft.updatedAt;
@@ -4418,9 +12408,14 @@ export class RunAuthorityEngine {
           events: [{ topic: "ticket.integrated", payload: { runId, ticketId } }],
         };
       });
-      this.#background(() => this.#tick(runId), runId);
+      this.#background(() => this.#tick(runId, advancement), runId);
     } catch (error) {
-      await this.#recordRunBlocker(runId, `Ticket publication failed: ${errorMessage(error)}`);
+      if (error instanceof RunAdvancementStoppedError) return;
+      await this.#recordRunBlocker(
+        runId,
+        `Ticket publication failed: ${errorMessage(error)}`,
+        advancement,
+      );
     }
   }
 
@@ -4429,8 +12424,10 @@ export class RunAuthorityEngine {
     conflictedTicketId: string,
     conflictReport: string,
     candidateOid: string,
+    advancement: RunAdvancementToken,
   ): Promise<void> {
     const run = await this.#store.getRun(runId);
+    if (!this.#matchesAdvancement(run, advancement)) return;
     const existing = Object.values(run.tickets).find(
       (ticket) => ticket.integrationForTicketId === conflictedTicketId && ticket.status !== "cancelled",
     );
@@ -4441,6 +12438,7 @@ export class RunAuthorityEngine {
     });
     await this.#server.mutateInternal(async ({ revision }) => {
       const current = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(current, advancement)) return this.#noOpInternal(revision);
       const source = current.tickets[conflictedTicketId];
       if (source === undefined) throw new AuthorityRpcError("ticket_missing", "conflicted ticket disappeared");
       if (Object.values(current.tickets).some(
@@ -4474,9 +12472,16 @@ export class RunAuthorityEngine {
   }
 
   /** Persist lifecycle-only projections for deterministic/no-op Git operations with no intent. */
-  async #persistGitLifecycle(runId: string, lifecycle: RunGitLifecycleRecord): Promise<void> {
+  async #persistGitLifecycle(
+    runId: string,
+    lifecycle: RunGitLifecycleRecord,
+    advancement?: RunAdvancementToken,
+  ): Promise<void> {
     await this.#server.mutateInternal(async ({ revision }) => {
       const run = await this.#store.getRun(runId);
+      if (advancement !== undefined && !this.#matchesAdvancement(run, advancement)) {
+        return this.#noOpInternal(revision);
+      }
       if (canonicalJsonHash(run.git) === canonicalJsonHash(lifecycle)) return this.#noOpInternal(revision);
       if (
         lifecycle.runId !== run.id ||
@@ -4493,36 +12498,620 @@ export class RunAuthorityEngine {
     });
   }
 
-  async #verify(runId: string): Promise<void> {
-    const run = await this.#store.getRun(runId);
-    if (run.lifecycle.phase !== "verifying") return;
-    const verification = await this.#program.verifyRun(run);
-    if (!verification.ok) {
-      await this.#recordRunBlocker(runId, verification.reason ?? "Verification failed");
+  #behaviorPostOrchestrationPlan(run: RunRecord): BehaviorPostOrchestrationPlan {
+    const behavior = run.behavior;
+    if (behavior === undefined) {
+      throw new AuthorityRpcError("post_orchestration_behavior", "run has no pinned executable behavior");
+    }
+    const pipeline = [...behavior.runType.pipeline];
+    if (
+      pipeline.length !== run.pipelineStageIds.length ||
+      pipeline.some((stage, index) => stage.id !== run.pipelineStageIds[index])
+    ) {
+      throw new AuthorityRpcError(
+        "post_orchestration_pipeline",
+        "pinned behavior pipeline differs from the durable run pipeline",
+      );
+    }
+    const orchestration = pipeline.filter((stage) => stage.kind === "orchestration");
+    if (orchestration.length !== 1) {
+      throw new AuthorityRpcError(
+        "post_orchestration_pipeline",
+        "behavior-backed run must contain exactly one orchestration stage",
+      );
+    }
+    const suffix = pipeline.slice(pipeline.indexOf(orchestration[0]!) + 1);
+    const expectedWithoutReview = ["target_sync", "checkpoint", "action", "promotion"];
+    const expectedWithReview = ["target_sync", "checkpoint", "agent_review", "action", "promotion"];
+    const kinds = suffix.map((stage) => stage.kind);
+    const expected = kinds.includes("agent_review") ? expectedWithReview : expectedWithoutReview;
+    if (kinds.length !== expected.length || kinds.some((kind, index) => kind !== expected[index])) {
+      throw new AuthorityRpcError(
+        "post_orchestration_pipeline",
+        "post-orchestration stages must be target_sync, checkpoint, optional single agent_review, automatic report action, then promotion",
+      );
+    }
+    const targetSync = suffix[0]!;
+    const checkpoint = suffix[1]!;
+    const review = expected.length === 5 ? suffix[2] : undefined;
+    const report = suffix[expected.length - 2]!;
+    const promotion = suffix[expected.length - 1]!;
+    if (checkpoint.config.kind !== "checkpoint" || checkpoint.config.checkpoint !== "verification") {
+      throw new AuthorityRpcError(
+        "post_orchestration_checkpoint",
+        "post-orchestration checkpoint must compile the verification checkpoint",
+      );
+    }
+    if (review !== undefined && review.config.kind !== "agent") {
+      throw new AuthorityRpcError(
+        "post_orchestration_review",
+        "agent_review stage is missing its compiler-authored persona and prompt",
+      );
+    }
+    if (report.config.kind !== "action" || !report.config.automatic) {
+      throw new AuthorityRpcError(
+        "post_orchestration_report",
+        "post-orchestration report must be a configured automatic compiler action",
+      );
+    }
+    const catalog = behavior.actions;
+    const stageActionId = catalog.aliases[report.config.action] ?? report.config.action;
+    const selectedActionId = catalog.aliases[behavior.runType.actionSelectors.report] ??
+      behavior.runType.actionSelectors.report;
+    if (stageActionId !== selectedActionId) {
+      throw new AuthorityRpcError(
+        "post_orchestration_report",
+        "report stage action differs from the pinned run-type report selector",
+      );
+    }
+    const reportAction = catalog.actions[stageActionId];
+    if (
+      reportAction === undefined || reportAction.actor !== "compiler" ||
+      reportAction.parameters.some((parameter) => parameter.required) ||
+      !reportAction.recipe.some((step) => step.primitive === "report.render") ||
+      reportAction.recipe.some((step) =>
+        step.primitive !== "project.validate" && step.primitive !== "report.render")
+    ) {
+      throw new AuthorityRpcError(
+        "post_orchestration_report",
+        "automatic report action must be a parameter-free compiler recipe composed of project.validate and report.render",
+      );
+    }
+    return {
+      targetSync,
+      checkpoint,
+      ...(review === undefined ? {} : { review }),
+      report,
+      reportAction,
+      promotion,
+    };
+  }
+
+  async #tickBehaviorPostOrchestration(
+    runId: string,
+    advancement: RunAdvancementToken,
+  ): Promise<void> {
+    let run = await this.#store.getRun(runId);
+    if (!this.#matchesAdvancement(run, advancement) || run.behavior === undefined) return;
+    const plan = this.#behaviorPostOrchestrationPlan(run);
+    let synchronized = await this.#synchronizeBehaviorTarget(runId, plan, advancement);
+    if (synchronized.status !== "synchronized") return;
+
+    run = await this.#store.getRun(runId);
+    if (!this.#matchesAdvancement(run, advancement)) return;
+    if (!samePostProduct(run.postOrchestration?.checkpoint, synchronized.binding)) {
+      if (!(await this.#compileBehaviorCheckpoint(runId, plan, advancement, synchronized.binding))) return;
+    }
+
+    run = await this.#store.getRun(runId);
+    if (!this.#matchesAdvancement(run, advancement)) return;
+    const currentBinding = requiredBehaviorProductBinding(run, plan.targetSync.id, this.#timestamp());
+    if (plan.review !== undefined && !samePostProduct(run.postOrchestration?.review, currentBinding)) {
+      if (!(await this.#settleOrLaunchBehaviorReview(runId, plan, advancement, currentBinding))) return;
+    }
+
+    run = await this.#store.getRun(runId);
+    if (!this.#matchesAdvancement(run, advancement)) return;
+    const reportBinding = requiredBehaviorProductBinding(run, plan.targetSync.id, this.#timestamp());
+    if (!samePostProduct(run.postOrchestration?.report, reportBinding)) {
+      if (!(await this.#compileBehaviorReport(runId, plan, advancement, reportBinding))) return;
+    }
+
+    // Re-observe the selected target immediately before promotion. A changed target advances the
+    // owned run head, clears every downstream proof, and starts the sequence again.
+    synchronized = await this.#synchronizeBehaviorTarget(runId, plan, advancement);
+    if (synchronized.status !== "synchronized") return;
+    run = await this.#store.getRun(runId);
+    if (!this.#matchesAdvancement(run, advancement)) return;
+    if (
+      !samePostProduct(run.postOrchestration?.checkpoint, synchronized.binding) ||
+      !samePostProduct(run.postOrchestration?.report, synchronized.binding) ||
+      (plan.review !== undefined && !samePostProduct(run.postOrchestration?.review, synchronized.binding))
+    ) {
+      this.#background(() => this.#tick(runId, advancement), runId);
       return;
     }
-    await this.#preparePromotion(runId, false, verification);
+    try {
+      await this.#preparePromotion(runId, false, undefined, advancement);
+    } catch (error) {
+      if (!(error instanceof GitLifecycleError) ||
+        (error.code !== "ref_moved" && error.code !== "invalid_state")) throw error;
+      const resynchronized = await this.#synchronizeBehaviorTarget(runId, plan, advancement);
+      if (resynchronized.status !== "synchronized") return;
+      const current = await this.#store.getRun(runId);
+      if (!samePostProduct(current.postOrchestration?.report, resynchronized.binding)) {
+        this.#background(() => this.#tick(runId, advancement), runId);
+        return;
+      }
+      throw error;
+    }
+  }
+
+  async #synchronizeBehaviorTarget(
+    runId: string,
+    plan: BehaviorPostOrchestrationPlan,
+    advancement: RunAdvancementToken,
+  ): Promise<
+    | { status: "synchronized"; binding: RunPostOrchestrationBinding; changed: boolean }
+    | { status: "integration_required" | "stopped" }
+  > {
+    let result;
+    try {
+      result = await this.#withGit(runId, async () => {
+        const current = await this.#store.getRun(runId);
+        if (!this.#matchesAdvancement(current, advancement)) throw new RunAdvancementStoppedError();
+        return this.#git.synchronizeTargetIntoRun(
+          current.git,
+          {
+            subject: `Synchronize ${current.git.target.ref} into Koni run ${current.id}`,
+            body: `Run ${current.id}\nTarget ${current.git.target.ref}`,
+          },
+          this.#gitJournal(runId, advancement),
+        );
+      });
+    } catch (error) {
+      if (error instanceof RunAdvancementStoppedError) return { status: "stopped" };
+      throw error;
+    }
+    if (!(await this.#advancementIsCurrent(runId, advancement))) return { status: "stopped" };
+    await this.#persistGitLifecycle(runId, result.lifecycle, advancement);
+    if (result.status === "integration_required") {
+      const current = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(current, advancement)) return { status: "stopped" };
+      const integration = await this.#program.createIntegrationTicket({
+        run: current,
+        conflictReport: result.conflict.message,
+        targetOid: result.conflict.candidateOid,
+      });
+      await this.#server.mutateInternal(async ({ revision }) => {
+        const observed = await this.#store.getRun(runId);
+        if (!this.#matchesAdvancement(observed, advancement)) return this.#noOpInternal(revision);
+        const existing = observed.tickets[integration.id];
+        if (existing?.status === "completed") {
+          throw new AuthorityRpcError(
+            "target_sync_integration",
+            "a completed integration ticket did not resolve the same target conflict",
+          );
+        }
+        const draft = nextRun(observed, this.#timestamp());
+        delete draft.postOrchestration;
+        draft.currentPipelineStageId = observed.behavior!.runType.pipeline
+          .find((stage) => stage.kind === "orchestration")!.id;
+        if (existing === undefined) {
+          const prepared = structuredClone(integration);
+          delete prepared.gitCycleId;
+          prepared.worktreePath = undefined;
+          prepared.branch = undefined;
+          draft.tickets[prepared.id] = prepared;
+        }
+        draft.activity.push(activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "git",
+          `Target synchronization requires integration: ${integration.title}`,
+        ));
+        applyLifecycle(draft, {
+          type: "integration_required",
+          atMs: this.#now().getTime(),
+          reason: result.conflict.message,
+        });
+        const committed = await this.#store.commit({
+          expectedRevision: revision,
+          runWrites: [{ record: draft, expectedRevision: observed.revision }],
+        });
+        return {
+          revision: committed.state.revision,
+          events: [{ topic: "run.integration.required", payload: { runId, ticketId: integration.id } }],
+        };
+      });
+      const executing = await this.#store.getRun(runId);
+      const next = this.#advancementToken(executing, "executing");
+      if (next !== undefined) await this.#tick(runId, next);
+      return { status: "integration_required" };
+    }
+    const synchronization = result.synchronization;
+    const synchronizedRunOid = synchronization.runOid;
+    if (synchronizedRunOid === undefined) {
+      throw new AuthorityRpcError(
+        "post_orchestration_binding",
+        "successful target synchronization omitted its run OID",
+      );
+    }
+
+    let changed = false;
+    let binding!: RunPostOrchestrationBinding;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const current = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(current, advancement)) return this.#noOpInternal(revision);
+      if (current.graphHash === undefined) {
+        throw new AuthorityRpcError("post_orchestration_graph", "target synchronization has no durable graph hash");
+      }
+      binding = {
+        stageId: plan.targetSync.id,
+        runOid: synchronizedRunOid,
+        targetOid: synchronization.targetOid,
+        graphHash: current.graphHash,
+        recordedAt: synchronization.synchronizedAt,
+      };
+      changed = !samePostProduct(current.postOrchestration?.synchronization, binding);
+      const stageChanged = current.currentPipelineStageId === plan.targetSync.id;
+      if (!changed && !stageChanged) return this.#noOpInternal(revision);
+      const draft = nextRun(current, this.#timestamp());
+      if (changed) {
+        draft.postOrchestration = {
+          protocol: "koni.post-orchestration.v1",
+          synchronization: structuredClone(binding),
+        };
+      }
+      if (changed || stageChanged) draft.currentPipelineStageId = plan.checkpoint.id;
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: current.revision }],
+      });
+      return { revision: committed.state.revision };
+    });
+    if (binding === undefined) return { status: "stopped" };
+    return { status: "synchronized", binding, changed };
+  }
+
+  async #compileBehaviorCheckpoint(
+    runId: string,
+    plan: BehaviorPostOrchestrationPlan,
+    advancement: RunAdvancementToken,
+    binding: RunPostOrchestrationBinding,
+  ): Promise<boolean> {
+    const run = await this.#store.getRun(runId);
+    if (!this.#matchesAdvancement(run, advancement) ||
+      !samePostProduct(run.postOrchestration?.synchronization, binding)) return false;
+    const verification = await this.#program.verifyRun(run);
+    await this.#lifecycleRacePoint("after_verification", runId);
+    if (!(await this.#advancementIsCurrent(runId, advancement))) return false;
+    if (!verification.ok) {
+      if (await this.#reopenVerificationWork(runId, verification, advancement)) return false;
+      await this.#recordRunBlocker(
+        runId,
+        verification.reason ?? "Verification checkpoint failed",
+        advancement,
+      );
+      return false;
+    }
+    const verificationSha256 = verificationCompilationSha256(verification);
+    let committed = false;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const current = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(current, advancement) ||
+        !samePostProduct(current.postOrchestration?.synchronization, binding)) {
+        return this.#noOpInternal(revision);
+      }
+      const draft = nextRun(current, this.#timestamp());
+      draft.postOrchestration = {
+        protocol: "koni.post-orchestration.v1",
+        synchronization: structuredClone(current.postOrchestration!.synchronization!),
+        checkpoint: {
+          ...structuredClone(binding),
+          stageId: plan.checkpoint.id,
+          recordedAt: draft.updatedAt,
+          verificationSha256,
+        },
+      };
+      draft.activity.push(...structuredClone(verification.activity ?? []));
+      draft.currentPipelineStageId = plan.review?.id ?? plan.report.id;
+      const result = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: current.revision }],
+      });
+      committed = true;
+      return { revision: result.state.revision };
+    });
+    return committed;
+  }
+
+  /**
+   * Verification is a fixpoint check, not a terminal failure boundary. A compiler upgrade,
+   * newly authenticated evidence, or target synchronization can make additional typed work
+   * applicable after the prior board completed. Admit that exact projection and return the run
+   * to deterministic orchestration; malformed verification failures remain blockers.
+   */
+  async #reopenVerificationWork(
+    runId: string,
+    verification: VerificationCompilation,
+    advancement: RunAdvancementToken,
+  ): Promise<boolean> {
+    if (verification.tickets === undefined || Object.keys(verification.tickets).length === 0) return false;
+    let reopened = false;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const current = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(current, advancement)) return this.#noOpInternal(revision);
+      const draft = nextRun(current, this.#timestamp());
+      draft.tickets = retainTicketAuthorityFields(
+        current.tickets,
+        structuredClone(verification.tickets!),
+      );
+      const applicableTicketIds = verification.applicableTicketIds ?? Object.keys(verification.tickets!)
+        .filter((ticketId) => current.tickets[ticketId] === undefined)
+        .sort();
+      const reissued: TicketRecord[] = [];
+      for (const ticketId of applicableTicketIds) {
+        const prior = current.tickets[ticketId];
+        const ticket = draft.tickets[ticketId];
+        if (prior?.status !== "completed" || ticket?.status !== "completed") continue;
+        resetTicketForFreshCycle(
+          ticket,
+          draft.updatedAt,
+          currentTicketExecutionEpoch(current, prior),
+        );
+        reissued.push(ticket);
+      }
+      delete draft.postOrchestration;
+      draft.currentPipelineStageId = await this.#stageForKinds(
+        draft,
+        ["orchestration"],
+        "orchestration",
+      );
+      draft.activity.push(...structuredClone(verification.activity ?? [activity(
+        this.#createId("activity"),
+        draft.updatedAt,
+        "compiler",
+        verification.reason ?? "Verification admitted newly applicable compiler work",
+      )]));
+      for (const ticket of reissued) {
+        draft.activity.push(activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "compiler",
+          `Reissued completed ticket whose compiler predicate is still applicable: ${ticket.title}`,
+          ticket.id,
+        ));
+      }
+      applyLifecycle(draft, { type: "execution_required", atMs: this.#now().getTime() });
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: current.revision }],
+        ...(verification.artifactWrites === undefined ? {} : { writes: verification.artifactWrites }),
+      });
+      reopened = true;
+      return {
+        revision: committed.state.revision,
+        events: [{ topic: "run.execution.required", payload: { runId } }],
+      };
+    });
+    if (reopened) {
+      const executing = await this.#store.getRun(runId);
+      const next = this.#advancementToken(executing, "executing");
+      if (next !== undefined) await this.#tick(runId, next);
+    }
+    return reopened;
+  }
+
+  async #settleOrLaunchBehaviorReview(
+    runId: string,
+    plan: BehaviorPostOrchestrationPlan,
+    advancement: RunAdvancementToken,
+    binding: RunPostOrchestrationBinding,
+  ): Promise<boolean> {
+    if (plan.review === undefined) return true;
+    const run = await this.#store.getRun(runId);
+    if (!this.#matchesAdvancement(run, advancement) ||
+      !samePostProduct(run.postOrchestration?.checkpoint, binding)) return false;
+    if (this.#program.compileVerificationOutput === undefined) {
+      await this.#recordRunBlocker(
+        runId,
+        "Pinned agent_review stage has no compiler for its terminal result",
+        advancement,
+      );
+      return false;
+    }
+    if (hasLiveAttempt(run, "verification")) return false;
+    const accepted = Object.values(run.attempts)
+      .filter((attempt) =>
+        attempt.kind === "verification" && attempt.status === "completed" &&
+        attempt.verificationAccepted === true && attempt.reviewedRunOid === binding.runOid &&
+        attempt.reviewedTargetOid === binding.targetOid &&
+        attempt.reviewedGraphHash === binding.graphHash)
+      .sort((left, right) => (right.endedAt ?? "").localeCompare(left.endedAt ?? "") ||
+        right.id.localeCompare(left.id))[0];
+    if (accepted === undefined) {
+      await this.#launchAttempt(run, "verification", undefined, advancement);
+      return false;
+    }
+    let committed = false;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const current = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(current, advancement) ||
+        !samePostProduct(current.postOrchestration?.checkpoint, binding)) {
+        return this.#noOpInternal(revision);
+      }
+      const attempt = current.attempts[accepted.id];
+      if (
+        attempt?.verificationAccepted !== true || attempt.status !== "completed" ||
+        attempt.reviewedRunOid !== binding.runOid || attempt.reviewedTargetOid !== binding.targetOid ||
+        attempt.reviewedGraphHash !== binding.graphHash
+      ) return this.#noOpInternal(revision);
+      const draft = nextRun(current, this.#timestamp());
+      draft.postOrchestration = {
+        ...structuredClone(current.postOrchestration!),
+        review: {
+          ...structuredClone(binding),
+          stageId: plan.review!.id,
+          recordedAt: draft.updatedAt,
+          attemptId: attempt.id,
+        },
+      };
+      delete draft.postOrchestration.report;
+      draft.currentPipelineStageId = plan.report.id;
+      const result = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: current.revision }],
+      });
+      committed = true;
+      return { revision: result.state.revision };
+    });
+    return committed;
+  }
+
+  async #compileBehaviorReport(
+    runId: string,
+    plan: BehaviorPostOrchestrationPlan,
+    advancement: RunAdvancementToken,
+    binding: RunPostOrchestrationBinding,
+  ): Promise<boolean> {
+    let run = await this.#store.getRun(runId);
+    if (!this.#matchesAdvancement(run, advancement) ||
+        !samePostProduct(run.postOrchestration?.checkpoint, binding) ||
+        (plan.review !== undefined && !samePostProduct(run.postOrchestration?.review, binding))) return false;
+    const productSha256 = behaviorProductSha256(binding);
+    let action = findRunActionAtBoundary(run, "post_orchestration_report", {
+      stageId: plan.report.id,
+      productSha256,
+    });
+    if (action?.settlement?.disposition === "abandoned") action = undefined;
+    if (action === undefined) {
+      let admittedId: string | undefined;
+      await this.#server.mutateInternal(async ({ revision }) => {
+        const current = await this.#store.getRun(runId);
+        if (!this.#matchesAdvancement(current, advancement) ||
+            current.currentPipelineStageId !== plan.report.id ||
+            !samePostProduct(current.postOrchestration?.checkpoint, binding) ||
+            (plan.review !== undefined && !samePostProduct(current.postOrchestration?.review, binding))) {
+          return this.#noOpInternal(revision);
+        }
+        const existing = findRunActionAtBoundary(current, "post_orchestration_report", {
+          stageId: plan.report.id,
+          productSha256,
+        });
+        if (existing !== undefined && existing.settlement?.disposition !== "abandoned") {
+          admittedId = existing.invocationId;
+          return this.#noOpInternal(revision);
+        }
+        const execution = prepareRunActionExecution(current, {
+          kind: "post_orchestration_report",
+          stageId: plan.report.id,
+          selector: current.behavior!.runType.actionSelectors.report,
+          checkout: plan.reportAction.checkout,
+          productSha256,
+          at: this.#timestamp(),
+        });
+        const draft = nextRun(current, execution.createdAt);
+        const archiveWrites = admitRunActionExecution(draft, execution);
+        admittedId = execution.invocationId;
+        const committed = await this.#store.commit({
+          expectedRevision: revision,
+          runWrites: [{ record: draft, expectedRevision: current.revision }],
+          ...(archiveWrites.length === 0 ? {} : { writes: archiveWrites }),
+        });
+        return {
+          revision: committed.state.revision,
+          events: [{ topic: "run.action.report.admitted", payload: { runId, invocationId: execution.invocationId } }],
+        };
+      });
+      if (admittedId === undefined) return false;
+      run = await this.#store.getRun(runId);
+      action = requiredRunActionExecution(run, admittedId);
+    }
+    if (!isTerminalActionJournal(action.journal)) {
+      await this.#executeRunAction(runId, action.invocationId);
+    }
+    let committed = false;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const current = await this.#store.getRun(runId);
+      const settled = requiredRunActionExecution(current, action!.invocationId);
+      if (settled.settledAt !== undefined &&
+          samePostProduct(current.postOrchestration?.report, binding)) {
+        committed = true;
+        return this.#noOpInternal(revision);
+      }
+      if (!this.#matchesAdvancement(current, advancement) ||
+          !samePostProduct(current.postOrchestration?.checkpoint, binding) ||
+          (plan.review !== undefined && !samePostProduct(current.postOrchestration?.review, binding))) {
+        return this.#noOpInternal(revision);
+      }
+      if (settled.journal.status !== "completed" || settled.semanticResult?.kind !== "report" ||
+          !samePostProduct(current.postOrchestration?.report, binding)) {
+        throw new AuthorityRpcError(
+          "action_report_failed",
+          `configured report action did not complete (${settled.journal.status})`,
+        );
+      }
+      const draft = nextRun(current, this.#timestamp());
+      const mutable = requiredRunActionExecution(draft, settled.invocationId);
+      settleRunAction(mutable, "completed", "Post-orchestration report published", draft.updatedAt, draft.revision);
+      draft.currentPipelineStageId = plan.promotion.id;
+      const result = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: current.revision }],
+      });
+      committed = true;
+      return { revision: result.state.revision };
+    });
+    return committed;
+  }
+
+  async #verify(runId: string, expected?: RunAdvancementToken): Promise<void> {
+    const run = await this.#store.getRun(runId);
+    const advancement = expected ?? this.#advancementToken(run, "verifying");
+    if (advancement === undefined || !this.#matchesAdvancement(run, advancement)) return;
+    const verification = await this.#program.verifyRun(run);
+    await this.#lifecycleRacePoint("after_verification", runId);
+    if (!(await this.#advancementIsCurrent(runId, advancement))) return;
+    if (!verification.ok) {
+      if (await this.#reopenVerificationWork(runId, verification, advancement)) return;
+      await this.#recordRunBlocker(
+        runId,
+        verification.reason ?? "Verification failed",
+        advancement,
+      );
+      return;
+    }
+    await this.#preparePromotion(runId, false, verification, advancement);
   }
 
   async #preparePromotion(
     runId: string,
     fromFailedPublish: boolean,
     verification?: VerificationCompilation,
+    expected?: RunAdvancementToken,
   ): Promise<void> {
     const run = await this.#store.getRun(runId);
+    const advancement = expected ?? this.#advancementToken(
+      run,
+      fromFailedPublish ? "merging" : "verifying",
+    );
+    if (advancement === undefined || !this.#matchesAdvancement(run, advancement)) return;
     const prepared = await this.#withGit(runId, () => this.#git.prepareTargetPromotion(run.git, {
       subject: `Merge Koni run ${run.id}`,
     }));
-    await this.#persistGitLifecycle(runId, prepared.lifecycle);
+    if (!(await this.#advancementIsCurrent(runId, advancement))) return;
+    await this.#persistGitLifecycle(runId, prepared.lifecycle, advancement);
     if (prepared.preparation.status === "ready") {
       await this.#server.mutateInternal(async ({ revision }) => {
         const current = await this.#store.getRun(runId);
-        if (!fromFailedPublish && current.lifecycle.phase !== "verifying") {
+        if (!this.#matchesAdvancement(current, advancement)) {
           return this.#noOpInternal(revision);
         }
         const draft = nextRun(current, this.#timestamp());
         draft.activity.push(...structuredClone(verification?.activity ?? []));
         appendReportPublication(draft, verification?.report);
+        draft.currentPipelineStageId = await this.#stageForKinds(draft, ["promotion"], "promotion");
         if (!fromFailedPublish) {
           applyLifecycle(draft, { type: "verification_passed", atMs: this.#now().getTime() });
         }
@@ -4538,10 +13127,13 @@ export class RunAuthorityEngine {
       });
       if (fromFailedPublish) {
         const refreshed = await this.#store.getRun(runId);
-        if (refreshed.lifecycle.phase === "merging") await this.#settleMerge(runId, 1);
+        if (this.#matchesAdvancement(refreshed, advancement)) {
+          await this.#settleMerge(runId, 1, advancement);
+        }
       }
       return;
     }
+    if (!(await this.#advancementIsCurrent(runId, advancement))) return;
     const ticket = await this.#program.createIntegrationTicket({
       run,
       conflictReport: prepared.preparation.conflict.message,
@@ -4549,9 +13141,11 @@ export class RunAuthorityEngine {
     });
     await this.#server.mutateInternal(async ({ revision }) => {
       const current = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(current, advancement)) return this.#noOpInternal(revision);
       const draft = nextRun(current, this.#timestamp());
       draft.activity.push(...structuredClone(verification?.activity ?? []));
       appendReportPublication(draft, verification?.report);
+      draft.currentPipelineStageId = await this.#stageForKinds(draft, ["orchestration"], "orchestration");
       const preparedTicket = structuredClone(ticket);
       delete preparedTicket.gitCycleId;
       preparedTicket.worktreePath = undefined;
@@ -4572,11 +13166,14 @@ export class RunAuthorityEngine {
         events: [{ topic: "run.integration.required", payload: { runId, ticketId: ticket.id } }],
       };
     });
-    await this.#tick(runId);
+    const executing = await this.#store.getRun(runId);
+    const next = this.#advancementToken(executing, "executing");
+    if (next !== undefined) await this.#tick(runId, next);
   }
 
   async #recoverInFlight(runId: string): Promise<void> {
     const run = await this.#store.getRun(runId);
+    this.#assertStartupMayContinue();
     const stale = Object.values(run.attempts).filter((attempt) =>
       attempt.status === "queued" || attempt.status === "running" || attempt.status === "waiting_question" ||
       attempt.status === "terminal_accepted"
@@ -4587,6 +13184,7 @@ export class RunAuthorityEngine {
       return;
     }
     for (const attempt of stale) {
+      this.#assertStartupMayContinue();
       if (attempt.status === "waiting_question") continue;
       try {
         const bytes = await this.#store.readArtifact(
@@ -4594,27 +13192,35 @@ export class RunAuthorityEngine {
           16 * 1024 * 1024,
         );
         const parsed: unknown = JSON.parse(bytes.toString("utf8"));
+        this.#assertStartupMayContinue();
         const spec = validateAgentLaunchSpec(parsed as AgentLaunchSpec);
         if (spec.specHash !== attempt.launchSpecHash) {
           throw new AuthorityRpcError("recovery_spec", "stored launch spec does not match attempt record");
         }
         const current = await this.#store.getRun(runId);
+        this.#assertStartupMayContinue();
         const currentAttempt = current.attempts[attempt.id];
         if (currentAttempt === undefined || isTerminalAttempt(currentAttempt.status)) continue;
         const prepared = await this.#program.recoverAttempt({ run: current, attempt: currentAttempt, spec });
+        this.#assertStartupMayContinue();
         assertPreparedIdentity(
           prepared,
           runId,
           attempt.id,
           attempt.sessionId,
           assignmentForAttempt(current, currentAttempt),
+          currentAttempt.kind,
+          currentAttempt.kind === "lead" ? leadJudgmentTriggerForAttempt(currentAttempt) : undefined,
         );
         assertRecoveredAuthorityPlan(prepared, spec, this.#projectRoot, this.#stateRoot);
         const handle = await this.#launchPreparedSession(prepared, "recover");
+        this.#assertStartupMayContinue();
         await this.#markAttemptRunning(runId, attempt.id, handle);
+        this.#assertStartupMayContinue();
         this.#attachOutcome(runId, attempt.id, assignmentForAttempt(current, currentAttempt), handle);
         await this.#activatePreparedSession(handle);
       } catch (error) {
+        if (error instanceof RunAdvancementStoppedError) throw error;
         await this.#failLaunch(
           runId,
           attempt.id,
@@ -4648,6 +13254,10 @@ export class RunAuthorityEngine {
       const run = await this.#store.getRun(envelope.runId);
       const attempt = run.attempts[envelope.attemptId];
       if (attempt === undefined || isTerminalAttempt(attempt.status)) return this.#noOpInternal(revision);
+      // Process-emitted usage is presentation only. Durable provider settlements are the sole
+      // authority for current-generation attempts; legacy injected supervisors retain their
+      // compatibility projection until those tests/runs are migrated.
+      if (attempt.authorityProviderRequests !== undefined) return this.#noOpInternal(revision);
       const draft = nextRun(run, this.#timestamp());
       applyUsage(draft.attempts[envelope.attemptId]!, usage);
       const committed = await this.#store.commit({
@@ -4661,10 +13271,20 @@ export class RunAuthorityEngine {
     });
   }
 
-  async #recordRunBlocker(runId: string, reason: string): Promise<void> {
+  async #recordRunBlocker(
+    runId: string,
+    reason: string,
+    advancement?: RunAdvancementToken,
+  ): Promise<void> {
     await this.#server.mutateInternal(async ({ revision }) => {
       const run = await this.#store.getRun(runId);
-      if (run.lifecycle.phase === "blocked" || run.lifecycle.phase === "deleted") return this.#noOpInternal(revision);
+      if (advancement !== undefined && !this.#matchesAdvancement(run, advancement)) {
+        return this.#noOpInternal(revision);
+      }
+      if (run.lifecycle.phase === "blocked" ||
+          new Set<RunPhase>(["pausing", "paused", "deleting", "deleted"]).has(run.lifecycle.phase)) {
+        return this.#noOpInternal(revision);
+      }
       const draft = nextRun(run, this.#timestamp());
       if (new Set([
         "draft",
@@ -4702,7 +13322,51 @@ export class RunAuthorityEngine {
     return { revision };
   }
 
+  #advancementToken(run: RunRecord, phase: RunPhase): RunAdvancementToken | undefined {
+    if (run.lifecycle.phase !== phase) return undefined;
+    return {
+      phase,
+      lifecycleRevision: run.lifecycle.revision,
+      generation: run.lifecycle.generation,
+    };
+  }
+
+  #matchesAdvancement(run: RunRecord, token: RunAdvancementToken): boolean {
+    return run.lifecycle.phase === token.phase &&
+      run.lifecycle.revision === token.lifecycleRevision &&
+      run.lifecycle.generation === token.generation;
+  }
+
+  async #advancementIsCurrent(runId: string, token: RunAdvancementToken): Promise<boolean> {
+    return this.#matchesAdvancement(await this.#store.getRun(runId), token);
+  }
+
+  async #drainRunGit(runId: string): Promise<void> {
+    while (true) {
+      const tail = this.#gitTails.get(runId);
+      if (tail === undefined) return;
+      await tail.catch(() => undefined);
+    }
+  }
+
+  async #lifecycleRacePoint(
+    point:
+      | "before_ticket_cycle_open"
+      | "before_run_materialization_settle"
+      | "after_ticket_checkpoint"
+      | "before_publication_settle"
+      | "after_verification",
+    runId: string,
+    ticketId?: string,
+  ): Promise<void> {
+    await this.#lifecycleFault?.(point, {
+      runId,
+      ...(ticketId === undefined ? {} : { ticketId }),
+    });
+  }
+
   async #withGit<T>(runId: string, operation: () => Promise<T>): Promise<T> {
+    const cancelOnStartupStop = this.#startupRecoveryActive;
     const prior = this.#gitTails.get(runId) ?? Promise.resolve();
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -4711,6 +13375,13 @@ export class RunAuthorityEngine {
     await prior.catch(() => undefined);
     try {
       await this.#assertRuntimeCurrent();
+      // A startup recovery operation may have queued while an older Git effect owned this run's
+      // lane. Recheck the foreground-start cancellation token after both waits and immediately
+      // before admitting the next external effect. Outside startup this is intentionally a no-op,
+      // so already-authorized pause/delete/quiesce finalizers retain their Git authority.
+      if (cancelOnStartupStop && this.#stopRequested) {
+        throw new RunAdvancementStoppedError(true);
+      }
       return await operation();
     } finally {
       release();
@@ -4738,6 +13409,7 @@ export class RunAuthorityEngine {
 
   #background(task: () => Promise<unknown>, runId?: string): void {
     const pending = Promise.resolve().then(task).catch(async (error) => {
+      if (error instanceof RunAdvancementStoppedError) return;
       if (runId !== undefined) {
         try {
           await this.#recordRunBlocker(runId, errorMessage(error));
@@ -4760,12 +13432,23 @@ export class RunAuthorityEngine {
 }
 
 function receiptFor(request: RpcRequest, result: JsonValue) {
+  const receiptParams = (request as RpcRequest & { [RECEIPT_PARAMS]?: JsonValue })[RECEIPT_PARAMS] ?? request.params;
   return {
     method: request.method,
     idempotencyKey: request.idempotencyKey!,
-    requestHash: authorityRequestHash(request.method, request.params),
+    requestHash: authorityRequestHash(request.method, receiptParams),
     result,
   };
+}
+
+function isStoppedPhase(phase: RunPhase): boolean {
+  return phase === "pausing" || phase === "paused" || phase === "deleting" || phase === "deleted";
+}
+
+function isPublicationIntent(
+  intent: GitLifecycleIntent,
+): intent is Extract<GitLifecycleIntent, { kind: "ticket_publish" | "target_publish" }> {
+  return intent.kind === "ticket_publish" || intent.kind === "target_publish";
 }
 
 function requireIdempotency(request: RpcRequest): void {
@@ -4781,6 +13464,25 @@ function requiredObject(value: JsonValue | undefined): Record<string, JsonValue>
   return value;
 }
 
+function assertExactParams(value: JsonValue | undefined, keys: readonly string[]): void {
+  if (value === undefined && keys.length === 0) return;
+  const object = requiredObject(value);
+  const actual = Object.keys(object).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw new AuthorityRpcError("params", `request params must contain exactly: ${expected.join(", ") || "no fields"}`);
+  }
+}
+
+function assertAllowedParams(value: JsonValue | undefined, keys: readonly string[]): void {
+  const object = requiredObject(value);
+  const allowed = new Set(keys);
+  const unexpected = Object.keys(object).filter((key) => !allowed.has(key)).sort();
+  if (unexpected.length > 0) {
+    throw new AuthorityRpcError("params", `request params contain unsupported fields: ${unexpected.join(", ")}`);
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -4794,11 +13496,81 @@ function requiredString(value: JsonValue | undefined, key: string): string {
   return field;
 }
 
+function requiredStringValue(value: JsonValue | undefined, key: string): string {
+  const field = requiredObject(value)[key];
+  if (typeof field !== "string") {
+    throw new AuthorityRpcError("params", `${key} must be a string`);
+  }
+  return field;
+}
+
 function optionalString(value: JsonValue | undefined, key: string): string | undefined {
   const object = requiredObject(value);
   const field = object[key];
   if (field === undefined || field === null) return undefined;
   if (typeof field !== "string") throw new AuthorityRpcError("params", `${key} must be a string`);
+  return field;
+}
+
+function optionalBoundedString(
+  value: JsonValue | undefined,
+  key: string,
+  maximumBytes: number,
+): string | undefined {
+  const field = optionalString(value, key);
+  if (field === undefined) return undefined;
+  if (field.trim().length === 0 || Buffer.byteLength(field, "utf8") > maximumBytes) {
+    throw new AuthorityRpcError(
+      "params",
+      `${key} must be nonempty and no larger than ${maximumBytes} UTF-8 bytes when provided`,
+    );
+  }
+  return field;
+}
+
+function requiredBoolean(value: JsonValue | undefined, key: string): boolean {
+  const field = requiredObject(value)[key];
+  if (typeof field !== "boolean") throw new AuthorityRpcError("params", `${key} must be a boolean`);
+  return field;
+}
+
+function optionalBoolean(value: JsonValue | undefined, key: string): boolean | undefined {
+  const field = requiredObject(value)[key];
+  if (field === undefined || field === null) return undefined;
+  if (typeof field !== "boolean") throw new AuthorityRpcError("params", `${key} must be a boolean`);
+  return field;
+}
+
+function requiredConfigDocumentDomain(
+  value: JsonValue | undefined,
+  key: string,
+): ConfigDocumentDomain {
+  const field = requiredString(value, key);
+  if (!CONFIG_DOCUMENT_DOMAINS.includes(field as ConfigDocumentDomain)) {
+    throw new AuthorityRpcError("params", `${key} must be a supported configuration domain`);
+  }
+  return field as ConfigDocumentDomain;
+}
+
+function requiredConfigResourceKind(
+  value: JsonValue | undefined,
+  key: string,
+): ConfigResourceKind {
+  const field = requiredString(value, key);
+  if (!CONFIG_RESOURCE_KINDS.includes(field as ConfigResourceKind)) {
+    throw new AuthorityRpcError("params", `${key} must be a supported configuration resource kind`);
+  }
+  return field as ConfigResourceKind;
+}
+
+function requiredConfigDocumentFormat(
+  value: JsonValue | undefined,
+  key: string,
+): "yaml" | "toml" | "markdown" {
+  const field = requiredString(value, key);
+  if (field !== "yaml" && field !== "toml" && field !== "markdown") {
+    throw new AuthorityRpcError("params", `${key} must be yaml, toml, or markdown`);
+  }
   return field;
 }
 
@@ -4813,6 +13585,62 @@ function optionalPositiveInt(value: JsonValue | undefined, key: string, fallback
   return field;
 }
 
+function requiredPositiveInt(value: JsonValue | undefined, key: string): number {
+  const field = requiredObject(value)[key];
+  if (typeof field !== "number" || !Number.isSafeInteger(field) || field < 1) {
+    throw new AuthorityRpcError("params", `${key} must be a positive integer`);
+  }
+  return field;
+}
+
+function requiredNonnegativeInt(value: JsonValue | undefined, key: string): number {
+  const field = requiredObject(value)[key];
+  if (typeof field !== "number" || !Number.isSafeInteger(field) || field < 0) {
+    throw new AuthorityRpcError("params", `${key} must be a non-negative integer`);
+  }
+  return field;
+}
+
+function requiredNullableSha256(value: JsonValue | undefined, key: string): Sha256Digest | null {
+  const field = requiredObject(value)[key];
+  if (field === null) return null;
+  if (typeof field !== "string" || !isSha256Digest(field)) {
+    throw new AuthorityRpcError("params", `${key} must be null or a SHA-256 digest`);
+  }
+  return field;
+}
+
+function requiredSha256(value: JsonValue | undefined, key: string): Sha256Digest {
+  const field = requiredObject(value)[key];
+  if (!isSha256Digest(field)) {
+    throw new AuthorityRpcError("params", `${key} must be a SHA-256 digest`);
+  }
+  return field;
+}
+
+function requiredDeletionMode(
+  value: JsonValue | undefined,
+): "preserve_branches" | "delete_owned_branches" {
+  const field = requiredObject(value).mode;
+  if (field !== "preserve_branches" && field !== "delete_owned_branches") {
+    throw new AuthorityRpcError(
+      "params",
+      "mode must be preserve_branches or delete_owned_branches",
+    );
+  }
+  return field;
+}
+
+function requiredProfileConflictResolution(
+  value: JsonValue | undefined,
+): "keep_project" | "accept_upstream" {
+  const field = requiredObject(value).resolution;
+  if (field !== "keep_project" && field !== "accept_upstream") {
+    throw new AuthorityRpcError("params", "resolution must be keep_project or accept_upstream");
+  }
+  return field;
+}
+
 function stringRecord(value: JsonValue, label: string): Record<string, string> {
   const object = requiredObject(value);
   const output: Record<string, string> = Object.create(null) as Record<string, string>;
@@ -4823,6 +13651,25 @@ function stringRecord(value: JsonValue, label: string): Record<string, string> {
     output[key] = field;
   }
   return output;
+}
+
+function configurationRecord(value: JsonValue, label: string): ConfigurationObject {
+  const object = requiredObject(value);
+  for (const key of Object.keys(object)) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(key)) {
+      throw new AuthorityRpcError("params", `${label} must use safe field identities`);
+    }
+  }
+  let encoded: string;
+  try {
+    encoded = canonicalEncode(object);
+  } catch (error) {
+    throw new AuthorityRpcError("params", `${label} is not canonical JSON: ${errorMessage(error)}`);
+  }
+  if (Buffer.byteLength(encoded, "utf8") > 4 * 1024 * 1024) {
+    throw new AuthorityRpcError("params", `${label} exceeds 4 MiB`);
+  }
+  return structuredClone(object) as ConfigurationObject;
 }
 
 function boundedText(value: string, label: string, maximum: number): string {
@@ -4852,6 +13699,298 @@ function validateQuestionOptions(options: RunQuestionRecord["options"]): RunQues
   });
 }
 
+function deletionGitWarnings(run: RunRecord): string[] {
+  const warnings: string[] = [];
+  const add = (label: string, blocker: string | undefined): void => {
+    if (blocker !== undefined && blocker.trim().length > 0) warnings.push(`${label}: ${blocker}`);
+  };
+  add("Planning worktree", run.git.planning.blocker);
+  add("Run worktree", run.git.run.blocker);
+  for (const cycle of Object.values(run.git.ticketCycles)) {
+    if (cycle.status !== "retired") add(`Ticket ${cycle.ticketId}`, cycle.blocker);
+  }
+  if (run.git.promotion?.status === "preserved") add("Target promotion", run.git.promotion.blocker);
+  if (run.legacyGitMigration?.status === "preserved") add("Legacy Git workspace", run.legacyGitMigration.reason);
+  return uniqueStrings(warnings);
+}
+
+function preservedGitLifecycle(
+  value: RunGitLifecycleRecord,
+  reason: string,
+): RunGitLifecycleRecord {
+  const lifecycle = structuredClone(value);
+  if (lifecycle.planning.status !== "retired") {
+    lifecycle.planning.status = "preserved";
+    lifecycle.planning.blocker = reason;
+  }
+  if (lifecycle.run.status !== "retired") {
+    lifecycle.run.status = "preserved";
+    lifecycle.run.blocker = reason;
+  }
+  for (const cycle of Object.values(lifecycle.ticketCycles)) {
+    if (cycle.status === "retired") continue;
+    cycle.status = "preserved";
+    cycle.blocker = reason;
+  }
+  if (lifecycle.promotion !== undefined && lifecycle.promotion.status !== "published") {
+    lifecycle.promotion.status = "preserved";
+    lifecycle.promotion.blocker = reason;
+  }
+  return lifecycle;
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values.filter((value) => value.trim().length > 0))];
+}
+
+function humanizeIdentifier(value: string): string {
+  const words = value.replace(/[._-]+/gu, " ").trim();
+  return words.length === 0 ? "Agent" : `${words[0]!.toUpperCase()}${words.slice(1)}`;
+}
+
+function attemptKindTitle(kind: AgentAttemptRecord["kind"]): string {
+  if (kind === "planning") return "Run planning";
+  if (kind === "lead") return "Lead judgment";
+  if (kind === "verification") return "Run verification";
+  if (kind === "integration") return "Conflict integration";
+  return "Compiled ticket";
+}
+
+function stageCapabilityStatus(
+  run: RunRecord,
+  position: number,
+  currentPosition: number,
+): StageCapability["status"] {
+  if (run.lifecycle.phase === "completed") return "succeeded";
+  if (position < currentPosition) return "succeeded";
+  if (position > currentPosition || currentPosition < 0) return "pending";
+  if (run.lifecycle.phase === "blocked") return "blocked";
+  if (run.lifecycle.phase === "failed") return "failed";
+  if (run.lifecycle.phase === "awaiting_questions" || run.lifecycle.phase === "awaiting_approval" || run.lifecycle.phase === "paused") {
+    return "waiting";
+  }
+  return "active";
+}
+
+function stageCapabilityCategory(kind: string): string {
+  if (kind === "planning" || kind === "approval") return "Planning";
+  if (kind === "orchestration" || kind === "initialize") return "Work";
+  if (kind === "checkpoint" || kind === "agent_review" || kind === "target_sync") return "Verification";
+  if (kind === "promotion") return "Promotion";
+  return "Automation";
+}
+
+function lockedStageField(
+  key: string,
+  label: string,
+  value: string | number,
+  displayValue: string,
+): StageActionFieldSchema {
+  return {
+    key,
+    label,
+    description: "Compiler-bound context; it cannot be edited.",
+    kind: typeof value === "number" ? "integer" : "text",
+    required: true,
+    locked: true,
+    visibility: "hidden",
+    lockedValue: value,
+    displayValue,
+  };
+}
+
+function stageStringValue(values: Readonly<Record<string, unknown>>, key: string): string {
+  const value = values[key];
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new AuthorityRpcError("stage_action_value", `${key} must be a non-empty string`);
+  }
+  return value;
+}
+
+function stageOptionalStringValue(
+  values: Readonly<Record<string, unknown>>,
+  key: string,
+): string | undefined {
+  const value = values[key];
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new AuthorityRpcError("stage_action_value", `${key} must be a non-empty string when provided`);
+  }
+  return value;
+}
+
+function stageIntegerValue(values: Readonly<Record<string, unknown>>, key: string): number {
+  const value = values[key];
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new AuthorityRpcError("stage_action_value", `${key} must be a nonnegative safe integer`);
+  }
+  return value;
+}
+
+function applyBatchResolutionToLegacyQuestions(
+  run: RunRecord,
+  resolution: QuestionBatchResolution,
+  answeredAt: string,
+): void {
+  for (const answer of resolution.answers) {
+    const question = run.questions[answer.questionId];
+    if (question === undefined || question.batchId !== resolution.batchId) continue;
+    question.selectedOptionId = answer.selectedOptionId;
+    question.notes = answer.notes;
+    if (answer.source !== undefined) question.answerSource = answer.source;
+    question.answerRevision = answer.answerRevision;
+    question.answeredAt = answeredAt;
+  }
+}
+
+function semanticQuestionPolicyForRun(run: RunRecord): QuestionPolicy | undefined {
+  return run.behavior?.runType.questions.policy ?? run.executionConfig?.semanticQuestionPolicy;
+}
+
+function questionScopeForAttempt(
+  run: RunRecord,
+  attempt: AgentAttemptRecord,
+): Pick<QuestionBatchRecord, "scope" | "ticketId"> {
+  const configured = run.behavior?.runType.questions.defaultScope ??
+    run.executionConfig?.questionDefaultScope;
+  if (configured === undefined) return {};
+  if (configured === "ticket" && run.tickets[attempt.ticketId] !== undefined) {
+    return { scope: "ticket", ticketId: attempt.ticketId };
+  }
+  return { scope: "run" };
+}
+
+function applyAutomaticQuestionAnswers(
+  current: QuestionBatchRecord,
+  answers: readonly Readonly<{
+    questionId: string;
+    selectedOptionId: string;
+    reason: "configured_recommendation";
+  }>[],
+  savedAt: string,
+): QuestionBatchRecord {
+  let next = current;
+  for (const answer of answers) {
+    next = saveQuestionBatchAnswer(next, {
+      expectedVersion: next.version,
+      questionId: answer.questionId,
+      selectedOptionId: answer.selectedOptionId,
+      source: answer.reason,
+      savedAt,
+    });
+  }
+  return next;
+}
+
+function appendLegacyQuestionProjection(
+  run: RunRecord,
+  batch: QuestionBatchRecord,
+  questions: readonly QuestionBatchQuestionInput[],
+  resolution: QuestionBatchResolution,
+  at: string,
+): void {
+  for (const [index, question] of questions.entries()) {
+    if (run.questions[question.id] !== undefined) {
+      throw new AuthorityRpcError("question_identity", "question identity already exists");
+    }
+    run.questions[question.id] = {
+      id: question.id,
+      attemptId: resolution.attemptId,
+      ...(batch.scope === undefined ? {} : { scope: batch.scope }),
+      ...(batch.ticketId === undefined ? {} : { ticketId: batch.ticketId }),
+      prompt: question.prompt,
+      options: structuredClone(question.options),
+      allowsNotes: question.allowsNotes,
+      askedAt: at,
+      answeredAt: undefined,
+      selectedOptionId: undefined,
+      notes: undefined,
+      batchId: batch.id,
+      batchPosition: index + 1,
+      batchSize: questions.length,
+      ...(question.impact === undefined ? {} : { impact: question.impact }),
+      ...(question.recommendedOptionId === undefined
+        ? {}
+        : { recommendationOptionId: question.recommendedOptionId }),
+    };
+  }
+  applyBatchResolutionToLegacyQuestions(run, resolution, at);
+}
+
+function questionBatchAnswerSummary(resolution: QuestionBatchResolution): string {
+  return `${resolution.answers.length} question${resolution.answers.length === 1 ? "" : "s"} answered`;
+}
+
+function questionBatchInputs(
+  value: Record<string, unknown>,
+  createQuestionId: () => string,
+  policyAware: boolean,
+): QuestionBatchQuestionInput[] {
+  const rawQuestions: unknown[] = Array.isArray(value.questions)
+    ? value.questions
+    : [value];
+  if (rawQuestions.length < 1 || rawQuestions.length > 8) {
+    throw new AuthorityRpcError("question_batch", "a question batch must contain between 1 and 8 questions");
+  }
+  const sourceIds = new Set<string>();
+  return rawQuestions.map((raw, index) => {
+    if (!isRecord(raw)) {
+      throw new AuthorityRpcError("question_batch", `question ${index + 1} must be an object`);
+    }
+    if (Array.isArray(value.questions)) {
+      const sourceId = boundedText(toolString(raw, "id"), "question id", 128);
+      if (sourceIds.has(sourceId)) {
+        throw new AuthorityRpcError("question_identity", `duplicate question id ${sourceId}`);
+      }
+      sourceIds.add(sourceId);
+    }
+    const recommendedOptionId = raw.recommendedOptionId === undefined
+      ? policyAware
+        ? (() => {
+            throw new AuthorityRpcError(
+              "question_recommendation",
+              "policy-aware questions require exactly one recommendedOptionId",
+            );
+          })()
+        : undefined
+      : typeof raw.recommendedOptionId === "string" && raw.recommendedOptionId.length > 0
+        ? raw.recommendedOptionId
+        : (() => {
+            throw new AuthorityRpcError(
+              "question_recommendation",
+              "recommendedOptionId must be a non-empty string",
+            );
+          })();
+    const impact = raw.impact === "routine" || raw.impact === "high_impact"
+      ? raw.impact
+      : policyAware
+        ? (() => {
+            throw new AuthorityRpcError(
+              "question_impact",
+              "policy-aware questions require impact to be routine or high_impact",
+            );
+          })()
+        : undefined;
+    return {
+      id: createQuestionId(),
+      prompt: boundedText(toolString(raw, "prompt"), "question prompt", 1024 * 1024),
+      options: validateQuestionOptions(raw.options as RunQuestionRecord["options"]),
+      allowsNotes: raw.allowsNotes !== false,
+      ...(impact === undefined ? {} : { impact }),
+      ...(recommendedOptionId === undefined ? {} : { recommendedOptionId }),
+    };
+  });
+}
+
+function questionBatchRpcError(error: unknown): AuthorityRpcError {
+  if (error instanceof AuthorityRpcError) return error;
+  return new AuthorityRpcError(
+    errorCode(error) ?? "question_batch_transition",
+    errorMessage(error),
+    { retryable: errorCode(error) === "version_conflict" },
+  );
+}
+
 function nextRun(run: RunRecord, updatedAt: string): RunRecord {
   const draft = structuredClone(run);
   draft.revision = run.revision + 1;
@@ -4860,8 +13999,67 @@ function nextRun(run: RunRecord, updatedAt: string): RunRecord {
 }
 
 function applyLifecycle(run: RunRecord, event: RunLifecycleEvent): void {
-  run.lifecycle = reduceRunLifecycle(run.lifecycle, event).state;
+  const priorPhase = run.lifecycle.phase;
+  const reduced = reduceRunLifecycle(run.lifecycle, event).state;
+  if (run.lifecycleCatalog !== undefined) {
+    authorizeConfiguredRunTransition(run.lifecycleCatalog, {
+      from: priorPhase,
+      to: reduced.phase,
+      actor: configuredLifecycleActor(event),
+    });
+  }
+  run.lifecycle = reduced;
   run.generation = run.lifecycle.generation;
+}
+
+function configuredLifecycleActor(event: RunLifecycleEvent): "human" | "compiler" {
+  switch (event.type) {
+    case "question_answered":
+    case "plan_revision_requested":
+    case "plan_approval_requested":
+    case "pause_requested":
+    case "resume_requested":
+    case "questions_resume_requested":
+    case "retry_requested":
+    case "merge_started":
+    case "delete_requested":
+      return "human";
+    default:
+      return "compiler";
+  }
+}
+
+function proposalLifecycleActor(
+  run: Readonly<RunRecord>,
+  from: TicketRecord["status"],
+  to: TicketRecord["status"],
+  decision: "approval" | "rejection",
+): string | undefined {
+  const catalog = run.lifecycleCatalog;
+  if (catalog === undefined) return undefined;
+  const machine = catalog.machines.ticket;
+  if (machine === undefined) {
+    throw new AuthorityRpcError("proposal_lifecycle", "run has no configured ticket lifecycle authority");
+  }
+  const configuredFrom = configuredTicketState(machine, from);
+  const configuredTo = configuredTicketState(machine, to);
+  const matches = machine.transitions.filter((transition) =>
+    transition.from.includes(configuredFrom) && transition.to === configuredTo);
+  if (matches.length === 0 || matches.some((transition) => transition.actors.length === 0)) {
+    throw new AuthorityRpcError(
+      "proposal_lifecycle_actor",
+      `proposal ${decision} has no explicit configured lifecycle actor`,
+    );
+  }
+  const actors = [...new Set(matches.flatMap((transition) => transition.actors))].sort();
+  if (decision === "rejection" && actors.includes("compiler")) return "compiler";
+  if (actors.length !== 1) {
+    throw new AuthorityRpcError(
+      "proposal_lifecycle_actor",
+      `proposal ${decision} lifecycle actor is ambiguous: ${actors.join(", ")}`,
+    );
+  }
+  return actors[0]!;
 }
 
 function restoreLegacyLifecycle(run: RunRecord, at: string): void {
@@ -4897,8 +14095,590 @@ function activity(
   at: string,
   kind: RunActivityRecord["kind"],
   message: string,
+  ticketId?: string,
 ): RunActivityRecord {
-  return { id, at, kind, message, ticketId: undefined, nodeId: undefined };
+  return { id, at, kind, message, ticketId, nodeId: undefined };
+}
+
+function requiredRunActionExecution(
+  run: Readonly<RunRecord>,
+  invocationId: string,
+): RunActionExecutionRecord {
+  const record = run.actionExecutions?.[invocationId];
+  if (record === undefined) {
+    throw new AuthorityRpcError("action_execution_missing", `configured action execution does not exist: ${invocationId}`);
+  }
+  return record;
+}
+
+function selectedRunAction(
+  run: Readonly<RunRecord>,
+  selector: string,
+): CompiledActionDefinition {
+  const catalog = run.behavior?.actions;
+  if (catalog === undefined) {
+    throw new AuthorityRpcError("action_catalog_missing", "native run has no pinned action catalog");
+  }
+  const actionId = catalog.aliases[selector] ?? selector;
+  const action = catalog.actions[actionId];
+  if (action === undefined) {
+    throw new AuthorityRpcError("action_selector_missing", `pinned action selector does not resolve: ${selector}`);
+  }
+  return action;
+}
+
+const CONFIGURED_STAGE_PRIMITIVES = new Set([
+  "lock.acquire",
+  "profile.validate",
+  "project.validate",
+  "graph.validate",
+  "ticket.validate",
+  "scope.validate",
+  "event.append",
+  "receipt.write",
+  "snapshot.write",
+  "board.render",
+  "graph.inspect",
+  "ticket.inspect",
+  "integration.validate",
+  "recovery.dispatch",
+]);
+
+function configuredStageActionCapability(
+  run: Readonly<RunRecord>,
+  stage: Readonly<{ id: string; title: string; kind: string }>,
+  current: boolean,
+): StageActionCapability {
+  const config = run.behavior?.runType.pipeline.find((candidate) => candidate.id === stage.id)?.config;
+  const selector = config?.kind === "action" && !config.compilerOwned && !config.automatic
+    ? config.action
+    : undefined;
+  const action = selector === undefined || run.behavior === undefined
+    ? undefined
+    : selectedRunAction(run, selector);
+  const ticketParameters = action?.parameters.filter((parameter) => parameter.type === "ticket_id") ?? [];
+  const eligibleTickets = action === undefined
+    ? []
+    : Object.values(run.tickets).filter((ticket) =>
+      action.allowedTicketStates.length === 0 || action.allowedTicketStates.includes(ticket.status));
+  const recovery = action?.recovery === undefined || run.behavior === undefined
+    ? undefined
+    : selectedRunAction(run, action.recovery);
+  const recoverySafe = recovery === undefined || (recovery.actor === "compiler" &&
+    recovery.recipe.every((step) => CONFIGURED_STAGE_PRIMITIVES.has(step.primitive)) &&
+    recovery.compensation.every((step) => CONFIGURED_STAGE_PRIMITIVES.has(step.primitive)));
+  let reason = "The current compiler stage exposes this exact configured action.";
+  let available = current && action !== undefined && action.actor === "compiler" &&
+    action.recipe.every((step) => CONFIGURED_STAGE_PRIMITIVES.has(step.primitive)) &&
+    action.compensation.every((step) => CONFIGURED_STAGE_PRIMITIVES.has(step.primitive)) && recoverySafe;
+  if (!current) reason = "Configured action is available only at its current pipeline stage.";
+  else if (action === undefined) reason = "Pinned stage action no longer resolves in the action catalog.";
+  else if (action.actor !== "compiler") reason = "Operator controls cannot impersonate a Lead-owned action.";
+  else if (ticketParameters.length > 1) {
+    available = false;
+    reason = "Configured stage actions may bind at most one ticket parameter.";
+  } else if (action.checkout === "ticket" && ticketParameters.length !== 1) {
+    available = false;
+    reason = "Ticket-checkout action has no exact ticket parameter to bind its authority.";
+  } else if (ticketParameters.length === 1 && eligibleTickets.length === 0) {
+    available = false;
+    reason = "No ticket is currently in an allowed state for this action.";
+  } else if (!action.recipe.every((step) => CONFIGURED_STAGE_PRIMITIVES.has(step.primitive)) ||
+      !action.compensation.every((step) => CONFIGURED_STAGE_PRIMITIVES.has(step.primitive)) || !recoverySafe) {
+    available = false;
+    reason = "This action reaches a scheduler, session, Git, graph-mutation, or ticket-transition boundary that is not operator-delegable.";
+  }
+  const fields: StageActionFieldSchema[] = action?.parameters.map((parameter) => {
+    const common = {
+      key: parameter.id,
+      label: humanizeIdentifier(parameter.id),
+      description: parameter.description.length === 0
+        ? `Configured ${parameter.type} parameter.`
+        : parameter.description,
+      required: parameter.required,
+      locked: false,
+      visibility: "shown" as const,
+      maxBytes: 1024 * 1024,
+    };
+    if (parameter.type === "ticket_id") {
+      return {
+        ...common,
+        kind: "select" as const,
+        options: eligibleTickets.map((ticket) => ({
+          value: ticket.id,
+          label: ticket.title,
+          description: `${ticket.status} · ${ticket.id}`,
+        })),
+        ...(typeof parameter.default === "string" ? { defaultValue: parameter.default } : {}),
+      };
+    }
+    if (parameter.type === "boolean") {
+      return { ...common, kind: "boolean" as const, ...(typeof parameter.default === "boolean" ? { defaultValue: parameter.default } : {}) };
+    }
+    if (parameter.type === "integer" || parameter.type === "number") {
+      return {
+        ...common,
+        kind: parameter.type as "integer" | "number",
+        ...(typeof parameter.default === "number" ? { defaultValue: parameter.default } : {}),
+      };
+    }
+    if (parameter.type === "json") {
+      return {
+        ...common,
+        kind: "multiline" as const,
+        ...(parameter.default === undefined ? {} : { defaultValue: canonicalEncode(parameter.default) }),
+      };
+    }
+    return {
+      ...common,
+      kind: "text" as const,
+      ...(typeof parameter.default === "string" ? { defaultValue: parameter.default } : {}),
+    };
+  }) ?? [];
+  return defineBuiltInStageAction({
+    id: `stage:${stage.id}:execute`,
+    intent: "execute_action",
+    available,
+    reason,
+    title: stage.title,
+    description: action === undefined ? "Execute the pinned stage action." : `Execute configured action ${action.id}.`,
+    form: {
+      title: stage.title,
+      description: action === undefined
+        ? "The pinned compiler action is unavailable."
+        : `Parameters are validated against ${action.id} before its durable action plan is admitted.`,
+      submitLabel: "Run action",
+      fields,
+    },
+  });
+}
+
+function configuredStageParameters(
+  action: Readonly<CompiledActionDefinition>,
+  values: Readonly<Record<string, StageActionValue>>,
+): ConfigurationObject {
+  const parameters: Record<string, ConfigurationValue> = Object.create(null) as Record<string, ConfigurationValue>;
+  for (const parameter of action.parameters) {
+    const raw = values[parameter.id];
+    if (raw === undefined) continue;
+    if (parameter.type === "json") {
+      if (typeof raw !== "string") {
+        throw new AuthorityRpcError("stage_action_parameter", `${parameter.id} must contain JSON text`);
+      }
+      try {
+        const value: unknown = JSON.parse(raw);
+        assertConfigurationValue(value, parameter.id);
+        parameters[parameter.id] = value;
+      } catch (error) {
+        if (error instanceof AuthorityRpcError) throw error;
+        throw new AuthorityRpcError("stage_action_parameter", `${parameter.id} is not valid JSON`);
+      }
+    } else {
+      if (Array.isArray(raw)) {
+        throw new AuthorityRpcError("stage_action_parameter", `${parameter.id} has an unsupported list value`);
+      }
+      parameters[parameter.id] = raw;
+    }
+  }
+  return parameters;
+}
+
+function requiredCurrentStageId(run: Readonly<RunRecord>, boundary: string): string {
+  if (run.currentPipelineStageId === undefined) {
+    throw new AuthorityRpcError("action_stage_missing", `${boundary} has no current compiler stage`);
+  }
+  return run.currentPipelineStageId;
+}
+
+function admitRunActionExecution(
+  draft: RunRecord,
+  execution: RunActionExecutionRecord,
+): TransactionWrite[] {
+  if (execution.boundary.runId !== draft.id ||
+      execution.boundary.compiledConfigHash !== draft.compiledConfigHash ||
+      execution.boundary.behaviorSha256 !== draft.behavior?.sha256 ||
+      execution.boundary.generation !== draft.generation ||
+      execution.expectedRunRevision !== draft.revision) {
+    throw new AuthorityRpcError(
+      "action_admission_binding",
+      "configured action admission differs from the exact durable run transition",
+    );
+  }
+  draft.actionExecutions ??= {};
+  const writes: TransactionWrite[] = [];
+  const active = Object.values(draft.actionExecutions);
+  if (active.length >= 256) {
+    const removable = active
+      .filter((record) => record.settledAt !== undefined &&
+        (isTerminalActionJournal(record.journal) || record.settlement?.disposition === "abandoned"))
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.invocationId.localeCompare(right.invocationId));
+    const required = active.length - 191;
+    if (removable.length < required) {
+      throw new AuthorityRpcError(
+        "action_retention_pressure",
+        "too many unsettled configured actions remain; recovery must settle them before new admission",
+      );
+    }
+    draft.actionExecutionArchive ??= [];
+    for (const record of removable.slice(0, required)) {
+      const archived = deriveRunActionExecutionArchive(draft, record);
+      writes.push({ path: archived.row.artifactPath, bytes: archived.bytes, expectedSha256: null });
+      draft.actionExecutionArchive.push(archived.row);
+      delete draft.actionExecutions[record.invocationId];
+    }
+    if (draft.actionExecutionArchive.length > 1_024) {
+      const compacted = draft.actionExecutionArchive.splice(0, draft.actionExecutionArchive.length - 256);
+      const archived = deriveRunActionExecutionArchiveSegment(draft.id, compacted);
+      writes.push({ path: archived.segment.artifactPath, bytes: archived.bytes, expectedSha256: null });
+      draft.actionExecutionArchiveSegments ??= [];
+      if (draft.actionExecutionArchiveSegments.length >= 10_000) {
+        throw new AuthorityRpcError("action_archive_segments", "configured-action archive index reached its audited segment bound");
+      }
+      draft.actionExecutionArchiveSegments.push(archived.segment);
+    }
+  }
+  const prior = draft.actionExecutions[execution.invocationId];
+  if (prior !== undefined && canonicalHash(prior) !== canonicalHash(execution)) {
+    throw new AuthorityRpcError("action_identity_collision", "configured action identity already has different bytes");
+  }
+  draft.actionExecutions[execution.invocationId] = structuredClone(execution);
+  return writes;
+}
+
+function findRunActionAtBoundary(
+  run: Readonly<RunRecord>,
+  kind: RunActionExecutionRecord["boundary"]["kind"],
+  binding: Readonly<{
+    stageId?: string;
+    ticketId?: string;
+    stepId?: string;
+    attemptId?: string;
+    productSha256?: Sha256Digest;
+    parentInvocationId?: string;
+  }> = {},
+): RunActionExecutionRecord | undefined {
+  return Object.values(run.actionExecutions ?? {})
+    .filter((record) => record.boundary.kind === kind &&
+      (binding.stageId === undefined || record.boundary.stageId === binding.stageId) &&
+      (binding.ticketId === undefined || record.boundary.ticketId === binding.ticketId) &&
+      (binding.stepId === undefined || record.boundary.stepId === binding.stepId) &&
+      (binding.attemptId === undefined || record.boundary.attemptId === binding.attemptId) &&
+      (binding.productSha256 === undefined || record.boundary.productSha256 === binding.productSha256) &&
+      (binding.parentInvocationId === undefined || record.boundary.parentInvocationId === binding.parentInvocationId))
+    .sort((left, right) =>
+      right.boundary.admittedRunRevision - left.boundary.admittedRunRevision ||
+      right.invocationId.localeCompare(left.invocationId))
+    [0];
+}
+
+function isTerminalActionJournal(journal: Readonly<ActionExecutionJournal>): boolean {
+  return new Set<ActionExecutionJournal["status"]>([
+    "completed", "failed", "compensated", "compensation_failed", "recovery_required",
+  ]).has(journal.status);
+}
+
+function retryableCompilerValidationAction(
+  run: Readonly<RunRecord>,
+  action: Readonly<RunActionExecutionRecord>,
+): boolean {
+  if (
+    action.boundary.kind !== "assignment_validation" ||
+    action.boundary.generation !== run.generation ||
+    action.settledAt !== undefined ||
+    action.settlement !== undefined ||
+    action.journal.status !== "failed" ||
+    action.semanticResult !== undefined ||
+    Object.keys(action.effects).length !== 0 ||
+    action.journal.steps.length !== 1
+  ) return false;
+  const attemptId = action.boundary.attemptId;
+  const attempt = attemptId === undefined ? undefined : run.attempts[attemptId];
+  if (
+    attempt === undefined ||
+    attempt.status !== "terminal_accepted" ||
+    attempt.terminalAcceptedAt === undefined ||
+    attempt.terminalOutputSha256 === undefined ||
+    attempt.terminalOutputSizeBytes === undefined
+  ) return false;
+  const failed = action.journal.steps[0]!;
+  const first = action.plan.recipe[0];
+  if (failed.status !== "failed" || first === undefined || failed.stepId !== first.id) return false;
+  try {
+    return isActionSemanticCompilerStep(action, first.id, first.primitive);
+  } catch {
+    return false;
+  }
+}
+
+function assertActionBoundaryCurrent(
+  run: Readonly<RunRecord>,
+  record: Readonly<RunActionExecutionRecord>,
+): void {
+  const boundary = record.boundary;
+  if (boundary.kind !== "recovery" && run.currentPipelineStageId !== boundary.stageId) {
+    throw new RunActionAuthorityError("stage_drift", "configured action is no longer at its compiler-bound stage");
+  }
+  if (boundary.kind === "approved_plan_compile" &&
+      (run.lifecycle.phase !== "approving" || run.plan?.status !== "approving")) {
+    throw new RunActionAuthorityError("approval_drift", "approved-plan compile action left the approving boundary");
+  }
+  if ((boundary.kind === "assignment_validation" || boundary.kind === "lead_launch") &&
+      run.lifecycle.phase !== "executing") {
+    throw new RunActionAuthorityError("execution_drift", "ticket or Lead action left deterministic orchestration");
+  }
+  if (boundary.kind === "post_orchestration_report" && run.lifecycle.phase !== "verifying") {
+    throw new RunActionAuthorityError("report_drift", "report action left post-orchestration verification");
+  }
+  if (boundary.kind === "lead_launch") {
+    const trigger = leadJudgmentTriggerFromStepId(boundary.stepId);
+    if (trigger === undefined || boundary.productSha256 !== leadActionProductSha256(run, trigger)) {
+      throw new RunActionAuthorityError("lead_product_drift", "Lead action graph or run product changed after admission");
+    }
+  }
+  if (boundary.attemptId !== undefined) {
+    const attempt = run.attempts[boundary.attemptId];
+    if (boundary.kind === "lead_launch" && attempt === undefined && record.settledAt === undefined) return;
+    if (attempt === undefined || attempt.ticketId !== boundary.ticketId || attempt.stepId !== boundary.stepId) {
+      throw new RunActionAuthorityError("attempt_drift", "configured action attempt binding changed");
+    }
+  }
+}
+
+/**
+ * Authenticate one action against the current run while allowing only a behind global CAS cursor.
+ * Parallel disjoint actions may advance the run revision between this action's effect and journal
+ * writes. The next write rebases that cursor atomically; no separate adoption mutation is needed.
+ */
+function currentRunActionCursor(
+  run: Readonly<RunRecord>,
+  record: Readonly<RunActionExecutionRecord>,
+): RunActionExecutionRecord {
+  if (record.expectedRunRevision > run.revision) {
+    throw new RunActionAuthorityError(
+      "stale_revision",
+      `action expects future run revision ${record.expectedRunRevision}, current revision is ${run.revision}`,
+    );
+  }
+  assertActionBoundaryCurrent(run, record);
+  if (record.expectedRunRevision === run.revision) {
+    assertRunActionCurrent(run, record);
+    return record as RunActionExecutionRecord;
+  }
+  const rebased = { ...structuredClone(record), expectedRunRevision: run.revision };
+  assertRunActionCurrent(run, rebased);
+  return rebased;
+}
+
+function isActionSemanticCompilerStep(
+  record: Readonly<RunActionExecutionRecord>,
+  stepId: string,
+  primitive: string,
+): boolean {
+  let preferred: readonly string[];
+  if (record.boundary.kind === "approved_plan_compile") {
+    preferred = ["rules.evaluate", "project.validate"];
+  } else if (record.boundary.kind === "assignment_validation") {
+    preferred = ["check.run", "review.validate", "rules.evaluate", "project.validate"];
+  } else if (record.boundary.kind === "post_orchestration_report") {
+    preferred = ["report.render"];
+  } else {
+    return false;
+  }
+  for (const candidate of preferred) {
+    const step = record.plan.recipe.find((item) => item.primitive === candidate);
+    if (step !== undefined) return step.id === stepId && primitive === candidate;
+  }
+  throw new AuthorityRpcError(
+    "action_semantic_primitive",
+    `configured ${record.boundary.kind} action contains no native semantic compiler primitive`,
+  );
+}
+
+function assertActionTicketArguments(ticketId: string, args: Readonly<ConfigurationObject>): void {
+  for (const key of ["ticket", "ticket_id"] as const) {
+    const value = args[key];
+    if (value !== undefined && value !== ticketId) {
+      throw new AuthorityRpcError("action_ticket_argument", `${key} differs from the compiler-bound ticket`);
+    }
+  }
+}
+
+function actionStringArgument(args: Readonly<ConfigurationObject>, key: string): string {
+  const value = args[key];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new AuthorityRpcError("action_argument", `configured primitive requires string argument ${key}`);
+  }
+  return value;
+}
+
+function actionOptionalStringArgument(
+  args: Readonly<ConfigurationObject>,
+  key: string,
+): string | undefined {
+  const value = args[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") {
+    throw new AuthorityRpcError("action_argument", `configured primitive argument ${key} must be text`);
+  }
+  return value;
+}
+
+function behaviorProductSha256(binding: Readonly<RunPostOrchestrationBinding>): Sha256Digest {
+  return canonicalHash({
+    runOid: binding.runOid,
+    targetOid: binding.targetOid,
+    graphHash: binding.graphHash,
+  });
+}
+
+function leadActionProductSha256(
+  run: Readonly<RunRecord>,
+  trigger: LeadJudgmentTrigger,
+): Sha256Digest {
+  if (run.behavior === undefined || run.graphHash === undefined || run.git.run.headOid === undefined) {
+    throw new AuthorityRpcError("lead_action_binding", "Lead action requires pinned behavior, graph, and run Git identity");
+  }
+  return canonicalHash({
+    behaviorSha256: run.behavior.sha256,
+    graphHash: run.graphHash,
+    runOid: run.git.run.headOid,
+    stageId: run.currentPipelineStageId ?? null,
+    trigger,
+    priorJudgments: (run.leadJudgments ?? []).map((judgment) => ({
+      trigger: judgment.trigger,
+      disposition: judgment.disposition,
+      graphHash: judgment.graphHash,
+      runOid: judgment.runOid,
+    })),
+  });
+}
+
+function leadJudgmentTriggerFromStepId(stepId: string | undefined): LeadJudgmentTrigger | undefined {
+  if (stepId === "lead-orchestration-entry") return "orchestration_entry";
+  if (stepId === "lead-compiler-deadlock") return "compiler_deadlock";
+  return undefined;
+}
+
+function prepareAssignmentValidationExecution(
+  run: Readonly<RunRecord>,
+  attempt: Readonly<AgentAttemptRecord>,
+  assignment: Readonly<ReadyAssignment>,
+  terminalOutput: unknown,
+  terminalOutputSha256: Sha256Digest,
+  at: string,
+): RunActionExecutionRecord {
+  const ticket = run.tickets[assignment.ticketId];
+  const step = ticket?.steps.find((candidate) => candidate.id === assignment.stepId);
+  if (ticket === undefined || step === undefined || attempt.id.length === 0) {
+    throw new AuthorityRpcError("action_assignment", "terminal output lost its exact ticket-step assignment");
+  }
+  if (step.validationAction === undefined) {
+    throw new AuthorityRpcError(
+      "action_validation_missing",
+      `behavior-backed ticket step ${ticket.id}/${step.id} has no compiler-pinned validation action`,
+    );
+  }
+  const action = selectedRunAction(run, step.validationAction);
+  if (action.actor !== "compiler") {
+    throw new AuthorityRpcError("action_validation_actor", "ticket validation action must be compiler-owned");
+  }
+  const terminal = isRecord(terminalOutput) ? terminalOutput : {};
+  const terminalStatus = terminal.status === "completed"
+    ? "passed"
+    : terminal.status === "failed"
+      ? "failed"
+      : undefined;
+  const terminalNotes = typeof terminal.summary === "string"
+    ? terminal.summary
+    : typeof terminal.blocker === "string"
+      ? terminal.blocker
+      : "";
+  const parameters: Record<string, ConfigurationValue> = Object.create(null) as Record<string, ConfigurationValue>;
+  for (const parameter of action.parameters) {
+    let value: ConfigurationValue | undefined;
+    if (parameter.type === "ticket_id") value = ticket.id;
+    else if (parameter.id === "status" && parameter.type === "string") value = terminalStatus;
+    else if ((parameter.id === "notes" || parameter.id === "summary") && parameter.type === "string") {
+      value = terminalNotes;
+    } else if (parameter.id === "step" && parameter.type === "string") value = step.id;
+    else if (parameter.id === "persona" && parameter.type === "string") value = step.personaId;
+    else if (parameter.id === "payload" && parameter.type === "json") {
+      assertConfigurationValue(terminalOutput, "terminal action payload");
+      value = terminalOutput as ConfigurationValue;
+    } else if (parameter.default !== undefined) value = structuredClone(parameter.default);
+    if (value === undefined && parameter.required) {
+      throw new AuthorityRpcError(
+        "action_validation_parameter",
+        `compiler cannot derive required validation parameter ${parameter.id} from the bound terminal schema`,
+      );
+    }
+    if (value !== undefined) parameters[parameter.id] = value;
+  }
+  return prepareRunActionExecution(run, {
+    kind: "assignment_validation",
+    stageId: requiredCurrentStageId(run, "ticket validation"),
+    selector: step.validationAction,
+    checkout: action.checkout,
+    parameters,
+    ticketId: ticket.id,
+    ticketState: configuredActionTicketState(run, ticket),
+    stepId: step.id,
+    attemptId: attempt.id,
+    ...(ticket.gitCycleId === undefined ? {} : { cycleId: ticket.gitCycleId }),
+    productSha256: canonicalHash({
+      terminalOutputSha256,
+      launchSpecHash: attempt.launchSpecHash,
+      ticketId: ticket.id,
+      stepId: step.id,
+      cycleId: ticket.gitCycleId ?? null,
+    }),
+    at,
+  });
+}
+
+function assignmentUsesConfiguredValidation(
+  run: Readonly<RunRecord>,
+  assignment: Readonly<ReadyAssignment>,
+): boolean {
+  return run.behavior !== undefined && run.tickets[assignment.ticketId]?.steps
+    .some((step) => step.id === assignment.stepId && step.validationAction !== undefined) === true;
+}
+
+function configuredActionTicketState(
+  run: Readonly<RunRecord>,
+  ticket: Readonly<TicketRecord>,
+): string {
+  const machine = run.lifecycleCatalog?.machines.ticket;
+  return machine === undefined ? ticket.status : configuredTicketState(machine, ticket.status);
+}
+
+function terminalActionSummary(output: unknown): string {
+  if (isRecord(output)) {
+    if (typeof output.summary === "string" && output.summary.trim().length > 0) return output.summary;
+    if (typeof output.blocker === "string" && output.blocker.trim().length > 0) return output.blocker;
+  }
+  return "Structured output accepted for configured validation";
+}
+
+function terminalOutputReportsFailure(output: unknown): boolean {
+  return isRecord(output) && output.status === "failed";
+}
+
+function failedSubmissionTerminalPolicy(acceptedAt: string): AgentTerminalPolicyRecord {
+  const material = {
+    protocol: "koni.agent-terminal-policy.v1" as const,
+    mode: "failed_submission" as const,
+    acceptedAt,
+  };
+  return { ...material, sha256: canonicalHash(material) };
+}
+
+function assertConfigurationValue(value: unknown, label: string): asserts value is ConfigurationValue {
+  try {
+    canonicalEncode(value as ConfigurationValue);
+  } catch {
+    throw new AuthorityRpcError("action_validation_parameter", `${label} is not a canonical configuration value`);
+  }
 }
 
 function gitActivityMessage(kind: GitLifecycleIntent["kind"]): string {
@@ -4908,9 +14688,11 @@ function gitActivityMessage(kind: GitLifecycleIntent["kind"]): string {
     ticket_materialize: "Prepared ticket worktree",
     ticket_checkpoint: "Checkpointed ticket candidate",
     ticket_publish: "Integrated ticket candidate",
+    target_sync: "Synchronized target into run workspace",
     target_publish: "Published run to target branch",
     forward_compensation: "Recorded forward Git compensation",
     ticket_retire: "Retired ticket worktree",
+    ticket_supersede: "Archived superseded ticket worktree",
     run_retire: "Retired run workspace",
     abandoned_run_retire: "Retired abandoned Koni workspaces",
     legacy_run_relocate: "Relocated legacy run workspace",
@@ -4925,6 +14707,57 @@ function canonicalJsonHash(value: unknown): Sha256Digest {
   return canonicalHash(JSON.parse(encoded) as JsonValue);
 }
 
+function samePostProduct(
+  left: Readonly<RunPostOrchestrationBinding> | undefined,
+  right: Readonly<RunPostOrchestrationBinding> | undefined,
+): boolean {
+  return left !== undefined && right !== undefined &&
+    left.runOid === right.runOid &&
+    left.targetOid === right.targetOid &&
+    left.graphHash === right.graphHash;
+}
+
+function requiredBehaviorProductBinding(
+  run: Readonly<RunRecord>,
+  stageId: string,
+  recordedAt: string,
+): RunPostOrchestrationBinding {
+  const synchronization = run.git.targetSynchronization;
+  if (
+    run.behavior === undefined || run.graphHash === undefined || run.git.run.headOid === undefined ||
+    synchronization?.status !== "synchronized" || synchronization.runOid === undefined ||
+    synchronization.runOid !== run.git.run.headOid
+  ) {
+    throw new AuthorityRpcError(
+      "post_orchestration_binding",
+      "post-orchestration stage is not bound to an exact synchronized run and graph",
+    );
+  }
+  return {
+    stageId,
+    runOid: synchronization.runOid,
+    targetOid: synchronization.targetOid,
+    graphHash: run.graphHash,
+    recordedAt,
+  };
+}
+
+function verificationCompilationSha256(value: Readonly<VerificationCompilation>): Sha256Digest {
+  return canonicalJsonHash({
+    ok: value.ok,
+    reason: value.reason ?? null,
+    applicableTicketIds: value.applicableTicketIds ?? [],
+    report: value.report === undefined ? null : reportPublicationMaterial(value.report),
+    activity: value.activity ?? [],
+    artifactWrites: (value.artifactWrites ?? []).map((write) => ({
+      path: write.path,
+      sha256: rawSha256(write.bytes),
+      sizeBytes: write.bytes.byteLength,
+      expectedSha256: write.expectedSha256 ?? null,
+    })),
+  });
+}
+
 function ticketGitScope(ticket: TicketRecord): GitPathScope {
   const allowed: GitPathScope["allowed"] = [...new Set(ticket.writePaths)]
     .sort()
@@ -4932,6 +14765,194 @@ function ticketGitScope(ticket: TicketRecord): GitPathScope {
       ? { kind: "glob" as const, pattern: "**" }
       : { kind: "prefix" as const, path: configured.replace(/^\.\//u, "").replace(/\/$/u, "") });
   return { allowed };
+}
+
+/**
+ * Resolve the ticket generation without rewriting legacy records. A ticket already executing in
+ * its second or later durable Git cycle predates the explicit field, so the cycle ordinal is the
+ * only authenticated evidence that its original obligation was reissued.
+ */
+function currentTicketExecutionEpoch(run: Readonly<RunRecord>, ticket: Readonly<TicketRecord>): number {
+  if (ticket.executionEpoch !== undefined) return ticket.executionEpoch;
+  const cycle = ticket.gitCycleId === undefined ? undefined : run.git.ticketCycles[ticket.gitCycleId];
+  return Math.max(0, (cycle?.ordinal ?? 1) - 1);
+}
+
+/**
+ * Epoch-less attempts belong to generation zero unless the current legacy record is already in a
+ * later cycle. In that ambiguous compatibility shape they are deliberately excluded: inheriting
+ * an old terminal conversation would be unsafe and wasteful, while beginning a fresh root loses
+ * no durable audit evidence.
+ */
+function attemptTicketExecutionEpoch(
+  run: Readonly<RunRecord>,
+  ticket: Readonly<TicketRecord>,
+  attempt: Readonly<AgentAttemptRecord>,
+): number | undefined {
+  if (attempt.ticketExecutionEpoch !== undefined) return attempt.ticketExecutionEpoch;
+  if (ticket.executionEpoch !== undefined) return 0;
+  const cycle = ticket.gitCycleId === undefined ? undefined : run.git.ticketCycles[ticket.gitCycleId];
+  return (cycle?.ordinal ?? 1) > 1 ? undefined : 0;
+}
+
+function resetTicketForFreshCycle(ticket: TicketRecord, at: string, currentEpoch: number): void {
+  ticket.executionEpoch = currentEpoch + 1;
+  delete ticket.gitCycleId;
+  ticket.worktreePath = undefined;
+  ticket.branch = undefined;
+  ticket.status = "ready";
+  ticket.blocker = undefined;
+  ticket.updatedAt = at;
+  for (const step of ticket.steps) {
+    step.status = "pending";
+    step.summary = undefined;
+    step.startedAt = undefined;
+    step.completedAt = undefined;
+  }
+  if (ticket.reviewReworkCount !== undefined) ticket.reviewReworkCount = 0;
+  if (ticket.reviewReworks !== undefined) ticket.reviewReworks = [];
+}
+
+function terminalFailureBinding(
+  run: Readonly<RunRecord>,
+  ticket: Readonly<TicketRecord>,
+): Readonly<{
+  stepId: string;
+  attemptId: string;
+  launchSpecHash: Sha256Digest;
+  terminalPolicySha256: Sha256Digest;
+  terminalOutputSha256: Sha256Digest;
+  failureSettlementSha256: Sha256Digest;
+  failureProof: import("../state/run-record.js").TerminalFailureSettlementProof;
+  sha256: Sha256Digest;
+}> | undefined {
+  const step = [...ticket.steps].reverse().find((candidate) => candidate.status === "failed");
+  const attemptId = step?.attemptIds.at(-1);
+  return attemptId === undefined
+    ? undefined
+    : terminalFailureBindingsForTicket(run, ticket).get(attemptId);
+}
+
+function terminalTicketAuthoritySha256(ticket: Readonly<TicketRecord>): Sha256Digest {
+  return canonicalHash({
+    protocol: "koni.terminal-ticket-authority.v1",
+    ticketId: ticket.id,
+    operationId: ticket.operationId,
+    status: ticket.status,
+    executionPolicyBindingSha256: ticket.executionPolicyBinding?.sha256 ?? null,
+    executionControl: ticket.executionControl ?? null,
+    steps: ticket.steps.map((step) => ({
+      id: step.id,
+      status: step.status,
+      attemptIds: step.attemptIds,
+      summary: step.summary ?? null,
+      completedAt: step.completedAt ?? null,
+      executionPolicyBindingSha256: step.executionPolicyBinding?.sha256 ?? null,
+    })),
+  });
+}
+
+function runSourceReleaseDecision(
+  run: Readonly<RunRecord>,
+  source: Readonly<TicketRecord>,
+  proposal: Readonly<TicketRecord>,
+): SourceReleaseDecision {
+  const proposalTerminal = proposal.status === "completed" || proposal.status === "failed" ||
+    proposal.status === "cancelled";
+  const disposition = proposal.executionControl?.proposalDisposition;
+  if (disposition?.kind === "rejected") {
+    return deriveSourceReleaseDecision({
+      sourceTicketId: source.id,
+      heldByProposalTicketId: proposal.id,
+      proposalTerminal,
+      ...(proposalTerminal ? { proposalTerminalSha256: terminalTicketAuthoritySha256(proposal) } : {}),
+      proposalDisposition: { kind: "rejected", authoritySha256: disposition.authoritySha256 },
+    });
+  }
+  if (disposition?.kind === "no_op") {
+    return deriveSourceReleaseDecision({
+      sourceTicketId: source.id,
+      heldByProposalTicketId: proposal.id,
+      proposalTerminal,
+      ...(proposalTerminal ? { proposalTerminalSha256: terminalTicketAuthoritySha256(proposal) } : {}),
+      proposalDisposition: { kind: "no_op", authoritySha256: disposition.authoritySha256 },
+    });
+  }
+  if (disposition?.kind === "application" && disposition.applicationTicketId !== undefined) {
+    const application = run.tickets[disposition.applicationTicketId];
+    const applicationApprovalSha256 = application?.executionControl?.approvedApplicationSha256;
+    if (application === undefined || applicationApprovalSha256 === undefined) {
+      throw new AuthorityRpcError(
+        "change_control_application_authority",
+        `proposal ${proposal.id} names a missing or unauthenticated application child`,
+      );
+    }
+    const applicationTerminal = application.status === "completed";
+    return deriveSourceReleaseDecision({
+      sourceTicketId: source.id,
+      heldByProposalTicketId: proposal.id,
+      proposalTerminal,
+      ...(proposalTerminal ? { proposalTerminalSha256: terminalTicketAuthoritySha256(proposal) } : {}),
+      proposalDisposition: {
+        kind: "application",
+        authoritySha256: disposition.authoritySha256,
+        applicationTicketId: application.id,
+        applicationApprovalSha256,
+        applicationTerminal,
+        ...(applicationTerminal ? {
+          applicationTerminalSha256: terminalTicketAuthoritySha256(application),
+        } : {}),
+      },
+    });
+  }
+  return deriveSourceReleaseDecision({
+    sourceTicketId: source.id,
+    heldByProposalTicketId: proposal.id,
+    proposalTerminal,
+    ...(proposalTerminal ? { proposalTerminalSha256: terminalTicketAuthoritySha256(proposal) } : {}),
+    proposalDisposition: { kind: "pending" },
+  });
+}
+
+function proposalReviewAuthoritySha256(
+  attempt: Readonly<AgentAttemptRecord>,
+  approvalSha256: Sha256Digest,
+): Sha256Digest {
+  if (
+    attempt.terminalPolicy === undefined ||
+    attempt.terminalOutputSha256 === undefined ||
+    attempt.terminalAcceptedAt === undefined
+  ) {
+    throw new AuthorityRpcError(
+      "change_control_review_authority",
+      `review attempt ${attempt.id} lacks accepted terminal-policy authority`,
+    );
+  }
+  return canonicalHash({
+    protocol: "koni.proposal-review-authority.v1",
+    attemptId: attempt.id,
+    launchSpecHash: attempt.launchSpecHash,
+    approvalSha256,
+    terminalPolicySha256: attempt.terminalPolicy.sha256,
+    terminalOutputSha256: attempt.terminalOutputSha256,
+    terminalAcceptedAt: attempt.terminalAcceptedAt,
+  });
+}
+
+function ticketReviewAttemptId(run: RunRecord, ticketId: string): string | undefined {
+  const ticket = run.tickets[ticketId];
+  if (ticket === undefined) return undefined;
+  const reviewStepIds = new Set(ticket.steps.filter((step) => step.kind === "review").map((step) => step.id));
+  return Object.values(run.attempts)
+    .filter((attempt) =>
+      attempt.ticketId === ticketId &&
+      reviewStepIds.has(attempt.stepId) &&
+      attempt.status === "completed"
+    )
+    .sort((left, right) =>
+      (right.endedAt ?? right.startedAt ?? "").localeCompare(left.endedAt ?? left.startedAt ?? "") ||
+      right.id.localeCompare(left.id)
+    )[0]?.id;
 }
 
 function retainTicketAuthorityFields(
@@ -4943,12 +14964,23 @@ function retainTicketAuthorityFields(
     if (prior === undefined) continue;
     if (prior.gitCycleId === undefined) delete ticket.gitCycleId;
     else ticket.gitCycleId = prior.gitCycleId;
+    if (prior.executionEpoch === undefined) delete ticket.executionEpoch;
+    else ticket.executionEpoch = prior.executionEpoch;
     ticket.worktreePath = prior.worktreePath;
     ticket.branch = prior.branch;
     if (prior.integrationForTicketId === undefined) delete ticket.integrationForTicketId;
     else ticket.integrationForTicketId = prior.integrationForTicketId;
   }
   return compiled;
+}
+
+function applyAssignmentRuleAuthorityEvidence(
+  run: RunRecord,
+  evidence: JsonValue | null | undefined,
+): void {
+  if (evidence === undefined) return;
+  if (evidence === null) delete run.ruleAuthorityEvidence;
+  else run.ruleAuthorityEvidence = structuredClone(evidence);
 }
 
 function appendReportPublication(run: RunRecord, report: RunReportRecord | undefined): void {
@@ -4975,6 +15007,36 @@ function hasLiveAttempt(run: RunRecord, kind: AgentAttemptRecord["kind"]): boole
   );
 }
 
+function isStartupSafetyQuiesce(
+  operation: DurableAuthorityQuiesceOperation,
+  receipts: Readonly<Record<string, DurableAuthorityReceipt>>,
+): boolean {
+  if (operation.purpose === "startup_failure" || operation.purpose === "dirty_startup_recovery") {
+    return true;
+  }
+  if (operation.purpose !== undefined) return false;
+  // Compatibility for pre-purpose startup-failure markers. The old internal failure path used this
+  // reserved key prefix but did not commit an authority.quiesce receipt. The operator path committed
+  // marker + matching receipt atomically, so caller-controlled prefix spoofing remains nonprivileged.
+  const operatorReceipt = Object.values(receipts).some((receipt) =>
+    receipt.method === "authority.quiesce" &&
+    receipt.idempotencyKey === operation.idempotencyKey &&
+    receipt.requestHash === operation.requestHash
+  );
+  return operation.idempotencyKey.startsWith("startup-failure:") && !operatorReceipt;
+}
+
+/**
+ * A terminal tool receipt admits exact output bytes; it does not close the provider attempt.
+ * Compiler action effects may already be staged in the durable run while that ACK is pending,
+ * so no downstream scheduler or Git consumer may observe them as final authority yet.
+ */
+function hasUnfinalizedAcceptedAssignment(run: Readonly<RunRecord>): boolean {
+  return Object.values(run.attempts).some((attempt) =>
+    attempt.status === "terminal_accepted" && assignmentForAttempt(run, attempt) !== undefined
+  );
+}
+
 function latestAttempt(run: RunRecord, kind: AgentAttemptRecord["kind"]): AgentAttemptRecord | undefined {
   return Object.values(run.attempts)
     .filter((attempt) => attempt.kind === kind)
@@ -4997,6 +15059,152 @@ function interruptRunningAttempts(run: RunRecord, reason: string, at: string): v
       ticket!.status = "ready";
       ticket!.blocker = undefined;
       ticket!.updatedAt = at;
+    }
+  }
+}
+
+/**
+ * A stopped boundary may also retire a terminal-accepted attempt, but only after its exact
+ * validation action has been abandoned. This ordering prevents a compiled terminal product from
+ * being both accepted and silently reset to pending.
+ */
+function interruptStoppedAttempts(run: RunRecord, reason: string, at: string): void {
+  for (const attempt of Object.values(run.attempts)) {
+    if (!new Set<AttemptStatus>(["queued", "running", "waiting_question", "terminal_accepted"])
+      .has(attempt.status)) continue;
+    if (attempt.status === "terminal_accepted") {
+      const validation = Object.values(run.actionExecutions ?? {}).find((action) =>
+        action.boundary.kind === "assignment_validation" &&
+        action.boundary.attemptId === attempt.id &&
+        action.boundary.generation === run.generation);
+      const assignment = assignmentForAttempt(run, attempt);
+      if (validation !== undefined && validation.settlement?.disposition !== "abandoned") {
+        if (!new Set(["completed", "failed"]).has(validation.settlement?.disposition ?? "") ||
+            attempt.terminalPolicy === undefined) {
+          throw new AuthorityRpcError(
+            "attempt_stop_binding",
+            `terminal-accepted attempt ${attempt.id} has not reached a safe semantic settlement`,
+          );
+        }
+        const accountingIssue = providerOutcomeAccountingIssue(attempt, undefined, false);
+        // The configured compiler result is already authoritative and may have advanced the
+        // ticket. Finalize only the provider attempt; resetting its assignment would erase or
+        // duplicate those accepted semantic effects after restart.
+        attempt.status = "completed";
+        attempt.endedAt = at;
+        attempt.terminalSummary ??= `${reason} after semantic validation`;
+        if (accountingIssue !== undefined) attempt.error = accountingIssue;
+        continue;
+      }
+      if (assignment !== undefined && assignmentUsesConfiguredValidation(run, assignment) &&
+          validation === undefined) {
+        throw new AuthorityRpcError(
+          "attempt_stop_binding",
+          `terminal-accepted attempt ${attempt.id} lost its configured validation action`,
+        );
+      }
+      if (attempt.terminalPolicy !== undefined) {
+        const accountingIssue = providerOutcomeAccountingIssue(attempt, undefined, false);
+        // Direct semantic compilation has already applied its exact graph/ticket/change-control
+        // effects in the same CAS that attached this policy. Close the provider attempt without
+        // rolling the accepted assignment back.
+        attempt.status = "completed";
+        attempt.endedAt = at;
+        attempt.terminalSummary ??= `${reason} after semantic compilation`;
+        if (accountingIssue !== undefined) attempt.error = accountingIssue;
+        continue;
+      }
+      if (assignment === undefined &&
+          new Set<AgentAttemptRecord["kind"]>(["planning", "lead", "verification"]).has(attempt.kind) &&
+          attempt.terminalAcceptedAt !== undefined && attempt.terminalOutputSha256 !== undefined) {
+        const accountingIssue = providerOutcomeAccountingIssue(attempt, undefined, false);
+        // These run-scoped roles compile their plan/judgment/review into the same terminal-tool
+        // CAS. Their semantic state is already authoritative even if the child outcome ACK died.
+        attempt.status = "completed";
+        attempt.endedAt = at;
+        attempt.terminalSummary ??= `${reason} after run-scoped semantic compilation`;
+        if (accountingIssue !== undefined) attempt.error = accountingIssue;
+        continue;
+      }
+    }
+    attempt.status = "interrupted";
+    attempt.error = reason;
+    attempt.endedAt = at;
+    attempt.terminalSummary = reason;
+    const assignment = assignmentForAttempt(run, attempt);
+    if (assignment !== undefined) resetAssignmentAfterInterruption(run, assignment, at);
+  }
+}
+
+function settleRunAction(
+  action: RunActionExecutionRecord,
+  disposition: "completed" | "failed" | "abandoned",
+  reason: string,
+  at: string,
+  expectedRunRevision: number,
+): void {
+  if (action.settledAt !== undefined || action.settlement !== undefined) {
+    throw new AuthorityRpcError("action_settlement_replay", `configured action ${action.invocationId} is already settled`);
+  }
+  action.settlement = createRunActionSettlement(action, disposition, reason, at);
+  action.settledAt = at;
+  action.expectedRunRevision = expectedRunRevision;
+  action.updatedAt = at;
+}
+
+/**
+ * Pause/delete wins by closing every admitted configured action in the same CAS as the terminal
+ * lifecycle label. In-process action promises are deliberately not awaited: the committed
+ * lifecycle tombstone makes every later primitive/finalization CAS fail closed, while the typed
+ * abandoned settlement prevents restart from resurrecting the admission.
+ */
+function closeStoppedRunActions(run: RunRecord, reason: string, at: string): void {
+  const actions = Object.values(run.actionExecutions ?? {})
+    .sort((left, right) =>
+      left.boundary.admittedRunRevision - right.boundary.admittedRunRevision ||
+      left.invocationId.localeCompare(right.invocationId));
+
+  for (const action of actions) {
+    if (action.settledAt !== undefined) continue;
+    if (action.boundary.kind === "assignment_validation") {
+      const attemptId = action.boundary.attemptId;
+      const attempt = attemptId === undefined ? undefined : run.attempts[attemptId];
+      if (attempt?.status === "terminal_accepted") {
+        const assignment = assignmentForAttempt(run, attempt);
+        if (assignment === undefined || assignment.ticketId !== action.boundary.ticketId ||
+            assignment.stepId !== action.boundary.stepId) {
+          throw new AuthorityRpcError(
+            "action_stop_binding",
+            `stopped assignment validation ${action.invocationId} lost its accepted attempt`,
+          );
+        }
+        attempt.status = "interrupted";
+        attempt.error = reason;
+        attempt.endedAt = at;
+        attempt.terminalSummary = reason;
+        resetAssignmentAfterInterruption(run, assignment, at);
+      }
+    } else if (action.boundary.kind === "post_orchestration_report" &&
+        action.semanticResult?.kind === "report") {
+      const reportId = action.semanticResult.reportId;
+      if (run.postOrchestration?.report?.reportId === reportId) {
+        delete run.postOrchestration.report;
+      }
+    }
+    settleRunAction(action, "abandoned", reason, at, run.revision);
+  }
+
+  // Recovery is a two-record protocol. Closing the child also records that its parent has no
+  // pending recovery settlement; both records retain their own immutable abandoned disposition.
+  for (const action of actions) {
+    if (action.boundary.kind !== "recovery" || action.boundary.parentInvocationId === undefined) {
+      continue;
+    }
+    const parent = run.actionExecutions?.[action.boundary.parentInvocationId];
+    if (parent !== undefined && parent.recoveryInvocationId === action.invocationId) {
+      parent.recoverySettledAt ??= at;
+      parent.expectedRunRevision = run.revision;
+      parent.updatedAt = at;
     }
   }
 }
@@ -5040,6 +15248,615 @@ function resetAssignmentAfterInterruption(
   }
 }
 
+function resetRetryableInfrastructureAssignments(
+  run: RunRecord,
+  at: string,
+): Array<{ ticketId: string; ticketTitle: string }> {
+  const retried: Array<{ ticketId: string; ticketTitle: string }> = [];
+  for (const ticket of Object.values(run.tickets)) {
+    if (ticket.status !== "blocked") continue;
+    const step = ticket.steps.find((candidate) => candidate.status === "failed");
+    const attemptId = step?.attemptIds.at(-1);
+    const attempt = attemptId === undefined ? undefined : run.attempts[attemptId];
+    if (
+      step === undefined ||
+      attempt === undefined ||
+      !new Set<AttemptStatus>(["failed", "aborted"]).has(attempt.status) ||
+      attempt.terminalAcceptedAt !== undefined ||
+      attempt.terminalOutputSha256 !== undefined ||
+      providerOutcomeAccountingIssue(attempt, undefined, false) !== undefined ||
+      !isRetryableInfrastructureAttempt(attempt)
+    ) continue;
+    step.status = "pending";
+    step.startedAt = undefined;
+    step.completedAt = undefined;
+    step.summary = undefined;
+    ticket.status = "ready";
+    ticket.blocker = undefined;
+    ticket.updatedAt = at;
+    retried.push({ ticketId: ticket.id, ticketTitle: ticket.title });
+  }
+  return retried;
+}
+
+function isRetryableInfrastructureAttempt(attempt: AgentAttemptRecord): boolean {
+  if (attempt.failureCode !== undefined && new Set([
+    "provider_admission",
+    "provider_input_exposure",
+    "provider_token_exposure",
+    "provider_reservation",
+    "provider_context",
+    "session_persistence",
+    "model_missing",
+    "model_catalog_drift",
+    "model_clamped",
+    "provider_output_cap",
+    "runtime_cleanup",
+    // The Pi session reached a terminal turn without one authority-accepted submission. This is
+    // retryable only at the explicit operator Resume boundary and only after the guards above
+    // prove that no terminal effect or unsettled provider request exists. A rejected terminal call
+    // (for example, after a contained check/runtime defect) must not strand the ticket forever.
+    "terminal_protocol",
+  ]).has(attempt.failureCode)) return true;
+  const error = attempt.error ?? "";
+  // Compatibility for attempts issued before failureCode became durable. These strings identify
+  // Koni/Pi containment and admission failures, not a compiler-reviewed semantic outcome.
+  return [
+    /^(?:input|output|cache-read|cache-write|new-token|cache-inclusive) token budget (?:exceeded|exhausted)$/u,
+    /input budget cannot reserve the prospective provider input/u,
+    /prospective provider input plus reserved output exceeds the authenticated model context window/u,
+    /authority tool result .* exceeds its .* launch bound/u,
+    /simulated contained session cold-start timeout/u,
+    /worker exited with code [0-9]+/u,
+  ].some((pattern) => pattern.test(error));
+}
+
+interface SettledProviderRequest {
+  record: AgentProviderRequestRecord;
+  assistantEntryId: string;
+  assistantEntrySha256: Sha256Digest;
+  usage: KoniAttemptUsage;
+  alreadySettled: boolean;
+}
+
+function validateProviderReservationForSpec(
+  spec: Readonly<AgentLaunchSpec>,
+  request: KoniProviderRequestReservationInput,
+): void {
+  let expectedProspective: number;
+  try {
+    expectedProspective = estimateProviderInputTokens(request.payloadSizeBytes);
+  } catch {
+    throw new AuthorityRpcError(
+      "provider_reservation",
+      "provider reservation does not match its immutable launch and payload bounds",
+    );
+  }
+  if (
+    !Number.isSafeInteger(request.sequence) || request.sequence < 1 ||
+    request.api !== spec.model.api ||
+    request.modelId !== spec.model.id ||
+    !isSha256Digest(request.payloadSha256) ||
+    !Number.isSafeInteger(request.payloadSizeBytes) || request.payloadSizeBytes < 1 ||
+    request.payloadSizeBytes > 64 * 1024 * 1024 ||
+    !Number.isSafeInteger(expectedProspective) ||
+    request.prospectiveInputTokens !== expectedProspective ||
+    !Number.isSafeInteger(request.reservedOutputTokens) || request.reservedOutputTokens < 1 ||
+    request.reservedOutputTokens > spec.model.catalogMaxTokens
+  ) {
+    throw new AuthorityRpcError(
+      "provider_reservation",
+      "provider reservation does not match its immutable launch and payload bounds",
+    );
+  }
+  const cap = request.serializedOutputCap;
+  if (cap !== undefined) {
+    if (
+      spec.model.api === "openai-codex-responses" ||
+      !isSupportedProviderOutputCap(spec.model.api, cap) ||
+      cap.value !== request.reservedOutputTokens
+    ) {
+      throw new AuthorityRpcError(
+        "provider_output_cap",
+        "serialized provider output cap is not supported by the bound Pi API",
+      );
+    }
+  } else if (
+    providerApiHasSupportedOutputCap(spec.model.api) ||
+    request.reservedOutputTokens !== spec.model.catalogMaxTokens
+  ) {
+    throw new AuthorityRpcError(
+      "provider_output_cap",
+      "an uncapped provider request must reserve the authenticated catalog maximum",
+    );
+  }
+}
+
+function assertProviderExposureBudget(
+  spec: Readonly<AgentLaunchSpec>,
+  attempt: AgentAttemptRecord,
+  request: KoniProviderRequestReservationInput,
+): void {
+  const maximum = spec.budgets.tokens;
+  if (request.reservedOutputTokens > maximum.providerOutputHeadroom) {
+    throw new AuthorityRpcError(
+      "provider_output_exposure",
+      "provider request exceeds its compiler-issued in-flight output headroom",
+    );
+  }
+  // v1 launch specs issued before Koni sealed Pi's contextWindow authenticated only the
+  // compiler's explicit input target and model output maximum. Preserve that exact historical
+  // admission boundary for resumability. Every new launch carries catalogContextWindow and uses
+  // the stronger provider-total capacity check.
+  const providerInputHeadroom = spec.model.catalogContextWindow === undefined
+    ? maximum.maxInput
+    : spec.model.catalogContextWindow - request.reservedOutputTokens;
+  if (providerInputHeadroom < 1 || request.prospectiveInputTokens > providerInputHeadroom) {
+    throw new AuthorityRpcError(
+      "provider_input_exposure",
+      "prospective provider input plus reserved output exceeds the authenticated model context window",
+    );
+  }
+  const componentChecks: Array<[number, number, string]> = [
+    [attempt.inputTokens, maximum.maxInput, "input"],
+    [attempt.cacheReadTokens, maximum.maxCacheRead, "cache-read"],
+    [attempt.cacheWriteTokens, maximum.maxCacheWrite, "cache-write"],
+  ];
+  for (const [used, limit, label] of componentChecks) {
+    // Settled provider usage is exact; the next request's serialized byte upper bound is not a
+    // prediction of how the provider will divide input, cache-read, and cache-write tokens. Stop
+    // at the desired component target, while the authenticated context window above provides the
+    // hard in-flight input exposure ceiling.
+    if (used >= limit) {
+      throw new AuthorityRpcError(
+        "provider_token_exhausted",
+        `settled ${label} usage reached its compiler-issued stop target`,
+      );
+    }
+  }
+  const newTokens = checkedProviderSum(attempt.inputTokens, attempt.outputTokens);
+  const allTokens = checkedProviderSum(
+    newTokens,
+    attempt.cacheReadTokens,
+    attempt.cacheWriteTokens,
+  );
+  if (
+    attempt.outputTokens >= maximum.maxOutput ||
+    newTokens >= maximum.maxNew ||
+    allTokens >= maximum.maxAll
+  ) {
+    throw new AuthorityRpcError(
+      "provider_token_exhausted",
+      "settled provider usage reached a desired stop target; headroom cannot fund another request",
+    );
+  }
+  const hardOutput = checkedProviderSum(maximum.maxOutput, maximum.providerOutputHeadroom);
+  const hardNew = checkedProviderSum(
+    maximum.maxNew,
+    providerInputHeadroom,
+    maximum.providerOutputHeadroom,
+  );
+  const hardAll = checkedProviderSum(
+    maximum.maxAll,
+    providerInputHeadroom,
+    maximum.providerOutputHeadroom,
+  );
+  if (
+    checkedProviderSum(attempt.outputTokens, request.reservedOutputTokens) > hardOutput ||
+    checkedProviderSum(newTokens, request.prospectiveInputTokens, request.reservedOutputTokens) > hardNew ||
+    checkedProviderSum(allTokens, request.prospectiveInputTokens, request.reservedOutputTokens) > hardAll
+  ) {
+    throw new AuthorityRpcError(
+      "provider_token_exposure",
+      "provider input plus worst-case output exceeds the context window reserved by the compiler-issued hard exposure ceiling",
+    );
+  }
+}
+
+async function readDurableAttemptTranscript(
+  spec: Readonly<AgentLaunchSpec>,
+  attempt: AgentAttemptRecord,
+  options: { allowCommittedResponseTail?: boolean } = {},
+): Promise<ParsedPiSession> {
+  const expected = path.join(spec.workspace.sessionDirectory, `${spec.identity.sessionId}.jsonl`);
+  if (
+    attempt.sessionFile === undefined ||
+    path.resolve(attempt.sessionFile) !== path.resolve(expected)
+  ) {
+    throw new AuthorityRpcError(
+      "provider_transcript_path",
+      "attempt session path does not match its immutable launch binding",
+    );
+  }
+  let parsed: ParsedPiSession;
+  try {
+    parsed = await readPiSessionDurably(expected, {
+      maxBytes: spec.budgets.transcript.maxBytes +
+        (options.allowCommittedResponseTail === true ? MAX_PROVIDER_RESPONSE_TRANSCRIPT_OVERSHOOT_BYTES : 0),
+      allowTruncatedTail: options.allowCommittedResponseTail === true,
+    });
+  } catch (error) {
+    throw new AuthorityRpcError(
+      "provider_transcript",
+      `Pi transcript could not be durably authenticated: ${errorMessage(error)}`,
+    );
+  }
+  if (
+    parsed.diagnostics.some((diagnostic) =>
+      diagnostic.code !== "truncated_tail" || options.allowCommittedResponseTail !== true
+    ) ||
+    parsed.header.id !== spec.identity.sessionId ||
+    parsed.header.cwd !== spec.workspace.cwd
+  ) {
+    throw new AuthorityRpcError(
+      "provider_transcript_header",
+      "Pi transcript header or commit boundary does not match the launch specification",
+    );
+  }
+  let expectedParent: string | null = null;
+  for (const entry of parsed.entries) {
+    if (entry.parentId !== expectedParent) {
+      throw new AuthorityRpcError(
+        "provider_transcript_branch",
+        "contained Pi provider transcript is not one linear parent chain",
+      );
+    }
+    expectedParent = entry.id;
+  }
+  const mappings = parsed.entries.filter(
+    (entry) => entry.type === "custom" && entry.customType === "koni.attempt-session-map",
+  );
+  const mapping = mappings[0]?.data;
+  const expectedMapping = providerAttemptSessionMapping(spec, expected);
+  if (
+    mappings.length !== 1 ||
+    !isRecord(mapping) ||
+    !canonicalValuesEqual(mapping, expectedMapping)
+  ) {
+    throw new AuthorityRpcError(
+      "provider_transcript_mapping",
+      "Pi transcript attempt mapping does not exactly match the immutable launch specification",
+    );
+  }
+  return parsed;
+}
+
+async function settleProviderRequestFromTranscript(
+  spec: Readonly<AgentLaunchSpec>,
+  attempt: AgentAttemptRecord,
+  expected?: KoniProviderRequestSettlementInput,
+): Promise<SettledProviderRequest> {
+  const records = attempt.authorityProviderRequests ?? [];
+  const record = expected === undefined
+    ? records.at(-1)
+    : records.find((candidate) => candidate.sequence === expected.sequence);
+  if (record === undefined) {
+    throw new AuthorityRpcError("provider_settlement", "provider reservation does not exist");
+  }
+  if (expected !== undefined && record.reservationId !== expected.reservationId) {
+    throw new AuthorityRpcError("provider_settlement", "provider reservation identity changed");
+  }
+  if (record.settledAt !== undefined) {
+    const settled = settledProviderRecord(record);
+    if (expected !== undefined) assertExpectedProviderSettlement(expected, settled);
+    return { record, ...settled, alreadySettled: true };
+  }
+  if (records.at(-1) !== record) {
+    throw new AuthorityRpcError("provider_settlement", "only the final provider reservation may be unsettled");
+  }
+  const transcript = await readDurableAttemptTranscript(spec, attempt, { allowCommittedResponseTail: true });
+  let derived: ReturnType<typeof deriveProviderSettlement>;
+  try {
+    derived = deriveProviderSettlement(transcript.entries, record.baselineEntryId);
+  } catch (error) {
+    throw new AuthorityRpcError(
+      "provider_settlement_transcript",
+      `Pi provider response cannot be uniquely reconciled: ${errorMessage(error)}`,
+    );
+  }
+  if (derived === undefined) {
+    throw new AuthorityRpcError(
+      "provider_settlement_pending",
+      "provider reservation has no committed canonical assistant response",
+    );
+  }
+  const assistant = transcript.byId.get(derived.assistantEntryId);
+  const message = assistant?.message;
+  if (
+    assistant?.type !== "message" ||
+    !isRecord(message) ||
+    message.role !== "assistant" ||
+    message.api !== spec.model.api ||
+    message.provider !== spec.model.provider ||
+    message.model !== spec.model.id
+  ) {
+    throw new AuthorityRpcError(
+      "provider_settlement_model",
+      "canonical Pi assistant entry does not match the compiler-issued model binding",
+    );
+  }
+  if (
+    checkedProviderSum(
+      derived.usage.input,
+      derived.usage.cacheRead,
+      derived.usage.cacheWrite,
+    ) > record.prospectiveInputTokens ||
+    derived.usage.output > record.reservedOutputTokens
+  ) {
+    throw new AuthorityRpcError(
+      "provider_settlement_exposure",
+      "canonical Pi assistant usage exceeds its durable request reservation",
+    );
+  }
+  const settled = {
+    assistantEntryId: derived.assistantEntryId,
+    assistantEntrySha256: derived.assistantEntrySha256,
+    usage: derived.usage,
+  };
+  if (expected !== undefined) assertExpectedProviderSettlement(expected, settled);
+  return { record, ...settled, alreadySettled: false };
+}
+
+async function deriveCanonicalProviderExposureRetirement(
+  spec: Readonly<AgentLaunchSpec>,
+  run: Readonly<RunRecord>,
+  attempt: AgentAttemptRecord,
+  authorizationSha256: Sha256Digest,
+  retiredAt: string,
+): Promise<NonNullable<AgentProviderRequestRecord["retirement"]> | undefined> {
+  const record = attempt.authorityProviderRequests?.at(-1);
+  if (record === undefined || !isOpenProviderRequest(record)) return undefined;
+  const transcript = await readDurableAttemptTranscript(spec, attempt, {
+    allowCommittedResponseTail: true,
+  });
+  const baselineIndex = transcript.entries.findIndex((entry) => entry.id === record.baselineEntryId);
+  if (baselineIndex < 0) return undefined;
+  const suffix = transcript.entries.slice(baselineIndex + 1);
+  const assistants = suffix.filter((entry) =>
+    entry.type === "message" && isRecord(entry.message) && entry.message.role === "assistant"
+  );
+  const assistant = assistants[0];
+  if (assistants.length !== 1 || assistant === undefined || suffix.at(-1)?.id !== assistant.id) {
+    return undefined;
+  }
+  const message = assistant.message;
+  if (!isRecord(message) || !isRecord(message.usage)) return undefined;
+  const responseId = typeof message.responseId === "string" &&
+    message.responseId.length > 0 &&
+    message.responseId.length <= 512 &&
+    !/[\u0000-\u001f\u007f]/u.test(message.responseId)
+    ? message.responseId
+    : undefined;
+  // Codex zeroes usage on abort/error terminals; anthropic-style adapters report the prompt
+  // tokens the interrupted request actually consumed (observed live: a paused Claude planner
+  // recorded 49K prompt tokens with "This operation was aborted"). Partial usage is equally
+  // uncertain either way — retirement retains the full worst-case reservation — so usage does
+  // not gate the boundary, and abort wording varies by adapter.
+  const commonTerminalBoundary = message.api === spec.model.api &&
+    message.provider === spec.model.provider &&
+    message.model === spec.model.id &&
+    responseId !== undefined;
+  const canonicalAbort = commonTerminalBoundary &&
+    message.stopReason === "aborted" &&
+    typeof message.errorMessage === "string" &&
+    /\baborted\b/iu.test(message.errorMessage);
+  const errorMessage = typeof message.errorMessage === "string" &&
+    message.errorMessage.length > 0 &&
+    Buffer.byteLength(message.errorMessage, "utf8") <= 4_096 &&
+    !/[\u0000\u007f]/u.test(message.errorMessage)
+    ? message.errorMessage
+    : undefined;
+  const content = Array.isArray(message.content) ? message.content : [];
+  const terminalToolCalls = content.filter((item) => isRecord(item) && item.type === "toolCall");
+  const terminalToolCallIds = terminalToolCalls.map((item) => item.id);
+  const terminalToolCallsAreDurablyInert = terminalToolCalls.every((item) =>
+    typeof item.id === "string" &&
+    item.id.length > 0 &&
+    Buffer.byteLength(item.id, "utf8") <= 2_048 &&
+    (item.name === "koni_write_file" || item.name === "koni_edit_file") &&
+    !(attempt.authorityToolResults ?? []).some((result) => result.callId === item.id) &&
+    !Object.values(run.pendingEffects ?? {}).some((effect) =>
+      effect.attemptId === attempt.id && effect.callId === item.id)
+  ) && new Set(terminalToolCallIds).size === terminalToolCallIds.length;
+  const canonicalProviderError = commonTerminalBoundary &&
+    message.stopReason === "error" &&
+    errorMessage !== undefined &&
+    content.every((item) =>
+      isRecord(item) && (item.type === "thinking" || item.type === "text" || item.type === "toolCall")
+    ) && terminalToolCallsAreDurablyInert;
+  if (
+    !canonicalAbort &&
+    !canonicalProviderError
+  ) return undefined;
+  const material = {
+    protocol: "koni.provider-exposure-retirement.v1" as const,
+    disposition: canonicalProviderError
+      ? "operator_acknowledged_provider_error" as const
+      : "operator_acknowledged_canonical_abort" as const,
+    assistantEntryId: assistant.id,
+    assistantEntrySha256: canonicalHash(assistant),
+    responseId,
+    ...(canonicalProviderError ? { errorMessageSha256: rawSha256(errorMessage!) } : {}),
+    authorizationSha256,
+    retiredAt,
+  };
+  return { ...material, sha256: canonicalHash(material) };
+}
+
+function settledProviderRecord(record: AgentProviderRequestRecord): {
+  assistantEntryId: string;
+  assistantEntrySha256: Sha256Digest;
+  usage: KoniAttemptUsage;
+} {
+  if (
+    record.assistantEntryId === undefined ||
+    record.assistantEntrySha256 === undefined ||
+    record.inputTokens === undefined ||
+    record.outputTokens === undefined ||
+    record.cacheReadTokens === undefined ||
+    record.cacheWriteTokens === undefined
+  ) {
+    throw new AuthorityRpcError("provider_settlement", "provider settlement is only partially durable");
+  }
+  return {
+    assistantEntryId: record.assistantEntryId,
+    assistantEntrySha256: record.assistantEntrySha256,
+    usage: providerUsage(
+      record.inputTokens,
+      record.outputTokens,
+      record.cacheReadTokens,
+      record.cacheWriteTokens,
+    ),
+  };
+}
+
+function assertExpectedProviderSettlement(
+  expected: KoniProviderRequestSettlementInput,
+  actual: {
+    assistantEntryId: string;
+    assistantEntrySha256: Sha256Digest;
+    usage: KoniAttemptUsage;
+  },
+): void {
+  if (
+    expected.assistantEntryId !== actual.assistantEntryId ||
+    expected.assistantEntrySha256 !== actual.assistantEntrySha256 ||
+    !canonicalValuesEqual(expected.usage, actual.usage)
+  ) {
+    throw new AuthorityRpcError(
+      "provider_settlement_mismatch",
+      "runtime settlement projection differs from canonical Pi transcript evidence",
+    );
+  }
+}
+
+function applyProviderSettlement(
+  attempt: AgentAttemptRecord,
+  settled: SettledProviderRequest,
+  at: string,
+): void {
+  const record = attempt.authorityProviderRequests?.find(
+    (candidate) => candidate.sequence === settled.record.sequence,
+  );
+  if (
+    record === undefined ||
+    record.reservationId !== settled.record.reservationId ||
+    record.settledAt !== undefined ||
+    settled.alreadySettled
+  ) {
+    throw new AuthorityRpcError("provider_settlement", "provider reservation changed before settlement commit");
+  }
+  record.assistantEntryId = settled.assistantEntryId;
+  record.assistantEntrySha256 = settled.assistantEntrySha256;
+  record.inputTokens = settled.usage.input;
+  record.outputTokens = settled.usage.output;
+  record.cacheReadTokens = settled.usage.cacheRead;
+  record.cacheWriteTokens = settled.usage.cacheWrite;
+  record.settledAt = at;
+  attempt.inputTokens = checkedProviderSum(attempt.inputTokens, settled.usage.input);
+  attempt.outputTokens = checkedProviderSum(attempt.outputTokens, settled.usage.output);
+  attempt.cacheReadTokens = checkedProviderSum(attempt.cacheReadTokens, settled.usage.cacheRead);
+  attempt.cacheWriteTokens = checkedProviderSum(attempt.cacheWriteTokens, settled.usage.cacheWrite);
+}
+
+function providerSettlementResponse(settled: SettledProviderRequest): KoniProviderRequestSettlement {
+  return {
+    protocol: "koni.provider-request-settlement.v1",
+    sequence: settled.record.sequence,
+    reservationId: settled.record.reservationId,
+    assistantEntryId: settled.assistantEntryId,
+    assistantEntrySha256: settled.assistantEntrySha256,
+    usage: structuredClone(settled.usage),
+  };
+}
+
+function providerRequestRecoveryRecord(record: AgentProviderRequestRecord) {
+  const base = {
+    sequence: record.sequence,
+    reservationId: record.reservationId,
+    api: record.api,
+    modelId: record.modelId,
+    payloadSha256: record.payloadSha256,
+    payloadSizeBytes: record.payloadSizeBytes,
+    prospectiveInputTokens: record.prospectiveInputTokens,
+    reservedOutputTokens: record.reservedOutputTokens,
+    ...(record.serializedOutputCap === undefined
+      ? {}
+      : { serializedOutputCap: structuredClone(record.serializedOutputCap) }),
+    baselineEntryId: record.baselineEntryId,
+  };
+  if (record.retirement !== undefined) {
+    return { ...base, retirement: structuredClone(record.retirement) };
+  }
+  if (record.settledAt === undefined) return base;
+  const settled = settledProviderRecord(record);
+  return {
+    ...base,
+    settlement: {
+      assistantEntryId: settled.assistantEntryId,
+      assistantEntrySha256: settled.assistantEntrySha256,
+      usage: structuredClone(settled.usage),
+    },
+  };
+}
+
+function providerAttemptSessionMapping(
+  spec: Readonly<AgentLaunchSpec>,
+  sessionFile: string,
+): Readonly<Record<string, unknown>> {
+  return {
+    protocol: "koni.attempt-session-map.v1",
+    specHash: spec.specHash,
+    runId: spec.identity.runId,
+    ticketId: spec.identity.ticketId,
+    stepId: spec.identity.stepId,
+    attemptId: spec.identity.attemptId,
+    sessionId: spec.identity.sessionId,
+    grantId: spec.authority.grantId,
+    grantHash: spec.authority.grantHash,
+    generation: spec.authority.generation,
+    epoch: spec.authority.epoch,
+    stateHash: spec.authority.expectedStateHash,
+    resourceSetHash: spec.resources.setHash,
+    model: spec.model,
+    lineage: spec.lineage,
+    sessionFile,
+  };
+}
+
+function providerUsage(
+  input: number,
+  output: number,
+  cacheRead: number,
+  cacheWrite: number,
+): KoniAttemptUsage {
+  const newTokens = checkedProviderSum(input, output);
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    newTokens,
+    allTokens: checkedProviderSum(newTokens, cacheRead, cacheWrite),
+  };
+}
+
+function checkedProviderSum(...values: number[]): number {
+  const sum = values.reduce((total, value) => total + value, 0);
+  if (!Number.isSafeInteger(sum)) {
+    throw new AuthorityRpcError("provider_usage", "provider token accounting exceeds safe integer range");
+  }
+  return sum;
+}
+
+function canonicalValuesEqual(left: unknown, right: unknown): boolean {
+  try {
+    return canonicalHash(left) === canonicalHash(right);
+  } catch {
+    return false;
+  }
+}
+
 function finishAttemptRecord(
   attempt: AgentAttemptRecord,
   outcome: Extract<ManagedSessionOutcome, { status: "completed" }>,
@@ -5049,7 +15866,61 @@ function finishAttemptRecord(
   attempt.status = "completed";
   attempt.endedAt = at;
   attempt.terminalSummary = summary;
-  applyUsage(attempt, outcome.usage);
+  if (attempt.authorityProviderRequests === undefined) applyUsage(attempt, outcome.usage);
+}
+
+function providerOutcomeAccountingIssue(
+  attempt: AgentAttemptRecord,
+  usage: ManagedSessionOutcome["usage"] | undefined,
+  requireOutcomeProjection = true,
+): string | undefined {
+  const requests = attempt.authorityProviderRequests;
+  if (requests === undefined) return undefined;
+  if (requests.some(isOpenProviderRequest)) {
+    return "Provider request remains reserved without a canonical assistant settlement; worst-case exposure is held";
+  }
+  if (usage === undefined) {
+    return !requireOutcomeProjection || (requests.length === 0 &&
+      attempt.inputTokens === 0 &&
+      attempt.outputTokens === 0 &&
+      attempt.cacheReadTokens === 0 &&
+      attempt.cacheWriteTokens === 0)
+      ? undefined
+      : "Attempt ended without an exact final provider-usage projection";
+  }
+  if (!requireOutcomeProjection) return undefined;
+  let newTokens: number;
+  let allTokens: number;
+  try {
+    newTokens = checkedProviderSum(attempt.inputTokens, attempt.outputTokens);
+    allTokens = checkedProviderSum(newTokens, attempt.cacheReadTokens, attempt.cacheWriteTokens);
+  } catch (error) {
+    return errorMessage(error);
+  }
+  if (
+    usage.input !== attempt.inputTokens ||
+    usage.output !== attempt.outputTokens ||
+    usage.cacheRead !== attempt.cacheReadTokens ||
+    usage.cacheWrite !== attempt.cacheWriteTokens ||
+    usage.newTokens !== newTokens ||
+    usage.allTokens !== allTokens
+  ) {
+    return "Attempt outcome usage differs from authority-settled canonical Pi transcript totals";
+  }
+  return undefined;
+}
+
+function hasUnsettledProviderRequest(attempt: AgentAttemptRecord): boolean {
+  const final = attempt.authorityProviderRequests?.at(-1);
+  return final !== undefined && isOpenProviderRequest(final);
+}
+
+function isOpenProviderRequest(record: AgentProviderRequestRecord): boolean {
+  return record.settledAt === undefined && record.retirement === undefined;
+}
+
+function isProviderPredecessor(status: AgentAttemptRecord["status"]): boolean {
+  return status === "terminal_accepted" || isTerminalAttempt(status);
 }
 
 function applyUsage(
@@ -5072,32 +15943,65 @@ function assertPreparedIdentity(
   attemptId: string,
   sessionId: string,
   assignment: ReadyAssignment | undefined,
+  kind: AgentAttemptRecord["kind"],
+  leadTrigger: LeadJudgmentTrigger | undefined,
 ): void {
   const identity = prepared.spec.identity;
+  const expectedLeadStep = leadTrigger === undefined ? undefined : leadJudgmentStepId(leadTrigger);
   if (
     identity.runId !== runId ||
     identity.attemptId !== attemptId ||
     identity.sessionId !== sessionId ||
+    (kind === "lead" && (
+      leadTrigger === undefined ||
+      identity.ticketId !== "run-orchestration" ||
+      identity.stepId !== expectedLeadStep
+    )) ||
     (assignment !== undefined && (
       identity.ticketId !== assignment.ticketId || identity.stepId !== assignment.stepId
     ))
   ) throw new AuthorityRpcError("launch_identity", "compiler returned a launch spec for another assignment");
 }
 
-function firstPlanningStage(run: RunRecord): string | undefined {
-  return run.pipelineStageIds.find((id) => id.includes("plan")) ?? run.pipelineStageIds[0];
+function leadJudgmentStepId(trigger: LeadJudgmentTrigger): string {
+  return trigger === "orchestration_entry"
+    ? "lead-orchestration-entry"
+    : "lead-compiler-deadlock";
 }
 
-function approvalStage(run: RunRecord): string | undefined {
-  return run.pipelineStageIds.find((id) => id.includes("approval")) ?? run.currentPipelineStageId;
+function leadJudgmentTriggerForAttempt(
+  attempt: Pick<AgentAttemptRecord, "kind" | "stepId">,
+): LeadJudgmentTrigger {
+  if (attempt.kind !== "lead") {
+    throw new AuthorityRpcError("lead_identity", "attempt is not a Lead judgment");
+  }
+  if (attempt.stepId === "lead-orchestration-entry") return "orchestration_entry";
+  if (attempt.stepId === "lead-compiler-deadlock") return "compiler_deadlock";
+  throw new AuthorityRpcError("lead_identity", `Lead attempt step ${attempt.stepId} has no compiler trigger`);
 }
 
-function orchestrationStage(run: RunRecord): string | undefined {
-  return run.pipelineStageIds.find((id) => id.includes("orchestrat")) ?? run.currentPipelineStageId;
+function assertResolvedPipeline(definition: ResolvedRunDefinition): void {
+  assertPipelineProjection(definition.pipelineStageIds, definition.pipelineStages);
 }
 
-function verificationStage(run: RunRecord): string | undefined {
-  return run.pipelineStageIds.find((id) => id.includes("verification")) ?? run.currentPipelineStageId;
+function assertPipelineProjection(
+  stageIds: readonly string[],
+  stages: readonly RunPipelineStageDefinition[],
+): void {
+  if (
+    stageIds.length === 0 ||
+    stages.length !== stageIds.length ||
+    stages.some((stage, index) =>
+      stage.id !== stageIds[index] ||
+      stage.title.length === 0 ||
+      stage.kind.length === 0 ||
+      typeof stage.automatic !== "boolean")
+  ) {
+    throw new AuthorityRpcError(
+      "pipeline_semantics_invalid",
+      "compiler semantic pipeline projection does not exactly match its ordered stage identities",
+    );
+  }
 }
 
 function errorMessage(error: unknown): string {
@@ -5117,6 +16021,57 @@ function errorDetails(error: unknown): JsonValue | undefined {
   return Array.isArray(diagnostics) && diagnostics.every((item) => typeof item === "string")
     ? { diagnostics }
     : undefined;
+}
+
+function profileConflictRpcError(error: unknown, fallbackCode: string): AuthorityRpcError {
+  if (error instanceof AuthorityRpcError) return error;
+  const details = errorDetails(error);
+  return new AuthorityRpcError(
+    errorCode(error) ?? fallbackCode,
+    errorMessage(error),
+    details === undefined ? {} : { details },
+  );
+}
+
+function projectStoreRpcError(error: unknown, fallbackCode: string): AuthorityRpcError {
+  if (error instanceof AuthorityRpcError) return error;
+  const code = errorCode(error) ?? fallbackCode;
+  return new AuthorityRpcError(code, errorMessage(error), {
+    retryable: code === "run_page_stale" || code === "revision_conflict",
+  });
+}
+
+function configDocumentRpcError(error: unknown, fallbackCode: string): AuthorityRpcError {
+  if (error instanceof AuthorityRpcError) return error;
+  const code = error instanceof ConfigDocumentAuthorityError
+    ? error.code
+    : errorCode(error) ?? fallbackCode;
+  const details = errorDetails(error);
+  return new AuthorityRpcError(
+    code,
+    errorMessage(error),
+    {
+      retryable: new Set([
+        "config_changed",
+        "config_document_changed",
+        "config_source_changed",
+        "config_template_changed",
+        "lifecycle_changed",
+        "migration_preview_changed",
+      ]).has(code),
+      ...(details === undefined ? {} : { details }),
+    },
+  );
+}
+
+function configMutationEventPayload(value: JsonValue): JsonValue {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  const changedDocuments = value.changedDocuments;
+  const protocol = value.protocol;
+  return {
+    ...(typeof protocol === "string" ? { protocol } : {}),
+    ...(typeof changedDocuments === "number" ? { changedDocuments } : {}),
+  };
 }
 
 function defaultId(kind: "run" | "attempt" | "session" | "question" | "activity"): string {
@@ -5308,6 +16263,18 @@ function enforceRepositoryCallBudget(
   attempt: AgentAttemptRecord,
   call: KoniToolInvocation,
 ): void {
+  if (attempt.planningSynthesis !== undefined && REPOSITORY_DISCOVERY_TOOLS.has(call.name)) {
+    throw new AuthorityRpcError(
+      "planning_synthesis_required",
+      "planning exploration is closed; synthesize the reviewable plan and submit it",
+      {
+        details: {
+          thresholdNewTokens: attempt.planningSynthesis.thresholdNewTokens,
+          limitNewTokens: attempt.planningSynthesis.limitNewTokens,
+        },
+      },
+    );
+  }
   const limit = spec.budgets.repositoryCalls?.max;
   if (limit === undefined || !REPOSITORY_DISCOVERY_TOOLS.has(call.name)) return;
   const used = (attempt.authorityToolResults ?? []).filter((result) =>
@@ -5320,6 +16287,77 @@ function enforceRepositoryCallBudget(
       { details: { limit, used } },
     );
   }
+}
+
+function planningSynthesisPolicy(
+  run: RunRecord,
+  attempt: AgentAttemptRecord,
+): Readonly<{ synthesisThreshold: number; synthesisReserve: number; limit: number }> | undefined {
+  if (attempt.kind !== "planning") return undefined;
+  return run.behavior?.runType.planning?.tokenPolicy;
+}
+
+function planningSynthesisInstruction(
+  synthesisThreshold: number,
+  limit: number,
+  synthesisReserve: number,
+  triggerReason: "token_threshold" | "provider_input_pressure",
+  triggeredNewTokens: number,
+): string {
+  return [
+    "Compiler policy: planning exploration is complete.",
+    "Stop reading, listing, or searching repository files. Do not begin another discovery pass.",
+    "Use the evidence already in this session to synthesize the concise and full reviewable plan now, then call koni_submit_output.",
+    triggerReason === "token_threshold"
+      ? `The configured transition began at ${synthesisThreshold} new tokens; ${synthesisReserve} tokens are reserved for synthesis before the hard ${limit}-token limit.`
+      : `The conservative next provider input could not fit safely, so synthesis began early at ${triggeredNewTokens} new tokens instead of waiting for the configured ${synthesisThreshold}-token threshold; the hard limit remains ${limit}.`,
+  ].join(" ");
+}
+
+function createPlanningSynthesisTransition(
+  run: RunRecord,
+  attempt: AgentAttemptRecord,
+  at: string,
+  options: {
+    forceReason?: "provider_input_pressure";
+  } = {},
+): Readonly<{
+  record: NonNullable<AgentAttemptRecord["planningSynthesis"]>;
+  write: TransactionWrite;
+}> | undefined {
+  const tokenPolicy = planningSynthesisPolicy(run, attempt);
+  const triggeredNewTokens = checkedProviderSum(attempt.inputTokens, attempt.outputTokens);
+  if (
+    tokenPolicy === undefined ||
+    attempt.planningSynthesis !== undefined ||
+    (options.forceReason === undefined && triggeredNewTokens < tokenPolicy.synthesisThreshold)
+  ) return undefined;
+  const triggerReason = options.forceReason ?? "token_threshold";
+  const content = planningSynthesisInstruction(
+    tokenPolicy.synthesisThreshold,
+    tokenPolicy.limit,
+    tokenPolicy.synthesisReserve,
+    triggerReason,
+    triggeredNewTokens,
+  );
+  const bytes = Buffer.from(content, "utf8");
+  const sha256 = rawSha256(bytes);
+  const artifactPath = planningSynthesisInstructionPath(run.id, attempt.id, sha256);
+  return {
+    record: {
+      protocol: "koni.planning-synthesis.v1",
+      thresholdNewTokens: tokenPolicy.synthesisThreshold,
+      limitNewTokens: tokenPolicy.limit,
+      reserveNewTokens: tokenPolicy.synthesisReserve,
+      triggerReason,
+      triggeredNewTokens,
+      instructionSha256: sha256,
+      instructionSizeBytes: bytes.byteLength,
+      instructionArtifactPath: artifactPath,
+      triggeredAt: at,
+    },
+    write: { path: artifactPath, bytes, expectedSha256: null },
+  };
 }
 
 function assertSameLaunchSpec(expected: AgentLaunchSpec, actual: Readonly<AgentLaunchSpec>): void {
@@ -5341,9 +16379,24 @@ function assertLiveAttempt(run: RunRecord, spec: AgentLaunchSpec): AgentAttemptR
   return attempt;
 }
 
+/** Settlement consumes already-spent provider exposure and remains legal after terminal acceptance. */
+function assertProviderSettlementAttempt(run: RunRecord, spec: AgentLaunchSpec): AgentAttemptRecord {
+  const attempt = run.attempts[spec.identity.attemptId];
+  if (
+    attempt === undefined ||
+    attempt.launchSpecHash !== spec.specHash
+  ) {
+    throw new AuthorityRpcError(
+      "provider_settlement_inactive",
+      "attempt no longer matches a settleable durable provider reservation",
+    );
+  }
+  return attempt;
+}
+
 function assignmentForAttempt(
-  run: RunRecord,
-  attempt: AgentAttemptRecord,
+  run: Readonly<RunRecord>,
+  attempt: Readonly<AgentAttemptRecord>,
 ): ReadyAssignment | undefined {
   if (attempt.kind === "planning") return undefined;
   const ticket = run.tickets[attempt.ticketId];
@@ -5371,6 +16424,14 @@ function authorityMessagePath(
   return `runs/${runId}/attempts/${attemptId}/authority-messages/${String(sequence).padStart(6, "0")}-${digest.slice(7)}.txt`;
 }
 
+function planningSynthesisInstructionPath(
+  runId: string,
+  attemptId: string,
+  digest: Sha256Digest,
+): string {
+  return `runs/${runId}/attempts/${attemptId}/planning-synthesis-${digest.slice(7)}.txt`;
+}
+
 function terminalOutputPath(runId: string, attemptId: string): string {
   return `runs/${runId}/attempts/${attemptId}/terminal-output.json`;
 }
@@ -5379,24 +16440,606 @@ function configuredCheckIntentId(grant: AuthorityGrant, callId: string): string 
   return `check-${rawSha256(`${grant.grantId}\0${grant.epoch}\0${grant.generation}\0${callId}`).slice(7, 39)}`;
 }
 
+function samePendingCheckIdentity(
+  left: PendingCheckIntentRecord,
+  right: PendingCheckIntentRecord,
+): boolean {
+  const { attempts: _leftAttempts, ...leftIdentity } = left;
+  const { attempts: _rightAttempts, ...rightIdentity } = right;
+  return canonicalHash(leftIdentity) === canonicalHash(rightIdentity);
+}
+
 function configuredCheckStreamPath(
   runId: string,
   attemptId: string,
   callId: string,
   index: number,
+  attemptNumber: number,
   stream: "stdout" | "stderr",
 ): string {
-  return `runs/${runId}/attempts/${attemptId}/checks/${rawSha256(callId).slice(7)}/${String(index).padStart(4, "0")}-${stream}.bin`;
+  return `runs/${runId}/attempts/${attemptId}/checks/${rawSha256(callId).slice(7)}/${String(index).padStart(4, "0")}-${String(attemptNumber).padStart(2, "0")}-${stream}.bin`;
 }
 
 function configuredCheckEvidencePath(runId: string, attemptId: string, callId: string): string {
   return `runs/${runId}/attempts/${attemptId}/checks/${rawSha256(callId).slice(7)}/evidence.json`;
 }
 
+function configuredTerminalReplayStreamPath(
+  runId: string,
+  attemptId: string,
+  projectionSha256: Sha256Digest,
+  checkIndex: number,
+  commandIndex: number,
+  attemptNumber: number,
+  stream: "stdout" | "stderr",
+): string {
+  return `runs/${runId}/attempts/${attemptId}/terminal-policy/${projectionSha256.slice(7, 23)}/${String(checkIndex).padStart(3, "0")}-${String(commandIndex).padStart(3, "0")}-${String(attemptNumber).padStart(2, "0")}-${stream}.bin`;
+}
+
+function terminalPolicyEvidencePath(
+  runId: string,
+  attemptId: string,
+  terminalPolicySha256: Sha256Digest,
+): string {
+  return `runs/${runId}/attempts/${attemptId}/terminal-policy/${terminalPolicySha256.slice(7)}.json`;
+}
+
+export function assertTerminalPolicyProjectionSafety(
+  projection: RuntimeAssignmentTerminalPolicyProjection,
+  binding: ExecutionPolicyBinding,
+  grant: AuthorityGrant,
+): void {
+  const { sha256, ...material } = projection;
+  if (projection.protocol !== "koni.assignment-terminal-policy.v1" ||
+      !isSha256Digest(sha256) || canonicalHash(material) !== sha256 ||
+      projection.configurationSha256 !== binding.configurationSha256 ||
+      projection.catalogSha256 !== binding.catalogSha256 ||
+      canonicalHash(projection.executionPolicyBinding) !== canonicalHash(binding)) {
+    throw new AuthorityRpcError("terminal_policy_projection", "compiler returned a stale terminal-policy projection");
+  }
+  const configured = grant.configuredChecks;
+  const hasProjectedConfiguredCheckWork = projection.validationCheckIds.length > 0 ||
+    projection.validationChecks.length > 0 ||
+    projection.composedReplayCheckIds.length > 0;
+  if ((configured === undefined && hasProjectedConfiguredCheckWork) ||
+      (configured !== undefined && (
+        new Set(projection.validationCheckIds).size !== projection.validationCheckIds.length ||
+        projection.validationCheckIds.some((checkId) => !configured.ids.includes(checkId))
+      ))) {
+    throw new AuthorityRpcError(
+      "terminal_policy_scope",
+      "terminal validation checks exceed the immutable configured-check grant",
+    );
+  }
+  const replayIds = new Set<string>();
+  for (const validation of projection.validationChecks) {
+    const selected = new Set(validation.replaySelection.replayCheckIds);
+    for (const command of validation.resolvedCheck.commands) {
+      if (!selected.has(command.checkId) || command.executionPolicy === undefined) {
+        throw new AuthorityRpcError(
+          "terminal_replay_selection",
+          `terminal replay includes compiler-unselected leaf ${command.checkId}`,
+        );
+      }
+      assertCheckPolicyMatchesBinding(command.executionPolicy, command.checkId, binding);
+      if (command.executionPolicy.effect !== "read_only" ||
+          command.executionPolicy.receiptFreshness !== "current" ||
+          command.executionPolicy.composedReplay !== "required" ||
+          command.effect !== "read_only" || command.networkAccess ||
+          configured === undefined || command.timeoutMs > configured.maxTimeoutMs) {
+        throw new AuthorityRpcError(
+          "terminal_replay_unsafe",
+          `terminal replay leaf ${command.checkId} is not current, opted-in, contained, and read-only`,
+        );
+      }
+      replayIds.add(command.checkId);
+    }
+  }
+  if (canonicalHash([...replayIds].sort()) !== canonicalHash([...projection.composedReplayCheckIds])) {
+    throw new AuthorityRpcError("terminal_replay_selection", "terminal replay closure differs from helper selection");
+  }
+}
+
+function terminalReceiptEvidence(
+  run: Readonly<RunRecord>,
+  attempt: Readonly<AgentAttemptRecord>,
+  projection: RuntimeAssignmentTerminalPolicyProjection,
+  replay: RuntimeAssignmentTerminalReplayCompilation,
+  compilerReceipts: readonly CompilerTerminalReceiptAuthority[] = [],
+): ExecutionPolicyReceiptEvidence[] {
+  const binding = projection.executionPolicyBinding;
+  const evidence: ExecutionPolicyReceiptEvidence[] = [];
+  for (const authority of compilerReceipts) {
+    assertCompilerTerminalReceiptAuthority(authority, projection);
+    evidence.push(structuredClone(authority.receipt));
+  }
+  for (const policy of projection.validationChecks) {
+    const result = replay.checks.find((candidate) => candidate.checkId === policy.checkId);
+    if (result === undefined) continue;
+    const retainedForPolicy = projection.retainedReceipts.filter((receipt) =>
+      policy.retainedLeafPolicies.some((leaf) =>
+        leaf.checkId === receipt.checkId &&
+        canonicalHash(leaf.executionPolicy) === canonicalHash(receipt.executionPolicy)));
+    const current = result.replayedLeafCheckIds.length > 0 ||
+      (retainedForPolicy.length > 0 && retainedForPolicy.every((receipt) => receipt.attemptId === attempt.id));
+    evidence.push({
+      receiptId: `terminal-replay:${projection.sha256}:${policy.checkId}`,
+      receiptType: policy.receiptType,
+      checkId: policy.checkId,
+      checkSha256: policy.checkSha256,
+      freshness: policy.receiptFreshness,
+      status: result.accepted && result.passed ? "passed" : "failed",
+      configurationSha256: projection.configurationSha256,
+      catalogSha256: projection.catalogSha256,
+      operationId: binding.operationId,
+      ...(binding.workflowId === undefined ? {} : { workflowId: binding.workflowId }),
+      stepId: binding.stepId!,
+      bindingSha256: binding.sha256,
+      integrityValid: replay.projectionSha256 === projection.sha256,
+      current,
+      historicalEvidenceValid: policy.receiptFreshness === "historical" && result.passed,
+      linkedToCurrentOutput: current,
+    });
+  }
+  for (const check of run.checks ?? []) {
+    const policy = check.executionPolicy;
+    if (policy === undefined || policy.bindingSha256 !== binding.sha256 ||
+        policy.configurationSha256 !== projection.configurationSha256 ||
+        policy.catalogSha256 !== projection.catalogSha256) continue;
+    const retained = projection.retainedReceipts.some((receipt) => receipt.runCheckId === check.id);
+    evidence.push({
+      receiptId: check.id,
+      receiptType: policy.receiptType,
+      checkId: policy.checkId,
+      checkSha256: policy.checkSha256,
+      freshness: policy.receiptFreshness,
+      status: check.accepted && check.passed === true ? "passed" : "failed",
+      configurationSha256: policy.configurationSha256,
+      catalogSha256: policy.catalogSha256,
+      operationId: binding.operationId,
+      ...(binding.workflowId === undefined ? {} : { workflowId: binding.workflowId }),
+      stepId: binding.stepId!,
+      bindingSha256: binding.sha256,
+      integrityValid: true,
+      current: check.attemptId === attempt.id,
+      historicalEvidenceValid: retained,
+      linkedToCurrentOutput: check.attemptId === attempt.id,
+    });
+  }
+  return evidence;
+}
+
+function createLaunchContextTerminalReceipt(
+  run: Readonly<RunRecord>,
+  attempt: Readonly<AgentAttemptRecord>,
+  assignment: Readonly<ReadyAssignment>,
+  prepared: Readonly<PreparedManagedAttempt>,
+  grant: Readonly<AuthorityGrant>,
+  projection: RuntimeAssignmentTerminalPolicyProjection,
+): CompilerTerminalReceiptAuthority | undefined {
+  const spec = prepared.spec;
+  if (
+    spec.specHash !== attempt.launchSpecHash ||
+    spec.identity.runId !== run.id ||
+    spec.identity.ticketId !== assignment.ticketId ||
+    spec.identity.stepId !== assignment.stepId ||
+    spec.identity.attemptId !== attempt.id ||
+    spec.identity.sessionId !== attempt.sessionId ||
+    canonicalHash(grant) !== spec.authority.grantHash ||
+    grant.grantId !== spec.authority.grantId ||
+    grant.runId !== run.id ||
+    grant.ticketId !== assignment.ticketId ||
+    grant.stepId !== assignment.stepId ||
+    grant.attemptId !== attempt.id ||
+    grant.sessionId !== attempt.sessionId ||
+    grant.generation !== run.generation ||
+    grant.generation !== spec.authority.generation ||
+    grant.epoch !== spec.authority.epoch
+  ) {
+    throw new AuthorityRpcError(
+      "terminal_context_binding",
+      "terminal context receipt differs from the immutable launch specification or authority grant",
+    );
+  }
+  // Imported compatibility attempts may not retain the original context bytes. They cannot
+  // manufacture a current context-pack receipt; the ordinary required-receipt evaluator will
+  // fail closed if their pinned workflow requires one.
+  if (prepared.contextContent === undefined) return undefined;
+  const contextSha256 = rawSha256(prepared.contextContent);
+  if (contextSha256 !== spec.authority.authoritativeContextHash) {
+    throw new AuthorityRpcError(
+      "terminal_context_hash",
+      "terminal context bytes differ from the immutable authoritative context hash",
+    );
+  }
+  return createCompilerTerminalReceipt(
+    "launch_context",
+    "context-pack",
+    projection,
+    {
+      protocol: "koni.terminal-context-pack-provenance.v1",
+      runId: run.id,
+      ticketId: assignment.ticketId,
+      stepId: assignment.stepId,
+      attemptId: attempt.id,
+      sessionId: attempt.sessionId,
+      launchSpecSha256: spec.specHash,
+      grantId: grant.grantId,
+      grantSha256: spec.authority.grantHash,
+      authoritativeContextSha256: spec.authority.authoritativeContextHash,
+      contextBytesSha256: contextSha256,
+      generation: run.generation,
+      authorityEpoch: grant.epoch,
+      authorityExpectedRevision: grant.expectedRevision,
+      authorityExpectedStateSha256: grant.expectedStateHash,
+      projectionSha256: projection.sha256,
+      bindingSha256: projection.executionPolicyBinding.sha256,
+    },
+  );
+}
+
+function createConfiguredActionTerminalReceipts(
+  run: Readonly<RunRecord>,
+  attempt: Readonly<AgentAttemptRecord>,
+  assignment: Readonly<ReadyAssignment>,
+  action: Readonly<RunActionExecutionRecord>,
+  projection: RuntimeAssignmentTerminalPolicyProjection,
+): CompilerTerminalReceiptAuthority[] {
+  if (
+    action.boundary.kind !== "assignment_validation" ||
+    action.boundary.runId !== run.id ||
+    action.boundary.ticketId !== assignment.ticketId ||
+    action.boundary.stepId !== assignment.stepId ||
+    action.boundary.attemptId !== attempt.id ||
+    action.journal.status !== "completed" ||
+    action.semanticResult?.kind !== "assignment" ||
+    attempt.terminalOutputSha256 === undefined
+  ) {
+    throw new AuthorityRpcError(
+      "terminal_compiler_action",
+      "terminal compiler receipt requires the completed exact assignment-validation action",
+    );
+  }
+  const ticket = run.tickets[assignment.ticketId];
+  const expectedProductSha256 = canonicalHash({
+    terminalOutputSha256: attempt.terminalOutputSha256,
+    launchSpecHash: attempt.launchSpecHash,
+    ticketId: assignment.ticketId,
+    stepId: assignment.stepId,
+    cycleId: ticket?.gitCycleId ?? null,
+  });
+  if (action.boundary.productSha256 !== expectedProductSha256) {
+    throw new AuthorityRpcError(
+      "terminal_compiler_product",
+      "assignment-validation action is not bound to the accepted terminal output",
+    );
+  }
+  const recipe = action.plan.recipe;
+  const emitsScopedCompile = recipe.some((step) =>
+    step.primitive === "rules.evaluate" && step.arguments.mode === "scoped") ||
+    recipe.some((step) =>
+      step.primitive === "event.append" && step.arguments.type === "compiler.compile.scoped");
+  const emitsReviewReceipt = recipe.some((step) => step.primitive === "review.validate") &&
+    recipe.some((step) => step.primitive === "review.record");
+  const common: JsonValue = {
+    protocol: "koni.terminal-configured-action-provenance.v1",
+    runId: run.id,
+    ticketId: assignment.ticketId,
+    stepId: assignment.stepId,
+    attemptId: attempt.id,
+    terminalOutputSha256: attempt.terminalOutputSha256,
+    launchSpecSha256: attempt.launchSpecHash,
+    actionInvocationId: action.invocationId,
+    actionBoundarySha256: action.boundary.sha256,
+    actionProductSha256: action.boundary.productSha256,
+    actionPlanSha256: action.plan.sha256,
+    actionJournalSha256: action.journal.sha256,
+    actionSemanticResultSha256: canonicalHash(action.semanticResult),
+    actionEffectsSha256: canonicalHash(action.effects),
+    graphHash: run.graphHash ?? null,
+    graphRevision: run.graphRevision ?? null,
+    ticketProjectionSha256: ticket === undefined ? null : canonicalHash(ticket),
+    projectionSha256: projection.sha256,
+    bindingSha256: projection.executionPolicyBinding.sha256,
+  };
+  const receipts: CompilerTerminalReceiptAuthority[] = [];
+  if (projection.requiredReceiptTypes.includes("scoped-compile") && emitsScopedCompile) {
+    receipts.push(createCompilerTerminalReceipt(
+      "configured_action",
+      "scoped-compile",
+      projection,
+      common,
+    ));
+  }
+  if (projection.requiredReceiptTypes.includes("review-receipt") && emitsReviewReceipt) {
+    receipts.push(createCompilerTerminalReceipt(
+      "configured_action",
+      "review-receipt",
+      projection,
+      common,
+    ));
+  }
+  return receipts;
+}
+
+function createDirectCompilationTerminalReceipts(
+  run: Readonly<RunRecord>,
+  attempt: Readonly<AgentAttemptRecord>,
+  assignment: Readonly<ReadyAssignment>,
+  terminalOutputSha256: Sha256Digest,
+  compiled: Readonly<AssignmentCompilation>,
+  projection: RuntimeAssignmentTerminalPolicyProjection,
+): CompilerTerminalReceiptAuthority[] {
+  const ticket = run.tickets[assignment.ticketId];
+  const step = ticket?.steps.find((candidate) => candidate.id === assignment.stepId);
+  if (ticket === undefined || step === undefined) {
+    throw new AuthorityRpcError(
+      "terminal_direct_assignment",
+      "direct compiler result lost its exact scheduler assignment",
+    );
+  }
+  const compilationProjection: JsonValue = {
+    outcome: structuredClone(compiled.outcome),
+    graphHash: compiled.graphHash ?? null,
+    graphRevision: compiled.graphRevision ?? null,
+    ticketsSha256: compiled.tickets === undefined ? null : canonicalHash(compiled.tickets),
+    activitySha256: canonicalHash(compiled.activity ?? []),
+    artifactWrites: (compiled.artifactWrites ?? []).map((write) => ({
+      path: write.path,
+      expectedSha256: write.expectedSha256 ?? null,
+      bytesSha256: rawSha256(write.bytes),
+      sizeBytes: write.bytes.byteLength,
+    })),
+    changeControlSha256: compiled.changeControl?.sha256 ?? null,
+  };
+  const common: JsonValue = {
+    protocol: "koni.terminal-direct-compilation-provenance.v1",
+    runId: run.id,
+    ticketId: assignment.ticketId,
+    stepId: assignment.stepId,
+    attemptId: attempt.id,
+    terminalOutputSha256,
+    launchSpecSha256: attempt.launchSpecHash,
+    compilerResultSha256: canonicalHash(compilationProjection),
+    compilerResult: compilationProjection,
+    projectionSha256: projection.sha256,
+    bindingSha256: projection.executionPolicyBinding.sha256,
+  };
+  const receipts: CompilerTerminalReceiptAuthority[] = [];
+  if (projection.requiredReceiptTypes.includes("scoped-compile")) {
+    receipts.push(createCompilerTerminalReceipt(
+      "direct_compilation",
+      "scoped-compile",
+      projection,
+      common,
+    ));
+  }
+  if (projection.requiredReceiptTypes.includes("review-receipt") && step.kind === "review") {
+    receipts.push(createCompilerTerminalReceipt(
+      "direct_compilation",
+      "review-receipt",
+      projection,
+      common,
+    ));
+  }
+  return receipts;
+}
+
+function createCompilerTerminalReceipt(
+  source: CompilerTerminalReceiptAuthority["source"],
+  receiptType: string,
+  projection: RuntimeAssignmentTerminalPolicyProjection,
+  provenance: JsonValue,
+): CompilerTerminalReceiptAuthority {
+  const binding = projection.executionPolicyBinding;
+  if (binding.stepId === undefined) {
+    throw new AuthorityRpcError("terminal_receipt_step", "assignment terminal receipt has no bound workflow step");
+  }
+  const receiptIdentity = {
+    protocol: "koni.compiler-terminal-receipt-identity.v1",
+    source,
+    receiptType,
+    provenance,
+  };
+  const receipt: ExecutionPolicyReceiptEvidence = {
+    receiptId: canonicalHash(receiptIdentity),
+    receiptType,
+    freshness: "current",
+    status: "passed",
+    configurationSha256: projection.configurationSha256,
+    catalogSha256: projection.catalogSha256,
+    operationId: binding.operationId,
+    ...(binding.workflowId === undefined ? {} : { workflowId: binding.workflowId }),
+    stepId: binding.stepId,
+    bindingSha256: binding.sha256,
+    integrityValid: true,
+    current: true,
+    historicalEvidenceValid: false,
+    linkedToCurrentOutput: true,
+  };
+  const material = {
+    protocol: "koni.compiler-terminal-receipt.v1" as const,
+    source,
+    receipt,
+    provenance,
+  };
+  return { ...material, sha256: canonicalHash(material) };
+}
+
+function assertCompilerTerminalReceiptAuthority(
+  authority: Readonly<CompilerTerminalReceiptAuthority>,
+  projection: RuntimeAssignmentTerminalPolicyProjection,
+): void {
+  const { sha256, ...material } = authority;
+  const receiptIdentity = {
+    protocol: "koni.compiler-terminal-receipt-identity.v1",
+    source: authority.source,
+    receiptType: authority.receipt.receiptType,
+    provenance: authority.provenance,
+  };
+  const binding = projection.executionPolicyBinding;
+  if (
+    authority.protocol !== "koni.compiler-terminal-receipt.v1" ||
+    canonicalHash(material) !== sha256 ||
+    authority.receipt.receiptId !== canonicalHash(receiptIdentity) ||
+    authority.receipt.status !== "passed" ||
+    authority.receipt.freshness !== "current" ||
+    !authority.receipt.integrityValid ||
+    !authority.receipt.current ||
+    !authority.receipt.linkedToCurrentOutput ||
+    authority.receipt.configurationSha256 !== projection.configurationSha256 ||
+    authority.receipt.catalogSha256 !== projection.catalogSha256 ||
+    authority.receipt.operationId !== binding.operationId ||
+    authority.receipt.workflowId !== binding.workflowId ||
+    authority.receipt.stepId !== binding.stepId ||
+    authority.receipt.bindingSha256 !== binding.sha256
+  ) {
+    throw new AuthorityRpcError(
+      "terminal_compiler_receipt_integrity",
+      "compiler terminal receipt is stale, unbound, or not current",
+    );
+  }
+}
+
+async function verifyTerminalSourcePreservation(
+  run: Readonly<RunRecord>,
+  attempt: Readonly<AgentAttemptRecord>,
+  projection: RuntimeAssignmentTerminalPolicyProjection,
+  workspace: string,
+): Promise<Sha256Digest[]> {
+  const receipts: Sha256Digest[] = [];
+  for (const pair of projection.sourceManifestPairs) {
+    if (pair.retainedSourceReceipts.length === 0 ||
+        canonicalHash([...pair.current.sourcePaths]) !== canonicalHash([...pair.source.sourcePaths])) {
+      throw new AuthorityRpcError(
+        "terminal_source_baseline",
+        `source-preservation member ${pair.memberNodeId} has no exact retained baseline`,
+      );
+    }
+    const baselines: RunCheckSourceManifestRecord[] = [];
+    for (const retained of pair.retainedSourceReceipts) {
+      const check = (run.checks ?? []).find((candidate) => candidate.id === retained.runCheckId);
+      const retainedAttempt = run.attempts[retained.attemptId];
+      const command = check?.commands[retained.commandIndex];
+      if (check === undefined || retainedAttempt === undefined ||
+          retainedAttempt.ticketId !== attempt.ticketId || retainedAttempt.stepId !== retained.stepId ||
+          !check.accepted || check.passed !== true || check.attemptId !== retained.attemptId ||
+          check.requestedCheckId !== retained.requestedCheckId || command === undefined ||
+          command.checkId !== retained.checkId || command.executionPolicy === undefined ||
+          canonicalHash(command.executionPolicy) !== canonicalHash(retained.executionPolicy) ||
+          command.sourceManifest === undefined ||
+          command.sourceManifest.commandBindingSha256 !== pair.source.commandBindingSha256 ||
+          command.sourceManifest.stepId !== pair.source.stepId) {
+        throw new AuthorityRpcError(
+          "terminal_source_receipt",
+          `source-preservation receipt ${retained.runCheckId}/${retained.commandIndex} is stale or unauthenticated`,
+        );
+      }
+      baselines.push(command.sourceManifest);
+    }
+    const baseline = baselines[0]!;
+    if (baselines.some((candidate) =>
+      canonicalHash(candidate.roots) !== canonicalHash(baseline.roots) ||
+      canonicalHash(candidate.entries) !== canonicalHash(baseline.entries))) {
+      throw new AuthorityRpcError(
+        "terminal_source_ambiguous",
+        `source-preservation member ${pair.memberNodeId} has conflicting retained baselines`,
+      );
+    }
+    const current = await snapshotContainedPaths(workspace, pair.current.sourcePaths);
+    if (baseline.entries.some((entry) => entry.kind === "missing") ||
+        current.entries.some((entry) => entry.kind === "missing") ||
+        canonicalHash(baseline.roots) !== canonicalHash(current.roots) ||
+        canonicalHash(baseline.entries) !== canonicalHash(current.entries)) {
+      throw new AuthorityRpcError(
+        "terminal_source_changed",
+        `workflow step ${attempt.stepId} changed exact source bytes from ${pair.source.stepId}`,
+      );
+    }
+    receipts.push(canonicalHash({
+      protocol: "koni.source-preservation-receipt.v1",
+      bindingSha256: projection.executionPolicyBinding.sha256,
+      pairSha256: pair.sha256,
+      baselineManifestSha256: baseline.sha256,
+      currentManifestSha256: current.manifestSha256,
+      preserved: true,
+    }));
+  }
+  return [...new Set(receipts)].sort();
+}
+
+function createRunCheckAttemptRecord(
+  material: Omit<RunCheckAttemptRecord, "sha256">,
+): RunCheckAttemptRecord {
+  return { ...material, sha256: canonicalHash(material) };
+}
+
+function createRunCheckSourceManifest(
+  binding: ExecutionPolicyBinding,
+  policy: CheckExecutionPolicyBinding,
+  command: ResolvedAgentCheckCommand,
+  manifest: ContainedPathManifest,
+  capturedAt: string,
+): RunCheckSourceManifestRecord {
+  if (command.memberNodeId === undefined || command.memberSourcePaths === undefined) {
+    throw new AuthorityRpcError(
+      "check_source_binding",
+      `configured check ${command.checkId} has no exact semantic source member`,
+    );
+  }
+  const commandBindingSha256 = canonicalHash({
+    stepId: binding.stepId,
+    checkId: command.checkId,
+    definitionHash: command.definitionHash,
+    executionPolicy: policy,
+    memberNodeId: command.memberNodeId,
+    memberSourcePaths: command.memberSourcePaths,
+    argv: command.argv,
+    cwd: command.cwd,
+    inputPaths: command.inputPaths,
+  });
+  const material = {
+    protocol: "koni.run-check-source-manifest.v1" as const,
+    configurationSha256: policy.configurationSha256,
+    catalogSha256: policy.catalogSha256,
+    bindingSha256: policy.bindingSha256,
+    checkSha256: policy.checkSha256,
+    commandBindingSha256,
+    stepId: binding.stepId!,
+    roots: [...manifest.roots],
+    entries: manifest.entries.map((entry) => ({ ...entry })),
+    manifestSha256: manifest.manifestSha256,
+    capturedAt,
+  };
+  return { ...material, sha256: canonicalHash(material) };
+}
+
+async function waitForConfiguredRetry(
+  backoffSeconds: number,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (signal?.aborted === true) {
+    throw new AuthorityRpcError("check_aborted", "configured check retry was aborted");
+  }
+  if (backoffSeconds === 0) return;
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, backoffSeconds * 1_000);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new AuthorityRpcError("check_aborted", "configured check retry was aborted"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 function assertResolvedAgentCheck(
   check: ResolvedAgentCheck,
   requestedCheckId: string,
   configured: NonNullable<AuthorityGrant["configuredChecks"]>,
+  expectedBinding: ExecutionPolicyBinding | undefined,
 ): void {
   if (
     check.protocol !== "koni.resolved-agent-check.v1" ||
@@ -5409,6 +17052,24 @@ function assertResolvedAgentCheck(
     (check.kind === "command" && check.commands.length !== 1) ||
     (check.kind === "composite" && check.commands.length === 0)
   ) throw new AuthorityRpcError("check_contract", "compiler returned an invalid configured check plan");
+  if (expectedBinding !== undefined) {
+    assertExecutionPolicyBindingIntegrity(expectedBinding);
+    if (check.executionPolicy === undefined) {
+      throw new AuthorityRpcError(
+        "check_policy_missing",
+        `behavior-backed check ${requestedCheckId} has no top-level execution policy`,
+      );
+    }
+  }
+  if (check.executionPolicy !== undefined) {
+    assertCheckPolicyMatchesBinding(check.executionPolicy, requestedCheckId, expectedBinding);
+    if (check.executionPolicy.checkSha256 !== check.definitionHash) {
+      throw new AuthorityRpcError(
+        "check_policy_mismatch",
+        `configured check ${requestedCheckId} differs from its top-level execution policy`,
+      );
+    }
+  }
   for (const command of check.commands) {
     if (
       typeof command.checkId !== "string" || command.checkId.length === 0 ||
@@ -5423,6 +17084,71 @@ function assertResolvedAgentCheck(
       (command.resultSource.kind === "file" && command.resultSource.path.length === 0) ||
       !Array.isArray(command.inputPaths) || !Array.isArray(command.outputPaths)
     ) throw new AuthorityRpcError("check_contract", `compiler returned an invalid command for ${requestedCheckId}`);
+    if (expectedBinding !== undefined && command.executionPolicy === undefined) {
+      throw new AuthorityRpcError(
+        "check_policy_missing",
+        `behavior-backed check leaf ${command.checkId} has no execution policy`,
+      );
+    }
+    if (command.executionPolicy !== undefined) {
+      assertCheckPolicyMatchesBinding(command.executionPolicy, command.checkId, expectedBinding);
+      if (command.executionPolicy.checkSha256 !== command.definitionHash ||
+          command.executionPolicy.effect !== command.effect ||
+          command.executionPolicy.receiptType !== command.receiptType) {
+        throw new AuthorityRpcError(
+          "check_policy_mismatch",
+          `configured command ${command.checkId} differs from its compiler-bound execution policy`,
+        );
+      }
+    }
+  }
+}
+
+function executionPolicyBindingForAttempt(
+  run: Readonly<RunRecord>,
+  attempt: Readonly<AgentAttemptRecord>,
+): ExecutionPolicyBinding | undefined {
+  const ticket = run.tickets[attempt.ticketId];
+  const step = ticket?.steps.find((candidate) => candidate.id === attempt.stepId);
+  if (ticket === undefined || step === undefined) return undefined;
+  const binding = step.executionPolicyBinding;
+  if (binding === undefined) return undefined;
+  assertExecutionPolicyBindingIntegrity(binding);
+  if (binding.operationId !== ticket.operationId ||
+      binding.stepId !== step.id ||
+      (ticket.executionPolicyBinding !== undefined &&
+        (ticket.executionPolicyBinding.operationId !== binding.operationId ||
+         ticket.executionPolicyBinding.configurationSha256 !== binding.configurationSha256 ||
+         ticket.executionPolicyBinding.catalogSha256 !== binding.catalogSha256))) {
+    throw new AuthorityRpcError(
+      "execution_policy_binding",
+      `attempt ${attempt.id} has a stale ticket/step execution-policy binding`,
+    );
+  }
+  return binding;
+}
+
+function assertCheckPolicyMatchesBinding(
+  policy: CheckExecutionPolicyBinding,
+  checkId: string,
+  binding: ExecutionPolicyBinding | undefined,
+): void {
+  assertCheckExecutionPolicyBinding(policy);
+  if (policy.checkId !== checkId) {
+    throw new AuthorityRpcError(
+      "check_policy_mismatch",
+      `configured check policy ${policy.checkId} was supplied for ${checkId}`,
+    );
+  }
+  if (binding !== undefined && (
+    policy.configurationSha256 !== binding.configurationSha256 ||
+    policy.catalogSha256 !== binding.catalogSha256 ||
+    policy.bindingSha256 !== binding.sha256
+  )) {
+    throw new AuthorityRpcError(
+      "check_policy_mismatch",
+      `configured check ${checkId} belongs to a different execution-policy binding`,
+    );
   }
 }
 
@@ -5431,6 +17157,7 @@ async function readConfiguredCheckResult(
   grant: AuthorityGrant,
   command: ResolvedAgentCheckCommand,
   stdout: Buffer,
+  tolerateInvalidStructuredResult = false,
 ): Promise<AgentCheckExecution["resultSource"]> {
   let bytes: Buffer;
   let sourcePath: string | undefined;
@@ -5445,11 +17172,20 @@ async function readConfiguredCheckResult(
     if (pathWithinGrant(sourcePath, grant.writePaths)) {
       const file = await paths.inspectWritable(sourcePath);
       if (file === undefined) {
-        throw new AuthorityRpcError("check_result_missing", `configured result file is missing: ${sourcePath}`);
+        if (!tolerateInvalidStructuredResult) {
+          throw new AuthorityRpcError("check_result_missing", `configured result file is missing: ${sourcePath}`);
+        }
+        bytes = Buffer.alloc(0);
+      } else {
+        bytes = file.bytes;
       }
-      bytes = file.bytes;
     } else {
-      bytes = (await paths.read(sourcePath)).bytes;
+      try {
+        bytes = (await paths.read(sourcePath)).bytes;
+      } catch (error) {
+        if (!tolerateInvalidStructuredResult) throw error;
+        bytes = Buffer.alloc(0);
+      }
     }
   }
   const text = bytes.toString("utf8");
@@ -5464,11 +17200,11 @@ async function readConfiguredCheckResult(
     try {
       value = JSON.parse(text) as JsonValue;
     } catch (error) {
-      if (structured) {
+      if (structured && !tolerateInvalidStructuredResult) {
         throw new AuthorityRpcError("check_result_json", `configured check result is not JSON: ${errorMessage(error)}`);
       }
     }
-  } else if (structured) {
+  } else if (structured && !tolerateInvalidStructuredResult) {
     throw new AuthorityRpcError("check_result_json", "configured check result is empty");
   }
   return {
@@ -5486,6 +17222,64 @@ function exactUtf8CheckStream(bytes: Buffer, label: string): string {
     throw new AuthorityRpcError("check_stream_encoding", `configured check ${label} is not exact non-NUL UTF-8`);
   }
   return text;
+}
+
+/**
+ * Give the assigned agent a bounded, actionable explanation when an authority-run check fails.
+ * Complete streams remain immutable artifacts in the check record; this projection is deliberately
+ * small enough for the model transcript and excludes successful leaves from a failed composite.
+ */
+export function configuredCheckFailureDiagnostics(
+  check: Pick<ResolvedAgentCheck, "commands">,
+  executions: readonly AgentCheckExecution[],
+): Array<Record<string, JsonValue>> {
+  const failed = executions.filter((execution, index) => {
+    const command = check.commands[index];
+    return execution.signal !== null || execution.exitCode === null ||
+      command === undefined || !command.expectedExitCodes.includes(execution.exitCode);
+  });
+  const selected = (failed.length === 0 ? executions : failed).slice(0, 8);
+  return selected.map((execution) => {
+    const commandIndex = executions.indexOf(execution);
+    const command = check.commands[commandIndex];
+    const stderrTail = boundedCheckDiagnosticTail(execution.stderr, 2_048);
+    const stdoutTail = boundedCheckDiagnosticTail(execution.stdout, 2_048);
+    return {
+      commandIndex,
+      checkId: execution.checkId,
+      exitCode: execution.exitCode,
+      signal: execution.signal,
+      expectedExitCodes: command?.expectedExitCodes ?? [],
+      ...(stderrTail.length === 0 ? {} : { stderrTail }),
+      ...(stdoutTail.length === 0 ? {} : { stdoutTail }),
+    };
+  });
+}
+
+/**
+ * An accepted non-zero result proves only the configured exit-code contract. The assigned
+ * author still needs bounded streams to authenticate that an expected-red check failed for
+ * the intended product reason rather than an unrelated fixture, import, or harness error.
+ */
+export function shouldProjectConfiguredCheckDiagnostics(
+  check: Pick<ResolvedAgentCheck, "commands">,
+  accepted: boolean,
+): boolean {
+  return !accepted || check.commands.some((command) =>
+    command.expectedExitCodes.some((exitCode) => exitCode !== 0)
+  );
+}
+
+function boundedCheckDiagnosticTail(value: string, maximumBytes: number): string {
+  const sanitized = value
+    .replace(/\u001B(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001B\\))/gu, "")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/gu, "")
+    .trim();
+  const bytes = Buffer.from(sanitized, "utf8");
+  if (bytes.byteLength <= maximumBytes) return sanitized;
+  let start = bytes.byteLength - maximumBytes;
+  while (start < bytes.byteLength && (bytes[start]! & 0xc0) === 0x80) start += 1;
+  return bytes.subarray(start).toString("utf8");
 }
 
 async function readConfiguredOutputFiles(
@@ -5643,6 +17437,22 @@ function workspaceEffectId(grant: AuthorityGrant, callId: string): string {
 
 function workspaceEffectContentPath(runId: string, attemptId: string, effectId: string): string {
   return `runs/${runId}/attempts/${attemptId}/workspace-effects/${effectId}.bin`;
+}
+
+function conversationParentSessionFile(spec: Readonly<AgentLaunchSpec>): string {
+  const lineage = spec.lineage;
+  if (
+    lineage.conversationFork === undefined ||
+    lineage.parentAttemptId === undefined ||
+    lineage.parentSessionId === undefined
+  ) {
+    throw new AuthorityRpcError("transcript_lineage", "attempt has no authenticated conversation parent");
+  }
+  return path.join(
+    path.dirname(spec.workspace.sessionDirectory),
+    lineage.parentAttemptId,
+    `${lineage.parentSessionId}.jsonl`,
+  );
 }
 
 function workspaceEffectReceipt(intent: WorkspaceEffectIntentRecord): KoniToolReceipt {
