@@ -464,3 +464,32 @@ exact compiled schema. This targets the single biggest token sink independent of
 
 Net: the submit-contract fix alone would have prevented both budget-abort losses and every
 placeholder submission across the 16 runs; items 1–2 are the next-largest compute recovery.
+
+## 2026-07-21 (session 5) — all remaining audit recommendations implemented
+
+Operator directive: "make all the fixes and continue improving it." The four remaining ranked
+recommendations from the session-4 transcript audit are now implemented (all provider-agnostic,
+tests green: run-lifecycle, stage-capability, run-authority-engine, native-run-program,
+pi-tool-catalog):
+
+- **W1 upfront grant + act-don't-ruminate (`30aef9d`)** — the launch prompt now lists the exact
+  compiled read/write path grant (ends the grant-probing waste in every attempt) and instructs
+  emitting the decided tool call in the same turn (prevents the observed reasoning-only truncation
+  deaths where a turn spent its whole output budget thinking).
+- **W2 check classification + deterministic-repeat note (`30aef9d`)** — the infrastructure-failure
+  classifier now catches runner-level errors (`spawn EPERM/EACCES`, `ERR_PNPM_*`, corepack), so a
+  sandbox spawn failure can no longer be silently accepted as the intended red baseline; and a
+  nonpassing check whose streams are byte-identical to a prior run in the same attempt is annotated
+  as deterministic so agents stop re-running it.
+- **W3 fork failure distillation (`30aef9d`)** — a same-scope continuation now receives the parent
+  attempt's authority-recorded failure cause (budget exhaustion / transient provider failure /
+  tool-contract rejection) with targeted instructions, ending the observed identical 40-turn loops
+  across fork generations.
+- **W4 approval-compile dead-end recovery (`b485695`)** — `plan_revision_requested` is now legal
+  from a run blocked at the approving boundary, clearing the blocker and spawning a fresh steered
+  planning attempt; the "Revise plan" stage action is exposed in that state. This resolves the
+  former dead end where an approved plan failing deterministic compilation could only be deleted.
+
+Deployed as bundle `6cbd4bbc`; validation run `ed339364` launched with the full fix stack
+(submit-contract self-description, grant visibility, check classification, fork distillation,
+compile-failure recovery, plus all session-3 engine fixes).
