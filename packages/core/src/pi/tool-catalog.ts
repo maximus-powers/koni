@@ -408,9 +408,11 @@ export function createKoniAuthorityTools(options: KoniToolCatalogOptions): Autho
       maxResultBytes,
       execute,
       reject,
+      // The terminal outcome contract stays the exact compiled union even though the advertised
+      // parameters carry the transport-flattened view (see transportToolSchema).
       ...(source.terminal ? {
-        terminalOutputSchema: parameters,
-        terminalOutputSchemaHash: schemaHash,
+        terminalOutputSchema: structuredClone(options.terminalOutputSchema ?? parameters),
+        terminalOutputSchemaHash: canonicalHash(options.terminalOutputSchema ?? parameters),
       } : {}),
       definition,
     };
