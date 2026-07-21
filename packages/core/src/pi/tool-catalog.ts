@@ -582,6 +582,14 @@ function resolveToolSchema(
     ? transportToolSchema(name, terminalOutputSchema)
     : CATALOG[name].schema;
   if (expectedSchemaHash === undefined || canonicalHash(current) === expectedSchemaHash) return current;
+  // Launch specs issued before the transport flatten bound the raw terminal union as the submit
+  // tool's parameter schema; keep those in-flight attempts recoverable.
+  if (
+    name === "koni_submit_output" && terminalOutputSchema !== undefined &&
+    canonicalHash(terminalOutputSchema) === expectedSchemaHash
+  ) {
+    return terminalOutputSchema;
+  }
   if (name === "koni_record_note" && canonicalHash(legacyRecordNoteSchema) === expectedSchemaHash) {
     return legacyRecordNoteSchema;
   }

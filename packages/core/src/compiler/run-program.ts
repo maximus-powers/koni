@@ -1282,7 +1282,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       },
       terminal: {
         toolName: "koni_submit_output",
-        outputSchemaHash: koniToolSchemaHash("koni_submit_output", descriptor.terminalSchema),
+        // The outcome contract binds the exact compiled union; the tool's advertised parameters
+        // (tools[].schemaHash) bind the transport-flattened view. These are distinct hashes.
+        outputSchemaHash: canonicalHash(descriptor.terminalSchema),
         maxOutputBytes: 4 * 1024 * 1024,
       },
     });
