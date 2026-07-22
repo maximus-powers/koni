@@ -547,3 +547,30 @@ Also fixed en route (`bc45d8d`, `3b0b16e`, `094c798`): the sealed-binding triple
 parameters + tools[].schemaHash carry the flattened transport view; terminal.outputSchemaHash and
 the tool's terminalOutputSchema carry the exact compiled union; legacy pre-flatten bindings stay
 recoverable, and binding mismatches are retryable infrastructure.
+
+## 2026-07-22 — FIRST FULL END-TO-END SUCCESS (run #19, b1697d74)
+
+Run `b1697d74` completed the entire pipeline for the first time across 19 runs:
+planning → approval → orchestrate (3 tickets: author-baseline, implement, assemble) →
+verification (3 accepted checks) → merge_ready → merging → **completed**. The verified
+candidate merged into `koni-smoke-small` as `b22fbcf76b`.
+
+Independent verification before authorizing:
+- Real, coherent diff (325 insertions / 5 files): a new shared `general-fields.ts` typed
+  contract + `general-fields.test.ts`, both the questionnaire (`questionnaire-definition.tsx`,
+  `useVisibleRefs.tsx`) and proposal (`ProposalCompany.tsx`) surfaces wired to the single
+  six-thread contract — exactly the approved objective (preserved Sales Notes card index 0 +
+  five optional SPICED long-text fields).
+- The proof test is genuinely green: 3/3 passed when run against the candidate source in a
+  clean checkout (vitest, apps/books), then cleaned up.
+
+The merge was authorized through the pty-driven TUI. Note the merge dialog defaults focus to
+**Cancel** (verified via the reverse-video `\x1b[7m` code around "Cancel", not "Authorize
+merge"); authorizing requires one Right-arrow to move focus to "Authorize merge" before Enter.
+
+This closes the session's arc: the audit-driven fixes (submit contract, transport schema, the
+sealed-binding triple split, fork distillation, approval-compile recovery) plus the
+ticket-definition-drift compiler bug — which the newly-typed submit schema let an agent isolate
+in a 24-attempt controlled protocol — together took the harness from "no run ever completed" to
+a blind-mergeable candidate. Runs #17 (ed339364) and #18 (c6e5d318) are preserved as the
+forensic pair; all 19 runs remain under .git/koni/runs/.
