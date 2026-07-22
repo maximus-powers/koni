@@ -391,6 +391,8 @@ export async function createProjectRun(options: {
   runTypeId: string;
   targetRef: string;
   intake?: Record<string, string>;
+  createTarget?: boolean;
+  baseRef?: string;
 }, dependencies: {
   ensure?: typeof ensureProjectAuthority;
   loadModels?: typeof loadSealedPiModelCatalog;
@@ -419,6 +421,8 @@ export async function createProjectRun(options: {
         runTypeId: options.runTypeId,
         targetRef: normalizeTargetRef(options.targetRef),
         intake: options.intake ?? { goal: options.objective },
+        ...(options.createTarget === true ? { createTarget: true } : {}),
+        ...(options.baseRef === undefined ? {} : { baseRef: options.baseRef }),
       },
       {
         expectedRevision: client.revision,

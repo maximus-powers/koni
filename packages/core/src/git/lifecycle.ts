@@ -817,7 +817,9 @@ export class GitLifecycleError extends Error {
       | "ref_moved"
       | "namespace_collision"
       | "invalid_state"
-      | "recovery_ambiguous",
+      | "recovery_ambiguous"
+      | "target_missing"
+      | "base_unresolved",
     message: string,
     public readonly details: Readonly<Record<string, unknown>> = {},
   ) {
@@ -975,33 +977,49 @@ export class IsolatedGitLifecycle {
     runId: string,
     targetRef: string,
     admission?: GitRunAdmission,
+    targetProvisioning?: TargetProvisioning,
   ): Promise<RunGitLifecycleRecord> {
     assertNamespaceId(runId, "run ID");
     assertUserTargetRef(targetRef);
     assertNewRunAdmission(admission, runId);
     const repository = await GitClient.discover(this.#projectRoot);
     const client = new GitClient(repository.worktreeRoot);
-    const selectedOid = await client.resolveRef(targetRef);
+    const existingOid = await client.tryResolveRef(targetRef);
+    if (existingOid === undefined && targetProvisioning?.create !== true) {
+      throw new GitLifecycleError(
+        "target_missing",
+        `target branch ${shortTargetBranch(targetRef)} does not exist; create it first, or start the run with --new-target [--from <ref>] to branch it automatically`,
+        { target: targetRef },
+      );
+    }
     const namespace = policyRunNamespace(repository.commonDirectory, admission.policy, admission.run);
     await assertNewRefNamespace(client, namespace.runRef, targetRef);
     await assertNewWorktreeNamespace(repository, namespace.root);
-    const targetCheckout = await uniqueCheckoutForRef(client, targetRef);
-    if (targetCheckout !== undefined) {
-      // Koni's own project configuration and install bookkeeping are not operator work product:
-      // refusing a run because of `.koni/` bytes Koni itself materialized blocks first runs in
-      // repositories that have not committed the configuration, while promotion never merges
-      // those paths. Everything else in the target checkout stays protected.
-      const dirty = (await new GitClient(targetCheckout).statusEntries())
-        .filter((entry) => entry.path !== ".koni" && !entry.path.startsWith(".koni/"));
-      if (dirty.length > 0) {
-        const preview = dirty.slice(0, 3).map((entry) => entry.path).join(", ");
-        throw new GitLifecycleError(
-          "dirty_checkout",
-          `selected target checkout has uncommitted work (${preview}${dirty.length > 3 ? ", …" : ""}); commit, stash, or deliberately ignore it before starting a run`,
-          { worktree: targetCheckout, paths: dirty.slice(0, 32).map((entry) => entry.path) },
-        );
+    // Resolve the base and validate every namespace/collision constraint before creating any ref,
+    // so a rejected plan never leaves a half-provisioned target branch behind.
+    const baseOid = existingOid ?? await resolveNewTargetBase(client, targetProvisioning?.baseRef);
+    if (existingOid !== undefined) {
+      const targetCheckout = await uniqueCheckoutForRef(client, targetRef);
+      if (targetCheckout !== undefined) {
+        // Koni's own project configuration and install bookkeeping are not operator work product:
+        // refusing a run because of `.koni/` bytes Koni itself materialized blocks first runs in
+        // repositories that have not committed the configuration, while promotion never merges
+        // those paths. Everything else in the target checkout stays protected.
+        const dirty = (await new GitClient(targetCheckout).statusEntries())
+          .filter((entry) => entry.path !== ".koni" && !entry.path.startsWith(".koni/"));
+        if (dirty.length > 0) {
+          const preview = dirty.slice(0, 3).map((entry) => entry.path).join(", ");
+          throw new GitLifecycleError(
+            "dirty_checkout",
+            `selected target checkout has uncommitted work (${preview}${dirty.length > 3 ? ", …" : ""}); commit, stash, or deliberately ignore it before starting a run`,
+            { worktree: targetCheckout, paths: dirty.slice(0, 32).map((entry) => entry.path) },
+          );
+        }
       }
+    } else {
+      await client.createRef(targetRef, baseOid);
     }
+    const selectedOid = baseOid;
     return {
       protocol: GIT_LIFECYCLE_PROTOCOL,
       runId,
@@ -3749,6 +3767,51 @@ function assertNamespaceId(value: string, label: string): void {
   ) {
     throw new Error(`${label} is not safe for a compiler-owned Git namespace: ${value}`);
   }
+}
+
+/**
+ * How a run acquires its target branch when the branch does not already exist. Absent (or
+ * `create: false`), a missing target is a hard error — this preserves typo safety, since a
+ * mistyped `--target` must not silently manufacture a branch. `baseRef` names the commit the
+ * new branch starts from; when omitted it defaults to the launch checkout's current branch.
+ */
+export interface TargetProvisioning {
+  create: boolean;
+  baseRef?: string;
+}
+
+function shortTargetBranch(ref: string): string {
+  return ref.replace(/^refs\/heads\//u, "");
+}
+
+/**
+ * Resolve the commit a newly provisioned target branch should start from. An explicit base must
+ * exist; the implicit default is the launch checkout's current branch (like `git checkout -b`),
+ * falling back to the most recently committed branch when HEAD is detached.
+ */
+async function resolveNewTargetBase(client: GitClient, baseRef?: string): Promise<string> {
+  if (baseRef !== undefined) {
+    const oid = await client.tryResolveRef(baseRef);
+    if (oid === undefined) {
+      throw new GitLifecycleError(
+        "base_unresolved",
+        `base ref for the new target does not exist: ${baseRef}`,
+        { baseRef },
+      );
+    }
+    return oid;
+  }
+  const head = await client.symbolicHead();
+  if (head !== undefined) {
+    const oid = await client.tryResolveRef(head);
+    if (oid !== undefined) return oid;
+  }
+  const [recent] = await client.recentBranches(1);
+  if (recent !== undefined) return recent.oid;
+  throw new GitLifecycleError(
+    "base_unresolved",
+    "cannot determine a base commit for the new target branch; pass an explicit --from <ref>",
+  );
 }
 
 function assertUserTargetRef(value: string): void {

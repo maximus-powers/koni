@@ -3075,6 +3075,8 @@ export class RunAuthorityEngine {
     const requestedObjective = boundedText(requiredString(params, "objective"), "objective", 4 * 1024 * 1024);
     const runTypeId = requiredString(params, "runTypeId");
     const targetRef = requiredString(params, "targetRef");
+    const createTarget = params.createTarget === true;
+    const baseRef = typeof params.baseRef === "string" ? params.baseRef : undefined;
     const suppliedIntake = configurationRecord(params.intake ?? { goal: requestedObjective }, "intake");
     const runId = this.#createId("run");
     const definition = await this.#program.resolveRun({
@@ -3108,7 +3110,10 @@ export class RunAuthorityEngine {
     if (gitAdmission.policy.policySha256 !== definition.behavior.gitPolicySha256) {
       throw new AuthorityRpcError("git_policy_binding", "compiler run behavior and Git policy hashes differ");
     }
-    const git = await this.#withGit(runId, () => this.#git.planRun(runId, targetRef, gitAdmission));
+    const git = await this.#withGit(runId, () => this.#git.planRun(runId, targetRef, gitAdmission, {
+      create: createTarget,
+      ...(baseRef === undefined ? {} : { baseRef }),
+    }));
     const now = this.#timestamp();
     const run: RunRecord = {
       protocol: "koni.run-record.v1",

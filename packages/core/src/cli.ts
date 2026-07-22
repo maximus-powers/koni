@@ -226,6 +226,11 @@ export async function runKoniCli(
       const objective = parsed.goal ?? parsed.positionals.join(" ").trim();
       if (objective.length === 0) throw new CliUsageError("run requires --goal <text>");
       const runTypeId = parsed.runType ?? "small";
+      // `--from <ref>` implies branching a new target; either flag opts into provisioning.
+      const createTarget = parsed.newTarget || parsed.from !== undefined;
+      if (createTarget && parsed.target === undefined) {
+        throw new CliUsageError("--new-target requires --target <branch> to name the branch to create");
+      }
       const targetRef = parsed.target ?? await defaultTargetBranch(projectRoot);
       const result = await dependencies.run({
         projectRoot,
@@ -233,8 +238,13 @@ export async function runKoniCli(
         objective,
         runTypeId,
         targetRef,
+        ...(createTarget ? { createTarget: true } : {}),
+        ...(parsed.from === undefined ? {} : { baseRef: parsed.from }),
       });
-      print(io, parsed.json, result, [`Started ${runTypeId} run ${result.runId} on ${targetRef}.`]);
+      const onto = createTarget
+        ? ` on new branch ${targetRef}${parsed.from === undefined ? "" : ` from ${parsed.from}`}`
+        : ` on ${targetRef}`;
+      print(io, parsed.json, result, [`Started ${runTypeId} run ${result.runId}${onto}.`]);
       return 0;
     }
     case "adopt": {
@@ -302,6 +312,8 @@ interface ParsedCli {
   profilePackage?: string;
   runType?: string;
   target?: string;
+  newTarget: boolean;
+  from?: string;
   goal?: string;
   migrationId?: string;
   runId?: string;
@@ -312,7 +324,7 @@ interface ParsedCli {
 }
 
 function parseCli(argv: readonly string[]): ParsedCli {
-  const result: ParsedCli = { positionals: [], apply: false, json: false, help: false, version: false };
+  const result: ParsedCli = { positionals: [], newTarget: false, apply: false, json: false, help: false, version: false };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]!;
     if (argument === "--help" || argument === "-h") result.help = true;
@@ -322,6 +334,8 @@ function parseCli(argv: readonly string[]): ParsedCli {
     else if (argument === "--profile-package") result.profilePackage = requireOptionValue(argv, ++index, argument);
     else if (argument === "--type" || argument === "--run-type") result.runType = requireOptionValue(argv, ++index, argument);
     else if (argument === "--target") result.target = requireOptionValue(argv, ++index, argument);
+    else if (argument === "--new-target") result.newTarget = true;
+    else if (argument === "--from") result.from = requireOptionValue(argv, ++index, argument);
     else if (argument === "--goal") result.goal = requireOptionValue(argv, ++index, argument);
     else if (argument === "--migration") result.migrationId = requireOptionValue(argv, ++index, argument);
     else if (argument === "--run") result.runId = requireOptionValue(argv, ++index, argument);
@@ -367,7 +381,8 @@ function helpText(): string {
     "  koni restart [--root PATH]\n" +
     "  koni status [--root PATH] [--json]\n" +
     "  koni config validate [--root PATH] [--json]\n" +
-    "  koni run --goal TEXT [--type small|medium|large] [--target BRANCH]\n" +
+    "  koni run --goal TEXT [--type small|medium|large] [--target BRANCH] [--new-target [--from REF]]\n" +
+    "    --new-target branches a not-yet-existing --target from --from (default: current branch).\n" +
     "  koni adopt --migration ID [--run LEGACY_RUN] [--apply] [--root PATH]\n" +
     "  koni resume --run RUN_ID [--root PATH]\n" +
     "  koni tui [--root PATH]\n\n" +
