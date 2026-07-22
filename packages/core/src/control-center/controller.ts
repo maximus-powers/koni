@@ -23,6 +23,14 @@ import {
 } from "../state/stage-capability.js";
 import type { ControlCenterKeyAction, ControlCenterPanel } from "./input.js";
 import {
+  createRunTargetDraft,
+  cycleRunTarget,
+  isCreatingNewTarget,
+  resolveRunTarget,
+  runTargetSelectedLabel,
+  type RunTargetDraft,
+} from "./run-target.js";
+import {
   parseConfigCatalog,
   parseConfigDocumentCatalog,
   parseConfigDocumentMutation,
@@ -118,8 +126,7 @@ export interface NewRunModalState {
   intakeCursors: Record<string, number>;
   intakeOptionIndexes: Record<string, number>;
   runTypeId: string;
-  branches: readonly { label: string; reference: string }[];
-  branchIndex: number;
+  target: RunTargetDraft;
   questionPolicy: "none" | "some" | "many";
   maxParallel: number;
   roles: readonly NewRunRoleSelection[];
@@ -3043,6 +3050,31 @@ export class ControlCenterController {
   }
 
   async #handleNewRun(modal: NewRunModalState, action: ControlCenterKeyAction): Promise<void> {
+    if (modal.focus === "branch_name") {
+      const value = modal.target.newName;
+      const cursor = modal.target.newNameCursor;
+      if (action.type === "focus" || action.type === "move") {
+        modal.focus = moveString(newRunControls(modal, this.#controlCatalog), modal.focus, action.delta);
+      } else if (action.type === "details_tab") {
+        setNewRunTargetName(modal, value, clampCharacterOffset(value, cursor + action.delta));
+      } else if (action.type === "scroll_home") {
+        setNewRunTargetName(modal, value, 0);
+      } else if (action.type === "scroll_end") {
+        setNewRunTargetName(modal, value, characterCount(value));
+      } else if (action.type === "backspace") {
+        const edit = removeCharacterBefore(value, cursor);
+        setNewRunTargetName(modal, edit.value, edit.cursor);
+      } else if (action.type === "delete_forward") {
+        setNewRunTargetName(modal, removeCharacterAt(value, cursor), cursor);
+      } else if (action.type === "append_text") {
+        const edit = insertBoundedAtCharacter(value, cursor, action.text, 200);
+        setNewRunTargetName(modal, edit.value, edit.cursor);
+      } else if (action.type === "activate") {
+        modal.focus = moveString(newRunControls(modal, this.#controlCatalog), modal.focus, 1);
+      }
+      this.#emit();
+      return;
+    }
     const intakeField = selectedNewRunIntakeField(modal, this.#controlCatalog);
     const textField = intakeField !== undefined && isTextEditableIntake(intakeField.kind) ? intakeField : undefined;
     const textValue = textField === undefined ? "" : modal.intakeText[textField.id] ?? "";
@@ -3121,7 +3153,7 @@ export class ControlCenterController {
       const runType = catalog.runTypes.find((item) => item.id === selected)!;
       applyRunTypeDefaults(modal, runType, this.#models);
     } else if (modal.focus === "branch") {
-      modal.branchIndex = cycleIndex(modal.branchIndex, modal.branches.length, delta);
+      modal.target = cycleRunTarget(modal.target, delta);
     } else if (modal.focus === "questions") {
       const values = ["none", "some", "many"] as const;
       modal.questionPolicy = moveString(values, modal.questionPolicy, delta);
@@ -3153,9 +3185,9 @@ export class ControlCenterController {
   }
 
   async #startRun(modal: NewRunModalState): Promise<void> {
-    const branch = modal.branches[modal.branchIndex];
-    if (branch === undefined) {
-      this.#notice = { kind: "error", message: "Target branch is required" };
+    const target = resolveRunTarget(modal.target);
+    if (!target.ok) {
+      this.#notice = { kind: "error", message: target.error };
       return;
     }
     const runType = this.#controlCatalog?.runTypes.find((item) => item.id === modal.runTypeId);
@@ -3189,7 +3221,7 @@ export class ControlCenterController {
       id: provisionalId,
       objective,
       runType: runType.title,
-      targetBranch: branch.reference,
+      targetBranch: target.targetRef,
       createdAt: new Date(this.#now()).toISOString(),
     });
     this.#selection = { runId: provisionalId, detailsTab: "overview", objectiveExpanded: false };
@@ -3206,7 +3238,9 @@ export class ControlCenterController {
       const response = await this.#client.request("run.create", {
         objective,
         runTypeId: modal.runTypeId,
-        targetRef: branch.reference,
+        targetRef: target.targetRef,
+        ...(target.createTarget === true ? { createTarget: true } : {}),
+        ...(target.baseRef === undefined ? {} : { baseRef: target.baseRef }),
         intake: configurationObjectToJsonObject(intake),
         overrides: {
           questionPolicy: modal.questionPolicy,
@@ -4242,8 +4276,7 @@ function newRunModal(
     intakeCursors: {},
     intakeOptionIndexes: {},
     runTypeId: runType.id,
-    branches,
-    branchIndex: 0,
+    target: createRunTargetDraft(branches),
     questionPolicy: runType.questionPolicy,
     maxParallel: runType.maxParallel,
     roles: [],
@@ -4293,12 +4326,21 @@ function newRunControls(modal: NewRunModalState, catalog: ControlCatalog | undef
     ...(runType?.intake.filter((field) => field.id !== runType.objectiveFieldId).map((field) => `intake:${field.id}`) ?? []),
     "run_type",
     "branch",
+    ...(isCreatingNewTarget(modal.target) ? ["branch_name"] : []),
     "stages",
     "questions",
     "parallel",
     ...modal.roles.flatMap((role) => [`role:${role.id}:model`, `role:${role.id}:thinking`]),
     "start",
   ];
+}
+
+function setNewRunTargetName(modal: NewRunModalState, value: string, cursor: number): void {
+  modal.target = {
+    ...modal.target,
+    newName: value,
+    newNameCursor: Math.max(0, Math.min(Array.from(value).length, cursor)),
+  };
 }
 
 function selectedNewRunIntakeField(

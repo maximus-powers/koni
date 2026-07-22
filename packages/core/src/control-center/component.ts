@@ -27,6 +27,7 @@ import {
   renderKoniMarkdown,
 } from "./markdown.js";
 import type { ControlIntakeField, ControlRunTypeOption } from "./protocol.js";
+import { isCreatingNewTarget, runTargetSelectedLabel } from "./run-target.js";
 import {
   type ControlCenterController,
   type ControlCenterControllerSnapshot,
@@ -1301,6 +1302,22 @@ export class ControlCenterComponent implements Component, Focusable {
     ], width, height, true, this.#palette);
   }
 
+  #newRunTargetLines(modal: NewRunModalState): string[] {
+    const lines = [
+      selectorLine("Target branch", runTargetSelectedLabel(modal.target), modal.focus === "branch", this.#palette),
+    ];
+    if (isCreatingNewTarget(modal.target)) {
+      const name = modal.target.newName;
+      lines.push(selectorLine(
+        "New branch name",
+        name.length === 0 ? "(type a name)" : name,
+        modal.focus === "branch_name",
+        this.#palette,
+      ));
+    }
+    return lines;
+  }
+
   #renderNewRun(modal: NewRunModalState, width: number, height: number): string[] {
     const inner = Math.max(1, width - 2);
     const runType = this.#snapshot.runTypes.find((item) => item.id === modal.runTypeId);
@@ -1344,7 +1361,7 @@ export class ControlCenterComponent implements Component, Focusable {
         ...intakeLines,
         centeredDivider("Run Config", inner, this.#palette),
         selectorWindow(this.#snapshot.runTypes.map((item) => item.title), Math.max(0, this.#snapshot.runTypes.findIndex((item) => item.id === modal.runTypeId)), inner, this.#palette),
-        selectorLine("Target branch", modal.branches[modal.branchIndex]?.label ?? "No branch", modal.focus === "branch", this.#palette),
+        ...this.#newRunTargetLines(modal),
         `${modal.focus === "stages" ? this.#palette.accent("›") : " "} ${this.#palette.bold(`Stages ${stageStart + 1}/${stages.length}`)} · ${stage?.included === false ? this.#palette.dim(stage.title) : this.#palette.text(stage?.title ?? "No stages")}`,
         `${this.#palette.muted("Questions")} ${["none", "some", "many"].map((value) => questionBadge(value, modal.questionPolicy === value, this.#palette)).join(" ")}  ${this.#palette.muted("Parallel")} ${inputBadge(String(modal.maxParallel), modal.focus === "parallel", this.#palette)}`,
         `${" ".repeat(13)}${this.#palette.muted("Model")}           ${this.#palette.muted("Reasoning")}`,
@@ -1367,7 +1384,7 @@ export class ControlCenterComponent implements Component, Focusable {
       ...intakeLines,
       centeredDivider("Run Config", inner, this.#palette),
       ...runTypeLines,
-      selectorLine("Target branch", modal.branches[modal.branchIndex]?.label ?? "No branch", modal.focus === "branch", this.#palette),
+      ...this.#newRunTargetLines(modal),
       `${modal.focus === "stages" ? this.#palette.accent("›") : " "} ${this.#palette.bold("Stages")} ${this.#palette.muted(`${stageStart + 1}–${Math.min(stages.length, stageStart + stageCount)} of ${stages.length}`)}`,
       ...stageLines,
       `${this.#palette.muted("Questions")} ${["none", "some", "many"].map((value) => questionBadge(value, modal.questionPolicy === value, this.#palette)).join(" ")}`,
