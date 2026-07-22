@@ -1,6 +1,6 @@
 ---
 name: configure-koni
-description: Inspect a repository and configure, customize, or extend its installed Köni project from natural-language requirements. Use when a Pi agent needs to adapt a default Coding or Research profile to the project's real architecture or empirical method; design graph structure, compiler rules, tickets, proof, or run behavior; edit current `.koni` configuration, provider-neutral agents, repository skills, or a detected legacy `.codex/koni` profile; tune models, capabilities, orchestration, storage, or Git policy; or diagnose a configuration validation failure.
+description: Inspect a repository and configure, customize, or extend its installed Köni project from natural-language requirements. Use when a Pi agent needs to adapt a default Coding or Research profile to the project's real architecture or empirical method; design graph structure, compiler rules, tickets, proof, or run behavior; edit current `.koni` configuration, provider-neutral agents, repository skills, or a detected legacy `.codex/koni` profile; tune models, capabilities, orchestration, storage, or Git policy; or diagnose a configuration validation failure. Only use this skill when the operator is explicitly working with Köni configuration in this project; it is not for ordinary chat or non-Köni tasks.
 ---
 
 # Configure Köni

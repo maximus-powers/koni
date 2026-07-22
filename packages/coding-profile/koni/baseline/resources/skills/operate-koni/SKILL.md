@@ -1,6 +1,6 @@
 ---
 name: operate-koni
-description: Initialize, validate, run, inspect, pause, resume, recover, and safely remove Köni project workflows. Use when a Pi agent needs to use `/koni`, `koni tui`, or the bounded Köni CLI; plan and approve runs; answer structured questions; inspect receipts or pinned state; diagnose blocked or interrupted work; or recover without bypassing compiler and Git safety boundaries.
+description: Initialize, validate, run, inspect, pause, resume, recover, and safely remove Köni project workflows. Use when a Pi agent needs to use `/koni`, `koni tui`, or the bounded Köni CLI; plan and approve runs; answer structured questions; inspect receipts or pinned state; diagnose blocked or interrupted work; or recover without bypassing compiler and Git safety boundaries. Only use this skill when the operator is explicitly working with Köni in this project (its commands, control center, runs, or configuration); it is not for ordinary chat or non-Köni tasks.
 ---
 
 # Operate Köni
