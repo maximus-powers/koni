@@ -322,17 +322,24 @@ export class ControlCenterComponent implements Component, Focusable {
   #renderConfigureScreen(modal: ConfigureModalState, layout: ConfigureScreenLayout): string[] {
     const section = modal.catalog.sections[modal.sectionIndex];
     const resource = section?.resources[modal.resourceIndex];
-    const domains = modal.catalog.sections.map((candidate, index) => {
-      const row = `${configDomainGlyph(candidate.id)} ${candidate.title}`;
-      return index === modal.sectionIndex ? this.#palette.selected(`› ${row}`) : `  ${this.#palette.muted(row)}`;
+    const domains = modal.catalog.sections.map((candidate, index) =>
+      configDomainRow(candidate.id, candidate.title, index === modal.sectionIndex, this.#palette));
+    const resourceList = section?.resources ?? [];
+    const resources = resourceList.map((candidate, index) => {
+      const depth = Math.max(0, candidate.depth ?? 0);
+      const next = resourceList[index + 1];
+      const connector = depth === 0 ? "" : ((next === undefined || (next.depth ?? 0) < depth) ? "└─ " : "├─ ");
+      const indent = "  ".repeat(depth === 0 ? 0 : depth - 1);
+      const selected = index === modal.resourceIndex;
+      const dirty = configResourceDirty(candidate.fields, modal);
+      if (selected) {
+        return this.#palette.selected(`▸ ${indent}${connector}${dirty ? "● " : ""}${candidate.title}`);
+      }
+      const rail = this.#palette.dim(`${indent}${connector}`);
+      const badge = dirty ? `${this.#palette.warning("●")} ` : "";
+      return `  ${rail}${badge}${this.#palette.text(candidate.title)}`;
     });
-    const resources = (section?.resources ?? []).map((candidate, index) => {
-      const indent = "  ".repeat(Math.max(0, candidate.depth ?? 0));
-      const branch = index === (section?.resources.length ?? 0) - 1 ? "└" : "├";
-      const row = `${indent}${branch} ${candidate.title}`;
-      return index === modal.resourceIndex ? this.#palette.selected(`› ${row}`) : `  ${this.#palette.muted(row)}`;
-    });
-    if (resources.length === 0) resources.push(this.#palette.muted("No resources in this domain."));
+    if (resources.length === 0) resources.push(this.#palette.dim("No resources in this domain."));
 
     const editor: string[] = [];
     if (modal.upstreamConflicts.conflicts.length > 0) {
@@ -347,8 +354,17 @@ export class ControlCenterComponent implements Component, Focusable {
       resource.fields.forEach((field, index) => {
         const selected = index === modal.fieldIndex;
         const value = configValueLabel(field, modal.draft[field.key], this.#snapshot.models);
-        const row = `${selected ? "›" : " "} ${field.label}  ${inputBadge(value, selected && modal.focus === "field", this.#palette)}`;
-        editor.push(selected ? this.#palette.text(row) : this.#palette.muted(row));
+        const chip = inputBadge(value, selected && modal.focus === "field", this.#palette, configScalarTint(field.kind, this.#palette));
+        const caret = selected ? this.#palette.accent("▸") : " ";
+        const name = selected ? this.#palette.bold(field.label) : this.#palette.text(field.label);
+        const mark = configFieldDirty(field, modal) ? ` ${this.#palette.warning("●")}` : "";
+        editor.push(`${caret} ${name}${mark}  ${chip}`);
+        if (!selected) {
+          const summary = (field.description.split("\n")[0] ?? "").trim();
+          if (summary.length > 0) {
+            editor.push(`   ${this.#palette.dim(truncateToWidth(summary, Math.max(1, layout.editor.width - 5), "…"))}`);
+          }
+        }
         if (selected) {
           editor.push(...wrapStyled(field.description, Math.max(1, layout.editor.width - 5), (line) => `   ${this.#palette.dim(line)}`));
           if (isConfigTextField(field)) {
@@ -384,13 +400,13 @@ export class ControlCenterComponent implements Component, Focusable {
         panel("Editor", editor, layout.editor.width, layout.editor.height, modal.focus === "field" || modal.focus === "actions", this.#palette),
       ], [layout.domains.width, layout.resources.width, layout.editor.width], layout.domains.height),
       ...panel(
-        modal.dirty ? "Draft · unpublished changes" : "Draft · configuration current",
+        "Configuration",
         [centerLine(
           modal.rebaseRequired
-            ? "Saved draft is stale · Ctrl-R rebase or Ctrl-D discard"
-            : "[r] Project Resources   [Ctrl-S] Save draft   [Ctrl-P] Validate & publish   [Ctrl-D] Discard",
+            ? "Saved draft is stale · Ctrl-R rebase · Ctrl-D discard"
+            : `${modal.dirty ? "● unpublished changes" : "configuration current"} · Ctrl-S save · Ctrl-P publish · Ctrl-D discard · [r] Project Resources`,
           Math.max(1, layout.width - 2),
-          modal.rebaseRequired ? this.#palette.warning : this.#palette.accent,
+          modal.rebaseRequired || modal.dirty ? this.#palette.warning : this.#palette.info,
         )],
         layout.draftBar.width,
         layout.draftBar.height,
@@ -410,15 +426,20 @@ export class ControlCenterComponent implements Component, Focusable {
     const documents = modal.catalog.documents.filter((document) => document.domain === domain);
     const selected = documents[modal.documentIndex];
     const domains = CONFIG_DOCUMENT_DOMAINS.map((candidate, index) => {
+      const { icon, tint } = configDomainStyle(candidate, this.#palette);
       const count = modal.catalog.documents.filter((document) => document.domain === candidate).length;
-      const row = `${configDocumentDomainGlyph(candidate)} ${titleCaseLabel(candidate)} ${this.#palette.muted(String(count))}`;
-      return index === modal.domainIndex ? this.#palette.selected(`› ${row}`) : `  ${this.#palette.muted(row)}`;
+      const label = titleCaseLabel(candidate);
+      if (index === modal.domainIndex) return this.#palette.selected(`▸ ${icon} ${label}  ${count}`);
+      return `  ${tint(icon)} ${this.#palette.text(label)}  ${this.#palette.dim(String(count))}`;
     });
     const resources = documents.map((document, index) => {
-      const branch = index === documents.length - 1 ? "└" : "├";
-      const lock = document.capabilities.update ? "" : ` ${this.#palette.muted("read only")}`;
-      const row = `${branch} ${document.title}${lock}`;
-      return index === modal.documentIndex ? this.#palette.selected(`› ${row}`) : `  ${this.#palette.muted(row)}`;
+      const connector = index === documents.length - 1 ? "└─" : "├─";
+      const readOnly = !document.capabilities.update;
+      if (index === modal.documentIndex) {
+        return this.#palette.selected(`▸ ${connector} ${document.title}${readOnly ? " read only" : ""}`);
+      }
+      const lock = readOnly ? ` ${this.#palette.dim("read only")}` : "";
+      return `  ${this.#palette.dim(connector)} ${this.#palette.text(document.title)}${lock}`;
     });
     if (resources.length === 0) resources.push(this.#palette.muted("No resources in this domain."));
 
@@ -2084,21 +2105,42 @@ function questionBadge(value: string, selected: boolean, palette: KoniPalette): 
   return selected ? palette.selected(badge) : palette.border(`[${badge}]`);
 }
 
-function configDomainGlyph(id: string): string {
-  const normalized = id.toLocaleLowerCase("en-US");
-  if (normalized.includes("run")) return "▶";
-  if (normalized.includes("agent")) return "●";
-  if (normalized.includes("skill")) return "✦";
-  if (normalized.includes("workflow") || normalized.includes("ticket")) return "↳";
-  if (normalized.includes("graph") || normalized.includes("rule")) return "◇";
-  if (normalized.includes("action") || normalized.includes("check")) return "✓";
-  if (normalized.includes("report") || normalized.includes("view")) return "▤";
-  if (normalized.includes("advanced")) return "⚙";
-  return "◆";
+/** Per-domain icon + tint so each config lane reads as its own semantic group. */
+function configDomainStyle(id: string, palette: KoniPalette): { icon: string; tint: (value: string) => string } {
+  const n = id.toLocaleLowerCase("en-US");
+  if (n.includes("run")) return { icon: "▶", tint: palette.accent };
+  if (n.includes("agent")) return { icon: "●", tint: palette.error };
+  if (n.includes("skill")) return { icon: "✦", tint: palette.success };
+  if (n.includes("workflow") || n.includes("ticket")) return { icon: "▦", tint: palette.warning };
+  if (n.includes("graph") || n.includes("rule")) return { icon: "◇", tint: palette.info };
+  if (n.includes("action") || n.includes("check")) return { icon: "⚡", tint: palette.error };
+  if (n.includes("report") || n.includes("view")) return { icon: "▤", tint: palette.success };
+  if (n.includes("advanced")) return { icon: "⚙", tint: palette.muted };
+  return { icon: "◆", tint: palette.info };
 }
 
-function configDocumentDomainGlyph(id: string): string {
-  return configDomainGlyph(id);
+/** A left-nav lane row: colored icon on rest rows, a caret + reverse-video wash when active. */
+function configDomainRow(id: string, title: string, active: boolean, palette: KoniPalette): string {
+  const { icon, tint } = configDomainStyle(id, palette);
+  if (active) return palette.selected(`▸ ${icon} ${title}`);
+  return `  ${tint(icon)} ${palette.text(title)}`;
+}
+
+/** Value-chip tint keyed to the field kind (mirrors the Rust scalar palette). */
+function configScalarTint(kind: string, palette: KoniPalette): (value: string, palette: KoniPalette) => string {
+  if (kind === "boolean") return (value) => palette.warning(value);
+  if (kind === "integer") return (value) => palette.info(value);
+  if (kind === "model" || kind === "thinking" || kind === "select") return (value) => palette.accent(value);
+  return (value) => palette.success(value);
+}
+
+function configFieldDirty(field: ConfigFieldDefinition, modal: ConfigureModalState): boolean {
+  if (!(field.key in modal.draft)) return false;
+  return JSON.stringify(modal.draft[field.key]) !== JSON.stringify(modal.snapshot.values[field.key]);
+}
+
+function configResourceDirty(fields: readonly ConfigFieldDefinition[], modal: ConfigureModalState): boolean {
+  return fields.some((field) => configFieldDirty(field, modal));
 }
 
 function formatBytes(value: number): string {
