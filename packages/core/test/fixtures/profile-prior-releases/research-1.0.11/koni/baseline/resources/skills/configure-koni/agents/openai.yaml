@@ -1,0 +1,4 @@
+interface:
+  display_name: "Configure Köni"
+  short_description: "Design a repo-aware Köni profile"
+  default_prompt: "Use $configure-koni to inspect this repository and propose a project-specific Köni profile for my approval."

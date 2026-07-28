@@ -1,0 +1,1517 @@
+schema_version: '2.0'
+module:
+  id: software.rules
+  version: 0.6.0
+rules:
+- id: objective.map-architecture
+  phase: architecture
+  priority: 100
+  for_each: objectives
+  bind: target
+  when:
+    not:
+      exists:
+        intersection:
+        - traverse:
+            from: $target
+            relation: systems
+            max_depth: 1
+            node_types:
+            - system
+        - active_systems
+  derive:
+  - kind: obligation
+    key: objective.architecture
+    severity: blocking
+    reason: Objective has no grounded affected repository boundary
+  emit:
+    operation: map-architecture
+    source_state: objective-without-affected-boundary
+    target_state: objective-has-grounded-affected-boundary
+    obligations:
+    - objective.architecture
+    target_nodes: $target
+    read_scope: $target
+    write_scope: $target
+    read_paths:
+    - .
+    workflow: architecture-map
+    title: Ground the affected boundary for {{ target.title }}
+- id: system.specify-contracts
+  phase: contracts
+  priority: 90
+  for_each: contract_required_systems
+  bind: target
+  when:
+    not:
+      exists:
+        intersection:
+        - traverse:
+            from: $target
+            relation: constrained_by
+            max_depth: 1
+            node_types:
+            - contract
+        - active_contracts
+  derive:
+  - kind: obligation
+    key: system.contracts
+    severity: blocking
+    reason: Boundary is explicitly contract-requiring but has no active material contract
+  emit:
+    operation: specify-contracts
+    source_state: material-contract-implicit
+    target_state: material-contract-explicit
+    obligations:
+    - system.contracts
+    target_nodes: $target
+    read_scope:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relations:
+          - exposes
+          - owns
+          - participates_in
+          - constrained_by
+          max_depth: 2
+    write_scope: $target
+    read_paths:
+    - select: $target
+      field: spec.owned_paths
+    workflow: contract-design
+    title: Specify the material contract for {{ target.title }}
+- id: objective.ground-defect
+  phase: design
+  priority: 82
+  for_each: ungrounded_objectives
+  bind: target
+  when:
+    exists:
+      intersection:
+      - $target
+      - ungrounded_objectives
+  derive:
+  - kind: obligation
+    key: objective.defect-grounding
+    severity: blocking
+    reason: Active defect work does not have exactly one focused diagnostic seam; create the missing seam or report duplicate proof IDs for human-authorized oracle selection before causal diagnosis
+  emit:
+    operation: ground-defect
+    source_state: objective-diagnostic-cardinality-invalid
+    target_state: objective-has-one-focused-diagnostic-proof-per-active-defect
+    obligations:
+    - objective.defect-grounding
+    target_nodes: $target
+    read_scope:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relations:
+          - systems
+          - contracts
+          - flows
+          - defects
+          - verified_by
+          max_depth: 3
+    write_scope:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relations:
+          - defects
+          - verified_by
+          max_depth: 2
+    read_paths:
+    - select:
+        traverse:
+          from: $target
+          relation: systems
+          max_depth: 1
+          node_types:
+          - system
+      field: spec.owned_paths
+    write_paths: []
+    workflow: defect-grounding
+    title: Ground the diagnostic seam for {{ target.title }}
+- id: proof.prepare
+  phase: assurance
+  priority: 81
+  for_each: proofs_requiring_preparation
+  bind: target
+  when:
+    not:
+      op: proof_preparation_current
+      subject: $target
+      check: baseline-proof-set
+      preparation_operation: assurance.proof.prepare
+      preparation_targets:
+        union:
+        - $target
+        - traverse:
+            from: $target
+            relation: verifies
+            max_depth: 1
+            node_types:
+            - risk
+  derive:
+  - kind: obligation
+    key: proof.preparation
+    severity: blocking
+    reason: Preparation-eligible proof lacks a current independently reviewed source-only preparation and honest historical baseline
+  emit:
+    operation: prepare-proof
+    source_state: proof-source-or-baseline-unprepared
+    target_state: proof-source-current-with-reviewed-historical-baseline
+    obligations:
+    - proof.preparation
+    target_nodes:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relation: verifies
+          max_depth: 1
+          node_types:
+          - risk
+    read_scope:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relations:
+          - verifies
+          - uses
+          max_depth: 2
+    write_scope: $target
+    read_paths:
+    - select: $target
+      field: spec.source_paths
+    - select: $target
+      field: spec.covered_paths
+    - select: $target
+      field: spec.support_paths
+    write_paths:
+    - select: $target
+      field: spec.source_paths
+    workflow: proof-preparation
+    title: Prepare the historical proof oracle for {{ target.title }}
+- id: objective.plan-change
+  phase: design
+  priority: 80
+  for_each:
+    nodes:
+      node_types:
+      - objective
+      status_excluding:
+      - satisfied
+      - superseded
+      where:
+        all:
+        - exists:
+            intersection:
+            - traverse:
+                from: $node
+                relation: systems
+                max_depth: 1
+                node_types:
+                - system
+            - active_systems
+        - for_all:
+            select:
+              intersection:
+              - traverse:
+                  from: $node
+                  relation: systems
+                  max_depth: 1
+                  node_types:
+                  - system
+              - active_systems
+            bind: affected_system
+            satisfies:
+              any:
+              - not:
+                  op: field_equals
+                  subject: $affected_system
+                  field: spec.contract_required
+                  value: true
+              - exists:
+                  intersection:
+                  - traverse:
+                      from: $affected_system
+                      relation: constrained_by
+                      max_depth: 1
+                      node_types:
+                      - contract
+                  - active_contracts
+        - any:
+          - not:
+              op: field_equals
+              subject: $node
+              field: spec.work_kind
+              value: bug_fix
+          - exists:
+              intersection:
+              - traverse:
+                  from: $node
+                  relation: defects
+                  max_depth: 1
+                  node_types:
+                  - defect
+              - active_defects
+        - op: coverage
+          numerator: diagnosed_defects
+          denominator:
+            intersection:
+            - traverse:
+                from: $node
+                relation: defects
+                max_depth: 1
+                node_types:
+                - defect
+            - active_defects
+  bind: target
+  when:
+    not:
+      all:
+      - op: field_present
+        subject: $target
+        field: spec.work_kind
+      - exists:
+          intersection:
+          - traverse:
+              from: $target
+              relation: realized_by
+              max_depth: 1
+              node_types:
+              - change
+          - active_changes
+      - op: coverage
+        numerator: design_ready_changes
+        denominator:
+          intersection:
+          - traverse:
+              from: $target
+              relation: realized_by
+              max_depth: 1
+              node_types:
+              - change
+          - active_changes
+      - not:
+          exists:
+            intersection:
+            - upstream_risk_gaps
+            - union:
+              - traverse:
+                  from:
+                    intersection:
+                    - traverse:
+                        from: $target
+                        relation: realized_by
+                        max_depth: 1
+                        node_types:
+                        - change
+                    - active_changes
+                  relation: introduces
+                  max_depth: 1
+                  node_types:
+                  - risk
+      - not:
+          exists:
+            intersection:
+            - proof_model_gaps
+            - union:
+              - traverse:
+                  from:
+                    intersection:
+                    - traverse:
+                        from: $target
+                        relation: realized_by
+                        max_depth: 1
+                        node_types:
+                        - change
+                    - active_changes
+                  relation: verified_by
+                  max_depth: 1
+                  node_types:
+                  - proof
+              - traverse:
+                  from:
+                    traverse:
+                      from:
+                        intersection:
+                        - traverse:
+                            from: $target
+                            relation: realized_by
+                            max_depth: 1
+                            node_types:
+                            - change
+                        - active_changes
+                      relation: introduces
+                      max_depth: 1
+                      node_types:
+                      - risk
+                  relation: verified_by
+                  max_depth: 1
+                  node_types:
+                  - proof
+              - traverse:
+                  from:
+                    intersection:
+                    - traverse:
+                        from: $target
+                        relation: defects
+                        max_depth: 1
+                        node_types:
+                        - defect
+                    - active_defects
+                  relation: verified_by
+                  max_depth: 1
+                  node_types:
+                  - proof
+              - traverse:
+                  from:
+                    traverse:
+                      from: $target
+                      relations:
+                      - systems
+                      - contracts
+                      - flows
+                      - exposes
+                      - owns
+                      - participates_in
+                      - constrained_by
+                      max_depth: 2
+                      node_types:
+                      - system
+                      - interface
+                      - data_model
+                      - contract
+                      - flow
+                  relation: threatens
+                  direction: incoming
+                  max_depth: 1
+                  node_types:
+                  - risk
+      - any:
+        - not:
+            op: field_equals
+            subject: $target
+            field: spec.work_kind
+            value: bug_fix
+        - exists:
+            intersection:
+            - traverse:
+                from: $target
+                relation: defects
+                max_depth: 1
+                node_types:
+                - defect
+            - active_defects
+      - op: coverage
+        numerator: diagnosed_defects
+        denominator:
+          intersection:
+          - traverse:
+              from: $target
+              relation: defects
+              max_depth: 1
+              node_types:
+              - defect
+          - active_defects
+      - op: coverage
+        numerator:
+          intersection:
+          - active_defects
+          - traverse:
+              from:
+                intersection:
+                - traverse:
+                    from: $target
+                    relation: realized_by
+                    max_depth: 1
+                    node_types:
+                    - change
+                - design_ready_changes
+              relation: addresses
+              max_depth: 1
+              node_types:
+              - defect
+        denominator:
+          intersection:
+          - traverse:
+              from: $target
+              relation: defects
+              max_depth: 1
+              node_types:
+              - defect
+          - active_defects
+  derive:
+  - kind: obligation
+    key: objective.change-plan
+    severity: blocking
+    reason: Objective lacks a classified, proof-bound, risk-appropriate vertical change plan
+  emit:
+    operation: plan-change
+    source_state: objective-without-implementation-ready-plan
+    target_state: objective-has-classified-vertical-change-plan
+    obligations:
+    - objective.change-plan
+    target_nodes: $target
+    read_scope:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relations:
+          - systems
+          - contracts
+          - flows
+          - defects
+          - realized_by
+          - constrained_by
+          - exposes
+          - owns
+          - participates_in
+          - affects
+          - addresses
+          - requires
+          - introduces
+          - verified_by
+          - mitigated_by
+          - accepted_by
+          max_depth: 3
+    write_scope:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relations:
+          - defects
+          - realized_by
+          - introduces
+          max_depth: 2
+      - traverse:
+          from:
+            traverse:
+              from: $target
+              relations:
+              - systems
+              - contracts
+              - flows
+              - exposes
+              - owns
+              - participates_in
+              - constrained_by
+              max_depth: 2
+              node_types:
+              - system
+              - interface
+              - data_model
+              - contract
+              - flow
+          relation: threatens
+          direction: incoming
+          max_depth: 1
+          node_types:
+          - risk
+    read_paths:
+    - select:
+        traverse:
+          from: $target
+          relation: systems
+          max_depth: 1
+          node_types:
+          - system
+      field: spec.owned_paths
+    workflow: change-design
+    title: Plan vertical evidence-guided work for {{ target.title }}
+- id: defect.diagnose
+  phase: design
+  priority: 78
+  for_each: diagnosable_defects
+  bind: target
+  when:
+    not:
+      exists:
+        intersection:
+        - $target
+        - diagnosed_defects
+  derive:
+  - kind: obligation
+    key: defect.causal-diagnosis
+    severity: blocking
+    reason: Defect lacks confirmed root cause, causal chain, or ruled-out alternatives
+  emit:
+    operation: diagnose-defect
+    source_state: defect-not-causally-localized
+    target_state: defect-has-reviewed-causal-diagnosis
+    obligations:
+    - defect.causal-diagnosis
+    target_nodes:
+      union:
+      - $target
+      - intersection:
+        - traverse:
+            from: $target
+            relation: verified_by
+            max_depth: 1
+            node_types:
+            - proof
+        - diagnostic_proofs
+    read_scope:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relations:
+          - manifests_in
+          - violates
+          - addressed_by
+          - verified_by
+          max_depth: 2
+    write_scope: $target
+    read_paths:
+    - select:
+        traverse:
+          from: $target
+          relations:
+          - manifests_in
+          - produced_by
+          - participants
+          max_depth: 2
+          node_types:
+          - system
+      field: spec.owned_paths
+    - select:
+        intersection:
+        - traverse:
+            from: $target
+            relation: verified_by
+            max_depth: 1
+            node_types:
+            - proof
+        - diagnostic_proofs
+      field: spec.source_paths
+    - select:
+        intersection:
+        - traverse:
+            from: $target
+            relation: verified_by
+            max_depth: 1
+            node_types:
+            - proof
+        - diagnostic_proofs
+      field: spec.covered_paths
+    workflow: defect-diagnosis
+    title: Diagnose the causal boundary for {{ target.title }}
+- id: risk.plan-treatment
+  phase: assurance
+  priority: 76
+  for_each: treatment_risk_gaps
+  bind: target
+  when:
+    not:
+      exists:
+        intersection:
+        - $target
+        - structurally_valid_risks
+  derive:
+  - kind: obligation
+    key: risk.treatment
+    severity: blocking
+    reason: Existing material-risk treatment has contradictory edges or lacks its boundary proof
+  emit:
+    operation: plan-risk-treatment
+    source_state: existing-risk-treatment-inconsistent
+    target_state: existing-risk-treatment-structurally-valid
+    obligations:
+    - risk.treatment
+    target_nodes: $target
+    read_scope:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relations:
+          - introduced_by
+          - threatens
+          - mitigated_by
+          - accepted_by
+          - verified_by
+          max_depth: 2
+    write_scope: $target
+    read_paths:
+    - select:
+        traverse:
+          from: $target
+          relations:
+          - threatens
+          - produced_by
+          - owned_by
+          - participants
+          max_depth: 2
+          node_types:
+          - system
+      field: spec.owned_paths
+    workflow: risk-treatment
+    title: Repair the bounded treatment for {{ target.title }}
+- id: decision.resolve
+  phase: design
+  priority: 75
+  for_each: open_decisions
+  bind: target
+  when:
+    not:
+      op: field_equals
+      subject: $target
+      field: status
+      value: accepted
+  emit:
+    operation: resolve-decision
+    source_state: approved-seed-decision-awaits-validation
+    target_state: approved-seed-decision-accepted
+    obligations:
+    - decision.disposition
+    target_nodes: $target
+    read_scope:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relation: concerns
+          max_depth: 1
+    write_scope: $target
+    read_paths:
+    - .
+    workflow: decision-resolution
+    title: Validate the approved decision for {{ target.title }}
+- id: migration.implement-red-green
+  phase: implementation
+  priority: 65
+  for_each:
+    intersection:
+    - planned_migrations
+    - implementation_ready_migrations
+    - nodes:
+        node_types:
+        - migration
+        where:
+          op: field_equals
+          subject: $node
+          field: spec.proof_strategy
+          value: red_green
+  bind: target
+  when:
+    not:
+      all:
+      - op: field_equals
+        subject: $target
+        field: status
+        value: complete
+      - op: field_equals
+        subject: $target
+        field: spec.proof_strategy
+        value: red_green
+      - exists:
+          intersection:
+          - $target
+          - implementation_ready_migrations
+      - for_all:
+          select:
+            intersection:
+            - traverse:
+                from: $target
+                relation: verified_by
+                max_depth: 1
+                node_types:
+                - proof
+            - well_scoped_implementation_proofs
+          bind: migration_proof
+          satisfies:
+            all:
+            - op: field_equals
+              subject: $migration_proof
+              field: status
+              value: passing
+            - op: check_passed
+              subject: $migration_proof
+              check: promotion-proof-set
+  emit:
+    operation: implement-migration
+    registry_entry_id: implementation.migration.red-green
+    source_state: migration-planned
+    target_state: migration-complete-with-current-promotion-proof
+    obligations:
+    - migration.implementation
+    - migration.rollback
+    target_nodes:
+      union:
+      - $target
+      - intersection:
+        - traverse:
+            from: $target
+            relation: verified_by
+            max_depth: 1
+            node_types:
+            - proof
+        - well_scoped_implementation_proofs
+    read_scope:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relations:
+          - changes
+          - protects
+          - verified_by
+          max_depth: 2
+    write_scope:
+      union:
+      - $target
+      - intersection:
+        - traverse:
+            from: $target
+            relation: verified_by
+            max_depth: 1
+            node_types:
+            - proof
+        - well_scoped_implementation_proofs
+    read_paths:
+    - select: $target
+      field: spec.owned_paths
+    - select:
+        traverse:
+          from: $target
+          relation: verified_by
+          max_depth: 1
+          node_types:
+          - proof
+      field: spec.source_paths
+    - select:
+        traverse:
+          from: $target
+          relation: verified_by
+          max_depth: 1
+          node_types:
+          - proof
+      field: spec.covered_paths
+    write_paths:
+    - select: $target
+      field: spec.owned_paths
+    workflow: red-green-implementation
+- id: migration.implement-characterization
+  phase: implementation
+  priority: 65
+  for_each:
+    intersection:
+    - planned_migrations
+    - implementation_ready_migrations
+    - nodes:
+        node_types:
+        - migration
+        where:
+          op: field_equals
+          subject: $node
+          field: spec.proof_strategy
+          value: characterization
+  bind: target
+  when:
+    not:
+      all:
+      - op: field_equals
+        subject: $target
+        field: status
+        value: complete
+      - op: field_equals
+        subject: $target
+        field: spec.proof_strategy
+        value: characterization
+      - exists:
+          intersection:
+          - $target
+          - implementation_ready_migrations
+      - for_all:
+          select:
+            intersection:
+            - traverse:
+                from: $target
+                relation: verified_by
+                max_depth: 1
+                node_types:
+                - proof
+            - well_scoped_implementation_proofs
+          bind: migration_proof
+          satisfies:
+            all:
+            - op: field_equals
+              subject: $migration_proof
+              field: status
+              value: passing
+            - op: check_passed
+              subject: $migration_proof
+              check: promotion-proof-set
+  emit:
+    operation: implement-migration
+    registry_entry_id: implementation.migration.characterize
+    source_state: migration-planned
+    target_state: migration-complete-with-current-promotion-proof
+    obligations:
+    - migration.implementation
+    - migration.rollback
+    target_nodes:
+      union:
+      - $target
+      - intersection:
+        - traverse:
+            from: $target
+            relation: verified_by
+            max_depth: 1
+            node_types:
+            - proof
+        - well_scoped_implementation_proofs
+    read_scope:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relations:
+          - changes
+          - protects
+          - verified_by
+          max_depth: 2
+    write_scope:
+      union:
+      - $target
+      - intersection:
+        - traverse:
+            from: $target
+            relation: verified_by
+            max_depth: 1
+            node_types:
+            - proof
+        - well_scoped_implementation_proofs
+    read_paths:
+    - select: $target
+      field: spec.owned_paths
+    - select:
+        traverse:
+          from: $target
+          relation: verified_by
+          max_depth: 1
+          node_types:
+          - proof
+      field: spec.source_paths
+    - select:
+        traverse:
+          from: $target
+          relation: verified_by
+          max_depth: 1
+          node_types:
+          - proof
+      field: spec.covered_paths
+    write_paths:
+    - select: $target
+      field: spec.owned_paths
+    workflow: characterization-implementation
+- id: migration.implement-current-verification
+  phase: implementation
+  priority: 65
+  for_each:
+    intersection:
+    - planned_migrations
+    - implementation_ready_migrations
+    - nodes:
+        node_types:
+        - migration
+        where:
+          op: field_equals
+          subject: $node
+          field: spec.proof_strategy
+          value: current_verification
+  bind: target
+  when:
+    not:
+      all:
+      - op: field_equals
+        subject: $target
+        field: status
+        value: complete
+      - op: field_equals
+        subject: $target
+        field: spec.proof_strategy
+        value: current_verification
+      - exists:
+          intersection:
+          - $target
+          - implementation_ready_migrations
+      - for_all:
+          select:
+            intersection:
+            - traverse:
+                from: $target
+                relation: verified_by
+                max_depth: 1
+                node_types:
+                - proof
+            - well_scoped_implementation_proofs
+          bind: migration_proof
+          satisfies:
+            all:
+            - op: field_equals
+              subject: $migration_proof
+              field: status
+              value: passing
+            - op: check_passed
+              subject: $migration_proof
+              check: promotion-proof-set
+  emit:
+    operation: implement-migration
+    registry_entry_id: implementation.migration.verify-current
+    source_state: migration-planned
+    target_state: migration-complete-with-current-promotion-proof
+    obligations:
+    - migration.implementation
+    - migration.rollback
+    target_nodes:
+      union:
+      - $target
+      - intersection:
+        - traverse:
+            from: $target
+            relation: verified_by
+            max_depth: 1
+            node_types:
+            - proof
+        - well_scoped_implementation_proofs
+    read_scope:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relations:
+          - changes
+          - protects
+          - verified_by
+          max_depth: 2
+    write_scope:
+      union:
+      - $target
+      - intersection:
+        - traverse:
+            from: $target
+            relation: verified_by
+            max_depth: 1
+            node_types:
+            - proof
+        - well_scoped_implementation_proofs
+    read_paths:
+    - select: $target
+      field: spec.owned_paths
+    - select:
+        traverse:
+          from: $target
+          relation: verified_by
+          max_depth: 1
+          node_types:
+          - proof
+      field: spec.source_paths
+    - select:
+        traverse:
+          from: $target
+          relation: verified_by
+          max_depth: 1
+          node_types:
+          - proof
+      field: spec.covered_paths
+    write_paths:
+    - select: $target
+      field: spec.owned_paths
+    workflow: current-verification-implementation
+- id: change.implement-red-green
+  phase: implementation
+  priority: 60
+  for_each:
+    intersection:
+    - planned_changes
+    - implementation_ready_changes
+    - nodes:
+        node_types:
+        - change
+        where:
+          op: field_equals
+          subject: $node
+          field: spec.proof_strategy
+          value: red_green
+  bind: target
+  when:
+    not:
+      all:
+      - op: field_equals
+        subject: $target
+        field: status
+        value: implemented
+      - op: field_equals
+        subject: $target
+        field: spec.proof_strategy
+        value: red_green
+      - exists:
+          intersection:
+          - $target
+          - implementation_ready_changes
+      - for_all:
+          select:
+            intersection:
+            - traverse:
+                from: $target
+                relation: verified_by
+                max_depth: 1
+                node_types:
+                - proof
+            - well_scoped_implementation_proofs
+          bind: change_proof
+          satisfies:
+            all:
+            - op: field_equals
+              subject: $change_proof
+              field: status
+              value: passing
+            - op: check_passed
+              subject: $change_proof
+              check: promotion-proof-set
+  emit:
+    operation: implement-change
+    registry_entry_id: implementation.change.red-green
+    source_state: change-planned
+    target_state: change-implemented-with-current-promotion-proof
+    obligations:
+    - change.implementation
+    target_nodes:
+      union:
+      - $target
+      - intersection:
+        - traverse:
+            from: $target
+            relation: verified_by
+            max_depth: 1
+            node_types:
+            - proof
+        - well_scoped_implementation_proofs
+    read_scope:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relations:
+          - affects
+          - addresses
+          - depends_on
+          - requires
+          - introduces
+          - verified_by
+          max_depth: 2
+    write_scope:
+      union:
+      - $target
+      - intersection:
+        - traverse:
+            from: $target
+            relation: verified_by
+            max_depth: 1
+            node_types:
+            - proof
+        - well_scoped_implementation_proofs
+    read_paths:
+    - select: $target
+      field: spec.owned_paths
+    - select:
+        traverse:
+          from: $target
+          relation: verified_by
+          max_depth: 1
+          node_types:
+          - proof
+      field: spec.source_paths
+    - select:
+        traverse:
+          from: $target
+          relation: verified_by
+          max_depth: 1
+          node_types:
+          - proof
+      field: spec.covered_paths
+    write_paths:
+    - select: $target
+      field: spec.owned_paths
+    workflow: red-green-implementation
+- id: change.implement-characterization
+  phase: implementation
+  priority: 60
+  for_each:
+    intersection:
+    - planned_changes
+    - implementation_ready_changes
+    - nodes:
+        node_types:
+        - change
+        where:
+          op: field_equals
+          subject: $node
+          field: spec.proof_strategy
+          value: characterization
+  bind: target
+  when:
+    not:
+      all:
+      - op: field_equals
+        subject: $target
+        field: status
+        value: implemented
+      - op: field_equals
+        subject: $target
+        field: spec.proof_strategy
+        value: characterization
+      - exists:
+          intersection:
+          - $target
+          - implementation_ready_changes
+      - for_all:
+          select:
+            intersection:
+            - traverse:
+                from: $target
+                relation: verified_by
+                max_depth: 1
+                node_types:
+                - proof
+            - well_scoped_implementation_proofs
+          bind: change_proof
+          satisfies:
+            all:
+            - op: field_equals
+              subject: $change_proof
+              field: status
+              value: passing
+            - op: check_passed
+              subject: $change_proof
+              check: promotion-proof-set
+  emit:
+    operation: implement-change
+    registry_entry_id: implementation.change.characterize
+    source_state: change-planned
+    target_state: change-implemented-with-current-promotion-proof
+    obligations:
+    - change.implementation
+    target_nodes:
+      union:
+      - $target
+      - intersection:
+        - traverse:
+            from: $target
+            relation: verified_by
+            max_depth: 1
+            node_types:
+            - proof
+        - well_scoped_implementation_proofs
+    read_scope:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relations:
+          - affects
+          - addresses
+          - depends_on
+          - requires
+          - introduces
+          - verified_by
+          max_depth: 2
+    write_scope:
+      union:
+      - $target
+      - intersection:
+        - traverse:
+            from: $target
+            relation: verified_by
+            max_depth: 1
+            node_types:
+            - proof
+        - well_scoped_implementation_proofs
+    read_paths:
+    - select: $target
+      field: spec.owned_paths
+    - select:
+        traverse:
+          from: $target
+          relation: verified_by
+          max_depth: 1
+          node_types:
+          - proof
+      field: spec.source_paths
+    - select:
+        traverse:
+          from: $target
+          relation: verified_by
+          max_depth: 1
+          node_types:
+          - proof
+      field: spec.covered_paths
+    write_paths:
+    - select: $target
+      field: spec.owned_paths
+    workflow: characterization-implementation
+- id: change.implement-current-verification
+  phase: implementation
+  priority: 60
+  for_each:
+    intersection:
+    - planned_changes
+    - implementation_ready_changes
+    - nodes:
+        node_types:
+        - change
+        where:
+          op: field_equals
+          subject: $node
+          field: spec.proof_strategy
+          value: current_verification
+  bind: target
+  when:
+    not:
+      all:
+      - op: field_equals
+        subject: $target
+        field: status
+        value: implemented
+      - op: field_equals
+        subject: $target
+        field: spec.proof_strategy
+        value: current_verification
+      - exists:
+          intersection:
+          - $target
+          - implementation_ready_changes
+      - for_all:
+          select:
+            intersection:
+            - traverse:
+                from: $target
+                relation: verified_by
+                max_depth: 1
+                node_types:
+                - proof
+            - well_scoped_implementation_proofs
+          bind: change_proof
+          satisfies:
+            all:
+            - op: field_equals
+              subject: $change_proof
+              field: status
+              value: passing
+            - op: check_passed
+              subject: $change_proof
+              check: promotion-proof-set
+  emit:
+    operation: implement-change
+    registry_entry_id: implementation.change.verify-current
+    source_state: change-planned
+    target_state: change-implemented-with-current-promotion-proof
+    obligations:
+    - change.implementation
+    target_nodes:
+      union:
+      - $target
+      - intersection:
+        - traverse:
+            from: $target
+            relation: verified_by
+            max_depth: 1
+            node_types:
+            - proof
+        - well_scoped_implementation_proofs
+    read_scope:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relations:
+          - affects
+          - addresses
+          - depends_on
+          - requires
+          - introduces
+          - verified_by
+          max_depth: 2
+    write_scope:
+      union:
+      - $target
+      - intersection:
+        - traverse:
+            from: $target
+            relation: verified_by
+            max_depth: 1
+            node_types:
+            - proof
+        - well_scoped_implementation_proofs
+    read_paths:
+    - select: $target
+      field: spec.owned_paths
+    - select:
+        traverse:
+          from: $target
+          relation: verified_by
+          max_depth: 1
+          node_types:
+          - proof
+      field: spec.source_paths
+    - select:
+        traverse:
+          from: $target
+          relation: verified_by
+          max_depth: 1
+          node_types:
+          - proof
+      field: spec.covered_paths
+    write_paths:
+    - select: $target
+      field: spec.owned_paths
+    workflow: current-verification-implementation
+- id: proof.establish
+  phase: assurance
+  priority: 50
+  for_each: executable_proofs
+  bind: target
+  when:
+    not:
+      all:
+      - op: field_equals
+        subject: $target
+        field: status
+        value: passing
+      - op: check_passed
+        subject: $target
+        check: promotion-proof-set
+      - exists:
+          intersection:
+          - $target
+          - executable_proofs
+  emit:
+    operation: establish-proof
+    source_state: proof-not-semantically-accepted-or-current
+    target_state: proof-reviewed-passing-with-current-composite-receipt
+    obligations:
+    - proof.current-receipt
+    - proof.semantic-acceptance
+    target_nodes:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relation: verifies
+          max_depth: 1
+          node_types:
+          - contract
+          - flow
+          - defect
+          - change
+          - migration
+          - risk
+    read_scope:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relations:
+          - verifies
+          - uses
+          max_depth: 2
+    write_scope: $target
+    read_paths:
+    - select: $target
+      field: spec.source_paths
+    - select: $target
+      field: spec.covered_paths
+    workflow: proof-execution
+    title: Establish current semantic proof for {{ target.title }}
+- id: delivery.prepare
+  phase: delivery
+  priority: 10
+  for_each: delivery_ready_objectives
+  bind: target
+  when:
+    not:
+      all:
+      - exists:
+          intersection:
+          - $target
+          - delivery_ready_objectives
+      - op: edge_count
+        subject: $target
+        relation: delivered_by
+        exact: 1
+      - exists:
+          intersection:
+          - traverse:
+              from: $target
+              relation: delivered_by
+              max_depth: 1
+              node_types:
+              - delivery
+          - current_candidate_deliveries
+  emit:
+    operation: prepare-delivery
+    source_state: exact-objective-closure-not-candidate-ready
+    target_state: exact-objective-closure-reviewed-candidate-ready
+    obligations:
+    - delivery.review
+    - delivery.current-proof
+    - delivery.exact-closure
+    target_nodes: $target
+    read_scope:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relations:
+          - realized_by
+          - delivered_by
+          - systems
+          - contracts
+          - flows
+          - defects
+          - affects
+          - addresses
+          - requires
+          - introduces
+          - verified_by
+          - mitigated_by
+          - accepted_by
+          - constrained_by
+          - exposes
+          - owns
+          - participates_in
+          max_depth: 5
+    write_scope:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relation: delivered_by
+          max_depth: 1
+          node_types:
+          - delivery
+    read_paths:
+    - select:
+        traverse:
+          from: $target
+          relation: systems
+          max_depth: 1
+          node_types:
+          - system
+      field: spec.owned_paths
+    write_paths: []
+    workflow: delivery-review
+    title: Assemble the exact candidate for {{ target.title }}

@@ -1,0 +1,170 @@
+schema_version: '2.0'
+module:
+  id: software.cockpit
+  version: 0.2.0
+views:
+- id: board
+  title: Delivery Board
+  kind: kanban
+  source: tickets
+  actions:
+  - compile
+  - start
+  - spawn-worker
+  - context
+  - review
+  - finish
+  - steer
+  - recover
+  options:
+    group_by: status
+    show_step_progress: true
+    show_scope_conflicts: true
+- id: transformation-graph
+  title: Evidence-Guided Delivery Graph
+  kind: graph
+  source: graph
+  actions:
+  - compile
+  options:
+    layout: nested
+    upward_edge_policy: mapped_only
+    hierarchy:
+    - objective
+    - system
+    - interface
+    - data_model
+    - contract
+    - flow
+    - defect
+    - decision
+    - change
+    - migration
+    - risk
+    - proof
+    - delivery
+    primary_parent_preferences:
+      system:
+      - objective
+      - system
+      interface:
+      - system
+      - objective
+      data_model:
+      - system
+      contract:
+      - system
+      - objective
+      - interface
+      - data_model
+      flow:
+      - objective
+      - system
+      - interface
+      defect:
+      - objective
+      - system
+      - interface
+      - flow
+      - contract
+      decision:
+      - objective
+      - system
+      - interface
+      - data_model
+      - contract
+      - flow
+      - defect
+      - risk
+      change:
+      - objective
+      - defect
+      - system
+      - interface
+      - data_model
+      - contract
+      - flow
+      - decision
+      - change
+      migration:
+      - change
+      - system
+      - data_model
+      - interface
+      - objective
+      risk:
+      - change
+      - migration
+      - decision
+      - contract
+      - flow
+      - system
+      - interface
+      - data_model
+      proof:
+      - change
+      - migration
+      - risk
+      - defect
+      - contract
+      - flow
+      - system
+      - interface
+      - data_model
+      delivery:
+      - objective
+      - change
+      - migration
+      - defect
+      - decision
+      - proof
+      - risk
+    reverse_display_edges:
+      interface.produced_by: exposes
+      data_model.owned_by: owns
+      contract.applies_to: constrained_by
+      flow.participants: participates_in
+      defect.concerns: defects
+      defect.manifests_in: defects
+      defect.violates: defects
+      decision.concerns: decisions
+      change.realizes: realized_by
+      change.affects: changes
+      change.addresses: addressed_by
+      change.requires: required_by
+      change.introduces: introduced_by
+      migration.changes: migrations
+      migration.protects: migrations
+      risk.threatens: risks
+      risk.mitigated_by: mitigates
+      risk.accepted_by: accepts
+      proof.verifies: proofs
+      proof.uses: proofs
+      delivery.fulfills: delivered_by
+      delivery.includes: deliveries
+      delivery.acknowledges: deliveries
+    secondary_edge_style: independent_right_lanes
+    show_titles: true
+- id: assurance
+  title: Risks and Proof
+  kind: table
+  source: graph
+  actions:
+  - run-check
+  - report
+  options:
+    node_types:
+    - defect
+    - risk
+    - proof
+    show_receipt_freshness: true
+- id: agents
+  title: Agents
+  kind: status_overlay
+  source: tickets
+  actions:
+  - spawn-worker
+  - steer
+  - recover
+  options:
+    completion_marker: task_complete

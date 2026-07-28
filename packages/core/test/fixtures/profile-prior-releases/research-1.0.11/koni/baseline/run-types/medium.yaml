@@ -1,0 +1,127 @@
+schema_version: '2.0'
+id: medium
+title: Medium
+description: A standard project with one combined plan, targeted questions, parallel execution, and a verification checkpoint.
+instructions:
+  planning: |
+    Identify at most two focused questions whose answers would materially change
+    scope, research design, validity, provenance, or verification. When related
+    decisions are already visible together, return them in one compiler-owned
+    structured question batch instead of splitting them across turns. A batch
+    may contain one to three questions; give each two to four choices, one
+    recommendation, and the consequence of each choice.
+    Keep conclusions bounded to configured empirical receipts and their
+    observed scope. Evidence candidates must retain the profile markers
+    `evidence_basis: empirical_runtime` and
+    `inference_scope: bounded_empirical`. Route proof, source review, API shape,
+    termination, provenance, and hygiene to methods, prerequisites, gates, or
+    review rather than treating them as promotable evidence or inventing
+    receipt classes.
+planning:
+  session_scope: run
+  graph_seed_stage: combined-plan
+  max_repository_tool_calls: 32
+  token_budget:
+    metric: new_tokens
+    limit: 450000
+    synthesis_reserve: 90000
+    on_exhausted: force_synthesis
+profile:
+  source: .koni/profile.yaml
+intake:
+  objective_field: goal
+  fields:
+    goal:
+      label: Goal
+      description: Describe the research outcome Koni should deliver.
+      type: text
+      required: true
+  order:
+  - goal
+pipeline:
+  stages:
+    intake:
+      kind: action
+      title: Validate intake
+      config:
+        compiler_owned: true
+        action: planning.intake
+    combined-plan:
+      kind: planning
+      title: Plan implementation, architecture, and risk
+      config:
+        persona: run-planner
+        prompt: Produce one research plan covering scoped scientific claims, a small cohesive empirical portfolio, dependencies, risks, configured receipt provenance, empirical_runtime evidence with bounded_empirical inference scope, and verification.
+    approval:
+      kind: approval
+      title: Approve the plan
+    initialize:
+      kind: initialize
+      title: Initialize the run
+    orchestrate:
+      kind: orchestration
+      title: Execute compiled work
+    target-sync:
+      kind: target_sync
+      title: Synchronize the target branch
+    verification:
+      kind: checkpoint
+      title: Verify the completed research
+      config:
+        checkpoint: verification
+    report:
+      kind: action
+      title: Compile final report
+      config:
+        action: report
+        automatic: true
+    promotion:
+      kind: promotion
+      title: Promote the completed research to the target branch
+  order:
+  - intake
+  - combined-plan
+  - approval
+  - initialize
+  - orchestrate
+  - target-sync
+  - verification
+  - report
+  - promotion
+questions:
+  policy: high_impact_only
+  default_scope: run
+git:
+  branch_template: koni/runs/{{ run.id }}/integration
+  ticket_branch_template: koni/runs/{{ run.id }}/tickets/{{ ticket.id }}/cycles/{{ cycle.id }}
+promotion:
+  conflict_operation: resolve-target-integration
+run_card:
+  sections:
+  - goal
+  - pipeline
+  - graph
+  - tickets
+  - checks
+  - report
+agents:
+  roles:
+    planner:
+      model: gpt-5.6-sol
+      thinking_level: xhigh
+    lead:
+      model: gpt-5.4-mini
+      thinking_level: low
+    ticket_worker:
+      model: gpt-5.6-terra
+      thinking_level: high
+    reviewer:
+      model: gpt-5.6-terra
+      thinking_level: xhigh
+  personas: {}
+orchestration:
+  auto_start: true
+  max_parallel: 3
+  compile_action: compile
+  lead_action: spawn-lead
+  report_action: report

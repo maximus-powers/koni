@@ -1,0 +1,61 @@
+schema_version: '2.0'
+id: bug-fix
+title: Bug Fix
+description: A Medium-derived causal repair preset centered on expected versus observed behavior, evidence-backed diagnosis, and regression proof.
+extends: medium
+overrides:
+- op: merge
+  path: /intake/fields
+  value:
+    expected_behavior:
+      label: Expected behavior
+      description: Describe what should happen and the contract or user expectation behind it.
+      type: text
+      required: true
+    observed_behavior:
+      label: Observed behavior
+      description: Describe what happens instead, including impact and relevant environment details.
+      type: text
+      required: true
+    reproduction_signal:
+      label: Reproduction or observation
+      description: Optional steps, command, log, trace, screenshot, or other concrete failure signal.
+      type: text
+- op: replace
+  path: /intake/order
+  value:
+  - goal
+  - expected_behavior
+  - observed_behavior
+  - reproduction_signal
+- op: replace
+  path: /instructions/planning
+  value: |
+    Seed objective.work_kind as bug_fix and create a defect carrying expected
+    behavior, observed behavior, the available reproduction or observation
+    signal, or an honest explanation when safe reproduction is unavailable.
+    Add exactly one focused diagnostic proof for that defect, with an exact
+    argv, source paths, covered product paths, structured oracle cases binding
+    the reported condition to the real production seam and exact seam paths,
+    working directory, honest
+    baseline check, expected signal, and proof limits. Do not seed defect
+    status or causal fields unless repository evidence already establishes
+    the root cause, causal chain, and ruled-out alternatives. Reproduce before
+    proposing a repair when feasible; a valid red must fail for the reported
+    behavior, not setup or an unrelated regression. Trace the first invalid
+    state and causal boundary rather than stopping at the first suspicious
+    line. An unresolved defect compiles bounded diagnosis before change
+    planning; do not speculate a repair or production write scope first. Once
+    independently reviewed evidence confirms the cause, plan the smallest
+    complete causal patch and lowest trustworthy focused regression proof at
+    the failure boundary, plus only the adjacent checks needed for blast
+    radius. Preserve adverse diagnostics and escalate a repeatedly invalid
+    oracle through explicit scoped change control instead of weakening it or
+    broadening into cleanup. Warn before approval if discovered scope belongs
+    in the Small or Large envelope.
+- op: replace
+  path: /pipeline/stages/combined-plan/config/prompt
+  value: Plan a causal defect repair and emit the smallest sufficient root-connected semantic seed. Set objective.work_kind to bug_fix; seed a defect with the intake's expected behavior, observed behavior, and an exact reproduction/observation signal or honest explanation that safe reproduction is unavailable; ground the affected repository-native system; and add exactly one focused diagnostic proof for the defect using the proof schema's sole-authority fields. Its structured oracle_cases must bind every condition and claim to the callable production seam, exact seam_paths, action, assertions, and material environment/recipe; every seam path must resolve to the same normalized project-relative identity present in read-only covered_paths, never inferred system ownership. Add only material boundaries and contracts. If repository evidence already confirms the cause, record the complete root cause, causal chain, and ruled-out alternatives; otherwise omit those causal fields so the compiler schedules bounded diagnosis before change planning. Do not seed a speculative change for an unresolved defect. Only a confirmed causal seed may include the smallest change that addresses the defect, its honest red_green, characterization, or current_verification focused proof, and risk-tier-required boundary proof attached through the introduced risk rather than directly to the change. Do not overfit the symptom, expand into cleanup, or seed status, tickets, receipts, transient notes, or any compiler-owned field.
+- op: replace
+  path: /orchestration/max_parallel
+  value: 1

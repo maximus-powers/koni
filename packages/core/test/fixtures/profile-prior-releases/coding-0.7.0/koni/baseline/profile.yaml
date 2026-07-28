@@ -1,0 +1,68 @@
+schema_version: '2.0'
+engine: '>=0.1,<0.2'
+profile:
+  id: software
+  version: 0.7.0
+  description: Evidence-guided vertical software delivery with risk-adaptive, compiler-current proof
+initialization:
+  root_node_type: objective
+  goal_field: outcome
+  planning_context_field: planning_context
+  planning_seed_operation: initialization.objective.seed-approved-plan
+  root_status: active
+storage:
+  backend: git_common_dir
+  graph_dir: program/graph
+  tickets_dir: program/tickets
+  state_path: program/state.yaml
+  work_dir: program/work
+  receipts_dir: program/receipts
+  reports_dir: program/reports
+  semantic_hash_excludes:
+  - annotations
+  - readiness
+  - obligations
+  - tickets
+  - receipts
+  - compiler
+  filesystem_scope_excludes:
+  - node_modules
+  - target
+  - .next
+  - coverage
+git:
+  enabled: true
+  backend: git_cli
+  integration_branch: current
+  ticket_branch_template: koni/runs/{{ run.id }}/tickets/{{ ticket.id }}/cycles/{{ cycle.id }}
+  worktree_root: .koni-worktrees
+  integration_strategy: squash
+  commit_template: '{{ ticket.operation }}: {{ ticket.title }}'
+orchestration:
+  running: true
+  max_parallel: 5
+  lease_stale_seconds: 1800
+  max_fixpoint_passes: 8
+  max_boundaries_per_lead: 1
+  disjoint_scope_parallelism: true
+imports:
+  graph:
+  - graph.yaml
+  rules:
+  - rules.yaml
+  operations:
+  - operations.yaml
+  workflows:
+  - workflows.yaml
+  actions:
+  - actions.yaml
+  checks:
+  - checks.yaml
+  personas:
+  - personas.yaml
+  reports:
+  - reports.yaml
+  cockpit:
+  - cockpit.yaml
+  lifecycles:
+  - lifecycle.yaml

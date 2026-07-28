@@ -1,0 +1,4 @@
+interface:
+  display_name: "Operate Köni"
+  short_description: "Run and recover Köni workflows confidently"
+  default_prompt: "Use $operate-koni to validate and operate this Köni project safely."

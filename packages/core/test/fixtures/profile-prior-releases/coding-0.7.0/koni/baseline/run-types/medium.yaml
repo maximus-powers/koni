@@ -1,0 +1,138 @@
+schema_version: '2.0'
+id: medium
+title: Medium
+description: A standard multi-component change with one combined semantic plan, targeted questions, and safely parallel vertical slices.
+instructions:
+  planning: |
+    Begin with a lightweight decision scan before broad repository inspection.
+    Ask one focused batch of one to three questions early when the answers would
+    materially change scope, architecture, safety, user experience, or
+    verification. Never ask for facts the repository can answer. Give each
+    question two to four choices, one recommendation, and the consequence of
+    each choice. After those decisions are resolved, perform one consolidated
+    investigation pass, lock the first complete repository-native design supported
+    by the evidence, and produce the combined plan plus the smallest
+    sufficient root-connected semantic graph seed. Seed objective.work_kind,
+    affected repository-native systems, cohesive vertical changes, risk tiers
+    and treatments, at least one primary focused single-subject proof per implementation claim,
+    and risk-attached boundary proof only when the tier requires it. Give every
+    proof structured oracle cases that bind real production seams and exact seam
+    paths already present in read-only covered paths; never infer broader system
+    ownership as proof scope. Materialize
+    architecture and contracts only when they constrain behavior, ownership,
+    compatibility, proof, or slice dependencies. Do not seed tickets, status,
+    receipts, transient notes, or any compiler-owned field. Do not continue exploring
+    alternate encodings after an existing compatible sibling seam satisfies the
+    objective. Preserve-in-place plus additive optional values is routine work, not a
+    migration or elevated risk, unless repository evidence proves a destructive or
+    interpretive transition.
+planning:
+  session_scope: run
+  graph_seed_stage: combined-plan
+  max_repository_tool_calls: 16
+  token_budget:
+    metric: new_tokens
+    limit: 120000
+    synthesis_reserve: 30000
+    on_exhausted: force_synthesis
+profile:
+  source: .koni/profile.yaml
+intake:
+  objective_field: goal
+  fields:
+    goal:
+      label: Goal
+      description: Describe the outcome Koni should deliver.
+      type: text
+      required: true
+  order:
+  - goal
+pipeline:
+  stages:
+    intake:
+      kind: action
+      title: Validate intake
+      config:
+        compiler_owned: true
+        action: planning.intake
+    combined-plan:
+      kind: planning
+      title: Plan implementation, architecture, and risk
+      config:
+        persona: run-planner
+        prompt: >-
+          Produce one concise, implementation-ready plan and the smallest sufficient root-connected graph seed. Define the observable outcome, explicit non-goals, success signals, objective.work_kind, affected repository-native systems, and the fewest dependency-ordered vertical changes, each expressible as one approval sentence. Lock the first complete repository-native design supported by the evidence and stop exploring alternatives. Preserving an existing compatible identity while adding optional sibling values is routine additive work; do not invent serialization, version markers, migrations, rollback systems, or elevated risk unless concrete repository evidence proves an unavoidable destructive or interpretive transition. Classify each change as routine, elevated, or critical from concrete risk factors; give every change a primary focused proof that verifies exactly that implementation subject, adding another only for a distinct remaining evidence gap. Only elevated or critical work introduces a material risk whose distinct boundary proof verifies the risk plus structural treatment. Choose an honest red_green, characterization, or current_verification baseline and exact repository-native argv. For every proof, bind condition and claim through structured oracle_cases to the callable production seam, exact seam_paths, action, assertions, and material environment/recipe; every seam path must resolve to the same normalized project-relative identity present in read-only covered_paths. Model interfaces, data, flows, contracts, migrations, decisions, and risks only when material. Keep each full human-readable plan domain to at most six compact Markdown bullets, each concise domain to at most three authored title/description items, and the graph to normally no more than twelve non-root nodes. Before submission, close every configured required relation already known in the seed: in particular, every system with contract_required true must already have its semantically complete contract linked through canonical contract.applies_to, reusing the existing fact rather than leaving a fallback ticket or duplicate. Use canonical edges and exact paths; never seed compiler-owned status, tickets, receipts, or implementation progress.
+    approval:
+      kind: approval
+      title: Approve the plan
+    initialize:
+      kind: initialize
+      title: Initialize the run
+    orchestrate:
+      kind: orchestration
+      title: Execute compiled work
+    target-sync:
+      kind: target_sync
+      title: Synchronize the target branch
+    verification:
+      kind: checkpoint
+      title: Verify the completed run
+      config:
+        checkpoint: verification
+    report:
+      kind: action
+      title: Compile final report
+      config:
+        action: report
+        automatic: true
+    promotion:
+      kind: promotion
+      title: Merge the completed run
+  order:
+  - intake
+  - combined-plan
+  - approval
+  - initialize
+  - orchestrate
+  - target-sync
+  - verification
+  - report
+  - promotion
+questions:
+  policy: high_impact_only
+  default_scope: run
+git:
+  branch_template: koni/runs/{{ run.id }}/integration
+  ticket_branch_template: koni/runs/{{ run.id }}/tickets/{{ ticket.id }}/cycles/{{ cycle.id }}
+promotion:
+  conflict_operation: resolve-target-integration
+run_card:
+  sections:
+  - goal
+  - pipeline
+  - graph
+  - tickets
+  - checks
+  - report
+agents:
+  roles:
+    planner:
+      model: gpt-5.6-sol
+      thinking_level: max
+    lead:
+      model: gpt-5.6-sol
+      thinking_level: xhigh
+    ticket_worker:
+      model: gpt-5.6-terra
+      thinking_level: high
+    reviewer:
+      model: gpt-5.6-sol
+      thinking_level: max
+  personas: {}
+orchestration:
+  auto_start: true
+  max_parallel: 3
+  compile_action: compile
+  lead_action: spawn-lead
+  lead_triggers: []
+  report_action: report
