@@ -1,6 +1,0 @@
-dist/*
-!dist/koni-pi-host.mjs
-!dist/koni-pi-host.sha256
-node_modules/
-coverage/
-*.tsbuildinfo
