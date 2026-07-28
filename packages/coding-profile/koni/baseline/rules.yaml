@@ -192,6 +192,8 @@ rules:
       field: spec.source_paths
     - select: $target
       field: spec.covered_paths
+    - select: $target
+      field: spec.support_paths
     write_paths:
     - select: $target
       field: spec.source_paths
@@ -451,9 +453,7 @@ rules:
   - kind: obligation
     key: objective.change-plan
     severity: blocking
-    reason: Objective lacks a classified
-    proof-bound: null
-    risk-appropriate vertical change plan: null
+    reason: Objective lacks a classified, proof-bound, risk-appropriate vertical change plan
   emit:
     operation: plan-change
     source_state: objective-without-implementation-ready-plan
@@ -544,9 +544,7 @@ rules:
   - kind: obligation
     key: defect.causal-diagnosis
     severity: blocking
-    reason: Defect lacks confirmed root cause
-    causal chain: null
-    or ruled-out alternatives: null
+    reason: Defect lacks confirmed root cause, causal chain, or ruled-out alternatives
   emit:
     operation: diagnose-defect
     source_state: defect-not-causally-localized
@@ -1517,3 +1515,71 @@ rules:
     write_paths: []
     workflow: delivery-review
     title: Assemble the exact candidate for {{ target.title }}
+- id: objective.decompose-domain
+  phase: design
+  priority: 95
+  for_each: continuous_improvement_objectives
+  bind: target
+  when:
+    not:
+      exists:
+        traverse:
+          from: $target
+          relation: decomposes
+          max_depth: 1
+          node_types:
+          - improvement_target
+  derive:
+  - kind: obligation
+    key: objective.decomposition
+    severity: blocking
+    reason: Continuous-improvement objective has no decomposed improvement targets
+  emit:
+    operation: decompose-domain
+    source_state: objective-without-domain-decomposition
+    target_state: objective-decomposed-into-improvement-targets
+    obligations:
+    - objective.decomposition
+    target_nodes: $target
+    read_scope: $target
+    write_scope: $target
+    read_paths:
+    - .
+    write_paths: []
+    workflow: domain-decomposition
+    title: Decompose the domain for {{ target.title }}
+- id: improvement_target.resolve
+  phase: design
+  priority: 84
+  for_each: active_improvement_targets
+  bind: target
+  when:
+    not:
+      exists:
+        intersection:
+        - $target
+        - resolved_improvement_targets
+  derive:
+  - kind: obligation
+    key: improvement_target.resolution
+    severity: blocking
+    reason: Improvement target has no accepted selection resolving it to a proven winning approach
+  emit:
+    operation: resolve-target
+    source_state: improvement-target-unresolved
+    target_state: improvement-target-resolved-with-selected-winner
+    obligations:
+    - improvement_target.resolution
+    target_nodes: $target
+    read_scope: $target
+    write_scope: $target
+    read_paths:
+    - .
+    write_paths:
+    - select:
+        intersection:
+        - $target
+        - improvement_targets
+      field: spec.slice_paths
+    workflow: target-resolution
+    title: Explore alternatives and select the winner for {{ target.title }}

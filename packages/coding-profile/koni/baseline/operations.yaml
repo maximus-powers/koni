@@ -20,6 +20,9 @@ operations:
   - migration
   - risk
   - proof
+  - improvement_target
+  - selection_criteria
+  - candidate_approach
   allowed_existing_node_types:
   - objective
   max_new_nodes: 64
@@ -63,7 +66,7 @@ operations:
   - contract
   max_new_nodes: 8
   review_contract: Each material contract states observable behavior, enforcement point, failure meaning, compatibility consequences, and the exact affected boundary without restating implementation steps.
-  output_contract: Add the fewest active contracts needed by this explicitly contract-requiring system and link each through canonical contract.applies_to. Add an interface, data model, or flow only when the contract cannot be understood or proved without it. Do not create a decision or mutate existing repository facts.
+  output_contract: Add the fewest active contracts needed by this explicitly contract-requiring system and link each through canonical contract.applies_to. In the structured graph delta, node upserts contain node data only and all relationships belong exclusively in addEdges/removeEdges. Every edge source must be inside the compiler-issued graph write scope. Reuse a semantically complete existing contract when the issued scope permits the canonical link; if it does not, submit one exact failed scope blocker rather than duplicating the contract or retrying invalid delta shapes. Add an interface, data model, or flow only when the contract cannot be understood or proved without it. Do not create a decision or mutate existing repository facts.
   ranking_hints:
   - phase
   - system-id
@@ -159,7 +162,7 @@ operations:
   - baseline-proof-set
   proof_source_preparation_check: baseline-proof-set
   review_contract: The diagnostic, risk-boundary, red-green, or characterization source seam is minimal, executable, semantically relevant, physically source-disjoint from every independently lifecycle-managed proof, and produces the exact honest historical result selected by baseline_check_id without production edits or oracle weakening. Named tests in one shared file are one authority boundary, not independently preparable sources. Every structured oracle case invokes its named production seam, and every exact seam path is explicit read-only covered_paths rather than inferred from a linked system. Current-verification uses an already-existing read-only proof and does not enter this source-authoring operation.
-  output_contract: Author or refine only the compiler-pinned proof.source_paths, execute the exact graph-selected historical baseline after output, and independently review every oracle_cases entry against its condition, claim, production_seam, seam_paths, action, assertions, and material environment/recipe. For a focused red-green or characterization implementation proof, this review must complete before the linked change or migration receives product-write authority. Do not modify covered product paths or semantic graph state. Passing review compiler-stamps prepared and establishes the compiler-bound source-only preparation identity; later command, subject, oracle, source-manifest, or review-input drift reopens this operation, while covered product changes do not. Current prepared source is immutable to overlapping production authority; only an exact compiler-proven re-preparation projection may write it.
+  output_contract: Author or refine only the compiler-pinned proof.source_paths, execute the exact graph-selected historical baseline after output, and independently review every oracle_cases entry against its condition, claim, production_seam, seam_paths, action, assertions, and material environment/recipe. Treat proof.support_paths as the exact read-only authority for package manifests, test-runner configuration, setup files, and established reference tests; prove every imported dependency, required runtime environment, JSX/global convention, alias, and mock boundary from those files before authoring. If the required environment evidence is absent from support_paths, stop with an exact modeling diagnostic before the first check instead of guessing. Before the first check, build a finite route matrix across every declared production seam and real consumer. Every oracle case and material assertion must be independently reachable during the historical execution; an intended early red must not short-circuit later fixtures, consumer calls, render paths, or assertions. Isolate an expected missing new module to its own exact specifier/importer assertion and keep all already-existing routes executable. Eventual green must prove actual parent-to-child consumer composition at the real import/render boundary, not separately green children, extracted wrappers, exported descriptors, or function-source text. A negative sibling-only fixture must make General empty, an exact sibling populated, and the identities queried observable. Fixed legacy identities such as note keys, links, storage IDs, labels, required state, and ordering must be asserted from independently known expected values and evaluated where callable, never echoed from the candidate value into the fixture. A missing approved local product module is an intended historical red only when it resolves to an exact covered path and the proof converts it into the bounded semantic assertion; raw package, harness, collection, render, or ambient dependency failure is never admissible. Construct the complete synchronous fixture/mock boundary before the first execution and run the historical check once after every route is reachable; repair setup classes in one pass rather than probing one missing field per run. An accepted nonzero result proves only the configured exit-code envelope; inspect every bounded stdout/stderr diagnostic returned with that accepted receipt and authenticate each failure as the exact intended product red before claiming preparation. Keep the configured proof command diagnostic-rich and never use `--silent`, discard stack traces, or suppress causal failure output needed to distinguish a product red from a broken fixture. For a focused red-green or characterization implementation proof, this review must complete before the linked change or migration receives product-write authority. Do not modify covered product paths, support paths, or semantic graph state. Passing review compiler-stamps prepared and establishes the compiler-bound source-only preparation identity; later command, subject, oracle, source-manifest, or review-input drift reopens this operation, while covered product changes do not. Current prepared source is immutable to overlapping production authority; only an exact compiler-proven re-preparation projection may write it.
   ranking_hints:
   - phase
   - proof-purpose
@@ -257,7 +260,7 @@ operations:
   - change
   - proof
   max_new_nodes: 0
-  review_contract: At least one configured focused baseline fails for the intended missing behavior without production edits or source weakening; any supplementary current baseline covers a distinct preservation or compatibility gap. The smallest cohesive patch stays in scope, the compiler-owned current focused proof set passes immediately after the implementation output, and one independent review judges the observable approval claim plus exactly the pinned focused proof candidates rather than merely green commands.
+  review_contract: Compiler-authenticated historicalPreparation proves that at least one configured focused baseline failed for the intended missing behavior without production edits or source weakening; any supplementary current baseline covers a distinct preservation or compatibility gap. Current predecessorExecution proves the smallest cohesive patch stayed in scope and the compiler-owned current focused proof set passed immediately after implementation. One independent review judges the observable approval claim plus exactly the pinned focused proof candidates rather than merely green commands; it never requires the earlier Pi conversation.
   output_contract: Expected-red composite receipt, byte-preserved focused proof sources, scoped production patch, compiler-owned current promotion-proof-set receipt from the implementation boundary, semantic readback, and explicit remaining proof limits. A passing review compiler-stamps the change implemented and its exact linked focused proofs passing; risk-boundary proofs remain separate until their terminal closure.
   ranking_hints:
   - phase
@@ -681,7 +684,7 @@ operations:
   allowed_existing_node_types:
   - proof
   max_new_nodes: 0
-  review_contract: The compiler-selected promotion member exercises the declared conditions and expected signal at the cheapest trustworthy seam, the receipt is current for exact command/member/input bindings, every repository-local executable or script named by the command is included in source_paths, and the semantic claim does not exceed not_proven.
+  review_contract: Compiler-authenticated historicalPreparation proves the independently reviewed historical baseline and exact current proof-source continuity without requiring the earlier Pi conversation. Current predecessorExecution proves the compiler-selected promotion member exercises the declared conditions and expected signal at the cheapest trustworthy seam, the receipt is current for exact command/member/input bindings, every repository-local executable or script named by the command is included in source_paths, and the semantic claim does not exceed not_proven.
   output_contract: Produce no model-authored graph delta; for a standalone, legacy, stale, or recovery proof execute the exact promotion set, confirm repository-local command executables and scripts are part of the causal proof-source manifest while external PATH tools remain external, and independently review exactly the targeted proof before the compiler marks it passing. Routine linked proof acceptance belongs to the implementation review.
   ranking_hints:
   - phase
@@ -1011,3 +1014,42 @@ operations:
   ranking_hints:
   - phase
   single_flight_group: target-integration
+- id: design.objective.decompose-domain
+  operation: decompose-domain
+  stage: design
+  target_types:
+  - objective
+  workflow: domain-decomposition
+  allowed_new_node_types:
+  - improvement_target
+  allowed_existing_node_types:
+  - objective
+  max_new_nodes: 12
+  review_contract: Decompose only the objective's own domain into disjoint improvement targets, each with an observable improvement outcome, a bounded domain slice, and exact slice_paths. No repository architecture, changes, or assurance ceremony here.
+  output_contract: Add at least one improvement_target linked from objective.decomposes, each with a distinct improvement_outcome, domain_slice, and exact slice_paths. Do not author criteria, approaches, evaluations, selections, or changes.
+  ranking_hints:
+  - phase
+  - objective-id
+- id: design.improvement_target.resolve
+  operation: resolve-target
+  stage: design
+  target_types:
+  - improvement_target
+  workflow: target-resolution
+  allowed_new_node_types:
+  - selection_criteria
+  - candidate_approach
+  - evaluation
+  - selection
+  - change
+  allowed_existing_node_types:
+  - improvement_target
+  - objective
+  - candidate_approach
+  - evaluation
+  max_new_nodes: 24
+  review_contract: 'One selection_criteria with a concrete decision rule; at least two materially distinct candidate approaches, each with an advantage hypothesis; one evaluation per approach that scores it against every criterion with evidence gathered by prototyping and checking that approach inside slice_paths; one accepted selection naming the winner with a rationale that beats every sibling under the decision rule and a rejection reason per loser; and exactly one design-ready vertical change that adopts the winning approach and realizes the objective. Prototype code is throwaway evaluation evidence, not committed product; only the winning change is implemented downstream through the ordinary change lifecycle.'
+  output_contract: Author the criteria, approaches, per-approach evaluations, the accepted selection, and one change that adopts the winner and realizes the objective. Leave no prototype code committed; the winner is implemented by the ordinary implementation lifecycle.
+  ranking_hints:
+  - phase
+  - objective-id

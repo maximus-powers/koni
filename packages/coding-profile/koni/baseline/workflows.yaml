@@ -103,13 +103,18 @@ workflows:
         - $target
         - active_proofs
       field: spec.covered_paths
+    - select:
+        intersection:
+        - $target
+        - active_proofs
+      field: spec.support_paths
     write_paths:
     - select:
         intersection:
         - $target
         - active_proofs
       field: spec.source_paths
-    expected_output: Minimal diagnostic, risk-boundary, red-green, or characterization proof source plus an honest compiler-recorded historical baseline for every structured condition-to-production-seam oracle case, with exact seam paths readable through covered_paths and all covered product bytes unchanged
+    expected_output: Minimal diagnostic, risk-boundary, red-green, or characterization proof source plus one independently reachable historical assertion path for every structured production seam and real consumer, exact legacy identities, an honest compiler-recorded baseline with no raw setup failure, exact seam paths readable through covered_paths, exact test-environment evidence readable through support_paths, and all covered product bytes unchanged
     checks:
     - baseline-proof-set
     required_receipts:
@@ -450,10 +455,9 @@ workflows:
     expected_output: Existing-proof sufficiency, acceptance alignment, correctness, scope, regression, and design review; on pass the compiler stamps the one implementation subject plus exactly its pinned active proofs
     validation_action: review
 - id: proof-execution
-  version: 3.0.0
+  version: 4.0.0
   applies_to:
   - establish-proof
-  review_failure_reopen_from: execute-proof
   steps:
   - id: execute-proof
     persona: verifier
@@ -474,7 +478,7 @@ workflows:
     expected_output: Independent proof relevance, oracle quality, freshness, sufficiency, and non-overclaim review
     validation_action: review
 - id: delivery-review
-  version: 2.0.0
+  version: 3.0.0
   applies_to:
   - prepare-delivery
   review_failure_reopen_from: assemble-candidate
@@ -491,6 +495,7 @@ workflows:
     graph_mutation: forbidden
     depends_on:
     - assemble-candidate
+    read_paths: []
     write_paths: []
     expected_output: Independent exact-closure, current-proof, terminal-prerequisite, risk-disposition, scope, and candidate-readiness review
     validation_action: review
@@ -516,4 +521,49 @@ workflows:
     depends_on:
     - verify-composed-tree
     expected_output: Independent preservation and regression review
+    validation_action: review
+- id: domain-decomposition
+  version: 1.0.0
+  applies_to:
+  - decompose-domain
+  review_failure_reopen_from: decompose
+  steps:
+  - id: decompose
+    persona: change-designer
+    graph_mutation: required
+    write_paths: []
+    expected_output: Disjoint improvement targets covering the objective's domain, each with an observable improvement outcome, a bounded domain slice, and exact slice_paths
+  - id: review
+    kind: review
+    persona: reviewer
+    graph_mutation: forbidden
+    depends_on:
+    - decompose
+    write_paths: []
+    expected_output: Independent review that the improvement targets are disjoint, material, outcome-named, and correctly path-scoped
+    validation_action: review
+- id: target-resolution
+  version: 1.0.0
+  applies_to:
+  - resolve-target
+  review_failure_reopen_from: explore-and-select
+  steps:
+  - id: explore-and-select
+    persona: implementer
+    graph_mutation: required
+    write_paths:
+    - select:
+        intersection:
+        - $target
+        - improvement_targets
+      field: spec.slice_paths
+    expected_output: One selection_criteria with a decision rule; at least two distinct candidate approaches each prototyped and checked within slice_paths for evidence; one evaluation per approach scored against every criterion; an accepted selection of the winner; and one design-ready change adopting the winner and realizing the objective, with no prototype code left committed
+  - id: review
+    kind: review
+    persona: reviewer
+    graph_mutation: forbidden
+    depends_on:
+    - explore-and-select
+    write_paths: []
+    expected_output: Independent review that criteria are sound, approaches are distinct and honestly evaluated on evidence, the winner beats every sibling under the decision rule, the adopting change is design-ready, and no throwaway prototype code was committed
     validation_action: review

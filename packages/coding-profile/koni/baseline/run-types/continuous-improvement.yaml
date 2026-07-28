@@ -1,0 +1,41 @@
+schema_version: '2.0'
+id: continuous-improvement
+title: Continuous Improvement
+description: A Medium-derived preset that decomposes a domain into improvement targets, explores and proves alternative implementations for each, selects the best against explicit criteria, and implements every winner.
+extends: medium
+overrides:
+- op: replace
+  path: /instructions/planning
+  value: |
+    Seed objective.work_kind as continuous_improvement. This run does not plan a
+    single change; it decomposes the objective's domain into the discrete
+    improvement targets named or implied by the goal, and then for each target it
+    explores alternative implementations, defines explicit selection criteria,
+    prototypes and evaluates every alternative on evidence, selects the best, and
+    implements that winner.
+
+    At plan time, seed only the decomposition skeleton: the objective, one
+    improvement_target per discrete slice (each with an observable
+    improvement_outcome, a bounded domain_slice, and exact slice_paths), and,
+    where already clear, an initial selection_criteria and the candidate
+    approaches worth exploring for a target. Do not seed evaluations, selections,
+    changes, proofs, or systems; the compiler authors those during orchestration
+    as it requires each target to be framed, its alternatives proven, a winner
+    selected, and the winning change implemented and proven through the ordinary
+    change lifecycle. Keep improvement targets disjoint and outcome-named, and
+    scope each target's slice_paths to the exact repository paths its alternatives
+    may touch. Ask only for missing product decisions about which parts of the
+    domain to improve and what "best" should mean.
+
+    Graph structure this run builds: objective -> improvement_target (decomposes);
+    per target -> selection_criteria (judged_by) and candidate_approach (explores);
+    per approach -> evaluation (evaluated_by) scored against the criteria; per
+    target -> selection (resolved_by) that selects the winning approach; and one
+    change (adopts) per winner that realizes the objective and flows through the
+    ordinary change -> proof -> delivery spine.
+- op: replace
+  path: /pipeline/stages/combined-plan/config/prompt
+  value: Produce the smallest sufficient root-connected continuous-improvement seed. Set objective.work_kind to continuous_improvement and decompose the objective's domain into disjoint improvement_target nodes linked from objective.decomposes, each with an observable improvement_outcome, a bounded domain_slice, and exact slice_paths. Where already clear, add each target's selection_criteria (judged_by, with a concrete decision_rule) and the candidate_approach alternatives worth exploring (explores, each with an advantage hypothesis). Do not seed evaluations, selections, changes, proofs, systems, status, tickets, receipts, or compiler-owned fields; the compiler requires each target to be framed, every alternative prototyped and evaluated, a winner selected, and the winning change implemented and proven during orchestration.
+- op: replace
+  path: /orchestration/max_parallel
+  value: 3

@@ -1,0 +1,46 @@
+{
+  "protocol": "koni.profile-retirement.v1",
+  "id": "retire-inert-semantics-v1",
+  "operations": [
+    {
+      "file": "profile.yaml",
+      "pointer": "/orchestration/lease_stale_seconds"
+    },
+    {
+      "file": "profile.yaml",
+      "pointer": "/orchestration/max_fixpoint_passes"
+    },
+    {
+      "file": "profile.yaml",
+      "pointer": "/orchestration/running"
+    },
+    {
+      "file": "profile.yaml",
+      "pointer": "/storage"
+    },
+    {
+      "file": "run-types/large.yaml",
+      "pointer": "/planning/graph_seed_stage"
+    },
+    {
+      "file": "run-types/large.yaml",
+      "pointer": "/planning/session_scope"
+    },
+    {
+      "file": "run-types/medium.yaml",
+      "pointer": "/planning/graph_seed_stage"
+    },
+    {
+      "file": "run-types/medium.yaml",
+      "pointer": "/planning/session_scope"
+    },
+    {
+      "file": "run-types/small.yaml",
+      "pointer": "/planning/graph_seed_stage"
+    },
+    {
+      "file": "run-types/small.yaml",
+      "pointer": "/planning/session_scope"
+    }
+  ]
+}

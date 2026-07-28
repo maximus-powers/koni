@@ -76,25 +76,18 @@ initialization:
   root_node_type: objective
   goal_field: outcome
   root_status: active
-storage:
-  backend: git_common_dir
-  graph_dir: program/graph
-  tickets_dir: program/tickets
-  state_path: program/state.yaml
-  work_dir: program/work
-  receipts_dir: program/receipts
-  reports_dir: program/reports
-  filesystem_scope_excludes: [node_modules, target, .next, coverage]
 git:
   enabled: true
-  backend: libgit2
+  backend: git_cli
   integration_branch: current
+  # The integration leaf is a literal sibling of tickets; Git refs cannot be both a leaf and a directory.
+  branch_template: "koni/runs/{{ run.id }}/integration"
+  ticket_branch_template: "koni/runs/{{ run.id }}/tickets/{{ ticket.id }}/cycles/{{ cycle.id }}"
+  worktree_root: .koni-worktrees
   integration_strategy: squash
+  commit_template: "{{ ticket.operation }}: {{ ticket.title }}"
 orchestration:
-  running: true
   max_parallel: 3
-  lease_stale_seconds: 1800
-  max_fixpoint_passes: 8
   max_boundaries_per_lead: 1
   disjoint_scope_parallelism: true
 imports:
@@ -110,9 +103,9 @@ imports:
   lifecycles: [lifecycle.yaml]
 ```
 
-Keep imports ordered, unique, project-relative, and contained beneath the profile root. Keep authored source paths out of `filesystem_scope_excludes`; reserve it for transient or generated trees. Unknown keys, duplicated definitions, dangling IDs, invalid cycles, and authority or path escapes must fail closed rather than become ignored intent.
+Keep imports ordered, unique, project-relative, and contained beneath the profile root. Unknown keys, duplicated definitions, dangling IDs, invalid cycles, and authority or path escapes must fail closed rather than become ignored intent.
 
-Choose `git_common_dir` when semantic state should remain outside the product tree and be shared by linked worktrees. Choose `tracked` only when graph and ticket state intentionally belongs in repository history.
+Do not add a `storage` block. Native authority state is always owner-only data beneath the authenticated Git common directory, and its internal paths and exact semantic hashes are protocol-owned rather than profile-configurable. Profile orchestration supports only `max_parallel`, `max_boundaries_per_lead: 1`, and `disjoint_scope_parallelism`; authority liveness, stale ownership, and compiler convergence are native lifecycle contracts, not profile timers or pass counts.
 
 ### Graph collection constraints
 

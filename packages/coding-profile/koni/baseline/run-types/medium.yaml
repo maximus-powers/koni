@@ -10,7 +10,8 @@ instructions:
     verification. Never ask for facts the repository can answer. Give each
     question two to four choices, one recommendation, and the consequence of
     each choice. After those decisions are resolved, perform one consolidated
-    investigation pass and produce the combined plan plus the smallest
+    investigation pass, lock the first complete repository-native design supported
+    by the evidence, and produce the combined plan plus the smallest
     sufficient root-connected semantic graph seed. Seed objective.work_kind,
     affected repository-native systems, cohesive vertical changes, risk tiers
     and treatments, at least one primary focused single-subject proof per implementation claim,
@@ -20,19 +21,22 @@ instructions:
     ownership as proof scope. Materialize
     architecture and contracts only when they constrain behavior, ownership,
     compatibility, proof, or slice dependencies. Do not seed tickets, status,
-    receipts, transient notes, or any compiler-owned field.
+    receipts, transient notes, or any compiler-owned field. Do not continue exploring
+    alternate encodings after an existing compatible sibling seam satisfies the
+    objective. Preserve-in-place plus additive optional values is routine work, not a
+    migration or elevated risk, unless repository evidence proves a destructive or
+    interpretive transition.
 planning:
-  session_scope: run
-  graph_seed_stage: combined-plan
-  max_repository_tool_calls: 24
+  max_repository_tool_calls: 16
   token_budget:
     metric: new_tokens
-    limit: 240000
-    synthesis_reserve: 60000
+    limit: 120000
+    synthesis_reserve: 30000
     on_exhausted: force_synthesis
 profile:
   source: .koni/profile.yaml
 intake:
+  objective_field: goal
   fields:
     goal:
       label: Goal
@@ -54,7 +58,8 @@ pipeline:
       title: Plan implementation, architecture, and risk
       config:
         persona: run-planner
-        prompt: Produce one concise, implementation-ready plan and the smallest sufficient root-connected graph seed. Define the observable outcome, explicit non-goals, success signals, objective.work_kind, affected repository-native systems, and the fewest dependency-ordered vertical changes, each expressible as one approval sentence. Classify each change as routine, elevated, or critical from concrete risk factors; give every change a primary focused proof that verifies exactly that implementation subject, adding another only for a distinct remaining evidence gap. Only elevated or critical work introduces a material risk whose distinct boundary proof verifies the risk plus structural treatment. Choose an honest red_green, characterization, or current_verification baseline and exact repository-native argv. For every proof, bind condition and claim through structured oracle_cases to the callable production seam, exact seam_paths, action, assertions, and material environment/recipe; every seam path must resolve to the same normalized project-relative identity present in read-only covered_paths. Model interfaces, data, flows, contracts, migrations, decisions, and risks only when material. Use canonical edges and exact paths; never seed compiler-owned status, tickets, receipts, or implementation progress.
+        prompt: >-
+          Produce one concise, implementation-ready plan and the smallest sufficient root-connected graph seed. Define the observable outcome, explicit non-goals, success signals, objective.work_kind, affected repository-native systems, and the fewest dependency-ordered vertical changes, each expressible as one approval sentence. Lock the first complete repository-native design supported by the evidence and stop exploring alternatives. Preserving an existing compatible identity while adding optional sibling values is routine additive work; do not invent serialization, version markers, migrations, rollback systems, or elevated risk unless concrete repository evidence proves an unavoidable destructive or interpretive transition. Classify each change as routine, elevated, or critical from concrete risk factors; give every change a primary focused proof that verifies exactly that implementation subject, adding another only for a distinct remaining evidence gap. Only elevated or critical work introduces a material risk whose distinct boundary proof verifies the risk plus structural treatment. Choose an honest red_green, characterization, or current_verification baseline and exact repository-native argv. For every proof, bind condition and claim through structured oracle_cases to the callable production seam, exact seam_paths, action, assertions, and material environment/recipe; every seam path must resolve to the same normalized project-relative identity present in read-only covered_paths. Model interfaces, data, flows, contracts, migrations, decisions, and risks only when material. Keep each full human-readable plan domain to at most six compact Markdown bullets, each concise domain to at most three authored title/description items, and the graph to normally no more than twelve non-root nodes. Before submission, close every configured required relation already known in the seed: in particular, every system with contract_required true must already have its semantically complete contract linked through canonical contract.applies_to, reusing the existing fact rather than leaving a fallback ticket or duplicate. Use canonical edges and exact paths; never seed compiler-owned status, tickets, receipts, or implementation progress.
     approval:
       kind: approval
       title: Approve the plan
@@ -95,8 +100,8 @@ questions:
   policy: high_impact_only
   default_scope: run
 git:
-  branch_template: koni/runs/{{ run.slug }}-{{ run.short_id }}
-  ticket_branch_template: koni/runs/{{ run.id }}/tickets/{{ ticket.id }}
+  branch_template: koni/runs/{{ run.id }}/integration
+  ticket_branch_template: koni/runs/{{ run.id }}/tickets/{{ ticket.id }}/cycles/{{ cycle.id }}
 promotion:
   conflict_operation: resolve-target-integration
 run_card:
@@ -127,4 +132,5 @@ orchestration:
   max_parallel: 3
   compile_action: compile
   lead_action: spawn-lead
+  lead_triggers: []
   report_action: report

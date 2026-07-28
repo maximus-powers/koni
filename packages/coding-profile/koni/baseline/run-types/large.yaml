@@ -25,8 +25,6 @@ instructions:
     It must not seed status, tickets, receipts, transient notes, or
     compiler-owned fields.
 planning:
-  session_scope: run
-  graph_seed_stage: verification-plan
   max_repository_tool_calls: 48
   token_budget:
     metric: new_tokens
@@ -36,6 +34,7 @@ planning:
 profile:
   source: .koni/profile.yaml
 intake:
+  objective_field: goal
   fields:
     goal:
       label: Goal
@@ -69,7 +68,8 @@ pipeline:
       title: Plan verification
       config:
         persona: run-planner
-        prompt: Using the existing architecture, decisions, risks, and repository ledger, produce the verification plan and final smallest sufficient root-connected graph seed. Give every change or migration a primary focused proof that verifies exactly that implementation subject; add another only when it closes a distinct remaining evidence gap. For elevated and critical work, introduce the material risk and give that risk a genuinely distinct boundary proof; do not make one proof directly certify both change and risk. Record exact project-native argv, strategy-appropriate pre-change baselines, conditions, expected signals, non-claims, and structured oracle_cases binding every condition/claim to its callable production seam, exact seam_paths, action, assertions, and material environment/recipe, plus regression coverage, observability, and completion criteria. Every seam path must resolve to the same normalized project-relative identity present in read-only covered_paths; do not inherit other system paths. Use canonical edges and exact paths. Do not repeat discovery, fake proof independence, manufacture expected-red failures, or seed compiler-owned status, tickets, receipts, or progress.
+        prompt: >-
+          Using the existing architecture, decisions, risks, and repository ledger, produce the verification plan and final smallest sufficient root-connected graph seed. Give every change or migration a primary focused proof that verifies exactly that implementation subject; add another only when it closes a distinct remaining evidence gap. For elevated and critical work, introduce the material risk and give that risk a genuinely distinct boundary proof; do not make one proof directly certify both change and risk. Record exact project-native argv, strategy-appropriate pre-change baselines, conditions, expected signals, non-claims, and structured oracle_cases binding every condition/claim to its callable production seam, exact seam_paths, action, assertions, and material environment/recipe, plus regression coverage, observability, and completion criteria. Every seam path must resolve to the same normalized project-relative identity present in read-only covered_paths; do not inherit other system paths. Before submission, close every configured required relation already known in the seed: in particular, every system with contract_required true must already have its semantically complete contract linked through canonical contract.applies_to, reusing the existing fact rather than leaving a fallback ticket or duplicate. Use canonical edges and exact paths. Do not repeat discovery, fake proof independence, manufacture expected-red failures, or seed compiler-owned status, tickets, receipts, or progress.
     approval:
       kind: approval
       title: Approve the plans
@@ -119,8 +119,8 @@ questions:
   policy: interactive
   default_scope: run
 git:
-  branch_template: koni/runs/{{ run.slug }}-{{ run.short_id }}
-  ticket_branch_template: koni/runs/{{ run.id }}/tickets/{{ ticket.id }}
+  branch_template: koni/runs/{{ run.id }}/integration
+  ticket_branch_template: koni/runs/{{ run.id }}/tickets/{{ ticket.id }}/cycles/{{ cycle.id }}
 promotion:
   conflict_operation: resolve-target-integration
 run_card:
@@ -151,4 +151,5 @@ orchestration:
   max_parallel: 5
   compile_action: compile
   lead_action: spawn-lead
+  lead_triggers: []
   report_action: report

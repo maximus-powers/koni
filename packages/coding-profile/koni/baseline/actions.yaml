@@ -47,7 +47,7 @@ actions:
   - id: lead
     primitive: agent.spawn
     persona: lead
-    prompt: Operate the configured software Lead pull loop until compiler-verifiable terminal state.
+    prompt: Perform one bounded software orchestration-readiness judgment. Review the compiled ticket graph for unresolved material ambiguity or unsafe assumptions, ask only policy-allowed questions, then submit proceed or blocked with a concise rationale. Never poll, schedule deterministic work, or spawn workers.
     transport: compiler_broker
     duplicate_policy: reject
   - primitive: event.append

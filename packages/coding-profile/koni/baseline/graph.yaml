@@ -31,6 +31,7 @@ node_types:
       - refactor
       - maintenance
       - migration
+      - continuous_improvement
       description: Optional at legacy initialization, but mechanically required before implementation begins.
     motivation:
       type: string
@@ -441,6 +442,12 @@ node_types:
         type: path
         required: true
       description: Exact product paths whose behavior the proof claims to exercise and whose current bytes the proof may read; these paths never grant write authority. This list is the canonical union of every oracle case's seam_paths, plus only additional product paths the proof genuinely exercises.
+    support_paths:
+      type: list
+      items:
+        type: path
+        required: true
+      description: Exact existing read-only repository files needed to construct and execute the proof honestly but not claimed as product coverage, such as the owning package manifest, test-runner configuration, TypeScript configuration, setup file, or one established neighboring test pattern. These paths grant no write authority and must never be used to smuggle additional product scope into the proof.
     oracle_cases:
       type: list
       required: true
@@ -539,6 +546,11 @@ node_types:
   initial_status: assembling
   compiler_owned_fields:
   - status
+  - spec.target_branch
+  agent_visible_compiler_owned_fields:
+  - spec.target_branch
+  compiler_field_sources:
+    spec.target_branch: run.git.target.ref
   fields:
     target_branch:
       type: string
@@ -550,6 +562,126 @@ node_types:
       type: list
     external_refs:
       type: list
+- id: improvement_target
+  description: A discrete slice of the objective's domain that a continuous-improvement run must improve by exploring alternatives, selecting the best, and implementing it. Not a repository ownership boundary (that is `system`); this is a problem-domain decomposition unit.
+  stage: design
+  required_any:
+  - - improvement_outcome
+  statuses:
+  - open
+  - resolved
+  - superseded
+  initial_status: open
+  compiler_owned_fields:
+  - status
+  fields:
+    improvement_outcome:
+      type: string
+      required: true
+      description: The observable improvement this slice must achieve before the run is complete.
+    domain_slice:
+      type: string
+      required: true
+      description: The bounded part of the objective's domain this target owns.
+    slice_paths:
+      type: list
+      required: true
+      description: The exact repository paths this target's alternatives may be prototyped within and its winner implemented in.
+      items:
+        type: path
+        required: true
+    resolution_meaning:
+      type: string
+      description: What "resolved" concretely means for this slice.
+- id: selection_criteria
+  description: The explicit decision rule that defines what "best" means for one improvement target; every candidate approach for that target is judged against exactly this set.
+  stage: design
+  required_any:
+  - - criteria
+  statuses:
+  - active
+  - superseded
+  initial_status: active
+  fields:
+    criteria:
+      type: list
+      required: true
+      description: One or more named criteria a winning approach must be evaluated against.
+    decision_rule:
+      type: string
+      required: true
+      description: How the criteria combine into a single ranking (for example weighted score, or must-pass gates then weighted factors).
+- id: candidate_approach
+  description: One alternative implementation for an improvement target, carried far enough to be prototyped, proven with executable evidence, and evaluated against the target's criteria.
+  stage: design
+  required_any:
+  - - approach
+  statuses:
+  - proposed
+  - prototyped
+  - evaluated
+  - selected
+  - rejected
+  - superseded
+  initial_status: proposed
+  compiler_owned_fields:
+  - status
+  fields:
+    approach:
+      type: string
+      required: true
+      description: One-sentence description of this alternative implementation.
+    hypothesis:
+      type: string
+      required: true
+      description: The expected advantage this approach is being explored to test.
+    key_tradeoffs:
+      type: list
+      description: Known costs or limits of this approach relative to its siblings.
+- id: evaluation
+  description: The evidence-backed assessment of exactly one candidate approach against its target's selection criteria, citing the approach's prototype proof as evidence.
+  stage: assurance
+  required_any:
+  - - verdict
+  statuses:
+  - recorded
+  - superseded
+  initial_status: recorded
+  fields:
+    verdict:
+      type: string
+      required: true
+      description: Summary judgment of this approach against the criteria.
+    scores:
+      type: list
+      required: true
+      description: One scored entry per criterion in the governing selection_criteria, each citing its evidence.
+    residual_concerns:
+      type: list
+- id: selection
+  description: The approved choice of one candidate approach as the adopted winner for one improvement target, justified against the criteria and the recorded evaluations.
+  stage: design
+  required_any:
+  - - rationale
+  statuses:
+  - proposed
+  - accepted
+  - superseded
+  initial_status: proposed
+  compiler_owned_fields:
+  - status
+  fields:
+    rationale:
+      type: string
+      required: true
+      description: Why the selected approach wins against every sibling under the decision rule.
+    rejected_rationale:
+      type: list
+      required: true
+      description: One entry per non-selected active approach stating why it lost.
+    reversibility:
+      type: string
+      description: How reversible adopting this approach is.
 edge_types:
 - source: objective
   relation: systems
@@ -732,6 +864,7 @@ edge_types:
   - change
   - migration
   - risk
+  - candidate_approach
   min: 1
 - source: proof
   relation: uses
@@ -760,6 +893,74 @@ edge_types:
   relation: acknowledges
   targets:
   - risk
+- source: improvement_target
+  relation: refines
+  inverse: decomposes
+  bidirectional: true
+  targets:
+  - objective
+  min: 1
+  max: 1
+- source: improvement_target
+  relation: concerns
+  targets:
+  - system
+- source: selection_criteria
+  relation: governs
+  inverse: judged_by
+  bidirectional: true
+  targets:
+  - improvement_target
+  min: 1
+  max: 1
+- source: candidate_approach
+  relation: addresses
+  inverse: explores
+  bidirectional: true
+  targets:
+  - improvement_target
+  min: 1
+  max: 1
+- source: evaluation
+  relation: assesses
+  inverse: evaluated_by
+  bidirectional: true
+  targets:
+  - candidate_approach
+  min: 1
+  max: 1
+- source: evaluation
+  relation: against
+  targets:
+  - selection_criteria
+  min: 1
+  max: 1
+- source: selection
+  relation: resolves
+  inverse: resolved_by
+  bidirectional: true
+  targets:
+  - improvement_target
+  min: 1
+  max: 1
+- source: selection
+  relation: selects
+  targets:
+  - candidate_approach
+  min: 1
+  max: 1
+- source: selection
+  relation: weighs
+  targets:
+  - evaluation
+  min: 1
+- source: change
+  relation: adopts
+  inverse: adopted_by
+  bidirectional: true
+  targets:
+  - candidate_approach
+  max: 1
 queries:
 - id: objectives
   node_types:
@@ -2470,12 +2671,124 @@ queries:
                 - op: check_passed
                   subject: $delivery_defect_proof
                   check: promotion-proof-set
+    - any:
+      - not:
+          op: field_equals
+          subject: $node
+          field: spec.work_kind
+          value: continuous_improvement
+      - all:
+        - exists:
+            traverse:
+              from: $node
+              relation: decomposes
+              max_depth: 1
+              node_types:
+              - improvement_target
+        - op: coverage
+          numerator: resolved_improvement_targets
+          denominator:
+            intersection:
+            - traverse:
+                from: $node
+                relation: decomposes
+                max_depth: 1
+                node_types:
+                - improvement_target
+            - improvement_targets
 - id: deliveries
   node_types:
   - delivery
   status_excluding:
   - candidate_ready
   - superseded
+- id: continuous_improvement_objectives
+  select: objectives
+  where:
+    op: field_equals
+    subject: $node
+    field: spec.work_kind
+    value: continuous_improvement
+- id: improvement_targets
+  node_types:
+  - improvement_target
+  status_excluding:
+  - superseded
+- id: active_improvement_targets
+  node_types:
+  - improvement_target
+  status_excluding:
+  - resolved
+  - superseded
+- id: active_candidate_approaches
+  node_types:
+  - candidate_approach
+  status_excluding:
+  - rejected
+  - superseded
+- id: accepted_selections
+  node_types:
+  - selection
+  statuses:
+  - accepted
+- id: well_framed_targets
+  select: active_improvement_targets
+  where:
+    all:
+    - op: edge_count
+      subject: $node
+      relation: judged_by
+      exact: 1
+    - op: edge_count
+      subject: $node
+      relation: explores
+      min: 2
+- id: proven_candidate_approaches
+  select: active_candidate_approaches
+  where:
+    all:
+    - exists:
+        intersection:
+        - traverse:
+            from: $node
+            relation: verified_by
+            max_depth: 1
+            node_types:
+            - proof
+        - passing_proofs
+    - exists:
+        traverse:
+          from: $node
+          relation: evaluated_by
+          max_depth: 1
+          node_types:
+          - evaluation
+- id: fully_explored_targets
+  select: well_framed_targets
+  where:
+    op: coverage
+    numerator: proven_candidate_approaches
+    denominator:
+      intersection:
+      - traverse:
+          from: $node
+          relation: explores
+          max_depth: 1
+          node_types:
+          - candidate_approach
+      - active_candidate_approaches
+- id: resolved_improvement_targets
+  select: improvement_targets
+  where:
+    exists:
+      intersection:
+      - traverse:
+          from: $node
+          relation: resolved_by
+          max_depth: 1
+          node_types:
+          - selection
+      - accepted_selections
 graph_constraints:
 - id: preparation-proof-source-paths-pairwise-disjoint
   kind: path_sets_disjoint

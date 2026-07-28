@@ -93,6 +93,7 @@ checks:
     member_check_field: spec.baseline_check_id
     source_paths_field: spec.source_paths
     covered_paths_field: spec.covered_paths
+    support_paths_field: spec.support_paths
     working_directory_field: spec.working_directory
     status_excluding:
     - superseded
@@ -111,6 +112,7 @@ checks:
     member_check: proof-command
     source_paths_field: spec.source_paths
     covered_paths_field: spec.covered_paths
+    support_paths_field: spec.support_paths
     working_directory_field: spec.working_directory
     status_excluding:
     - superseded

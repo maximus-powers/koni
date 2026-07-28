@@ -9,6 +9,17 @@ instructions:
     the actual candidate diff and compiler packet against the approved outcome,
     non-goals, graph neighborhood, material risks, and current receipts.
 
+    Begin with the compiler-injected candidate delta or diff, predecessor execution,
+    receipts, and bounded graph packet. For graph-only planning or contract review,
+    remain on that evidence unless one exact unresolved material claim requires a
+    repository lookup. Never issue parallel whole-file reads across nontrivial
+    files or perform a broad root scan. For a known literal or symbol in a file
+    larger than 32768 bytes, search first, then read at most 32768 bytes around the
+    returned offset; read another region only when the observed code proves it is
+    needed. Retain an `eof:true` result instead of searching or reading the same
+    content again. A review is not more independent merely because it re-reads the
+    entire repository.
+
     Prioritize: behavioral correctness and acceptance alignment; regressions,
     error paths, security, data, and compatibility; whether proof would fail when
     behavior breaks; scope discipline; repository-native architectural fit; then
@@ -45,6 +56,23 @@ instructions:
     `uses`-linked system's broader `owned_paths` is semantic context, never implicit
     file authority. Require correction of the proof graph instead of asking a
     worker to broaden scope.
+
+    Treat compiler-injected `predecessorExecution` as the execution authority for
+    the step under review. Inspect every command's authenticated stdout and stderr,
+    not only the composite `passed` flag or predecessor summary. Map each
+    `oracle_cases` entry to an observed intended assertion signal. Reject omitted
+    material streams, setup or collection errors, harness/render crashes, unrelated
+    failures, and any oracle case that did not reach its claimed production seam.
+    Reject a proof command that deliberately silences stack traces or other causal
+    failure output needed to distinguish a product red from a broken fixture.
+    For a red-green implementation review, require authenticated evidence from the
+    complete causal chain: compiler-injected `historicalPreparation` for the
+    independently reviewed read-only baseline and current `predecessorExecution`
+    for the promotion execution. The historical envelope is sufficient provenance
+    for the earlier ticket; never demand or inherit its Pi conversation. Reject a
+    context that supplies only the final green step, or a historical failure whose
+    first assertion prevented later declared routes from reaching their fixtures,
+    consumers, and assertions.
 
     For `proof.prepare`, require source-only authority, an honest configured
     historical baseline, a relevant non-vacuous and consumer-complete oracle, exact

@@ -20,13 +20,8 @@ review.
 
 Initialization validates package identity and the effective candidate before publication,
 preserves unrelated `.codex`, Pi, and repository content, and creates no run. Treat an ownership
-conflict, mixed legacy/current layout, modified managed resource, escaping path, or symlink
-rejection as a condition to inspect rather than bypass.
-
-> **Pi-native command supersession — 2026-07-16:** The frozen Rust initializer accepted bare
-> `koni init`, `--profile`, `--from`, `--target`, `--replace`, `--open`, and `--dry-run`. Those names
-> are retained here as migration history and are not aliases in current Core. Do not try them when
-> operating the Pi package line.
+conflict, modified managed resource, escaping path, or symlink rejection as a condition to inspect
+rather than bypass.
 
 ## Plan
 

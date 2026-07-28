@@ -1,6 +1,6 @@
 {
   "name": "@koni/coding-profile",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Koni's evidence-guided coding profile for Pi",
   "type": "module",
   "license": "MIT",
@@ -46,6 +46,8 @@
     "@earendil-works/pi-coding-agent": "*"
   },
   "peerDependenciesMeta": {
-    "@earendil-works/pi-coding-agent": { "optional": true }
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
   }
 }

@@ -2,12 +2,12 @@
   "protocol": "koni.profile-package.v1",
   "package": {
     "name": "@koni/coding-profile",
-    "version": "0.7.0"
+    "version": "0.8.0"
   },
   "profile": {
     "id": "software",
     "display_name": "Coding",
-    "version": "0.7.0",
+    "version": "0.8.0",
     "lineage": "koni.software"
   },
   "compatibility": {
@@ -20,8 +20,8 @@
     "files": [
       {
         "path": "actions.yaml",
-        "sha256": "sha256:97dc1eb8c0a6a5b244aa945b8cace8c987c9a349b688a211120e7341b2d16789",
-        "size_bytes": 5424,
+        "sha256": "sha256:f9ca4998e64d70398b02e8d5979282c4db7fcc9c15d9b7ede17ea647f6f8ff48",
+        "size_bytes": 5639,
         "kind": "config"
       },
       {
@@ -38,14 +38,14 @@
       },
       {
         "path": "agents/contract-designer.yaml",
-        "sha256": "sha256:bc428d476ae14f15816882edcf21284253da6eb55a1c7579eea094d781314e0d",
-        "size_bytes": 1694,
+        "sha256": "sha256:afebbfec7b1a20268888fe6c954e1342fe36e55257183ad9ade23fbe960ba747",
+        "size_bytes": 2187,
         "kind": "agent"
       },
       {
         "path": "agents/implementer.yaml",
-        "sha256": "sha256:1965fc4b5adce20f0130e1c42c21731724f5dd110bc741212abba5baad97c604",
-        "size_bytes": 5562,
+        "sha256": "sha256:7b9ebee16a4860953e2cf765a0af8530a97d0509634fafcf3f97bfbe33923804",
+        "size_bytes": 11651,
         "kind": "agent"
       },
       {
@@ -56,14 +56,14 @@
       },
       {
         "path": "agents/lead.yaml",
-        "sha256": "sha256:3759cdeee0482bbfd0017231321b589b4f52ea1668030c6e0a380d903d46f15d",
-        "size_bytes": 2691,
+        "sha256": "sha256:45c134bb39a0e8446d7ca65fca1ec2ba986460777e6afd5dde1ea157c687f569",
+        "size_bytes": 1699,
         "kind": "agent"
       },
       {
         "path": "agents/reviewer.yaml",
-        "sha256": "sha256:36f1dde04c1858ab881cabfe22c6782f1af40ca7a08bcf778ccd75f1767c2a88",
-        "size_bytes": 4997,
+        "sha256": "sha256:11fa13a808b8bbb49072ad543473dd6804b0b9c6a33d83098a001b819cfb7e18",
+        "size_bytes": 7012,
         "kind": "agent"
       },
       {
@@ -74,8 +74,8 @@
       },
       {
         "path": "agents/run-planner.yaml",
-        "sha256": "sha256:cc87d8765596b12a822dde419792596ccacc9f031af00f0f6a93b69ba58b8c40",
-        "size_bytes": 6123,
+        "sha256": "sha256:5d74a3cd1ccc62efef6a03280087a85a438b26e44ffb2ff76ec4a18d2c6073fc",
+        "size_bytes": 11071,
         "kind": "agent"
       },
       {
@@ -86,8 +86,8 @@
       },
       {
         "path": "checks.yaml",
-        "sha256": "sha256:a0c22a9f5d8d3440242a120daf28a67f60b2f8d9a47056dada4d547792c9d7cf",
-        "size_bytes": 2333,
+        "sha256": "sha256:940416c0f2241a3029a6f1c36900b2757e27678461baa34f4802ba865a7b5be9",
+        "size_bytes": 2421,
         "kind": "config"
       },
       {
@@ -98,20 +98,20 @@
       },
       {
         "path": "graph.yaml",
-        "sha256": "sha256:173857dfcd378b8c24097cecc3ccf23f2e4e664d0f3164cc62a7b4e1acd4b86c",
-        "size_bytes": 64604,
+        "sha256": "sha256:0445ff2cd449d55f9f98833dd5b59a786a85b10d4e988f841327de26a4f2f97a",
+        "size_bytes": 73072,
         "kind": "config"
       },
       {
         "path": "lifecycle.yaml",
-        "sha256": "sha256:c1fc25a33fb82ab19812a9d5f7bc372b9a2572540419950b0e4b3a6aa92ac17f",
-        "size_bytes": 1693,
+        "sha256": "sha256:c5f5b91b8fedcf0665ccc8c607222c38e59e84012e136e613abc1d975358bd88",
+        "size_bytes": 2441,
         "kind": "config"
       },
       {
         "path": "operations.yaml",
-        "sha256": "sha256:121d854251b634d39e940c016b441c29e62a383f49da6c082a59f20c3be29a66",
-        "size_bytes": 39998,
+        "sha256": "sha256:92ad2c8c0191cb7d2f84884878bbdbdb808ad46df9601f568db9a51ac719bf20",
+        "size_bytes": 45519,
         "kind": "config"
       },
       {
@@ -122,14 +122,14 @@
       },
       {
         "path": "profile.yaml",
-        "sha256": "sha256:00e3e37cf4f547f2fa42fa16fe8ab50ecf934acdd6bf88d9d6a5dfdc37826ab3",
-        "size_bytes": 1507,
+        "sha256": "sha256:64746fb30ebcfc9123903d22609e4aa742f476f69e520ea5fb07bc0801944176",
+        "size_bytes": 1073,
         "kind": "config"
       },
       {
         "path": "project.yaml",
-        "sha256": "sha256:c4560564fdc5bddbfb1119a108b001f115e3962e7bcc15d5132a6672b41365f2",
-        "size_bytes": 436,
+        "sha256": "sha256:f9e276f513a379aedcf292fda1c8d3e2b80263f9001bf6c180b81a759e365776",
+        "size_bytes": 527,
         "kind": "config"
       },
       {
@@ -146,8 +146,8 @@
       },
       {
         "path": "resources/skills/configure-koni/SKILL.md",
-        "sha256": "sha256:06e8023a18ba7b9dadfb34d12b7d7f16776e3fd2eeecc814c7144157efd58335",
-        "size_bytes": 7788,
+        "sha256": "sha256:bf7e2e89f87761d18af976f68d5bfaf1d7f3925c8631b88e82f0d447c405fb00",
+        "size_bytes": 7938,
         "kind": "skill"
       },
       {
@@ -164,8 +164,8 @@
       },
       {
         "path": "resources/skills/configure-koni/references/configuration-layers.md",
-        "sha256": "sha256:d2d158c31ba3cc0200fb6248c4ffc5a0bea7d9af13cfe6a771080efcf84d261c",
-        "size_bytes": 8130,
+        "sha256": "sha256:3a02cc2310254195e997e1b42a21f2e7f6ed9167f4a012323cdf0abcac10e47e",
+        "size_bytes": 8286,
         "kind": "skill"
       },
       {
@@ -176,8 +176,8 @@
       },
       {
         "path": "resources/skills/configure-koni/references/run-types.md",
-        "sha256": "sha256:d97a973f84f69afeb8ba2757fb2492f0111cde089c0e0ac0ccb521be6ef48ad8",
-        "size_bytes": 5103,
+        "sha256": "sha256:b015b350a2b3c546723ca2dfff4039a2eb91ce7355f7d5a44fcbfd7a953b896b",
+        "size_bytes": 5750,
         "kind": "skill"
       },
       {
@@ -224,8 +224,8 @@
       },
       {
         "path": "resources/skills/operate-koni/SKILL.md",
-        "sha256": "sha256:e364660d36d5a4e8e399edaf3f437fc05709ad9e4069284c94bc85915e220912",
-        "size_bytes": 4427,
+        "sha256": "sha256:bfaa0b95a075f77542874d99b475b4a39c79575b6ced9eedab84d348513fa6e2",
+        "size_bytes": 4618,
         "kind": "skill"
       },
       {
@@ -248,14 +248,14 @@
       },
       {
         "path": "resources/skills/operate-koni/references/run-lifecycle.md",
-        "sha256": "sha256:0c295fa0c0e2e6268236a6371d4b8ce307b47f550ec8473dd79f2eec99a4bca2",
-        "size_bytes": 3688,
+        "sha256": "sha256:0f2051857583d9c1b930a57cd4fa53099bc9781b98d2e5a0ba200265a041be66",
+        "size_bytes": 3329,
         "kind": "skill"
       },
       {
         "path": "rules.yaml",
-        "sha256": "sha256:2583987a0a576c3d6ae797f320872f34e5e2f35ff123268740f8edd7687971e2",
-        "size_bytes": 38566,
+        "sha256": "sha256:7c2a3a97a4e9cc5cc080147e91434a21b8effdd37d4cca7bb98b04ef8aa737af",
+        "size_bytes": 40441,
         "kind": "config"
       },
       {
@@ -265,15 +265,21 @@
         "kind": "config"
       },
       {
+        "path": "run-types/continuous-improvement.yaml",
+        "sha256": "sha256:ab71add21f94d44300887312c2a04829e0c1dcafcd9a3c332933a414eee3bd4b",
+        "size_bytes": 3137,
+        "kind": "config"
+      },
+      {
         "path": "run-types/large.yaml",
-        "sha256": "sha256:630990b67a0a55fdd2a7d393a8089ac1372f5d0dbf40f945516f9f9d0a32ca39",
-        "size_bytes": 7131,
+        "sha256": "sha256:3a11ead642976d0776ff68b369c4539013a0ce79d2076b4ab3204950f3e7c552",
+        "size_bytes": 7462,
         "kind": "config"
       },
       {
         "path": "run-types/medium.yaml",
-        "sha256": "sha256:6d6890676f28933fcf8c79206feac4e60739c6325f354f43e9bec2bd8cefaa45",
-        "size_bytes": 5068,
+        "sha256": "sha256:f32de200c1cf45d7387152e25dc2797c777e5f3493bf70e9681ddf761d89c86d",
+        "size_bytes": 6409,
         "kind": "config"
       },
       {
@@ -284,17 +290,29 @@
       },
       {
         "path": "run-types/small.yaml",
-        "sha256": "sha256:c69e8ffa563e7127628a6fa17d24eeff34e5e3b9e4bd711bccf2ceae65a549cb",
-        "size_bytes": 4605,
+        "sha256": "sha256:02a20117612c3b119252cc1778cde25f0c6e83ba946255aee1c867ecf54d72c7",
+        "size_bytes": 4937,
         "kind": "config"
       },
       {
         "path": "workflows.yaml",
-        "sha256": "sha256:4b6375be430f3f1325a295ab6a15d18b5762bd67e47c22c4bebe4def42091d83",
-        "size_bytes": 17844,
+        "sha256": "sha256:805eb84bbf5821dcb4fde5365503b19e99ccf89742927567b0643487a6252ab8",
+        "size_bytes": 19940,
         "kind": "config"
       }
     ]
   },
-  "bundle_sha256": "sha256:2d686e082bbd72a7d866472e979578370dc2d9fe2e5bc1f7a711eeeeacb3a856"
+  "migrations": [
+    {
+      "id": "retire-inert-semantics-v1",
+      "kind": "retire_yaml_fields",
+      "from_profile_range": ">=0.7.0 <0.8.0",
+      "from_bundle_sha256": [
+        "sha256:4e955f7fb5a6bbd58542f395471d2e3f1c87364840abd218f973b8f62a5c0c7e"
+      ],
+      "path": "migrations/retire-inert-semantics-v1.json",
+      "sha256": "sha256:76557e8ef44078c59656280cc2af17bdfab09797205e04eb35be906cd88b395d"
+    }
+  ],
+  "bundle_sha256": "sha256:df6e6f62434fa3856880438b2d735f0c45c5b5a62ffe3ef84144e2130e675693"
 }

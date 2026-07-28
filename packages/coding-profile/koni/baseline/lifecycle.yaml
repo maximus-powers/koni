@@ -1,7 +1,7 @@
 schema_version: '2.0'
 module:
   id: software.lifecycle
-  version: 0.2.0
+  version: 0.3.0
 state_machines:
 - id: ticket
   initial: todo
@@ -17,12 +17,26 @@ state_machines:
   - closed
   - retired
   transitions:
+  - id: propose-change
+    from:
+    - todo
+    to: proposed
+    actors:
+    - lead
+    - compiler
   - id: approve
     from:
     - proposed
     to: todo
     actors:
     - lead
+  - id: reject-proposal
+    from:
+    - proposed
+    to: closed
+    actors:
+    - lead
+    - compiler
   - id: start
     from:
     - todo
@@ -64,11 +78,29 @@ state_machines:
     actors:
     - compiler
     - lead
+  - id: interrupt-active
+    from:
+    - in_progress
+    to: todo
+    actors:
+    - compiler
   - id: finish
     from:
     - integrating
     - in_progress
     to: closed
+    actors:
+    - compiler
+  - id: resolve-blocked
+    from:
+    - blocked
+    to: closed
+    actors:
+    - compiler
+  - id: reopen-stale-obligation
+    from:
+    - closed
+    to: todo
     actors:
     - compiler
   - id: retire
@@ -118,6 +150,25 @@ state_machines:
     from:
     - active
     - paused
+    to: stopped
+    actors:
+    - human
+  - id: fail
+    from:
+    - active
+    - paused
+    to: failed
+    actors:
+    - compiler
+  - id: cleanup-concluded
+    from:
+    - concluded
+    to: stopped
+    actors:
+    - human
+  - id: cleanup-failed
+    from:
+    - failed
     to: stopped
     actors:
     - human

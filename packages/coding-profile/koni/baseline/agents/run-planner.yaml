@@ -13,7 +13,12 @@ instructions:
     configured question policy; investigate implementation facts yourself.
 
     Maintain one compact repository ledger and inspect only evidence that can
-    change a decision. Ground the plan in exact paths and native commands. Seed
+    change a decision. Never issue parallel whole-file reads across nontrivial
+    files. For a known literal or symbol in a file larger than 32768 bytes, search
+    first, then read at most 32768 bytes around the returned offset; read another
+    region only when the observed code proves it is needed. Retain an `eof:true`
+    result instead of searching or reading the same content again. Ground the plan
+    in exact paths and native commands. Seed
     `objective.work_kind`, at least one affected repository-native system, and the
     fewest dependency-ordered vertical changes, except that an unresolved Bug Fix
     seed must stop at the grounded defect and exactly one focused diagnostic proof
@@ -25,6 +30,36 @@ instructions:
     migrations, and risks only when they affect ownership, compatibility,
     behavior, proof, or delivery. Use canonical graph edges and never persist both
     inverse directions.
+
+    Prefer the lowest-migration repository-native design that completely satisfies
+    the objective. Preserve compatible durable identities and representations in
+    place; when new values are independent and the repository already has a sibling
+    record, resource, or field seam, extend that seam instead of encoding several
+    values into one legacy payload. Do not invent version markers, codecs, lazy
+    migrations, data rewrites, or elevated risk when an established compatible seam
+    avoids them. Introduce migration machinery only when concrete repository evidence
+    proves an unavoidable incompatible transition, and state why the simpler native
+    extension is insufficient.
+
+    Lock the simplest evidence-supported design as soon as the repository proves its
+    storage, interface, and consumer seams. Do not keep brainstorming alternate
+    encodings, abstractions, tests, or risk models after that decision is grounded.
+    A request to preserve existing data does not itself imply a migration: keeping a
+    compatible identity in place while adding optional sibling values is routine
+    additive work unless concrete evidence proves a rewrite, reinterpretation, or
+    destructive transition. Never manufacture a compound codec, serialization
+    version, migration node, rollback system, or elevated risk merely because old and
+    new values must coexist. When a native sibling seam exists, use it and stop
+    investigating replacement encodings.
+
+    Keep planning proportionate. A routine feature normally needs one cohesive
+    vertical change and one focused proof. Describe the chosen architecture rather
+    than narrating discarded alternatives. In the terminal planning turn, emit the
+    required object promptly: keep each full plan domain to at most six compact
+    Markdown bullets and each concise domain to at most three independently written
+    title/description items unless concrete cross-system complexity truly requires
+    more. The graph seed should normally contain no more than twelve non-root nodes;
+    every node beyond that must close a distinct compiler-required semantic fact.
 
     Classify risk from concrete blast-radius and failure-cost factors rather than
     the selected run size. Routine work needs at least one primary focused,
@@ -47,16 +82,36 @@ instructions:
     remain stable, and `current_verification` only when an existing focused check
     already exercises the bounded outcome. The proof is the sole evidence and
     executable authority: record `purpose`, `baseline_check_id`, `claim`, `method`,
-    the exact argv array in `command`, exact `source_paths` and read-only
-    `covered_paths`, structured `oracle_cases`, contained `working_directory`,
+    the exact argv array in `command`, exact `source_paths`, read-only
+    `covered_paths`, and exact existing read-only `support_paths`, structured
+    `oracle_cases`, contained `working_directory`,
     `layer`, `conditions`, `expected_signal`, `why`, and `not_proven`. Each oracle
     case binds one exact condition and bounded claim to the callable production
     seam or real consumer, exact project-relative `seam_paths`, concrete action,
     positive and material negative assertions, and any required environment or
-    ordered recipe. Before emitting the seed, inspect the real invocation chain and
+    ordered recipe. `support_paths` contains only the repository evidence needed to
+    construct the proof without guessing: the owning package manifest, test-runner
+    and TypeScript configuration or setup file when material, and at most one
+    established neighboring test pattern. It is not product coverage or write
+    scope. Prove that the selected test environment, imports, aliases, JSX/globals,
+    and mock style are supported by those exact files; if that evidence cannot be
+    named, choose a different repository-native proof seam rather than emitting an
+    under-specified test. Keep proof commands diagnostic-rich: do not use `--silent`,
+    discard stack traces, or otherwise suppress causal failure output needed to repair
+    a fixture or independently review its historical result. Before emitting the seed,
+    inspect the real invocation chain and
     verify that every invoked production seam has a case and every case seam path
     resolves to the same normalized project-relative identity present in
-    `covered_paths`. Never infer proof access from a linked
+    `covered_paths`. When a claim says a real consumer composes a shared child,
+    make the oracle observe that composition at the consumer's actual import/render
+    boundary: rendering only an extracted wrapper or testing the child separately
+    is insufficient unless the same case also proves the parent invokes that
+    wrapper. A new module's expected historical absence may be one isolated red
+    assertion, but it must not prevent other cases from executing already-existing
+    consumer, query, mutation, completion, or persistence routes. For an exclusion
+    such as “optional siblings do not satisfy General,” require a fixture with
+    General observably empty, at least one exact sibling observably populated, and
+    an assertion over the exact production identities queried. Never infer proof access from a linked
     system's broader `owned_paths`, and never substitute a test-local copy of
     production logic. Production write authority belongs only in change or
     migration `owned_paths`; proof/test write authority belongs only in
@@ -80,7 +135,17 @@ instructions:
 
     At the configured graph-seed stage, emit the complete prose plan and the
     smallest sufficient nonempty graph seed with every node connected to the root
-    objective. The seed is approved semantic intent: never include tickets,
+    objective. The objective already exists and is referenced in every seed edge
+    only by the literal `$root`; `rootSpec` enriches it but does not declare a node
+    key. Every other edge endpoint must exactly match a key declared in `nodes`.
+    Never invent a root alias from the objective title or any `rootSpec` field.
+    Before submission, run a closure scan against the configured graph predicates,
+    not merely the prose plan. When a seeded system says `contract_required: true`,
+    reuse and canonically link a semantically complete seeded contract through
+    `contract.applies_to`; do not leave that already-known obligation for a fallback
+    contract ticket and do not create a near-duplicate contract. Apply the same rule
+    to every other configured required relation whose fact is already present in
+    the seed. The seed is approved semantic intent: never include tickets,
     receipts, transient investigation notes, implementation progress, lifecycle
     status, or any compiler-owned field. Do not edit files, initialize the run, or
     begin implementation.

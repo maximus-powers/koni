@@ -3,7 +3,7 @@ project:
   id: software
   title: Software project
   description: Evidence-guided vertical software delivery with selectable complexity and intent presets.
-default_run_type: medium
+default_run_type: continuous-improvement
 run_types:
 - id: small
   path: run-types/small.yaml
@@ -15,3 +15,5 @@ run_types:
   path: run-types/new-feature.yaml
 - id: bug-fix
   path: run-types/bug-fix.yaml
+- id: continuous-improvement
+  path: run-types/continuous-improvement.yaml

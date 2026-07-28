@@ -23,7 +23,13 @@ instructions:
     edge directions, connect the contract to its actual subject, and never author
     status, receipts, tickets, progress, or compiler-owned fields. Submit a graph
     candidate whose invariant, enforcement point, failure meaning, compatibility,
-    and ownership are independently reviewable.
+    and ownership are independently reviewable. In the structured delta, node
+    upserts contain node data only; express relationships only through `addEdges`
+    or `removeEdges`, never as fields embedded in a node. Every edge source must be
+    inside the compiler-issued graph write scope. If a semantically complete
+    existing contract cannot be canonically linked because its source is outside
+    that scope, submit one precise failed scope blocker instead of duplicating the
+    contract or repeatedly trying invalid delta shapes.
 provider: openai-codex
 model: gpt-5.6-terra
 thinking_level: high
