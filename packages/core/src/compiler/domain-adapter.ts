@@ -24,6 +24,8 @@ export interface RulePredicateEvidence {
   result: boolean;
   recordedAt: string;
   sourceReceiptIds: readonly string[];
+  /** Exact current receipt status. Gate satisfaction compares it with the compiled policy set. */
+  receiptStatus?: string;
   /** Authenticated semantic identity used by composed coverage predicates. */
   leaf?: ConfigurationObject;
   subjectNodeId?: string;
@@ -85,10 +87,12 @@ export function rulePredicateEvidenceKey(input: RulePredicateEvidenceKeyInput): 
     inputGraphSha256: input.inputGraphSha256,
     leaf: input.leaf,
     subjectNodeId: input.subjectNodeId ?? null,
-    bindings: Object.fromEntries(Object.entries(input.bindings)
-      .filter(([name]) => referencedBindings.has(name))
-      .sort(([left], [right]) => compareUtf8(left, right))
-      .map(([name, ids]) => [name, [...new Set(ids)].sort(compareUtf8)])),
+    bindings: Object.fromEntries(
+      Object.entries(input.bindings)
+        .filter(([name]) => referencedBindings.has(name))
+        .sort(([left], [right]) => compareUtf8(left, right))
+        .map(([name, ids]) => [name, [...new Set(ids)].sort(compareUtf8)]),
+    ),
   });
 }
 
@@ -157,7 +161,8 @@ export async function createProductionRuleDomainAdapter(
           const checkId = stringValue(leaf.check);
           const check = context.configuration.registries.checks[checkId];
           if (check === undefined) return false;
-          if (check.kind !== "graph") return evidenceResult(evidence, leaf, context, inputGraphSha256);
+          if (check.kind !== "graph")
+            return evidenceResult(evidence, leaf, context, inputGraphSha256);
           if (checkStack.has(checkId) || check.predicate === undefined) return false;
           checkStack.add(checkId);
           try {
@@ -176,27 +181,45 @@ export async function createProductionRuleDomainAdapter(
           if (subject === undefined) return false;
           const expected = manifestSnapshot.get(subject.id);
           const definition = context.configuration.registries.node_types[subject.type];
-          const outputField = optionalString(recordValue(definition?.filesystem_manifest)?.output_field);
+          const outputField = optionalString(
+            recordValue(definition?.filesystem_manifest)?.output_field,
+          );
           const actual = outputField === undefined ? undefined : nodeField(subject, outputField);
-          return expected !== undefined && actual !== undefined && canonicalHash(actual) === canonicalHash(expected);
+          return (
+            expected !== undefined &&
+            actual !== undefined &&
+            canonicalHash(actual) === canonicalHash(expected)
+          );
         }
         case "gate_policy_compatible": {
           const gate = boundNode(context, optionalString(leaf.gate_subject) ?? "$gate");
-          return gate !== undefined && context.subject !== undefined &&
-            candidateCompatible(policy(context, leaf), gate, context.subject) !== undefined;
+          return (
+            gate !== undefined &&
+            context.subject !== undefined &&
+            candidateCompatible(policy(context, leaf), gate, context.subject) !== undefined
+          );
         }
         case "gate_policy_has_selection": {
           const gate = boundNode(context, optionalString(leaf.gate_subject) ?? "$gate");
-          return gate !== undefined && gateSelection(policy(context, leaf), gate, context).winner !== undefined;
+          return (
+            gate !== undefined &&
+            gateSelection(policy(context, leaf), gate, context).winner !== undefined
+          );
         }
         case "gate_policy_selected": {
           const gate = boundNode(context, optionalString(leaf.gate_subject) ?? "$gate");
-          return gate !== undefined && context.subject !== undefined &&
-            gateSelection(policy(context, leaf), gate, context).winner?.id === context.subject.id;
+          return (
+            gate !== undefined &&
+            context.subject !== undefined &&
+            gateSelection(policy(context, leaf), gate, context).winner?.id === context.subject.id
+          );
         }
         case "gate_policy_candidate_count": {
           const gate = boundNode(context, optionalString(leaf.gate_subject) ?? "$gate");
-          const count = gate === undefined ? 0 : gateSelection(policy(context, leaf), gate, context).compatible.length;
+          const count =
+            gate === undefined
+              ? 0
+              : gateSelection(policy(context, leaf), gate, context).compatible.length;
           return countMatches(count, leaf);
         }
         case "gate_policy_command_available": {
@@ -212,11 +235,24 @@ export async function createProductionRuleDomainAdapter(
           if (gate === undefined) return false;
           const selected = gateSelection(policy(context, leaf), gate, context).winner;
           const predicate = policy(context, leaf).execution_ready;
-          return selected !== undefined && predicate !== undefined && context.withBinding("gate", [gate.id], () =>
-            context.withBinding("winner", [selected.id], () =>
-              context.withBinding("candidate", [selected.id], () => context.evaluate(predicate))));
+          return (
+            selected !== undefined &&
+            predicate !== undefined &&
+            context.withBinding("gate", [gate.id], () =>
+              context.withBinding("winner", [selected.id], () =>
+                context.withBinding("candidate", [selected.id], () => context.evaluate(predicate)),
+              ),
+            )
+          );
         }
         case "gate_policy_satisfied":
+          return gatePolicyReceiptSatisfied(
+            evidence,
+            policy(context, leaf),
+            leaf,
+            context,
+            inputGraphSha256,
+          );
         case "gate_policy_has_current_terminal":
         case "current_receipt":
         case "proof_preparation_current":
@@ -240,7 +276,16 @@ function evidenceResult(
   context: RuleDomainContext,
   inputGraphSha256: Sha256Digest,
 ): boolean {
-  if (evidence === undefined) return false;
+  return predicateEvidence(evidence, leaf, context, inputGraphSha256)?.result === true;
+}
+
+function predicateEvidence(
+  evidence: RuleAuthorityEvidence | undefined,
+  leaf: ConfigurationObject,
+  context: RuleDomainContext,
+  inputGraphSha256: Sha256Digest,
+): RulePredicateEvidence | undefined {
+  if (evidence === undefined) return undefined;
   const key = rulePredicateEvidenceKey({
     configurationSha256: context.configuration.configuration_sha256,
     inputGraphSha256,
@@ -248,7 +293,21 @@ function evidenceResult(
     ...(context.subject === undefined ? {} : { subjectNodeId: context.subject.id }),
     bindings: context.bindings,
   });
-  return evidence.predicates[key]?.result === true;
+  return evidence.predicates[key];
+}
+
+function gatePolicyReceiptSatisfied(
+  evidence: RuleAuthorityEvidence | undefined,
+  configured: ConfigurationObject,
+  leaf: ConfigurationObject,
+  context: RuleDomainContext,
+  inputGraphSha256: Sha256Digest,
+): boolean {
+  const current = predicateEvidence(evidence, leaf, context, inputGraphSha256);
+  if (current?.result !== true) return false;
+  // Compatibility for existing durable evidence: its true result historically meant "passed".
+  const status = current.receiptStatus ?? "passed";
+  return stringArray(configured.passing_receipt_statuses).includes(status);
 }
 
 function receiptCoverageCurrent(
@@ -261,21 +320,36 @@ function receiptCoverageCurrent(
     const operationId = stringValue(leaf.receipt_coverage);
     const operation = context.configuration.registries.operations[operationId];
     const contract = recordValue(operation?.receipt_coverage);
-    if (contract === undefined || !stringArray(contract.candidate_node_types).includes(context.subject.type)) return false;
+    if (
+      contract === undefined ||
+      !stringArray(contract.candidate_node_types).includes(context.subject.type)
+    )
+      return false;
     if (leaf.coverage_targets === undefined) return false;
     const coverageTargets = context.select(leaf.coverage_targets);
-    const requiredDefinition = requiredRecord(contract.required_nodes, "receipt coverage required nodes");
-    const required = new Set(context.withBinding("coverage_target", coverageTargets, () => context.select({
-      traverse: {
-        from: "$coverage_target",
-        ...(requiredDefinition.relation === undefined ? {} : { relation: requiredDefinition.relation }),
-        ...(requiredDefinition.relations === undefined ? {} : { relations: requiredDefinition.relations }),
-        direction: requiredDefinition.direction ?? "outgoing",
-        min_depth: requiredDefinition.min_depth ?? 1,
-        max_depth: requiredDefinition.max_depth ?? 1,
-        node_types: requiredDefinition.node_types ?? [],
-      },
-    })));
+    const requiredDefinition = requiredRecord(
+      contract.required_nodes,
+      "receipt coverage required nodes",
+    );
+    const required = new Set(
+      context.withBinding("coverage_target", coverageTargets, () =>
+        context.select({
+          traverse: {
+            from: "$coverage_target",
+            ...(requiredDefinition.relation === undefined
+              ? {}
+              : { relation: requiredDefinition.relation }),
+            ...(requiredDefinition.relations === undefined
+              ? {}
+              : { relations: requiredDefinition.relations }),
+            direction: requiredDefinition.direction ?? "outgoing",
+            min_depth: requiredDefinition.min_depth ?? 1,
+            max_depth: requiredDefinition.max_depth ?? 1,
+            node_types: requiredDefinition.node_types ?? [],
+          },
+        }),
+      ),
+    );
     if (required.size === 0) return false;
     const relation = stringValue(contract.candidate_link_relation);
     const linkedValues = context.subject.edges[relation] ?? [];
@@ -286,12 +360,14 @@ function receiptCoverageCurrent(
     const expectedReceipts = new Map<string, string>();
     for (const nodeId of nodesToBind) {
       const receipt = latestReceiptEvidence(evidence, nodeId, stringValue(contract.receipt_type));
-      if (receipt === undefined || receipt.result !== true || receipt.sourceReceiptIds.length !== 1) return false;
+      if (receipt === undefined || receipt.result !== true || receipt.sourceReceiptIds.length !== 1)
+        return false;
       expectedReceipts.set(nodeId, receipt.sourceReceiptIds[0]!);
     }
     const dispositionPath = stringValue(contract.disposition_map_path);
     const dispositions = recordValue(nodeField(context.subject, dispositionPath));
-    if (dispositions === undefined || !setsEqual(new Set(Object.keys(dispositions)), linked)) return false;
+    if (dispositions === undefined || !setsEqual(new Set(Object.keys(dispositions)), linked))
+      return false;
     const disposition = requiredRecord(contract.disposition, "receipt coverage disposition");
     const allowed = new Set(stringArray(disposition.allowed_values));
     for (const nodeId of linked) {
@@ -301,10 +377,13 @@ function receiptCoverageCurrent(
       const receiptId = valueAtConfiguredPath(entry, stringValue(disposition.receipt_id_path));
       const rationale = valueAtConfiguredPath(entry, stringValue(disposition.rationale_path));
       if (
-        typeof value !== "string" || !allowed.has(value) ||
+        typeof value !== "string" ||
+        !allowed.has(value) ||
         receiptId !== expectedReceipts.get(nodeId) ||
-        typeof rationale !== "string" || rationale.trim().length === 0
-      ) return false;
+        typeof rationale !== "string" ||
+        rationale.trim().length === 0
+      )
+        return false;
     }
     const receiptRefsPath = optionalString(contract.receipt_refs_path);
     if (receiptRefsPath !== undefined) {
@@ -327,22 +406,32 @@ function reviewEffectCoverageCurrent(
   try {
     const candidate = context.subject;
     if (candidate === undefined) return false;
-    const operation = context.configuration.registries.operations[stringValue(leaf.review_operation)];
+    const operation =
+      context.configuration.registries.operations[stringValue(leaf.review_operation)];
     const effects = arrayValue(operation?.review_effects);
-    const effect = effects.map((value) => recordValue(value)).find((value) => value?.id === leaf.review_effect);
+    const effect = effects
+      .map((value) => recordValue(value))
+      .find((value) => value?.id === leaf.review_effect);
     if (effect === undefined) return false;
     const select = requiredRecord(effect.select, "review effect selector");
-    if (!stringArray(select.node_types).includes(candidate.type) || leaf.coverage_targets === undefined) return false;
+    if (
+      !stringArray(select.node_types).includes(candidate.type) ||
+      leaf.coverage_targets === undefined
+    )
+      return false;
     const targets = context.select(leaf.coverage_targets);
-    return context.withBinding("target", targets, () => context.withBinding("candidate", [candidate.id], () =>
-      arrayValue(effect.coverage).every((rawCoverage) => {
-        const coverage = requiredRecord(rawCoverage, "review effect coverage");
-        const actual = requiredRecord(coverage.actual, "review effect coverage actual");
-        if (coverage.required === undefined) return false;
-        const required = new Set(context.select(coverage.required));
-        const observed = reviewCoverageActual(candidate, actual);
-        return observed !== undefined && setsEqual(required, observed);
-      })));
+    return context.withBinding("target", targets, () =>
+      context.withBinding("candidate", [candidate.id], () =>
+        arrayValue(effect.coverage).every((rawCoverage) => {
+          const coverage = requiredRecord(rawCoverage, "review effect coverage");
+          const actual = requiredRecord(coverage.actual, "review effect coverage actual");
+          if (coverage.required === undefined) return false;
+          const required = new Set(context.select(coverage.required));
+          const observed = reviewCoverageActual(candidate, actual);
+          return observed !== undefined && setsEqual(required, observed);
+        }),
+      ),
+    );
   } catch {
     return false;
   }
@@ -354,12 +443,16 @@ function latestReceiptEvidence(
   receiptType: string,
 ): RulePredicateEvidence | undefined {
   return Object.values(evidence.predicates)
-    .filter((entry) =>
-      entry.subjectNodeId === subjectNodeId &&
-      entry.leaf?.op === "current_receipt" &&
-      entry.leaf.receipt_type === receiptType)
-    .sort((left, right) =>
-      right.recordedAt.localeCompare(left.recordedAt) || compareUtf8(right.key, left.key))[0];
+    .filter(
+      (entry) =>
+        entry.subjectNodeId === subjectNodeId &&
+        entry.leaf?.op === "current_receipt" &&
+        entry.leaf.receipt_type === receiptType,
+    )
+    .sort(
+      (left, right) =>
+        right.recordedAt.localeCompare(left.recordedAt) || compareUtf8(right.key, left.key),
+    )[0];
 }
 
 function reviewCoverageActual(
@@ -374,18 +467,24 @@ function reviewCoverageActual(
   const field = optionalString(actual.field);
   if (field === undefined) return undefined;
   const value = nodeField(candidate, field);
-  if (kind === "field_value") return typeof value === "string" ? strictStringSet([value]) : undefined;
+  if (kind === "field_value")
+    return typeof value === "string" ? strictStringSet([value]) : undefined;
   if (kind === "field_values") {
     return Array.isArray(value) && value.every((item) => typeof item === "string")
-      ? strictStringSet(value as string[])
+      ? strictStringSet(value)
       : undefined;
   }
   if (kind === "object_keys") {
     const object = recordValue(value);
     if (object === undefined) return undefined;
     const allowed = arrayValue(actual.allowed_values);
-    if (allowed.length > 0 && Object.values(object).some((item) =>
-      !allowed.some((candidate) => canonicalHash(candidate) === canonicalHash(item)))) return undefined;
+    if (
+      allowed.length > 0 &&
+      Object.values(object).some(
+        (item) => !allowed.some((candidate) => canonicalHash(candidate) === canonicalHash(item)),
+      )
+    )
+      return undefined;
     return strictStringSet(Object.keys(object));
   }
   return undefined;
@@ -429,7 +528,10 @@ function validateEvidence(
     evidenceSha256 !== canonicalHash(material) ||
     material.configurationSha256 !== configurationSha256 ||
     material.inputGraphSha256 !== inputGraphSha256
-  ) throw new Error("rule authority evidence does not match this compiler graph/configuration snapshot");
+  )
+    throw new Error(
+      "rule authority evidence does not match this compiler graph/configuration snapshot",
+    );
   return deepFreeze(structuredClone(evidence));
 }
 
@@ -439,7 +541,8 @@ function validateEvidenceMaterial(material: RuleAuthorityEvidenceMaterial): void
     !isDigest(material.configurationSha256) ||
     !isDigest(material.inputGraphSha256) ||
     !isPlainRecord(material.predicates)
-  ) throw new Error("rule authority evidence has an invalid envelope");
+  )
+    throw new Error("rule authority evidence has an invalid envelope");
   for (const [key, unknownValue] of Object.entries(material.predicates)) {
     if (!isPlainRecord(unknownValue)) {
       throw new Error(`rule authority predicate evidence ${key} is invalid`);
@@ -452,14 +555,22 @@ function validateEvidenceMaterial(material: RuleAuthorityEvidenceMaterial): void
       !isIsoTimestamp(value.recordedAt) ||
       !Array.isArray(value.sourceReceiptIds) ||
       value.sourceReceiptIds.some((id) => typeof id !== "string" || id.trim().length === 0) ||
+      (value.receiptStatus !== undefined &&
+        (typeof value.receiptStatus !== "string" ||
+          value.receiptStatus.trim().length === 0 ||
+          value.receiptStatus.trim() !== value.receiptStatus)) ||
       (value.leaf !== undefined && !isPlainRecord(value.leaf)) ||
-      (value.subjectNodeId !== undefined && (typeof value.subjectNodeId !== "string" || value.subjectNodeId.trim().length === 0)) ||
-      (value.bindings !== undefined && (
-        !isPlainRecord(value.bindings) ||
-        Object.values(value.bindings).some((ids) =>
-          !Array.isArray(ids) || ids.some((id) => typeof id !== "string" || id.trim().length === 0))
-      ))
-    ) throw new Error(`rule authority predicate evidence ${key} is invalid`);
+      (value.subjectNodeId !== undefined &&
+        (typeof value.subjectNodeId !== "string" || value.subjectNodeId.trim().length === 0)) ||
+      (value.bindings !== undefined &&
+        (!isPlainRecord(value.bindings) ||
+          Object.values(value.bindings).some(
+            (ids) =>
+              !Array.isArray(ids) ||
+              ids.some((id) => typeof id !== "string" || id.trim().length === 0),
+          )))
+    )
+      throw new Error(`rule authority predicate evidence ${key} is invalid`);
   }
 }
 
@@ -475,11 +586,14 @@ function selectPolicyApplicability(
   const classIndex = new Map(classOrder.map((name, index) => [name, index]));
   const classes = requiredRecord(applicability.context_classes, "gate applicability classes");
   const classFor = (node: CompilerGraphNode): number | undefined => {
-    const matches = Object.entries(classes).flatMap(([name, raw]) => {
-      const nodeTypes = stringArray(recordValue(recordValue(raw)?.nodes)?.node_types);
-      return nodeTypes.includes(node.type) ? [classIndex.get(name)] : [];
-    }).filter((value): value is number => value !== undefined);
-    if (matches.length > 1) throw new Error(`node ${node.id} belongs to multiple gate applicability classes`);
+    const matches = Object.entries(classes)
+      .flatMap(([name, raw]) => {
+        const nodeTypes = stringArray(recordValue(recordValue(raw)?.nodes)?.node_types);
+        return nodeTypes.includes(node.type) ? [classIndex.get(name)] : [];
+      })
+      .filter((value): value is number => value !== undefined);
+    if (matches.length > 1)
+      throw new Error(`node ${node.id} belongs to multiple gate applicability classes`);
     return matches[0];
   };
   const allIds = context.select({ nodes: {} });
@@ -504,12 +618,16 @@ function selectPolicyApplicability(
   const enabled = new Set(context.select(requiredValue(configured.gate_subjects, "gate subjects")));
   for (const subjectId of subjects) {
     const subject = context.node(subjectId);
-    if (subject === undefined) throw new Error(`gate applicability subject ${subjectId} is missing`);
+    if (subject === undefined)
+      throw new Error(`gate applicability subject ${subjectId} is missing`);
     const startClass = classFor(subject);
-    if (startClass === undefined) throw new Error(`gate applicability subject ${subjectId} has no context class`);
+    if (startClass === undefined)
+      throw new Error(`gate applicability subject ${subjectId} has no context class`);
     const ancestors = new Set<string>();
     const seen = new Set<string>([subjectId]);
-    const queue: Array<{ id: string; classIndex: number }> = [{ id: subjectId, classIndex: startClass }];
+    const queue: Array<{ id: string; classIndex: number }> = [
+      { id: subjectId, classIndex: startClass },
+    ];
     while (queue.length > 0) {
       const current = queue.shift()!;
       const node = context.node(current.id)!;
@@ -528,15 +646,24 @@ function selectPolicyApplicability(
       }
     }
     for (const id of ancestors) ancestorsAll.add(id);
-    context.withBinding("subject", [subjectId], () => context.withBinding("ancestors", [...ancestors], () => {
-      for (const id of context.select(requiredValue(applicability.direct_gates, "direct gate selector"))) {
-        if (enabled.has(id)) direct.add(id);
-      }
-      for (const id of context.select(requiredValue(applicability.inherited_gates, "inherited gate selector"))) {
-        if (enabled.has(id)) inherited.add(id);
-      }
-      for (const id of context.select(requiredValue(applicability.context, "gate context selector"))) contextAll.add(id);
-    }));
+    context.withBinding("subject", [subjectId], () =>
+      context.withBinding("ancestors", [...ancestors], () => {
+        for (const id of context.select(
+          requiredValue(applicability.direct_gates, "direct gate selector"),
+        )) {
+          if (enabled.has(id)) direct.add(id);
+        }
+        for (const id of context.select(
+          requiredValue(applicability.inherited_gates, "inherited gate selector"),
+        )) {
+          if (enabled.has(id)) inherited.add(id);
+        }
+        for (const id of context.select(
+          requiredValue(applicability.context, "gate context selector"),
+        ))
+          contextAll.add(id);
+      }),
+    );
   }
   const result = optionalString(envelope.result) ?? "applicable_gates";
   if (result === "direct_gates") return sorted(direct);
@@ -568,7 +695,8 @@ function selectPolicySelection(
 
 function policy(context: RuleDomainContext, leaf: ConfigurationObject): ConfigurationObject {
   const id = optionalString(leaf.gate_policy) ?? optionalString(leaf.policy);
-  const configured = id === undefined ? undefined : context.configuration.registries.gate_policies[id];
+  const configured =
+    id === undefined ? undefined : context.configuration.registries.gate_policies[id];
   if (configured === undefined) throw new Error(`unknown configured gate policy ${id ?? ""}`);
   return configured;
 }
@@ -579,22 +707,36 @@ function gateSelection(
   context: RuleDomainContext,
 ): { compatible: CompilerGraphNode[]; winner?: CompilerGraphNode } {
   if (!stringArray(configured.gate_node_types).includes(gate.type)) return { compatible: [] };
-  const candidates = context.select(requiredValue(configured.candidate_pool, "gate candidate pool"))
+  const candidates = context
+    .select(requiredValue(configured.candidate_pool, "gate candidate pool"))
     .flatMap((id) => {
       const node = context.node(id);
       return node === undefined ? [] : [node];
     });
   const selection = requiredRecord(configured.selection, "gate selection");
   const ranks = arrayValue(selection.ranks);
-  const compatible = candidates.flatMap((candidate) => {
-    const capability = candidateCompatible(configured, gate, candidate);
-    if (capability === undefined) return [];
-    const rank = firstMatchingRank(ranks, candidate, gate);
-    return [{ candidate, rank }];
-  }).sort((left, right) =>
-    left.rank - right.rank || compareScalar(nodeField(left.candidate, optionalString(recordValue(selection.tie_break)?.field) ?? "id"),
-      nodeField(right.candidate, optionalString(recordValue(selection.tie_break)?.field) ?? "id")) ||
-    compareUtf8(left.candidate.id, right.candidate.id));
+  const compatible = candidates
+    .flatMap((candidate) => {
+      const capability = candidateCompatible(configured, gate, candidate);
+      if (capability === undefined) return [];
+      const rank = firstMatchingRank(ranks, candidate, gate);
+      return [{ candidate, rank }];
+    })
+    .sort(
+      (left, right) =>
+        left.rank - right.rank ||
+        compareScalar(
+          nodeField(
+            left.candidate,
+            optionalString(recordValue(selection.tie_break)?.field) ?? "id",
+          ),
+          nodeField(
+            right.candidate,
+            optionalString(recordValue(selection.tie_break)?.field) ?? "id",
+          ),
+        ) ||
+        compareUtf8(left.candidate.id, right.candidate.id),
+    );
   return {
     compatible: compatible.map((item) => item.candidate),
     ...(compatible[0] === undefined ? {} : { winner: compatible[0].candidate }),
@@ -609,8 +751,16 @@ function candidateCompatible(
   if (!stringArray(configured.candidate_node_types).includes(candidate.type)) return undefined;
   const capability = requiredRecord(configured.capability, "gate capability");
   const requiredName = firstStringField(gate, stringArray(capability.required_name_fields));
-  const requiredVersion = firstStringField(gate, stringArray(capability.required_version_req_fields));
-  if (requiredName === undefined || requiredVersion === undefined || validRange(requiredVersion) === null) return undefined;
+  const requiredVersion = firstStringField(
+    gate,
+    stringArray(capability.required_version_req_fields),
+  );
+  if (
+    requiredName === undefined ||
+    requiredVersion === undefined ||
+    validRange(requiredVersion) === null
+  )
+    return undefined;
   for (const field of stringArray(capability.provider_collection_fields)) {
     const collection = nodeField(candidate, field);
     if (!Array.isArray(collection)) continue;
@@ -623,7 +773,8 @@ function candidateCompatible(
         version !== undefined &&
         valid(version) !== null &&
         satisfies(version, requiredVersion)
-      ) return item;
+      )
+        return item;
     }
   }
   return undefined;
@@ -641,22 +792,35 @@ function firstMatchingRank(
   return ranks.length;
 }
 
-function rankMatches(rank: ConfigurationObject, candidate: CompilerGraphNode, gate: CompilerGraphNode): boolean {
+function rankMatches(
+  rank: ConfigurationObject,
+  candidate: CompilerGraphNode,
+  gate: CompilerGraphNode,
+): boolean {
   const kind = optionalString(rank.kind);
   const fields = stringArray(rank.fields);
   if (kind === "compatible") return true;
   if (kind === "edge_contains_gate") {
-    return stringArray(rank.relations).some((relation) => (candidate.edges[relation] ?? []).includes(gate.id));
+    return stringArray(rank.relations).some((relation) =>
+      (candidate.edges[relation] ?? []).includes(gate.id),
+    );
   }
   if (kind === "field_equals_gate_id") {
     return fields.some((field) => nodeField(candidate, field) === gate.id);
   }
   if (kind === "map_has_gate_key" || kind === "merged_map_has_gate_key") {
-    return fields.some((field) => fieldValues(candidate, field).some((value) => isRecord(value) && Object.hasOwn(value, gate.id)));
+    return fields.some((field) =>
+      fieldValues(candidate, field).some(
+        (value) => isRecord(value) && Object.hasOwn(value, gate.id),
+      ),
+    );
   }
   if (kind === "merged_map_value_equals") {
-    return fields.some((field) => fieldValues(candidate, field).some((value) =>
-      isRecord(value) && canonicalHash(value[gate.id]) === canonicalHash(rank.value)));
+    return fields.some((field) =>
+      fieldValues(candidate, field).some(
+        (value) => isRecord(value) && canonicalHash(value[gate.id]) === canonicalHash(rank.value),
+      ),
+    );
   }
   return false;
 }
@@ -667,7 +831,9 @@ function gateTargetsReady(
   context: RuleDomainContext,
 ): boolean {
   const target = requiredRecord(configured.evaluation_targets, "gate evaluation targets");
-  const ids = context.withBinding("gate", [gate.id], () => context.select(requiredValue(target.select, "gate target selector")));
+  const ids = context.withBinding("gate", [gate.id], () =>
+    context.select(requiredValue(target.select, "gate target selector")),
+  );
   const cardinality = optionalString(target.cardinality) ?? "exactly_one";
   if (cardinality === "exactly_one") return ids.length === 1;
   if (cardinality === "one_or_more") return ids.length >= 1;
@@ -685,12 +851,17 @@ function gateCommandAvailable(
   if (winner === undefined) return false;
   const auto = recordValue(configured.auto_evaluate);
   const checkId = optionalString(auto?.check);
-  const check = checkId === undefined ? undefined : context.configuration.registries.checks[checkId];
+  const check =
+    checkId === undefined ? undefined : context.configuration.registries.checks[checkId];
   const source = recordValue(check?.command_source);
   const field = optionalString(source?.field);
   if (field === undefined) return false;
   const command = dynamicNodeField(winner, field, { "gate.id": gate.id });
-  return Array.isArray(command) && command.length > 0 && command.every((item) => typeof item === "string" && item.length > 0);
+  return (
+    Array.isArray(command) &&
+    command.length > 0 &&
+    command.every((item) => typeof item === "string" && item.length > 0)
+  );
 }
 
 async function snapshotConfiguredPaths(
@@ -727,8 +898,11 @@ async function snapshotFilesystemManifests(
 ): Promise<Map<string, ConfigurationValue>> {
   const output = new Map<string, ConfigurationValue>();
   for (const node of graph.nodes()) {
-    const definition = recordValue(configuration.registries.node_types[node.type]?.filesystem_manifest);
-    if (definition !== undefined) output.set(node.id, await deriveFilesystemManifest(node, definition, projectRoot));
+    const definition = recordValue(
+      configuration.registries.node_types[node.type]?.filesystem_manifest,
+    );
+    if (definition !== undefined)
+      output.set(node.id, await deriveFilesystemManifest(node, definition, projectRoot));
   }
   return output;
 }
@@ -742,20 +916,24 @@ async function deriveFilesystemManifest(
   const rootField = stringValue(definition.root_field);
   const rawRoot = optionalString(nodeField(node, rootField));
   const relativeRoot = rawRoot === undefined ? undefined : normalizedRelativePath(rawRoot);
-  if (relativeRoot === undefined) errors.add(`${rootField} must be a nonempty project-relative path`);
+  if (relativeRoot === undefined)
+    errors.add(`${rootField} must be a nonempty project-relative path`);
   const prefixes = stringArray(definition.allowed_root_prefixes).flatMap((item) => {
     const normalized = normalizedRelativePath(item);
     return normalized === undefined ? [] : [normalized];
   });
-  if (relativeRoot !== undefined && prefixes.length > 0 && !prefixes.some((prefix) =>
-    relativeRoot === prefix || relativeRoot.startsWith(`${prefix}/`))) {
+  if (
+    relativeRoot !== undefined &&
+    prefixes.length > 0 &&
+    !prefixes.some((prefix) => relativeRoot === prefix || relativeRoot.startsWith(`${prefix}/`))
+  ) {
     errors.add(`filesystem root ${relativeRoot} is outside configured root prefixes`);
   }
   const scan = recordValue(definition.scan) ?? {};
   const rows: ConfigurationObject[] = [];
   if (relativeRoot !== undefined && errors.size === 0) {
     const root = path.join(projectRoot, ...relativeRoot.split("/"));
-    if (!await safePathExists(projectRoot, relativeRoot)) {
+    if (!(await safePathExists(projectRoot, relativeRoot))) {
       errors.add(`filesystem root does not exist: ${relativeRoot}`);
     } else {
       await scanManifestRoot(root, relativeRoot, scan, rows, errors);
@@ -771,7 +949,7 @@ async function deriveFilesystemManifest(
   const entrypointField = stringValue(definition.implementation_entrypoints_field);
   const rawEntrypoints = nodeField(node, entrypointField);
   const entrypointPaths = Array.isArray(rawEntrypoints)
-    ? rawEntrypoints.flatMap((item) => typeof item === "string" ? [item] : [])
+    ? rawEntrypoints.flatMap((item) => (typeof item === "string" ? [item] : []))
     : [];
   if (entrypointPaths.length === 0) errors.add(`${entrypointField} must be a nonempty list`);
   const inventory = new Map(rows.map((row) => [String(row.path), row]));
@@ -789,11 +967,14 @@ async function deriveFilesystemManifest(
       entrypoints.push(inventory.get(normalized)!);
     }
   }
-  const contractFields = Object.fromEntries(stringArray(definition.contract_fields)
-    .sort(compareUtf8)
-    .map((field) => [field, nodeField(node, field) ?? null]));
+  const contractFields = Object.fromEntries(
+    stringArray(definition.contract_fields)
+      .sort(compareUtf8)
+      .map((field) => [field, nodeField(node, field) ?? null]),
+  );
   const source = deriveSource(node, definition, rows, relativeRoot);
-  if (source.vendorStatus !== "vendored") errors.add(`filesystem vendor status is not ready: ${source.vendorStatus}`);
+  if (source.vendorStatus !== "vendored")
+    errors.add(`filesystem vendor status is not ready: ${source.vendorStatus}`);
   const contentHash = canonicalHash({
     root: relativeRoot ?? null,
     source: source.source,
@@ -808,7 +989,8 @@ async function deriveFilesystemManifest(
   const outputField = stringValue(definition.output_field);
   const prior = recordValue(nodeField(node, outputField));
   const accepted = optionalString(prior?.accepted_content_hash);
-  if (errors.size === 0 && accepted !== contentHash) errors.add("filesystem content hash requires scoped compiler acceptance");
+  if (errors.size === 0 && accepted !== contentHash)
+    errors.add("filesystem content hash requires scoped compiler acceptance");
   const material: ConfigurationObject = {
     schema_version: "1.0",
     root: relativeRoot ?? null,
@@ -875,10 +1057,16 @@ function manifestIgnored(parts: string[], scan: ConfigurationObject): boolean {
   const file = parts.at(-1) ?? "";
   if (stringArray(scan.ignored_file_names).includes(file)) return true;
   if (parts.some((part) => stringArray(scan.ignored_path_components).includes(part))) return true;
-  if (stringArray(scan.ignored_suffixes).some((suffix) => file.toLowerCase().endsWith(suffix.toLowerCase()))) return true;
+  if (
+    stringArray(scan.ignored_suffixes).some((suffix) =>
+      file.toLowerCase().endsWith(suffix.toLowerCase()),
+    )
+  )
+    return true;
   const relative = parts.join("/");
-  return stringArray(scan.ignored_path_prefixes).some((prefix) =>
-    relative === prefix || relative.startsWith(`${prefix}/`));
+  return stringArray(scan.ignored_path_prefixes).some(
+    (prefix) => relative === prefix || relative.startsWith(`${prefix}/`),
+  );
 }
 
 function deriveSource(
@@ -888,33 +1076,47 @@ function deriveSource(
   relativeRoot: string | undefined,
 ): { source: string; external: boolean; vendorStatus: string } {
   const policy = recordValue(definition.source);
-  if (policy === undefined) return {
-    source: "unspecified",
-    external: false,
-    vendorStatus: rows.length === 0 ? "missing" : "vendored",
-  };
-  const source = optionalString(nodeField(node, stringValue(policy.field))) ??
-    optionalString(policy.unspecified_value) ?? "unspecified";
-  const external = stringArray(policy.external_values).some((item) => item.toLowerCase() === source.toLowerCase());
+  if (policy === undefined)
+    return {
+      source: "unspecified",
+      external: false,
+      vendorStatus: rows.length === 0 ? "missing" : "vendored",
+    };
+  const source =
+    optionalString(nodeField(node, stringValue(policy.field))) ??
+    optionalString(policy.unspecified_value) ??
+    "unspecified";
+  const external = stringArray(policy.external_values).some(
+    (item) => item.toLowerCase() === source.toLowerCase(),
+  );
   const vendor = recordValue(policy.vendor);
-  if (vendor === undefined) return { source, external, vendorStatus: rows.length === 0 ? "missing" : "vendored" };
-  if (stringArray(vendor.blocked_reason_fields).some((field) => optionalString(nodeField(node, field)) !== undefined)) {
+  if (vendor === undefined)
+    return { source, external, vendorStatus: rows.length === 0 ? "missing" : "vendored" };
+  if (
+    stringArray(vendor.blocked_reason_fields).some(
+      (field) => optionalString(nodeField(node, field)) !== undefined,
+    )
+  ) {
     return { source, external, vendorStatus: "blocked" };
   }
   const expected = stringArray(vendor.path_fields).flatMap((field) => {
     const value = nodeField(node, field);
     if (typeof value === "string") return [value];
-    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+    return Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === "string")
+      : [];
   });
   const inventory = new Set(rows.map((row) => String(row.path)));
-  if (expected.length === 0) return { source, external, vendorStatus: rows.length === 0 ? "missing" : "vendored" };
+  if (expected.length === 0)
+    return { source, external, vendorStatus: rows.length === 0 ? "missing" : "vendored" };
   for (const raw of expected) {
     const normalized = normalizedRelativePath(raw);
     if (
       normalized === undefined ||
       relativeRoot === undefined ||
       !(normalized === relativeRoot || normalized.startsWith(`${relativeRoot}/`))
-    ) return { source, external, vendorStatus: "invalid_path" };
+    )
+      return { source, external, vendorStatus: "invalid_path" };
     if (!inventory.has(normalized)) return { source, external, vendorStatus: "missing" };
   }
   return { source, external, vendorStatus: "vendored" };
@@ -923,7 +1125,8 @@ function deriveSource(
 async function canonicalProjectRoot(root: string): Promise<string> {
   const canonical = await realpath(root);
   const metadata = await lstat(canonical);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error("rule project root is not a regular directory");
+  if (!metadata.isDirectory() || metadata.isSymbolicLink())
+    throw new Error("rule project root is not a regular directory");
   return canonical;
 }
 
@@ -949,13 +1152,17 @@ function normalizedRelativePath(value: string): string | undefined {
     trimmed.startsWith("/") ||
     path.posix.normalize(trimmed) !== trimmed ||
     trimmed.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
-  ) return undefined;
+  )
+    return undefined;
   return trimmed;
 }
 
 function isWithin(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
-  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+  return (
+    relative === "" ||
+    (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))
+  );
 }
 
 function nodeField(node: CompilerGraphNode, field: string): ConfigurationValue | undefined {
@@ -984,11 +1191,17 @@ function dynamicNodeField(
   variables: Readonly<Record<string, string>>,
 ): ConfigurationValue | undefined {
   let rendered = field;
-  for (const [name, value] of Object.entries(variables)) rendered = rendered.replaceAll(`$${name}`, value);
+  for (const [name, value] of Object.entries(variables))
+    rendered = rendered.replaceAll(`$${name}`, value);
   const segments = rendered.replace(/^\$?\./u, "").match(/[^.[\]]+/gu) ?? [];
   let current: ConfigurationValue = {
-    ...(node.fields ?? {}), id: node.id, type: node.type, title: node.title,
-    status: node.status, spec: node.spec, edges: node.edges,
+    ...(node.fields ?? {}),
+    id: node.id,
+    type: node.type,
+    title: node.title,
+    status: node.status,
+    spec: node.spec,
+    edges: node.edges,
   };
   for (const segment of segments) {
     if (!isRecord(current) || current[segment] === undefined) return undefined;
@@ -999,10 +1212,17 @@ function dynamicNodeField(
 
 function fieldValues(node: CompilerGraphNode, field: string): ConfigurationValue[] {
   const segments = field.replace(/^\$?\./u, "").split(".");
-  let values: ConfigurationValue[] = [{
-    ...(node.fields ?? {}), id: node.id, type: node.type, title: node.title,
-    status: node.status, spec: node.spec, edges: node.edges,
-  }];
+  let values: ConfigurationValue[] = [
+    {
+      ...(node.fields ?? {}),
+      id: node.id,
+      type: node.type,
+      title: node.title,
+      status: node.status,
+      spec: node.spec,
+      edges: node.edges,
+    },
+  ];
   for (const segment of segments) {
     values = values.flatMap((value) => {
       if (segment === "*") return isRecord(value) ? Object.values(value) : [];
@@ -1020,7 +1240,10 @@ function firstStringField(node: CompilerGraphNode, fields: readonly string[]): s
   return undefined;
 }
 
-function firstObjectString(object: ConfigurationObject, fields: readonly string[]): string | undefined {
+function firstObjectString(
+  object: ConfigurationObject,
+  fields: readonly string[],
+): string | undefined {
   for (const field of fields) {
     const value = object[field];
     if (typeof value === "string" && value.trim().length > 0) return value;
@@ -1041,9 +1264,15 @@ function countMatches(count: number, leaf: ConfigurationObject): boolean {
   return true;
 }
 
-function compareScalar(left: ConfigurationValue | undefined, right: ConfigurationValue | undefined): number {
-  if ((typeof left !== "string" && typeof left !== "number" && typeof left !== "boolean") ||
-      (typeof right !== "string" && typeof right !== "number" && typeof right !== "boolean")) return 0;
+function compareScalar(
+  left: ConfigurationValue | undefined,
+  right: ConfigurationValue | undefined,
+): number {
+  if (
+    (typeof left !== "string" && typeof left !== "number" && typeof left !== "boolean") ||
+    (typeof right !== "string" && typeof right !== "number" && typeof right !== "boolean")
+  )
+    return 0;
   return compareUtf8(String(left), String(right));
 }
 
@@ -1059,11 +1288,12 @@ function requiredRecord(value: ConfigurationValue | undefined, label: string): C
 }
 
 function recordValue(value: unknown): ConfigurationObject | undefined {
-  return isRecord(value) ? value as ConfigurationObject : undefined;
+  return isRecord(value) ? value : undefined;
 }
 
 function stringValue(value: unknown): string {
-  if (typeof value !== "string" || value.trim().length === 0) throw new Error("configured value must be a nonempty string");
+  if (typeof value !== "string" || value.trim().length === 0)
+    throw new Error("configured value must be a nonempty string");
   return value;
 }
 
@@ -1072,11 +1302,13 @@ function optionalString(value: unknown): string | undefined {
 }
 
 function stringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
 }
 
 function arrayValue(value: unknown): readonly ConfigurationValue[] {
-  return Array.isArray(value) ? value as readonly ConfigurationValue[] : [];
+  return Array.isArray(value) ? (value as readonly ConfigurationValue[]) : [];
 }
 
 function sorted(values: Set<string>): string[] {
@@ -1096,7 +1328,11 @@ function isDigest(value: unknown): value is Sha256Digest {
 }
 
 function isIsoTimestamp(value: unknown): boolean {
-  return typeof value === "string" && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+  return (
+    typeof value === "string" &&
+    Number.isFinite(Date.parse(value)) &&
+    new Date(value).toISOString() === value
+  );
 }
 
 function deepFreeze<Value>(value: Value): Value {

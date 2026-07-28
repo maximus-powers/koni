@@ -38,12 +38,16 @@ export interface ProfileBaseline {
   files: readonly ProfileBaselineFile[];
 }
 
-export interface ProfileMigration {
-  from_profile_range: string;
+export interface ProfileRetireYamlFieldsMigration {
   id: string;
+  kind: "retire_yaml_fields";
+  from_profile_range: string;
+  from_bundle_sha256: readonly Sha256Digest[];
   path: string;
   sha256: Sha256Digest;
 }
+
+export type ProfileMigration = ProfileRetireYamlFieldsMigration;
 
 export interface ProfilePackageManifest {
   protocol: typeof PROFILE_PACKAGE_PROTOCOL;

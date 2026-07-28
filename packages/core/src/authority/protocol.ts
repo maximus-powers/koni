@@ -85,7 +85,10 @@ export class FrameDecoder {
 
   public constructor(maxFrameBytes = MAX_AUTHORITY_FRAME_BYTES) {
     if (!Number.isSafeInteger(maxFrameBytes) || maxFrameBytes < 1) {
-      throw new AuthorityProtocolError("frame_limit", "frame limit must be a positive safe integer");
+      throw new AuthorityProtocolError(
+        "frame_limit",
+        "frame limit must be a positive safe integer",
+      );
     }
     this.#maxFrameBytes = maxFrameBytes;
   }
@@ -133,8 +136,11 @@ function parseEnvelope(payload: Buffer): RpcEnvelope {
   } catch {
     throw new AuthorityProtocolError("invalid_json", "authority frame is not valid UTF-8 JSON");
   }
-  if (!isRecord(value) || typeof value.type !== "string" && typeof value.protocol !== "string") {
-    throw new AuthorityProtocolError("invalid_envelope", "authority frame is not a protocol object");
+  if (!isRecord(value) || (typeof value.type !== "string" && typeof value.protocol !== "string")) {
+    throw new AuthorityProtocolError(
+      "invalid_envelope",
+      "authority frame is not a protocol object",
+    );
   }
   if ("protocol" in value) {
     if (value.protocol !== AUTHORITY_PROTOCOL) {
@@ -146,7 +152,10 @@ function parseEnvelope(payload: Buffer): RpcEnvelope {
     return value as unknown as ProtocolHandshake;
   }
   if (!new Set(["request", "response", "event"]).has(String(value.type))) {
-    throw new AuthorityProtocolError("invalid_envelope", `unknown authority frame type ${String(value.type)}`);
+    throw new AuthorityProtocolError(
+      "invalid_envelope",
+      `unknown authority frame type ${String(value.type)}`,
+    );
   }
   return value as unknown as RpcEnvelope;
 }

@@ -1,10 +1,12 @@
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import {
   THINKING_LEVELS,
   type ControlModelOption,
   type ControlRoleDefault,
   type ControlThinkingLevel,
 } from "../control-center/protocol.js";
+import { canonicalHash, type Sha256Digest } from "../shared/canonical.js";
 
 export interface PiModelDescriptor {
   provider: string;
@@ -15,15 +17,69 @@ export interface PiModelDescriptor {
   thinkingLevelMap?: Partial<Record<ControlThinkingLevel, string | null>>;
 }
 
+/**
+ * Secret-free transport identity persisted in every compiler-issued launch specification.
+ *
+ * Pi model headers are deliberately excluded: extensions and provider configuration may place
+ * credentials there. The contained runtime compares this digest against its own freshly loaded
+ * model before any provider request, so mutable catalog routing/capability drift fails closed
+ * without copying provider secrets into Koni state.
+ */
+export interface SealedPiModelDescriptor {
+  provider: string;
+  id: string;
+  api: string;
+  baseUrl: string;
+  reasoning: boolean;
+  input: readonly ("text" | "image")[];
+  contextWindow: number;
+  maxTokens: number;
+  thinkingLevelMap?: Readonly<Partial<Record<ControlThinkingLevel, string | null>>>;
+  compat?: CanonicalJsonObject;
+}
+
+export interface SealedPiModelBinding {
+  provider: string;
+  id: string;
+  api: string;
+  /** Authenticated total provider context capacity, distinct from maximum generated output. */
+  catalogContextWindow: number;
+  catalogMaxTokens: number;
+  catalogSha256: Sha256Digest;
+}
+
+export interface SealedPiModelBindingRuntime {
+  getAvailableSnapshot(): readonly Model<Api>[];
+}
+
+export interface LoadSealedPiModelBindingOptions {
+  /** Tests may inject an isolated runtime; production always constructs a fresh offline Pi runtime. */
+  runtime?: SealedPiModelBindingRuntime;
+}
+
+export class SealedPiModelBindingError extends Error {
+  public readonly code: "model_unavailable" | "model_descriptor_invalid";
+
+  public constructor(code: "model_unavailable" | "model_descriptor_invalid", message: string) {
+    super(message);
+    this.name = "SealedPiModelBindingError";
+    this.code = code;
+  }
+}
+
+type CanonicalJson = null | boolean | number | string | CanonicalJson[] | CanonicalJsonObject;
+interface CanonicalJsonObject {
+  [key: string]: CanonicalJson;
+}
+
 export interface SealedRoleModelSelection extends Pick<
   ControlRoleDefault,
   "id" | "title" | "provider" | "model" | "thinkingLevel"
 > {}
 
-export type SealedRoleModelOverrides = Readonly<Record<string, Partial<Pick<
-  SealedRoleModelSelection,
-  "provider" | "model" | "thinkingLevel"
->>>>;
+export type SealedRoleModelOverrides = Readonly<
+  Record<string, Partial<Pick<SealedRoleModelSelection, "provider" | "model" | "thinkingLevel">>>
+>;
 
 export interface SealedModelAdmissionIssue {
   code: "model_unavailable" | "thinking_level_unsupported";
@@ -72,8 +128,112 @@ export interface LoadSealedPiModelCatalogOptions {
 export async function loadSealedPiModelCatalog(
   options: LoadSealedPiModelCatalogOptions = {},
 ): Promise<ControlModelOption[]> {
-  const runtime = options.runtime ?? await ModelRuntime.create({ allowModelNetwork: false });
+  const runtime = options.runtime ?? (await ModelRuntime.create({ allowModelNetwork: false }));
   return projectSealedPiModelCatalog(runtime, options.ambientRegistry);
+}
+
+/**
+ * Load and seal one executable model from Pi's ordinary offline availability snapshot.
+ * No provider registration, credential rewrite, model refresh, or network access occurs here.
+ */
+export async function loadSealedPiModelBinding(
+  provider: string,
+  id: string,
+  options: LoadSealedPiModelBindingOptions = {},
+): Promise<SealedPiModelBinding> {
+  const runtime = options.runtime ?? (await ModelRuntime.create({ allowModelNetwork: false }));
+  const matches = runtime
+    .getAvailableSnapshot()
+    .filter((candidate) => candidate.provider === provider && candidate.id === id);
+  if (matches.length !== 1) {
+    throw new SealedPiModelBindingError(
+      "model_unavailable",
+      matches.length === 0
+        ? `The contained Pi runtime cannot execute ${provider}/${id} under the current Pi configuration.`
+        : `The contained Pi runtime exposed an ambiguous catalog identity for ${provider}/${id}.`,
+    );
+  }
+  return sealPiModelDescriptor(matches[0]!);
+}
+
+/** Build the exact secret-free catalog projection used by both compiler and contained runtime. */
+export function sealedPiModelDescriptor(model: Readonly<Model<Api>>): SealedPiModelDescriptor {
+  assertNonemptyModelText(model.provider, "provider");
+  assertNonemptyModelText(model.id, "id");
+  assertNonemptyModelText(model.api, "api");
+  assertNonemptyModelText(model.baseUrl, "baseUrl");
+  let endpoint: URL;
+  try {
+    endpoint = new URL(model.baseUrl);
+  } catch {
+    throw new SealedPiModelBindingError(
+      "model_descriptor_invalid",
+      "Pi model baseUrl is not an absolute URL",
+    );
+  }
+  if (endpoint.username.length > 0 || endpoint.password.length > 0) {
+    throw new SealedPiModelBindingError(
+      "model_descriptor_invalid",
+      "Pi model baseUrl must not embed credentials in compiler-persisted model identity",
+    );
+  }
+  assertPositiveSafeInteger(model.contextWindow, "contextWindow");
+  assertPositiveSafeInteger(model.maxTokens, "maxTokens");
+  if (model.maxTokens > model.contextWindow) {
+    throw new SealedPiModelBindingError(
+      "model_descriptor_invalid",
+      "Pi model maxTokens cannot exceed its context window",
+    );
+  }
+  if (typeof model.reasoning !== "boolean") {
+    throw new SealedPiModelBindingError(
+      "model_descriptor_invalid",
+      "Pi model reasoning capability is invalid",
+    );
+  }
+  if (
+    !Array.isArray(model.input) ||
+    model.input.length === 0 ||
+    model.input.some((entry) => entry !== "text" && entry !== "image")
+  ) {
+    throw new SealedPiModelBindingError(
+      "model_descriptor_invalid",
+      "Pi model input capabilities are invalid",
+    );
+  }
+  const thinkingLevelMap =
+    model.thinkingLevelMap === undefined
+      ? undefined
+      : canonicalThinkingLevelMap(model.thinkingLevelMap);
+  const compat =
+    model.compat === undefined
+      ? undefined
+      : canonicalJsonObject(model.compat, "compat", new Set<object>());
+  return {
+    provider: model.provider,
+    id: model.id,
+    api: model.api,
+    baseUrl: model.baseUrl,
+    reasoning: model.reasoning,
+    input: [...model.input],
+    contextWindow: model.contextWindow,
+    maxTokens: model.maxTokens,
+    ...(thinkingLevelMap === undefined ? {} : { thinkingLevelMap }),
+    ...(compat === undefined ? {} : { compat }),
+  };
+}
+
+/** Seal a Pi model without ever serializing its optional headers or cost/credential state. */
+export function sealPiModelDescriptor(model: Readonly<Model<Api>>): SealedPiModelBinding {
+  const descriptor = sealedPiModelDescriptor(model);
+  return {
+    provider: descriptor.provider,
+    id: descriptor.id,
+    api: descriptor.api,
+    catalogContextWindow: descriptor.contextWindow,
+    catalogMaxTokens: descriptor.maxTokens,
+    catalogSha256: canonicalHash(descriptor),
+  };
 }
 
 /** Pure projection used by both `/koni` and standalone `koni tui`. */
@@ -96,10 +256,11 @@ export function projectSealedPiModelCatalog(
       reasoning: model.reasoning,
       thinkingLevels: supportedThinkingLevels(model),
       available,
-      ...(available ? {} : {
-        unavailableReason:
-          `The contained Pi runtime did not make ${model.provider}/${model.id} available under the current Pi credentials.`,
-      }),
+      ...(available
+        ? {}
+        : {
+            unavailableReason: `The contained Pi runtime did not make ${model.provider}/${model.id} available under the current Pi credentials.`,
+          }),
     };
   });
 
@@ -119,11 +280,13 @@ export function projectSealedPiModelCatalog(
     });
   }
 
-  return projected.sort((left, right) =>
-    Number(right.available) - Number(left.available)
-      || left.provider.localeCompare(right.provider)
-      || left.name.localeCompare(right.name)
-      || left.id.localeCompare(right.id));
+  return projected.sort(
+    (left, right) =>
+      Number(right.available) - Number(left.available) ||
+      left.provider.localeCompare(right.provider) ||
+      left.name.localeCompare(right.name) ||
+      left.id.localeCompare(right.id),
+  );
 }
 
 /**
@@ -141,10 +304,12 @@ export function sealedModelAdmissionIssue(
     const provider = override?.provider ?? role.provider;
     const modelId = override?.model ?? role.model;
     const thinkingLevel = override?.thinkingLevel ?? role.thinkingLevel;
-    const model = models.find((candidate) => candidate.provider === provider && candidate.id === modelId);
+    const model = models.find(
+      (candidate) => candidate.provider === provider && candidate.id === modelId,
+    );
     if (model?.available !== true) {
-      const reason = model?.unavailableReason
-        ?? "This model is not executable by the contained Pi runtime.";
+      const reason =
+        model?.unavailableReason ?? "This model is not executable by the contained Pi runtime.";
       return {
         code: "model_unavailable",
         roleId: role.id,
@@ -206,4 +371,103 @@ function modelKeys(models: readonly Pick<PiModelDescriptor, "provider" | "id">[]
 
 function modelKey(model: Pick<PiModelDescriptor, "provider" | "id">): string {
   return `${model.provider}\0${model.id}`;
+}
+
+function canonicalThinkingLevelMap(
+  value: NonNullable<Model<Api>["thinkingLevelMap"]>,
+): Partial<Record<ControlThinkingLevel, string | null>> {
+  const result: Partial<Record<ControlThinkingLevel, string | null>> = {};
+  for (const level of THINKING_LEVELS) {
+    const mapped = value[level];
+    if (mapped === undefined) continue;
+    if (mapped !== null && typeof mapped !== "string") {
+      throw new SealedPiModelBindingError(
+        "model_descriptor_invalid",
+        "Pi thinking-level mapping is invalid",
+      );
+    }
+    result[level] = mapped;
+  }
+  return result;
+}
+
+function canonicalJsonObject(
+  value: unknown,
+  label: string,
+  ancestors: Set<object>,
+): CanonicalJsonObject {
+  const projected = canonicalJson(value, label, ancestors);
+  if (projected === null || Array.isArray(projected) || typeof projected !== "object") {
+    throw new SealedPiModelBindingError(
+      "model_descriptor_invalid",
+      `${label} must be a plain object`,
+    );
+  }
+  return projected;
+}
+
+function canonicalJson(value: unknown, label: string, ancestors: Set<object>): CanonicalJson {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value))) {
+      throw new SealedPiModelBindingError(
+        "model_descriptor_invalid",
+        `${label} contains an invalid number`,
+      );
+    }
+    return Object.is(value, -0) ? 0 : value;
+  }
+  if (Array.isArray(value)) {
+    if (ancestors.has(value)) {
+      throw new SealedPiModelBindingError("model_descriptor_invalid", `${label} contains a cycle`);
+    }
+    ancestors.add(value);
+    try {
+      return value.map((entry, index) => canonicalJson(entry, `${label}[${index}]`, ancestors));
+    } finally {
+      ancestors.delete(value);
+    }
+  }
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  ) {
+    throw new SealedPiModelBindingError(
+      "model_descriptor_invalid",
+      `${label} contains a non-JSON value`,
+    );
+  }
+  if (ancestors.has(value)) {
+    throw new SealedPiModelBindingError("model_descriptor_invalid", `${label} contains a cycle`);
+  }
+  ancestors.add(value);
+  const projected: CanonicalJsonObject = Object.create(null) as CanonicalJsonObject;
+  try {
+    for (const [key, entry] of Object.entries(value)) {
+      if (entry === undefined) continue;
+      projected[key] = canonicalJson(entry, `${label}.${key}`, ancestors);
+    }
+    return projected;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function assertNonemptyModelText(value: unknown, label: string): asserts value is string {
+  if (typeof value !== "string" || value.trim().length === 0 || value.includes("\u0000")) {
+    throw new SealedPiModelBindingError(
+      "model_descriptor_invalid",
+      `Pi model ${label} is empty or invalid`,
+    );
+  }
+}
+
+function assertPositiveSafeInteger(value: unknown, label: string): asserts value is number {
+  if (!Number.isSafeInteger(value) || Number(value) < 1) {
+    throw new SealedPiModelBindingError(
+      "model_descriptor_invalid",
+      `Pi model ${label} must be a positive safe integer`,
+    );
+  }
 }

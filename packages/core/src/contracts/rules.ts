@@ -8,6 +8,8 @@ import type { Sha256Digest } from "../shared/canonical.js";
 export const RULE_EVALUATION_PROTOCOL = "koni.rule-evaluation.v1" as const;
 export const DERIVED_FACT_PROTOCOL = "koni.derived-fact.v1" as const;
 export const DERIVED_TICKET_PROTOCOL = "koni.derived-ticket.v1" as const;
+export const GATE_POLICY_CONTEXT_PROTOCOL = "koni.gate-policy-context.v1" as const;
+export const STATE_MACHINE_CATALOG_PROTOCOL = "koni.state-machine-catalog.v1" as const;
 
 export type DerivationKind =
   | "obligation"
@@ -62,12 +64,48 @@ export interface DerivedFact {
   readonly fact_sha256: Sha256Digest;
 }
 
-export type DerivedWorkflowStepKind =
-  | "production"
-  | "integration"
-  | "review"
-  | "agent"
-  | "manual";
+export interface CompiledGatePolicyContext {
+  readonly protocol: typeof GATE_POLICY_CONTEXT_PROTOCOL;
+  readonly policy_id: string;
+  readonly policy_contract_sha256: Sha256Digest;
+  readonly gate_node_id: string;
+  readonly winner_node_id?: string;
+  readonly evaluation_target_node_ids: readonly string[];
+  readonly ancestor_node_ids: readonly string[];
+  readonly direct_gate_node_ids: readonly string[];
+  readonly inherited_gate_node_ids: readonly string[];
+  readonly applicable_gate_node_ids: readonly string[];
+  readonly context_node_ids: readonly string[];
+  readonly read_paths: readonly string[];
+  readonly context_sha256: Sha256Digest;
+}
+
+export interface CompiledStateTransition {
+  readonly id: string;
+  readonly from: readonly string[];
+  readonly to: string;
+  /** Empty means every authenticated actor. */
+  readonly actors: readonly string[];
+  readonly transition_sha256: Sha256Digest;
+}
+
+export interface CompiledStateMachine {
+  readonly id: string;
+  readonly initial: string;
+  readonly states: readonly string[];
+  readonly terminal_states: readonly string[];
+  readonly transitions: readonly CompiledStateTransition[];
+  readonly machine_sha256: Sha256Digest;
+}
+
+export interface CompiledStateMachineCatalog {
+  readonly protocol: typeof STATE_MACHINE_CATALOG_PROTOCOL;
+  readonly configuration_sha256: Sha256Digest;
+  readonly machines: Readonly<Record<string, CompiledStateMachine>>;
+  readonly catalog_sha256: Sha256Digest;
+}
+
+export type DerivedWorkflowStepKind = "production" | "integration" | "review" | "agent" | "manual";
 
 export type DerivedGraphMutationPolicy = "allowed" | "forbidden" | "required";
 
@@ -135,6 +173,8 @@ export interface CompiledRuleEvaluationMaterial {
   readonly input_graph_sha256: Sha256Digest;
   readonly derived_graph_sha256: Sha256Digest;
   readonly facts: readonly DerivedFact[];
+  readonly gate_policy_contexts: readonly CompiledGatePolicyContext[];
+  readonly state_machine_catalog: CompiledStateMachineCatalog;
   readonly program_state: ConfigurationObject;
   readonly tickets: readonly DerivedTicketDefinition[];
 }

@@ -1,25 +1,13 @@
-import {
-  ProcessTerminal,
-  TUI,
-  type Terminal,
-} from "@earendil-works/pi-tui";
+import { ProcessTerminal, TUI, type Terminal } from "@earendil-works/pi-tui";
 import { AuthorityClient } from "../authority/client.js";
 import { loadSealedPiModelCatalog } from "../pi/model-catalog.js";
-import {
-  ControlCenterComponent,
-} from "./component.js";
-import {
-  ControlCenterController,
-  type ControlCenterAuthorityClient,
-} from "./controller.js";
+import { ControlCenterComponent } from "./component.js";
+import { ControlCenterController, type ControlCenterAuthorityClient } from "./controller.js";
 import type { ControlCenterCockpitCatalogResolver } from "./cockpit-config.js";
 import { createAuthorityCockpitCatalogResolver } from "./authority-cockpit-resolver.js";
 import { ResilientControlCenterClient } from "./resilient-client.js";
 import type { ControlModelOption } from "./protocol.js";
-import {
-  ansiKoniPalette,
-  type KoniPalette,
-} from "./markdown.js";
+import { ansiKoniPalette, type KoniPalette } from "./markdown.js";
 
 export interface StandaloneControlCenterOptions {
   projectRoot: string;
@@ -55,18 +43,24 @@ export async function createStandaloneControlCenter(
   options: StandaloneControlCenterOptions,
 ): Promise<StandaloneControlCenterHandle> {
   const ownsClient = options.client === undefined;
-  const initialClient = options.client ?? await AuthorityClient.connect({
-    projectRoot: options.projectRoot,
-    client: "tui",
-    version: options.version,
-  });
-  const client = options.reconnectClient === undefined
-    ? initialClient
-    : new ResilientControlCenterClient({ client: initialClient, reconnect: options.reconnectClient });
+  const initialClient =
+    options.client ??
+    (await AuthorityClient.connect({
+      projectRoot: options.projectRoot,
+      client: "tui",
+      version: options.version,
+    }));
+  const client =
+    options.reconnectClient === undefined
+      ? initialClient
+      : new ResilientControlCenterClient({
+          client: initialClient,
+          reconnect: options.reconnectClient,
+        });
   const terminal = options.terminal ?? new ProcessTerminal();
   // Authority-client ownership is unrelated to Pi model discovery. The CLI deliberately injects
   // its already-leased authority client, but New Run must still see the ordinary Pi catalog.
-  const models = options.models ?? await loadStandaloneModels();
+  const models = options.models ?? (await loadStandaloneModels());
   const tui = new TUI(terminal);
   let started = false;
   let stopped = false;
@@ -90,7 +84,8 @@ export async function createStandaloneControlCenter(
     projectRoot: options.projectRoot,
     client,
     models,
-    cockpitCatalogResolver: options.cockpitCatalogResolver ?? createAuthorityCockpitCatalogResolver(client),
+    cockpitCatalogResolver:
+      options.cockpitCatalogResolver ?? createAuthorityCockpitCatalogResolver(client),
     closeClientOnDispose: ownsClient || options.reconnectClient !== undefined,
     onQuit: () => void stop(),
   });
@@ -112,7 +107,9 @@ export async function createStandaloneControlCenter(
     component,
     tui,
     closed,
-    get started() { return started; },
+    get started() {
+      return started;
+    },
     start(): void {
       if (started || stopped) return;
       started = true;
@@ -129,7 +126,9 @@ async function loadStandaloneModels(): Promise<ControlModelOption[]> {
 }
 
 /** Explicit blocking host used by the `koni tui` command. */
-export async function runStandaloneControlCenter(options: StandaloneControlCenterOptions): Promise<void> {
+export async function runStandaloneControlCenter(
+  options: StandaloneControlCenterOptions,
+): Promise<void> {
   const handle = await createStandaloneControlCenter(options);
   handle.start();
   await handle.closed;

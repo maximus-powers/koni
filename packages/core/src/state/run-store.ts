@@ -45,7 +45,10 @@ export class DurableRunStore {
       }
       records.push(await this.get(entry.name));
     }
-    return records.sort((left, right) => right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id));
+    return records.sort(
+      (left, right) =>
+        right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id),
+    );
   }
 
   public async get(runId: string): Promise<RunRecord> {
@@ -78,9 +81,7 @@ export class DurableRunStore {
       const relative = this.#relativeRunFile(record.id);
       const bytes = encodeRun(record);
       const txId = makeTransactionId(record.id, 0);
-      await this.#transactions.prepare(txId, [
-        { path: relative, bytes, expectedSha256: null },
-      ]);
+      await this.#transactions.prepare(txId, [{ path: relative, bytes, expectedSha256: null }]);
       await this.#transactions.commit(txId);
       await this.#transactions.cleanupCommitted(txId);
       return structuredClone(record);
@@ -135,7 +136,10 @@ export class DurableRunStore {
 
   async #serialized<T>(operation: () => Promise<T>): Promise<T> {
     const run = this.#tail.then(operation, operation);
-    this.#tail = run.then(() => undefined, () => undefined);
+    this.#tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
     return run;
   }
 }

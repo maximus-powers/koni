@@ -9,7 +9,10 @@ import {
   GraphExpressionEvaluator,
   type RuleDomainAdapter,
 } from "../src/compiler/expressions.js";
-import { parseProfilePackageManifest, type VerifiedProfileBaseline } from "../src/compiler/profile-package.js";
+import {
+  parseProfilePackageManifest,
+  type VerifiedProfileBaseline,
+} from "../src/compiler/profile-package.js";
 import { deterministicTicketId, evaluateConfiguredRules } from "../src/compiler/rules.js";
 import { resolveCompiledPersona, resolveCompiledRunType } from "../src/compiler/resolution.js";
 import type { CompiledConfiguration, ConfigurationObject } from "../src/contracts/configuration.js";
@@ -26,7 +29,18 @@ describe("deterministic graph expression and rule compiler", () => {
       if (!result.ok) continue;
       expect(() => new GraphSchema(result.value)).not.toThrow();
       expect(result.value.nodeTypes.length).toBeGreaterThan(0);
-      expect(result.value.nodeTypes.every((nodeType) => nodeType.description.length > 0)).toBe(true);
+      expect(result.value.nodeTypes.every((nodeType) => nodeType.description.length > 0)).toBe(
+        true,
+      );
+      if (packageDirectory === "coding-profile") {
+        expect(result.value.nodeTypes.find((nodeType) => nodeType.id === "delivery")).toMatchObject(
+          {
+            compiler_owned_fields: expect.arrayContaining(["spec.target_branch"]),
+            agent_visible_compiler_owned_fields: expect.arrayContaining(["spec.target_branch"]),
+            compiler_field_sources: { "spec.target_branch": "run.git.target.ref" },
+          },
+        );
+      }
       expect(Object.isFrozen(result.value)).toBe(true);
     }
   });
@@ -42,14 +56,16 @@ describe("deterministic graph expression and rule compiler", () => {
     };
     const result = projectGraphSchemaDefinition(invalid);
     expect(result.ok).toBe(false);
-    expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toContain("graph_schema.semantic");
+    expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toContain(
+      "graph_schema.semantic",
+    );
   });
 
   it("resolves default run types and effective persona settings without launch-time duplication", () => {
     const configuration = compileProfile("coding-profile");
     const defaultRunType = resolveCompiledRunType(configuration);
     expect(defaultRunType.ok).toBe(true);
-    if (defaultRunType.ok) expect(defaultRunType.value.id).toBe("medium");
+    if (defaultRunType.ok) expect(defaultRunType.value.id).toBe("continuous-improvement");
 
     const planner = resolveCompiledPersona(configuration, "run-planner", { runTypeId: "small" });
     expect(planner.ok, diagnostics(planner)).toBe(true);
@@ -87,12 +103,14 @@ describe("deterministic graph expression and rule compiler", () => {
     if (!first.ok) return;
     expect(first.value.tickets).toHaveLength(1);
     const ticket = first.value.tickets[0]!;
-    expect(ticket.id).toBe(deterministicTicketId(
-      "objective.map-architecture",
-      ["objective-a"],
-      "objective-without-affected-boundary",
-      configuration.configuration_sha256,
-    ));
+    expect(ticket.id).toBe(
+      deterministicTicketId(
+        "objective.map-architecture",
+        ["objective-a"],
+        "objective-without-affected-boundary",
+        configuration.configuration_sha256,
+      ),
+    );
     expect(ticket.operation_registry_id).toBe("architecture.objective.map");
     expect(ticket.workflow_id).toBe("architecture-map");
     expect(ticket.review_failure_reopen_from).toBe("map-affected-boundary");
@@ -113,11 +131,52 @@ describe("deterministic graph expression and rule compiler", () => {
     if (reordered.ok) expect(reordered.value.evaluation_sha256).toBe(first.value.evaluation_sha256);
   });
 
+  it("rejects review rework routes whose owner cannot durably repair the finding", () => {
+    const configuration = compileProfile("coding-profile");
+    const workflow = structuredClone(configuration.registries.workflows["architecture-map"]!);
+    const steps = workflow.steps as ConfigurationObject[];
+    steps[0] = {
+      ...steps[0]!,
+      graph_mutation: "forbidden",
+      write_paths: [],
+    };
+    const invalid: CompiledConfiguration = {
+      ...configuration,
+      registries: {
+        ...configuration.registries,
+        workflows: {
+          ...configuration.registries.workflows,
+          "architecture-map": workflow,
+        },
+      },
+    };
+    const result = evaluateConfiguredRules(
+      {
+        configuration: invalid,
+        graph: projection([
+          node("objective-a", "objective", "Build notes", "active", {
+            outcome: "Users can keep notes",
+          }),
+        ]),
+      },
+      { ruleIds: ["objective.map-architecture"] },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.diagnostics.map((item) => item.code)).toContain("rule.review_rework_no_effect");
+  });
+
   it("suppresses an architecture ticket after the bidirectional semantic boundary exists", () => {
     const configuration = compileProfile("coding-profile");
-    const objective = node("objective-a", "objective", "Build notes", "active", { outcome: "Notes" }, {
-      systems: ["system-a"],
-    });
+    const objective = node(
+      "objective-a",
+      "objective",
+      "Build notes",
+      "active",
+      { outcome: "Notes" },
+      {
+        systems: ["system-a"],
+      },
+    );
     const system = node("system-a", "system", "Notes app", "active", {
       kind: "app",
       responsibility: "Store notes",
@@ -146,12 +205,19 @@ describe("deterministic graph expression and rule compiler", () => {
         },
       },
     });
-    const experiment = node("experiment-a", "experiment", "Run A", "draft", {}, {
-      methods: ["method-a"],
-      metrics: ["metric-a"],
-      ablations: ["ablation-a"],
-      requires: ["prerequisite-a"],
-    });
+    const experiment = node(
+      "experiment-a",
+      "experiment",
+      "Run A",
+      "draft",
+      {},
+      {
+        methods: ["method-a"],
+        metrics: ["metric-a"],
+        ablations: ["ablation-a"],
+        requires: ["prerequisite-a"],
+      },
+    );
     const graph = projection([
       experiment,
       node("method-a", "method", "Method", "draft"),
@@ -191,7 +257,9 @@ describe("deterministic graph expression and rule compiler", () => {
     expect(right.ok, diagnostics(right)).toBe(true);
     if (!left.ok || !right.ok) return;
     expect(left.value.tickets).toHaveLength(1);
-    expect(left.value.tickets[0]?.operation_registry_id).toBe("formulation.hypothesis.drill-hypothesis");
+    expect(left.value.tickets[0]?.operation_registry_id).toBe(
+      "formulation.hypothesis.drill-hypothesis",
+    );
     expect(left.value.tickets[0]?.workflow.map((step) => step.id)).toEqual([
       "drill-claims",
       "map-related-work",
@@ -215,7 +283,8 @@ describe("deterministic graph expression and rule compiler", () => {
       { ruleIds: ["system.specify-contracts"] },
     );
     expect(good.ok, diagnostics(good)).toBe(true);
-    if (good.ok) expect(good.value.tickets[0]?.scope.read_paths).toEqual(["packages/api", "packages/api/src"]);
+    if (good.ok)
+      expect(good.value.tickets[0]?.scope.read_paths).toEqual(["packages/api", "packages/api/src"]);
 
     const unsafe = { ...system, spec: { ...system.spec, owned_paths: ["../secrets"] } };
     const bad = evaluateConfiguredRules(
@@ -229,39 +298,53 @@ describe("deterministic graph expression and rule compiler", () => {
   it("normalizes inverse edges, set algebra, vacuous quantifiers, and recursive query errors", () => {
     const configuration = compileProfile("research-profile");
     const claim = node("claim-a", "claim", "Claim", "active");
-    const experiment = node("experiment-a", "experiment", "Experiment", "draft", {}, {
-      target_claims: ["claim-a"],
-    });
+    const experiment = node(
+      "experiment-a",
+      "experiment",
+      "Experiment",
+      "draft",
+      {},
+      {
+        target_claims: ["claim-a"],
+      },
+    );
     const evaluator = new GraphExpressionEvaluator(configuration, projection([experiment, claim]));
     evaluator.bind("target", ["claim-a"]);
-    expect(evaluator.select({
-      traverse: {
-        from: "$target",
-        relation: "tested_by",
-        max_depth: 1,
-        node_types: ["experiment"],
-      },
-    })).toEqual(["experiment-a"]);
-    expect(evaluator.select({
-      difference: {
-        left: { union: ["claim", "experiment"] },
-        right: { intersection: ["experiment", { ids: ["experiment-a"] }] },
-      },
-    })).toEqual(["claim-a"]);
-    expect(evaluator.evaluate({
-      for_all: {
-        select: { nodes: { node_types: ["asset"] } },
-        bind: "asset",
-        satisfies: { op: "field_present", subject: "$asset", field: "spec.root" },
-      },
-    })).toBe(true);
+    expect(
+      evaluator.select({
+        traverse: {
+          from: "$target",
+          relation: "tested_by",
+          max_depth: 1,
+          node_types: ["experiment"],
+        },
+      }),
+    ).toEqual(["experiment-a"]);
+    expect(
+      evaluator.select({
+        difference: {
+          left: { union: ["claim", "experiment"] },
+          right: { intersection: ["experiment", { ids: ["experiment-a"] }] },
+        },
+      }),
+    ).toEqual(["claim-a"]);
+    expect(
+      evaluator.evaluate({
+        for_all: {
+          select: { nodes: { node_types: ["asset"] } },
+          bind: "asset",
+          satisfies: { op: "field_present", subject: "$asset", field: "spec.root" },
+        },
+      }),
+    ).toBe(true);
 
     const recursive = withQueries(configuration, {
       "recursive-a": { id: "recursive-a", select: "recursive-b" },
       "recursive-b": { id: "recursive-b", select: "recursive-a" },
     });
-    expect(() => new GraphExpressionEvaluator(recursive, projection([claim])).select("recursive-a"))
-      .toThrowError(/recursive query/);
+    expect(() =>
+      new GraphExpressionEvaluator(recursive, projection([claim])).select("recursive-a"),
+    ).toThrowError(/recursive query/);
   });
 
   it("requires explicit domain adapters and validates their selected nodes", () => {
@@ -269,19 +352,23 @@ describe("deterministic graph expression and rule compiler", () => {
     const claim = node("claim-a", "claim", "Claim", "active");
     const evaluator = new GraphExpressionEvaluator(configuration, projection([claim]));
     evaluator.bind("target", ["claim-a"]);
-    expect(() => evaluator.evaluate({ op: "check_passed", check: "gate-verifier" }))
-      .toThrowError(ExpressionEvaluationError);
+    expect(() => evaluator.evaluate({ op: "check_passed", check: "gate-verifier" })).toThrowError(
+      ExpressionEvaluationError,
+    );
 
     const adapter: RuleDomainAdapter = {
-      evaluatePredicate: (leaf, context) => leaf.op === "check_passed" && context.subject?.id === "claim-a",
+      evaluatePredicate: (leaf, context) =>
+        leaf.op === "check_passed" && context.subject?.id === "claim-a",
       selectPolicy: () => ["missing-node"],
     };
     const adapted = new GraphExpressionEvaluator(configuration, projection([claim]), adapter);
     adapted.bind("target", ["claim-a"]);
     expect(adapted.evaluate({ op: "check_passed", check: "gate-verifier" })).toBe(true);
-    expect(() => adapted.select({
-      policy_applicability: { policy: "research-capability-gates", subject: "$target" },
-    })).toThrow(/missing node/);
+    expect(() =>
+      adapted.select({
+        policy_applicability: { policy: "research-capability-gates", subject: "$target" },
+      }),
+    ).toThrow(/missing node/);
   });
 
   it("fails closed when operation resolution is ambiguous", () => {
@@ -296,7 +383,9 @@ describe("deterministic graph expression and rule compiler", () => {
     const result = evaluateConfiguredRules(
       {
         configuration: ambiguous,
-        graph: projection([node("objective-a", "objective", "Objective", "active", { outcome: "Done" })]),
+        graph: projection([
+          node("objective-a", "objective", "Objective", "active", { outcome: "Done" }),
+        ]),
       },
       { ruleIds: ["objective.map-architecture"] },
     );
@@ -323,10 +412,13 @@ function readBaseline(packageDirectory: string): VerifiedProfileBaseline {
 function readTree(root: string): ReadonlyMap<string, Uint8Array> {
   const files = new Map<string, Uint8Array>();
   const visit = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    )) {
       const path = join(directory, entry.name);
       if (entry.isDirectory()) visit(path);
-      else if (entry.isFile()) files.set(relative(root, path).split(sep).join("/"), readFileSync(path));
+      else if (entry.isFile())
+        files.set(relative(root, path).split(sep).join("/"), readFileSync(path));
     }
   };
   visit(root);
@@ -377,6 +469,8 @@ function withOperations(
   };
 }
 
-function diagnostics(result: { diagnostics: readonly { path: string; code: string; message: string }[] }): string {
+function diagnostics(result: {
+  diagnostics: readonly { path: string; code: string; message: string }[];
+}): string {
   return result.diagnostics.map((item) => `${item.path}:${item.code}:${item.message}`).join("\n");
 }

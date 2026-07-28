@@ -7,6 +7,6 @@ console.log = diagnostic;
 console.info = diagnostic;
 console.debug = diagnostic;
 
-await assertRuntimeClosureFromEnvironment();
+await assertRuntimeClosureFromEnvironment(import.meta.url);
 const { runPiAttemptProcessChild } = await import("./attempt-process-child.js");
 await runPiAttemptProcessChild();

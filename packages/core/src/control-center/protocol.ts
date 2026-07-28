@@ -12,8 +12,6 @@ import {
   CONFIG_DOCUMENT_DOMAINS,
   CONFIG_DOCUMENT_MUTATION_PROTOCOL,
   CONFIG_DOCUMENT_SOURCE_PROTOCOL,
-  CONFIG_LEGACY_MIGRATION_PREVIEW_PROTOCOL,
-  CONFIG_LEGACY_MIGRATION_RESULT_PROTOCOL,
   CONFIG_RESOURCE_KINDS,
   CONFIG_RUN_TYPE_TEMPLATES_PROTOCOL,
   type ConfigDocumentCatalog,
@@ -21,8 +19,6 @@ import {
   type ConfigDocumentMutationResult,
   type ConfigDocumentSource,
   type ConfigDocumentSummary,
-  type ConfigLegacyMigrationPreview,
-  type ConfigLegacyMigrationResult,
   type ConfigResourceKind,
   type ConfigRunTypeTemplates,
 } from "../authority/config-documents.js";
@@ -33,8 +29,6 @@ export type {
   ConfigDocumentMutationResult,
   ConfigDocumentSource,
   ConfigDocumentSummary,
-  ConfigLegacyMigrationPreview,
-  ConfigLegacyMigrationResult,
   ConfigResourceKind,
   ConfigRunTypeTemplate,
   ConfigRunTypeTemplates,
@@ -43,8 +37,10 @@ export type {
 export const CONTROL_CATALOG_PROTOCOL = "koni.control-catalog.v1" as const;
 export const CONFIG_CATALOG_PROTOCOL = "koni.config-catalog.v1" as const;
 export const CONFIG_SNAPSHOT_PROTOCOL = "koni.config-snapshot.v1" as const;
-export const PROFILE_CONFLICT_CATALOG_PROTOCOL = "koni.profile-upstream-conflict-catalog.v1" as const;
-export const PROFILE_CONFLICT_INSPECTION_PROTOCOL = "koni.profile-upstream-conflict-inspection.v1" as const;
+export const PROFILE_CONFLICT_CATALOG_PROTOCOL =
+  "koni.profile-upstream-conflict-catalog.v1" as const;
+export const PROFILE_CONFLICT_INSPECTION_PROTOCOL =
+  "koni.profile-upstream-conflict-inspection.v1" as const;
 export const RUN_DELETION_PREVIEW_PROTOCOL = "koni.run-deletion-preview.v1" as const;
 export const RUN_MERGE_PREVIEW_PROTOCOL = "koni.run-merge-preview.v1" as const;
 export const RUN_ATTEMPT_LINEAGE_PROTOCOL = "koni.run-attempt-lineage.v1" as const;
@@ -77,15 +73,7 @@ export interface ControlProposalInspection {
   disposition: ControlProposalDisposition;
 }
 
-export const THINKING_LEVELS = [
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-] as const;
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 export type ControlThinkingLevel = (typeof THINKING_LEVELS)[number];
 
@@ -164,14 +152,7 @@ export interface ControlCatalog {
 }
 
 export type ConfigFieldKind =
-  | "text"
-  | "multiline"
-  | "integer"
-  | "boolean"
-  | "select"
-  | "model"
-  | "thinking"
-  | "string_list";
+  "text" | "multiline" | "integer" | "boolean" | "select" | "model" | "thinking" | "string_list";
 
 export interface ConfigFieldOption {
   value: string;
@@ -209,6 +190,8 @@ export interface ConfigResourceDefinition {
   /** Optional semantic tree relation used only for guided presentation. */
   parentId?: string;
   depth?: number;
+  /** Within-section sub-group label used to cluster related resources under a header. */
+  group?: string;
   canDuplicate?: boolean;
   canDelete?: boolean;
   /** Recipes for resources that may be created beneath this resource. */
@@ -293,12 +276,7 @@ export interface ControlRunMergePreview {
 }
 
 export type ControlAttemptLineageReason =
-  | "initial"
-  | "retry"
-  | "rework"
-  | "review"
-  | "recovery"
-  | "integration";
+  "initial" | "retry" | "rework" | "review" | "recovery" | "integration";
 
 export type ControlAttemptLineageStatus =
   | "queued"
@@ -354,17 +332,34 @@ export function parseControlCatalog(value: unknown): ControlCatalog {
     if (row.startMode !== "planning" && row.startMode !== "work") {
       throw new Error(`authority returned an invalid start mode for ${id}`);
     }
-    if (!Array.isArray(row.stages) || !Array.isArray(row.roles) || !Array.isArray(row.intake) || !Array.isArray(row.runCardSections)) {
+    if (
+      !Array.isArray(row.stages) ||
+      !Array.isArray(row.roles) ||
+      !Array.isArray(row.intake) ||
+      !Array.isArray(row.runCardSections)
+    ) {
       throw new Error(`authority returned incomplete launch defaults for ${id}`);
     }
     if (row.questionDefaultScope !== "run" && row.questionDefaultScope !== "ticket") {
       throw new Error(`authority returned invalid question scope for ${id}`);
     }
-    if (typeof row.autoStart !== "boolean") throw new Error(`authority returned invalid auto-start policy for ${id}`);
-    const intake = row.intake.map((field, fieldIndex) => parseControlIntakeField(field, fieldIndex));
+    if (typeof row.autoStart !== "boolean")
+      throw new Error(`authority returned invalid auto-start policy for ${id}`);
+    const intake = row.intake.map((field, fieldIndex) =>
+      parseControlIntakeField(field, fieldIndex),
+    );
     const objectiveFieldId = requiredText(row.objectiveFieldId, "objective field id");
-    if (!intake.some((field) => field.id === objectiveFieldId && field.required && (field.kind === "string" || field.kind === "text"))) {
-      throw new Error(`authority objective field ${objectiveFieldId} is not a required text intake field for ${id}`);
+    if (
+      !intake.some(
+        (field) =>
+          field.id === objectiveFieldId &&
+          field.required &&
+          (field.kind === "string" || field.kind === "text"),
+      )
+    ) {
+      throw new Error(
+        `authority objective field ${objectiveFieldId} is not a required text intake field for ${id}`,
+      );
     }
     return {
       id,
@@ -377,10 +372,13 @@ export function parseControlCatalog(value: unknown): ControlCatalog {
       intake,
       questionDefaultScope: row.questionDefaultScope,
       autoStart: row.autoStart,
-      runCardSections: row.runCardSections.map((section, sectionIndex) => requiredText(section, `run-card section ${sectionIndex + 1}`)),
+      runCardSections: row.runCardSections.map((section, sectionIndex) =>
+        requiredText(section, `run-card section ${sectionIndex + 1}`),
+      ),
       stages: row.stages.map((stage, stageIndex) => {
         const record = requiredRecord(stage, `stage ${stageIndex + 1}`);
-        if (typeof record.included !== "boolean") throw new Error("authority returned an invalid stage inclusion");
+        if (typeof record.included !== "boolean")
+          throw new Error("authority returned an invalid stage inclusion");
         return {
           id: requiredText(record.id, "stage id"),
           title: requiredText(record.title, "stage title"),
@@ -406,22 +404,38 @@ export function parseControlCatalog(value: unknown): ControlCatalog {
   });
   if (runTypes.length === 0) throw new Error("project has no runnable run types");
   if (!ids.has(defaultRunTypeId)) {
-    throw new Error(`authority default run type ${defaultRunTypeId} is not in the compiled run type catalog`);
+    throw new Error(
+      `authority default run type ${defaultRunTypeId} is not in the compiled run type catalog`,
+    );
   }
   return { protocol: CONTROL_CATALOG_PROTOCOL, defaultRunTypeId, runTypes };
 }
 
 function parseControlIntakeField(value: unknown, index: number): ControlIntakeField {
   const row = requiredRecord(value, `intake field ${index + 1}`);
-  const kinds = ["string", "text", "path", "boolean", "integer", "number", "choice", "multi_choice", "json"] as const;
-  if (!kinds.includes(row.kind as (typeof kinds)[number])) throw new Error("authority returned unsupported intake field kind");
-  if (typeof row.required !== "boolean" || !Array.isArray(row.options)) throw new Error("authority returned invalid intake field metadata");
+  const kinds = [
+    "string",
+    "text",
+    "path",
+    "boolean",
+    "integer",
+    "number",
+    "choice",
+    "multi_choice",
+    "json",
+  ] as const;
+  if (!kinds.includes(row.kind as (typeof kinds)[number]))
+    throw new Error("authority returned unsupported intake field kind");
+  if (typeof row.required !== "boolean" || !Array.isArray(row.options))
+    throw new Error("authority returned invalid intake field metadata");
   const options = row.options.map((option, optionIndex) => {
     const candidate = requiredRecord(option, `intake option ${optionIndex + 1}`);
     return {
       value: requiredText(candidate.value, "intake option value"),
       label: requiredText(candidate.label, "intake option label"),
-      ...(candidate.description === undefined ? {} : { description: requiredText(candidate.description, "intake option description") }),
+      ...(candidate.description === undefined
+        ? {}
+        : { description: requiredText(candidate.description, "intake option description") }),
     };
   });
   return {
@@ -430,7 +444,9 @@ function parseControlIntakeField(value: unknown, index: number): ControlIntakeFi
     description: typeof row.description === "string" ? row.description : "",
     kind: row.kind as IntakeFieldKind,
     required: row.required,
-    ...(row.default === undefined ? {} : { default: structuredClone(row.default) as ConfigurationValue }),
+    ...(row.default === undefined
+      ? {}
+      : { default: structuredClone(row.default) as ConfigurationValue }),
     options,
   };
 }
@@ -444,19 +460,24 @@ export function parseConfigCatalog(value: unknown): ConfigCatalog {
     protocol: CONFIG_CATALOG_PROTOCOL,
     sections: root.sections.map((section, sectionIndex) => {
       const row = requiredRecord(section, `configuration section ${sectionIndex + 1}`);
-      if (!Array.isArray(row.resources)) throw new Error("configuration section has no resource list");
+      if (!Array.isArray(row.resources))
+        throw new Error("configuration section has no resource list");
       return {
         id: requiredText(row.id, "configuration section id"),
         title: requiredText(row.title, "configuration section title"),
         description: requiredText(row.description, "configuration section description"),
-        ...(row.createOptions === undefined ? {} : {
-          createOptions: parseCreateOptions(row.createOptions, "configuration section"),
-        }),
+        ...(row.createOptions === undefined
+          ? {}
+          : {
+              createOptions: parseCreateOptions(row.createOptions, "configuration section"),
+            }),
         resources: row.resources.map((resource, resourceIndex) => {
           const record = requiredRecord(resource, `configuration resource ${resourceIndex + 1}`);
-          if (!Array.isArray(record.fields)) throw new Error("configuration resource has no field list");
+          if (!Array.isArray(record.fields))
+            throw new Error("configuration resource has no field list");
           const depth = optionalSafeNumber(record.depth, "configuration resource depth");
-          if (depth !== undefined && depth < 0) throw new Error("configuration resource depth is invalid");
+          if (depth !== undefined && depth < 0)
+            throw new Error("configuration resource depth is invalid");
           if (record.canDuplicate !== undefined && typeof record.canDuplicate !== "boolean") {
             throw new Error("configuration resource duplicate capability is invalid");
           }
@@ -467,13 +488,20 @@ export function parseConfigCatalog(value: unknown): ConfigCatalog {
             id: requiredText(record.id, "configuration resource id"),
             title: requiredText(record.title, "configuration resource title"),
             description: requiredText(record.description, "configuration resource description"),
-            ...(typeof record.parentId === "string" ? { parentId: requiredText(record.parentId, "configuration resource parent") } : {}),
+            ...(typeof record.parentId === "string"
+              ? { parentId: requiredText(record.parentId, "configuration resource parent") }
+              : {}),
             ...(depth === undefined ? {} : { depth }),
+            ...(typeof record.group === "string"
+              ? { group: requiredText(record.group, "configuration resource group") }
+              : {}),
             ...(record.canDuplicate === undefined ? {} : { canDuplicate: record.canDuplicate }),
             ...(record.canDelete === undefined ? {} : { canDelete: record.canDelete }),
-            ...(record.createOptions === undefined ? {} : {
-              createOptions: parseCreateOptions(record.createOptions, "configuration resource"),
-            }),
+            ...(record.createOptions === undefined
+              ? {}
+              : {
+                  createOptions: parseCreateOptions(record.createOptions, "configuration resource"),
+                }),
             fields: record.fields.map(parseConfigField),
           };
         }),
@@ -511,9 +539,12 @@ export function parseConfigSnapshot(value: unknown): ConfigSnapshot {
 
 export function parseProfileConflictCatalog(value: unknown): ControlProfileConflictCatalog {
   const root = requiredRecord(value, "upstream conflict catalog");
-  if (root.protocol !== PROFILE_CONFLICT_CATALOG_PROTOCOL ||
-      !Number.isSafeInteger(root.lifecycleGeneration) || typeof root.profileVersion !== "string" ||
-      !Array.isArray(root.conflicts)) {
+  if (
+    root.protocol !== PROFILE_CONFLICT_CATALOG_PROTOCOL ||
+    !Number.isSafeInteger(root.lifecycleGeneration) ||
+    typeof root.profileVersion !== "string" ||
+    !Array.isArray(root.conflicts)
+  ) {
     throw new Error("authority returned an unsupported upstream conflict catalog");
   }
   return {
@@ -526,18 +557,20 @@ export function parseProfileConflictCatalog(value: unknown): ControlProfileConfl
 
 export function parseProfileConflictInspection(value: unknown): ControlProfileConflictInspection {
   const root = requiredRecord(value, "upstream conflict inspection");
-  if (root.protocol !== PROFILE_CONFLICT_INSPECTION_PROTOCOL ||
-      !Number.isSafeInteger(root.lifecycleGeneration) ||
-      (root.currentText !== null && typeof root.currentText !== "string") ||
-      (root.upstreamText !== null && typeof root.upstreamText !== "string")) {
+  if (
+    root.protocol !== PROFILE_CONFLICT_INSPECTION_PROTOCOL ||
+    !Number.isSafeInteger(root.lifecycleGeneration) ||
+    (root.currentText !== null && typeof root.currentText !== "string") ||
+    (root.upstreamText !== null && typeof root.upstreamText !== "string")
+  ) {
     throw new Error("authority returned an unsupported upstream conflict inspection");
   }
   return {
     protocol: PROFILE_CONFLICT_INSPECTION_PROTOCOL,
     lifecycleGeneration: root.lifecycleGeneration as number,
     conflict: parseProfileConflict(root.conflict),
-    currentText: root.currentText as string | null,
-    upstreamText: root.upstreamText as string | null,
+    currentText: root.currentText,
+    upstreamText: root.upstreamText,
   };
 }
 
@@ -573,7 +606,9 @@ export function parseRunMergePreview(value: unknown): ControlRunMergePreview {
   if (
     root.protocol !== RUN_MERGE_PREVIEW_PROTOCOL ||
     typeof root.targetAdvanced !== "boolean" ||
-    (root.resyncState !== "current" && root.resyncState !== "required" && root.resyncState !== "unavailable") ||
+    (root.resyncState !== "current" &&
+      root.resyncState !== "required" &&
+      root.resyncState !== "unavailable") ||
     typeof root.canAuthorize !== "boolean" ||
     !isSha256Digest(root.previewToken)
   ) {
@@ -597,25 +632,46 @@ export function parseRunMergePreview(value: unknown): ControlRunMergePreview {
 
 export function parseControlProposalInspection(value: unknown): ControlProposalInspection {
   const root = requiredRecord(value, "proposal inspection");
-  assertExactFields(root, [
-    "runId", "ticketId", "sourceTicketId", "status", "title", "summary",
-    "targetNodeIds", "createdAt", "decision", "disposition",
-  ], "proposal inspection");
+  assertExactFields(
+    root,
+    [
+      "runId",
+      "ticketId",
+      "sourceTicketId",
+      "status",
+      "title",
+      "summary",
+      "targetNodeIds",
+      "createdAt",
+      "decision",
+      "disposition",
+    ],
+    "proposal inspection",
+  );
   const status = proposalTicketStatus(root.status, "proposal ticket status");
   const targetNodeIds = boundedIdentityArray(root.targetNodeIds, "proposal target node", 256);
   const disposition = parseProposalDisposition(root.disposition);
   const decision = root.decision === undefined ? undefined : parseProposalDecision(root.decision);
   if (decision?.decision === "rejection" && disposition.kind !== "rejected") {
-    throw new Error("authority returned a rejected proposal decision without a rejected disposition");
+    throw new Error(
+      "authority returned a rejected proposal decision without a rejected disposition",
+    );
   }
   if (disposition.kind === "rejected" && decision?.decision !== "rejection") {
-    throw new Error("authority returned a rejected proposal disposition without its durable decision");
+    throw new Error(
+      "authority returned a rejected proposal disposition without its durable decision",
+    );
   }
   if (decision?.decision === "approval" && disposition.kind === "rejected") {
     throw new Error("authority returned an approved proposal with a rejected disposition");
   }
-  if ((disposition.kind === "no_op" || disposition.kind === "application") && decision?.decision !== "approval") {
-    throw new Error("authority returned an applied proposal disposition without its durable approval");
+  if (
+    (disposition.kind === "no_op" || disposition.kind === "application") &&
+    decision?.decision !== "approval"
+  ) {
+    throw new Error(
+      "authority returned an applied proposal disposition without its durable approval",
+    );
   }
   return {
     runId: boundedRequiredText(root.runId, "proposal run id", 256),
@@ -633,7 +689,11 @@ export function parseControlProposalInspection(value: unknown): ControlProposalI
 
 function parseProposalDecision(value: unknown): ControlProposalDecision {
   const row = requiredRecord(value, "proposal decision");
-  assertExactFields(row, ["decision", "authoritySha256", "message", "actor", "decidedAt"], "proposal decision");
+  assertExactFields(
+    row,
+    ["decision", "authoritySha256", "message", "actor", "decidedAt"],
+    "proposal decision",
+  );
   if (row.decision !== "approval" && row.decision !== "rejection") {
     throw new Error("authority returned an invalid proposal decision");
   }
@@ -667,10 +727,18 @@ function parseProposalDisposition(value: unknown): ControlProposalDisposition {
     };
   }
   if (row.kind === "application") {
-    assertExactFields(row, ["kind", "applicationTicketId", "applicationStatus"], "proposal disposition");
+    assertExactFields(
+      row,
+      ["kind", "applicationTicketId", "applicationStatus"],
+      "proposal disposition",
+    );
     return {
       kind: "application",
-      applicationTicketId: boundedRequiredText(row.applicationTicketId, "proposal application ticket id", 256),
+      applicationTicketId: boundedRequiredText(
+        row.applicationTicketId,
+        "proposal application ticket id",
+        256,
+      ),
       applicationStatus: proposalTicketStatus(row.applicationStatus, "proposal application status"),
     };
   }
@@ -697,7 +765,8 @@ export function parseRunAttemptLineage(value: unknown): ControlRunAttemptLineage
   const attempts = root.attempts.map((value, index): ControlAttemptLineageEntry => {
     const row = requiredRecord(value, `attempt lineage row ${index + 1}`);
     const attemptId = requiredText(row.attemptId, "attempt lineage identity");
-    if (attemptIds.has(attemptId)) throw new Error("authority returned duplicate attempt lineage identity");
+    if (attemptIds.has(attemptId))
+      throw new Error("authority returned duplicate attempt lineage identity");
     attemptIds.add(attemptId);
     if (
       !ATTEMPT_LINEAGE_STATUSES.has(String(row.status) as ControlAttemptLineageStatus) ||
@@ -721,7 +790,8 @@ export function parseRunAttemptLineage(value: unknown): ControlRunAttemptLineage
         ? {}
         : { parentAttemptId: requiredText(row.parentAttemptId, "parent attempt identity") }),
       childAttemptIds: row.childAttemptIds.map((child, childIndex) =>
-        requiredText(child, `child attempt identity ${childIndex + 1}`)),
+        requiredText(child, `child attempt identity ${childIndex + 1}`),
+      ),
       activeLeaf: row.activeLeaf,
     };
   });
@@ -745,11 +815,13 @@ export function parseConfigDocumentCatalog(value: unknown): ConfigDocumentCatalo
     typeof root.valid !== "boolean" ||
     !Array.isArray(root.diagnostics) ||
     !Array.isArray(root.documents)
-  ) throw new Error("authority returned an unsupported configuration document catalog");
+  )
+    throw new Error("authority returned an unsupported configuration document catalog");
   const documents = root.documents.map(parseConfigDocumentSummary);
   const ids = new Set<string>();
   for (const document of documents) {
-    if (ids.has(document.id)) throw new Error("authority returned duplicate configuration document identity");
+    if (ids.has(document.id))
+      throw new Error("authority returned duplicate configuration document identity");
     ids.add(document.id);
   }
   return {
@@ -771,7 +843,8 @@ export function parseConfigDocumentSource(value: unknown): ConfigDocumentSource 
     root.protocol !== CONFIG_DOCUMENT_SOURCE_PROTOCOL ||
     !isSha256Digest(root.catalogToken) ||
     typeof root.source !== "string"
-  ) throw new Error("authority returned an unsupported configuration document source");
+  )
+    throw new Error("authority returned an unsupported configuration document source");
   return {
     protocol: CONFIG_DOCUMENT_SOURCE_PROTOCOL,
     catalogToken: root.catalogToken,
@@ -787,7 +860,10 @@ export function parseConfigDocumentMutation(value: unknown): ConfigDocumentMutat
   }
   return {
     protocol: CONFIG_DOCUMENT_MUTATION_PROTOCOL,
-    changedDocuments: nonnegativeSafeNumber(root.changedDocuments, "changed configuration document count"),
+    changedDocuments: nonnegativeSafeNumber(
+      root.changedDocuments,
+      "changed configuration document count",
+    ),
     catalog: parseConfigDocumentCatalog(root.catalog),
   };
 }
@@ -798,7 +874,8 @@ export function parseConfigRunTypeTemplates(value: unknown): ConfigRunTypeTempla
     root.protocol !== CONFIG_RUN_TYPE_TEMPLATES_PROTOCOL ||
     !isSha256Digest(root.catalogToken) ||
     !Array.isArray(root.templates)
-  ) throw new Error("authority returned unsupported run type templates");
+  )
+    throw new Error("authority returned unsupported run type templates");
   return {
     protocol: CONFIG_RUN_TYPE_TEMPLATES_PROTOCOL,
     catalogToken: root.catalogToken,
@@ -813,42 +890,6 @@ export function parseConfigRunTypeTemplates(value: unknown): ConfigRunTypeTempla
   };
 }
 
-export function parseConfigLegacyMigrationPreview(value: unknown): ConfigLegacyMigrationPreview {
-  const root = requiredRecord(value, "legacy migration preview");
-  if (
-    root.protocol !== CONFIG_LEGACY_MIGRATION_PREVIEW_PROTOCOL ||
-    !isSha256Digest(root.previewToken) ||
-    (root.sourceKind !== "codex_schema1" && root.sourceKind !== "unmanaged_koni") ||
-    typeof root.requiresRunBarrier !== "boolean" ||
-    root.sourceRetained !== true
-  ) throw new Error("authority returned an unsupported legacy migration preview");
-  return {
-    protocol: CONFIG_LEGACY_MIGRATION_PREVIEW_PROTOCOL,
-    previewToken: root.previewToken,
-    migrationId: requiredText(root.migrationId, "legacy migration identity"),
-    sourceKind: root.sourceKind,
-    profileVersion: requiredText(root.profileVersion, "legacy migration profile version"),
-    configurationFiles: nonnegativeSafeNumber(root.configurationFiles, "legacy configuration file count"),
-    externalAgents: nonnegativeSafeNumber(root.externalAgents, "external agent count"),
-    runs: nonnegativeSafeNumber(root.runs, "legacy run count"),
-    requiresRunBarrier: root.requiresRunBarrier,
-    sourceRetained: true,
-  };
-}
-
-export function parseConfigLegacyMigrationResult(value: unknown): ConfigLegacyMigrationResult {
-  const root = requiredRecord(value, "legacy migration result");
-  if (root.protocol !== CONFIG_LEGACY_MIGRATION_RESULT_PROTOCOL || root.sourceRetained !== true) {
-    throw new Error("authority returned an unsupported legacy migration result");
-  }
-  return {
-    protocol: CONFIG_LEGACY_MIGRATION_RESULT_PROTOCOL,
-    migrationId: requiredText(root.migrationId, "legacy migration identity"),
-    sourceRetained: true,
-    catalog: parseConfigDocumentCatalog(root.catalog),
-  };
-}
-
 function parseConfigDocumentSummary(value: unknown): ConfigDocumentSummary {
   const row = requiredRecord(value, "configuration document");
   const capabilities = requiredRecord(row.capabilities, "configuration document capabilities");
@@ -856,16 +897,20 @@ function parseConfigDocumentSummary(value: unknown): ConfigDocumentSummary {
     !CONFIG_DOCUMENT_DOMAINS.includes(row.domain as ConfigDocumentDomain) ||
     !CONFIG_RESOURCE_KINDS.includes(row.kind as ConfigResourceKind) ||
     !Array.isArray(row.resourceKinds) ||
-    !row.resourceKinds.every((kind) => CONFIG_RESOURCE_KINDS.includes(kind as ConfigResourceKind)) ||
+    !row.resourceKinds.every((kind) =>
+      CONFIG_RESOURCE_KINDS.includes(kind as ConfigResourceKind),
+    ) ||
     (row.format !== "yaml" && row.format !== "toml" && row.format !== "markdown") ||
-    !Number.isSafeInteger(row.sizeBytes) || (row.sizeBytes as number) < 0 ||
+    !Number.isSafeInteger(row.sizeBytes) ||
+    (row.sizeBytes as number) < 0 ||
     !isSha256Digest(row.sourceToken) ||
     capabilities.read !== true ||
     typeof capabilities.update !== "boolean" ||
     typeof capabilities.rename !== "boolean" ||
     typeof capabilities.delete !== "boolean" ||
     (capabilities.reason !== undefined && typeof capabilities.reason !== "string")
-  ) throw new Error("authority returned an invalid configuration document");
+  )
+    throw new Error("authority returned an invalid configuration document");
   return {
     id: requiredText(row.id, "configuration document identity"),
     title: requiredText(row.title, "configuration document title"),
@@ -877,24 +922,44 @@ function parseConfigDocumentSummary(value: unknown): ConfigDocumentSummary {
     sourceToken: row.sourceToken,
     capabilities: {
       read: true,
-      update: capabilities.update as boolean,
-      rename: capabilities.rename as boolean,
-      delete: capabilities.delete as boolean,
+      update: capabilities.update,
+      rename: capabilities.rename,
+      delete: capabilities.delete,
       ...(typeof capabilities.reason === "string" ? { reason: capabilities.reason } : {}),
     },
   };
 }
 
 const ATTEMPT_LINEAGE_STATUSES = new Set<ControlAttemptLineageStatus>([
-  "queued", "running", "waiting_question", "terminal_accepted", "completed", "failed", "aborted", "interrupted",
+  "queued",
+  "running",
+  "waiting_question",
+  "terminal_accepted",
+  "completed",
+  "failed",
+  "aborted",
+  "interrupted",
 ]);
 
 const ATTEMPT_LINEAGE_REASONS = new Set<ControlAttemptLineageReason>([
-  "initial", "retry", "rework", "review", "recovery", "integration",
+  "initial",
+  "retry",
+  "rework",
+  "review",
+  "recovery",
+  "integration",
 ]);
 
 const PROPOSAL_TICKET_STATUSES = new Set<TicketStatus>([
-  "proposed", "todo", "ready", "running", "review", "blocked", "completed", "failed", "cancelled",
+  "proposed",
+  "todo",
+  "ready",
+  "running",
+  "review",
+  "blocked",
+  "completed",
+  "failed",
+  "cancelled",
 ]);
 
 function proposalTicketStatus(value: unknown, label: string): TicketStatus {
@@ -917,7 +982,10 @@ function assertExactFields(
 
 function boundedRequiredText(value: unknown, label: string, maximum: number): string {
   const text = requiredText(value, label);
-  if ([...text].length > maximum || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(text)) {
+  if (
+    [...text].length > maximum ||
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(text)
+  ) {
     throw new Error(`${label} is invalid`);
   }
   return text;
@@ -925,7 +993,9 @@ function boundedRequiredText(value: unknown, label: string, maximum: number): st
 
 function boundedIdentityArray(value: unknown, label: string, maximum: number): string[] {
   if (!Array.isArray(value) || value.length > maximum) throw new Error(`${label} list is invalid`);
-  const parsed = value.map((item, index) => boundedRequiredText(item, `${label} ${index + 1}`, 256));
+  const parsed = value.map((item, index) =>
+    boundedRequiredText(item, `${label} ${index + 1}`, 256),
+  );
   if (new Set(parsed).size !== parsed.length) throw new Error(`${label} list contains duplicates`);
   return parsed;
 }
@@ -938,9 +1008,11 @@ function requiredTimestamp(value: unknown, label: string): string {
 
 function parseProfileConflict(value: unknown): ControlProfileConflict {
   const row = requiredRecord(value, "upstream conflict");
-  if (!new Set(["modified", "deleted", "orphaned"]).has(String(row.reason)) ||
-      (row.currentSha256 !== null && !isSha256Digest(row.currentSha256)) ||
-      (row.upstreamSha256 !== null && !isSha256Digest(row.upstreamSha256))) {
+  if (
+    !new Set(["modified", "deleted", "orphaned"]).has(String(row.reason)) ||
+    (row.currentSha256 !== null && !isSha256Digest(row.currentSha256)) ||
+    (row.upstreamSha256 !== null && !isSha256Digest(row.upstreamSha256))
+  ) {
     throw new Error("authority returned an invalid upstream conflict");
   }
   return {
@@ -948,19 +1020,30 @@ function parseProfileConflict(value: unknown): ControlProfileConflict {
     title: requiredText(row.title, "upstream conflict title"),
     domain: requiredText(row.domain, "upstream conflict domain"),
     reason: row.reason as ControlProfileConflict["reason"],
-    currentSha256: row.currentSha256 as Sha256Digest | null,
-    upstreamSha256: row.upstreamSha256 as Sha256Digest | null,
+    currentSha256: row.currentSha256,
+    upstreamSha256: row.upstreamSha256,
   };
 }
 
 function parseConfigField(value: unknown, index: number): ConfigFieldDefinition {
   const row = requiredRecord(value, `configuration field ${index + 1}`);
   const kind = row.kind;
-  if (!new Set<ConfigFieldKind>([
-    "text", "multiline", "integer", "boolean", "select", "model", "thinking", "string_list",
-  ]).has(kind as ConfigFieldKind)) throw new Error("configuration field has an unsupported kind");
+  if (
+    !new Set<ConfigFieldKind>([
+      "text",
+      "multiline",
+      "integer",
+      "boolean",
+      "select",
+      "model",
+      "thinking",
+      "string_list",
+    ]).has(kind as ConfigFieldKind)
+  )
+    throw new Error("configuration field has an unsupported kind");
   const options = row.options;
-  if (options !== undefined && !Array.isArray(options)) throw new Error("configuration field options are invalid");
+  if (options !== undefined && !Array.isArray(options))
+    throw new Error("configuration field options are invalid");
   const minimum = optionalSafeNumber(row.minimum, "configuration field minimum");
   const maximum = optionalSafeNumber(row.maximum, "configuration field maximum");
   return {
@@ -968,16 +1051,18 @@ function parseConfigField(value: unknown, index: number): ConfigFieldDefinition 
     label: requiredText(row.label, "configuration field label"),
     description: requiredText(row.description, "configuration field description"),
     kind: kind as ConfigFieldKind,
-    ...(options === undefined ? {} : {
-      options: options.map((option, optionIndex) => {
-        const item = requiredRecord(option, `configuration field option ${optionIndex + 1}`);
-        return {
-          value: requiredText(item.value, "configuration option value"),
-          label: requiredText(item.label, "configuration option label"),
-          ...(typeof item.description === "string" ? { description: item.description } : {}),
-        };
-      }),
-    }),
+    ...(options === undefined
+      ? {}
+      : {
+          options: options.map((option, optionIndex) => {
+            const item = requiredRecord(option, `configuration field option ${optionIndex + 1}`);
+            return {
+              value: requiredText(item.value, "configuration option value"),
+              label: requiredText(item.label, "configuration option label"),
+              ...(typeof item.description === "string" ? { description: item.description } : {}),
+            };
+          }),
+        }),
     ...(minimum === undefined ? {} : { minimum }),
     ...(maximum === undefined ? {} : { maximum }),
   };
@@ -991,13 +1076,15 @@ function requiredRecord(value: unknown, label: string): Record<string, unknown> 
 }
 
 function requiredText(value: unknown, label: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) throw new Error(`${label} is missing`);
+  if (typeof value !== "string" || value.trim().length === 0)
+    throw new Error(`${label} is missing`);
   return value;
 }
 
 function optionalSafeNumber(value: unknown, label: string): number | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== "number" || !Number.isSafeInteger(value)) throw new Error(`${label} is invalid`);
+  if (typeof value !== "number" || !Number.isSafeInteger(value))
+    throw new Error(`${label} is invalid`);
   return value;
 }
 

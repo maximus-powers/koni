@@ -13,7 +13,9 @@ import { parseControlCatalog } from "../control-center/protocol.js";
 import {
   assertSealedModelAdmission,
   loadSealedPiModelCatalog,
+  sealPiModelDescriptor,
 } from "../pi/model-catalog.js";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { CompilerDiagnostic } from "../shared/diagnostics.js";
 import {
   loadCachedInstalledProfile,
@@ -24,14 +26,24 @@ import { loadProfilePackage } from "../profile/install.js";
 import { PiAttemptProcessSupervisor } from "../pi/attempt-process-pool.js";
 import {
   assertRuntimeClosureCurrent,
+  assertRuntimeClosureFromEnvironment,
   captureRuntimeClosure,
+  KONI_RUNTIME_CLOSURE_ENV,
+  KONI_RUNTIME_PIN_PATH_ENV,
+  KONI_RUNTIME_PIN_SHA256_ENV,
   persistRuntimeClosurePin,
   runtimeExecutable,
 } from "../runtime/identity.js";
 import { pinAuthorityGitExecutable } from "../git/client.js";
 import { resolvePiPeerRuntime } from "../runtime/pi-peer-runtime.js";
 
-const DEFAULT_START_TIMEOUT_MS = 15_000;
+// A first launch from an exact packed Pi installation has to materialize and verify the complete
+// content-addressed runtime stage before the authority may bind its socket. Cold filesystems and
+// package-manager layouts can make that honest security work take longer than a minute even
+// though the daemon is healthy. A child exit cannot prove global startup failure because that
+// child may have lost the lease to a concurrent winner that has not bound its socket yet.
+const DEFAULT_START_TIMEOUT_MS = 120_000;
+const DEFAULT_STOP_TIMEOUT_MS = 15_000;
 
 export interface EnsureAuthorityOptions {
   projectRoot: string;
@@ -39,8 +51,6 @@ export interface EnsureAuthorityOptions {
   client: ProtocolHandshake["client"];
   timeoutMs?: number;
   launch?: AuthorityDaemonLauncher;
-  /** Provider-free tests may inject the exact host authenticator; production never bypasses it. */
-  resolvePiRuntime?: typeof resolvePiPeerRuntime;
 }
 
 export interface AuthorityDaemonLauncher {
@@ -69,7 +79,11 @@ export interface ProjectAuthorityStatus {
 export interface ProjectAuthorityStopResult {
   wasRunning: boolean;
   projectRoot: string;
+  /** Exact number of runs settled to paused by the quiesce operation. */
+  pausedRunCount: number;
+  /** Bounded compatibility sample; use pausedRunCount for operator totals. */
   pausedRunIds: readonly string[];
+  pausedRunIdsTruncated: boolean;
 }
 
 export interface ProjectConfigurationStatus {
@@ -96,37 +110,52 @@ export class AuthorityBootstrapError extends Error {
 }
 
 /** Connect to the repository authority, starting its detached daemon only when absent. */
-export async function ensureProjectAuthority(options: EnsureAuthorityOptions): Promise<AuthorityClient> {
+export async function ensureProjectAuthority(
+  options: EnsureAuthorityOptions,
+): Promise<AuthorityClient> {
   // Authenticate the active Pi + TypeBox host before even reusing an existing authority. A Pi
   // upgrade must therefore fail identically in `/koni`, `koni run`, and standalone operation.
-  await (options.resolvePiRuntime ?? resolvePiPeerRuntime)();
-  const existing = await connectIfRunning(options);
-  if (existing !== undefined) return existing;
-
+  await resolvePiPeerRuntime();
   const endpoint = await discoverAuthorityEndpoint(options.projectRoot);
   const projectRoot = endpoint.identity.worktreeRoot;
-  // Loading the cache before spawning gives the operator an immediate, actionable error and
-  // prevents a detached process from ever treating mutable install metadata as package authority.
-  await loadCachedInstalledProfile(projectRoot);
-  const launch = await (options.launch ?? launchAuthorityDaemon)({
-    projectRoot,
-    version: options.version,
-  });
   const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_START_TIMEOUT_MS);
   let delay = 25;
+  let launch: AuthorityDaemonLaunch | undefined;
+  let launchAttempted = false;
   let exit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
-  launch.exited?.then((value) => { exit = value; }).catch(() => undefined);
+  let lastProbeStatus: "ready" | "starting" | "absent" = "absent";
   while (Date.now() < deadline) {
-    const connected = await connectIfRunning(options);
-    if (connected !== undefined) return connected;
-    if (exit !== undefined) {
-      throw new AuthorityBootstrapError(
-        "authority_start_failed",
-        `Koni authority exited before startup (code ${String(exit.code)}, signal ${String(exit.signal)})`,
-      );
+    const probe = await probeAuthority(options);
+    lastProbeStatus = probe.status;
+    if (probe.status === "ready") return probe.client;
+    if (probe.status === "starting") {
+      // A concurrent cold starter may have won the lease while this caller's child lost it and
+      // exited. Keep polling the observed lease holder; never launch a duplicate or blame the
+      // losing child while an authority is demonstrably recovering.
+    } else if (!launchAttempted) {
+      // Loading the cache before spawning gives the operator an immediate, actionable error and
+      // prevents a detached process from treating mutable install metadata as package authority.
+      await loadCachedInstalledProfile(projectRoot);
+      launchAttempted = true;
+      launch = await (options.launch ?? launchAuthorityDaemon)({
+        projectRoot,
+        version: options.version,
+      });
+      launch.exited
+        ?.then((value) => {
+          exit = value;
+        })
+        .catch(() => undefined);
     }
     await wait(delay);
     delay = Math.min(400, delay * 2);
+  }
+  if (exit !== undefined && lastProbeStatus === "absent") {
+    throw new AuthorityBootstrapError(
+      "authority_start_failed",
+      `Koni authority exited and no concurrent authority became reachable before the startup deadline ` +
+        `(code ${String(exit.code)}, signal ${String(exit.signal)})`,
+    );
   }
   throw new AuthorityBootstrapError(
     "authority_start_timeout",
@@ -140,9 +169,11 @@ export async function inspectProjectAuthority(options: {
   version: string;
 }): Promise<ProjectAuthorityStatus> {
   const endpoint = await discoverAuthorityEndpoint(options.projectRoot);
-  const profile = await readInstalledProfileReference(endpoint.identity.worktreeRoot).catch(() => undefined);
-  const client = await connectIfRunning({ ...options, client: "cli", connectTimeoutMs: 500 });
-  if (client === undefined) {
+  const profile = await readInstalledProfileReference(endpoint.identity.worktreeRoot).catch(
+    () => undefined,
+  );
+  const probe = await probeAuthority({ ...options, client: "cli", connectTimeoutMs: 500 });
+  if (probe.status === "absent") {
     return {
       running: false,
       projectRoot: endpoint.identity.worktreeRoot,
@@ -152,6 +183,17 @@ export async function inspectProjectAuthority(options: {
       ...(profile === undefined ? {} : { profile }),
     };
   }
+  if (probe.status === "starting") {
+    return {
+      running: true,
+      projectRoot: endpoint.identity.worktreeRoot,
+      commonDirectory: endpoint.identity.commonDirectory,
+      stateRoot: endpoint.stateRoot,
+      endpoint: endpoint.endpoint,
+      ...(profile === undefined ? {} : { profile }),
+    };
+  }
+  const client = probe.client;
   try {
     const response = await client.request("project.status");
     const status = parseProjectStatus(response);
@@ -195,24 +237,26 @@ export async function stopProjectAuthority(options: {
       return {
         wasRunning: false,
         projectRoot: endpoint.identity.worktreeRoot,
+        pausedRunCount: 0,
         pausedRunIds: [],
+        pausedRunIdsTruncated: false,
       };
     }
     throw error;
   }
 
-  let pausedRunIds: string[] = [];
+  let quiesce: ParsedQuiesceResult;
   try {
     const response = await client.request("authority.quiesce", undefined, {
       expectedRevision: client.revision,
       idempotencyKey: `operator-authority-quiesce:${randomUUID()}`,
     });
-    pausedRunIds = parseQuiesceResult(response);
+    quiesce = parseQuiesceResult(response);
   } finally {
     client.close();
   }
 
-  const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_START_TIMEOUT_MS);
+  const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_STOP_TIMEOUT_MS);
   while (Date.now() < deadline) {
     try {
       const probe = await AuthorityClient.connect({
@@ -228,7 +272,7 @@ export async function stopProjectAuthority(options: {
         return {
           wasRunning: true,
           projectRoot: endpoint.identity.worktreeRoot,
-          pausedRunIds,
+          ...quiesce,
         };
       }
       throw error;
@@ -237,7 +281,7 @@ export async function stopProjectAuthority(options: {
   }
   throw new AuthorityBootstrapError(
     "authority_stop_timeout",
-    `Koni authority did not stop within ${options.timeoutMs ?? DEFAULT_START_TIMEOUT_MS}ms`,
+    `Koni authority did not stop within ${options.timeoutMs ?? DEFAULT_STOP_TIMEOUT_MS}ms`,
   );
 }
 
@@ -282,8 +326,15 @@ export async function serveProjectAuthority(options: {
    */
   providerFreeAdmissionProbe?: true;
 }): Promise<void> {
+  const parentRuntimeClosure = await assertRuntimeClosureFromEnvironment(import.meta.url);
   const piPeerRuntime = await resolvePiPeerRuntime();
-  const runtimeClosure = await captureRuntimeClosure();
+  const runtimeClosure = await captureRuntimeClosure(import.meta.url, piPeerRuntime.packageRoot);
+  if (runtimeClosure.closureSha256 !== parentRuntimeClosure.closureSha256) {
+    throw new AuthorityBootstrapError(
+      "authority_runtime_stage_drift",
+      "staged authority runtime differs from the parent-authenticated closure",
+    );
+  }
   const gitExecutable = runtimeExecutable(runtimeClosure, "git");
   await pinAuthorityGitExecutable(gitExecutable);
   const endpoint = await discoverAuthorityEndpoint(options.projectRoot);
@@ -298,6 +349,9 @@ export async function serveProjectAuthority(options: {
       const current = await loadCachedInstalledProfile(endpoint.identity.worktreeRoot);
       return loadProfilePackage(current.packageRoot);
     },
+    ...(options.providerFreeAdmissionProbe === true
+      ? { sealedModelBindingLoader: loadProviderFreeTestModelBinding }
+      : {}),
   });
   const requestedShutdown = deferred<void>();
   const engine = await RunAuthorityEngine.open({
@@ -320,10 +374,7 @@ export async function serveProjectAuthority(options: {
   });
   await engine.start();
   try {
-    await Promise.race([
-      options.shutdown ?? processShutdown(),
-      requestedShutdown.promise,
-    ]);
+    await Promise.race([options.shutdown ?? processShutdown(), requestedShutdown.promise]);
   } finally {
     await engine.stop();
   }
@@ -332,9 +383,23 @@ export async function serveProjectAuthority(options: {
 export async function launchAuthorityDaemon(input: {
   projectRoot: string;
   version: string;
+  /**
+   * Packaged-release evidence only. The daemon still crosses the exact authenticated bootstrap,
+   * but its attempt sessions stop after durable admission so the smoke cannot call a provider.
+   */
+  providerFreeAdmissionProbe?: true;
 }): Promise<AuthorityDaemonLaunch> {
+  if (input.providerFreeAdmissionProbe === true && process.env.NODE_ENV !== "test") {
+    throw new AuthorityBootstrapError(
+      "provider_free_probe",
+      "provider-free authority admission is available only to the packaged test boundary",
+    );
+  }
   const endpoint = await discoverAuthorityEndpoint(input.projectRoot);
   const piPeerRuntime = await resolvePiPeerRuntime();
+  const runtimeClosure = await captureRuntimeClosure(import.meta.url, piPeerRuntime.packageRoot);
+  await assertRuntimeClosureCurrent(runtimeClosure);
+  const runtimeClosurePin = await persistRuntimeClosurePin(endpoint.stateRoot, runtimeClosure);
   const logDirectory = path.join(endpoint.stateRoot, "authority");
   await mkdir(logDirectory, { recursive: true, mode: 0o700 });
   const log = await open(path.join(logDirectory, "daemon.log"), "a", 0o600);
@@ -354,16 +419,26 @@ export async function launchAuthorityDaemon(input: {
         cwd: endpoint.identity.worktreeRoot,
         detached: true,
         stdio: ["ignore", log.fd, log.fd],
-        env: authorityDaemonEnvironment(piPeerRuntime.environment),
+        env: authorityDaemonEnvironment({
+          ...piPeerRuntime.environment,
+          [KONI_RUNTIME_CLOSURE_ENV]: runtimeClosurePin.closureSha256,
+          [KONI_RUNTIME_PIN_PATH_ENV]: runtimeClosurePin.path,
+          [KONI_RUNTIME_PIN_SHA256_ENV]: runtimeClosurePin.pinSha256,
+          ...(input.providerFreeAdmissionProbe === true
+            ? { KONI_PROVIDER_FREE_RELEASE_PROBE: "1", NODE_ENV: "test" }
+            : {}),
+        }),
       },
     );
   } finally {
     await log.close();
   }
-  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("exit", (code, signal) => resolve({ code, signal }));
-  });
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+    (resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", (code, signal) => resolve({ code, signal }));
+    },
+  );
   child.unref();
   return { ...(child.pid === undefined ? {} : { pid: child.pid }), exited };
 }
@@ -378,25 +453,58 @@ function authorityDaemonEnvironment(
   };
   // The exact peer bridge is an argv preload above. Never forward ambient Node injection into the
   // authority process, even when the interactive launcher itself was started through NODE_OPTIONS.
-  for (const name of ["NODE_OPTIONS", "NODE_PATH", "NPM_CONFIG_NODE_OPTIONS", "NODE_INSPECT_RESUME_ON_START"]) {
+  for (const name of [
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "NPM_CONFIG_NODE_OPTIONS",
+    "NODE_INSPECT_RESUME_ON_START",
+  ]) {
     delete environment[name];
   }
   return environment;
 }
 
-export async function createProjectRun(options: {
-  projectRoot: string;
-  version: string;
-  objective: string;
-  runTypeId: string;
-  targetRef: string;
-  intake?: Record<string, string>;
-  createTarget?: boolean;
-  baseRef?: string;
-}, dependencies: {
-  ensure?: typeof ensureProjectAuthority;
-  loadModels?: typeof loadSealedPiModelCatalog;
-} = {}): Promise<{ runId: string; status: string }> {
+/**
+ * A release-fixture-only admission seal. It deliberately reads Pi's built-in model descriptor
+ * without treating a missing user credential as provider permission. The matching run is created
+ * with activation withheld and must be paused/deleted before a provider request is possible.
+ */
+async function loadProviderFreeTestModelBinding(provider: string, modelId: string) {
+  if (process.env.NODE_ENV !== "test" || process.env.KONI_PROVIDER_FREE_RELEASE_PROBE !== "1") {
+    throw new AuthorityBootstrapError(
+      "provider_free_probe",
+      "provider-free model admission is available only to the packaged test boundary",
+    );
+  }
+  const runtime = await ModelRuntime.create({ allowModelNetwork: false });
+  const matches = runtime
+    .getModels()
+    .filter((candidate) => candidate.provider === provider && candidate.id === modelId);
+  if (matches.length !== 1) {
+    throw new AuthorityBootstrapError(
+      "provider_free_model",
+      `Pi's built-in catalog did not expose one descriptor for ${provider}/${modelId}`,
+    );
+  }
+  return sealPiModelDescriptor(matches[0]!);
+}
+
+export async function createProjectRun(
+  options: {
+    projectRoot: string;
+    version: string;
+    objective: string;
+    runTypeId: string;
+    targetRef: string;
+    intake?: Record<string, string>;
+    createTarget?: boolean;
+    baseRef?: string;
+  },
+  dependencies: {
+    ensure?: typeof ensureProjectAuthority;
+    loadModels?: typeof loadSealedPiModelCatalog;
+  } = {},
+): Promise<{ runId: string; status: string }> {
   const client = await (dependencies.ensure ?? ensureProjectAuthority)({
     projectRoot: options.projectRoot,
     version: options.version,
@@ -435,85 +543,13 @@ export async function createProjectRun(options: {
   }
 }
 
-export interface LegacyRunAdoptionCatalog {
-  protocol: "koni.legacy-run-adoption-catalog.v1";
-  migrationId: string;
-  projectRoot: string;
-  sourceRetained: true;
-  runs: Array<Record<string, unknown>>;
-}
-
-export interface LegacyRunAdoptionResult {
-  migrationId: string;
-  sourceRunId: string;
-  successorRunId: string;
-  status: "adopted_paused" | "already_adopted";
-  phase: string;
-  sourceRetained: true;
-}
-
-export interface LegacyRunOperatorDependencies {
-  /** Provider-free tests may inject `ensureProjectAuthority` with an authenticated Pi fixture. */
-  ensure?: typeof ensureProjectAuthority;
-}
-
-/** Preview exact legacy evidence without mutating source, Git, or authority state. */
-export async function previewProjectLegacyRunAdoption(options: {
-  projectRoot: string;
-  version: string;
-  migrationId: string;
-  runId?: string;
-}, dependencies: LegacyRunOperatorDependencies = {}): Promise<LegacyRunAdoptionCatalog> {
-  const client = await (dependencies.ensure ?? ensureProjectAuthority)({
-    projectRoot: options.projectRoot,
-    version: options.version,
-    client: "cli",
-  });
-  try {
-    const response = await client.request("migration.legacy.preview", {
-      migrationId: options.migrationId,
-      ...(options.runId === undefined ? {} : { runId: options.runId }),
-    });
-    return parseLegacyRunAdoptionCatalog(response);
-  } finally {
-    client.close();
-  }
-}
-
-/** Atomically register one paused current successor. This does not start a provider turn. */
-export async function adoptProjectLegacyRun(options: {
-  projectRoot: string;
-  version: string;
-  migrationId: string;
-  runId: string;
-}, dependencies: LegacyRunOperatorDependencies = {}): Promise<LegacyRunAdoptionResult> {
-  const client = await (dependencies.ensure ?? ensureProjectAuthority)({
-    projectRoot: options.projectRoot,
-    version: options.version,
-    client: "cli",
-  });
-  try {
-    const response = await client.request(
-      "migration.legacy.adopt",
-      { migrationId: options.migrationId, runId: options.runId },
-      {
-        expectedRevision: client.revision,
-        idempotencyKey: `operator-legacy-adopt:${options.migrationId}:${options.runId}`,
-      },
-    );
-    return parseLegacyRunAdoptionResult(response);
-  } finally {
-    client.close();
-  }
-}
-
-/** Explicitly resume a paused current run, including a newly adopted successor. */
+/** Explicitly resume a paused run or retry a blocked run from its durable prior phase. */
 export async function resumeProjectRun(options: {
   projectRoot: string;
   version: string;
   runId: string;
-}, dependencies: LegacyRunOperatorDependencies = {}): Promise<{ runId: string; status: string }> {
-  const client = await (dependencies.ensure ?? ensureProjectAuthority)({
+}): Promise<{ runId: string; status: string }> {
+  const client = await ensureProjectAuthority({
     projectRoot: options.projectRoot,
     version: options.version,
     client: "cli",
@@ -533,21 +569,30 @@ export async function resumeProjectRun(options: {
   }
 }
 
-async function connectIfRunning(options: {
+type AuthorityProbe =
+  { status: "ready"; client: AuthorityClient } | { status: "starting" } | { status: "absent" };
+
+async function probeAuthority(options: {
   projectRoot: string;
   version: string;
   client: ProtocolHandshake["client"];
   connectTimeoutMs?: number;
-}): Promise<AuthorityClient | undefined> {
+}): Promise<AuthorityProbe> {
   try {
-    return await AuthorityClient.connect({
-      projectRoot: options.projectRoot,
-      client: options.client,
-      version: options.version,
-      connectTimeoutMs: options.connectTimeoutMs ?? 750,
-    });
+    return {
+      status: "ready",
+      client: await AuthorityClient.connect({
+        projectRoot: options.projectRoot,
+        client: options.client,
+        version: options.version,
+        connectTimeoutMs: options.connectTimeoutMs ?? 750,
+      }),
+    };
   } catch (error) {
-    if (authorityUnavailable(error)) return undefined;
+    if (error instanceof AuthorityClientError && error.code === "authority_starting") {
+      return { status: "starting" };
+    }
+    if (authorityUnavailable(error)) return { status: "absent" };
     throw error;
   }
 }
@@ -564,8 +609,11 @@ function authorityUnavailable(error: unknown): boolean {
   return false;
 }
 
-function parseProjectStatus(response: RpcSuccess): NonNullable<ProjectAuthorityStatus["authority"]> {
-  if (!isRecord(response.result)) throw new AuthorityBootstrapError("authority_status", "authority returned invalid status");
+function parseProjectStatus(
+  response: RpcSuccess,
+): NonNullable<ProjectAuthorityStatus["authority"]> {
+  if (!isRecord(response.result))
+    throw new AuthorityBootstrapError("authority_status", "authority returned invalid status");
   const result = response.result as unknown as Record<string, unknown>;
   const { version, revision, runCount } = result;
   if (
@@ -574,65 +622,66 @@ function parseProjectStatus(response: RpcSuccess): NonNullable<ProjectAuthorityS
     !Number.isSafeInteger(revision) ||
     typeof runCount !== "number" ||
     !Number.isSafeInteger(runCount)
-  ) throw new AuthorityBootstrapError("authority_status", "authority returned invalid status");
+  )
+    throw new AuthorityBootstrapError("authority_status", "authority returned invalid status");
   return { version, revision, runCount };
 }
 
 function parseRunCreation(response: RpcSuccess): { runId: string; status: string } {
   const result = response.result as unknown;
-  if (
-    !isRecord(result) ||
-    typeof result.runId !== "string" ||
-    typeof result.status !== "string"
-  ) throw new AuthorityBootstrapError("run_create", "authority returned an invalid run creation response");
+  if (!isRecord(result) || typeof result.runId !== "string" || typeof result.status !== "string")
+    throw new AuthorityBootstrapError(
+      "run_create",
+      "authority returned an invalid run creation response",
+    );
   return { runId: result.runId, status: result.status };
 }
 
-function parseLegacyRunAdoptionCatalog(response: RpcSuccess): LegacyRunAdoptionCatalog {
-  const result = response.result as unknown;
-  if (
-    !isRecord(result) ||
-    result.protocol !== "koni.legacy-run-adoption-catalog.v1" ||
-    typeof result.migrationId !== "string" ||
-    typeof result.projectRoot !== "string" ||
-    result.sourceRetained !== true ||
-    !Array.isArray(result.runs) ||
-    !result.runs.every(isRecord)
-  ) {
-    throw new AuthorityBootstrapError(
-      "legacy_adoption_preview",
-      "authority returned an invalid legacy adoption catalog",
-    );
-  }
-  return result as unknown as LegacyRunAdoptionCatalog;
+interface ParsedQuiesceResult {
+  pausedRunCount: number;
+  pausedRunIds: string[];
+  pausedRunIdsTruncated: boolean;
 }
 
-function parseLegacyRunAdoptionResult(response: RpcSuccess): LegacyRunAdoptionResult {
-  const result = response.result as unknown;
+function parseQuiesceResult(response: RpcSuccess): ParsedQuiesceResult {
   if (
-    !isRecord(result) ||
-    typeof result.migrationId !== "string" ||
-    typeof result.sourceRunId !== "string" ||
-    typeof result.successorRunId !== "string" ||
-    (result.status !== "adopted_paused" && result.status !== "already_adopted") ||
-    typeof result.phase !== "string" ||
-    result.sourceRetained !== true
+    !isRecord(response.result) ||
+    (response.result.status !== "quiesced" && response.result.status !== "quiescing") ||
+    !Array.isArray(response.result.pausedRunIds) ||
+    !response.result.pausedRunIds.every((value) => typeof value === "string")
   ) {
     throw new AuthorityBootstrapError(
-      "legacy_adoption_apply",
-      "authority returned an invalid legacy adoption result",
+      "authority_quiesce",
+      "authority returned an invalid quiesce response",
     );
   }
-  return result as unknown as LegacyRunAdoptionResult;
-}
-
-function parseQuiesceResult(response: RpcSuccess): string[] {
-  if (!isRecord(response.result) || response.result.status !== "quiesced" ||
-      !Array.isArray(response.result.pausedRunIds) ||
-      !response.result.pausedRunIds.every((value) => typeof value === "string")) {
-    throw new AuthorityBootstrapError("authority_quiesce", "authority returned an invalid quiesce response");
+  const pausedRunIds = [...response.result.pausedRunIds];
+  // Compatibility daemons returned only the complete ID array. New daemons return an exact count
+  // plus a bounded sample so a stop response can never amplify with project history.
+  if (
+    response.result.pausedRunCount === undefined &&
+    response.result.pausedRunIdsTruncated === undefined
+  ) {
+    return { pausedRunCount: pausedRunIds.length, pausedRunIds, pausedRunIdsTruncated: false };
   }
-  return [...response.result.pausedRunIds];
+  if (
+    !Number.isSafeInteger(response.result.pausedRunCount) ||
+    Number(response.result.pausedRunCount) < 0 ||
+    typeof response.result.pausedRunIdsTruncated !== "boolean" ||
+    Number(response.result.pausedRunCount) < pausedRunIds.length ||
+    response.result.pausedRunIdsTruncated !==
+      Number(response.result.pausedRunCount) > pausedRunIds.length
+  ) {
+    throw new AuthorityBootstrapError(
+      "authority_quiesce",
+      "authority returned invalid bounded quiesce totals",
+    );
+  }
+  return {
+    pausedRunCount: Number(response.result.pausedRunCount),
+    pausedRunIds,
+    pausedRunIdsTruncated: response.result.pausedRunIdsTruncated,
+  };
 }
 
 function normalizeTargetRef(value: string): string {
@@ -661,7 +710,9 @@ function deferred<T>(): {
   resolve(value: T | PromiseLike<T>): void;
 } {
   let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((innerResolve) => { resolve = innerResolve; });
+  const promise = new Promise<T>((innerResolve) => {
+    resolve = innerResolve;
+  });
   return { promise, resolve };
 }
 

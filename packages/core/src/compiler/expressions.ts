@@ -9,7 +9,12 @@ import type {
   CompilerGraphProjection,
   DerivationKind,
 } from "../contracts/rules.js";
-import { canonicalEncode, canonicalHash, compareUtf8, type Sha256Digest } from "../shared/canonical.js";
+import {
+  canonicalEncode,
+  canonicalHash,
+  compareUtf8,
+  type Sha256Digest,
+} from "../shared/canonical.js";
 import { pointer } from "../shared/diagnostics.js";
 
 const PURE_PREDICATE_OPERATORS = new Set([
@@ -91,10 +96,7 @@ export interface RuleDomainAdapter {
     context: RuleDomainContext,
   ): readonly string[] | undefined;
   /** Return undefined when the adapter does not implement this domain leaf. */
-  evaluatePredicate?(
-    leaf: ConfigurationObject,
-    context: RuleDomainContext,
-  ): boolean | undefined;
+  evaluatePredicate?(leaf: ConfigurationObject, context: RuleDomainContext): boolean | undefined;
 }
 
 interface MutableGraphNode {
@@ -109,12 +111,7 @@ interface MutableGraphNode {
 }
 
 type MutableConfigurationValue =
-  | null
-  | boolean
-  | number
-  | string
-  | MutableConfigurationObject
-  | MutableConfigurationValue[];
+  null | boolean | number | string | MutableConfigurationObject | MutableConfigurationValue[];
 
 interface MutableConfigurationObject {
   [key: string]: MutableConfigurationValue;
@@ -150,7 +147,11 @@ export class GraphExpressionEvaluator {
       const path = pointer("/graph/nodes", index);
       const node = snapshotNode(source, path);
       if (this.#nodes.has(node.id)) {
-        fail("expression.duplicate_node", pointer(path, "id"), `graph node id is duplicated: ${node.id}`);
+        fail(
+          "expression.duplicate_node",
+          pointer(path, "id"),
+          `graph node id is duplicated: ${node.id}`,
+        );
       }
       this.#nodes.set(node.id, node);
     }
@@ -188,7 +189,11 @@ export class GraphExpressionEvaluator {
     const selected = uniqueSortedStrings(ids, path);
     for (const id of selected) {
       if (!this.#nodes.has(id)) {
-        fail("expression.missing_node", path, `binding ${normalized} references missing node ${id}`);
+        fail(
+          "expression.missing_node",
+          path,
+          `binding ${normalized} references missing node ${id}`,
+        );
       }
     }
     this.#bindings.set(normalized, selected);
@@ -204,7 +209,11 @@ export class GraphExpressionEvaluator {
     const selected = uniqueSortedStrings(ids, path);
     for (const id of selected) {
       if (!this.#nodes.has(id)) {
-        fail("expression.missing_node", path, `binding ${normalized} references missing node ${id}`);
+        fail(
+          "expression.missing_node",
+          path,
+          `binding ${normalized} references missing node ${id}`,
+        );
       }
     }
     return this.#withBinding(normalized, selected, evaluate);
@@ -217,7 +226,11 @@ export class GraphExpressionEvaluator {
     const envelope = record(selector, path, "selector must be a string or mapping");
     const keys = Object.keys(envelope);
     if (keys.length !== 1) {
-      fail("expression.selector_shape", path, "selector mapping must contain exactly one selector operator");
+      fail(
+        "expression.selector_shape",
+        path,
+        "selector mapping must contain exactly one selector operator",
+      );
     }
     const kind = keys[0]!;
     switch (kind) {
@@ -229,7 +242,11 @@ export class GraphExpressionEvaluator {
         const ids = stringArray(required(envelope, "ids", path), pointer(path, "ids"));
         for (const id of ids) {
           if (!this.#nodes.has(id)) {
-            fail("expression.missing_node", pointer(path, "ids"), `ids selector references missing node ${id}`);
+            fail(
+              "expression.missing_node",
+              pointer(path, "ids"),
+              `ids selector references missing node ${id}`,
+            );
           }
         }
         return uniqueSortedStrings(ids, pointer(path, "ids"));
@@ -239,12 +256,16 @@ export class GraphExpressionEvaluator {
       case "query":
         return this.#selectQueryEnvelope(required(envelope, "query", path), pointer(path, "query"));
       case "traverse":
-        return this.#selectTraverse(required(envelope, "traverse", path), pointer(path, "traverse"));
+        return this.#selectTraverse(
+          required(envelope, "traverse", path),
+          pointer(path, "traverse"),
+        );
       case "union": {
         const selectors = nonemptyArray(envelope.union, pointer(path, "union"));
         const output = new Set<string>();
         for (const [index, child] of selectors.entries()) {
-          for (const id of this.select(child, pointer(pointer(path, "union"), index))) output.add(id);
+          for (const id of this.select(child, pointer(pointer(path, "union"), index)))
+            output.add(id);
         }
         return sortedSet(output);
       }
@@ -252,7 +273,9 @@ export class GraphExpressionEvaluator {
         const selectors = nonemptyArray(envelope.intersection, pointer(path, "intersection"));
         let output = new Set(this.select(selectors[0]!, pointer(pointer(path, "intersection"), 0)));
         for (let index = 1; index < selectors.length; index += 1) {
-          const right = new Set(this.select(selectors[index]!, pointer(pointer(path, "intersection"), index)));
+          const right = new Set(
+            this.select(selectors[index]!, pointer(pointer(path, "intersection"), index)),
+          );
           output = new Set([...output].filter((id) => right.has(id)));
         }
         return sortedSet(output);
@@ -263,8 +286,18 @@ export class GraphExpressionEvaluator {
           pointer(path, "difference"),
           ["left", "right"],
         );
-        const left = new Set(this.select(required(difference, "left", path), pointer(pointer(path, "difference"), "left")));
-        const right = new Set(this.select(required(difference, "right", path), pointer(pointer(path, "difference"), "right")));
+        const left = new Set(
+          this.select(
+            required(difference, "left", path),
+            pointer(pointer(path, "difference"), "left"),
+          ),
+        );
+        const right = new Set(
+          this.select(
+            required(difference, "right", path),
+            pointer(pointer(path, "difference"), "right"),
+          ),
+        );
         return sortedSet(new Set([...left].filter((id) => !right.has(id))));
       }
       case "policy_selection":
@@ -307,10 +340,12 @@ export class GraphExpressionEvaluator {
         ["select", "satisfies"],
       );
       const selected = this.select(quantified.select!, pointer(pointer(path, "for_all"), "select"));
-      const binding = optionalString(quantified.bind, pointer(pointer(path, "for_all"), "bind")) ?? "node";
+      const binding =
+        optionalString(quantified.bind, pointer(pointer(path, "for_all"), "bind")) ?? "node";
       for (const id of selected) {
         const passed = this.#withBinding(binding, [id], () =>
-          this.evaluate(quantified.satisfies!, pointer(pointer(path, "for_all"), "satisfies")));
+          this.evaluate(quantified.satisfies!, pointer(pointer(path, "for_all"), "satisfies")),
+        );
         if (!passed) return false;
       }
       return true;
@@ -353,12 +388,14 @@ export class GraphExpressionEvaluator {
       case "obligation": {
         const obligations = mutableRecordAt(node.fields, "obligations");
         const unmet = mutableArrayAt(obligations, "unmet");
-        unmet.push(compactObject({
-          key,
-          severity: optionalString(derivation.severity, pointer(path, "severity")) ?? "blocking",
-          reason,
-          rule: ruleId,
-        }));
+        unmet.push(
+          compactObject({
+            key,
+            severity: optionalString(derivation.severity, pointer(path, "severity")) ?? "blocking",
+            reason,
+            rule: ruleId,
+          }),
+        );
         break;
       }
       case "readiness":
@@ -394,7 +431,8 @@ export class GraphExpressionEvaluator {
 
   #selectNamed(name: string, path: string): readonly string[] {
     if (name.startsWith("$")) return this.#bound(name, path);
-    if (Object.hasOwn(this.#configuration.registries.queries, name)) return this.#selectQuery(name, path);
+    if (Object.hasOwn(this.#configuration.registries.queries, name))
+      return this.#selectQuery(name, path);
     if (Object.hasOwn(this.#configuration.registries.node_types, name)) {
       return [...this.#nodes.values()]
         .filter((node) => node.type === name)
@@ -408,24 +446,39 @@ export class GraphExpressionEvaluator {
     const normalized = normalizeBindingName(name, path);
     const ids = this.#bindings.get(normalized);
     if (ids === undefined) {
-      fail("expression.unknown_binding", path, `selector references unbound variable $${normalized}`);
+      fail(
+        "expression.unknown_binding",
+        path,
+        `selector references unbound variable $${normalized}`,
+      );
     }
     return [...ids];
   }
 
   #selectNodes(value: ConfigurationValue, path: string): readonly string[] {
-    const filter = exactRecord(value, path, ["node_types", "statuses", "status_excluding", "where"]);
+    const filter = exactRecord(value, path, [
+      "node_types",
+      "statuses",
+      "status_excluding",
+      "where",
+    ]);
     const types = optionalStringArray(filter.node_types, pointer(path, "node_types"));
     const statuses = optionalStringArray(filter.statuses, pointer(path, "statuses"));
-    const excluded = optionalStringArray(filter.status_excluding, pointer(path, "status_excluding"));
+    const excluded = optionalStringArray(
+      filter.status_excluding,
+      pointer(path, "status_excluding"),
+    );
     const output: string[] = [];
-    for (const node of [...this.#nodes.values()].sort((left, right) => compareUtf8(left.id, right.id))) {
+    for (const node of [...this.#nodes.values()].sort((left, right) =>
+      compareUtf8(left.id, right.id),
+    )) {
       if (types.length > 0 && !types.includes(node.type)) continue;
       if (statuses.length > 0 && !statuses.includes(node.status)) continue;
       if (excluded.includes(node.status)) continue;
       if (filter.where !== undefined) {
         const passed = this.#withBinding("node", [node.id], () =>
-          this.evaluate(filter.where!, pointer(path, "where")));
+          this.evaluate(filter.where!, pointer(path, "where")),
+        );
         if (!passed) continue;
       }
       output.push(node.id);
@@ -437,15 +490,26 @@ export class GraphExpressionEvaluator {
     if (typeof value === "string") return this.#selectQuery(value, path);
     const query = exactRecord(value, path, ["id", "args"], ["id"]);
     const id = stringValue(query.id, pointer(path, "id"));
-    if (query.args !== undefined && Object.keys(record(query.args, pointer(path, "args"))).length > 0) {
-      fail("expression.query_arguments", pointer(path, "args"), `query ${id} supplied unsupported arguments`);
+    if (
+      query.args !== undefined &&
+      Object.keys(record(query.args, pointer(path, "args"))).length > 0
+    ) {
+      fail(
+        "expression.query_arguments",
+        pointer(path, "args"),
+        `query ${id} supplied unsupported arguments`,
+      );
     }
     return this.#selectQuery(id, path);
   }
 
   #selectQuery(id: string, path: string): readonly string[] {
     if (this.#queryStack.includes(id)) {
-      fail("expression.recursive_query", path, `recursive query ${[...this.#queryStack, id].join(" -> ")}`);
+      fail(
+        "expression.recursive_query",
+        path,
+        `recursive query ${[...this.#queryStack, id].join(" -> ")}`,
+      );
     }
     const source = this.#configuration.registries.queries[id];
     if (source === undefined) {
@@ -486,7 +550,10 @@ export class GraphExpressionEvaluator {
           .sort(compareUtf8);
       }
       const statuses = optionalStringArray(query.statuses, pointer(path, "statuses"));
-      const excluded = optionalStringArray(query.status_excluding, pointer(path, "status_excluding"));
+      const excluded = optionalStringArray(
+        query.status_excluding,
+        pointer(path, "status_excluding"),
+      );
       const filtered: string[] = [];
       for (const nodeId of output) {
         const node = this.#nodes.get(nodeId);
@@ -495,7 +562,8 @@ export class GraphExpressionEvaluator {
         if (excluded.includes(node.status)) continue;
         if (query.where !== undefined) {
           const passed = this.#withBinding("node", [nodeId], () =>
-            this.evaluate(query.where!, pointer(path, "where")));
+            this.evaluate(query.where!, pointer(path, "where")),
+          );
           if (!passed) continue;
         }
         filtered.push(nodeId);
@@ -514,21 +582,34 @@ export class GraphExpressionEvaluator {
       ["from"],
     );
     if (traversal.relation !== undefined && traversal.relations !== undefined) {
-      fail("expression.traverse_relations", path, "traverse uses either relation or relations, not both");
+      fail(
+        "expression.traverse_relations",
+        path,
+        "traverse uses either relation or relations, not both",
+      );
     }
     const starts = this.select(traversal.from!, pointer(path, "from"));
     const relation = optionalString(traversal.relation, pointer(path, "relation"));
-    const relations = relation === undefined
-      ? optionalStringArray(traversal.relations, pointer(path, "relations"))
-      : [relation];
+    const relations =
+      relation === undefined
+        ? optionalStringArray(traversal.relations, pointer(path, "relations"))
+        : [relation];
     const direction = optionalString(traversal.direction, pointer(path, "direction")) ?? "outgoing";
     if (!new Set(["outgoing", "incoming", "both"]).has(direction)) {
-      fail("expression.traverse_direction", pointer(path, "direction"), `unsupported traversal direction ${direction}`);
+      fail(
+        "expression.traverse_direction",
+        pointer(path, "direction"),
+        `unsupported traversal direction ${direction}`,
+      );
     }
     const minDepth = optionalBound(traversal.min_depth, pointer(path, "min_depth")) ?? 1;
     const maxDepth = optionalBound(traversal.max_depth, pointer(path, "max_depth")) ?? 1;
     if (minDepth < 1 || maxDepth < minDepth || maxDepth > 64) {
-      fail("expression.traverse_depth", path, "traverse depth must satisfy 1 <= min_depth <= max_depth <= 64");
+      fail(
+        "expression.traverse_depth",
+        path,
+        "traverse depth must satisfy 1 <= min_depth <= max_depth <= 64",
+      );
     }
     const types = optionalStringArray(traversal.node_types, pointer(path, "node_types"));
     const output = new Set<string>();
@@ -547,16 +628,31 @@ export class GraphExpressionEvaluator {
 
   #selectPolicy(envelope: ConfigurationObject, path: string): readonly string[] {
     if (this.#adapter?.selectPolicy === undefined) {
-      fail("expression.domain_adapter_required", path, "policy selector requires a configured rule domain adapter");
+      fail(
+        "expression.domain_adapter_required",
+        path,
+        "policy selector requires a configured rule domain adapter",
+      );
     }
-    const selected = this.#adapter.selectPolicy(cloneObject(envelope), this.#domainContext(undefined, path));
+    const selected = this.#adapter.selectPolicy(
+      cloneObject(envelope),
+      this.#domainContext(undefined, path),
+    );
     if (selected === undefined) {
-      fail("expression.domain_selector_unhandled", path, "rule domain adapter did not handle policy selector");
+      fail(
+        "expression.domain_selector_unhandled",
+        path,
+        "rule domain adapter did not handle policy selector",
+      );
     }
     const ids = uniqueSortedStrings(selected, path);
     for (const id of ids) {
       if (!this.#nodes.has(id)) {
-        fail("expression.domain_missing_node", path, `rule domain adapter selected missing node ${id}`);
+        fail(
+          "expression.domain_missing_node",
+          path,
+          `rule domain adapter selected missing node ${id}`,
+        );
       }
     }
     return ids;
@@ -567,14 +663,29 @@ export class GraphExpressionEvaluator {
     if (DOMAIN_PREDICATE_OPERATORS.has(op)) {
       const subject = this.#subject(leaf, path);
       if (this.#adapter?.evaluatePredicate === undefined) {
-        fail("expression.domain_adapter_required", path, `predicate ${op} requires a configured rule domain adapter`);
+        fail(
+          "expression.domain_adapter_required",
+          path,
+          `predicate ${op} requires a configured rule domain adapter`,
+        );
       }
-      const result = this.#adapter.evaluatePredicate(cloneObject(leaf), this.#domainContext(subject, path));
+      const result = this.#adapter.evaluatePredicate(
+        cloneObject(leaf),
+        this.#domainContext(subject, path),
+      );
       if (result === undefined) {
-        fail("expression.domain_predicate_unhandled", path, `rule domain adapter did not handle predicate ${op}`);
+        fail(
+          "expression.domain_predicate_unhandled",
+          path,
+          `rule domain adapter did not handle predicate ${op}`,
+        );
       }
       if (typeof result !== "boolean") {
-        fail("expression.domain_predicate_result", path, `rule domain adapter returned a non-boolean result for ${op}`);
+        fail(
+          "expression.domain_predicate_result",
+          path,
+          `rule domain adapter returned a non-boolean result for ${op}`,
+        );
       }
       return result;
     }
@@ -587,12 +698,18 @@ export class GraphExpressionEvaluator {
         return true;
       case "edge_count": {
         const relation = stringValue(leaf.relation, pointer(path, "relation"));
-        const count = subject === undefined ? 0 : this.#semanticNeighbors(subject.id, relation, "outgoing").length;
+        const count =
+          subject === undefined
+            ? 0
+            : this.#semanticNeighbors(subject.id, relation, "outgoing").length;
         return countMatches(count, leaf, path);
       }
       case "incoming_count": {
         const relation = optionalString(leaf.relation, pointer(path, "relation"));
-        const count = subject === undefined ? 0 : this.#semanticNeighbors(subject.id, relation, "incoming").length;
+        const count =
+          subject === undefined
+            ? 0
+            : this.#semanticNeighbors(subject.id, relation, "incoming").length;
         return countMatches(count, leaf, path);
       }
       case "field_present": {
@@ -613,7 +730,10 @@ export class GraphExpressionEvaluator {
         const field = stringValue(leaf.field, pointer(path, "field"));
         const values = nonemptyArray(leaf.values, pointer(path, "values"));
         const actual = subject === undefined ? undefined : this.#fieldValue(subject, field);
-        return actual !== undefined && values.some((candidate) => canonicalEncode(candidate) === canonicalEncode(actual));
+        return (
+          actual !== undefined &&
+          values.some((candidate) => canonicalEncode(candidate) === canonicalEncode(actual))
+        );
       }
       case "query_count": {
         const query = stringValue(leaf.query, pointer(path, "query"));
@@ -631,25 +751,43 @@ export class GraphExpressionEvaluator {
       }
       case "set_relation": {
         if (leaf.left === undefined || leaf.right === undefined) {
-          fail("expression.predicate_selector", path, "set_relation requires left and right selectors");
+          fail(
+            "expression.predicate_selector",
+            path,
+            "set_relation requires left and right selectors",
+          );
         }
         const left = new Set(this.select(leaf.left, pointer(path, "left")));
         const right = new Set(this.select(leaf.right, pointer(path, "right")));
         const relation = stringValue(leaf.relation_kind, pointer(path, "relation_kind"));
         switch (relation) {
-          case "equal": return setsEqual(left, right);
-          case "subset": return isSubset(left, right);
-          case "superset": return isSubset(right, left);
-          case "disjoint": return [...left].every((id) => !right.has(id));
-          case "intersects": return [...left].some((id) => right.has(id));
-          default: fail("expression.set_relation", pointer(path, "relation_kind"), `unknown set relation ${relation}`);
+          case "equal":
+            return setsEqual(left, right);
+          case "subset":
+            return isSubset(left, right);
+          case "superset":
+            return isSubset(right, left);
+          case "disjoint":
+            return [...left].every((id) => !right.has(id));
+          case "intersects":
+            return [...left].some((id) => right.has(id));
+          default:
+            return fail(
+              "expression.set_relation",
+              pointer(path, "relation_kind"),
+              `unknown set relation ${relation}`,
+            );
         }
       }
       case "coverage": {
         const numerator = leaf.numerator;
         const denominator = leaf.denominator;
         if (numerator === undefined || denominator === undefined) {
-          fail("expression.predicate_selector", path, "coverage requires numerator and denominator selectors");
+          fail(
+            "expression.predicate_selector",
+            path,
+            "coverage requires numerator and denominator selectors",
+          );
         }
         return isSubset(
           new Set(this.select(denominator, pointer(path, "denominator"))),
@@ -661,11 +799,17 @@ export class GraphExpressionEvaluator {
       case "semver_compatible": {
         const provided = optionalString(leaf.provided ?? leaf.value, pointer(path, "provided"));
         const requiredRange = optionalString(leaf.required, pointer(path, "required"));
-        return provided !== undefined && requiredRange !== undefined && valid(provided) !== null &&
-          validRange(requiredRange) !== null && satisfies(provided, requiredRange);
+        return (
+          provided !== undefined &&
+          requiredRange !== undefined &&
+          valid(provided) !== null &&
+          validRange(requiredRange) !== null &&
+          satisfies(provided, requiredRange)
+        );
       }
       case "obligation_exists": {
-        const obligations = subject === undefined ? undefined : this.#fieldValue(subject, "obligations.unmet");
+        const obligations =
+          subject === undefined ? undefined : this.#fieldValue(subject, "obligations.unmet");
         return Array.isArray(obligations) && obligations.length > 0;
       }
       case "stage_is": {
@@ -674,7 +818,11 @@ export class GraphExpressionEvaluator {
         return expected !== undefined && this.#nodeStages.get(subject.type) === expected;
       }
       default:
-        fail("expression.unknown_predicate", pointer(path, "op"), `unknown predicate operator ${op}`);
+        fail(
+          "expression.unknown_predicate",
+          pointer(path, "op"),
+          `unknown predicate operator ${op}`,
+        );
     }
   }
 
@@ -686,7 +834,11 @@ export class GraphExpressionEvaluator {
     const binding = normalizeBindingName(source, pointer(path, "subject"));
     const ids = this.#bindings.get(binding);
     if (ids === undefined) {
-      fail("expression.unknown_binding", pointer(path, "subject"), `predicate references unbound subject $${binding}`);
+      fail(
+        "expression.unknown_binding",
+        pointer(path, "subject"),
+        `predicate references unbound subject $${binding}`,
+      );
     }
     return ids[0] === undefined ? undefined : this.#nodes.get(ids[0]);
   }
@@ -701,15 +853,18 @@ export class GraphExpressionEvaluator {
       title: node.title,
       status: node.status,
       spec: cloneMutableObject(node.spec),
-      edges: cloneMutableObject(node.edges as unknown as MutableConfigurationObject),
-      ...(node.annotations === undefined ? {} : { annotations: cloneMutableObject(node.annotations) }),
+      edges: cloneMutableObject(node.edges),
+      ...(node.annotations === undefined
+        ? {}
+        : { annotations: cloneMutableObject(node.annotations) }),
     };
     let current: MutableConfigurationValue = root;
     const normalized = field.replace(/^\$?\./u, "");
     for (const segment of normalized.split(".")) {
       if (Array.isArray(current)) {
         const index = Number(segment);
-        if (!Number.isSafeInteger(index) || index < 0 || current[index] === undefined) return undefined;
+        if (!Number.isSafeInteger(index) || index < 0 || current[index] === undefined)
+          return undefined;
         current = current[index]!;
       } else if (isMutableRecord(current) && current[segment] !== undefined) {
         current = current[segment]!;
@@ -734,12 +889,17 @@ export class GraphExpressionEvaluator {
       const current = queue.shift()!;
       if (current.depth >= maxDepth) continue;
       const requested = relations ?? [undefined];
-      const neighbors = uniqueSortedStrings(requested.flatMap((relation) => direction === "both"
-        ? [
-            ...this.#semanticNeighbors(current.id, relation, "outgoing"),
-            ...this.#semanticNeighbors(current.id, relation, "incoming"),
-          ]
-        : this.#semanticNeighbors(current.id, relation, direction)), "/traverse");
+      const neighbors = uniqueSortedStrings(
+        requested.flatMap((relation) =>
+          direction === "both"
+            ? [
+                ...this.#semanticNeighbors(current.id, relation, "outgoing"),
+                ...this.#semanticNeighbors(current.id, relation, "incoming"),
+              ]
+            : this.#semanticNeighbors(current.id, relation, direction),
+        ),
+        "/traverse",
+      );
       for (const id of neighbors) {
         if (seen.has(id)) continue;
         seen.add(id);
@@ -778,14 +938,16 @@ export class GraphExpressionEvaluator {
       const node = this.#nodes.get(nodeId);
       if (node === undefined) return [];
       if (relation === undefined) {
-        for (const targets of Object.values(node.edges)) for (const target of targets) output.add(target);
+        for (const targets of Object.values(node.edges))
+          for (const target of targets) output.add(target);
       } else {
         for (const target of node.edges[relation] ?? []) output.add(target);
       }
     } else {
       for (const candidate of this.#nodes.values()) {
         if (relation === undefined) {
-          if (Object.values(candidate.edges).some((targets) => targets.includes(nodeId))) output.add(candidate.id);
+          if (Object.values(candidate.edges).some((targets) => targets.includes(nodeId)))
+            output.add(candidate.id);
         } else if ((candidate.edges[relation] ?? []).includes(nodeId)) {
           output.add(candidate.id);
         }
@@ -824,8 +986,13 @@ export class GraphExpressionEvaluator {
   }
 
   #domainContext(subject: MutableGraphNode | undefined, path: string): RuleDomainContext {
-    const bindings: Record<string, readonly string[]> = Object.create(null) as Record<string, readonly string[]>;
-    for (const [name, ids] of [...this.#bindings].sort(([left], [right]) => compareUtf8(left, right))) {
+    const bindings: Record<string, readonly string[]> = Object.create(null) as Record<
+      string,
+      readonly string[]
+    >;
+    for (const [name, ids] of [...this.#bindings].sort(([left], [right]) =>
+      compareUtf8(left, right),
+    )) {
       bindings[name] = Object.freeze([...ids]);
     }
     return Object.freeze({
@@ -835,7 +1002,8 @@ export class GraphExpressionEvaluator {
       ...(subject === undefined ? {} : { subject: publicNode(subject) }),
       select: (selector: ConfigurationValue) => this.select(selector, `${path}/domain-selector`),
       node: (id: string) => this.node(id),
-      evaluate: (predicate: ConfigurationValue) => this.evaluate(predicate, `${path}/domain-predicate`),
+      evaluate: (predicate: ConfigurationValue) =>
+        this.evaluate(predicate, `${path}/domain-predicate`),
       withBinding: <Value>(name: string, ids: readonly string[], evaluate: () => Value) =>
         this.withBinding(name, ids, evaluate, `${path}/domain-binding`),
     });
@@ -845,7 +1013,11 @@ export class GraphExpressionEvaluator {
     for (const node of this.#nodes.values()) {
       for (const [relation, targets] of Object.entries(node.edges)) {
         if (relation.trim().length === 0) {
-          fail("expression.edge_relation", `/graph/nodes/${escapePointer(node.id)}/edges`, "edge relation must not be empty");
+          fail(
+            "expression.edge_relation",
+            `/graph/nodes/${escapePointer(node.id)}/edges`,
+            "edge relation must not be empty",
+          );
         }
         for (const target of targets) {
           if (!this.#nodes.has(target)) {
@@ -861,8 +1033,13 @@ export class GraphExpressionEvaluator {
   }
 
   #compileEdgeSemantics(): void {
-    for (const [index, value] of this.#configuration.edge_types.entries()) {
-      if (value.bidirectional !== true || typeof value.inverse !== "string" || typeof value.relation !== "string") continue;
+    for (const value of this.#configuration.edge_types) {
+      if (
+        value.bidirectional !== true ||
+        typeof value.inverse !== "string" ||
+        typeof value.relation !== "string"
+      )
+        continue;
       const current = this.#inverseRelations.get(value.inverse) ?? [];
       current.push(value.relation);
       this.#inverseRelations.set(value.inverse, [...new Set(current)].sort(compareUtf8));
@@ -883,16 +1060,29 @@ function snapshotNode(source: CompilerGraphNode, path: string): MutableGraphNode
   const status = stringValue(source.status, pointer(path, "status"));
   const spec = cloneMutableObject(record(source.spec, pointer(path, "spec")));
   const edges: Record<string, string[]> = Object.create(null) as Record<string, string[]>;
-  for (const [relation, targets] of Object.entries(source.edges).sort(([left], [right]) => compareUtf8(left, right))) {
+  for (const [relation, targets] of Object.entries(source.edges).sort(([left], [right]) =>
+    compareUtf8(left, right),
+  )) {
     edges[relation] = uniqueSortedStrings(targets, `${path}/edges/${escapePointer(relation)}`);
   }
-  const annotations = source.annotations === undefined
-    ? undefined
-    : cloneMutableObject(record(source.annotations, pointer(path, "annotations")));
-  const fields = source.fields === undefined
-    ? Object.create(null) as MutableConfigurationObject
-    : cloneMutableObject(record(source.fields, pointer(path, "fields")));
-  return { id, type, title, status, spec, edges, ...(annotations === undefined ? {} : { annotations }), fields };
+  const annotations =
+    source.annotations === undefined
+      ? undefined
+      : cloneMutableObject(record(source.annotations, pointer(path, "annotations")));
+  const fields =
+    source.fields === undefined
+      ? (Object.create(null) as MutableConfigurationObject)
+      : cloneMutableObject(record(source.fields, pointer(path, "fields")));
+  return {
+    id,
+    type,
+    title,
+    status,
+    spec,
+    edges,
+    ...(annotations === undefined ? {} : { annotations }),
+    fields,
+  };
 }
 
 function publicNode(node: MutableGraphNode): CompilerGraphNode {
@@ -915,15 +1105,22 @@ function nodeMaterial(node: MutableGraphNode): ConfigurationObject {
     title: node.title,
     status: node.status,
     spec: cloneObject(node.spec),
-    edges: cloneObject(node.edges as unknown as ConfigurationObject),
+    edges: cloneObject(node.edges),
     ...(node.annotations === undefined ? {} : { annotations: cloneObject(node.annotations) }),
     ...(Object.keys(node.fields).length === 0 ? {} : { fields: cloneObject(node.fields) }),
   };
 }
 
-function cloneEdges(edges: Readonly<Record<string, readonly string[]>>): Readonly<Record<string, readonly string[]>> {
-  const output: Record<string, readonly string[]> = Object.create(null) as Record<string, readonly string[]>;
-  for (const [relation, targets] of Object.entries(edges).sort(([left], [right]) => compareUtf8(left, right))) {
+function cloneEdges(
+  edges: Readonly<Record<string, readonly string[]>>,
+): Readonly<Record<string, readonly string[]>> {
+  const output: Record<string, readonly string[]> = Object.create(null) as Record<
+    string,
+    readonly string[]
+  >;
+  for (const [relation, targets] of Object.entries(edges).sort(([left], [right]) =>
+    compareUtf8(left, right),
+  )) {
     output[relation] = Object.freeze([...targets]);
   }
   return Object.freeze(output);
@@ -936,9 +1133,11 @@ function countMatches(count: number, leaf: ConfigurationObject, path: string): b
   if (min !== undefined && max !== undefined && min > max) {
     fail("expression.count_bounds", path, "predicate min must not exceed max");
   }
-  return (exact === undefined || count === exact) &&
+  return (
+    (exact === undefined || count === exact) &&
     (min === undefined || count >= min) &&
-    (max === undefined || count <= max);
+    (max === undefined || count <= max)
+  );
 }
 
 function setValuePath(
@@ -949,7 +1148,11 @@ function setValuePath(
 ): void {
   const segments = field.split(".");
   if (segments.length === 0 || segments.some((segment) => segment.length === 0)) {
-    fail("rule.derivation_field", pointer(path, "field"), "derivation field must be a nonempty dot path");
+    fail(
+      "rule.derivation_field",
+      pointer(path, "field"),
+      "derivation field must be a nonempty dot path",
+    );
   }
   let current = root;
   for (const [index, segment] of segments.entries()) {
@@ -965,12 +1168,19 @@ function setValuePath(
     } else if (isMutableRecord(existing)) {
       current = existing;
     } else {
-      fail("rule.derivation_field_conflict", pointer(path, "field"), `derivation field ${field} crosses a non-object value`);
+      fail(
+        "rule.derivation_field_conflict",
+        pointer(path, "field"),
+        `derivation field ${field} crosses a non-object value`,
+      );
     }
   }
 }
 
-function mutableRecordAt(root: MutableConfigurationObject, key: string): MutableConfigurationObject {
+function mutableRecordAt(
+  root: MutableConfigurationObject,
+  key: string,
+): MutableConfigurationObject {
   const existing = root[key];
   if (existing === undefined) {
     const created: MutableConfigurationObject = Object.create(null) as MutableConfigurationObject;
@@ -978,12 +1188,19 @@ function mutableRecordAt(root: MutableConfigurationObject, key: string): Mutable
     return created;
   }
   if (!isMutableRecord(existing)) {
-    fail("rule.derivation_projection", `/graph/fields/${escapePointer(key)}`, `compiler projection ${key} is not an object`);
+    fail(
+      "rule.derivation_projection",
+      `/graph/fields/${escapePointer(key)}`,
+      `compiler projection ${key} is not an object`,
+    );
   }
   return existing;
 }
 
-function mutableArrayAt(root: MutableConfigurationObject, key: string): MutableConfigurationValue[] {
+function mutableArrayAt(
+  root: MutableConfigurationObject,
+  key: string,
+): MutableConfigurationValue[] {
   const existing = root[key];
   if (existing === undefined) {
     const created: MutableConfigurationValue[] = [];
@@ -991,22 +1208,30 @@ function mutableArrayAt(root: MutableConfigurationObject, key: string): MutableC
     return created;
   }
   if (!Array.isArray(existing)) {
-    fail("rule.derivation_projection", `/graph/fields/${escapePointer(key)}`, `compiler projection ${key} is not an array`);
+    fail(
+      "rule.derivation_projection",
+      `/graph/fields/${escapePointer(key)}`,
+      `compiler projection ${key} is not an array`,
+    );
   }
   return existing;
 }
 
-function compactObject(values: Record<string, MutableConfigurationValue | undefined>): MutableConfigurationObject {
+function compactObject(
+  values: Record<string, MutableConfigurationValue | undefined>,
+): MutableConfigurationObject {
   const output: MutableConfigurationObject = Object.create(null) as MutableConfigurationObject;
   for (const [key, value] of Object.entries(values)) if (value !== undefined) output[key] = value;
   return output;
 }
 
 function isEmptyValue(value: ConfigurationValue | MutableConfigurationValue): boolean {
-  return value === null ||
+  return (
+    value === null ||
     (typeof value === "string" && value.trim().length === 0) ||
     (Array.isArray(value) && value.length === 0) ||
-    (isRecordLike(value) && Object.keys(value).length === 0);
+    (isRecordLike(value) && Object.keys(value).length === 0)
+  );
 }
 
 function setsEqual(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
@@ -1037,9 +1262,14 @@ function optionalBound(value: ConfigurationValue | undefined, path: string): num
   return value;
 }
 
-function required(source: ConfigurationObject, key: string, parentPath: string): ConfigurationValue {
+function required(
+  source: ConfigurationObject,
+  key: string,
+  parentPath: string,
+): ConfigurationValue {
   const value = source[key];
-  if (value === undefined) fail("expression.missing_field", pointer(parentPath, key), `required field ${key} is missing`);
+  if (value === undefined)
+    fail("expression.missing_field", pointer(parentPath, key), `required field ${key} is missing`);
   return value;
 }
 
@@ -1052,7 +1282,8 @@ function exactRecord(
   const output = record(value, path);
   exactKeys(output, path, allowed);
   for (const key of requiredKeys) {
-    if (output[key] === undefined) fail("expression.missing_field", pointer(path, key), `required field ${key} is missing`);
+    if (output[key] === undefined)
+      fail("expression.missing_field", pointer(path, key), `required field ${key} is missing`);
   }
   return output;
 }
@@ -1061,7 +1292,11 @@ function exactKeys(value: ConfigurationObject, path: string, allowed: readonly s
   const permitted = new Set(allowed);
   for (const key of Object.keys(value)) {
     if (!permitted.has(key)) {
-      fail("expression.unknown_field", pointer(path, key), `expression contains unknown field ${key}`);
+      fail(
+        "expression.unknown_field",
+        pointer(path, key),
+        `expression contains unknown field ${key}`,
+      );
     }
   }
 }
@@ -1095,7 +1330,10 @@ function optionalStringArray(value: ConfigurationValue | undefined, path: string
   return value === undefined ? [] : stringArray(value, path);
 }
 
-function nonemptyArray(value: ConfigurationValue | undefined, path: string): readonly ConfigurationValue[] {
+function nonemptyArray(
+  value: ConfigurationValue | undefined,
+  path: string,
+): readonly ConfigurationValue[] {
   if (!Array.isArray(value) || value.length === 0) {
     fail("expression.nonempty_array", path, "expected a nonempty array");
   }
@@ -1124,11 +1362,15 @@ function isMutableRecord(value: MutableConfigurationValue): value is MutableConf
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function cloneOptional(value: MutableConfigurationValue | undefined): ConfigurationValue | undefined {
+function cloneOptional(
+  value: MutableConfigurationValue | undefined,
+): ConfigurationValue | undefined {
   return value === undefined ? undefined : cloneValue(value);
 }
 
-function cloneValue(value: ConfigurationValue | MutableConfigurationValue): MutableConfigurationValue {
+function cloneValue(
+  value: ConfigurationValue | MutableConfigurationValue,
+): MutableConfigurationValue {
   return cloneMutableValue(value as MutableConfigurationValue);
 }
 
@@ -1139,7 +1381,7 @@ function cloneMutableValue(value: MutableConfigurationValue): MutableConfigurati
 }
 
 function cloneObject(value: ConfigurationObject | MutableConfigurationObject): ConfigurationObject {
-  return cloneMutableObject(value as MutableConfigurationObject) as ConfigurationObject;
+  return cloneMutableObject(value);
 }
 
 function cloneMutableObject(

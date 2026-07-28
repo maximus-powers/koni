@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   catalogProjectAuthoredConfig,
-  ProjectConfigMutationError,
+  type ProjectConfigMutationError,
   readProjectAuthoredConfigDocument,
   updateProjectAuthoredConfigDocument,
   updateProjectAuthoredConfigDocuments,
@@ -24,20 +24,28 @@ describe("lifecycle-owned structured project configuration edits", () => {
     const catalog = await catalogProjectAuthoredConfig(project, codingProfile);
     expect(catalog.protocol).toBe("koni.project-config-catalog.v1");
     expect(catalog.profileId).toBe("software");
-    expect(catalog.entries.find(({ path: relative }) => relative === "project.yaml")).toMatchObject({
-      semanticDomain: "project",
-      guidedEditable: true,
-      kind: "config",
-    });
-    expect(catalog.entries.find(({ path: relative }) => relative === "run-types/small.yaml")).toMatchObject({
+    expect(catalog.entries.find(({ path: relative }) => relative === "project.yaml")).toMatchObject(
+      {
+        semanticDomain: "project",
+        guidedEditable: true,
+        kind: "config",
+      },
+    );
+    expect(
+      catalog.entries.find(({ path: relative }) => relative === "run-types/small.yaml"),
+    ).toMatchObject({
       semanticDomain: "run-type",
       guidedEditable: true,
     });
-    expect(catalog.entries.find(({ path: relative }) => relative === "agents/run-planner.yaml")).toMatchObject({
+    expect(
+      catalog.entries.find(({ path: relative }) => relative === "agents/run-planner.yaml"),
+    ).toMatchObject({
       semanticDomain: "agent",
       guidedEditable: true,
     });
-    expect(catalog.entries.some(({ path: relative }) => relative.startsWith(".managed/"))).toBe(false);
+    expect(catalog.entries.some(({ path: relative }) => relative.startsWith(".managed/"))).toBe(
+      false,
+    );
     expect(catalog.entries.some(({ path: relative }) => relative.startsWith(".pi/"))).toBe(false);
   }, 30_000);
 
@@ -62,31 +70,46 @@ describe("lifecycle-owned structured project configuration edits", () => {
     expect((after.document.project as Record<string, unknown>).description).toBe(description);
     expect(after.catalog.configurationSha256).toBe(result.configurationSha256);
     expect(after.catalog.effectiveBundleSha256).toBe(result.effectiveBundleSha256);
-    expect((await readProfileLifecycle(project))?.overlay).toContainEqual(expect.objectContaining({
-      path: "project.yaml",
-      disposition: "modified",
-      projectSha256: result.sourceSha256,
-    }));
-    expect(await readFile(path.join(project, ".pi", "settings.json"), "utf8")).toBe('{"theme":"mine"}\n');
+    expect((await readProfileLifecycle(project))?.overlay).toContainEqual(
+      expect.objectContaining({
+        path: "project.yaml",
+        disposition: "modified",
+        projectSha256: result.sourceSha256,
+      }),
+    );
+    expect(await readFile(path.join(project, ".pi", "settings.json"), "utf8")).toBe(
+      '{"theme":"mine"}\n',
+    );
   }, 30_000);
 
   it("rejects stale editors and invalid complete candidates without changing bytes", async () => {
     const project = await initializedProject();
     const before = await readProjectAuthoredConfigDocument(project, codingProfile, "project.yaml");
     const originalSource = await readFile(path.join(project, ".koni", "project.yaml"), "utf8");
-    const originalLifecycle = await readFile(path.join(project, ".koni", ".managed", "lifecycle.json"), "utf8");
+    const originalLifecycle = await readFile(
+      path.join(project, ".koni", ".managed", "lifecycle.json"),
+      "utf8",
+    );
 
     const invalid = structuredClone(before.document);
     invalid.default_run_type = "does-not-exist";
-    await expect(updateProjectAuthoredConfigDocument({
-      projectRoot: project,
-      profilePackageRoot: codingProfile,
-      path: "project.yaml",
-      expectedSourceSha256: before.entry.sourceSha256,
-      document: invalid,
-    })).rejects.toMatchObject({ code: "candidate_configuration_invalid" } satisfies Partial<ProjectConfigMutationError>);
-    expect(await readFile(path.join(project, ".koni", "project.yaml"), "utf8")).toBe(originalSource);
-    expect(await readFile(path.join(project, ".koni", ".managed", "lifecycle.json"), "utf8")).toBe(originalLifecycle);
+    await expect(
+      updateProjectAuthoredConfigDocument({
+        projectRoot: project,
+        profilePackageRoot: codingProfile,
+        path: "project.yaml",
+        expectedSourceSha256: before.entry.sourceSha256,
+        document: invalid,
+      }),
+    ).rejects.toMatchObject({
+      code: "candidate_configuration_invalid",
+    } satisfies Partial<ProjectConfigMutationError>);
+    expect(await readFile(path.join(project, ".koni", "project.yaml"), "utf8")).toBe(
+      originalSource,
+    );
+    expect(await readFile(path.join(project, ".koni", ".managed", "lifecycle.json"), "utf8")).toBe(
+      originalLifecycle,
+    );
 
     const valid = structuredClone(before.document);
     (valid.project as Record<string, unknown>).description = "First accepted edit";
@@ -97,30 +120,45 @@ describe("lifecycle-owned structured project configuration edits", () => {
       expectedSourceSha256: before.entry.sourceSha256,
       document: valid,
     });
-    await expect(updateProjectAuthoredConfigDocument({
-      projectRoot: project,
-      profilePackageRoot: codingProfile,
-      path: "project.yaml",
-      expectedSourceSha256: before.entry.sourceSha256,
-      document: before.document,
-    })).rejects.toMatchObject({ code: "config_source_changed" } satisfies Partial<ProjectConfigMutationError>);
+    await expect(
+      updateProjectAuthoredConfigDocument({
+        projectRoot: project,
+        profilePackageRoot: codingProfile,
+        path: "project.yaml",
+        expectedSourceSha256: before.entry.sourceSha256,
+        document: before.document,
+      }),
+    ).rejects.toMatchObject({
+      code: "config_source_changed",
+    } satisfies Partial<ProjectConfigMutationError>);
   }, 30_000);
 
   it("never accepts direct edits to lifecycle-owned paths", async () => {
     const project = await initializedProject();
-    await expect(updateProjectAuthoredConfigDocument({
-      projectRoot: project,
-      profilePackageRoot: codingProfile,
-      path: ".managed/lifecycle.yaml",
-      expectedSourceSha256: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-      document: {},
-    })).rejects.toMatchObject({ code: "config_path" } satisfies Partial<ProjectConfigMutationError>);
+    await expect(
+      updateProjectAuthoredConfigDocument({
+        projectRoot: project,
+        profilePackageRoot: codingProfile,
+        path: ".managed/lifecycle.yaml",
+        expectedSourceSha256:
+          "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        document: {},
+      }),
+    ).rejects.toMatchObject({ code: "config_path" } satisfies Partial<ProjectConfigMutationError>);
   }, 30_000);
 
   it("validates and publishes several guided documents as one transaction", async () => {
     const project = await initializedProject();
-    const projectDocument = await readProjectAuthoredConfigDocument(project, codingProfile, "project.yaml");
-    const agentDocument = await readProjectAuthoredConfigDocument(project, codingProfile, "agents/run-planner.yaml");
+    const projectDocument = await readProjectAuthoredConfigDocument(
+      project,
+      codingProfile,
+      "project.yaml",
+    );
+    const agentDocument = await readProjectAuthoredConfigDocument(
+      project,
+      codingProfile,
+      "agents/run-planner.yaml",
+    );
     const nextProject = structuredClone(projectDocument.document);
     const nextAgent = structuredClone(agentDocument.document);
     (nextProject.project as Record<string, unknown>).description = "Edited together";
@@ -143,8 +181,10 @@ describe("lifecycle-owned structured project configuration edits", () => {
     });
     expect(result.protocol).toBe("koni.project-config-batch-update.v1");
     expect(result.documents).toHaveLength(2);
-    expect((await readProjectAuthoredConfigDocument(project, codingProfile, "agents/run-planner.yaml")).document)
-      .toMatchObject({ description: "Plans with an explicitly configured description." });
+    expect(
+      (await readProjectAuthoredConfigDocument(project, codingProfile, "agents/run-planner.yaml"))
+        .document,
+    ).toMatchObject({ description: "Plans with an explicitly configured description." });
   }, 30_000);
 });
 

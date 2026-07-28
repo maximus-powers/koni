@@ -9,13 +9,13 @@ const fixtures = [
     directory: "coding-0.7.0",
     bundleSha256: "sha256:4e955f7fb5a6bbd58542f395471d2e3f1c87364840abd218f973b8f62a5c0c7e",
     targetDirectory: "coding-profile",
-    targetBundleSha256: "sha256:2ba17d3b4259e957e9631336f4e3bcc5796062ed8428a27c05f8896f38f49649",
+    targetBundleSha256: "sha256:df6e6f62434fa3856880438b2d735f0c45c5b5a62ffe3ef84144e2130e675693",
   },
   {
     directory: "research-1.0.11",
     bundleSha256: "sha256:1bc8bdb64934ccd475f50acad5b22a7b1b6f7e168a748ecd91e234be76126c60",
     targetDirectory: "research-profile",
-    targetBundleSha256: "sha256:b3a70e54bdd237f8cbda10ef2f5ac5addf0d07e077037488dca79731eb7902ec",
+    targetBundleSha256: "sha256:e75e482a20d39659782edb8b0a23f3b0fc9cce27a6d97695e935e9efdd121153",
   },
 ] as const;
 
@@ -51,7 +51,7 @@ describe("prior profile release fixtures", () => {
     ) as ProfilePackageManifest;
 
     const matchingMigrations = (manifest.migrations ?? []).filter((migration) =>
-      migration.from_bundle_sha256.includes(fixture.bundleSha256)
+      migration.from_bundle_sha256.includes(fixture.bundleSha256),
     );
 
     expect(manifest.bundle_sha256).toBe(fixture.targetBundleSha256);

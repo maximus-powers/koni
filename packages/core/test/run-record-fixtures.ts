@@ -1,8 +1,5 @@
 import path from "node:path";
-import type {
-  RunGitLifecycleRecord,
-  TicketGitCycleRecord,
-} from "../src/git/lifecycle.js";
+import type { RunGitLifecycleRecord, TicketGitCycleRecord } from "../src/git/lifecycle.js";
 import type { RunRecord, TicketRecord } from "../src/state/run-record.js";
 
 const OID = "a".repeat(40);
@@ -15,6 +12,9 @@ export function fixtureRunGit(
   const commonDirectory = path.join(projectRoot, ".git");
   const root = path.join(commonDirectory, "koni", "worktrees", "runs", runId);
   const runRef = `refs/heads/koni/runs/${runId}`;
+  const planningWorktree = path.join(root, "planning");
+  const runWorktree = path.join(root, "integration");
+  const ticketRoot = path.join(root, "tickets");
   return {
     protocol: "koni.git-lifecycle.v1",
     runId,
@@ -24,14 +24,14 @@ export function fixtureRunGit(
     namespace: {
       root,
       runRef,
-      planningWorktree: projectRoot,
-      runWorktree: projectRoot,
-      ticketRoot: projectRoot,
+      planningWorktree,
+      runWorktree,
+      ticketRoot,
     },
     planning: {
       status: mode === "planning" ? "ready" : "retired",
       baseOid: OID,
-      worktree: projectRoot,
+      worktree: planningWorktree,
       createdAt: "2026-07-16T00:00:00.000Z",
       retiredAt: mode === "planning" ? undefined : "2026-07-16T00:00:01.000Z",
       blocker: undefined,
@@ -39,7 +39,7 @@ export function fixtureRunGit(
     run: {
       status: mode === "planning" ? "unmaterialized" : "ready",
       branchRef: runRef,
-      worktree: projectRoot,
+      worktree: runWorktree,
       headOid: mode === "planning" ? undefined : OID,
       materializedAt: mode === "planning" ? undefined : "2026-07-16T00:00:01.000Z",
       retiredAt: undefined,
@@ -51,7 +51,10 @@ export function fixtureRunGit(
   };
 }
 
-export function attachFixtureTicketCycle(run: RunRecord, ticket: TicketRecord): TicketGitCycleRecord {
+export function attachFixtureTicketCycle(
+  run: RunRecord,
+  ticket: TicketRecord,
+): TicketGitCycleRecord {
   if (run.git.run.status !== "ready") {
     run.git.planning.status = "retired";
     run.git.planning.retiredAt ??= "2026-07-16T00:00:01.000Z";
@@ -61,7 +64,7 @@ export function attachFixtureTicketCycle(run: RunRecord, ticket: TicketRecord): 
   }
   const cycleId = `cycle-${ticket.id}`;
   const branchRef = `refs/heads/koni/tickets/${run.id}/${ticket.id}/cycles/${cycleId}`;
-  const worktree = run.projectRoot;
+  const worktree = path.join(run.git.namespace.ticketRoot, ticket.id, "cycles", cycleId);
   const cycle: TicketGitCycleRecord = {
     cycleId,
     ticketId: ticket.id,

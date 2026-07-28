@@ -30,7 +30,11 @@ export interface ProviderPayloadIdentity {
  * provider usage remains the accounting authority after every settled response.
  */
 export function estimateProviderInputTokens(payloadSizeBytes: number): number {
-  if (!Number.isSafeInteger(payloadSizeBytes) || payloadSizeBytes < 1 || payloadSizeBytes > MAX_PROVIDER_PAYLOAD_BYTES) {
+  if (
+    !Number.isSafeInteger(payloadSizeBytes) ||
+    payloadSizeBytes < 1 ||
+    payloadSizeBytes > MAX_PROVIDER_PAYLOAD_BYTES
+  ) {
     throw new Error("Pi provider payload exceeds its authority admission bound");
   }
   const estimate = Math.ceil(payloadSizeBytes / 2) + PROVIDER_PAYLOAD_TOKEN_RESERVE;
@@ -55,11 +59,12 @@ export function isSupportedStoredProviderInputEstimate(
   const legacyDiv3 = Math.ceil(payloadSizeBytes / 3) + PROVIDER_PAYLOAD_TOKEN_RESERVE;
   const legacyDiv4 = Math.ceil(payloadSizeBytes / 4) + PROVIDER_PAYLOAD_TOKEN_RESERVE;
   const legacyBytes = payloadSizeBytes + PROVIDER_PAYLOAD_TOKEN_RESERVE;
-  return Number.isSafeInteger(legacyBytes) && (
-    prospectiveInputTokens === current ||
-    prospectiveInputTokens === legacyDiv3 ||
-    prospectiveInputTokens === legacyDiv4 ||
-    prospectiveInputTokens === legacyBytes
+  return (
+    Number.isSafeInteger(legacyBytes) &&
+    (prospectiveInputTokens === current ||
+      prospectiveInputTokens === legacyDiv3 ||
+      prospectiveInputTokens === legacyDiv4 ||
+      prospectiveInputTokens === legacyBytes)
   );
 }
 
@@ -133,9 +138,15 @@ export function serializedProviderOutputCap(
   return { path: present[0]!.path, value: Number(present[0]!.value) };
 }
 
-export function isSupportedProviderOutputCap(api: string, cap: SerializedProviderOutputCap): boolean {
-  return OUTPUT_CAP_PATHS[api]?.includes(cap.path) === true &&
-    Number.isSafeInteger(cap.value) && cap.value > 0;
+export function isSupportedProviderOutputCap(
+  api: string,
+  cap: SerializedProviderOutputCap,
+): boolean {
+  return (
+    OUTPUT_CAP_PATHS[api]?.includes(cap.path) === true &&
+    Number.isSafeInteger(cap.value) &&
+    cap.value > 0
+  );
 }
 
 export function providerApiHasSupportedOutputCap(api: string): boolean {
@@ -154,10 +165,12 @@ export function deriveProviderSettlement(
   baselineEntryId: string,
   nextBaselineEntryId?: string,
 ): DerivedProviderSettlement | undefined {
-  return deriveProviderSettlements(entries, [{
-    baselineEntryId,
-    ...(nextBaselineEntryId === undefined ? {} : { nextBaselineEntryId }),
-  }])[0];
+  return deriveProviderSettlements(entries, [
+    {
+      baselineEntryId,
+      ...(nextBaselineEntryId === undefined ? {} : { nextBaselineEntryId }),
+    },
+  ])[0];
 }
 
 /** Re-derive an ordered request ledger in one linear transcript pass. */
@@ -171,17 +184,20 @@ export function deriveProviderSettlements(
     if (entry.parentId !== expectedParent) {
       throw new Error("Pi provider transcript is not one linear parent chain");
     }
-    if (entryIndexes.has(entry.id)) throw new Error("Pi provider transcript contains a duplicate entry id");
+    if (entryIndexes.has(entry.id))
+      throw new Error("Pi provider transcript contains a duplicate entry id");
     entryIndexes.set(entry.id, index);
     expectedParent = entry.id;
   }
   let previousEnd = -1;
   return boundaries.map((boundary) => {
     const baselineIndex = entryIndexes.get(boundary.baselineEntryId) ?? -1;
-    const nextBaselineIndex = boundary.nextBaselineEntryId === undefined
-      ? entries.length - 1
-      : entryIndexes.get(boundary.nextBaselineEntryId) ?? -1;
-    if (baselineIndex === -1) throw new Error("Pi provider baseline is missing from its transcript");
+    const nextBaselineIndex =
+      boundary.nextBaselineEntryId === undefined
+        ? entries.length - 1
+        : (entryIndexes.get(boundary.nextBaselineEntryId) ?? -1);
+    if (baselineIndex === -1)
+      throw new Error("Pi provider baseline is missing from its transcript");
     if (
       nextBaselineIndex < baselineIndex ||
       (boundary.nextBaselineEntryId !== undefined && nextBaselineIndex === baselineIndex)
@@ -197,7 +213,9 @@ export function deriveProviderSettlements(
       const entry = entries[index]!;
       if (!isAssistantEntry(entry)) continue;
       if (assistant !== undefined) {
-        throw new Error("Pi transcript contains multiple assistant turns after one provider reservation");
+        throw new Error(
+          "Pi transcript contains multiple assistant turns after one provider reservation",
+        );
       }
       assistant = entry;
     }

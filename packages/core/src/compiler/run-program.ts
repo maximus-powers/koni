@@ -33,7 +33,6 @@ import type {
   ControlCatalog,
   ControlRoleDefault,
   ControlStageOption,
-  ControlThinkingLevel,
 } from "../control-center/protocol.js";
 import {
   projectCompiledCockpitViewCatalog,
@@ -92,7 +91,6 @@ import {
   type GraphContextualState,
   type GraphDelta,
   type GraphEdge,
-  type GraphEdgeTypeDefinition,
   type GraphFieldDefinition,
   type GraphNode,
   type GraphNodeTypeDefinition,
@@ -102,7 +100,6 @@ import {
 import {
   DynamicGraphContextSelector,
   type DynamicGraphSelectionRequest,
-  type LegacyGraphNoteRecord,
   type SelectedDynamicGraphContext,
 } from "../graph/context-selector.js";
 import type { KoniCompactionSnapshot } from "../pi/compaction.js";
@@ -114,10 +111,7 @@ import {
   type AgentLaunchSpec,
   type LaunchResource,
 } from "../pi/launch-spec.js";
-import {
-  loadSealedPiModelBinding,
-  type SealedPiModelBinding,
-} from "../pi/model-catalog.js";
+import { loadSealedPiModelBinding, type SealedPiModelBinding } from "../pi/model-catalog.js";
 import {
   KONI_TOOL_NAMES,
   isSupportedKoniToolSchemaHash,
@@ -126,7 +120,13 @@ import {
   type KoniToolInvocation,
   type KoniToolName,
 } from "../pi/tool-catalog.js";
-import { canonicalEncode, canonicalHash, isSha256Digest, rawSha256, type Sha256Digest } from "../shared/canonical.js";
+import {
+  canonicalEncode,
+  canonicalHash,
+  isSha256Digest,
+  rawSha256,
+  type Sha256Digest,
+} from "../shared/canonical.js";
 import type { CompilerDiagnostic, ValidationResult } from "../shared/diagnostics.js";
 import {
   createRunBehaviorSnapshot,
@@ -163,10 +163,7 @@ import {
   type PinnedCommunityResourceBundle,
   type SelectedCommunityAttemptResources,
 } from "./community-resources.js";
-import {
-  projectGatePolicyDefinitions,
-  projectGraphSchemaDefinition,
-} from "./graph-schema.js";
+import { projectGatePolicyDefinitions, projectGraphSchemaDefinition } from "./graph-schema.js";
 import { GraphExpressionEvaluator } from "./expressions.js";
 import { compileProjectDirectory } from "./project-directory.js";
 import {
@@ -180,10 +177,7 @@ import {
   projectHistoricalCompiledBehavior,
 } from "./historical-behavior.js";
 import { resolveCompiledPersona, resolveCompiledRunType } from "./resolution.js";
-import {
-  compileStateMachineCatalog,
-  evaluateConfiguredRules,
-} from "./rules.js";
+import { compileStateMachineCatalog, evaluateConfiguredRules } from "./rules.js";
 import {
   compileExecutionSemanticCatalog,
   type CompiledExecutionSemanticCatalog,
@@ -354,6 +348,8 @@ interface GraphNoteArtifact {
 }
 
 interface PlanningOutput {
+  /** Planner-authored 3-4 word operator label; optional for frozen personas that omit it. */
+  title?: string;
   full: Record<PlanDomain, string>;
   concise: Record<PlanDomain, { title: string; description: string }[]>;
   graphSeed: PlanningGraphSeed;
@@ -518,8 +514,9 @@ export interface NativeRunCompilerProgramOptions {
    * Supplies authenticated, snapshot-bound assertions for receipt/review/command predicates.
    * Local graph, gate-selection, and contained-filesystem predicates never consume assertions.
    */
-  ruleAuthorityEvidence?: (request: NativeRuleAuthorityEvidenceRequest) =>
-    Promise<RuleAuthorityEvidence | undefined>;
+  ruleAuthorityEvidence?: (
+    request: NativeRuleAuthorityEvidenceRequest,
+  ) => Promise<RuleAuthorityEvidence | undefined>;
 }
 
 export interface NativeRuleAuthorityEvidenceRequest {
@@ -554,7 +551,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
   readonly #packageBaselineLoader: (() => Promise<VerifiedProfileBaseline>) | undefined;
   readonly #installedPiPackagesLoader: () => Promise<readonly InstalledPiPackageReference[]>;
   readonly #communityToolAdapters: readonly CommunityToolAdapterDefinition[];
-  readonly #sealedModelBindingLoader: (provider: string, modelId: string) => Promise<SealedPiModelBinding>;
+  readonly #sealedModelBindingLoader: (
+    provider: string,
+    modelId: string,
+  ) => Promise<SealedPiModelBinding>;
   readonly #stateRoot: string;
   readonly #now: () => Date;
   readonly #ruleAuthorityEvidence: NativeRunCompilerProgramOptions["ruleAuthorityEvidence"];
@@ -562,24 +562,25 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
   readonly #issuedSpecs = new Map<string, Readonly<AgentLaunchSpec>>();
   readonly #dynamicContextSelector = new DynamicGraphContextSelector();
 
-  private constructor(
-    options: NativeRunCompilerProgramOptions,
-    stateRoot: string,
-  ) {
+  private constructor(options: NativeRunCompilerProgramOptions, stateRoot: string) {
     this.#projectRoot = path.resolve(options.projectRoot);
     this.#packageBaseline = options.packageBaseline;
     this.#packageBaselineLoader = options.packageBaselineLoader;
-    this.#installedPiPackagesLoader = options.installedPiPackagesLoader ?? (() =>
-      discoverInstalledPiPackageReferences({ projectRoot: this.#projectRoot }));
+    this.#installedPiPackagesLoader =
+      options.installedPiPackagesLoader ??
+      (() => discoverInstalledPiPackageReferences({ projectRoot: this.#projectRoot }));
     this.#communityToolAdapters = structuredClone(options.communityToolAdapters ?? []);
-    this.#sealedModelBindingLoader = options.sealedModelBindingLoader ?? ((provider, modelId) =>
-      loadSealedPiModelBinding(provider, modelId));
+    this.#sealedModelBindingLoader =
+      options.sealedModelBindingLoader ??
+      ((provider, modelId) => loadSealedPiModelBinding(provider, modelId));
     this.#stateRoot = stateRoot;
     this.#now = options.now ?? (() => new Date());
     this.#ruleAuthorityEvidence = options.ruleAuthorityEvidence;
   }
 
-  public static async create(options: NativeRunCompilerProgramOptions): Promise<NativeRunCompilerProgram> {
+  public static async create(
+    options: NativeRunCompilerProgramOptions,
+  ): Promise<NativeRunCompilerProgram> {
     const endpoint = await discoverAuthorityEndpoint(options.projectRoot);
     return new NativeRunCompilerProgram(options, endpoint.stateRoot);
   }
@@ -595,7 +596,8 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     );
     const resolved = compiled.run_type_order.map((runTypeId) => {
       const behavior = compiled.behavior.runTypes[runTypeId];
-      if (behavior === undefined) fail("run_type_invalid", `run type ${runTypeId} has no compiled behavior`);
+      if (behavior === undefined)
+        fail("run_type_invalid", `run type ${runTypeId} has no compiled behavior`);
       return behavior;
     });
     const stageOrder: string[] = [];
@@ -634,7 +636,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
           questionPolicy: runType.questions.presentation,
           questionDefaultScope: runType.questions.defaultScope,
           maxParallel: runType.maxParallel,
-          startMode: runType.pipeline.some((stage) => stage.kind === "planning") ? "planning" : "work",
+          startMode: runType.pipeline.some((stage) => stage.kind === "planning")
+            ? "planning"
+            : "work",
           objectiveFieldId: runType.objectiveFieldId,
           intake: runType.intake.map((field) => structuredClone(field)),
           autoStart: runType.autoStart,
@@ -669,22 +673,44 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       fail("terminal_policy_run", "terminal policy assignment belongs to another run");
     }
     const attempt = input.run.attempts[input.attemptId];
-    if (attempt === undefined ||
-        attempt.ticketId !== input.assignment.ticketId ||
-        attempt.stepId !== input.assignment.stepId ||
-        attempt.personaId !== input.assignment.personaId) {
-      fail("terminal_policy_attempt", "terminal policy attempt does not match its exact assignment");
+    if (
+      attempt === undefined ||
+      attempt.ticketId !== input.assignment.ticketId ||
+      attempt.stepId !== input.assignment.stepId ||
+      attempt.personaId !== input.assignment.personaId
+    ) {
+      fail(
+        "terminal_policy_attempt",
+        "terminal policy attempt does not match its exact assignment",
+      );
     }
     const pinned = await this.#loadPinned(input.run);
     const catalog = requireExecutionSemanticCatalog(pinned.configuration);
-    const descriptor = await this.#descriptorForRecordedAttempt(input.run, attempt, pinned.configuration);
-    if (descriptor.step === undefined || descriptor.definition === undefined || descriptor.graph === undefined ||
-        descriptor.executionPolicyBinding === undefined) {
-      fail("terminal_policy_descriptor", "terminal policy requires one compiler-bound ticket workflow step");
+    const descriptor = await this.#descriptorForRecordedAttempt(
+      input.run,
+      attempt,
+      pinned.configuration,
+    );
+    if (
+      descriptor.step === undefined ||
+      descriptor.definition === undefined ||
+      descriptor.graph === undefined ||
+      descriptor.executionPolicyBinding === undefined
+    ) {
+      fail(
+        "terminal_policy_descriptor",
+        "terminal policy requires one compiler-bound ticket workflow step",
+      );
     }
     const stepSemantics = terminalStepSemantics(catalog, descriptor.executionPolicyBinding);
-    if (canonicalHash(stepSemantics.validationChecks) !== canonicalHash(descriptor.step.validation_checks)) {
-      fail("terminal_policy_checks", "durable workflow validation checks differ from pinned execution semantics");
+    if (
+      canonicalHash(stepSemantics.validationChecks) !==
+      canonicalHash(descriptor.step.validation_checks)
+    ) {
+      fail(
+        "terminal_policy_checks",
+        "durable workflow validation checks differ from pinned execution semantics",
+      );
     }
     const validationChecks = await resolveTerminalValidationCheckPolicies({
       configuration: pinned.configuration,
@@ -697,8 +723,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       ),
       checkIds: stepSemantics.validationChecks,
     });
-    const composedReplayCheckIds = [...new Set(validationChecks.flatMap((policy) =>
-      policy.replaySelection.replayCheckIds))].sort(compareText);
+    const composedReplayCheckIds = [
+      ...new Set(validationChecks.flatMap((policy) => policy.replaySelection.replayCheckIds)),
+    ].sort(compareText);
     const retainedReceipts = retainedTerminalReceipts(
       input.run,
       input.assignment.ticketId,
@@ -708,8 +735,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     let sourceManifestPairs: AssignmentTerminalPolicySourceManifestPair[] = [];
     if (stepSemantics.preserveSourcePathsFrom !== undefined) {
       const definitions = await this.#readTicketDefinitions(input.run, pinned.configuration);
-      const sourceStep = descriptor.definition.workflow.find((candidate) =>
-        candidate.id === stepSemantics.preserveSourcePathsFrom);
+      const sourceStep = descriptor.definition.workflow.find(
+        (candidate) => candidate.id === stepSemantics.preserveSourcePathsFrom,
+      );
       if (sourceStep === undefined) {
         fail(
           "terminal_policy_source_step",
@@ -726,9 +754,15 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         definitions.value.evaluation.gate_policy_contexts,
       );
       if (sourceDescriptor.executionPolicyBinding === undefined) {
-        fail("terminal_policy_source_binding", "source-preservation step has no exact execution policy binding");
+        fail(
+          "terminal_policy_source_binding",
+          "source-preservation step has no exact execution policy binding",
+        );
       }
-      const sourceSemantics = terminalStepSemantics(catalog, sourceDescriptor.executionPolicyBinding);
+      const sourceSemantics = terminalStepSemantics(
+        catalog,
+        sourceDescriptor.executionPolicyBinding,
+      );
       const sourceChecks = await resolveTerminalValidationCheckPolicies({
         configuration: pinned.configuration,
         catalog,
@@ -790,27 +824,44 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     }
     const pinned = await this.#loadPinned(input.run);
     const attempt = input.run.attempts[input.attemptId]!;
-    const descriptor = await this.#descriptorForRecordedAttempt(input.run, attempt, pinned.configuration);
-    if (descriptor.graph === undefined) fail("terminal_replay_graph", "terminal replay has no compiler-bound graph");
+    const descriptor = await this.#descriptorForRecordedAttempt(
+      input.run,
+      attempt,
+      pinned.configuration,
+    );
+    if (descriptor.graph === undefined)
+      fail("terminal_replay_graph", "terminal replay has no compiler-bound graph");
     const byCheck = new Map<string, readonly AgentCheckExecution[]>();
     for (const entry of input.executions) {
-      if (byCheck.has(entry.checkId)) fail("terminal_replay_duplicate", `duplicate terminal replay ${entry.checkId}`);
+      if (byCheck.has(entry.checkId))
+        fail("terminal_replay_duplicate", `duplicate terminal replay ${entry.checkId}`);
       byCheck.set(entry.checkId, entry.executions);
     }
-    if (byCheck.size !== projection.validationChecks.length ||
-        projection.validationChecks.some((policy) => !byCheck.has(policy.checkId))) {
-      fail("terminal_replay_checks", "terminal replay executions do not match the exact validation check set");
+    if (
+      byCheck.size !== projection.validationChecks.length ||
+      projection.validationChecks.some((policy) => !byCheck.has(policy.checkId))
+    ) {
+      fail(
+        "terminal_replay_checks",
+        "terminal replay executions do not match the exact validation check set",
+      );
     }
-    const candidateReceipts = new Map(projection.retainedReceipts.map((receipt) => [
-      terminalRetainedReceiptKey(receipt),
-      receipt,
-    ]));
+    const candidateReceipts = new Map(
+      projection.retainedReceipts.map((receipt) => [terminalRetainedReceiptKey(receipt), receipt]),
+    );
     const selectedReceipts = new Map<string, AssignmentTerminalPolicyRetainedReceipt>();
     for (const receipt of input.retainedReceipts) {
       const key = terminalRetainedReceiptKey(receipt);
       const candidate = candidateReceipts.get(key);
-      if (candidate === undefined || canonicalHash(candidate) !== canonicalHash(receipt) || selectedReceipts.has(key)) {
-        fail("terminal_replay_receipt", `terminal replay retained receipt ${key} is stale, unknown, or duplicated`);
+      if (
+        candidate === undefined ||
+        canonicalHash(candidate) !== canonicalHash(receipt) ||
+        selectedReceipts.has(key)
+      ) {
+        fail(
+          "terminal_replay_receipt",
+          `terminal replay retained receipt ${key} is stale, unknown, or duplicated`,
+        );
       }
       selectedReceipts.set(key, receipt);
     }
@@ -832,13 +883,22 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         );
       }
       const compiled = policy.resolvedCheck.commands.map((command, index) =>
-        compileCheckCommandExecution(command, executions[index]!, index, pinned.configuration, descriptor));
+        compileCheckCommandExecution(
+          command,
+          executions[index]!,
+          index,
+          pinned.configuration,
+          descriptor,
+        ),
+      );
       const retainedLeafCheckIds: string[] = [];
       for (const expected of policy.retainedLeafPolicies) {
-        const match = [...selectedReceipts.entries()].find(([key, receipt]) =>
-          unusedReceiptKeys.has(key) &&
-          receipt.checkId === expected.checkId &&
-          canonicalHash(receipt.executionPolicy) === canonicalHash(expected.executionPolicy));
+        const match = [...selectedReceipts.entries()].find(
+          ([key, receipt]) =>
+            unusedReceiptKeys.has(key) &&
+            receipt.checkId === expected.checkId &&
+            canonicalHash(receipt.executionPolicy) === canonicalHash(expected.executionPolicy),
+        );
         if (match === undefined) {
           fail(
             "terminal_replay_receipt_missing",
@@ -868,7 +928,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       });
     }
     if (unusedReceiptKeys.size > 0) {
-      fail("terminal_replay_receipt_extra", "terminal replay supplied retained receipts outside exact closure needs");
+      fail(
+        "terminal_replay_receipt_extra",
+        "terminal replay supplied retained receipts outside exact closure needs",
+      );
     }
     const accepted = checkResults.every((result) => result.accepted);
     const passed = accepted && checkResults.every((result) => result.passed);
@@ -890,13 +953,17 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       projectionSha256: projection.sha256,
       accepted,
       passed,
-      checks: Object.freeze(checkResults.map((result) => deepFreeze({
-        checkId: result.checkId,
-        accepted: result.accepted,
-        passed: result.passed,
-        replayedLeafCheckIds: Object.freeze([...result.replayedLeafCheckIds]),
-        retainedLeafCheckIds: Object.freeze([...result.retainedLeafCheckIds]),
-      }))),
+      checks: Object.freeze(
+        checkResults.map((result) =>
+          deepFreeze({
+            checkId: result.checkId,
+            accepted: result.accepted,
+            passed: result.passed,
+            replayedLeafCheckIds: Object.freeze([...result.replayedLeafCheckIds]),
+            retainedLeafCheckIds: Object.freeze([...result.retainedLeafCheckIds]),
+          }),
+        ),
+      ),
       evidence: structuredClone(evidence) as unknown as JsonValue,
     };
     return deepFreeze({ ...material, sha256: canonicalHash(material) });
@@ -929,15 +996,26 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const runBehavior = resolveRunBehavior(compiled, runType.id);
     const normalizedIntake = normalizeRunIntake(runBehavior, request.intake);
     if (request.objective.trim() !== normalizedIntake.objective) {
-      fail("objective_intake_mismatch", `objective must exactly match intake field ${runBehavior.objectiveFieldId}`);
+      fail(
+        "objective_intake_mismatch",
+        `objective must exactly match intake field ${runBehavior.objectiveFieldId}`,
+      );
     }
     const behavior: RunBehaviorSnapshot = createRunBehaviorSnapshot(compiled.behavior, runType.id);
     const orchestration = effectiveOrchestrationPolicy(compiled.behavior.profile, runBehavior);
     const overrides = parseRunOverrides(request.overrides, compiled);
-    const workingSpecOwnerId = resolveWorkingSpecOwner(compiled, runType.document, overrides.workingSpecOwner);
+    const workingSpecOwnerId = resolveWorkingSpecOwner(
+      compiled,
+      runType.document,
+      overrides.workingSpecOwner,
+    );
     const pipelineStages = projectCompiledPipelineDefinition(runBehavior.pipeline);
-    const planningMode = runBehavior.pipeline.some((stage) => stage.kind === "planning") ? "agent" : "direct";
-    const agents: ResolvedRunDefinition["executionConfig"]["agents"] = Object.create(null) as ResolvedRunDefinition["executionConfig"]["agents"];
+    const planningMode = runBehavior.pipeline.some((stage) => stage.kind === "planning")
+      ? "agent"
+      : "direct";
+    const agents: ResolvedRunDefinition["executionConfig"]["agents"] = Object.create(
+      null,
+    ) as ResolvedRunDefinition["executionConfig"]["agents"];
     for (const personaId of Object.keys(compiled.registries.personas).sort(compareText)) {
       const personaDefinition = requiredRecord(
         compiled.registries.personas[personaId],
@@ -951,7 +1029,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         resolveCompiledPersona(compiled, personaId, {
           runTypeId: runType.id,
           ...(selected?.model === undefined ? {} : { model: selected.model }),
-          ...(selected?.thinkingLevel === undefined ? {} : { thinkingLevel: selected.thinkingLevel }),
+          ...(selected?.thinkingLevel === undefined
+            ? {}
+            : { thinkingLevel: selected.thinkingLevel }),
         }),
         "persona_invalid",
         `persona ${personaId} is not executable`,
@@ -962,8 +1042,11 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       agents[personaId] = { provider, model, thinkingLevel };
     }
     const skills = await pinConfiguredSkills(compiled, this.#projectRoot);
-    const needsCommunityInventory = compiled.pi_resource_bindings?.bindings.some(({ enabled, integration }) =>
-      enabled && integration !== "interactive_only" && integration !== "not_recommended") === true;
+    const needsCommunityInventory =
+      compiled.pi_resource_bindings?.bindings.some(
+        ({ enabled, integration }) =>
+          enabled && integration !== "interactive_only" && integration !== "not_recommended",
+      ) === true;
     let installedPiPackages: readonly InstalledPiPackageReference[] = [];
     if (needsCommunityInventory) {
       try {
@@ -997,9 +1080,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     this.#pinned.set(request.runId, pinned);
     const bytes = encodeArtifact(pinned);
     const questionPolicy = overrides.questionPolicy ?? runBehavior.questions.presentation;
-    const semanticPolicy = overrides.questionPolicy === undefined
-      ? runBehavior.questions.policy
-      : semanticQuestionPolicy(overrides.questionPolicy);
+    const semanticPolicy =
+      overrides.questionPolicy === undefined
+        ? runBehavior.questions.policy
+        : semanticQuestionPolicy(overrides.questionPolicy);
     const runInstructions = [runBehavior.planningInstructions, overrides.instructions]
       .filter((item): item is string => item !== undefined && item.trim().length > 0)
       .join("\n\n");
@@ -1040,7 +1124,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         },
         {
           path: graphArtifactPath(request.runId),
-          bytes: encodeRunGraphArtifact(initialGraphArtifact(request.runId, compiled, workingSpecOwnerId, this.#projectRoot)),
+          bytes: encodeRunGraphArtifact(
+            initialGraphArtifact(request.runId, compiled, workingSpecOwnerId, this.#projectRoot),
+          ),
           expectedSha256: null,
         },
       ],
@@ -1055,10 +1141,15 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       `pinned run type ${run.runTypeId} is unavailable`,
     );
     const pipeline = pipelineDefinition(runType.document);
-    if (pipeline.order.some((id) =>
-      requiredRecord(pipeline.stages[id], `pipeline stage ${id}`).kind === "planning"
-    )) {
-      fail("direct_approval_planning_stage", "a run type with a planning stage cannot use direct approval");
+    if (
+      pipeline.order.some(
+        (id) => requiredRecord(pipeline.stages[id], `pipeline stage ${id}`).kind === "planning",
+      )
+    ) {
+      fail(
+        "direct_approval_planning_stage",
+        "a run type with a planning stage cannot use direct approval",
+      );
     }
     const graph = compileDirectInitialGraph(pinned.configuration, run, this.#projectRoot);
     const plan: RunPlanRecord = {
@@ -1080,7 +1171,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       plan,
       graphHash: graph.hash,
       graphRevision: 0,
-      activity: [compilerActivity(run, "Direct-approval root graph validated", "plan")],
+      activity: [compilerActivity(run, "Direct-approval root graph validated", "plan", "success")],
       artifactWrites: [
         {
           path: `runs/${run.id}/direct-approval.json`,
@@ -1115,19 +1206,29 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     );
     const runBehavior = pinnedRunTypeBehavior(input.run, pinned.configuration);
     const descriptor = await this.#attemptDescriptor(input, pinned.configuration, runType.document);
-    const parentAttempt = input.lineage.parentAttemptId === undefined
-      ? undefined
-      : input.run.attempts[input.lineage.parentAttemptId];
+    const parentAttempt =
+      input.lineage.parentAttemptId === undefined
+        ? undefined
+        : input.run.attempts[input.lineage.parentAttemptId];
     const parentFailure = parentAttempt?.error?.slice(0, 400) ?? parentAttempt?.failureCode;
-    const initialPrompt = sameScopeContinuationPrompt(descriptor.initialPrompt, input.lineage, parentFailure);
+    const initialPrompt = sameScopeContinuationPrompt(
+      descriptor.initialPrompt,
+      input.lineage,
+      parentFailure,
+    );
     const persona = requireValidation(
-      resolveCompiledPersona(pinned.configuration, descriptor.personaId, { runTypeId: input.run.runTypeId }),
+      resolveCompiledPersona(pinned.configuration, descriptor.personaId, {
+        runTypeId: input.run.runTypeId,
+      }),
       "persona_invalid",
       `persona ${descriptor.personaId} is not executable`,
     );
     const selection = input.run.executionConfig?.agents[descriptor.personaId];
     const provider = selection?.provider ?? persona.provider ?? "openai-codex";
-    const model = requiredNonempty(selection?.model ?? persona.model, `persona ${descriptor.personaId} model`);
+    const model = requiredNonempty(
+      selection?.model ?? persona.model,
+      `persona ${descriptor.personaId} model`,
+    );
     const thinkingLevel = requireThinkingLevel(
       selection?.thinkingLevel ?? persona.thinking_level,
       `persona ${descriptor.personaId}`,
@@ -1150,14 +1251,20 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     );
     let communitySelection: SelectedCommunityAttemptResources;
     try {
-      communitySelection = input.kind === "lead"
-        ? { resources: [], toolNames: [], bindingIds: [] }
-        : selectCommunityAttemptResources({
-            bundle: pinned.community,
-            personaId: descriptor.personaId,
-            stageIds: communityAttemptStageIds(input.kind, descriptor, pinned.configuration, runType.document),
-            networkAccess: configuredChecks?.networkAccess === true,
-          });
+      communitySelection =
+        input.kind === "lead"
+          ? { resources: [], toolNames: [], bindingIds: [] }
+          : selectCommunityAttemptResources({
+              bundle: pinned.community,
+              personaId: descriptor.personaId,
+              stageIds: communityAttemptStageIds(
+                input.kind,
+                descriptor,
+                pinned.configuration,
+                runType.document,
+              ),
+              networkAccess: configuredChecks?.networkAccess === true,
+            });
     } catch (error) {
       fail("community_attempt_unavailable", error instanceof Error ? error.message : String(error));
     }
@@ -1196,21 +1303,21 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       "Your attempt is incomplete until koni_submit_output returns an accepted receipt. After the final check or edit, call it immediately as the only tool in that assistant turn. A plain final assistant message is discarded and fails the attempt.",
       "Reason briefly, then act: once you have decided the next tool call, emit it in the same turn instead of continuing to deliberate. A turn that spends its whole output budget on reasoning is cut off before any tool call and the entire turn is lost. Never re-derive a conclusion you already reached in an earlier turn.",
       "Read the koni_submit_output schema from its tool definition before calling it, and submit your real result on the first call. Never send placeholder, probing, or schema-discovery payloads: an accepted failed submission is terminal, cannot be retried, and permanently fails this assignment even if your actual work succeeded.",
-      "Do the concrete work this step requires before you submit — author the proof, make the edit and run the check, or assemble and verify the candidate as the step demands; do not submit failed with little or no tool use. A failed submission is a genuine-impossibility last resort, and its blocker must be a specific self-contained diagnosis: the exact obstacle, what you tried, and why nothing within your grant can resolve it. An accepted failed submission is terminal and strands the whole run for operator recovery, so a terse or placeholder blocker (for example \"test\", \"probe\", \"blocked\") is never acceptable — never submit one.",
-      ...(descriptor.writePaths.length === 0 ? [] : [
-        "This is an implementation attempt with a write grant. Reading alone does not satisfy it. Make the change with koni_write_file/koni_edit_file inside your write grant, then run the configured proof with koni_run_check before you submit. Reserve a failed submission for a blocker that survives an actual implementation attempt (missing capability, contradictory contract, grant that cannot express the change), never for difficulty, uncertainty, or investigation you have not yet turned into edits and a check run.",
-        "If the configured proof fails, that is normal iteration, not a blocker: read the failure, fix the edit, and run it again. Keep iterating until it passes or you have proven the objective is impossible within the grant. Do not stop after a single failing check.",
-      ]),
-      ...(repositoryCallBudget === undefined ? [] : [
-        `Repository discovery is bounded to ${repositoryCallBudget} total koni_read_file, koni_list_files, and koni_search_files calls for this planning attempt. Reuse compiler context, prioritize high-value reads, and synthesize before the authority ceiling is exhausted.`,
-        "Begin with the narrowest objective-derived source root (for example, the named app's src directory). Do not search `.` or broad monorepo/package roots when the objective identifies a narrower area; bounded broad scans can fail and still consume a discovery call.",
-      ]),
+      'Do the concrete work this step requires before you submit — author the proof, make the edit and run the check, or assemble and verify the candidate as the step demands; do not submit failed with little or no tool use. A failed submission is a genuine-impossibility last resort, and its blocker must be a specific self-contained diagnosis: the exact obstacle, what you tried, and why nothing within your grant can resolve it. An accepted failed submission is terminal and strands the whole run for operator recovery, so a terse or placeholder blocker (for example "test", "probe", "blocked") is never acceptable — never submit one.',
+      ...(descriptor.writePaths.length === 0
+        ? []
+        : [
+            "This is an implementation attempt with a write grant. Reading alone does not satisfy it. Make the change with koni_write_file/koni_edit_file inside your write grant, then run the configured proof with koni_run_check before you submit. Reserve a failed submission for a blocker that survives an actual implementation attempt (missing capability, contradictory contract, grant that cannot express the change), never for difficulty, uncertainty, or investigation you have not yet turned into edits and a check run.",
+            "If the configured proof fails, that is normal iteration, not a blocker: read the failure, fix the edit, and run it again. Keep iterating until it passes or you have proven the objective is impossible within the grant. Do not stop after a single failing check.",
+          ]),
+      ...(repositoryCallBudget === undefined
+        ? []
+        : [
+            `Repository discovery is bounded to ${repositoryCallBudget} total koni_read_file, koni_list_files, and koni_search_files calls for this planning attempt. Reuse compiler context, prioritize high-value reads, and synthesize before the authority ceiling is exhausted.`,
+            "Begin with the narrowest objective-derived source root (for example, the named app's src directory). Do not search `.` or broad monorepo/package roots when the objective identifies a narrower area; bounded broad scans can fail and still consume a discovery call.",
+          ]),
     ].join("\n\n");
-    const tokenBudget = attemptTokenBudget(
-      runBehavior,
-      input.kind,
-      modelBinding.catalogMaxTokens,
-    );
+    const tokenBudget = attemptTokenBudget(runBehavior, input.kind, modelBinding.catalogMaxTokens);
     // Ticket-local review steps use the verification containment/persona class, but their
     // compiler assignment still belongs to the ticket cycle. Only the assignment-free final
     // reviewer reads the composed run checkout.
@@ -1241,7 +1348,13 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       },
       workspace: {
         cwd: workspace,
-        sessionDirectory: path.join(this.#stateRoot, "runs", input.run.id, "sessions", input.attemptId),
+        sessionDirectory: path.join(
+          this.#stateRoot,
+          "runs",
+          input.run.id,
+          "sessions",
+          input.attemptId,
+        ),
       },
       persona: {
         id: descriptor.personaId,
@@ -1276,9 +1389,11 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         // ambiguous automatic retry; workflow-level recovery remains compiler-visible.
         retries: { maxProviderRetries: 0, baseDelayMs: 0 },
         transcript: { maxBytes: ATTEMPT_TRANSCRIPT_MAX_BYTES },
-        ...(repositoryCallBudget === undefined ? {} : {
-          repositoryCalls: { max: repositoryCallBudget },
-        }),
+        ...(repositoryCallBudget === undefined
+          ? {}
+          : {
+              repositoryCalls: { max: repositoryCallBudget },
+            }),
       },
       terminal: {
         toolName: "koni_submit_output",
@@ -1299,17 +1414,19 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     };
     this.#issuedSpecs.set(input.attemptId, spec);
     return {
-      spec: spec as AgentLaunchSpec,
+      spec: spec,
       authorityGrant,
       toolNames,
       terminalOutputSchema: descriptor.terminalSchema,
       contextContent,
       compactionSnapshot: snapshot,
-      artifactWrites: [{
-        path: `runs/${input.run.id}/attempts/${input.attemptId}/compiler-input.json`,
-        bytes: encodeArtifact(attemptArtifact),
-        expectedSha256: null,
-      }],
+      artifactWrites: [
+        {
+          path: `runs/${input.run.id}/attempts/${input.attemptId}/compiler-input.json`,
+          bytes: encodeArtifact(attemptArtifact),
+          expectedSha256: null,
+        },
+      ],
     };
   }
 
@@ -1322,35 +1439,51 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     assertRecoveryIdentity(run, attempt, spec);
     const kind = recoveredAttemptKind(run, attempt);
     if (
-      spec.workspace.cwd !== attemptWorkspace(run, recordedAttemptWorkspaceKind(attempt), attempt.ticketId) ||
-      spec.workspace.sessionDirectory !== path.join(this.#stateRoot, "runs", run.id, "sessions", attempt.id) ||
+      spec.workspace.cwd !==
+        attemptWorkspace(run, recordedAttemptWorkspaceKind(attempt), attempt.ticketId) ||
+      spec.workspace.sessionDirectory !==
+        path.join(this.#stateRoot, "runs", run.id, "sessions", attempt.id) ||
       spec.authority.generation !== run.generation
-    ) fail("recovery_workspace_drift", "stored launch workspace or generation no longer matches the run");
+    )
+      fail(
+        "recovery_workspace_drift",
+        "stored launch workspace or generation no longer matches the run",
+      );
     const pinned = await this.#loadPinned(run);
     const runType = requireValidation(
       resolveCompiledRunType(pinned.configuration, run.runTypeId),
       "run_type_invalid",
       `pinned run type ${run.runTypeId} is unavailable`,
     );
-    const assignment = kind === "planning" || kind === "lead" || isRunWideVerificationAttempt(attempt)
-      ? undefined
-      : assignmentFromAttempt(run, attempt);
-    const descriptor = await this.#attemptDescriptor({
-      kind,
-      run,
-      ...(assignment === undefined ? {} : { assignment }),
-      ...(kind === "lead" ? { leadTrigger: leadTriggerForAttempt(attempt) } : {}),
-    }, pinned.configuration, runType.document);
+    const assignment =
+      kind === "planning" || kind === "lead" || isRunWideVerificationAttempt(attempt)
+        ? undefined
+        : assignmentFromAttempt(run, attempt);
+    const descriptor = await this.#attemptDescriptor(
+      {
+        kind,
+        run,
+        ...(assignment === undefined ? {} : { assignment }),
+        ...(kind === "lead" ? { leadTrigger: leadTriggerForAttempt(attempt) } : {}),
+      },
+      pinned.configuration,
+      runType.document,
+    );
     if (
       descriptor.ticketId !== spec.identity.ticketId ||
       descriptor.stepId !== spec.identity.stepId ||
       descriptor.personaId !== spec.persona.id
     ) {
-      fail("recovery_assignment_drift", "stored launch identity no longer matches its pinned compiler assignment");
+      fail(
+        "recovery_assignment_drift",
+        "stored launch identity no longer matches its pinned compiler assignment",
+      );
     }
 
     const persona = requireValidation(
-      resolveCompiledPersona(pinned.configuration, descriptor.personaId, { runTypeId: run.runTypeId }),
+      resolveCompiledPersona(pinned.configuration, descriptor.personaId, {
+        runTypeId: run.runTypeId,
+      }),
       "persona_invalid",
       `persona ${descriptor.personaId} is not executable`,
     );
@@ -1362,14 +1495,20 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     );
     let communitySelection: SelectedCommunityAttemptResources;
     try {
-      communitySelection = kind === "lead"
-        ? { resources: [], toolNames: [], bindingIds: [] }
-        : selectCommunityAttemptResources({
-            bundle: pinned.community,
-            personaId: descriptor.personaId,
-            stageIds: communityAttemptStageIds(kind, descriptor, pinned.configuration, runType.document),
-            networkAccess: configuredChecks?.networkAccess === true,
-          });
+      communitySelection =
+        kind === "lead"
+          ? { resources: [], toolNames: [], bindingIds: [] }
+          : selectCommunityAttemptResources({
+              bundle: pinned.community,
+              personaId: descriptor.personaId,
+              stageIds: communityAttemptStageIds(
+                kind,
+                descriptor,
+                pinned.configuration,
+                runType.document,
+              ),
+              networkAccess: configuredChecks?.networkAccess === true,
+            });
     } catch (error) {
       fail("recovery_community_resource", error instanceof Error ? error.message : String(error));
     }
@@ -1383,21 +1522,36 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       computeLaunchResourceSetHash(expectedResources) !== spec.resources.setHash ||
       canonicalHash(expectedResources) !== canonicalHash(spec.resources.entries)
     ) {
-      fail("recovery_resource_drift", "stored launch resources no longer match pinned compiler state");
+      fail(
+        "recovery_resource_drift",
+        "stored launch resources no longer match pinned compiler state",
+      );
     }
-    const compiledTools = toolInventory(run, descriptor, expectedResources, communitySelection.toolNames);
+    const compiledTools = toolInventory(
+      run,
+      descriptor,
+      expectedResources,
+      communitySelection.toolNames,
+    );
     const storedTools = spec.tools.map((tool) => tool.name);
     // Contextual tools added after a launch was issued never rewrite a legacy launch inventory.
-    const expectedTools = run.workingSpecOwnerId === undefined
-      ? compiledTools.filter((name) =>
-          (name !== "koni_record_note" && name !== "koni_update_working_spec") || storedTools.includes(name))
-      : compiledTools;
+    const expectedTools =
+      run.workingSpecOwnerId === undefined
+        ? compiledTools.filter(
+            (name) =>
+              (name !== "koni_record_note" && name !== "koni_update_working_spec") ||
+              storedTools.includes(name),
+          )
+        : compiledTools;
     if (
       JSON.stringify(storedTools) !== JSON.stringify(expectedTools) ||
       spec.terminal.toolName !== "koni_submit_output" ||
       spec.terminal.outputSchemaHash !== canonicalHash(descriptor.terminalSchema)
     ) {
-      fail("recovery_tool_drift", "stored launch tools or terminal contract no longer match pinned compiler state");
+      fail(
+        "recovery_tool_drift",
+        "stored launch tools or terminal contract no longer match pinned compiler state",
+      );
     }
     for (const tool of spec.tools) {
       const name = requireKoniToolName(tool.name);
@@ -1405,13 +1559,16 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         !isSupportedKoniToolSchemaHash(name, tool.schemaHash, descriptor.terminalSchema) ||
         tool.executionMode !== toolExecutionMode(name) ||
         tool.maxResultBytes !== koniToolMaxResultBytes(name)
-      ) fail("recovery_tool_drift", `stored tool binding ${tool.name} no longer matches its compiler contract`);
+      )
+        fail(
+          "recovery_tool_drift",
+          `stored tool binding ${tool.name} no longer matches its compiler contract`,
+        );
     }
 
     const compilerInput = await this.#readPreparedAttemptArtifact(run, attempt, spec);
-    if (
-      rawSha256(compilerInput.contextContent) !== spec.authority.authoritativeContextHash
-    ) fail("recovery_context", "stored launch spec has no valid authoritative assignment context");
+    if (rawSha256(compilerInput.contextContent) !== spec.authority.authoritativeContextHash)
+      fail("recovery_context", "stored launch spec has no valid authoritative assignment context");
     const authorityGrant: AuthorityGrant = {
       protocol: "koni.authority-grant.v1",
       grantId: spec.authority.grantId,
@@ -1430,7 +1587,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       expectedStateHash: spec.authority.expectedStateHash,
     };
     if (canonicalHash(authorityGrant) !== spec.authority.grantHash) {
-      fail("recovery_grant_drift", "stored launch authority no longer matches pinned compiler scope");
+      fail(
+        "recovery_grant_drift",
+        "stored launch authority no longer matches pinned compiler scope",
+      );
     }
     this.#issuedSpecs.set(attempt.id, spec);
     return {
@@ -1460,7 +1620,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       // Pre-contextual pinned planning attempts legitimately predate the canonical graph shell.
-      const graph = new TypedGraph(requireGraphSchema(pinned.configuration), [], { projectRoot: this.#projectRoot });
+      const graph = new TypedGraph(requireGraphSchema(pinned.configuration), [], {
+        projectRoot: this.#projectRoot,
+      });
       assertConfiguredGraphConstraints(pinned.configuration, graph, this.#projectRoot);
       const artifact: GraphArtifact = {
         protocol: GRAPH_ARTIFACT_PROTOCOL,
@@ -1474,13 +1636,15 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     }
     const attemptKind = recoveredAttemptKind(run, attempt);
     if (
-      attemptKind !== "planning" && (
-        graphRead.artifact.revision !== run.graphRevision ||
+      attemptKind !== "planning" &&
+      (graphRead.artifact.revision !== run.graphRevision ||
         run.graphHash === undefined ||
-        graphRead.graph.hash !== run.graphHash
-      )
+        graphRead.graph.hash !== run.graphHash)
     ) {
-      fail("graph_artifact_drift", "dynamic context observed a semantic graph transaction in an incoherent state");
+      fail(
+        "graph_artifact_drift",
+        "dynamic context observed a semantic graph transaction in an incoherent state",
+      );
     }
     const contextual = this.#contextualState(run, graphRead.artifact);
     const request = input.request;
@@ -1488,7 +1652,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       const visible = new Set([...descriptor.readNodeIds, ...descriptor.writeNodeIds]);
       for (const anchor of request.anchors) {
         if (!visible.has(anchor) || graphRead.graph.node(anchor) === undefined) {
-          fail("graph_context_anchor", `graph context anchor ${anchor} is outside this step's compiler-visible scope`);
+          fail(
+            "graph_context_anchor",
+            `graph context anchor ${anchor} is outside this step's compiler-visible scope`,
+          );
         }
       }
     }
@@ -1496,10 +1663,12 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       const relations = new Set<string>();
       for (const edge of pinned.configuration.edge_types) {
         if (typeof edge.relation === "string") relations.add(edge.relation);
-        if (edge.bidirectional === true && typeof edge.inverse === "string") relations.add(edge.inverse);
+        if (edge.bidirectional === true && typeof edge.inverse === "string")
+          relations.add(edge.inverse);
       }
       for (const relation of request.relations) {
-        if (!relations.has(relation)) fail("graph_context_relation", `unknown configured graph relation ${relation}`);
+        if (!relations.has(relation))
+          fail("graph_context_relation", `unknown configured graph relation ${relation}`);
       }
     }
     if (request?.nodeTypes !== undefined) {
@@ -1511,10 +1680,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     }
     const lineage = compatibleAttemptLineage(run, attempt);
     const { touchedFiles } = await this.#readAttemptReceiptContext(run, attempt);
-    const nodePaths = Object.fromEntries(graphRead.graph.nodes().map((node) => [
-      node.id,
-      graphRead.graph.repositoryPaths(node.id),
-    ]));
+    const nodePaths = Object.fromEntries(
+      graphRead.graph.nodes().map((node) => [node.id, graphRead.graph.repositoryPaths(node.id)]),
+    );
     const ticket = run.tickets[attempt.ticketId];
     const cacheKey = canonicalHash({
       runId: run.id,
@@ -1547,8 +1715,12 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       nodePaths,
       legacyNotes: await this.#readGraphNotes(run),
       ticketTargetIds: ticket?.targetNodeIds ?? descriptor.definition?.target_node_ids ?? [],
-      stepTargetIds: [...new Set([...descriptor.writeNodeIds, ...descriptor.readNodeIds])].sort(compareText),
-      scopedPaths: [...new Set([...descriptor.readPaths, ...descriptor.writePaths])].sort(compareText),
+      stepTargetIds: [...new Set([...descriptor.writeNodeIds, ...descriptor.readNodeIds])].sort(
+        compareText,
+      ),
+      scopedPaths: [...new Set([...descriptor.readPaths, ...descriptor.writePaths])].sort(
+        compareText,
+      ),
       touchedPaths: touchedFiles,
       graphActivity: run.activity.map((activity) => ({
         at: activity.at,
@@ -1561,7 +1733,11 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     });
   }
 
-  public dynamicContextCacheStats(): { selections: number; indexBuilds: number; cachedIndexes: number } {
+  public dynamicContextCacheStats(): {
+    selections: number;
+    indexBuilds: number;
+    cachedIndexes: number;
+  } {
     return this.#dynamicContextSelector.stats();
   }
 
@@ -1579,21 +1755,28 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       `pinned run type ${run.runTypeId} is unavailable`,
     );
     const kind = recoveredAttemptKind(run, attempt);
-    const assignment = kind === "planning" || kind === "lead" || isRunWideVerificationAttempt(attempt)
-      ? undefined
-      : assignmentFromAttempt(run, attempt);
-    const descriptor = await this.#attemptDescriptor({
-      kind,
-      run,
-      ...(assignment === undefined ? {} : { assignment }),
-      ...(kind === "lead" ? { leadTrigger: leadTriggerForAttempt(attempt) } : {}),
-    }, pinned.configuration, runType.document);
+    const assignment =
+      kind === "planning" || kind === "lead" || isRunWideVerificationAttempt(attempt)
+        ? undefined
+        : assignmentFromAttempt(run, attempt);
+    const descriptor = await this.#attemptDescriptor(
+      {
+        kind,
+        run,
+        ...(assignment === undefined ? {} : { assignment }),
+        ...(kind === "lead" ? { leadTrigger: leadTriggerForAttempt(attempt) } : {}),
+      },
+      pinned.configuration,
+      runType.document,
+    );
     const snapshot = compactionSnapshot(run, descriptor);
     const durable = await this.#readAttemptReceiptContext(run, attempt);
     const dynamic = await this.selectDynamicGraphContext({ run, attempt, spec });
     snapshot.receiptIds = durable.receiptIds;
     snapshot.touchedFiles = durable.touchedFiles;
-    snapshot.graphRefs = dynamic.envelope.selection.selected.map((entry) => `${entry.id} (${entry.reason})`);
+    snapshot.graphRefs = dynamic.envelope.selection.selected.map(
+      (entry) => `${entry.id} (${entry.reason})`,
+    );
     snapshot.dynamicGraphContext = {
       envelopeHash: dynamic.envelopeHash,
       semanticRevision: dynamic.envelope.binding.semanticRevision,
@@ -1632,12 +1815,18 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const plan: RunPlanRecord = {
       revision,
       status: "planning",
+      ...(parsed.title === undefined ? {} : { title: parsed.title }),
       full: parsed.full,
       concise: parsed.concise,
       graphSeed: structuredClone(parsed.graphSeed) as unknown as JsonValue,
       steeringHistory: structuredClone(input.run.plan?.steeringHistory ?? []),
     };
-    const pendingGraphArtifact: GraphArtifact = graphArtifact(input.run, pinned.configuration, graph, 0);
+    const pendingGraphArtifact: GraphArtifact = graphArtifact(
+      input.run,
+      pinned.configuration,
+      graph,
+      0,
+    );
     const compiledArtifact = {
       protocol: PLAN_ARTIFACT_PROTOCOL,
       runId: input.run.id,
@@ -1649,7 +1838,14 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       plan,
       graphHash: graph.hash,
       graphRevision: 0,
-      activity: [compilerActivity(input.run, `Planning graph validated (${graph.nodes().length} nodes)`, "plan")],
+      activity: [
+        compilerActivity(
+          input.run,
+          `Planning graph validated (${graph.nodes().length} nodes)`,
+          "plan",
+          "success",
+        ),
+      ],
       artifactWrites: [
         {
           path: `runs/${input.run.id}/attempts/${input.attemptId}/planning-output.json`,
@@ -1695,36 +1891,45 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     try {
       return parseLeadJudgmentOutput(input.output);
     } catch (error) {
-      fail("lead_output", error instanceof Error ? error.message : "Lead judgment output is invalid");
+      fail(
+        "lead_output",
+        error instanceof Error ? error.message : "Lead judgment output is invalid",
+      );
     }
   }
 
   public async initializeApprovedPlan(run: RunRecord): Promise<ApprovedPlanCompilation> {
     const pinned = await this.#loadPinned(run);
-    if (run.plan === undefined) fail("plan_missing", "run has no compiler-validated approval artifact");
+    if (run.plan === undefined)
+      fail("plan_missing", "run has no compiler-validated approval artifact");
     const runType = requireValidation(
       resolveCompiledRunType(pinned.configuration, run.runTypeId),
       "run_type_invalid",
       `pinned run type ${run.runTypeId} is unavailable`,
     );
     const pipeline = pipelineDefinition(runType.document);
-    const hasPlanningStage = pipeline.order.some((id) =>
-      requiredRecord(pipeline.stages[id], `pipeline stage ${id}`).kind === "planning"
+    const hasPlanningStage = pipeline.order.some(
+      (id) => requiredRecord(pipeline.stages[id], `pipeline stage ${id}`).kind === "planning",
     );
-    const graph = run.plan.graphSeed === undefined
-      ? (() => {
-          if (hasPlanningStage) fail("plan_missing", "approved plan has no compiler-validated graph seed");
-          return compileDirectInitialGraph(pinned.configuration, run, this.#projectRoot);
-        })()
-      : compilePlanningSeed(
-          pinned.configuration,
-          run,
-          parsePlanningSeed(run.plan.graphSeed),
-          parsePlanTextRecord(run.plan.full, "approved full plan"),
-          this.#projectRoot,
-        );
+    const graph =
+      run.plan.graphSeed === undefined
+        ? (() => {
+            if (hasPlanningStage)
+              fail("plan_missing", "approved plan has no compiler-validated graph seed");
+            return compileDirectInitialGraph(pinned.configuration, run, this.#projectRoot);
+          })()
+        : compilePlanningSeed(
+            pinned.configuration,
+            run,
+            parsePlanningSeed(run.plan.graphSeed),
+            parsePlanTextRecord(run.plan.full, "approved full plan"),
+            this.#projectRoot,
+          );
     if (run.graphHash !== undefined && run.graphHash !== graph.hash) {
-      fail("approved_graph_drift", "approved graph seed no longer matches the reviewed planning graph");
+      fail(
+        "approved_graph_drift",
+        "approved graph seed no longer matches the reviewed planning graph",
+      );
     }
     const evaluation = requireValidation(
       await this.#evaluateRules(run, pinned.configuration, graph),
@@ -1739,25 +1944,24 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       this.#projectRoot,
     );
     const graphRevision = 1;
-    let priorGraph: { graph: TypedGraph; artifact: GraphArtifact; bytesSha256: Sha256Digest } | undefined;
+    let priorGraph:
+      { graph: TypedGraph; artifact: GraphArtifact; bytesSha256: Sha256Digest } | undefined;
     try {
       priorGraph = await this.#readContextGraph(run, pinned.configuration);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-    const priorContext = priorGraph === undefined
-      ? createGraphContextualState(runRootContextId(run.id), run.workingSpecOwnerId)
-      : this.#contextualState(run, priorGraph.artifact);
-    const contextual = run.workingSpecOwnerId === undefined
-      ? priorContext
-      : await this.#materializeWorkingSpecBaseline(run, graph, graphRevision, priorContext);
-    const graphBytes = encodeRunGraphArtifact(graphArtifact(
-      run,
-      pinned.configuration,
-      graph,
-      graphRevision,
-      contextual,
-    ));
+    const priorContext =
+      priorGraph === undefined
+        ? createGraphContextualState(runRootContextId(run.id), run.workingSpecOwnerId)
+        : this.#contextualState(run, priorGraph.artifact);
+    const contextual =
+      run.workingSpecOwnerId === undefined
+        ? priorContext
+        : await this.#materializeWorkingSpecBaseline(run, graph, graphRevision, priorContext);
+    const graphBytes = encodeRunGraphArtifact(
+      graphArtifact(run, pinned.configuration, graph, graphRevision, contextual),
+    );
     const definitions = ticketArtifact(run, graphRevision, evaluation);
     this.#dynamicContextSelector.clear();
     return {
@@ -1766,7 +1970,12 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       tickets,
       activity: [
         ...graph.nodes().map((node) => graphActivity(run, "graph_added", node, "approved")),
-        compilerActivity(run, `Compiled ${evaluation.tickets.length} deterministic tickets`, "initialize"),
+        compilerActivity(
+          run,
+          `Compiled ${evaluation.tickets.length} deterministic tickets`,
+          "initialize",
+          "warning",
+        ),
       ],
       artifactWrites: [
         {
@@ -1799,9 +2008,11 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const executionCatalog = requireExecutionSemanticCatalog(pinned.configuration);
     const definitionsRead = await this.#readTicketDefinitions(input.run, pinned.configuration);
     const attempt = input.run.attempts[input.attemptId];
-    if (attempt === undefined) fail("assignment_attempt", `assignment attempt ${input.attemptId} is unavailable`);
-    const pinnedDefinition = ticketDefinitionFromArtifact(definitionsRead.value, input.assignment.ticketId)
-      ?? configuredControlDefinitionFromTicket(
+    if (attempt === undefined)
+      fail("assignment_attempt", `assignment attempt ${input.attemptId} is unavailable`);
+    const pinnedDefinition =
+      ticketDefinitionFromArtifact(definitionsRead.value, input.assignment.ticketId) ??
+      configuredControlDefinitionFromTicket(
         input.run,
         input.assignment,
         pinned.configuration,
@@ -1809,16 +2020,23 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         graphRead.graph,
       );
     const ticket = input.run.tickets[input.assignment.ticketId];
-    const synthetic = pinnedDefinition ?? (
-      ticket?.operationId === integrationOperation(pinned.configuration, input.run.runTypeId)
+    const synthetic =
+      pinnedDefinition ??
+      (ticket?.operationId === integrationOperation(pinned.configuration, input.run.runTypeId)
         ? integrationDefinition(input.run, input.assignment, pinned.configuration)
-        : await this.#recoverDefinitionFromRecordedAttempt(input.run, attempt, pinned.configuration)
-    );
+        : await this.#recoverDefinitionFromRecordedAttempt(
+            input.run,
+            attempt,
+            pinned.configuration,
+          ));
     const step = synthetic.workflow.find((item) => item.id === input.assignment.stepId);
     if (step === undefined || step.persona_id !== input.assignment.personaId) {
       fail("assignment_drift", "assignment no longer matches its pinned compiler definition");
     }
-    const executionBinding = resolveDefinitionExecutionBindings(executionCatalog, synthetic).steps.get(step.id);
+    const executionBinding = resolveDefinitionExecutionBindings(
+      executionCatalog,
+      synthetic,
+    ).steps.get(step.id);
     if (executionBinding === undefined) {
       fail("execution_policy_step", `assignment step ${step.id} has no pinned semantic binding`);
     }
@@ -1853,7 +2071,12 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         changeControl,
       };
     }
-    const changes: Array<{ kind: "added" | "modified" | "deleted"; nodeId: string; nodeType: string; title: string }> = [];
+    const changes: Array<{
+      kind: "added" | "modified" | "deleted";
+      nodeId: string;
+      nodeType: string;
+      title: string;
+    }> = [];
     if (result.graphDelta !== undefined && result.graphDelta !== null) {
       validateAgentGraphDelta(pinned.configuration, graph, synthetic, step, result.graphDelta);
       const effectiveDelta = materializeCompilerFieldSources(
@@ -1871,9 +2094,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       graph = applied.graph;
       changes.push(...applied.changes);
     }
-    const reviewCandidates = step.kind === "review"
-      ? await this.#reviewCandidateNodeIds(input.run, synthetic, executionCatalog)
-      : [];
+    const reviewCandidates =
+      step.kind === "review"
+        ? await this.#reviewCandidateNodeIds(input.run, synthetic, executionCatalog)
+        : [];
     const postDeltaEvidence = rebindRuleEvidenceAcrossNonInterferingGraphChange({
       configuration: pinned.configuration,
       before: evidenceInputGraph,
@@ -1906,20 +2130,25 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       attemptWorkspace(input.run, "ticket", input.assignment.ticketId),
     );
     if (step.graph_mutation === "required" && changes.length === 0) {
-      fail("graph_mutation_required", "this compiler step completed without its required graph change");
+      fail(
+        "graph_mutation_required",
+        "this compiler step completed without its required graph change",
+      );
     }
     if (changes.length === 0) {
       return { outcome: { status: "completed", summary: result.summary! } };
     }
-    const selfPreparationReview = step.kind === "review" &&
+    const selfPreparationReview =
+      step.kind === "review" &&
       typeof pinned.configuration.registries.operations[synthetic.operation_registry_id]
         ?.proof_source_preparation_check === "string";
-    const evaluationRun = successorEvidence === undefined
-      ? input.run
-      : {
-          ...structuredClone(input.run),
-          ruleAuthorityEvidence: successorEvidence as unknown as JsonValue,
-        };
+    const evaluationRun =
+      successorEvidence === undefined
+        ? input.run
+        : {
+            ...structuredClone(input.run),
+            ruleAuthorityEvidence: successorEvidence as unknown as JsonValue,
+          };
     const evaluation = requireValidation(
       await this.#evaluateRules(evaluationRun, pinned.configuration, graph, {
         ...(selfPreparationReview ? { selfPreparationReviewAttemptId: input.attemptId } : {}),
@@ -1935,13 +2164,15 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       this.#now().toISOString(),
       this.#projectRoot,
     );
-    const graphBytes = encodeRunGraphArtifact(graphArtifact(
-      input.run,
-      pinned.configuration,
-      graph,
-      graphRevision,
-      this.#contextualState(input.run, graphRead.artifact),
-    ));
+    const graphBytes = encodeRunGraphArtifact(
+      graphArtifact(
+        input.run,
+        pinned.configuration,
+        graph,
+        graphRevision,
+        this.#contextualState(input.run, graphRead.artifact),
+      ),
+    );
     const definitions = ticketArtifact(input.run, graphRevision, evaluation, definitionsRead.value);
     this.#dynamicContextSelector.clear();
     return {
@@ -1952,12 +2183,18 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       ...(successorEvidence === undefined
         ? { ruleAuthorityEvidence: null }
         : { ruleAuthorityEvidence: successorEvidence as unknown as JsonValue }),
-      activity: changes.map((change) => graphActivity(
-        input.run,
-        change.kind === "added" ? "graph_added" : change.kind === "deleted" ? "graph_deleted" : "graph_modified",
-        { id: change.nodeId, type: change.nodeType, title: change.title },
-        input.assignment.ticketId,
-      )),
+      activity: changes.map((change) =>
+        graphActivity(
+          input.run,
+          change.kind === "added"
+            ? "graph_added"
+            : change.kind === "deleted"
+              ? "graph_deleted"
+              : "graph_modified",
+          { id: change.nodeId, type: change.nodeType, title: change.title },
+          input.assignment.ticketId,
+        ),
+      ),
       artifactWrites: [
         {
           path: graphArtifactPath(input.run.id),
@@ -1986,8 +2223,8 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       `pinned run type ${run.runTypeId} is unavailable`,
     );
     const pipeline = pipelineDefinition(runType.document);
-    return pipeline.order.some((id) =>
-      requiredRecord(pipeline.stages[id], `pipeline stage ${id}`).kind === "agent_review"
+    return pipeline.order.some(
+      (id) => requiredRecord(pipeline.stages[id], `pipeline stage ${id}`).kind === "agent_review",
     );
   }
 
@@ -2009,7 +2246,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
   }): Promise<AssignmentCompilation> {
     const attempt = input.run.attempts[input.attemptId];
     if (attempt === undefined || attempt.kind !== "verification") {
-      fail("verification_attempt", "independent-review output is not bound to a verification attempt");
+      fail(
+        "verification_attempt",
+        "independent-review output is not bound to a verification attempt",
+      );
     }
     const result = parseAssignmentOutput(input.output, "forbidden");
     return result.status === "failed"
@@ -2043,12 +2283,16 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         reason,
         tickets,
         applicableTicketIds: evaluation.tickets.map((ticket) => ticket.id).sort(compareText),
-        activity: [compilerActivity(run, reason, "verify")],
-        artifactWrites: [{
-          path: ticketDefinitionsPath(run.id),
-          bytes: encodeArtifact(ticketArtifact(run, run.graphRevision, evaluation, definitionsRead.value)),
-          expectedSha256: definitionsRead.bytesSha256,
-        }],
+        activity: [compilerActivity(run, reason, "verify", "error")],
+        artifactWrites: [
+          {
+            path: ticketDefinitionsPath(run.id),
+            bytes: encodeArtifact(
+              ticketArtifact(run, run.graphRevision, evaluation, definitionsRead.value),
+            ),
+            expectedSha256: definitionsRead.bytesSha256,
+          },
+        ],
       };
     }
     if (Object.values(run.tickets).some((ticket) => ticket.status !== "completed")) {
@@ -2065,7 +2309,14 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     return {
       ok: true,
       report: reports.report,
-      activity: [compilerActivity(run, "Typed graph and deterministic ticket fixpoint verified", "verify")],
+      activity: [
+        compilerActivity(
+          run,
+          "Typed graph and deterministic ticket fixpoint verified",
+          "verify",
+          "success",
+        ),
+      ],
       artifactWrites: [
         {
           path: `runs/${run.id}/program/verification-${run.revision}.json`,
@@ -2085,7 +2336,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     };
   }
 
-  async #prepareReportWrites(artifacts: readonly PreparedReportArtifact[]): Promise<TransactionWrite[]> {
+  async #prepareReportWrites(
+    artifacts: readonly PreparedReportArtifact[],
+  ): Promise<TransactionWrite[]> {
     const writes: TransactionWrite[] = [];
     for (const artifact of artifacts) {
       const absolute = path.join(this.#stateRoot, artifact.path);
@@ -2125,35 +2378,51 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       input.changeControl.sourceTicketId.length === 0 ||
       input.changeControl.sourceStepId.length === 0
     ) {
-      fail("change_control_publication_binding", "upstream change request differs from this run's pinned authority");
+      fail(
+        "change_control_publication_binding",
+        "upstream change request differs from this run's pinned authority",
+      );
     }
     const source = input.run.tickets[input.changeControl.sourceTicketId];
     const sourceStep = source?.steps.find((step) => step.id === input.changeControl.sourceStepId);
     if (source === undefined || sourceStep?.executionPolicyBinding === undefined) {
-      fail("change_control_source_binding", "upstream change request has no exact durable source step binding");
+      fail(
+        "change_control_source_binding",
+        "upstream change request has no exact durable source step binding",
+      );
     }
     assertExecutionBindingExact(catalog, sourceStep.executionPolicyBinding, "upstream source step");
     if (sourceStep.executionPolicyBinding.sha256 !== input.changeControl.sourceBindingSha256) {
-      fail("change_control_source_binding", "upstream change request source policy hash is stale or mutated");
+      fail(
+        "change_control_source_binding",
+        "upstream change request source policy hash is stale or mutated",
+      );
     }
     const existing = input.run.tickets[publication.proposalTicketId];
-    const existingProposal = existing === undefined
-      ? undefined
-      : existingChangeControlProposal(existing);
+    const existingProposal =
+      existing === undefined ? undefined : existingChangeControlProposal(existing);
     const priorSourceProof = existing?.executionControl?.controlTicketAuthority?.causal;
-    const expectedSourceCompilationSha256 = existing === undefined
-      ? input.changeControl.sha256
-      : priorSourceProof?.role === "proposal"
-        ? priorSourceProof.sourceTerminalProof.semanticResult.changeControlSha256
-        : undefined;
-    if (input.sourceTerminalProof.runId !== input.run.id ||
-        input.sourceTerminalProof.ticketId !== source.id ||
-        input.sourceTerminalProof.stepId !== sourceStep.id ||
-        input.sourceTerminalProof.semanticResult.status !== "completed" ||
-        input.sourceTerminalProof.semanticResult.changeControlSha256 !== expectedSourceCompilationSha256 ||
-        (priorSourceProof?.role === "proposal" &&
-          canonicalHash(input.sourceTerminalProof) !== canonicalHash(priorSourceProof.sourceTerminalProof))) {
-      fail("change_control_source_terminal_proof", "proposal publication lacks its exact successful source action");
+    const expectedSourceCompilationSha256 =
+      existing === undefined
+        ? input.changeControl.sha256
+        : priorSourceProof?.role === "proposal"
+          ? priorSourceProof.sourceTerminalProof.semanticResult.changeControlSha256
+          : undefined;
+    if (
+      input.sourceTerminalProof.runId !== input.run.id ||
+      input.sourceTerminalProof.ticketId !== source.id ||
+      input.sourceTerminalProof.stepId !== sourceStep.id ||
+      input.sourceTerminalProof.semanticResult.status !== "completed" ||
+      input.sourceTerminalProof.semanticResult.changeControlSha256 !==
+        expectedSourceCompilationSha256 ||
+      (priorSourceProof?.role === "proposal" &&
+        canonicalHash(input.sourceTerminalProof) !==
+          canonicalHash(priorSourceProof.sourceTerminalProof))
+    ) {
+      fail(
+        "change_control_source_terminal_proof",
+        "proposal publication lacks its exact successful source action",
+      );
     }
     const expectedPublication = deriveChangeControlPublication(catalog, {
       runId: input.run.id,
@@ -2167,7 +2436,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       ...(existingProposal === undefined ? {} : { existingProposal }),
     });
     if (canonicalHash(expectedPublication) !== canonicalHash(publication)) {
-      fail("change_control_publication_drift", "compiled proposal publication is not the exact deterministic projection");
+      fail(
+        "change_control_publication_drift",
+        "compiled proposal publication is not the exact deterministic projection",
+      );
     }
     assertExistingControlTargets(
       graph,
@@ -2224,12 +2496,18 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     });
     if (existing === undefined) {
       if (publication.disposition !== "create") {
-        fail("change_control_proposal_reuse", "proposal publication requested reuse but no durable proposal exists");
+        fail(
+          "change_control_proposal_reuse",
+          "proposal publication requested reuse but no durable proposal exists",
+        );
       }
       return template;
     }
     if (publication.disposition !== "reuse") {
-      fail("change_control_proposal_collision", "proposal publication requested creation over a durable proposal");
+      fail(
+        "change_control_proposal_collision",
+        "proposal publication requested creation over a durable proposal",
+      );
     }
     preserveControlTicketCreationAuthority(existing, template, "proposal");
     assertControlTicketTemplate(existing, template, "proposal");
@@ -2254,7 +2532,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       input.materialization.catalogSha256 !== catalog.sha256 ||
       input.materialization.proposalTicketId !== input.selection.proposalTicketId
     ) {
-      fail("change_control_application_binding", "approved application differs from this run's pinned proposal authority");
+      fail(
+        "change_control_application_binding",
+        "approved application differs from this run's pinned proposal authority",
+      );
     }
     const proposal = input.run.tickets[input.selection.proposalTicketId];
     const proposalStep = proposal?.steps.find((step) => step.id === input.selection.proposalStepId);
@@ -2267,23 +2548,42 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       proposal.executionControl.changeControlScopeNodeIds === undefined ||
       proposal.executionPolicyBinding.sha256 !== input.selection.proposalBindingSha256
     ) {
-      fail("change_control_application_proposal", "approved application has no exact durable proposal authority");
+      fail(
+        "change_control_application_proposal",
+        "approved application has no exact durable proposal authority",
+      );
     }
     assertExecutionBindingExact(catalog, proposal.executionPolicyBinding, "proposal ticket");
-    assertExecutionBindingExact(catalog, proposalStep.executionPolicyBinding, "proposal application step");
-    assertExecutionBindingExact(catalog, input.selection.applicationBinding, "selected application");
+    assertExecutionBindingExact(
+      catalog,
+      proposalStep.executionPolicyBinding,
+      "proposal application step",
+    );
+    assertExecutionBindingExact(
+      catalog,
+      input.selection.applicationBinding,
+      "selected application",
+    );
     if (input.selection.applicationBinding.operationId !== input.selection.applicationOperationId) {
-      fail("change_control_application_binding", "selected application operation and policy binding disagree");
+      fail(
+        "change_control_application_binding",
+        "selected application operation and policy binding disagree",
+      );
     }
     const proposalOperation = catalog.operations[proposal.operationId];
     const applicationOperation = catalog.operations[input.selection.applicationOperationId];
     if (
       proposalOperation?.changeControl.role !== "proposal" ||
       applicationOperation === undefined ||
-      !proposalOperation.changeControl.applicationOperations.includes(applicationOperation.publicOperation) ||
+      !proposalOperation.changeControl.applicationOperations.includes(
+        applicationOperation.publicOperation,
+      ) ||
       applicationOperation.publicOperation !== input.selection.applicationPublicOperation
     ) {
-      fail("change_control_application_route", "approved application is outside the proposal's configured route");
+      fail(
+        "change_control_application_route",
+        "approved application is outside the proposal's configured route",
+      );
     }
     assertExistingControlTargets(
       graph,
@@ -2291,8 +2591,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       new Set(proposal.executionControl.changeControlScopeNodeIds),
       "approved application",
     );
-    const existingChildren = Object.values(input.run.tickets).filter((ticket) =>
-      ticket.executionControl?.sourceProposalTicketId === input.selection.proposalTicketId);
+    const existingChildren = Object.values(input.run.tickets).filter(
+      (ticket) =>
+        ticket.executionControl?.sourceProposalTicketId === input.selection.proposalTicketId,
+    );
     if (applicationOperation.changeControl.role === "disposition") {
       if (
         input.materialization.kind !== "no_op" ||
@@ -2302,32 +2604,49 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         input.selection.scope.readPaths.length !== 0 ||
         input.selection.scope.writePaths.length !== 0
       ) {
-        fail("change_control_no_op_scope", "no-op disposition must materialize without a ticket, child, or authority scope");
+        fail(
+          "change_control_no_op_scope",
+          "no-op disposition must materialize without a ticket, child, or authority scope",
+        );
       }
       return undefined;
     }
     if (input.materialization.kind !== "application") {
-      fail("change_control_application_scope", "typed application route requires an application materialization");
+      fail(
+        "change_control_application_scope",
+        "typed application route requires an application materialization",
+      );
     }
     const materialization = input.materialization;
     if (
       applicationOperation.changeControl.role !== "application" ||
       materialization.applicationOperationId !== applicationOperation.id ||
-      materialization.applicationTicketId !== deterministicControlTicketId("application", {
-        proposalTicketId: input.selection.proposalTicketId,
-        authoritySha256: materialization.authoritySha256,
-      }) ||
-      canonicalHash(materialization.applicationBinding) !== canonicalHash(input.selection.applicationBinding) ||
-      canonicalHash(materialization.controlScopeNodeIds) !== canonicalHash(input.selection.targetNodeIds) ||
-      canonicalHash(input.selection.scope.writeNodeIds) !== canonicalHash(input.selection.targetNodeIds) ||
-      canonicalHash(input.selection.scope.readNodeIds) !== canonicalHash(input.selection.targetNodeIds) ||
+      materialization.applicationTicketId !==
+        deterministicControlTicketId("application", {
+          proposalTicketId: input.selection.proposalTicketId,
+          authoritySha256: materialization.authoritySha256,
+        }) ||
+      canonicalHash(materialization.applicationBinding) !==
+        canonicalHash(input.selection.applicationBinding) ||
+      canonicalHash(materialization.controlScopeNodeIds) !==
+        canonicalHash(input.selection.targetNodeIds) ||
+      canonicalHash(input.selection.scope.writeNodeIds) !==
+        canonicalHash(input.selection.targetNodeIds) ||
+      canonicalHash(input.selection.scope.readNodeIds) !==
+        canonicalHash(input.selection.targetNodeIds) ||
       input.selection.scope.readPaths.length !== 0 ||
       input.selection.scope.writePaths.length !== 0
     ) {
-      fail("change_control_application_scope", "application materialization exceeds or differs from its approved exact scope");
+      fail(
+        "change_control_application_scope",
+        "application materialization exceeds or differs from its approved exact scope",
+      );
     }
     if (existingChildren.some((ticket) => ticket.id !== materialization.applicationTicketId)) {
-      fail("change_control_application_collision", "proposal already owns a different application child");
+      fail(
+        "change_control_application_collision",
+        "proposal already owns a different application child",
+      );
     }
     const definition = configuredControlTicketDefinition({
       configuration: pinned.configuration,
@@ -2365,18 +2684,25 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         role: "approved_application",
         materialization: structuredClone(materialization),
         proposalTicketAuthoritySha256: proposal.executionControl.controlTicketAuthority.sha256,
-        proposalTicketProjectionSha256: proposal.executionControl.controlTicketAuthority.projectionSha256,
+        proposalTicketProjectionSha256:
+          proposal.executionControl.controlTicketAuthority.projectionSha256,
       },
     });
     const existing = input.run.tickets[materialization.applicationTicketId];
     if (existing === undefined) {
       if (materialization.disposition !== "create") {
-        fail("change_control_application_reuse", "application requested reuse but no durable child exists");
+        fail(
+          "change_control_application_reuse",
+          "application requested reuse but no durable child exists",
+        );
       }
       return template;
     }
     if (materialization.disposition !== "reuse") {
-      fail("change_control_application_collision", "application requested creation over a durable child");
+      fail(
+        "change_control_application_collision",
+        "application requested creation over a durable child",
+      );
     }
     preserveControlTicketCreationAuthority(existing, template, "approved_application");
     assertControlTicketTemplate(existing, template, "application");
@@ -2396,17 +2722,29 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       input.reconciliation.configurationSha256 !== pinned.configuration.configuration_sha256 ||
       input.reconciliation.catalogSha256 !== catalog.sha256
     ) {
-      fail("terminal_resolver_binding", "terminal resolver differs from this run's pinned authority");
+      fail(
+        "terminal_resolver_binding",
+        "terminal resolver differs from this run's pinned authority",
+      );
     }
     const source = input.run.tickets[input.reconciliation.sourceTicketId];
     if (source?.executionPolicyBinding === undefined) {
-      fail("terminal_resolver_source", "terminal resolver has no exact durable source ticket binding");
+      fail(
+        "terminal_resolver_source",
+        "terminal resolver has no exact durable source ticket binding",
+      );
     }
     assertExecutionBindingExact(catalog, source.executionPolicyBinding, "terminal resolver source");
     const sourceOperation = catalog.operations[source.operationId];
     if (input.reconciliation.chainSuppressed) {
-      if (!sourceOperation?.terminalResolver || input.reconciliation.disposition !== "chain_suppressed") {
-        fail("terminal_resolver_chain", "resolver suppression is only valid for a configured resolver source");
+      if (
+        !sourceOperation?.terminalResolver ||
+        input.reconciliation.disposition !== "chain_suppressed"
+      ) {
+        fail(
+          "terminal_resolver_chain",
+          "resolver suppression is only valid for a configured resolver source",
+        );
       }
       return undefined;
     }
@@ -2414,10 +2752,15 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       sourceOperation?.terminalResolver ||
       catalog.terminalResolverOperationId !== input.reconciliation.resolverOperationId
     ) {
-      fail("terminal_resolver_route", "terminal resolver is not the pinned nonrecursive recovery operation");
+      fail(
+        "terminal_resolver_route",
+        "terminal resolver is not the pinned nonrecursive recovery operation",
+      );
     }
     assertExecutionBindingExact(catalog, input.reconciliation.resolverBinding, "terminal resolver");
-    if (input.reconciliation.resolverBinding.operationId !== input.reconciliation.resolverOperationId) {
+    if (
+      input.reconciliation.resolverBinding.operationId !== input.reconciliation.resolverOperationId
+    ) {
       fail("terminal_resolver_binding", "terminal resolver operation and policy binding disagree");
     }
     const failureHashes = boundedDigests(
@@ -2425,10 +2768,19 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       "terminal failure bindings",
     );
     if (failureHashes.length !== 1) {
-      fail("terminal_resolver_binding", "terminal resolver must bind one immutable attempt failure");
+      fail(
+        "terminal_resolver_binding",
+        "terminal resolver must bind one immutable attempt failure",
+      );
     }
-    if (terminalFailureBindingFromProof(input.run, source, input.sourceFailureProof)?.sha256 !== failureHashes[0]) {
-      fail("terminal_resolver_failure_proof", "terminal resolver source failure proof differs from reconciliation");
+    if (
+      terminalFailureBindingFromProof(input.run, source, input.sourceFailureProof)?.sha256 !==
+      failureHashes[0]
+    ) {
+      fail(
+        "terminal_resolver_failure_proof",
+        "terminal resolver source failure proof differs from reconciliation",
+      );
     }
     const expectedId = deterministicControlTicketId("recovery", {
       runId: input.run.id,
@@ -2439,12 +2791,17 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       resolverOperationId: input.reconciliation.resolverOperationId,
     });
     if (expectedId !== input.reconciliation.resolverTicketId) {
-      fail("terminal_resolver_identity", "terminal resolver ticket id is not the deterministic compiler identity");
+      fail(
+        "terminal_resolver_identity",
+        "terminal resolver ticket id is not the deterministic compiler identity",
+      );
     }
     const graph = (await this.#readGraph(input.run, pinned.configuration)).graph;
-    const readNodeIds = canonicalControlStrings([
-      ...new Set([...(source.readNodeIds ?? []), ...(source.writeNodeIds ?? [])]),
-    ], "terminal resolver read nodes", true);
+    const readNodeIds = canonicalControlStrings(
+      [...new Set([...(source.readNodeIds ?? []), ...(source.writeNodeIds ?? [])])],
+      "terminal resolver read nodes",
+      true,
+    );
     const writeNodeIds = canonicalControlStrings(
       source.writeNodeIds ?? [],
       "terminal resolver write nodes",
@@ -2478,7 +2835,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       summary: `Recover terminal ticket ${source.id} from ${failureHashes.length} authenticated failure binding(s).`,
       dependencyIds: [],
       executionControl: {
-        changeControlScopeNodeIds: [...new Set([...readNodeIds, ...writeNodeIds])].sort(compareText),
+        changeControlScopeNodeIds: [...new Set([...readNodeIds, ...writeNodeIds])].sort(
+          compareText,
+        ),
         terminalRecovery: {
           protocol: "koni.terminal-recovery-authority.v2",
           configurationSha256: catalog.configurationSha256,
@@ -2486,7 +2845,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
           resolverOperationId: input.reconciliation.resolverOperationId,
           resolverTicketId: input.reconciliation.resolverTicketId,
           resolverBinding: structuredClone(input.reconciliation.resolverBinding),
-          resolverOperation: structuredClone(catalog.operations[input.reconciliation.resolverOperationId]!),
+          resolverOperation: structuredClone(
+            catalog.operations[input.reconciliation.resolverOperationId]!,
+          ),
           sourceTicketId: source.id,
           failureBindingSha256s: [...failureHashes],
           sourceFailureProof: structuredClone(input.sourceFailureProof),
@@ -2522,18 +2883,30 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const existing = input.run.tickets[input.reconciliation.resolverTicketId];
     if (existing === undefined) {
       if (input.reconciliation.disposition !== "create") {
-        fail("terminal_resolver_reuse", "terminal resolver requested reuse but no durable resolver exists");
+        fail(
+          "terminal_resolver_reuse",
+          "terminal resolver requested reuse but no durable resolver exists",
+        );
       }
       return template;
     }
     if (input.reconciliation.disposition !== "reuse") {
-      fail("terminal_resolver_collision", "terminal resolver requested creation over a durable resolver");
+      fail(
+        "terminal_resolver_collision",
+        "terminal resolver requested creation over a durable resolver",
+      );
     }
     const durableRecovery = existing.executionControl?.terminalRecovery;
     const expectedRecovery = template.executionControl?.terminalRecovery;
-    if (durableRecovery === undefined || expectedRecovery === undefined ||
-        durableRecovery.reconciliationDisposition !== "create") {
-      fail("terminal_resolver_reuse", "terminal resolver reuse lacks its original creation authority");
+    if (
+      durableRecovery === undefined ||
+      expectedRecovery === undefined ||
+      durableRecovery.reconciliationDisposition !== "create"
+    ) {
+      fail(
+        "terminal_resolver_reuse",
+        "terminal resolver reuse lacks its original creation authority",
+      );
     }
     // A reuse decision is an observation, not a new creation authority. Compare the entire
     // compiler template while retaining only the original reconciliation envelope; all bound
@@ -2544,7 +2917,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     expectedRecovery.reconciliationSha256 = durableRecovery.reconciliationSha256;
     expectedRecovery.sha256 = durableRecovery.sha256;
     preserveControlTicketCreationAuthority(existing, template, "terminal_resolver");
-    assertControlTicketTemplate(existing, template, "terminal resolver", { allowFailureHashExtension: true });
+    assertControlTicketTemplate(existing, template, "terminal resolver", {
+      allowFailureHashExtension: true,
+    });
     return structuredClone(existing);
   }
 
@@ -2554,9 +2929,14 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     targetOid: string;
   }): Promise<TicketRecord> {
     const pinned = await this.#loadPinned(input.run);
-    const runType = requireValidation(resolveCompiledRunType(pinned.configuration, input.run.runTypeId), "run_type_invalid", "run type disappeared");
+    const runType = requireValidation(
+      resolveCompiledRunType(pinned.configuration, input.run.runTypeId),
+      "run_type_invalid",
+      "run type disappeared",
+    );
     const promotion = optionalRecord(runType.document.promotion);
-    const operationId = optionalString(promotion?.conflict_operation) ?? "resolve-target-integration";
+    const operationId =
+      optionalString(promotion?.conflict_operation) ?? "resolve-target-integration";
     const executionCatalog = requireExecutionSemanticCatalog(pinned.configuration);
     const ticketBinding = resolveExecutionPolicyBinding(executionCatalog, {
       configurationSha256: pinned.configuration.configuration_sha256,
@@ -2581,17 +2961,19 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       targetNodeIds: [],
       readPaths: ["."],
       writePaths: ["."],
-      steps: [{
-        id: "resolve-conflicts",
-        title: "Resolve target conflicts",
-        personaId: "integrator",
-        executionPolicyBinding: stepBinding,
-        status: "pending",
-        attemptIds: [],
-        summary: undefined,
-        startedAt: undefined,
-        completedAt: undefined,
-      }],
+      steps: [
+        {
+          id: "resolve-conflicts",
+          title: "Resolve target conflicts",
+          personaId: "integrator",
+          executionPolicyBinding: stepBinding,
+          status: "pending",
+          attemptIds: [],
+          summary: undefined,
+          startedAt: undefined,
+          completedAt: undefined,
+        },
+      ],
       worktreePath: undefined,
       branch: undefined,
       blocker: undefined,
@@ -2610,45 +2992,72 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const ownerPersonaId = run.workingSpecOwnerId;
     if (ownerPersonaId === undefined) return prior;
     if (prior.canonicalWorkingSpecId !== undefined) {
-      fail("working_spec_baseline_exists", "approved run graph already has a canonical working-spec baseline");
+      fail(
+        "working_spec_baseline_exists",
+        "approved run graph already has a canonical working-spec baseline",
+      );
     }
     if (prior.ownerPersonaId !== undefined && prior.ownerPersonaId !== ownerPersonaId) {
-      fail("working_spec_owner_drift", "durable graph owner differs from the owner pinned at run creation");
+      fail(
+        "working_spec_owner_drift",
+        "durable graph owner differs from the owner pinned at run creation",
+      );
     }
     const source = await this.#workingSpecBaselineSource(run);
     const full = run.plan?.full ?? {};
     const planned = source.kind === "approved_plan";
     const baseline: WorkingSpecBaseline = {
       objective: run.objective,
-      intake: Object.fromEntries(Object.entries(run.intake).sort(([left], [right]) => compareText(left, right))),
-      acceptedPlan: planned ? {
-        architecture: full.architecture ?? "",
-        decisions: full.decisions ?? "",
-        risk: full.risk ?? "",
-        verification: full.verification ?? "",
-      } : null,
-      resolvedDecisions: planned ? full.decisions ?? "" : "Direct approval preserves the objective and intake as the decision baseline.",
+      intake: Object.fromEntries(
+        Object.entries(run.intake).sort(([left], [right]) => compareText(left, right)),
+      ),
+      acceptedPlan: planned
+        ? {
+            architecture: full.architecture ?? "",
+            decisions: full.decisions ?? "",
+            risk: full.risk ?? "",
+            verification: full.verification ?? "",
+          }
+        : null,
+      resolvedDecisions: planned
+        ? (full.decisions ?? "")
+        : "Direct approval preserves the objective and intake as the decision baseline.",
       verificationIntent: planned
-        ? full.verification ?? ""
+        ? (full.verification ?? "")
         : `Verify the approved objective against its intake: ${Object.values(run.intake).join("; ")}`,
       source,
     };
-    const guidance = JSON.stringify({
-      objective: baseline.objective,
-      intake: baseline.intake,
-      acceptedPlan: baseline.acceptedPlan,
-      resolvedDecisions: baseline.resolvedDecisions,
-      verificationIntent: baseline.verificationIntent,
-    }, null, 2);
-    if (Buffer.byteLength(guidance, "utf8") > MAX_BASELINE_SPEC_BYTES || guidance.includes("\u0000")) {
+    const guidance = JSON.stringify(
+      {
+        objective: baseline.objective,
+        intake: baseline.intake,
+        acceptedPlan: baseline.acceptedPlan,
+        resolvedDecisions: baseline.resolvedDecisions,
+        verificationIntent: baseline.verificationIntent,
+      },
+      null,
+      2,
+    );
+    if (
+      Buffer.byteLength(guidance, "utf8") > MAX_BASELINE_SPEC_BYTES ||
+      guidance.includes("\u0000")
+    ) {
       fail("working_spec_baseline_size", "canonical working-spec baseline is oversized or unsafe");
     }
-    const rootNodes = graph.nodes().filter((node) =>
-      node.annotations.run_root === true || node.title === run.objective);
+    const rootNodes = graph
+      .nodes()
+      .filter((node) => node.annotations.run_root === true || node.title === run.objective);
     const affectedNodeIds = rootNodes.map((node) => node.id).sort(compareText);
-    const repositoryPaths = [...new Set(graph.nodes().flatMap((node) => graph.repositoryPaths(node.id)))].sort(compareText);
+    const repositoryPaths = [
+      ...new Set(graph.nodes().flatMap((node) => graph.repositoryPaths(node.id))),
+    ].sort(compareText);
     const baselineDigest = canonicalHash(baseline);
-    const digest = workingSpecDigest({ baselineDigest, guidance, affectedNodeIds, repositoryPaths });
+    const digest = workingSpecDigest({
+      baselineDigest,
+      guidance,
+      affectedNodeIds,
+      repositoryPaths,
+    });
     const id = `spec-${digestBody(canonicalHash([run.id, 1, digest, source.artifactSha256])).slice(0, 24)}`;
     const record: WorkingSpecVersionRecord = {
       protocol: WORKING_SPEC_PROTOCOL,
@@ -2676,25 +3085,36 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         recordedAt: this.#now().toISOString(),
       },
     };
-    return appendContextualRecord(prior, record, [
-      { sourceId: id, relation: "context_for", targetKind: "run_root", targetId: prior.runRootId },
-      ...affectedNodeIds.map((targetId): GraphContextualLink => ({
-        sourceId: id,
-        relation: "affects",
-        targetKind: "semantic_node",
-        targetId,
-      })),
-      ...repositoryPaths.map((targetId): GraphContextualLink => ({
-        sourceId: id,
-        relation: "references_path",
-        targetKind: "repository_path",
-        targetId,
-      })),
-    ], { canonicalWorkingSpecId: id, ownerPersonaId });
+    return appendContextualRecord(
+      prior,
+      record,
+      [
+        {
+          sourceId: id,
+          relation: "context_for",
+          targetKind: "run_root",
+          targetId: prior.runRootId,
+        },
+        ...affectedNodeIds.map((targetId): GraphContextualLink => ({
+          sourceId: id,
+          relation: "affects",
+          targetKind: "semantic_node",
+          targetId,
+        })),
+        ...repositoryPaths.map((targetId): GraphContextualLink => ({
+          sourceId: id,
+          relation: "references_path",
+          targetKind: "repository_path",
+          targetId,
+        })),
+      ],
+      { canonicalWorkingSpecId: id, ownerPersonaId },
+    );
   }
 
   async #workingSpecBaselineSource(run: RunRecord): Promise<WorkingSpecBaseline["source"]> {
-    if (run.plan === undefined) fail("working_spec_source", "working-spec baseline has no approved plan source");
+    if (run.plan === undefined)
+      fail("working_spec_source", "working-spec baseline has no approved plan source");
     if (run.planningMode === "direct") {
       const artifactPath = `runs/${run.id}/direct-approval.json`;
       let bytes: Buffer;
@@ -2725,7 +3145,11 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         sourcePlan.revision !== run.plan.revision ||
         canonicalHash(sourcePlan.full) !== canonicalHash(run.plan.full) ||
         canonicalHash(sourcePlan.concise) !== canonicalHash(run.plan.concise)
-      ) fail("working_spec_source", "direct-approval source artifact failed its immutable compiler binding");
+      )
+        fail(
+          "working_spec_source",
+          "direct-approval source artifact failed its immutable compiler binding",
+        );
       return {
         kind: "direct_approval",
         artifactPath,
@@ -2735,8 +3159,11 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     }
     const candidates = Object.values(run.attempts)
       .filter((attempt) => attempt.kind === "planning" && attempt.terminalAcceptedAt !== undefined)
-      .sort((left, right) =>
-        (right.terminalAcceptedAt ?? "").localeCompare(left.terminalAcceptedAt ?? "") || compareText(left.id, right.id));
+      .sort(
+        (left, right) =>
+          (right.terminalAcceptedAt ?? "").localeCompare(left.terminalAcceptedAt ?? "") ||
+          compareText(left.id, right.id),
+      );
     for (const attempt of candidates) {
       const artifactPath = `runs/${run.id}/attempts/${attempt.id}/planning-output.json`;
       let bytes: Buffer;
@@ -2746,7 +3173,8 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
         throw error;
       }
-      if (bytes.byteLength === 0 || bytes.byteLength > 16 * 1024 * 1024 || bytes.includes(0)) continue;
+      if (bytes.byteLength === 0 || bytes.byteLength > 16 * 1024 * 1024 || bytes.includes(0))
+        continue;
       let value: unknown;
       try {
         value = JSON.parse(bytes.toString("utf8"));
@@ -2767,7 +3195,8 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         canonicalHash(plan.full) !== canonicalHash(run.plan.full) ||
         canonicalHash(plan.concise) !== canonicalHash(run.plan.concise) ||
         canonicalHash(plan.graphSeed ?? null) !== canonicalHash(run.plan.graphSeed ?? null)
-      ) continue;
+      )
+        continue;
       return {
         kind: "approved_plan",
         artifactPath,
@@ -2788,7 +3217,8 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
   }): Promise<AgentToolCompilation> {
     const { run, attempt, grant, call } = input;
     const spec = input.spec ?? this.#issuedSpecs.get(attempt.id);
-    if (spec === undefined) fail("agent_tool_spec", "agent tool request has no authenticated launch specification");
+    if (spec === undefined)
+      fail("agent_tool_spec", "agent tool request has no authenticated launch specification");
     assertAgentToolIdentity(run, attempt, grant);
     assertRecoveryIdentity(run, attempt, spec);
     const pinned = await this.#loadPinned(run);
@@ -2809,10 +3239,18 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         graphRevision: dynamic.envelope.binding.semanticRevision,
         contextualSha256: dynamic.envelope.binding.contextualHash,
         contextualRevision: dynamic.envelope.binding.contextualRevision,
-        anchors: [...new Set(request.anchors ?? descriptor.definition?.target_node_ids ?? descriptor.readNodeIds)].sort(compareText),
+        anchors: [
+          ...new Set(
+            request.anchors ?? descriptor.definition?.target_node_ids ?? descriptor.readNodeIds,
+          ),
+        ].sort(compareText),
         nodes: semantic.map((record) => record.node),
-        edges: graphRead.graph.edges().filter((edge) => ids.has(edge.source) && ids.has(edge.target)),
-        contextualRecords: dynamic.envelope.records.filter((record) => record.kind !== "semantic_node"),
+        edges: graphRead.graph
+          .edges()
+          .filter((edge) => ids.has(edge.source) && ids.has(edge.target)),
+        contextualRecords: dynamic.envelope.records.filter(
+          (record) => record.kind !== "semantic_node",
+        ),
         dynamicEnvelopeHash: dynamic.envelopeHash,
         selection: dynamic.envelope.selection,
         budget: dynamic.envelope.budget,
@@ -2826,8 +3264,14 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       };
     }
     if (call.name === "koni_update_working_spec") {
-      if (attempt.personaId !== run.workingSpecOwnerId || contextual.ownerPersonaId !== run.workingSpecOwnerId) {
-        fail("working_spec_owner", "only the working-spec owner pinned at run creation may update the canonical version");
+      if (
+        attempt.personaId !== run.workingSpecOwnerId ||
+        contextual.ownerPersonaId !== run.workingSpecOwnerId
+      ) {
+        fail(
+          "working_spec_owner",
+          "only the working-spec owner pinned at run creation may update the canonical version",
+        );
       }
       const canonicalId = contextual.canonicalWorkingSpecId;
       const current = canonicalId === undefined ? undefined : contextual.records[canonicalId];
@@ -2835,33 +3279,57 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         fail("working_spec_missing", "run has no initialized canonical working-spec baseline");
       }
       const expectedRevision = requiredToolInteger(call.arguments, "expectedContextualRevision");
-      const expectedDigest = requireDigest(call.arguments.expectedCanonicalDigest, "expected canonical working-spec digest");
+      const expectedDigest = requireDigest(
+        call.arguments.expectedCanonicalDigest,
+        "expected canonical working-spec digest",
+      );
       if (expectedRevision !== contextual.revision || expectedDigest !== current.digest) {
         fail("working_spec_cas", "working-spec contextual revision or canonical digest is stale");
       }
       const guidanceArg = optionalToolString(call.arguments, "guidance");
       const contentArg = optionalToolString(call.arguments, "content");
       if ((guidanceArg === undefined) === (contentArg === undefined)) {
-        fail("working_spec_shape", "working-spec update requires exactly one guidance/content field");
+        fail(
+          "working_spec_shape",
+          "working-spec update requires exactly one guidance/content field",
+        );
       }
-      const guidance = boundedText(guidanceArg ?? contentArg, "working-spec guidance", MAX_WORKING_SPEC_BYTES);
+      const guidance = boundedText(
+        guidanceArg ?? contentArg,
+        "working-spec guidance",
+        MAX_WORKING_SPEC_BYTES,
+      );
       const requestedNodeIds = optionalToolStringArray(call.arguments, "affectedNodeIds");
-      const affectedNodeIds = [...new Set(requestedNodeIds ?? current.affectedNodeIds)].sort(compareText);
+      const affectedNodeIds = [...new Set(requestedNodeIds ?? current.affectedNodeIds)].sort(
+        compareText,
+      );
       const visibleNodes = new Set([...descriptor.readNodeIds, ...descriptor.writeNodeIds]);
       for (const nodeId of affectedNodeIds) {
         if (graphRead.graph.node(nodeId) === undefined) {
-          fail("working_spec_scope", `working-spec update references missing semantic node ${nodeId}`);
+          fail(
+            "working_spec_scope",
+            `working-spec update references missing semantic node ${nodeId}`,
+          );
         }
         if (requestedNodeIds !== undefined && !visibleNodes.has(nodeId)) {
-          fail("working_spec_scope", `working-spec update expands beyond compiler-visible node ${nodeId}`);
+          fail(
+            "working_spec_scope",
+            `working-spec update expands beyond compiler-visible node ${nodeId}`,
+          );
         }
       }
       const requestedPaths = optionalToolStringArray(call.arguments, "paths");
-      const repositoryPaths = requestedPaths === undefined
-        ? [...current.repositoryPaths]
-        : normalizeReferencedPaths(requestedPaths, grant, "working-spec");
+      const repositoryPaths =
+        requestedPaths === undefined
+          ? [...current.repositoryPaths]
+          : normalizeReferencedPaths(requestedPaths, grant, "working-spec");
       const baselineDigest = current.baselineDigest;
-      const digest = workingSpecDigest({ baselineDigest, guidance, affectedNodeIds, repositoryPaths });
+      const digest = workingSpecDigest({
+        baselineDigest,
+        guidance,
+        affectedNodeIds,
+        repositoryPaths,
+      });
       const version = current.version + 1;
       const recordedAt = this.#now().toISOString();
       const id = `spec-${digestBody(canonicalHash([run.id, version, digest, attempt.id, call.callId])).slice(0, 24)}`;
@@ -2891,12 +3359,37 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
           recordedAt,
         ),
       };
-      const nextContext = appendContextualRecord(contextual, record, [
-        { sourceId: id, relation: "context_for", targetKind: "run_root", targetId: contextual.runRootId },
-        { sourceId: id, relation: "supersedes", targetKind: "context_record", targetId: current.id },
-        ...affectedNodeIds.map((targetId): GraphContextualLink => ({ sourceId: id, relation: "affects", targetKind: "semantic_node", targetId })),
-        ...repositoryPaths.map((targetId): GraphContextualLink => ({ sourceId: id, relation: "references_path", targetKind: "repository_path", targetId })),
-      ], { canonicalWorkingSpecId: id, ownerPersonaId: attempt.personaId });
+      const nextContext = appendContextualRecord(
+        contextual,
+        record,
+        [
+          {
+            sourceId: id,
+            relation: "context_for",
+            targetKind: "run_root",
+            targetId: contextual.runRootId,
+          },
+          {
+            sourceId: id,
+            relation: "supersedes",
+            targetKind: "context_record",
+            targetId: current.id,
+          },
+          ...affectedNodeIds.map((targetId): GraphContextualLink => ({
+            sourceId: id,
+            relation: "affects",
+            targetKind: "semantic_node",
+            targetId,
+          })),
+          ...repositoryPaths.map((targetId): GraphContextualLink => ({
+            sourceId: id,
+            relation: "references_path",
+            targetKind: "repository_path",
+            targetId,
+          })),
+        ],
+        { canonicalWorkingSpecId: id, ownerPersonaId: attempt.personaId },
+      );
       this.#dynamicContextSelector.clear();
       return {
         summary: `Working specification advanced to version ${version}`,
@@ -2908,11 +3401,21 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
           contextualHash: nextContext.hash,
           supersedes: current.id,
         },
-        artifactWrites: [{
-          path: graphArtifactPath(run.id),
-          bytes: encodeRunGraphArtifact(graphArtifact(run, pinned.configuration, graphRead.graph, graphRead.artifact.revision, nextContext)),
-          expectedSha256: graphRead.bytesSha256,
-        }],
+        artifactWrites: [
+          {
+            path: graphArtifactPath(run.id),
+            bytes: encodeRunGraphArtifact(
+              graphArtifact(
+                run,
+                pinned.configuration,
+                graphRead.graph,
+                graphRead.artifact.revision,
+                nextContext,
+              ),
+            ),
+            expectedSha256: graphRead.bytesSha256,
+          },
+        ],
       };
     }
     if (call.name === "koni_record_note") {
@@ -2928,45 +3431,58 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       }
       const kind = requiredToolString(call.arguments, "kind");
       if (!isGraphNoteKind(kind)) fail("graph_note_kind", `unsupported advisory note kind ${kind}`);
-      const body = boundedText(requiredToolString(call.arguments, "body"), "graph note body", 1024 * 1024);
+      const body = boundedText(
+        requiredToolString(call.arguments, "body"),
+        "graph note body",
+        1024 * 1024,
+      );
       const repositoryPaths = normalizeReferencedPaths(
         optionalToolStringArray(call.arguments, "paths") ?? [],
         grant,
         "graph note",
       );
       const supersedes = optionalToolString(call.arguments, "supersedes");
-      const existingNativeNotes = Object.values(contextual.records)
-        .filter((record): record is GraphChangeNoteRecord => record.recordType === "change_note");
+      const existingNativeNotes = Object.values(contextual.records).filter(
+        (record): record is GraphChangeNoteRecord => record.recordType === "change_note",
+      );
       const legacyNotes = await this.#readGraphNotes(run);
       if (supersedes !== undefined) {
-        const prior = existingNativeNotes.find((note) => note.id === supersedes)
-          ?? legacyNotes.find((note) => note.id === supersedes);
-        if (prior === undefined) fail("graph_note_lineage", `superseded graph note ${supersedes} is missing`);
-        const priorSubject = prior.protocol === LEGACY_GRAPH_NOTE_PROTOCOL
-          ? { kind: "semantic_node" as const, id: prior.nodeId }
-          : prior.subject;
+        const prior =
+          existingNativeNotes.find((note) => note.id === supersedes) ??
+          legacyNotes.find((note) => note.id === supersedes);
+        if (prior === undefined)
+          fail("graph_note_lineage", `superseded graph note ${supersedes} is missing`);
+        const priorSubject =
+          prior.protocol === LEGACY_GRAPH_NOTE_PROTOCOL
+            ? { kind: "semantic_node" as const, id: prior.nodeId }
+            : prior.subject;
         const subjectKind = isRunRoot ? "run_root" : "semantic_node";
         if (priorSubject.kind !== subjectKind || priorSubject.id !== targetId) {
-          fail("graph_note_lineage", "a graph note may supersede only the same node/run-root subject");
+          fail(
+            "graph_note_lineage",
+            "a graph note may supersede only the same node/run-root subject",
+          );
         }
         if ([...existingNativeNotes, ...legacyNotes].some((note) => note.supersedes === prior.id)) {
           fail("graph_note_lineage", `graph note ${prior.id} already has a superseding successor`);
         }
       }
       const recordedAt = this.#now().toISOString();
-      const id = `note-${digestBody(canonicalHash([
-        run.id,
-        run.generation,
-        attempt.id,
-        call.callId,
-        targetId,
-        kind,
-        body,
-        repositoryPaths,
-        supersedes ?? null,
-        graphRead.graph.hash,
-        contextual.hash,
-      ])).slice(0, 24)}`;
+      const id = `note-${digestBody(
+        canonicalHash([
+          run.id,
+          run.generation,
+          attempt.id,
+          call.callId,
+          targetId,
+          kind,
+          body,
+          repositoryPaths,
+          supersedes ?? null,
+          graphRead.graph.hash,
+          contextual.hash,
+        ]),
+      ).slice(0, 24)}`;
       const note: GraphChangeNoteRecord = {
         protocol: GRAPH_CHANGE_NOTE_PROTOCOL,
         recordType: "change_note",
@@ -3003,12 +3519,16 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
           targetKind: "repository_path",
           targetId: path,
         })),
-        ...(supersedes === undefined ? [] : [{
-          sourceId: id,
-          relation: "supersedes" as const,
-          targetKind: "context_record" as const,
-          targetId: supersedes,
-        }]),
+        ...(supersedes === undefined
+          ? []
+          : [
+              {
+                sourceId: id,
+                relation: "supersedes" as const,
+                targetKind: "context_record" as const,
+                targetId: supersedes,
+              },
+            ]),
       ]);
       this.#dynamicContextSelector.clear();
       return {
@@ -3021,19 +3541,31 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
           contextualRevision: nextContext.revision,
           contextualHash: nextContext.hash,
         },
-        activity: [{
-          id: `activity-${digestBody(canonicalHash([run.id, run.revision, id])).slice(0, 20)}`,
-          at: recordedAt,
-          kind: "agent",
-          message: `${attempt.personaId} noted ${node === undefined ? "run root" : `${node.type}: ${node.title}`}`,
-          ticketId: attempt.ticketId,
-          nodeId: node?.id,
-        }],
-        artifactWrites: [{
-          path: graphArtifactPath(run.id),
-          bytes: encodeRunGraphArtifact(graphArtifact(run, pinned.configuration, graphRead.graph, graphRead.artifact.revision, nextContext)),
-          expectedSha256: graphRead.bytesSha256,
-        }],
+        activity: [
+          {
+            id: `activity-${digestBody(canonicalHash([run.id, run.revision, id])).slice(0, 20)}`,
+            at: recordedAt,
+            kind: "agent",
+            message: `${attempt.personaId} noted ${node === undefined ? "run root" : `${node.type}: ${node.title}`}`,
+            ticketId: attempt.ticketId,
+            nodeId: node?.id,
+          },
+        ],
+        artifactWrites: [
+          {
+            path: graphArtifactPath(run.id),
+            bytes: encodeRunGraphArtifact(
+              graphArtifact(
+                run,
+                pinned.configuration,
+                graphRead.graph,
+                graphRead.artifact.revision,
+                nextContext,
+              ),
+            ),
+            expectedSha256: graphRead.bytesSha256,
+          },
+        ],
       };
     }
     fail("tool_unsupported", `${call.name} is not a compiler-owned graph tool`);
@@ -3045,16 +3577,25 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     checkId: string;
   }): Promise<ResolvedAgentCheck> {
     const pinned = await this.#loadPinned(input.run);
-    const descriptor = await this.#descriptorForRecordedAttempt(input.run, input.attempt, pinned.configuration);
+    const descriptor = await this.#descriptorForRecordedAttempt(
+      input.run,
+      input.attempt,
+      pinned.configuration,
+    );
     const configuredIds = new Set([
       ...(descriptor.step?.validation_checks ?? []),
       ...(descriptor.gatePolicyContexts ?? []).map((binding) => binding.checkId),
     ]);
     if (descriptor.step === undefined || !configuredIds.has(input.checkId)) {
-      fail("check_scope", `check ${input.checkId} is outside this step's exact configured validation checks`);
+      fail(
+        "check_scope",
+        `check ${input.checkId} is outside this step's exact configured validation checks`,
+      );
     }
-    if (descriptor.graph === undefined) fail("check_graph", "configured checks require a compiler-bound graph epoch");
-    if (descriptor.executionPolicyBinding === undefined) fail("check_execution_policy", "configured check has no pinned step policy");
+    if (descriptor.graph === undefined)
+      fail("check_graph", "configured checks require a compiler-bound graph epoch");
+    if (descriptor.executionPolicyBinding === undefined)
+      fail("check_execution_policy", "configured check has no pinned step policy");
     return resolveConfiguredAgentCheck({
       configuration: pinned.configuration,
       executionCatalog: requireExecutionSemanticCatalog(pinned.configuration),
@@ -3078,16 +3619,25 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     executions: AgentCheckExecution[];
   }): Promise<CompiledAgentCheckResult> {
     const pinned = await this.#loadPinned(input.run);
-    const descriptor = await this.#descriptorForRecordedAttempt(input.run, input.attempt, pinned.configuration);
+    const descriptor = await this.#descriptorForRecordedAttempt(
+      input.run,
+      input.attempt,
+      pinned.configuration,
+    );
     const configuredIds = new Set([
       ...(descriptor.step?.validation_checks ?? []),
       ...(descriptor.gatePolicyContexts ?? []).map((binding) => binding.checkId),
     ]);
     if (descriptor.step === undefined || !configuredIds.has(input.check.requestedCheckId)) {
-      fail("check_scope", `check ${input.check.requestedCheckId} is outside this step's exact configured validation checks`);
+      fail(
+        "check_scope",
+        `check ${input.check.requestedCheckId} is outside this step's exact configured validation checks`,
+      );
     }
-    if (descriptor.graph === undefined) fail("check_graph", "configured checks require a compiler-bound graph epoch");
-    if (descriptor.executionPolicyBinding === undefined) fail("check_execution_policy", "configured check has no pinned step policy");
+    if (descriptor.graph === undefined)
+      fail("check_graph", "configured checks require a compiler-bound graph epoch");
+    if (descriptor.executionPolicyBinding === undefined)
+      fail("check_execution_policy", "configured check has no pinned step policy");
     const resolved = await resolveConfiguredAgentCheck({
       configuration: pinned.configuration,
       executionCatalog: requireExecutionSemanticCatalog(pinned.configuration),
@@ -3103,10 +3653,16 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       requestedCheckId: input.check.requestedCheckId,
     });
     if (canonicalHash(resolved) !== canonicalHash(input.check)) {
-      fail("check_resolution_drift", "configured check resolution changed before its result was compiled");
+      fail(
+        "check_resolution_drift",
+        "configured check resolution changed before its result was compiled",
+      );
     }
     if (input.executions.length !== resolved.commands.length) {
-      fail("check_execution_count", "configured check execution count does not match its compiler plan");
+      fail(
+        "check_execution_count",
+        "configured check execution count does not match its compiler plan",
+      );
     }
     const compiled = resolved.commands.map((command, index) =>
       compileCheckCommandExecution(
@@ -3115,26 +3671,27 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         index,
         pinned.configuration,
         descriptor,
-      ));
+      ),
+    );
     const accepted = compiled.every((result) => result.accepted);
     let passed = compiled.every((result) => result.passed);
     if (resolved.kind === "graph") {
       passed = await evaluateRequestedGraphCheck(
         pinned.configuration,
         descriptor.graph,
-        attemptWorkspace(input.run, recordedAttemptWorkspaceKind(input.attempt), input.attempt.ticketId),
+        attemptWorkspace(
+          input.run,
+          recordedAttemptWorkspaceKind(input.attempt),
+          input.attempt.ticketId,
+        ),
         resolved.requestedCheckId,
         descriptor.definition?.target_node_ids ?? descriptor.readNodeIds,
       );
     }
     const inputGraphSha256 = ruleInputGraphSha256(pinned.configuration, descriptor.graph);
-    const evidenceId = `check-evidence-${digestBody(canonicalHash([
-      input.run.id,
-      input.attempt.id,
-      resolved,
-      input.executions,
-      inputGraphSha256,
-    ])).slice(0, 24)}`;
+    const evidenceId = `check-evidence-${digestBody(
+      canonicalHash([input.run.id, input.attempt.id, resolved, input.executions, inputGraphSha256]),
+    ).slice(0, 24)}`;
     const evidenceArtifact = {
       protocol: "koni.agent-check-execution-evidence.v1",
       id: evidenceId,
@@ -3184,31 +3741,43 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       this.#now().toISOString(),
       this.#projectRoot,
     );
-    const definitions = ticketArtifact(input.run, input.run.graphRevision, evaluation, definitionsRead.value);
+    const definitions = ticketArtifact(
+      input.run,
+      input.run.graphRevision,
+      evaluation,
+      definitionsRead.value,
+    );
     // A nonpassing run whose streams are byte-identical to an earlier run of the same check in
     // this attempt is deterministic: re-running without changing any input is a no-op (observed
     // live: many consecutive identical re-runs burning turns). Say so in the receipt the agent
     // reads, so it iterates on the inputs or reports the blocker instead of retrying.
-    const deterministicRepeat = !passed && (input.run.checks ?? []).some((record) =>
-      record.attemptId === input.attempt.id &&
-      record.requestedCheckId === resolved.requestedCheckId &&
-      record.passed !== true &&
-      record.commands.length === compiled.length &&
-      record.commands.every((prior, index) => {
-        const next = compiled[index]!.evidence as Record<string, unknown>;
-        return prior.exitCode === next.exitCode &&
-          prior.stdoutSha256 === next.stdoutSha256 &&
-          prior.stderrSha256 === next.stderrSha256;
-      }));
+    const deterministicRepeat =
+      !passed &&
+      (input.run.checks ?? []).some(
+        (record) =>
+          record.attemptId === input.attempt.id &&
+          record.requestedCheckId === resolved.requestedCheckId &&
+          record.passed !== true &&
+          record.commands.length === compiled.length &&
+          record.commands.every((prior, index) => {
+            const next = compiled[index]!.evidence as Record<string, unknown>;
+            return (
+              prior.exitCode === next.exitCode &&
+              prior.stdoutSha256 === next.stdoutSha256 &&
+              prior.stderrSha256 === next.stderrSha256
+            );
+          }),
+      );
     const repeatNote = deterministicRepeat
       ? " — byte-identical to a previous run of this check in this attempt; the failure is deterministic, so re-running without changing its inputs cannot change the result"
       : "";
     return {
       accepted,
       passed,
-      summary: (accepted
-        ? `${resolved.requestedCheckId} ${passed ? "passed" : "recorded a nonpassing result"}`
-        : `${resolved.requestedCheckId} failed its configured result contract`) + repeatNote,
+      summary:
+        (accepted
+          ? `${resolved.requestedCheckId} ${passed ? "passed" : "recorded a nonpassing result"}`
+          : `${resolved.requestedCheckId} failed its configured result contract`) + repeatNote,
       value: {
         requestedCheckId: resolved.requestedCheckId,
         accepted,
@@ -3220,23 +3789,30 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       evidence: evidenceArtifact as unknown as JsonValue,
       ruleAuthorityEvidence: envelope as unknown as JsonValue,
       tickets,
-      activity: [{
-        id: `activity-${digestBody(canonicalHash([input.run.id, input.run.revision, evidenceId])).slice(0, 20)}`,
-        at: evidenceArtifact.recordedAt,
-        kind: "compiler",
-        message: `${resolved.requestedCheckId} ${passed ? "passed" : accepted ? "recorded a nonpassing result" : "failed validation"}`,
-        ticketId: input.attempt.ticketId,
-        nodeId: undefined,
-      }],
-      artifactWrites: [{
-        path: ticketDefinitionsPath(input.run.id),
-        bytes: encodeArtifact(definitions),
-        expectedSha256: definitionsRead.bytesSha256,
-      }],
+      activity: [
+        {
+          id: `activity-${digestBody(canonicalHash([input.run.id, input.run.revision, evidenceId])).slice(0, 20)}`,
+          at: evidenceArtifact.recordedAt,
+          kind: "compiler",
+          message: `${resolved.requestedCheckId} ${passed ? "passed" : accepted ? "recorded a nonpassing result" : "failed validation"}`,
+          ticketId: input.attempt.ticketId,
+          nodeId: undefined,
+        },
+      ],
+      artifactWrites: [
+        {
+          path: ticketDefinitionsPath(input.run.id),
+          bytes: encodeArtifact(definitions),
+          expectedSha256: definitionsRead.bytesSha256,
+        },
+      ],
     };
   }
 
-  public async projectGraph(run: RunRecord, ticketId?: string): Promise<{
+  public async projectGraph(
+    run: RunRecord,
+    ticketId?: string,
+  ): Promise<{
     nodes: GraphNode[];
     edges: GraphEdge[];
   }> {
@@ -3244,7 +3820,8 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const graph = (await this.#readGraph(run, pinned.configuration)).graph;
     if (ticketId === undefined) return { nodes: graph.nodes(), edges: graph.edges() };
     const ticket = run.tickets[ticketId];
-    if (ticket === undefined) fail("ticket_missing", `ticket ${ticketId} does not exist in run ${run.id}`);
+    if (ticket === undefined)
+      fail("ticket_missing", `ticket ${ticketId} does not exist in run ${run.id}`);
     const selected = new Set<string>();
     for (const nodeId of [...ticket.targetNodeIds].sort(compareText)) {
       if (graph.node(nodeId) === undefined) continue;
@@ -3269,17 +3846,27 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     options: RuleEvaluationOptions = {},
   ): Promise<ValidationResult<CompiledRuleEvaluation>> {
     const inputGraphSha256 = ruleInputGraphSha256(configuration, graph);
-    const durableEvidence = runRuleEvidence(run, configuration.configuration_sha256, inputGraphSha256);
-    const injectedEvidence = this.#ruleAuthorityEvidence === undefined
-      ? undefined
-      : await this.#ruleAuthorityEvidence(deepFreeze({
-          run: structuredClone(run),
-          configuration,
-          inputGraphSha256,
-          graphNodes: graph.nodes(),
-        }));
-    if (durableEvidence !== undefined && injectedEvidence !== undefined &&
-        canonicalHash(durableEvidence) !== canonicalHash(injectedEvidence)) {
+    const durableEvidence = runRuleEvidence(
+      run,
+      configuration.configuration_sha256,
+      inputGraphSha256,
+    );
+    const injectedEvidence =
+      this.#ruleAuthorityEvidence === undefined
+        ? undefined
+        : await this.#ruleAuthorityEvidence(
+            deepFreeze({
+              run: structuredClone(run),
+              configuration,
+              inputGraphSha256,
+              graphNodes: graph.nodes(),
+            }),
+          );
+    if (
+      durableEvidence !== undefined &&
+      injectedEvidence !== undefined &&
+      canonicalHash(durableEvidence) !== canonicalHash(injectedEvidence)
+    ) {
       fail("rule_evidence_conflict", "durable and injected rule-authority evidence disagree");
     }
     const evidence = await this.#proofPreparationRuleEvidence({
@@ -3317,11 +3904,11 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const leaves = collectProofPreparationLeaves(input.configuration);
     if (leaves.length === 0) return input.prior;
     const inputGraphSha256 = ruleInputGraphSha256(input.configuration, input.graph);
-    const predicates = Object.fromEntries(Object.entries(input.prior?.predicates ?? {})
-      .filter(([, evidence]) => evidence.leaf?.op !== "proof_preparation_current")) as Record<
-        Sha256Digest,
-        RulePredicateEvidence
-      >;
+    const predicates = Object.fromEntries(
+      Object.entries(input.prior?.predicates ?? {}).filter(
+        ([, evidence]) => evidence.leaf?.op !== "proof_preparation_current",
+      ),
+    ) as Record<Sha256Digest, RulePredicateEvidence>;
     const evaluator = new GraphExpressionEvaluator(input.configuration, input.graph);
     const attemptOrder = new Map(Object.keys(input.run.attempts).map((id, index) => [id, index]));
     const currentByBinding = new Map<Sha256Digest, Promise<boolean>>();
@@ -3334,7 +3921,8 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         let expectedTargets: readonly string[];
         try {
           expectedTargets = withRuleBindings(evaluator, bindings, () =>
-            evaluator.select(leaf.preparation_targets as ConfigurationValue));
+            evaluator.select(leaf.preparation_targets as ConfigurationValue),
+          );
         } catch {
           continue;
         }
@@ -3344,14 +3932,12 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         if (operationId === undefined || checkId === undefined) continue;
         const operation = input.configuration.registries.operations[operationId];
         if (operation?.proof_source_preparation_check !== checkId) continue;
-        const candidate = latestReviewCandidate(
-          input.run,
-          operationId,
-          subject.id,
-          attemptOrder,
-        );
-        if (candidate === undefined ||
-            canonicalHash(candidate.ticket.targetNodeIds) !== canonicalHash(expectedTargets)) continue;
+        const candidate = latestReviewCandidate(input.run, operationId, subject.id, attemptOrder);
+        if (
+          candidate === undefined ||
+          canonicalHash(candidate.ticket.targetNodeIds) !== canonicalHash(expectedTargets)
+        )
+          continue;
         const bindingKey = canonicalHash({
           operationId,
           checkId,
@@ -3383,10 +3969,15 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         predicates[key] = {
           key,
           result: true,
-          recordedAt: candidate.attempt.terminalAcceptedAt ?? candidate.attempt.endedAt ?? this.#now().toISOString(),
+          recordedAt:
+            candidate.attempt.terminalAcceptedAt ??
+            candidate.attempt.endedAt ??
+            this.#now().toISOString(),
           sourceReceiptIds: [
             candidate.attempt.id,
-            ...(candidate.attempt.terminalPolicy === undefined ? [] : [candidate.attempt.terminalPolicy.sha256]),
+            ...(candidate.attempt.terminalPolicy === undefined
+              ? []
+              : [candidate.attempt.terminalPolicy.sha256]),
           ],
           leaf: structuredClone(leaf),
           subjectNodeId: subject.id,
@@ -3433,9 +4024,12 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       candidate: input.candidate,
       allowTerminalAccepted: self,
     });
-    if (snapshot === undefined ||
-        snapshot.definition.operation_registry_id !== input.leaf.preparation_operation ||
-        canonicalHash(snapshot.definition.target_node_ids) !== canonicalHash(input.expectedTargets)) return undefined;
+    if (
+      snapshot === undefined ||
+      snapshot.definition.operation_registry_id !== input.leaf.preparation_operation ||
+      canonicalHash(snapshot.definition.target_node_ids) !== canonicalHash(input.expectedTargets)
+    )
+      return undefined;
     const reviewedSubject = snapshot.reviewedNodes.find((node) => node.id === input.subject.id);
     if (reviewedSubject === undefined) return undefined;
     const baseline = this.#historicalPreparationBaseline({
@@ -3447,9 +4041,13 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       checkId: requiredNonempty(input.leaf.check, "proof preparation check"),
     });
     if (baseline === undefined) return undefined;
-    const roots = stringArray(baseline.sourceManifest.roots, "proof preparation source manifest roots");
+    const roots = stringArray(
+      baseline.sourceManifest.roots,
+      "proof preparation source manifest roots",
+    );
     const workspace = self
-      ? input.candidate.ticket.worktreePath ?? attemptWorkspace(input.run, "ticket", input.candidate.ticket.id)
+      ? (input.candidate.ticket.worktreePath ??
+        attemptWorkspace(input.run, "ticket", input.candidate.ticket.id))
       : input.run.git.run.worktree;
     let currentManifest;
     try {
@@ -3457,10 +4055,13 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     } catch {
       return undefined;
     }
-    if (currentManifest.entries.some((entry) => entry.kind === "missing") ||
-        canonicalHash(currentManifest.roots) !== canonicalHash(baseline.sourceManifest.roots) ||
-        canonicalHash(sourceByteEntries(currentManifest.entries)) !==
-          canonicalHash(sourceByteEntries(baseline.sourceManifest.entries))) return undefined;
+    if (
+      currentManifest.entries.some((entry) => entry.kind === "missing") ||
+      canonicalHash(currentManifest.roots) !== canonicalHash(baseline.sourceManifest.roots) ||
+      canonicalHash(sourceByteEntries(currentManifest.entries)) !==
+        canonicalHash(sourceByteEntries(baseline.sourceManifest.entries))
+    )
+      return undefined;
 
     const prepared = projectPassedReviewEffects(
       input.configuration,
@@ -3478,14 +4079,17 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         currentVia: "preparation_review",
       };
     }
-    if (!(await this.#reviewEffectSuccessorCurrent({
-      run: input.run,
-      configuration: input.configuration,
-      subjectId: input.subject.id,
-      prepared,
-      current: input.subject,
-      excludedAttemptId: input.candidate.attempt.id,
-    }))) return undefined;
+    if (
+      !(await this.#reviewEffectSuccessorCurrent({
+        run: input.run,
+        configuration: input.configuration,
+        subjectId: input.subject.id,
+        prepared,
+        current: input.subject,
+        excludedAttemptId: input.candidate.attempt.id,
+      }))
+    )
+      return undefined;
     return {
       snapshot,
       reviewedSubject,
@@ -3501,18 +4105,28 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     snapshot: AuthenticatedReviewSnapshot;
     reviewedSubject: GraphNode;
     checkId: string;
-  }): Omit<AuthenticatedProofPreparationCurrent, "snapshot" | "reviewedSubject" | "currentVia"> | undefined {
-    const baselineSteps = input.snapshot.definition.workflow.filter((step) =>
-      step.required && step.kind !== "review" && step.validation_checks.includes(input.checkId));
+  }):
+    | Omit<AuthenticatedProofPreparationCurrent, "snapshot" | "reviewedSubject" | "currentVia">
+    | undefined {
+    const baselineSteps = input.snapshot.definition.workflow.filter(
+      (step) =>
+        step.required && step.kind !== "review" && step.validation_checks.includes(input.checkId),
+    );
     if (baselineSteps.length !== 1) return undefined;
     const baselineStep = baselineSteps[0]!;
-    if (!input.snapshot.step.depends_on.includes(baselineStep.id) ||
-        baselineStep.persona_id === input.snapshot.step.persona_id) return undefined;
+    if (
+      !input.snapshot.step.depends_on.includes(baselineStep.id) ||
+      baselineStep.persona_id === input.snapshot.step.persona_id
+    )
+      return undefined;
     const predecessorEnvelope = optionalRecord(input.snapshot.context.predecessorExecution);
-    if (predecessorEnvelope?.protocol !== "koni.review-predecessor-execution.v1" ||
-        predecessorEnvelope.ticketId !== input.candidate.ticket.id ||
-        predecessorEnvelope.reviewStepId !== input.candidate.step.id ||
-        !Array.isArray(predecessorEnvelope.predecessors)) return undefined;
+    if (
+      predecessorEnvelope?.protocol !== "koni.review-predecessor-execution.v1" ||
+      predecessorEnvelope.ticketId !== input.candidate.ticket.id ||
+      predecessorEnvelope.reviewStepId !== input.candidate.step.id ||
+      !Array.isArray(predecessorEnvelope.predecessors)
+    )
+      return undefined;
     const predecessors = predecessorEnvelope.predecessors
       .map((value) => optionalRecord(value))
       .filter((value): value is ConfigurationObject => value?.stepId === baselineStep.id);
@@ -3521,53 +4135,83 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const attemptId = optionalString(predecessor.attemptId);
     const attempt = attemptId === undefined ? undefined : input.run.attempts[attemptId];
     const durableStep = input.candidate.ticket.steps.find((step) => step.id === baselineStep.id);
-    if (attempt === undefined || durableStep === undefined ||
-        !durableStep.attemptIds.includes(attempt.id) || attempt.stepId !== baselineStep.id ||
-        attempt.ticketId !== input.candidate.ticket.id || attempt.personaId !== baselineStep.persona_id ||
-        attempt.status !== "completed" || attempt.terminalPolicy?.mode !== "semantic") return undefined;
+    if (
+      attempt === undefined ||
+      durableStep === undefined ||
+      !durableStep.attemptIds.includes(attempt.id) ||
+      attempt.stepId !== baselineStep.id ||
+      attempt.ticketId !== input.candidate.ticket.id ||
+      attempt.personaId !== baselineStep.persona_id ||
+      attempt.status !== "completed" ||
+      attempt.terminalPolicy?.mode !== "semantic"
+    )
+      return undefined;
     const checks = Array.isArray(predecessor.checks)
-      ? predecessor.checks.map((value) => optionalRecord(value)).filter((value): value is ConfigurationObject => value !== undefined)
+      ? predecessor.checks
+          .map((value) => optionalRecord(value))
+          .filter((value): value is ConfigurationObject => value !== undefined)
       : [];
-    const matchingChecks = checks.filter((check) =>
-      check.requestedCheckId === input.checkId && check.accepted === true && check.passed === true);
+    const matchingChecks = checks.filter(
+      (check) =>
+        check.requestedCheckId === input.checkId &&
+        check.accepted === true &&
+        check.passed === true,
+    );
     if (matchingChecks.length !== 1) return undefined;
     const projectedCheck = matchingChecks[0]!;
-    const durableChecks = (input.run.checks ?? []).filter((check) =>
-      check.attemptId === attempt.id && check.requestedCheckId === input.checkId &&
-      check.accepted && check.passed === true && check.evidenceSha256 === projectedCheck.evidenceSha256 &&
-      check.recordedAt === projectedCheck.recordedAt);
+    const durableChecks = (input.run.checks ?? []).filter(
+      (check) =>
+        check.attemptId === attempt.id &&
+        check.requestedCheckId === input.checkId &&
+        check.accepted &&
+        check.passed === true &&
+        check.evidenceSha256 === projectedCheck.evidenceSha256 &&
+        check.recordedAt === projectedCheck.recordedAt,
+    );
     if (durableChecks.length !== 1 || !Array.isArray(projectedCheck.commands)) return undefined;
-    const sourcePaths = [...new Set([
-      ...stringArray(input.reviewedSubject.spec.source_paths, "prepared proof source_paths"),
-      ...(input.reviewedSubject.spec.support_paths === undefined
-        ? []
-        : stringArray(input.reviewedSubject.spec.support_paths, "prepared proof support_paths")),
-    ])].sort(compareText);
+    const sourcePaths = [
+      ...new Set([
+        ...stringArray(input.reviewedSubject.spec.source_paths, "prepared proof source_paths"),
+        ...(input.reviewedSubject.spec.support_paths === undefined
+          ? []
+          : stringArray(input.reviewedSubject.spec.support_paths, "prepared proof support_paths")),
+      ]),
+    ].sort(compareText);
     const manifests: ConfigurationObject[] = [];
     for (const projectedCommandValue of projectedCheck.commands) {
       const projectedCommand = optionalRecord(projectedCommandValue);
       const sourceManifest = optionalRecord(projectedCommand?.sourceManifest);
       if (projectedCommand === undefined || sourceManifest === undefined) continue;
-      const durableCommand = durableChecks[0]!.commands.find((command) =>
-        command.checkId === projectedCommand.checkId &&
-        command.definitionHash === projectedCommand.definitionHash &&
-        command.sourceManifest?.sha256 === sourceManifest.sha256);
-      if (durableCommand?.sourceManifest === undefined ||
-          sourceManifest.protocol !== "koni.run-check-source-manifest.v1" ||
-          sourceManifest.configurationSha256 !== input.configuration.configuration_sha256 ||
-          sourceManifest.catalogSha256 !== input.candidate.ticket.executionPolicyBinding?.catalogSha256 ||
-          sourceManifest.bindingSha256 !== durableStep.executionPolicyBinding?.sha256 ||
-          sourceManifest.checkSha256 !== projectedCommand.definitionHash ||
-          sourceManifest.stepId !== baselineStep.id ||
-          canonicalHash(sourceManifest.roots) !== canonicalHash(sourcePaths) ||
-          !isSha256Digest(sourceManifest.manifestSha256) || !isSha256Digest(sourceManifest.sha256)) continue;
+      const durableCommand = durableChecks[0]!.commands.find(
+        (command) =>
+          command.checkId === projectedCommand.checkId &&
+          command.definitionHash === projectedCommand.definitionHash &&
+          command.sourceManifest?.sha256 === sourceManifest.sha256,
+      );
+      if (
+        durableCommand?.sourceManifest === undefined ||
+        sourceManifest.protocol !== "koni.run-check-source-manifest.v1" ||
+        sourceManifest.configurationSha256 !== input.configuration.configuration_sha256 ||
+        sourceManifest.catalogSha256 !==
+          input.candidate.ticket.executionPolicyBinding?.catalogSha256 ||
+        sourceManifest.bindingSha256 !== durableStep.executionPolicyBinding?.sha256 ||
+        sourceManifest.checkSha256 !== projectedCommand.definitionHash ||
+        sourceManifest.stepId !== baselineStep.id ||
+        canonicalHash(sourceManifest.roots) !== canonicalHash(sourcePaths) ||
+        !isSha256Digest(sourceManifest.manifestSha256) ||
+        !isSha256Digest(sourceManifest.sha256)
+      )
+        continue;
       const material = withoutField(sourceManifest, "sha256");
-      if (canonicalHash(material) !== sourceManifest.sha256 ||
-          canonicalHash({
-            protocol: "koni.contained-path-manifest.v1",
-            roots: sourceManifest.roots,
-            entries: sourceManifest.entries,
-          }) !== sourceManifest.manifestSha256) continue;
+      if (
+        canonicalHash(material) !== sourceManifest.sha256 ||
+        canonicalHash({
+          protocol: "koni.contained-path-manifest.v1",
+          roots: sourceManifest.roots,
+          entries: sourceManifest.entries,
+        }) !== sourceManifest.manifestSha256
+      )
+        continue;
       manifests.push(sourceManifest);
     }
     if (manifests.length !== 1) return undefined;
@@ -3587,12 +4231,18 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     current: GraphNode;
     excludedAttemptId: string;
   }): Promise<boolean> {
-    const candidates = allReviewCandidates(input.run)
-      .filter((candidate) => candidate.attempt.id !== input.excludedAttemptId &&
-        candidate.ticket.status === "completed" && candidate.step.status === "completed" &&
-        candidate.attempt.status === "completed" && candidate.attempt.terminalPolicy?.mode === "semantic" &&
-        candidate.ticket.targetNodeIds.includes(input.subjectId));
-    const reachable = new Map<Sha256Digest, GraphNode>([[canonicalHash(input.prepared), input.prepared]]);
+    const candidates = allReviewCandidates(input.run).filter(
+      (candidate) =>
+        candidate.attempt.id !== input.excludedAttemptId &&
+        candidate.ticket.status === "completed" &&
+        candidate.step.status === "completed" &&
+        candidate.attempt.status === "completed" &&
+        candidate.attempt.terminalPolicy?.mode === "semantic" &&
+        candidate.ticket.targetNodeIds.includes(input.subjectId),
+    );
+    const reachable = new Map<Sha256Digest, GraphNode>([
+      [canonicalHash(input.prepared), input.prepared],
+    ]);
     const remaining = new Set(candidates.map((candidate) => candidate.attempt.id));
     for (let pass = 0; pass <= candidates.length && remaining.size > 0; pass += 1) {
       let changed = false;
@@ -3636,71 +4286,120 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     allowTerminalAccepted: boolean;
   }): Promise<AuthenticatedReviewSnapshot | undefined> {
     const { ticket, step, attempt } = input.candidate;
-    if (step.kind !== "review" || attempt.ticketId !== ticket.id || attempt.stepId !== step.id ||
-        attempt.personaId !== step.personaId || ticket.executionPolicyBinding?.operationId !== ticket.operationId ||
-        ticket.executionPolicyBinding.configurationSha256 !== input.configuration.configuration_sha256 ||
-        step.executionPolicyBinding?.operationId !== ticket.operationId ||
-        step.executionPolicyBinding.configurationSha256 !== input.configuration.configuration_sha256) return undefined;
+    if (
+      step.kind !== "review" ||
+      attempt.ticketId !== ticket.id ||
+      attempt.stepId !== step.id ||
+      attempt.personaId !== step.personaId ||
+      ticket.executionPolicyBinding?.operationId !== ticket.operationId ||
+      ticket.executionPolicyBinding.configurationSha256 !==
+        input.configuration.configuration_sha256 ||
+      step.executionPolicyBinding?.operationId !== ticket.operationId ||
+      step.executionPolicyBinding.configurationSha256 !== input.configuration.configuration_sha256
+    )
+      return undefined;
     if (input.allowTerminalAccepted) {
-      if (attempt.status !== "terminal_accepted" || attempt.terminalAcceptedAt === undefined) return undefined;
-    } else if (ticket.status !== "completed" || step.status !== "completed" ||
-        attempt.status !== "completed" || attempt.terminalPolicy?.mode !== "semantic") return undefined;
-    if (attempt.terminalOutputSha256 === undefined || attempt.terminalOutputSizeBytes === undefined) return undefined;
-    const specBytes = await readFile(path.join(
-      this.#stateRoot,
-      `runs/${input.run.id}/attempts/${attempt.id}/launch-spec.json`,
-    ));
+      if (attempt.status !== "terminal_accepted" || attempt.terminalAcceptedAt === undefined)
+        return undefined;
+    } else if (
+      ticket.status !== "completed" ||
+      step.status !== "completed" ||
+      attempt.status !== "completed" ||
+      attempt.terminalPolicy?.mode !== "semantic"
+    )
+      return undefined;
+    if (attempt.terminalOutputSha256 === undefined || attempt.terminalOutputSizeBytes === undefined)
+      return undefined;
+    const specBytes = await readFile(
+      path.join(this.#stateRoot, `runs/${input.run.id}/attempts/${attempt.id}/launch-spec.json`),
+    );
     if (specBytes.byteLength > MAX_LAUNCH_SPEC_BYTES || specBytes.includes(0)) {
-      fail("proof_preparation_spec", `launch specification for ${attempt.id} is oversized or unsafe`);
+      fail(
+        "proof_preparation_spec",
+        `launch specification for ${attempt.id} is oversized or unsafe`,
+      );
     }
     let parsedSpec: unknown;
-    try { parsedSpec = JSON.parse(specBytes.toString("utf8")); } catch {
+    try {
+      parsedSpec = JSON.parse(specBytes.toString("utf8"));
+    } catch {
       fail("proof_preparation_spec", `launch specification for ${attempt.id} is not JSON`);
     }
     const spec = validateAgentLaunchSpec(parsedSpec as AgentLaunchSpec);
-    if (spec.specHash !== attempt.launchSpecHash || spec.identity.runId !== input.run.id ||
-        spec.identity.ticketId !== ticket.id || spec.identity.stepId !== step.id ||
-        spec.identity.attemptId !== attempt.id || spec.identity.sessionId !== attempt.sessionId ||
-        spec.persona.id !== attempt.personaId || !isSha256Digest(attempt.reviewedGraphHash)) {
+    if (
+      spec.specHash !== attempt.launchSpecHash ||
+      spec.identity.runId !== input.run.id ||
+      spec.identity.ticketId !== ticket.id ||
+      spec.identity.stepId !== step.id ||
+      spec.identity.attemptId !== attempt.id ||
+      spec.identity.sessionId !== attempt.sessionId ||
+      spec.persona.id !== attempt.personaId ||
+      !isSha256Digest(attempt.reviewedGraphHash)
+    ) {
       fail("proof_preparation_spec", `launch specification for ${attempt.id} has drifted identity`);
     }
     const prepared = await this.#readPreparedAttemptArtifact(input.run, attempt, spec);
     let contextValue: unknown;
-    try { contextValue = JSON.parse(prepared.contextContent); } catch {
+    try {
+      contextValue = JSON.parse(prepared.contextContent);
+    } catch {
       fail("proof_preparation_context", `review context for ${attempt.id} is not JSON`);
     }
-    const context = requiredRecord(contextValue, `review context for ${attempt.id}`) as Record<string, unknown>;
+    const context = requiredRecord(contextValue, `review context for ${attempt.id}`);
     const definitionRecord = requiredRecord(context.ticket, `review ticket for ${attempt.id}`);
-    if (!isSha256Digest(definitionRecord.definition_sha256) ||
-        canonicalHash(withoutField(definitionRecord, "definition_sha256")) !== definitionRecord.definition_sha256) {
-      fail("proof_preparation_context", `review ticket definition for ${attempt.id} failed its hash`);
+    if (
+      !isSha256Digest(definitionRecord.definition_sha256) ||
+      canonicalHash(withoutField(definitionRecord, "definition_sha256")) !==
+        definitionRecord.definition_sha256
+    ) {
+      fail(
+        "proof_preparation_context",
+        `review ticket definition for ${attempt.id} failed its hash`,
+      );
     }
     const definition = structuredClone(definitionRecord) as unknown as DerivedTicketDefinition;
     const contextStepRecord = requiredRecord(context.step, `review step for ${attempt.id}`);
     const contextStep = structuredClone(contextStepRecord) as unknown as DerivedWorkflowStep;
     const definitionStep = definition.workflow.find((candidate) => candidate.id === step.id);
-    if (definition.configuration_sha256 !== input.configuration.configuration_sha256 ||
-        definition.id !== ticket.id || definition.operation_registry_id !== ticket.operationId ||
-        canonicalHash(definition.target_node_ids) !== canonicalHash(ticket.targetNodeIds) ||
-        definitionStep === undefined || canonicalHash(definitionStep) !== canonicalHash(contextStep) ||
-        definitionStep.kind !== "review" || definitionStep.persona_id !== attempt.personaId ||
-        canonicalHash(context.executionPolicy) !== canonicalHash(step.executionPolicyBinding)) return undefined;
-    const terminalBytes = await readFile(path.join(
-      this.#stateRoot,
-      `runs/${input.run.id}/attempts/${attempt.id}/terminal-output.json`,
-    ));
-    if (terminalBytes.byteLength !== attempt.terminalOutputSizeBytes ||
-        rawSha256(terminalBytes) !== attempt.terminalOutputSha256 || terminalBytes.includes(0)) {
-      fail("proof_preparation_output", `review output for ${attempt.id} failed its authority binding`);
+    if (
+      definition.configuration_sha256 !== input.configuration.configuration_sha256 ||
+      definition.id !== ticket.id ||
+      definition.operation_registry_id !== ticket.operationId ||
+      canonicalHash(definition.target_node_ids) !== canonicalHash(ticket.targetNodeIds) ||
+      definitionStep === undefined ||
+      canonicalHash(definitionStep) !== canonicalHash(contextStep) ||
+      definitionStep.kind !== "review" ||
+      definitionStep.persona_id !== attempt.personaId ||
+      canonicalHash(context.executionPolicy) !== canonicalHash(step.executionPolicyBinding)
+    )
+      return undefined;
+    const terminalBytes = await readFile(
+      path.join(
+        this.#stateRoot,
+        `runs/${input.run.id}/attempts/${attempt.id}/terminal-output.json`,
+      ),
+    );
+    if (
+      terminalBytes.byteLength !== attempt.terminalOutputSizeBytes ||
+      rawSha256(terminalBytes) !== attempt.terminalOutputSha256 ||
+      terminalBytes.includes(0)
+    ) {
+      fail(
+        "proof_preparation_output",
+        `review output for ${attempt.id} failed its authority binding`,
+      );
     }
     let terminalValue: unknown;
-    try { terminalValue = JSON.parse(terminalBytes.toString("utf8")); } catch {
+    try {
+      terminalValue = JSON.parse(terminalBytes.toString("utf8"));
+    } catch {
       fail("proof_preparation_output", `review output for ${attempt.id} is not JSON`);
     }
     if (optionalRecord(terminalValue)?.status !== "completed") return undefined;
     if (!Array.isArray(context.graph)) return undefined;
     const reviewedNodes = context.graph.map((value) => parseGraphNode(value));
-    if (new Set(reviewedNodes.map((node) => node.id)).size !== reviewedNodes.length) return undefined;
+    if (new Set(reviewedNodes.map((node) => node.id)).size !== reviewedNodes.length)
+      return undefined;
     return { definition, step: contextStep, reviewedNodes, context };
   }
 
@@ -3710,35 +4409,51 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     descriptor: AttemptDescriptor,
     capabilities: ConfigurationObject,
   ): Promise<AuthorityGrant["configuredChecks"] | undefined> {
-    const ids = [...new Set([
-      ...(descriptor.step?.validation_checks ?? []),
-      ...(descriptor.gatePolicyContexts ?? []).map((binding) => binding.checkId),
-    ])].sort(compareText);
+    const ids = [
+      ...new Set([
+        ...(descriptor.step?.validation_checks ?? []),
+        ...(descriptor.gatePolicyContexts ?? []).map((binding) => binding.checkId),
+      ]),
+    ].sort(compareText);
     if (ids.length === 0) return undefined;
-    if (descriptor.graph === undefined) fail("check_graph", "configured checks require a compiler-bound graph epoch");
+    if (descriptor.graph === undefined)
+      fail("check_graph", "configured checks require a compiler-bound graph epoch");
     if (descriptor.executionPolicyBinding === undefined) {
-      fail("check_execution_policy", "configured checks require an exact operation/workflow/step binding");
+      fail(
+        "check_execution_policy",
+        "configured checks require an exact operation/workflow/step binding",
+      );
     }
     const executionCatalog = requireExecutionSemanticCatalog(configuration);
-    const plans = await Promise.all(ids.map((requestedCheckId) => resolveConfiguredAgentCheck({
-      configuration,
-      executionCatalog,
-      executionPolicyBinding: descriptor.executionPolicyBinding!,
-      gatePolicyContexts: descriptor.gatePolicyContexts ?? [],
-      graph: descriptor.graph!,
-      descriptor,
-      projectRoot: attemptWorkspace(run, "ticket", descriptor.ticketId),
-      requestedCheckId,
-    })));
+    const plans = await Promise.all(
+      ids.map((requestedCheckId) =>
+        resolveConfiguredAgentCheck({
+          configuration,
+          executionCatalog,
+          executionPolicyBinding: descriptor.executionPolicyBinding!,
+          gatePolicyContexts: descriptor.gatePolicyContexts ?? [],
+          graph: descriptor.graph!,
+          descriptor,
+          projectRoot: attemptWorkspace(run, "ticket", descriptor.ticketId),
+          requestedCheckId,
+        }),
+      ),
+    );
     const commands = plans.flatMap((plan) => plan.commands);
     const commandCapability = optionalString(capabilities.commands) ?? "none";
     const personaNetwork = capabilities.network_access === true;
     for (const command of commands) {
       if (command.effect === "workspace_write" && commandCapability !== "workspace_write") {
-        fail("check_capability", `persona ${descriptor.personaId} cannot execute workspace-writing check ${command.checkId}`);
+        fail(
+          "check_capability",
+          `persona ${descriptor.personaId} cannot execute workspace-writing check ${command.checkId}`,
+        );
       }
       if (command.networkAccess && !personaNetwork) {
-        fail("check_capability", `persona ${descriptor.personaId} cannot execute networked check ${command.checkId}`);
+        fail(
+          "check_capability",
+          `persona ${descriptor.personaId} cannot execute networked check ${command.checkId}`,
+        );
       }
     }
     return {
@@ -3759,39 +4474,59 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       `pinned run type ${run.runTypeId} is unavailable`,
     );
     const kind = recoveredAttemptKind(run, attempt);
-    const assignment = kind === "planning" || kind === "lead" || isRunWideVerificationAttempt(attempt)
-      ? undefined
-      : assignmentFromAttempt(run, attempt);
+    const assignment =
+      kind === "planning" || kind === "lead" || isRunWideVerificationAttempt(attempt)
+        ? undefined
+        : assignmentFromAttempt(run, attempt);
     let descriptor: AttemptDescriptor;
     try {
-      descriptor = await this.#attemptDescriptor({
-        kind,
-        run,
-        ...(assignment === undefined ? {} : { assignment }),
-        ...(kind === "lead" ? { leadTrigger: leadTriggerForAttempt(attempt) } : {}),
-      }, configuration, runType.document);
+      descriptor = await this.#attemptDescriptor(
+        {
+          kind,
+          run,
+          ...(assignment === undefined ? {} : { assignment }),
+          ...(kind === "lead" ? { leadTrigger: leadTriggerForAttempt(attempt) } : {}),
+        },
+        configuration,
+        runType.document,
+      );
     } catch (error) {
       if (
         !(error instanceof NativeRunProgramError) ||
         error.code !== "ticket_definition_missing" ||
         assignment === undefined
-      ) throw error;
+      )
+        throw error;
       const graph = (await this.#readGraph(run, configuration)).graph;
       const definitions = await this.#readTicketDefinitions(run, configuration);
-      const definition = await this.#recoverDefinitionFromRecordedAttempt(run, attempt, configuration);
+      const definition = await this.#recoverDefinitionFromRecordedAttempt(
+        run,
+        attempt,
+        configuration,
+      );
       const step = definition.workflow.find((candidate) => candidate.id === assignment.stepId);
       if (step === undefined || step.persona_id !== assignment.personaId) {
-        fail("attempt_assignment_drift", "recovered compiler definition differs from the durable attempt assignment");
+        fail(
+          "attempt_assignment_drift",
+          "recovered compiler definition differs from the durable attempt assignment",
+        );
       }
-      const predecessorExecution = step.kind === "review"
-        ? await this.#reviewPredecessorExecution(run, definition, step)
-        : undefined;
-      const reviewCandidateNodeIds = step.kind === "review"
-        ? await this.#reviewCandidateNodeIds(run, definition, requireExecutionSemanticCatalog(configuration))
-        : [];
-      const historicalPreparation = step.kind === "review"
-        ? await this.#reviewHistoricalPreparation(run, definition, step, graph, configuration)
-        : undefined;
+      const predecessorExecution =
+        step.kind === "review"
+          ? await this.#reviewPredecessorExecution(run, definition, step)
+          : undefined;
+      const reviewCandidateNodeIds =
+        step.kind === "review"
+          ? await this.#reviewCandidateNodeIds(
+              run,
+              definition,
+              requireExecutionSemanticCatalog(configuration),
+            )
+          : [];
+      const historicalPreparation =
+        step.kind === "review"
+          ? await this.#reviewHistoricalPreparation(run, definition, step, graph, configuration)
+          : undefined;
       descriptor = ticketAttempt(
         run,
         definition,
@@ -3809,7 +4544,11 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       descriptor.ticketId !== attempt.ticketId ||
       descriptor.stepId !== attempt.stepId ||
       descriptor.personaId !== attempt.personaId
-    ) fail("attempt_assignment_drift", "durable attempt no longer matches its pinned compiler assignment");
+    )
+      fail(
+        "attempt_assignment_drift",
+        "durable attempt no longer matches its pinned compiler assignment",
+      );
     return descriptor;
   }
 
@@ -3818,19 +4557,22 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     attempt: AgentAttemptRecord,
     configuration: CompiledConfiguration,
   ): Promise<DerivedTicketDefinition> {
-    const launchBytes = await readStableDurableFile(path.join(
-      this.#stateRoot,
-      `runs/${run.id}/attempts/${attempt.id}/launch-spec.json`,
-    ), {
-      minimum: 1,
-      maximum: 8 * 1024 * 1024,
-      label: `launch specification for ${attempt.id}`,
-    });
+    const launchBytes = await readStableDurableFile(
+      path.join(this.#stateRoot, `runs/${run.id}/attempts/${attempt.id}/launch-spec.json`),
+      {
+        minimum: 1,
+        maximum: 8 * 1024 * 1024,
+        label: `launch specification for ${attempt.id}`,
+      },
+    );
     let launchValue: unknown;
     try {
       launchValue = JSON.parse(launchBytes.toString("utf8"));
     } catch {
-      fail("recovery_launch_spec", `stored launch specification for ${attempt.id} is not valid JSON`);
+      fail(
+        "recovery_launch_spec",
+        `stored launch specification for ${attempt.id} is not valid JSON`,
+      );
     }
     let spec: Readonly<AgentLaunchSpec>;
     try {
@@ -3848,7 +4590,11 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       spec.identity.ticketId !== attempt.ticketId ||
       spec.identity.stepId !== attempt.stepId ||
       spec.identity.sessionId !== attempt.sessionId
-    ) fail("recovery_launch_spec", `stored launch specification for ${attempt.id} differs from durable attempt identity`);
+    )
+      fail(
+        "recovery_launch_spec",
+        `stored launch specification for ${attempt.id} differs from durable attempt identity`,
+      );
     const prepared = await this.#readPreparedAttemptArtifact(run, attempt, spec);
     let contextValue: unknown;
     try {
@@ -3857,7 +4603,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       fail("recovery_ticket_definition", `compiler context for ${attempt.id} is not valid JSON`);
     }
     if (!isRecord(contextValue) || !isRecord(contextValue.ticket)) {
-      fail("recovery_ticket_definition", `compiler context for ${attempt.id} has no ticket definition`);
+      fail(
+        "recovery_ticket_definition",
+        `compiler context for ${attempt.id} has no ticket definition`,
+      );
     }
     const definition = contextValue.ticket as unknown as DerivedTicketDefinition;
     if (
@@ -3865,21 +4614,32 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       definition.id !== attempt.ticketId ||
       definition.configuration_sha256 !== configuration.configuration_sha256 ||
       !isSha256Digest(definition.definition_sha256) ||
-      canonicalHash(withoutField(definition as unknown as Record<string, unknown>, "definition_sha256")) !==
+      canonicalHash(withoutField(definition, "definition_sha256")) !==
         definition.definition_sha256 ||
       !Array.isArray(definition.workflow) ||
-      !definition.workflow.some((step) =>
-        step.id === attempt.stepId && step.persona_id === attempt.personaId)
-    ) fail("recovery_ticket_definition", `compiler context for ${attempt.id} has a drifted ticket definition`);
+      !definition.workflow.some(
+        (step) => step.id === attempt.stepId && step.persona_id === attempt.personaId,
+      )
+    )
+      fail(
+        "recovery_ticket_definition",
+        `compiler context for ${attempt.id} has a drifted ticket definition`,
+      );
     return structuredClone(definition);
   }
 
-  async #readGraphNote(run: RunRecord, id: string): Promise<{
+  async #readGraphNote(
+    run: RunRecord,
+    id: string,
+  ): Promise<{
     value: GraphNoteArtifact;
     sizeBytes: number;
   }> {
-    if (!/^note-[0-9a-f]{24}$/u.test(id)) fail("graph_note_id", "superseded graph note id is malformed");
-    const bytes = await readFile(path.join(this.#stateRoot, graphNotePath(run.id, id))).catch(() => undefined);
+    if (!/^note-[0-9a-f]{24}$/u.test(id))
+      fail("graph_note_id", "superseded graph note id is malformed");
+    const bytes = await readFile(path.join(this.#stateRoot, graphNotePath(run.id, id))).catch(
+      () => undefined,
+    );
     if (bytes === undefined || bytes.byteLength > 2 * 1024 * 1024 || bytes.includes(0)) {
       fail("graph_note_lineage", `superseded graph note ${id} is missing or unsafe`);
     }
@@ -3897,14 +4657,16 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       typeof value.nodeId !== "string" ||
       typeof value.body !== "string" ||
       !isGraphNoteKind(value.kind)
-    ) fail("graph_note_lineage", `superseded graph note ${id} failed its identity binding`);
+    )
+      fail("graph_note_lineage", `superseded graph note ${id} failed its identity binding`);
     return { value: value as unknown as GraphNoteArtifact, sizeBytes: bytes.byteLength };
   }
 
   async #readGraphNotes(run: RunRecord): Promise<GraphNoteArtifact[]> {
     const directory = path.join(this.#stateRoot, `runs/${run.id}/program/notes`);
     const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
-    if (entries.length > MAX_GRAPH_NOTES) fail("graph_note_limit", "run graph note inventory exceeds its compiler bound");
+    if (entries.length > MAX_GRAPH_NOTES)
+      fail("graph_note_limit", "run graph note inventory exceeds its compiler bound");
     const output: GraphNoteArtifact[] = [];
     let totalBytes = 0;
     for (const entry of entries.sort((left, right) => compareText(left.name, right.name))) {
@@ -3926,9 +4688,11 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
   ): Promise<AttemptDescriptor> {
     if (input.kind === "planning") return planningAttempt(input.run, runType, configuration);
     if (input.kind === "lead") {
-      if (input.assignment !== undefined) fail("lead_assignment", "run-level Lead judgment cannot carry a ticket assignment");
+      if (input.assignment !== undefined)
+        fail("lead_assignment", "run-level Lead judgment cannot carry a ticket assignment");
       const trigger = input.leadTrigger;
-      if (trigger === undefined) fail("lead_trigger", "Lead judgment attempt requires an exact compiler trigger");
+      if (trigger === undefined)
+        fail("lead_trigger", "Lead judgment attempt requires an exact compiler trigger");
       return leadJudgmentAttempt(
         input.run,
         trigger,
@@ -3939,37 +4703,42 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       const graph = (await this.#readGraph(input.run, configuration)).graph;
       return verificationAttempt(input.run, runType, graph);
     }
-    if (input.assignment === undefined) fail("assignment_missing", `${input.kind} attempt has no assignment`);
+    if (input.assignment === undefined)
+      fail("assignment_missing", `${input.kind} attempt has no assignment`);
     const graph = (await this.#readGraph(input.run, configuration)).graph;
     const executionCatalog = requireExecutionSemanticCatalog(configuration);
     const definitions = await this.#readTicketDefinitions(input.run, configuration);
-    const definition = ticketDefinitionFromArtifact(definitions.value, input.assignment.ticketId)
-      ?? configuredControlDefinitionFromTicket(
+    const definition =
+      ticketDefinitionFromArtifact(definitions.value, input.assignment.ticketId) ??
+      configuredControlDefinitionFromTicket(
         input.run,
         input.assignment,
         configuration,
         executionCatalog,
         graph,
-      )
-      ?? await this.#recoverDefinitionForActiveAssignment(
+      ) ??
+      (await this.#recoverDefinitionForActiveAssignment(
         input.run,
         input.assignment,
         configuration,
-      )
-      ?? integrationDefinition(input.run, input.assignment, configuration);
+      )) ??
+      integrationDefinition(input.run, input.assignment, configuration);
     const step = definition.workflow.find((item) => item.id === input.assignment!.stepId);
     if (step === undefined || step.persona_id !== input.assignment.personaId) {
       fail("assignment_drift", "scheduler assignment does not match the compiler definition");
     }
-    const predecessorExecution = step.kind === "review"
-      ? await this.#reviewPredecessorExecution(input.run, definition, step)
-      : undefined;
-    const reviewCandidateNodeIds = step.kind === "review"
-      ? await this.#reviewCandidateNodeIds(input.run, definition, executionCatalog)
-      : [];
-    const historicalPreparation = step.kind === "review"
-      ? await this.#reviewHistoricalPreparation(input.run, definition, step, graph, configuration)
-      : undefined;
+    const predecessorExecution =
+      step.kind === "review"
+        ? await this.#reviewPredecessorExecution(input.run, definition, step)
+        : undefined;
+    const reviewCandidateNodeIds =
+      step.kind === "review"
+        ? await this.#reviewCandidateNodeIds(input.run, definition, executionCatalog)
+        : [];
+    const historicalPreparation =
+      step.kind === "review"
+        ? await this.#reviewHistoricalPreparation(input.run, definition, step, graph, configuration)
+        : undefined;
     return ticketAttempt(
       input.run,
       definition,
@@ -4002,14 +4771,18 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const candidates = Object.values(run.attempts)
       .filter((attempt) => attempt.ticketId === assignment.ticketId)
       .sort((left, right) => {
-        const leftExact = left.stepId === assignment.stepId && left.personaId === assignment.personaId;
-        const rightExact = right.stepId === assignment.stepId && right.personaId === assignment.personaId;
+        const leftExact =
+          left.stepId === assignment.stepId && left.personaId === assignment.personaId;
+        const rightExact =
+          right.stepId === assignment.stepId && right.personaId === assignment.personaId;
         if (leftExact !== rightExact) return leftExact ? -1 : 1;
         const leftAccepted = left.terminalOutputSha256 !== undefined;
         const rightAccepted = right.terminalOutputSha256 !== undefined;
         if (leftAccepted !== rightAccepted) return leftAccepted ? -1 : 1;
-        return (right.startedAt ?? "").localeCompare(left.startedAt ?? "") ||
-          right.id.localeCompare(left.id);
+        return (
+          (right.startedAt ?? "").localeCompare(left.startedAt ?? "") ||
+          right.id.localeCompare(left.id)
+        );
       });
     const source = candidates[0];
     if (source === undefined) return undefined;
@@ -4033,22 +4806,36 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     if (ticket === undefined || reviewStep.depends_on.length === 0) return undefined;
     let remainingBytes = MAX_REVIEW_EXECUTION_EVIDENCE_BYTES;
     const predecessors: Record<string, unknown>[] = [];
-    for (const predecessorStepId of orderedReviewPredecessorStepIds(definition.workflow, reviewStep)) {
+    for (const predecessorStepId of orderedReviewPredecessorStepIds(
+      definition.workflow,
+      reviewStep,
+    )) {
       const durableStep = ticket.steps.find((candidate) => candidate.id === predecessorStepId);
       if (durableStep === undefined) {
-        fail("review_evidence_step", `review predecessor ${predecessorStepId} is absent from durable ticket ${ticket.id}`);
+        fail(
+          "review_evidence_step",
+          `review predecessor ${predecessorStepId} is absent from durable ticket ${ticket.id}`,
+        );
       }
       const attempt = [...durableStep.attemptIds]
         .reverse()
         .map((attemptId) => run.attempts[attemptId])
-        .find((candidate) => candidate?.status === "completed" && candidate.stepId === predecessorStepId);
+        .find(
+          (candidate) =>
+            candidate?.status === "completed" && candidate.stepId === predecessorStepId,
+        );
       if (attempt === undefined) {
-        fail("review_evidence_attempt", `review predecessor ${predecessorStepId} has no completed durable attempt`);
+        fail(
+          "review_evidence_attempt",
+          `review predecessor ${predecessorStepId} has no completed durable attempt`,
+        );
       }
       const checks: Record<string, unknown>[] = [];
       for (const check of (run.checks ?? [])
         .filter((candidate) => candidate.attemptId === attempt.id)
-        .sort((left, right) => compareText(`${left.recordedAt}\0${left.id}`, `${right.recordedAt}\0${right.id}`))) {
+        .sort((left, right) =>
+          compareText(`${left.recordedAt}\0${left.id}`, `${right.recordedAt}\0${right.id}`),
+        )) {
         const commands: Record<string, unknown>[] = [];
         for (const command of check.commands) {
           const stdout = await this.#reviewCheckStream(
@@ -4072,7 +4859,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
           commands.push({
             checkId: command.checkId,
             definitionHash: command.definitionHash,
-            ...(command.executionPolicy === undefined ? {} : { executionPolicy: command.executionPolicy }),
+            ...(command.executionPolicy === undefined
+              ? {}
+              : { executionPolicy: command.executionPolicy }),
             argv: command.argv,
             startedAt: command.startedAt,
             completedAt: command.completedAt,
@@ -4081,7 +4870,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
             environmentSha256: command.environmentSha256,
             preManifestSha256: command.preManifestSha256,
             postManifestSha256: command.postManifestSha256,
-            ...(command.sourceManifest === undefined ? {} : { sourceManifest: command.sourceManifest }),
+            ...(command.sourceManifest === undefined
+              ? {}
+              : { sourceManifest: command.sourceManifest }),
             stdout: stdout.value,
             stderr: stderr.value,
           });
@@ -4090,7 +4881,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
           requestedCheckId: check.requestedCheckId,
           definitionHash: check.definitionHash,
           kind: check.kind,
-          ...(check.executionPolicy === undefined ? {} : { executionPolicy: check.executionPolicy }),
+          ...(check.executionPolicy === undefined
+            ? {}
+            : { executionPolicy: check.executionPolicy }),
           accepted: check.accepted,
           ...(check.passed === undefined ? {} : { passed: check.passed }),
           summary: check.summary,
@@ -4103,7 +4896,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         stepId: predecessorStepId,
         attemptId: attempt.id,
         personaId: attempt.personaId,
-        ...(attempt.terminalSummary === undefined ? {} : { terminalSummary: attempt.terminalSummary }),
+        ...(attempt.terminalSummary === undefined
+          ? {}
+          : { terminalSummary: attempt.terminalSummary }),
         checks,
       });
     }
@@ -4134,7 +4929,8 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const leaves = collectProofPreparationLeaves(configuration);
     if (leaves.length === 0) return undefined;
     const targetIds = new Set(definition.target_node_ids);
-    const subjects = graph.nodes()
+    const subjects = graph
+      .nodes()
       .filter((node) => targetIds.has(node.id))
       .sort((left, right) => compareText(left.id, right.id));
     if (subjects.length === 0) return undefined;
@@ -4150,7 +4946,8 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         let expectedTargets: readonly string[];
         try {
           expectedTargets = withRuleBindings(evaluator, bindings, () =>
-            evaluator.select(leaf.preparation_targets as ConfigurationValue));
+            evaluator.select(leaf.preparation_targets as ConfigurationValue),
+          );
         } catch {
           continue;
         }
@@ -4158,10 +4955,17 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         const operationId = optionalString(leaf.preparation_operation);
         const checkId = optionalString(leaf.check);
         if (operationId === undefined || checkId === undefined) continue;
-        if (configuration.registries.operations[operationId]?.proof_source_preparation_check !== checkId) continue;
+        if (
+          configuration.registries.operations[operationId]?.proof_source_preparation_check !==
+          checkId
+        )
+          continue;
         const candidate = latestReviewCandidate(run, operationId, subject.id, attemptOrder);
-        if (candidate === undefined ||
-            canonicalHash(candidate.ticket.targetNodeIds) !== canonicalHash(expectedTargets)) continue;
+        if (
+          candidate === undefined ||
+          canonicalHash(candidate.ticket.targetNodeIds) !== canonicalHash(expectedTargets)
+        )
+          continue;
         const authenticated = await this.#authenticatedProofPreparationCurrent({
           run,
           configuration,
@@ -4216,10 +5020,12 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       configurationSha256: configuration.configuration_sha256,
       ticketId: definition.id,
       reviewStepId: reviewStep.id,
-      entries: [...entries.values()].sort((left, right) => compareText(
-        requiredNonempty(left.subjectNodeId, "historical preparation subject"),
-        requiredNonempty(right.subjectNodeId, "historical preparation subject"),
-      )),
+      entries: [...entries.values()].sort((left, right) =>
+        compareText(
+          requiredNonempty(left.subjectNodeId, "historical preparation subject"),
+          requiredNonempty(right.subjectNodeId, "historical preparation subject"),
+        ),
+      ),
     };
     return { ...material, sha256: canonicalHash(material) };
   }
@@ -4245,10 +5051,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       sha256: expectedSha256,
       sizeBytes: expectedSizeBytes,
     };
-    if (
-      expectedSizeBytes > MAX_REVIEW_CHECK_STREAM_BYTES ||
-      expectedSizeBytes > remainingBytes
-    ) {
+    if (expectedSizeBytes > MAX_REVIEW_CHECK_STREAM_BYTES || expectedSizeBytes > remainingBytes) {
       return {
         includedBytes: 0,
         value: {
@@ -4267,7 +5070,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         label,
       });
     } catch (error) {
-      fail("review_evidence_stream", `${label} is not durably readable: ${error instanceof Error ? error.message : String(error)}`);
+      fail(
+        "review_evidence_stream",
+        `${label} is not durably readable: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
     if (bytes.byteLength !== expectedSizeBytes || rawSha256(bytes) !== expectedSha256) {
       fail("review_evidence_stream", `${label} differs from its compiler-recorded hash or size`);
@@ -4298,7 +5104,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       fail("pinned_configuration_json", "pinned run configuration is not valid JSON");
     }
     let artifact = validatePinnedArtifact(value);
-    const historicalBehavior = projectHistoricalCompiledBehavior(artifact.configuration, run.runTypeId);
+    const historicalBehavior = projectHistoricalCompiledBehavior(
+      artifact.configuration,
+      run.runTypeId,
+    );
     if (historicalBehavior !== undefined) {
       assertHistoricalBehaviorMatchesRun(run, historicalBehavior, artifact.configuration);
       artifact = attachHistoricalBehavior(artifact, historicalBehavior);
@@ -4319,15 +5128,14 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     // project the reviewed seed rather than compare its hash with the still-current committed
     // graph and report false corruption. Execution never enters this branch because it is
     // lifecycle-gated until approval publishes the graph artifact below.
-    const graphPhase = run.lifecycle.phase === "pausing" || run.lifecycle.phase === "paused"
-      ? run.lifecycle.resumePhase
-      : run.lifecycle.phase;
+    const graphPhase =
+      run.lifecycle.phase === "pausing" || run.lifecycle.phase === "paused"
+        ? run.lifecycle.resumePhase
+        : run.lifecycle.phase;
     if (
-      (
-        (graphPhase === "planning" && run.plan?.status === "planning") ||
+      ((graphPhase === "planning" && run.plan?.status === "planning") ||
         (graphPhase === "awaiting_approval" && run.plan?.status === "awaiting_approval") ||
-        (graphPhase === "approving" && run.plan?.status === "approving")
-      ) &&
+        (graphPhase === "approving" && run.plan?.status === "approving")) &&
       run.plan?.graphSeed !== undefined
     ) {
       const graph = compilePlanningSeed(
@@ -4366,11 +5174,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     if (artifact.runId !== run.id || artifact.configurationSha256 !== run.compiledConfigHash) {
       fail("graph_artifact_drift", "durable graph artifact does not match the run identity");
     }
-    const graph = new TypedGraph(
-      requireGraphSchema(configuration),
-      Object.values(artifact.nodes),
-      { projectRoot: this.#projectRoot },
-    );
+    const graph = new TypedGraph(requireGraphSchema(configuration), Object.values(artifact.nodes), {
+      projectRoot: this.#projectRoot,
+    });
     assertConfiguredGraphConstraints(configuration, graph, this.#projectRoot);
     if (graph.hash !== artifact.graphSha256) {
       fail("graph_artifact_hash", "durable semantic graph bytes do not match their compiler hash");
@@ -4379,14 +5185,18 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
   }
 
   #contextualState(run: RunRecord, artifact: GraphArtifact): GraphContextualState {
-    const contextual = artifact.contextual === undefined
-      ? createGraphContextualState(runRootContextId(run.id), run.workingSpecOwnerId)
-      : structuredClone(artifact.contextual);
+    const contextual =
+      artifact.contextual === undefined
+        ? createGraphContextualState(runRootContextId(run.id), run.workingSpecOwnerId)
+        : structuredClone(artifact.contextual);
     assertContextualAuthorityBinding(run, artifact.revision, contextual);
     return contextual;
   }
 
-  async #readTicketDefinitions(run: RunRecord, configuration: CompiledConfiguration): Promise<{
+  async #readTicketDefinitions(
+    run: RunRecord,
+    configuration: CompiledConfiguration,
+  ): Promise<{
     value: TicketDefinitionsArtifact;
     bytesSha256: Sha256Digest;
   }> {
@@ -4398,14 +5208,19 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       fail("ticket_artifact_json", "ticket definition artifact is not valid JSON");
     }
     if (!isRecord(value) || value.protocol !== TICKET_ARTIFACT_PROTOCOL || value.runId !== run.id) {
-      fail("ticket_artifact_shape", "ticket definition artifact has the wrong identity or protocol");
+      fail(
+        "ticket_artifact_shape",
+        "ticket definition artifact has the wrong identity or protocol",
+      );
     }
     const artifact = value as unknown as TicketDefinitionsArtifact;
     if (
       artifact.graphRevision !== run.graphRevision ||
       artifact.evaluation.configuration_sha256 !== run.compiledConfigHash ||
-      canonicalHash(withoutField(artifact.evaluation, "evaluation_sha256")) !== artifact.evaluation.evaluation_sha256
-    ) fail("ticket_artifact_hash", "ticket definition artifact failed its compiler binding");
+      canonicalHash(withoutField(artifact.evaluation, "evaluation_sha256")) !==
+        artifact.evaluation.evaluation_sha256
+    )
+      fail("ticket_artifact_hash", "ticket definition artifact failed its compiler binding");
     if (artifact.retainedDefinitions !== undefined) {
       if (!Array.isArray(artifact.retainedDefinitions)) {
         fail("ticket_artifact_retained", "retained ticket definitions are not an array");
@@ -4418,10 +5233,15 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
           definition.protocol !== "koni.derived-ticket.v1" ||
           definition.configuration_sha256 !== run.compiledConfigHash ||
           !isSha256Digest(definition.definition_sha256) ||
-          canonicalHash(withoutField(definition, "definition_sha256")) !== definition.definition_sha256 ||
+          canonicalHash(withoutField(definition, "definition_sha256")) !==
+            definition.definition_sha256 ||
           applicableIds.has(definition.id) ||
           retainedIds.has(definition.id)
-        ) fail("ticket_artifact_retained", "retained ticket definition failed its compiler binding");
+        )
+          fail(
+            "ticket_artifact_retained",
+            "retained ticket definition failed its compiler binding",
+          );
         retainedIds.add(definition.id);
       }
     }
@@ -4431,7 +5251,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       "pinned state-machine configuration did not compile",
     );
     if (canonicalHash(artifact.evaluation.state_machine_catalog) !== canonicalHash(stateMachines)) {
-      fail("ticket_state_machine_drift", "ticket definition lifecycle catalog differs from its pinned configuration");
+      fail(
+        "ticket_state_machine_drift",
+        "ticket definition lifecycle catalog differs from its pinned configuration",
+      );
     }
     return { value: artifact, bytesSha256: rawSha256(bytes) };
   }
@@ -4441,10 +5264,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     attempt: AgentAttemptRecord,
     spec: Readonly<AgentLaunchSpec>,
   ): Promise<PreparedAttemptArtifact> {
-    const bytes = await readFile(path.join(
-      this.#stateRoot,
-      `runs/${run.id}/attempts/${attempt.id}/compiler-input.json`,
-    ));
+    const bytes = await readFile(
+      path.join(this.#stateRoot, `runs/${run.id}/attempts/${attempt.id}/compiler-input.json`),
+    );
     if (bytes.byteLength > MAX_CONTEXT_BYTES + 1024 * 1024 || bytes.includes(0)) {
       fail("recovery_compiler_input", "stored compiler input is oversized or unsafe");
     }
@@ -4462,12 +5284,17 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       parsed.terminalSchemaHash !== spec.terminal.outputSchemaHash ||
       typeof parsed.contextContent !== "string" ||
       !isRecord(parsed.grant)
-    ) fail("recovery_compiler_input", "stored compiler input does not match the immutable launch spec");
+    )
+      fail(
+        "recovery_compiler_input",
+        "stored compiler input does not match the immutable launch spec",
+      );
     const artifact = parsed as unknown as PreparedAttemptArtifact;
     if (
       rawSha256(artifact.contextContent) !== artifact.contextHash ||
       canonicalHash(artifact.grant) !== spec.authority.grantHash
-    ) fail("recovery_compiler_input", "stored compiler input failed its content or grant binding");
+    )
+      fail("recovery_compiler_input", "stored compiler input failed its content or grant binding");
     return artifact;
   }
 
@@ -4479,21 +5306,26 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const candidates = new Set<string>();
     const stepBindings = resolveDefinitionExecutionBindings(executionCatalog, ticket).steps;
     const priorAttempts = Object.values(run.attempts)
-      .filter((attempt) => attempt.ticketId === ticket.id && attempt.terminalOutputSha256 !== undefined)
+      .filter(
+        (attempt) => attempt.ticketId === ticket.id && attempt.terminalOutputSha256 !== undefined,
+      )
       .sort((left, right) => compareText(left.id, right.id));
     for (const attempt of priorAttempts) {
       const step = ticket.workflow.find((candidate) => candidate.id === attempt.stepId);
       if (step === undefined || step.kind === "review") continue;
-      const bytes = await readFile(path.join(
-        this.#stateRoot,
-        `runs/${run.id}/attempts/${attempt.id}/terminal-output.json`,
-      ));
+      const bytes = await readFile(
+        path.join(this.#stateRoot, `runs/${run.id}/attempts/${attempt.id}/terminal-output.json`),
+      );
       if (
         bytes.byteLength !== attempt.terminalOutputSizeBytes ||
         rawSha256(bytes) !== attempt.terminalOutputSha256 ||
         bytes.byteLength > MAX_CONTEXT_BYTES ||
         bytes.includes(0)
-      ) fail("review_effect_provenance", `terminal output for ${attempt.id} failed its authority binding`);
+      )
+        fail(
+          "review_effect_provenance",
+          `terminal output for ${attempt.id} failed its authority binding`,
+        );
       let parsed: unknown;
       try {
         parsed = JSON.parse(bytes.toString("utf8"));
@@ -4512,7 +5344,12 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         step.graph_mutation,
         assignmentChangeControlContract(executionCatalog, binding, step.id),
       );
-      if (output.status !== "completed" || output.graphDelta === undefined || output.graphDelta === null) continue;
+      if (
+        output.status !== "completed" ||
+        output.graphDelta === undefined ||
+        output.graphDelta === null
+      )
+        continue;
       for (const mutation of output.graphDelta.upsertNodes) candidates.add(mutation.node.id);
       for (const edge of output.graphDelta.addEdges) candidates.add(edge.source);
     }
@@ -4529,16 +5366,23 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const receiptIds = new Set<string>();
     const touchedFiles = new Set<string>();
     const expectedPrefix = `runs/${run.id}/attempts/${attempt.id}/tool-receipts/`;
-    for (const record of [...(attempt.authorityToolResults ?? [])].sort((left, right) => left.sequence - right.sequence)) {
+    for (const record of [...(attempt.authorityToolResults ?? [])].sort(
+      (left, right) => left.sequence - right.sequence,
+    )) {
       if (
         !record.artifactPath.startsWith(expectedPrefix) ||
         path.posix.normalize(record.artifactPath) !== record.artifactPath
-      ) fail("compaction_receipt_path", "authority tool result points outside its attempt receipt directory");
+      )
+        fail(
+          "compaction_receipt_path",
+          "authority tool result points outside its attempt receipt directory",
+        );
       const bytes = await readFile(path.join(this.#stateRoot, record.artifactPath));
-      if (
-        bytes.byteLength > 16 * 1024 * 1024 ||
-        bytes.includes(0)
-      ) fail("compaction_receipt_hash", "authority tool receipt bytes do not match their durable record");
+      if (bytes.byteLength > 16 * 1024 * 1024 || bytes.includes(0))
+        fail(
+          "compaction_receipt_hash",
+          "authority tool receipt bytes do not match their durable record",
+        );
       let parsed: unknown;
       try {
         parsed = JSON.parse(bytes.toString("utf8"));
@@ -4553,7 +5397,11 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       if (
         Buffer.byteLength(canonical, "utf8") !== record.receiptSizeBytes ||
         rawSha256(canonical) !== record.receiptSha256
-      ) fail("compaction_receipt_hash", "authority tool receipt bytes do not match their durable record");
+      )
+        fail(
+          "compaction_receipt_hash",
+          "authority tool receipt bytes do not match their durable record",
+        );
       if (!isRecord(parsed) || typeof parsed.receiptId !== "string") {
         fail("compaction_receipt_shape", "authority tool receipt has an invalid shape");
       }
@@ -4564,7 +5412,8 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         record.toolName === "koni_write_file" ||
         record.toolName === "koni_edit_file"
       ) {
-        if (typeof value?.path === "string" && value.path.trim().length > 0) touchedFiles.add(value.path);
+        if (typeof value?.path === "string" && value.path.trim().length > 0)
+          touchedFiles.add(value.path);
       } else if (record.toolName === "koni_list_files" && Array.isArray(value?.entries)) {
         // A directory inventory is discovery metadata, not evidence that every returned entry was
         // read. Folding thousands of recursively listed paths into compaction previously made the
@@ -4593,7 +5442,8 @@ function sameScopeContinuationPrompt(
   if (
     lineage.conversationFork === undefined ||
     (lineage.reason !== "retry" && lineage.reason !== "recovery")
-  ) return initialPrompt;
+  )
+    return initialPrompt;
   return [
     initialPrompt,
     "This is an authenticated same-scope continuation. The inherited Pi conversation is the repository and execution ledger: reuse its successful reads, searches, checks, and decisions instead of repeating them.",
@@ -4601,9 +5451,11 @@ function sameScopeContinuationPrompt(
     // The authority-classified cause of the parent's death is metadata the inherited transcript
     // never contains — without it, forks re-derived the failure from scratch or repeated it
     // (observed live: identical 40-turn loops across fork generations). Name it explicitly.
-    ...(parentFailure === undefined ? [] : [
-      `The parent attempt ended for this authority-recorded reason: ${parentFailure}. Account for it directly instead of re-deriving it: an exhausted budget means finish minimal remaining work and submit immediately; a transient provider failure means your prior work is intact, so proceed straight to submission; a tool-contract rejection means correct that exact call rather than retrying variations.`,
-    ]),
+    ...(parentFailure === undefined
+      ? []
+      : [
+          `The parent attempt ended for this authority-recorded reason: ${parentFailure}. Account for it directly instead of re-deriving it: an exhausted budget means finish minimal remaining work and submit immediately; a transient provider failure means your prior work is intact, so proceed straight to submission; a tool-contract rejection means correct that exact call rather than retrying variations.`,
+        ]),
   ].join("\n\n");
 }
 
@@ -4624,23 +5476,40 @@ function createPinnedArtifact(
 }
 
 function validatePinnedArtifact(value: unknown): PinnedConfigurationArtifact {
-  if (!isRecord(value) || value.protocol !== PINNED_CONFIGURATION_PROTOCOL || !isRecord(value.configuration) || !isRecord(value.skills)) {
+  if (
+    !isRecord(value) ||
+    value.protocol !== PINNED_CONFIGURATION_PROTOCOL ||
+    !isRecord(value.configuration) ||
+    !isRecord(value.skills)
+  ) {
     fail("pinned_configuration_shape", "pinned run configuration has an invalid shape");
   }
   const artifact = value as unknown as PinnedConfigurationArtifact;
   if (canonicalHash(withoutField(artifact, "artifactSha256")) !== artifact.artifactSha256) {
-    fail("pinned_configuration_hash", "pinned run configuration artifact hash does not match its bytes");
+    fail(
+      "pinned_configuration_hash",
+      "pinned run configuration artifact hash does not match its bytes",
+    );
   }
   const configuration = artifact.configuration;
-  if (canonicalHash(withoutField(configuration, "configuration_sha256")) !== configuration.configuration_sha256) {
+  if (
+    canonicalHash(withoutField(configuration, "configuration_sha256")) !==
+    configuration.configuration_sha256
+  ) {
     fail("configuration_hash", "pinned compiled configuration hash does not match its content");
   }
   for (const [id, skill] of Object.entries(artifact.skills)) {
-    if (!isRecord(skill) || skill.id !== id || !isRecord(skill.files) || !Object.hasOwn(skill.files, "SKILL.md")) {
+    if (
+      !isRecord(skill) ||
+      skill.id !== id ||
+      !isRecord(skill.files) ||
+      !Object.hasOwn(skill.files, "SKILL.md")
+    ) {
       fail("skill_hash", `pinned skill ${id} has an invalid package inventory`);
     }
     for (const [relativePath, rawFile] of Object.entries(skill.files)) {
-      if (!isRecord(rawFile)) fail("skill_hash", `pinned skill ${id}/${relativePath} has invalid metadata`);
+      if (!isRecord(rawFile))
+        fail("skill_hash", `pinned skill ${id}/${relativePath} has invalid metadata`);
       const file = rawFile as unknown as PinnedSkillFile;
       if (
         file.relativePath !== relativePath ||
@@ -4656,7 +5525,7 @@ function validatePinnedArtifact(value: unknown): PinnedConfigurationArtifact {
   if (artifact.community !== undefined) {
     validatePinnedCommunityResourceBundle(artifact.community);
   }
-  return deepFreeze(structuredClone(artifact)) as PinnedConfigurationArtifact;
+  return deepFreeze(structuredClone(artifact));
 }
 
 function attachHistoricalBehavior(
@@ -4674,17 +5543,27 @@ function attachHistoricalBehavior(
   });
   const projected = { ...artifact, configuration } as PinnedConfigurationArtifact;
   if (
-    canonicalHash(withoutField(configuration, "configuration_sha256")) !== configuration.configuration_sha256 ||
+    canonicalHash(withoutField(configuration, "configuration_sha256")) !==
+      configuration.configuration_sha256 ||
     canonicalHash(withoutField(projected, "artifactSha256")) !== projected.artifactSha256
   ) {
-    fail("historical_behavior_hash", "runtime compatibility projection changed authenticated pinned bytes");
+    fail(
+      "historical_behavior_hash",
+      "runtime compatibility projection changed authenticated pinned bytes",
+    );
   }
   return deepFreeze(projected);
 }
 
 function assertPinnedMatchesRun(artifact: PinnedConfigurationArtifact, run: RunRecord): void {
-  if (artifact.runId !== run.id || artifact.configuration.configuration_sha256 !== run.compiledConfigHash) {
-    fail("pinned_configuration_identity", "pinned configuration belongs to another run or compiler snapshot");
+  if (
+    artifact.runId !== run.id ||
+    artifact.configuration.configuration_sha256 !== run.compiledConfigHash
+  ) {
+    fail(
+      "pinned_configuration_identity",
+      "pinned configuration belongs to another run or compiler snapshot",
+    );
   }
 }
 
@@ -4696,7 +5575,10 @@ async function pinConfiguredSkills(
   for (const persona of Object.values(configuration.registries.personas)) {
     const skills = persona.skills;
     if (skills === undefined) continue;
-    if (!Array.isArray(skills) || skills.some((item) => typeof item !== "string" || !SAFE_LOCAL_KEY.test(item))) {
+    if (
+      !Array.isArray(skills) ||
+      skills.some((item) => typeof item !== "string" || !SAFE_LOCAL_KEY.test(item))
+    ) {
       fail("skill_configuration", "persona skills must be safe string identifiers");
     }
     for (const item of skills) requested.add(item as string);
@@ -4708,9 +5590,11 @@ async function pinConfiguredSkills(
   for (const id of [...requested].sort(compareText)) {
     const skillRoot = path.join(configRoot, "resources", "skills", id);
     const metadata = await lstat(skillRoot);
-    if (!metadata.isDirectory() || metadata.isSymbolicLink()) fail("skill_directory", `skill ${id} is not a regular directory`);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink())
+      fail("skill_directory", `skill ${id} is not a regular directory`);
     const canonical = await realpath(skillRoot);
-    if (!isWithinDirectory(configRoot, canonical)) fail("skill_escape", `skill ${id} escapes .koni`);
+    if (!isWithinDirectory(configRoot, canonical))
+      fail("skill_escape", `skill ${id} escapes .koni`);
     const files = await readSkillPackage(canonical, id);
     if (!Object.hasOwn(files, "SKILL.md")) fail("skill_file", `skill ${id} has no root SKILL.md`);
     totalFiles += Object.keys(files).length;
@@ -4727,7 +5611,10 @@ async function readSkillPackage(
   skillRoot: string,
   skillId: string,
 ): Promise<Record<string, PinnedSkillFile>> {
-  const output: Record<string, PinnedSkillFile> = Object.create(null) as Record<string, PinnedSkillFile>;
+  const output: Record<string, PinnedSkillFile> = Object.create(null) as Record<
+    string,
+    PinnedSkillFile
+  >;
   const walk = async (directory: string, segments: string[]): Promise<void> => {
     const entries = await readdir(directory, { withFileTypes: true });
     entries.sort((left, right) => compareText(left.name, right.name));
@@ -4739,19 +5626,25 @@ async function readSkillPackage(
         entry.name.includes("\u0000") ||
         entry.name.includes("/") ||
         entry.name.includes("\\")
-      ) fail("skill_path", `skill ${skillId} contains an unsafe resource name`);
+      )
+        fail("skill_path", `skill ${skillId} contains an unsafe resource name`);
       const source = path.join(directory, entry.name);
       const metadata = await lstat(source);
-      if (metadata.isSymbolicLink()) fail("skill_symlink", `skill ${skillId} contains a symbolic link`);
+      if (metadata.isSymbolicLink())
+        fail("skill_symlink", `skill ${skillId} contains a symbolic link`);
       if (metadata.isDirectory()) {
         await walk(source, [...segments, entry.name]);
         continue;
       }
       if (!metadata.isFile() || metadata.size < 1 || metadata.size > MAX_SKILL_FILE_BYTES) {
-        fail("skill_file", `skill ${skillId} contains an empty, oversized, or non-regular resource`);
+        fail(
+          "skill_file",
+          `skill ${skillId} contains an empty, oversized, or non-regular resource`,
+        );
       }
       const canonical = await realpath(source);
-      if (!isWithinDirectory(skillRoot, canonical)) fail("skill_escape", `skill ${skillId} resource escapes its package`);
+      if (!isWithinDirectory(skillRoot, canonical))
+        fail("skill_escape", `skill ${skillId} resource escapes its package`);
       const handle = await open(source, constants.O_RDONLY | constants.O_NOFOLLOW);
       let bytes: Buffer;
       try {
@@ -4763,7 +5656,8 @@ async function readSkillPackage(
       } finally {
         await handle.close();
       }
-      if (bytes.byteLength !== metadata.size) fail("skill_race", `skill ${skillId} changed while it was pinned`);
+      if (bytes.byteLength !== metadata.size)
+        fail("skill_race", `skill ${skillId} changed while it was pinned`);
       const content = bytes.toString("utf8");
       if (!Buffer.from(content, "utf8").equals(bytes) || content.includes("\u0000")) {
         fail("skill_encoding", `skill ${skillId} resources must be non-NUL UTF-8 text`);
@@ -4800,29 +5694,47 @@ function parseRunOverrides(
     agents: Record<string, { provider?: string; model?: string; thinkingLevel?: string }>;
     roles: Record<string, { provider?: string; model?: string; thinkingLevel?: string }>;
   } = {
-    agents: Object.create(null) as Record<string, { provider?: string; model?: string; thinkingLevel?: string }>,
-    roles: Object.create(null) as Record<string, { provider?: string; model?: string; thinkingLevel?: string }>,
+    agents: Object.create(null) as Record<
+      string,
+      { provider?: string; model?: string; thinkingLevel?: string }
+    >,
+    roles: Object.create(null) as Record<
+      string,
+      { provider?: string; model?: string; thinkingLevel?: string }
+    >,
   };
   if (value === undefined || value === null) return output;
   const source = requiredRecord(value, "run overrides");
-  assertAllowedFields(source, ["maxParallel", "questionPolicy", "instructions", "workingSpecOwner", "agents", "roles"], "run overrides");
+  assertAllowedFields(
+    source,
+    ["maxParallel", "questionPolicy", "instructions", "workingSpecOwner", "agents", "roles"],
+    "run overrides",
+  );
   if (source.maxParallel !== undefined) {
-    if (!Number.isSafeInteger(source.maxParallel) || (source.maxParallel as number) < 1) fail("override_parallel", "maxParallel must be at least one");
+    if (!Number.isSafeInteger(source.maxParallel) || (source.maxParallel as number) < 1)
+      fail("override_parallel", "maxParallel must be at least one");
     output.maxParallel = source.maxParallel as number;
   }
   if (source.questionPolicy !== undefined) {
-    if (!["none", "some", "many"].includes(String(source.questionPolicy))) fail("override_questions", "questionPolicy must be none, some, or many");
+    if (!["none", "some", "many"].includes(String(source.questionPolicy)))
+      fail("override_questions", "questionPolicy must be none, some, or many");
     output.questionPolicy = source.questionPolicy as "none" | "some" | "many";
   }
-  if (source.instructions !== undefined) output.instructions = boundedText(source.instructions, "run instructions", 1024 * 1024);
+  if (source.instructions !== undefined)
+    output.instructions = boundedText(source.instructions, "run instructions", 1024 * 1024);
   if (source.workingSpecOwner !== undefined) {
-    output.workingSpecOwner = requiredNonempty(source.workingSpecOwner, "working-spec owner override");
+    output.workingSpecOwner = requiredNonempty(
+      source.workingSpecOwner,
+      "working-spec owner override",
+    );
   }
   if (source.roles !== undefined) {
     const roles = requiredRecord(source.roles, "role overrides");
-    const configuredRoles = new Set(Object.values(configuration.registries.personas)
-      .map((persona) => optionalString(persona.model_role))
-      .filter((role): role is string => role !== undefined));
+    const configuredRoles = new Set(
+      Object.values(configuration.registries.personas)
+        .map((persona) => optionalString(persona.model_role))
+        .filter((role): role is string => role !== undefined),
+    );
     for (const [roleId, raw] of Object.entries(roles)) {
       if (!configuredRoles.has(roleId)) fail("override_role", `unknown override role ${roleId}`);
       output.roles[roleId] = parseAgentSelection(raw, `role override ${roleId}`, roleId);
@@ -4831,7 +5743,8 @@ function parseRunOverrides(
   if (source.agents !== undefined) {
     const agents = requiredRecord(source.agents, "agent overrides");
     for (const [personaId, raw] of Object.entries(agents)) {
-      if (configuration.registries.personas[personaId] === undefined) fail("override_persona", `unknown override persona ${personaId}`);
+      if (configuration.registries.personas[personaId] === undefined)
+        fail("override_persona", `unknown override persona ${personaId}`);
       output.agents[personaId] = parseAgentSelection(raw, `agent override ${personaId}`, personaId);
     }
   }
@@ -4846,7 +5759,8 @@ function parseAgentSelection(
   const item = requiredRecord(value, label);
   assertAllowedFields(item, ["provider", "model", "thinkingLevel"], label);
   const selected: { provider?: string; model?: string; thinkingLevel?: string } = {};
-  if (item.provider !== undefined) selected.provider = boundedText(item.provider, `${identity} provider`, 256);
+  if (item.provider !== undefined)
+    selected.provider = boundedText(item.provider, `${identity} provider`, 256);
   if (item.model !== undefined) selected.model = boundedText(item.model, `${identity} model`, 512);
   if (item.thinkingLevel !== undefined) {
     selected.thinkingLevel = requireThinkingLevel(item.thinkingLevel, label);
@@ -4871,14 +5785,26 @@ function resolveWorkingSpecOwner(
   const runTypeOwner = optionalString(optionalRecord(runType.working_spec)?.owner);
   const changeControl = optionalRecord(configuration.profile.change_control);
   const profileOwner = optionalString(changeControl?.working_spec_owner);
-  const explicit = [...new Set([explicitOverride, runTypeOwner, profileOwner].filter((value): value is string => value !== undefined))];
+  const explicit = [
+    ...new Set(
+      [explicitOverride, runTypeOwner, profileOwner].filter(
+        (value): value is string => value !== undefined,
+      ),
+    ),
+  ];
   if (explicit.length > 1) {
-    fail("working_spec_owner_ambiguous", "working-spec owner configuration resolves to conflicting personas");
+    fail(
+      "working_spec_owner_ambiguous",
+      "working-spec owner configuration resolves to conflicting personas",
+    );
   }
   if (explicit.length === 1) {
     const owner = explicit[0]!;
     if (configuration.registries.personas[owner] === undefined) {
-      fail("working_spec_owner_invalid", `configured working-spec owner ${owner} is not exactly one managed persona`);
+      fail(
+        "working_spec_owner_invalid",
+        `configured working-spec owner ${owner} is not exactly one managed persona`,
+      );
     }
     return owner;
   }
@@ -4897,19 +5823,26 @@ function resolveWorkingSpecOwner(
   return leads[0]!;
 }
 
-function pipelineDefinition(document: ConfigurationObject): { order: string[]; stages: ConfigurationObject } {
+function pipelineDefinition(document: ConfigurationObject): {
+  order: string[];
+  stages: ConfigurationObject;
+} {
   const pipeline = requiredRecord(document.pipeline, "run pipeline");
   const stages = requiredRecord(pipeline.stages, "run pipeline stages");
-  if (!Array.isArray(pipeline.order) || pipeline.order.length === 0) fail("pipeline_order", "run pipeline order is empty or invalid");
+  if (!Array.isArray(pipeline.order) || pipeline.order.length === 0)
+    fail("pipeline_order", "run pipeline order is empty or invalid");
   const order = pipeline.order.map((item) => requiredNonempty(item, "pipeline stage id"));
-  if (new Set(order).size !== order.length) fail("pipeline_order", "run pipeline contains duplicate stages");
-  for (const id of order) if (!isRecord(stages[id])) fail("pipeline_stage", `run pipeline stage ${id} is missing`);
+  if (new Set(order).size !== order.length)
+    fail("pipeline_order", "run pipeline contains duplicate stages");
+  for (const id of order)
+    if (!isRecord(stages[id])) fail("pipeline_stage", `run pipeline stage ${id} is missing`);
   return { order, stages: stages as ConfigurationObject };
 }
 
-function projectPipelineDefinition(
-  pipeline: { order: string[]; stages: ConfigurationObject },
-): RunPipelineStageDefinition[] {
+function projectPipelineDefinition(pipeline: {
+  order: string[];
+  stages: ConfigurationObject;
+}): RunPipelineStageDefinition[] {
   return pipeline.order.map((id) => {
     const stage = requiredRecord(pipeline.stages[id], `pipeline stage ${id}`);
     const config = optionalRecord(stage.config);
@@ -4918,14 +5851,17 @@ function projectPipelineDefinition(
       id,
       title: optionalString(stage.title) ?? humanize(id),
       kind,
-      automatic: config?.automatic === true || config?.compiler_owned === true || new Set([
-        "initialize",
-        "planning",
-        "orchestration",
-        "target_sync",
-        "checkpoint",
-        "agent_review",
-      ]).has(kind),
+      automatic:
+        config?.automatic === true ||
+        config?.compiler_owned === true ||
+        new Set([
+          "initialize",
+          "planning",
+          "orchestration",
+          "target_sync",
+          "checkpoint",
+          "agent_review",
+        ]).has(kind),
     };
   });
 }
@@ -4945,9 +5881,10 @@ function projectCompiledPipelineDefinition(
     id: stage.id,
     title: stage.title,
     kind: stage.kind,
-    automatic: stage.config.kind === "action"
-      ? stage.config.automatic || stage.config.compilerOwned
-      : automaticallyDriven.has(stage.kind),
+    automatic:
+      stage.config.kind === "action"
+        ? stage.config.automatic || stage.config.compilerOwned
+        : automaticallyDriven.has(stage.kind),
   }));
 }
 
@@ -4982,9 +5919,7 @@ function pinnedRunTypeBehavior(
 }
 
 function leadJudgmentStepId(trigger: LeadJudgmentTrigger): string {
-  return trigger === "orchestration_entry"
-    ? "lead-orchestration-entry"
-    : "lead-compiler-deadlock";
+  return trigger === "orchestration_entry" ? "lead-orchestration-entry" : "lead-compiler-deadlock";
 }
 
 function leadTriggerForAttempt(attempt: Pick<AgentAttemptRecord, "stepId">): LeadJudgmentTrigger {
@@ -5026,7 +5961,11 @@ function leadJudgmentAttempt(
       })),
     }));
   const activeAttempts = Object.values(run.attempts)
-    .filter((attempt) => new Set<AttemptStatus>(["queued", "running", "waiting_question", "terminal_accepted"]).has(attempt.status))
+    .filter((attempt) =>
+      new Set<AttemptStatus>(["queued", "running", "waiting_question", "terminal_accepted"]).has(
+        attempt.status,
+      ),
+    )
     .sort((left, right) => compareText(left.id, right.id))
     .map((attempt) => ({
       id: attempt.id,
@@ -5054,21 +5993,29 @@ function leadJudgmentAttempt(
       graphRevision: run.graphRevision,
       graphHash: run.graphHash,
     },
-    plan: run.plan === undefined ? undefined : {
-      revision: run.plan.revision,
-      status: run.plan.status,
-      full: run.plan.full,
-      concise: run.plan.concise,
-    },
-    questionPolicy: run.executionConfig?.semanticQuestionPolicy ?? semanticQuestionPolicy(
-      run.executionConfig?.questionPolicy ?? "some",
-    ),
+    plan:
+      run.plan === undefined
+        ? undefined
+        : {
+            revision: run.plan.revision,
+            status: run.plan.status,
+            full: run.plan.full,
+            concise: run.plan.concise,
+          },
+    questionPolicy:
+      run.executionConfig?.semanticQuestionPolicy ??
+      semanticQuestionPolicy(run.executionConfig?.questionPolicy ?? "some"),
     questionDefaultScope: run.executionConfig?.questionDefaultScope ?? "run",
     resolvedQuestions: answeredQuestionContext(run),
     unresolvedQuestions: Object.values(run.questions)
       .filter((question) => question.answeredAt === undefined)
       .sort((left, right) => compareText(left.id, right.id))
-      .map((question) => ({ id: question.id, scope: question.scope, ticketId: question.ticketId, prompt: question.prompt })),
+      .map((question) => ({
+        id: question.id,
+        scope: question.scope,
+        ticketId: question.ticketId,
+        prompt: question.prompt,
+      })),
     ticketBoard: tickets,
     activeAttempts,
     requiredOutput: {
@@ -5109,18 +6056,25 @@ function planningAttempt(
     const stage = requiredRecord(pipeline.stages[id], `pipeline stage ${id}`);
     if (stage.kind !== "planning") return [];
     const config = optionalRecord(stage.config) ?? {};
-    return [{
-      id,
-      title: optionalString(stage.title) ?? id,
-      persona: optionalString(config.persona) ?? "run-planner",
-      prompt: optionalString(config.prompt) ?? "Produce the implementation-ready plan for this stage.",
-    }];
+    return [
+      {
+        id,
+        title: optionalString(stage.title) ?? id,
+        persona: optionalString(config.persona) ?? "run-planner",
+        prompt:
+          optionalString(config.prompt) ?? "Produce the implementation-ready plan for this stage.",
+      },
+    ];
   });
   if (planning.length === 0) {
-    fail("planning_stage_missing", "this run type has no planning stage; the authority must use its direct-approval fast path");
+    fail(
+      "planning_stage_missing",
+      "this run type has no planning stage; the authority must use its direct-approval fast path",
+    );
   }
   const personas = new Set(planning.map((stage) => stage.persona));
-  if (personas.size !== 1) fail("planning_persona", "one managed planning session cannot impersonate multiple personas");
+  if (personas.size !== 1)
+    fail("planning_persona", "one managed planning session cannot impersonate multiple personas");
   const stageId = planning.at(-1)!.id;
   const graphSeedContract = planningGraphSeedContract(configuration);
   const latestSteering = run.plan?.steeringHistory.at(-1)?.instructions;
@@ -5133,6 +6087,7 @@ function planningAttempt(
     stages: planning,
     instructions: run.executionConfig?.instructions ?? "",
     requiredOutput: {
+      title: "One 3-4 word operator-facing run name (3-60 characters).",
       full: PLAN_DOMAINS,
       concise: "Each domain is an independently authored list of {title, description} items.",
       graphSeed: graphSeedContract.context,
@@ -5157,6 +6112,7 @@ function planningAttempt(
           ].join("\n\n"),
       "Complete every configured planning concern in one bounded shared session.",
       "The final output must contain four complete Markdown plans (architecture, decisions, risk, verification), four separately written concise title/description item lists for human approval, and the exact typed graph seed. Do not derive mini-plan headings by truncating the full prose.",
+      'Also emit a top-level "title": a concise 3-4 word name for this run, suitable as an operator dashboard row label. Do not restate the full objective.',
       "For graphSeed, reference the already-existing run objective only with the literal $root. rootSpec enriches that objective and never declares a node key. Every other edge endpoint must exactly equal a key declared in nodes; connect every declared node to $root and never invent a root alias from the objective title.",
     ].join("\n\n"),
     context,
@@ -5167,6 +6123,8 @@ function planningAttempt(
 export function resolvePinnedGateAutoEvaluationContexts(input: {
   configuration: CompiledConfiguration;
   descriptorBoundary: "full" | "scoped";
+  /** Ticket operation of the compiling descriptor; gate checks that do not apply to it are skipped. */
+  operation?: string;
   subjectNodeIds: readonly string[];
   contexts: readonly CompiledGatePolicyContext[];
 }): ResolvedGateAutoEvaluationContextBinding[] {
@@ -5180,31 +6138,69 @@ export function resolvePinnedGateAutoEvaluationContexts(input: {
   const output: ResolvedGateAutoEvaluationContextBinding[] = [];
   for (const context of input.contexts) {
     if (canonicalHash(withoutField(context, "context_sha256")) !== context.context_sha256) {
-      fail("gate_policy_context_hash", `gate context ${context.gate_node_id} failed its compiler hash binding`);
+      fail(
+        "gate_policy_context_hash",
+        `gate context ${context.gate_node_id} failed its compiler hash binding`,
+      );
     }
     if (
       !subjectIds.has(context.gate_node_id) &&
       !context.evaluation_target_node_ids.some((id) => subjectIds.has(id))
-    ) continue;
+    )
+      continue;
     const rawPolicy = input.configuration.registries.gate_policies[context.policy_id];
     const definition = definitions.get(context.policy_id);
-    if (rawPolicy === undefined || definition === undefined ||
-        definition.contractSha256 !== context.policy_contract_sha256) {
-      fail("gate_policy_context_drift", `gate context ${context.context_sha256} differs from its pinned policy`);
+    if (
+      rawPolicy === undefined ||
+      definition === undefined ||
+      definition.contractSha256 !== context.policy_contract_sha256
+    ) {
+      fail(
+        "gate_policy_context_drift",
+        `gate context ${context.context_sha256} differs from its pinned policy`,
+      );
     }
     if (rawPolicy.auto_evaluate === undefined) continue;
-    const auto = requiredRecord(rawPolicy.auto_evaluate, `gate policy ${context.policy_id} auto_evaluate`);
-    assertExactFields(auto, ["check", "boundaries"], `gate policy ${context.policy_id} auto_evaluate`);
-    const checkId = requiredNonempty(auto.check, `gate policy ${context.policy_id} auto-evaluate check`);
-    const boundaries = stringArray(auto.boundaries, `gate policy ${context.policy_id} auto-evaluate boundaries`);
-    if (new Set(boundaries).size !== boundaries.length ||
-        boundaries.some((boundary) => boundary !== "full" && boundary !== "scoped")) {
-      fail("gate_policy_auto_boundary", `gate policy ${context.policy_id} declares an invalid auto-evaluate boundary`);
+    const auto = requiredRecord(
+      rawPolicy.auto_evaluate,
+      `gate policy ${context.policy_id} auto_evaluate`,
+    );
+    assertExactFields(
+      auto,
+      ["check", "boundaries"],
+      `gate policy ${context.policy_id} auto_evaluate`,
+    );
+    const checkId = requiredNonempty(
+      auto.check,
+      `gate policy ${context.policy_id} auto-evaluate check`,
+    );
+    const boundaries = stringArray(
+      auto.boundaries,
+      `gate policy ${context.policy_id} auto-evaluate boundaries`,
+    );
+    if (
+      new Set(boundaries).size !== boundaries.length ||
+      boundaries.some((boundary) => boundary !== "full" && boundary !== "scoped")
+    ) {
+      fail(
+        "gate_policy_auto_boundary",
+        `gate policy ${context.policy_id} declares an invalid auto-evaluate boundary`,
+      );
     }
     if (!boundaries.includes(input.descriptorBoundary)) continue;
-    if (input.configuration.registries.checks[checkId] === undefined) {
-      fail("gate_policy_auto_check", `gate policy ${context.policy_id} references missing check ${checkId}`);
+    const checkDefinition = input.configuration.registries.checks[checkId];
+    if (checkDefinition === undefined) {
+      fail(
+        "gate_policy_auto_check",
+        `gate policy ${context.policy_id} references missing check ${checkId}`,
+      );
     }
+    // A gate auto-evaluation is an obligation of the operations its check applies to. A ticket
+    // that merely reads or links the gate node (e.g. experiment design touching a gate) must not
+    // fail its launch compile over it — the gate evaluates under its own applicable operation.
+    const applies = stringArray(checkDefinition.applies_to, `${checkId} applies_to`);
+    if (input.operation !== undefined && applies.length > 0 && !applies.includes(input.operation))
+      continue;
     const material = {
       policyId: context.policy_id,
       policyContractSha256: context.policy_contract_sha256,
@@ -5216,10 +6212,9 @@ export function resolvePinnedGateAutoEvaluationContexts(input: {
     } as const;
     output.push(deepFreeze({ ...material, sha256: canonicalHash(material) }));
   }
-  return output.sort((left, right) => compareText(
-    `${left.policyId}\0${left.gateNodeId}`,
-    `${right.policyId}\0${right.gateNodeId}`,
-  ));
+  return output.sort((left, right) =>
+    compareText(`${left.policyId}\0${left.gateNodeId}`, `${right.policyId}\0${right.gateNodeId}`),
+  );
 }
 
 function portfolioGuidancePrompt(binding: ExecutionPolicyBinding): string {
@@ -5246,7 +6241,10 @@ export function orderedReviewPredecessorStepIds(
     }
     const step = byId.get(stepId);
     if (step === undefined) {
-      fail("review_evidence_step", `review predecessor ${stepId} is absent from the compiled workflow`);
+      fail(
+        "review_evidence_step",
+        `review predecessor ${stepId} is absent from the compiled workflow`,
+      );
     }
     for (const dependencyId of step.depends_on) visit(dependencyId);
     closure.add(stepId);
@@ -5275,70 +6273,93 @@ function ticketAttempt(
   const durableTicket = run.tickets[definition.id] as SemanticTicketRecord | undefined;
   const durableStep = durableTicket?.steps.find((candidate) => candidate.id === step.id);
   const compatibility: string[] = [];
-  if (durableTicket?.executionPolicyBinding === undefined) compatibility.push("ticket_binding_rederived_from_pinned_configuration");
-  else assertOrBackfillExecutionPolicyBinding(
-    { executionPolicyBinding: durableTicket.executionPolicyBinding },
-    semantic.ticket,
-    `ticket ${definition.id}`,
-  );
-  if (durableStep?.executionPolicyBinding === undefined) compatibility.push("step_binding_rederived_from_pinned_configuration");
-  else assertOrBackfillExecutionPolicyBinding(
-    { executionPolicyBinding: durableStep.executionPolicyBinding },
-    executionPolicyBinding,
-    `ticket ${definition.id} step ${step.id}`,
-  );
+  if (durableTicket?.executionPolicyBinding === undefined)
+    compatibility.push("ticket_binding_rederived_from_pinned_configuration");
+  else
+    assertOrBackfillExecutionPolicyBinding(
+      { executionPolicyBinding: durableTicket.executionPolicyBinding },
+      semantic.ticket,
+      `ticket ${definition.id}`,
+    );
+  if (durableStep?.executionPolicyBinding === undefined)
+    compatibility.push("step_binding_rederived_from_pinned_configuration");
+  else
+    assertOrBackfillExecutionPolicyBinding(
+      { executionPolicyBinding: durableStep.executionPolicyBinding },
+      executionPolicyBinding,
+      `ticket ${definition.id} step ${step.id}`,
+    );
   const boundGateContexts = resolvePinnedGateAutoEvaluationContexts({
     configuration,
     descriptorBoundary: "scoped",
-    subjectNodeIds: [...new Set([
-      ...definition.target_node_ids,
-      ...(step.read_node_ids ?? definition.scope.read_node_ids),
-      ...(step.write_node_ids ?? definition.scope.write_node_ids),
-    ])],
+    operation: definition.operation,
+    subjectNodeIds: [
+      ...new Set([
+        ...definition.target_node_ids,
+        ...(step.read_node_ids ?? definition.scope.read_node_ids),
+        ...(step.write_node_ids ?? definition.scope.write_node_ids),
+      ]),
+    ],
     contexts: gatePolicyContexts,
   });
-  const legacyDeliveryReview = step.kind === "review" &&
+  const legacyDeliveryReview =
+    step.kind === "review" &&
     executionPolicyBinding.workflowSha256 === LEGACY_BROAD_DELIVERY_REVIEW_WORKFLOW_SHA256;
-  const readPaths = [...new Set([
-    ...(legacyDeliveryReview ? [] : (step.read_paths ?? definition.scope.read_paths)),
-    ...boundGateContexts.flatMap((binding) => binding.readPaths),
-  ])].sort(compareText);
+  const readPaths = [
+    ...new Set([
+      ...(legacyDeliveryReview ? [] : (step.read_paths ?? definition.scope.read_paths)),
+      ...boundGateContexts.flatMap((binding) => binding.readPaths),
+    ]),
+  ].sort(compareText);
   const writePaths = [...(step.write_paths ?? definition.scope.write_paths)];
-  const readNodeIds = [...new Set([
-    ...(step.read_node_ids ?? definition.scope.read_node_ids),
-    ...(step.kind === "review" ? reviewCandidateNodeIds : []),
-  ])].sort(compareText);
+  const readNodeIds = [
+    ...new Set([
+      ...(step.read_node_ids ?? definition.scope.read_node_ids),
+      ...(step.kind === "review" ? reviewCandidateNodeIds : []),
+    ]),
+  ].sort(compareText);
   const writeNodeIds = [...(step.write_node_ids ?? definition.scope.write_node_ids)];
-  const contextNodes = graph.nodes().filter((node) => new Set([...readNodeIds, ...writeNodeIds]).has(node.id));
+  const contextNodes = graph
+    .nodes()
+    .filter((node) => new Set([...readNodeIds, ...writeNodeIds]).has(node.id));
   const mutationContract = assignmentMutationContract(configuration, definition);
   const compilerOwnedFields = assignmentCompilerOwnedFields(configuration, definition);
   const predecessorHasCommandEvidence = reviewPredecessorHasCommandEvidence(predecessorExecution);
   const reviewRework = durableTicket?.reviewReworks?.at(-1);
-  const reopenIndex = definition.review_failure_reopen_from === undefined
-    ? -1
-    : definition.workflow.findIndex((candidate) => candidate.id === definition.review_failure_reopen_from);
+  const reopenIndex =
+    definition.review_failure_reopen_from === undefined
+      ? -1
+      : definition.workflow.findIndex(
+          (candidate) => candidate.id === definition.review_failure_reopen_from,
+        );
   const stepIndex = definition.workflow.findIndex((candidate) => candidate.id === step.id);
-  const activeReviewRework = reviewRework?.scope === "review_only" && step.kind === "review"
-    ? reviewRework
-    : reviewRework !== undefined && reopenIndex >= 0 && stepIndex >= reopenIndex
+  const activeReviewRework =
+    reviewRework?.scope === "review_only" && step.kind === "review"
       ? reviewRework
-      : undefined;
+      : reviewRework !== undefined && reopenIndex >= 0 && stepIndex >= reopenIndex
+        ? reviewRework
+        : undefined;
   const proposalControl = durableTicket?.executionControl;
-  const proposalApproval = proposalControl?.proposalDecision?.decision === "approval" &&
+  const proposalApproval =
+    proposalControl?.proposalDecision?.decision === "approval" &&
     proposalControl.proposalApprovalSha256 === proposalControl.proposalDecision.sha256
-    ? {
-        protocol: "koni.proposal-attempt-approval.v1" as const,
-        requestSha256: proposalControl.proposalRequest!.requestSha256,
-        approvalSha256: proposalControl.proposalApprovalSha256,
-        event: structuredClone(proposalControl.proposalDecision),
-      }
-    : undefined;
+      ? {
+          protocol: "koni.proposal-attempt-approval.v1" as const,
+          requestSha256: proposalControl.proposalRequest!.requestSha256,
+          approvalSha256: proposalControl.proposalApprovalSha256,
+          event: structuredClone(proposalControl.proposalDecision),
+        }
+      : undefined;
   if (
-    executionCatalog.operations[definition.operation_registry_id]?.changeControl.role === "proposal" &&
+    executionCatalog.operations[definition.operation_registry_id]?.changeControl.role ===
+      "proposal" &&
     durableTicket?.status !== "proposed" &&
     proposalApproval === undefined
   ) {
-    fail("proposal_attempt_approval", `proposal ticket ${definition.id} lacks exact active approval context`);
+    fail(
+      "proposal_attempt_approval",
+      `proposal ticket ${definition.id} lacks exact active approval context`,
+    );
   }
   return {
     ticketId: definition.id,
@@ -5366,12 +6387,12 @@ function ticketAttempt(
       ...(step.kind !== "review" || predecessorExecution === undefined
         ? []
         : predecessorHasCommandEvidence
-        ? [
-            "Inspect every command in the compiler-authenticated predecessorExecution evidence. A composite pass/fail or predecessor summary is never sufficient by itself: map every claimed oracle case to its actual stdout/stderr signal, and reject setup errors, harness crashes, unrelated failures, omitted material streams, or cases that never reached their intended assertion.",
-          ]
-        : [
-            "The compiler-authenticated predecessorExecution for this review contains no direct command evidence because the preceding step is graph-only. Judge exactly the configured review contract and compiler-authenticated graph/evidence closure; do not demand raw stdout/stderr or unrelated checks that this operation does not require.",
-          ]),
+          ? [
+              "Inspect every command in the compiler-authenticated predecessorExecution evidence. A composite pass/fail or predecessor summary is never sufficient by itself: map every claimed oracle case to its actual stdout/stderr signal, and reject setup errors, harness crashes, unrelated failures, omitted material streams, or cases that never reached their intended assertion.",
+            ]
+          : [
+              "The compiler-authenticated predecessorExecution for this review contains no direct command evidence because the preceding step is graph-only. Judge exactly the configured review contract and compiler-authenticated graph/evidence closure; do not demand raw stdout/stderr or unrelated checks that this operation does not require.",
+            ]),
       ...(step.kind !== "review" || historicalPreparation === undefined
         ? []
         : [
@@ -5386,23 +6407,29 @@ function ticketAttempt(
       ...(executionPolicyBinding.context.stopConditions.values.length === 0
         ? []
         : [`Stop on: ${executionPolicyBinding.context.stopConditions.values.join("; ")}`]),
-      ...(step.expected_outputs.length === 0 ? [] : [`Expected result: ${step.expected_outputs.join("; ")}`]),
+      ...(step.expected_outputs.length === 0
+        ? []
+        : [`Expected result: ${step.expected_outputs.join("; ")}`]),
       ...(activeReviewRework === undefined
         ? []
         : [
             activeReviewRework.scope === "review_only"
               ? `The operator authorized an independent rereview of the unchanged compiler-accepted predecessor. Re-evaluate it from scratch under the current configured review contract. This earlier blocker is historical context, not a required conclusion; retain only findings supported by the current authenticated evidence: ${activeReviewRework.blocker}`
               : activeReviewRework.mode === "supervised"
-              ? `The operator explicitly authorized reviewed-blocker recovery ${activeReviewRework.ordinal}. Materially address every finding before rerunning proof: ${activeReviewRework.blocker}`
-              : `This is bounded automatic review rework ${activeReviewRework.ordinal}: ${activeReviewRework.blocker}`,
+                ? `The operator explicitly authorized reviewed-blocker recovery ${activeReviewRework.ordinal}. Materially address every finding before rerunning proof: ${activeReviewRework.blocker}`
+                : `This is bounded automatic review rework ${activeReviewRework.ordinal}: ${activeReviewRework.blocker}`,
             ...(activeReviewRework.operatorSteering === undefined
               ? []
-              : [`Operator steering for this exact recovery: ${activeReviewRework.operatorSteering}`]),
+              : [
+                  `Operator steering for this exact recovery: ${activeReviewRework.operatorSteering}`,
+                ]),
             "This is a fresh attempt. Any koni_submit_output call or accepted terminal result in the inherited parent transcript belongs only to that parent and does not settle this attempt. Finish this attempt with a newly accepted koni_submit_output call, even when the correct graph delta is empty or repeats the parent's candidate.",
           ]),
       ...(proposalApproval === undefined
         ? []
-        : [`Operator approval (${proposalApproval.approvalSha256}): ${proposalApproval.event.message ?? "Approved."}`]),
+        : [
+            `Operator approval (${proposalApproval.approvalSha256}): ${proposalApproval.event.message ?? "Approved."}`,
+          ]),
       ...(compilerOwnedFields.length === 0
         ? []
         : [
@@ -5453,12 +6480,19 @@ function ticketAttempt(
   };
 }
 
-function verificationAttempt(run: RunRecord, runType: ConfigurationObject, graph: TypedGraph): AttemptDescriptor {
+function verificationAttempt(
+  run: RunRecord,
+  runType: ConfigurationObject,
+  graph: TypedGraph,
+): AttemptDescriptor {
   const pipeline = pipelineDefinition(runType);
-  const review = pipeline.order.map((id) => ({ id, stage: requiredRecord(pipeline.stages[id], `stage ${id}`) }))
+  const review = pipeline.order
+    .map((id) => ({ id, stage: requiredRecord(pipeline.stages[id], `stage ${id}`) }))
     .find(({ stage }) => stage.kind === "agent_review");
   const config = review === undefined ? undefined : optionalRecord(review.stage.config);
-  const personaId = optionalString(config?.persona) ?? (run.executionConfig?.agents.verifier === undefined ? "reviewer" : "verifier");
+  const personaId =
+    optionalString(config?.persona) ??
+    (run.executionConfig?.agents.verifier === undefined ? "reviewer" : "verifier");
   return {
     ticketId: "run-verification",
     stepId: review?.id ?? "verification",
@@ -5468,7 +6502,9 @@ function verificationAttempt(run: RunRecord, runType: ConfigurationObject, graph
     readNodeIds: graph.nodes().map((node) => node.id),
     writeNodeIds: [],
     graphMutation: "forbidden",
-    initialPrompt: optionalString(config?.prompt) ?? "Independently verify the completed run against its approved plan and current evidence. Do not repair it.",
+    initialPrompt:
+      optionalString(config?.prompt) ??
+      "Independently verify the completed run against its approved plan and current evidence. Do not repair it.",
     context: {
       protocol: "koni.attempt-context.v1",
       kind: "verification",
@@ -5522,33 +6558,55 @@ function configuredControlTicketDefinition(
   const operation = input.catalog.operations[input.operationId];
   const rawOperation = input.configuration.registries.operations[input.operationId];
   if (operation === undefined || rawOperation === undefined) {
-    fail("control_ticket_operation", `control ticket references unknown operation ${input.operationId}`);
+    fail(
+      "control_ticket_operation",
+      `control ticket references unknown operation ${input.operationId}`,
+    );
   }
-  if (requiredNonempty(rawOperation.id, `operation ${input.operationId} id`) !== input.operationId) {
-    fail("control_ticket_operation", `operation registry identity differs from ${input.operationId}`);
+  if (
+    requiredNonempty(rawOperation.id, `operation ${input.operationId} id`) !== input.operationId
+  ) {
+    fail(
+      "control_ticket_operation",
+      `operation registry identity differs from ${input.operationId}`,
+    );
   }
   const workflowId = operation.workflowId;
   if (workflowId === undefined) {
-    fail("control_ticket_workflow", `control operation ${input.operationId} has no configured workflow`);
+    fail(
+      "control_ticket_workflow",
+      `control operation ${input.operationId} has no configured workflow`,
+    );
   }
   const rawWorkflow = input.configuration.registries.workflows[workflowId];
   const workflowSemantics = input.catalog.workflows[workflowId];
   if (rawWorkflow === undefined || workflowSemantics === undefined) {
-    fail("control_ticket_workflow", `control operation ${input.operationId} references missing workflow ${workflowId}`);
+    fail(
+      "control_ticket_workflow",
+      `control operation ${input.operationId} references missing workflow ${workflowId}`,
+    );
   }
   if (requiredNonempty(rawWorkflow.id, `workflow ${workflowId} id`) !== workflowId) {
     fail("control_ticket_workflow", `workflow registry identity differs from ${workflowId}`);
   }
   const appliesTo = stringArray(rawWorkflow.applies_to, `workflow ${workflowId} applies_to`);
   if (appliesTo.length > 0 && !appliesTo.includes(operation.publicOperation)) {
-    fail("control_ticket_workflow", `workflow ${workflowId} does not apply to ${operation.publicOperation}`);
+    fail(
+      "control_ticket_workflow",
+      `workflow ${workflowId} does not apply to ${operation.publicOperation}`,
+    );
   }
   const targetNodeIds = canonicalControlStrings(input.targetNodeIds, "control target nodes", true);
   const readNodeIds = canonicalControlStrings(input.readNodeIds, "control read nodes", true);
   const writeNodeIds = canonicalControlStrings(input.writeNodeIds, "control write nodes", true);
   const readPaths = canonicalControlPaths(input.readPaths, "control read paths");
   const writePaths = canonicalControlPaths(input.writePaths, "control write paths");
-  assertExistingControlTargets(input.graph, targetNodeIds, new Set(targetNodeIds), "control ticket");
+  assertExistingControlTargets(
+    input.graph,
+    targetNodeIds,
+    new Set(targetNodeIds),
+    "control ticket",
+  );
   for (const nodeId of [...readNodeIds, ...writeNodeIds]) {
     if (input.graph.node(nodeId) === undefined) {
       fail("control_ticket_scope", `control ticket scope references missing node ${nodeId}`);
@@ -5563,11 +6621,18 @@ function configuredControlTicketDefinition(
   }
   if (
     rawSteps.length !== workflowSemantics.steps.length ||
-    rawSteps.some((raw, index) =>
-      requiredNonempty(requiredRecord(raw, `workflow ${workflowId} step ${index}`).id, `workflow ${workflowId} step id`) !==
-        workflowSemantics.steps[index]?.id)
+    rawSteps.some(
+      (raw, index) =>
+        requiredNonempty(
+          requiredRecord(raw, `workflow ${workflowId} step ${index}`).id,
+          `workflow ${workflowId} step id`,
+        ) !== workflowSemantics.steps[index]?.id,
+    )
   ) {
-    fail("control_ticket_workflow", `workflow ${workflowId} differs from its pinned semantic step catalog`);
+    fail(
+      "control_ticket_workflow",
+      `workflow ${workflowId} differs from its pinned semantic step catalog`,
+    );
   }
   const parsed = rawSteps.map((raw, index) => {
     const step = requiredRecord(raw, `workflow ${workflowId} step ${index}`);
@@ -5578,109 +6643,173 @@ function configuredControlTicketDefinition(
   const evaluator = new GraphExpressionEvaluator(input.configuration, input.graph);
   const workflow = evaluator.withBinding("target", targetNodeIds, () =>
     evaluator.withBinding("ticket_read_scope", readNodeIds, () =>
-      evaluator.withBinding("ticket_write_scope", writeNodeIds, () => parsed.map(({ step, id, index }) => {
-        const semantic = workflowSemantics.steps[index]!;
-        const stepReadNodeIds = [...evaluator.select(
-          (step.read_scope ?? { variable: "ticket_read_scope" }) as ConfigurationValue,
-          `/registries/workflows/${workflowId}/steps/${index}/read_scope`,
-        )];
-        const stepWriteNodeIds = [...evaluator.select(
-          (step.write_scope ?? { variable: "ticket_write_scope" }) as ConfigurationValue,
-          `/registries/workflows/${workflowId}/steps/${index}/write_scope`,
-        )];
-        if (!isControlSubset(stepReadNodeIds, readNodeIds) || !isControlSubset(stepWriteNodeIds, writeNodeIds)) {
-          fail("control_ticket_step_scope", `workflow ${workflowId} step ${id} exceeds the ticket graph scope`);
-        }
-        const stepReadPaths = step.read_paths === undefined
-          ? undefined
-          : resolveConfiguredControlPathScopes(
-              configuredArray(step.read_paths, `workflow ${workflowId} step ${id} read_paths`),
-              evaluator,
-              `workflow ${workflowId} step ${id} read_paths`,
+      evaluator.withBinding("ticket_write_scope", writeNodeIds, () =>
+        parsed.map(({ step, id, index }) => {
+          const semantic = workflowSemantics.steps[index]!;
+          const stepReadNodeIds = [
+            ...evaluator.select(
+              (step.read_scope ?? { variable: "ticket_read_scope" }) as ConfigurationValue,
+              `/registries/workflows/${workflowId}/steps/${index}/read_scope`,
+            ),
+          ];
+          const stepWriteNodeIds = [
+            ...evaluator.select(
+              (step.write_scope ?? { variable: "ticket_write_scope" }) as ConfigurationValue,
+              `/registries/workflows/${workflowId}/steps/${index}/write_scope`,
+            ),
+          ];
+          if (
+            !isControlSubset(stepReadNodeIds, readNodeIds) ||
+            !isControlSubset(stepWriteNodeIds, writeNodeIds)
+          ) {
+            fail(
+              "control_ticket_step_scope",
+              `workflow ${workflowId} step ${id} exceeds the ticket graph scope`,
             );
-        const stepWritePaths = step.write_paths === undefined
-          ? undefined
-          : resolveConfiguredControlPathScopes(
-              configuredArray(step.write_paths, `workflow ${workflowId} step ${id} write_paths`),
-              evaluator,
-              `workflow ${workflowId} step ${id} write_paths`,
+          }
+          const stepReadPaths =
+            step.read_paths === undefined
+              ? undefined
+              : resolveConfiguredControlPathScopes(
+                  configuredArray(step.read_paths, `workflow ${workflowId} step ${id} read_paths`),
+                  evaluator,
+                  `workflow ${workflowId} step ${id} read_paths`,
+                );
+          const stepWritePaths =
+            step.write_paths === undefined
+              ? undefined
+              : resolveConfiguredControlPathScopes(
+                  configuredArray(
+                    step.write_paths,
+                    `workflow ${workflowId} step ${id} write_paths`,
+                  ),
+                  evaluator,
+                  `workflow ${workflowId} step ${id} write_paths`,
+                );
+          for (const selected of stepReadPaths ?? []) {
+            if (!controlPathCovered(selected, readPaths)) {
+              fail(
+                "control_ticket_step_scope",
+                `workflow ${workflowId} step ${id} read path ${selected} exceeds ticket scope`,
+              );
+            }
+          }
+          for (const selected of stepWritePaths ?? []) {
+            if (!controlPathCovered(selected, writePaths)) {
+              fail(
+                "control_ticket_step_scope",
+                `workflow ${workflowId} step ${id} write path ${selected} exceeds ticket scope`,
+              );
+            }
+          }
+          const kind = optionalString(step.kind) ?? "production";
+          if (!["production", "integration", "review", "agent", "manual"].includes(kind)) {
+            fail(
+              "control_ticket_step_kind",
+              `workflow ${workflowId} step ${id} has unsupported kind ${kind}`,
             );
-        for (const selected of stepReadPaths ?? []) {
-          if (!controlPathCovered(selected, readPaths)) {
-            fail("control_ticket_step_scope", `workflow ${workflowId} step ${id} read path ${selected} exceeds ticket scope`);
           }
-        }
-        for (const selected of stepWritePaths ?? []) {
-          if (!controlPathCovered(selected, writePaths)) {
-            fail("control_ticket_step_scope", `workflow ${workflowId} step ${id} write path ${selected} exceeds ticket scope`);
+          const configuredMutation = optionalString(step.graph_mutation) ?? "allowed";
+          if (!["allowed", "forbidden", "required"].includes(configuredMutation)) {
+            fail(
+              "control_ticket_graph_mutation",
+              `workflow ${workflowId} step ${id} has invalid graph mutation policy`,
+            );
           }
-        }
-        const kind = optionalString(step.kind) ?? "production";
-        if (!["production", "integration", "review", "agent", "manual"].includes(kind)) {
-          fail("control_ticket_step_kind", `workflow ${workflowId} step ${id} has unsupported kind ${kind}`);
-        }
-        const configuredMutation = optionalString(step.graph_mutation) ?? "allowed";
-        if (!["allowed", "forbidden", "required"].includes(configuredMutation)) {
-          fail("control_ticket_graph_mutation", `workflow ${workflowId} step ${id} has invalid graph mutation policy`);
-        }
-        const graphMutation = input.forceGraphMutationForbidden ? "forbidden" : configuredMutation;
-        const dependsOn = stringArray(step.depends_on, `workflow ${workflowId} step ${id} depends_on`);
-        const preserveSourcePathsFrom = semantic.preserveSourcePathsFrom;
-        if (preserveSourcePathsFrom !== undefined && !controlDependsTransitively(id, preserveSourcePathsFrom, parsed)) {
-          fail("control_ticket_preserve_source", `workflow ${workflowId} step ${id} does not depend on ${preserveSourcePathsFrom}`);
-        }
-        const differsReadNodes = canonicalHash(stepReadNodeIds) !== canonicalHash(readNodeIds);
-        const differsWriteNodes = canonicalHash(stepWriteNodeIds) !== canonicalHash(writeNodeIds);
-        const contextMaterial = [
-          input.id,
-          id,
-          readNodeIds,
-          writeNodeIds,
-          readPaths,
-          writePaths,
-          stepReadPaths ?? null,
-          stepWritePaths ?? null,
-          input.configuration.configuration_sha256,
-          preserveSourcePathsFrom ?? null,
-          differsReadNodes ? stepReadNodeIds : null,
-          differsWriteNodes ? stepWriteNodeIds : null,
-          input.forceGraphMutationForbidden,
-        ];
-        return deepFreeze({
-          id,
-          kind: kind as DerivedWorkflowStep["kind"],
-          persona_id: requiredNonempty(step.persona, `workflow ${workflowId} step ${id} persona`),
-          depends_on: Object.freeze(dependsOn),
-          required: true,
-          ...(differsReadNodes ? { read_node_ids: Object.freeze(stepReadNodeIds) } : {}),
-          ...(differsWriteNodes ? { write_node_ids: Object.freeze(stepWriteNodeIds) } : {}),
-          ...(stepReadPaths === undefined ? {} : { read_paths: Object.freeze(stepReadPaths) }),
-          ...(stepWritePaths === undefined ? {} : { write_paths: Object.freeze(stepWritePaths) }),
-          ...(preserveSourcePathsFrom === undefined ? {} : { preserve_source_paths_from: preserveSourcePathsFrom }),
-          expected_outputs: Object.freeze(step.expected_output === undefined
-            ? []
-            : [requiredNonempty(step.expected_output, `workflow ${workflowId} step ${id} expected_output`)]),
-          graph_mutation: graphMutation as DerivedWorkflowStep["graph_mutation"],
-          ...(step.validation_action === undefined
-            ? {}
-            : { validation_action: requiredNonempty(step.validation_action, `workflow ${workflowId} step ${id} validation_action`) }),
-          required_receipts: Object.freeze([...semantic.requiredReceipts]),
-          escalation_triggers: Object.freeze([...semantic.escalationTriggers]),
-          stop_conditions: Object.freeze([...semantic.stopConditions]),
-          validation_checks: Object.freeze([...semantic.validationChecks]),
-          context_sha256: canonicalHash(contextMaterial),
-        } satisfies DerivedWorkflowStep);
-      })),
+          const graphMutation = input.forceGraphMutationForbidden
+            ? "forbidden"
+            : configuredMutation;
+          const dependsOn = stringArray(
+            step.depends_on,
+            `workflow ${workflowId} step ${id} depends_on`,
+          );
+          const preserveSourcePathsFrom = semantic.preserveSourcePathsFrom;
+          if (
+            preserveSourcePathsFrom !== undefined &&
+            !controlDependsTransitively(id, preserveSourcePathsFrom, parsed)
+          ) {
+            fail(
+              "control_ticket_preserve_source",
+              `workflow ${workflowId} step ${id} does not depend on ${preserveSourcePathsFrom}`,
+            );
+          }
+          const differsReadNodes = canonicalHash(stepReadNodeIds) !== canonicalHash(readNodeIds);
+          const differsWriteNodes = canonicalHash(stepWriteNodeIds) !== canonicalHash(writeNodeIds);
+          const contextMaterial = [
+            input.id,
+            id,
+            readNodeIds,
+            writeNodeIds,
+            readPaths,
+            writePaths,
+            stepReadPaths ?? null,
+            stepWritePaths ?? null,
+            input.configuration.configuration_sha256,
+            preserveSourcePathsFrom ?? null,
+            differsReadNodes ? stepReadNodeIds : null,
+            differsWriteNodes ? stepWriteNodeIds : null,
+            input.forceGraphMutationForbidden,
+          ];
+          return deepFreeze({
+            id,
+            kind: kind as DerivedWorkflowStep["kind"],
+            persona_id: requiredNonempty(step.persona, `workflow ${workflowId} step ${id} persona`),
+            depends_on: Object.freeze(dependsOn),
+            required: true,
+            ...(differsReadNodes ? { read_node_ids: Object.freeze(stepReadNodeIds) } : {}),
+            ...(differsWriteNodes ? { write_node_ids: Object.freeze(stepWriteNodeIds) } : {}),
+            ...(stepReadPaths === undefined ? {} : { read_paths: Object.freeze(stepReadPaths) }),
+            ...(stepWritePaths === undefined ? {} : { write_paths: Object.freeze(stepWritePaths) }),
+            ...(preserveSourcePathsFrom === undefined
+              ? {}
+              : { preserve_source_paths_from: preserveSourcePathsFrom }),
+            expected_outputs: Object.freeze(
+              step.expected_output === undefined
+                ? []
+                : [
+                    requiredNonempty(
+                      step.expected_output,
+                      `workflow ${workflowId} step ${id} expected_output`,
+                    ),
+                  ],
+            ),
+            graph_mutation: graphMutation as DerivedWorkflowStep["graph_mutation"],
+            ...(step.validation_action === undefined
+              ? {}
+              : {
+                  validation_action: requiredNonempty(
+                    step.validation_action,
+                    `workflow ${workflowId} step ${id} validation_action`,
+                  ),
+                }),
+            required_receipts: Object.freeze([...semantic.requiredReceipts]),
+            escalation_triggers: Object.freeze([...semantic.escalationTriggers]),
+            stop_conditions: Object.freeze([...semantic.stopConditions]),
+            validation_checks: Object.freeze([...semantic.validationChecks]),
+            context_sha256: canonicalHash(contextMaterial),
+          } satisfies DerivedWorkflowStep);
+        }),
+      ),
     ),
   );
   const reviewFailureReopenFrom = configuredReviewFailureReopen(rawWorkflow, workflowId);
-  if (reviewFailureReopenFrom !== undefined && !workflow.some((step) => step.id === reviewFailureReopenFrom)) {
-    fail("control_ticket_review_rework", `workflow ${workflowId} reopens unknown step ${reviewFailureReopenFrom}`);
+  if (
+    reviewFailureReopenFrom !== undefined &&
+    !workflow.some((step) => step.id === reviewFailureReopenFrom)
+  ) {
+    fail(
+      "control_ticket_review_rework",
+      `workflow ${workflowId} reopens unknown step ${reviewFailureReopenFrom}`,
+    );
   }
   const rawDispatchPriority = rawOperation.dispatch_priority;
-  const dispatchPriority = rawDispatchPriority === undefined
-    ? 0
-    : requireSignedInteger(rawDispatchPriority, `operation ${input.operationId} dispatch_priority`);
+  const dispatchPriority =
+    rawDispatchPriority === undefined
+      ? 0
+      : requireSignedInteger(
+          rawDispatchPriority,
+          `operation ${input.operationId} dispatch_priority`,
+        );
   const material = {
     protocol: "koni.derived-ticket.v1" as const,
     id: requiredNonempty(input.id, "control ticket id"),
@@ -5691,7 +6820,9 @@ function configuredControlTicketDefinition(
     operation: operation.publicOperation,
     operation_registry_id: operation.id,
     operation_dispatch_priority: dispatchPriority,
-    ranking_hints: Object.freeze(stringArray(rawOperation.ranking_hints, `operation ${input.operationId} ranking_hints`)),
+    ranking_hints: Object.freeze(
+      stringArray(rawOperation.ranking_hints, `operation ${input.operationId} ranking_hints`),
+    ),
     title: boundedText(input.title, "control ticket title", 16_384),
     target_node_ids: Object.freeze(targetNodeIds),
     scope: deepFreeze({
@@ -5702,9 +6833,13 @@ function configuredControlTicketDefinition(
     }),
     source_state_key: input.sourceStateKey,
     target_state_key: input.targetStateKey,
-    obligation_keys: Object.freeze(canonicalControlStrings(input.obligationKeys, "control obligations", true)),
+    obligation_keys: Object.freeze(
+      canonicalControlStrings(input.obligationKeys, "control obligations", true),
+    ),
     workflow_id: workflowId,
-    ...(reviewFailureReopenFrom === undefined ? {} : { review_failure_reopen_from: reviewFailureReopenFrom }),
+    ...(reviewFailureReopenFrom === undefined
+      ? {}
+      : { review_failure_reopen_from: reviewFailureReopenFrom }),
     workflow: Object.freeze(workflow),
     configuration_sha256: input.configuration.configuration_sha256,
   };
@@ -5721,8 +6856,15 @@ function controlTicketRecordFromDefinition(input: ControlTicketRecordInput): Tic
     title: input.definition.title,
     summary: boundedText(input.summary, "control ticket summary", 64 * 1024),
     status: input.status,
-    priority: -(input.definition.rule_priority * 1_000 + input.definition.operation_dispatch_priority),
-    dependencyIds: canonicalControlStrings(input.dependencyIds, "control ticket dependencies", true),
+    priority: -(
+      input.definition.rule_priority * 1_000 +
+      input.definition.operation_dispatch_priority
+    ),
+    dependencyIds: canonicalControlStrings(
+      input.dependencyIds,
+      "control ticket dependencies",
+      true,
+    ),
     targetNodeIds: [...input.definition.target_node_ids],
     readNodeIds: [...input.definition.scope.read_node_ids],
     writeNodeIds: [...input.definition.scope.write_node_ids],
@@ -5764,7 +6906,10 @@ function controlTicketRecordFromDefinition(input: ControlTicketRecordInput): Tic
   const workflowId = input.definition.workflow_id;
   const workflow = workflowId === undefined ? undefined : input.catalog.workflows[workflowId];
   if (operation === undefined || workflow === undefined) {
-    fail("control_ticket_authority", `control ticket ${ticket.id} lost its pinned operation or workflow`);
+    fail(
+      "control_ticket_authority",
+      `control ticket ${ticket.id} lost its pinned operation or workflow`,
+    );
   }
   ticket.executionControl!.controlTicketAuthority = createCompilerControlTicketAuthority({
     runId: input.runId,
@@ -5797,21 +6942,28 @@ function configuredControlDefinitionFromTicket(
   let forceGraphMutationForbidden = false;
   if (operation.changeControl.role === "proposal") {
     if (control?.proposalRequest === undefined || control.changeControlScopeNodeIds === undefined) {
-      fail("control_ticket_projection", `proposal ticket ${ticket.id} has no compiler request authority`);
+      fail(
+        "control_ticket_projection",
+        `proposal ticket ${ticket.id} has no compiler request authority`,
+      );
     }
     if (
-      ticket.id !== deterministicControlTicketId("change", {
-        runId: run.id,
-        proposalOperationId: operation.id,
-        requestSha256: control.proposalRequest.requestSha256,
-      }) ||
+      ticket.id !==
+        deterministicControlTicketId("change", {
+          runId: run.id,
+          proposalOperationId: operation.id,
+          requestSha256: control.proposalRequest.requestSha256,
+        }) ||
       (ticket.writeNodeIds?.length ?? 0) !== 0 ||
       ticket.readPaths.length !== 0 ||
       ticket.writePaths.length !== 0 ||
       canonicalHash(ticket.targetNodeIds) !== canonicalHash(control.changeControlScopeNodeIds) ||
       canonicalHash(ticket.readNodeIds ?? []) !== canonicalHash(control.changeControlScopeNodeIds)
     ) {
-      fail("control_ticket_projection", `proposal ticket ${ticket.id} exceeds its bounded read-only control scope`);
+      fail(
+        "control_ticket_projection",
+        `proposal ticket ${ticket.id} exceeds its bounded read-only control scope`,
+      );
     }
     ruleId = "compiler.change-control.proposal";
     sourceStateKey = "upstream-change-requested";
@@ -5822,16 +6974,20 @@ function configuredControlDefinitionFromTicket(
     if (
       control?.sourceProposalTicketId === undefined ||
       control.approvedApplicationSha256 === undefined ||
-      ticket.id !== deterministicControlTicketId("application", {
-        proposalTicketId: control.sourceProposalTicketId,
-        authoritySha256: control.approvedApplicationSha256,
-      }) ||
+      ticket.id !==
+        deterministicControlTicketId("application", {
+          proposalTicketId: control.sourceProposalTicketId,
+          authoritySha256: control.approvedApplicationSha256,
+        }) ||
       canonicalHash(ticket.writeNodeIds ?? []) !== canonicalHash(ticket.targetNodeIds) ||
       canonicalHash(ticket.readNodeIds ?? []) !== canonicalHash(ticket.targetNodeIds) ||
       ticket.readPaths.length !== 0 ||
       ticket.writePaths.length !== 0
     ) {
-      fail("control_ticket_projection", `application ticket ${ticket.id} differs from its approved exact scope`);
+      fail(
+        "control_ticket_projection",
+        `application ticket ${ticket.id} differs from its approved exact scope`,
+      );
     }
     ruleId = "compiler.change-control.application";
     sourceStateKey = "change-approved";
@@ -5842,24 +6998,36 @@ function configuredControlDefinitionFromTicket(
       fail("control_ticket_projection", `terminal resolver ${ticket.id} has no failure authority`);
     }
     if (control.terminalRecovery.failureBindingSha256s.length !== 1) {
-      fail("control_ticket_projection", `terminal resolver ${ticket.id} must bind one immutable failure`);
+      fail(
+        "control_ticket_projection",
+        `terminal resolver ${ticket.id} must bind one immutable failure`,
+      );
     }
-    if (ticket.id !== deterministicControlTicketId("recovery", {
-      runId: run.id,
-      sourceTicketId: control.terminalRecovery.sourceTicketId,
-      failureBindingSha256: control.terminalRecovery.failureBindingSha256s[0],
-      configurationSha256: catalog.configurationSha256,
-      catalogSha256: catalog.sha256,
-      resolverOperationId: operation.id,
-    })) {
-      fail("control_ticket_projection", `terminal resolver ${ticket.id} has a noncanonical identity`);
+    if (
+      ticket.id !==
+      deterministicControlTicketId("recovery", {
+        runId: run.id,
+        sourceTicketId: control.terminalRecovery.sourceTicketId,
+        failureBindingSha256: control.terminalRecovery.failureBindingSha256s[0],
+        configurationSha256: catalog.configurationSha256,
+        catalogSha256: catalog.sha256,
+        resolverOperationId: operation.id,
+      })
+    ) {
+      fail(
+        "control_ticket_projection",
+        `terminal resolver ${ticket.id} has a noncanonical identity`,
+      );
     }
     ruleId = "compiler.change-control.terminal-resolver";
     sourceStateKey = "terminal-failure";
     targetStateKey = "recovered";
     obligations = control.terminalRecovery.failureBindingSha256s;
   } else if (operation.changeControl.role === "disposition") {
-    fail("control_ticket_disposition", `disposition ${operation.id} must never own an executable ticket`);
+    fail(
+      "control_ticket_disposition",
+      `disposition ${operation.id} must never own an executable ticket`,
+    );
   } else {
     return undefined;
   }
@@ -5883,19 +7051,36 @@ function configuredControlDefinitionFromTicket(
   });
   assertTicketDefinitionStable(ticket, definition);
   if (ticket.executionPolicyBinding === undefined) {
-    fail("control_ticket_binding", `control ticket ${ticket.id} has no durable execution-policy binding`);
+    fail(
+      "control_ticket_binding",
+      `control ticket ${ticket.id} has no durable execution-policy binding`,
+    );
   }
-  assertExecutionBindingExact(catalog, ticket.executionPolicyBinding, `control ticket ${ticket.id}`);
+  assertExecutionBindingExact(
+    catalog,
+    ticket.executionPolicyBinding,
+    `control ticket ${ticket.id}`,
+  );
   for (const step of ticket.steps) {
     if (step.executionPolicyBinding === undefined) {
-      fail("control_ticket_binding", `control ticket ${ticket.id} step ${step.id} has no durable policy binding`);
+      fail(
+        "control_ticket_binding",
+        `control ticket ${ticket.id} step ${step.id} has no durable policy binding`,
+      );
     }
-    assertExecutionBindingExact(catalog, step.executionPolicyBinding, `control ticket ${ticket.id} step ${step.id}`);
+    assertExecutionBindingExact(
+      catalog,
+      step.executionPolicyBinding,
+      `control ticket ${ticket.id} step ${step.id}`,
+    );
   }
   return definition;
 }
 
-function configuredReviewFailureReopen(workflow: ConfigurationObject, workflowId: string): string | undefined {
+function configuredReviewFailureReopen(
+  workflow: ConfigurationObject,
+  workflowId: string,
+): string | undefined {
   const direct = optionalString(workflow.review_failure_reopen_from);
   const rawRoutes = workflow.review_failure_routes;
   if (rawRoutes === undefined) return direct;
@@ -5903,10 +7088,18 @@ function configuredReviewFailureReopen(workflow: ConfigurationObject, workflowId
   const routed = Object.entries(routes).flatMap(([id, value]) => {
     const route = requiredRecord(value, `workflow ${workflowId} review route ${id}`);
     if (optionalString(route.disposition) !== "reopen") return [];
-    return [requiredNonempty(route.reopen_from, `workflow ${workflowId} review route ${id} reopen_from`)];
+    return [
+      requiredNonempty(route.reopen_from, `workflow ${workflowId} review route ${id} reopen_from`),
+    ];
   });
-  if (new Set(routed).size > 1 || (direct !== undefined && routed[0] !== undefined && routed[0] !== direct)) {
-    fail("control_ticket_review_rework", `workflow ${workflowId} has ambiguous review rework ownership`);
+  if (
+    new Set(routed).size > 1 ||
+    (direct !== undefined && routed[0] !== undefined && routed[0] !== direct)
+  ) {
+    fail(
+      "control_ticket_review_rework",
+      `workflow ${workflowId} has ambiguous review rework ownership`,
+    );
   }
   return direct ?? routed[0];
 }
@@ -5916,15 +7109,24 @@ function assertControlWorkflowDag(
   steps: readonly { step: Record<string, unknown>; id: string }[],
 ): void {
   const byId = new Map(steps.map((step) => [step.id, step] as const));
-  if (byId.size !== steps.length) fail("control_ticket_workflow", `workflow ${workflowId} has duplicate step ids`);
+  if (byId.size !== steps.length)
+    fail("control_ticket_workflow", `workflow ${workflowId} has duplicate step ids`);
   const visiting = new Set<string>();
   const visited = new Set<string>();
   const visit = (id: string): void => {
-    if (visiting.has(id)) fail("control_ticket_workflow", `workflow ${workflowId} has a dependency cycle at ${id}`);
+    if (visiting.has(id))
+      fail("control_ticket_workflow", `workflow ${workflowId} has a dependency cycle at ${id}`);
     if (visited.has(id)) return;
     visiting.add(id);
-    for (const dependency of stringArray(byId.get(id)!.step.depends_on, `workflow ${workflowId} step ${id} depends_on`)) {
-      if (!byId.has(dependency)) fail("control_ticket_workflow", `workflow ${workflowId} step ${id} depends on unknown ${dependency}`);
+    for (const dependency of stringArray(
+      byId.get(id)!.step.depends_on,
+      `workflow ${workflowId} step ${id} depends_on`,
+    )) {
+      if (!byId.has(dependency))
+        fail(
+          "control_ticket_workflow",
+          `workflow ${workflowId} step ${id} depends on unknown ${dependency}`,
+        );
       visit(dependency);
     }
     visiting.delete(id);
@@ -5942,7 +7144,10 @@ function controlDependsTransitively(
   const seen = new Set<string>();
   const visit = (id: string): boolean => {
     if (!seen.add(id)) return false;
-    for (const dependency of stringArray(byId.get(id)?.depends_on, `workflow step ${id} depends_on`)) {
+    for (const dependency of stringArray(
+      byId.get(id)?.depends_on,
+      `workflow step ${id} depends_on`,
+    )) {
       if (dependency === expected || visit(dependency)) return true;
     }
     return false;
@@ -5964,14 +7169,21 @@ function resolveConfiguredControlPathScopes(
     const projection = requiredRecord(definition, `${label} ${index}`);
     assertExactFields(projection, ["select", "field"], `${label} ${index}`);
     const field = requiredNonempty(projection.field, `${label} ${index} field`);
-    for (const nodeId of evaluator.select(projection.select as ConfigurationValue, `${label} ${index} select`)) {
+    for (const nodeId of evaluator.select(
+      projection.select as ConfigurationValue,
+      `${label} ${index} select`,
+    )) {
       const value = evaluator.field(nodeId, field);
       if (value === undefined) continue;
-      const values = typeof value === "string"
-        ? [value]
-        : Array.isArray(value)
-          ? value.map((item) => requiredNonempty(item, `${label} ${index} projected path`))
-          : fail("control_ticket_path_projection", `${nodeId}.${field} must project a path string or list`);
+      const values =
+        typeof value === "string"
+          ? [value]
+          : Array.isArray(value)
+            ? value.map((item) => requiredNonempty(item, `${label} ${index} projected path`))
+            : fail(
+                "control_ticket_path_projection",
+                `${nodeId}.${field} must project a path string or list`,
+              );
       for (const selected of values) output.add(controlScopePath(selected, `${label} ${index}`));
     }
   }
@@ -5984,13 +7196,21 @@ function configuredArray(value: unknown, label: string): ConfigurationValue[] {
 }
 
 function canonicalControlPaths(values: readonly string[], label: string): string[] {
-  const output = values.map((value, index) => controlScopePath(value, `${label} ${index}`)).sort(compareText);
-  if (new Set(output).size !== output.length) fail("control_ticket_duplicate", `${label} contain duplicates`);
+  const output = values
+    .map((value, index) => controlScopePath(value, `${label} ${index}`))
+    .sort(compareText);
+  if (new Set(output).size !== output.length)
+    fail("control_ticket_duplicate", `${label} contain duplicates`);
   return output;
 }
 
 function controlScopePath(value: string, label: string): string {
-  if (typeof value !== "string" || value.length === 0 || value.includes("\u0000") || /[*?]/u.test(value)) {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.includes("\u0000") ||
+    /[*?]/u.test(value)
+  ) {
     fail("control_ticket_path", `${label} must be a nonempty literal project path`);
   }
   const normalized = value.replaceAll("\\", "/");
@@ -6004,7 +7224,9 @@ function controlScopePath(value: string, label: string): string {
 }
 
 function controlPathCovered(selected: string, scopes: readonly string[]): boolean {
-  return scopes.some((scope) => scope === "." || selected === scope || selected.startsWith(`${scope}/`));
+  return scopes.some(
+    (scope) => scope === "." || selected === scope || selected.startsWith(`${scope}/`),
+  );
 }
 
 function isControlSubset(values: readonly string[], superset: readonly string[]): boolean {
@@ -6012,20 +7234,27 @@ function isControlSubset(values: readonly string[], superset: readonly string[])
   return values.every((value) => allowed.has(value));
 }
 
-function canonicalControlStrings(values: readonly string[], label: string, allowEmpty: boolean): string[] {
+function canonicalControlStrings(
+  values: readonly string[],
+  label: string,
+  allowEmpty: boolean,
+): string[] {
   const output = values.map((value) => requiredNonempty(value, label)).sort(compareText);
-  if (new Set(output).size !== output.length) fail("control_ticket_duplicate", `${label} contain duplicates`);
+  if (new Set(output).size !== output.length)
+    fail("control_ticket_duplicate", `${label} contain duplicates`);
   if (!allowEmpty && output.length === 0) fail("control_ticket_empty", `${label} must be nonempty`);
   return output;
 }
 
 function requireSignedInteger(value: unknown, label: string): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value)) fail("control_ticket_integer", `${label} must be an integer`);
+  if (typeof value !== "number" || !Number.isSafeInteger(value))
+    fail("control_ticket_integer", `${label} must be an integer`);
   return value;
 }
 
 function boundedDigests(values: readonly Sha256Digest[], label: string): Sha256Digest[] {
-  if (values.length === 0 || values.length > 256) fail("control_ticket_digest", `${label} must contain 1..256 hashes`);
+  if (values.length === 0 || values.length > 256)
+    fail("control_ticket_digest", `${label} must contain 1..256 hashes`);
   const output = canonicalControlStrings(values, label, false) as Sha256Digest[];
   for (const value of output) requireDigest(value, label);
   return output;
@@ -6044,7 +7273,10 @@ function controlTicketTitle(prefix: string, summary: string): string {
 }
 
 function assertHashBoundRecord(value: { readonly sha256: Sha256Digest }, label: string): void {
-  if (!isSha256Digest(value.sha256) || canonicalHash(withoutField(value, "sha256")) !== value.sha256) {
+  if (
+    !isSha256Digest(value.sha256) ||
+    canonicalHash(withoutField(value, "sha256")) !== value.sha256
+  ) {
     fail("change_control_hash", `${label} failed its canonical SHA-256 binding`);
   }
 }
@@ -6070,7 +7302,10 @@ function existingChangeControlProposal(ticket: TicketRecord): ExistingChangeCont
   const request = ticket.executionControl?.proposalRequest;
   const scope = ticket.executionControl?.changeControlScopeNodeIds;
   if (request === undefined || scope === undefined) {
-    fail("change_control_proposal_collision", `proposal ${ticket.id} has no exact compiler request metadata`);
+    fail(
+      "change_control_proposal_collision",
+      `proposal ${ticket.id} has no exact compiler request metadata`,
+    );
   }
   return {
     ticketId: ticket.id,
@@ -6095,9 +7330,15 @@ function assertControlTicketTemplate(
     const prior = existingControl?.terminalRecovery?.failureBindingSha256s ?? [];
     const next = expectedControl?.terminalRecovery?.failureBindingSha256s ?? [];
     if (!prior.every((hash) => next.includes(hash))) {
-      fail("control_ticket_failure_binding", `${label} discarded an authenticated terminal failure binding`);
+      fail(
+        "control_ticket_failure_binding",
+        `${label} discarded an authenticated terminal failure binding`,
+      );
     }
-    if (existingControl?.terminalRecovery !== undefined && expectedControl?.terminalRecovery !== undefined) {
+    if (
+      existingControl?.terminalRecovery !== undefined &&
+      expectedControl?.terminalRecovery !== undefined
+    ) {
       existingControl.terminalRecovery.failureBindingSha256s = [...next];
     }
   }
@@ -6132,8 +7373,14 @@ function assertControlTicketTemplate(
     reviewFailureReopenFrom: ticket.reviewFailureReopenFrom ?? null,
     reviewReworkLimit: ticket.reviewReworkLimit ?? null,
   });
-  if (canonicalHash(immutable(existing, existingControl)) !== canonicalHash(immutable(expected, expectedControl))) {
-    fail("control_ticket_collision", `${label} ${expected.id} differs from its deterministic compiler template`);
+  if (
+    canonicalHash(immutable(existing, existingControl)) !==
+    canonicalHash(immutable(expected, expectedControl))
+  ) {
+    fail(
+      "control_ticket_collision",
+      `${label} ${expected.id} differs from its deterministic compiler template`,
+    );
   }
 }
 
@@ -6144,8 +7391,12 @@ function preserveControlTicketCreationAuthority(
 ): void {
   const prior = existing.executionControl?.controlTicketAuthority;
   const projected = expected.executionControl?.controlTicketAuthority;
-  if (prior?.role !== role || projected?.role !== role || prior.causal.role !== role ||
-      projected.causal.role !== role) {
+  if (
+    prior?.role !== role ||
+    projected?.role !== role ||
+    prior.causal.role !== role ||
+    projected.causal.role !== role
+  ) {
     fail("control_ticket_authority", `${role} replay lacks its original compiler authority`);
   }
   const normalize = (authority: typeof prior): unknown => {
@@ -6160,12 +7411,14 @@ function preserveControlTicketCreationAuthority(
       const materialization = { ...causal.materialization } as Record<string, unknown>;
       delete materialization.disposition;
       delete materialization.sha256;
-      (causal as unknown as { materialization: Record<string, unknown> }).materialization = materialization;
+      (causal as unknown as { materialization: Record<string, unknown> }).materialization =
+        materialization;
     } else {
       const reconciliation = { ...causal.reconciliation } as Record<string, unknown>;
       delete reconciliation.disposition;
       delete reconciliation.sha256;
-      (causal as unknown as { reconciliation: Record<string, unknown> }).reconciliation = reconciliation;
+      (causal as unknown as { reconciliation: Record<string, unknown> }).reconciliation =
+        reconciliation;
     }
     const authorityMaterial = copy as unknown as Record<string, unknown>;
     delete authorityMaterial.causal;
@@ -6174,9 +7427,14 @@ function preserveControlTicketCreationAuthority(
     delete authorityMaterial.sha256;
     return { authority: authorityMaterial, causal };
   };
-  if (canonicalHash(normalize(prior)) !== canonicalHash(normalize(projected)) ||
-      canonicalHash(prior.projection) !== canonicalHash(ticketImmutableProjection(expected))) {
-    fail("control_ticket_authority", `${role} replay differs from its original causal compiler authority`);
+  if (
+    canonicalHash(normalize(prior)) !== canonicalHash(normalize(projected)) ||
+    canonicalHash(prior.projection) !== canonicalHash(ticketImmutableProjection(expected))
+  ) {
+    fail(
+      "control_ticket_authority",
+      `${role} replay differs from its original causal compiler authority`,
+    );
   }
   expected.executionControl!.controlTicketAuthority = structuredClone(prior);
 }
@@ -6187,8 +7445,14 @@ function integrationDefinition(
   configuration: CompiledConfiguration,
 ): DerivedTicketDefinition {
   const ticket = run.tickets[assignment.ticketId];
-  if (ticket === undefined || ticket.operationId !== integrationOperation(configuration, run.runTypeId)) {
-    fail("ticket_definition_missing", `ticket ${assignment.ticketId} has no pinned compiler definition`);
+  if (
+    ticket === undefined ||
+    ticket.operationId !== integrationOperation(configuration, run.runTypeId)
+  ) {
+    fail(
+      "ticket_definition_missing",
+      `ticket ${assignment.ticketId} has no pinned compiler definition`,
+    );
   }
   const material = {
     protocol: "koni.derived-ticket.v1" as const,
@@ -6208,44 +7472,67 @@ function integrationDefinition(
     target_state_key: "target-integrated",
     obligation_keys: ["target.integration"],
     workflow_id: "target-integration",
-    workflow: [{
-      id: assignment.stepId,
-      kind: "integration" as const,
-      persona_id: assignment.personaId,
-      depends_on: [],
-      required: true,
-      read_paths: ["."],
-      write_paths: ["."],
-      expected_outputs: ["Conflict-free preservation of both target and run behavior"],
-      graph_mutation: "forbidden" as const,
-      required_receipts: [],
-      escalation_triggers: [],
-      stop_conditions: [],
-      validation_checks: [],
-      context_sha256: canonicalHash([ticket.id, assignment.stepId, run.compiledConfigHash]),
-    }],
+    workflow: [
+      {
+        id: assignment.stepId,
+        kind: "integration" as const,
+        persona_id: assignment.personaId,
+        depends_on: [],
+        required: true,
+        read_paths: ["."],
+        write_paths: ["."],
+        expected_outputs: ["Conflict-free preservation of both target and run behavior"],
+        graph_mutation: "forbidden" as const,
+        required_receipts: [],
+        escalation_triggers: [],
+        stop_conditions: [],
+        validation_checks: [],
+        context_sha256: canonicalHash([ticket.id, assignment.stepId, run.compiledConfigHash]),
+      },
+    ],
     configuration_sha256: configuration.configuration_sha256,
   };
   return deepFreeze({ ...material, definition_sha256: canonicalHash(material) });
 }
 
 function integrationOperation(configuration: CompiledConfiguration, runTypeId: string): string {
-  const runType = requireValidation(resolveCompiledRunType(configuration, runTypeId), "run_type_invalid", "run type disappeared");
-  return optionalString(optionalRecord(runType.document.promotion)?.conflict_operation) ?? "resolve-target-integration";
+  const runType = requireValidation(
+    resolveCompiledRunType(configuration, runTypeId),
+    "run_type_invalid",
+    "run type disappeared",
+  );
+  return (
+    optionalString(optionalRecord(runType.document.promotion)?.conflict_operation) ??
+    "resolve-target-integration"
+  );
 }
 
 function planningTerminalSchema(graphSeed: TSchema): TSchema {
-  const miniItem = Type.Object({
-    title: Type.String({ minLength: 1, maxLength: 160 }),
-    description: Type.String({ minLength: 1, maxLength: 1_200 }),
-  }, { additionalProperties: false });
-  const domains = Object.fromEntries(PLAN_DOMAINS.map((domain) => [domain, Type.String({ minLength: 1, maxLength: MAX_PLAN_CHARS })]));
-  const concise = Object.fromEntries(PLAN_DOMAINS.map((domain) => [domain, Type.Array(miniItem, { minItems: 1, maxItems: 7 })]));
-  return Type.Object({
-    full: Type.Object(domains, { additionalProperties: false }),
-    concise: Type.Object(concise, { additionalProperties: false }),
-    graphSeed,
-  }, { additionalProperties: false });
+  const miniItem = Type.Object(
+    {
+      title: Type.String({ minLength: 1, maxLength: 160 }),
+      description: Type.String({ minLength: 1, maxLength: 1_200 }),
+    },
+    { additionalProperties: false },
+  );
+  const domains = Object.fromEntries(
+    PLAN_DOMAINS.map((domain) => [
+      domain,
+      Type.String({ minLength: 1, maxLength: MAX_PLAN_CHARS }),
+    ]),
+  );
+  const concise = Object.fromEntries(
+    PLAN_DOMAINS.map((domain) => [domain, Type.Array(miniItem, { minItems: 1, maxItems: 7 })]),
+  );
+  return Type.Object(
+    {
+      title: Type.Optional(Type.String({ minLength: 3, maxLength: 60 })),
+      full: Type.Object(domains, { additionalProperties: false }),
+      concise: Type.Object(concise, { additionalProperties: false }),
+      graphSeed,
+    },
+    { additionalProperties: false },
+  );
 }
 
 interface PlanningGraphSeedContract {
@@ -6254,17 +7541,28 @@ interface PlanningGraphSeedContract {
 }
 
 function leadJudgmentTerminalSchema(): TSchema {
-  return Type.Object({
-    protocol: Type.Literal(LEAD_JUDGMENT_OUTPUT_PROTOCOL),
-    disposition: Type.Union([Type.Literal("proceed"), Type.Literal("blocked")]),
-    summary: Type.String({ minLength: 1, maxLength: 4_096 }),
-  }, { additionalProperties: false });
+  return Type.Object(
+    {
+      protocol: Type.Literal(LEAD_JUDGMENT_OUTPUT_PROTOCOL),
+      disposition: Type.Union([Type.Literal("proceed"), Type.Literal("blocked")]),
+      summary: Type.String({ minLength: 1, maxLength: 4_096 }),
+    },
+    { additionalProperties: false },
+  );
 }
 
-function planningGraphSeedContract(configuration: CompiledConfiguration): PlanningGraphSeedContract {
+function planningGraphSeedContract(
+  configuration: CompiledConfiguration,
+): PlanningGraphSeedContract {
   const initialization = configuration.behavior.profile.initialization;
-  const rootType = requiredNonempty(initialization.rootNodeType, "compiled initialization root node type");
-  const goalField = requiredNonempty(initialization.goalField, "compiled initialization goal field").replace(/^spec\./u, "");
+  const rootType = requiredNonempty(
+    initialization.rootNodeType,
+    "compiled initialization root node type",
+  );
+  const goalField = requiredNonempty(
+    initialization.goalField,
+    "compiled initialization goal field",
+  ).replace(/^spec\./u, "");
   const contextField = requiredNonempty(
     initialization.planningContextField,
     "compiled initialization planning context field",
@@ -6274,8 +7572,12 @@ function planningGraphSeedContract(configuration: CompiledConfiguration): Planni
     "compiled initialization planning seed operation",
   );
   const operation = configuration.registries.operations[operationId];
-  if (operation === undefined) fail("graph_seed_operation", `planning seed operation ${operationId} is missing`);
-  const allowedTypeIds = stringArray(operation.allowed_new_node_types, "planning seed allowed node types");
+  if (operation === undefined)
+    fail("graph_seed_operation", `planning seed operation ${operationId} is missing`);
+  const allowedTypeIds = stringArray(
+    operation.allowed_new_node_types,
+    "planning seed allowed node types",
+  );
   const maximum = optionalSafeInteger(operation.max_new_nodes) ?? 1_024;
   const definition = requireValidation(
     projectGraphSchemaDefinition(configuration),
@@ -6284,18 +7586,27 @@ function planningGraphSeedContract(configuration: CompiledConfiguration): Planni
   );
   const nodeTypes = new Map(definition.nodeTypes.map((nodeType) => [nodeType.id, nodeType]));
   const rootDefinition = nodeTypes.get(rootType);
-  if (rootDefinition === undefined) fail("graph_seed_root_type", `unknown root node type ${rootType}`);
+  if (rootDefinition === undefined)
+    fail("graph_seed_root_type", `unknown root node type ${rootType}`);
   const allowedNodeTypes = allowedTypeIds.map((id) => {
     const nodeType = nodeTypes.get(id);
-    if (nodeType === undefined) fail("graph_seed_node_type", `planning seed operation allows unknown node type ${id}`);
+    if (nodeType === undefined)
+      fail("graph_seed_node_type", `planning seed operation allows unknown node type ${id}`);
     return nodeType;
   });
-  if (allowedNodeTypes.length === 0) fail("graph_seed_node_type", "planning seed operation allows no node types");
+  if (allowedNodeTypes.length === 0)
+    fail("graph_seed_node_type", "planning seed operation allows no node types");
   const participatingTypes = new Set([rootType, ...allowedTypeIds]);
-  const edgeTypes = definition.edgeTypes.filter((edge) =>
-    participatingTypes.has(edge.source) && edge.targets.some((target) => participatingTypes.has(target))
+  const edgeTypes = definition.edgeTypes.filter(
+    (edge) =>
+      participatingTypes.has(edge.source) &&
+      edge.targets.some((target) => participatingTypes.has(target)),
   );
-  const protectedRootFields = new Set([goalField, contextField, ...compilerOwnedSpecFields(rootDefinition)]);
+  const protectedRootFields = new Set([
+    goalField,
+    contextField,
+    ...compilerOwnedSpecFields(rootDefinition),
+  ]);
   const rootFields = planningFieldDefinitions(rootDefinition, protectedRootFields);
   const nodeSchemas = allowedNodeTypes.map((nodeType) => planningNodeSeedSchema(nodeType));
   const relationNames = [...new Set(edgeTypes.map((edge) => edge.relation))].sort(compareText);
@@ -6346,53 +7657,73 @@ function graphSeedSchema(input: {
   relationNames: string[];
   maximum: number;
 }): TSchema {
-  const relation = input.relationNames.length === 0
-    ? Type.String({ minLength: 1, maxLength: 128 })
-    : literalUnion(input.relationNames, {
-      description: "A canonical relation from the compiled graph contract. It must be valid for the selected source and target node types.",
-    });
-  return Type.Object({
-    rootSpec: planningSpecSchema(input.rootDefinition, input.rootFields, {
-      description: "Only declared, agent-authored spec fields merged into the existing run-objective root. This does not declare a local node key; edges reference that objective with the literal $root.",
-    }),
-    nodes: Type.Array(schemaUnion(input.nodeSchemas), {
-      maxItems: input.maximum,
-      description: "Typed semantic nodes introduced by this seed. Every key must be unique and every node must be connected by edges to $root.",
-    }),
-    edges: Type.Array(Type.Object({
-      source: Type.String({
-        minLength: 1,
-        maxLength: 128,
-        description: "Either the literal $root for the existing run objective or a key declared in nodes.",
+  const relation =
+    input.relationNames.length === 0
+      ? Type.String({ minLength: 1, maxLength: 128 })
+      : literalUnion(input.relationNames, {
+          description:
+            "A canonical relation from the compiled graph contract. It must be valid for the selected source and target node types.",
+        });
+  return Type.Object(
+    {
+      rootSpec: planningSpecSchema(input.rootDefinition, input.rootFields, {
+        description:
+          "Only declared, agent-authored spec fields merged into the existing run-objective root. This does not declare a local node key; edges reference that objective with the literal $root.",
       }),
-      relation,
-      target: Type.String({
-        minLength: 1,
-        maxLength: 128,
-        description: "Either the literal $root for the existing run objective or a key declared in nodes.",
+      nodes: Type.Array(schemaUnion(input.nodeSchemas), {
+        maxItems: input.maximum,
+        description:
+          "Typed semantic nodes introduced by this seed. Every key must be unique and every node must be connected by edges to $root.",
       }),
-    }, { additionalProperties: false }), {
-      maxItems: 4_096,
-      description: "Canonical relationships whose endpoints are only $root or keys declared in nodes. Never use a title, rootSpec field, or invented root alias as an endpoint.",
-    }),
-  }, { additionalProperties: false });
+      edges: Type.Array(
+        Type.Object(
+          {
+            source: Type.String({
+              minLength: 1,
+              maxLength: 128,
+              description:
+                "Either the literal $root for the existing run objective or a key declared in nodes.",
+            }),
+            relation,
+            target: Type.String({
+              minLength: 1,
+              maxLength: 128,
+              description:
+                "Either the literal $root for the existing run objective or a key declared in nodes.",
+            }),
+          },
+          { additionalProperties: false },
+        ),
+        {
+          maxItems: 4_096,
+          description:
+            "Canonical relationships whose endpoints are only $root or keys declared in nodes. Never use a title, rootSpec field, or invented root alias as an endpoint.",
+        },
+      ),
+    },
+    { additionalProperties: false },
+  );
 }
 
 function planningNodeSeedSchema(definition: GraphNodeTypeDefinition): TSchema {
-  return Type.Object({
-    key: Type.String({
-      minLength: 1,
-      maxLength: 128,
-      pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
-      description: "Unique local key declared by this node. Do not declare $root or invent another alias for the existing run objective.",
-    }),
-    type: Type.Literal(definition.id, { description: definition.description }),
-    title: Type.String({ minLength: 1, maxLength: 16_384 }),
-    spec: planningSpecSchema(definition, planningFieldDefinitions(definition)),
-  }, {
-    additionalProperties: false,
-    description: `${definition.id}: ${definition.description}`,
-  });
+  return Type.Object(
+    {
+      key: Type.String({
+        minLength: 1,
+        maxLength: 128,
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+        description:
+          "Unique local key declared by this node. Do not declare $root or invent another alias for the existing run objective.",
+      }),
+      type: Type.Literal(definition.id, { description: definition.description }),
+      title: Type.String({ minLength: 1, maxLength: 16_384 }),
+      spec: planningSpecSchema(definition, planningFieldDefinitions(definition)),
+    },
+    {
+      additionalProperties: false,
+      description: `${definition.id}: ${definition.description}`,
+    },
+  );
 }
 
 function planningSpecSchema(
@@ -6401,16 +7732,19 @@ function planningSpecSchema(
   options: Record<string, unknown> = {},
 ): TSchema {
   const properties: Record<string, TSchema> = Object.create(null) as Record<string, TSchema>;
-  for (const [name, field] of Object.entries(fields).sort(([left], [right]) => compareText(left, right))) {
+  for (const [name, field] of Object.entries(fields).sort(([left], [right]) =>
+    compareText(left, right),
+  )) {
     const schema = graphFieldSchema(field);
     properties[name] = field.required === true ? schema : Type.Optional(schema);
   }
   const requiredAny = (definition.required_any ?? [])
     .map((group) => group.filter((name) => Object.hasOwn(fields, name)))
     .filter((group) => group.length > 0);
-  const requirement = requiredAny.length === 0
-    ? ""
-    : ` At least one field from each configured group is required: ${requiredAny.map((group) => `[${group.join(", ")}]`).join("; ")}.`;
+  const requirement =
+    requiredAny.length === 0
+      ? ""
+      : ` At least one field from each configured group is required: ${requiredAny.map((group) => `[${group.join(", ")}]`).join("; ")}.`;
   const description = `${typeof options.description === "string" ? options.description : `Spec for ${definition.id}.`}${requirement}`;
   return Type.Object(properties, { ...options, description, additionalProperties: false });
 }
@@ -6419,7 +7753,9 @@ function planningFieldDefinitions(
   definition: GraphNodeTypeDefinition,
   excluded: ReadonlySet<string> = new Set(compilerOwnedSpecFields(definition)),
 ): Record<string, GraphFieldDefinition> {
-  return Object.fromEntries(Object.entries(definition.fields).filter(([name]) => !excluded.has(name)));
+  return Object.fromEntries(
+    Object.entries(definition.fields).filter(([name]) => !excluded.has(name)),
+  );
 }
 
 function compilerOwnedSpecFields(definition: GraphNodeTypeDefinition): string[] {
@@ -6431,7 +7767,9 @@ function compilerOwnedSpecFields(definition: GraphNodeTypeDefinition): string[] 
 
 function planningFieldContract(fields: Record<string, GraphFieldDefinition>): JsonValue {
   const output: Record<string, JsonValue> = Object.create(null) as Record<string, JsonValue>;
-  for (const [name, field] of Object.entries(fields).sort(([left], [right]) => compareText(left, right))) {
+  for (const [name, field] of Object.entries(fields).sort(([left], [right]) =>
+    compareText(left, right),
+  )) {
     output[name] = graphFieldContract(field);
   }
   return output;
@@ -6442,14 +7780,22 @@ function assignmentMutationContract(
   ticket: DerivedTicketDefinition,
 ): JsonValue {
   const operation = configuration.registries.operations[ticket.operation_registry_id];
-  if (operation === undefined) fail("operation_missing", `ticket ${ticket.id} operation is unavailable`);
+  if (operation === undefined)
+    fail("operation_missing", `ticket ${ticket.id} operation is unavailable`);
   const schema = requireGraphSchema(configuration);
   const allowedNew = stringArray(operation.allowed_new_node_types, "allowed new node types");
-  const allowedExisting = stringArray(operation.allowed_existing_node_types, "allowed existing node types");
+  const allowedExisting = stringArray(
+    operation.allowed_existing_node_types,
+    "allowed existing node types",
+  );
   const participating = new Set([...allowedNew, ...allowedExisting]);
   const nodeTypes = [...participating].sort(compareText).map((id) => {
     const definition = schema.nodeTypes.get(id);
-    if (definition === undefined) fail("operation_node_type", `operation ${ticket.operation_registry_id} allows unknown node type ${id}`);
+    if (definition === undefined)
+      fail(
+        "operation_node_type",
+        `operation ${ticket.operation_registry_id} allows unknown node type ${id}`,
+      );
     return {
       id,
       description: definition.description,
@@ -6467,7 +7813,11 @@ function assignmentMutationContract(
     allowEdgeDeletion: operation.allow_edge_deletion === true,
     nodeTypes,
     canonicalEdges: schema.edgeTypes
-      .filter((edge) => participating.has(edge.source) || edge.targets.some((target) => participating.has(target)))
+      .filter(
+        (edge) =>
+          participating.has(edge.source) ||
+          edge.targets.some((target) => participating.has(target)),
+      )
       .map((edge) => ({
         sourceType: edge.source,
         relation: edge.relation,
@@ -6482,23 +7832,25 @@ function assignmentCompilerOwnedFields(
   ticket: DerivedTicketDefinition,
 ): string[] {
   const operation = configuration.registries.operations[ticket.operation_registry_id];
-  if (operation === undefined) fail("operation_missing", `ticket ${ticket.id} operation is unavailable`);
+  if (operation === undefined)
+    fail("operation_missing", `ticket ${ticket.id} operation is unavailable`);
   const schema = requireGraphSchema(configuration);
   const participating = new Set([
     ...stringArray(operation.allowed_new_node_types, "allowed new node types"),
     ...stringArray(operation.allowed_existing_node_types, "allowed existing node types"),
   ]);
-  return [...participating]
-    .sort(compareText)
-    .flatMap((nodeType) => {
-      const definition = schema.nodeTypes.get(nodeType);
-      if (definition === undefined) {
-        fail("operation_node_type", `operation ${ticket.operation_registry_id} allows unknown node type ${nodeType}`);
-      }
-      return Object.keys(compilerFieldSourcesForNodeType(definition))
-        .sort(compareText)
-        .map((field) => `${nodeType}.${field}`);
-    });
+  return [...participating].sort(compareText).flatMap((nodeType) => {
+    const definition = schema.nodeTypes.get(nodeType);
+    if (definition === undefined) {
+      fail(
+        "operation_node_type",
+        `operation ${ticket.operation_registry_id} allows unknown node type ${nodeType}`,
+      );
+    }
+    return Object.keys(compilerFieldSourcesForNodeType(definition))
+      .sort(compareText)
+      .map((field) => `${nodeType}.${field}`);
+  });
 }
 
 function reviewPredecessorHasCommandEvidence(
@@ -6537,7 +7889,8 @@ function boundedHistoricalPreparationCheck(
       content: prefix,
       includedBytes: Buffer.byteLength(prefix, "utf8"),
       truncated: true,
-      omission: "Authenticated historical stream was truncated to the bounded cross-ticket evidence budget.",
+      omission:
+        "Authenticated historical stream was truncated to the bounded cross-ticket evidence budget.",
     };
   };
   const commands = Array.isArray(check.commands)
@@ -6567,8 +7920,12 @@ function graphFieldContract(field: GraphFieldDefinition): JsonValue {
     ...(field.pattern === undefined ? {} : { pattern: field.pattern }),
     ...(field.description === undefined ? {} : { description: field.description }),
     ...(field.items === undefined ? {} : { items: graphFieldContract(field.items) }),
-    ...(field.properties === undefined ? {} : { properties: planningFieldContract(field.properties) }),
-    ...(field.additional_properties === undefined ? {} : { additionalProperties: field.additional_properties }),
+    ...(field.properties === undefined
+      ? {}
+      : { properties: planningFieldContract(field.properties) }),
+    ...(field.additional_properties === undefined
+      ? {}
+      : { additionalProperties: field.additional_properties }),
     ...(field.unique_by === undefined ? {} : { uniqueBy: field.unique_by }),
     ...(field.subset_of === undefined ? {} : { subsetOf: field.subset_of }),
     ...(field.disjoint_from === undefined ? {} : { disjointFrom: field.disjoint_from }),
@@ -6585,11 +7942,15 @@ function graphFieldSchema(field: GraphFieldDefinition): TSchema {
       }
       return [];
     });
-    if (variants.length === field.enum.length && variants.length > 0) return schemaUnion(variants, description);
+    if (variants.length === field.enum.length && variants.length > 0)
+      return schemaUnion(variants, description);
   }
   switch (field.type) {
     case "string":
-      return Type.String({ ...description, ...(field.pattern === undefined ? {} : { pattern: field.pattern }) });
+      return Type.String({
+        ...description,
+        ...(field.pattern === undefined ? {} : { pattern: field.pattern }),
+      });
     case "path":
     case "node_ref":
       return Type.String(description);
@@ -6600,11 +7961,17 @@ function graphFieldSchema(field: GraphFieldDefinition): TSchema {
     case "integer":
       return Type.Integer(description);
     case "list":
-      return Type.Array(field.items === undefined ? Type.Unknown() : graphFieldSchema(field.items), description);
+      return Type.Array(
+        field.items === undefined ? Type.Unknown() : graphFieldSchema(field.items),
+        description,
+      );
     case "object": {
-      if (field.properties === undefined) return Type.Record(Type.String(), Type.Unknown(), description);
+      if (field.properties === undefined)
+        return Type.Record(Type.String(), Type.Unknown(), description);
       const properties: Record<string, TSchema> = Object.create(null) as Record<string, TSchema>;
-      for (const [name, child] of Object.entries(field.properties).sort(([left], [right]) => compareText(left, right))) {
+      for (const [name, child] of Object.entries(field.properties).sort(([left], [right]) =>
+        compareText(left, right),
+      )) {
         const schema = graphFieldSchema(child);
         properties[name] = child.required === true ? schema : Type.Optional(schema);
       }
@@ -6619,11 +7986,14 @@ function graphFieldSchema(field: GraphFieldDefinition): TSchema {
 }
 
 function literalUnion(values: string[], options: Record<string, unknown> = {}): TSchema {
-  return schemaUnion(values.map((value) => Type.Literal(value)), options);
+  return schemaUnion(
+    values.map((value) => Type.Literal(value)),
+    options,
+  );
 }
 
 function schemaUnion(schemas: TSchema[], options: Record<string, unknown> = {}): TSchema {
-  if (schemas.length === 1) return { ...schemas[0], ...options } as TSchema;
+  if (schemas.length === 1) return { ...schemas[0], ...options };
   return Type.Union(schemas, options);
 }
 
@@ -6635,118 +8005,195 @@ function assignmentTerminalSchema(
     requireChangeApplication: false,
   },
 ): TSchema {
-  const graphDelta = Type.Object({
-    protocol: Type.Literal("koni.graph-delta.v1"),
-    expectedGraphHash: Type.String({ pattern: "^sha256:[0-9a-f]{64}$" }),
-    upsertNodes: Type.Array(Type.Object({
-      node: Type.Object({
-        schema_version: Type.Literal("1.0"),
-        id: Type.String({ minLength: 1, maxLength: 128 }),
-        type: Type.String({ minLength: 1, maxLength: 128 }),
-        title: Type.String({ minLength: 1, maxLength: 16_384 }),
-        status: Type.String({ minLength: 1, maxLength: 128 }),
-        spec: Type.Record(Type.String({ minLength: 1, maxLength: 256 }), Type.Unknown()),
-        edges: Type.Record(Type.String({ minLength: 1, maxLength: 128 }), Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { uniqueItems: true })),
-        annotations: Type.Record(Type.String({ minLength: 1, maxLength: 256 }), Type.Unknown()),
-      }, { additionalProperties: false }),
-      expectedNodeHash: Type.Union([Type.String({ pattern: "^sha256:[0-9a-f]{64}$" }), Type.Null()]),
-    }, { additionalProperties: false }), { maxItems: 1_024 }),
-    deleteNodes: Type.Array(Type.Object({
-      id: Type.String({ minLength: 1, maxLength: 128 }),
-      expectedNodeHash: Type.String({ pattern: "^sha256:[0-9a-f]{64}$" }),
-    }, { additionalProperties: false }), { maxItems: 1_024 }),
-    addEdges: Type.Array(edgeSchema(), { maxItems: 4_096 }),
-    removeEdges: Type.Array(edgeSchema(), { maxItems: 4_096 }),
-  }, { additionalProperties: false });
+  const graphDelta = Type.Object(
+    {
+      protocol: Type.Literal("koni.graph-delta.v1"),
+      expectedGraphHash: Type.String({ pattern: "^sha256:[0-9a-f]{64}$" }),
+      upsertNodes: Type.Array(
+        Type.Object(
+          {
+            node: Type.Object(
+              {
+                schema_version: Type.Literal("1.0"),
+                id: Type.String({ minLength: 1, maxLength: 128 }),
+                type: Type.String({ minLength: 1, maxLength: 128 }),
+                title: Type.String({ minLength: 1, maxLength: 16_384 }),
+                status: Type.String({ minLength: 1, maxLength: 128 }),
+                spec: Type.Record(Type.String({ minLength: 1, maxLength: 256 }), Type.Unknown()),
+                edges: Type.Record(
+                  Type.String({ minLength: 1, maxLength: 128 }),
+                  Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { uniqueItems: true }),
+                ),
+                annotations: Type.Record(
+                  Type.String({ minLength: 1, maxLength: 256 }),
+                  Type.Unknown(),
+                ),
+              },
+              { additionalProperties: false },
+            ),
+            expectedNodeHash: Type.Union([
+              Type.String({ pattern: "^sha256:[0-9a-f]{64}$" }),
+              Type.Null(),
+            ]),
+          },
+          { additionalProperties: false },
+        ),
+        { maxItems: 1_024 },
+      ),
+      deleteNodes: Type.Array(
+        Type.Object(
+          {
+            id: Type.String({ minLength: 1, maxLength: 128 }),
+            expectedNodeHash: Type.String({ pattern: "^sha256:[0-9a-f]{64}$" }),
+          },
+          { additionalProperties: false },
+        ),
+        { maxItems: 1_024 },
+      ),
+      addEdges: Type.Array(edgeSchema(), { maxItems: 4_096 }),
+      removeEdges: Type.Array(edgeSchema(), { maxItems: 4_096 }),
+    },
+    { additionalProperties: false },
+  );
   const baseCompleteFields: Record<string, TSchema> = {
     status: Type.Literal("completed", {
-      description: 'Required. The exact literal string "completed" (not "success"/"done"/"ok"/a hash) — use it when the step succeeded.',
+      description:
+        'Required. The exact literal string "completed" (not "success"/"done"/"ok"/a hash) — use it when the step succeeded.',
     }),
     summary: Type.String({
       minLength: 1,
       maxLength: 1_024,
-      description: "One concise sentence describing what this step accomplished. Plain text, at most 1024 characters.",
+      description:
+        "One concise sentence describing what this step accomplished. Plain text, at most 1024 characters.",
     }),
   };
   const normalFields = { ...baseCompleteFields };
   if (policy === "required") normalFields.graphDelta = graphDelta;
-  else if (policy === "allowed") normalFields.graphDelta = Type.Optional(Type.Union([graphDelta, Type.Null()]));
+  else if (policy === "allowed")
+    normalFields.graphDelta = Type.Optional(Type.Union([graphDelta, Type.Null()]));
   const complete: TSchema[] = [];
   if (!changeControl.requireChangeApplication) {
     complete.push(Type.Object(normalFields, { additionalProperties: false }));
   }
   if (changeControl.allowUpstreamRequest) {
-    complete.push(Type.Object({
-      ...baseCompleteFields,
-      upstreamChangeRequest: Type.Object({
-        targetNodeIds: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), {
-          minItems: 1,
-          maxItems: 1_024,
-          uniqueItems: true,
-        }),
-        summary: Type.String({ minLength: 1, maxLength: 1_024 }),
-        reason: Type.String({ minLength: 1, maxLength: 4_096 }),
-      }, { additionalProperties: false }),
-    }, { additionalProperties: false }));
+    complete.push(
+      Type.Object(
+        {
+          ...baseCompleteFields,
+          upstreamChangeRequest: Type.Object(
+            {
+              targetNodeIds: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), {
+                minItems: 1,
+                maxItems: 1_024,
+                uniqueItems: true,
+              }),
+              summary: Type.String({ minLength: 1, maxLength: 1_024 }),
+              reason: Type.String({ minLength: 1, maxLength: 4_096 }),
+            },
+            { additionalProperties: false },
+          ),
+        },
+        { additionalProperties: false },
+      ),
+    );
   }
   if (changeControl.requireChangeApplication) {
-    complete.push(Type.Object({
-      ...baseCompleteFields,
-      changeApplication: Type.Object({
-        operation: Type.String({ minLength: 1, maxLength: 128 }),
-        targetNodeIds: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), {
-          minItems: 1,
-          maxItems: 1_024,
-          uniqueItems: true,
-        }),
-        summary: Type.String({ minLength: 1, maxLength: 1_024 }),
-      }, { additionalProperties: false }),
-    }, { additionalProperties: false }));
+    complete.push(
+      Type.Object(
+        {
+          ...baseCompleteFields,
+          changeApplication: Type.Object(
+            {
+              operation: Type.String({ minLength: 1, maxLength: 128 }),
+              targetNodeIds: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), {
+                minItems: 1,
+                maxItems: 1_024,
+                uniqueItems: true,
+              }),
+              summary: Type.String({ minLength: 1, maxLength: 1_024 }),
+            },
+            { additionalProperties: false },
+          ),
+        },
+        { additionalProperties: false },
+      ),
+    );
   }
-  const failed = Type.Object({
-    status: Type.Literal("failed", {
-      description: 'Required. The exact literal string "failed" — use it only when the objective is genuinely impossible within this grant, not to probe the schema.',
-    }),
-    blocker: Type.String({
-      minLength: 1,
-      maxLength: 64 * 1024,
-      description: "A specific, self-contained diagnosis: the exact obstacle, what you tried (edits, checks and their output), and why nothing in your grant can resolve it. Never a placeholder such as \"test\" or \"probe\".",
-    }),
-  }, { additionalProperties: false });
+  const failed = Type.Object(
+    {
+      status: Type.Literal("failed", {
+        description:
+          'Required. The exact literal string "failed" — use it only when the objective is genuinely impossible within this grant, not to probe the schema.',
+      }),
+      blocker: Type.String({
+        minLength: 1,
+        maxLength: 64 * 1024,
+        description:
+          'A specific, self-contained diagnosis: the exact obstacle, what you tried (edits, checks and their output), and why nothing in your grant can resolve it. Never a placeholder such as "test" or "probe".',
+      }),
+    },
+    { additionalProperties: false },
+  );
   return Type.Union([...complete, failed]);
 }
 
 function edgeSchema(): TSchema {
-  return Type.Object({
-    source: Type.String({ minLength: 1, maxLength: 128 }),
-    relation: Type.String({ minLength: 1, maxLength: 128 }),
-    target: Type.String({ minLength: 1, maxLength: 128 }),
-  }, { additionalProperties: false });
+  return Type.Object(
+    {
+      source: Type.String({ minLength: 1, maxLength: 128 }),
+      relation: Type.String({ minLength: 1, maxLength: 128 }),
+      target: Type.String({ minLength: 1, maxLength: 128 }),
+    },
+    { additionalProperties: false },
+  );
 }
 
 function parsePlanningOutput(value: unknown): PlanningOutput {
   const root = requiredRecord(value, "planning output");
-  assertExactFields(root, ["full", "concise", "graphSeed"], "planning output");
+  assertAllowedFields(root, ["full", "concise", "graphSeed", "title"], "planning output");
+  for (const key of ["full", "concise", "graphSeed"] as const) {
+    if (!Object.hasOwn(root, key)) fail("missing_field", `planning output is missing ${key}`);
+  }
+  const title =
+    root.title === undefined
+      ? undefined
+      : boundedText(root.title, "plan title", 60).replace(/\s+/gu, " ").trim();
+  if (title !== undefined && title.length < 3)
+    fail("plan_title", "plan title must be at least 3 characters");
   const full = parsePlanTextRecord(requiredRecord(root.full, "full plans"), "full plans");
   const conciseSource = requiredRecord(root.concise, "concise plans");
   assertExactFields(conciseSource, PLAN_DOMAINS, "concise plans");
-  const concise = Object.create(null) as Record<PlanDomain, { title: string; description: string }[]>;
+  const concise = Object.create(null) as Record<
+    PlanDomain,
+    { title: string; description: string }[]
+  >;
   for (const domain of PLAN_DOMAINS) {
     const raw = conciseSource[domain];
-    if (!Array.isArray(raw) || raw.length < 1 || raw.length > 7) fail("plan_concise_items", `${domain} requires one to seven concise items`);
+    if (!Array.isArray(raw) || raw.length < 1 || raw.length > 7)
+      fail("plan_concise_items", `${domain} requires one to seven concise items`);
     const titles = new Set<string>();
     concise[domain] = raw.map((item, index) => {
       const record = requiredRecord(item, `${domain} concise item ${index}`);
       assertExactFields(record, ["title", "description"], `${domain} concise item ${index}`);
       const title = boundedText(record.title, `${domain} concise title`, 160).trim();
-      const description = boundedText(record.description, `${domain} concise description`, 1_200).trim();
+      const description = boundedText(
+        record.description,
+        `${domain} concise description`,
+        1_200,
+      ).trim();
       const key = title.toLocaleLowerCase("en-US");
-      if (titles.has(key)) fail("plan_concise_duplicate", `${domain} contains duplicate concise title ${title}`);
+      if (titles.has(key))
+        fail("plan_concise_duplicate", `${domain} contains duplicate concise title ${title}`);
       titles.add(key);
       return { title, description };
     });
   }
-  return { full, concise, graphSeed: parsePlanningSeed(root.graphSeed) };
+  return {
+    ...(title === undefined ? {} : { title }),
+    full,
+    concise,
+    graphSeed: parsePlanningSeed(root.graphSeed),
+  };
 }
 
 function parsePlanTextRecord(value: unknown, label: string): Record<PlanDomain, string> {
@@ -6759,7 +8206,8 @@ function parsePlanTextRecord(value: unknown, label: string): Record<PlanDomain, 
     total += text.length;
     output[domain] = text;
   }
-  if (total > 4 * MAX_PLAN_CHARS) fail("plan_size", "combined full plans exceed their bounded allowance");
+  if (total > 4 * MAX_PLAN_CHARS)
+    fail("plan_size", "combined full plans exceed their bounded allowance");
   return output;
 }
 
@@ -6767,14 +8215,17 @@ function parsePlanningSeed(value: unknown): PlanningGraphSeed {
   const root = requiredRecord(value, "graph seed");
   assertExactFields(root, ["rootSpec", "nodes", "edges"], "graph seed");
   const rootSpec = jsonRecord(root.rootSpec, "graph seed rootSpec");
-  if (!Array.isArray(root.nodes) || root.nodes.length > 1_024) fail("graph_seed_nodes", "graph seed nodes are invalid or oversized");
-  if (!Array.isArray(root.edges) || root.edges.length > 4_096) fail("graph_seed_edges", "graph seed edges are invalid or oversized");
+  if (!Array.isArray(root.nodes) || root.nodes.length > 1_024)
+    fail("graph_seed_nodes", "graph seed nodes are invalid or oversized");
+  if (!Array.isArray(root.edges) || root.edges.length > 4_096)
+    fail("graph_seed_edges", "graph seed edges are invalid or oversized");
   const keys = new Set<string>();
   const nodes = root.nodes.map((item, index) => {
     const node = requiredRecord(item, `graph seed node ${index}`);
     assertExactFields(node, ["key", "type", "title", "spec"], `graph seed node ${index}`);
     const key = requiredNonempty(node.key, "graph seed node key");
-    if (!SAFE_LOCAL_KEY.test(key) || key === "$root" || keys.has(key)) fail("graph_seed_key", `invalid or duplicate graph seed key ${key}`);
+    if (!SAFE_LOCAL_KEY.test(key) || key === "$root" || keys.has(key))
+      fail("graph_seed_key", `invalid or duplicate graph seed key ${key}`);
     keys.add(key);
     return {
       key,
@@ -6792,22 +8243,25 @@ function parsePlanningSeed(value: unknown): PlanningGraphSeed {
       relation: requiredNonempty(edge.relation, "graph seed edge relation"),
       target: requiredNonempty(edge.target, "graph seed edge target"),
     };
-    const unknownKeys = [...new Set([parsed.source, parsed.target].filter(
-      (key) => key !== "$root" && !keys.has(key),
-    ))];
+    const unknownKeys = [
+      ...new Set([parsed.source, parsed.target].filter((key) => key !== "$root" && !keys.has(key))),
+    ];
     if (unknownKeys.length > 0) {
       fail(
         "graph_seed_edge_key",
         `graph seed edge ${index} references unknown local ${unknownKeys.length === 1 ? "key" : "keys"}: ${unknownKeys.join(", ")}; use $root for the existing run objective`,
       );
     }
-    if (parsed.source === parsed.target) fail("graph_seed_self_edge", "graph seed edge may not self-reference");
+    if (parsed.source === parsed.target)
+      fail("graph_seed_self_edge", "graph seed edge may not self-reference");
     const identity = `${parsed.source}\u0000${parsed.relation}\u0000${parsed.target}`;
-    if (edgeKeys.has(identity)) fail("graph_seed_edge_duplicate", "graph seed contains a duplicate relationship");
+    if (edgeKeys.has(identity))
+      fail("graph_seed_edge_duplicate", "graph seed contains a duplicate relationship");
     edgeKeys.add(identity);
     return parsed;
   });
-  if (Object.keys(rootSpec).length === 0 && nodes.length === 0) fail("graph_seed_empty", "graph seed must enrich the root or add at least one typed node");
+  if (Object.keys(rootSpec).length === 0 && nodes.length === 0)
+    fail("graph_seed_empty", "graph seed must enrich the root or add at least one typed node");
   ensureSeedConnected(keys, edges);
   return { rootSpec, nodes, edges };
 }
@@ -6821,53 +8275,77 @@ function compilePlanningSeed(
 ): TypedGraph {
   const schema = requireGraphSchema(configuration);
   const initialization = configuration.behavior.profile.initialization;
-  const rootType = requiredNonempty(initialization.rootNodeType, "compiled initialization root node type");
-  const goalField = requiredNonempty(initialization.goalField, "compiled initialization goal field").replace(/^spec\./u, "");
+  const rootType = requiredNonempty(
+    initialization.rootNodeType,
+    "compiled initialization root node type",
+  );
+  const goalField = requiredNonempty(
+    initialization.goalField,
+    "compiled initialization goal field",
+  ).replace(/^spec\./u, "");
   const contextField = requiredNonempty(
     initialization.planningContextField,
     "compiled initialization planning context field",
   ).replace(/^spec\./u, "");
   if (Object.hasOwn(seed.rootSpec, goalField) || Object.hasOwn(seed.rootSpec, contextField)) {
-    fail("graph_seed_protected_root", "graph seed rootSpec may not replace the run goal or compiler planning context");
+    fail(
+      "graph_seed_protected_root",
+      "graph seed rootSpec may not replace the run goal or compiler planning context",
+    );
   }
   const operationId = requiredNonempty(
     initialization.planningSeedOperation,
     "compiled initialization planning seed operation",
   );
   const operation = configuration.registries.operations[operationId];
-  if (operation === undefined) fail("graph_seed_operation", `planning seed operation ${operationId} is missing`);
-  const allowedTypes = new Set(stringArray(operation.allowed_new_node_types, "planning seed allowed node types"));
+  if (operation === undefined)
+    fail("graph_seed_operation", `planning seed operation ${operationId} is missing`);
+  const allowedTypes = new Set(
+    stringArray(operation.allowed_new_node_types, "planning seed allowed node types"),
+  );
   const maximum = optionalSafeInteger(operation.max_new_nodes) ?? 1_024;
-  if (seed.nodes.length > maximum) fail("graph_seed_node_limit", `graph seed exceeds operation limit ${maximum}`);
+  if (seed.nodes.length > maximum)
+    fail("graph_seed_node_limit", `graph seed exceeds operation limit ${maximum}`);
   const rootDefinition = schema.nodeTypes.get(rootType);
-  if (rootDefinition === undefined) fail("graph_seed_root_type", `unknown root node type ${rootType}`);
+  if (rootDefinition === undefined)
+    fail("graph_seed_root_type", `unknown root node type ${rootType}`);
   const rootId = `root-${digestBody(canonicalHash([run.id, rootType])).slice(0, 20)}`;
   const ids = new Map<string, string>([["$root", rootId]]);
   for (const node of seed.nodes) {
-    if (!allowedTypes.has(node.type)) fail("graph_seed_node_type", `planning seed operation does not allow ${node.type}`);
-    ids.set(node.key, `${node.type}-${digestBody(canonicalHash([run.id, node.key, node.type])).slice(0, 20)}`);
+    if (!allowedTypes.has(node.type))
+      fail("graph_seed_node_type", `planning seed operation does not allow ${node.type}`);
+    ids.set(
+      node.key,
+      `${node.type}-${digestBody(canonicalHash([run.id, node.key, node.type])).slice(0, 20)}`,
+    );
   }
-  const nodes: GraphNode[] = [{
-    schema_version: "1.0",
-    id: rootId,
-    type: rootType,
-    title: run.objective,
-    status: requiredNonempty(initialization.rootStatus, "compiled initialization root status"),
-    spec: {
-      [goalField]: run.objective,
-      ...structuredClone(seed.rootSpec),
-      [contextField]: {
-        protocol: "koni.approved-planning-context.v1",
-        fullPlanSha256: canonicalHash(fullPlan),
-        runTypeId: run.runTypeId,
+  const nodes: GraphNode[] = [
+    {
+      schema_version: "1.0",
+      id: rootId,
+      type: rootType,
+      title: run.objective,
+      status: requiredNonempty(initialization.rootStatus, "compiled initialization root status"),
+      spec: {
+        [goalField]: run.objective,
+        ...structuredClone(seed.rootSpec),
+        [contextField]: {
+          protocol: "koni.approved-planning-context.v1",
+          fullPlanSha256: canonicalHash(fullPlan),
+          runTypeId: run.runTypeId,
+        },
       },
+      edges: {},
+      annotations: {},
     },
-    edges: {},
-    annotations: {},
-  }];
+  ];
   for (const source of seed.nodes) {
     const definition = schema.nodeTypes.get(source.type)!;
-    rejectCompilerOwnedSpec(definition.compiler_owned_fields ?? [], source.spec, `graph seed node ${source.key}`);
+    rejectCompilerOwnedSpec(
+      definition.compiler_owned_fields ?? [],
+      source.spec,
+      `graph seed node ${source.key}`,
+    );
     nodes.push({
       schema_version: "1.0",
       id: ids.get(source.key)!,
@@ -6896,15 +8374,20 @@ function compilePlanningSeed(
     assertConfiguredGraphConstraints(configuration, graph, projectRoot);
     return graph;
   } catch (error) {
-    if (error instanceof GraphValidationError) fail("graph_seed_invalid", "planning graph seed violates its typed schema", error.diagnostics);
+    if (error instanceof GraphValidationError)
+      fail(
+        "graph_seed_invalid",
+        "planning graph seed violates its typed schema",
+        error.diagnostics,
+      );
     throw error;
   }
 }
 
 /**
- * Rust-era direct-approval runs intentionally approved the objective itself: no model plan and no
- * approved planning context were invented. The root-only graph is still fully schema validated so
- * the normal rule compiler can deterministically derive the first research/formulation tickets.
+ * Direct-approval runs approve the objective itself: no model plan or approved planning context is
+ * invented. The root-only graph is still fully schema validated so the normal rule compiler can
+ * deterministically derive the first research/formulation tickets.
  */
 function compileDirectInitialGraph(
   configuration: CompiledConfiguration,
@@ -6913,27 +8396,47 @@ function compileDirectInitialGraph(
 ): TypedGraph {
   const schema = requireGraphSchema(configuration);
   const initialization = configuration.behavior.profile.initialization;
-  const rootType = requiredNonempty(initialization.rootNodeType, "compiled initialization root node type");
-  const goalField = requiredNonempty(initialization.goalField, "compiled initialization goal field").replace(/^spec\./u, "");
+  const rootType = requiredNonempty(
+    initialization.rootNodeType,
+    "compiled initialization root node type",
+  );
+  const goalField = requiredNonempty(
+    initialization.goalField,
+    "compiled initialization goal field",
+  ).replace(/^spec\./u, "");
   const rootDefinition = schema.nodeTypes.get(rootType);
-  if (rootDefinition === undefined) fail("direct_approval_root_type", `unknown root node type ${rootType}`);
+  if (rootDefinition === undefined)
+    fail("direct_approval_root_type", `unknown root node type ${rootType}`);
   const rootId = `root-${digestBody(canonicalHash([run.id, rootType])).slice(0, 20)}`;
   try {
-    const graph = new TypedGraph(schema, [{
-      schema_version: "1.0",
-      id: rootId,
-      type: rootType,
-      title: run.objective,
-      status: requiredNonempty(initialization.rootStatus, "compiled initialization root status"),
-      spec: { [goalField]: run.objective },
-      edges: {},
-      annotations: { run_root: true },
-    }], { projectRoot });
+    const graph = new TypedGraph(
+      schema,
+      [
+        {
+          schema_version: "1.0",
+          id: rootId,
+          type: rootType,
+          title: run.objective,
+          status: requiredNonempty(
+            initialization.rootStatus,
+            "compiled initialization root status",
+          ),
+          spec: { [goalField]: run.objective },
+          edges: {},
+          annotations: { run_root: true },
+        },
+      ],
+      { projectRoot },
+    );
     assertConfiguredGraphConstraints(configuration, graph, projectRoot);
     return graph;
   } catch (error) {
     if (error instanceof GraphValidationError) {
-      fail("direct_approval_graph_invalid", "direct-approval root violates its typed schema", error.diagnostics);
+      fail(
+        "direct_approval_graph_invalid",
+        "direct-approval root violates its typed schema",
+        error.diagnostics,
+      );
     }
     throw error;
   }
@@ -6946,55 +8449,98 @@ function validateAgentGraphDelta(
   step: DerivedWorkflowStep,
   delta: GraphDelta,
 ): void {
-  if (delta.expectedGraphHash !== graph.hash) fail("graph_delta_cas", "agent graph delta targets a stale graph hash");
+  if (delta.expectedGraphHash !== graph.hash)
+    fail("graph_delta_cas", "agent graph delta targets a stale graph hash");
   const operation = configuration.registries.operations[ticket.operation_registry_id];
-  if (operation === undefined && !ticket.rule_id.startsWith("compiler.")) fail("operation_missing", "ticket operation disappeared from pinned config");
+  if (operation === undefined && !ticket.rule_id.startsWith("compiler."))
+    fail("operation_missing", "ticket operation disappeared from pinned config");
   const writable = new Set(step.write_node_ids ?? ticket.scope.write_node_ids);
-  const allowedNew = new Set(stringArray(operation?.allowed_new_node_types, "allowed new node types"));
-  const allowedExisting = new Set(stringArray(operation?.allowed_existing_node_types, "allowed existing node types"));
+  const allowedNew = new Set(
+    stringArray(operation?.allowed_new_node_types, "allowed new node types"),
+  );
+  const allowedExisting = new Set(
+    stringArray(operation?.allowed_existing_node_types, "allowed existing node types"),
+  );
   const schema = requireGraphSchema(configuration);
   let added = 0;
   for (const mutation of delta.upsertNodes) {
     const existing = graph.node(mutation.node.id);
     if (existing === undefined) {
       added += 1;
-      if (!allowedNew.has(mutation.node.type)) fail("graph_delta_new_type", `operation cannot add ${mutation.node.type}`);
+      if (!allowedNew.has(mutation.node.type))
+        fail("graph_delta_new_type", `operation cannot add ${mutation.node.type}`);
       const definition = schema.nodeTypes.get(mutation.node.type);
       if (definition === undefined || mutation.node.status !== definition.initial_status) {
-        fail("graph_delta_new_status", "new graph nodes must carry the compiler-declared initial status");
+        fail(
+          "graph_delta_new_status",
+          "new graph nodes must carry the compiler-declared initial status",
+        );
       }
-      rejectCompilerOwnedSpec(definition.compiler_owned_fields ?? [], mutation.node.spec, `new node ${mutation.node.id}`);
-      if (Object.keys(mutation.node.edges).length > 0 || Object.keys(mutation.node.annotations).length > 0) {
-        fail("graph_delta_embedded_state", "new node relationships and annotations must use dedicated authority tools/edge mutations");
+      rejectCompilerOwnedSpec(
+        definition.compiler_owned_fields ?? [],
+        mutation.node.spec,
+        `new node ${mutation.node.id}`,
+      );
+      if (
+        Object.keys(mutation.node.edges).length > 0 ||
+        Object.keys(mutation.node.annotations).length > 0
+      ) {
+        fail(
+          "graph_delta_embedded_state",
+          "new node relationships and annotations must use dedicated authority tools/edge mutations",
+        );
       }
     } else {
-      if (!writable.has(existing.id)) fail("graph_delta_write_scope", `node ${existing.id} is outside the step write scope`);
-      if (allowedExisting.size > 0 && !allowedExisting.has(existing.type)) fail("graph_delta_existing_type", `operation cannot update ${existing.type}`);
+      if (!writable.has(existing.id))
+        fail("graph_delta_write_scope", `node ${existing.id} is outside the step write scope`);
+      if (allowedExisting.size > 0 && !allowedExisting.has(existing.type))
+        fail("graph_delta_existing_type", `operation cannot update ${existing.type}`);
       if (mutation.node.type !== existing.type || mutation.node.status !== existing.status) {
         fail("graph_delta_compiler_state", "agent graph deltas may not change node type or status");
       }
-      if (canonicalHash(mutation.node.edges) !== canonicalHash(existing.edges) || canonicalHash(mutation.node.annotations) !== canonicalHash(existing.annotations)) {
-        fail("graph_delta_embedded_state", "relationships and annotations must not be smuggled through a node upsert");
+      if (
+        canonicalHash(mutation.node.edges) !== canonicalHash(existing.edges) ||
+        canonicalHash(mutation.node.annotations) !== canonicalHash(existing.annotations)
+      ) {
+        fail(
+          "graph_delta_embedded_state",
+          "relationships and annotations must not be smuggled through a node upsert",
+        );
       }
-      preserveCompilerOwnedSpec(schema.nodeTypes.get(existing.type)?.compiler_owned_fields ?? [], existing, mutation.node);
+      preserveCompilerOwnedSpec(
+        schema.nodeTypes.get(existing.type)?.compiler_owned_fields ?? [],
+        existing,
+        mutation.node,
+      );
     }
   }
   const maximum = optionalSafeInteger(operation?.max_new_nodes) ?? 0;
-  if (added > maximum) fail("graph_delta_new_limit", `operation permits at most ${maximum} new nodes`);
-  if (delta.deleteNodes.length > 0 && operation?.allow_node_deletion !== true) fail("graph_delta_delete", "operation does not allow node deletion");
-  for (const deletion of delta.deleteNodes) if (!writable.has(deletion.id)) fail("graph_delta_write_scope", `node ${deletion.id} is outside the step write scope`);
-  if (delta.removeEdges.length > 0 && operation?.allow_edge_deletion !== true) fail("graph_delta_edge_delete", "operation does not allow relationship deletion");
-  const addedIds = new Set(delta.upsertNodes.filter((item) => item.expectedNodeHash === null).map((item) => item.node.id));
+  if (added > maximum)
+    fail("graph_delta_new_limit", `operation permits at most ${maximum} new nodes`);
+  if (delta.deleteNodes.length > 0 && operation?.allow_node_deletion !== true)
+    fail("graph_delta_delete", "operation does not allow node deletion");
+  for (const deletion of delta.deleteNodes)
+    if (!writable.has(deletion.id))
+      fail("graph_delta_write_scope", `node ${deletion.id} is outside the step write scope`);
+  if (delta.removeEdges.length > 0 && operation?.allow_edge_deletion !== true)
+    fail("graph_delta_edge_delete", "operation does not allow relationship deletion");
+  const addedIds = new Set(
+    delta.upsertNodes.filter((item) => item.expectedNodeHash === null).map((item) => item.node.id),
+  );
   const projected = new Map(graph.nodes().map((node) => [node.id, node]));
   for (const item of delta.upsertNodes) projected.set(item.node.id, item.node);
   for (const edge of [...delta.addEdges, ...delta.removeEdges]) {
     const source = projected.get(edge.source);
     const target = projected.get(edge.target);
-    if (source === undefined || target === undefined) fail("graph_delta_edge_node", "graph edge references a missing node");
+    if (source === undefined || target === undefined)
+      fail("graph_delta_edge_node", "graph edge references a missing node");
     const resolved = schema.resolveEdge(source.type, edge.relation, target.type);
     const canonicalSourceId = resolved.reversed ? target.id : source.id;
     if (!writable.has(canonicalSourceId) && !addedIds.has(canonicalSourceId)) {
-      fail("graph_delta_edge_scope", `relationship source ${canonicalSourceId} is outside the write scope`);
+      fail(
+        "graph_delta_edge_scope",
+        `relationship source ${canonicalSourceId} is outside the write scope`,
+      );
     }
   }
 }
@@ -7037,47 +8583,58 @@ function compilerFieldSourcesForNodeType(
     : {};
 }
 
-function compilerFieldSourceValue(
-  run: RunRecord,
-  source: GraphCompilerFieldSource,
-): JsonValue {
+function compilerFieldSourceValue(run: RunRecord, source: GraphCompilerFieldSource): JsonValue {
   switch (source) {
-    case "run.id": return run.id;
-    case "run.objective": return run.objective;
-    case "run.run_type_id": return run.runTypeId;
-    case "run.git.target.ref": return run.git.target.ref;
+    case "run.id":
+      return run.id;
+    case "run.objective":
+      return run.objective;
+    case "run.run_type_id":
+      return run.runTypeId;
+    case "run.git.target.ref":
+      return run.git.target.ref;
   }
 }
 
 export async function applyReviewEffects(input: {
-  configuration: CompiledConfiguration,
-  graph: TypedGraph,
-  ticket: DerivedTicketDefinition,
-  step: DerivedWorkflowStep,
-  reviewId: string,
-  actor: string,
-  candidateNodeIds: readonly string[],
-  projectRoot: string,
-  evidence?: RuleAuthorityEvidence,
-}): Promise<{ graph: TypedGraph; changes: Array<{ kind: "modified"; nodeId: string; nodeType: string; title: string }> }> {
+  configuration: CompiledConfiguration;
+  graph: TypedGraph;
+  ticket: DerivedTicketDefinition;
+  step: DerivedWorkflowStep;
+  reviewId: string;
+  actor: string;
+  candidateNodeIds: readonly string[];
+  projectRoot: string;
+  evidence?: RuleAuthorityEvidence;
+}): Promise<{
+  graph: TypedGraph;
+  changes: Array<{ kind: "modified"; nodeId: string; nodeType: string; title: string }>;
+}> {
   const { configuration, graph, ticket, step } = input;
   if (step.kind !== "review") return { graph, changes: [] };
   const operation = configuration.registries.operations[ticket.operation_registry_id];
-  if (operation === undefined || !Array.isArray(operation.review_effects)) return { graph, changes: [] };
+  if (operation === undefined || !Array.isArray(operation.review_effects))
+    return { graph, changes: [] };
   let current = graph;
   const changes: Array<{ kind: "modified"; nodeId: string; nodeType: string; title: string }> = [];
   for (const rawEffect of operation.review_effects) {
-    const effect = requiredRecord(rawEffect, `review effect for ${ticket.id}`) as ConfigurationObject;
+    const effect = requiredRecord(
+      rawEffect,
+      `review effect for ${ticket.id}`,
+    ) as ConfigurationObject;
     if (effect.verdict !== "passed") continue;
     const select = requiredRecord(effect.select, "review effect selector");
     const nodeTypes = new Set(stringArray(select.node_types, "review effect node types"));
     const set = requiredRecord(effect.set, "review effect set") as ConfigurationObject;
-    const classified = input.candidateNodeIds.map((id) => current.node(id)).flatMap((node) => {
-      if (node === undefined || (nodeTypes.size > 0 && !nodeTypes.has(node.type))) return [];
-      const pending = predicateMatches(node, optionalRecord(select.predicate));
-      if (!pending && !reviewEffectSetAlreadyApplied(node, set, input.reviewId, input.actor)) return [];
-      return [{ node, pending }];
-    });
+    const classified = input.candidateNodeIds
+      .map((id) => current.node(id))
+      .flatMap((node) => {
+        if (node === undefined || (nodeTypes.size > 0 && !nodeTypes.has(node.type))) return [];
+        const pending = predicateMatches(node, optionalRecord(select.predicate));
+        if (!pending && !reviewEffectSetAlreadyApplied(node, set, input.reviewId, input.actor))
+          return [];
+        return [{ node, pending }];
+      });
     const candidates = classified.map(({ node }) => node);
     validateEffectCount(candidates.length, optionalRecord(effect.count));
     const preconditions = Array.isArray(effect.preconditions) ? effect.preconditions : [];
@@ -7115,7 +8672,8 @@ export async function applyReviewEffects(input: {
       for (const [field, value] of Object.entries(set)) {
         const resolved = resolveReviewEffectTokens(value, input.reviewId, input.actor);
         if (field === "status") updated.status = requiredNonempty(resolved, "review effect status");
-        else if (field.startsWith("spec.")) setNestedSpec(updated.spec, field.slice("spec.".length), resolved);
+        else if (field.startsWith("spec."))
+          setNestedSpec(updated.spec, field.slice("spec.".length), resolved);
         else fail("review_effect_field", `unsupported compiler review effect field ${field}`);
       }
       // A terminal action may be replayed after its graph writes were durably published but its
@@ -7202,7 +8760,9 @@ async function validateOperationReceiptCoverage(input: {
   });
   const evaluator = new GraphExpressionEvaluator(input.configuration, input.graph, adapter);
   for (const candidate of input.candidates) {
-    const current = evaluator.withBinding("node", [candidate.id], () => evaluator.evaluate(leaves[0]!));
+    const current = evaluator.withBinding("node", [candidate.id], () =>
+      evaluator.evaluate(leaves[0]!),
+    );
     if (!current) {
       fail(
         "review_effect_receipt_coverage",
@@ -7212,12 +8772,16 @@ async function validateOperationReceiptCoverage(input: {
   }
 }
 
-function predicateMatches(node: GraphNode, predicate: Readonly<Record<string, unknown>> | undefined): boolean {
+function predicateMatches(
+  node: GraphNode,
+  predicate: Readonly<Record<string, unknown>> | undefined,
+): boolean {
   if (predicate === undefined) return true;
   const field = requiredNonempty(predicate.field, "effect predicate field");
   const operation = requiredNonempty(predicate.op, "effect predicate op");
   const value = graphField(node, field);
-  if (operation === "equals") return canonicalHash(value ?? null) === canonicalHash(predicate.value ?? null);
+  if (operation === "equals")
+    return canonicalHash(value ?? null) === canonicalHash(predicate.value ?? null);
   if (operation === "present") return value !== undefined;
   if (operation === "absent") return value === undefined;
   if (operation === "non_empty") return isNonemptyConfigurationValue(value);
@@ -7245,14 +8809,23 @@ async function validateReviewEffectCoverage(input: {
   for (const candidate of input.candidates) {
     evaluator.withBinding("candidate", [candidate.id], () => {
       for (const rawCoverage of input.effect.coverage as ConfigurationValue[]) {
-        const coverage = requiredRecord(rawCoverage, "review effect coverage") as ConfigurationObject;
+        const coverage = requiredRecord(
+          rawCoverage,
+          "review effect coverage",
+        ) as ConfigurationObject;
         const coverageId = requiredNonempty(coverage.id, "review effect coverage id");
         const requiredSelector = coverage.required;
         if (requiredSelector === undefined) {
-          fail("review_effect_coverage", `review effect coverage ${coverageId} has no required selector`);
+          fail(
+            "review_effect_coverage",
+            `review effect coverage ${coverageId} has no required selector`,
+          );
         }
-        const requiredIds = new Set(evaluator.select(requiredSelector!));
-        const actual = requiredRecord(coverage.actual, `review effect coverage ${coverageId} actual`) as ConfigurationObject;
+        const requiredIds = new Set(evaluator.select(requiredSelector));
+        const actual = requiredRecord(
+          coverage.actual,
+          `review effect coverage ${coverageId} actual`,
+        ) as ConfigurationObject;
         const actualIds = reviewEffectActualIds(candidate, actual, coverageId);
         const missing = [...requiredIds].filter((id) => !actualIds.has(id)).sort(compareText);
         const extra = [...actualIds].filter((id) => !requiredIds.has(id)).sort(compareText);
@@ -7274,40 +8847,71 @@ function reviewEffectActualIds(
 ): Set<string> {
   const kind = requiredNonempty(actual.kind, `review effect coverage ${coverageId} actual kind`);
   if (kind === "outgoing_relation") {
-    const relation = requiredNonempty(actual.relation, `review effect coverage ${coverageId} relation`);
+    const relation = requiredNonempty(
+      actual.relation,
+      `review effect coverage ${coverageId} relation`,
+    );
     return strictReviewIdSet(candidate.edges[relation] ?? [], coverageId);
   }
   const field = requiredNonempty(actual.field, `review effect coverage ${coverageId} field`);
   const value = graphField(candidate, field);
   if (kind === "field_value") {
-    return strictReviewIdSet([requiredNonempty(value, `review effect coverage ${coverageId} field ${field}`)], coverageId);
+    return strictReviewIdSet(
+      [requiredNonempty(value, `review effect coverage ${coverageId} field ${field}`)],
+      coverageId,
+    );
   }
   if (kind === "field_values") {
-    if (!Array.isArray(value)) fail("review_effect_coverage", `review effect coverage ${coverageId} field ${field} is not a list`);
-    return strictReviewIdSet(value.map((item) => requiredNonempty(item, `review effect coverage ${coverageId} field ${field}`)), coverageId);
+    if (!Array.isArray(value))
+      fail(
+        "review_effect_coverage",
+        `review effect coverage ${coverageId} field ${field} is not a list`,
+      );
+    return strictReviewIdSet(
+      value.map((item) =>
+        requiredNonempty(item, `review effect coverage ${coverageId} field ${field}`),
+      ),
+      coverageId,
+    );
   }
   if (kind === "object_keys") {
-    if (!isRecord(value)) fail("review_effect_coverage", `review effect coverage ${coverageId} field ${field} is not an object`);
+    if (!isRecord(value))
+      fail(
+        "review_effect_coverage",
+        `review effect coverage ${coverageId} field ${field} is not an object`,
+      );
     const allowed = Array.isArray(actual.allowed_values) ? actual.allowed_values : [];
     if (allowed.length > 0) {
       for (const [id, disposition] of Object.entries(value)) {
         if (!allowed.some((item) => canonicalHash(item) === canonicalHash(disposition))) {
-          fail("review_effect_coverage", `review effect coverage ${coverageId} has an invalid disposition for ${id}`);
+          fail(
+            "review_effect_coverage",
+            `review effect coverage ${coverageId} has an invalid disposition for ${id}`,
+          );
         }
       }
     }
     return strictReviewIdSet(Object.keys(value), coverageId);
   }
-  fail("review_effect_coverage", `review effect coverage ${coverageId} has unsupported actual kind ${kind}`);
+  fail(
+    "review_effect_coverage",
+    `review effect coverage ${coverageId} has unsupported actual kind ${kind}`,
+  );
 }
 
 function strictReviewIdSet(values: readonly string[], coverageId: string): Set<string> {
   if (values.some((value) => value.trim().length === 0)) {
-    fail("review_effect_coverage", `review effect coverage ${coverageId} contains an empty node id`);
+    fail(
+      "review_effect_coverage",
+      `review effect coverage ${coverageId} contains an empty node id`,
+    );
   }
   const output = new Set(values);
   if (output.size !== values.length) {
-    fail("review_effect_coverage", `review effect coverage ${coverageId} contains duplicate node ids`);
+    fail(
+      "review_effect_coverage",
+      `review effect coverage ${coverageId} contains duplicate node ids`,
+    );
   }
   return output;
 }
@@ -7318,12 +8922,18 @@ function resolveReviewEffectTokens(value: unknown, reviewId: string, actor: stri
   if (typeof value === "string" && value.startsWith("$")) {
     fail("review_effect_token", `unknown review effect compiler token ${value}`);
   }
-  if (Array.isArray(value)) return value.map((item) => resolveReviewEffectTokens(item, reviewId, actor));
+  if (Array.isArray(value))
+    return value.map((item) => resolveReviewEffectTokens(item, reviewId, actor));
   if (isRecord(value)) {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, resolveReviewEffectTokens(item, reviewId, actor)]));
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        resolveReviewEffectTokens(item, reviewId, actor),
+      ]),
+    );
   }
   assertJsonValue(value, "review effect value");
-  return value as JsonValue;
+  return value;
 }
 
 function isNonemptyConfigurationValue(value: JsonValue | undefined): boolean {
@@ -7338,8 +8948,15 @@ function validateEffectCount(actual: number, count: ConfigurationObject | undefi
   const exact = optionalSafeInteger(count.exact);
   const min = optionalSafeInteger(count.min);
   const max = optionalSafeInteger(count.max);
-  if ((exact !== undefined && actual !== exact) || (min !== undefined && actual < min) || (max !== undefined && actual > max)) {
-    fail("review_effect_count", `review effect selected ${actual} nodes outside its configured count`);
+  if (
+    (exact !== undefined && actual !== exact) ||
+    (min !== undefined && actual < min) ||
+    (max !== undefined && actual > max)
+  ) {
+    fail(
+      "review_effect_count",
+      `review effect selected ${actual} nodes outside its configured count`,
+    );
   }
 }
 
@@ -7377,25 +8994,44 @@ function parseAssignmentOutput(
   const root = requiredRecord(value, "assignment output");
   if (root.status === "failed") {
     assertExactFields(root, ["status", "blocker"], "failed assignment output");
-    return { status: "failed", blocker: boundedText(root.blocker, "assignment blocker", 64 * 1024) };
+    return {
+      status: "failed",
+      blocker: boundedText(root.blocker, "assignment blocker", 64 * 1024),
+    };
   }
-  if (root.status !== "completed") fail("assignment_status", "assignment status must be completed or failed");
+  if (root.status !== "completed")
+    fail("assignment_status", "assignment status must be completed or failed");
   const hasUpstreamRequest = root.upstreamChangeRequest !== undefined;
   const hasChangeApplication = root.changeApplication !== undefined;
   if (hasUpstreamRequest && hasChangeApplication) {
-    fail("change_control_output_collision", "one assignment cannot request upstream work and select an application");
+    fail(
+      "change_control_output_collision",
+      "one assignment cannot request upstream work and select an application",
+    );
   }
   if (hasUpstreamRequest && !changeControl.allowUpstreamRequest) {
-    fail("change_control_route_forbidden", `change-control role ${changeControl.role} cannot issue upstream requests`);
+    fail(
+      "change_control_route_forbidden",
+      `change-control role ${changeControl.role} cannot issue upstream requests`,
+    );
   }
   if (hasChangeApplication && !changeControl.requireChangeApplication) {
-    fail("change_control_application_step", "changeApplication is allowed only on the configured proposal step");
+    fail(
+      "change_control_application_step",
+      "changeApplication is allowed only on the configured proposal step",
+    );
   }
   if (changeControl.requireChangeApplication && !hasChangeApplication) {
-    fail("change_control_application_required", "configured proposal step requires changeApplication");
+    fail(
+      "change_control_application_required",
+      "configured proposal step requires changeApplication",
+    );
   }
   if ((hasUpstreamRequest || hasChangeApplication) && root.graphDelta !== undefined) {
-    fail("change_control_graph_collision", "typed change-control output cannot also contain graphDelta");
+    fail(
+      "change_control_graph_collision",
+      "typed change-control output cannot also contain graphDelta",
+    );
   }
   const allowed = hasUpstreamRequest
     ? ["status", "summary", "upstreamChangeRequest"]
@@ -7412,14 +9048,20 @@ function parseAssignmentOutput(
   const changeApplication = hasChangeApplication
     ? parseChangeApplication(root.changeApplication)
     : undefined;
-  const graphDelta = root.graphDelta === undefined || root.graphDelta === null
-    ? root.graphDelta as undefined | null
-    : parseGraphDelta(root.graphDelta);
-  if (policy === "required" && !hasUpstreamRequest && !hasChangeApplication &&
-      (graphDelta === undefined || graphDelta === null)) {
+  const graphDelta =
+    root.graphDelta === undefined || root.graphDelta === null
+      ? root.graphDelta
+      : parseGraphDelta(root.graphDelta);
+  if (
+    policy === "required" &&
+    !hasUpstreamRequest &&
+    !hasChangeApplication &&
+    (graphDelta === undefined || graphDelta === null)
+  ) {
     fail("graph_delta_required", "assignment requires a graph delta");
   }
-  if (policy === "forbidden" && graphDelta !== undefined) fail("graph_delta_forbidden", "assignment forbids graph mutation");
+  if (policy === "forbidden" && graphDelta !== undefined)
+    fail("graph_delta_forbidden", "assignment forbids graph mutation");
   return {
     status: "completed",
     summary,
@@ -7472,16 +9114,26 @@ function compileAssignmentChangeControl(input: {
   if (input.result.upstreamChangeRequest !== undefined) {
     const request = input.result.upstreamChangeRequest;
     const operation = input.catalog.operations[input.binding.operationId];
-    if (operation?.changeControl.role !== "ordinary" ||
-        !operation.changeControl.allowUpstreamRequests ||
-        operation.changeControl.proposalOperation === undefined) {
-      fail("change_control_route_forbidden", `operation ${input.binding.operationId} cannot issue upstream requests`);
+    if (
+      operation?.changeControl.role !== "ordinary" ||
+      !operation.changeControl.allowUpstreamRequests ||
+      operation.changeControl.proposalOperation === undefined
+    ) {
+      fail(
+        "change_control_route_forbidden",
+        `operation ${input.binding.operationId} cannot issue upstream requests`,
+      );
     }
     const boundedSourceScope = new Set([
       ...input.definition.scope.read_node_ids,
       ...input.definition.scope.write_node_ids,
     ]);
-    assertExistingControlTargets(input.graph, request.targetNodeIds, boundedSourceScope, "upstream request");
+    assertExistingControlTargets(
+      input.graph,
+      request.targetNodeIds,
+      boundedSourceScope,
+      "upstream request",
+    );
     const sourceOutputMaterial = {
       status: "completed" as const,
       summary: input.result.summary!,
@@ -7502,7 +9154,10 @@ function compileAssignmentChangeControl(input: {
     let existingProposal: ExistingChangeControlProposal | undefined;
     if (existingTicket !== undefined) {
       const control = existingTicket.executionControl;
-      if (control?.proposalRequest === undefined || control.changeControlScopeNodeIds === undefined) {
+      if (
+        control?.proposalRequest === undefined ||
+        control.changeControlScopeNodeIds === undefined
+      ) {
         fail(
           "change_control_proposal_collision",
           `deterministic proposal ${initial.proposalTicketId} has no exact compiler request metadata`,
@@ -7518,19 +9173,20 @@ function compileAssignmentChangeControl(input: {
         controlScopeNodeIds: control.changeControlScopeNodeIds,
       };
     }
-    const publication = existingProposal === undefined
-      ? initial
-      : deriveChangeControlPublication(input.catalog, {
-          runId: input.run.id,
-          sourceTicketId: input.definition.id,
-          sourceStepId: input.step.id,
-          sourceOutputSha256,
-          sourceBinding: input.binding,
-          targetNodeIds: request.targetNodeIds,
-          summary: request.summary,
-          reason: request.reason,
-          existingProposal,
-        });
+    const publication =
+      existingProposal === undefined
+        ? initial
+        : deriveChangeControlPublication(input.catalog, {
+            runId: input.run.id,
+            sourceTicketId: input.definition.id,
+            sourceStepId: input.step.id,
+            sourceOutputSha256,
+            sourceBinding: input.binding,
+            targetNodeIds: request.targetNodeIds,
+            summary: request.summary,
+            reason: request.reason,
+            existingProposal,
+          });
     const material = {
       protocol: "koni.assignment-change-control.v1" as const,
       kind: "upstream_request" as const,
@@ -7548,29 +9204,53 @@ function compileAssignmentChangeControl(input: {
   if (input.result.changeApplication === undefined) return undefined;
   const selection = input.result.changeApplication;
   const proposalOperation = input.catalog.operations[input.binding.operationId];
-  if (proposalOperation?.changeControl.role !== "proposal" ||
-      proposalOperation.changeControl.proposalStep !== input.step.id) {
-    fail("change_control_application_step", "changeApplication is not bound to the configured proposal step");
+  if (
+    proposalOperation?.changeControl.role !== "proposal" ||
+    proposalOperation.changeControl.proposalStep !== input.step.id
+  ) {
+    fail(
+      "change_control_application_step",
+      "changeApplication is not bound to the configured proposal step",
+    );
   }
   const durableProposal = input.run.tickets[input.definition.id];
   const controlScope = durableProposal?.executionControl?.changeControlScopeNodeIds;
-  if (durableProposal === undefined || controlScope === undefined ||
-      durableProposal.executionPolicyBinding === undefined ||
-      canonicalHash(durableProposal.executionPolicyBinding) !==
-        canonicalHash(resolveExecutionPolicyBinding(input.catalog, {
+  if (
+    durableProposal === undefined ||
+    controlScope === undefined ||
+    durableProposal.executionPolicyBinding === undefined ||
+    canonicalHash(durableProposal.executionPolicyBinding) !==
+      canonicalHash(
+        resolveExecutionPolicyBinding(input.catalog, {
           configurationSha256: input.catalog.configurationSha256,
           operationId: proposalOperation.id,
-          ...(proposalOperation.workflowId === undefined ? {} : { workflowId: proposalOperation.workflowId }),
-        }))) {
-    fail("change_control_proposal_binding", "proposal ticket has no exact pinned control-scope authority");
+          ...(proposalOperation.workflowId === undefined
+            ? {}
+            : { workflowId: proposalOperation.workflowId }),
+        }),
+      )
+  ) {
+    fail(
+      "change_control_proposal_binding",
+      "proposal ticket has no exact pinned control-scope authority",
+    );
   }
-  assertExistingControlTargets(input.graph, selection.targetNodeIds, new Set(controlScope), "change application");
-  const matches = Object.values(input.catalog.operations)
-    .filter((candidate) => candidate.publicOperation === selection.operation);
+  assertExistingControlTargets(
+    input.graph,
+    selection.targetNodeIds,
+    new Set(controlScope),
+    "change application",
+  );
+  const matches = Object.values(input.catalog.operations).filter(
+    (candidate) => candidate.publicOperation === selection.operation,
+  );
   const application = matches.length === 1 ? matches[0] : undefined;
-  if (application === undefined ||
-      (application.changeControl.role !== "application" && application.changeControl.role !== "disposition") ||
-      !proposalOperation.changeControl.applicationOperations.includes(application.publicOperation)) {
+  if (
+    application === undefined ||
+    (application.changeControl.role !== "application" &&
+      application.changeControl.role !== "disposition") ||
+    !proposalOperation.changeControl.applicationOperations.includes(application.publicOperation)
+  ) {
     fail(
       "change_control_application_route",
       `proposal ${proposalOperation.id} does not permit application ${selection.operation}`,
@@ -7581,14 +9261,15 @@ function compileAssignmentChangeControl(input: {
     operationId: application.id,
     ...(application.workflowId === undefined ? {} : { workflowId: application.workflowId }),
   });
-  const scope = application.changeControl.role === "disposition"
-    ? { readNodeIds: [], writeNodeIds: [], readPaths: [], writePaths: [] }
-    : {
-        readNodeIds: [...selection.targetNodeIds],
-        writeNodeIds: [...selection.targetNodeIds],
-        readPaths: [],
-        writePaths: [],
-      };
+  const scope =
+    application.changeControl.role === "disposition"
+      ? { readNodeIds: [], writeNodeIds: [], readPaths: [], writePaths: [] }
+      : {
+          readNodeIds: [...selection.targetNodeIds],
+          writeNodeIds: [...selection.targetNodeIds],
+          readPaths: [],
+          writePaths: [],
+        };
   const proposalOutputMaterial = {
     status: "completed" as const,
     summary: input.result.summary!,
@@ -7620,8 +9301,13 @@ function assertExistingControlTargets(
   label: string,
 ): void {
   for (const nodeId of targetNodeIds) {
-    if (graph.node(nodeId) === undefined) fail("change_control_target_missing", `${label} target ${nodeId} does not exist`);
-    if (!allowed.has(nodeId)) fail("change_control_target_scope", `${label} target ${nodeId} is outside compiler control scope`);
+    if (graph.node(nodeId) === undefined)
+      fail("change_control_target_missing", `${label} target ${nodeId} does not exist`);
+    if (!allowed.has(nodeId))
+      fail(
+        "change_control_target_scope",
+        `${label} target ${nodeId} is outside compiler control scope`,
+      );
   }
 }
 
@@ -7639,14 +9325,21 @@ function assertCurrentAssignmentChecks(
     attempt.stepId !== assignment.stepId ||
     attempt.personaId !== assignment.personaId
   ) {
-    fail("assignment_check_provenance", "configured checks are not bound to the current assignment attempt");
+    fail(
+      "assignment_check_provenance",
+      "configured checks are not bound to the current assignment attempt",
+    );
   }
-  const missing = step.validation_checks.filter((checkId) => !(run.checks ?? []).some((check) =>
-    check.attemptId === attemptId &&
-    check.requestedCheckId === checkId &&
-    check.accepted &&
-    check.passed === true
-  ));
+  const missing = step.validation_checks.filter(
+    (checkId) =>
+      !(run.checks ?? []).some(
+        (check) =>
+          check.attemptId === attemptId &&
+          check.requestedCheckId === checkId &&
+          check.accepted &&
+          check.passed === true,
+      ),
+  );
   if (missing.length > 0) {
     fail(
       "assignment_checks_incomplete",
@@ -7657,10 +9350,20 @@ function assertCurrentAssignmentChecks(
 
 function parseGraphDelta(value: unknown): GraphDelta {
   const root = requiredRecord(value, "graph delta");
-  assertExactFields(root, ["protocol", "expectedGraphHash", "upsertNodes", "deleteNodes", "addEdges", "removeEdges"], "graph delta");
-  if (root.protocol !== "koni.graph-delta.v1") fail("graph_delta_protocol", "unsupported graph delta protocol");
+  assertExactFields(
+    root,
+    ["protocol", "expectedGraphHash", "upsertNodes", "deleteNodes", "addEdges", "removeEdges"],
+    "graph delta",
+  );
+  if (root.protocol !== "koni.graph-delta.v1")
+    fail("graph_delta_protocol", "unsupported graph delta protocol");
   const expectedGraphHash = requireDigest(root.expectedGraphHash, "graph delta expectedGraphHash");
-  if (!Array.isArray(root.upsertNodes) || !Array.isArray(root.deleteNodes) || !Array.isArray(root.addEdges) || !Array.isArray(root.removeEdges)) {
+  if (
+    !Array.isArray(root.upsertNodes) ||
+    !Array.isArray(root.deleteNodes) ||
+    !Array.isArray(root.addEdges) ||
+    !Array.isArray(root.removeEdges)
+  ) {
     fail("graph_delta_shape", "graph delta mutation collections must be arrays");
   }
   const upsertNodes = root.upsertNodes.map((item, index) => {
@@ -7668,13 +9371,19 @@ function parseGraphDelta(value: unknown): GraphDelta {
     assertExactFields(mutation, ["node", "expectedNodeHash"], `graph upsert ${index}`);
     return {
       node: parseGraphNode(mutation.node),
-      expectedNodeHash: mutation.expectedNodeHash === null ? null : requireDigest(mutation.expectedNodeHash, "expected node hash"),
+      expectedNodeHash:
+        mutation.expectedNodeHash === null
+          ? null
+          : requireDigest(mutation.expectedNodeHash, "expected node hash"),
     };
   });
   const deleteNodes = root.deleteNodes.map((item, index) => {
     const deletion = requiredRecord(item, `graph deletion ${index}`);
     assertExactFields(deletion, ["id", "expectedNodeHash"], `graph deletion ${index}`);
-    return { id: requiredNonempty(deletion.id, "graph deletion id"), expectedNodeHash: requireDigest(deletion.expectedNodeHash, "expected node hash") };
+    return {
+      id: requiredNonempty(deletion.id, "graph deletion id"),
+      expectedNodeHash: requireDigest(deletion.expectedNodeHash, "expected node hash"),
+    };
   });
   return {
     protocol: "koni.graph-delta.v1",
@@ -7688,12 +9397,18 @@ function parseGraphDelta(value: unknown): GraphDelta {
 
 function parseGraphNode(value: unknown): GraphNode {
   const node = requiredRecord(value, "graph node");
-  assertExactFields(node, ["schema_version", "id", "type", "title", "status", "spec", "edges", "annotations"], "graph node");
-  if (node.schema_version !== "1.0") fail("graph_node_schema", "graph node schema_version must be 1.0");
+  assertExactFields(
+    node,
+    ["schema_version", "id", "type", "title", "status", "spec", "edges", "annotations"],
+    "graph node",
+  );
+  if (node.schema_version !== "1.0")
+    fail("graph_node_schema", "graph node schema_version must be 1.0");
   const edgesSource = requiredRecord(node.edges, "graph node edges");
   const edges: Record<string, string[]> = Object.create(null) as Record<string, string[]>;
   for (const [relation, targets] of Object.entries(edgesSource)) {
-    if (!Array.isArray(targets) || targets.some((target) => typeof target !== "string")) fail("graph_node_edges", `graph relation ${relation} must contain string ids`);
+    if (!Array.isArray(targets) || targets.some((target) => typeof target !== "string"))
+      fail("graph_node_edges", `graph relation ${relation} must contain string ids`);
     edges[relation] = [...new Set(targets as string[])].sort(compareText);
   }
   return {
@@ -7815,7 +9530,10 @@ function reconcileTickets(
       ) {
         const operation = executionCatalog.operations[definition.operation_registry_id];
         if (operation === undefined) {
-          fail("execution_policy_operation", `derived ticket ${definition.id} references unknown operation ${definition.operation_registry_id}`);
+          fail(
+            "execution_policy_operation",
+            `derived ticket ${definition.id} references unknown operation ${definition.operation_registry_id}`,
+          );
         }
         existing.status = operation.changeControl.role === "proposal" ? "proposed" : "ready";
         existing.blocker = undefined;
@@ -7831,19 +9549,25 @@ function reconcileTickets(
       for (const [index, step] of existing.steps.entries()) {
         const compiled = definition.workflow[index]!;
         const stepBinding = semantic.steps.get(compiled.id);
-        if (stepBinding === undefined) fail("execution_policy_step", `ticket ${definition.id} has no semantic binding for ${compiled.id}`);
+        if (stepBinding === undefined)
+          fail(
+            "execution_policy_step",
+            `ticket ${definition.id} has no semantic binding for ${compiled.id}`,
+          );
         assertOrBackfillExecutionPolicyBinding(
-          step as SemanticTicketStepRecord,
+          step,
           stepBinding,
           `ticket ${definition.id} step ${compiled.id}`,
         );
         step.kind ??= compiled.kind;
         step.dependsOn ??= [...compiled.depends_on];
         if (compiled.read_node_ids !== undefined) step.readNodeIds ??= [...compiled.read_node_ids];
-        if (compiled.write_node_ids !== undefined) step.writeNodeIds ??= [...compiled.write_node_ids];
+        if (compiled.write_node_ids !== undefined)
+          step.writeNodeIds ??= [...compiled.write_node_ids];
         if (compiled.read_paths !== undefined) step.readPaths ??= [...compiled.read_paths];
         if (compiled.write_paths !== undefined) step.writePaths ??= [...compiled.write_paths];
-        if (compiled.validation_action !== undefined) step.validationAction ??= compiled.validation_action;
+        if (compiled.validation_action !== undefined)
+          step.validationAction ??= compiled.validation_action;
       }
       existing.dependencyIds = [...(dependencies.get(definition.id) ?? [])];
       existing.readNodeIds ??= [...definition.scope.read_node_ids];
@@ -7856,10 +9580,14 @@ function reconcileTickets(
       }
       continue;
     }
-    if (definition.workflow.length === 0) fail("ticket_workflow", `derived ticket ${definition.id} has no executable workflow`);
+    if (definition.workflow.length === 0)
+      fail("ticket_workflow", `derived ticket ${definition.id} has no executable workflow`);
     const operation = executionCatalog.operations[definition.operation_registry_id];
     if (operation === undefined) {
-      fail("execution_policy_operation", `derived ticket ${definition.id} references unknown operation ${definition.operation_registry_id}`);
+      fail(
+        "execution_policy_operation",
+        `derived ticket ${definition.id} references unknown operation ${definition.operation_registry_id}`,
+      );
     }
     const ticket: SemanticTicketRecord = {
       id: definition.id,
@@ -7886,7 +9614,9 @@ function reconcileTickets(
         ...(step.write_node_ids === undefined ? {} : { writeNodeIds: [...step.write_node_ids] }),
         ...(step.read_paths === undefined ? {} : { readPaths: [...step.read_paths] }),
         ...(step.write_paths === undefined ? {} : { writePaths: [...step.write_paths] }),
-        ...(step.validation_action === undefined ? {} : { validationAction: step.validation_action }),
+        ...(step.validation_action === undefined
+          ? {}
+          : { validationAction: step.validation_action }),
         status: "pending",
         attemptIds: [],
         summary: undefined,
@@ -7909,10 +9639,15 @@ function reconcileTickets(
     };
     tickets[definition.id] = ticket;
   }
-  return Object.fromEntries(Object.entries(tickets).sort(([left], [right]) => compareText(left, right)));
+  return Object.fromEntries(
+    Object.entries(tickets).sort(([left], [right]) => compareText(left, right)),
+  );
 }
 
-function assertTicketDefinitionStable(ticket: TicketRecord, definition: DerivedTicketDefinition): void {
+function assertTicketDefinitionStable(
+  ticket: TicketRecord,
+  definition: DerivedTicketDefinition,
+): void {
   // A started ticket's issued workflow settles under the node scope it was issued with. Its own
   // accepted graph effects legitimately change what the rules re-derive for the same deterministic
   // id (observed live: a delivery-node graphDelta added the new node to its submitting ticket's
@@ -7920,32 +9655,58 @@ function assertTicketDefinitionStable(ticket: TicketRecord, definition: DerivedT
   // step unsatisfiable). Tolerate node-scope drift for started tickets; operation, title,
   // workflow, and path drift remain fatal for every ticket.
   const pinnedNodeScope = !ticketIsNeverStarted(ticket);
-  const nodeScopeDrift = !pinnedNodeScope && (
-    canonicalHash(ticket.targetNodeIds) !== canonicalHash(definition.target_node_ids) ||
-    (ticket.readNodeIds !== undefined &&
-      canonicalHash(ticket.readNodeIds) !== canonicalHash(definition.scope.read_node_ids)) ||
-    (ticket.writeNodeIds !== undefined &&
-      canonicalHash(ticket.writeNodeIds) !== canonicalHash(definition.scope.write_node_ids)) ||
-    ticket.steps.some((step, index) =>
-      (step.readNodeIds !== undefined && canonicalHash(step.readNodeIds) !== canonicalHash(definition.workflow[index]!.read_node_ids ?? definition.scope.read_node_ids)) ||
-      (step.writeNodeIds !== undefined && canonicalHash(step.writeNodeIds) !== canonicalHash(definition.workflow[index]!.write_node_ids ?? definition.scope.write_node_ids)))
-  );
+  const nodeScopeDrift =
+    !pinnedNodeScope &&
+    (canonicalHash(ticket.targetNodeIds) !== canonicalHash(definition.target_node_ids) ||
+      (ticket.readNodeIds !== undefined &&
+        canonicalHash(ticket.readNodeIds) !== canonicalHash(definition.scope.read_node_ids)) ||
+      (ticket.writeNodeIds !== undefined &&
+        canonicalHash(ticket.writeNodeIds) !== canonicalHash(definition.scope.write_node_ids)) ||
+      ticket.steps.some(
+        (step, index) =>
+          (step.readNodeIds !== undefined &&
+            canonicalHash(step.readNodeIds) !==
+              canonicalHash(
+                definition.workflow[index]!.read_node_ids ?? definition.scope.read_node_ids,
+              )) ||
+          (step.writeNodeIds !== undefined &&
+            canonicalHash(step.writeNodeIds) !==
+              canonicalHash(
+                definition.workflow[index]!.write_node_ids ?? definition.scope.write_node_ids,
+              )),
+      ));
   if (
     nodeScopeDrift ||
     ticket.operationId !== definition.operation_registry_id ||
     ticket.title !== definition.title ||
     canonicalHash(ticket.readPaths) !== canonicalHash(definition.scope.read_paths) ||
     canonicalHash(ticket.writePaths) !== canonicalHash(definition.scope.write_paths) ||
-    canonicalHash(ticket.steps.map((step) => [step.id, step.personaId])) !== canonicalHash(definition.workflow.map((step) => [step.id, step.persona_id])) ||
-    ticket.steps.some((step, index) =>
-      (step.kind !== undefined && step.kind !== definition.workflow[index]!.kind) ||
-      (step.dependsOn !== undefined && canonicalHash(step.dependsOn) !== canonicalHash(definition.workflow[index]!.depends_on)) ||
-      (step.readPaths !== undefined && canonicalHash(step.readPaths) !== canonicalHash(definition.workflow[index]!.read_paths ?? definition.scope.read_paths)) ||
-      (step.writePaths !== undefined && canonicalHash(step.writePaths) !== canonicalHash(definition.workflow[index]!.write_paths ?? definition.scope.write_paths)) ||
-      (step.validationAction !== undefined && step.validationAction !== definition.workflow[index]!.validation_action)) ||
+    canonicalHash(ticket.steps.map((step) => [step.id, step.personaId])) !==
+      canonicalHash(definition.workflow.map((step) => [step.id, step.persona_id])) ||
+    ticket.steps.some(
+      (step, index) =>
+        (step.kind !== undefined && step.kind !== definition.workflow[index]!.kind) ||
+        (step.dependsOn !== undefined &&
+          canonicalHash(step.dependsOn) !==
+            canonicalHash(definition.workflow[index]!.depends_on)) ||
+        (step.readPaths !== undefined &&
+          canonicalHash(step.readPaths) !==
+            canonicalHash(definition.workflow[index]!.read_paths ?? definition.scope.read_paths)) ||
+        (step.writePaths !== undefined &&
+          canonicalHash(step.writePaths) !==
+            canonicalHash(
+              definition.workflow[index]!.write_paths ?? definition.scope.write_paths,
+            )) ||
+        (step.validationAction !== undefined &&
+          step.validationAction !== definition.workflow[index]!.validation_action),
+    ) ||
     (ticket.reviewFailureReopenFrom !== undefined &&
       ticket.reviewFailureReopenFrom !== definition.review_failure_reopen_from)
-  ) fail("ticket_definition_drift", `ticket ${ticket.id} changed under the same deterministic identity`);
+  )
+    fail(
+      "ticket_definition_drift",
+      `ticket ${ticket.id} changed under the same deterministic identity`,
+    );
 }
 
 function runRootContextId(runId: string): string {
@@ -7961,7 +9722,10 @@ function assertContextualAuthorityBinding(
     contextual.runRootId !== runRootContextId(run.id) ||
     (run.workingSpecOwnerId !== undefined && contextual.ownerPersonaId !== run.workingSpecOwnerId)
   ) {
-    fail("graph_contextual_binding", "durable contextual graph owner or stable run root differs from the run record");
+    fail(
+      "graph_contextual_binding",
+      "durable contextual graph owner or stable run root differs from the run record",
+    );
   }
   for (const record of Object.values(contextual.records)) {
     if (
@@ -7970,11 +9734,17 @@ function assertContextualAuthorityBinding(
       record.provenance.semanticRevision > semanticRevision ||
       record.provenance.contextualRevision >= contextual.revision
     ) {
-      fail("graph_contextual_binding", `contextual record ${record.id} is not bound to this durable run epoch`);
+      fail(
+        "graph_contextual_binding",
+        `contextual record ${record.id} is not bound to this durable run epoch`,
+      );
     }
   }
   if (run.workingSpecOwnerId === undefined && contextual.canonicalWorkingSpecId !== undefined) {
-    fail("working_spec_owner_drift", "canonical working specification has no owner pinned in the run record");
+    fail(
+      "working_spec_owner_drift",
+      "canonical working specification has no owner pinned in the run record",
+    );
   }
   if (
     semanticRevision > 0 &&
@@ -8002,7 +9772,9 @@ function initialGraphArtifact(
     graphSha256: graph.hash,
     semanticSha256: graph.hash,
     nodes: graph.toJSON(),
-    ...contextualArtifactFields(createGraphContextualState(runRootContextId(runId), ownerPersonaId)),
+    ...contextualArtifactFields(
+      createGraphContextualState(runRootContextId(runId), ownerPersonaId),
+    ),
   };
 }
 
@@ -8019,19 +9791,23 @@ function appendContextualRecord(
     record.provenance.contextualRevision !== prior.revision ||
     record.provenance.contextualHash !== prior.hash
   ) {
-    fail("contextual_record_cas", `contextual graph record ${record.id} is not based on the current contextual epoch`);
+    fail(
+      "contextual_record_cas",
+      `contextual graph record ${record.id} is not based on the current contextual epoch`,
+    );
   }
   const records = structuredClone(prior.records);
   records[record.id] = structuredClone(record);
   if (Object.keys(records).length > MAX_GRAPH_NOTES) {
     fail("contextual_record_limit", `run contextual record inventory exceeds ${MAX_GRAPH_NOTES}`);
   }
-  const allLinks = [...structuredClone(prior.links), ...structuredClone(links)]
-    .sort((left, right) =>
+  const allLinks = [...structuredClone(prior.links), ...structuredClone(links)].sort(
+    (left, right) =>
       compareText(left.sourceId, right.sourceId) ||
       compareText(left.relation, right.relation) ||
       compareText(left.targetKind, right.targetKind) ||
-      compareText(left.targetId, right.targetId));
+      compareText(left.targetId, right.targetId),
+  );
   const next = sealGraphContextualState({
     protocol: prior.protocol,
     revision: prior.revision + 1,
@@ -8108,13 +9884,22 @@ function parseGraphArtifact(bytes: Buffer): GraphArtifact {
   if (
     (artifact.semanticRevision !== undefined && artifact.semanticRevision !== artifact.revision) ||
     (artifact.semanticSha256 !== undefined && artifact.semanticSha256 !== artifact.graphSha256)
-  ) fail("graph_artifact_semantic_alias", "graph artifact semantic aliases disagree with legacy fields");
+  )
+    fail(
+      "graph_artifact_semantic_alias",
+      "graph artifact semantic aliases disagree with legacy fields",
+    );
   if (
     artifact.contextual === undefined
       ? artifact.contextualRevision !== undefined || artifact.contextualSha256 !== undefined
       : (artifact.contextualRevision !== undefined || artifact.contextualSha256 !== undefined) &&
-        (artifact.contextualRevision !== artifact.contextual.revision || artifact.contextualSha256 !== artifact.contextual.hash)
-  ) fail("graph_artifact_contextual_alias", "graph artifact contextual aliases disagree with contextual state");
+        (artifact.contextualRevision !== artifact.contextual.revision ||
+          artifact.contextualSha256 !== artifact.contextual.hash)
+  )
+    fail(
+      "graph_artifact_contextual_alias",
+      "graph artifact contextual aliases disagree with contextual state",
+    );
   if (artifact.contextual !== undefined) {
     try {
       validateGraphContextualState(artifact.contextual);
@@ -8144,10 +9929,13 @@ function ticketArtifact(
       ticket.status === "completed" ||
       ticket.status === "cancelled" ||
       ticketIsNeverStarted(ticket)
-    ) continue;
+    )
+      continue;
     retainedById.set(definition.id, structuredClone(definition));
   }
-  const retainedDefinitions = [...retainedById.values()].sort((left, right) => compareText(left.id, right.id));
+  const retainedDefinitions = [...retainedById.values()].sort((left, right) =>
+    compareText(left.id, right.id),
+  );
   return {
     protocol: TICKET_ARTIFACT_PROTOCOL,
     runId: run.id,
@@ -8163,11 +9951,12 @@ function ticketIsNeverStarted(ticket: Readonly<TicketRecord>): boolean {
     ticket.worktreePath === undefined &&
     ticket.branch === undefined &&
     ticket.gitCycleId === undefined &&
-    ticket.steps.every((step) =>
-      step.status === "pending" &&
-      step.attemptIds.length === 0 &&
-      step.startedAt === undefined &&
-      step.completedAt === undefined
+    ticket.steps.every(
+      (step) =>
+        step.status === "pending" &&
+        step.attemptIds.length === 0 &&
+        step.startedAt === undefined &&
+        step.completedAt === undefined,
     )
   );
 }
@@ -8176,8 +9965,10 @@ function ticketDefinitionFromArtifact(
   artifact: TicketDefinitionsArtifact,
   ticketId: string,
 ): DerivedTicketDefinition | undefined {
-  return artifact.evaluation.tickets.find((definition) => definition.id === ticketId)
-    ?? artifact.retainedDefinitions?.find((definition) => definition.id === ticketId);
+  return (
+    artifact.evaluation.tickets.find((definition) => definition.id === ticketId) ??
+    artifact.retainedDefinitions?.find((definition) => definition.id === ticketId)
+  );
 }
 
 function requireGraphSchema(configuration: CompiledConfiguration): GraphSchema {
@@ -8230,11 +10021,14 @@ function typedGateIdentityCatalog(
     "gate_policy_invalid",
     "pinned gate policies did not compile",
   );
-  const gateNodeTypes = [...new Set(policies.flatMap((policy) => policy.gateNodeTypes))].sort(compareText);
+  const gateNodeTypes = [...new Set(policies.flatMap((policy) => policy.gateNodeTypes))].sort(
+    compareText,
+  );
   const typed = new Set(gateNodeTypes);
   return {
     gateNodeTypes,
-    gateNodes: graph.nodes()
+    gateNodes: graph
+      .nodes()
       .filter((node) => typed.has(node.type))
       .map((node) => ({ id: node.id, type: node.type }))
       .sort((left, right) => compareText(left.id, right.id)),
@@ -8275,22 +10069,46 @@ function launchResources(
   for (const id of [...new Set(skillIds)].sort(compareText)) {
     const skill = pinned.skills[id];
     if (skill === undefined) fail("skill_unpinned", `persona requested unpinned skill ${id}`);
-    for (const [relativePath, file] of Object.entries(skill.files).sort(([left], [right]) => compareText(left, right))) {
-      const resourceId = relativePath === "SKILL.md"
-        ? `skill-${id}`
-        : `skill-${id}-${digestBody(rawSha256(relativePath)).slice(0, 16)}`;
+    for (const [relativePath, file] of Object.entries(skill.files).sort(([left], [right]) =>
+      compareText(left, right),
+    )) {
+      const resourceId =
+        relativePath === "SKILL.md"
+          ? `skill-${id}`
+          : `skill-${id}-${digestBody(rawSha256(relativePath)).slice(0, 16)}`;
       resources.push(resource("skill", resourceId, `skills/${id}/${relativePath}`, file.content));
     }
   }
   if (runInstructions.trim().length > 0) {
-    resources.push(resource("append_system_prompt", "run-instructions", "prompts/run-instructions.md", runInstructions.trim()));
+    resources.push(
+      resource(
+        "append_system_prompt",
+        "run-instructions",
+        "prompts/run-instructions.md",
+        runInstructions.trim(),
+      ),
+    );
   }
   resources.push(...structuredClone(communityResources));
-  return resources.sort((left, right) => compareText(`${left.id}\0${left.relativePath}`, `${right.id}\0${right.relativePath}`));
+  return resources.sort((left, right) =>
+    compareText(`${left.id}\0${left.relativePath}`, `${right.id}\0${right.relativePath}`),
+  );
 }
 
-function resource(kind: LaunchResource["kind"], id: string, relativePath: string, content: string): LaunchResource {
-  return { kind, id, relativePath, content, sha256: rawSha256(content), sizeBytes: Buffer.byteLength(content, "utf8") };
+function resource(
+  kind: LaunchResource["kind"],
+  id: string,
+  relativePath: string,
+  content: string,
+): LaunchResource {
+  return {
+    kind,
+    id,
+    relativePath,
+    content,
+    sha256: rawSha256(content),
+    sizeBytes: Buffer.byteLength(content, "utf8"),
+  };
 }
 
 function toolInventory(
@@ -8310,9 +10128,13 @@ function toolInventory(
   // budget without adding authority or information. The catalog entry remains available to the
   // interactive package, but autonomous launch inventories intentionally omit it.
   const names = new Set<KoniToolName>();
-  if (resources.some((entry) =>
-    entry.kind === "prompt" ||
-    (entry.kind === "skill" && path.posix.basename(entry.relativePath) !== "SKILL.md"))) {
+  if (
+    resources.some(
+      (entry) =>
+        entry.kind === "prompt" ||
+        (entry.kind === "skill" && path.posix.basename(entry.relativePath) !== "SKILL.md"),
+    )
+  ) {
     names.add("koni_read_resource");
   }
   if (descriptor.graph !== undefined) names.add("koni_graph_context");
@@ -8332,7 +10154,8 @@ function toolInventory(
   if (run.workingSpecOwnerId === descriptor.personaId) names.add("koni_update_working_spec");
   if ((run.executionConfig?.questionPolicy ?? "some") !== "none") names.add("koni_ask_question");
   for (const name of communityTools) {
-    if (name === "koni_submit_output") fail("community_terminal_tool", "community adapters cannot select the terminal tool");
+    if (name === "koni_submit_output")
+      fail("community_terminal_tool", "community adapters cannot select the terminal tool");
     names.add(name);
   }
   names.add("koni_submit_output");
@@ -8355,7 +10178,8 @@ function communityAttemptStageIds(
   } else if (kind === "ticket") {
     stages.add("orchestrate");
     const operationId = descriptor.definition?.operation_registry_id;
-    const operation = operationId === undefined ? undefined : configuration.registries.operations[operationId];
+    const operation =
+      operationId === undefined ? undefined : configuration.registries.operations[operationId];
     const configuredStage = operation === undefined ? undefined : optionalString(operation.stage);
     if (configuredStage !== undefined) stages.add(configuredStage.replaceAll("_", "-"));
   } else if (kind === "verification") {
@@ -8388,7 +10212,8 @@ function assertRecoveryIdentity(
     spec.identity.stepId !== attempt.stepId ||
     spec.persona.id !== attempt.personaId ||
     spec.authority.generation !== run.generation
-  ) fail("recovery_identity", "stored launch spec does not match its durable attempt record");
+  )
+    fail("recovery_identity", "stored launch spec does not match its durable attempt record");
 }
 
 function recoveredAttemptKind(
@@ -8399,7 +10224,8 @@ function recoveredAttemptKind(
   if (attempt.ticketId === "run-orchestration" && attempt.stepId.startsWith("lead-")) return "lead";
   if (attempt.ticketId === "run-planning") return "planning";
   if (attempt.ticketId === "run-verification") return "verification";
-  if (run.tickets[attempt.ticketId]?.id.startsWith("TK-integration-") === true) return "integration";
+  if (run.tickets[attempt.ticketId]?.id.startsWith("TK-integration-") === true)
+    return "integration";
   return "ticket";
 }
 
@@ -8410,13 +10236,15 @@ function isRunWideVerificationAttempt(attempt: AgentAttemptRecord): boolean {
 function recordedAttemptWorkspaceKind(
   attempt: AgentAttemptRecord,
 ): "planning" | "lead" | "ticket" | "verification" | "integration" {
-  const kind = attempt.kind ?? (attempt.ticketId === "run-planning"
-    ? "planning"
-    : attempt.ticketId === "run-orchestration" && attempt.stepId.startsWith("lead-")
-      ? "lead"
-    : attempt.ticketId === "run-verification"
-      ? "verification"
-      : "ticket");
+  const kind =
+    attempt.kind ??
+    (attempt.ticketId === "run-planning"
+      ? "planning"
+      : attempt.ticketId === "run-orchestration" && attempt.stepId.startsWith("lead-")
+        ? "lead"
+        : attempt.ticketId === "run-verification"
+          ? "verification"
+          : "ticket");
   return kind === "verification" && !isRunWideVerificationAttempt(attempt) ? "ticket" : kind;
 }
 
@@ -8462,7 +10290,9 @@ function compactionSnapshot(run: RunRecord, descriptor: AttemptDescriptor): Koni
     touchedFiles: [],
     receiptIds: [],
     checkIds: descriptor.step?.validation_checks ?? [],
-    unresolvedQuestions: Object.values(run.questions).filter((question) => question.answeredAt === undefined).map((question) => question.prompt),
+    unresolvedQuestions: Object.values(run.questions)
+      .filter((question) => question.answeredAt === undefined)
+      .map((question) => question.prompt),
     nextAction: descriptor.initialPrompt,
   };
 }
@@ -8476,19 +10306,28 @@ function answeredQuestionContext(run: RunRecord): Array<{
   answeredAt: string;
 }> {
   return Object.values(run.questions)
-    .filter((question): question is typeof question & { answeredAt: string } => question.answeredAt !== undefined)
-    .sort((left, right) => left.answeredAt.localeCompare(right.answeredAt) || compareText(left.id, right.id))
+    .filter(
+      (question): question is typeof question & { answeredAt: string } =>
+        question.answeredAt !== undefined,
+    )
+    .sort(
+      (left, right) =>
+        left.answeredAt.localeCompare(right.answeredAt) || compareText(left.id, right.id),
+    )
     .map((question) => {
-      const selected = question.selectedOptionId === undefined
-        ? undefined
-        : question.options.find((option) => option.id === question.selectedOptionId);
+      const selected =
+        question.selectedOptionId === undefined
+          ? undefined
+          : question.options.find((option) => option.id === question.selectedOptionId);
       return {
         questionId: question.id,
         prompt: question.prompt,
-        ...(selected === undefined ? {} : {
-          selectedOptionId: selected.id,
-          selectedOption: selected.label,
-        }),
+        ...(selected === undefined
+          ? {}
+          : {
+              selectedOptionId: selected.id,
+              selectedOption: selected.label,
+            }),
         ...(question.notes === undefined ? {} : { notes: question.notes }),
         answeredAt: question.answeredAt,
       };
@@ -8515,9 +10354,12 @@ function attemptTokenBudget(
   // productive implementers before they could write a single edit. Give the worker the full
   // planning envelope; the lighter non-planning roles (review, verification, integration) keep the
   // halved envelope, which is ample for their bounded turn counts in practice.
-  const maxNew = kind === "planning" ? configured!
-    : kind === "ticket" ? Math.max(32_000, semanticEnvelope)
-    : Math.max(32_000, Math.floor(semanticEnvelope / 2));
+  const maxNew =
+    kind === "planning"
+      ? configured!
+      : kind === "ticket"
+        ? Math.max(32_000, semanticEnvelope)
+        : Math.max(32_000, Math.floor(semanticEnvelope / 2));
   // The cache-inclusive ceiling is a worst-case exposure hold, not a spend target. Anthropic
   // usage reports re-read the entire cached prefix on every turn (observed live: a healthy
   // 14-turn implementer accumulated 905K cacheRead against 6.6K new tokens before crossing the
@@ -8587,16 +10429,23 @@ function attemptRepositoryCallBudget(
   if (kind !== "planning") return undefined;
   const configured = runType.planning?.maxRepositoryToolCalls;
   if (configured === undefined) {
-    fail("planning_repository_budget", "planning attempts require a compiled repository-call budget");
+    fail(
+      "planning_repository_budget",
+      "planning attempts require a compiled repository-call budget",
+    );
   }
   return configured;
 }
 
 function requireThinkingLevel(value: unknown, label: string): ThinkingLevel {
   if (value === "ultra") {
-    fail("legacy_thinking_level", `${label} still uses legacy ultra; migrate it explicitly to Pi max before execution`);
+    fail(
+      "legacy_thinking_level",
+      `${label} still uses legacy ultra; migrate it explicitly to Pi max before execution`,
+    );
   }
-  if (!PI_THINKING_LEVELS.has(value as ThinkingLevel)) fail("thinking_level", `${label} has unsupported Pi thinking level ${String(value)}`);
+  if (!PI_THINKING_LEVELS.has(value as ThinkingLevel))
+    fail("thinking_level", `${label} has unsupported Pi thinking level ${String(value)}`);
   return value as ThinkingLevel;
 }
 
@@ -8622,23 +10471,52 @@ function ensureSeedConnected(keys: Set<string>, edges: PlanningGraphSeed["edges"
     }
   }
   const missing = [...keys].filter((key) => !seen.has(key));
-  if (missing.length > 0) fail("graph_seed_disconnected", `graph seed nodes are not connected to $root: ${missing.join(", ")}`);
+  if (missing.length > 0)
+    fail(
+      "graph_seed_disconnected",
+      `graph seed nodes are not connected to $root: ${missing.join(", ")}`,
+    );
 }
 
-function rejectCompilerOwnedSpec(fields: readonly string[], spec: Record<string, JsonValue>, label: string): void {
+function rejectCompilerOwnedSpec(
+  fields: readonly string[],
+  spec: Record<string, JsonValue>,
+  label: string,
+): void {
   for (const field of fields) {
     const normalized = field.replace(/^spec\./u, "");
     if (!field.startsWith("spec.")) continue;
-    if (graphField({ schema_version: "1.0", id: "x", type: "x", title: "x", status: "x", spec, edges: {}, annotations: {} }, normalized) !== undefined) {
+    if (
+      graphField(
+        {
+          schema_version: "1.0",
+          id: "x",
+          type: "x",
+          title: "x",
+          status: "x",
+          spec,
+          edges: {},
+          annotations: {},
+        },
+        normalized,
+      ) !== undefined
+    ) {
       fail("compiler_owned_field", `${label} may not author compiler-owned spec.${normalized}`);
     }
   }
 }
 
-function preserveCompilerOwnedSpec(fields: readonly string[], existing: GraphNode, updated: GraphNode): void {
+function preserveCompilerOwnedSpec(
+  fields: readonly string[],
+  existing: GraphNode,
+  updated: GraphNode,
+): void {
   for (const field of fields) {
     if (!field.startsWith("spec.")) continue;
-    if (canonicalHash(graphField(existing, field) ?? null) !== canonicalHash(graphField(updated, field) ?? null)) {
+    if (
+      canonicalHash(graphField(existing, field) ?? null) !==
+      canonicalHash(graphField(updated, field) ?? null)
+    ) {
       fail("compiler_owned_field", `agent may not change compiler-owned ${field}`);
     }
   }
@@ -8657,7 +10535,8 @@ function assertAgentToolIdentity(
     grant.stepId !== attempt.stepId ||
     grant.generation !== run.generation ||
     grant.grantId !== `grant-${attempt.id}`
-  ) fail("agent_tool_identity", "agent tool request does not match its immutable run assignment");
+  )
+    fail("agent_tool_identity", "agent tool request does not match its immutable run assignment");
 }
 
 interface ResolveConfiguredCheckInput {
@@ -8687,21 +10566,29 @@ interface CompositeMemberBinding {
   inputPaths: string[];
 }
 
-async function resolveConfiguredAgentCheck(input: ResolveConfiguredCheckInput): Promise<SemanticResolvedAgentCheck> {
+async function resolveConfiguredAgentCheck(
+  input: ResolveConfiguredCheckInput,
+): Promise<SemanticResolvedAgentCheck> {
   const adapter = await createProductionRuleDomainAdapter({
     configuration: input.configuration,
     graph: input.graph,
     projectRoot: input.projectRoot,
   });
-  const evaluator = new GraphExpressionEvaluator(
-    input.configuration,
-    input.graph,
-    adapter,
-  );
+  const evaluator = new GraphExpressionEvaluator(input.configuration, input.graph, adapter);
   const targetIds = input.descriptor.definition?.target_node_ids ?? input.descriptor.readNodeIds;
-  const resolved = await resolveCheckRecursive({ ...input, evaluator }, input.requestedCheckId, targetIds, [], undefined);
+  const resolved = await resolveCheckRecursive(
+    { ...input, evaluator },
+    input.requestedCheckId,
+    targetIds,
+    [],
+    undefined,
+  );
   const check = input.executionCatalog.checks[input.requestedCheckId];
-  if (check === undefined) fail("check_semantics", `configured check ${input.requestedCheckId} has no pinned execution semantics`);
+  if (check === undefined)
+    fail(
+      "check_semantics",
+      `configured check ${input.requestedCheckId} has no pinned execution semantics`,
+    );
   const gatePolicyContexts = input.gatePolicyContexts
     .filter((binding) => binding.checkId === input.requestedCheckId)
     .map((binding) => structuredClone(binding));
@@ -8709,7 +10596,10 @@ async function resolveConfiguredAgentCheck(input: ResolveConfiguredCheckInput): 
   const commands = resolved.commands.map((command) => {
     const commandCheck = input.executionCatalog.checks[command.checkId];
     if (commandCheck === undefined) {
-      fail("check_semantics", `configured command ${command.checkId} has no pinned execution semantics`);
+      fail(
+        "check_semantics",
+        `configured command ${command.checkId} has no pinned execution semantics`,
+      );
     }
     return {
       ...command,
@@ -8731,11 +10621,15 @@ async function resolveConfiguredAgentCheck(input: ResolveConfiguredCheckInput): 
 }
 
 function resolvedCheckExecutionPolicy(
-  input: Pick<ResolveConfiguredCheckInput, "executionCatalog" | "executionPolicyBinding" | "gatePolicyContexts">,
+  input: Pick<
+    ResolveConfiguredCheckInput,
+    "executionCatalog" | "executionPolicyBinding" | "gatePolicyContexts"
+  >,
   checkId: string,
 ): ResolvedCheckExecutionPolicyBinding {
   const check = input.executionCatalog.checks[checkId];
-  if (check === undefined) fail("check_semantics", `configured check ${checkId} has no pinned execution semantics`);
+  if (check === undefined)
+    fail("check_semantics", `configured check ${checkId} has no pinned execution semantics`);
   return deepFreeze({
     configurationSha256: input.executionCatalog.configurationSha256,
     catalogSha256: input.executionCatalog.sha256,
@@ -8757,21 +10651,36 @@ function terminalStepSemantics(
   catalog: CompiledExecutionSemanticCatalog,
   binding: ExecutionPolicyBinding,
 ): CompiledWorkflowStepSemantics {
-  if (binding.configurationSha256 !== catalog.configurationSha256 ||
-      binding.catalogSha256 !== catalog.sha256 ||
-      binding.workflowId === undefined || binding.workflowSha256 === undefined ||
-      binding.stepId === undefined || binding.stepSha256 === undefined) {
-    fail("terminal_policy_binding", "terminal policy binding does not belong to one pinned workflow step");
+  if (
+    binding.configurationSha256 !== catalog.configurationSha256 ||
+    binding.catalogSha256 !== catalog.sha256 ||
+    binding.workflowId === undefined ||
+    binding.workflowSha256 === undefined ||
+    binding.stepId === undefined ||
+    binding.stepSha256 === undefined
+  ) {
+    fail(
+      "terminal_policy_binding",
+      "terminal policy binding does not belong to one pinned workflow step",
+    );
   }
   const operation = catalog.operations[binding.operationId];
   const workflow = catalog.workflows[binding.workflowId];
   const step = workflow?.steps.find((candidate) => candidate.id === binding.stepId);
-  if (operation === undefined || operation.sha256 !== binding.operationSha256 ||
-      operation.workflowId !== binding.workflowId ||
-      workflow === undefined || workflow.sha256 !== binding.workflowSha256 ||
-      workflow.version !== binding.workflowVersion ||
-      step === undefined || step.sha256 !== binding.stepSha256) {
-    fail("terminal_policy_binding", "terminal policy binding differs from the pinned semantic catalog");
+  if (
+    operation === undefined ||
+    operation.sha256 !== binding.operationSha256 ||
+    operation.workflowId !== binding.workflowId ||
+    workflow === undefined ||
+    workflow.sha256 !== binding.workflowSha256 ||
+    workflow.version !== binding.workflowVersion ||
+    step === undefined ||
+    step.sha256 !== binding.stepSha256
+  ) {
+    fail(
+      "terminal_policy_binding",
+      "terminal policy binding differs from the pinned semantic catalog",
+    );
   }
   return step;
 }
@@ -8783,7 +10692,8 @@ function assignmentChangeControlContract(
 ): AssignmentChangeControlContract {
   terminalStepSemantics(catalog, binding);
   const operation = catalog.operations[binding.operationId];
-  if (operation === undefined) fail("change_control_operation", `operation ${binding.operationId} is unavailable`);
+  if (operation === undefined)
+    fail("change_control_operation", `operation ${binding.operationId} is unavailable`);
   const policy = operation.changeControl;
   return {
     role: policy.role,
@@ -8799,8 +10709,14 @@ async function resolveTerminalValidationCheckPolicies(input: {
   projectRoot: string;
   checkIds: readonly string[];
 }): Promise<AssignmentTerminalValidationCheckPolicy[]> {
-  if (input.descriptor.executionPolicyBinding === undefined || input.descriptor.graph === undefined) {
-    fail("terminal_policy_descriptor", "terminal validation checks require a graph and step binding");
+  if (
+    input.descriptor.executionPolicyBinding === undefined ||
+    input.descriptor.graph === undefined
+  ) {
+    fail(
+      "terminal_policy_descriptor",
+      "terminal validation checks require a graph and step binding",
+    );
   }
   const output: AssignmentTerminalValidationCheckPolicy[] = [];
   for (const checkId of input.checkIds) {
@@ -8819,32 +10735,47 @@ async function resolveTerminalValidationCheckPolicies(input: {
       fail("terminal_policy_check", `terminal validation check ${checkId} has no pinned semantics`);
     }
     const causalResolvedCheckSha256 = canonicalHash(resolvedCheck);
-    const leafIds = [...new Set(resolvedCheck.commands.map((command) => command.checkId))].sort(compareText);
+    const leafIds = [...new Set(resolvedCheck.commands.map((command) => command.checkId))].sort(
+      compareText,
+    );
     const replaySelection = selectComposedReplayChecks(
       input.catalog,
       input.catalog.configurationSha256,
       leafIds,
     );
     const replayIds = new Set(replaySelection.replayCheckIds);
-    const replayCommands = resolvedCheck.commands.filter((command) => replayIds.has(command.checkId));
+    const replayCommands = resolvedCheck.commands.filter((command) =>
+      replayIds.has(command.checkId),
+    );
     const retainedLeafPolicies = resolvedCheck.commands.flatMap((command, commandIndex) => {
       if (replayIds.has(command.checkId)) return [];
       if (command.executionPolicy === undefined) {
-        fail("terminal_policy_leaf_binding", `resolved leaf ${command.checkId} has no exact execution policy`);
+        fail(
+          "terminal_policy_leaf_binding",
+          `resolved leaf ${command.checkId} has no exact execution policy`,
+        );
       }
-      return [{ commandIndex, checkId: command.checkId, executionPolicy: structuredClone(command.executionPolicy) }];
+      return [
+        {
+          commandIndex,
+          checkId: command.checkId,
+          executionPolicy: structuredClone(command.executionPolicy),
+        },
+      ];
     });
-    output.push(deepFreeze({
-      checkId,
-      checkSha256: semantics.sha256,
-      receiptType: semantics.receiptType,
-      receiptFreshness: semantics.receiptFreshness,
-      resolvedCheck: { ...resolvedCheck, commands: replayCommands },
-      causalResolvedCheckSha256,
-      causalCommands: Object.freeze([...resolvedCheck.commands]),
-      retainedLeafPolicies,
-      replaySelection,
-    }));
+    output.push(
+      deepFreeze({
+        checkId,
+        checkSha256: semantics.sha256,
+        receiptType: semantics.receiptType,
+        receiptFreshness: semantics.receiptFreshness,
+        resolvedCheck: { ...resolvedCheck, commands: replayCommands },
+        causalResolvedCheckSha256,
+        causalCommands: Object.freeze([...resolvedCheck.commands]),
+        retainedLeafPolicies,
+        replaySelection,
+      }),
+    );
   }
   return output;
 }
@@ -8865,8 +10796,9 @@ function retainedTerminalReceipts(
   const checks = new Map((run.checks ?? []).map((check) => [check.id, check]));
   const selected: AssignmentTerminalPolicyRetainedReceipt[] = [];
   for (const key of [...expected.keys()].sort(compareText)) {
-    const matches = candidates.filter((candidate) =>
-      `${candidate.checkId}\0${canonicalHash(candidate.executionPolicy)}` === key);
+    const matches = candidates.filter(
+      (candidate) => `${candidate.checkId}\0${canonicalHash(candidate.executionPolicy)}` === key,
+    );
     matches.sort((left, right) => {
       const leftCurrent = left.attemptId === currentAttemptId ? 1 : 0;
       const rightCurrent = right.attemptId === currentAttemptId ? 1 : 0;
@@ -8893,29 +10825,38 @@ function retainedReceiptsMatching(
   const output: AssignmentTerminalPolicyRetainedReceipt[] = [];
   for (const check of run.checks ?? []) {
     const attempt = run.attempts[check.attemptId];
-    if (attempt === undefined || attempt.ticketId !== ticketId ||
-        (stepId !== undefined && attempt.stepId !== stepId) ||
-        !check.accepted || check.passed !== true) continue;
+    if (
+      attempt === undefined ||
+      attempt.ticketId !== ticketId ||
+      (stepId !== undefined && attempt.stepId !== stepId) ||
+      !check.accepted ||
+      check.passed !== true
+    )
+      continue;
     for (const [commandIndex, command] of check.commands.entries()) {
       if (command.executionPolicy === undefined) continue;
       const key = `${command.checkId}\0${canonicalHash(command.executionPolicy)}`;
       const policy = expected.get(key);
       if (policy === undefined) continue;
-      output.push(deepFreeze({
-        runCheckId: check.id,
-        attemptId: check.attemptId,
-        stepId: attempt.stepId,
-        requestedCheckId: check.requestedCheckId,
-        commandIndex,
-        checkId: command.checkId,
-        executionPolicy: structuredClone(policy),
-      }));
+      output.push(
+        deepFreeze({
+          runCheckId: check.id,
+          attemptId: check.attemptId,
+          stepId: attempt.stepId,
+          requestedCheckId: check.requestedCheckId,
+          commandIndex,
+          checkId: command.checkId,
+          executionPolicy: structuredClone(policy),
+        }),
+      );
     }
   }
-  return output.sort((left, right) => compareText(
-    `${left.stepId}\0${left.runCheckId}\0${left.commandIndex}`,
-    `${right.stepId}\0${right.runCheckId}\0${right.commandIndex}`,
-  ));
+  return output.sort((left, right) =>
+    compareText(
+      `${left.stepId}\0${left.runCheckId}\0${left.commandIndex}`,
+      `${right.stepId}\0${right.runCheckId}\0${right.commandIndex}`,
+    ),
+  );
 }
 
 function terminalRetainedReceiptKey(receipt: AssignmentTerminalPolicyRetainedReceipt): string {
@@ -8955,11 +10896,20 @@ function pairSourceManifestCommands(input: {
       );
     }
     const expected = new Map<string, CheckExecutionPolicyBinding>();
-    const sourcePolicy = input.sourceChecks.flatMap((policy) => policy.causalCommands)
-      .find((candidate) => commandBindingSha256(candidate as SemanticResolvedAgentCheckCommand, input.sourceStepId) ===
-        source.commandBindingSha256)?.executionPolicy;
+    const sourcePolicy = input.sourceChecks
+      .flatMap((policy) => policy.causalCommands)
+      .find(
+        (candidate) =>
+          commandBindingSha256(
+            candidate as SemanticResolvedAgentCheckCommand,
+            input.sourceStepId,
+          ) === source.commandBindingSha256,
+      )?.executionPolicy;
     if (sourcePolicy === undefined) {
-      fail("terminal_policy_source_binding", `source command ${source.checkId} has no exact execution policy`);
+      fail(
+        "terminal_policy_source_binding",
+        `source command ${source.checkId} has no exact execution policy`,
+      );
     }
     expected.set(`${source.checkId}\0${canonicalHash(sourcePolicy)}`, sourcePolicy);
     const retainedSourceReceipts = retainedReceiptsMatching(
@@ -8976,9 +10926,15 @@ function pairSourceManifestCommands(input: {
     };
     output.push(deepFreeze({ ...material, sha256: canonicalHash(material) }));
   }
-  if (sourceCommands.some((source) => !currentCommands.some((current) =>
-    current.memberNodeId === source.memberNodeId))) {
-    fail("terminal_policy_source_pair", "baseline source members differ from current validation members");
+  if (
+    sourceCommands.some(
+      (source) => !currentCommands.some((current) => current.memberNodeId === source.memberNodeId),
+    )
+  ) {
+    fail(
+      "terminal_policy_source_pair",
+      "baseline source members differ from current validation members",
+    );
   }
   return output.sort((left, right) => compareText(left.memberNodeId, right.memberNodeId));
 }
@@ -8991,26 +10947,34 @@ function terminalCommandsWithMembers(
   for (const policy of policies) {
     for (const rawCommand of policy.causalCommands) {
       const command = rawCommand as SemanticResolvedAgentCheckCommand;
-      if (command.memberNodeId === undefined || command.memberSourcePaths === undefined ||
-          command.memberSourcePaths.length === 0) {
+      if (
+        command.memberNodeId === undefined ||
+        command.memberSourcePaths === undefined ||
+        command.memberSourcePaths.length === 0
+      ) {
         fail(
           "terminal_policy_source_member",
           `source-preservation check ${policy.checkId} did not resolve an exact member and source-path set`,
         );
       }
-      output.push(deepFreeze({
-        stepId,
-        checkId: command.checkId,
-        memberNodeId: command.memberNodeId,
-        commandBindingSha256: commandBindingSha256(command, stepId),
-        sourcePaths: Object.freeze([...command.memberSourcePaths]),
-      }));
+      output.push(
+        deepFreeze({
+          stepId,
+          checkId: command.checkId,
+          memberNodeId: command.memberNodeId,
+          commandBindingSha256: commandBindingSha256(command, stepId),
+          sourcePaths: Object.freeze([...command.memberSourcePaths]),
+        }),
+      );
     }
   }
   const identities = new Set<string>();
   for (const command of output) {
     if (identities.has(command.memberNodeId)) {
-      fail("terminal_policy_source_member", `source-preservation member ${command.memberNodeId} has multiple commands`);
+      fail(
+        "terminal_policy_source_member",
+        `source-preservation member ${command.memberNodeId} has multiple commands`,
+      );
     }
     identities.add(command.memberNodeId);
   }
@@ -9021,9 +10985,15 @@ function commandBindingSha256(
   command: SemanticResolvedAgentCheckCommand,
   stepId: string,
 ): Sha256Digest {
-  if (command.executionPolicy === undefined || command.memberNodeId === undefined ||
-      command.memberSourcePaths === undefined) {
-    fail("terminal_policy_command_binding", `command ${command.checkId} has no exact semantic member binding`);
+  if (
+    command.executionPolicy === undefined ||
+    command.memberNodeId === undefined ||
+    command.memberSourcePaths === undefined
+  ) {
+    fail(
+      "terminal_policy_command_binding",
+      `command ${command.checkId} has no exact semantic member binding`,
+    );
   }
   return canonicalHash({
     stepId,
@@ -9044,8 +11014,16 @@ async function resolveCheckRecursive(
   subjectIds: readonly string[],
   stack: readonly string[],
   member: CompositeMemberBinding | undefined,
-): Promise<{ kind: ResolvedAgentCheck["kind"]; definitionHash: Sha256Digest; commands: ResolvedAgentCheckCommand[] }> {
-  if (stack.includes(checkId)) fail("check_recursive", `configured check recursion is cyclic: ${[...stack, checkId].join(" -> ")}`);
+): Promise<{
+  kind: ResolvedAgentCheck["kind"];
+  definitionHash: Sha256Digest;
+  commands: ResolvedAgentCheckCommand[];
+}> {
+  if (stack.includes(checkId))
+    fail(
+      "check_recursive",
+      `configured check recursion is cyclic: ${[...stack, checkId].join(" -> ")}`,
+    );
   const definition = input.configuration.registries.checks[checkId];
   if (definition === undefined) fail("check_missing", `configured check ${checkId} does not exist`);
   assertCheckApplies(definition, input.descriptor, checkId);
@@ -9059,49 +11037,69 @@ async function resolveCheckRecursive(
       commands: await resolveCommandCheck(input, checkId, definition, subjectIds, member),
     };
   }
-  if (kind !== "composite") fail("check_kind", `configured check ${checkId} has unsupported kind ${kind ?? ""}`);
+  if (kind !== "composite")
+    fail("check_kind", `configured check ${checkId} has unsupported kind ${kind ?? ""}`);
   const set = optionalRecord(definition.graph_set);
-  if (set === undefined) fail("check_composite", `composite check ${checkId} has no graph_set contract`);
-  const selector = set.members as ConfigurationValue | undefined;
-  if (selector === undefined) fail("check_composite", `composite check ${checkId} has no member selector`);
-  const selected = input.evaluator.withBinding("target", subjectIds, () => input.evaluator.select(selector));
+  if (set === undefined)
+    fail("check_composite", `composite check ${checkId} has no graph_set contract`);
+  const selector = set.members;
+  if (selector === undefined)
+    fail("check_composite", `composite check ${checkId} has no member selector`);
+  const selected = input.evaluator.withBinding("target", subjectIds, () =>
+    input.evaluator.select(selector),
+  );
   const memberTypes = new Set(stringArray(set.member_node_types, `${checkId} member node types`));
   const excluded = new Set(stringArray(set.status_excluding, `${checkId} excluded statuses`));
-  const members = selected.flatMap((id) => {
-    const node = input.graph.node(id);
-    if (node === undefined || (memberTypes.size > 0 && !memberTypes.has(node.type)) || excluded.has(node.status)) return [];
-    return [node];
-  }).sort((left, right) => compareText(left.id, right.id));
+  const members = selected
+    .flatMap((id) => {
+      const node = input.graph.node(id);
+      if (
+        node === undefined ||
+        (memberTypes.size > 0 && !memberTypes.has(node.type)) ||
+        excluded.has(node.status)
+      )
+        return [];
+      return [node];
+    })
+    .sort((left, right) => compareText(left.id, right.id));
   const minimum = optionalSafeInteger(set.min_members) ?? 0;
   if (members.length < minimum) {
-    fail("check_composite_coverage", `composite check ${checkId} selected ${members.length} members, below ${minimum}`);
+    fail(
+      "check_composite_coverage",
+      `composite check ${checkId} selected ${members.length} members, below ${minimum}`,
+    );
   }
   const commands: ResolvedAgentCheckCommand[] = [];
   for (const node of members) {
     const configuredChild = optionalString(set.member_check);
     const field = optionalString(set.member_check_field);
-    const childId = configuredChild ?? (field === undefined ? undefined : optionalString(graphNodeField(node, field)));
-    if (childId === undefined) fail("check_composite_member", `composite check ${checkId} member ${node.id} has no check id`);
+    const childId =
+      configuredChild ??
+      (field === undefined ? undefined : optionalString(graphNodeField(node, field)));
+    if (childId === undefined)
+      fail(
+        "check_composite_member",
+        `composite check ${checkId} member ${node.id} has no check id`,
+      );
     const sourcePaths = configuredNodePaths(node, optionalString(set.source_paths_field));
     const coveredPaths = configuredNodePaths(node, optionalString(set.covered_paths_field));
     const supportPaths = configuredNodePaths(node, optionalString(set.support_paths_field));
     const workingDirectory = optionalString(set.working_directory_field);
-    const cwd = workingDirectory === undefined ? undefined : optionalString(graphNodeField(node, workingDirectory));
-    const resolved = await resolveCheckRecursive(
-      input,
-      childId,
-      [node.id],
-      [...stack, checkId],
-      {
-        nodeId: node.id,
-        ...(cwd === undefined ? {} : { cwd }),
-        // Test-support configuration is causal to an honest prepared baseline. Keep its exact
-        // bytes in the same preservation manifest as the writable proof source, while retaining
-        // a distinct graph field so it never becomes write authority or claimed product coverage.
-        sourcePaths: [...new Set([...sourcePaths, ...supportPaths])].sort(compareText),
-        inputPaths: [...new Set([...sourcePaths, ...coveredPaths, ...supportPaths])].sort(compareText),
-      },
-    );
+    const cwd =
+      workingDirectory === undefined
+        ? undefined
+        : optionalString(graphNodeField(node, workingDirectory));
+    const resolved = await resolveCheckRecursive(input, childId, [node.id], [...stack, checkId], {
+      nodeId: node.id,
+      ...(cwd === undefined ? {} : { cwd }),
+      // Test-support configuration is causal to an honest prepared baseline. Keep its exact
+      // bytes in the same preservation manifest as the writable proof source, while retaining
+      // a distinct graph field so it never becomes write authority or claimed product coverage.
+      sourcePaths: [...new Set([...sourcePaths, ...supportPaths])].sort(compareText),
+      inputPaths: [...new Set([...sourcePaths, ...coveredPaths, ...supportPaths])].sort(
+        compareText,
+      ),
+    });
     commands.push(...resolved.commands);
   }
   return { kind, definitionHash, commands };
@@ -9114,29 +11112,47 @@ async function resolveCommandCheck(
   subjectIds: readonly string[],
   member: CompositeMemberBinding | undefined,
 ): Promise<ResolvedAgentCheckCommand[]> {
-  const staticArgv = Array.isArray(definition.argv) ? exactArgv(definition.argv, checkId) : undefined;
+  const staticArgv = Array.isArray(definition.argv)
+    ? exactArgv(definition.argv, checkId)
+    : undefined;
   const source = optionalRecord(definition.command_source);
   if ((staticArgv === undefined) === (source === undefined)) {
-    fail("check_command_source", `command check ${checkId} must have exactly one static or dynamic command source`);
+    fail(
+      "check_command_source",
+      `command check ${checkId} must have exactly one static or dynamic command source`,
+    );
   }
-  const bindings: Array<{ argv: string[]; root?: ConfigurationValue; variables: Record<string, string> }> = [];
+  const bindings: Array<{
+    argv: string[];
+    root?: ConfigurationValue;
+    variables: Record<string, string>;
+  }> = [];
   if (staticArgv !== undefined) {
     bindings.push({ argv: staticArgv, variables: {} });
   } else {
     const sourceKind = optionalString(source!.kind);
     const field = requiredNonempty(source!.field, `${checkId} command source field`);
     if (sourceKind === "node") {
-      const allowedTypes = new Set(stringArray(source!.node_types, `${checkId} command source node types`));
+      const allowedTypes = new Set(
+        stringArray(source!.node_types, `${checkId} command source node types`),
+      );
       const gatePolicy = optionalString(source!.gate_policy);
       if (gatePolicy !== undefined) {
         for (const gateId of [...new Set(subjectIds)].sort(compareText)) {
           const winners = input.evaluator.select({
             policy_selection: { policy: gatePolicy, gate: { ids: [gateId] }, result: "winner" },
           });
-          if (winners.length !== 1) fail("check_command_source", `check ${checkId} gate ${gateId} has no unique policy winner`);
+          if (winners.length !== 1)
+            fail(
+              "check_command_source",
+              `check ${checkId} gate ${gateId} has no unique policy winner`,
+            );
           const winner = input.graph.node(winners[0]!)!;
           if (allowedTypes.size > 0 && !allowedTypes.has(winner.type)) {
-            fail("check_command_source", `check ${checkId} selected unauthorized ${winner.type} command node ${winner.id}`);
+            fail(
+              "check_command_source",
+              `check ${checkId} selected unauthorized ${winner.type} command node ${winner.id}`,
+            );
           }
           const variables = {
             "gate.id": gateId,
@@ -9151,12 +11167,19 @@ async function resolveCommandCheck(
           });
         }
       } else {
-        const candidates = [...new Set(subjectIds)].flatMap((id) => {
-          const node = input.graph.node(id);
-          return node !== undefined && (allowedTypes.size === 0 || allowedTypes.has(node.type)) ? [node] : [];
-        }).sort((left, right) => compareText(left.id, right.id));
+        const candidates = [...new Set(subjectIds)]
+          .flatMap((id) => {
+            const node = input.graph.node(id);
+            return node !== undefined && (allowedTypes.size === 0 || allowedTypes.has(node.type))
+              ? [node]
+              : [];
+          })
+          .sort((left, right) => compareText(left.id, right.id));
         if (candidates.length !== 1) {
-          fail("check_command_source", `check ${checkId} resolved ${candidates.length} target command nodes, expected exactly one`);
+          fail(
+            "check_command_source",
+            `check ${checkId} resolved ${candidates.length} target command nodes, expected exactly one`,
+          );
         }
         const candidate = candidates[0]!;
         const variables = {
@@ -9171,12 +11194,17 @@ async function resolveCommandCheck(
         });
       }
     } else if (sourceKind === "ticket") {
-      const candidates = [...new Set(subjectIds)].flatMap((id) => {
-        const node = input.graph.node(id);
-        return node === undefined ? [] : [node];
-      }).sort((left, right) => compareText(left.id, right.id));
+      const candidates = [...new Set(subjectIds)]
+        .flatMap((id) => {
+          const node = input.graph.node(id);
+          return node === undefined ? [] : [node];
+        })
+        .sort((left, right) => compareText(left.id, right.id));
       if (candidates.length !== 1) {
-        fail("check_command_source", `check ${checkId} resolved ${candidates.length} ticket command nodes, expected exactly one`);
+        fail(
+          "check_command_source",
+          `check ${checkId} resolved ${candidates.length} ticket command nodes, expected exactly one`,
+        );
       }
       const target = candidates[0]!;
       const variables = { "target.id": target.id, "ticket.id": input.descriptor.ticketId };
@@ -9186,11 +11214,15 @@ async function resolveCommandCheck(
         variables,
       });
     } else {
-      fail("check_command_source", `check ${checkId} has unsupported dynamic source kind ${sourceKind ?? ""}`);
+      fail(
+        "check_command_source",
+        `check ${checkId} has unsupported dynamic source kind ${sourceKind ?? ""}`,
+      );
     }
   }
   const effect = optionalString(definition.effect) ?? "read_only";
-  if (effect !== "read_only" && effect !== "workspace_write") fail("check_effect", `check ${checkId} has unsupported effect ${effect}`);
+  if (effect !== "read_only" && effect !== "workspace_write")
+    fail("check_effect", `check ${checkId} has unsupported effect ${effect}`);
   const timeoutSeconds = optionalSafeInteger(definition.timeout_seconds);
   if (timeoutSeconds === undefined || timeoutSeconds < 1 || timeoutSeconds > 86_400) {
     fail("check_timeout", `check ${checkId} timeout must be between 1 and 86400 seconds`);
@@ -9199,77 +11231,115 @@ async function resolveCommandCheck(
   const inherit = stringArray(environment.inherit, `${checkId} inherited environment`);
   const set = optionalRecord(environment.set) ?? {};
   const environmentSet: Record<string, string> = {};
-  for (const [name, value] of Object.entries(set).sort(([left], [right]) => compareText(left, right))) {
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name) || typeof value !== "string" || value.includes("\u0000")) {
+  for (const [name, value] of Object.entries(set).sort(([left], [right]) =>
+    compareText(left, right),
+  )) {
+    if (
+      !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name) ||
+      typeof value !== "string" ||
+      value.includes("\u0000")
+    ) {
       fail("check_environment", `check ${checkId} has an invalid fixed environment entry`);
     }
     environmentSet[name] = value;
   }
   const expectedExitCodes = stringOrNumberArray(definition.expected_exit_codes, [0], checkId);
-  const cwd = normalizeCheckPath(member?.cwd ?? optionalString(definition.cwd) ?? ".", `${checkId} cwd`);
-  return Promise.all(bindings.map(async (binding) => {
-    const boundInputPaths = await resolveCheckInputBindings(
-      definition,
-      binding.root,
-      binding.argv,
-      checkId,
-      input.projectRoot,
-    );
-    const inputPaths = [...new Set([...(member?.inputPaths ?? []), ...boundInputPaths])]
-      .map((value) => normalizeCheckPath(value, `${checkId} input path`))
-      .sort(compareText);
-    // A proof check reads not only the ticket-owned production seams (the attempt's covered read
-    // grant) but also its declared support files — the test files it runs, the vitest/tsconfig
-    // config, and the package manifest `pnpm exec vitest` needs to resolve. The compiler already
-    // lists those support files in the check's source manifest and the ticket's runtime read grant,
-    // so they are readable at run time; validating check inputs against the narrow per-step covered
-    // scope alone rejected every support file as "outside path scope" and deadlocked every
-    // implementation proof (observed live across both Sonnet and Opus planners). Validate against the
-    // union of the granted read scope and the check's own declared source/support paths; other
-    // inputs still stay bounded to the attempt's read grant.
-    const checkReadScope = [...input.descriptor.readPaths, ...(member?.sourcePaths ?? [])];
-    for (const value of inputPaths) assertPathInScopes(value, checkReadScope, `${checkId} input path`);
-    const dynamicResult = optionalRecord(definition.dynamic_result);
-    const resultPath = resolveDynamicResultPath(dynamicResult, binding.root, binding.variables, checkId);
-    if (resultPath !== undefined) assertPathInScopes(resultPath, input.descriptor.writePaths, `${checkId} result path`);
-    const outputPaths = effect === "workspace_write"
-      ? [...new Set(input.descriptor.writePaths)].sort(compareText)
-      : [];
-    const artifactDefinition = optionalRecord(dynamicResult?.artifacts);
-    const outputArtifactSelector = artifactDefinition === undefined ? undefined : {
-      field: requiredNonempty(artifactDefinition.field, `${checkId} artifact field`),
-      allowPathStrings: artifactDefinition.allow_path_strings === true,
-      pathField: optionalString(artifactDefinition.path_field) ?? "path",
-    };
-    return {
-      checkId,
-      definitionHash: canonicalHash(definition),
-      executionPolicy: resolvedCheckExecutionPolicy(input, checkId),
-      ...(member === undefined ? {} : {
-        memberNodeId: member.nodeId,
-        memberSourcePaths: Object.freeze([...member.sourcePaths]),
-      }),
-      argv: binding.argv,
-      cwd,
-      timeoutMs: timeoutSeconds * 1_000,
-      effect,
-      networkAccess: definition.network_access === true,
-      environment: { inherit, set: environmentSet },
-      expectedExitCodes,
-      allowNonpassingReceipt: definition.allow_nonpassing_receipt === true,
-      receiptType: requiredNonempty(definition.receipt_type, `${checkId} receipt type`),
-      ...(optionalString(definition.result_protocol) === undefined ? {} : { resultProtocol: optionalString(definition.result_protocol)! }),
-      requiredResultFields: stringArray(definition.required_result_fields, `${checkId} required result fields`),
-      ...(definition.result_schema === undefined ? {} : { resultSchema: structuredClone(definition.result_schema) as JsonValue }),
-      resultSource: resultPath === undefined ? { kind: "stdout" as const } : { kind: "file" as const, path: resultPath },
-      ...(outputArtifactSelector === undefined ? {} : { outputArtifactSelector }),
-      inputPaths,
-      outputPaths,
-    };
-  }));
+  const cwd = normalizeCheckPath(
+    member?.cwd ?? optionalString(definition.cwd) ?? ".",
+    `${checkId} cwd`,
+  );
+  return Promise.all(
+    bindings.map(async (binding) => {
+      const boundInputPaths = await resolveCheckInputBindings(
+        definition,
+        binding.root,
+        binding.argv,
+        checkId,
+        input.projectRoot,
+      );
+      const inputPaths = [...new Set([...(member?.inputPaths ?? []), ...boundInputPaths])]
+        .map((value) => normalizeCheckPath(value, `${checkId} input path`))
+        .sort(compareText);
+      // A proof check reads not only the ticket-owned production seams (the attempt's covered read
+      // grant) but also its declared support files — the test files it runs, the vitest/tsconfig
+      // config, and the package manifest `pnpm exec vitest` needs to resolve. The compiler already
+      // lists those support files in the check's source manifest and the ticket's runtime read grant,
+      // so they are readable at run time; validating check inputs against the narrow per-step covered
+      // scope alone rejected every support file as "outside path scope" and deadlocked every
+      // implementation proof (observed live across both Sonnet and Opus planners). Validate against the
+      // union of the granted read scope and the check's own declared source/support paths; other
+      // inputs still stay bounded to the attempt's read grant.
+      const checkReadScope = [...input.descriptor.readPaths, ...(member?.sourcePaths ?? [])];
+      for (const value of inputPaths)
+        assertPathInScopes(value, checkReadScope, `${checkId} input path`);
+      const dynamicResult = optionalRecord(definition.dynamic_result);
+      const resultPath = resolveDynamicResultPath(
+        dynamicResult,
+        binding.root,
+        binding.variables,
+        checkId,
+      );
+      if (resultPath !== undefined)
+        assertPathInScopes(resultPath, input.descriptor.writePaths, `${checkId} result path`);
+      const outputPaths =
+        effect === "workspace_write"
+          ? [...new Set(input.descriptor.writePaths)].sort(compareText)
+          : [];
+      const artifactDefinition = optionalRecord(dynamicResult?.artifacts);
+      const outputArtifactSelector =
+        artifactDefinition === undefined
+          ? undefined
+          : {
+              field: requiredNonempty(artifactDefinition.field, `${checkId} artifact field`),
+              allowPathStrings: artifactDefinition.allow_path_strings === true,
+              pathField: optionalString(artifactDefinition.path_field) ?? "path",
+            };
+      return {
+        checkId,
+        definitionHash: canonicalHash(definition),
+        executionPolicy: resolvedCheckExecutionPolicy(input, checkId),
+        ...(member === undefined
+          ? {}
+          : {
+              memberNodeId: member.nodeId,
+              memberSourcePaths: Object.freeze([...member.sourcePaths]),
+            }),
+        argv: binding.argv,
+        cwd,
+        timeoutMs: timeoutSeconds * 1_000,
+        effect,
+        networkAccess: definition.network_access === true,
+        environment: { inherit, set: environmentSet },
+        expectedExitCodes,
+        allowNonpassingReceipt: definition.allow_nonpassing_receipt === true,
+        receiptType: requiredNonempty(definition.receipt_type, `${checkId} receipt type`),
+        ...(optionalString(definition.result_protocol) === undefined
+          ? {}
+          : { resultProtocol: optionalString(definition.result_protocol)! }),
+        requiredResultFields: stringArray(
+          definition.required_result_fields,
+          `${checkId} required result fields`,
+        ),
+        ...(definition.result_schema === undefined
+          ? {}
+          : { resultSchema: structuredClone(definition.result_schema) as JsonValue }),
+        resultSource:
+          resultPath === undefined
+            ? { kind: "stdout" as const }
+            : { kind: "file" as const, path: resultPath },
+        ...(outputArtifactSelector === undefined ? {} : { outputArtifactSelector }),
+        inputPaths,
+        outputPaths,
+      };
+    }),
+  );
 }
 
-function assertCheckApplies(definition: ConfigurationObject, descriptor: AttemptDescriptor, checkId: string): void {
+function assertCheckApplies(
+  definition: ConfigurationObject,
+  descriptor: AttemptDescriptor,
+  checkId: string,
+): void {
   const applies = stringArray(definition.applies_to, `${checkId} applies_to`);
   const operation = descriptor.definition?.operation;
   if (operation !== undefined && applies.length > 0 && !applies.includes(operation)) {
@@ -9281,7 +11351,8 @@ function configuredNodePaths(node: GraphNode, field: string | undefined): string
   if (field === undefined) return [];
   const value = graphNodeField(node, field);
   const values = typeof value === "string" ? [value] : Array.isArray(value) ? value : [];
-  if (values.some((item) => typeof item !== "string")) fail("check_composite_path", `${node.id}.${field} contains a non-string path`);
+  if (values.some((item) => typeof item !== "string"))
+    fail("check_composite_path", `${node.id}.${field} contains a non-string path`);
   return (values as string[]).map((item) => normalizeCheckPath(item, `${node.id}.${field}`));
 }
 
@@ -9320,19 +11391,30 @@ function dynamicValuePath(
       if (!Number.isSafeInteger(index) || index < 0) return undefined;
       current = current[index];
     } else if (isRecord(current)) {
-      current = current[key] as ConfigurationValue | undefined;
+      current = current[key];
     } else return undefined;
   }
   return current;
 }
 
 function exactArgv(value: unknown, checkId: string): string[] {
-  if (!Array.isArray(value) || value.length === 0 || value.some((item) =>
-    typeof item !== "string" || item.trim().length === 0 || item.includes("\u0000") || item.includes("\n") || item.includes("\r"))) {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.some(
+      (item) =>
+        typeof item !== "string" ||
+        item.trim().length === 0 ||
+        item.includes("\u0000") ||
+        item.includes("\n") ||
+        item.includes("\r"),
+    )
+  ) {
     fail("check_argv", `check ${checkId} command must be one exact nonempty argv array`);
   }
   const argv = value as string[];
-  if (/\s/u.test(argv[0]!)) fail("check_argv", `check ${checkId} executable argv element may not contain whitespace`);
+  if (/\s/u.test(argv[0]!))
+    fail("check_argv", `check ${checkId} executable argv element may not contain whitespace`);
   if (argv.length > 4_096 || argv.some((item) => Buffer.byteLength(item, "utf8") > 1024 * 1024)) {
     fail("check_argv", `check ${checkId} argv exceeds its compiler bound`);
   }
@@ -9341,7 +11423,13 @@ function exactArgv(value: unknown, checkId: string): string[] {
 
 function stringOrNumberArray(value: unknown, fallback: number[], checkId: string): number[] {
   if (value === undefined) return fallback;
-  if (!Array.isArray(value) || value.length === 0 || value.some((item) => !Number.isSafeInteger(item) || (item as number) < 0 || (item as number) > 255)) {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.some(
+      (item) => !Number.isSafeInteger(item) || (item as number) < 0 || (item as number) > 255,
+    )
+  ) {
     fail("check_exit_codes", `check ${checkId} expected exit codes are invalid`);
   }
   return [...new Set(value as number[])].sort((left, right) => left - right);
@@ -9356,24 +11444,40 @@ async function resolveCheckInputBindings(
 ): Promise<string[]> {
   const configured = optionalRecord(definition.argv_input_bindings);
   if (configured === undefined) return [];
-  if (root === undefined) fail("check_input_binding", `check ${checkId} has no dynamic root for argv input bindings`);
+  if (root === undefined)
+    fail("check_input_binding", `check ${checkId} has no dynamic root for argv input bindings`);
   const from = requiredNonempty(configured.from, `${checkId} argv input source`);
   const rows = dynamicValuePath(root, from, {});
   if (!Array.isArray(rows) || (configured.require_nonempty === true && rows.length === 0)) {
-    fail("check_input_binding", `check ${checkId} argv input source is not a permitted nonempty list`);
+    fail(
+      "check_input_binding",
+      `check ${checkId} argv input source is not a permitted nonempty list`,
+    );
   }
   const pathField = optionalString(configured.path_field) ?? "path";
-  const requiredFields = stringArray(configured.required_fields, `${checkId} required input fields`);
+  const requiredFields = stringArray(
+    configured.required_fields,
+    `${checkId} required input fields`,
+  );
   const paths: string[] = [];
   for (const [index, row] of rows.entries()) {
-    if (!isRecord(row)) fail("check_input_binding", `check ${checkId} input binding ${index} is not an object`);
-    for (const field of requiredFields) if (row[field] === undefined) {
-      fail("check_input_binding", `check ${checkId} input binding ${index} is missing ${field}`);
-    }
+    if (!isRecord(row))
+      fail("check_input_binding", `check ${checkId} input binding ${index} is not an object`);
+    for (const field of requiredFields)
+      if (row[field] === undefined) {
+        fail("check_input_binding", `check ${checkId} input binding ${index} is missing ${field}`);
+      }
     const value = requiredNonempty(row[pathField], `${checkId} input binding path`);
     const normalized = normalizeCheckPath(value, `${checkId} input binding path`);
-    if (configured.require_exact_argument === true && !argv.includes(normalized) && !argv.includes(value)) {
-      fail("check_input_binding", `check ${checkId} input path ${normalized} is not an exact argv element`);
+    if (
+      configured.require_exact_argument === true &&
+      !argv.includes(normalized) &&
+      !argv.includes(value)
+    ) {
+      fail(
+        "check_input_binding",
+        `check ${checkId} input path ${normalized} is not an exact argv element`,
+      );
     }
     if (configured.require_project_file === true) {
       await assertExistingProjectFile(projectRoot, normalized, checkId);
@@ -9394,19 +11498,31 @@ async function assertExistingProjectFile(
     canonicalRoot = await realpath(projectRoot);
     canonicalFile = await realpath(path.join(canonicalRoot, relativePath));
   } catch {
-    fail("check_input_binding", `check ${checkId} input path ${relativePath} does not exist as a project file`);
+    fail(
+      "check_input_binding",
+      `check ${checkId} input path ${relativePath} does not exist as a project file`,
+    );
   }
   if (!isWithinDirectory(canonicalRoot!, canonicalFile!)) {
-    fail("check_input_binding", `check ${checkId} input path ${relativePath} escapes the project root`);
+    fail(
+      "check_input_binding",
+      `check ${checkId} input path ${relativePath} escapes the project root`,
+    );
   }
   let metadata;
   try {
     metadata = await lstat(canonicalFile!);
   } catch {
-    fail("check_input_binding", `check ${checkId} input path ${relativePath} does not exist as a project file`);
+    fail(
+      "check_input_binding",
+      `check ${checkId} input path ${relativePath} does not exist as a project file`,
+    );
   }
-  if (!metadata!.isFile()) {
-    fail("check_input_binding", `check ${checkId} input path ${relativePath} is not a project file`);
+  if (!metadata.isFile()) {
+    fail(
+      "check_input_binding",
+      `check ${checkId} input path ${relativePath} is not a project file`,
+    );
   }
 }
 
@@ -9418,27 +11534,39 @@ function resolveDynamicResultPath(
 ): string | undefined {
   const source = optionalRecord(dynamicResult?.result_path);
   if (source === undefined) return undefined;
-  if (root === undefined) fail("check_result_path", `check ${checkId} has no dynamic root for its result path`);
+  if (root === undefined)
+    fail("check_result_path", `check ${checkId} has no dynamic root for its result path`);
   const field = requiredNonempty(source.field, `${checkId} result path field`);
   const value = dynamicValuePath(root, field, variables);
   if (value === undefined || value === null) return undefined;
-  return normalizeCheckPath(requiredNonempty(value, `${checkId} result path`), `${checkId} result path`);
+  return normalizeCheckPath(
+    requiredNonempty(value, `${checkId} result path`),
+    `${checkId} result path`,
+  );
 }
 
 function normalizeCheckPath(value: string, label: string): string {
   const trimmed = value.trim();
   if (trimmed === ".") return ".";
   if (
-    trimmed.length === 0 || trimmed.includes("\u0000") || trimmed.includes("\\") ||
-    trimmed.startsWith("/") || path.posix.normalize(trimmed) !== trimmed ||
+    trimmed.length === 0 ||
+    trimmed.includes("\u0000") ||
+    trimmed.includes("\\") ||
+    trimmed.startsWith("/") ||
+    path.posix.normalize(trimmed) !== trimmed ||
     trimmed.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
-  ) fail("check_path", `${label} must be a normalized project-relative path`);
+  )
+    fail("check_path", `${label} must be a normalized project-relative path`);
   return trimmed;
 }
 
 function assertPathInScopes(value: string, scopes: readonly string[], label: string): void {
   const normalizedScopes = scopes.map((scope) => normalizeCheckPath(scope, `${label} scope`));
-  if (!normalizedScopes.some((scope) => scope === "." || value === scope || value.startsWith(`${scope}/`))) {
+  if (
+    !normalizedScopes.some(
+      (scope) => scope === "." || value === scope || value.startsWith(`${scope}/`),
+    )
+  ) {
     fail("check_path_scope", `${label} ${value} is outside the exact compiler-issued path scope`);
   }
 }
@@ -9475,20 +11603,25 @@ export function commandInfrastructureFailure(
     // runner loads, so it can never be a legitimate test result (observed live: a sandbox
     // `spawn EPERM` surfaced as `ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL`, exit 1, which fell inside
     // the configured exit-code range and was silently accepted as the intended red baseline).
-    contains("spawn eperm") || contains("spawn eacces") ||
+    contains("spawn eperm") ||
+    contains("spawn eacces") ||
     contains("err_pnpm_") ||
     (contains("corepack") && (contains("eperm") || contains("eacces") || contains("cannot create")))
   ) {
     cause = "the check runner failed to launch (package-manager or subprocess spawn error)";
   } else if (
-    contains("startup error") || contains("getaddrinfo enotfound") || contains("getaddrinfo eai_")
+    contains("startup error") ||
+    contains("getaddrinfo enotfound") ||
+    contains("getaddrinfo eai_")
   ) {
     cause = "the configured runtime failed during startup";
   } else if (contains("invalid environment variables")) {
     cause = "the configured test environment was invalid";
   } else if (
-    contains("tests  no tests") || contains("no test files found") ||
-    contains("no tests found") || contains("your test suite must contain at least one test")
+    contains("tests  no tests") ||
+    contains("no test files found") ||
+    contains("no tests found") ||
+    contains("your test suite must contain at least one test")
   ) {
     cause = "the configured test runner did not execute a test";
   } else if (
@@ -9497,8 +11630,10 @@ export function commandInfrastructureFailure(
   ) {
     cause = "the configured command interpreter was unavailable";
   } else if (
-    contains("err_module_not_found") || contains("cannot find module") ||
-    contains("cannot find package") || contains("failed to resolve import") ||
+    contains("err_module_not_found") ||
+    contains("cannot find module") ||
+    contains("cannot find package") ||
+    contains("failed to resolve import") ||
     contains("failed to load url")
   ) {
     if (onlyDeclaredLocalModulesAreMissing(rawOutput, declaredInputPaths)) {
@@ -9507,12 +11642,13 @@ export function commandInfrastructureFailure(
       cause = "the configured test graph could not load one of its modules";
     }
   }
-  if (cause === undefined && (
-    contains("referenceerror: react is not defined") ||
-    contains("objects are not valid as a react child") ||
-    contains("element type is invalid:") ||
-    contains("invalid hook call")
-  )) {
+  if (
+    cause === undefined &&
+    (contains("referenceerror: react is not defined") ||
+      contains("objects are not valid as a react child") ||
+      contains("element type is invalid:") ||
+      contains("invalid hook call"))
+  ) {
     cause = "the configured test harness failed before its focused assertions ran";
   }
   return cause === undefined
@@ -9532,30 +11668,43 @@ function onlyDeclaredLocalModulesAreMissing(
 ): boolean {
   if (declaredInputPaths.length === 0) return false;
   const foldedOutput = output.toLocaleLowerCase("en-US");
-  const missingModulePattern = /cannot find module\s+['"]([^'"]+)['"]\s+imported from\s+['"]([^'"]+)['"]/giu;
+  const missingModulePattern =
+    /cannot find module\s+['"]([^'"]+)['"]\s+imported from\s+['"]([^'"]+)['"]/giu;
   const matches = [...output.matchAll(missingModulePattern)];
   const markerCount = foldedOutput.match(/cannot find module/gu)?.length ?? 0;
   if (matches.length === 0 || matches.length !== markerCount) return false;
   // Node/Vite attach ERR_MODULE_NOT_FOUND to both ambient dependency failures and an honest
   // not-yet-created relative production import. The exact specifier/importer proof below is the
   // authority boundary; the generic code marker alone must not override it.
-  if (foldedOutput.includes("cannot find package") || foldedOutput.includes("failed to resolve import")) {
+  if (
+    foldedOutput.includes("cannot find package") ||
+    foldedOutput.includes("failed to resolve import")
+  ) {
     return false;
   }
 
-  const normalizedInputs = [...new Set(declaredInputPaths.map((candidate) => candidate.replaceAll("\\", "/")))];
+  const normalizedInputs = [
+    ...new Set(declaredInputPaths.map((candidate) => candidate.replaceAll("\\", "/"))),
+  ];
   const allowedSpecifiers = new Set<string>();
   for (const match of matches) {
     const specifier = match[1]!;
     const importer = match[2]!.replaceAll("\\", "/");
     if (!specifier.startsWith("./") && !specifier.startsWith("../")) return false;
-    const importerPath = normalizedInputs.find((candidate) =>
-      importer === candidate || importer.endsWith(`/${candidate}`));
+    const importerPath = normalizedInputs.find(
+      (candidate) => importer === candidate || importer.endsWith(`/${candidate}`),
+    );
     if (importerPath === undefined) return false;
-    const unresolved = path.posix.normalize(path.posix.join(path.posix.dirname(importerPath), specifier));
-    if (unresolved === ".." || unresolved.startsWith("../") || path.posix.isAbsolute(unresolved)) return false;
-    const declared = normalizedInputs.some((candidate) =>
-      candidate === unresolved || stripModuleExtension(candidate) === stripModuleExtension(unresolved));
+    const unresolved = path.posix.normalize(
+      path.posix.join(path.posix.dirname(importerPath), specifier),
+    );
+    if (unresolved === ".." || unresolved.startsWith("../") || path.posix.isAbsolute(unresolved))
+      return false;
+    const declared = normalizedInputs.some(
+      (candidate) =>
+        candidate === unresolved ||
+        stripModuleExtension(candidate) === stripModuleExtension(unresolved),
+    );
     if (!declared) return false;
     allowedSpecifiers.add(specifier.toLocaleLowerCase("en-US"));
   }
@@ -9581,41 +11730,72 @@ function compileCheckCommandExecution(
     execution.argv.length !== command.argv.length ||
     execution.argv[0] !== execution.resolvedExecutable ||
     canonicalHash(execution.argv.slice(1)) !== canonicalHash(command.argv.slice(1))
-  ) fail("check_execution_identity", `check execution ${index} does not match its compiler-resolved command`);
+  )
+    fail(
+      "check_execution_identity",
+      `check execution ${index} does not match its compiler-resolved command`,
+    );
   const hasAttemptNumber = execution.attemptNumber !== undefined;
   const hasRetryAudit = execution.retryAuditSha256 !== undefined;
   if (hasAttemptNumber !== hasRetryAudit) {
-    fail("check_execution_retry", `check execution ${index} must bind attempt number and retry audit together`);
+    fail(
+      "check_execution_retry",
+      `check execution ${index} must bind attempt number and retry audit together`,
+    );
   }
-  if (hasAttemptNumber && (
-    !Number.isSafeInteger(execution.attemptNumber) || execution.attemptNumber! < 1 ||
-    execution.attemptNumber! > 3 || !isSha256Digest(execution.retryAuditSha256)
-  )) {
+  if (
+    hasAttemptNumber &&
+    (!Number.isSafeInteger(execution.attemptNumber) ||
+      execution.attemptNumber! < 1 ||
+      execution.attemptNumber! > 3 ||
+      !isSha256Digest(execution.retryAuditSha256))
+  ) {
     fail("check_execution_retry", `check execution ${index} has invalid retry audit authority`);
   }
-  if (!isIsoTimestamp(execution.startedAt) || !isIsoTimestamp(execution.completedAt) ||
-      Date.parse(execution.completedAt) < Date.parse(execution.startedAt)) {
+  if (
+    !isIsoTimestamp(execution.startedAt) ||
+    !isIsoTimestamp(execution.completedAt) ||
+    Date.parse(execution.completedAt) < Date.parse(execution.startedAt)
+  ) {
     fail("check_execution_time", `check execution ${index} has invalid authority timestamps`);
   }
   if (
-    typeof execution.resolvedExecutable !== "string" || !path.isAbsolute(execution.resolvedExecutable) ||
-    execution.resolvedExecutable.includes("\u0000") || !isSha256Digest(execution.environmentSha256) ||
-    !isSha256Digest(execution.preManifestSha256) || !isSha256Digest(execution.postManifestSha256) ||
+    typeof execution.resolvedExecutable !== "string" ||
+    !path.isAbsolute(execution.resolvedExecutable) ||
+    execution.resolvedExecutable.includes("\u0000") ||
+    !isSha256Digest(execution.environmentSha256) ||
+    !isSha256Digest(execution.preManifestSha256) ||
+    !isSha256Digest(execution.postManifestSha256) ||
     !isSha256Digest(execution.sandboxProfileSha256) ||
-    typeof execution.sandboxKind !== "string" || execution.sandboxKind.trim().length === 0
-  ) fail("check_execution_authority", `check execution ${index} has invalid sandbox or environment provenance`);
-  if (Buffer.byteLength(execution.stdout, "utf8") > 16 * 1024 * 1024 ||
-      Buffer.byteLength(execution.stderr, "utf8") > 16 * 1024 * 1024 ||
-      execution.stdoutSizeBytes !== Buffer.byteLength(execution.stdout, "utf8") ||
-      execution.stderrSizeBytes !== Buffer.byteLength(execution.stderr, "utf8") ||
-      rawSha256(execution.stdout) !== execution.stdoutSha256 ||
-      rawSha256(execution.stderr) !== execution.stderrSha256) {
-    fail("check_execution_stream", `check execution ${index} stream bytes do not match their authority hashes`);
+    typeof execution.sandboxKind !== "string" ||
+    execution.sandboxKind.trim().length === 0
+  )
+    fail(
+      "check_execution_authority",
+      `check execution ${index} has invalid sandbox or environment provenance`,
+    );
+  if (
+    Buffer.byteLength(execution.stdout, "utf8") > 16 * 1024 * 1024 ||
+    Buffer.byteLength(execution.stderr, "utf8") > 16 * 1024 * 1024 ||
+    execution.stdoutSizeBytes !== Buffer.byteLength(execution.stdout, "utf8") ||
+    execution.stderrSizeBytes !== Buffer.byteLength(execution.stderr, "utf8") ||
+    rawSha256(execution.stdout) !== execution.stdoutSha256 ||
+    rawSha256(execution.stderr) !== execution.stderrSha256
+  ) {
+    fail(
+      "check_execution_stream",
+      `check execution ${index} stream bytes do not match their authority hashes`,
+    );
   }
   const errors: string[] = [];
-  const exitAccepted = execution.signal === null && execution.exitCode !== null &&
+  const exitAccepted =
+    execution.signal === null &&
+    execution.exitCode !== null &&
     command.expectedExitCodes.includes(execution.exitCode);
-  if (!exitAccepted) errors.push(`exit ${execution.exitCode ?? execution.signal ?? "unknown"} is outside the configured contract`);
+  if (!exitAccepted)
+    errors.push(
+      `exit ${execution.exitCode ?? execution.signal ?? "unknown"} is outside the configured contract`,
+    );
   if (exitAccepted && execution.exitCode !== 0) {
     const infrastructureFailure = commandInfrastructureFailure(
       execution.stdout,
@@ -9624,34 +11804,53 @@ function compileCheckCommandExecution(
     );
     if (infrastructureFailure !== undefined) errors.push(infrastructureFailure);
   }
-  if (command.effect === "read_only" && execution.preManifestSha256 !== execution.postManifestSha256) {
+  if (
+    command.effect === "read_only" &&
+    execution.preManifestSha256 !== execution.postManifestSha256
+  ) {
     errors.push("read-only check changed the workspace manifest");
   }
   if (
     execution.resultSource.kind !== command.resultSource.kind ||
-    (command.resultSource.kind === "file" && execution.resultSource.path !== command.resultSource.path) ||
+    (command.resultSource.kind === "file" &&
+      execution.resultSource.path !== command.resultSource.path) ||
     !isSha256Digest(execution.resultSource.bytesSha256) ||
-    !Number.isSafeInteger(execution.resultSource.sizeBytes) || execution.resultSource.sizeBytes < 0
-  ) fail("check_result_source", `check execution ${index} result source is not the compiler-resolved source`);
-  if (command.resultSource.kind === "stdout" && (
-    execution.resultSource.bytesSha256 !== execution.stdoutSha256 ||
-    execution.resultSource.sizeBytes !== Buffer.byteLength(execution.stdout, "utf8")
-  )) fail("check_result_source", `check execution ${index} stdout result bytes are not authority-bound`);
-  const resultRequired = command.resultProtocol !== undefined || command.resultSchema !== undefined ||
-    command.requiredResultFields.length > 0 || command.outputArtifactSelector !== undefined;
+    !Number.isSafeInteger(execution.resultSource.sizeBytes) ||
+    execution.resultSource.sizeBytes < 0
+  )
+    fail(
+      "check_result_source",
+      `check execution ${index} result source is not the compiler-resolved source`,
+    );
+  if (
+    command.resultSource.kind === "stdout" &&
+    (execution.resultSource.bytesSha256 !== execution.stdoutSha256 ||
+      execution.resultSource.sizeBytes !== Buffer.byteLength(execution.stdout, "utf8"))
+  )
+    fail(
+      "check_result_source",
+      `check execution ${index} stdout result bytes are not authority-bound`,
+    );
+  const resultRequired =
+    command.resultProtocol !== undefined ||
+    command.resultSchema !== undefined ||
+    command.requiredResultFields.length > 0 ||
+    command.outputArtifactSelector !== undefined;
   let result = execution.resultSource.value;
   if (resultRequired && command.resultSource.kind === "stdout") {
     try {
       const parsed = JSON.parse(execution.stdout) as unknown;
       assertJsonValue(parsed, `${command.checkId} stdout result`);
-      if (canonicalHash(parsed) !== canonicalHash(result)) errors.push("authority-parsed stdout result differs from stdout bytes");
-      result = parsed as JsonValue;
+      if (canonicalHash(parsed) !== canonicalHash(result))
+        errors.push("authority-parsed stdout result differs from stdout bytes");
+      result = parsed;
     } catch {
       errors.push("stdout is not one complete JSON result");
     }
   }
   const resultObject = isRecord(result) ? result : undefined;
-  if (resultRequired && resultObject === undefined) errors.push("configured result must be an object");
+  if (resultRequired && resultObject === undefined)
+    errors.push("configured result must be an object");
   if (command.resultProtocol !== undefined && resultObject?.protocol !== command.resultProtocol) {
     errors.push(`result protocol is not ${command.resultProtocol}`);
   }
@@ -9660,25 +11859,38 @@ function compileCheckCommandExecution(
   }
   if (command.resultSchema !== undefined) {
     try {
-      if (!Value.Check(command.resultSchema as TSchema, result)) errors.push("result does not match the configured schema");
+      if (!Value.Check(command.resultSchema as TSchema, result))
+        errors.push("result does not match the configured schema");
     } catch {
-      fail("check_result_schema", `compiled result schema for ${command.checkId} is not executable`);
+      fail(
+        "check_result_schema",
+        `compiled result schema for ${command.checkId} is not executable`,
+      );
     }
   }
   const definition = configuration.registries.checks[command.checkId];
   if (definition === undefined) {
-    fail("check_definition_drift", `check ${command.checkId} definition changed during result compilation`);
+    fail(
+      "check_definition_drift",
+      `check ${command.checkId} definition changed during result compilation`,
+    );
   }
-  const definitionCurrent = command.executionPolicy === undefined
-    ? canonicalHash(definition) === command.definitionHash
-    : (() => {
-        const semantics = requireExecutionSemanticCatalog(configuration).checks[command.checkId];
-        return semantics !== undefined &&
-          semantics.sha256 === command.definitionHash &&
-          semantics.sha256 === command.executionPolicy.checkSha256;
-      })();
+  const definitionCurrent =
+    command.executionPolicy === undefined
+      ? canonicalHash(definition) === command.definitionHash
+      : (() => {
+          const semantics = requireExecutionSemanticCatalog(configuration).checks[command.checkId];
+          return (
+            semantics !== undefined &&
+            semantics.sha256 === command.definitionHash &&
+            semantics.sha256 === command.executionPolicy.checkSha256
+          );
+        })();
   if (!definitionCurrent) {
-    fail("check_definition_drift", `check ${command.checkId} definition changed during result compilation`);
+    fail(
+      "check_definition_drift",
+      `check ${command.checkId} definition changed during result compilation`,
+    );
   }
   validateDynamicCheckResult(definition, resultObject, descriptor, command, errors);
   const acceptance = optionalRecord(definition.result_acceptance);
@@ -9686,13 +11898,20 @@ function compileCheckCommandExecution(
   if (acceptance !== undefined) {
     const field = requiredNonempty(acceptance.field, `${command.checkId} result acceptance field`);
     const values = Array.isArray(acceptance.values) ? acceptance.values : [];
-    semanticPassing = resultObject !== undefined && values.some((value) =>
-      canonicalHash(value) === canonicalHash(resultObject[field] ?? null));
+    semanticPassing =
+      resultObject !== undefined &&
+      values.some((value) => canonicalHash(value) === canonicalHash(resultObject[field] ?? null));
   }
-  const outputFiles = validateCheckOutputFiles(execution.outputFiles, command, resultObject, errors);
+  const outputFiles = validateCheckOutputFiles(
+    execution.outputFiles,
+    command,
+    resultObject,
+    errors,
+  );
   const contractValid = errors.length === 0;
   const passed = contractValid && exitAccepted && semanticPassing;
-  const accepted = contractValid && exitAccepted && (semanticPassing || command.allowNonpassingReceipt);
+  const accepted =
+    contractValid && exitAccepted && (semanticPassing || command.allowNonpassingReceipt);
   const value: JsonValue = {
     checkId: command.checkId,
     accepted,
@@ -9730,8 +11949,8 @@ function compileCheckCommandExecution(
       stderrSha256: execution.stderrSha256,
       preManifestSha256: execution.preManifestSha256,
       postManifestSha256: execution.postManifestSha256,
-      resultSource: execution.resultSource as unknown as ConfigurationValue,
-      outputFiles: outputFiles as unknown as ConfigurationValue,
+      resultSource: execution.resultSource,
+      outputFiles: outputFiles,
       accepted,
       passed,
       errors,
@@ -9758,13 +11977,25 @@ function validateDynamicCheckResult(
   const requiredKeys = optionalRecord(dynamic?.required_keys);
   if (requiredKeys !== undefined) {
     const source = optionalRecord(requiredKeys.source);
-    const actualField = requiredNonempty(requiredKeys.actual_field, `${command.checkId} dynamic actual field`);
+    const actualField = requiredNonempty(
+      requiredKeys.actual_field,
+      `${command.checkId} dynamic actual field`,
+    );
     const root = descriptor.graph === undefined ? undefined : ticketCommandRoot(descriptor);
-    const expected = source === undefined || root === undefined
-      ? undefined
-      : dynamicValuePath(root, requiredNonempty(source.field, `${command.checkId} required key source`), {});
+    const expected =
+      source === undefined || root === undefined
+        ? undefined
+        : dynamicValuePath(
+            root,
+            requiredNonempty(source.field, `${command.checkId} required key source`),
+            {},
+          );
     const actual = result[actualField];
-    if (!Array.isArray(expected) || expected.some((item) => typeof item !== "string") || !isRecord(actual)) {
+    if (
+      !Array.isArray(expected) ||
+      expected.some((item) => typeof item !== "string") ||
+      !isRecord(actual)
+    ) {
       errors.push("dynamic required-key contract could not be resolved");
     } else if ((expected as string[]).some((key) => actual[key] === undefined)) {
       errors.push(`result ${actualField} does not contain every compiler-required key`);
@@ -9778,15 +12009,26 @@ function validateCheckOutputFiles(
   result: Record<string, unknown> | undefined,
   errors: string[],
 ): Array<{ path: string; sha256: Sha256Digest; sizeBytes: number }> {
-  const output = files.map((file) => {
-    const normalized = normalizeCheckPath(file.path, `${command.checkId} output artifact`);
-    if (!isSha256Digest(file.sha256) || !Number.isSafeInteger(file.sizeBytes) || file.sizeBytes < 0) {
-      fail("check_output_file", `check ${command.checkId} has invalid authority output-file metadata`);
-    }
-    if (command.effect !== "workspace_write") errors.push("read-only check reported output files");
-    else assertPathInScopes(normalized, command.outputPaths, `${command.checkId} output artifact`);
-    return { path: normalized, sha256: file.sha256, sizeBytes: file.sizeBytes };
-  }).sort((left, right) => compareText(left.path, right.path));
+  const output = files
+    .map((file) => {
+      const normalized = normalizeCheckPath(file.path, `${command.checkId} output artifact`);
+      if (
+        !isSha256Digest(file.sha256) ||
+        !Number.isSafeInteger(file.sizeBytes) ||
+        file.sizeBytes < 0
+      ) {
+        fail(
+          "check_output_file",
+          `check ${command.checkId} has invalid authority output-file metadata`,
+        );
+      }
+      if (command.effect !== "workspace_write")
+        errors.push("read-only check reported output files");
+      else
+        assertPathInScopes(normalized, command.outputPaths, `${command.checkId} output artifact`);
+      return { path: normalized, sha256: file.sha256, sizeBytes: file.sizeBytes };
+    })
+    .sort((left, right) => compareText(left.path, right.path));
   if (new Set(output.map((file) => file.path)).size !== output.length) {
     fail("check_output_file", `check ${command.checkId} reported duplicate output files`);
   }
@@ -9798,16 +12040,22 @@ function validateCheckOutputFiles(
     } else {
       const expected: string[] = [];
       for (const item of raw) {
-        const pathValue = typeof item === "string" && selector.allowPathStrings
-          ? item
-          : isRecord(item) ? item[selector.pathField] : undefined;
+        const pathValue =
+          typeof item === "string" && selector.allowPathStrings
+            ? item
+            : isRecord(item)
+              ? item[selector.pathField]
+              : undefined;
         if (typeof pathValue !== "string") {
           errors.push(`result ${selector.field} contains an invalid artifact path`);
           continue;
         }
         expected.push(normalizeCheckPath(pathValue, `${command.checkId} result artifact`));
       }
-      if (canonicalHash([...new Set(expected)].sort(compareText)) !== canonicalHash(output.map((file) => file.path))) {
+      if (
+        canonicalHash([...new Set(expected)].sort(compareText)) !==
+        canonicalHash(output.map((file) => file.path))
+      ) {
         errors.push("authority output-file inventory differs from the typed result artifacts");
       }
     }
@@ -9830,13 +12078,19 @@ async function evaluateRequestedGraphCheck(
   targetIds: readonly string[],
 ): Promise<boolean> {
   const definition = configuration.registries.checks[checkId];
-  if (definition === undefined || definition.kind !== "graph" || definition.predicate === undefined || targetIds.length === 0) {
+  if (
+    definition === undefined ||
+    definition.kind !== "graph" ||
+    definition.predicate === undefined ||
+    targetIds.length === 0
+  ) {
     return false;
   }
   const adapter = await createProductionRuleDomainAdapter({ configuration, graph, projectRoot });
   const evaluator = new GraphExpressionEvaluator(configuration, graph, adapter);
   return [...new Set(targetIds)].every((id) =>
-    evaluator.withBinding("target", [id], () => evaluator.evaluate(definition.predicate!)));
+    evaluator.withBinding("target", [id], () => evaluator.evaluate(definition.predicate!)),
+  );
 }
 
 function mergeCheckRuleEvidence(input: {
@@ -9851,13 +12105,20 @@ function mergeCheckRuleEvidence(input: {
   recordedAt: string;
 }): RuleAuthorityEvidence {
   const inputGraphSha256 = ruleInputGraphSha256(input.configuration, input.graph);
-  const predicates = structuredClone(input.prior?.predicates ?? {}) as Record<Sha256Digest, import("./domain-adapter.js").RulePredicateEvidence>;
+  const predicates = structuredClone(input.prior?.predicates ?? {}) as Record<
+    Sha256Digest,
+    import("./domain-adapter.js").RulePredicateEvidence
+  >;
   const receiptTypes = new Set(input.resolved.commands.map((command) => command.receiptType));
-  const gatePolicies = new Set(input.resolved.commands.flatMap((command) => {
-    const source = optionalRecord(input.configuration.registries.checks[command.checkId]?.command_source);
-    const policy = optionalString(source?.gate_policy);
-    return policy === undefined ? [] : [policy];
-  }));
+  const gatePolicies = new Set(
+    input.resolved.commands.flatMap((command) => {
+      const source = optionalRecord(
+        input.configuration.registries.checks[command.checkId]?.command_source,
+      );
+      const policy = optionalString(source?.gate_policy);
+      return policy === undefined ? [] : [policy];
+    }),
+  );
   const leaves: Array<{ leaf: ConfigurationObject; result: boolean }> = [];
   collectEvidenceLeaves(
     input.configuration.registries,
@@ -9868,8 +12129,16 @@ function mergeCheckRuleEvidence(input: {
     input.passed,
     leaves,
   );
-  if (!leaves.some((item) => item.leaf.op === "check_passed" && item.leaf.check === input.resolved.requestedCheckId)) {
-    leaves.push({ leaf: { op: "check_passed", check: input.resolved.requestedCheckId }, result: input.passed });
+  if (
+    !leaves.some(
+      (item) =>
+        item.leaf.op === "check_passed" && item.leaf.check === input.resolved.requestedCheckId,
+    )
+  ) {
+    leaves.push({
+      leaf: { op: "check_passed", check: input.resolved.requestedCheckId },
+      result: input.passed,
+    });
   }
   const targets = evidenceSubjectNodeIds(
     input.configuration,
@@ -9879,9 +12148,11 @@ function mergeCheckRuleEvidence(input: {
   );
   for (const subjectNodeId of [...new Set(targets)].sort(compareText)) {
     for (const { leaf, result } of leaves) {
-      const bindings = Object.fromEntries([...rulePredicateBindingNames(leaf)]
-        .sort(compareText)
-        .map((name) => [name, [subjectNodeId]]));
+      const bindings = Object.fromEntries(
+        [...rulePredicateBindingNames(leaf)]
+          .sort(compareText)
+          .map((name) => [name, [subjectNodeId]]),
+      );
       const key = rulePredicateEvidenceKey({
         configurationSha256: input.configuration.configuration_sha256,
         inputGraphSha256,
@@ -9908,7 +12179,9 @@ function mergeCheckRuleEvidence(input: {
   });
 }
 
-function collectProofPreparationLeaves(configuration: CompiledConfiguration): ConfigurationObject[] {
+function collectProofPreparationLeaves(
+  configuration: CompiledConfiguration,
+): ConfigurationObject[] {
   const unique = new Map<Sha256Digest, ConfigurationObject>();
   const visit = (value: unknown): void => {
     if (Array.isArray(value)) {
@@ -9923,7 +12196,9 @@ function collectProofPreparationLeaves(configuration: CompiledConfiguration): Co
     for (const child of Object.values(value)) visit(child);
   };
   for (const registry of Object.values(configuration.registries)) visit(registry);
-  return [...unique.values()].sort((left, right) => compareText(canonicalHash(left), canonicalHash(right)));
+  return [...unique.values()].sort((left, right) =>
+    compareText(canonicalHash(left), canonicalHash(right)),
+  );
 }
 
 function withRuleBindings<Value>(
@@ -9947,13 +12222,21 @@ function allReviewCandidates(run: RunRecord): ProofPreparationReviewCandidate[] 
     for (const step of ticket.steps.filter((candidate) => candidate.kind === "review")) {
       for (const attemptId of step.attemptIds) {
         const attempt = run.attempts[attemptId];
-        if (attempt === undefined || attempt.ticketId !== ticket.id || attempt.stepId !== step.id) continue;
-        candidates.push({ ticket, step, attempt, attemptOrder: attemptOrder.get(attempt.id) ?? -1 });
+        if (attempt === undefined || attempt.ticketId !== ticket.id || attempt.stepId !== step.id)
+          continue;
+        candidates.push({
+          ticket,
+          step,
+          attempt,
+          attemptOrder: attemptOrder.get(attempt.id) ?? -1,
+        });
       }
     }
   }
-  return candidates.sort((left, right) => left.attemptOrder - right.attemptOrder ||
-    compareText(left.attempt.id, right.attempt.id));
+  return candidates.sort(
+    (left, right) =>
+      left.attemptOrder - right.attemptOrder || compareText(left.attempt.id, right.attempt.id),
+  );
 }
 
 function latestReviewCandidate(
@@ -9968,13 +12251,21 @@ function latestReviewCandidate(
     for (const step of ticket.steps.filter((candidate) => candidate.kind === "review")) {
       for (const attemptId of step.attemptIds) {
         const attempt = run.attempts[attemptId];
-        if (attempt === undefined || attempt.ticketId !== ticket.id || attempt.stepId !== step.id) continue;
-        candidates.push({ ticket, step, attempt, attemptOrder: attemptOrder.get(attempt.id) ?? -1 });
+        if (attempt === undefined || attempt.ticketId !== ticket.id || attempt.stepId !== step.id)
+          continue;
+        candidates.push({
+          ticket,
+          step,
+          attempt,
+          attemptOrder: attemptOrder.get(attempt.id) ?? -1,
+        });
       }
     }
   }
-  candidates.sort((left, right) => left.attemptOrder - right.attemptOrder ||
-    compareText(left.attempt.id, right.attempt.id));
+  candidates.sort(
+    (left, right) =>
+      left.attemptOrder - right.attemptOrder || compareText(left.attempt.id, right.attempt.id),
+  );
   return candidates.at(-1);
 }
 
@@ -9997,19 +12288,26 @@ function projectPassedReviewEffects(
     const nodeTypes = Array.isArray(select.node_types)
       ? new Set(select.node_types.filter((value): value is string => typeof value === "string"))
       : new Set<string>();
-    if ((nodeTypes.size > 0 && !nodeTypes.has(current.type)) ||
-        !predicateMatches(current, optionalRecord(select.predicate))) continue;
+    if (
+      (nodeTypes.size > 0 && !nodeTypes.has(current.type)) ||
+      !predicateMatches(current, optionalRecord(select.predicate))
+    )
+      continue;
     const preconditions = Array.isArray(effect.preconditions) ? effect.preconditions : [];
-    if (preconditions.some((value) => {
-      const predicate = optionalRecord(value);
-      return predicate === undefined || !predicateMatches(current, predicate);
-    })) return undefined;
+    if (
+      preconditions.some((value) => {
+        const predicate = optionalRecord(value);
+        return predicate === undefined || !predicateMatches(current, predicate);
+      })
+    )
+      return undefined;
     const set = optionalRecord(effect.set);
     if (set === undefined) return undefined;
     for (const [field, value] of Object.entries(set)) {
       const resolved = resolveReviewEffectTokens(value, reviewId, actor);
       if (field === "status") current.status = requiredNonempty(resolved, "review effect status");
-      else if (field.startsWith("spec.")) setNestedSpec(current.spec, field.slice("spec.".length), resolved);
+      else if (field.startsWith("spec."))
+        setNestedSpec(current.spec, field.slice("spec.".length), resolved);
       else return undefined;
     }
     applied = true;
@@ -10049,12 +12347,21 @@ function evidenceSubjectNodeIds(
     return [...new Set(targets)].filter((id) => graph.node(id) !== undefined).sort(compareText);
   }
   const evaluator = new GraphExpressionEvaluator(configuration, graph);
-  const memberTypes = new Set(stringArray(graphSet.member_node_types, `${requestedCheckId} member node types`));
-  const excluded = new Set(stringArray(graphSet.status_excluding, `${requestedCheckId} excluded statuses`));
-  return evaluator.withBinding("target", targets, () => evaluator.select(graphSet.members!))
+  const memberTypes = new Set(
+    stringArray(graphSet.member_node_types, `${requestedCheckId} member node types`),
+  );
+  const excluded = new Set(
+    stringArray(graphSet.status_excluding, `${requestedCheckId} excluded statuses`),
+  );
+  return evaluator
+    .withBinding("target", targets, () => evaluator.select(graphSet.members!))
     .filter((id) => {
       const node = graph.node(id);
-      return node !== undefined && (memberTypes.size === 0 || memberTypes.has(node.type)) && !excluded.has(node.status);
+      return (
+        node !== undefined &&
+        (memberTypes.size === 0 || memberTypes.has(node.type)) &&
+        !excluded.has(node.status)
+      );
     })
     .filter((id, index, values) => values.indexOf(id) === index)
     .sort(compareText);
@@ -10070,15 +12377,8 @@ function collectEvidenceLeaves(
   output: Array<{ leaf: ConfigurationObject; result: boolean }>,
 ): void {
   if (Array.isArray(value)) {
-    for (const item of value) collectEvidenceLeaves(
-      item,
-      resolved,
-      receiptTypes,
-      gatePolicies,
-      accepted,
-      passed,
-      output,
-    );
+    for (const item of value)
+      collectEvidenceLeaves(item, resolved, receiptTypes, gatePolicies, accepted, passed, output);
     return;
   }
   if (!isRecord(value)) return;
@@ -10087,26 +12387,24 @@ function collectEvidenceLeaves(
     output.push({ leaf: structuredClone(value) as ConfigurationObject, result: passed });
   } else if (op === "check_has_current_terminal" && value.check === resolved.requestedCheckId) {
     output.push({ leaf: structuredClone(value) as ConfigurationObject, result: accepted });
-  } else if (op === "current_receipt" && typeof value.receipt_type === "string" && receiptTypes.has(value.receipt_type)) {
+  } else if (
+    op === "current_receipt" &&
+    typeof value.receipt_type === "string" &&
+    receiptTypes.has(value.receipt_type)
+  ) {
     output.push({ leaf: structuredClone(value) as ConfigurationObject, result: accepted });
   } else if (
     (op === "gate_policy_has_current_terminal" || op === "gate_policy_satisfied") &&
-    typeof value.gate_policy === "string" && gatePolicies.has(value.gate_policy)
+    typeof value.gate_policy === "string" &&
+    gatePolicies.has(value.gate_policy)
   ) {
     output.push({
       leaf: structuredClone(value) as ConfigurationObject,
       result: op === "gate_policy_satisfied" ? passed : accepted,
     });
   }
-  for (const child of Object.values(value)) collectEvidenceLeaves(
-    child,
-    resolved,
-    receiptTypes,
-    gatePolicies,
-    accepted,
-    passed,
-    output,
-  );
+  for (const child of Object.values(value))
+    collectEvidenceLeaves(child, resolved, receiptTypes, gatePolicies, accepted, passed, output);
 }
 
 function runRuleEvidence(
@@ -10116,14 +12414,24 @@ function runRuleEvidence(
 ): RuleAuthorityEvidence | undefined {
   const value = run.ruleAuthorityEvidence;
   if (value === undefined) return undefined;
-  if (!isRecord(value) || value.protocol !== RULE_AUTHORITY_EVIDENCE_PROTOCOL ||
-      !isSha256Digest(value.configurationSha256) || !isSha256Digest(value.inputGraphSha256) ||
-      !isSha256Digest(value.evidenceSha256) || !isRecord(value.predicates)) {
+  if (
+    !isRecord(value) ||
+    value.protocol !== RULE_AUTHORITY_EVIDENCE_PROTOCOL ||
+    !isSha256Digest(value.configurationSha256) ||
+    !isSha256Digest(value.inputGraphSha256) ||
+    !isSha256Digest(value.evidenceSha256) ||
+    !isRecord(value.predicates)
+  ) {
     fail("rule_evidence_shape", "durable rule-authority evidence is malformed");
   }
   const { evidenceSha256, ...material } = structuredClone(value);
-  if (canonicalHash(material) !== evidenceSha256) fail("rule_evidence_hash", "durable rule-authority evidence failed its integrity hash");
-  if (value.configurationSha256 !== configurationSha256 || value.inputGraphSha256 !== inputGraphSha256) return undefined;
+  if (canonicalHash(material) !== evidenceSha256)
+    fail("rule_evidence_hash", "durable rule-authority evidence failed its integrity hash");
+  if (
+    value.configurationSha256 !== configurationSha256 ||
+    value.inputGraphSha256 !== inputGraphSha256
+  )
+    return undefined;
   return value as unknown as RuleAuthorityEvidence;
 }
 
@@ -10149,7 +12457,8 @@ export function rebindRuleEvidenceAcrossNonInterferingGraphChange(input: {
   if (
     input.evidence.configurationSha256 !== input.configuration.configuration_sha256 ||
     input.evidence.inputGraphSha256 !== beforeSha256
-  ) return undefined;
+  )
+    return undefined;
   const afterSha256 = ruleInputGraphSha256(input.configuration, input.after);
   if (afterSha256 === beforeSha256) return input.evidence;
   const predicates: Record<Sha256Digest, RulePredicateEvidence> = Object.create(null) as Record<
@@ -10189,10 +12498,10 @@ export function rebindRuleEvidenceAcrossNonInterferingGraphChange(input: {
 
 /** Compatibility name retained for callers compiled against the narrower first implementation. */
 export function rebindRuleEvidenceAcrossStatusOnlyReviewEffects(input: {
-  configuration: CompiledConfiguration,
-  before: TypedGraph,
-  after: TypedGraph,
-  evidence: RuleAuthorityEvidence | undefined,
+  configuration: CompiledConfiguration;
+  before: TypedGraph;
+  after: TypedGraph;
+  evidence: RuleAuthorityEvidence | undefined;
 }): RuleAuthorityEvidence | undefined {
   return rebindRuleEvidenceAcrossNonInterferingGraphChange(input);
 }
@@ -10271,25 +12580,31 @@ function checkEvidenceGraphScopeMaterial(
   }
   if (kind !== "composite") return undefined;
   const set = optionalRecord(definition.graph_set);
-  const selector = set?.members as ConfigurationValue | undefined;
+  const selector = set?.members;
   if (set === undefined || selector === undefined) return undefined;
   const selected = evaluator.withBinding("target", subjects, () => evaluator.select(selector));
   const memberTypes = new Set(stringArray(set.member_node_types, `${checkId} member node types`));
   const excluded = new Set(stringArray(set.status_excluding, `${checkId} excluded statuses`));
-  const members = selected.flatMap((id) => {
-    const node = graph.node(id);
-    if (node === undefined || (memberTypes.size > 0 && !memberTypes.has(node.type)) || excluded.has(node.status)) {
-      return [];
-    }
-    return [node];
-  }).sort((left, right) => compareText(left.id, right.id));
+  const members = selected
+    .flatMap((id) => {
+      const node = graph.node(id);
+      if (
+        node === undefined ||
+        (memberTypes.size > 0 && !memberTypes.has(node.type)) ||
+        excluded.has(node.status)
+      ) {
+        return [];
+      }
+      return [node];
+    })
+    .sort((left, right) => compareText(left.id, right.id));
   const configuredChild = optionalString(set.member_check);
   const childField = optionalString(set.member_check_field);
   const projectedMembers: ConfigurationValue[] = [];
   for (const node of members) {
-    const childId = configuredChild ?? (childField === undefined
-      ? undefined
-      : optionalString(graphNodeField(node, childField)));
+    const childId =
+      configuredChild ??
+      (childField === undefined ? undefined : optionalString(graphNodeField(node, childField)));
     if (childId === undefined) return undefined;
     const child = checkEvidenceGraphScopeMaterial(
       configuration,
@@ -10307,11 +12622,15 @@ function checkEvidenceGraphScopeMaterial(
 
 function graphNodeEvidenceMaterial(node: GraphNode): ConfigurationObject {
   const { status: _status, ...material } = structuredClone(node);
-  return material as unknown as ConfigurationObject;
+  return material;
 }
 
 function isIsoTimestamp(value: unknown): boolean {
-  return typeof value === "string" && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+  return (
+    typeof value === "string" &&
+    Number.isFinite(Date.parse(value)) &&
+    new Date(value).toISOString() === value
+  );
 }
 
 function requiredToolString(args: Record<string, unknown>, field: string): string {
@@ -10326,10 +12645,16 @@ function optionalToolString(args: Record<string, unknown>, field: string): strin
   return args[field] === undefined ? undefined : requiredToolString(args, field);
 }
 
-function optionalToolStringArray(args: Record<string, unknown>, field: string): string[] | undefined {
+function optionalToolStringArray(
+  args: Record<string, unknown>,
+  field: string,
+): string[] | undefined {
   const value = args[field];
   if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim().length === 0)) {
+  if (
+    !Array.isArray(value) ||
+    value.some((item) => typeof item !== "string" || item.trim().length === 0)
+  ) {
     fail("tool_arguments", `${field} must be an array of nonempty strings`);
   }
   return value as string[];
@@ -10357,25 +12682,41 @@ function dynamicRelationArcs(
     arcs.push({ from: edge.source, relation: edge.relation, to: edge.target });
     const source = graph.node(edge.source);
     const target = graph.node(edge.target);
-    const definition = source === undefined || target === undefined ? undefined : configuration.edge_types.find((candidate) =>
-      candidate.source === source.type &&
-      candidate.relation === edge.relation &&
-      Array.isArray(candidate.targets) &&
-      candidate.targets.includes(target.type));
+    const definition =
+      source === undefined || target === undefined
+        ? undefined
+        : configuration.edge_types.find(
+            (candidate) =>
+              candidate.source === source.type &&
+              candidate.relation === edge.relation &&
+              Array.isArray(candidate.targets) &&
+              candidate.targets.includes(target.type),
+          );
     if (definition?.bidirectional === true && typeof definition.inverse === "string") {
       arcs.push({ from: edge.target, relation: definition.inverse, to: edge.source });
     }
   }
-  return arcs.sort((left, right) =>
-    compareText(left.from, right.from) || compareText(left.relation, right.relation) || compareText(left.to, right.to));
+  return arcs.sort(
+    (left, right) =>
+      compareText(left.from, right.from) ||
+      compareText(left.relation, right.relation) ||
+      compareText(left.to, right.to),
+  );
 }
 
-function parseDynamicGraphSelectionRequest(args: Record<string, unknown>): DynamicGraphSelectionRequest {
+function parseDynamicGraphSelectionRequest(
+  args: Record<string, unknown>,
+): DynamicGraphSelectionRequest {
   const anchors = optionalToolStringArray(args, "anchors");
   const relations = optionalToolStringArray(args, "relations");
   const nodeTypes = optionalToolStringArray(args, "nodeTypes");
   const direction = optionalToolString(args, "direction");
-  if (direction !== undefined && direction !== "outgoing" && direction !== "incoming" && direction !== "both") {
+  if (
+    direction !== undefined &&
+    direction !== "outgoing" &&
+    direction !== "incoming" &&
+    direction !== "both"
+  ) {
     fail("graph_context_direction", `unsupported graph context direction ${direction}`);
   }
   const maxDepth = optionalToolInteger(args, "maxDepth") ?? 1;
@@ -10401,11 +12742,25 @@ function normalizeReferencedPaths(
   for (const value of values) {
     if (
       value !== "." &&
-      (value.length === 0 || value.length > 16 * 1024 || value.startsWith("/") || /^[A-Za-z]:\//u.test(value) || value.includes("\\") ||
-        value.includes("\u0000") || value.split("/").some((part) => part === "" || part === "." || part === ".."))
-    ) fail(`${label.replaceAll(" ", "_")}_path`, `${label} path ${value} is not normalized and repository-relative`);
-    if (!scopes.some((scope) => scope === "." || value === scope || value.startsWith(`${scope}/`))) {
-      fail(`${label.replaceAll(" ", "_")}_scope`, `${label} path ${value} is outside this attempt's read/write scope`);
+      (value.length === 0 ||
+        value.length > 16 * 1024 ||
+        value.startsWith("/") ||
+        /^[A-Za-z]:\//u.test(value) ||
+        value.includes("\\") ||
+        value.includes("\u0000") ||
+        value.split("/").some((part) => part === "" || part === "." || part === ".."))
+    )
+      fail(
+        `${label.replaceAll(" ", "_")}_path`,
+        `${label} path ${value} is not normalized and repository-relative`,
+      );
+    if (
+      !scopes.some((scope) => scope === "." || value === scope || value.startsWith(`${scope}/`))
+    ) {
+      fail(
+        `${label.replaceAll(" ", "_")}_scope`,
+        `${label} path ${value} is outside this attempt's read/write scope`,
+      );
     }
     output.add(value);
   }
@@ -10448,12 +12803,17 @@ function compatibleAttemptLineage(
   active: AgentAttemptRecord,
 ): { compatible: Set<string>; abandoned: Set<string> } {
   const abandonedStatuses = new Set<AttemptStatus>(["failed", "aborted", "interrupted"]);
-  const abandoned = new Set(Object.values(run.attempts)
-    .filter((attempt) => abandonedStatuses.has(attempt.status))
-    .map((attempt) => attempt.id));
+  const abandoned = new Set(
+    Object.values(run.attempts)
+      .filter((attempt) => abandonedStatuses.has(attempt.status))
+      .map((attempt) => attempt.id),
+  );
   const ancestors = new Set<string>([active.id]);
   let cursor: AgentAttemptRecord | undefined = active;
-  while (cursor?.lineage?.parentAttemptId !== undefined && !ancestors.has(cursor.lineage.parentAttemptId)) {
+  while (
+    cursor?.lineage?.parentAttemptId !== undefined &&
+    !ancestors.has(cursor.lineage.parentAttemptId)
+  ) {
     ancestors.add(cursor.lineage.parentAttemptId);
     cursor = run.attempts[cursor.lineage.parentAttemptId];
   }
@@ -10479,11 +12839,21 @@ function compatibleAttemptLineage(
 }
 
 function isGraphNoteKind(value: unknown): value is GraphNoteArtifact["kind"] {
-  return value === "observation" || value === "implementation_detail" || value === "rationale" ||
-    value === "nit" || value === "open_question";
+  return (
+    value === "observation" ||
+    value === "implementation_detail" ||
+    value === "rationale" ||
+    value === "nit" ||
+    value === "open_question"
+  );
 }
 
-function compilerActivity(run: RunRecord, message: string, salt: string): RunActivityRecord {
+function compilerActivity(
+  run: RunRecord,
+  message: string,
+  salt: string,
+  tone?: RunActivityRecord["tone"],
+): RunActivityRecord {
   const at = new Date().toISOString();
   return {
     id: `activity-${digestBody(canonicalHash([run.id, run.revision, salt, message])).slice(0, 20)}`,
@@ -10492,6 +12862,7 @@ function compilerActivity(run: RunRecord, message: string, salt: string): RunAct
     message,
     ticketId: undefined,
     nodeId: undefined,
+    ...(tone === undefined ? {} : { tone }),
   };
 }
 
@@ -10514,15 +12885,26 @@ function graphActivity(
 
 function boundedContext(value: unknown): string {
   const content = `${JSON.stringify(value, null, 2)}\n`;
-  if (Buffer.byteLength(content, "utf8") > MAX_CONTEXT_BYTES || content.includes("\u0000")) fail("context_size", "compiler-issued context is oversized or unsafe");
+  if (Buffer.byteLength(content, "utf8") > MAX_CONTEXT_BYTES || content.includes("\u0000"))
+    fail("context_size", "compiler-issued context is oversized or unsafe");
   return content;
 }
 
-function graphArtifactPath(runId: string): string { return `runs/${runId}/program/graph.json`; }
-function ticketDefinitionsPath(runId: string): string { return `runs/${runId}/program/ticket-definitions.json`; }
-function pinnedConfigurationPath(runId: string): string { return `runs/${runId}/configuration/compiled.json`; }
-function evaluationPath(runId: string, revision: number): string { return `runs/${runId}/program/evaluations/${revision}.json`; }
-function graphNotePath(runId: string, noteId: string): string { return `runs/${runId}/program/notes/${noteId}.json`; }
+function graphArtifactPath(runId: string): string {
+  return `runs/${runId}/program/graph.json`;
+}
+function ticketDefinitionsPath(runId: string): string {
+  return `runs/${runId}/program/ticket-definitions.json`;
+}
+function pinnedConfigurationPath(runId: string): string {
+  return `runs/${runId}/configuration/compiled.json`;
+}
+function evaluationPath(runId: string, revision: number): string {
+  return `runs/${runId}/program/evaluations/${revision}.json`;
+}
+function graphNotePath(runId: string, noteId: string): string {
+  return `runs/${runId}/program/notes/${noteId}.json`;
+}
 
 function encodeRunGraphArtifact(value: GraphArtifact): Buffer {
   const bytes = encodeArtifact(value);
@@ -10541,7 +12923,8 @@ function requireValidation<Value>(
   code: string,
   message: string,
 ): Value {
-  if (!result.ok) throw new NativeRunProgramError(code, message, diagnosticLines(result.diagnostics));
+  if (!result.ok)
+    throw new NativeRunProgramError(code, message, diagnosticLines(result.diagnostics));
   return result.value;
 }
 
@@ -10555,24 +12938,33 @@ function requiredRecord(value: unknown, label: string): Record<string, unknown> 
 }
 
 function optionalRecord(value: unknown): ConfigurationObject | undefined {
-  return value === undefined || value === null || !isRecord(value) ? undefined : value as ConfigurationObject;
+  return value === undefined || value === null || !isRecord(value)
+    ? undefined
+    : (value as ConfigurationObject);
 }
 
 function jsonRecord(value: unknown, label: string): Record<string, JsonValue> {
   const record = requiredRecord(value, label);
   assertJsonValue(record, label);
-  return structuredClone(record) as Record<string, JsonValue>;
+  return structuredClone(record);
 }
 
 function assertJsonValue(value: unknown, label: string): asserts value is JsonValue {
-  if (value === null || typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) return;
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    (typeof value === "number" && Number.isFinite(value))
+  )
+    return;
   if (Array.isArray(value)) {
     for (const item of value) assertJsonValue(item, label);
     return;
   }
   if (isRecord(value)) {
     for (const [key, item] of Object.entries(value)) {
-      if (key.length === 0 || key.includes("\u0000")) fail("json_key", `${label} contains an invalid key`);
+      if (key.length === 0 || key.includes("\u0000"))
+        fail("json_key", `${label} contains an invalid key`);
       assertJsonValue(item, label);
     }
     return;
@@ -10580,18 +12972,29 @@ function assertJsonValue(value: unknown, label: string): asserts value is JsonVa
   fail("json_value", `${label} contains a non-JSON value`);
 }
 
-function assertExactFields(record: Record<string, unknown>, allowed: readonly string[], label: string): void {
+function assertExactFields(
+  record: Record<string, unknown>,
+  allowed: readonly string[],
+  label: string,
+): void {
   assertAllowedFields(record, allowed, label);
-  for (const key of allowed) if (!Object.hasOwn(record, key)) fail("missing_field", `${label} is missing ${key}`);
+  for (const key of allowed)
+    if (!Object.hasOwn(record, key)) fail("missing_field", `${label} is missing ${key}`);
 }
 
-function assertAllowedFields(record: Record<string, unknown>, allowed: readonly string[], label: string): void {
+function assertAllowedFields(
+  record: Record<string, unknown>,
+  allowed: readonly string[],
+  label: string,
+): void {
   const accepted = new Set(allowed);
-  for (const key of Object.keys(record)) if (!accepted.has(key)) fail("unknown_field", `${label} contains unknown field ${key}`);
+  for (const key of Object.keys(record))
+    if (!accepted.has(key)) fail("unknown_field", `${label} contains unknown field ${key}`);
 }
 
 function requiredNonempty(value: unknown, label: string): string {
-  if (typeof value !== "string" || value.trim().length === 0 || value.includes("\u0000")) fail("string", `${label} must be a nonempty safe string`);
+  if (typeof value !== "string" || value.trim().length === 0 || value.includes("\u0000"))
+    fail("string", `${label} must be a nonempty safe string`);
   return value;
 }
 
@@ -10602,13 +13005,18 @@ function optionalString(value: unknown): string | undefined {
 
 function boundedText(value: unknown, label: string, maximum: number): string {
   const text = requiredNonempty(value, label);
-  if (Buffer.byteLength(text, "utf8") > maximum) fail("text_size", `${label} exceeds ${maximum} UTF-8 bytes`);
+  if (Buffer.byteLength(text, "utf8") > maximum)
+    fail("text_size", `${label} exceeds ${maximum} UTF-8 bytes`);
   return text;
 }
 
 function stringArray(value: unknown, label: string): string[] {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim().length === 0)) fail("string_array", `${label} must contain strings`);
+  if (
+    !Array.isArray(value) ||
+    value.some((item) => typeof item !== "string" || item.trim().length === 0)
+  )
+    fail("string_array", `${label} must contain strings`);
   return [...new Set(value as string[])].sort(compareText);
 }
 
@@ -10617,7 +13025,8 @@ function optionalSafeInteger(value: unknown): number | undefined {
 }
 
 function requireDigest(value: unknown, label: string): Sha256Digest {
-  if (typeof value !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(value)) fail("digest", `${label} must be a sha256 digest`);
+  if (typeof value !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(value))
+    fail("digest", `${label} must be a sha256 digest`);
   return value as Sha256Digest;
 }
 
@@ -10643,22 +13052,34 @@ function normalizeResourcePath(value: string): string {
     value.startsWith("/") ||
     path.posix.normalize(value) !== value ||
     value.split("/").some((segment) => segment.length === 0 || segment === "." || segment === "..")
-  ) fail("resource_path", `resource path ${value} is not a safe normalized relative path`);
+  )
+    fail("resource_path", `resource path ${value} is not a safe normalized relative path`);
   return value;
 }
 
 function isWithinDirectory(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
-  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+  return (
+    relative === "" ||
+    (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))
+  );
 }
 
-function digestBody(value: Sha256Digest): string { return value.slice("sha256:".length); }
+function digestBody(value: Sha256Digest): string {
+  return value.slice("sha256:".length);
+}
 
 function humanize(value: string): string {
-  return value.split(/[-_]/u).filter(Boolean).map((part) => `${part[0]?.toUpperCase() ?? ""}${part.slice(1)}`).join(" ");
+  return value
+    .split(/[-_]/u)
+    .filter(Boolean)
+    .map((part) => `${part[0]?.toUpperCase() ?? ""}${part.slice(1)}`)
+    .join(" ");
 }
 
-function shortOid(value: string): string { return value.slice(0, 12); }
+function shortOid(value: string): string {
+  return value.slice(0, 12);
+}
 
 function attemptWorkspace(
   run: RunRecord,

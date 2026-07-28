@@ -53,7 +53,10 @@ export class WorktreePathAuthority {
     const root = await realpath(worktreeRoot);
     const metadata = await lstat(root);
     if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-      throw new PathAuthorityError("unsafe_root", "worktree authority root must be a real directory");
+      throw new PathAuthorityError(
+        "unsafe_root",
+        "worktree authority root must be a real directory",
+      );
     }
     return new WorktreePathAuthority(
       root,
@@ -129,7 +132,10 @@ export class WorktreePathAuthority {
     expectedSha256: Sha256Digest,
   ): Promise<Sha256Digest> {
     if (oldText.length === 0 || oldText === newText) {
-      throw new PathAuthorityError("edit_input", "edit must replace nonempty text with different text");
+      throw new PathAuthorityError(
+        "edit_input",
+        "edit must replace nonempty text with different text",
+      );
     }
     const current = await this.inspectWritable(relative);
     if (current === undefined || current.sha256 !== expectedSha256) {
@@ -140,7 +146,11 @@ export class WorktreePathAuthority {
     if (first < 0 || text.indexOf(oldText, first + oldText.length) >= 0) {
       throw new PathAuthorityError("edit_match", "edit text must match exactly once");
     }
-    return this.write(relative, Buffer.from(text.slice(0, first) + newText + text.slice(first + oldText.length)), expectedSha256);
+    return this.write(
+      relative,
+      Buffer.from(text.slice(0, first) + newText + text.slice(first + oldText.length)),
+      expectedSha256,
+    );
   }
 
   /** List a bounded, grant-filtered directory tree without following symlinks. */
@@ -164,14 +174,16 @@ export class WorktreePathAuthority {
       children.sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
       for (const child of children) {
         if (output.length >= limit) break;
-        const childRelative = current.relative === "." ? child.name : `${current.relative}/${child.name}`;
+        const childRelative =
+          current.relative === "." ? child.name : `${current.relative}/${child.name}`;
         if (!this.#isWithinScope(childRelative, this.#readRoots)) continue;
         const childAbsolute = path.join(current.absolute, child.name);
         const childMetadata = await lstat(childAbsolute);
         if (childMetadata.isSymbolicLink()) continue;
         if (childMetadata.isDirectory()) {
           output.push({ path: childRelative, kind: "directory", sizeBytes: 0 });
-          if (options.recursive === true) queue.push({ relative: childRelative, absolute: childAbsolute });
+          if (options.recursive === true)
+            queue.push({ relative: childRelative, absolute: childAbsolute });
         } else if (childMetadata.isFile()) {
           output.push({ path: childRelative, kind: "file", sizeBytes: childMetadata.size });
         }
@@ -185,12 +197,20 @@ export class WorktreePathAuthority {
     query: string,
     options: { roots?: readonly string[]; limit?: number; caseSensitive?: boolean } = {},
   ): Promise<AuthorizedSearchMatch[]> {
-    if (query.length === 0 || Buffer.byteLength(query, "utf8") > 4 * 1024 || query.includes("\u0000")) {
-      throw new PathAuthorityError("search_query", "search query is empty, oversized, or contains NUL");
+    if (
+      query.length === 0 ||
+      Buffer.byteLength(query, "utf8") > 4 * 1024 ||
+      query.includes("\u0000")
+    ) {
+      throw new PathAuthorityError(
+        "search_query",
+        "search query is empty, oversized, or contains NUL",
+      );
     }
-    const roots = options.roots?.length === 0 || options.roots === undefined
-      ? this.#readRoots
-      : [...new Set(options.roots.map((value) => normalizeRelative(value)))];
+    const roots =
+      options.roots?.length === 0 || options.roots === undefined
+        ? this.#readRoots
+        : [...new Set(options.roots.map((value) => normalizeRelative(value)))];
     for (const root of roots) this.#requireScope(root, this.#readRoots, "read_scope");
     const limit = boundedLimit(options.limit, MAX_SEARCH_RESULTS, "search limit");
     const files = new Set<string>();
@@ -215,7 +235,9 @@ export class WorktreePathAuthority {
     const needle = options.caseSensitive === false ? query.toLocaleLowerCase("en-US") : query;
     const matches: AuthorizedSearchMatch[] = [];
     let scannedBytes = 0;
-    for (const file of [...files].sort((left, right) => Buffer.from(left).compare(Buffer.from(right)))) {
+    for (const file of [...files].sort((left, right) =>
+      Buffer.from(left).compare(Buffer.from(right)),
+    )) {
       const result = await this.read(file);
       scannedBytes += result.bytes.byteLength;
       if (scannedBytes > MAX_SEARCH_BYTES) {
@@ -230,7 +252,8 @@ export class WorktreePathAuthority {
       let lineStartCharacter = 0;
       let lineStartByte = 0;
       for (const [index, rawLine] of lines.entries()) {
-        const haystack = options.caseSensitive === false ? rawLine.toLocaleLowerCase("en-US") : rawLine;
+        const haystack =
+          options.caseSensitive === false ? rawLine.toLocaleLowerCase("en-US") : rawLine;
         let offset = 0;
         while (matches.length < limit) {
           const found = haystack.indexOf(needle, offset);
@@ -249,8 +272,8 @@ export class WorktreePathAuthority {
         const newlineCharacters = text.startsWith("\r\n", newlineStart)
           ? 2
           : text.startsWith("\n", newlineStart)
-          ? 1
-          : 0;
+            ? 1
+            : 0;
         lineStartCharacter = newlineStart + newlineCharacters;
         lineStartByte += Buffer.byteLength(rawLine, "utf8") + newlineCharacters;
       }
@@ -265,7 +288,9 @@ export class WorktreePathAuthority {
   }
 
   #isWithinScope(relative: string, roots: readonly string[]): boolean {
-    return roots.some((root) => root === "." || relative === root || relative.startsWith(`${root}/`));
+    return roots.some(
+      (root) => root === "." || relative === root || relative.startsWith(`${root}/`),
+    );
   }
 
   async #safeAbsolute(relative: string, allowMissingLeaf: boolean): Promise<string> {
@@ -312,9 +337,13 @@ function boundedPreview(value: string): string {
 function normalizeRoots(values: readonly string[], write: boolean): string[] {
   const roots = [...new Set(values.map(normalizeRelative))].sort();
   if (write) roots.forEach(rejectCompilerOwned);
-  return roots.filter((root, index) => !roots.some((other, otherIndex) =>
-    otherIndex !== index && (other === "." || root.startsWith(`${other}/`))
-  ));
+  return roots.filter(
+    (root, index) =>
+      !roots.some(
+        (other, otherIndex) =>
+          otherIndex !== index && (other === "." || root.startsWith(`${other}/`)),
+      ),
+  );
 }
 
 function normalizeRelative(value: string): string {
@@ -325,14 +354,18 @@ function normalizeRelative(value: string): string {
       !value.includes("\\") &&
       !value.includes("\0") &&
       !value.split("/").some((segment) => segment === "" || segment === "." || segment === ".."))
-  ) return value;
+  )
+    return value;
   throw new PathAuthorityError("path_escape", `unsafe project-relative path: ${value}`);
 }
 
 function rejectCompilerOwned(relative: string): void {
   const first = relative.split("/")[0];
   if (first === ".git" || first === ".koni") {
-    throw new PathAuthorityError("compiler_owned", `${first} is compiler-owned and cannot be granted`);
+    throw new PathAuthorityError(
+      "compiler_owned",
+      `${first} is compiler-owned and cannot be granted`,
+    );
   }
 }
 
@@ -359,5 +392,7 @@ async function syncDirectory(directory: string): Promise<void> {
 }
 
 function isCode(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
+  return (
+    error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code
+  );
 }

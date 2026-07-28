@@ -8,11 +8,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import type {
-  AgentRowView,
-  ControlCenterViewModel,
-  GraphNodeView,
-} from "./view-model.js";
+import type { ControlCenterViewModel, GraphNodeView } from "./view-model.js";
 import { sealedModelAdmissionIssue } from "../pi/model-catalog.js";
 import {
   decodeControlCenterPointer,
@@ -22,6 +18,7 @@ import {
 } from "./input.js";
 import {
   ansiKoniPalette,
+  type KoniChipTone,
   type KoniPalette,
   paletteFromPiTheme,
   renderKoniMarkdown,
@@ -40,7 +37,6 @@ import {
   type ConfigDocumentRenameModalState,
   type ConfigDocumentDeleteModalState,
   type ConfigRunTypeWizardModalState,
-  type ConfigLegacyMigrationModalState,
   type ControlCenterHelpTopic,
   type EditScalarModalState,
   configResourceActions,
@@ -50,7 +46,6 @@ import {
   type PlanReviewModalState,
   type ProposalReviewModalState,
   type ProfileConflictsModalState,
-  selectedConfigField,
 } from "./controller.js";
 import type { ConfigFieldDefinition, ControlModelOption } from "./protocol.js";
 import { CellGrid } from "./cell-grid.js";
@@ -64,7 +59,6 @@ import {
 } from "./layout.js";
 import {
   cockpitBooleanOption,
-  cockpitIntegerOption,
   cockpitStringArrayMapOption,
   cockpitStringArrayOption,
   cockpitStringMapOption,
@@ -103,11 +97,14 @@ export class ControlCenterComponent implements Component, Focusable {
       this.invalidate();
       this.#requestRender?.();
     });
-    this.#ticker = this.#requestRender === undefined ? undefined : setInterval(() => {
-      if (!hasAnimatedWork(this.#snapshot)) return;
-      this.#animationFrame = (this.#animationFrame + 1) % 4;
-      this.#requestRender?.();
-    }, 500);
+    this.#ticker =
+      this.#requestRender === undefined
+        ? undefined
+        : setInterval(() => {
+            if (!hasAnimatedWork(this.#snapshot)) return;
+            this.#animationFrame = (this.#animationFrame + 1) % 4;
+            this.#requestRender?.();
+          }, 500);
     this.#ticker?.unref();
   }
 
@@ -163,13 +160,17 @@ export class ControlCenterComponent implements Component, Focusable {
     if (configure !== undefined) {
       const configureGeometry = configureLayout(safeWidth, safeRows);
       if (configureGeometry.kind === "resize") {
-        this.#lastFrame = CellGrid.fromAnsiLines(resizeScreen(safeWidth, safeRows, this.#palette), safeWidth, safeRows)
-          .addRegion("resize", configureGeometry.screen);
+        this.#lastFrame = CellGrid.fromAnsiLines(
+          resizeScreen(safeWidth, safeRows, this.#palette),
+          safeWidth,
+          safeRows,
+        ).addRegion("resize", configureGeometry.screen);
         return this.#lastFrame;
       }
-      let configured = configure.kind === "configure"
-        ? this.#renderConfigureScreen(configure, configureGeometry)
-        : this.#renderConfigureDocumentsScreen(configure, configureGeometry);
+      let configured =
+        configure.kind === "configure"
+          ? this.#renderConfigureScreen(configure, configureGeometry)
+          : this.#renderConfigureDocumentsScreen(configure, configureGeometry);
       if (this.#snapshot.modal?.kind === "profile_conflicts") {
         configured = overlayModal(
           configured,
@@ -190,55 +191,63 @@ export class ControlCenterComponent implements Component, Focusable {
           ),
           safeWidth,
         );
-      } else if (this.#snapshot.modal !== undefined && this.#snapshot.modal.kind !== configure.kind) {
+      } else if (
+        this.#snapshot.modal !== undefined &&
+        this.#snapshot.modal.kind !== configure.kind
+      ) {
         configured = overlayModal(
           configured,
-          this.#renderModal(
-            Math.max(24, Math.min(118, safeWidth - 4)),
-            Math.max(12, safeRows - 4),
-          ),
+          this.#renderModal(Math.max(24, Math.min(118, safeWidth - 4)), Math.max(12, safeRows - 4)),
           safeWidth,
         );
       }
-      const frame = CellGrid.fromAnsiLines(fitRows(configured, safeWidth, safeRows), safeWidth, safeRows);
+      const frame = CellGrid.fromAnsiLines(
+        fitRows(configured, safeWidth, safeRows),
+        safeWidth,
+        safeRows,
+      );
       frame.addRegion("header", configureGeometry.header);
       frame.addRegion("config.domains", configureGeometry.domains, "config:domains");
       frame.addRegion("config.resources", configureGeometry.resources, "config:resources");
       frame.addRegion("config.editor", configureGeometry.editor, "config:editor");
       frame.addRegion("config.draft", configureGeometry.draftBar, "config:draft");
       frame.addRegion("footer", configureGeometry.footer);
-      if (this.#snapshot.modal !== undefined && this.#snapshot.modal.kind !== configure.kind ||
-          configure.kind === "configure" && configure.resourceOperation !== undefined) {
+      if (
+        (this.#snapshot.modal !== undefined && this.#snapshot.modal.kind !== configure.kind) ||
+        (configure.kind === "configure" && configure.resourceOperation !== undefined)
+      ) {
         frame.addHitTarget("modal", { x: 0, y: 0, width: safeWidth, height: safeRows });
       }
-      if (configure.kind === "configure") annotateConfigureHitTargets(frame, configureGeometry, this.#snapshot, configure);
+      if (configure.kind === "configure")
+        annotateConfigureHitTargets(frame, configureGeometry, this.#snapshot, configure);
       else annotateConfigureDocumentHitTargets(frame, configureGeometry, this.#snapshot, configure);
       this.#lastFrame = frame;
       return frame;
     }
 
     const rendered = this.#renderOperate(layout);
-    const withModal = this.#snapshot.modal === undefined
-      ? rendered
-      : overlayModal(
-        rendered,
-        this.#renderModal(
-          Math.max(24, Math.min(118, safeWidth - 4)),
-          Math.max(12, safeRows - 4),
-        ),
-        safeWidth,
-      );
+    const withModal =
+      this.#snapshot.modal === undefined
+        ? rendered
+        : overlayModal(
+            rendered,
+            this.#renderModal(
+              Math.max(24, Math.min(118, safeWidth - 4)),
+              Math.max(12, safeRows - 4),
+            ),
+            safeWidth,
+          );
     const frame = CellGrid.fromAnsiLines(
       fitRows(withModal, safeWidth, safeRows),
       safeWidth,
       safeRows,
     );
-    frame.addRegion("header", layout.header);
     frame.addRegion("runs", layout.runs, "panel:runs");
     frame.addRegion("tickets", layout.tickets, "panel:tickets");
     frame.addRegion("agents", layout.agents, "panel:agents");
     frame.addRegion("details", layout.details, "panel:details");
-    if (layout.questions !== undefined) frame.addRegion("questions", layout.questions, "panel:questions");
+    if (layout.questions !== undefined)
+      frame.addRegion("questions", layout.questions, "panel:questions");
     frame.addRegion("activity", layout.activity, "panel:activity");
     frame.addRegion("graph", layout.graph, "panel:graph");
     frame.addRegion("footer", layout.footer);
@@ -258,7 +267,8 @@ export class ControlCenterComponent implements Component, Focusable {
     if (target === undefined) return;
     const panel = panelFromHitTarget(target);
     if (pointer.kind === "wheel") {
-      if (panel !== undefined) void this.#controller.handle({ type: "pointer_scroll", panel, delta: pointer.delta });
+      if (panel !== undefined)
+        void this.#controller.handle({ type: "pointer_scroll", panel, delta: pointer.delta });
       return;
     }
     if (pointer.kind !== "press" || pointer.button !== "left") return;
@@ -281,19 +291,19 @@ export class ControlCenterComponent implements Component, Focusable {
       ...this.#ticketsPanel(layout.tickets.width, layout.tickets.height),
       ...this.#agentsPanel(layout.agents.width, layout.agents.height),
     ];
-    const middle = layout.questions === undefined
-      ? this.#detailsPanel(layout.details.width, layout.details.height)
-      : [
-        ...this.#detailsPanel(layout.details.width, layout.details.height),
-        ...this.#questionsPanel(layout.questions.width, layout.questions.height),
-      ];
+    const middle =
+      layout.questions === undefined
+        ? this.#detailsPanel(layout.details.width, layout.details.height)
+        : [
+            ...this.#detailsPanel(layout.details.width, layout.details.height),
+            ...this.#questionsPanel(layout.questions.width, layout.questions.height),
+          ];
     const right = [
       ...this.#activityPanel(layout.activity.width, layout.activity.height),
       ...this.#graphPanel(layout.graph.width, layout.graph.height),
     ];
-    const bodyHeight = layout.footer.y - layout.header.height;
+    const bodyHeight = layout.footer.y;
     return [
-      ...this.#header(layout.width),
       ...joinColumns(
         [left, middle, right],
         [layout.runs.width, layout.details.width, layout.activity.width],
@@ -303,18 +313,21 @@ export class ControlCenterComponent implements Component, Focusable {
     ];
   }
 
-  #header(width: number, mode: "OPERATE" | "CONFIGURE" | "PROJECT RESOURCES" = "OPERATE"): string[] {
+  #header(width: number, mode: "CONFIGURE" | "PROJECT RESOURCES"): string[] {
     const run = this.#snapshot.view.selectedRun;
-    const metadata = run === undefined
-      ? this.#palette.muted("No runs yet")
-      : [
-        this.#palette.accent(run.header.runType),
-        `${run.spendingTokens ? `${this.#animatedCog()} ` : ""}${run.header.stage}`,
-        `${run.header.ticketCount} tickets`,
-        run.header.newTokens,
-        ...(run.header.awaitingApproval ? [this.#palette.warning("approval needed")] : []),
-        ...(this.#snapshot.cockpitIssue === undefined ? [] : [this.#palette.warning("view config unavailable")]),
-      ].join(this.#palette.muted(" · "));
+    const metadata =
+      run === undefined
+        ? this.#palette.muted("No runs yet")
+        : [
+            this.#palette.accent(run.header.runType),
+            `${run.spendingTokens ? `${this.#animatedCog()} ` : ""}${run.header.stage}`,
+            `${run.header.ticketCount} tickets`,
+            run.header.newTokens,
+            ...(run.header.awaitingApproval ? [this.#palette.warning("approval needed")] : []),
+            ...(this.#snapshot.cockpitIssue === undefined
+              ? []
+              : [this.#palette.warning("view config unavailable")]),
+          ].join(this.#palette.muted(" · "));
     const title = `${this.#palette.bold(this.#palette.accent(" KONI "))} ${this.#palette.accent(mode)} ${this.#palette.text(`project:${this.#snapshot.view.projectRoot}`)}`;
     return framedHeader(title, metadata, width, this.#palette);
   }
@@ -323,38 +336,69 @@ export class ControlCenterComponent implements Component, Focusable {
     const section = modal.catalog.sections[modal.sectionIndex];
     const resource = section?.resources[modal.resourceIndex];
     const domains = modal.catalog.sections.map((candidate, index) =>
-      configDomainRow(candidate.id, candidate.title, index === modal.sectionIndex, this.#palette));
+      configDomainRow(candidate.id, candidate.title, index === modal.sectionIndex, this.#palette),
+    );
     const resourceList = section?.resources ?? [];
-    const resources = resourceList.map((candidate, index) => {
+    const resources: string[] = [];
+    let selectedResourceLine = 0;
+    let lastGroup: string | undefined;
+    resourceList.forEach((candidate, index) => {
+      const group = candidate.group;
+      if (group !== undefined && group !== lastGroup) {
+        if (resources.length > 0) resources.push("");
+        resources.push(this.#palette.muted(group));
+        lastGroup = group;
+      }
       const depth = Math.max(0, candidate.depth ?? 0);
       const next = resourceList[index + 1];
-      const connector = depth === 0 ? "" : ((next === undefined || (next.depth ?? 0) < depth) ? "└─ " : "├─ ");
+      const connector =
+        depth === 0 ? "" : next === undefined || (next.depth ?? 0) < depth ? "└─ " : "├─ ";
       const indent = "  ".repeat(depth === 0 ? 0 : depth - 1);
       const selected = index === modal.resourceIndex;
+      if (selected) selectedResourceLine = resources.length;
       const dirty = configResourceDirty(candidate.fields, modal);
       if (selected) {
-        return this.#palette.selected(`▸ ${indent}${connector}${dirty ? "● " : ""}${candidate.title}`);
+        resources.push(
+          this.#palette.selected(`▸ ${indent}${connector}${dirty ? "● " : ""}${candidate.title}`),
+        );
+        return;
       }
       const rail = this.#palette.dim(`${indent}${connector}`);
       const badge = dirty ? `${this.#palette.warning("●")} ` : "";
-      return `  ${rail}${badge}${this.#palette.text(candidate.title)}`;
+      resources.push(`  ${rail}${badge}${this.#palette.text(candidate.title)}`);
     });
     if (resources.length === 0) resources.push(this.#palette.dim("No resources in this domain."));
 
     const editor: string[] = [];
     if (modal.upstreamConflicts.conflicts.length > 0) {
-      editor.push(this.#palette.warning(
-        `${modal.upstreamConflicts.conflicts.length} upstream ${modal.upstreamConflicts.conflicts.length === 1 ? "change needs" : "changes need"} review · [u] Open comparison`,
-      ), "");
+      editor.push(
+        this.#palette.warning(
+          `${modal.upstreamConflicts.conflicts.length} upstream ${modal.upstreamConflicts.conflicts.length === 1 ? "change needs" : "changes need"} review · [u] Open comparison`,
+        ),
+        "",
+      );
     }
-    if (resource === undefined) editor.push(this.#palette.muted("Select a resource to inspect its settings."));
+    if (resource === undefined)
+      editor.push(this.#palette.muted("Select a resource to inspect its settings."));
     else {
       editor.push(sectionHeading(resource.title, this.#palette));
-      editor.push(...wrapStyled(resource.description, Math.max(1, layout.editor.width - 2), this.#palette.muted), "");
+      editor.push(
+        ...wrapStyled(
+          resource.description,
+          Math.max(1, layout.editor.width - 2),
+          this.#palette.muted,
+        ),
+        "",
+      );
       resource.fields.forEach((field, index) => {
         const selected = index === modal.fieldIndex;
         const value = configValueLabel(field, modal.draft[field.key], this.#snapshot.models);
-        const chip = inputBadge(value, selected && modal.focus === "field", this.#palette, configScalarTint(field.kind, this.#palette));
+        const chip = inputBadge(
+          value,
+          selected && modal.focus === "field",
+          this.#palette,
+          configScalarTint(field.kind, this.#palette),
+        );
         const caret = selected ? this.#palette.accent("▸") : " ";
         const name = selected ? this.#palette.bold(field.label) : this.#palette.text(field.label);
         const mark = configFieldDirty(field, modal) ? ` ${this.#palette.warning("●")}` : "";
@@ -362,52 +406,97 @@ export class ControlCenterComponent implements Component, Focusable {
         if (!selected) {
           const summary = (field.description.split("\n")[0] ?? "").trim();
           if (summary.length > 0) {
-            editor.push(`   ${this.#palette.dim(truncateToWidth(summary, Math.max(1, layout.editor.width - 5), "…"))}`);
+            editor.push(
+              `   ${this.#palette.dim(truncateToWidth(summary, Math.max(1, layout.editor.width - 5), "…"))}`,
+            );
           }
         }
         if (selected) {
-          editor.push(...wrapStyled(field.description, Math.max(1, layout.editor.width - 5), (line) => `   ${this.#palette.dim(line)}`));
+          editor.push(
+            ...wrapStyled(
+              field.description,
+              Math.max(1, layout.editor.width - 5),
+              (line) => `   ${this.#palette.dim(line)}`,
+            ),
+          );
           if (isConfigTextField(field)) {
-            const source = modal.textEditor?.key === field.key
-              ? modal.textEditor.value
-              : modal.draft[field.key];
-            const valueText = typeof source === "string" ? source
-              : Array.isArray(source) ? source.filter((item): item is string => typeof item === "string").join("\n")
-                : "";
-            editor.push(...wrapStyled(
-              `${modal.editing ? "▌ " : "  "}${valueText.length === 0 ? this.#palette.dim("Empty") : valueText}`,
-              Math.max(1, layout.editor.width - 4),
-              (line) => selected ? this.#palette.selected(line) : line,
-            ));
+            const source =
+              modal.textEditor?.key === field.key ? modal.textEditor.value : modal.draft[field.key];
+            const valueText =
+              typeof source === "string"
+                ? source
+                : Array.isArray(source)
+                  ? source.filter((item): item is string => typeof item === "string").join("\n")
+                  : "";
+            editor.push(
+              ...wrapStyled(
+                `${modal.editing ? "▌ " : "  "}${valueText.length === 0 ? this.#palette.dim("Empty") : valueText}`,
+                Math.max(1, layout.editor.width - 4),
+                (line) => (selected ? this.#palette.selected(line) : line),
+              ),
+            );
           }
         }
       });
       const resourceActions = configResourceActions(modal);
       if (resourceActions.length > 0) {
-        editor.push("", resourceActions.map((action) => {
-          if (action === "create") return "[a] Add";
-          if (action === "duplicate") return "[d] Duplicate";
-          return "[x] Delete";
-        }).join("  "));
+        editor.push(
+          "",
+          resourceActions
+            .map((action) => {
+              if (action === "create") return "[a] Add";
+              if (action === "duplicate") return "[d] Duplicate";
+              return "[x] Delete";
+            })
+            .join("  "),
+        );
       }
     }
 
     const content = [
       ...this.#header(layout.width, "CONFIGURE"),
-      ...joinColumns([
-        panel("Domains", domains, layout.domains.width, layout.domains.height, modal.focus === "tree", this.#palette),
-        panel(section?.title ?? "Resources", resources, layout.resources.width, layout.resources.height, modal.focus === "tree", this.#palette, visibleOffset(0, modal.resourceIndex, Math.max(1, layout.resources.height - 2))),
-        panel("Editor", editor, layout.editor.width, layout.editor.height, modal.focus === "field" || modal.focus === "actions", this.#palette),
-      ], [layout.domains.width, layout.resources.width, layout.editor.width], layout.domains.height),
+      ...joinColumns(
+        [
+          panel(
+            "Domains",
+            domains,
+            layout.domains.width,
+            layout.domains.height,
+            modal.focus === "tree",
+            this.#palette,
+          ),
+          panel(
+            section?.title ?? "Resources",
+            resources,
+            layout.resources.width,
+            layout.resources.height,
+            modal.focus === "tree",
+            this.#palette,
+            visibleOffset(0, selectedResourceLine, Math.max(1, layout.resources.height - 2)),
+          ),
+          panel(
+            "Editor",
+            editor,
+            layout.editor.width,
+            layout.editor.height,
+            modal.focus === "field" || modal.focus === "actions",
+            this.#palette,
+          ),
+        ],
+        [layout.domains.width, layout.resources.width, layout.editor.width],
+        layout.domains.height,
+      ),
       ...panel(
         "Configuration",
-        [centerLine(
-          modal.rebaseRequired
-            ? "Saved draft is stale · Ctrl-R rebase · Ctrl-D discard"
-            : `${modal.dirty ? "● unpublished changes" : "configuration current"} · Ctrl-S save · Ctrl-P publish · Ctrl-D discard · [r] Project Resources`,
-          Math.max(1, layout.width - 2),
-          modal.rebaseRequired || modal.dirty ? this.#palette.warning : this.#palette.info,
-        )],
+        [
+          centerLine(
+            modal.rebaseRequired
+              ? "Saved draft is stale · Ctrl-R rebase · Ctrl-D discard"
+              : `${modal.dirty ? "● unpublished changes" : "configuration current"} · Ctrl-S save · Ctrl-P publish · Ctrl-D discard · [r] Project Resources`,
+            Math.max(1, layout.width - 2),
+            modal.rebaseRequired || modal.dirty ? this.#palette.warning : this.#palette.info,
+          ),
+        ],
         layout.draftBar.width,
         layout.draftBar.height,
         modal.focus === "publish",
@@ -427,16 +516,21 @@ export class ControlCenterComponent implements Component, Focusable {
     const selected = documents[modal.documentIndex];
     const domains = CONFIG_DOCUMENT_DOMAINS.map((candidate, index) => {
       const { icon, tint } = configDomainStyle(candidate, this.#palette);
-      const count = modal.catalog.documents.filter((document) => document.domain === candidate).length;
+      const count = modal.catalog.documents.filter(
+        (document) => document.domain === candidate,
+      ).length;
       const label = titleCaseLabel(candidate);
-      if (index === modal.domainIndex) return this.#palette.selected(`▸ ${icon} ${label}  ${count}`);
+      if (index === modal.domainIndex)
+        return this.#palette.selected(`▸ ${icon} ${label}  ${count}`);
       return `  ${tint(icon)} ${this.#palette.text(label)}  ${this.#palette.dim(String(count))}`;
     });
     const resources = documents.map((document, index) => {
       const connector = index === documents.length - 1 ? "└─" : "├─";
       const readOnly = !document.capabilities.update;
       if (index === modal.documentIndex) {
-        return this.#palette.selected(`▸ ${connector} ${document.title}${readOnly ? " read only" : ""}`);
+        return this.#palette.selected(
+          `▸ ${connector} ${document.title}${readOnly ? " read only" : ""}`,
+        );
       }
       const lock = readOnly ? ` ${this.#palette.dim("read only")}` : "";
       return `  ${this.#palette.dim(connector)} ${this.#palette.text(document.title)}${lock}`;
@@ -446,9 +540,17 @@ export class ControlCenterComponent implements Component, Focusable {
     const editor: string[] = [];
     let editorFocusLine = 0;
     if (!modal.catalog.valid) {
-      editor.push(this.#palette.warning("Configuration needs repair; edit the exact source below."));
-      editor.push(...modal.catalog.diagnostics.slice(0, 4).flatMap((diagnostic) =>
-        wrapStyled(diagnostic, Math.max(1, layout.editor.width - 2), this.#palette.warning)), "");
+      editor.push(
+        this.#palette.warning("Configuration needs repair; edit the exact source below."),
+      );
+      editor.push(
+        ...modal.catalog.diagnostics
+          .slice(0, 4)
+          .flatMap((diagnostic) =>
+            wrapStyled(diagnostic, Math.max(1, layout.editor.width - 2), this.#palette.warning),
+          ),
+        "",
+      );
     }
     if (selected === undefined || modal.source === undefined) {
       editor.push(this.#palette.muted("Select a resource to inspect its project-authored source."));
@@ -457,17 +559,23 @@ export class ControlCenterComponent implements Component, Focusable {
         sectionHeading(selected.title, this.#palette),
         `${this.#palette.muted(titleCaseLabel(selected.kind))} · ${selected.format.toUpperCase()} · ${formatBytes(selected.sizeBytes)}`,
       );
-      if (selected.capabilities.reason !== undefined) editor.push(this.#palette.muted(selected.capabilities.reason));
+      if (selected.capabilities.reason !== undefined)
+        editor.push(this.#palette.muted(selected.capabilities.reason));
       editor.push("");
       const source = modal.editing ? insertCaret(modal.draft, modal.cursor) : modal.draft;
       const sourceLines = source.split("\n");
       const numberWidth = Math.max(2, String(sourceLines.length).length);
       sourceLines.forEach((line, index) => {
         const prefix = `${String(index + 1).padStart(numberWidth)} │ `;
-        const wrapped = wrapTextWithAnsi(line.length === 0 ? " " : line, Math.max(1, layout.editor.width - prefix.length - 2));
+        const wrapped = wrapTextWithAnsi(
+          line.length === 0 ? " " : line,
+          Math.max(1, layout.editor.width - prefix.length - 2),
+        );
         wrapped.forEach((part, partIndex) => {
           if (part.includes("▌")) editorFocusLine = editor.length;
-          editor.push(`${this.#palette.muted(partIndex === 0 ? prefix : " ".repeat(prefix.length))}${modal.editing ? this.#palette.text(part) : part}`);
+          editor.push(
+            `${this.#palette.muted(partIndex === 0 ? prefix : " ".repeat(prefix.length))}${modal.editing ? this.#palette.text(part) : part}`,
+          );
         });
       });
     }
@@ -475,30 +583,51 @@ export class ControlCenterComponent implements Component, Focusable {
     const dirtyCopy = modal.dirty ? "Raw source · unpublished changes" : "Raw source · current";
     const content = [
       ...this.#header(layout.width, "PROJECT RESOURCES"),
-      ...joinColumns([
-        panel("Domains", domains, layout.domains.width, layout.domains.height, modal.focus === "domains", this.#palette),
-        panel(titleCaseLabel(domain), resources, layout.resources.width, layout.resources.height, modal.focus === "documents", this.#palette, visibleOffset(0, modal.documentIndex, Math.max(1, layout.resources.height - 2))),
-        panel(
-          "Source Editor",
-          editor,
-          layout.editor.width,
-          layout.editor.height,
-          modal.focus === "editor",
-          this.#palette,
-          modal.editing
-            ? visibleOffset(modal.scroll, editorFocusLine, Math.max(1, layout.editor.height - 2))
-            : modal.scroll,
-        ),
-      ], [layout.domains.width, layout.resources.width, layout.editor.width], layout.domains.height),
+      ...joinColumns(
+        [
+          panel(
+            "Domains",
+            domains,
+            layout.domains.width,
+            layout.domains.height,
+            modal.focus === "domains",
+            this.#palette,
+          ),
+          panel(
+            titleCaseLabel(domain),
+            resources,
+            layout.resources.width,
+            layout.resources.height,
+            modal.focus === "documents",
+            this.#palette,
+            visibleOffset(0, modal.documentIndex, Math.max(1, layout.resources.height - 2)),
+          ),
+          panel(
+            "Source Editor",
+            editor,
+            layout.editor.width,
+            layout.editor.height,
+            modal.focus === "editor",
+            this.#palette,
+            modal.editing
+              ? visibleOffset(modal.scroll, editorFocusLine, Math.max(1, layout.editor.height - 2))
+              : modal.scroll,
+          ),
+        ],
+        [layout.domains.width, layout.resources.width, layout.editor.width],
+        layout.domains.height,
+      ),
       ...panel(
         dirtyCopy,
-        [centerLine(
-          modal.dirty
-            ? "[Ctrl-S] Validate & save   [Ctrl-D] Discard   Esc stays here"
-            : "[Enter] Edit   [a] New   [e] Rename   [x] Delete   [t] Run type   [l] Legacy migration   [Esc] Guided",
-          Math.max(1, layout.width - 2),
-          modal.dirty ? this.#palette.warning : this.#palette.accent,
-        )],
+        [
+          centerLine(
+            modal.dirty
+              ? "[Ctrl-S] Validate & save   [Ctrl-D] Discard   Esc stays here"
+              : "[Enter] Edit   [a] New   [e] Rename   [x] Delete   [t] Run type   [l] Legacy migration   [Esc] Guided",
+            Math.max(1, layout.width - 2),
+            modal.dirty ? this.#palette.warning : this.#palette.accent,
+          ),
+        ],
         layout.draftBar.width,
         layout.draftBar.height,
         false,
@@ -510,15 +639,21 @@ export class ControlCenterComponent implements Component, Focusable {
   }
 
   #footer(width: number): string[] {
-    const message = this.#snapshot.busy === undefined
-      ? this.#snapshot.notice?.message
-      : `⚙ ${this.#snapshot.busy}`;
-    const status = message === undefined
-      ? footerHelp(width)
-      : message;
-    const styled = this.#snapshot.notice?.kind === "error"
-      ? this.#palette.error(status)
-      : this.#snapshot.busy === undefined ? this.#palette.muted(status) : this.#palette.accent(status);
+    const message =
+      this.#snapshot.busy === undefined
+        ? this.#snapshot.notice?.message
+        : `⚙ ${this.#snapshot.busy}`;
+    const cockpitIssue =
+      this.#snapshot.cockpitIssue === undefined ? undefined : "view config unavailable";
+    const status = message ?? cockpitIssue ?? footerHelp(width);
+    const styled =
+      this.#snapshot.notice?.kind === "error"
+        ? this.#palette.error(status)
+        : message === undefined && cockpitIssue !== undefined
+          ? this.#palette.warning(status)
+          : this.#snapshot.busy === undefined
+            ? this.#palette.muted(status)
+            : this.#palette.accent(status);
     return [padLine(styled, width)];
   }
 
@@ -527,51 +662,59 @@ export class ControlCenterComponent implements Component, Focusable {
     const page = this.#snapshot.view.runPage;
     const hiddenAbove = page.startIndex;
     const hiddenBelow = page.totalRuns - page.startIndex - page.visibleRuns;
-    const pageTitle = page.totalRuns > page.visibleRuns
-      ? `Runs ${page.startIndex + 1}–${page.startIndex + page.visibleRuns} of ${page.totalRuns}${
-        hiddenAbove > 0 ? ` · ↑${hiddenAbove} more` : ""
-      }${hiddenBelow > 0 ? ` · ↓${hiddenBelow} more` : ""}`
-      : "Runs";
+    const pageTitle =
+      page.totalRuns > page.visibleRuns
+        ? `Runs ${page.startIndex + 1}–${page.startIndex + page.visibleRuns} of ${page.totalRuns}${
+            hiddenAbove > 0 ? ` · ↑${hiddenAbove} more` : ""
+          }${hiddenBelow > 0 ? ` · ↓${hiddenBelow} more` : ""}`
+        : "Runs";
     let selectedLine = 0;
+    const innerWidth = Math.max(1, width - 2);
     for (const row of this.#snapshot.view.runs) {
       const selected = row.id === this.#snapshot.selection.runId;
       if (selected) selectedLine = lines.length;
-      const marker = row.provisional || row.activeAgentCount > 0
-        ? this.#animatedCog()
-        : row.paused ? "Ⅱ" : row.mergeReady ? "◆" : "●";
-      const primary = `${selected ? "›" : " "} ${statusStyle(marker, row.state, this.#palette)} ${row.title}`;
-      const badges = [
-        // Identity first: same-goal retries render identical titles, so the short id and age are
-        // the only way to tell rows apart at a glance.
-        this.#palette.muted(`#${row.shortId}`),
-        this.#palette.muted(relativeAge(row.createdAt)),
-        row.runType,
-        row.stage,
-        row.ticketProgress,
-        ...(row.questionCount === 0 ? [] : [`${row.questionCount} Q`]),
-        ...(row.proposalCount === 0 ? [] : [this.#palette.warning(`${row.proposalCount} proposal${row.proposalCount === 1 ? "" : "s"}`)]),
-        ...(row.activeAgentCount === 0 ? [] : [`${row.activeAgentCount} working`]),
+      const marker =
+        row.provisional || row.activeAgentCount > 0
+          ? this.#animatedCog()
+          : row.paused
+            ? "Ⅱ"
+            : row.mergeReady
+              ? "◆"
+              : "●";
+      // The right slot surfaces only what needs the operator now: a pause still draining
+      // (or scheduled for the next pausable boundary), the settled pause, or a plan review.
+      const rightStatus =
+        row.pausePending || row.phase === "pausing"
+          ? this.#palette.warning("pausing…")
+          : row.paused
+            ? this.#palette.warning("paused")
+            : row.awaitingApproval
+              ? this.#palette.warning("[v] review")
+              : "";
+      const primary = overlayRight(
+        `${selected ? "›" : " "} ${statusStyle(marker, row.state, this.#palette)} ${row.title}`,
+        rightStatus,
+        innerWidth,
+      );
+      const detail = [
         row.targetBranch,
+        this.#palette.chip(row.stage, stageTone(row.phase)),
+        row.runType,
         row.newTokens,
-        ...(row.mergeReady ? [this.#palette.success("ready · m")] : []),
-        ...(row.awaitingApproval ? [this.#palette.warning("approve") ] : []),
-      ];
+      ].join(this.#palette.muted(" · "));
       lines.push(selected ? this.#palette.selected(primary) : primary);
-      lines.push(`    ${badges.join(this.#palette.muted(" · "))}`);
+      lines.push(`    ${detail}`);
     }
     if (lines.length === 0) {
-      lines.push(this.#palette.muted("No runs"), this.#palette.dim("Start a run from Koni's New Run flow."));
+      lines.push(
+        this.#palette.muted("No runs"),
+        this.#palette.dim("Start a run from Koni's New Run flow."),
+        this.#palette.accent("[n] New run"),
+      );
     }
-    return panelWithFooter(
+    return panel(
       pageTitle,
       lines,
-      this.#snapshot.view.runs.length === 0
-        ? "[n] New run"
-        : completeFooter([
-            "[Space] pause/play · [v] review · [m] merge · [d] delete · [n] new",
-            "[Space] pause/play · [v] review · [n] new",
-            "[Space] pause/play",
-          ], Math.max(1, width - 2)),
       width,
       height,
       this.#snapshot.focus === "runs",
@@ -588,27 +731,50 @@ export class ControlCenterComponent implements Component, Focusable {
     const customColumns = configuredColumns.size > 0;
     const activeTab = selectedRun?.ticketTabs.find((tab) => tab.id === selectedRun.ticketTab);
     const lines: string[] = [
-      centerLine(`‹ ${activeTab?.title ?? "All"} ${activeTab?.count ?? 0} ›`, Math.max(1, width - 2), this.#palette.accent),
+      centerLine(
+        `‹ ${activeTab?.title ?? "All"} ${activeTab?.count ?? 0} ›`,
+        Math.max(1, width - 2),
+        this.#palette.accent,
+      ),
     ];
     let selectedLine = 0;
+    const cursorId = this.#snapshot.cursor.ticketId ?? this.#snapshot.selection.ticketId;
     for (const ticket of tickets) {
-      const selected = ticket.id === this.#snapshot.selection.ticketId;
-      if (selected) selectedLine = lines.length;
-      const marker = ticket.proposalAwaitingDecision ? "◆"
-        : ticket.recovery ? "!" : ticket.active ? "⚙" : ticket.status === "Completed" ? "●" : "○";
-      const line = `${selected ? "›" : " "} ${statusStyle(marker, ticket.status, this.#palette)} ${ticket.title}`;
-      lines.push(selected ? this.#palette.selected(line) : line);
+      const onCursor = ticket.id === cursorId;
+      const committed = ticket.id === this.#snapshot.selection.ticketId;
+      if (onCursor) selectedLine = lines.length;
+      const marker = ticket.proposalAwaitingDecision
+        ? "◆"
+        : ticket.recovery
+          ? "!"
+          : ticket.active
+            ? "⚙"
+            : ticket.status === "Completed"
+              ? "●"
+              : "○";
+      const caret = onCursor ? "›" : committed ? this.#palette.accent("▸") : " ";
+      const line = `${caret} ${statusStyle(marker, ticket.status, this.#palette)} ${ticket.title}`;
+      lines.push(onCursor ? this.#palette.selected(line) : line);
       const details = [
         ...(!customColumns || configuredColumns.has("operation") ? [ticket.status] : []),
-        ...(!customColumns || configuredColumns.has("steps") ? [`${ticket.rail} ${ticket.progress}`] : []),
-        ...((!customColumns || configuredColumns.has("agents")) && ticket.currentPersona !== undefined
-          ? [this.#palette.info(ticket.currentPersona)] : []),
+        ...(!customColumns || configuredColumns.has("steps")
+          ? [`${ticket.rail} ${ticket.progress}`]
+          : []),
+        ...((!customColumns || configuredColumns.has("agents")) &&
+        ticket.currentPersona !== undefined
+          ? [this.#palette.info(ticket.currentPersona)]
+          : []),
         ...(ticket.recovery ? [this.#palette.error("recovery needed")] : []),
-        ...(ticket.proposalAwaitingDecision ? [this.#palette.warning("decision needed · Enter/p inspect")] : []),
+        ...(ticket.proposalAwaitingDecision
+          ? [this.#palette.warning("decision needed · Enter/p inspect")]
+          : []),
       ];
       lines.push(`    ${details.join(this.#palette.muted(" · "))}`);
     }
-    if (tickets.length === 0) lines.push(this.#palette.muted(`No ${(activeTab?.title ?? "visible").toLowerCase()} tickets.`));
+    if (tickets.length === 0)
+      lines.push(
+        this.#palette.muted(`No ${(activeTab?.title ?? "visible").toLowerCase()} tickets.`),
+      );
     return panel(
       configured?.title ?? "Tickets",
       lines,
@@ -625,34 +791,73 @@ export class ControlCenterComponent implements Component, Focusable {
     const configured = cockpitView(this.#snapshot.view.cockpit, ["nested_detail"]);
     const title = detailsTitle(this.#snapshot, this.#palette, configured?.title);
     const run = this.#snapshot.view.selectedRun;
-    const lines = run === undefined
-      ? [this.#palette.muted("Select or start a run to inspect its work.")]
-      : this.#detailsLines(run, innerWidth);
-    return panel(
+    const lines =
+      run === undefined
+        ? [this.#palette.muted("Select or start a run to inspect its work.")]
+        : this.#detailsLines(run, innerWidth);
+    const tab = this.#snapshot.selection.detailsTab;
+    const footer =
+      tab === "chat"
+        ? completeFooter(
+            [
+              "[Ctrl-O] tool results · [/] history · [s] compose · [Esc] back",
+              "[Ctrl-O] tools · [/] history · [Esc] back",
+              "[Esc] back",
+            ],
+            innerWidth,
+          )
+        : tab === "plan"
+          ? completeFooter(["[←→] tabs"], innerWidth)
+          : completeFooter(
+              [
+                "[Ctrl-O] objective · [←→] tabs · [Enter] stage action",
+                "[Ctrl-O] objective · [←→] tabs",
+                "[Ctrl-O] objective",
+              ],
+              innerWidth,
+            );
+    // The open chat is bottom-anchored: scroll.details counts up from the newest line.
+    const capacity = Math.max(1, height - 3);
+    const scroll =
+      tab === "chat"
+        ? Math.max(0, lines.length - capacity - this.#snapshot.scroll.details)
+        : this.#snapshot.scroll.details;
+    return panelWithFooter(
       title,
       lines,
+      footer,
       width,
       height,
       this.#snapshot.focus === "details",
       this.#palette,
-      this.#snapshot.scroll.details,
+      scroll,
     );
   }
 
   #detailsLines(run: NonNullable<ControlCenterViewModel["selectedRun"]>, width: number): string[] {
     switch (this.#snapshot.selection.detailsTab) {
       case "overview": {
-        const objectiveFocused = this.#snapshot.focus === "details";
-        const renderedObjective = wrapTextWithAnsi(run.objective.text, width);
-        const objective = run.objective.expanded || objectiveFocused ? renderedObjective : renderedObjective.slice(0, 4);
-        const lines = [
-          sectionHeading("Objective", this.#palette),
-          ...objective.map((line) => this.#palette.text(line)),
-          this.#palette.dim(objectiveFocused ? "Focused Objective · scroll for full text" : run.objective.expanded ? "[Enter/o] collapse" : "[Enter/o] show full objective"),
-        ];
-        if (run.ticketDetails !== undefined) {
+        const lines: string[] = [];
+        if (run.blockedBanner !== undefined) {
           lines.push(
-            "",
+            this.#palette.bold(this.#palette.error("Run blocked")),
+            ...wrapStyled(run.blockedBanner.reason, width, this.#palette.error),
+          );
+          for (const action of run.blockedBanner.actions) {
+            lines.push(
+              ...wrapStyled(
+                `• ${action.title} — ${action.reason}`,
+                width,
+                action.available ? this.#palette.accent : this.#palette.muted,
+              ),
+            );
+          }
+          lines.push(this.#palette.dim("[a] all actions"), "");
+        }
+        if (run.ticketDetails !== undefined) {
+          // A committed ticket owns the overview: its title renders once as the heading and
+          // the run-level sections stay out of the way (Enter on the run row restores them).
+          lines.push(
             sectionHeading(run.ticketDetails.title, this.#palette),
             statusText(run.ticketDetails.status, this.#palette),
             ...wrapStyled(run.ticketDetails.summary, width, this.#palette.text),
@@ -663,28 +868,86 @@ export class ControlCenterComponent implements Component, Focusable {
           lines.push("", sectionHeading("Steps", this.#palette));
           for (const step of run.ticketDetails.steps) {
             const complete = step.status === "Completed";
-            const marker = complete ? this.#palette.success("●")
-              : step.status === "Running" ? this.#palette.accent("⚙")
-                : step.status === "Failed" ? this.#palette.error("●")
+            const marker = complete
+              ? this.#palette.success("●")
+              : step.status === "Running"
+                ? this.#palette.accent("⚙")
+                : step.status === "Failed"
+                  ? this.#palette.error("●")
                   : this.#palette.muted("○");
             const state = complete ? "" : ` · ${step.status}`;
             lines.push(`${marker} ${step.title} · ${this.#palette.muted(step.persona)}${state}`);
             if (complete) {
-              lines.push(`  ${step.summary === undefined ? this.#palette.muted("No outcome summary recorded") : this.#palette.success(step.summary)}`);
+              lines.push(
+                `  ${step.summary === undefined ? this.#palette.muted("No outcome summary recorded") : this.#palette.success(step.summary)}`,
+              );
             }
           }
+          if (
+            run.ticketDetails.interactsWith.length > 0 ||
+            run.ticketDetails.unresolvedNodeCount > 0
+          ) {
+            const outside =
+              run.ticketDetails.unresolvedNodeCount > 0
+                ? `${run.ticketDetails.interactsWith.length > 0 ? " · " : ""}${run.ticketDetails.unresolvedNodeCount} more outside this view`
+                : "";
+            lines.push(
+              "",
+              ...wrapStyled(
+                `Interacts with: ${run.ticketDetails.interactsWith.join(" · ")}${outside}`,
+                width,
+                this.#palette.text,
+              ),
+            );
+          }
+          if (run.ticketDetails.mustSatisfy.length > 0) {
+            lines.push(
+              ...wrapStyled(
+                `Must satisfy: ${run.ticketDetails.mustSatisfy.join(" · ")}`,
+                width,
+                this.#palette.text,
+              ),
+            );
+          }
+          if (run.ticketDetails.policy !== undefined) {
+            lines.push(
+              ...wrapStyled(`Policy: ${run.ticketDetails.policy}`, width, this.#palette.muted),
+            );
+          }
+          return lines;
         }
+        const renderedObjective = wrapTextWithAnsi(run.objective.text, width);
+        const objective = run.objective.expanded
+          ? renderedObjective
+          : renderedObjective.slice(0, 4);
+        lines.push(
+          sectionHeading("Objective", this.#palette),
+          ...objective.map((line) => this.#palette.text(line)),
+          this.#palette.dim(
+            run.objective.expanded ? "[Ctrl-O] collapse objective" : "[Ctrl-O] full objective",
+          ),
+        );
         for (const section of run.overviewSections) {
           lines.push("", sectionHeading(section.title, this.#palette));
           for (const [index, value] of section.lines.entries()) {
-            const style = section.tone === "error" ? this.#palette.error
-              : section.tone === "success" ? this.#palette.success
-                : this.#palette.text;
-            lines.push(...wrapStyled(value, width, index === 0 && section.tone !== undefined
-              ? (line) => this.#palette.bold(style(line))
-              : style));
+            const style =
+              section.tone === "error"
+                ? this.#palette.error
+                : section.tone === "success"
+                  ? this.#palette.success
+                  : this.#palette.text;
+            lines.push(
+              ...wrapStyled(
+                value,
+                width,
+                index === 0 && section.tone !== undefined
+                  ? (line) => this.#palette.bold(style(line))
+                  : style,
+              ),
+            );
           }
         }
+        lines.push("", sectionHeading("Stages", this.#palette), ...this.#stageLines(run, width));
         return lines;
       }
       case "plan": {
@@ -703,75 +966,75 @@ export class ControlCenterComponent implements Component, Focusable {
         }
         return lines;
       }
-      case "stages":
-        return run.stages.flatMap((stage, index) => {
-          const marker = stage.state === "done" ? this.#palette.success("●")
-            : stage.state === "active" && run.spendingTokens ? this.#palette.accent(this.#animatedCog())
-              : stage.state === "active" ? this.#palette.accent("◐")
-              : this.#palette.muted("○");
-          const available = stage.actions.filter((action) => action.available);
-          const disabled = stage.actions.filter((action) => !action.available);
-          return [
-            ...wrapStyled(`${marker} ${index + 1}. ${stage.title}`, width, (value) => value),
-            ...(stage.state === "active" ? [this.#palette.muted(
-              `   ${stage.category ?? "Current stage"} · ${stage.interaction?.mode ?? "automatic"}`,
-            )] : []),
-            ...(stage.summary === undefined ? [] : wrapStyled(stage.summary, Math.max(1, width - 3), (value) => `   ${this.#palette.warning(value)}`)),
-            ...available.flatMap((action) => wrapStyled(
-              `   [Enter] ${action.title} · ${action.reason}`,
-              width,
-              this.#palette.accent,
-            )),
-            ...(stage.state !== "active" || disabled.length === 0 ? [] : disabled.flatMap((action) => wrapStyled(
-              `   ${action.title} unavailable · ${action.reason}`,
-              width,
-              this.#palette.muted,
-            ))),
-          ];
-        });
       case "chat": {
-        const agent = run.agents.find((candidate) => candidate.id === this.#snapshot.selection.attemptId);
-        if (agent === undefined) return [this.#palette.muted("Select an agent to inspect its session.")];
-        const lines = [
-          sectionHeading(agent.label, this.#palette),
-          `${agent.active ? this.#palette.accent("⚙ active") : this.#palette.muted(agent.status)} · ${modelStyle(agent.model, this.#palette)} · ${thinkingStyle(agent.thinking, this.#palette)}`,
-          "",
-          this.#palette.muted(agent.work),
-          ...(agent.lineage === undefined ? [] : [
-            `${this.#palette.muted("Lineage")} ${agent.lineage.reason} · ${agent.lineage.branch}${agent.lineage.activeLeaf ? ` · ${this.#palette.success("active leaf")}` : ""}`,
-            ...(agent.lineage.parent === undefined ? [] : [`${this.#palette.muted("Parent")} ${agent.lineage.parent}`]),
-            ...(agent.lineage.children.length === 0 ? [] : [
-              `${this.#palette.muted("Children")} ${agent.lineage.children.join(" · ")}`,
-            ]),
-          ]),
+        const agent = run.agents.find(
+          (candidate) => candidate.id === this.#snapshot.selection.attemptId,
+        );
+        if (agent === undefined)
+          return [this.#palette.muted("Select an agent to inspect its session.")];
+        const lines: string[] = [
           ...(agent.active ? [] : [this.#palette.muted("Historical session · read-only")]),
         ];
         const chat = this.#snapshot.chat;
-        if (chat === undefined || chat.status === "loading") lines.push("", this.#palette.accent("⚙ Loading Pi session…"));
-        else if (chat.status === "unavailable") lines.push("", this.#palette.muted("This authority does not expose persisted Pi transcripts."));
-        else if (chat.status === "error") lines.push("", this.#palette.error(chat.error ?? "Pi transcript could not be loaded."));
-        else {
-          const historyEnd = chat.history.startBlock + chat.history.visibleBlocks;
-          const historyRange = chat.history.totalBlocks === 0
-            ? "History is empty"
-            : `History ${chat.history.startBlock + 1}–${historyEnd} of ${chat.history.totalBlocks}`;
+        if (chat === undefined || chat.status === "loading")
+          lines.push("", this.#palette.accent("⚙ Loading Pi session…"));
+        else if (chat.status === "unavailable")
           lines.push(
             "",
-            this.#palette.muted(historyRange),
-            ...wrapStyled(
-              `${chat.history.hasOlder ? this.#palette.accent("[ older") : this.#palette.dim("[ oldest")} · ${chat.history.hasNewer ? this.#palette.accent("] newer") : this.#palette.dim("] newest")} · PgUp/PgDn scroll · r latest`,
-              width,
-              (line) => line,
-            ),
+            this.#palette.muted("This authority does not expose persisted Pi transcripts."),
           );
-          for (const block of chat.blocks) {
-            const chunk = block.chunk === undefined
-              ? ""
-              : ` · part ${block.chunk.index}/${block.chunk.total}`;
-            lines.push("", transcriptHeading(block.kind, `${block.branch ? "↳ " : ""}${block.title}${chunk}`, this.#palette));
-            lines.push(...renderKoniMarkdown(block.markdown, width, this.#palette));
+        else if (chat.status === "error")
+          lines.push("", this.#palette.error(chat.error ?? "Pi transcript could not be loaded."));
+        else {
+          // Model/reasoning changes already live in the panel title; session bookkeeping
+          // notices are metadata, not conversation.
+          const visible = chat.blocks.filter(
+            (block) =>
+              !(block.kind === "notice" && HEADER_NOTICE_TITLES.has(block.title)) &&
+              (chat.toolsVisible || (block.kind !== "tool_call" && block.kind !== "tool_result")),
+          );
+          const hiddenTools = chat.toolsVisible
+            ? 0
+            : chat.blocks.filter(
+                (block) => block.kind === "tool_call" || block.kind === "tool_result",
+              ).length;
+          if (chat.history.hasOlder) {
+            lines.push(
+              "",
+              this.#palette.dim("Older history available · [ loads the previous window"),
+            );
           }
-          for (const diagnostic of chat.diagnostics) lines.push("", this.#palette.warning(diagnostic));
+          if (hiddenTools > 0) {
+            lines.push(
+              "",
+              this.#palette.dim(
+                `${hiddenTools} tool event${hiddenTools === 1 ? "" : "s"} hidden · [Ctrl-O] show`,
+              ),
+            );
+          }
+          for (const block of visible) {
+            const chunk =
+              block.chunk === undefined ? "" : ` · part ${block.chunk.index}/${block.chunk.total}`;
+            lines.push(
+              "",
+              ...surfaceBlock(
+                [
+                  transcriptHeading(
+                    block.kind,
+                    `${block.branch ? "↳ " : ""}${block.title}${chunk}`,
+                    this.#palette,
+                  ),
+                  ...renderKoniMarkdown(block.markdown, Math.max(1, width - 2), this.#palette).map(
+                    (line) => ` ${line}`,
+                  ),
+                ],
+                width,
+                this.#palette,
+              ),
+            );
+          }
+          for (const diagnostic of chat.diagnostics)
+            lines.push("", this.#palette.warning(diagnostic));
         }
         if (chat !== undefined && agent.active) {
           lines.push(
@@ -779,20 +1042,82 @@ export class ControlCenterComponent implements Component, Focusable {
             sectionHeading("Message", this.#palette),
             `${selectorBadge(chat.draft.mode === "steer" ? "Steer now" : "Follow up", chat.draft.editing, this.#palette)} ${this.#palette.muted("[Tab] mode")}`,
           );
-          const value = chat.draft.text.length === 0 ? this.#palette.dim("Write steering or a follow-up…") : chat.draft.text;
-          lines.push(...wrapStyled(`${chat.draft.editing ? "▌ " : "  "}${value}`, width, (line) => line));
-          lines.push(this.#palette.dim(chat.draft.editing ? "[Ctrl-Enter] send · [Alt/Shift-Enter] newline · [Esc] finish" : "[Enter/s] compose"));
+          const value =
+            chat.draft.text.length === 0
+              ? this.#palette.dim("Write steering or a follow-up…")
+              : chat.draft.text;
+          lines.push(
+            ...wrapStyled(`${chat.draft.editing ? "▌ " : "  "}${value}`, width, (line) => line),
+          );
+          lines.push(
+            this.#palette.dim(
+              chat.draft.editing
+                ? "[Ctrl-Enter] send · [Alt/Shift-Enter] newline · [Esc] finish"
+                : "[Enter/s] compose",
+            ),
+          );
         }
         return lines;
       }
     }
   }
 
+  #stageLines(run: NonNullable<ControlCenterViewModel["selectedRun"]>, width: number): string[] {
+    return run.stages.flatMap((stage, index) => {
+      const marker =
+        stage.state === "done"
+          ? this.#palette.success("●")
+          : stage.state === "active" && run.spendingTokens
+            ? this.#palette.accent(this.#animatedCog())
+            : stage.state === "active"
+              ? this.#palette.accent("◐")
+              : this.#palette.muted("○");
+      const available = stage.actions.filter((action) => action.available);
+      const disabled = stage.actions.filter((action) => !action.available);
+      return [
+        ...wrapStyled(`${marker} ${index + 1}. ${stage.title}`, width, (value) => value),
+        ...(stage.state === "active"
+          ? [
+              this.#palette.muted(
+                `   ${stage.category ?? "Current stage"} · ${stage.interaction?.mode ?? "automatic"}`,
+              ),
+            ]
+          : []),
+        ...(stage.summary === undefined
+          ? []
+          : wrapStyled(
+              stage.summary,
+              Math.max(1, width - 3),
+              (value) => `   ${this.#palette.warning(value)}`,
+            )),
+        ...available.flatMap((action) =>
+          wrapStyled(`   [Enter] ${action.title} · ${action.reason}`, width, this.#palette.accent),
+        ),
+        ...(stage.state !== "active" || disabled.length === 0
+          ? []
+          : disabled.flatMap((action) =>
+              wrapStyled(
+                `   ${action.title} unavailable · ${action.reason}`,
+                width,
+                this.#palette.muted,
+              ),
+            )),
+      ];
+    });
+  }
+
   #questionsPanel(width: number, height: number): string[] {
     const questions = this.#snapshot.view.selectedRun?.questions ?? [];
     const question = questions[this.#snapshot.questionIndex];
     if (question === undefined) {
-      return panel("Questions", [this.#palette.muted("No questions pending.")], width, height, this.#snapshot.focus === "questions", this.#palette);
+      return panel(
+        "Questions",
+        [this.#palette.muted("No questions pending.")],
+        width,
+        height,
+        this.#snapshot.focus === "questions",
+        this.#palette,
+      );
     }
     const inner = Math.max(1, width - 2);
     const draft = this.#snapshot.questionDraft;
@@ -809,31 +1134,44 @@ export class ControlCenterComponent implements Component, Focusable {
     for (const option of question.options) {
       const selected = draft?.selectedOptionId === option.id;
       if (selected) selectedLine = lines.length;
-      const recommended = question.recommendationOptionId === option.id ? ` ${this.#palette.warning("★")}` : "";
+      const recommended =
+        question.recommendationOptionId === option.id ? ` ${this.#palette.warning("★")}` : "";
       const row = `${selected ? "●" : "○"} ${option.label}${recommended}`;
       lines.push(selected ? this.#palette.selected(row) : row);
-      lines.push(...wrapStyled(option.description, Math.max(1, inner - 3), (value) => `   ${this.#palette.muted(value)}`));
+      lines.push(
+        ...wrapStyled(
+          option.description,
+          Math.max(1, inner - 3),
+          (value) => `   ${this.#palette.muted(value)}`,
+        ),
+      );
     }
     const noneSelected = draft?.selectedOptionId === undefined;
     if (noneSelected) selectedLine = lines.length;
-    lines.push(noneSelected ? this.#palette.selected("● None of the above") : "○ None of the above");
+    lines.push(
+      noneSelected ? this.#palette.selected("● None of the above") : "○ None of the above",
+    );
     if (question.allowsNotes) {
       lines.push("", centeredDivider("Notes (optional)", inner, this.#palette));
       const notes = draft?.notes ?? "";
       const noteText = notes.length === 0 ? this.#palette.dim("Add context to any answer…") : notes;
-      lines.push(...wrapStyled(
-        `${draft?.editingNotes === true ? "▌ " : "  "}${noteText}`,
-        inner,
-        (value) => draft?.editingNotes === true ? this.#palette.selected(value) : value,
-      ));
+      lines.push(
+        ...wrapStyled(`${draft?.editingNotes === true ? "▌ " : "  "}${noteText}`, inner, (value) =>
+          draft?.editingNotes === true ? this.#palette.selected(value) : value,
+        ),
+      );
     }
-    if (question.answerSaved) lines.push("", this.#palette.success("Saved · submit again to revise"));
+    if (question.answerSaved)
+      lines.push("", this.#palette.success("Saved · submit again to revise"));
     return panelWithFooter(
       "Questions",
       lines,
-      completeFooter(question.allowsNotes
-        ? ["←→/[] · ↑↓/jk · Enter · [n] notes", "←→/[] ↑↓/jk Enter", "Enter"]
-        : ["←→/[] · ↑↓/jk · Enter", "←→/[] ↑↓/jk Enter", "Enter"], Math.max(1, width - 2)),
+      completeFooter(
+        question.allowsNotes
+          ? ["←→/[] · ↑↓/jk · Enter · [n] notes", "←→/[] ↑↓/jk Enter", "Enter"]
+          : ["←→/[] · ↑↓/jk · Enter", "←→/[] ↑↓/jk Enter", "Enter"],
+        Math.max(1, width - 2),
+      ),
       width,
       height,
       this.#snapshot.focus === "questions",
@@ -847,53 +1185,99 @@ export class ControlCenterComponent implements Component, Focusable {
     const agents = this.#snapshot.view.selectedRun?.agents ?? [];
     const lines: string[] = [];
     let selectedLine = 0;
+    const cursorId = this.#snapshot.cursor.attemptId ?? this.#snapshot.selection.attemptId;
     for (const agent of agents) {
-      const selected = agent.id === this.#snapshot.selection.attemptId;
-      if (selected) selectedLine = lines.length;
+      const onCursor = agent.id === cursorId;
+      const openChat = agent.id === this.#snapshot.selection.attemptId;
+      if (onCursor) selectedLine = lines.length;
       const marker = agent.active ? this.#palette.accent("⚙") : "●";
-      const row = `${selected ? "›" : " "} ${marker} ${agent.label} · ${this.#palette.muted(agent.work)}`;
-      lines.push(selected ? this.#palette.selected(row) : agent.active ? row : this.#palette.muted(row));
-      const detail = `    ${modelStyle(agent.model, this.#palette)} · ${thinkingStyle(agent.thinking, this.#palette)} · ${agent.newTokens} new${agent.lineage === undefined ? "" : ` · ${agent.lineage.reason}${agent.lineage.activeLeaf ? " · leaf" : ""}`}`;
+      // Lineage renders as nesting: children indent under the attempt they branched from.
+      const indent = `${"  ".repeat(agent.depth)}${agent.depth > 0 ? "└ " : ""}`;
+      const caret = onCursor ? "›" : openChat ? this.#palette.accent("▸") : " ";
+      const row = `${caret} ${indent}${marker} ${agent.label} · ${this.#palette.muted(agent.work)}`;
+      lines.push(
+        onCursor ? this.#palette.selected(row) : agent.active ? row : this.#palette.muted(row),
+      );
+      const leaf = agent.lineage?.activeLeaf === true ? ` · ${this.#palette.success("leaf")}` : "";
+      const detail = `    ${indent}${modelStyle(agent.model, this.#palette)} · ${thinkingStyle(agent.thinking, this.#palette)} · ${agent.newTokens} new${leaf}`;
       lines.push(agent.active ? detail : this.#palette.dim(detail));
     }
     if (lines.length === 0) lines.push(this.#palette.muted("No agent attempts yet."));
-    return panel(configured?.title ?? "Agents", lines, width, height, this.#snapshot.focus === "agents", this.#palette, visibleOffset(this.#snapshot.scroll.agents, selectedLine, height - 2));
+    return panel(
+      configured?.title ?? "Agents",
+      lines,
+      width,
+      height,
+      this.#snapshot.focus === "agents",
+      this.#palette,
+      visibleOffset(this.#snapshot.scroll.agents, selectedLine, height - 2),
+    );
   }
 
   #activityPanel(width: number, height: number): string[] {
     const run = this.#snapshot.view.selectedRun;
     const configured = cockpitView(this.#snapshot.view.cockpit, ["summary"]);
-    const title = recentActivityTitle(run?.activeDuration, Math.max(1, width - 2), configured?.title);
-    const eventLimit = cockpitIntegerOption(configured, "event_limit");
-    const activity = eventLimit === undefined ? run?.activity : run?.activity.slice(0, eventLimit);
-    const lines = activity?.flatMap((activity) => wrapStyled(
-      `${this.#palette.muted(activity.timestamp)}  ${activityStyle(activity.kind, activity.message, this.#palette)}`,
+    const title = recentActivityTitle(
+      run?.activeDuration,
       Math.max(1, width - 2),
-      (value) => value,
-    )) ?? [];
+      configured?.title,
+    );
+    // Every retained event renders; the panel scroll is the operator's window into history.
+    const lines =
+      run?.activity.flatMap((activity) =>
+        wrapStyled(
+          `${this.#palette.muted(activity.timestamp)}  ${activityStyle(activity.kind, activity.message, this.#palette, activity.tone)}`,
+          Math.max(1, width - 2),
+          (value) => value,
+        ),
+      ) ?? [];
     if (lines.length === 0) lines.push(this.#palette.muted("No activity recorded."));
-    return panel(title, lines, width, height, this.#snapshot.focus === "activity", this.#palette, this.#snapshot.scroll.activity);
+    return panel(
+      title,
+      lines,
+      width,
+      height,
+      this.#snapshot.focus === "activity",
+      this.#palette,
+      this.#snapshot.scroll.activity,
+    );
   }
 
   #graphPanel(width: number, height: number): string[] {
     const graph = this.#snapshot.view.selectedRun?.graph;
     const configured = cockpitView(this.#snapshot.view.cockpit, ["typed_tree", "graph"]);
     const graphOptions = configuredGraphOptions(configured);
-    const lines = graph === undefined || graph.nodes.length === 0
-      ? [this.#palette.muted("No graph nodes yet.")]
-      : renderGraphLines(graph.nodes, graph.edges, Math.max(1, width - 2), this.#palette, graphOptions);
-    const scope = configured?.source.kind === "graph" && configured.source.scope === "main_checkout"
-      ? "main checkout" : graph?.scope;
+    const cursorIndex = Math.min(
+      Math.max(0, (graph?.nodes.length ?? 1) - 1),
+      Math.max(0, this.#snapshot.cursor.graphIndex),
+    );
+    const view =
+      graph === undefined || graph.nodes.length === 0
+        ? undefined
+        : renderGraphView(graph.nodes, graph.edges, Math.max(1, width - 2), this.#palette, {
+            ...graphOptions,
+            // The node cursor (full title + highlight) appears only while the panel is focused.
+            ...(this.#snapshot.focus === "graph" ? { focusedIndex: cursorIndex } : {}),
+          });
+    const lines = view?.lines ?? [this.#palette.muted("No graph nodes yet.")];
+    const scope =
+      configured?.source.kind === "graph" && configured.source.scope === "main_checkout"
+        ? "main checkout"
+        : graph?.scope;
     return panel(
       configured === undefined
-        ? graph === undefined ? "Graph" : `Graph · ${graph.scope}`
-        : scope === undefined ? configured.title : `${configured.title} · ${scope}`,
+        ? graph === undefined
+          ? "Graph"
+          : `Graph · ${graph.scope}`
+        : scope === undefined
+          ? configured.title
+          : `${configured.title} · ${scope}`,
       lines,
       width,
       height,
       this.#snapshot.focus === "graph",
       this.#palette,
-      this.#snapshot.scroll.graph,
+      visibleOffset(this.#snapshot.scroll.graph, view?.nodeLines[cursorIndex] ?? 0, height - 2),
     );
   }
 
@@ -909,11 +1293,14 @@ export class ControlCenterComponent implements Component, Focusable {
     if (modal.kind === "answer_question") return this.#renderAnswerQuestion(modal, width, height);
     if (modal.kind === "action_palette") return this.#renderActionPalette(modal, width, height);
     if (modal.kind === "action_form") return this.#renderActionForm(modal, width, height);
-    if (modal.kind === "config_document_create") return this.#renderConfigDocumentCreate(modal, width, height);
-    if (modal.kind === "config_document_rename") return this.#renderConfigDocumentRename(modal, width, height);
-    if (modal.kind === "config_document_delete") return this.#renderConfigDocumentDelete(modal, width, height);
-    if (modal.kind === "config_run_type_wizard") return this.#renderConfigRunTypeWizard(modal, width, height);
-    if (modal.kind === "config_legacy_migration") return this.#renderConfigLegacyMigration(modal, width, height);
+    if (modal.kind === "config_document_create")
+      return this.#renderConfigDocumentCreate(modal, width, height);
+    if (modal.kind === "config_document_rename")
+      return this.#renderConfigDocumentRename(modal, width, height);
+    if (modal.kind === "config_document_delete")
+      return this.#renderConfigDocumentDelete(modal, width, height);
+    if (modal.kind === "config_run_type_wizard")
+      return this.#renderConfigRunTypeWizard(modal, width, height);
     if (modal.kind === "edit_scalar") return this.#renderEditScalar(modal, width, height);
     if (modal.kind === "configure") return this.#renderConfigure(modal, width, height);
     if (modal.kind === "configure_documents") {
@@ -926,7 +1313,8 @@ export class ControlCenterComponent implements Component, Focusable {
         this.#palette,
       );
     }
-    if (modal.kind === "profile_conflicts") return this.#renderProfileConflicts(modal, width, height);
+    if (modal.kind === "profile_conflicts")
+      return this.#renderProfileConflicts(modal, width, height);
     const help = HELP[modal.topic];
     return panel(
       `Help · ${help.title}`,
@@ -938,7 +1326,9 @@ export class ControlCenterComponent implements Component, Focusable {
         ...wrapStyled(helpWorkflow(modal.topic), width - 2, this.#palette.muted),
         "",
         sectionHeading("Available here", this.#palette),
-        ...help.actions.map(([keys, meaning]) => `${this.#palette.accent(keys.padEnd(16))}${meaning}`),
+        ...help.actions.map(
+          ([keys, meaning]) => `${this.#palette.accent(keys.padEnd(16))}${meaning}`,
+        ),
         "",
         this.#palette.muted("[h/F1/Esc/Enter/q] close"),
       ],
@@ -959,36 +1349,58 @@ export class ControlCenterComponent implements Component, Focusable {
       `${this.#palette.muted("Owned resources")} ${modal.ownedWorktrees} worktrees · ${modal.ownedBranches} branches`,
       `${this.#palette.muted("Live agents")} ${modal.liveAgents}`,
       "",
-      this.#palette.error("Deletion first tombstones this run and stops every associated Pi session."),
-      this.#palette.muted("Koni then retires its owned Git resources. The target branch is never deleted."),
+      this.#palette.error(
+        "Deletion first tombstones this run and stops every associated Pi session.",
+      ),
+      this.#palette.muted(
+        "Koni then retires its owned Git resources. The target branch is never deleted.",
+      ),
     ];
     if (modal.blockers.length > 0) {
       lines.push("", sectionHeading("Current blockers", this.#palette));
-      lines.push(...modal.blockers.flatMap((blocker) => wrapStyled(`• ${blocker}`, inner, this.#palette.warning)));
+      lines.push(
+        ...modal.blockers.flatMap((blocker) =>
+          wrapStyled(`• ${blocker}`, inner, this.#palette.warning),
+        ),
+      );
     }
     if (modal.dirtyWorktreeWarnings.length > 0) {
       lines.push("", sectionHeading("Preserved work", this.#palette));
-      lines.push(...modal.dirtyWorktreeWarnings.flatMap((warning) =>
-        wrapStyled(`• ${warning}`, inner, this.#palette.warning)));
+      lines.push(
+        ...modal.dirtyWorktreeWarnings.flatMap((warning) =>
+          wrapStyled(`• ${warning}`, inner, this.#palette.warning),
+        ),
+      );
     }
     lines.push(
       "",
-      centerButtons([
-        { label: "Cancel", selected: modal.selected === "cancel", tone: "normal" },
-        {
-          label: "Preserve branches",
-          selected: modal.selected === "preserve_branches",
-          tone: modal.canPreserveBranches ? "success" : "disabled",
-        },
-        {
-          label: "Delete owned branches",
-          selected: modal.selected === "delete_owned_branches",
-          tone: modal.canDeleteOwnedBranches ? "danger" : "disabled",
-        },
-      ], this.#palette),
+      centerButtons(
+        [
+          { label: "Cancel", selected: modal.selected === "cancel", tone: "normal" },
+          {
+            label: "Preserve branches",
+            selected: modal.selected === "preserve_branches",
+            tone: modal.canPreserveBranches ? "success" : "disabled",
+          },
+          {
+            label: "Delete owned branches",
+            selected: modal.selected === "delete_owned_branches",
+            tone: modal.canDeleteOwnedBranches ? "danger" : "disabled",
+          },
+        ],
+        this.#palette,
+      ),
       this.#palette.dim("←→/[] choose · Enter confirm · Esc cancel · h help"),
     );
-    return panel("Delete run", lines, width, height, true, this.#palette, visibleOffset(0, lines.length - 2, Math.max(1, height - 2)));
+    return panel(
+      "Delete run",
+      lines,
+      width,
+      height,
+      true,
+      this.#palette,
+      visibleOffset(0, lines.length - 2, Math.max(1, height - 2)),
+    );
   }
 
   #renderMergeRun(modal: MergeRunModalState, width: number, height: number): string[] {
@@ -1002,41 +1414,71 @@ export class ControlCenterComponent implements Component, Focusable {
     ];
     if (modal.blockers.length > 0) {
       lines.push("", sectionHeading("Cannot promote yet", this.#palette));
-      lines.push(...modal.blockers.flatMap((blocker) => wrapStyled(`• ${blocker}`, inner, this.#palette.warning)));
+      lines.push(
+        ...modal.blockers.flatMap((blocker) =>
+          wrapStyled(`• ${blocker}`, inner, this.#palette.warning),
+        ),
+      );
     } else {
       lines.push(
         "",
         this.#palette.success("Compiler preparation is complete."),
-        this.#palette.muted("Authorization re-checks the target before publishing the prepared result."),
+        this.#palette.muted(
+          "Authorization re-checks the target before publishing the prepared result.",
+        ),
       );
     }
     if (modal.targetAdvanced || modal.resyncState !== "current") {
       lines.push(
         "",
-        this.#palette.warning(modal.resyncState === "required"
-          ? "The target advanced; Koni must resynchronize and verify again before promotion."
-          : "The current target state is unavailable for authorization."),
+        this.#palette.warning(
+          modal.resyncState === "required"
+            ? "The target advanced; Koni must resynchronize and verify again before promotion."
+            : "The current target state is unavailable for authorization.",
+        ),
       );
     }
     lines.push(
       "",
-      centerButtons([
-        { label: "Cancel", selected: modal.selected === "cancel", tone: "normal" },
-        { label: "Authorize merge", selected: modal.selected === "authorize", tone: modal.canAuthorize ? "success" : "disabled" },
-      ], this.#palette),
+      centerButtons(
+        [
+          { label: "Cancel", selected: modal.selected === "cancel", tone: "normal" },
+          {
+            label: "Authorize merge",
+            selected: modal.selected === "authorize",
+            tone: modal.canAuthorize ? "success" : "disabled",
+          },
+        ],
+        this.#palette,
+      ),
       this.#palette.dim("←→/[] choose · Enter authorize · Esc cancel · h help"),
     );
-    return panel("Merge run", lines, width, height, true, this.#palette, visibleOffset(0, lines.length - 2, Math.max(1, height - 2)));
+    return panel(
+      "Merge run",
+      lines,
+      width,
+      height,
+      true,
+      this.#palette,
+      visibleOffset(0, lines.length - 2, Math.max(1, height - 2)),
+    );
   }
 
   #renderAnswerQuestion(modal: AnswerQuestionModalState, width: number, height: number): string[] {
     const questions = this.#snapshot.view.selectedRun?.questions ?? [];
-    const index = Math.max(0, questions.findIndex((question) => question.id === modal.questionId));
+    const index = Math.max(
+      0,
+      questions.findIndex((question) => question.id === modal.questionId),
+    );
     const question = questions[index];
     if (question === undefined) {
       return panel(
         "Answer question",
-        [this.#palette.muted("This question is no longer pending."), "", this.#palette.dim("[Esc] close")],
+        [
+          this.#palette.muted("This question is no longer pending."),
+          "",
+          this.#palette.dim("[Esc] close"),
+        ],
         width,
         Math.min(height, 7),
         true,
@@ -1054,14 +1496,19 @@ export class ControlCenterComponent implements Component, Focusable {
     for (const option of question.options) {
       const selected = draft?.selectedOptionId === option.id;
       if (selected) selectedChoiceLine = lines.length;
-      const recommended = question.recommendationOptionId === option.id ? ` ${this.#palette.warning("★ Recommended")}` : "";
+      const recommended =
+        question.recommendationOptionId === option.id
+          ? ` ${this.#palette.warning("★ Recommended")}`
+          : "";
       const row = `${selected ? "●" : "○"} ${option.label}${recommended}`;
       lines.push(modal.focus === "choices" && selected ? this.#palette.selected(row) : row);
-      lines.push(...wrapStyled(
-        option.description,
-        Math.max(1, inner - 4),
-        (value) => `    ${this.#palette.muted(value)}`,
-      ));
+      lines.push(
+        ...wrapStyled(
+          option.description,
+          Math.max(1, inner - 4),
+          (value) => `    ${this.#palette.muted(value)}`,
+        ),
+      );
     }
     const none = draft?.selectedOptionId === undefined;
     if (none) selectedChoiceLine = lines.length;
@@ -1071,18 +1518,31 @@ export class ControlCenterComponent implements Component, Focusable {
     lines.push(centeredDivider("Notes (optional)", inner, this.#palette));
     const notes = draft?.notes ?? "";
     const noteText = notes.length === 0 ? this.#palette.dim("Add context to any answer…") : notes;
-    lines.push(...wrapStyled(
-      `${modal.focus === "notes" ? "▌ " : "  "}${noteText}`,
-      inner,
-      (value) => modal.focus === "notes" ? this.#palette.selected(value) : value,
-    ));
+    lines.push(
+      ...wrapStyled(`${modal.focus === "notes" ? "▌ " : "  "}${noteText}`, inner, (value) =>
+        modal.focus === "notes" ? this.#palette.selected(value) : value,
+      ),
+    );
     const submitLine = lines.length + 1;
     const submitLabel = question.resolvesBatchOnSubmit
-      ? (question.batchQuestionCount ?? 1) === 1 ? "Submit answer" : "Submit all answers"
-      : question.answerSaved ? "Revise answer" : "Save & next";
+      ? (question.batchQuestionCount ?? 1) === 1
+        ? "Submit answer"
+        : "Submit all answers"
+      : question.answerSaved
+        ? "Revise answer"
+        : "Save & next";
     lines.push("", centeredButton(submitLabel, modal.focus === "submit", this.#palette));
-    lines.push(this.#palette.dim("←→/[] question · ↑↓/jk option · Tab focus · Enter select/newline · Ctrl-Enter submit · Esc close"));
-    const focusLine = modal.focus === "choices" ? selectedChoiceLine : modal.focus === "notes" ? notesLine : submitLine;
+    lines.push(
+      this.#palette.dim(
+        "←→/[] question · ↑↓/jk option · Tab focus · Enter select/newline · Ctrl-Enter submit · Esc close",
+      ),
+    );
+    const focusLine =
+      modal.focus === "choices"
+        ? selectedChoiceLine
+        : modal.focus === "notes"
+          ? notesLine
+          : submitLine;
     return panel(
       "Answer question",
       lines,
@@ -1104,17 +1564,23 @@ export class ControlCenterComponent implements Component, Focusable {
       const available = action.availability.state === "available";
       const marker = available ? this.#palette.success("●") : this.#palette.muted("○");
       const title = `${selected ? "›" : " "} ${marker} ${action.title}`;
-      lines.push(selected ? this.#palette.selected(title) : available ? title : this.#palette.muted(title));
-      lines.push(...wrapStyled(
-        action.description,
-        Math.max(1, inner - 4),
-        (value) => `    ${available ? this.#palette.text(value) : this.#palette.muted(value)}`,
-      ));
-      lines.push(...wrapStyled(
-        action.availability.reason,
-        Math.max(1, inner - 4),
-        (value) => `    ${available ? this.#palette.dim(value) : this.#palette.warning(value)}`,
-      ));
+      lines.push(
+        selected ? this.#palette.selected(title) : available ? title : this.#palette.muted(title),
+      );
+      lines.push(
+        ...wrapStyled(
+          action.description,
+          Math.max(1, inner - 4),
+          (value) => `    ${available ? this.#palette.text(value) : this.#palette.muted(value)}`,
+        ),
+      );
+      lines.push(
+        ...wrapStyled(
+          action.availability.reason,
+          Math.max(1, inner - 4),
+          (value) => `    ${available ? this.#palette.dim(value) : this.#palette.warning(value)}`,
+        ),
+      );
       if (index < modal.actions.length - 1) lines.push("");
     });
     lines.push("", this.#palette.dim("↑↓/jk choose · Enter open/run · Esc close · h help"));
@@ -1141,17 +1607,32 @@ export class ControlCenterComponent implements Component, Focusable {
       if (field.visibility === "hidden") return;
       const selected = modal.focus === "fields" && modal.fieldIndex === index;
       if (selected) focusLine = lines.length;
-      const value = field.locked && field.displayValue !== undefined
-        ? field.displayValue
-        : actionValueLabel(modal.values[field.key]);
+      const value =
+        field.locked && field.displayValue !== undefined
+          ? field.displayValue
+          : actionValueLabel(modal.values[field.key]);
       const lock = field.locked ? ` ${this.#palette.muted("compiler bound")}` : "";
-      lines.push(`${selected ? this.#palette.accent("›") : " "} ${this.#palette.bold(field.label)}  ${inputBadge(value, selected, this.#palette)}${lock}`);
+      lines.push(
+        `${selected ? this.#palette.accent("›") : " "} ${this.#palette.bold(field.label)}  ${inputBadge(value, selected, this.#palette)}${lock}`,
+      );
       if (selected || field.locked) {
-        lines.push(...wrapStyled(field.description, Math.max(1, inner - 4), (copy) => `    ${this.#palette.muted(copy)}`));
+        lines.push(
+          ...wrapStyled(
+            field.description,
+            Math.max(1, inner - 4),
+            (copy) => `    ${this.#palette.muted(copy)}`,
+          ),
+        );
       }
       if (selected && modal.editing && !field.locked) {
         const editor = insertCaret(actionValueLabel(modal.values[field.key]), modal.cursor);
-        lines.push(...wrapStyled(editor, Math.max(1, inner - 4), (copy) => `    ${this.#palette.selected(copy)}`));
+        lines.push(
+          ...wrapStyled(
+            editor,
+            Math.max(1, inner - 4),
+            (copy) => `    ${this.#palette.selected(copy)}`,
+          ),
+        );
       }
     });
     if (modal.action.confirmation.required) {
@@ -1164,12 +1645,19 @@ export class ControlCenterComponent implements Component, Focusable {
         `${modal.confirmed ? this.#palette.success("●") : this.#palette.muted("○")} ${confirmation.confirmLabel}`,
       );
     }
-    if (modal.error !== undefined) lines.push("", ...wrapStyled(modal.error, inner, this.#palette.error));
+    if (modal.error !== undefined)
+      lines.push("", ...wrapStyled(modal.error, inner, this.#palette.error));
     if (modal.focus === "submit") focusLine = lines.length + 1;
     lines.push(
       "",
-      centeredButton(form?.submitLabel ?? modal.action.title, modal.focus === "submit", this.#palette),
-      this.#palette.dim("Tab/↑↓ fields · ←→ change · Enter edit/select · Ctrl-Enter apply · Esc close · h help"),
+      centeredButton(
+        form?.submitLabel ?? modal.action.title,
+        modal.focus === "submit",
+        this.#palette,
+      ),
+      this.#palette.dim(
+        "Tab/↑↓ fields · ←→ change · Enter edit/select · Ctrl-Enter apply · Esc close · h help",
+      ),
     );
     return panel(
       form?.title ?? modal.action.title,
@@ -1182,159 +1670,239 @@ export class ControlCenterComponent implements Component, Focusable {
     );
   }
 
-  #renderConfigDocumentCreate(modal: ConfigDocumentCreateModalState, width: number, height: number): string[] {
+  #renderConfigDocumentCreate(
+    modal: ConfigDocumentCreateModalState,
+    width: number,
+    height: number,
+  ): string[] {
     const inner = Math.max(1, width - 2);
     const choice = modal.choices[modal.choiceIndex];
-    const title = modal.focus === "title" ? insertCaret(modal.title, modal.cursor)
-      : modal.title.length === 0 ? "Name this resource…" : modal.title;
+    const title =
+      modal.focus === "title"
+        ? insertCaret(modal.title, modal.cursor)
+        : modal.title.length === 0
+          ? "Name this resource…"
+          : modal.title;
     const lines = [
       centeredDivider("Resource type", inner, this.#palette),
-      selectorWindow(modal.choices.map((item) => item.label), modal.choiceIndex, inner, this.#palette),
+      selectorWindow(
+        modal.choices.map((item) => item.label),
+        modal.choiceIndex,
+        inner,
+        this.#palette,
+      ),
       ...wrapStyled(choice?.description ?? "", inner, this.#palette.muted),
       "",
       centeredDivider("Title", inner, this.#palette),
-      modal.focus === "title" ? this.#palette.selected(` ${title}`) : ` ${this.#palette.muted(title)}`,
+      modal.focus === "title"
+        ? this.#palette.selected(` ${title}`)
+        : ` ${this.#palette.muted(title)}`,
       "",
       centeredButton("Create resource", modal.focus === "submit", this.#palette),
-      this.#palette.dim("←→ type/caret · Tab/↑↓ focus · Enter continue/create · Esc cancel · h help"),
+      this.#palette.dim(
+        "←→ type/caret · Tab/↑↓ focus · Enter continue/create · Esc cancel · h help",
+      ),
     ];
-    return panel("New project resource", lines, width, Math.min(height, Math.max(14, lines.length + 2)), true, this.#palette);
+    return panel(
+      "New project resource",
+      lines,
+      width,
+      Math.min(height, Math.max(14, lines.length + 2)),
+      true,
+      this.#palette,
+    );
   }
 
-  #renderConfigDocumentRename(modal: ConfigDocumentRenameModalState, width: number, height: number): string[] {
+  #renderConfigDocumentRename(
+    modal: ConfigDocumentRenameModalState,
+    width: number,
+    height: number,
+  ): string[] {
     const inner = Math.max(1, width - 2);
     const value = modal.focus === "title" ? insertCaret(modal.title, modal.cursor) : modal.title;
-    return panel("Rename resource", [
-      ...wrapStyled("Renaming updates semantic identity and compiler references atomically where the resource kind requires it.", inner, this.#palette.muted),
-      "",
-      centeredDivider("Title", inner, this.#palette),
-      modal.focus === "title" ? this.#palette.selected(` ${value}`) : ` ${value}`,
-      "",
-      centeredButton("Rename resource", modal.focus === "submit", this.#palette),
-      this.#palette.dim("←→ caret · Tab focus · Enter continue/rename · Esc cancel · h help"),
-    ], width, Math.min(height, 14), true, this.#palette);
+    return panel(
+      "Rename resource",
+      [
+        ...wrapStyled(
+          "Renaming updates semantic identity and compiler references atomically where the resource kind requires it.",
+          inner,
+          this.#palette.muted,
+        ),
+        "",
+        centeredDivider("Title", inner, this.#palette),
+        modal.focus === "title" ? this.#palette.selected(` ${value}`) : ` ${value}`,
+        "",
+        centeredButton("Rename resource", modal.focus === "submit", this.#palette),
+        this.#palette.dim("←→ caret · Tab focus · Enter continue/rename · Esc cancel · h help"),
+      ],
+      width,
+      Math.min(height, 14),
+      true,
+      this.#palette,
+    );
   }
 
-  #renderConfigDocumentDelete(modal: ConfigDocumentDeleteModalState, width: number, height: number): string[] {
+  #renderConfigDocumentDelete(
+    modal: ConfigDocumentDeleteModalState,
+    width: number,
+    height: number,
+  ): string[] {
     const inner = Math.max(1, width - 2);
     const allowed = modal.canDelete;
     const explanation = allowed
       ? "The authority will compile the complete project without this resource before publishing the deletion."
-      : modal.reason ?? "The configuration authority does not allow this resource to be deleted.";
-    return panel("Delete project resource", [
-      sectionHeading(modal.title, this.#palette),
-      "",
-      ...wrapStyled(
-        explanation,
-        inner,
-        allowed ? this.#palette.warning : this.#palette.error,
-      ),
-      "",
-      ...centerButtons([
-        { label: "Cancel", selected: modal.selected === "cancel", tone: "normal" },
-        { label: "Delete resource", selected: modal.selected === "delete", tone: allowed ? "danger" : "disabled" },
-      ], this.#palette),
-      this.#palette.dim("←→ choose · Enter confirm · Esc cancel · h help"),
-    ], width, Math.min(height, 14), true, this.#palette);
+      : (modal.reason ?? "The configuration authority does not allow this resource to be deleted.");
+    return panel(
+      "Delete project resource",
+      [
+        sectionHeading(modal.title, this.#palette),
+        "",
+        ...wrapStyled(explanation, inner, allowed ? this.#palette.warning : this.#palette.error),
+        "",
+        ...centerButtons(
+          [
+            { label: "Cancel", selected: modal.selected === "cancel", tone: "normal" },
+            {
+              label: "Delete resource",
+              selected: modal.selected === "delete",
+              tone: allowed ? "danger" : "disabled",
+            },
+          ],
+          this.#palette,
+        ),
+        this.#palette.dim("←→ choose · Enter confirm · Esc cancel · h help"),
+      ],
+      width,
+      Math.min(height, 14),
+      true,
+      this.#palette,
+    );
   }
 
-  #renderConfigRunTypeWizard(modal: ConfigRunTypeWizardModalState, width: number, height: number): string[] {
+  #renderConfigRunTypeWizard(
+    modal: ConfigRunTypeWizardModalState,
+    width: number,
+    height: number,
+  ): string[] {
     const inner = Math.max(1, width - 2);
     const template = modal.templates.templates[modal.templateIndex];
-    const field = (label: string, value: string, focus: ConfigRunTypeWizardModalState["focus"]): string[] => {
+    const field = (
+      label: string,
+      value: string,
+      focus: ConfigRunTypeWizardModalState["focus"],
+    ): string[] => {
       const selected = modal.focus === focus;
-      const shown = selected ? insertCaret(value, modal.cursor) : value.length === 0 ? "Optional" : value;
+      const shown = selected
+        ? insertCaret(value, modal.cursor)
+        : value.length === 0
+          ? "Optional"
+          : value;
       return [
         `${selected ? this.#palette.accent("›") : " "} ${this.#palette.bold(label)}  ${inputBadge(shown, selected, this.#palette)}`,
       ];
     };
-    const description = modal.focus === "description"
-      ? insertCaret(modal.description, modal.cursor)
-      : modal.description.length === 0 ? "Describe when this workflow should be used…" : modal.description;
+    const description =
+      modal.focus === "description"
+        ? insertCaret(modal.description, modal.cursor)
+        : modal.description.length === 0
+          ? "Describe when this workflow should be used…"
+          : modal.description;
     const lines = [
       centeredDivider("Template", inner, this.#palette),
-      selectorWindow(modal.templates.templates.map((item) => item.title), modal.templateIndex, inner, this.#palette),
+      selectorWindow(
+        modal.templates.templates.map((item) => item.title),
+        modal.templateIndex,
+        inner,
+        this.#palette,
+      ),
       ...wrapStyled(template?.description ?? "", inner, this.#palette.muted),
       "",
       ...field("Title", modal.title, "title"),
       ...field("Slug", modal.slug, "slug"),
       `${modal.focus === "description" ? this.#palette.accent("›") : " "} ${this.#palette.bold("Description")}`,
-      ...wrapStyled(description, Math.max(1, inner - 3), (copy) => `   ${modal.focus === "description" ? this.#palette.selected(copy) : this.#palette.muted(copy)}`),
+      ...wrapStyled(
+        description,
+        Math.max(1, inner - 3),
+        (copy) =>
+          `   ${modal.focus === "description" ? this.#palette.selected(copy) : this.#palette.muted(copy)}`,
+      ),
       `${modal.makeDefault ? this.#palette.success("●") : this.#palette.muted("○")} Make this the project default`,
       "",
       centeredButton("Create run type", modal.focus === "submit", this.#palette),
-      this.#palette.dim("Tab/↑↓ focus · ←→ change · Enter continue/newline · Ctrl-Enter create · Esc cancel"),
-    ];
-    return panel("New run type", lines, width, height, true, this.#palette, visibleOffset(0, lines.length - 2, Math.max(1, height - 2)));
-  }
-
-  #renderConfigLegacyMigration(modal: ConfigLegacyMigrationModalState, width: number, height: number): string[] {
-    const inner = Math.max(1, width - 2);
-    const preview = modal.preview;
-    const lines = [
-      sectionHeading("Legacy project detected", this.#palette),
-      ...wrapStyled(
-        `Koni can import this ${titleCaseLabel(preview.sourceKind)} configuration into the managed ${preview.profileVersion} profile model.`,
-        inner,
-        this.#palette.text,
+      this.#palette.dim(
+        "Tab/↑↓ focus · ←→ change · Enter continue/newline · Ctrl-Enter create · Esc cancel",
       ),
-      "",
-      `${this.#palette.muted("Configuration files")} ${preview.configurationFiles}`,
-      `${this.#palette.muted("External agents")} ${preview.externalAgents}`,
-      `${this.#palette.muted("Historical runs")} ${preview.runs}`,
-      `${this.#palette.muted("Run barrier")} ${preview.requiresRunBarrier ? this.#palette.warning("required") : "not required"}`,
-      "",
-      this.#palette.success("The original legacy source will be retained."),
-      ...wrapStyled("Applying revalidates the exact preview token, project state, run barrier, and target profile before publication.", inner, this.#palette.muted),
-      "",
-      ...centerButtons([
-        { label: "Cancel", selected: modal.selected === "cancel", tone: "normal" },
-        { label: "Apply migration", selected: modal.selected === "apply", tone: "success" },
-      ], this.#palette),
-      this.#palette.dim("←→ choose · Enter apply · Esc cancel · h help"),
     ];
-    return panel("Legacy migration", lines, width, Math.min(height, Math.max(16, lines.length + 2)), true, this.#palette);
+    return panel(
+      "New run type",
+      lines,
+      width,
+      height,
+      true,
+      this.#palette,
+      visibleOffset(0, lines.length - 2, Math.max(1, height - 2)),
+    );
   }
 
   #renderEditScalar(modal: EditScalarModalState, width: number, height: number): string[] {
     const inner = Math.max(1, width - 2);
     const withCaret = insertCaret(modal.value, modal.cursor);
-    const editor = withCaret.split("\n").flatMap((line) => wrapStyled(
-      line.length === 0 ? " " : line,
-      inner,
-      this.#palette.selected,
-    ));
+    const editor = withCaret
+      .split("\n")
+      .flatMap((line) => wrapStyled(line.length === 0 ? " " : line, inner, this.#palette.selected));
     const valueRows = Math.max(2, height - 10 - Number(modal.error !== undefined));
-    const caretLine = Math.max(0, editor.findIndex((line) => line.includes("▌")));
+    const caretLine = Math.max(
+      0,
+      editor.findIndex((line) => line.includes("▌")),
+    );
     const start = visibleOffset(0, caretLine, valueRows);
     const visible = editor.slice(start, start + valueRows);
     while (visible.length < valueRows) visible.push(this.#palette.selected(" "));
-    const submit = modal.field.kind === "multiline" || modal.field.kind === "string_list"
-      ? "Ctrl-Enter apply"
-      : "Enter apply";
-    return panel(`Edit ${modal.field.label}`, [
-      ...wrapStyled(modal.field.description, inner, this.#palette.muted),
-      `${this.#palette.muted("Type")} ${configKindLabel(modal.field.kind)}`,
-      "",
-      ...visible,
-      ...(modal.error === undefined ? [] : ["", ...wrapStyled(modal.error, inner, this.#palette.error)]),
-      "",
-      this.#palette.dim(`←→ caret · Home/End · Backspace/Delete · ${submit} · Esc cancel · h help`),
-    ], width, height, true, this.#palette);
+    const submit =
+      modal.field.kind === "multiline" || modal.field.kind === "string_list"
+        ? "Ctrl-Enter apply"
+        : "Enter apply";
+    return panel(
+      `Edit ${modal.field.label}`,
+      [
+        ...wrapStyled(modal.field.description, inner, this.#palette.muted),
+        `${this.#palette.muted("Type")} ${configKindLabel(modal.field.kind)}`,
+        "",
+        ...visible,
+        ...(modal.error === undefined
+          ? []
+          : ["", ...wrapStyled(modal.error, inner, this.#palette.error)]),
+        "",
+        this.#palette.dim(
+          `←→ caret · Home/End · Backspace/Delete · ${submit} · Esc cancel · h help`,
+        ),
+      ],
+      width,
+      height,
+      true,
+      this.#palette,
+    );
   }
 
   #newRunTargetLines(modal: NewRunModalState): string[] {
     const lines = [
-      selectorLine("Target branch", runTargetSelectedLabel(modal.target), modal.focus === "branch", this.#palette),
+      selectorLine(
+        "Target branch",
+        runTargetSelectedLabel(modal.target),
+        modal.focus === "branch",
+        this.#palette,
+      ),
     ];
     if (isCreatingNewTarget(modal.target)) {
       const name = modal.target.newName;
-      lines.push(selectorLine(
-        "New branch name",
-        name.length === 0 ? "(type a name)" : name,
-        modal.focus === "branch_name",
-        this.#palette,
-      ));
+      lines.push(
+        selectorLine(
+          "New branch name",
+          name.length === 0 ? "(type a name)" : name,
+          modal.focus === "branch_name",
+          this.#palette,
+        ),
+      );
     }
     return lines;
   }
@@ -1343,19 +1911,32 @@ export class ControlCenterComponent implements Component, Focusable {
     const inner = Math.max(1, width - 2);
     const runType = this.#snapshot.runTypes.find((item) => item.id === modal.runTypeId);
     const objectiveRows = height >= 30 ? 3 : 1;
-    const objectiveSource = modal.focus === "objective"
-      ? insertCaret(modal.objective, modal.objectiveCursor)
-      : modal.objective.length === 0 ? "Describe the outcome…" : modal.objective;
+    const objectiveSource =
+      modal.focus === "objective"
+        ? insertCaret(modal.objective, modal.objectiveCursor)
+        : modal.objective.length === 0
+          ? "Describe the outcome…"
+          : modal.objective;
     const objectiveLines = wrapTextWithAnsi(objectiveSource, inner - 2);
-    const objectiveCaretLine = Math.max(0, objectiveLines.findIndex((line) => line.includes("▌")));
-    const objectiveStart = modal.focus === "objective"
-      ? Math.max(0, objectiveCaretLine - objectiveRows + 1)
-      : Math.max(0, objectiveLines.length - objectiveRows);
+    const objectiveCaretLine = Math.max(
+      0,
+      objectiveLines.findIndex((line) => line.includes("▌")),
+    );
+    const objectiveStart =
+      modal.focus === "objective"
+        ? Math.max(0, objectiveCaretLine - objectiveRows + 1)
+        : Math.max(0, objectiveLines.length - objectiveRows);
     const objectiveVisible = objectiveLines.slice(objectiveStart, objectiveStart + objectiveRows);
-    const intakeLines = runType === undefined ? [] : newRunAdditionalIntakeLines(modal, runType, inner, this.#palette);
-    const runTypeBadges = this.#snapshot.runTypes.map((item) => runTypeBadge(item.title, item.id === modal.runTypeId, this.#palette));
+    const intakeLines =
+      runType === undefined
+        ? []
+        : newRunAdditionalIntakeLines(modal, runType, inner, this.#palette);
+    const runTypeBadges = this.#snapshot.runTypes.map((item) =>
+      runTypeBadge(item.title, item.id === modal.runTypeId, this.#palette),
+    );
     const runTypeLines = wrapSegments(runTypeBadges, inner);
-    const fixedRows = 15 + objectiveVisible.length + intakeLines.length + modal.roles.length + runTypeLines.length;
+    const fixedRows =
+      15 + objectiveVisible.length + intakeLines.length + modal.roles.length + runTypeLines.length;
     const stageBudget = Math.max(1, height - fixedRows);
     const stages = runType?.stages ?? [];
     const stageStart = Math.min(modal.stageScroll, Math.max(0, stages.length - 1));
@@ -1366,7 +1947,11 @@ export class ControlCenterComponent implements Component, Focusable {
       const marker = stage.included ? this.#palette.accent("●") : this.#palette.dim("○");
       const rows = [
         ...(stageLines.length > 0 ? [this.#palette.dim("  ↓")] : []),
-        ...wrapStyled(`${marker} ${stage.title}`, inner, stage.included ? this.#palette.text : this.#palette.dim),
+        ...wrapStyled(
+          `${marker} ${stage.title}`,
+          inner,
+          stage.included ? this.#palette.text : this.#palette.dim,
+        ),
       ];
       if (stageLines.length > 0 && stageLines.length + rows.length > stageBudget) break;
       stageLines.push(...rows);
@@ -1381,27 +1966,46 @@ export class ControlCenterComponent implements Component, Focusable {
           : ` ${objectiveVisible.at(-1) ?? this.#palette.dim("Describe the outcome…")}`,
         ...intakeLines,
         centeredDivider("Run Config", inner, this.#palette),
-        selectorWindow(this.#snapshot.runTypes.map((item) => item.title), Math.max(0, this.#snapshot.runTypes.findIndex((item) => item.id === modal.runTypeId)), inner, this.#palette),
+        selectorWindow(
+          this.#snapshot.runTypes.map((item) => item.title),
+          Math.max(
+            0,
+            this.#snapshot.runTypes.findIndex((item) => item.id === modal.runTypeId),
+          ),
+          inner,
+          this.#palette,
+        ),
         ...this.#newRunTargetLines(modal),
         `${modal.focus === "stages" ? this.#palette.accent("›") : " "} ${this.#palette.bold(`Stages ${stageStart + 1}/${stages.length}`)} · ${stage?.included === false ? this.#palette.dim(stage.title) : this.#palette.text(stage?.title ?? "No stages")}`,
         `${this.#palette.muted("Questions")} ${["none", "some", "many"].map((value) => questionBadge(value, modal.questionPolicy === value, this.#palette)).join(" ")}  ${this.#palette.muted("Parallel")} ${inputBadge(String(modal.maxParallel), modal.focus === "parallel", this.#palette)}`,
         `${" ".repeat(13)}${this.#palette.muted("Model")}           ${this.#palette.muted("Reasoning")}`,
       ];
       for (const role of modal.roles) {
-        const model = this.#snapshot.models.find((item) => item.provider === role.provider && item.id === role.model);
+        const model = this.#snapshot.models.find(
+          (item) => item.provider === role.provider && item.id === role.model,
+        );
         const modelLabel = `${model?.name ?? role.model}${model?.available === false ? " !" : ""}`;
-        compact.push(`${role.title.padEnd(12)} ${inputBadge(modelLabel, modal.focus === `role:${role.id}:model`, this.#palette)} ${inputBadge(role.thinkingLevel, modal.focus === `role:${role.id}:thinking`, this.#palette, thinkingStyle)}`);
+        compact.push(
+          `${role.title.padEnd(12)} ${inputBadge(modelLabel, modal.focus === `role:${role.id}:model`, this.#palette)} ${inputBadge(role.thinkingLevel, modal.focus === `role:${role.id}:thinking`, this.#palette, thinkingStyle)}`,
+        );
       }
       const warning = selectedModelWarning(modal, this.#snapshot.models);
-      if (warning !== undefined) compact.push(this.#palette.warning(truncateToWidth(warning, inner, "…", true)));
+      if (warning !== undefined)
+        compact.push(this.#palette.warning(truncateToWidth(warning, inner, "…", true)));
       const label = runType?.startMode === "work" ? "Start Work" : "Start Planning";
       compact.push(centeredButton(label, modal.focus === "start", this.#palette));
-      compact.push(this.#palette.dim("Tab/↑↓ move · ←→ change · PgUp/PgDn stages · Enter select · Esc close · h help"));
+      compact.push(
+        this.#palette.dim(
+          "Tab/↑↓ move · ←→ change · PgUp/PgDn stages · Enter select · Esc close · h help",
+        ),
+      );
       return panel("New run", compact, width, height, true, this.#palette);
     }
     const lines = [
       centeredDivider("Goal Prompt", inner, this.#palette),
-      ...objectiveVisible.map((line) => modal.focus === "objective" ? this.#palette.selected(` ${line}`) : ` ${line}`),
+      ...objectiveVisible.map((line) =>
+        modal.focus === "objective" ? this.#palette.selected(` ${line}`) : ` ${line}`,
+      ),
       ...intakeLines,
       centeredDivider("Run Config", inner, this.#palette),
       ...runTypeLines,
@@ -1409,21 +2013,34 @@ export class ControlCenterComponent implements Component, Focusable {
       `${modal.focus === "stages" ? this.#palette.accent("›") : " "} ${this.#palette.bold("Stages")} ${this.#palette.muted(`${stageStart + 1}–${Math.min(stages.length, stageStart + stageCount)} of ${stages.length}`)}`,
       ...stageLines,
       `${this.#palette.muted("Questions")} ${["none", "some", "many"].map((value) => questionBadge(value, modal.questionPolicy === value, this.#palette)).join(" ")}`,
-      selectorLine("Max parallel agents", String(modal.maxParallel), modal.focus === "parallel", this.#palette),
+      selectorLine(
+        "Max parallel agents",
+        String(modal.maxParallel),
+        modal.focus === "parallel",
+        this.#palette,
+      ),
       `${" ".repeat(Math.min(24, Math.max(0, inner - 30)))}${this.#palette.muted("Model")}           ${this.#palette.muted("Reasoning")}`,
     ];
     for (const role of modal.roles) {
       const modelFocus = modal.focus === `role:${role.id}:model`;
       const thinkingFocus = modal.focus === `role:${role.id}:thinking`;
-      const model = this.#snapshot.models.find((item) => item.provider === role.provider && item.id === role.model);
+      const model = this.#snapshot.models.find(
+        (item) => item.provider === role.provider && item.id === role.model,
+      );
       const modelLabel = `${model?.name ?? role.model}${model?.available === false ? " !" : ""}`;
-      lines.push(`${role.title.padEnd(12)} ${inputBadge(modelLabel, modelFocus, this.#palette)} ${inputBadge(role.thinkingLevel, thinkingFocus, this.#palette, thinkingStyle)}`);
+      lines.push(
+        `${role.title.padEnd(12)} ${inputBadge(modelLabel, modelFocus, this.#palette)} ${inputBadge(role.thinkingLevel, thinkingFocus, this.#palette, thinkingStyle)}`,
+      );
     }
     const warning = selectedModelWarning(modal, this.#snapshot.models);
     if (warning !== undefined) lines.push(...wrapStyled(warning, inner, this.#palette.warning));
     const label = runType?.startMode === "work" ? "Start Work" : "Start Planning";
     lines.push("", centeredButton(label, modal.focus === "start", this.#palette));
-    lines.push(this.#palette.dim("Tab/↑↓ moves · ←→ changes · PgUp/PgDn stages · Enter newline/select · Esc close · h help"));
+    lines.push(
+      this.#palette.dim(
+        "Tab/↑↓ moves · ←→ changes · PgUp/PgDn stages · Enter newline/select · Esc close · h help",
+      ),
+    );
     return panel("New run", lines, width, height, true, this.#palette);
   }
 
@@ -1438,10 +2055,18 @@ export class ControlCenterComponent implements Component, Focusable {
       { id: "verification", title: "Verification", items: [] },
     ];
     const current = sections[Math.min(modal.sectionIndex, sections.length - 1)]!;
-    const tabs = sections.map((section, index) => selectorBadge(section.title, index === modal.sectionIndex, this.#palette)).join(this.#palette.muted("  "));
+    const tabs = sections
+      .map((section, index) =>
+        selectorBadge(section.title, index === modal.sectionIndex, this.#palette),
+      )
+      .join(this.#palette.muted("  "));
     const document: string[] = [];
     if (current.items.length === 0) {
-      document.push(this.#palette.muted("No agent-authored concise review items were recorded for this section."));
+      document.push(
+        this.#palette.muted(
+          "No agent-authored concise review items were recorded for this section.",
+        ),
+      );
     } else {
       current.items.forEach((item, index) => {
         if (index > 0) document.push("");
@@ -1451,21 +2076,30 @@ export class ControlCenterComponent implements Component, Focusable {
     }
     if (current.id === "verification" && (approval?.graphSeed.length ?? 0) > 0) {
       document.push("", sectionHeading("Graph Seed", this.#palette));
-      document.push(...approval!.graphSeed.flatMap((line) => wrapStyled(line, inner, this.#palette.muted)));
+      document.push(
+        ...approval!.graphSeed.flatMap((line) => wrapStyled(line, inner, this.#palette.muted)),
+      );
     }
-    const steeringSource = modal.focus === "steering"
-      ? insertCaret(modal.steering, modal.steeringCursor)
-      : modal.steering.length === 0 ? "Add steering here to request a revised plan…" : modal.steering;
+    const steeringSource =
+      modal.focus === "steering"
+        ? insertCaret(modal.steering, modal.steeringCursor)
+        : modal.steering.length === 0
+          ? "Add steering here to request a revised plan…"
+          : modal.steering;
     const steeringLines = wrapTextWithAnsi(steeringSource, inner - 2);
     const editorRows = Math.max(2, Math.min(4, Math.floor(height / 5)));
     const bodyRows = Math.max(2, height - editorRows - 11);
     const bodyStart = Math.min(modal.scroll, Math.max(0, document.length - bodyRows));
     const visibleDocument = document.slice(bodyStart, bodyStart + bodyRows);
     while (visibleDocument.length < bodyRows) visibleDocument.push("");
-    const steeringCaretLine = Math.max(0, steeringLines.findIndex((line) => line.includes("▌")));
-    const steeringStart = modal.focus === "steering"
-      ? Math.max(0, steeringCaretLine - editorRows + 1)
-      : Math.max(0, steeringLines.length - editorRows);
+    const steeringCaretLine = Math.max(
+      0,
+      steeringLines.findIndex((line) => line.includes("▌")),
+    );
+    const steeringStart =
+      modal.focus === "steering"
+        ? Math.max(0, steeringCaretLine - editorRows + 1)
+        : Math.max(0, steeringLines.length - editorRows);
     const steeringVisible = steeringLines.slice(steeringStart, steeringStart + editorRows);
     while (steeringVisible.length < editorRows) steeringVisible.push("");
     const hasSteering = modal.steering.trim().length > 0;
@@ -1477,7 +2111,10 @@ export class ControlCenterComponent implements Component, Focusable {
       tabs,
       ...visibleDocument,
       centeredDivider("Steering instructions", inner, this.#palette),
-      ...steeringVisible.map((line) => ` ${modal.steering.length === 0 && modal.focus !== "steering" ? this.#palette.dim(line) : line}`),
+      ...steeringVisible.map(
+        (line) =>
+          ` ${modal.steering.length === 0 && modal.focus !== "steering" ? this.#palette.dim(line) : line}`,
+      ),
       centeredButton(button, modal.focus === "action", this.#palette),
       this.#palette.dim("←→/[] sections · ↑↓/jk/PgUp/PgDn scroll · Tab focus · Enter · Esc"),
     ];
@@ -1508,31 +2145,58 @@ export class ControlCenterComponent implements Component, Focusable {
     const visibleDocument = document.slice(documentStart, documentStart + documentRows);
     while (visibleDocument.length < documentRows) visibleDocument.push("");
 
-    const messageSource = modal.focus === "message"
-      ? insertCaret(modal.message, modal.messageCursor)
-      : modal.message.length === 0 ? "Optional context for this decision…" : modal.message;
+    const messageSource =
+      modal.focus === "message"
+        ? insertCaret(modal.message, modal.messageCursor)
+        : modal.message.length === 0
+          ? "Optional context for this decision…"
+          : modal.message;
     const messageLines = wrapTextWithAnsi(messageSource, Math.max(1, inner - 2));
-    const caretLine = Math.max(0, messageLines.findIndex((line) => line.includes("▌")));
-    const messageStart = modal.focus === "message"
-      ? Math.max(0, caretLine - editorRows + 1)
-      : Math.max(0, messageLines.length - editorRows);
+    const caretLine = Math.max(
+      0,
+      messageLines.findIndex((line) => line.includes("▌")),
+    );
+    const messageStart =
+      modal.focus === "message"
+        ? Math.max(0, caretLine - editorRows + 1)
+        : Math.max(0, messageLines.length - editorRows);
     const visibleMessage = messageLines.slice(messageStart, messageStart + editorRows);
     while (visibleMessage.length < editorRows) visibleMessage.push("");
 
     const lines = [
       ...visibleDocument,
       centeredDivider("Decision message (optional)", inner, this.#palette),
-      ...visibleMessage.map((line) => ` ${modal.message.length === 0 && modal.focus !== "message" ? this.#palette.dim(line) : line}`),
-      centerButtons([
-        { label: "Approve proposal", selected: modal.focus === "choice" && modal.decision === "approval", tone: "success" },
-        { label: "Reject proposal", selected: modal.focus === "choice" && modal.decision === "rejection", tone: "danger" },
-      ], this.#palette),
+      ...visibleMessage.map(
+        (line) =>
+          ` ${modal.message.length === 0 && modal.focus !== "message" ? this.#palette.dim(line) : line}`,
+      ),
+      centerButtons(
+        [
+          {
+            label: "Approve proposal",
+            selected: modal.focus === "choice" && modal.decision === "approval",
+            tone: "success",
+          },
+          {
+            label: "Reject proposal",
+            selected: modal.focus === "choice" && modal.decision === "rejection",
+            tone: "danger",
+          },
+        ],
+        this.#palette,
+      ),
       centeredButton(
-        modal.decision === "approval" ? "Record approval" : modal.decision === "rejection" ? "Record rejection" : "Choose a decision",
+        modal.decision === "approval"
+          ? "Record approval"
+          : modal.decision === "rejection"
+            ? "Record rejection"
+            : "Choose a decision",
         modal.focus === "submit",
         this.#palette,
       ),
-      this.#palette.dim("↑↓ scroll · Tab focus · ←→ choose · Enter navigate/newline · Ctrl-Enter record · Esc close"),
+      this.#palette.dim(
+        "↑↓ scroll · Tab focus · ←→ choose · Enter navigate/newline · Ctrl-Enter record · Esc close",
+      ),
     ];
     return panel("Review change proposal", lines, width, height, true, this.#palette);
   }
@@ -1551,7 +2215,10 @@ export class ControlCenterComponent implements Component, Focusable {
       this.#palette,
     );
     const hasUpstream = modal.upstreamConflicts.conflicts.length > 0;
-    const contentHeight = Math.max(5, height - 8 - Number(modal.rebaseRequired) - Number(hasUpstream));
+    const contentHeight = Math.max(
+      5,
+      height - 8 - Number(modal.rebaseRequired) - Number(hasUpstream),
+    );
     const leftWidth = Math.max(18, Math.min(32, Math.floor(inner * 0.31)));
     const rightWidth = Math.max(1, inner - leftWidth - 1);
     const tree = (section?.resources ?? []).map((item, index) => {
@@ -1561,7 +2228,8 @@ export class ControlCenterComponent implements Component, Focusable {
       return selected ? this.#palette.selected(row) : this.#palette.muted(row);
     });
     const right: string[] = [];
-    if (resource === undefined) right.push(this.#palette.muted("No configurable resources in this section."));
+    if (resource === undefined)
+      right.push(this.#palette.muted("No configurable resources in this section."));
     else {
       right.push(sectionHeading(resource.title, this.#palette));
       right.push(...wrapStyled(resource.description, rightWidth, this.#palette.muted), "");
@@ -1569,99 +2237,163 @@ export class ControlCenterComponent implements Component, Focusable {
         const selected = index === modal.fieldIndex;
         const value = configValueLabel(field, modal.draft[field.key], this.#snapshot.models);
         const textField = isConfigTextField(field);
-        const line = textField && selected
-          ? `${selected ? "›" : " "} ${field.label}`
-          : `${selected ? "›" : " "} ${field.label}  ${inputBadge(value, selected && modal.focus === "field", this.#palette)}`;
+        const line =
+          textField && selected
+            ? `${selected ? "›" : " "} ${field.label}`
+            : `${selected ? "›" : " "} ${field.label}  ${inputBadge(value, selected && modal.focus === "field", this.#palette)}`;
         right.push(selected ? this.#palette.text(line) : this.#palette.muted(line));
         if (selected) {
-          right.push(...wrapStyled(field.description, rightWidth - 2, (text) => `  ${this.#palette.dim(text)}`));
+          right.push(
+            ...wrapStyled(
+              field.description,
+              rightWidth - 2,
+              (text) => `  ${this.#palette.dim(text)}`,
+            ),
+          );
           const rawModel = modal.draft[field.key];
           if (field.kind === "model" && typeof rawModel === "string") {
             const configured = configuredModelOption(rawModel, this.#snapshot.models);
             if (configured?.available === false) {
-              right.push(...wrapStyled(
-                `  Unavailable: ${configured.unavailableReason ?? "The contained Pi runtime cannot execute this model."}`,
-                rightWidth - 2,
-                this.#palette.warning,
-              ));
+              right.push(
+                ...wrapStyled(
+                  `  Unavailable: ${configured.unavailableReason ?? "The contained Pi runtime cannot execute this model."}`,
+                  rightWidth - 2,
+                  this.#palette.warning,
+                ),
+              );
             }
           }
           if (field.kind === "thinking" && typeof rawModel === "string") {
             const modelField = resource.fields.find((candidate) => candidate.kind === "model");
-            const configuredModel = modelField === undefined
-              ? undefined
-              : typeof modal.draft[modelField.key] === "string"
-                ? configuredModelOption(modal.draft[modelField.key] as string, this.#snapshot.models)
-                : undefined;
+            const configuredModel =
+              modelField === undefined
+                ? undefined
+                : typeof modal.draft[modelField.key] === "string"
+                  ? configuredModelOption(
+                      modal.draft[modelField.key] as string,
+                      this.#snapshot.models,
+                    )
+                  : undefined;
             if (
               configuredModel !== undefined &&
               !configuredModel.thinkingLevels.some((level) => level === rawModel)
             ) {
-              right.push(...wrapStyled(
-                `  Unsupported for ${configuredModel.name}. Choose: ${configuredModel.thinkingLevels.join(", ")}.`,
-                rightWidth - 2,
-                this.#palette.warning,
-              ));
+              right.push(
+                ...wrapStyled(
+                  `  Unsupported for ${configuredModel.name}. Choose: ${configuredModel.thinkingLevels.join(", ")}.`,
+                  rightWidth - 2,
+                  this.#palette.warning,
+                ),
+              );
             }
           }
           if (textField) {
             const stored = modal.draft[field.key];
-            const raw = modal.textEditor?.key === field.key
-              ? modal.textEditor.value
-              : typeof stored === "string" ? stored
-                : field.kind === "string_list" && Array.isArray(stored)
-                  ? stored.filter((item): item is string => typeof item === "string").join("\n")
-                  : "";
+            const raw =
+              modal.textEditor?.key === field.key
+                ? modal.textEditor.value
+                : typeof stored === "string"
+                  ? stored
+                  : field.kind === "string_list" && Array.isArray(stored)
+                    ? stored.filter((item): item is string => typeof item === "string").join("\n")
+                    : "";
             const shown = raw.length === 0 ? this.#palette.dim("Empty") : raw;
-            right.push(...wrapStyled(
-              `${modal.focus === "field" && modal.editing ? "▌ " : "  "}${shown}`,
-              Math.max(1, rightWidth - 2),
-              (text) => modal.focus === "field" ? this.#palette.selected(text) : this.#palette.text(text),
-            ));
+            right.push(
+              ...wrapStyled(
+                `${modal.focus === "field" && modal.editing ? "▌ " : "  "}${shown}`,
+                Math.max(1, rightWidth - 2),
+                (text) =>
+                  modal.focus === "field" ? this.#palette.selected(text) : this.#palette.text(text),
+              ),
+            );
           }
         }
       });
     }
-    const leftStart = Math.max(0, Math.min(modal.resourceIndex - Math.floor(contentHeight / 2), Math.max(0, tree.length - contentHeight)));
-    const rightSelectedLine = Math.max(0, right.findIndex((line) => line.includes("›")));
-    const rightStart = Math.max(0, Math.min(rightSelectedLine - Math.floor(contentHeight / 2), Math.max(0, right.length - contentHeight)));
-    const joined = joinColumns([
-      tree.slice(leftStart, leftStart + contentHeight),
-      right.slice(rightStart, rightStart + contentHeight),
-    ], [leftWidth, rightWidth], contentHeight);
+    const leftStart = Math.max(
+      0,
+      Math.min(
+        modal.resourceIndex - Math.floor(contentHeight / 2),
+        Math.max(0, tree.length - contentHeight),
+      ),
+    );
+    const rightSelectedLine = Math.max(
+      0,
+      right.findIndex((line) => line.includes("›")),
+    );
+    const rightStart = Math.max(
+      0,
+      Math.min(
+        rightSelectedLine - Math.floor(contentHeight / 2),
+        Math.max(0, right.length - contentHeight),
+      ),
+    );
+    const joined = joinColumns(
+      [
+        tree.slice(leftStart, leftStart + contentHeight),
+        right.slice(rightStart, rightStart + contentHeight),
+      ],
+      [leftWidth, rightWidth],
+      contentHeight,
+    );
     const actions = configResourceActions(modal);
     const actionLabels: Record<(typeof actions)[number], string> = {
       create: "[a] Add",
       duplicate: "[d] Duplicate",
       delete: "[x] Delete",
     };
-    const actionRow = actions.length === 0
-      ? this.#palette.dim("No collection actions for this resource")
-      : actions.map((action, index) => selectorBadge(
-        actionLabels[action],
-        modal.focus === "actions" && modal.actionIndex === index,
-        this.#palette,
-      )).join(" ");
+    const actionRow =
+      actions.length === 0
+        ? this.#palette.dim("No collection actions for this resource")
+        : actions
+            .map((action, index) =>
+              selectorBadge(
+                actionLabels[action],
+                modal.focus === "actions" && modal.actionIndex === index,
+                this.#palette,
+              ),
+            )
+            .join(" ");
     const publish = modal.dirty ? "Publish changes" : "Configuration current";
-    return panel("Configure", [
-      sections,
-      this.#palette.muted(section?.description ?? ""),
-      ...(hasUpstream ? [this.#palette.warning(
-        `${modal.upstreamConflicts.conflicts.length} upstream ${modal.upstreamConflicts.conflicts.length === 1 ? "change needs" : "changes need"} review · [u] Open comparison`,
-      )] : []),
-      ...(modal.rebaseRequired ? [this.#palette.warning("Saved draft is stale · Ctrl-R rebase or Ctrl-D discard")] : []),
-      ...joined,
-      actionRow,
-      centeredButton(publish, modal.focus === "publish", this.#palette),
-      this.#palette.dim("←→ sections/values/actions · ↑↓ resources/fields · Tab focus · Enter select · u upstream changes · a add · d duplicate · x delete · Ctrl-S save · Ctrl-R rebase · Ctrl-P publish · Ctrl-D discard · Esc close · h help"),
-    ], width, height, true, this.#palette);
+    return panel(
+      "Configure",
+      [
+        sections,
+        this.#palette.muted(section?.description ?? ""),
+        ...(hasUpstream
+          ? [
+              this.#palette.warning(
+                `${modal.upstreamConflicts.conflicts.length} upstream ${modal.upstreamConflicts.conflicts.length === 1 ? "change needs" : "changes need"} review · [u] Open comparison`,
+              ),
+            ]
+          : []),
+        ...(modal.rebaseRequired
+          ? [this.#palette.warning("Saved draft is stale · Ctrl-R rebase or Ctrl-D discard")]
+          : []),
+        ...joined,
+        actionRow,
+        centeredButton(publish, modal.focus === "publish", this.#palette),
+        this.#palette.dim(
+          "←→ sections/values/actions · ↑↓ resources/fields · Tab focus · Enter select · u upstream changes · a add · d duplicate · x delete · Ctrl-S save · Ctrl-R rebase · Ctrl-P publish · Ctrl-D discard · Esc close · h help",
+        ),
+      ],
+      width,
+      height,
+      true,
+      this.#palette,
+    );
   }
 
-  #renderProfileConflicts(modal: ProfileConflictsModalState, width: number, height: number): string[] {
+  #renderProfileConflicts(
+    modal: ProfileConflictsModalState,
+    width: number,
+    height: number,
+  ): string[] {
     const inner = Math.max(1, width - 2);
     const selected = modal.catalog.conflicts[modal.selectedIndex] ?? modal.inspection.conflict;
-    const labels = modal.catalog.conflicts.map((conflict) =>
-      `${conflict.title} · ${conflict.reason}`);
+    const labels = modal.catalog.conflicts.map(
+      (conflict) => `${conflict.title} · ${conflict.reason}`,
+    );
     const selector = selectorWindow(labels, modal.selectedIndex, inner, this.#palette);
     const columnGap = 1;
     const leftWidth = Math.max(1, Math.floor((inner - columnGap) / 2));
@@ -1681,47 +2413,82 @@ export class ControlCenterComponent implements Component, Focusable {
     );
     const maxScroll = Math.max(0, Math.max(current.length, upstream.length) - bodyHeight);
     const start = Math.min(modal.scroll, maxScroll);
-    const comparison = joinColumns([
-      current.slice(start, start + bodyHeight),
-      upstream.slice(start, start + bodyHeight),
-    ], [leftWidth, rightWidth], bodyHeight);
+    const comparison = joinColumns(
+      [current.slice(start, start + bodyHeight), upstream.slice(start, start + bodyHeight)],
+      [leftWidth, rightWidth],
+      bodyHeight,
+    );
     const actions = ["Keep project", "Use update"];
-    const actionRow = actions.map((label, index) => selectorBadge(
-      label,
-      modal.focus === "actions" && modal.actionIndex === index,
+    const actionRow = actions
+      .map((label, index) =>
+        selectorBadge(
+          label,
+          modal.focus === "actions" && modal.actionIndex === index,
+          this.#palette,
+        ),
+      )
+      .join("  ");
+    return panel(
+      "Upstream changes",
+      [
+        selector,
+        `${modal.focus === "list" ? this.#palette.accent("›") : " "} ${this.#palette.bold(selected.title)} ${this.#palette.muted(`· ${conflictReason(selected.reason)} · ${selected.domain}`)}`,
+        this.#palette.dim(selected.path),
+        joinColumns(
+          [
+            [sectionHeading("Project version", this.#palette)],
+            [sectionHeading("Upstream update", this.#palette)],
+          ],
+          [leftWidth, rightWidth],
+          1,
+        )[0]!,
+        ...comparison,
+        actionRow,
+        this.#palette.dim(
+          "↑↓/jk change resource · PgUp/PgDn scroll · Tab actions · ←→ choose · Enter resolve · Esc back · h help",
+        ),
+      ],
+      width,
+      height,
+      true,
       this.#palette,
-    )).join("  ");
-    return panel("Upstream changes", [
-      selector,
-      `${modal.focus === "list" ? this.#palette.accent("›") : " "} ${this.#palette.bold(selected.title)} ${this.#palette.muted(`· ${conflictReason(selected.reason)} · ${selected.domain}`)}`,
-      this.#palette.dim(selected.path),
-      joinColumns([
-        [sectionHeading("Project version", this.#palette)],
-        [sectionHeading("Upstream update", this.#palette)],
-      ], [leftWidth, rightWidth], 1)[0]!,
-      ...comparison,
-      actionRow,
-      this.#palette.dim("↑↓/jk change resource · PgUp/PgDn scroll · Tab actions · ←→ choose · Enter resolve · Esc back · h help"),
-    ], width, height, true, this.#palette);
+    );
   }
 
-  #renderConfigResourceOperation(modal: ConfigureModalState, width: number, height: number): string[] {
+  #renderConfigResourceOperation(
+    modal: ConfigureModalState,
+    width: number,
+    height: number,
+  ): string[] {
     const operation = modal.resourceOperation!;
     const inner = Math.max(1, width - 2);
     const option = operation.options[operation.templateIndex];
-    const title = operation.kind === "create" ? "Add resource"
-      : operation.kind === "duplicate" ? "Duplicate resource" : "Delete resource";
+    const title =
+      operation.kind === "create"
+        ? "Add resource"
+        : operation.kind === "duplicate"
+          ? "Duplicate resource"
+          : "Delete resource";
     const lines: string[] = [];
     if (operation.kind === "create") {
       lines.push(sectionHeading("Resource type", this.#palette));
-      lines.push(selectorWindow(
-        operation.options.map((candidate) => candidate.title),
-        operation.templateIndex,
-        inner,
-        this.#palette,
-      ));
+      lines.push(
+        selectorWindow(
+          operation.options.map((candidate) => candidate.title),
+          operation.templateIndex,
+          inner,
+          this.#palette,
+        ),
+      );
       if (option !== undefined) {
-        lines.push(...boundedWrapped(option.description, inner, Math.max(1, height - 11), this.#palette.muted));
+        lines.push(
+          ...boundedWrapped(
+            option.description,
+            inner,
+            Math.max(1, height - 11),
+            this.#palette.muted,
+          ),
+        );
       }
     } else {
       lines.push(sectionHeading(operation.resourceTitle ?? "Selected resource", this.#palette));
@@ -1737,47 +2504,85 @@ export class ControlCenterComponent implements Component, Focusable {
         ),
       );
     } else {
-      const label = operation.kind === "create" ? option?.nameLabel ?? "Name" : "Copy name";
+      const label = operation.kind === "create" ? (option?.nameLabel ?? "Name") : "Copy name";
       lines.push(
         "",
         sectionHeading(label, this.#palette),
         operation.focus === "name"
-          ? this.#palette.selected(`▌ ${operation.name.length === 0 ? "Enter a name" : operation.name}`)
-          : inputBadge(operation.name.length === 0 ? "Enter a name" : operation.name, false, this.#palette),
+          ? this.#palette.selected(
+              `▌ ${operation.name.length === 0 ? "Enter a name" : operation.name}`,
+            )
+          : inputBadge(
+              operation.name.length === 0 ? "Enter a name" : operation.name,
+              false,
+              this.#palette,
+            ),
       );
     }
-    const button = operation.kind === "create" ? "Create resource"
-      : operation.kind === "duplicate" ? "Duplicate resource" : "Delete resource";
+    const button =
+      operation.kind === "create"
+        ? "Create resource"
+        : operation.kind === "duplicate"
+          ? "Duplicate resource"
+          : "Delete resource";
     lines.push(
       "",
       centeredButton(button, operation.focus === "confirm", this.#palette),
-      this.#palette.dim(operation.kind === "create" && operation.options.length > 1
-        ? "←→ type · Tab/↑↓ focus · Enter select/confirm · Esc cancel · h help"
-        : "Tab/↑↓ focus · Enter select/confirm · Esc cancel · h help"),
+      this.#palette.dim(
+        operation.kind === "create" && operation.options.length > 1
+          ? "←→ type · Tab/↑↓ focus · Enter select/confirm · Esc cancel · h help"
+          : "Tab/↑↓ focus · Enter select/confirm · Esc cancel · h help",
+      ),
     );
-    return panel(title, lines, width, Math.min(height, Math.max(10, lines.length + 2)), true, this.#palette);
+    return panel(
+      title,
+      lines,
+      width,
+      Math.min(height, Math.max(10, lines.length + 2)),
+      true,
+      this.#palette,
+    );
   }
 
   #animatedCog(): string {
-    const styles = [this.#palette.accent, this.#palette.info, this.#palette.success, this.#palette.info] as const;
+    const styles = [
+      this.#palette.accent,
+      this.#palette.info,
+      this.#palette.success,
+      this.#palette.info,
+    ] as const;
     return styles[this.#animationFrame]!("⚙");
   }
 }
 
 function helpWorkflow(topic: ControlCenterHelpTopic): string {
-  if (topic === "runs" || topic === "new_run") return "Runs are the durable top-level units Koni plans, schedules, verifies, and prepares for an operator-authorized merge.";
-  if (topic === "tickets" || topic === "agents" || topic === "chat") return "The compiler turns the run specification into tickets; exact agent attempts carry out bounded ticket steps and preserve their Pi sessions.";
-  if (topic === "questions" || topic === "answer_question") return "Questions stop ambiguous work at a durable decision boundary. Your answer is recorded before the responsible work can continue.";
-  if (topic === "action_palette" || topic === "action_form") return "The compiler projects exactly which run and stage actions exist now. Koni revalidates the opaque action, run revision, generation, fields, and confirmation before any effect.";
-  if (topic === "plan_review") return "Planning turns the goal into architecture, decisions, risk controls, verification, and an initial graph. Work starts only after explicit approval.";
-  if (topic === "proposal_review") return "Change proposals hold overlapping compiler work at a durable operator boundary. Inspection is read-only; only an explicit recorded approval or rejection advances authority state.";
-  if (topic === "configure" || topic === "configure_documents" ||
-      topic === "config_document_create" || topic === "config_document_rename" ||
-      topic === "config_document_delete" || topic === "config_run_type_wizard" ||
-      topic === "config_legacy_migration" || topic === "profile_conflicts" ||
-      topic === "edit_scalar") return "Configuration compiles project-owned profiles into the graph vocabulary, workflows, tickets, resources, models, and lifecycle rules used by future runs.";
-  if (topic === "graph") return "The graph is the shared typed specification from which the compiler validates relationships and derives ready work.";
-  if (topic === "activity") return "Activity is the human audit trail across compiler decisions, graph changes, agent work, Git, and lifecycle transitions.";
+  if (topic === "runs" || topic === "new_run")
+    return "Runs are the durable top-level units Koni plans, schedules, verifies, and prepares for an operator-authorized merge.";
+  if (topic === "tickets" || topic === "agents" || topic === "chat")
+    return "The compiler turns the run specification into tickets; exact agent attempts carry out bounded ticket steps and preserve their Pi sessions.";
+  if (topic === "questions" || topic === "answer_question")
+    return "Questions stop ambiguous work at a durable decision boundary. Your answer is recorded before the responsible work can continue.";
+  if (topic === "action_palette" || topic === "action_form")
+    return "The compiler projects exactly which run and stage actions exist now. Koni revalidates the opaque action, run revision, generation, fields, and confirmation before any effect.";
+  if (topic === "plan_review")
+    return "Planning turns the goal into architecture, decisions, risk controls, verification, and an initial graph. Work starts only after explicit approval.";
+  if (topic === "proposal_review")
+    return "Change proposals hold overlapping compiler work at a durable operator boundary. Inspection is read-only; only an explicit recorded approval or rejection advances authority state.";
+  if (
+    topic === "configure" ||
+    topic === "configure_documents" ||
+    topic === "config_document_create" ||
+    topic === "config_document_rename" ||
+    topic === "config_document_delete" ||
+    topic === "config_run_type_wizard" ||
+    topic === "profile_conflicts" ||
+    topic === "edit_scalar"
+  )
+    return "Configuration compiles project-owned profiles into the graph vocabulary, workflows, tickets, resources, models, and lifecycle rules used by future runs.";
+  if (topic === "graph")
+    return "The graph is the shared typed specification from which the compiler validates relationships and derives ready work.";
+  if (topic === "activity")
+    return "Activity is the human audit trail across compiler decisions, graph changes, agent work, Git, and lifecycle transitions.";
   return "This panel is one view of the same durable run state used by scheduling, verification, recovery, and final promotion.";
 }
 
@@ -1834,16 +2639,29 @@ function panelWithFooter(
   const safeHeight = Math.max(4, height);
   const capacity = Math.max(1, safeHeight - 3);
   const start = Math.min(Math.max(0, scroll), Math.max(0, content.length - capacity));
-  const lines = panel(title, content.slice(start, start + capacity), width, safeHeight, focused, palette);
+  const lines = panel(
+    title,
+    content.slice(start, start + capacity),
+    width,
+    safeHeight,
+    focused,
+    palette,
+  );
   const safeWidth = Math.max(4, width);
   const inner = safeWidth - 2;
   const border = focused ? palette.borderActive : palette.border;
   const clipped = truncateToWidth(centerLine(footer, inner, palette.accent), inner, "…", true);
-  lines[safeHeight - 2] = `${border("│")}${clipped}${" ".repeat(Math.max(0, inner - visibleWidth(clipped)))}${border("│")}`;
+  lines[safeHeight - 2] =
+    `${border("│")}${clipped}${" ".repeat(Math.max(0, inner - visibleWidth(clipped)))}${border("│")}`;
   return lines;
 }
 
-function framedHeader(title: string, metadata: string, width: number, palette: KoniPalette): string[] {
+function framedHeader(
+  title: string,
+  metadata: string,
+  width: number,
+  palette: KoniPalette,
+): string[] {
   const inner = Math.max(1, width - 2);
   return [
     palette.border(`┌${"─".repeat(inner)}┐`),
@@ -1853,26 +2671,54 @@ function framedHeader(title: string, metadata: string, width: number, palette: K
   ].map((line) => padLine(line, width));
 }
 
+/** Session bookkeeping notices whose content already renders in the chat panel title. */
+const HEADER_NOTICE_TITLES = new Set([
+  "Model changed",
+  "Reasoning changed",
+  "Session label",
+  "Session name",
+]);
+
+/** Paints one chat message as a contiguous background-washed block. */
+function surfaceBlock(lines: readonly string[], width: number, palette: KoniPalette): string[] {
+  return lines.map((line) => {
+    const clipped = truncateToWidth(line, width, "…", true);
+    return palette.surface(`${clipped}${" ".repeat(Math.max(0, width - visibleWidth(clipped)))}`);
+  });
+}
+
 function detailsTitle(
   snapshot: ControlCenterControllerSnapshot,
   palette: KoniPalette,
   configuredTitle?: string,
 ): string {
   if (snapshot.selection.detailsTab === "chat") {
-    const agent = snapshot.view.selectedRun?.agents.find((candidate) => candidate.id === snapshot.selection.attemptId);
-    return agent === undefined ? "Chat" : `${agent.active ? "⚙ " : ""}Chat · ${agent.label}`;
+    const agent = snapshot.view.selectedRun?.agents.find(
+      (candidate) => candidate.id === snapshot.selection.attemptId,
+    );
+    if (agent === undefined) return "Chat";
+    return [
+      `${agent.active ? "⚙ " : ""}Chat · ${agent.persona}`,
+      ...(agent.stepTitle === undefined ? [agent.work] : [agent.stepTitle]),
+      modelStyle(agent.model, palette),
+      thinkingStyle(agent.thinking, palette),
+    ].join(palette.muted(" · "));
   }
   const active = snapshot.selection.detailsTab;
-  const label = (id: "overview" | "plan" | "stages", title: string): string =>
+  const label = (id: "overview" | "plan", title: string): string =>
     id === active ? palette.text(title) : palette.muted(title);
-  const tabs = [label("overview", "Overview"), label("plan", "Plan"), label("stages", "Stages")];
+  const tabs = [label("overview", "Overview"), label("plan", "Plan")];
   return `${palette.muted(`${configuredTitle ?? "Details"}:`)} ${tabs.join(palette.muted(" - "))}`;
 }
 
-function joinColumns(columns: readonly string[][], widths: readonly number[], height: number): string[] {
-  return Array.from({ length: height }, (_, row) => columns.map((column, index) =>
-    padLine(column[row] ?? "", widths[index]!),
-  ).join(""));
+function joinColumns(
+  columns: readonly string[][],
+  widths: readonly number[],
+  height: number,
+): string[] {
+  return Array.from({ length: height }, (_, row) =>
+    columns.map((column, index) => padLine(column[row] ?? "", widths[index]!)).join(""),
+  );
 }
 
 function resizeScreen(width: number, height: number, palette: KoniPalette): string[] {
@@ -1887,7 +2733,8 @@ function resizeScreen(width: number, height: number, palette: KoniPalette): stri
   copy.forEach((line, index) => {
     const clipped = truncateToWidth(line, inner, "…");
     const left = Math.max(0, Math.floor((inner - visibleWidth(clipped)) / 2));
-    body[start + index] = `${" ".repeat(left)}${clipped}${" ".repeat(Math.max(0, inner - left - visibleWidth(clipped)))}`;
+    body[start + index] =
+      `${" ".repeat(left)}${clipped}${" ".repeat(Math.max(0, inner - left - visibleWidth(clipped)))}`;
   });
   if (height === 1) return [truncateToWidth("resize terminal", width, "")];
   const title = truncateToWidth(" resize terminal ", inner, "");
@@ -1907,6 +2754,37 @@ function fitRows(lines: readonly string[], width: number, rows: number): string[
 function padLine(line: string, width: number): string {
   const clipped = truncateToWidth(line, width, "", true);
   return `${clipped}${" ".repeat(Math.max(0, width - visibleWidth(clipped)))}`;
+}
+
+/** Right-aligns `right` on the same line, truncating `left` first when space runs out. */
+function overlayRight(left: string, right: string, width: number): string {
+  const safeWidth = Math.max(1, width);
+  if (visibleWidth(right) === 0) return truncateToWidth(left, safeWidth, "…", true);
+  const rightWidth = visibleWidth(right);
+  if (rightWidth + 1 >= safeWidth) return truncateToWidth(right, safeWidth, "…", true);
+  const clippedLeft = truncateToWidth(left, safeWidth - rightWidth - 1, "…", true);
+  return `${clippedLeft}${" ".repeat(Math.max(1, safeWidth - visibleWidth(clippedLeft) - rightWidth))}${right}`;
+}
+
+function stageTone(phase: string): KoniChipTone {
+  switch (phase) {
+    case "blocked":
+    case "failed":
+      return "error";
+    case "paused":
+    case "pausing":
+      return "muted";
+    case "awaiting_approval":
+      return "warning";
+    case "merge_ready":
+    case "merging":
+    case "completed":
+      return "success";
+    case "executing":
+      return "accent";
+    default:
+      return "info";
+  }
 }
 
 function framedLine(value: string, width: number, palette: KoniPalette): string {
@@ -1942,17 +2820,27 @@ function centeredButton(label: string, selected: boolean, palette: KoniPalette):
 }
 
 function centerButtons(
-  buttons: readonly { label: string; selected: boolean; tone: "normal" | "success" | "danger" | "disabled" }[],
+  buttons: readonly {
+    label: string;
+    selected: boolean;
+    tone: "normal" | "success" | "danger" | "disabled";
+  }[],
   palette: KoniPalette,
 ): string {
-  const rendered = buttons.map((button) => {
-    const body = `  ${button.label}  `;
-    const toned = button.tone === "danger" ? palette.error(body)
-      : button.tone === "success" ? palette.success(body)
-        : button.tone === "disabled" ? palette.dim(body)
-          : palette.text(body);
-    return button.selected ? palette.selected(toned) : palette.border(`[${toned}]`);
-  }).join("  ");
+  const rendered = buttons
+    .map((button) => {
+      const body = `  ${button.label}  `;
+      const toned =
+        button.tone === "danger"
+          ? palette.error(body)
+          : button.tone === "success"
+            ? palette.success(body)
+            : button.tone === "disabled"
+              ? palette.dim(body)
+              : palette.text(body);
+      return button.selected ? palette.selected(toned) : palette.border(`[${toned}]`);
+    })
+    .join("  ");
   return `${" ".repeat(Math.max(0, 20 - Math.floor(visibleWidth(rendered) / 2)))}${rendered}`;
 }
 
@@ -1976,7 +2864,8 @@ function selectorWindow(
   let start = Math.max(0, Math.min(selected, labels.length - 1));
   let end = start + 1;
   const render = (from: number, to: number): string => {
-    const body = labels.slice(from, to)
+    const body = labels
+      .slice(from, to)
       .map((label, offset) => selectorBadge(label, from + offset === selected, palette))
       .join(" ");
     return `${from > 0 ? `${palette.muted("…")} ` : ""}${body}${to < labels.length ? ` ${palette.muted("…")}` : ""}`;
@@ -2038,7 +2927,12 @@ function inputBadge(
   return selected ? palette.bold(`${palette.accent("›")} ${body}`) : `  ${body}`;
 }
 
-function selectorLine(label: string, value: string, selected: boolean, palette: KoniPalette): string {
+function selectorLine(
+  label: string,
+  value: string,
+  selected: boolean,
+  palette: KoniPalette,
+): string {
   return `${selected ? palette.accent("›") : " "} ${label}: ${inputBadge(value, selected, palette)}`;
 }
 
@@ -2053,10 +2947,13 @@ function newRunAdditionalIntakeLines(
   palette: KoniPalette,
 ): string[] {
   const lines: string[] = [];
-  for (const field of runType.intake.filter((candidate) => candidate.id !== runType.objectiveFieldId)) {
+  for (const field of runType.intake.filter(
+    (candidate) => candidate.id !== runType.objectiveFieldId,
+  )) {
     const focused = modal.focus === `intake:${field.id}`;
     lines.push("", palette.muted(`${field.label}${field.required ? " *" : ""}`));
-    if (field.description.length > 0) lines.push(...wrapStyled(field.description, width, palette.dim));
+    if (field.description.length > 0)
+      lines.push(...wrapStyled(field.description, width, palette.dim));
     lines.push(...controlIntakeValueLines(modal, field, width, palette, focused));
   }
   return lines;
@@ -2071,18 +2968,48 @@ function controlIntakeValueLines(
 ): string[] {
   if (field.kind === "boolean") {
     const current = modal.intake[field.id] === true;
-    return [[false, true].map((value) => selectorBadge(value ? "yes" : "no", current === value || focused && current === value, palette)).join("  ")];
+    return [
+      [false, true]
+        .map((value) =>
+          selectorBadge(
+            value ? "yes" : "no",
+            current === value || (focused && current === value),
+            palette,
+          ),
+        )
+        .join("  "),
+    ];
   }
   if (field.kind === "choice" || field.kind === "multi_choice") {
-    const selected = field.kind === "choice"
-      ? new Set(typeof modal.intake[field.id] === "string" ? [modal.intake[field.id] as string] : [])
-      : new Set(Array.isArray(modal.intake[field.id]) ? (modal.intake[field.id] as readonly unknown[]).filter((item): item is string => typeof item === "string") : []);
+    const selected =
+      field.kind === "choice"
+        ? new Set(
+            typeof modal.intake[field.id] === "string" ? [modal.intake[field.id] as string] : [],
+          )
+        : new Set(
+            Array.isArray(modal.intake[field.id])
+              ? (modal.intake[field.id] as readonly unknown[]).filter(
+                  (item): item is string => typeof item === "string",
+                )
+              : [],
+          );
     const index = modal.intakeOptionIndexes[field.id] ?? 0;
     const result: string[] = [];
     field.options.forEach((option, optionIndex) => {
-      const label = `${field.kind === "multi_choice" ? selected.has(option.value) ? "✓ " : "□ " : ""}${option.label}`;
-      result.push(selectorBadge(label, selected.has(option.value) || focused && index === optionIndex, palette));
-      if (option.description !== undefined) result.push(...wrapStyled(option.description, Math.max(1, width - 2), palette.dim).map((line) => `  ${line}`));
+      const label = `${field.kind === "multi_choice" ? (selected.has(option.value) ? "✓ " : "□ ") : ""}${option.label}`;
+      result.push(
+        selectorBadge(
+          label,
+          selected.has(option.value) || (focused && index === optionIndex),
+          palette,
+        ),
+      );
+      if (option.description !== undefined)
+        result.push(
+          ...wrapStyled(option.description, Math.max(1, width - 2), palette.dim).map(
+            (line) => `  ${line}`,
+          ),
+        );
     });
     if (field.kind === "multi_choice") result.push(palette.dim("←/→ choose · Enter toggles"));
     return result;
@@ -2091,22 +3018,39 @@ function controlIntakeValueLines(
   const cursor = modal.intakeCursors[field.id] ?? 0;
   const display = focused
     ? `${Array.from(source).slice(0, cursor).join("")}▌${Array.from(source).slice(cursor).join("")}`
-    : source.length === 0 ? "Enter a value…" : source;
+    : source.length === 0
+      ? "Enter a value…"
+      : source;
   const wrapped = wrapTextWithAnsi(display, Math.max(1, width - 1));
   const limit = field.kind === "text" || field.kind === "json" ? 8 : 2;
-  return wrapped.slice(0, limit).map((line) => focused ? palette.selected(` ${line}`) : source.length === 0 ? palette.dim(` ${line}`) : ` ${line}`);
+  return wrapped
+    .slice(0, limit)
+    .map((line) =>
+      focused
+        ? palette.selected(` ${line}`)
+        : source.length === 0
+          ? palette.dim(` ${line}`)
+          : ` ${line}`,
+    );
 }
 
 function questionBadge(value: string, selected: boolean, palette: KoniPalette): string {
   const label = value === "none" ? "no" : value;
-  const color = (text: string): string => value === "none" ? palette.muted(text)
-    : value === "some" ? palette.info(text) : palette.warning(text);
+  const color = (text: string): string =>
+    value === "none"
+      ? palette.muted(text)
+      : value === "some"
+        ? palette.info(text)
+        : palette.warning(text);
   const badge = color(` ${label} `);
   return selected ? palette.selected(badge) : palette.border(`[${badge}]`);
 }
 
 /** Per-domain icon + tint so each config lane reads as its own semantic group. */
-function configDomainStyle(id: string, palette: KoniPalette): { icon: string; tint: (value: string) => string } {
+function configDomainStyle(
+  id: string,
+  palette: KoniPalette,
+): { icon: string; tint: (value: string) => string } {
   const n = id.toLocaleLowerCase("en-US");
   if (n.includes("run")) return { icon: "▶", tint: palette.accent };
   if (n.includes("agent")) return { icon: "●", tint: palette.error };
@@ -2127,19 +3071,28 @@ function configDomainRow(id: string, title: string, active: boolean, palette: Ko
 }
 
 /** Value-chip tint keyed to the field kind (mirrors the Rust scalar palette). */
-function configScalarTint(kind: string, palette: KoniPalette): (value: string, palette: KoniPalette) => string {
+function configScalarTint(
+  kind: string,
+  palette: KoniPalette,
+): (value: string, palette: KoniPalette) => string {
   if (kind === "boolean") return (value) => palette.warning(value);
   if (kind === "integer") return (value) => palette.info(value);
-  if (kind === "model" || kind === "thinking" || kind === "select") return (value) => palette.accent(value);
+  if (kind === "model" || kind === "thinking" || kind === "select")
+    return (value) => palette.accent(value);
   return (value) => palette.success(value);
 }
 
 function configFieldDirty(field: ConfigFieldDefinition, modal: ConfigureModalState): boolean {
   if (!(field.key in modal.draft)) return false;
-  return JSON.stringify(modal.draft[field.key]) !== JSON.stringify(modal.snapshot.values[field.key]);
+  return (
+    JSON.stringify(modal.draft[field.key]) !== JSON.stringify(modal.snapshot.values[field.key])
+  );
 }
 
-function configResourceDirty(fields: readonly ConfigFieldDefinition[], modal: ConfigureModalState): boolean {
+function configResourceDirty(
+  fields: readonly ConfigFieldDefinition[],
+  modal: ConfigureModalState,
+): boolean {
   return fields.some((field) => configFieldDirty(field, modal));
 }
 
@@ -2153,7 +3106,8 @@ function statusText(status: string, palette: KoniPalette): string {
   const normalized = status.toLowerCase();
   if (normalized.includes("fail") || normalized.includes("block")) return palette.error(status);
   if (normalized.includes("complete")) return palette.success(status);
-  if (normalized.includes("run") || normalized.includes("active")) return palette.accent(`⚙ ${status}`);
+  if (normalized.includes("run") || normalized.includes("active"))
+    return palette.accent(`⚙ ${status}`);
   return palette.muted(status);
 }
 
@@ -2166,14 +3120,19 @@ function transcriptHeading(kind: string, title: string, palette: KoniPalette): s
   return palette.warning(title);
 }
 
-function recentActivityTitle(duration: string | undefined, width: number, configuredTitle = "Recent Activity"): string {
+function recentActivityTitle(
+  duration: string | undefined,
+  width: number,
+  configuredTitle = "Activity",
+): string {
   if (duration === undefined) return configuredTitle;
   const full = `${configuredTitle} · ${duration} active`;
   if (visibleWidth(full) <= width) return full;
-  const identity = configuredTitle === "Recent Activity" ? "Activity" : configuredTitle;
-  const compact = `${identity} · ${duration.replace(/\s+/gu, "")}`;
+  const compact = `${configuredTitle} · ${duration.replace(/\s+/gu, "")}`;
   if (visibleWidth(compact) <= width) return compact;
-  return visibleWidth(identity) <= width ? identity : truncateToWidth(identity, width, "…");
+  return visibleWidth(configuredTitle) <= width
+    ? configuredTitle
+    : truncateToWidth(configuredTitle, width, "…");
 }
 
 /** Select only complete control-copy groups; never leave a clipped half-label at a panel edge. */
@@ -2193,41 +3152,33 @@ function formatOperatorTimestamp(value: string): string {
   });
 }
 
-/** Compact operator-facing age ("34m", "3h", "2d") for run rows; falls back to the raw value. */
-function relativeAge(createdAt: string): string {
-  const parsed = Date.parse(createdAt);
-  if (Number.isNaN(parsed)) return createdAt;
-  const elapsedMs = Math.max(0, Date.now() - parsed);
-  const minutes = Math.floor(elapsedMs / 60_000);
-  if (minutes < 1) return "now";
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 48) return `${hours}h`;
-  return `${Math.floor(hours / 24)}d`;
-}
-
 function footerHelp(width: number): string {
   const candidates = [
-    "[n] new  [a] actions  [c] configure  [v] review  [Tab] panels  [↑↓/jk] move  [←→/[]] tabs  [Space] pause  [m] merge  [d] delete  [h] help  [q] close",
-    "[n] new  [a] actions  [c] config  [v] review  [Tab] panels  [↑↓/jk] move  [Space] pause  [h] help  [q] close",
-    "[n] new  [a] actions  [c] config  [Tab] panels  [↑↓] move  [h] help  [q] close",
+    "[n] new  [a] actions  [c] configure  [v] review  [Tab] panels  [↑↓/jk] move  [Enter] select  [←→/[]] tabs  [Space] pause  [m] merge  [d] delete  [h] help  [Esc/q] close",
+    "[n] new  [a] actions  [c] config  [v] review  [Tab] panels  [↑↓/jk] move  [Enter] select  [Space] pause  [h] help  [Esc/q] close",
+    "[n] new  [a] actions  [c] config  [Tab] panels  [↑↓] move  [h] help  [Esc/q] close",
   ];
-  return candidates.find((candidate) => visibleWidth(candidate) <= width) ?? "[n] new  [a] actions  [c] config  [h] help  [q] close";
+  return (
+    candidates.find((candidate) => visibleWidth(candidate) <= width) ??
+    "[n] new  [a] actions  [c] config  [h] help  [q] close"
+  );
 }
 
 function modalEditingText(snapshot: ControlCenterControllerSnapshot): boolean {
   const modal = snapshot.modal;
-  return modal?.kind === "new_run" && modal.focus === "objective"
-    || modal?.kind === "plan_review" && modal.focus === "steering"
-    || modal?.kind === "proposal_review" && modal.focus === "message"
-    || modal?.kind === "edit_scalar"
-    || modal?.kind === "action_form" && modal.editing
-    || modal?.kind === "configure" && (modal.editing || modal.resourceOperation?.focus === "name")
-    || modal?.kind === "configure_documents" && modal.editing
-    || modal?.kind === "config_document_create" && modal.focus === "title"
-    || modal?.kind === "config_document_rename" && modal.focus === "title"
-    || modal?.kind === "config_run_type_wizard" &&
-      (modal.focus === "title" || modal.focus === "slug" || modal.focus === "description");
+  return (
+    (modal?.kind === "new_run" && modal.focus === "objective") ||
+    (modal?.kind === "plan_review" && modal.focus === "steering") ||
+    (modal?.kind === "proposal_review" && modal.focus === "message") ||
+    modal?.kind === "edit_scalar" ||
+    (modal?.kind === "action_form" && modal.editing) ||
+    (modal?.kind === "configure" && (modal.editing || modal.resourceOperation?.focus === "name")) ||
+    (modal?.kind === "configure_documents" && modal.editing) ||
+    (modal?.kind === "config_document_create" && modal.focus === "title") ||
+    (modal?.kind === "config_document_rename" && modal.focus === "title") ||
+    (modal?.kind === "config_run_type_wizard" &&
+      (modal.focus === "title" || modal.focus === "slug" || modal.focus === "description"))
+  );
 }
 
 function insertCaret(value: string, offset: number): string {
@@ -2275,7 +3226,9 @@ function configuredModelOption(
 ): ControlModelOption | undefined {
   const split = value.indexOf("/");
   if (split < 0) return undefined;
-  return models.find((model) => model.provider === value.slice(0, split) && model.id === value.slice(split + 1));
+  return models.find(
+    (model) => model.provider === value.slice(0, split) && model.id === value.slice(split + 1),
+  );
 }
 
 function conflictDocumentLines(
@@ -2286,11 +3239,9 @@ function conflictDocumentLines(
 ): string[] {
   if (source === null) return [palette.muted(`(${absentLabel})`)];
   const lines = source.replace(/\r\n?/gu, "\n").split("\n");
-  const rendered = lines.flatMap((line) => wrapStyled(
-    line.length === 0 ? " " : line,
-    width,
-    palette.text,
-  ));
+  const rendered = lines.flatMap((line) =>
+    wrapStyled(line.length === 0 ? " " : line, width, palette.text),
+  );
   return rendered.length === 0 ? [palette.muted("(empty document)")] : rendered;
 }
 
@@ -2324,8 +3275,10 @@ function hasAnimatedWork(snapshot: ControlCenterControllerSnapshot): boolean {
 function statusStyle(marker: string, status: string, palette: KoniPalette): string {
   const normalized = status.toLowerCase();
   if (normalized.includes("fail") || normalized.includes("block")) return palette.error(marker);
-  if (normalized.includes("complete") || normalized.includes("ready")) return palette.success(marker);
-  if (normalized.includes("approval") || normalized.includes("pause")) return palette.warning(marker);
+  if (normalized.includes("complete") || normalized.includes("ready"))
+    return palette.success(marker);
+  if (normalized.includes("approval") || normalized.includes("pause"))
+    return palette.warning(marker);
   if (marker === "⚙") return palette.accent(marker);
   return palette.muted(marker);
 }
@@ -2338,18 +3291,36 @@ function modelStyle(model: string, palette: KoniPalette): string {
 
 function thinkingStyle(level: string, palette: KoniPalette): string {
   switch (level.toLowerCase()) {
-    case "off": return palette.muted(level);
-    case "minimal": return palette.dim(level);
-    case "low": return palette.success(level);
-    case "medium": return palette.info(level);
-    case "high": return palette.accent(level);
-    case "xhigh": return palette.warning(level);
-    case "max": return palette.error(level);
-    default: return palette.text(level);
+    case "off":
+      return palette.muted(level);
+    case "minimal":
+      return palette.dim(level);
+    case "low":
+      return palette.success(level);
+    case "medium":
+      return palette.info(level);
+    case "high":
+      return palette.accent(level);
+    case "xhigh":
+      return palette.warning(level);
+    case "max":
+      return palette.error(level);
+    default:
+      return palette.text(level);
   }
 }
 
-function activityStyle(kind: string, message: string, palette: KoniPalette): string {
+function activityStyle(
+  kind: string,
+  message: string,
+  palette: KoniPalette,
+  tone?: "info" | "success" | "warning" | "error",
+): string {
+  // An explicit effect tone recorded at the emit site wins; kind is the fallback heuristic.
+  if (tone === "success") return palette.success(message);
+  if (tone === "warning") return palette.warning(message);
+  if (tone === "error") return palette.error(message);
+  if (tone === "info") return palette.info(message);
   if (kind === "graph_added") return palette.success(message);
   if (kind === "graph_modified") return palette.warning(message);
   if (kind === "graph_deleted") return palette.error(message);
@@ -2397,6 +3368,14 @@ interface NestedGraphRow {
 interface ExpandedGraphRow {
   structural: string;
   nodeRow?: NestedGraphRow;
+  /** Cursor-focused title overlay: pre-truncated text painted in place of the short label. */
+  focusTitle?: { start: number; end: number; text: string };
+}
+
+export interface GraphViewResult {
+  lines: string[];
+  /** Display line index of each node row, in outline order (parallel to the node cursor). */
+  nodeLines: number[];
 }
 
 /**
@@ -2412,13 +3391,29 @@ export function renderGraphLines(
   palette: KoniPalette,
   options: GraphRenderOptions = {},
 ): string[] {
-  if (nodes.length === 0 || width < 3) return [];
+  return renderGraphView(nodes, edges, width, palette, options).lines;
+}
+
+/** Full graph projection: rendered lines plus the node-cursor line map. */
+export function renderGraphView(
+  nodes: readonly GraphNodeView[],
+  edges: readonly { source: string; target: string; relation?: string }[],
+  width: number,
+  palette: KoniPalette,
+  options: GraphRenderOptions & { focusedIndex?: number } = {},
+): GraphViewResult {
+  if (nodes.length === 0 || width < 3) return { lines: [], nodeLines: [] };
   const compareNodes = (left: GraphNodeView, right: GraphNodeView): number =>
     graphNodeCompare(left, right, options.hierarchy);
   const ordered = [...nodes].sort(compareNodes);
   const byId = new Map(ordered.map((node) => [node.id, node]));
   const normalized = normalizeGraphEdges(edges, byId, options.reverseDisplayEdges, compareNodes);
-  const primaryByChild = choosePrimaryGraphEdges(normalized, byId, compareNodes, options.primaryParentPreferences);
+  const primaryByChild = choosePrimaryGraphEdges(
+    normalized,
+    byId,
+    compareNodes,
+    options.primaryParentPreferences,
+  );
   const primaryKeys = new Set([...primaryByChild.values()].map(graphEdgeKey));
   const secondary = normalized.filter((edge) => !primaryKeys.has(graphEdgeKey(edge)));
   const children = new Map<string, GraphDisplayEdge[]>();
@@ -2428,7 +3423,11 @@ export function renderGraphLines(
     children.set(edge.source, list);
   }
   for (const list of children.values()) {
-    list.sort((left, right) => compareNodes(byId.get(left.target)!, byId.get(right.target)!) || left.relation.localeCompare(right.relation));
+    list.sort(
+      (left, right) =>
+        compareNodes(byId.get(left.target)!, byId.get(right.target)!) ||
+        left.relation.localeCompare(right.relation),
+    );
   }
 
   const rows: NestedGraphRow[] = [];
@@ -2444,17 +3443,29 @@ export function renderGraphLines(
     emitted.add(node.id);
     const prefix = compactGraphPrefix(rawPrefix, width);
     const branch = isRoot ? "" : isLast ? "└─" : "├─";
-    const edgeBranch = isRoot ? "" : `${branch}<${formatGraphRelation(incoming?.relation ?? "related")}>─`;
+    const edgeBranch = isRoot
+      ? ""
+      : `${branch}<${formatGraphRelation(incoming?.relation ?? "related")}>─`;
     const badge = graphBadge(node.type, width);
     const structural = `${prefix}${edgeBranch}${badge}`;
     const markerStart = visibleWidth(`${prefix}${edgeBranch}`);
     const markerEnd = markerStart + visibleWidth(badge);
-    rows.push({ node, structural, prefix, isRoot, isLast, markerStart, markerEnd, titleStart: markerEnd + 1 });
+    rows.push({
+      node,
+      structural,
+      prefix,
+      isRoot,
+      isLast,
+      markerStart,
+      markerEnd,
+      titleStart: markerEnd + 1,
+    });
     const outgoing = children.get(node.id) ?? [];
     const childPrefix = isRoot ? "" : `${prefix}${isLast ? "   " : "│  "}`;
     outgoing.forEach((edge, index) => {
       const child = byId.get(edge.target);
-      if (child !== undefined) append(child, childPrefix, index + 1 === outgoing.length, false, edge);
+      if (child !== undefined)
+        append(child, childPrefix, index + 1 === outgoing.length, false, edge);
     });
   };
 
@@ -2478,11 +3489,40 @@ export function renderGraphLines(
   });
 
   const expanded: ExpandedGraphRow[] = [];
+  const nodeLines: number[] = [];
   const endpointRows = new Map<string, number>();
   const endpointStarts = new Map<string, number>();
   rows.forEach((row, rowIndex) => {
-    expanded.push({ structural: row.structural, nodeRow: row });
-    const rowEndpoints = (endpoints.get(rowIndex) ?? []).sort((left, right) => left.edgeIndex - right.edgeIndex || Number(right.source) - Number(left.source));
+    nodeLines.push(expanded.length);
+    if (options.focusedIndex === rowIndex && options.showTitles !== false) {
+      // The cursor row shows the complete title: the first segment replaces the short label
+      // and up to two continuation rows carry the rest between the tree rails.
+      const available = Math.max(1, width - row.titleStart);
+      const segments = wrapTextWithAnsi(row.node.fullTitle, available).slice(0, 3);
+      const overlay = (text: string): NonNullable<ExpandedGraphRow["focusTitle"]> => {
+        const clipped = truncateToWidth(text, available, "…");
+        return {
+          start: row.titleStart,
+          end: row.titleStart + visibleWidth(clipped),
+          text: clipped,
+        };
+      };
+      expanded.push({
+        structural: row.structural,
+        nodeRow: row,
+        focusTitle: overlay(segments[0] ?? row.node.fullTitle),
+      });
+      const continuationPrefix = row.isRoot ? "" : `${row.prefix}${row.isLast ? "   " : "│  "}`;
+      for (const segment of segments.slice(1)) {
+        expanded.push({ structural: continuationPrefix, focusTitle: overlay(segment) });
+      }
+    } else {
+      expanded.push({ structural: row.structural, nodeRow: row });
+    }
+    const rowEndpoints = (endpoints.get(rowIndex) ?? []).sort(
+      (left, right) =>
+        left.edgeIndex - right.edgeIndex || Number(right.source) - Number(left.source),
+    );
     for (const endpoint of rowEndpoints) {
       const edge = secondary[endpoint.edgeIndex]!;
       const childPrefix = row.isRoot ? "" : `${row.prefix}${row.isLast ? "   " : "│  "}`;
@@ -2495,7 +3535,9 @@ export function renderGraphLines(
     }
   });
 
-  const canvas = Array.from({ length: Math.max(1, expanded.length) }, () => Array.from({ length: width }, () => " "));
+  const canvas = Array.from({ length: Math.max(1, expanded.length) }, () =>
+    Array.from({ length: width }, () => " "),
+  );
   const usedLanes: number[] = [];
   secondary.forEach((edge, edgeIndex) => {
     const sourceY = endpointRows.get(`${edgeIndex}:source`);
@@ -2505,9 +3547,18 @@ export function renderGraphLines(
     const targetStart = endpointStarts.get(`${edgeIndex}:target`) ?? 0;
     const sourceNodeRow = rows[rowByNode.get(edge.source)!]!;
     const targetNodeRow = rows[rowByNode.get(edge.target)!]!;
-    const base = Math.min(width - 1, Math.max(sourceStart, targetStart, visibleWidth(sourceNodeRow.structural), visibleWidth(targetNodeRow.structural)) + 2);
+    const base = Math.min(
+      width - 1,
+      Math.max(
+        sourceStart,
+        targetStart,
+        visibleWidth(sourceNodeRow.structural),
+        visibleWidth(targetNodeRow.structural),
+      ) + 2,
+    );
     let lane = base;
-    while (lane < width - 1 && usedLanes.some((candidate) => Math.abs(candidate - lane) < 2)) lane += 1;
+    while (lane < width - 1 && usedLanes.some((candidate) => Math.abs(candidate - lane) < 2))
+      lane += 1;
     usedLanes.push(lane);
     drawGraphHorizontal(canvas, sourceY, sourceStart, lane);
     drawGraphHorizontal(canvas, targetY, targetStart, lane);
@@ -2516,32 +3567,53 @@ export function renderGraphLines(
 
   expanded.forEach((row, y) => writeGraphText(canvas[y]!, 0, row.structural));
   expanded.forEach((row, y) => {
-    if (row.nodeRow === undefined) return;
-    if (options.showTitles !== false) {
-      const available = Math.max(0, width - row.nodeRow.titleStart);
-      writeGraphText(canvas[y]!, row.nodeRow.titleStart, truncateToWidth(row.nodeRow.node.label, available, "…"));
+    if (options.showTitles === false) return;
+    if (row.focusTitle !== undefined) {
+      writeGraphText(canvas[y]!, row.focusTitle.start, row.focusTitle.text);
+      return;
     }
+    if (row.nodeRow === undefined) return;
+    const available = Math.max(0, width - row.nodeRow.titleStart);
+    writeGraphText(
+      canvas[y]!,
+      row.nodeRow.titleStart,
+      truncateToWidth(row.nodeRow.node.label, available, "…"),
+    );
   });
 
-  return canvas.map((cells, y) => {
+  const lines = canvas.map((cells, y) => {
     const nodeRow = expanded[y]?.nodeRow;
+    const focus = expanded[y]?.focusTitle;
     let output = "";
-    let mode: "edge" | "marker" | "title" | "muted-title" = "edge";
+    let mode: "edge" | "marker" | "title" | "muted-title" | "focus-title" = "edge";
     let segment = "";
     const flush = (): void => {
       if (segment.length === 0) return;
-      output += mode === "marker" ? palette.bold(graphNodeStyle(nodeRow?.node.type ?? "", segment, palette))
-        : mode === "title" ? palette.muted(segment)
-          : mode === "muted-title" ? palette.dim(segment)
-            : palette.border(segment);
+      output +=
+        mode === "marker"
+          ? palette.bold(graphNodeStyle(nodeRow?.node.type ?? "", segment, palette))
+          : mode === "title"
+            ? palette.muted(segment)
+            : mode === "muted-title"
+              ? palette.dim(segment)
+              : mode === "focus-title"
+                ? palette.selected(segment)
+                : palette.border(segment);
       segment = "";
     };
     cells.forEach((cell, x) => {
-      const nextMode = nodeRow === undefined || x < nodeRow.markerStart ? "edge"
-        : x < nodeRow.markerEnd ? "marker"
-          : x >= nodeRow.titleStart && cell.trim().length > 0
-            ? nodeRow.node.muted ? "muted-title" : "title"
-            : "edge";
+      const nextMode =
+        focus !== undefined && x >= focus.start && x < focus.end
+          ? "focus-title"
+          : nodeRow === undefined || x < nodeRow.markerStart
+            ? "edge"
+            : x < nodeRow.markerEnd
+              ? "marker"
+              : x >= nodeRow.titleStart && cell.trim().length > 0
+                ? nodeRow.node.muted
+                  ? "muted-title"
+                  : "title"
+                : "edge";
       if (nextMode !== mode) {
         flush();
         mode = nextMode;
@@ -2551,6 +3623,7 @@ export function renderGraphLines(
     flush();
     return truncateToWidth(output.trimEnd(), width, "…");
   });
+  return { lines, nodeLines };
 }
 
 function drawGraphHorizontal(canvas: string[][], y: number, from: number, to: number): void {
@@ -2622,9 +3695,12 @@ function normalizeGraphEdges(
       continue;
     }
     const [leftId, rightId] = [pairEdges[0]!.source, pairEdges[0]!.target].sort((left, right) =>
-      compareNodes(byId.get(left)!, byId.get(right)!));
+      compareNodes(byId.get(left)!, byId.get(right)!),
+    );
     const forward = pairEdges.filter((edge) => edge.source === leftId && edge.target === rightId);
-    const labels = [...new Set((forward.length > 0 ? forward : pairEdges).map((edge) => edge.relation))].sort();
+    const labels = [
+      ...new Set((forward.length > 0 ? forward : pairEdges).map((edge) => edge.relation)),
+    ].sort();
     output.push({ source: leftId!, target: rightId!, relation: labels.join("/") || "related" });
   }
   return output.sort((left, right) => graphEdgeKey(left).localeCompare(graphEdgeKey(right)));
@@ -2637,11 +3713,14 @@ function choosePrimaryGraphEdges(
   primaryParentPreferences: Readonly<Record<string, readonly string[]>> | undefined,
 ): Map<string, GraphDisplayEdge> {
   const output = new Map<string, GraphDisplayEdge>();
-  const sorted = [...edges].sort((left, right) =>
-    compareNodes(byId.get(left.target)!, byId.get(right.target)!) ||
-    parentPreferenceRank(left, byId, primaryParentPreferences) - parentPreferenceRank(right, byId, primaryParentPreferences) ||
-    compareNodes(byId.get(left.source)!, byId.get(right.source)!) ||
-    left.relation.localeCompare(right.relation));
+  const sorted = [...edges].sort(
+    (left, right) =>
+      compareNodes(byId.get(left.target)!, byId.get(right.target)!) ||
+      parentPreferenceRank(left, byId, primaryParentPreferences) -
+        parentPreferenceRank(right, byId, primaryParentPreferences) ||
+      compareNodes(byId.get(left.source)!, byId.get(right.source)!) ||
+      left.relation.localeCompare(right.relation),
+  );
   for (const edge of sorted) {
     if (output.has(edge.target)) continue;
     let ancestor: string | undefined = edge.source;
@@ -2671,19 +3750,46 @@ function parentPreferenceRank(
   return index < 0 ? Number.MAX_SAFE_INTEGER : index;
 }
 
-function graphNodeCompare(left: GraphNodeView, right: GraphNodeView, hierarchy?: readonly string[]): number {
-  return graphTypeRank(left.type, hierarchy) - graphTypeRank(right.type, hierarchy) ||
-    left.type.localeCompare(right.type) || left.label.localeCompare(right.label) || left.id.localeCompare(right.id);
+function graphNodeCompare(
+  left: GraphNodeView,
+  right: GraphNodeView,
+  hierarchy?: readonly string[],
+): number {
+  return (
+    graphTypeRank(left.type, hierarchy) - graphTypeRank(right.type, hierarchy) ||
+    left.type.localeCompare(right.type) ||
+    left.label.localeCompare(right.label) ||
+    left.id.localeCompare(right.id)
+  );
 }
 
 function graphTypeRank(type: string, configured?: readonly string[]): number {
   const normalized = type.toLocaleLowerCase("en-US");
   const order = configured ?? [
-    "goal", "objective", "problem", "requirement", "architecture", "decision", "change",
-    "hypothesis", "claim", "literature", "method", "experiment", "ablation", "implementation",
-    "metric", "evidence", "result", "verification", "gate", "report",
+    "goal",
+    "objective",
+    "problem",
+    "requirement",
+    "architecture",
+    "decision",
+    "change",
+    "hypothesis",
+    "claim",
+    "literature",
+    "method",
+    "experiment",
+    "ablation",
+    "implementation",
+    "metric",
+    "evidence",
+    "result",
+    "verification",
+    "gate",
+    "report",
   ];
-  const index = order.findIndex((candidate) => normalized === candidate || normalized.includes(candidate));
+  const index = order.findIndex(
+    (candidate) => normalized === candidate || normalized.includes(candidate),
+  );
   return index < 0 ? order.length : index;
 }
 
@@ -2709,28 +3815,60 @@ function compactGraphPrefix(prefix: string, width: number): string {
 }
 
 function graphBadge(type: string, width: number): string {
-  if (width >= 48) return `[${truncateToWidth(type.replace(/_/gu, "-"), Math.max(1, width - 2), "…")}]`;
+  if (width >= 48)
+    return `[${truncateToWidth(type.replace(/_/gu, "-"), Math.max(1, width - 2), "…")}]`;
   const known: Readonly<Record<string, string | undefined>> = {
-    hypothesis: "hy", literature: "li", paper: "pa", claim: "cl", experiment: "ex",
-    method: "mt", metric: "me", prerequisite: "pr", decision: "de", ablation: "ab",
-    asset: "as", gate: "gt", implementation: "im", run: "rn", evidence: "ev",
-    report: "rp", "change-request": "cr",
+    hypothesis: "hy",
+    literature: "li",
+    paper: "pa",
+    claim: "cl",
+    experiment: "ex",
+    method: "mt",
+    metric: "me",
+    prerequisite: "pr",
+    decision: "de",
+    ablation: "ab",
+    asset: "as",
+    gate: "gt",
+    implementation: "im",
+    run: "rn",
+    evidence: "ev",
+    report: "rp",
+    "change-request": "cr",
   };
   const normalized = type.toLocaleLowerCase("en-US").replace(/_/gu, "-");
-  const initials = normalized.split("-").map((part) => part[0] ?? "").join("").slice(0, 2);
-  const fallback = Array.from(normalized).filter((character) => /[\p{L}\p{N}]/u.test(character)).slice(0, 2).join("");
+  const initials = normalized
+    .split("-")
+    .map((part) => part[0] ?? "")
+    .join("")
+    .slice(0, 2);
+  const fallback = Array.from(normalized)
+    .filter((character) => /[\p{L}\p{N}]/u.test(character))
+    .slice(0, 2)
+    .join("");
   return `[${known[normalized] ?? initials.padEnd(2, fallback[1] ?? fallback[0] ?? "?")}]`;
 }
 
 function graphNodeStyle(type: string, value: string, palette: KoniPalette): string {
-  const styles = [palette.accent, palette.info, palette.success, palette.warning, palette.error] as const;
-  const hash = Array.from(type).reduce((total, character) => total + (character.codePointAt(0) ?? 0), 0);
+  const styles = [
+    palette.accent,
+    palette.info,
+    palette.success,
+    palette.warning,
+    palette.error,
+  ] as const;
+  const hash = Array.from(type).reduce(
+    (total, character) => total + (character.codePointAt(0) ?? 0),
+    0,
+  );
   return styles[hash % styles.length]!(value);
 }
 
 function graphGraphemes(value: string): string[] {
   if (Intl.Segmenter === undefined) return Array.from(value);
-  return [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(value)].map((entry) => entry.segment);
+  return [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(value)].map(
+    (entry) => entry.segment,
+  );
 }
 
 function overlayModal(base: readonly string[], modal: readonly string[], width: number): string[] {
@@ -2739,7 +3877,8 @@ function overlayModal(base: readonly string[], modal: readonly string[], width: 
   const left = Math.max(0, Math.floor((width - modalWidth) / 2));
   const top = Math.max(0, Math.floor((base.length - modal.length) / 2));
   modal.forEach((line, index) => {
-    output[top + index] = `${" ".repeat(left)}${truncateToWidth(line, modalWidth, "", true)}${" ".repeat(Math.max(0, width - left - modalWidth))}`;
+    output[top + index] =
+      `${" ".repeat(left)}${truncateToWidth(line, modalWidth, "", true)}${" ".repeat(Math.max(0, width - left - modalWidth))}`;
   });
   return output;
 }
@@ -2749,19 +3888,26 @@ function annotateOperateHitTargets(
   layout: OperateLayout,
   snapshot: ControlCenterControllerSnapshot,
 ): void {
-  const selectedRunIndex = Math.max(0, snapshot.view.runs.findIndex((run) => run.id === snapshot.selection.runId));
+  const selectedRunIndex = Math.max(
+    0,
+    snapshot.view.runs.findIndex((run) => run.id === snapshot.selection.runId),
+  );
   addTwoLineListTargets({
     frame,
     rect: layout.runs,
     ids: snapshot.view.runs.map((run) => `run:${run.id}`),
     selectedLine: selectedRunIndex * 2,
     scroll: snapshot.scroll.runs,
-    fixedFooter: true,
+    fixedFooter: false,
     leadingLines: 0,
   });
 
   const tickets = snapshot.view.selectedRun?.tickets ?? [];
-  const selectedTicketIndex = Math.max(0, tickets.findIndex((ticket) => ticket.id === snapshot.selection.ticketId));
+  const ticketCursorId = snapshot.cursor.ticketId ?? snapshot.selection.ticketId;
+  const selectedTicketIndex = Math.max(
+    0,
+    tickets.findIndex((ticket) => ticket.id === ticketCursorId),
+  );
   addTwoLineListTargets({
     frame,
     rect: layout.tickets,
@@ -2773,7 +3919,11 @@ function annotateOperateHitTargets(
   });
 
   const agents = snapshot.view.selectedRun?.agents ?? [];
-  const selectedAgentIndex = Math.max(0, agents.findIndex((agent) => agent.id === snapshot.selection.attemptId));
+  const agentCursorId = snapshot.cursor.attemptId ?? snapshot.selection.attemptId;
+  const selectedAgentIndex = Math.max(
+    0,
+    agents.findIndex((agent) => agent.id === agentCursorId),
+  );
   addTwoLineListTargets({
     frame,
     rect: layout.agents,
@@ -2790,7 +3940,7 @@ function annotateOperateControlHitTargets(
   layout: OperateLayout,
   snapshot: ControlCenterControllerSnapshot,
 ): void {
-  for (const tab of ["overview", "plan", "stages"] as const) {
+  for (const tab of ["overview", "plan"] as const) {
     frame.addTextHitTarget(`details-tab:${tab}`, titleCaseLabel(tab), layout.details);
   }
   frame.addTextHitTarget("ticket-tab:previous", "‹", layout.tickets);
@@ -2856,7 +4006,6 @@ function annotateConfigureDocumentHitTargets(
     frame.addTextHitTarget("config-doc:rename", "Rename", layout.draftBar);
     frame.addTextHitTarget("config-doc:delete", "Delete", layout.draftBar);
     frame.addTextHitTarget("config-doc:run-type", "Run type", layout.draftBar);
-    frame.addTextHitTarget("config-doc:migration", "Legacy migration", layout.draftBar);
     frame.addTextHitTarget("config-doc:guided", "Guided", layout.draftBar);
   }
 }
@@ -2884,38 +4033,59 @@ function annotateModalHitTargets(frame: CellGrid, snapshot: ControlCenterControl
     frame.addTextHitTarget("new-run:branch", "Target branch");
     frame.addTextHitTarget("new-run:parallel", "Max parallel agents");
     const selected = snapshot.runTypes.find((runType) => runType.id === modal.runTypeId);
-    frame.addTextHitTarget("new-run:start", selected?.startMode === "work" ? "Start Work" : "Start Planning");
+    frame.addTextHitTarget(
+      "new-run:start",
+      selected?.startMode === "work" ? "Start Work" : "Start Planning",
+    );
   } else if (modal.kind === "plan_review") {
     const sections = snapshot.view.selectedRun?.approval?.sections ?? [];
-    sections.forEach((section, index) => frame.addTextHitTarget(`plan:section:${index}`, section.title));
+    sections.forEach((section, index) =>
+      frame.addTextHitTarget(`plan:section:${index}`, section.title),
+    );
     frame.addTextHitTarget("plan:steering", "Steering instructions");
-    frame.addTextHitTarget("plan:action", modal.steering.trim().length > 0 ? "Revise plan" : "Approve run");
+    frame.addTextHitTarget(
+      "plan:action",
+      modal.steering.trim().length > 0 ? "Revise plan" : "Approve run",
+    );
   } else if (modal.kind === "proposal_review") {
     frame.addTextHitTarget("proposal:message", "Decision message (optional)");
     frame.addTextHitTarget("proposal:approve", "Approve proposal");
     frame.addTextHitTarget("proposal:reject", "Reject proposal");
     frame.addTextHitTarget(
       "proposal:submit",
-      modal.decision === "approval" ? "Record approval" : modal.decision === "rejection" ? "Record rejection" : "Choose a decision",
+      modal.decision === "approval"
+        ? "Record approval"
+        : modal.decision === "rejection"
+          ? "Record rejection"
+          : "Choose a decision",
     );
   } else if (modal.kind === "answer_question") {
-    const question = snapshot.view.selectedRun?.questions?.find((candidate) => candidate.id === modal.questionId);
-    question?.options.forEach((option, index) => frame.addTextHitTarget(`answer:option:${index}`, option.label));
+    const question = snapshot.view.selectedRun?.questions?.find(
+      (candidate) => candidate.id === modal.questionId,
+    );
+    question?.options.forEach((option, index) =>
+      frame.addTextHitTarget(`answer:option:${index}`, option.label),
+    );
     frame.addTextHitTarget("answer:option:none", "None of the above");
     frame.addTextHitTarget("answer:notes", "Notes (optional)");
     frame.addTextHitTarget("answer:submit", "Submit answer");
   } else if (modal.kind === "action_palette") {
-    modal.actions.forEach((action, index) => frame.addTextHitTarget(`action-palette:${index}`, action.title));
+    modal.actions.forEach((action, index) =>
+      frame.addTextHitTarget(`action-palette:${index}`, action.title),
+    );
   } else if (modal.kind === "action_form") {
     modal.action.form?.fields.forEach((field, index) => {
-      if (field.visibility !== "hidden") frame.addTextHitTarget(`action-field:${index}`, field.label);
+      if (field.visibility !== "hidden")
+        frame.addTextHitTarget(`action-field:${index}`, field.label);
     });
     if (modal.action.confirmation.required) {
       frame.addTextHitTarget("action-confirm", modal.action.confirmation.confirmLabel);
     }
     frame.addTextHitTarget("action-submit", modal.action.form?.submitLabel ?? modal.action.title);
   } else if (modal.kind === "config_document_create") {
-    modal.choices.forEach((choice, index) => frame.addTextHitTarget(`config-create:choice:${index}`, choice.label));
+    modal.choices.forEach((choice, index) =>
+      frame.addTextHitTarget(`config-create:choice:${index}`, choice.label),
+    );
     frame.addTextHitTarget("config-create:title", "Title");
     frame.addTextHitTarget("config-create:submit", "Create resource");
   } else if (modal.kind === "config_document_rename") {
@@ -2925,21 +4095,24 @@ function annotateModalHitTargets(frame: CellGrid, snapshot: ControlCenterControl
     frame.addTextHitTarget("config-delete:cancel", "Cancel");
     frame.addTextHitTarget("config-delete:confirm", "Delete resource");
   } else if (modal.kind === "config_run_type_wizard") {
-    modal.templates.templates.forEach((template, index) => frame.addTextHitTarget(`config-run-type:template:${index}`, template.title));
+    modal.templates.templates.forEach((template, index) =>
+      frame.addTextHitTarget(`config-run-type:template:${index}`, template.title),
+    );
     frame.addTextHitTarget("config-run-type:title", "Title");
     frame.addTextHitTarget("config-run-type:slug", "Slug");
     frame.addTextHitTarget("config-run-type:description", "Description");
     frame.addTextHitTarget("config-run-type:default", "Make this the project default");
     frame.addTextHitTarget("config-run-type:submit", "Create run type");
-  } else if (modal.kind === "config_legacy_migration") {
-    frame.addTextHitTarget("config-migration:cancel", "Cancel");
-    frame.addTextHitTarget("config-migration:apply", "Apply migration");
   } else if (modal.kind === "profile_conflicts") {
     frame.addTextHitTarget("conflict:action:project", "Keep project");
     frame.addTextHitTarget("conflict:action:upstream", "Use update");
   } else if (modal.kind === "configure" && modal.resourceOperation !== undefined) {
-    const button = modal.resourceOperation.kind === "create" ? "Create resource"
-      : modal.resourceOperation.kind === "duplicate" ? "Duplicate resource" : "Delete resource";
+    const button =
+      modal.resourceOperation.kind === "create"
+        ? "Create resource"
+        : modal.resourceOperation.kind === "duplicate"
+          ? "Duplicate resource"
+          : "Delete resource";
     frame.addTextHitTarget("config:resource-operation", button);
   }
 }
@@ -2983,130 +4156,278 @@ function addTwoLineListTargets(input: {
 function panelFromHitTarget(target: string): ControlCenterPanel | undefined {
   if (!target.startsWith("panel:")) return undefined;
   const panel = target.slice("panel:".length);
-  return new Set<ControlCenterPanel>(["runs", "tickets", "agents", "details", "questions", "activity", "graph"])
-    .has(panel as ControlCenterPanel)
-    ? panel as ControlCenterPanel
+  return new Set<ControlCenterPanel>([
+    "runs",
+    "tickets",
+    "agents",
+    "details",
+    "questions",
+    "activity",
+    "graph",
+  ]).has(panel as ControlCenterPanel)
+    ? (panel as ControlCenterPanel)
     : undefined;
 }
 
-const HELP: Readonly<Record<ControlCenterHelpTopic, {
-  title: string;
-  description: string;
-  actions: readonly (readonly [string, string])[];
-}>> = {
+const HELP: Readonly<
+  Record<
+    ControlCenterHelpTopic,
+    {
+      title: string;
+      description: string;
+      actions: readonly (readonly [string, string])[];
+    }
+  >
+> = {
   runs: {
     title: "Runs",
-    description: "Each run is a durable, isolated execution against the target branch shown in its row. Koni plans and works in its run worktree; only you publish a merge-ready result.",
-    actions: [["↑/↓ or j/k", "select run"], ["Space", "pause or resume"], ["m", "merge a ready run"], ["d", "stop and delete"]],
+    description:
+      "Each run is a durable, isolated execution against the target branch shown in its row. Koni plans and works in its run worktree; only you publish a merge-ready result.",
+    actions: [
+      ["↑/↓ or j/k", "select run"],
+      ["Enter", "focus the run overview"],
+      ["Space", "pause or resume"],
+      ["m", "merge a ready run"],
+      ["d", "stop and delete"],
+    ],
   },
   tickets: {
     title: "Tickets",
-    description: "The compiler derives tickets from the typed graph. Selecting one filters Agents and Graph to that ticket; Esc returns to the run-wide view.",
-    actions: [["↑/↓ or j/k", "select ticket"], ["Esc", "clear ticket filter"]],
+    description:
+      "The compiler derives tickets from the typed graph. Arrows only move the highlight; Enter selects the ticket and filters Details, Agents, and Graph to it. Esc returns to the run-wide view.",
+    actions: [
+      ["↑/↓ or j/k", "highlight ticket"],
+      ["Enter", "select and inspect ticket"],
+      ["Esc", "clear ticket filter"],
+    ],
   },
   details: {
     title: "Details",
-    description: "Overview keeps Objective, Goal, Run, and Evidence together. Plan shows live planning activity until submission, then the durable human-readable plan. Stages shows pipeline progress.",
-    actions: [["←/→ or [ ]", "switch tab"], ["↑/↓ or j/k", "scroll"], ["Enter/o", "expand objective"]],
+    description:
+      "Overview keeps Objective, Run, Evidence, and Stages together; a blocked run leads with its reason and recovery options. Plan shows live planning activity until submission, then the concise human-readable plan.",
+    actions: [
+      ["←/→ or [ ]", "switch tab"],
+      ["↑/↓ or j/k", "scroll"],
+      ["Ctrl-O/o", "expand objective"],
+      ["Enter", "run the current stage action"],
+    ],
   },
   questions: {
     title: "Questions",
-    description: "Pending questions pause the responsible attempt. The inline panel previews the same choices, descriptions, None option, and notes used by the complete answer dialog.",
-    actions: [["↑/↓ or j/k", "choose option"], ["←/→ or [ ]", "switch question"], ["n", "edit notes"], ["Enter", "open the answer dialog"]],
+    description:
+      "Pending questions pause the responsible attempt. The inline panel previews the same choices, descriptions, None option, and notes used by the complete answer dialog.",
+    actions: [
+      ["↑/↓ or j/k", "choose option"],
+      ["←/→ or [ ]", "switch question"],
+      ["n", "edit notes"],
+      ["Enter", "open the answer dialog"],
+    ],
   },
   agents: {
     title: "Agents",
-    description: "Active and past attempts remain visible as a semantic lineage tree. Run-wide rows include their ticket prefix; selecting a ticket narrows the list. Retry, rework, review, recovery, parent/child, and active-leaf context never exposes internal IDs.",
-    actions: [["↑/↓ or j/k", "select attempt"], ["Enter", "open attempt chat"], ["Esc", "leave chat"]],
+    description:
+      "Active and past attempts remain visible as a semantic lineage tree. Run-wide rows include their ticket prefix; selecting a ticket narrows the list. Retry, rework, review, recovery, parent/child, and active-leaf context never exposes internal IDs.",
+    actions: [
+      ["↑/↓ or j/k", "highlight attempt"],
+      ["Enter", "open attempt chat"],
+      ["Ctrl-O/o", "show or hide tool results"],
+      ["Esc", "leave chat"],
+    ],
   },
   activity: {
-    title: "Recent Activity",
-    description: "This durable feed combines compiler, graph, Git, and agent events. Green adds graph knowledge, yellow changes it, red deletes it, and timestamps show when each event happened.",
-    actions: [["↑/↓ or j/k", "scroll"], ["PgUp/PgDn", "scroll a page"]],
+    title: "Activity",
+    description:
+      "This durable feed combines compiler, graph, Git, and agent events. Green adds graph knowledge, yellow changes it, red deletes it, and timestamps show when each event happened.",
+    actions: [
+      ["↑/↓ or j/k", "scroll"],
+      ["PgUp/PgDn", "scroll a page"],
+    ],
   },
   graph: {
     title: "Graph",
-    description: "The typed context graph is Koni's shared specification. Markers replace relationship lines at each node, while concise muted titles preserve topology without IDs or dense prose.",
-    actions: [["↑/↓ or j/k", "scroll"], ["PgUp/PgDn", "scroll a page"]],
+    description:
+      "The typed context graph is Koni's shared specification. Markers replace relationship lines at each node, while concise muted titles preserve topology without IDs or dense prose.",
+    actions: [
+      ["↑/↓ or j/k", "move between nodes"],
+      ["PgUp/PgDn", "scroll a page"],
+    ],
   },
   new_run: {
     title: "New Run",
-    description: "A run pins one target branch, run type, and set of run-local overrides. Skipped stages remain visible in muted text; publishing the form asks authority to validate everything again and immediately creates a provisional Runs row.",
-    actions: [["Tab or ↑/↓", "move between controls"], ["←/→", "change a selector"], ["PgUp/PgDn", "inspect every stage"], ["Enter", "newline, select, or start"]],
+    description:
+      "A run pins one target branch, run type, and set of run-local overrides. Skipped stages remain visible in muted text; publishing the form asks authority to validate everything again and immediately creates a provisional Runs row.",
+    actions: [
+      ["Tab or ↑/↓", "move between controls"],
+      ["←/→", "change a selector"],
+      ["PgUp/PgDn", "inspect every stage"],
+      ["Enter", "newline, select, or start"],
+    ],
   },
   plan_review: {
     title: "Review Plan",
-    description: "The four sections are independently authored concise review summaries. Empty steering approves; any steering changes the one action to Revise. After approval, Details → Plan keeps the complete Markdown plans available.",
-    actions: [["←/→ or [ ]", "switch section"], ["↑/↓ or j/k", "scroll"], ["Tab", "move document/editor/action"], ["Ctrl-Enter", "perform the adaptive action"]],
+    description:
+      "The four sections are independently authored concise review summaries. Empty steering approves; any steering changes the one action to Revise. After approval, Details → Plan keeps these concise review summaries available.",
+    actions: [
+      ["←/→ or [ ]", "switch section"],
+      ["↑/↓ or j/k", "scroll"],
+      ["Tab", "move document/editor/action"],
+      ["Ctrl-Enter", "perform the adaptive action"],
+    ],
   },
   proposal_review: {
     title: "Review Change Proposal",
-    description: "A model may propose an upstream graph or specification change, but only the compiler publishes this bounded review and only you may approve or reject it. The surface starts with no selected outcome.",
-    actions: [["↑/↓ or j/k", "read the complete proposal"], ["Tab", "move through message, choice, and action"], ["←/→", "choose approval or rejection"], ["Ctrl-Enter", "record the reviewed decision"]],
+    description:
+      "A model may propose an upstream graph or specification change, but only the compiler publishes this bounded review and only you may approve or reject it. The surface starts with no selected outcome.",
+    actions: [
+      ["↑/↓ or j/k", "read the complete proposal"],
+      ["Tab", "move through message, choice, and action"],
+      ["←/→", "choose approval or rejection"],
+      ["Ctrl-Enter", "record the reviewed decision"],
+    ],
   },
   answer_question: {
     title: "Answer Question",
-    description: "Questions are durable compiler-owned decisions. Compare every option and its description, choose None of the above when needed, add optional steering notes, then submit explicitly.",
-    actions: [["←/→ or [ ]", "switch pending question"], ["↑/↓ or j/k", "choose an option"], ["Tab", "move to notes or submit"], ["Ctrl-Enter", "submit the selected answer and notes"]],
+    description:
+      "Questions are durable compiler-owned decisions. Compare every option and its description, choose None of the above when needed, add optional steering notes, then submit explicitly.",
+    actions: [
+      ["←/→ or [ ]", "switch pending question"],
+      ["↑/↓ or j/k", "choose an option"],
+      ["Tab", "move to notes or submit"],
+      ["Ctrl-Enter", "submit the selected answer and notes"],
+    ],
   },
   action_palette: {
     title: "Actions",
-    description: "This palette is authored from current compiler and lifecycle state. Disabled actions stay visible with the exact reason; delete and merge always open their guarded review before any mutation.",
-    actions: [["↑/↓ or j/k", "choose an action"], ["Enter", "open or execute an available action"], ["Esc", "close without changing state"]],
+    description:
+      "This palette is authored from current compiler and lifecycle state. Disabled actions stay visible with the exact reason; delete and merge always open their guarded review before any mutation.",
+    actions: [
+      ["↑/↓ or j/k", "choose an action"],
+      ["Enter", "open or execute an available action"],
+      ["Esc", "close without changing state"],
+    ],
   },
   action_form: {
     title: "Action Form",
-    description: "The compiler defines these semantic fields and locked context. Inputs are submitted with the exact run revision and generation; stale or altered requests fail closed at authority.",
-    actions: [["Tab or ↑/↓", "move between fields and action"], ["←/→", "change a selector or number"], ["Enter", "edit, select, or confirm"], ["Ctrl-Enter", "submit explicitly"]],
+    description:
+      "The compiler defines these semantic fields and locked context. Inputs are submitted with the exact run revision and generation; stale or altered requests fail closed at authority.",
+    actions: [
+      ["Tab or ↑/↓", "move between fields and action"],
+      ["←/→", "change a selector or number"],
+      ["Enter", "edit, select, or confirm"],
+      ["Ctrl-Enter", "submit explicitly"],
+    ],
   },
   configure: {
     title: "Configure",
-    description: "Guided domains edit an in-memory project-overlay draft. Koni never makes YAML the primary interface. Publish sends the complete candidate and source-CAS token to authority; active and pinned runs are unchanged by a draft.",
-    actions: [["←/→", "change section, value, or action"], ["↑/↓", "choose resource or field"], ["r", "open semantic Project Resources"], ["u", "review staged upstream changes"], ["a / d / x", "add, duplicate, or delete resource"], ["Ctrl-S", "save in-memory draft"], ["Ctrl-R", "rebase a stale saved draft"], ["Ctrl-P", "validate and publish"], ["Ctrl-D", "discard draft"]],
+    description:
+      "Guided domains edit an in-memory project-overlay draft. Koni never makes YAML the primary interface. Publish sends the complete candidate and source-CAS token to authority; active and pinned runs are unchanged by a draft.",
+    actions: [
+      ["←/→", "change section, value, or action"],
+      ["↑/↓", "choose resource or field"],
+      ["r", "open semantic Project Resources"],
+      ["u", "review staged upstream changes"],
+      ["a / d / x", "add, duplicate, or delete resource"],
+      ["Ctrl-S", "save in-memory draft"],
+      ["Ctrl-R", "rebase a stale saved draft"],
+      ["Ctrl-P", "validate and publish"],
+      ["Ctrl-D", "discard draft"],
+    ],
   },
   configure_documents: {
     title: "Project Resources",
-    description: "This expert surface groups exact project-authored configuration by semantic domain. It edits source through authority-owned document and revision tokens; filesystem paths and compiler-owned files are never exposed as UI authority.",
-    actions: [["Tab", "move between domains, resources, and source"], ["Enter", "start or stop source editing"], ["Ctrl-S", "validate and save the exact document"], ["Ctrl-D", "discard the raw edit"], ["a / e / x", "create, rename, or review deletion"], ["t", "create a run type from a compiled template"], ["l", "preview legacy migration"], ["Esc", "return to Guided Configure when clean"]],
+    description:
+      "This expert surface groups exact project-authored configuration by semantic domain. It edits source through authority-owned document and revision tokens; filesystem paths and compiler-owned files are never exposed as UI authority.",
+    actions: [
+      ["Tab", "move between domains, resources, and source"],
+      ["Enter", "start or stop source editing"],
+      ["Ctrl-S", "validate and save the exact document"],
+      ["Ctrl-D", "discard the raw edit"],
+      ["a / e / x", "create, rename, or review deletion"],
+      ["t", "create a run type from a compiled template"],
+      ["Esc", "return to Guided Configure when clean"],
+    ],
   },
   config_document_create: {
     title: "New Project Resource",
-    description: "Create one supported project-owned resource from a semantic type. Authority chooses its managed location, compiles the complete candidate, and publishes only a valid result.",
-    actions: [["←/→ or [ ]", "choose a resource type"], ["Tab", "move to title or action"], ["Enter", "continue or create"], ["Esc", "return without creating"]],
+    description:
+      "Create one supported project-owned resource from a semantic type. Authority chooses its managed location, compiles the complete candidate, and publishes only a valid result.",
+    actions: [
+      ["←/→ or [ ]", "choose a resource type"],
+      ["Tab", "move to title or action"],
+      ["Enter", "continue or create"],
+      ["Esc", "return without creating"],
+    ],
   },
   config_document_rename: {
     title: "Rename Project Resource",
-    description: "Rename the selected semantic resource under exact catalog and source revision checks. Required references are updated atomically by the configuration authority.",
-    actions: [["←/→", "move the title caret"], ["Tab", "move to the action"], ["Enter", "continue or rename"], ["Esc", "return without renaming"]],
+    description:
+      "Rename the selected semantic resource under exact catalog and source revision checks. Required references are updated atomically by the configuration authority.",
+    actions: [
+      ["←/→", "move the title caret"],
+      ["Tab", "move to the action"],
+      ["Enter", "continue or rename"],
+      ["Esc", "return without renaming"],
+    ],
   },
   config_document_delete: {
     title: "Delete Project Resource",
-    description: "Deletion is a reviewed, compiler-validated operation. The dialog keeps unavailable deletion visible with the authority-authored reason and cannot bypass that decision.",
-    actions: [["←/→", "choose Cancel or Delete"], ["Enter", "confirm the selected action"], ["Esc", "return without deleting"]],
+    description:
+      "Deletion is a reviewed, compiler-validated operation. The dialog keeps unavailable deletion visible with the authority-authored reason and cannot bypass that decision.",
+    actions: [
+      ["←/→", "choose Cancel or Delete"],
+      ["Enter", "confirm the selected action"],
+      ["Esc", "return without deleting"],
+    ],
   },
   config_run_type_wizard: {
     title: "New Run Type",
-    description: "Create a project run type by cloning a compiler-valid template, then give it a human title, optional slug and description, and an explicit default choice.",
-    actions: [["←/→", "choose a template or edit the caret"], ["Tab/↑/↓", "move between fields"], ["Enter", "continue, toggle, or add a description line"], ["Ctrl-Enter", "create the run type"], ["Esc", "return without creating"]],
-  },
-  config_legacy_migration: {
-    title: "Legacy Migration",
-    description: "This preview counts the legacy configuration, external agents, and runs that will be imported. Apply revalidates the exact preview and retains the original source for recovery and audit.",
-    actions: [["←/→", "choose Cancel or Apply"], ["Enter", "apply the reviewed migration"], ["Esc", "return without migrating"]],
+    description:
+      "Create a project run type by cloning a compiler-valid template, then give it a human title, optional slug and description, and an explicit default choice.",
+    actions: [
+      ["←/→", "choose a template or edit the caret"],
+      ["Tab/↑/↓", "move between fields"],
+      ["Enter", "continue, toggle, or add a description line"],
+      ["Ctrl-Enter", "create the run type"],
+      ["Esc", "return without creating"],
+    ],
   },
   profile_conflicts: {
     title: "Upstream Changes",
-    description: "Profile upgrades preserve project overrides and stage upstream changes for an explicit decision. Compare the complete project and upstream documents, then keep the project version or accept the authenticated update under source and lifecycle checks.",
-    actions: [["↑/↓ or j/k", "switch changed resource"], ["PgUp/PgDn", "scroll both documents"], ["Tab", "focus resolution actions"], ["←/→", "choose Keep project or Use update"], ["Enter", "apply the selected decision"], ["Esc", "return to Configure"]],
+    description:
+      "Profile upgrades preserve project overrides and stage upstream changes for an explicit decision. Compare the complete project and upstream documents, then keep the project version or accept the authenticated update under source and lifecycle checks.",
+    actions: [
+      ["↑/↓ or j/k", "switch changed resource"],
+      ["PgUp/PgDn", "scroll both documents"],
+      ["Tab", "focus resolution actions"],
+      ["←/→", "choose Keep project or Use update"],
+      ["Enter", "apply the selected decision"],
+      ["Esc", "return to Configure"],
+    ],
   },
   edit_scalar: {
     title: "Edit Setting",
-    description: "This editor changes only the in-memory Configure draft. Its Unicode caret moves by complete characters, the complete wrapped value remains reachable, and schema validation runs before the draft is updated.",
-    actions: [["←/→", "move the caret"], ["Home/End", "move to either boundary"], ["Backspace/Delete", "remove text around the caret"], ["Enter/Ctrl-Enter", "apply a scalar/multiline value"], ["Esc", "return without changing the draft"]],
+    description:
+      "This editor changes only the in-memory Configure draft. Its Unicode caret moves by complete characters, the complete wrapped value remains reachable, and schema validation runs before the draft is updated.",
+    actions: [
+      ["←/→", "move the caret"],
+      ["Home/End", "move to either boundary"],
+      ["Backspace/Delete", "remove text around the caret"],
+      ["Enter/Ctrl-Enter", "apply a scalar/multiline value"],
+      ["Esc", "return without changing the draft"],
+    ],
   },
   chat: {
     title: "Agent Chat",
-    description: "This is the persisted Pi session itself: complete assistant messages, reasoning, calls, results, compaction, and branch points. Large items remain complete as ordered bounded parts. Only terminal and invisible-direction controls are stripped or replaced for safe display; canonical Pi JSONL is unchanged. Image bytes stay private while an ordered type-and-size attachment row remains visible. Steering and follow-ups still cross Koni authority before Pi receives them.",
-    actions: [["←/→ or [ ]", "move to adjacent older/newer history windows"], ["PgUp/PgDn", "scroll within the current bounded window"], ["r", "reload the current newest history"], ["Enter or s", "open the composer"], ["Tab", "switch steer/follow-up"], ["Ctrl-Enter", "send through authority"], ["Esc", "close the composer, then exit Chat"]],
+    description:
+      "This is the persisted Pi session itself: complete assistant messages, reasoning, calls, results, compaction, and branch points. Large items remain complete as ordered bounded parts. Only terminal and invisible-direction controls are stripped or replaced for safe display; canonical Pi JSONL is unchanged. Image bytes stay private while an ordered type-and-size attachment row remains visible. Steering and follow-ups still cross Koni authority before Pi receives them.",
+    actions: [
+      ["←/→ or [ ]", "move to adjacent older/newer history windows"],
+      ["PgUp/PgDn", "scroll within the current bounded window"],
+      ["r", "reload the current newest history"],
+      ["Enter or s", "open the composer"],
+      ["Tab", "switch steer/follow-up"],
+      ["Ctrl-Enter", "send through authority"],
+      ["Esc", "close the composer, then exit Chat"],
+    ],
   },
 };

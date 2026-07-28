@@ -39,10 +39,9 @@ export function inspectGitPathScope(
   scope: GitPathScope,
 ): GitPathScopeInspection {
   const allowed = scope.allowed.map(compileRule);
-  const compilerOwned = [
-    ...DEFAULT_COMPILER_OWNED_PATHS,
-    ...(scope.compilerOwned ?? []),
-  ].map(compileRule);
+  const compilerOwned = [...DEFAULT_COMPILER_OWNED_PATHS, ...(scope.compilerOwned ?? [])].map(
+    compileRule,
+  );
   const changed = [...new Set(changedPaths.map(normalizeGitPath))].sort();
   const deniedByOwnership: string[] = [];
   const deniedByScope: string[] = [];

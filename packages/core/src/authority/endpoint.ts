@@ -43,9 +43,14 @@ export async function discoverAuthorityEndpoint(projectRoot: string): Promise<Au
   const identity = await GitClient.discover(projectRoot);
   const stateRoot = path.join(identity.commonDirectory, "koni");
   const digest = createHash("sha256").update(identity.commonDirectory).digest("hex").slice(0, 32);
-  const endpoint = process.platform === "win32"
-    ? `\\\\.\\pipe\\koni-${digest}`
-    : path.join(os.tmpdir(), `koni-${typeof process.getuid === "function" ? process.getuid() : "user"}`, `${digest}.sock`);
+  const endpoint =
+    process.platform === "win32"
+      ? `\\\\.\\pipe\\koni-${digest}`
+      : path.join(
+          os.tmpdir(),
+          `koni-${typeof process.getuid === "function" ? process.getuid() : "user"}`,
+          `${digest}.sock`,
+        );
   return {
     identity,
     stateRoot,
@@ -101,7 +106,10 @@ export class AuthorityLease {
           staleLease.endpoint !== target.endpoint ||
           staleLease.commonDirectory !== target.identity.commonDirectory
         ) {
-          throw new AuthorityLeaseError("lease_corrupt", "Koni authority lease targets another repository endpoint");
+          throw new AuthorityLeaseError(
+            "lease_corrupt",
+            "Koni authority lease targets another repository endpoint",
+          );
         }
         if (processExists(staleLease.pid)) {
           throw new AuthorityLeaseError(
@@ -113,7 +121,10 @@ export class AuthorityLease {
         // Re-read the nonce so an outside replacement cannot be silently discarded.
         const current = await readLease(target.leasePath);
         if (current.pid !== staleLease.pid || current.nonce !== staleLease.nonce) {
-          throw new AuthorityLeaseError("lease_lost", "stale authority lease changed during reclamation");
+          throw new AuthorityLeaseError(
+            "lease_lost",
+            "stale authority lease changed during reclamation",
+          );
         }
         await rm(target.leasePath, { force: true });
       }
@@ -167,7 +178,10 @@ export class AuthorityLease {
     try {
       const current = await readLease(this.#leasePath);
       if (current.nonce !== this.#record.nonce || current.pid !== process.pid) {
-        throw new AuthorityLeaseError("lease_lost", "authority lease ownership changed before release");
+        throw new AuthorityLeaseError(
+          "lease_lost",
+          "authority lease ownership changed before release",
+        );
       }
       await rm(this.#leasePath, { force: true });
       this.#released = true;
@@ -252,7 +266,10 @@ class AuthorityStartupLock {
         if (!isCode(error, "ENOENT")) throw error;
       }
     }
-    throw new AuthorityLeaseError("authority_running", "could not serialize Koni authority startup");
+    throw new AuthorityLeaseError(
+      "authority_running",
+      "could not serialize Koni authority startup",
+    );
   }
 
   public async release(): Promise<void> {
@@ -260,7 +277,10 @@ class AuthorityStartupLock {
     if (this.#retiredPath === undefined) {
       const current = await readStartupLock(this.#lockPath);
       if (current.pid !== this.#record.pid || current.nonce !== this.#record.nonce) {
-        throw new AuthorityLeaseError("lease_lost", "authority startup lock ownership changed before release");
+        throw new AuthorityLeaseError(
+          "lease_lost",
+          "authority startup lock ownership changed before release",
+        );
       }
       const quarantine = `${this.#lockPath}.released-${process.pid}-${randomBytes(12).toString("base64url")}`;
       await rename(this.#lockPath, quarantine);
@@ -289,7 +309,10 @@ async function readStartupLock(lockPath: string): Promise<AuthorityStartupLockRe
     typeof value.nonce !== "string" ||
     typeof value.createdAt !== "string"
   ) {
-    throw new AuthorityLeaseError("lease_corrupt", "Koni authority startup lock has an invalid shape");
+    throw new AuthorityLeaseError(
+      "lease_corrupt",
+      "Koni authority startup lock has an invalid shape",
+    );
   }
   return value as unknown as AuthorityStartupLockRecord;
 }
@@ -339,7 +362,9 @@ function processExists(pid: number): boolean {
 }
 
 function isCode(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
+  return (
+    error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code
+  );
 }
 
 function isExistingDestination(error: unknown): boolean {

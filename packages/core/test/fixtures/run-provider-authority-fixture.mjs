@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, chmodSync, closeSync, fsyncSync, mkdirSync, openSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  chmodSync,
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 
 const protocol = "koni.pi-attempt-process.v1";
@@ -31,7 +39,10 @@ function onFrame(frame) {
   if (launch === undefined) {
     launch = frame;
     if (frame.type !== "launch" || frame.protocol !== protocol) process.exit(91);
-    sessionFile = path.join(frame.spec.workspace.sessionDirectory, `${frame.spec.identity.sessionId}.jsonl`);
+    sessionFile = path.join(
+      frame.spec.workspace.sessionDirectory,
+      `${frame.spec.identity.sessionId}.jsonl`,
+    );
     createTranscript(frame.spec);
     send({ type: "ready", sessionFile });
     return;
@@ -68,7 +79,11 @@ function onFrame(frame) {
       if (scenario === "context_window_headroom") {
         send({
           type: "outcome",
-          outcome: { status: "failed", error: `first reservation rejected: ${frame.error ?? "invalid response"}`, usage: emptyUsage() },
+          outcome: {
+            status: "failed",
+            error: `first reservation rejected: ${frame.error ?? "invalid response"}`,
+            usage: emptyUsage(),
+          },
         });
         finish(23);
         return;
@@ -77,7 +92,10 @@ function onFrame(frame) {
     }
     reservationId = frame.value.reservationId;
     if (scenario === "partial_assistant") {
-      appendFileSync(sessionFile, '{"type":"message","id":"assistant","parentId":"baseline","message":{"role":"assistant"');
+      appendFileSync(
+        sessionFile,
+        '{"type":"message","id":"assistant","parentId":"baseline","message":{"role":"assistant"',
+      );
       syncFile();
       finish(23);
       return;
@@ -90,7 +108,9 @@ function onFrame(frame) {
     if (scenario === "pause_canonical_abort" && launch.spec.lineage.branchEpoch === 0) return;
     appendAssistant();
     if (
-      (scenario === "failed_provider" || scenario === "failed_provider_tool_call" || scenario === "uncanonical_provider_error") &&
+      (scenario === "failed_provider" ||
+        scenario === "failed_provider_tool_call" ||
+        scenario === "uncanonical_provider_error") &&
       launch.spec.lineage.branchEpoch === 0
     ) {
       finish(23);
@@ -129,13 +149,18 @@ function onFrame(frame) {
     }
     return;
   }
-  if (frame.requestId === "settle" && (
-    scenario === "normal" ||
-    scenario === "torn_after_assistant" ||
-    scenario.startsWith("assignment_terminal_")
-  )) {
-    if (!frame.ok || frame.value?.protocol !== "koni.provider-request-settlement.v1") process.exit(94);
-    if (scenario.startsWith("assignment_terminal_") && launch.spec.identity.ticketId === "ticket-one") {
+  if (
+    frame.requestId === "settle" &&
+    (scenario === "normal" ||
+      scenario === "torn_after_assistant" ||
+      scenario.startsWith("assignment_terminal_"))
+  ) {
+    if (!frame.ok || frame.value?.protocol !== "koni.provider-request-settlement.v1")
+      process.exit(94);
+    if (
+      scenario.startsWith("assignment_terminal_") &&
+      launch.spec.identity.ticketId === "ticket-one"
+    ) {
       // Leave the assignment process alive after authority has atomically compiled its terminal
       // tool. The parent test commits pause/delete before any child outcome can publish or tick.
       return;
@@ -151,14 +176,19 @@ function onFrame(frame) {
     finish(0);
   }
   if (frame.requestId === "settle" && scenario === "response_overshoot") {
-    if (!frame.ok || frame.value?.protocol !== "koni.provider-request-settlement.v1") process.exit(95);
+    if (!frame.ok || frame.value?.protocol !== "koni.provider-request-settlement.v1")
+      process.exit(95);
     requestNextReservation();
   }
   if (frame.requestId === "settle" && scenario === "context_window_headroom") {
     if (!frame.ok || frame.value?.protocol !== "koni.provider-request-settlement.v1") {
       send({
         type: "outcome",
-        outcome: { status: "failed", error: `first settlement rejected: ${frame.error ?? "invalid response"}`, usage: usage() },
+        outcome: {
+          status: "failed",
+          error: `first settlement rejected: ${frame.error ?? "invalid response"}`,
+          usage: usage(),
+        },
       });
       finish(23);
       return;
@@ -166,7 +196,8 @@ function onFrame(frame) {
     requestNextReservation();
   }
   if (frame.requestId === "settle" && scenario === "synthesis_threshold") {
-    if (!frame.ok || frame.value?.protocol !== "koni.provider-request-settlement.v1") process.exit(97);
+    if (!frame.ok || frame.value?.protocol !== "koni.provider-request-settlement.v1")
+      process.exit(97);
     requestSynthesisContext();
   }
   if (frame.requestId === "synthesis-context" && scenario === "synthesis_threshold") {
@@ -177,11 +208,16 @@ function onFrame(frame) {
       policy?.kind !== "planning_synthesis" ||
       typeof policy.content !== "string" ||
       !policy.content.includes("Stop reading, listing, or searching repository files")
-    ) process.exit(98);
+    )
+      process.exit(98);
     requestForbiddenRead();
   }
   if (frame.requestId === "synthesis-read" && scenario === "synthesis_threshold") {
-    if (frame.ok || typeof frame.error !== "string" || !frame.error.includes("planning exploration is closed")) {
+    if (
+      frame.ok ||
+      typeof frame.error !== "string" ||
+      !frame.error.includes("planning exploration is closed")
+    ) {
       process.exit(99);
     }
     requestTerminal();
@@ -190,12 +226,17 @@ function onFrame(frame) {
     if (frame.ok) process.exit(96);
     send({
       type: "outcome",
-      outcome: { status: "failed", error: "next provider request correctly denied after transcript overshoot", usage: usage() },
+      outcome: {
+        status: "failed",
+        error: "next provider request correctly denied after transcript overshoot",
+        usage: usage(),
+      },
     });
     finish(23);
   }
   if (frame.requestId === "reserve-next" && scenario === "context_window_headroom") {
-    if (!frame.ok || frame.value?.protocol !== "koni.provider-request-reservation.v1") process.exit(101);
+    if (!frame.ok || frame.value?.protocol !== "koni.provider-request-reservation.v1")
+      process.exit(101);
     secondReservationId = frame.value.reservationId;
     appendSecondAssistant();
     requestSecondTerminal();
@@ -205,7 +246,8 @@ function onFrame(frame) {
     requestSecondSettlement();
   }
   if (frame.requestId === "settle-second" && scenario === "context_window_headroom") {
-    if (!frame.ok || frame.value?.protocol !== "koni.provider-request-settlement.v1") process.exit(103);
+    if (!frame.ok || frame.value?.protocol !== "koni.provider-request-settlement.v1")
+      process.exit(103);
     send({
       type: "outcome",
       outcome: {
@@ -254,19 +296,24 @@ function createTranscript(spec) {
       timestamp: Date.now(),
     },
   };
-  writeFileSync(sessionFile, jsonl(
-    { type: "session", version: 3, id: spec.identity.sessionId, cwd: spec.workspace.cwd },
-    mapping,
-    initial,
-  ), { mode: 0o600 });
+  writeFileSync(
+    sessionFile,
+    jsonl(
+      { type: "session", version: 3, id: spec.identity.sessionId, cwd: spec.workspace.cwd },
+      mapping,
+      initial,
+    ),
+    { mode: 0o600 },
+  );
   chmodSync(sessionFile, 0o600);
   syncFile();
 }
 
 function requestReservation() {
-  const payload = scenario === "context_window_headroom"
-    ? sizedProviderPayload(103_386)
-    : { model: launch.spec.model.id, input: [{ role: "user", content: "work" }], stream: true };
+  const payload =
+    scenario === "context_window_headroom"
+      ? sizedProviderPayload(103_386)
+      : { model: launch.spec.model.id, input: [{ role: "user", content: "work" }], stream: true };
   const encoded = JSON.stringify(payload);
   send({
     type: "authority_request",
@@ -288,35 +335,52 @@ function requestReservation() {
 }
 
 function appendAssistant() {
-  const failed = (
-    scenario === "failed_provider" || scenario === "failed_provider_tool_call" || scenario === "uncanonical_provider_error"
-  ) && launch.spec.lineage.branchEpoch === 0;
-  const content = scenario === "response_overshoot"
-    ? [{ type: "text", text: "x".repeat(1_100_000) }]
-    : scenario === "context_window_headroom"
-    ? [{ type: "text", text: "Inspecting the already-injected compiler context." }]
-    : scenario === "synthesis_threshold"
-    ? [{ type: "text", text: "Continue repository exploration." }]
-    : failed || scenario === "pause" || scenario === "delete"
-    ? failed
-      ? scenario === "failed_provider_tool_call"
-        ? [
-            { type: "thinking", thinking: "partial provider reasoning before a terminal error" },
-            {
-              type: "toolCall",
-              id: "unaccepted-write-call",
-              name: "koni_write_file",
-              arguments: { path: "never-written.txt", expectedSha256: null, content: "must not execute" },
-            },
-          ]
-        : [{ type: "thinking", thinking: "partial provider reasoning before a terminal error" }]
-      : [{ type: "text", text: "provider response" }]
-    : [{
-        type: "toolCall",
-        id: "terminal-call",
-        name: launch.spec.terminal.toolName,
-        arguments: { result: "provider-plan" },
-      }];
+  const failed =
+    (scenario === "failed_provider" ||
+      scenario === "failed_provider_tool_call" ||
+      scenario === "uncanonical_provider_error") &&
+    launch.spec.lineage.branchEpoch === 0;
+  const content =
+    scenario === "response_overshoot"
+      ? [{ type: "text", text: "x".repeat(1_100_000) }]
+      : scenario === "context_window_headroom"
+        ? [{ type: "text", text: "Inspecting the already-injected compiler context." }]
+        : scenario === "synthesis_threshold"
+          ? [{ type: "text", text: "Continue repository exploration." }]
+          : failed || scenario === "pause" || scenario === "delete"
+            ? failed
+              ? scenario === "failed_provider_tool_call"
+                ? [
+                    {
+                      type: "thinking",
+                      thinking: "partial provider reasoning before a terminal error",
+                    },
+                    {
+                      type: "toolCall",
+                      id: "unaccepted-write-call",
+                      name: "koni_write_file",
+                      arguments: {
+                        path: "never-written.txt",
+                        expectedSha256: null,
+                        content: "must not execute",
+                      },
+                    },
+                  ]
+                : [
+                    {
+                      type: "thinking",
+                      thinking: "partial provider reasoning before a terminal error",
+                    },
+                  ]
+              : [{ type: "text", text: "provider response" }]
+            : [
+                {
+                  type: "toolCall",
+                  id: "terminal-call",
+                  name: launch.spec.terminal.toolName,
+                  arguments: { result: "provider-plan" },
+                },
+              ];
   assistantEntry = {
     type: "message",
     id: "assistant",
@@ -329,12 +393,14 @@ function appendAssistant() {
       model: launch.spec.model.id,
       usage: failed ? emptyPiUsage() : piUsage(),
       stopReason: failed ? "error" : content[0].type === "toolCall" ? "toolUse" : "stop",
-      ...(failed ? {
-        ...(scenario === "failed_provider" || scenario === "failed_provider_tool_call"
-          ? { responseId: "resp_fixture_provider_error" }
-          : {}),
-        errorMessage: "Codex error: simulated terminal provider failure",
-      } : {}),
+      ...(failed
+        ? {
+            ...(scenario === "failed_provider" || scenario === "failed_provider_tool_call"
+              ? { responseId: "resp_fixture_provider_error" }
+              : {}),
+            errorMessage: "Codex error: simulated terminal provider failure",
+          }
+        : {}),
       timestamp: Date.now(),
     },
   };
@@ -374,12 +440,14 @@ function appendSecondAssistant() {
     parentId: assistantEntry.id,
     message: {
       role: "assistant",
-      content: [{
-        type: "toolCall",
-        id: "terminal-call-second",
-        name: launch.spec.terminal.toolName,
-        arguments: { result: "provider-plan" },
-      }],
+      content: [
+        {
+          type: "toolCall",
+          id: "terminal-call-second",
+          name: launch.spec.terminal.toolName,
+          arguments: { result: "provider-plan" },
+        },
+      ],
       api: launch.spec.model.api,
       provider: launch.spec.model.provider,
       model: launch.spec.model.id,
@@ -393,9 +461,10 @@ function appendSecondAssistant() {
 }
 
 function requestNextReservation() {
-  const payload = scenario === "context_window_headroom"
-    ? sizedProviderPayload(99_290)
-    : { model: launch.spec.model.id, input: [{ role: "user", content: "next" }], stream: true };
+  const payload =
+    scenario === "context_window_headroom"
+      ? sizedProviderPayload(99_290)
+      : { model: launch.spec.model.id, input: [{ role: "user", content: "next" }], stream: true };
   const encoded = JSON.stringify(payload);
   send({
     type: "authority_request",
@@ -417,11 +486,16 @@ function requestNextReservation() {
 }
 
 function sizedProviderPayload(targetBytes) {
-  const payload = { model: launch.spec.model.id, input: [{ role: "user", content: "" }], stream: true };
+  const payload = {
+    model: launch.spec.model.id,
+    input: [{ role: "user", content: "" }],
+    stream: true,
+  };
   const baseBytes = Buffer.byteLength(JSON.stringify(payload));
   if (baseBytes > targetBytes) throw new Error("provider payload target is too small");
   payload.input[0].content = "x".repeat(targetBytes - baseBytes);
-  if (Buffer.byteLength(JSON.stringify(payload)) !== targetBytes) throw new Error("provider payload target drifted");
+  if (Buffer.byteLength(JSON.stringify(payload)) !== targetBytes)
+    throw new Error("provider payload target drifted");
   return payload;
 }
 
@@ -518,17 +592,38 @@ function requestSettlement() {
 
 function usage() {
   if (scenario === "context_window_headroom") {
-    return { input: 21_248, output: 146, cacheRead: 0, cacheWrite: 0, newTokens: 21_394, allTokens: 21_394 };
+    return {
+      input: 21_248,
+      output: 146,
+      cacheRead: 0,
+      cacheWrite: 0,
+      newTokens: 21_394,
+      allTokens: 21_394,
+    };
   }
   return { input: 10, output: 5, cacheRead: 2, cacheWrite: 1, newTokens: 15, allTokens: 18 };
 }
 
 function secondUsage() {
-  return { input: 22_000, output: 20, cacheRead: 0, cacheWrite: 0, newTokens: 22_020, allTokens: 22_020 };
+  return {
+    input: 22_000,
+    output: 20,
+    cacheRead: 0,
+    cacheWrite: 0,
+    newTokens: 22_020,
+    allTokens: 22_020,
+  };
 }
 
 function combinedUsage() {
-  return { input: 43_248, output: 166, cacheRead: 0, cacheWrite: 0, newTokens: 43_414, allTokens: 43_414 };
+  return {
+    input: 43_248,
+    output: 166,
+    cacheRead: 0,
+    cacheWrite: 0,
+    newTokens: 43_414,
+    allTokens: 43_414,
+  };
 }
 
 function emptyUsage() {
@@ -579,18 +674,24 @@ function emptyPiUsage() {
 }
 
 function send(body) {
-  process.stdout.write(`${JSON.stringify({
-    ...body,
-    protocol,
-    attemptId: launch.attemptId,
-    specHash: launch.specHash,
-    sequence: ++sequence,
-  })}\n`);
+  process.stdout.write(
+    `${JSON.stringify({
+      ...body,
+      protocol,
+      attemptId: launch.attemptId,
+      specHash: launch.specHash,
+      sequence: ++sequence,
+    })}\n`,
+  );
 }
 
 function syncFile() {
   const fd = openSync(sessionFile, "r+");
-  try { fsyncSync(fd); } finally { closeSync(fd); }
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function jsonl(...values) {
@@ -606,10 +707,13 @@ function canonicalHash(value) {
 }
 
 function canonicalEncode(value) {
-  if (value === null || typeof value === "boolean" || typeof value === "string") return JSON.stringify(value);
+  if (value === null || typeof value === "boolean" || typeof value === "string")
+    return JSON.stringify(value);
   if (typeof value === "number") return Object.is(value, -0) ? "0" : String(value);
   if (Array.isArray(value)) return `[${value.map(canonicalEncode).join(",")}]`;
-  const keys = Object.keys(value).sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
+  const keys = Object.keys(value).sort((left, right) =>
+    Buffer.compare(Buffer.from(left), Buffer.from(right)),
+  );
   return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalEncode(value[key])}`).join(",")}}`;
 }
 

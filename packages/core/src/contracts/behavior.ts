@@ -13,7 +13,15 @@ export const LEAD_JUDGMENT_TRIGGERS = ["orchestration_entry", "compiler_deadlock
 export type LeadJudgmentTrigger = (typeof LEAD_JUDGMENT_TRIGGERS)[number];
 
 export const INTAKE_FIELD_KINDS = [
-  "string", "text", "path", "boolean", "integer", "number", "choice", "multi_choice", "json",
+  "string",
+  "text",
+  "path",
+  "boolean",
+  "integer",
+  "number",
+  "choice",
+  "multi_choice",
+  "json",
 ] as const;
 export type IntakeFieldKind = (typeof INTAKE_FIELD_KINDS)[number];
 
@@ -143,7 +151,8 @@ export interface CompiledRunTypeBehavior {
   readonly sha256: Sha256Digest;
 }
 
-export type ActionParameterType = "string" | "ticket_id" | "path" | "json" | "boolean" | "integer" | "number";
+export type ActionParameterType =
+  "string" | "ticket_id" | "path" | "json" | "boolean" | "integer" | "number";
 
 export interface CompiledActionParameter {
   readonly id: string;
@@ -262,15 +271,17 @@ export interface ActionExecutionJournal {
 }
 
 export interface ActionPrimitiveHost {
-  execute(input: Readonly<{
-    invocationId: string;
-    planSha256: Sha256Digest;
-    /** Stable host deduplication key; replay after effect-before-journal crash must return once. */
-    effectKey: string;
-    actionId: string;
-    actor: "compiler" | "lead";
-    phase: "recipe" | "compensation";
-    step: PreparedActionStep;
-    context: ActionInvocationContext;
-  }>): Promise<ConfigurationValue>;
+  execute(
+    input: Readonly<{
+      invocationId: string;
+      planSha256: Sha256Digest;
+      /** Stable host deduplication key; replay after effect-before-journal crash must return once. */
+      effectKey: string;
+      actionId: string;
+      actor: "compiler" | "lead";
+      phase: "recipe" | "compensation";
+      step: PreparedActionStep;
+      context: ActionInvocationContext;
+    }>,
+  ): Promise<ConfigurationValue>;
 }

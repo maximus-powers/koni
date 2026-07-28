@@ -3,6 +3,7 @@ import type { CompiledConfiguration } from "../src/contracts/configuration.js";
 import { GraphSchema, TypedGraph } from "../src/graph/model.js";
 import { compileConfiguredReports } from "../src/compiler/reports.js";
 import type { RunRecord } from "../src/state/run-record.js";
+import { minimalCompiledBehavior } from "./fixtures/compiled-behavior.js";
 
 const SHA_A = `sha256:${"a".repeat(64)}` as const;
 const SHA_B = `sha256:${"b".repeat(64)}` as const;
@@ -75,24 +76,40 @@ describe("deterministic configured reports", () => {
 
     expect(first.report.reportId).toBe(second.report.reportId);
     expect(first.report.bundleHash).toBe(second.report.bundleHash);
-    expect(first.artifacts.map((artifact) => [artifact.path, Buffer.from(artifact.bytes).toString("utf8")]))
-      .toEqual(second.artifacts.map((artifact) => [artifact.path, Buffer.from(artifact.bytes).toString("utf8")]));
-    const claimJson = first.artifacts.find((artifact) =>
-      artifact.ledgerId === "claim-evidence-ledger" && artifact.format === "json")!;
-    const claimData = JSON.parse(Buffer.from(claimJson.bytes).toString("utf8")) as { rows: Array<Record<string, unknown>> };
-    expect(claimData.rows).toEqual([{
-      claim_id: "claim-one",
-      statement: "Bounded retrieval improves accuracy.",
-      support_count: 1,
-    }]);
-    const markdown = first.artifacts.find((artifact) =>
-      artifact.ledgerId === "claim-evidence-ledger" && artifact.format === "markdown")!.bytes;
+    expect(
+      first.artifacts.map((artifact) => [
+        artifact.path,
+        Buffer.from(artifact.bytes).toString("utf8"),
+      ]),
+    ).toEqual(
+      second.artifacts.map((artifact) => [
+        artifact.path,
+        Buffer.from(artifact.bytes).toString("utf8"),
+      ]),
+    );
+    const claimJson = first.artifacts.find(
+      (artifact) => artifact.ledgerId === "claim-evidence-ledger" && artifact.format === "json",
+    )!;
+    const claimData = JSON.parse(Buffer.from(claimJson.bytes).toString("utf8")) as {
+      rows: Array<Record<string, unknown>>;
+    };
+    expect(claimData.rows).toEqual([
+      {
+        claim_id: "claim-one",
+        statement: "Bounded retrieval improves accuracy.",
+        support_count: 1,
+      },
+    ]);
+    const markdown = first.artifacts.find(
+      (artifact) => artifact.ledgerId === "claim-evidence-ledger" && artifact.format === "markdown",
+    )!.bytes;
     const markdownText = Buffer.from(markdown).toString("utf8");
     expect(markdownText).toContain("# Claim Evidence Ledger");
     expect(markdownText).toContain("| claim | supports | statement |");
     expect(markdownText).toContain("| claim-one | 1 | Bounded retrieval improves accuracy. |");
-    const ticketJson = first.artifacts.find((artifact) =>
-      artifact.ledgerId === "ticket-ledger" && artifact.format === "json")!;
+    const ticketJson = first.artifacts.find(
+      (artifact) => artifact.ledgerId === "ticket-ledger" && artifact.format === "json",
+    )!;
     expect(Buffer.from(ticketJson.bytes).toString("utf8")).toContain('"operation": "implement"');
   });
 });
@@ -114,8 +131,16 @@ function fixtureConfiguration(): CompiledConfiguration {
     profile: { reporting: { bundle_kind: "research-ledger-bundle" } },
     project: {},
     modules: {
-      graph: [], rules: [], operations: [], workflows: [], actions: [], checks: [],
-      personas: [], reports: [], cockpit: [], lifecycles: [],
+      graph: [],
+      rules: [],
+      operations: [],
+      workflows: [],
+      actions: [],
+      checks: [],
+      personas: [],
+      reports: [],
+      cockpit: [],
+      lifecycles: [],
     },
     run_type_order: [],
     run_types: {},
@@ -125,13 +150,18 @@ function fixtureConfiguration(): CompiledConfiguration {
       { source: "evidence", relation: "contradicts", targets: ["claim"] },
       { source: "evidence", relation: "informs", targets: ["claim"] },
     ],
+    behavior: minimalCompiledBehavior("research"),
     registries: {
       node_types: {
         claim: { id: "claim" },
         evidence: { id: "evidence" },
       },
       queries: {
-        "active-claims": { id: "active-claims", node_types: ["claim"], status_excluding: ["satisfied"] },
+        "active-claims": {
+          id: "active-claims",
+          node_types: ["claim"],
+          status_excluding: ["satisfied"],
+        },
       },
       graph_constraints: {},
       gate_policies: {},
@@ -171,7 +201,7 @@ function fixtureConfiguration(): CompiledConfiguration {
       state_machines: {},
       agents: {},
     },
-  } as CompiledConfiguration;
+  };
 }
 
 function fixtureRun(): RunRecord {

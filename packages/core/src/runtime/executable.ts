@@ -36,10 +36,13 @@ export async function resolveRuntimeExecutable(
   pathValue: string | undefined,
   options: { requireRootOwned?: boolean } = {},
 ): Promise<RuntimeExecutableIdentity> {
-  const candidates = command.includes(path.sep) || path.isAbsolute(command)
-    ? [path.resolve(command)]
-    : (pathValue ?? "").split(path.delimiter).filter(Boolean)
-      .map((entry) => path.resolve(entry, command));
+  const candidates =
+    command.includes(path.sep) || path.isAbsolute(command)
+      ? [path.resolve(command)]
+      : (pathValue ?? "")
+          .split(path.delimiter)
+          .filter(Boolean)
+          .map((entry) => path.resolve(entry, command));
   for (const candidate of candidates) {
     try {
       await access(candidate, constants.X_OK);
@@ -50,7 +53,10 @@ export async function resolveRuntimeExecutable(
       }
     }
   }
-  throw new RuntimeExecutableError("executable_unavailable", `cannot resolve ${role} executable ${command}`);
+  throw new RuntimeExecutableError(
+    "executable_unavailable",
+    `cannot resolve ${role} executable ${command}`,
+  );
 }
 
 export async function captureRuntimeExecutable(
@@ -59,7 +65,10 @@ export async function captureRuntimeExecutable(
   options: { requireRootOwned?: boolean } = {},
 ): Promise<RuntimeExecutableIdentity> {
   const canonical = await realpath(candidate).catch(() => {
-    throw new RuntimeExecutableError("executable_unavailable", `${role} executable is unavailable: ${candidate}`);
+    throw new RuntimeExecutableError(
+      "executable_unavailable",
+      `${role} executable is unavailable: ${candidate}`,
+    );
   });
   const identity = await readExecutableIdentity(role, canonical);
   if (options.requireRootOwned === true && process.platform !== "win32" && identity.uid !== 0) {
@@ -99,15 +108,26 @@ export function sameRuntimeExecutableIdentity(
 export function isRuntimeExecutableIdentity(value: unknown): value is RuntimeExecutableIdentity {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const entry = value as Partial<RuntimeExecutableIdentity>;
-  return (entry.role === "node" || entry.role === "git" || entry.role === "sandbox") &&
-    typeof entry.path === "string" && path.isAbsolute(entry.path) &&
-    typeof entry.sha256 === "string" && /^sha256:[0-9a-f]{64}$/u.test(entry.sha256) &&
-    typeof entry.size === "number" && Number.isSafeInteger(entry.size) && entry.size >= 0 &&
-    typeof entry.device === "string" && typeof entry.inode === "string" &&
-    typeof entry.mode === "number" && Number.isSafeInteger(entry.mode) &&
-    typeof entry.uid === "number" && Number.isSafeInteger(entry.uid) &&
-    typeof entry.gid === "number" && Number.isSafeInteger(entry.gid) &&
-    typeof entry.modifiedNs === "string" && typeof entry.changedNs === "string";
+  return (
+    (entry.role === "node" || entry.role === "git" || entry.role === "sandbox") &&
+    typeof entry.path === "string" &&
+    path.isAbsolute(entry.path) &&
+    typeof entry.sha256 === "string" &&
+    /^sha256:[0-9a-f]{64}$/u.test(entry.sha256) &&
+    typeof entry.size === "number" &&
+    Number.isSafeInteger(entry.size) &&
+    entry.size >= 0 &&
+    typeof entry.device === "string" &&
+    typeof entry.inode === "string" &&
+    typeof entry.mode === "number" &&
+    Number.isSafeInteger(entry.mode) &&
+    typeof entry.uid === "number" &&
+    Number.isSafeInteger(entry.uid) &&
+    typeof entry.gid === "number" &&
+    Number.isSafeInteger(entry.gid) &&
+    typeof entry.modifiedNs === "string" &&
+    typeof entry.changedNs === "string"
+  );
 }
 
 async function readExecutableIdentity(
@@ -116,12 +136,22 @@ async function readExecutableIdentity(
 ): Promise<RuntimeExecutableIdentity> {
   const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
   const handle = await open(canonical, constants.O_RDONLY | noFollow).catch(() => {
-    throw new RuntimeExecutableError("executable_unavailable", `${role} executable cannot be opened: ${canonical}`);
+    throw new RuntimeExecutableError(
+      "executable_unavailable",
+      `${role} executable cannot be opened: ${canonical}`,
+    );
   });
   try {
     const before = await handle.stat({ bigint: true });
-    if (!before.isFile() || before.size > BigInt(MAX_EXECUTABLE_BYTES) || (before.mode & 0o111n) === 0n) {
-      throw new RuntimeExecutableError("executable_type", `${role} executable is not a safe bounded executable file`);
+    if (
+      !before.isFile() ||
+      before.size > BigInt(MAX_EXECUTABLE_BYTES) ||
+      (before.mode & 0o111n) === 0n
+    ) {
+      throw new RuntimeExecutableError(
+        "executable_type",
+        `${role} executable is not a safe bounded executable file`,
+      );
     }
     const hash = createHash("sha256");
     const buffer = Buffer.allocUnsafe(1024 * 1024);
@@ -134,9 +164,16 @@ async function readExecutableIdentity(
     }
     const after = await handle.stat({ bigint: true });
     const pathMetadata = await lstat(canonical, { bigint: true });
-    if (!sameBigIntStat(before, after) || !sameBigIntStat(after, pathMetadata) ||
-        !pathMetadata.isFile() || BigInt(position) !== after.size) {
-      throw new RuntimeExecutableError("executable_race", `${role} executable changed while it was authenticated`);
+    if (
+      !sameBigIntStat(before, after) ||
+      !sameBigIntStat(after, pathMetadata) ||
+      !pathMetadata.isFile() ||
+      BigInt(position) !== after.size
+    ) {
+      throw new RuntimeExecutableError(
+        "executable_race",
+        `${role} executable changed while it was authenticated`,
+      );
     }
     return {
       role,
@@ -156,18 +193,34 @@ async function readExecutableIdentity(
   }
 }
 
-function sameBigIntStat(
-  left: BigIntStats,
-  right: BigIntStats,
-): boolean {
-  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode &&
-    left.uid === right.uid && left.gid === right.gid && left.size === right.size &&
-    left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+function sameBigIntStat(left: BigIntStats, right: BigIntStats): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mode === right.mode &&
+    left.uid === right.uid &&
+    left.gid === right.gid &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
 }
 
-function sameExecutable(left: RuntimeExecutableIdentity, right: RuntimeExecutableIdentity): boolean {
-  return left.role === right.role && left.path === right.path && left.sha256 === right.sha256 &&
-    left.size === right.size && left.device === right.device && left.inode === right.inode &&
-    left.mode === right.mode && left.uid === right.uid && left.gid === right.gid &&
-    left.modifiedNs === right.modifiedNs && left.changedNs === right.changedNs;
+function sameExecutable(
+  left: RuntimeExecutableIdentity,
+  right: RuntimeExecutableIdentity,
+): boolean {
+  return (
+    left.role === right.role &&
+    left.path === right.path &&
+    left.sha256 === right.sha256 &&
+    left.size === right.size &&
+    left.device === right.device &&
+    left.inode === right.inode &&
+    left.mode === right.mode &&
+    left.uid === right.uid &&
+    left.gid === right.gid &&
+    left.modifiedNs === right.modifiedNs &&
+    left.changedNs === right.changedNs
+  );
 }

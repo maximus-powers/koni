@@ -85,102 +85,160 @@ interface CatalogEntry {
   maxResultBytes: number;
 }
 
-const stringList = (maximum: number) => Type.Array(Type.String({ minLength: 1, maxLength: 4_096 }), {
-  maxItems: maximum,
-  uniqueItems: true,
-});
+const stringList = (maximum: number) =>
+  Type.Array(Type.String({ minLength: 1, maxLength: 4_096 }), {
+    maxItems: maximum,
+    uniqueItems: true,
+  });
 const pathField = Type.String({ minLength: 1, maxLength: 4_096 });
 const sha256Field = Type.String({ pattern: "^sha256:[0-9a-f]{64}$" });
 const jsonObject = Type.Record(Type.String({ minLength: 1, maxLength: 256 }), Type.Unknown());
-const legacyRecordNoteSchema = Type.Object({
-  nodeId: Type.String({ minLength: 1, maxLength: 256 }),
-  kind: Type.Union([
-    Type.Literal("observation"),
-    Type.Literal("implementation_detail"),
-    Type.Literal("rationale"),
-    Type.Literal("nit"),
-    Type.Literal("open_question"),
-  ]),
-  body: Type.String({ minLength: 1, maxLength: 1024 * 1024 }),
-  supersedes: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
-}, { additionalProperties: false });
-const currentRecordNoteSchema = Type.Object({
-  nodeId: Type.String({ minLength: 1, maxLength: 256 }),
-  kind: Type.Union([
-    Type.Literal("observation"),
-    Type.Literal("implementation_detail"),
-    Type.Literal("rationale"),
-    Type.Literal("nit"),
-    Type.Literal("open_question"),
-  ]),
-  body: Type.String({ minLength: 1, maxLength: 1024 * 1024 }),
-  paths: Type.Optional(Type.Array(pathField, { maxItems: 256, uniqueItems: true })),
-  supersedes: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
-}, { additionalProperties: false });
+const legacyRecordNoteSchema = Type.Object(
+  {
+    nodeId: Type.String({ minLength: 1, maxLength: 256 }),
+    kind: Type.Union([
+      Type.Literal("observation"),
+      Type.Literal("implementation_detail"),
+      Type.Literal("rationale"),
+      Type.Literal("nit"),
+      Type.Literal("open_question"),
+    ]),
+    body: Type.String({ minLength: 1, maxLength: 1024 * 1024 }),
+    supersedes: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+  },
+  { additionalProperties: false },
+);
+const currentRecordNoteSchema = Type.Object(
+  {
+    nodeId: Type.String({ minLength: 1, maxLength: 256 }),
+    kind: Type.Union([
+      Type.Literal("observation"),
+      Type.Literal("implementation_detail"),
+      Type.Literal("rationale"),
+      Type.Literal("nit"),
+      Type.Literal("open_question"),
+    ]),
+    body: Type.String({ minLength: 1, maxLength: 1024 * 1024 }),
+    paths: Type.Optional(Type.Array(pathField, { maxItems: 256, uniqueItems: true })),
+    supersedes: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+  },
+  { additionalProperties: false },
+);
 
 /** Recovery-only schema for attempts issued before policy-aware recommendations were mandatory. */
 const legacyAskQuestionSchema = Type.Union([
-  Type.Object({
-    prompt: Type.String({ minLength: 1, maxLength: 1024 * 1024 }),
-    options: Type.Array(Type.Object({
-      id: Type.String({ minLength: 1, maxLength: 128 }),
-      label: Type.String({ minLength: 1, maxLength: 16 * 1024 }),
-      description: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
-    }, { additionalProperties: false }), { minItems: 2, maxItems: 8 }),
-    allowsNotes: Type.Optional(Type.Boolean()),
-    recommendedOptionId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
-  }, { additionalProperties: false }),
-  Type.Object({
-    questions: Type.Array(Type.Object({
-      id: Type.String({ minLength: 1, maxLength: 128 }),
+  Type.Object(
+    {
       prompt: Type.String({ minLength: 1, maxLength: 1024 * 1024 }),
-      options: Type.Array(Type.Object({
-        id: Type.String({ minLength: 1, maxLength: 128 }),
-        label: Type.String({ minLength: 1, maxLength: 16 * 1024 }),
-        description: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
-      }, { additionalProperties: false }), { minItems: 2, maxItems: 8 }),
+      options: Type.Array(
+        Type.Object(
+          {
+            id: Type.String({ minLength: 1, maxLength: 128 }),
+            label: Type.String({ minLength: 1, maxLength: 16 * 1024 }),
+            description: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
+          },
+          { additionalProperties: false },
+        ),
+        { minItems: 2, maxItems: 8 },
+      ),
       allowsNotes: Type.Optional(Type.Boolean()),
       recommendedOptionId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
-    }, { additionalProperties: false }), { minItems: 1, maxItems: 8 }),
-  }, { additionalProperties: false }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      questions: Type.Array(
+        Type.Object(
+          {
+            id: Type.String({ minLength: 1, maxLength: 128 }),
+            prompt: Type.String({ minLength: 1, maxLength: 1024 * 1024 }),
+            options: Type.Array(
+              Type.Object(
+                {
+                  id: Type.String({ minLength: 1, maxLength: 128 }),
+                  label: Type.String({ minLength: 1, maxLength: 16 * 1024 }),
+                  description: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
+                },
+                { additionalProperties: false },
+              ),
+              { minItems: 2, maxItems: 8 },
+            ),
+            allowsNotes: Type.Optional(Type.Boolean()),
+            recommendedOptionId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+          },
+          { additionalProperties: false },
+        ),
+        { minItems: 1, maxItems: 8 },
+      ),
+    },
+    { additionalProperties: false },
+  ),
 ]);
 
 const currentAskQuestionSchema = Type.Union([
-  Type.Object({
-    prompt: Type.String({ minLength: 1, maxLength: 1024 * 1024 }),
-    options: Type.Array(Type.Object({
-      id: Type.String({ minLength: 1, maxLength: 128 }),
-      label: Type.String({ minLength: 1, maxLength: 16 * 1024 }),
-      description: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
-    }, { additionalProperties: false }), { minItems: 2, maxItems: 8 }),
-    allowsNotes: Type.Optional(Type.Boolean()),
-    recommendedOptionId: Type.String({ minLength: 1, maxLength: 128 }),
-    impact: Type.Union([Type.Literal("routine"), Type.Literal("high_impact")]),
-  }, { additionalProperties: false }),
-  Type.Object({
-    questions: Type.Array(Type.Object({
-      id: Type.String({ minLength: 1, maxLength: 128 }),
+  Type.Object(
+    {
       prompt: Type.String({ minLength: 1, maxLength: 1024 * 1024 }),
-      options: Type.Array(Type.Object({
-        id: Type.String({ minLength: 1, maxLength: 128 }),
-        label: Type.String({ minLength: 1, maxLength: 16 * 1024 }),
-        description: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
-      }, { additionalProperties: false }), { minItems: 2, maxItems: 8 }),
+      options: Type.Array(
+        Type.Object(
+          {
+            id: Type.String({ minLength: 1, maxLength: 128 }),
+            label: Type.String({ minLength: 1, maxLength: 16 * 1024 }),
+            description: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
+          },
+          { additionalProperties: false },
+        ),
+        { minItems: 2, maxItems: 8 },
+      ),
       allowsNotes: Type.Optional(Type.Boolean()),
       recommendedOptionId: Type.String({ minLength: 1, maxLength: 128 }),
       impact: Type.Union([Type.Literal("routine"), Type.Literal("high_impact")]),
-    }, { additionalProperties: false }), { minItems: 1, maxItems: 8 }),
-  }, { additionalProperties: false }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      questions: Type.Array(
+        Type.Object(
+          {
+            id: Type.String({ minLength: 1, maxLength: 128 }),
+            prompt: Type.String({ minLength: 1, maxLength: 1024 * 1024 }),
+            options: Type.Array(
+              Type.Object(
+                {
+                  id: Type.String({ minLength: 1, maxLength: 128 }),
+                  label: Type.String({ minLength: 1, maxLength: 16 * 1024 }),
+                  description: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
+                },
+                { additionalProperties: false },
+              ),
+              { minItems: 2, maxItems: 8 },
+            ),
+            allowsNotes: Type.Optional(Type.Boolean()),
+            recommendedOptionId: Type.String({ minLength: 1, maxLength: 128 }),
+            impact: Type.Union([Type.Literal("routine"), Type.Literal("high_impact")]),
+          },
+          { additionalProperties: false },
+        ),
+        { minItems: 1, maxItems: 8 },
+      ),
+    },
+    { additionalProperties: false },
+  ),
 ]);
 
 const CATALOG: Readonly<Record<KoniToolName, Omit<CatalogEntry, "name">>> = {
   koni_context: {
     label: "Ticket context",
     description: "Read a bounded page of compiler-issued context for this exact ticket step.",
-    schema: Type.Object({
-      offsetChars: Type.Optional(Type.Integer({ minimum: 0 })),
-      maxChars: Type.Optional(Type.Integer({ minimum: 1, maximum: 131_072 })),
-    }, { additionalProperties: false }),
+    schema: Type.Object(
+      {
+        offsetChars: Type.Optional(Type.Integer({ minimum: 0 })),
+        maxChars: Type.Optional(Type.Integer({ minimum: 1, maximum: 131_072 })),
+      },
+      { additionalProperties: false },
+    ),
     executionMode: "parallel",
     terminal: false,
     maxResultBytes: 512 * 1024,
@@ -188,41 +246,50 @@ const CATALOG: Readonly<Record<KoniToolName, Omit<CatalogEntry, "name">>> = {
   koni_read_resource: {
     label: "Read resource",
     description: "Read a bounded page of one immutable compiler-issued skill or prompt resource.",
-    schema: Type.Object({
-      resourceId: Type.String({ minLength: 1, maxLength: 256 }),
-      offsetChars: Type.Optional(Type.Integer({ minimum: 0 })),
-      maxChars: Type.Optional(Type.Integer({ minimum: 1, maximum: 131_072 })),
-    }, { additionalProperties: false }),
+    schema: Type.Object(
+      {
+        resourceId: Type.String({ minLength: 1, maxLength: 256 }),
+        offsetChars: Type.Optional(Type.Integer({ minimum: 0 })),
+        maxChars: Type.Optional(Type.Integer({ minimum: 1, maximum: 131_072 })),
+      },
+      { additionalProperties: false },
+    ),
     executionMode: "parallel",
     terminal: false,
     maxResultBytes: 512 * 1024,
   },
   koni_graph_context: {
     label: "Graph context",
-    description: "Read a bounded typed-graph neighborhood inside this attempt's compiler-issued scope.",
-    schema: Type.Object({
-      anchors: Type.Optional(stringList(16)),
-      relations: Type.Optional(stringList(32)),
-      direction: Type.Optional(Type.Union([
-        Type.Literal("outgoing"),
-        Type.Literal("incoming"),
-        Type.Literal("both"),
-      ])),
-      maxDepth: Type.Optional(Type.Integer({ minimum: 0, maximum: 16 })),
-      nodeTypes: Type.Optional(stringList(32)),
-    }, { additionalProperties: false }),
+    description:
+      "Read a bounded typed-graph neighborhood inside this attempt's compiler-issued scope.",
+    schema: Type.Object(
+      {
+        anchors: Type.Optional(stringList(16)),
+        relations: Type.Optional(stringList(32)),
+        direction: Type.Optional(
+          Type.Union([Type.Literal("outgoing"), Type.Literal("incoming"), Type.Literal("both")]),
+        ),
+        maxDepth: Type.Optional(Type.Integer({ minimum: 0, maximum: 16 })),
+        nodeTypes: Type.Optional(stringList(32)),
+      },
+      { additionalProperties: false },
+    ),
     executionMode: "parallel",
     terminal: false,
     maxResultBytes: 2 * 1024 * 1024,
   },
   koni_read_file: {
     label: "Read",
-    description: "Read at most 32 KiB from an allowed regular file. For a large file, search for a known symbol or literal before reading at a nonzero byte offset.",
-    schema: Type.Object({
-      path: pathField,
-      offset: Type.Optional(Type.Integer({ minimum: 0 })),
-      maxBytes: Type.Optional(Type.Integer({ minimum: 1, maximum: 1024 * 1024 })),
-    }, { additionalProperties: false }),
+    description:
+      "Read at most 32 KiB from an allowed regular file. For a large file, search for a known symbol or literal before reading at a nonzero byte offset.",
+    schema: Type.Object(
+      {
+        path: pathField,
+        offset: Type.Optional(Type.Integer({ minimum: 0 })),
+        maxBytes: Type.Optional(Type.Integer({ minimum: 1, maximum: 1024 * 1024 })),
+      },
+      { additionalProperties: false },
+    ),
     executionMode: "parallel",
     terminal: false,
     maxResultBytes: 2 * 1024 * 1024,
@@ -230,24 +297,31 @@ const CATALOG: Readonly<Record<KoniToolName, Omit<CatalogEntry, "name">>> = {
   koni_list_files: {
     label: "List",
     description: "List bounded regular files and directories allowed by the compiled ticket grant.",
-    schema: Type.Object({
-      path: Type.Optional(pathField),
-      recursive: Type.Optional(Type.Boolean()),
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 10_000 })),
-    }, { additionalProperties: false }),
+    schema: Type.Object(
+      {
+        path: Type.Optional(pathField),
+        recursive: Type.Optional(Type.Boolean()),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 10_000 })),
+      },
+      { additionalProperties: false },
+    ),
     executionMode: "parallel",
     terminal: false,
     maxResultBytes: 4 * 1024 * 1024,
   },
   koni_search_files: {
     label: "Search",
-    description: "Search literal UTF-8 text in allowed regular files and return line, preview, and exact byte offsets for targeted reads.",
-    schema: Type.Object({
-      query: Type.String({ minLength: 1, maxLength: 4_096 }),
-      roots: Type.Optional(Type.Array(pathField, { maxItems: 64, uniqueItems: true })),
-      caseSensitive: Type.Optional(Type.Boolean()),
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })),
-    }, { additionalProperties: false }),
+    description:
+      "Search literal UTF-8 text in allowed regular files and return line, preview, and exact byte offsets for targeted reads.",
+    schema: Type.Object(
+      {
+        query: Type.String({ minLength: 1, maxLength: 4_096 }),
+        roots: Type.Optional(Type.Array(pathField, { maxItems: 64, uniqueItems: true })),
+        caseSensitive: Type.Optional(Type.Boolean()),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })),
+      },
+      { additionalProperties: false },
+    ),
     executionMode: "parallel",
     terminal: false,
     maxResultBytes: 4 * 1024 * 1024,
@@ -255,49 +329,64 @@ const CATALOG: Readonly<Record<KoniToolName, Omit<CatalogEntry, "name">>> = {
   koni_run_check: {
     label: "Run check",
     description: "Execute one exact compiler-configured check in the authority-owned OS sandbox.",
-    schema: Type.Object({
-      checkId: Type.String({ minLength: 1, maxLength: 256 }),
-    }, { additionalProperties: false }),
+    schema: Type.Object(
+      {
+        checkId: Type.String({ minLength: 1, maxLength: 256 }),
+      },
+      { additionalProperties: false },
+    ),
     executionMode: "sequential",
     terminal: false,
     maxResultBytes: 4 * 1024 * 1024,
   },
   koni_write_file: {
     label: "Write",
-    description: "Atomically replace a compiled-grant file using an exact content-hash precondition.",
-    schema: Type.Object({
-      path: pathField,
-      content: Type.String({ maxLength: 16 * 1024 * 1024 }),
-      expectedSha256: Type.Union([sha256Field, Type.Null()]),
-    }, { additionalProperties: false }),
+    description:
+      "Atomically replace a compiled-grant file using an exact content-hash precondition.",
+    schema: Type.Object(
+      {
+        path: pathField,
+        content: Type.String({ maxLength: 16 * 1024 * 1024 }),
+        expectedSha256: Type.Union([sha256Field, Type.Null()]),
+      },
+      { additionalProperties: false },
+    ),
     executionMode: "sequential",
     terminal: false,
     maxResultBytes: 1024 * 1024,
   },
   koni_edit_file: {
     label: "Edit",
-    description: "Replace one exact text occurrence in a compiled-grant file under a content-hash precondition.",
-    schema: Type.Object({
-      path: pathField,
-      oldText: Type.String({ minLength: 1, maxLength: 8 * 1024 * 1024 }),
-      newText: Type.String({ maxLength: 8 * 1024 * 1024 }),
-      expectedSha256: sha256Field,
-    }, { additionalProperties: false }),
+    description:
+      "Replace one exact text occurrence in a compiled-grant file under a content-hash precondition.",
+    schema: Type.Object(
+      {
+        path: pathField,
+        oldText: Type.String({ minLength: 1, maxLength: 8 * 1024 * 1024 }),
+        newText: Type.String({ maxLength: 8 * 1024 * 1024 }),
+        expectedSha256: sha256Field,
+      },
+      { additionalProperties: false },
+    ),
     executionMode: "sequential",
     terminal: false,
     maxResultBytes: 1024 * 1024,
   },
   koni_update_working_spec: {
     label: "Update working specification",
-    description: "Create the next canonical working-spec version under owner authentication and contextual CAS.",
-    schema: Type.Object({
-      expectedContextualRevision: Type.Integer({ minimum: 0 }),
-      expectedCanonicalDigest: sha256Field,
-      guidance: Type.Optional(Type.String({ minLength: 1, maxLength: 1024 * 1024 })),
-      content: Type.Optional(Type.String({ minLength: 1, maxLength: 1024 * 1024 })),
-      affectedNodeIds: Type.Optional(stringList(256)),
-      paths: Type.Optional(Type.Array(pathField, { maxItems: 256, uniqueItems: true })),
-    }, { additionalProperties: false }),
+    description:
+      "Create the next canonical working-spec version under owner authentication and contextual CAS.",
+    schema: Type.Object(
+      {
+        expectedContextualRevision: Type.Integer({ minimum: 0 }),
+        expectedCanonicalDigest: sha256Field,
+        guidance: Type.Optional(Type.String({ minLength: 1, maxLength: 1024 * 1024 })),
+        content: Type.Optional(Type.String({ minLength: 1, maxLength: 1024 * 1024 })),
+        affectedNodeIds: Type.Optional(stringList(256)),
+        paths: Type.Optional(Type.Array(pathField, { maxItems: 256, uniqueItems: true })),
+      },
+      { additionalProperties: false },
+    ),
     executionMode: "sequential",
     terminal: false,
     maxResultBytes: 2 * 1024 * 1024,
@@ -312,7 +401,8 @@ const CATALOG: Readonly<Record<KoniToolName, Omit<CatalogEntry, "name">>> = {
   },
   koni_ask_question: {
     label: "Ask user",
-    description: "Submit explicit recommendations and impact. The pinned run policy either records them automatically or pauses for operator input.",
+    description:
+      "Submit explicit recommendations and impact. The pinned run policy either records them automatically or pauses for operator input.",
     schema: currentAskQuestionSchema,
     executionMode: "sequential",
     terminal: false,
@@ -320,7 +410,8 @@ const CATALOG: Readonly<Record<KoniToolName, Omit<CatalogEntry, "name">>> = {
   },
   koni_submit_output: {
     label: "Submit output",
-    description: 'Submit the one terminal structured result and end this attempt. status is a literal string: exactly "completed" on success (with a one-sentence summary and any step-specific fields the schema requires) or exactly "failed" only when the objective is genuinely impossible (with a specific blocker diagnosis). Do not guess other status values or send placeholder/probe content. Send the arguments as a JSON object.',
+    description:
+      'Submit the one terminal structured result and end this attempt. status is a literal string: exactly "completed" on success (with a one-sentence summary and any step-specific fields the schema requires) or exactly "failed" only when the objective is genuinely impossible (with a specific blocker diagnosis). Do not guess other status values or send placeholder/probe content. Send the arguments as a JSON object.',
     schema: jsonObject,
     executionMode: "sequential",
     terminal: true,
@@ -330,7 +421,8 @@ const CATALOG: Readonly<Record<KoniToolName, Omit<CatalogEntry, "name">>> = {
 
 /** Build the exact hash-bound inventory loaded into one contained Pi AgentSession. */
 export function createKoniAuthorityTools(options: KoniToolCatalogOptions): AuthorityBackedTool[] {
-  if (options.names.length === 0) throw new Error("a contained attempt requires at least one Koni tool");
+  if (options.names.length === 0)
+    throw new Error("a contained attempt requires at least one Koni tool");
   const names = new Set<KoniToolName>();
   return options.names.map((name) => {
     if (names.has(name)) throw new Error(`duplicate Koni tool ${name}`);
@@ -354,7 +446,9 @@ export function createKoniAuthorityTools(options: KoniToolCatalogOptions): Autho
         ...(source.terminal && receipt.outcome === "accepted" ? { terminate: true } : {}),
       };
       if (koniToolResultPayloadBytes(result) > resultLimitBytes) {
-        throw new Error(`authority tool result for ${name} exceeds its ${resultLimitBytes}-byte launch bound`);
+        throw new Error(
+          `authority tool result for ${name} exceeds its ${resultLimitBytes}-byte launch bound`,
+        );
       }
       return result;
     };
@@ -373,12 +467,15 @@ export function createKoniAuthorityTools(options: KoniToolCatalogOptions): Autho
     };
     const reject: AuthorityBackedTool["reject"] = async (callId, args, rejection, signal) => {
       validateRuntimeRejection(rejection);
-      const receipt = await options.reject({
-        callId,
-        name,
-        arguments: structuredClone(args),
-        ...(signal === undefined ? {} : { signal }),
-      }, structuredClone(rejection));
+      const receipt = await options.reject(
+        {
+          callId,
+          name,
+          arguments: structuredClone(args),
+          ...(signal === undefined ? {} : { signal }),
+        },
+        structuredClone(rejection),
+      );
       validateKoniToolReceipt(receipt);
       if (receipt.outcome !== "rejected" || receipt.code !== rejection.code) {
         throw new Error(`authority returned the wrong rejection outcome for ${name}`);
@@ -399,7 +496,13 @@ export function createKoniAuthorityTools(options: KoniToolCatalogOptions): Autho
         return renderKoniToolCall(name, source.label, args, theme, context.lastComponent);
       },
       renderResult(result, renderOptions, theme, context) {
-        return renderKoniToolResult(source.label, result, renderOptions, theme, context.lastComponent);
+        return renderKoniToolResult(
+          source.label,
+          result,
+          renderOptions,
+          theme,
+          context.lastComponent,
+        );
       },
     };
     return {
@@ -410,16 +513,21 @@ export function createKoniAuthorityTools(options: KoniToolCatalogOptions): Autho
       reject,
       // The terminal outcome contract stays the exact compiled union even though the advertised
       // parameters carry the transport-flattened view (see transportToolSchema).
-      ...(source.terminal ? {
-        terminalOutputSchema: structuredClone(options.terminalOutputSchema ?? parameters),
-        terminalOutputSchemaHash: canonicalHash(options.terminalOutputSchema ?? parameters),
-      } : {}),
+      ...(source.terminal
+        ? {
+            terminalOutputSchema: structuredClone(options.terminalOutputSchema ?? parameters),
+            terminalOutputSchemaHash: canonicalHash(options.terminalOutputSchema ?? parameters),
+          }
+        : {}),
       definition,
     };
   });
 }
 
-export function koniToolSchemaHash(name: KoniToolName, terminalOutputSchema?: TSchema): Sha256Digest {
+export function koniToolSchemaHash(
+  name: KoniToolName,
+  terminalOutputSchema?: TSchema,
+): Sha256Digest {
   return canonicalHash(resolveToolSchema(name, terminalOutputSchema));
 }
 
@@ -453,7 +561,10 @@ export function validateKoniToolArguments(
   // transport artifact outside the agent's control.
   const parsed = coerceJsonObjectArguments(value);
   const accepts = (candidate: unknown): candidate is Record<string, unknown> =>
-    Value.Check(schema, candidate) && typeof candidate === "object" && candidate !== null && !Array.isArray(candidate);
+    Value.Check(schema, candidate) &&
+    typeof candidate === "object" &&
+    candidate !== null &&
+    !Array.isArray(candidate);
   if (accepts(parsed)) return structuredClone(parsed);
   // Repair nested fields the transport stringified (e.g. an object-typed `graphDelta` delivered as
   // a JSON string). Only accepted when the repaired payload passes the exact compiled schema, so a
@@ -493,7 +604,10 @@ function transportToolSchema(name: KoniToolName, schema: TSchema): TSchema {
   if (name !== "koni_submit_output") return schema;
   const branches = (schema as { anyOf?: TSchema[] }).anyOf;
   if (!Array.isArray(branches) || branches.length === 0) return schema;
-  const byKey = new Map<string, { variants: TSchema[]; hashes: Set<string>; occurrences: number }>();
+  const byKey = new Map<
+    string,
+    { variants: TSchema[]; hashes: Set<string>; occurrences: number }
+  >();
   for (const branch of branches) {
     const properties = (branch as { properties?: Record<string, TSchema> }).properties;
     if (properties === undefined) return schema;
@@ -525,11 +639,20 @@ function repairStringifiedObjectFields(value: unknown): Record<string, unknown> 
   let changed = false;
   const out: Record<string, unknown> = {};
   for (const [key, field] of Object.entries(value)) {
-    if (typeof field === "string" && (field.trim().startsWith("{") || field.trim().startsWith("["))) {
+    if (
+      typeof field === "string" &&
+      (field.trim().startsWith("{") || field.trim().startsWith("["))
+    ) {
       try {
         const parsed = JSON.parse(field.trim());
-        if (typeof parsed === "object" && parsed !== null) { out[key] = parsed; changed = true; continue; }
-      } catch { /* leave as-is */ }
+        if (typeof parsed === "object" && parsed !== null) {
+          out[key] = parsed;
+          changed = true;
+          continue;
+        }
+      } catch {
+        /* leave as-is */
+      }
     }
     out[key] = field;
   }
@@ -540,12 +663,18 @@ function repairStringifiedObjectFields(value: unknown): Record<string, unknown> 
 function describeSchemaMismatch(name: KoniToolName, schema: TSchema, value: unknown): string {
   const observed = isRecord(value)
     ? Object.entries(value)
-        .map(([key, field]) => (typeof field === "string" ? `${key}(${field.length} chars)` : `${key}(${Array.isArray(field) ? "array" : typeof field})`))
+        .map(([key, field]) =>
+          typeof field === "string"
+            ? `${key}(${field.length} chars)`
+            : `${key}(${Array.isArray(field) ? "array" : typeof field})`,
+        )
         .join(", ")
     : typeof value;
-  return `arguments do not match the compiler-issued schema for ${name}. ` +
+  return (
+    `arguments do not match the compiler-issued schema for ${name}. ` +
     `You sent: { ${observed} }. Expected exactly one of: ${describeSchemaShape(schema)}. ` +
-    "Send status as the exact literal shown, include every listed field, and keep each string within its char limit.";
+    "Send status as the exact literal shown, include every listed field, and keep each string within its char limit."
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -558,7 +687,11 @@ function describeSchemaShape(schema: TSchema): string {
     ? (schema as { anyOf: TSchema[] }).anyOf
     : [schema];
   const rendered = branches.map((branch) => {
-    const props = (branch as { properties?: Record<string, { const?: unknown; type?: string; maxLength?: number }> }).properties;
+    const props = (
+      branch as {
+        properties?: Record<string, { const?: unknown; type?: string; maxLength?: number }>;
+      }
+    ).properties;
     if (props === undefined) return "{…}";
     const fields = Object.entries(props).map(([key, prop]) => {
       if (prop && Object.hasOwn(prop, "const")) return `${key}: ${JSON.stringify(prop.const)}`;
@@ -580,14 +713,17 @@ function resolveToolSchema(
   // separately hash-bound via spec.terminal.outputSchemaHash and enforced by the compiler's
   // assignment-output parse. Flattening here keeps the sealed binding consistent: the spec's
   // schemaHash, the child's exposed definition, and argument validation all derive from one place.
-  const current = name === "koni_submit_output" && terminalOutputSchema !== undefined
-    ? transportToolSchema(name, terminalOutputSchema)
-    : CATALOG[name].schema;
-  if (expectedSchemaHash === undefined || canonicalHash(current) === expectedSchemaHash) return current;
+  const current =
+    name === "koni_submit_output" && terminalOutputSchema !== undefined
+      ? transportToolSchema(name, terminalOutputSchema)
+      : CATALOG[name].schema;
+  if (expectedSchemaHash === undefined || canonicalHash(current) === expectedSchemaHash)
+    return current;
   // Launch specs issued before the transport flatten bound the raw terminal union as the submit
   // tool's parameter schema; keep those in-flight attempts recoverable.
   if (
-    name === "koni_submit_output" && terminalOutputSchema !== undefined &&
+    name === "koni_submit_output" &&
+    terminalOutputSchema !== undefined &&
     canonicalHash(terminalOutputSchema) === expectedSchemaHash
   ) {
     return terminalOutputSchema;
@@ -595,7 +731,10 @@ function resolveToolSchema(
   if (name === "koni_record_note" && canonicalHash(legacyRecordNoteSchema) === expectedSchemaHash) {
     return legacyRecordNoteSchema;
   }
-  if (name === "koni_ask_question" && canonicalHash(legacyAskQuestionSchema) === expectedSchemaHash) {
+  if (
+    name === "koni_ask_question" &&
+    canonicalHash(legacyAskQuestionSchema) === expectedSchemaHash
+  ) {
     return legacyAskQuestionSchema;
   }
   throw new Error(`unsupported historical schema hash for ${name}`);
@@ -603,21 +742,30 @@ function resolveToolSchema(
 
 export function renderKoniToolReceipt(receipt: KoniToolReceipt): string {
   validateKoniToolReceipt(receipt);
-  return JSON.stringify({
-    status: receipt.outcome,
-    receiptId: receipt.receiptId,
-    summary: receipt.summary,
-    ...(receipt.outcome === "rejected" ? { code: receipt.code } : {}),
-    ...(receipt.value === undefined ? {} : { value: receipt.value }),
-  }, null, 2);
+  return JSON.stringify(
+    {
+      status: receipt.outcome,
+      receiptId: receipt.receiptId,
+      summary: receipt.summary,
+      ...(receipt.outcome === "rejected" ? { code: receipt.code } : {}),
+      ...(receipt.value === undefined ? {} : { value: receipt.value }),
+    },
+    null,
+    2,
+  );
 }
 
-export function koniToolResultPayloadBytes(result: Pick<AgentToolResult<unknown>, "content" | "details" | "terminate">): number {
-  return Buffer.byteLength(canonicalEncode({
-    content: result.content,
-    details: result.details,
-    ...(result.terminate === undefined ? {} : { terminate: result.terminate }),
-  }), "utf8");
+export function koniToolResultPayloadBytes(
+  result: Pick<AgentToolResult<unknown>, "content" | "details" | "terminate">,
+): number {
+  return Buffer.byteLength(
+    canonicalEncode({
+      content: result.content,
+      details: result.details,
+      ...(result.terminate === undefined ? {} : { terminate: result.terminate }),
+    }),
+    "utf8",
+  );
 }
 
 export function validateKoniToolReceipt(value: unknown): asserts value is KoniToolReceipt {
@@ -625,9 +773,23 @@ export function validateKoniToolReceipt(value: unknown): asserts value is KoniTo
     throw new Error("authority tool receipt must be an object");
   }
   const receipt = value as Record<string, unknown>;
-  const expected = receipt.outcome === "rejected"
-    ? ["code", "outcome", "protocol", "receiptId", "summary", ...(receipt.value === undefined ? [] : ["value"])]
-    : ["outcome", "protocol", "receiptId", "summary", ...(receipt.value === undefined ? [] : ["value"])];
+  const expected =
+    receipt.outcome === "rejected"
+      ? [
+          "code",
+          "outcome",
+          "protocol",
+          "receiptId",
+          "summary",
+          ...(receipt.value === undefined ? [] : ["value"]),
+        ]
+      : [
+          "outcome",
+          "protocol",
+          "receiptId",
+          "summary",
+          ...(receipt.value === undefined ? [] : ["value"]),
+        ];
   const actual = Object.keys(receipt).sort();
   expected.sort();
   if (
@@ -658,10 +820,12 @@ function validateRuntimeRejection(value: KoniRuntimeToolRejection): void {
 }
 
 function safeReceiptText(value: unknown, maximum: number): value is string {
-  return typeof value === "string" &&
+  return (
+    typeof value === "string" &&
     Buffer.byteLength(value, "utf8") > 0 &&
     Buffer.byteLength(value, "utf8") <= maximum &&
-    !value.includes("\u0000");
+    !value.includes("\u0000")
+  );
 }
 
 function safeReceiptCode(value: unknown): value is string {

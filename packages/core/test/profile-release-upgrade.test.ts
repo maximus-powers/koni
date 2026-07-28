@@ -2,14 +2,17 @@ import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ProfileBaselineFile, ProfilePackageManifest } from "../src/contracts/profile-package.js";
+import type {
+  ProfileBaselineFile,
+  ProfilePackageManifest,
+} from "../src/contracts/profile-package.js";
 import { computeProfileBundleSha256 } from "../src/compiler/profile-package.js";
 import {
   installProfile,
   loadProfilePackage,
   previewProfileInstall,
   readProfileLifecycle,
-  ProfileInstallError,
+  type ProfileInstallError,
 } from "../src/profile/install.js";
 import { rawSha256 } from "../src/shared/canonical.js";
 
@@ -24,7 +27,7 @@ const releases = [
     oldVersion: "0.7.0",
     newVersion: "0.8.0",
     oldBundleSha256: "sha256:4e955f7fb5a6bbd58542f395471d2e3f1c87364840abd218f973b8f62a5c0c7e",
-    newBundleSha256: "sha256:2ba17d3b4259e957e9631336f4e3bcc5796062ed8428a27c05f8896f38f49649",
+    newBundleSha256: "sha256:df6e6f62434fa3856880438b2d735f0c45c5b5a62ffe3ef84144e2130e675693",
     parallelism: { source: 5, project: 7 },
   },
   {
@@ -34,7 +37,7 @@ const releases = [
     oldVersion: "1.0.11",
     newVersion: "1.1.0",
     oldBundleSha256: "sha256:1bc8bdb64934ccd475f50acad5b22a7b1b6f7e168a748ecd91e234be76126c60",
-    newBundleSha256: "sha256:b3a70e54bdd237f8cbda10ef2f5ac5addf0d07e077037488dca79731eb7902ec",
+    newBundleSha256: "sha256:e75e482a20d39659782edb8b0a23f3b0fc9cce27a6d97695e935e9efdd121153",
     parallelism: { source: 64, project: 17 },
   },
 ] as const;
@@ -98,19 +101,24 @@ describe("official profile release upgrades", () => {
         expectedPreviewSha256: preview.previewSha256,
       });
       expect(upgraded.profileVersion).toBe(release.newVersion);
-      expect(upgraded.pendingUpstream).toContainEqual(expect.objectContaining({
-        path: "resources/skills/configure-koni/references/configuration-layers.md",
-        reason: "modified",
-      }));
+      expect(upgraded.pendingUpstream).toContainEqual(
+        expect.objectContaining({
+          path: "resources/skills/configure-koni/references/configuration-layers.md",
+          reason: "modified",
+        }),
+      );
       const appliedProfile = await readFile(profilePath, "utf8");
       expect(appliedProfile).toContain(`  version: ${release.newVersion}`);
       expect(appliedProfile).toContain(`  max_parallel: ${release.parallelism.project}`);
       expect(appliedProfile).not.toContain("max_fixpoint_passes");
       expect(appliedProfile).not.toContain("lease_stale_seconds");
       expect(appliedProfile).not.toContain("storage:");
-      expect(await readFile(projectResourcePath, "utf8")).toContain("Project-owned configuration guidance");
-      expect(await readFile(path.join(project, ".koni", "agents", "lead.yaml"), "utf8"))
-        .toContain("koni.lead-judgment-output.v1");
+      expect(await readFile(projectResourcePath, "utf8")).toContain(
+        "Project-owned configuration guidance",
+      );
+      expect(await readFile(path.join(project, ".koni", "agents", "lead.yaml"), "utf8")).toContain(
+        "koni.lead-judgment-output.v1",
+      );
 
       const lifecycle = (await readProfileLifecycle(project))!;
       expect(lifecycle.semanticRetirements).toHaveLength(1);
@@ -120,10 +128,12 @@ describe("official profile release upgrades", () => {
         sourceBundleSha256: release.oldBundleSha256,
         targetBundleSha256: release.newBundleSha256,
       });
-      expect(await readFile(
-        path.join(project, ".koni", retirement.artifactRoot, "receipt.json"),
-        "utf8",
-      )).toContain(preview.previewSha256);
+      expect(
+        await readFile(
+          path.join(project, ".koni", retirement.artifactRoot, "receipt.json"),
+          "utf8",
+        ),
+      ).toContain(preview.previewSha256);
 
       const repeated = await installProfile(project, targetPackage);
       expect(repeated.mandatoryRetirements).toEqual([]);
@@ -144,82 +154,130 @@ describe("official profile release upgrades", () => {
     60_000,
   );
 
-  it.each(releases)("$name rejects a same-version bundle not named by the release", async (release) => {
-    const targetPackage = path.join(repositoryRoot, "packages", release.directory);
-    const wrongSource = await buildPriorReleasePackage(release);
-    const projectFile = path.join(wrongSource, "koni", "baseline", "project.yaml");
-    await writeFile(projectFile, `${await readFile(projectFile, "utf8")}# unauthorized rebuild\n`);
-    const wrongManifest = await refreshManifest(wrongSource);
-    expect(wrongManifest.bundle_sha256).not.toBe(release.oldBundleSha256);
-    const project = await temporary(`${release.directory}-wrong-source`);
-    await installProfile(project, wrongSource);
-    await expect(previewProfileInstall(project, targetPackage)).rejects.toMatchObject({
-      code: "retirement_source_bundle",
-    } satisfies Partial<ProfileInstallError>);
-  }, 60_000);
+  it.each(releases)(
+    "$name rejects a same-version bundle not named by the release",
+    async (release) => {
+      const targetPackage = path.join(repositoryRoot, "packages", release.directory);
+      const wrongSource = await buildPriorReleasePackage(release);
+      const projectFile = path.join(wrongSource, "koni", "baseline", "project.yaml");
+      await writeFile(
+        projectFile,
+        `${await readFile(projectFile, "utf8")}# unauthorized rebuild\n`,
+      );
+      const wrongManifest = await refreshManifest(wrongSource);
+      expect(wrongManifest.bundle_sha256).not.toBe(release.oldBundleSha256);
+      const project = await temporary(`${release.directory}-wrong-source`);
+      await installProfile(project, wrongSource);
+      await expect(previewProfileInstall(project, targetPackage)).rejects.toMatchObject({
+        code: "retirement_source_bundle",
+      } satisfies Partial<ProfileInstallError>);
+    },
+    60_000,
+  );
 
-  it.each(releases)("$name preserves comment-only customization in a retirement-touched YAML file", async (release) => {
-    const targetPackage = path.join(repositoryRoot, "packages", release.directory);
-    const oldPackage = await buildPriorReleasePackage(release);
-    const project = await temporary(`${release.directory}-comment-overlay`);
-    await installProfile(project, oldPackage);
-    const profilePath = path.join(project, ".koni", "profile.yaml");
-    await writeFile(profilePath, `# project-owned profile note\n${await readFile(profilePath, "utf8")}`);
+  it.each(releases)(
+    "$name rejects an older bundle outside the named release range",
+    async (release) => {
+      const targetPackage = path.join(repositoryRoot, "packages", release.directory);
+      const wrongSource = await buildPriorReleasePackage(release);
+      const projectFile = path.join(wrongSource, "koni", "baseline", "project.yaml");
+      await writeFile(projectFile, `${await readFile(projectFile, "utf8")}# older rebuild\n`);
+      const manifestPath = path.join(wrongSource, "koni", "profile-manifest.json");
+      const wrongManifest = await refreshManifest(wrongSource);
+      wrongManifest.profile.version = "0.1.0";
+      wrongManifest.package.version = "0.1.0";
+      await writeFile(manifestPath, `${JSON.stringify(wrongManifest, null, 2)}\n`);
+      const project = await temporary(`${release.directory}-older-unknown-source`);
+      await installProfile(project, wrongSource);
+      await expect(previewProfileInstall(project, targetPackage)).rejects.toMatchObject({
+        code: "retirement_source_bundle",
+      } satisfies Partial<ProfileInstallError>);
+    },
+    60_000,
+  );
 
-    const preview = await previewProfileInstall(project, targetPackage);
-    await installProfile(project, targetPackage, { expectedPreviewSha256: preview.previewSha256 });
-    const profile = await readFile(profilePath, "utf8");
-    expect(profile).toContain("# project-owned profile note");
-    expect(profile).toContain(`  version: ${release.newVersion}`);
-    expect(profile).not.toContain("max_fixpoint_passes");
-    expect(profile).not.toContain("storage:");
-  }, 60_000);
+  it.each(releases)(
+    "$name preserves comment-only customization in a retirement-touched YAML file",
+    async (release) => {
+      const targetPackage = path.join(repositoryRoot, "packages", release.directory);
+      const oldPackage = await buildPriorReleasePackage(release);
+      const project = await temporary(`${release.directory}-comment-overlay`);
+      await installProfile(project, oldPackage);
+      const profilePath = path.join(project, ".koni", "profile.yaml");
+      await writeFile(
+        profilePath,
+        `# project-owned profile note\n${await readFile(profilePath, "utf8")}`,
+      );
 
-  it.each(releases)("$name rejects a changed immutable source archive", async (release) => {
-    const targetPackage = path.join(repositoryRoot, "packages", release.directory);
-    const oldPackage = await buildPriorReleasePackage(release);
-    const project = await temporary(`${release.directory}-source-archive-tamper`);
-    await installProfile(project, oldPackage);
-    const lifecycle = (await readProfileLifecycle(project))!;
-    const source = lifecycle.immutableBaselines.find(
-      (entry) => entry.bundleSha256 === release.oldBundleSha256,
-    )!;
-    const archivedProfile = path.join(project, ".koni", source.root, "files", "profile.yaml");
-    await writeFile(archivedProfile, `${await readFile(archivedProfile, "utf8")}# changed archive\n`);
-    await expect(previewProfileInstall(project, targetPackage)).rejects.toMatchObject({
-      code: "baseline_store_corrupt",
-    } satisfies Partial<ProfileInstallError>);
-  }, 60_000);
+      const preview = await previewProfileInstall(project, targetPackage);
+      await installProfile(project, targetPackage, {
+        expectedPreviewSha256: preview.previewSha256,
+      });
+      const profile = await readFile(profilePath, "utf8");
+      expect(profile).toContain("# project-owned profile note");
+      expect(profile).toContain(`  version: ${release.newVersion}`);
+      expect(profile).not.toContain("max_fixpoint_passes");
+      expect(profile).not.toContain("storage:");
+    },
+    60_000,
+  );
 
-  it.each(releases)("$name rejects descriptor and resource tampering", async (release) => {
-    const targetPackage = path.join(repositoryRoot, "packages", release.directory);
+  it.each(releases)(
+    "$name rejects a changed immutable source archive",
+    async (release) => {
+      const targetPackage = path.join(repositoryRoot, "packages", release.directory);
+      const oldPackage = await buildPriorReleasePackage(release);
+      const project = await temporary(`${release.directory}-source-archive-tamper`);
+      await installProfile(project, oldPackage);
+      const lifecycle = (await readProfileLifecycle(project))!;
+      const source = lifecycle.immutableBaselines.find(
+        (entry) => entry.bundleSha256 === release.oldBundleSha256,
+      )!;
+      const archivedProfile = path.join(project, ".koni", source.root, "files", "profile.yaml");
+      await writeFile(
+        archivedProfile,
+        `${await readFile(archivedProfile, "utf8")}# changed archive\n`,
+      );
+      await expect(previewProfileInstall(project, targetPackage)).rejects.toMatchObject({
+        code: "baseline_store_corrupt",
+      } satisfies Partial<ProfileInstallError>);
+    },
+    60_000,
+  );
 
-    const descriptorTamper = await temporary(`${release.directory}-descriptor-tamper`);
-    await cp(targetPackage, descriptorTamper, { recursive: true });
-    const manifestPath = path.join(descriptorTamper, "koni", "profile-manifest.json");
-    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-    manifest.migrations[0].from_profile_range = "*";
-    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-    await expect(loadProfilePackage(descriptorTamper)).rejects.toMatchObject({
-      code: "manifest_invalid",
-    } satisfies Partial<ProfileInstallError>);
+  it.each(releases)(
+    "$name rejects descriptor and resource tampering",
+    async (release) => {
+      const targetPackage = path.join(repositoryRoot, "packages", release.directory);
 
-    const resourceTamper = await temporary(`${release.directory}-resource-tamper`);
-    await cp(targetPackage, resourceTamper, { recursive: true });
-    const resourcePath = path.join(
-      resourceTamper,
-      "koni",
-      "migrations",
-      "retire-inert-semantics-v1.json",
-    );
-    await writeFile(resourcePath, `${await readFile(resourcePath, "utf8")} `);
-    await expect(loadProfilePackage(resourceTamper)).rejects.toMatchObject({
-      code: "migration_resource_sha256",
-    } satisfies Partial<ProfileInstallError>);
-  }, 30_000);
+      const descriptorTamper = await temporary(`${release.directory}-descriptor-tamper`);
+      await cp(targetPackage, descriptorTamper, { recursive: true });
+      const manifestPath = path.join(descriptorTamper, "koni", "profile-manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      manifest.migrations[0].from_profile_range = "*";
+      await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+      await expect(loadProfilePackage(descriptorTamper)).rejects.toMatchObject({
+        code: "manifest_invalid",
+      } satisfies Partial<ProfileInstallError>);
+
+      const resourceTamper = await temporary(`${release.directory}-resource-tamper`);
+      await cp(targetPackage, resourceTamper, { recursive: true });
+      const resourcePath = path.join(
+        resourceTamper,
+        "koni",
+        "migrations",
+        "retire-inert-semantics-v1.json",
+      );
+      await writeFile(resourcePath, `${await readFile(resourcePath, "utf8")} `);
+      await expect(loadProfilePackage(resourceTamper)).rejects.toMatchObject({
+        code: "migration_resource_sha256",
+      } satisfies Partial<ProfileInstallError>);
+    },
+    30_000,
+  );
 });
 
-async function buildPriorReleasePackage(release: typeof releases[number]): Promise<string> {
+async function buildPriorReleasePackage(release: (typeof releases)[number]): Promise<string> {
   const root = await temporary(`${release.directory}-prior-release`);
   const fixture = path.join(
     import.meta.dirname,
@@ -265,4 +323,3 @@ async function temporary(label: string): Promise<string> {
   roots.push(root);
   return root;
 }
-

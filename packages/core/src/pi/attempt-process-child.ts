@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { TSchema } from "typebox";
+import path from "node:path";
 import {
   BoundedJsonLineDecoder,
   PI_ATTEMPT_PROCESS_PROTOCOL,
@@ -20,7 +20,11 @@ import {
 import type { SelectedDynamicGraphContext } from "../graph/context-selector.js";
 import { rawSha256 } from "../shared/canonical.js";
 import { validateAgentLaunchSpec, type AgentLaunchSpec } from "./launch-spec.js";
-import { ManagedPiSession, type ManagedSessionOutcome } from "./managed-session.js";
+import {
+  ManagedPiSession,
+  ManagedSessionError,
+  type ManagedSessionOutcome,
+} from "./managed-session.js";
 import {
   KONI_TOOL_NAMES,
   createKoniAuthorityTools,
@@ -45,40 +49,81 @@ export async function runPiAttemptProcessChild(): Promise<void> {
       terminalOutputSchema: structuredClone(launch.terminalOutputSchema),
       schemaHashes: Object.fromEntries(spec.tools.map((tool) => [tool.name, tool.schemaHash])),
       invoke: async (call) => {
-        const result = await transport.request({
-          operation: "invoke_tool",
-          callId: call.callId,
-          name: call.name,
-          arguments: structuredClone(call.arguments),
-        }, call.signal);
+        const result = await transport.request(
+          {
+            operation: "invoke_tool",
+            callId: call.callId,
+            name: call.name,
+            arguments: structuredClone(call.arguments),
+          },
+          call.signal,
+        );
         return result as KoniToolReceipt;
       },
       reject: async (call, rejection) => {
-        const result = await transport.request({
-          operation: "reject_tool",
-          callId: call.callId,
-          name: call.name,
-          arguments: structuredClone(call.arguments),
-          rejection: structuredClone(rejection),
-        }, call.signal);
+        const result = await transport.request(
+          {
+            operation: "reject_tool",
+            callId: call.callId,
+            name: call.name,
+            arguments: structuredClone(call.arguments),
+            rejection: structuredClone(rejection),
+          },
+          call.signal,
+        );
         return result as Extract<KoniToolReceipt, { outcome: "rejected" }>;
       },
     });
-    session = launch.mode === "fresh"
-      ? await ManagedPiSession.create(spec, { tools, contextProvider })
-      : await ManagedPiSession.recover(spec, { tools, contextProvider });
-    transport.attachSession(session);
-    session.subscribe((event) => {
-      void transport.send({ type: "event", event: structuredClone(event) }).catch(() => undefined);
-    });
-    await transport.send({ type: "ready", sessionFile: session.sessionFile });
-    await transport.waitForActivation();
+    if (launch.mode === "recover") {
+      // Recovery has an immutable pre-existing session path. Publish that deterministic path first
+      // and wait for the parent to commit+activate it before acquiring recovery ownership or
+      // replaying a pending authority tool receipt. This removes every effectful recovery RPC from
+      // the construction window.
+      await transport.send({
+        type: "ready",
+        sessionFile: path.join(spec.workspace.sessionDirectory, `${spec.identity.sessionId}.jsonl`),
+      });
+      await transport.waitForActivation();
+      if (transport.abortRequested === undefined) {
+        session = await ManagedPiSession.recover(spec, { tools, contextProvider });
+      }
+    } else {
+      session = await ManagedPiSession.create(spec, { tools, contextProvider });
+      transport.attachSession(session);
+      session.subscribe((event) => {
+        void transport
+          .send({ type: "event", event: structuredClone(event) })
+          .catch(() => undefined);
+      });
+      await transport.send({ type: "ready", sessionFile: session.sessionFile });
+      await transport.waitForActivation();
+    }
+    if (session !== undefined && launch.mode === "recover") {
+      transport.attachSession(session);
+      session.subscribe((event) => {
+        void transport
+          .send({ type: "event", event: structuredClone(event) })
+          .catch(() => undefined);
+      });
+    }
 
     let outcome: ManagedSessionOutcome;
-    if (transport.abortRequested !== undefined) {
-      await session.abort(transport.abortRequested);
-      outcome = { status: "aborted", reason: transport.abortRequested, usage: session.usage };
-      await session.dispose();
+    if (transport.abortRequested !== undefined || session === undefined) {
+      if (session !== undefined) {
+        await session.abort(transport.abortRequested ?? "attempt aborted before recovery");
+        outcome = {
+          status: "aborted",
+          reason: transport.abortRequested ?? "attempt aborted before recovery",
+          usage: session.usage,
+        };
+        await session.dispose();
+      } else {
+        outcome = {
+          status: "aborted",
+          reason: transport.abortRequested ?? "attempt aborted before recovery",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, newTokens: 0, allTokens: 0 },
+        };
+      }
     } else {
       outcome = await session.start();
       await session.releaseRuntime();
@@ -112,6 +157,7 @@ class ChildTransport {
   #closed = false;
   #abortRequested: string | undefined;
   #lastAuthorizedMessageSequence = 0;
+  #activationToken: string | undefined;
 
   public constructor() {
     process.stdin.on("data", (chunk: Buffer) => this.#onInput(chunk));
@@ -141,7 +187,11 @@ class ChildTransport {
 
   public bind(spec: Readonly<AgentLaunchSpec>): void {
     const launch = this.#launch.value;
-    if (launch === undefined || launch.specHash !== spec.specHash || launch.attemptId !== spec.identity.attemptId) {
+    if (
+      launch === undefined ||
+      launch.specHash !== spec.specHash ||
+      launch.attemptId !== spec.identity.attemptId
+    ) {
       throw new Error("launch frame does not match its validated immutable specification");
     }
     this.#spec = spec;
@@ -151,7 +201,10 @@ class ChildTransport {
     this.#session = session;
   }
 
-  public request(request: PiAuthorityRequest, signal?: AbortSignal): Promise<PiAuthorityResponseValue> {
+  public request(
+    request: PiAuthorityRequest,
+    signal?: AbortSignal,
+  ): Promise<PiAuthorityResponseValue> {
     if (this.#closed) return Promise.reject(new Error("authority channel is closed"));
     const requestId = randomUUID();
     const pending = deferred<PiAuthorityResponseValue>();
@@ -166,8 +219,12 @@ class ChildTransport {
       pending.reject(new Error("authority request aborted"));
     };
     signal?.addEventListener("abort", onAbort, { once: true });
-    void this.send({ type: "authority_request", requestId, request })
-      .catch((error) => pending.reject(asError(error)));
+    void this.send({
+      type: "authority_request",
+      requestId,
+      ...(this.#activationToken === undefined ? {} : { activationToken: this.#activationToken }),
+      request,
+    }).catch((error) => pending.reject(asError(error)));
     return pending.promise.finally(() => {
       signal?.removeEventListener("abort", onAbort);
       this.#pending.delete(requestId);
@@ -190,9 +247,12 @@ class ChildTransport {
       sequence: ++this.#outboundSequence,
     } as PiAttemptChildFrame;
     const bytes = encodePiAttemptProcessFrame(envelope);
-    this.#writeChain = this.#writeChain.then(() => new Promise<void>((resolve, reject) => {
-      process.stdout.write(bytes, (error) => error === null ? resolve() : reject(error));
-    }));
+    this.#writeChain = this.#writeChain.then(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          process.stdout.write(bytes, (error) => (error === null ? resolve() : reject(error)));
+        }),
+    );
     return this.#writeChain;
   }
 
@@ -207,7 +267,8 @@ class ChildTransport {
   public async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    for (const pending of this.#pending.values()) pending.reject(new Error("authority channel closed"));
+    for (const pending of this.#pending.values())
+      pending.reject(new Error("authority channel closed"));
     this.#pending.clear();
     await this.#writeChain.catch(() => undefined);
     process.stdin.removeAllListeners();
@@ -221,7 +282,8 @@ class ChildTransport {
       for (const value of this.#decoder.push(chunk)) {
         const frame = parseParentFrame(value);
         if (this.#launch.value === undefined) {
-          if (frame.type !== "launch") throw new Error("first attempt-process frame must be launch");
+          if (frame.type !== "launch")
+            throw new Error("first attempt-process frame must be launch");
           if (frame.sequence !== 1) throw new Error("launch frame sequence must be one");
           this.#inboundSequence = 1;
           this.#launch.resolve(validateLaunchFrame(frame));
@@ -241,7 +303,16 @@ class ChildTransport {
       this.#launch.reject(asError(error));
       this.#abortRequested ??= "invalid authority process protocol";
       this.#activation.resolve(undefined);
-      void this.#session?.abort(this.#abortRequested).finally(() => this.#session?.dispose()).catch(() => undefined);
+      const session = this.#session;
+      if (session !== undefined) {
+        void (async () => {
+          try {
+            await session.abort(this.#abortRequested);
+          } finally {
+            await session.dispose();
+          }
+        })().catch(() => undefined);
+      }
       void this.fatal(error).finally(() => {
         process.exitCode = 1;
         void this.close();
@@ -258,7 +329,13 @@ class ChildTransport {
       }
       this.#cancelledRequests.delete(frame.requestId);
       if (frame.ok) pending.resolve(frame.value as PiAuthorityResponseValue);
-      else pending.reject(new Error(sanitizeText(frame.error ?? "authority request failed", MAX_ERROR_BYTES)));
+      else
+        pending.reject(
+          new ManagedSessionError(
+            frame.errorCode ?? "authority_request",
+            sanitizeText(frame.error ?? "authority request failed", MAX_ERROR_BYTES),
+          ),
+        );
       return;
     }
     if (frame.type === "control") {
@@ -283,10 +360,20 @@ class ChildTransport {
         if (this.#launch.value?.deferActivation !== true) {
           throw new Error("attempt launch did not request deferred activation");
         }
-        if (this.#session === undefined) throw new Error("Pi session is not ready for activation");
-        if (this.#abortRequested !== undefined) throw new Error("attempt was aborted before activation");
+        if (this.#session === undefined && this.#launch.value?.mode !== "recover") {
+          throw new Error("Pi session is not ready for activation");
+        }
+        if (
+          this.#activationToken !== undefined &&
+          this.#activationToken !== frame.activationToken
+        ) {
+          throw new Error("attempt activation capability changed");
+        }
+        if (this.#abortRequested !== undefined)
+          throw new Error("attempt was aborted before activation");
         // Idempotent resolution makes a retried control harmless while frame identities still
         // prevent replay across attempts.
+        this.#activationToken = frame.activationToken;
         this.#activation.resolve(undefined);
       } else {
         if (this.#session === undefined) throw new Error("Pi session is not ready for messages");
@@ -300,7 +387,12 @@ class ChildTransport {
       }
       await this.send({ type: "control_result", controlId: frame.controlId, ok: true });
     } catch (error) {
-      await this.send({ type: "control_result", controlId: frame.controlId, ok: false, error: sanitizeError(error) });
+      await this.send({
+        type: "control_result",
+        controlId: frame.controlId,
+        ok: false,
+        error: sanitizeError(error),
+      });
     }
   }
 
@@ -328,19 +420,28 @@ class ChildTransport {
 function remoteContextProvider(transport: ChildTransport): KoniContextProvider {
   return {
     async loadBoundContext() {
-      return await transport.request({ operation: "load_bound_context" }) as Awaited<ReturnType<KoniContextProvider["loadBoundContext"]>>;
+      return (await transport.request({ operation: "load_bound_context" })) as Awaited<
+        ReturnType<KoniContextProvider["loadBoundContext"]>
+      >;
     },
     async loadDynamicGraphContext() {
-      return await transport.request({ operation: "load_dynamic_graph_context" }) as SelectedDynamicGraphContext;
+      return (await transport.request({
+        operation: "load_dynamic_graph_context",
+      })) as SelectedDynamicGraphContext;
     },
     async loadCompactionSnapshot() {
-      return await transport.request({ operation: "load_compaction_snapshot" }) as Awaited<ReturnType<KoniContextProvider["loadCompactionSnapshot"]>>;
+      return (await transport.request({ operation: "load_compaction_snapshot" })) as Awaited<
+        ReturnType<KoniContextProvider["loadCompactionSnapshot"]>
+      >;
     },
     async authorizeCompaction(_spec, record) {
-      return await transport.request({ operation: "authorize_compaction", record: structuredClone(record) }) as { authorizationId: string };
+      return (await transport.request({
+        operation: "authorize_compaction",
+        record: structuredClone(record),
+      })) as { authorizationId: string };
     },
     async acquireRecoveryClaim() {
-      const response = await transport.request({ operation: "acquire_recovery_claim" }) as {
+      const response = (await transport.request({ operation: "acquire_recovery_claim" })) as {
         claimToken: string;
         claimId: string;
         state: KoniAttemptRecoveryClaim["state"];
@@ -353,9 +454,24 @@ function remoteContextProvider(transport: ChildTransport): KoniContextProvider {
         async release() {
           if (released) return;
           released = true;
-          await transport.request({ operation: "release_recovery_claim", claimToken: response.claimToken });
+          await transport.request({
+            operation: "release_recovery_claim",
+            claimToken: response.claimToken,
+          });
         },
       };
+    },
+    async reserveProviderRequest(_spec, request) {
+      return (await transport.request({
+        operation: "reserve_provider_request",
+        request: structuredClone(request),
+      })) as Awaited<ReturnType<NonNullable<KoniContextProvider["reserveProviderRequest"]>>>;
+    },
+    async reconcileProviderRequest(_spec, settlement) {
+      return (await transport.request({
+        operation: "reconcile_provider_request",
+        settlement: structuredClone(settlement),
+      })) as Awaited<ReturnType<NonNullable<KoniContextProvider["reconcileProviderRequest"]>>>;
     },
   };
 }
@@ -363,15 +479,19 @@ function remoteContextProvider(transport: ChildTransport): KoniContextProvider {
 function exactKoniToolNames(spec: Readonly<AgentLaunchSpec>): KoniToolName[] {
   const known = new Set<string>(KONI_TOOL_NAMES);
   return spec.tools.map((tool) => {
-    if (!known.has(tool.name)) throw new Error(`launch tool ${tool.name} is not a sealed Koni authority tool`);
+    if (!known.has(tool.name))
+      throw new Error(`launch tool ${tool.name} is not a sealed Koni authority tool`);
     return tool.name as KoniToolName;
   });
 }
 
 function validateLaunchFrame(frame: LaunchAttemptFrame): LaunchAttemptFrame {
-  if (frame.mode !== "fresh" && frame.mode !== "recover") throw new Error("invalid attempt launch mode");
-  if (typeof frame.deferActivation !== "boolean") throw new Error("invalid attempt activation policy");
-  if (typeof frame.spec !== "object" || frame.spec === null) throw new Error("launch specification is missing");
+  if (frame.mode !== "fresh" && frame.mode !== "recover")
+    throw new Error("invalid attempt launch mode");
+  if (typeof frame.deferActivation !== "boolean")
+    throw new Error("invalid attempt activation policy");
+  if (typeof frame.spec !== "object" || frame.spec === null)
+    throw new Error("launch specification is missing");
   if (typeof frame.terminalOutputSchema !== "object" || frame.terminalOutputSchema === null) {
     throw new Error("terminal output schema is missing");
   }
@@ -399,7 +519,12 @@ type ChildFramePayload =
   | { type: "event"; event: import("./managed-session.js").ManagedSessionEvent }
   | { type: "outcome"; outcome: ManagedSessionOutcome }
   | { type: "control_result"; controlId: string; ok: boolean; error?: string }
-  | { type: "authority_request"; requestId: string; request: PiAuthorityRequest }
+  | {
+      type: "authority_request";
+      requestId: string;
+      activationToken?: string;
+      request: PiAuthorityRequest;
+    }
   | { type: "authority_cancel"; requestId: string }
   | { type: "fatal"; error: string };
 
@@ -443,7 +568,9 @@ function sanitizeError(error: unknown): string {
 
 function sanitizeText(value: string, maximumBytes: number): string {
   const bytes = Buffer.from(String(value).replaceAll("\u0000", "�"), "utf8");
-  return (bytes.byteLength <= maximumBytes ? bytes : bytes.subarray(0, maximumBytes)).toString("utf8");
+  return (bytes.byteLength <= maximumBytes ? bytes : bytes.subarray(0, maximumBytes)).toString(
+    "utf8",
+  );
 }
 
 function asError(error: unknown): Error {

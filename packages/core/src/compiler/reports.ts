@@ -6,7 +6,7 @@ import type {
   ConfigurationObject,
   ConfigurationValue,
 } from "../contracts/configuration.js";
-import type { GraphNode, TypedGraph } from "../graph/model.js";
+import type { TypedGraph } from "../graph/model.js";
 import { canonicalHash, rawSha256, type Sha256Digest } from "../shared/canonical.js";
 import type { RunRecord, RunReportRecord } from "../state/run-record.js";
 import { GraphExpressionEvaluator } from "./expressions.js";
@@ -51,8 +51,9 @@ export function compileConfiguredReports(input: {
   compiledAt: string;
 }): PreparedReportBundle {
   const evaluator = new GraphExpressionEvaluator(input.configuration, input.graph);
-  const definitions = Object.entries(input.configuration.registries.reports)
-    .sort(([left], [right]) => left.localeCompare(right));
+  const definitions = Object.entries(input.configuration.registries.reports).sort(
+    ([left], [right]) => left.localeCompare(right),
+  );
   const ledgers: ReportLedger[] = definitions.map(([registryId, definition]) => {
     const id = requiredText(definition.id ?? registryId, `report ${registryId} id`);
     if (id !== registryId) throw new Error(`report registry id ${registryId} does not match ${id}`);
@@ -66,10 +67,12 @@ export function compileConfiguredReports(input: {
       .filter((row) => reportFilter(definition.filter, row, evaluator));
     rows.sort((left, right) => reportRowKey(left).localeCompare(reportRowKey(right)));
     if (columns.length > 0) {
-      rows = rows.map((row) => Object.fromEntries(columns.map((column) => [
-        column.id,
-        projectValue(column.value, row),
-      ])) as JsonValue);
+      rows = rows.map(
+        (row) =>
+          Object.fromEntries(
+            columns.map((column) => [column.id, projectValue(column.value, row)]),
+          ) as JsonValue,
+      );
     }
     return {
       id,
@@ -84,14 +87,20 @@ export function compileConfiguredReports(input: {
     };
   });
 
-  const bundleKind = optionalText(asRecord(input.configuration.profile.reporting)?.bundle_kind)
-    ?? `${input.configuration.package.profile_lineage}-report-bundle`;
-  const bundleContract = Object.fromEntries(ledgers.map((ledger) => [ledger.id, {
-    ledgerHash: ledger.hash,
-    rowCount: ledger.rows.length,
-    formats: ledger.formats,
-    output: ledger.output,
-  }]));
+  const bundleKind =
+    optionalText(asRecord(input.configuration.profile.reporting)?.bundle_kind) ??
+    `${input.configuration.package.profile_lineage}-report-bundle`;
+  const bundleContract = Object.fromEntries(
+    ledgers.map((ledger) => [
+      ledger.id,
+      {
+        ledgerHash: ledger.hash,
+        rowCount: ledger.rows.length,
+        formats: ledger.formats,
+        output: ledger.output,
+      },
+    ]),
+  );
   const bundleHash = canonicalHash(bundleContract);
   const reportId = stableId("RPT", [bundleKind, bundleHash]);
   const root = `runs/${input.run.id}/program/reports/${reportId}`;
@@ -129,8 +138,10 @@ export function compileConfiguredReports(input: {
       });
     }
   }
-  outputs.sort((left, right) =>
-    left.ledgerId.localeCompare(right.ledgerId) || left.format.localeCompare(right.format));
+  outputs.sort(
+    (left, right) =>
+      left.ledgerId.localeCompare(right.ledgerId) || left.format.localeCompare(right.format),
+  );
   const graphHash = input.graph.hash;
   const ticketBoardHash = canonicalHash(reportTicketRows(input.run));
   const runStateHash = canonicalHash({
@@ -190,17 +201,21 @@ function sourceRows(
   run: RunRecord,
   evaluator: GraphExpressionEvaluator,
 ): JsonValue[] {
-  if (source === "graph" || typeof source !== "object" || source === null || Array.isArray(source)) {
+  if (
+    source === "graph" ||
+    typeof source !== "object" ||
+    source === null ||
+    Array.isArray(source)
+  ) {
     return graph.nodes() as unknown as JsonValue[];
   }
   const record = source as ConfigurationObject;
   if (record.tickets !== undefined) return reportTicketRows(run);
   if (typeof record.query === "string") {
-    return evaluator.select({ query: record.query })
-      .flatMap((id) => {
-        const node = graph.node(id);
-        return node === undefined ? [] : [node as unknown as JsonValue];
-      });
+    return evaluator.select({ query: record.query }).flatMap((id) => {
+      const node = graph.node(id);
+      return node === undefined ? [] : [node as unknown as JsonValue];
+    });
   }
   if (typeof record.node_type === "string") {
     return graph.nodes().filter((node) => node.type === record.node_type) as unknown as JsonValue[];
@@ -220,20 +235,23 @@ function sourceRows(
 }
 
 function reportTicketRows(run: RunRecord): JsonValue[] {
-  return Object.values(run.tickets).sort((left, right) => left.id.localeCompare(right.id)).map((ticket) => {
-    const attempts = ticket.steps.flatMap((step) => step.attemptIds)
-      .flatMap((id) => run.attempts[id] === undefined ? [] : [run.attempts[id]!]);
-    return jsonValue({
-      ...ticket,
-      ticket_id: ticket.id,
-      operation: ticket.operationId,
-      target_nodes: ticket.targetNodeIds,
-      steering: attempts.flatMap((attempt) => attempt.authorityMessages ?? []),
-      step_outputs: ticket.steps.filter((step) => step.summary !== undefined).length,
-      scope_warnings: [],
-      review_result: { status: ticket.status === "completed" ? "accepted" : ticket.status },
+  return Object.values(run.tickets)
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map((ticket) => {
+      const attempts = ticket.steps
+        .flatMap((step) => step.attemptIds)
+        .flatMap((id) => (run.attempts[id] === undefined ? [] : [run.attempts[id]]));
+      return jsonValue({
+        ...ticket,
+        ticket_id: ticket.id,
+        operation: ticket.operationId,
+        target_nodes: ticket.targetNodeIds,
+        steering: attempts.flatMap((attempt) => attempt.authorityMessages ?? []),
+        step_outputs: ticket.steps.filter((step) => step.summary !== undefined).length,
+        scope_warnings: [],
+        review_result: { status: ticket.status === "completed" ? "accepted" : ticket.status },
+      });
     });
-  });
 }
 
 function reportReceiptRows(
@@ -243,23 +261,30 @@ function reportReceiptRows(
 ): JsonValue[] {
   return (run.checks ?? []).flatMap((check) => {
     const definition = configuration.registries.checks[check.requestedCheckId];
-    const configuredType = optionalText(definition?.receipt_type) ??
-      optionalText(asRecord(definition?.command)?.receipt_type) ?? "check.receipt";
+    const configuredType =
+      optionalText(definition?.receipt_type) ??
+      optionalText(asRecord(definition?.command)?.receipt_type) ??
+      "check.receipt";
     if (configuredType !== receiptType) return [];
     const attempt = run.attempts[check.attemptId];
-    return [jsonValue({
-      id: check.id,
-      receipt_id: check.id,
-      receipt_type: configuredType,
-      ticket_id: attempt?.ticketId ?? null,
-      status: check.accepted ? "passed" : "failed",
-      verdict: check.accepted ? "passed" : "failed",
-      exit_code: check.commands.at(-1)?.exitCode ?? null,
-      runtime: check.commands.map((command) => command.sandboxKind),
-      command: check.commands.map((command) => [command.resolvedExecutable, ...command.argv.slice(1)]),
-      summary: check.summary,
-      targets: attempt === undefined ? [] : run.tickets[attempt.ticketId]?.targetNodeIds ?? [],
-    })];
+    return [
+      jsonValue({
+        id: check.id,
+        receipt_id: check.id,
+        receipt_type: configuredType,
+        ticket_id: attempt?.ticketId ?? null,
+        status: check.accepted ? "passed" : "failed",
+        verdict: check.accepted ? "passed" : "failed",
+        exit_code: check.commands.at(-1)?.exitCode ?? null,
+        runtime: check.commands.map((command) => command.sandboxKind),
+        command: check.commands.map((command) => [
+          command.resolvedExecutable,
+          ...command.argv.slice(1),
+        ]),
+        summary: check.summary,
+        targets: attempt === undefined ? [] : (run.tickets[attempt.ticketId]?.targetNodeIds ?? []),
+      }),
+    ];
   });
 }
 
@@ -267,15 +292,26 @@ function decorateGraphRow(row: JsonValue, graph: TypedGraph): JsonValue {
   if (!isRecord(row) || typeof row.id !== "string") return row;
   const node = graph.node(row.id);
   if (node === undefined || node.type !== "claim") return row;
-  const related = graph.nodes().filter((candidate) => candidate.type === "evidence" &&
-    ["supports", "contradicts", "informs"].some((relation) =>
-      (candidate.edges[relation] ?? []).includes(node.id)));
+  const related = graph
+    .nodes()
+    .filter(
+      (candidate) =>
+        candidate.type === "evidence" &&
+        ["supports", "contradicts", "informs"].some((relation) =>
+          (candidate.edges[relation] ?? []).includes(node.id),
+        ),
+    );
   return jsonValue({
     ...row,
     derived: {
-      support_count: related.filter((candidate) => (candidate.edges.supports ?? []).includes(node.id)).length,
-      contradiction_count: related.filter((candidate) => (candidate.edges.contradicts ?? []).includes(node.id)).length,
-      inform_count: related.filter((candidate) => (candidate.edges.informs ?? []).includes(node.id)).length,
+      support_count: related.filter((candidate) =>
+        (candidate.edges.supports ?? []).includes(node.id),
+      ).length,
+      contradiction_count: related.filter((candidate) =>
+        (candidate.edges.contradicts ?? []).includes(node.id),
+      ).length,
+      inform_count: related.filter((candidate) => (candidate.edges.informs ?? []).includes(node.id))
+        .length,
     },
   });
 }
@@ -286,7 +322,8 @@ function reportFilter(
   evaluator: GraphExpressionEvaluator,
 ): boolean {
   if (filter === undefined) return true;
-  if (!isRecord(row) || typeof row.id !== "string" || evaluator.node(row.id) === undefined) return false;
+  if (!isRecord(row) || typeof row.id !== "string" || evaluator.node(row.id) === undefined)
+    return false;
   return evaluator.withBinding("row", [row.id], () => evaluator.evaluate(filter));
 }
 
@@ -305,8 +342,12 @@ function reportColumns(value: ConfigurationValue | undefined, reportId: string):
   });
 }
 
-function reportFormats(value: ConfigurationValue | undefined, reportId: string): ReportLedger["formats"] {
-  if (!Array.isArray(value) || value.length === 0) throw new Error(`report ${reportId} has no output formats`);
+function reportFormats(
+  value: ConfigurationValue | undefined,
+  reportId: string,
+): ReportLedger["formats"] {
+  if (!Array.isArray(value) || value.length === 0)
+    throw new Error(`report ${reportId} has no output formats`);
   const allowed = new Set<ReportLedger["formats"][number]>(["json", "markdown", "yaml", "csv"]);
   return value.map((format) => {
     if (typeof format !== "string" || !allowed.has(format as ReportLedger["formats"][number])) {
@@ -316,42 +357,56 @@ function reportFormats(value: ConfigurationValue | undefined, reportId: string):
   });
 }
 
-function renderReport(format: ReportLedger["formats"][number], ledger: ReportLedger, data: JsonValue): Buffer {
+function renderReport(
+  format: ReportLedger["formats"][number],
+  ledger: ReportLedger,
+  data: JsonValue,
+): Buffer {
   if (format === "json") return stableJsonBytes(data);
-  if (format === "yaml") return Buffer.from(YAML.stringify(sortJson(data), { lineWidth: 0 }), "utf8");
+  if (format === "yaml")
+    return Buffer.from(YAML.stringify(sortJson(data), { lineWidth: 0 }), "utf8");
   if (format === "csv") return Buffer.from(renderCsv(ledger.rows), "utf8");
   return Buffer.from(renderMarkdown(ledger), "utf8");
 }
 
 function renderMarkdown(ledger: ReportLedger): string {
-  const columns = ledger.columns.length > 0
-    ? ledger.columns.map((column) => [column.id, column.title] as const)
-    : [...new Set(ledger.rows.flatMap((row) => isRecord(row) ? Object.keys(row) : []))]
-      .sort().map((id) => [id, id] as const);
+  const columns =
+    ledger.columns.length > 0
+      ? ledger.columns.map((column) => [column.id, column.title] as const)
+      : [...new Set(ledger.rows.flatMap((row) => (isRecord(row) ? Object.keys(row) : [])))]
+          .sort()
+          .map((id) => [id, id] as const);
   let output = `# ${ledger.title}\n\n`;
   if (columns.length === 0) return `${output}No rows.\n`;
   output += `| ${columns.map(([, title]) => title).join(" | ")} |\n`;
   output += `| ${columns.map(() => "---").join(" | ")} |\n`;
   if (ledger.rows.length === 0) {
-    output += `| ${columns.map((_, index) => index === 0 ? "no rows" : "-").join(" | ")} |\n`;
+    output += `| ${columns.map((_, index) => (index === 0 ? "no rows" : "-")).join(" | ")} |\n`;
   }
   for (const row of ledger.rows) {
-    output += `| ${columns.map(([id]) => markdownCell(isRecord(row) ? row[id] ?? null : null)).join(" | ")} |\n`;
+    output += `| ${columns.map(([id]) => markdownCell(isRecord(row) ? (row[id] ?? null) : null)).join(" | ")} |\n`;
   }
   return output;
 }
 
 function renderCsv(rows: readonly JsonValue[]): string {
-  const columns = [...new Set(rows.flatMap((row) => isRecord(row) ? Object.keys(row) : []))].sort();
+  const columns = [
+    ...new Set(rows.flatMap((row) => (isRecord(row) ? Object.keys(row) : []))),
+  ].sort();
   const lines = [columns.map(csvCell).join(",")];
   for (const row of rows) {
-    lines.push(columns.map((column) => csvCell(cellText(isRecord(row) ? row[column] ?? null : null))).join(","));
+    lines.push(
+      columns
+        .map((column) => csvCell(cellText(isRecord(row) ? (row[column] ?? null) : null)))
+        .join(","),
+    );
   }
   return `${lines.join("\n")}\n`;
 }
 
 function projectValue(expression: ConfigurationValue, row: JsonValue): JsonValue {
-  if (typeof expression !== "string" || !expression.startsWith("$row")) return jsonValue(expression);
+  if (typeof expression !== "string" || !expression.startsWith("$row"))
+    return jsonValue(expression);
   const path = expression.slice("$row".length).replace(/^\./u, "").split(".").filter(Boolean);
   let cursor: JsonValue | undefined = row;
   for (const segment of path) {
@@ -377,7 +432,9 @@ function isNegativeRow(row: JsonValue): boolean {
   const values = [row.status, row.verdict, asRecord(row.spec)?.polarity]
     .filter((value): value is string => typeof value === "string")
     .map((value) => value.toLocaleLowerCase());
-  return values.some((value) => ["failed", "rejected", "contradicts", "negative", "blocked"].includes(value));
+  return values.some((value) =>
+    ["failed", "rejected", "contradicts", "negative", "blocked"].includes(value),
+  );
 }
 
 function withExtension(output: string, format: ReportLedger["formats"][number]): string {
@@ -390,9 +447,14 @@ function withExtension(output: string, format: ReportLedger["formats"][number]):
 function safeReportOutput(value: string, id: string): string {
   const normalized = value.replaceAll("\\", "/").replace(/^\.\//u, "");
   if (
-    normalized.length === 0 || normalized.startsWith("/") || normalized === ".." ||
-    normalized.startsWith("../") || normalized.includes("/../") || normalized.includes("\0")
-  ) throw new Error(`report ${id} output escapes its compiler artifact namespace`);
+    normalized.length === 0 ||
+    normalized.startsWith("/") ||
+    normalized === ".." ||
+    normalized.startsWith("../") ||
+    normalized.includes("/../") ||
+    normalized.includes("\0")
+  )
+    throw new Error(`report ${id} output escapes its compiler artifact namespace`);
   return normalized;
 }
 
@@ -407,18 +469,37 @@ function stableJsonBytes(value: JsonValue): Buffer {
 function sortJson(value: JsonValue): JsonValue {
   if (Array.isArray(value)) return value.map(sortJson);
   if (isRecord(value)) {
-    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortJson(value[key]!)]));
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, sortJson(value[key]!)]),
+    );
   }
   return value;
 }
 
 function jsonValue(value: unknown): JsonValue {
-  if (value === undefined || typeof value === "function" || typeof value === "symbol" || typeof value === "bigint") return null;
-  if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") return value;
+  if (
+    value === undefined ||
+    typeof value === "function" ||
+    typeof value === "symbol" ||
+    typeof value === "bigint"
+  )
+    return null;
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    typeof value === "number"
+  )
+    return value;
   if (Array.isArray(value)) return value.map(jsonValue);
   if (typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).filter(([, child]) => child !== undefined)
-      .map(([key, child]) => [key, jsonValue(child)]));
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, child]) => child !== undefined)
+        .map(([key, child]) => [key, jsonValue(child)]),
+    );
   }
   return String(value);
 }
@@ -440,7 +521,7 @@ function csvCell(value: string): string {
 
 function asRecord(value: unknown): Record<string, JsonValue> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, JsonValue>
+    ? (value as Record<string, JsonValue>)
     : undefined;
 }
 
@@ -449,7 +530,8 @@ function isRecord(value: unknown): value is Record<string, JsonValue> {
 }
 
 function requiredText(value: unknown, label: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) throw new Error(`${label} is missing`);
+  if (typeof value !== "string" || value.trim().length === 0)
+    throw new Error(`${label} is missing`);
   return value;
 }
 

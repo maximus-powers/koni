@@ -88,17 +88,30 @@ export function projectCompiledCockpitViewCatalog(
   configuration: CompiledConfiguration,
 ): CompiledCockpitViewCatalog {
   if (!isSha256Digest(configuration.configuration_sha256)) {
-    throw new CockpitConfigurationError("$.configuration_sha256", "expected a canonical sha256 digest");
+    throw new CockpitConfigurationError(
+      "$.configuration_sha256",
+      "expected a canonical sha256 digest",
+    );
   }
   const records = Object.entries(configuration.registries.views);
-  if (records.length > 64) throw new CockpitConfigurationError("$.registries.views", "at most 64 views are supported");
+  if (records.length > 64)
+    throw new CockpitConfigurationError("$.registries.views", "at most 64 views are supported");
   const views = records
     .sort(([left], [right]) => compareUtf8(left, right))
-    .map(([registryId, value], index) => compileView(value, `$.registries.views/${registryId}`, registryId, index));
-  ensureUnique(views.map((view) => view.id), "$.registries.views", "view id");
+    .map(([registryId, value], index) =>
+      compileView(value, `$.registries.views/${registryId}`, registryId, index),
+    );
+  ensureUnique(
+    views.map((view) => view.id),
+    "$.registries.views",
+    "view id",
+  );
   for (const view of views) {
     const selectionViewId = view.source.kind === "selection" ? view.source.viewId : undefined;
-    if (selectionViewId !== undefined && !views.some((candidate) => candidate.id === selectionViewId)) {
+    if (
+      selectionViewId !== undefined &&
+      !views.some((candidate) => candidate.id === selectionViewId)
+    ) {
       throw new CockpitConfigurationError(
         `$.registries.views/${view.id}/source/selection_from`,
         `references unknown view ${selectionViewId}`,
@@ -118,23 +131,41 @@ export function parseCompiledCockpitViewCatalog(
   value: unknown,
   expectedConfigurationSha256: Sha256Digest,
 ): CompiledCockpitViewCatalog {
-  const root = exactRecord(value, "$", ["protocol", "configurationSha256", "views", "catalogSha256"]);
+  const root = exactRecord(value, "$", [
+    "protocol",
+    "configurationSha256",
+    "views",
+    "catalogSha256",
+  ]);
   if (root.protocol !== COMPILED_COCKPIT_CATALOG_PROTOCOL) {
     throw new CockpitConfigurationError("$.protocol", "unsupported cockpit catalog protocol");
   }
   if (root.configurationSha256 !== expectedConfigurationSha256) {
-    throw new CockpitConfigurationError("$.configurationSha256", "catalog is not bound to the selected run configuration");
+    throw new CockpitConfigurationError(
+      "$.configurationSha256",
+      "catalog is not bound to the selected run configuration",
+    );
   }
   if (!isSha256Digest(root.configurationSha256) || !isSha256Digest(root.catalogSha256)) {
     throw new CockpitConfigurationError("$", "catalog digests are malformed");
   }
   const rows = boundedArray(root.views, "$.views", 64);
   const views = rows.map((row, index) => parseProjectedView(row, `$.views/${index}`));
-  ensureUnique(views.map((view) => view.id), "$.views", "view id");
+  ensureUnique(
+    views.map((view) => view.id),
+    "$.views",
+    "view id",
+  );
   for (const view of views) {
     const selectionViewId = view.source.kind === "selection" ? view.source.viewId : undefined;
-    if (selectionViewId !== undefined && !views.some((candidate) => candidate.id === selectionViewId)) {
-      throw new CockpitConfigurationError(`$.views/${view.id}/source/viewId`, "references an unknown view");
+    if (
+      selectionViewId !== undefined &&
+      !views.some((candidate) => candidate.id === selectionViewId)
+    ) {
+      throw new CockpitConfigurationError(
+        `$.views/${view.id}/source/viewId`,
+        "references an unknown view",
+      );
     }
   }
   const material: CompiledCockpitViewCatalogMaterial = {
@@ -143,7 +174,10 @@ export function parseCompiledCockpitViewCatalog(
     views,
   };
   if (canonicalHash(material) !== root.catalogSha256) {
-    throw new CockpitConfigurationError("$.catalogSha256", "catalog content does not match its digest");
+    throw new CockpitConfigurationError(
+      "$.catalogSha256",
+      "catalog content does not match its digest",
+    );
   }
   return deepFreeze({ ...material, catalogSha256: root.catalogSha256 });
 }
@@ -161,7 +195,7 @@ export function cockpitStringArrayOption(
 ): readonly string[] | undefined {
   const value = view?.options[key];
   return Array.isArray(value) && value.every((entry) => typeof entry === "string")
-    ? value as readonly string[]
+    ? value
     : undefined;
 }
 
@@ -187,7 +221,7 @@ export function cockpitIntegerOption(
   key: string,
 ): number | undefined {
   const value = view?.options[key];
-  return Number.isSafeInteger(value) ? value as number : undefined;
+  return Number.isSafeInteger(value) ? (value as number) : undefined;
 }
 
 export function cockpitStringMapOption(
@@ -197,7 +231,7 @@ export function cockpitStringMapOption(
   const value = view?.options[key];
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   return Object.values(value).every((entry) => typeof entry === "string")
-    ? value as Readonly<Record<string, string>>
+    ? (value as Readonly<Record<string, string>>)
     : undefined;
 }
 
@@ -207,9 +241,10 @@ export function cockpitStringArrayMapOption(
 ): Readonly<Record<string, readonly string[]>> | undefined {
   const value = view?.options[key];
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-  return Object.values(value).every((entry) =>
-    Array.isArray(entry) && entry.every((item) => typeof item === "string"))
-    ? value as Readonly<Record<string, readonly string[]>>
+  return Object.values(value).every(
+    (entry) => Array.isArray(entry) && entry.every((item) => typeof item === "string"),
+  )
+    ? (value as Readonly<Record<string, readonly string[]>>)
     : undefined;
 }
 
@@ -219,9 +254,18 @@ function compileView(
   registryId: string,
   _index: number,
 ): CompiledCockpitView {
-  const row = exactConfigurationRecord(value, path, ["id", "title", "kind", "source", "columns", "actions", "options"]);
+  const row = exactConfigurationRecord(value, path, [
+    "id",
+    "title",
+    "kind",
+    "source",
+    "columns",
+    "actions",
+    "options",
+  ]);
   const id = identifier(row.id, `${path}/id`);
-  if (id !== registryId) throw new CockpitConfigurationError(`${path}/id`, "must match its registry key");
+  if (id !== registryId)
+    throw new CockpitConfigurationError(`${path}/id`, "must match its registry key");
   const kind = viewKind(row.kind, `${path}/kind`);
   const source = compileSource(row.source, `${path}/source`);
   validateSourceForKind(kind, source, `${path}/source`);
@@ -249,14 +293,19 @@ function compileSource(value: ConfigurationValue | undefined, path: string): Com
     return { kind: "state", fields: identifierArray(row.state, `${path}/state`, 32, false) };
   }
   if (sameKeys(keys, ["tickets"])) {
-    if (row.tickets !== "all") throw new CockpitConfigurationError(`${path}/tickets`, "only the all ticket source is supported");
+    if (row.tickets !== "all")
+      throw new CockpitConfigurationError(
+        `${path}/tickets`,
+        "only the all ticket source is supported",
+      );
     return { kind: "tickets", mode: "all" };
   }
   if (sameKeys(keys, ["selection_from"])) {
     return { kind: "selection", viewId: identifier(row.selection_from, `${path}/selection_from`) };
   }
   if (sameKeys(keys, ["graph"])) {
-    if (row.graph !== "main_checkout") throw new CockpitConfigurationError(`${path}/graph`, "unsupported graph scope");
+    if (row.graph !== "main_checkout")
+      throw new CockpitConfigurationError(`${path}/graph`, "unsupported graph scope");
     return { kind: "graph", scope: "main_checkout" };
   }
   if (sameKeys(keys, ["codex", "correlate_by"])) {
@@ -269,14 +318,21 @@ function compileSource(value: ConfigurationValue | undefined, path: string): Com
   if (sameKeys(keys, ["file"])) {
     const file = safeText(row.file, `${path}/file`, 256);
     if (file.startsWith("/") || file.includes("..") || file.includes("\\")) {
-      throw new CockpitConfigurationError(`${path}/file`, "must be a normalized project-relative path");
+      throw new CockpitConfigurationError(
+        `${path}/file`,
+        "must be a normalized project-relative path",
+      );
     }
     return { kind: "file", path: file };
   }
   throw new CockpitConfigurationError(path, "unsupported source shape");
 }
 
-function validateSourceForKind(kind: CockpitViewKind, source: CompiledCockpitSource, path: string): void {
+function validateSourceForKind(
+  kind: CockpitViewKind,
+  source: CompiledCockpitSource,
+  path: string,
+): void {
   const allowed: Readonly<Record<CockpitViewKind, readonly CompiledCockpitSource["kind"][]>> = {
     kanban: ["tickets"],
     graph: ["graph"],
@@ -289,7 +345,10 @@ function validateSourceForKind(kind: CockpitViewKind, source: CompiledCockpitSou
     controls: ["file"],
   };
   if (!allowed[kind].includes(source.kind)) {
-    throw new CockpitConfigurationError(path, `${source.kind} is not a supported source for ${kind}`);
+    throw new CockpitConfigurationError(
+      path,
+      `${source.kind} is not a supported source for ${kind}`,
+    );
   }
 }
 
@@ -342,11 +401,18 @@ function compileColumns(
     const id = identifier(row.id, `${path}/${index}/id`);
     const expression = safeText(row.value, `${path}/${index}/value`, 128);
     if (allowed[id] !== expression) {
-      throw new CockpitConfigurationError(`${path}/${index}`, `column ${id} is not a supported ${kind} projection`);
+      throw new CockpitConfigurationError(
+        `${path}/${index}`,
+        `column ${id} is not a supported ${kind} projection`,
+      );
     }
     return { id, value: expression };
   });
-  ensureUnique(columns.map((column) => column.id), path, "column id");
+  ensureUnique(
+    columns.map((column) => column.id),
+    path,
+    "column id",
+  );
   return columns;
 }
 
@@ -359,7 +425,9 @@ function compileOptions(
   const allowed = OPTION_KEYS[kind];
   rejectUnknownKeys(row, path, allowed);
   const output: Record<string, ConfigurationValue> = {};
-  for (const [key, option] of Object.entries(row).sort(([left], [right]) => compareUtf8(left, right))) {
+  for (const [key, option] of Object.entries(row).sort(([left], [right]) =>
+    compareUtf8(left, right),
+  )) {
     output[key] = compileOption(kind, key, option, `${path}/${key}`);
   }
   return deepFreeze(output);
@@ -367,30 +435,98 @@ function compileOptions(
 
 const OPTION_KEYS: Readonly<Record<CockpitViewKind, readonly string[]>> = {
   kanban: ["group_by", "show_step_progress", "show_scope_conflicts"],
-  graph: ["layout", "upward_edge_policy", "hierarchy", "primary_parent_preferences", "reverse_display_edges", "secondary_edge_style", "show_titles"],
+  graph: [
+    "layout",
+    "upward_edge_policy",
+    "hierarchy",
+    "primary_parent_preferences",
+    "reverse_display_edges",
+    "secondary_edge_style",
+    "show_titles",
+  ],
   table: ["node_types", "show_receipt_freshness"],
   status_overlay: ["stale_seconds", "completion_marker", "detached_agents_in_status_only"],
   summary: ["event_limit", "invalid_state_visible", "attention_conditions"],
-  tabbed_table: ["tabs", "default_tab", "active_states", "show_raw_ids", "worktree_states", "agent_active_glyph", "step_glyphs"],
-  nested_detail: ["sections", "recent_ticket_events", "scope_mode", "gate_preview", "show_context_receipts", "show_runtime_receipts"],
-  typed_tree: ["layout", "upward_edge_policy", "hierarchy", "primary_parent_preferences", "reverse_display_edges", "secondary_edge_style", "show_titles"],
+  tabbed_table: [
+    "tabs",
+    "default_tab",
+    "active_states",
+    "show_raw_ids",
+    "worktree_states",
+    "agent_active_glyph",
+    "step_glyphs",
+  ],
+  nested_detail: [
+    "sections",
+    "recent_ticket_events",
+    "scope_mode",
+    "gate_preview",
+    "show_context_receipts",
+    "show_runtime_receipts",
+  ],
+  typed_tree: [
+    "layout",
+    "upward_edge_policy",
+    "hierarchy",
+    "primary_parent_preferences",
+    "reverse_display_edges",
+    "secondary_edge_style",
+    "show_titles",
+  ],
   controls: ["controls", "keybindings", "compiler_effect"],
 };
 
-function compileOption(kind: CockpitViewKind, key: string, value: ConfigurationValue, path: string): ConfigurationValue {
-  if (["show_step_progress", "show_scope_conflicts", "show_receipt_freshness", "invalid_state_visible", "show_raw_ids",
-    "detached_agents_in_status_only", "show_context_receipts", "show_runtime_receipts", "show_titles"].includes(key)) {
+function compileOption(
+  kind: CockpitViewKind,
+  key: string,
+  value: ConfigurationValue,
+  path: string,
+): ConfigurationValue {
+  if (
+    [
+      "show_step_progress",
+      "show_scope_conflicts",
+      "show_receipt_freshness",
+      "invalid_state_visible",
+      "show_raw_ids",
+      "detached_agents_in_status_only",
+      "show_context_receipts",
+      "show_runtime_receipts",
+      "show_titles",
+    ].includes(key)
+  ) {
     return booleanValue(value, path);
   }
   if (["event_limit", "recent_ticket_events", "stale_seconds"].includes(key)) {
     return boundedInteger(value, path, 1, key === "stale_seconds" ? 86_400 : 100);
   }
-  if (["hierarchy", "node_types", "attention_conditions", "tabs", "active_states", "worktree_states", "sections", "controls"].includes(key)) {
+  if (
+    [
+      "hierarchy",
+      "node_types",
+      "attention_conditions",
+      "tabs",
+      "active_states",
+      "worktree_states",
+      "sections",
+      "controls",
+    ].includes(key)
+  ) {
     const values = identifierArray(value, path, 64, false);
     ensureUnique(values, path, "option value");
     if (key === "tabs") {
-      const supported = new Set(["all", "active", "todo", "blocked", "proposed", "closed", "other"]);
-      for (const tab of values) if (!supported.has(tab)) throw new CockpitConfigurationError(path, `unsupported ticket tab ${tab}`);
+      const supported = new Set([
+        "all",
+        "active",
+        "todo",
+        "blocked",
+        "proposed",
+        "closed",
+        "other",
+      ]);
+      for (const tab of values)
+        if (!supported.has(tab))
+          throw new CockpitConfigurationError(path, `unsupported ticket tab ${tab}`);
     }
     return values;
   }
@@ -400,7 +536,8 @@ function compileOption(kind: CockpitViewKind, key: string, value: ConfigurationV
   if (key === "step_glyphs") return glyphMap(value, path);
   if (key === "agent_active_glyph") {
     const glyph = safeText(value, path, 4);
-    if (Array.from(glyph).length !== 1) throw new CockpitConfigurationError(path, "must contain one visible glyph");
+    if (Array.from(glyph).length !== 1)
+      throw new CockpitConfigurationError(path, "must contain one visible glyph");
     return glyph;
   }
   const text = safeText(value, path, 128);
@@ -415,7 +552,7 @@ function compileOption(kind: CockpitViewKind, key: string, value: ConfigurationV
     gate_preview: ["compact"],
     compiler_effect: ["paused-full-compile-is-read-only"],
   };
-  if (literals[key] !== undefined && !literals[key]!.includes(text)) {
+  if (literals[key] !== undefined && !literals[key].includes(text)) {
     throw new CockpitConfigurationError(path, `unsupported ${key} value`);
   }
   if (kind === "tabbed_table" && key === "default_tab") return text;
@@ -423,7 +560,15 @@ function compileOption(kind: CockpitViewKind, key: string, value: ConfigurationV
 }
 
 function parseProjectedView(value: unknown, path: string): CompiledCockpitView {
-  const row = exactRecord(value, path, ["id", "title", "kind", "source", "columns", "actions", "options"]);
+  const row = exactRecord(value, path, [
+    "id",
+    "title",
+    "kind",
+    "source",
+    "columns",
+    "actions",
+    "options",
+  ]);
   const id = identifier(row.id, `${path}/id`);
   const kind = viewKind(row.kind, `${path}/kind`);
   const source = parseProjectedSource(row.source, `${path}/source`);
@@ -431,7 +576,15 @@ function parseProjectedView(value: unknown, path: string): CompiledCockpitView {
   const columns = compileColumns(row.columns as ConfigurationValue, kind, `${path}/columns`);
   const actions = identifierArray(row.actions as ConfigurationValue, `${path}/actions`, 64, true);
   const options = compileOptions(row.options as ConfigurationValue, kind, `${path}/options`);
-  return { id, title: safeText(row.title, `${path}/title`, 96), kind, source, columns, actions, options };
+  return {
+    id,
+    title: safeText(row.title, `${path}/title`, 96),
+    kind,
+    source,
+    columns,
+    actions,
+    options,
+  };
 }
 
 function parseProjectedSource(value: unknown, path: string): CompiledCockpitSource {
@@ -439,17 +592,22 @@ function parseProjectedSource(value: unknown, path: string): CompiledCockpitSour
   const kind = safeText(row.kind, `${path}/kind`, 32);
   if (kind === "tickets") {
     exactKeys(row, path, ["kind", "mode"]);
-    if (row.mode !== "all") throw new CockpitConfigurationError(`${path}/mode`, "unsupported ticket source mode");
+    if (row.mode !== "all")
+      throw new CockpitConfigurationError(`${path}/mode`, "unsupported ticket source mode");
     return { kind, mode: "all" };
   }
   if (kind === "graph") {
     exactKeys(row, path, ["kind", "scope"]);
-    if (row.scope !== "selection" && row.scope !== "main_checkout") throw new CockpitConfigurationError(`${path}/scope`, "unsupported graph scope");
+    if (row.scope !== "selection" && row.scope !== "main_checkout")
+      throw new CockpitConfigurationError(`${path}/scope`, "unsupported graph scope");
     return { kind, scope: row.scope };
   }
   if (kind === "state") {
     exactKeys(row, path, ["kind", "fields"]);
-    return { kind, fields: identifierArray(row.fields as ConfigurationValue, `${path}/fields`, 32, false) };
+    return {
+      kind,
+      fields: identifierArray(row.fields as ConfigurationValue, `${path}/fields`, 32, false),
+    };
   }
   if (kind === "selection") {
     exactKeys(row, path, ["kind", "viewId"]);
@@ -460,7 +618,12 @@ function parseProjectedSource(value: unknown, path: string): CompiledCockpitSour
     return {
       kind,
       feeds: identifierArray(row.feeds as ConfigurationValue, `${path}/feeds`, 16, false),
-      correlateBy: identifierArray(row.correlateBy as ConfigurationValue, `${path}/correlateBy`, 16, false),
+      correlateBy: identifierArray(
+        row.correlateBy as ConfigurationValue,
+        `${path}/correlateBy`,
+        16,
+        false,
+      ),
     };
   }
   if (kind === "file") {
@@ -480,7 +643,8 @@ function viewKind(value: unknown, path: string): CockpitViewKind {
 
 function identifier(value: unknown, path: string): string {
   const text = safeText(value, path, 128);
-  if (!/^[a-z][a-z0-9_.-]*$/u.test(text)) throw new CockpitConfigurationError(path, "expected a lowercase identifier");
+  if (!/^[a-z][a-z0-9_.-]*$/u.test(text))
+    throw new CockpitConfigurationError(path, "expected a lowercase identifier");
   return text;
 }
 
@@ -490,8 +654,11 @@ function identifierArray(
   limit: number,
   allowEmpty: boolean,
 ): readonly string[] {
-  const values = configurationArray(value, path, limit).map((entry, index) => identifier(entry, `${path}/${index}`));
-  if (!allowEmpty && values.length === 0) throw new CockpitConfigurationError(path, "must not be empty");
+  const values = configurationArray(value, path, limit).map((entry, index) =>
+    identifier(entry, `${path}/${index}`),
+  );
+  if (!allowEmpty && values.length === 0)
+    throw new CockpitConfigurationError(path, "must not be empty");
   return values;
 }
 
@@ -499,7 +666,9 @@ function stringMap(value: ConfigurationValue, path: string, arrays: boolean): Co
   const row = configurationRecord(value, path);
   if (Object.keys(row).length > 128) throw new CockpitConfigurationError(path, "map is too large");
   const output: Record<string, ConfigurationValue> = {};
-  for (const [key, entry] of Object.entries(row).sort(([left], [right]) => compareUtf8(left, right))) {
+  for (const [key, entry] of Object.entries(row).sort(([left], [right]) =>
+    compareUtf8(left, right),
+  )) {
     identifier(key, `${path}/${key}`);
     output[key] = arrays
       ? identifierArray(entry, `${path}/${key}`, 32, false)
@@ -512,7 +681,9 @@ function safeStringMap(value: ConfigurationValue, path: string): ConfigurationOb
   const row = configurationRecord(value, path);
   if (Object.keys(row).length > 32) throw new CockpitConfigurationError(path, "map is too large");
   const output: Record<string, ConfigurationValue> = {};
-  for (const [key, entry] of Object.entries(row).sort(([left], [right]) => compareUtf8(left, right))) {
+  for (const [key, entry] of Object.entries(row).sort(([left], [right]) =>
+    compareUtf8(left, right),
+  )) {
     identifier(key, `${path}/${key}`);
     output[key] = safeText(entry, `${path}/${key}`, 32);
   }
@@ -525,7 +696,8 @@ function glyphMap(value: ConfigurationValue, path: string): ConfigurationObject 
   const output: Record<string, ConfigurationValue> = {};
   for (const key of ["done", "active", "pending"] as const) {
     const glyph = safeText(row[key], `${path}/${key}`, 4);
-    if (Array.from(glyph).length !== 1) throw new CockpitConfigurationError(`${path}/${key}`, "must contain one visible glyph");
+    if (Array.from(glyph).length !== 1)
+      throw new CockpitConfigurationError(`${path}/${key}`, "must contain one visible glyph");
     output[key] = glyph;
   }
   return output;
@@ -535,7 +707,8 @@ function safeText(value: unknown, path: string, maximum: number): string {
   if (typeof value !== "string" || value.length === 0 || Array.from(value).length > maximum) {
     throw new CockpitConfigurationError(path, `expected 1-${maximum} characters`);
   }
-  if (/\p{Control}/u.test(value)) throw new CockpitConfigurationError(path, "control characters are not allowed");
+  if (/\p{Control}/u.test(value))
+    throw new CockpitConfigurationError(path, "control characters are not allowed");
   return value;
 }
 
@@ -551,7 +724,10 @@ function boundedInteger(value: unknown, path: string, minimum: number, maximum: 
   return value as number;
 }
 
-function configurationRecord(value: ConfigurationValue | undefined, path: string): ConfigurationObject {
+function configurationRecord(
+  value: ConfigurationValue | undefined,
+  path: string,
+): ConfigurationObject {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new CockpitConfigurationError(path, "expected an object");
   }
@@ -563,7 +739,8 @@ function record(value: unknown, path: string): Record<string, unknown> {
     throw new CockpitConfigurationError(path, "expected an object");
   }
   const prototype = Object.getPrototypeOf(value) as object | null;
-  if (prototype !== Object.prototype && prototype !== null) throw new CockpitConfigurationError(path, "expected a plain object");
+  if (prototype !== Object.prototype && prototype !== null)
+    throw new CockpitConfigurationError(path, "expected a plain object");
   return value as Record<string, unknown>;
 }
 
@@ -575,35 +752,56 @@ function exactConfigurationRecord(
   const row = configurationRecord(value, path);
   rejectUnknownKeys(row, path, allowed);
   for (const required of ["id", "title", "kind", "source"]) {
-    if (allowed.includes(required) && row[required] === undefined) throw new CockpitConfigurationError(`${path}/${required}`, "is required");
+    if (allowed.includes(required) && row[required] === undefined)
+      throw new CockpitConfigurationError(`${path}/${required}`, "is required");
   }
   return row;
 }
 
-function exactRecord(value: unknown, path: string, allowed: readonly string[]): Record<string, unknown> {
+function exactRecord(
+  value: unknown,
+  path: string,
+  allowed: readonly string[],
+): Record<string, unknown> {
   const row = record(value, path);
   exactKeys(row, path, allowed);
   return row;
 }
 
-function exactKeys(row: Readonly<Record<string, unknown>>, path: string, allowed: readonly string[]): void {
+function exactKeys(
+  row: Readonly<Record<string, unknown>>,
+  path: string,
+  allowed: readonly string[],
+): void {
   rejectUnknownKeys(row, path, allowed);
-  for (const key of allowed) if (!(key in row)) throw new CockpitConfigurationError(`${path}/${key}`, "is required");
+  for (const key of allowed)
+    if (!(key in row)) throw new CockpitConfigurationError(`${path}/${key}`, "is required");
 }
 
-function rejectUnknownKeys(row: Readonly<Record<string, unknown>>, path: string, allowed: readonly string[]): void {
+function rejectUnknownKeys(
+  row: Readonly<Record<string, unknown>>,
+  path: string,
+  allowed: readonly string[],
+): void {
   for (const key of Object.keys(row)) {
-    if (!allowed.includes(key)) throw new CockpitConfigurationError(`${path}/${key}`, "unknown field is not consumed");
+    if (!allowed.includes(key))
+      throw new CockpitConfigurationError(`${path}/${key}`, "unknown field is not consumed");
   }
 }
 
-function configurationArray(value: ConfigurationValue | undefined, path: string, limit: number): readonly ConfigurationValue[] {
-  if (!Array.isArray(value) || value.length > limit) throw new CockpitConfigurationError(path, `expected an array with at most ${limit} items`);
+function configurationArray(
+  value: ConfigurationValue | undefined,
+  path: string,
+  limit: number,
+): readonly ConfigurationValue[] {
+  if (!Array.isArray(value) || value.length > limit)
+    throw new CockpitConfigurationError(path, `expected an array with at most ${limit} items`);
   return value;
 }
 
 function boundedArray(value: unknown, path: string, limit: number): readonly unknown[] {
-  if (!Array.isArray(value) || value.length > limit) throw new CockpitConfigurationError(path, `expected an array with at most ${limit} items`);
+  if (!Array.isArray(value) || value.length > limit)
+    throw new CockpitConfigurationError(path, `expected an array with at most ${limit} items`);
   return value;
 }
 
@@ -613,7 +811,8 @@ function sameKeys(actual: readonly string[], expected: readonly string[]): boole
 }
 
 function ensureUnique(values: readonly string[], path: string, label: string): void {
-  if (new Set(values).size !== values.length) throw new CockpitConfigurationError(path, `contains a duplicate ${label}`);
+  if (new Set(values).size !== values.length)
+    throw new CockpitConfigurationError(path, `contains a duplicate ${label}`);
 }
 
 function deepFreeze<T>(value: T): T {

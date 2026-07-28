@@ -52,10 +52,13 @@ export class AuthorityClientError extends Error {
 export class AuthorityClient {
   readonly #socket: Socket;
   readonly #decoder = new FrameDecoder();
-  readonly #pending = new Map<string, {
-    resolve(value: RpcSuccess): void;
-    reject(error: Error): void;
-  }>();
+  readonly #pending = new Map<
+    string,
+    {
+      resolve(value: RpcSuccess): void;
+      reject(error: Error): void;
+    }
+  >();
   readonly #listeners = new Set<(event: RpcEvent) => void>();
   #revision = 0;
   #closed = false;
@@ -63,7 +66,9 @@ export class AuthorityClient {
   private constructor(socket: Socket) {
     this.#socket = socket;
     socket.on("data", (chunk: Buffer) => this.#receive(chunk));
-    socket.once("close", () => this.#closePending(new AuthorityClientError("closed", "authority connection closed")));
+    socket.once("close", () =>
+      this.#closePending(new AuthorityClientError("closed", "authority connection closed")),
+    );
     socket.once("error", (error) => this.#closePending(error));
   }
 
@@ -87,7 +92,9 @@ export class AuthorityClient {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         socket.destroy();
-        reject(new AuthorityClientError("connect_timeout", "timed out connecting to Koni authority"));
+        reject(
+          new AuthorityClientError("connect_timeout", "timed out connecting to Koni authority"),
+        );
       }, options.connectTimeoutMs ?? 5_000);
       timer.unref();
       socket.once("connect", () => {
@@ -102,7 +109,9 @@ export class AuthorityClient {
     const ready = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         unsubscribe();
-        reject(new AuthorityClientError("handshake_timeout", "authority did not accept the handshake"));
+        reject(
+          new AuthorityClientError("handshake_timeout", "authority did not accept the handshake"),
+        );
       }, options.connectTimeoutMs ?? 5_000);
       timer.unref();
       const unsubscribe = client.onEvent((event) => {
@@ -119,22 +128,36 @@ export class AuthorityClient {
             event.payload.version !== options.version ||
             event.payload.buildSha256 !== buildSha256
           ) {
-            reject(new AuthorityClientError(
-              "runtime_mismatch",
-              "running Koni authority does not match this Core version/build; preserve or pause runs, restart the authority, then reconnect",
-              isRecord(event.payload) ? { details: event.payload } : {},
-            ));
+            reject(
+              new AuthorityClientError(
+                "runtime_mismatch",
+                "running Koni authority does not match this Core version/build; preserve or pause runs, restart the authority, then reconnect",
+                isRecord(event.payload) ? { details: event.payload } : {},
+              ),
+            );
           } else {
             resolve();
           }
         } else if (event.topic === "authority.incompatible") {
           clearTimeout(timer);
           unsubscribe();
-          reject(new AuthorityClientError(
-            "runtime_mismatch",
-            "running Koni authority does not match this Core version/build; preserve or pause runs, restart the authority, then reconnect",
-            isRecord(event.payload) ? { details: event.payload } : {},
-          ));
+          reject(
+            new AuthorityClientError(
+              "runtime_mismatch",
+              "running Koni authority does not match this Core version/build; preserve or pause runs, restart the authority, then reconnect",
+              isRecord(event.payload) ? { details: event.payload } : {},
+            ),
+          );
+        } else if (event.topic === "authority.starting") {
+          clearTimeout(timer);
+          unsubscribe();
+          reject(
+            new AuthorityClientError(
+              "authority_starting",
+              "Koni authority is completing durable startup recovery",
+              { retryable: true },
+            ),
+          );
         }
       });
     });
@@ -175,7 +198,9 @@ export class AuthorityClient {
       id,
       method,
       ...(params === undefined ? {} : { params }),
-      ...(options.expectedRevision === undefined ? {} : { expectedRevision: options.expectedRevision }),
+      ...(options.expectedRevision === undefined
+        ? {}
+        : { expectedRevision: options.expectedRevision }),
       ...(options.idempotencyKey === undefined ? {} : { idempotencyKey: options.idempotencyKey }),
     };
     const response = new Promise<RpcSuccess>((resolve, reject) => {
@@ -214,12 +239,18 @@ export class AuthorityClient {
       return;
     }
     if (!isResponse(envelope)) {
-      throw new AuthorityClientError("unexpected_envelope", "authority sent an unexpected envelope");
+      throw new AuthorityClientError(
+        "unexpected_envelope",
+        "authority sent an unexpected envelope",
+      );
     }
     this.#revision = Math.max(this.#revision, envelope.revision);
     const pending = this.#pending.get(envelope.id);
     if (pending === undefined) {
-      throw new AuthorityClientError("unknown_response", `authority responded to unknown request ${envelope.id}`);
+      throw new AuthorityClientError(
+        "unknown_response",
+        `authority responded to unknown request ${envelope.id}`,
+      );
     }
     this.#pending.delete(envelope.id);
     if (envelope.ok) {

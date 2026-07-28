@@ -38,18 +38,22 @@ export class SessionSupervisorError extends Error {
  */
 export class ManagedSessionSupervisor {
   readonly #sessions = new Map<string, ManagedSessionHandle>();
-  readonly #pending = new Map<string, {
-    runId: string;
-    specHash: string;
-    epoch: number;
-    mode: "fresh" | "recover";
-    promise: Promise<ManagedSessionHandle>;
-  }>();
+  readonly #pending = new Map<
+    string,
+    {
+      runId: string;
+      specHash: string;
+      epoch: number;
+      mode: "fresh" | "recover";
+      promise: Promise<ManagedSessionHandle>;
+    }
+  >();
   readonly #runEpochs = new Map<string, number>();
   readonly #suspendedRuns = new Set<string>();
   readonly #deletedRuns = new Set<string>();
   readonly #deletions = new Map<string, Promise<void>>();
   readonly #listeners = new Set<(event: SupervisorEvent) => void>();
+  #allSuspended = false;
 
   public subscribe(listener: (event: SupervisorEvent) => void): () => void {
     this.#listeners.add(listener);
@@ -81,14 +85,21 @@ export class ManagedSessionSupervisor {
     const existing = this.#sessions.get(attemptId);
     if (existing !== undefined) {
       if (existing.session.spec.specHash !== spec.specHash) {
-        return Promise.reject(new SessionSupervisorError("attempt_reuse", `attempt ${attemptId} was rebound to different bytes`));
+        return Promise.reject(
+          new SessionSupervisorError(
+            "attempt_reuse",
+            `attempt ${attemptId} was rebound to different bytes`,
+          ),
+        );
       }
       return Promise.resolve(existing);
     }
     const pending = this.#pending.get(attemptId);
     if (pending !== undefined) {
       if (pending.specHash !== spec.specHash || pending.runId !== runId || pending.mode !== mode) {
-        return Promise.reject(new SessionSupervisorError("attempt_reuse", `pending attempt ${attemptId} was rebound`));
+        return Promise.reject(
+          new SessionSupervisorError("attempt_reuse", `pending attempt ${attemptId} was rebound`),
+        );
       }
       return pending.promise;
     }
@@ -96,11 +107,13 @@ export class ManagedSessionSupervisor {
     const epoch = this.#runEpoch(runId);
     const promise = this.#createAndStart(spec, options, epoch, mode);
     this.#pending.set(attemptId, { runId, specHash: spec.specHash, epoch, mode, promise });
-    void promise.finally(() => {
-      if (this.#pending.get(attemptId)?.promise === promise) {
-        this.#pending.delete(attemptId);
-      }
-    }).catch(() => undefined);
+    void promise
+      .finally(() => {
+        if (this.#pending.get(attemptId)?.promise === promise) {
+          this.#pending.delete(attemptId);
+        }
+      })
+      .catch(() => undefined);
     return promise;
   }
 
@@ -133,6 +146,23 @@ export class ManagedSessionSupervisor {
     this.#suspendedRuns.add(runId);
     this.#bumpRunEpoch(runId);
     await this.#abortRunSessions(runId, reason, false);
+  }
+
+  /** Install one synchronous global admission tombstone, then drain only actually live runs. */
+  public async suspendAll(reason = "authority quiescing"): Promise<void> {
+    this.#allSuspended = true;
+    const runIds = new Set<string>();
+    for (const entry of this.#sessions.values()) runIds.add(entry.session.spec.identity.runId);
+    for (const pending of this.#pending.values()) runIds.add(pending.runId);
+    let failure: unknown;
+    for (const runId of [...runIds].sort()) {
+      try {
+        await this.abortByRun(runId, reason);
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+    if (failure !== undefined) throw failure;
   }
 
   /** Resume admission. Aborted attempts remain terminal and require new immutable attempt IDs. */
@@ -172,18 +202,24 @@ export class ManagedSessionSupervisor {
     for (const pending of this.#pending.values()) {
       runIds.add(pending.runId);
     }
-    const aborted = await Promise.allSettled(
-      [...runIds].map((runId) => this.abortByRun(runId, "supervisor disposed")),
-    );
-    const disposed = await Promise.allSettled(
-      [...this.#sessions.values()].map(async (entry) => entry.session.dispose()),
-    );
+    let failure: unknown;
+    for (const runId of [...runIds].sort()) {
+      try {
+        await this.abortByRun(runId, "supervisor disposed");
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+    for (const entry of [...this.#sessions.values()]) {
+      try {
+        await entry.session.dispose();
+      } catch (error) {
+        failure ??= error;
+      }
+    }
     this.#sessions.clear();
     this.#listeners.clear();
-    const failure = [...aborted, ...disposed].find(
-      (result): result is PromiseRejectedResult => result.status === "rejected",
-    );
-    if (failure !== undefined) throw failure.reason;
+    if (failure !== undefined) throw failure;
   }
 
   async #createAndStart(
@@ -192,11 +228,13 @@ export class ManagedSessionSupervisor {
     launchEpoch: number,
     mode: "fresh" | "recover",
   ): Promise<ManagedSessionHandle> {
-    const session = mode === "fresh"
-      ? await ManagedPiSession.create(spec, options)
-      : await ManagedPiSession.recover(spec, options);
+    const session =
+      mode === "fresh"
+        ? await ManagedPiSession.create(spec, options)
+        : await ManagedPiSession.recover(spec, options);
     const { runId, attemptId } = spec.identity;
     if (
+      this.#allSuspended ||
       this.#deletedRuns.has(runId) ||
       this.#suspendedRuns.has(runId) ||
       this.#runEpoch(runId) !== launchEpoch
@@ -230,13 +268,15 @@ export class ManagedSessionSupervisor {
     session.subscribe((event) => this.#emit(session, event));
     const handle: ManagedSessionHandle = { session, outcome: session.start() };
     this.#sessions.set(attemptId, handle);
-    void handle.outcome.finally(() => {
-      if (this.#sessions.get(attemptId) === handle) {
-        // Durable attempt/history state belongs to authority. Retaining settled provider/session
-        // objects here only leaks memory and makes a dead attempt look live to control callers.
-        this.#sessions.delete(attemptId);
-      }
-    }).catch(() => undefined);
+    void handle.outcome
+      .finally(() => {
+        if (this.#sessions.get(attemptId) === handle) {
+          // Durable attempt/history state belongs to authority. Retaining settled provider/session
+          // objects here only leaks memory and makes a dead attempt look live to control callers.
+          this.#sessions.delete(attemptId);
+        }
+      })
+      .catch(() => undefined);
     return handle;
   }
 
@@ -244,17 +284,22 @@ export class ManagedSessionSupervisor {
     const pending = [...this.#pending.values()]
       .filter((entry) => entry.runId === runId)
       .map((entry) => entry.promise.catch(() => undefined));
-    if (pending.length > 0) {
-      await Promise.all(pending);
-    }
-    const entries = [...this.#sessions.entries()]
-      .filter(([, entry]) => entry.session.spec.identity.runId === runId);
-    await Promise.all(entries.map(async ([attemptId, entry]) => {
+    for (const creation of pending) await creation;
+    const entries = [...this.#sessions.entries()].filter(
+      ([, entry]) => entry.session.spec.identity.runId === runId,
+    );
+    let firstFailure: unknown;
+    for (const [attemptId, entry] of entries) {
       let cleanupError: unknown;
       try {
         await entry.session.abort(reason);
       } catch (error) {
         cleanupError = error;
+      }
+      try {
+        await entry.outcome;
+      } catch (error) {
+        cleanupError ??= error;
       }
       if (dispose) {
         try {
@@ -265,8 +310,9 @@ export class ManagedSessionSupervisor {
           this.#sessions.delete(attemptId);
         }
       }
-      if (cleanupError !== undefined) throw cleanupError;
-    }));
+      firstFailure ??= cleanupError;
+    }
+    if (firstFailure !== undefined) throw firstFailure;
   }
 
   #requiredLiveAttempt(attemptId: string): ManagedPiSession {
@@ -275,6 +321,9 @@ export class ManagedSessionSupervisor {
       throw new SessionSupervisorError("attempt_missing", `attempt ${attemptId} is not supervised`);
     }
     const runId = entry.session.spec.identity.runId;
+    if (this.#allSuspended) {
+      throw new SessionSupervisorError("authority_suspended", "authority is quiescing");
+    }
     if (this.#deletedRuns.has(runId)) {
       throw new SessionSupervisorError("run_deleted", `run ${runId} has been deleted`);
     }
@@ -285,6 +334,9 @@ export class ManagedSessionSupervisor {
   }
 
   #assertRunMayLaunch(runId: string): void {
+    if (this.#allSuspended) {
+      throw new SessionSupervisorError("authority_suspended", "authority is quiescing");
+    }
     if (this.#deletedRuns.has(runId)) {
       throw new SessionSupervisorError("run_deleted", `run ${runId} has been deleted`);
     }

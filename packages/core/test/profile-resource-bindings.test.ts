@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   parsePiResourceBindingCatalog,
-  PiResourceBindingError,
+  type PiResourceBindingError,
   resolveOptionalPiResources,
 } from "../src/profile/resource-bindings.js";
 
@@ -20,13 +20,18 @@ describe("optional Pi package resource bindings", () => {
   it.each([
     ["coding", codingCatalog],
     ["research", researchCatalog],
-  ])("parses the %s profile catalog with every community package opt-in", async (_name, catalogPath) => {
-    const catalog = parsePiResourceBindingCatalog(await readFile(catalogPath, "utf8"));
-    expect(catalog.protocol).toBe("koni.pi-resource-bindings.v1");
-    expect(catalog.bindings.length).toBeGreaterThan(0);
-    expect(catalog.bindings.every(({ enabled }) => enabled === false)).toBe(true);
-    expect(catalog.bindings.find(({ id }) => id === "pi-subagents")?.integration).toBe("not_recommended");
-  });
+  ])(
+    "parses the %s profile catalog with every community package opt-in",
+    async (_name, catalogPath) => {
+      const catalog = parsePiResourceBindingCatalog(await readFile(catalogPath, "utf8"));
+      expect(catalog.protocol).toBe("koni.pi-resource-bindings.v1");
+      expect(catalog.bindings.length).toBeGreaterThan(0);
+      expect(catalog.bindings.every(({ enabled }) => enabled === false)).toBe(true);
+      expect(catalog.bindings.find(({ id }) => id === "pi-subagents")?.integration).toBe(
+        "not_recommended",
+      );
+    },
+  );
 
   it("only resolves explicitly enabled resources already present in Pi's inventory", () => {
     const catalog = parsePiResourceBindingCatalog(`
@@ -77,7 +82,9 @@ bindings:
         packageVersion: "1.0.0",
         packageRoot: "/tmp/pi/useful-skills",
         source: "npm:useful-skills",
-        resources: [{ kind: "skill", relativePath: "skills/useful/SKILL.md", ambientEnabled: true }],
+        resources: [
+          { kind: "skill", relativePath: "skills/useful/SKILL.md", ambientEnabled: true },
+        ],
       },
       {
         packageName: "ambient-package",
@@ -119,7 +126,9 @@ bindings:
     expect(() => parsePiResourceBindingCatalog(invalid)).toThrowError(
       expect.objectContaining({ code: "binding_unknown_field" }) as PiResourceBindingError,
     );
-    expect(() => parsePiResourceBindingCatalog(invalid.replace("    install_automatically: true\n", ""))).toThrowError(
+    expect(() =>
+      parsePiResourceBindingCatalog(invalid.replace("    install_automatically: true\n", "")),
+    ).toThrowError(
       expect.objectContaining({ code: "binding_unsafe_enable" }) as PiResourceBindingError,
     );
   });
@@ -142,14 +151,27 @@ bindings:
     expect(() => parsePiResourceBindingCatalog(enabledWithoutSelection)).toThrowError(
       expect.objectContaining({ code: "binding_selection" }) as PiResourceBindingError,
     );
-    expect(() => parsePiResourceBindingCatalog(enabledWithoutSelection.replace(
-      "    stages: [planning]",
-      "    select: { skills: ['skills/**/SKILL.md'], prompts: [], tools: [] }\n    stages: [planning]",
-    ))).toThrowError(expect.objectContaining({ code: "binding_resource_path" }) as PiResourceBindingError);
-    expect(() => parsePiResourceBindingCatalog(enabledWithoutSelection
-      .replace("    integration: skills_only", "    integration: interactive_only")
-      .replace("    stages: [planning]", "    select: { skills: [skills/method/SKILL.md], prompts: [], tools: [] }\n    stages: []")
-      .replace("    personas: [planner]", "    personas: []"))).toThrowError(
+    expect(() =>
+      parsePiResourceBindingCatalog(
+        enabledWithoutSelection.replace(
+          "    stages: [planning]",
+          "    select: { skills: ['skills/**/SKILL.md'], prompts: [], tools: [] }\n    stages: [planning]",
+        ),
+      ),
+    ).toThrowError(
+      expect.objectContaining({ code: "binding_resource_path" }) as PiResourceBindingError,
+    );
+    expect(() =>
+      parsePiResourceBindingCatalog(
+        enabledWithoutSelection
+          .replace("    integration: skills_only", "    integration: interactive_only")
+          .replace(
+            "    stages: [planning]",
+            "    select: { skills: [skills/method/SKILL.md], prompts: [], tools: [] }\n    stages: []",
+          )
+          .replace("    personas: [planner]", "    personas: []"),
+      ),
+    ).toThrowError(
       expect.objectContaining({ code: "binding_interactive_scope" }) as PiResourceBindingError,
     );
   });

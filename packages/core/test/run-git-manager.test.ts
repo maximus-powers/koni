@@ -47,8 +47,9 @@ describe("run Git namespaces and explicit promotion", () => {
     expect(prepared.status).toBe("conflicts");
     expect(await readFile(path.join(root, "README.md"), "utf8")).toBe("from target\n");
     await expect(manager.cleanup(namespace.git)).rejects.toThrow("not integrated");
-    expect(await readFile(path.join(namespace.git.runWorktree, "README.md"), "utf8"))
-      .toBe("from run\n");
+    expect(await readFile(path.join(namespace.git.runWorktree, "README.md"), "utf8")).toBe(
+      "from run\n",
+    );
   });
 });
 

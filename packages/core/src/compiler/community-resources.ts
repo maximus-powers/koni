@@ -5,11 +5,7 @@ import type {
   OptionalPiResourceBinding,
   PiResourceBindingCatalog,
 } from "../contracts/pi-resources.js";
-import {
-  KONI_TOOL_NAMES,
-  koniToolSchemaHash,
-  type KoniToolName,
-} from "../pi/tool-catalog.js";
+import { KONI_TOOL_NAMES, koniToolSchemaHash, type KoniToolName } from "../pi/tool-catalog.js";
 import type { LaunchResource } from "../pi/launch-spec.js";
 import type {
   InstalledPiPackageReference,
@@ -99,20 +95,31 @@ export async function pinCommunityResourceBundle(options: {
   adapters?: readonly CommunityToolAdapterDefinition[];
 }): Promise<PinnedCommunityResourceBundle> {
   const catalog = options.catalog;
-  if (catalog === undefined || !catalog.bindings.some(({ enabled, integration }) =>
-    enabled && integration !== "interactive_only" && integration !== "not_recommended")) {
+  if (
+    catalog === undefined ||
+    !catalog.bindings.some(
+      ({ enabled, integration }) =>
+        enabled && integration !== "interactive_only" && integration !== "not_recommended",
+    )
+  ) {
     return createBundle(Object.create(null) as Record<string, PinnedCommunityBinding>);
   }
   const installed = uniqueInstalledPackages(options.installed);
   const adapters = uniqueAdapters(options.adapters ?? []);
-  const bindings: Record<string, PinnedCommunityBinding> = Object.create(null) as Record<string, PinnedCommunityBinding>;
+  const bindings: Record<string, PinnedCommunityBinding> = Object.create(null) as Record<
+    string,
+    PinnedCommunityBinding
+  >;
   let totalFiles = 0;
   let totalBytes = 0;
 
   for (const binding of catalog.bindings) {
     if (!binding.enabled || binding.integration === "interactive_only") continue;
     if (binding.integration === "not_recommended") {
-      throw new CommunityResourceError("not_recommended", `binding ${binding.id} cannot enter an autonomous run`);
+      throw new CommunityResourceError(
+        "not_recommended",
+        `binding ${binding.id} cannot enter an autonomous run`,
+      );
     }
     const packageReference = installed.get(binding.package);
     if (packageReference === undefined) {
@@ -136,14 +143,28 @@ export async function pinCommunityResourceBundle(options: {
 }
 
 /** Revalidate a deserialized pinned bundle without consulting mutable package state. */
-export function validatePinnedCommunityResourceBundle(value: unknown): PinnedCommunityResourceBundle {
-  if (!isRecord(value) || value.protocol !== PINNED_COMMUNITY_RESOURCES_PROTOCOL || !isRecord(value.bindings)) {
-    throw new CommunityResourceError("pinned_shape", "pinned community resource bundle has an invalid envelope");
+export function validatePinnedCommunityResourceBundle(
+  value: unknown,
+): PinnedCommunityResourceBundle {
+  if (
+    !isRecord(value) ||
+    value.protocol !== PINNED_COMMUNITY_RESOURCES_PROTOCOL ||
+    !isRecord(value.bindings)
+  ) {
+    throw new CommunityResourceError(
+      "pinned_shape",
+      "pinned community resource bundle has an invalid envelope",
+    );
   }
-  const bindings: Record<string, PinnedCommunityBinding> = Object.create(null) as Record<string, PinnedCommunityBinding>;
+  const bindings: Record<string, PinnedCommunityBinding> = Object.create(null) as Record<
+    string,
+    PinnedCommunityBinding
+  >;
   let totalFiles = 0;
   let totalBytes = 0;
-  for (const [id, raw] of Object.entries(value.bindings).sort(([left], [right]) => compareUtf8(left, right))) {
+  for (const [id, raw] of Object.entries(value.bindings).sort(([left], [right]) =>
+    compareUtf8(left, right),
+  )) {
     if (!isRecord(raw) || raw.id !== id || !Array.isArray(raw.files) || !Array.isArray(raw.tools)) {
       throw new CommunityResourceError("pinned_shape", `pinned community binding ${id} is invalid`);
     }
@@ -152,13 +173,19 @@ export function validatePinnedCommunityResourceBundle(value: unknown): PinnedCom
     totalFiles += binding.files.length;
     totalBytes += binding.files.reduce((sum, file) => sum + file.sizeBytes, 0);
     if (totalFiles > MAX_PINNED_FILES || totalBytes > MAX_PINNED_BYTES) {
-      throw new CommunityResourceError("pinned_limit", "pinned community resource bundle exceeds its byte or file bound");
+      throw new CommunityResourceError(
+        "pinned_limit",
+        "pinned community resource bundle exceeds its byte or file bound",
+      );
     }
     bindings[id] = binding;
   }
   const bundle = createBundle(bindings);
   if (value.bundleHash !== bundle.bundleHash) {
-    throw new CommunityResourceError("pinned_hash", "pinned community resource bundle hash does not match its content");
+    throw new CommunityResourceError(
+      "pinned_hash",
+      "pinned community resource bundle hash does not match its content",
+    );
   }
   return deepFreeze(bundle);
 }
@@ -176,8 +203,14 @@ export function selectCommunityAttemptResources(options: {
   const resources: LaunchResource[] = [];
   const toolNames = new Set<KoniToolName>();
   const bindingIds: string[] = [];
-  for (const binding of Object.values(bundle.bindings).sort((left, right) => compareUtf8(left.id, right.id))) {
-    if (!binding.personas.includes(options.personaId) || !binding.stages.some((stage) => stages.has(stage))) continue;
+  for (const binding of Object.values(bundle.bindings).sort((left, right) =>
+    compareUtf8(left.id, right.id),
+  )) {
+    if (
+      !binding.personas.includes(options.personaId) ||
+      !binding.stages.some((stage) => stages.has(stage))
+    )
+      continue;
     if (binding.requiresNetwork && !options.networkAccess) {
       throw new CommunityResourceError(
         "network_grant",
@@ -186,11 +219,9 @@ export function selectCommunityAttemptResources(options: {
     }
     bindingIds.push(binding.id);
     for (const file of binding.files) {
-      const resourceId = `community-${binding.id}-${digestBody(canonicalHash([
-        binding.id,
-        file.relativePath,
-        file.sha256,
-      ])).slice(0, 24)}`;
+      const resourceId = `community-${binding.id}-${digestBody(
+        canonicalHash([binding.id, file.relativePath, file.sha256]),
+      ).slice(0, 24)}`;
       const relativePath = `community/${binding.id}/${file.relativePath}`;
       resources.push({
         kind: file.kind,
@@ -205,22 +236,29 @@ export function selectCommunityAttemptResources(options: {
           `Compiler-selected prompt resource ${binding.packageName}/${file.relativePath}:`,
           file.content,
         ].join("\n\n");
-        resources.push(launchResource(
-          "append_system_prompt",
-          `${resourceId}-instructions`,
-          `${relativePath}.instructions.md`,
-          content,
-        ));
+        resources.push(
+          launchResource(
+            "append_system_prompt",
+            `${resourceId}-instructions`,
+            `${relativePath}.instructions.md`,
+            content,
+          ),
+        );
       }
     }
     for (const adapter of binding.tools) {
       if (adapter.requiresNetwork && !options.networkAccess) {
-        throw new CommunityResourceError("network_grant", `tool adapter ${adapter.id} requires network authority`);
+        throw new CommunityResourceError(
+          "network_grant",
+          `tool adapter ${adapter.id} requires network authority`,
+        );
       }
       toolNames.add(adapter.toolName);
     }
   }
-  resources.sort((left, right) => compareUtf8(`${left.id}\0${left.relativePath}`, `${right.id}\0${right.relativePath}`));
+  resources.sort((left, right) =>
+    compareUtf8(`${left.id}\0${left.relativePath}`, `${right.id}\0${right.relativePath}`),
+  );
   return {
     resources,
     toolNames: KONI_TOOL_NAMES.filter((name) => toolNames.has(name)),
@@ -235,11 +273,17 @@ async function pinBinding(
 ): Promise<PinnedCommunityBinding> {
   const packageRoot = await realpath(installed.packageRoot).catch(() => undefined);
   if (packageRoot === undefined || packageRoot !== installed.packageRoot) {
-    throw new CommunityResourceError("package_root", `installed package ${installed.packageName} has no canonical root`);
+    throw new CommunityResourceError(
+      "package_root",
+      `installed package ${installed.packageName} has no canonical root`,
+    );
   }
   const rootMetadata = await lstat(packageRoot);
   if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
-    throw new CommunityResourceError("package_root", `installed package ${installed.packageName} root is unsafe`);
+    throw new CommunityResourceError(
+      "package_root",
+      `installed package ${installed.packageName} root is unsafe`,
+    );
   }
   const manifestBefore = await readTextFile(packageRoot, "package.json");
   const manifest = parsePackageManifest(manifestBefore.content, installed);
@@ -247,45 +291,57 @@ async function pinBinding(
   const files = new Map<string, PinnedCommunityFile>();
   for (const selected of binding.select.skills) {
     requireResolvedResource(resources, "skill", selected, binding.id);
-    const closure = path.posix.basename(selected) === "SKILL.md"
-      ? await readStableTextTree(packageRoot, path.posix.dirname(selected), "skill")
-      : [await readPinnedFile(packageRoot, selected, "skill")];
+    const closure =
+      path.posix.basename(selected) === "SKILL.md"
+        ? await readStableTextTree(packageRoot, path.posix.dirname(selected), "skill")
+        : [await readPinnedFile(packageRoot, selected, "skill")];
     for (const file of closure) addPinnedFile(files, file, binding.id);
   }
   for (const selected of binding.select.prompts) {
     requireResolvedResource(resources, "prompt", selected, binding.id);
     if (path.posix.extname(selected).toLowerCase() !== ".md") {
-      throw new CommunityResourceError("prompt_type", `selected prompt ${selected} is not Markdown`);
+      throw new CommunityResourceError(
+        "prompt_type",
+        `selected prompt ${selected} is not Markdown`,
+      );
     }
     addPinnedFile(files, await readPinnedFile(packageRoot, selected, "prompt"), binding.id);
   }
-  const tools = binding.select.tools.map((adapterId) => {
-    const adapter = adapters.get(adapterId);
-    if (
-      adapter === undefined ||
-      adapter.bindingId !== binding.id ||
-      adapter.packageName !== binding.package ||
-      adapter.requiresNetwork !== binding.requiresNetwork
-    ) {
-      throw new CommunityResourceError(
-        "adapter_unavailable",
-        `binding ${binding.id} has no exact Koni-owned compatibility adapter ${adapterId}`,
-      );
-    }
-    if (adapter.requiresNetwork && adapter.toolName !== "koni_run_check") {
-      throw new CommunityResourceError(
-        "adapter_network",
-        `network adapter ${adapter.id} is not routed through the authority check runner`,
-      );
-    }
-    return {
-      ...structuredClone(adapter),
-      schemaHash: koniToolSchemaHash(adapter.toolName),
-    };
-  }).sort((left, right) => compareUtf8(left.id, right.id));
+  const tools = binding.select.tools
+    .map((adapterId) => {
+      const adapter = adapters.get(adapterId);
+      if (
+        adapter === undefined ||
+        adapter.bindingId !== binding.id ||
+        adapter.packageName !== binding.package ||
+        adapter.requiresNetwork !== binding.requiresNetwork
+      ) {
+        throw new CommunityResourceError(
+          "adapter_unavailable",
+          `binding ${binding.id} has no exact Koni-owned compatibility adapter ${adapterId}`,
+        );
+      }
+      if (adapter.requiresNetwork && adapter.toolName !== "koni_run_check") {
+        throw new CommunityResourceError(
+          "adapter_network",
+          `network adapter ${adapter.id} is not routed through the authority check runner`,
+        );
+      }
+      return {
+        ...structuredClone(adapter),
+        schemaHash: koniToolSchemaHash(adapter.toolName),
+      };
+    })
+    .sort((left, right) => compareUtf8(left.id, right.id));
   const manifestAfter = await readTextFile(packageRoot, "package.json");
-  if (manifestAfter.sha256 !== manifestBefore.sha256 || manifestAfter.content !== manifestBefore.content) {
-    throw new CommunityResourceError("package_race", `installed package ${installed.packageName} changed while pinned`);
+  if (
+    manifestAfter.sha256 !== manifestBefore.sha256 ||
+    manifestAfter.content !== manifestBefore.content
+  ) {
+    throw new CommunityResourceError(
+      "package_race",
+      `installed package ${installed.packageName} changed while pinned`,
+    );
   }
   if (binding.integration !== "skills_only" && binding.integration !== "explicit_tools") {
     throw new CommunityResourceError("integration", `binding ${binding.id} is not autonomous`);
@@ -300,13 +356,17 @@ async function pinBinding(
     stages: [...binding.stages],
     personas: [...binding.personas],
     requiresNetwork: binding.requiresNetwork,
-    files: [...files.values()].sort((left, right) => compareUtf8(left.relativePath, right.relativePath)),
+    files: [...files.values()].sort((left, right) =>
+      compareUtf8(left.relativePath, right.relativePath),
+    ),
     tools,
   } as const;
   return deepFreeze({ ...material, bindingHash: canonicalHash(material) });
 }
 
-function createBundle(bindings: Record<string, PinnedCommunityBinding>): PinnedCommunityResourceBundle {
+function createBundle(
+  bindings: Record<string, PinnedCommunityBinding>,
+): PinnedCommunityResourceBundle {
   const sorted = Object.fromEntries(
     Object.entries(bindings).sort(([left], [right]) => compareUtf8(left, right)),
   ) as Record<string, PinnedCommunityBinding>;
@@ -316,18 +376,31 @@ function createBundle(bindings: Record<string, PinnedCommunityBinding>): PinnedC
 
 function validatePinnedBinding(binding: PinnedCommunityBinding): void {
   if (
-    typeof binding.id !== "string" || !isIdentifier(binding.id) ||
-    typeof binding.packageName !== "string" || !isPackageName(binding.packageName) ||
-    typeof binding.packageVersion !== "string" || binding.packageVersion.length < 1 || binding.packageVersion.length > 256 ||
-    typeof binding.installedSource !== "string" || binding.installedSource.length < 1 || binding.installedSource.length > 8_192 ||
+    typeof binding.id !== "string" ||
+    !isIdentifier(binding.id) ||
+    typeof binding.packageName !== "string" ||
+    !isPackageName(binding.packageName) ||
+    typeof binding.packageVersion !== "string" ||
+    binding.packageVersion.length < 1 ||
+    binding.packageVersion.length > 256 ||
+    typeof binding.installedSource !== "string" ||
+    binding.installedSource.length < 1 ||
+    binding.installedSource.length > 8_192 ||
     !isSha256Digest(binding.packageManifestSha256) ||
     !["skills_only", "explicit_tools"].includes(binding.integration) ||
     !isSortedIdentifiers(binding.stages) ||
     !isSortedIdentifiers(binding.personas) ||
     typeof binding.requiresNetwork !== "boolean"
-  ) throw new CommunityResourceError("pinned_shape", `pinned community binding ${binding.id} has invalid metadata`);
+  )
+    throw new CommunityResourceError(
+      "pinned_shape",
+      `pinned community binding ${binding.id} has invalid metadata`,
+    );
   if (!isSha256Digest(binding.bindingHash)) {
-    throw new CommunityResourceError("pinned_hash", `pinned community binding ${binding.id} has no valid hash`);
+    throw new CommunityResourceError(
+      "pinned_hash",
+      `pinned community binding ${binding.id} has no valid hash`,
+    );
   }
   const filePaths = new Set<string>();
   for (const file of binding.files) {
@@ -338,12 +411,20 @@ function validatePinnedBinding(binding: PinnedCommunityBinding): void {
       normalizeRelativePath(file.relativePath) !== file.relativePath ||
       typeof file.content !== "string" ||
       file.sizeBytes !== Buffer.byteLength(file.content, "utf8") ||
-      file.sizeBytes < 1 || file.sizeBytes > MAX_FILE_BYTES ||
+      file.sizeBytes < 1 ||
+      file.sizeBytes > MAX_FILE_BYTES ||
       rawSha256(file.content) !== file.sha256 ||
       filePaths.has(file.relativePath)
-    ) throw new CommunityResourceError("pinned_file", `pinned community file in ${binding.id} is invalid`);
+    )
+      throw new CommunityResourceError(
+        "pinned_file",
+        `pinned community file in ${binding.id} is invalid`,
+      );
     if (file.kind === "prompt" && path.posix.extname(file.relativePath).toLowerCase() !== ".md") {
-      throw new CommunityResourceError("pinned_file", `pinned community prompt in ${binding.id} is not Markdown`);
+      throw new CommunityResourceError(
+        "pinned_file",
+        `pinned community prompt in ${binding.id} is not Markdown`,
+      );
     }
     filePaths.add(file.relativePath);
   }
@@ -358,17 +439,27 @@ function validatePinnedBinding(binding: PinnedCommunityBinding): void {
       typeof tool.requiresNetwork !== "boolean" ||
       tool.requiresNetwork !== binding.requiresNetwork ||
       (tool.requiresNetwork && tool.toolName !== "koni_run_check") ||
-      tool.schemaHash !== koniToolSchemaHash(tool.toolName as KoniToolName) ||
+      tool.schemaHash !== koniToolSchemaHash(tool.toolName) ||
       toolIds.has(String(tool.id))
-    ) throw new CommunityResourceError("pinned_tool", `pinned community tool in ${binding.id} is invalid`);
+    )
+      throw new CommunityResourceError(
+        "pinned_tool",
+        `pinned community tool in ${binding.id} is invalid`,
+      );
     toolIds.add(String(tool.id));
   }
   if (binding.integration === "skills_only" && binding.tools.length > 0) {
-    throw new CommunityResourceError("pinned_tool", `skills-only binding ${binding.id} contains a tool adapter`);
+    throw new CommunityResourceError(
+      "pinned_tool",
+      `skills-only binding ${binding.id} contains a tool adapter`,
+    );
   }
   const { bindingHash, ...material } = binding;
   if (canonicalHash(material) !== bindingHash) {
-    throw new CommunityResourceError("pinned_hash", `pinned community binding ${binding.id} hash does not match`);
+    throw new CommunityResourceError(
+      "pinned_hash",
+      `pinned community binding ${binding.id} hash does not match`,
+    );
   }
 }
 
@@ -378,7 +469,10 @@ function uniqueInstalledPackages(
   const output = new Map<string, InstalledPiPackageReference>();
   for (const entry of entries) {
     if (output.has(entry.packageName)) {
-      throw new CommunityResourceError("package_ambiguous", `installed Pi package ${entry.packageName} is ambiguous`);
+      throw new CommunityResourceError(
+        "package_ambiguous",
+        `installed Pi package ${entry.packageName} is ambiguous`,
+      );
     }
     output.set(entry.packageName, structuredClone(entry));
   }
@@ -395,8 +489,13 @@ function uniqueAdapters(
       !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u.test(adapter.bindingId) ||
       !(KONI_TOOL_NAMES as readonly string[]).includes(adapter.toolName) ||
       typeof adapter.requiresNetwork !== "boolean"
-    ) throw new CommunityResourceError("adapter_shape", `community tool adapter ${adapter.id} is invalid`);
-    if (output.has(adapter.id)) throw new CommunityResourceError("adapter_duplicate", `duplicate adapter ${adapter.id}`);
+    )
+      throw new CommunityResourceError(
+        "adapter_shape",
+        `community tool adapter ${adapter.id} is invalid`,
+      );
+    if (output.has(adapter.id))
+      throw new CommunityResourceError("adapter_duplicate", `duplicate adapter ${adapter.id}`);
     output.set(adapter.id, structuredClone(adapter));
   }
   return output;
@@ -430,7 +529,10 @@ async function readStableTextTree(
   const first = await readTextTree(packageRoot, relativeRoot, kind);
   const second = await readTextTree(packageRoot, relativeRoot, kind);
   if (canonicalHash(first) !== canonicalHash(second)) {
-    throw new CommunityResourceError("package_race", `community resource tree ${relativeRoot} changed while pinned`);
+    throw new CommunityResourceError(
+      "package_race",
+      `community resource tree ${relativeRoot} changed while pinned`,
+    );
   }
   return second;
 }
@@ -443,27 +545,49 @@ async function readTextTree(
   const root = containedPath(packageRoot, relativeRoot);
   const rootMetadata = await lstat(root);
   if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
-    throw new CommunityResourceError("resource_tree", `community resource directory ${relativeRoot} is unsafe`);
+    throw new CommunityResourceError(
+      "resource_tree",
+      `community resource directory ${relativeRoot} is unsafe`,
+    );
   }
   const output: PinnedCommunityFile[] = [];
   const walk = async (directory: string, depth: number): Promise<void> => {
-    if (depth > MAX_DEPTH) throw new CommunityResourceError("resource_depth", `community resource tree ${relativeRoot} is too deep`);
+    if (depth > MAX_DEPTH)
+      throw new CommunityResourceError(
+        "resource_depth",
+        `community resource tree ${relativeRoot} is too deep`,
+      );
     const entries: Dirent[] = await readdir(directory, { withFileTypes: true });
     entries.sort((left, right) => compareUtf8(left.name, right.name));
     for (const entry of entries) {
-      if (entry.name.startsWith(".") || entry.name.includes("\u0000") || entry.name.includes("/") || entry.name.includes("\\")) {
-        throw new CommunityResourceError("resource_path", `community resource tree ${relativeRoot} has an unsafe entry`);
+      if (
+        entry.name.startsWith(".") ||
+        entry.name.includes("\u0000") ||
+        entry.name.includes("/") ||
+        entry.name.includes("\\")
+      ) {
+        throw new CommunityResourceError(
+          "resource_path",
+          `community resource tree ${relativeRoot} has an unsafe entry`,
+        );
       }
       const absolute = path.join(directory, entry.name);
       const metadata = await lstat(absolute);
-      if (metadata.isSymbolicLink()) throw new CommunityResourceError("resource_symlink", `community resource ${absolute} is a symlink`);
+      if (metadata.isSymbolicLink())
+        throw new CommunityResourceError(
+          "resource_symlink",
+          `community resource ${absolute} is a symlink`,
+        );
       if (metadata.isDirectory()) {
         await walk(absolute, depth + 1);
       } else if (metadata.isFile()) {
         const relativePath = normalizeRelativePath(path.relative(packageRoot, absolute));
         output.push(await readPinnedFile(packageRoot, relativePath, kind));
       } else {
-        throw new CommunityResourceError("resource_type", `community resource ${absolute} is not a regular file`);
+        throw new CommunityResourceError(
+          "resource_type",
+          `community resource ${absolute} is not a regular file`,
+        );
       }
     }
   };
@@ -486,26 +610,46 @@ async function readTextFile(
 ): Promise<{ content: string; sha256: Sha256Digest; sizeBytes: number }> {
   const absolute = containedPath(packageRoot, relativePath);
   const metadata = await lstat(absolute);
-  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 1 || metadata.size > MAX_FILE_BYTES) {
-    throw new CommunityResourceError("resource_file", `community resource ${relativePath} is empty, oversized, or unsafe`);
+  if (
+    !metadata.isFile() ||
+    metadata.isSymbolicLink() ||
+    metadata.size < 1 ||
+    metadata.size > MAX_FILE_BYTES
+  ) {
+    throw new CommunityResourceError(
+      "resource_file",
+      `community resource ${relativePath} is empty, oversized, or unsafe`,
+    );
   }
   const canonical = await realpath(absolute);
   if (canonical !== absolute || !isWithin(packageRoot, canonical)) {
-    throw new CommunityResourceError("resource_escape", `community resource ${relativePath} escapes its package`);
+    throw new CommunityResourceError(
+      "resource_escape",
+      `community resource ${relativePath} escapes its package`,
+    );
   }
   const handle = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const opened = await handle.stat();
     if (!opened.isFile() || opened.dev !== metadata.dev || opened.ino !== metadata.ino) {
-      throw new CommunityResourceError("resource_race", `community resource ${relativePath} changed while read`);
+      throw new CommunityResourceError(
+        "resource_race",
+        `community resource ${relativePath} changed while read`,
+      );
     }
     const bytes = await handle.readFile();
     if (bytes.byteLength !== metadata.size || bytes.includes(0)) {
-      throw new CommunityResourceError("resource_encoding", `community resource ${relativePath} is invalid`);
+      throw new CommunityResourceError(
+        "resource_encoding",
+        `community resource ${relativePath} is invalid`,
+      );
     }
     const content = bytes.toString("utf8");
     if (!Buffer.from(content, "utf8").equals(bytes)) {
-      throw new CommunityResourceError("resource_encoding", `community resource ${relativePath} is not UTF-8 text`);
+      throw new CommunityResourceError(
+        "resource_encoding",
+        `community resource ${relativePath} is not UTF-8 text`,
+      );
     }
     return { content, sha256: rawSha256(content), sizeBytes: bytes.byteLength };
   } finally {
@@ -518,10 +662,23 @@ function parsePackageManifest(
   installed: InstalledPiPackageReference,
 ): { name: string; version: string } {
   let value: unknown;
-  try { value = JSON.parse(source); }
-  catch { throw new CommunityResourceError("package_manifest", `package ${installed.packageName} has invalid package.json`); }
-  if (!isRecord(value) || value.name !== installed.packageName || value.version !== installed.packageVersion) {
-    throw new CommunityResourceError("package_identity", `package ${installed.packageName} identity changed after Pi resolved it`);
+  try {
+    value = JSON.parse(source);
+  } catch {
+    throw new CommunityResourceError(
+      "package_manifest",
+      `package ${installed.packageName} has invalid package.json`,
+    );
+  }
+  if (
+    !isRecord(value) ||
+    value.name !== installed.packageName ||
+    value.version !== installed.packageVersion
+  ) {
+    throw new CommunityResourceError(
+      "package_identity",
+      `package ${installed.packageName} identity changed after Pi resolved it`,
+    );
   }
   return { name: installed.packageName, version: installed.packageVersion };
 }
@@ -533,7 +690,10 @@ function addPinnedFile(
 ): void {
   const prior = files.get(file.relativePath);
   if (prior !== undefined && canonicalHash(prior) !== canonicalHash(file)) {
-    throw new CommunityResourceError("resource_collision", `binding ${bindingId} resolved conflicting bytes at ${file.relativePath}`);
+    throw new CommunityResourceError(
+      "resource_collision",
+      `binding ${bindingId} resolved conflicting bytes at ${file.relativePath}`,
+    );
   }
   files.set(file.relativePath, file);
 }
@@ -541,7 +701,11 @@ function addPinnedFile(
 function containedPath(root: string, relativePath: string): string {
   const normalized = normalizeRelativePath(relativePath);
   const absolute = path.join(root, normalized);
-  if (!isWithin(root, absolute)) throw new CommunityResourceError("resource_escape", `community resource ${relativePath} escapes its package`);
+  if (!isWithin(root, absolute))
+    throw new CommunityResourceError(
+      "resource_escape",
+      `community resource ${relativePath} escapes its package`,
+    );
   return absolute;
 }
 
@@ -553,7 +717,11 @@ function normalizeRelativePath(value: string): string {
     path.posix.isAbsolute(normalized) ||
     path.posix.normalize(normalized) !== normalized ||
     normalized.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
-  ) throw new CommunityResourceError("resource_path", `community resource path ${JSON.stringify(value)} is unsafe`);
+  )
+    throw new CommunityResourceError(
+      "resource_path",
+      `community resource path ${JSON.stringify(value)} is unsafe`,
+    );
   return normalized;
 }
 
@@ -595,10 +763,12 @@ function isPackageName(value: string): boolean {
 }
 
 function isSortedIdentifiers(value: readonly string[]): boolean {
-  return Array.isArray(value) &&
+  return (
+    Array.isArray(value) &&
     value.every((item) => typeof item === "string" && isIdentifier(item)) &&
     value.length === new Set(value).size &&
-    value.every((item, index) => index === 0 || compareUtf8(value[index - 1]!, item) < 0);
+    value.every((item, index) => index === 0 || compareUtf8(value[index - 1], item) < 0)
+  );
 }
 
 function deepFreeze<T>(value: T): T {

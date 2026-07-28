@@ -2,10 +2,7 @@ export const PI_RESOURCE_BINDINGS_PROTOCOL = "koni.pi-resource-bindings.v1" as c
 
 export type PiResourceKind = "extension" | "skill" | "prompt";
 export type PiResourceIntegration =
-  | "skills_only"
-  | "interactive_only"
-  | "explicit_tools"
-  | "not_recommended";
+  "skills_only" | "interactive_only" | "explicit_tools" | "not_recommended";
 
 /** Exact, non-glob selectors authored by the project. */
 export interface PiResourceSelection {

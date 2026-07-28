@@ -13,9 +13,7 @@ import {
   type RunCompilerProgram,
   type RunAuthorityEngineOptions,
 } from "../src/authority/run-engine.js";
-import {
-  NativeRunCompilerProgram,
-} from "../src/compiler/run-program.js";
+import { NativeRunCompilerProgram } from "../src/compiler/run-program.js";
 import type { VerifiedProfileBaseline } from "../src/compiler/profile-package.js";
 import type { AgentLaunchSpec } from "../src/pi/launch-spec.js";
 import type {
@@ -52,10 +50,15 @@ describe("composed change-control authority", () => {
     fixture = await researchAuthority(new ScriptHarness(), {
       actionFault: async (point, input) => {
         const last = input.journal?.steps.at(-1);
-        if (point !== "before_journal" || last?.primitive !== "rules.evaluate" ||
-            last.status !== "completed") return;
+        if (
+          point !== "before_journal" ||
+          last?.primitive !== "rules.evaluate" ||
+          last.status !== "completed"
+        )
+          return;
         const run = await fixture.engine.store.getRun(input.runId);
-        if (run.actionExecutions?.[input.invocationId]?.boundary.kind !== "approved_plan_compile") return;
+        if (run.actionExecutions?.[input.invocationId]?.boundary.kind !== "approved_plan_compile")
+          return;
         approvalCompilerWorkspace = structuredClone({
           planning: run.git.planning,
           run: run.git.run,
@@ -67,36 +70,52 @@ describe("composed change-control authority", () => {
       client: "tui",
       version: "1.0.0",
     });
-    const created = await client.request("run.create", {
-      objective: "Test whether retrieval improves bounded factual recall",
-      runTypeId: "small",
-      targetRef: "refs/heads/main",
-      intake: { goal: "Test whether retrieval improves bounded factual recall" },
-    }, { expectedRevision: 0, idempotencyKey: "create-research-change-control" });
+    const created = await client.request(
+      "run.create",
+      {
+        objective: "Test whether retrieval improves bounded factual recall",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Test whether retrieval improves bounded factual recall" },
+      },
+      { expectedRevision: 0, idempotencyKey: "create-research-change-control" },
+    );
     const runId = (created.result as { runId: string }).runId;
-    await waitFor(async () => (await fixture.engine.store.getRun(runId)).lifecycle.phase === "awaiting_approval");
+    await waitFor(
+      async () =>
+        (await fixture.engine.store.getRun(runId)).lifecycle.phase === "awaiting_approval",
+    );
     await client.request("authority.ping");
-    await client.request("plan.approve", { runId }, {
-      expectedRevision: client.revision,
-      idempotencyKey: "approve-research-change-control",
-    });
+    await client.request(
+      "plan.approve",
+      { runId },
+      {
+        expectedRevision: client.revision,
+        idempotencyKey: "approve-research-change-control",
+      },
+    );
 
     let published: { run: RunRecord; proposal: RunRecord["tickets"][string] };
     try {
       published = await waitForValue(async () => {
         const run = await fixture.engine.store.getRun(runId);
         if (run.lifecycle.phase === "blocked" || run.lifecycle.phase === "failed") {
-          throw new Error(`run stopped before proposal publication: ${run.lifecycle.blocker ?? run.lifecycle.terminalReason ?? run.lifecycle.phase}`);
+          throw new Error(
+            `run stopped before proposal publication: ${run.lifecycle.blocker ?? run.lifecycle.terminalReason ?? run.lifecycle.phase}`,
+          );
         }
-        const proposal = Object.values(run.tickets).find((ticket) =>
-          ticket.executionControl?.proposalRequest !== undefined);
+        const proposal = Object.values(run.tickets).find(
+          (ticket) => ticket.executionControl?.proposalRequest !== undefined,
+        );
         return proposal === undefined ? undefined : { run, proposal };
       });
     } catch (error) {
       const run = await fixture.engine.store.getRun(runId);
-      const failedAttempt = Object.values(run.attempts).find((attempt) =>
-        attempt.kind === "ticket" && attempt.status === "failed");
-      const failedTicket = failedAttempt === undefined ? undefined : run.tickets[failedAttempt.ticketId];
+      const failedAttempt = Object.values(run.attempts).find(
+        (attempt) => attempt.kind === "ticket" && attempt.status === "failed",
+      );
+      const failedTicket =
+        failedAttempt === undefined ? undefined : run.tickets[failedAttempt.ticketId];
       const failedStep = failedTicket?.steps.find((step) => step.id === failedAttempt?.stepId);
       let terminalPolicy: unknown;
       try {
@@ -126,51 +145,56 @@ describe("composed change-control authority", () => {
         }
       } catch (projectionError) {
         terminalPolicy = {
-          projectionError: projectionError instanceof Error
-            ? projectionError.message
-            : String(projectionError),
+          projectionError:
+            projectionError instanceof Error ? projectionError.message : String(projectionError),
         };
       }
-      throw new Error(`proposal was not published: ${JSON.stringify({
-        phase: run.lifecycle.phase,
-        blocker: run.lifecycle.blocker,
-        tickets: Object.values(run.tickets).map((ticket) => ({
-          id: ticket.id,
-          operation: ticket.operationId,
-          status: ticket.status,
-          blocker: ticket.blocker,
-          steps: ticket.steps.map((step) => ({ id: step.id, status: step.status })),
-        })),
-        attempts: Object.values(run.attempts).map((attempt) => ({
-          kind: attempt.kind,
-          ticket: attempt.ticketId,
-          step: attempt.stepId,
-          status: attempt.status,
-          summary: attempt.terminalSummary,
-        })),
-        actions: Object.values(run.actionExecutions ?? {})
-          .filter((action) => action.settledAt === undefined || action.journal.status !== "completed")
-          .map((action) => ({
-          invocationId: action.invocationId,
-          boundary: action.boundary,
-          journal: action.journal,
-          semanticResult: action.semanticResult,
-          settlement: action.settlement,
-          recoveryInvocationId: action.recoveryInvocationId,
-          recoverySettledAt: action.recoverySettledAt,
-        })),
-        terminalPolicy,
-        proposalProjectionTrace: fixture.harness.proposalProjectionTrace,
-        script: fixture.harness.trace,
-        activity: run.activity.slice(-12).map((entry) => entry.message),
-      })}`, { cause: error });
+      throw new Error(
+        `proposal was not published: ${JSON.stringify({
+          phase: run.lifecycle.phase,
+          blocker: run.lifecycle.blocker,
+          tickets: Object.values(run.tickets).map((ticket) => ({
+            id: ticket.id,
+            operation: ticket.operationId,
+            status: ticket.status,
+            blocker: ticket.blocker,
+            steps: ticket.steps.map((step) => ({ id: step.id, status: step.status })),
+          })),
+          attempts: Object.values(run.attempts).map((attempt) => ({
+            kind: attempt.kind,
+            ticket: attempt.ticketId,
+            step: attempt.stepId,
+            status: attempt.status,
+            summary: attempt.terminalSummary,
+          })),
+          actions: Object.values(run.actionExecutions ?? {})
+            .filter(
+              (action) => action.settledAt === undefined || action.journal.status !== "completed",
+            )
+            .map((action) => ({
+              invocationId: action.invocationId,
+              boundary: action.boundary,
+              journal: action.journal,
+              semanticResult: action.semanticResult,
+              settlement: action.settlement,
+              recoveryInvocationId: action.recoveryInvocationId,
+              recoverySettledAt: action.recoverySettledAt,
+            })),
+          terminalPolicy,
+          proposalProjectionTrace: fixture.harness.proposalProjectionTrace,
+          script: fixture.harness.trace,
+          activity: run.activity.slice(-12).map((entry) => entry.message),
+        })}`,
+        { cause: error },
+      );
     }
     const request = published.proposal.executionControl!.proposalRequest!;
     const source = published.run.tickets[request.sourceTicketId]!;
     const authority = published.proposal.executionControl!.controlTicketAuthority!;
     const causal = authority.causal;
     expect(causal.role).toBe("proposal");
-    if (causal.role !== "proposal") throw new Error("Research proposal has non-proposal causal authority");
+    if (causal.role !== "proposal")
+      throw new Error("Research proposal has non-proposal causal authority");
     expect(published.run.profile).toMatchObject({ lineage: "koni.research" });
     expect(approvalCompilerWorkspace).toMatchObject({
       planning: { status: "retired" },
@@ -215,27 +239,32 @@ describe("composed change-control authority", () => {
     });
     expect(causal.sourceTicketProjection).toEqual(ticketImmutableProjection(source));
     expect(causal.sourceHold).toEqual(source.executionControl?.sourceHold);
-    expect(published.run.terminalSuccessProofs?.[causal.sourceTerminalProof.sha256])
-      .toEqual(causal.sourceTerminalProof);
-    expect(published.run.actionExecutions?.[causal.sourceTerminalProof.actionInvocationId])
-      .toMatchObject({
-        boundary: {
-          kind: "assignment_validation",
-          ticketId: source.id,
-          stepId: request.sourceStepId,
-          attemptId: causal.sourceTerminalProof.attemptId,
-        },
-        semanticResult: {
-          kind: "assignment",
-          status: "completed",
-          changeControlSha256: causal.sourceTerminalProof.semanticResult.changeControlSha256,
-        },
-        settlement: { disposition: "completed" },
-      });
+    expect(published.run.terminalSuccessProofs?.[causal.sourceTerminalProof.sha256]).toEqual(
+      causal.sourceTerminalProof,
+    );
+    expect(
+      published.run.actionExecutions?.[causal.sourceTerminalProof.actionInvocationId],
+    ).toMatchObject({
+      boundary: {
+        kind: "assignment_validation",
+        ticketId: source.id,
+        stepId: request.sourceStepId,
+        attemptId: causal.sourceTerminalProof.attemptId,
+      },
+      semanticResult: {
+        kind: "assignment",
+        status: "completed",
+        changeControlSha256: causal.sourceTerminalProof.semanticResult.changeControlSha256,
+      },
+      settlement: { disposition: "completed" },
+    });
     expect(() => assertRunRecord(structuredClone(published.run))).not.toThrow();
-    expect(source.executionPolicyBinding?.configurationSha256).toBe(published.run.compiledConfigHash);
-    expect(published.proposal.executionPolicyBinding?.configurationSha256)
-      .toBe(published.run.compiledConfigHash);
+    expect(source.executionPolicyBinding?.configurationSha256).toBe(
+      published.run.compiledConfigHash,
+    );
+    expect(published.proposal.executionPolicyBinding?.configurationSha256).toBe(
+      published.run.compiledConfigHash,
+    );
     expect(fixture.harness.promptCalls).toBeGreaterThanOrEqual(2);
     client.close();
   }, 60_000);
@@ -251,12 +280,22 @@ describe("composed change-control authority", () => {
       client: "tui",
       version: "1.0.0",
     });
-    const runId = await createApprovedRun(client, fixture.engine, "research-change-control-decisions");
+    const runId = await createApprovedRun(
+      client,
+      fixture.engine,
+      "research-change-control-decisions",
+    );
 
     const first = await nextProposal(fixture.engine, runId, new Set(), harness);
     const sourceId = first.proposal.executionControl!.proposalRequest!.sourceTicketId;
     const firstSourceCycleId = first.run.tickets[sourceId]!.gitCycleId!;
-    await decideProposal(client, runId, first.proposal.id, "rejection", "Reject the first bounded request");
+    await decideProposal(
+      client,
+      runId,
+      first.proposal.id,
+      "rejection",
+      "Reject the first bounded request",
+    );
     const second = await nextProposal(fixture.engine, runId, new Set([first.proposal.id]), harness);
     const afterRejection = second.run;
     expect(afterRejection.tickets[first.proposal.id]).toMatchObject({
@@ -270,14 +309,16 @@ describe("composed change-control authority", () => {
           decision: "rejection",
           actor: "operator",
         },
-        proposalDecisionHistory: [{
-          protocol: "koni.proposal-decision-authority.v2",
-          runId,
-          proposalTicketId: first.proposal.id,
-          requestSha256: first.proposal.executionControl!.proposalRequest!.requestSha256,
-          decision: "rejection",
-          actor: "operator",
-        }],
+        proposalDecisionHistory: [
+          {
+            protocol: "koni.proposal-decision-authority.v2",
+            runId,
+            proposalTicketId: first.proposal.id,
+            requestSha256: first.proposal.executionControl!.proposalRequest!.requestSha256,
+            decision: "rejection",
+            actor: "operator",
+          },
+        ],
         proposalDisposition: { kind: "rejected" },
       },
     });
@@ -287,10 +328,17 @@ describe("composed change-control authority", () => {
       supersessionSha256: expect.stringMatching(/^sha256:/u),
     });
     expect(afterRejection.tickets[sourceId]!.gitCycleId).not.toBe(firstSourceCycleId);
-    expect(afterRejection.tickets[sourceId]!.executionControl?.sourceHold?.proposalTicketId)
-      .toBe(second.proposal.id);
+    expect(afterRejection.tickets[sourceId]!.executionControl?.sourceHold?.proposalTicketId).toBe(
+      second.proposal.id,
+    );
 
-    await decideProposal(client, runId, second.proposal.id, "approval", "Approve the reviewed no-op");
+    await decideProposal(
+      client,
+      runId,
+      second.proposal.id,
+      "approval",
+      "Approve the reviewed no-op",
+    );
     const third = await nextProposal(
       fixture.engine,
       runId,
@@ -312,24 +360,39 @@ describe("composed change-control authority", () => {
       },
     });
     const noOp = third.run.tickets[second.proposal.id]!.executionControl!.approvedMaterialization!;
-    expect(noOp.proposalTerminalProof.actionInvocationId)
-      .not.toBe(noOp.reviewTerminalProof.actionInvocationId);
+    expect(noOp.proposalTerminalProof.actionInvocationId).not.toBe(
+      noOp.reviewTerminalProof.actionInvocationId,
+    );
     expect(noOp.proposalTerminalProof.attemptId).not.toBe(noOp.reviewTerminalProof.attemptId);
-    expect(third.run.terminalSuccessProofs?.[noOp.proposalTerminalProof.sha256])
-      .toEqual(noOp.proposalTerminalProof);
-    expect(third.run.terminalSuccessProofs?.[noOp.reviewTerminalProof.sha256])
-      .toEqual(noOp.reviewTerminalProof);
-    expect(() => assertRunRecord(forgeMaterializationWithOneProof(third.run, second.proposal.id)))
-      .toThrow();
-    expect(() => assertRunRecord(forgeMaterializationBindingIdentity(third.run, second.proposal.id)))
-      .toThrow();
-    expect(Object.values(third.run.tickets).some((ticket) =>
-      ticket.executionControl?.sourceProposalTicketId === second.proposal.id)).toBe(false);
-    expect(third.run.tickets[sourceId]!.executionControl?.sourceHold?.proposalTicketId)
-      .toBe(third.proposal.id);
+    expect(third.run.terminalSuccessProofs?.[noOp.proposalTerminalProof.sha256]).toEqual(
+      noOp.proposalTerminalProof,
+    );
+    expect(third.run.terminalSuccessProofs?.[noOp.reviewTerminalProof.sha256]).toEqual(
+      noOp.reviewTerminalProof,
+    );
+    expect(() =>
+      assertRunRecord(forgeMaterializationWithOneProof(third.run, second.proposal.id)),
+    ).toThrow();
+    expect(() =>
+      assertRunRecord(forgeMaterializationBindingIdentity(third.run, second.proposal.id)),
+    ).toThrow();
+    expect(
+      Object.values(third.run.tickets).some(
+        (ticket) => ticket.executionControl?.sourceProposalTicketId === second.proposal.id,
+      ),
+    ).toBe(false);
+    expect(third.run.tickets[sourceId]!.executionControl?.sourceHold?.proposalTicketId).toBe(
+      third.proposal.id,
+    );
     const preApplicationSourceCycleId = third.run.tickets[sourceId]!.gitCycleId!;
 
-    await decideProposal(client, runId, third.proposal.id, "approval", "Approve the bounded application");
+    await decideProposal(
+      client,
+      runId,
+      third.proposal.id,
+      "approval",
+      "Approve the bounded application",
+    );
     let applied: {
       run: RunRecord;
       proposal: RunRecord["tickets"][string];
@@ -340,7 +403,9 @@ describe("composed change-control authority", () => {
       applied = await waitForDurableProgressValue(async () => {
         const run = await fixture.engine.store.getRun(runId);
         if (run.lifecycle.phase === "blocked" || run.lifecycle.phase === "failed") {
-          throw new Error(`run stopped before approved application publication: ${run.lifecycle.blocker ?? run.lifecycle.phase}`);
+          throw new Error(
+            `run stopped before approved application publication: ${run.lifecycle.blocker ?? run.lifecycle.phase}`,
+          );
         }
         const proposal = run.tickets[third.proposal.id];
         const disposition = proposal?.executionControl?.proposalDisposition;
@@ -352,86 +417,100 @@ describe("composed change-control authority", () => {
         if (proposal === undefined || application === undefined || source === undefined) {
           return { progress: run.revision };
         }
-        const value = application.status === "completed" && source.executionControl?.sourceHold === undefined &&
-          source.gitCycleId !== undefined && source.gitCycleId !== preApplicationSourceCycleId
-          ? { run, proposal, application, source }
-          : undefined;
-        return value === undefined
-          ? { progress: run.revision }
-          : { progress: run.revision, value };
+        const value =
+          application.status === "completed" &&
+          source.executionControl?.sourceHold === undefined &&
+          source.gitCycleId !== undefined &&
+          source.gitCycleId !== preApplicationSourceCycleId
+            ? { run, proposal, application, source }
+            : undefined;
+        return value === undefined ? { progress: run.revision } : { progress: run.revision, value };
       });
     } catch (error) {
       const run = await fixture.engine.store.getRun(runId);
       const proposal = run.tickets[third.proposal.id];
       const applicationId = proposal?.executionControl?.proposalDisposition?.applicationTicketId;
       const application = applicationId === undefined ? undefined : run.tickets[applicationId];
-      throw new Error(`approved application did not publish and release its source: ${JSON.stringify({
-        error: error instanceof Error ? error.message : String(error),
-        phase: run.lifecycle.phase,
-        blocker: run.lifecycle.blocker,
-        revision: run.revision,
-        proposal: proposal === undefined ? undefined : {
-          id: proposal.id,
-          status: proposal.status,
-          disposition: proposal.executionControl?.proposalDisposition,
-        },
-        application: application === undefined ? undefined : {
-          id: application.id,
-          status: application.status,
-          blocker: application.blocker,
-          gitCycleId: application.gitCycleId,
-          steps: application.steps.map((step) => ({
-            id: step.id,
-            status: step.status,
-            attemptIds: step.attemptIds,
+      throw new Error(
+        `approved application did not publish and release its source: ${JSON.stringify({
+          error: error instanceof Error ? error.message : String(error),
+          phase: run.lifecycle.phase,
+          blocker: run.lifecycle.blocker,
+          revision: run.revision,
+          proposal:
+            proposal === undefined
+              ? undefined
+              : {
+                  id: proposal.id,
+                  status: proposal.status,
+                  disposition: proposal.executionControl?.proposalDisposition,
+                },
+          application:
+            application === undefined
+              ? undefined
+              : {
+                  id: application.id,
+                  status: application.status,
+                  blocker: application.blocker,
+                  gitCycleId: application.gitCycleId,
+                  steps: application.steps.map((step) => ({
+                    id: step.id,
+                    status: step.status,
+                    attemptIds: step.attemptIds,
+                  })),
+                },
+          source:
+            run.tickets[sourceId] === undefined
+              ? undefined
+              : {
+                  status: run.tickets[sourceId].status,
+                  blocker: run.tickets[sourceId].blocker,
+                  gitCycleId: run.tickets[sourceId].gitCycleId,
+                  sourceHold: run.tickets[sourceId].executionControl?.sourceHold,
+                },
+          attempts: Object.values(run.attempts).map((attempt) => ({
+            id: attempt.id,
+            ticketId: attempt.ticketId,
+            stepId: attempt.stepId,
+            status: attempt.status,
+            error: attempt.error,
           })),
-        },
-        source: run.tickets[sourceId] === undefined ? undefined : {
-          status: run.tickets[sourceId]!.status,
-          blocker: run.tickets[sourceId]!.blocker,
-          gitCycleId: run.tickets[sourceId]!.gitCycleId,
-          sourceHold: run.tickets[sourceId]!.executionControl?.sourceHold,
-        },
-        attempts: Object.values(run.attempts).map((attempt) => ({
-          id: attempt.id,
-          ticketId: attempt.ticketId,
-          stepId: attempt.stepId,
-          status: attempt.status,
-          error: attempt.error,
-        })),
-        actions: Object.values(run.actionExecutions ?? {})
-          .filter((action) => action.settledAt === undefined || action.journal.status !== "completed")
-          .map((action) => ({
-          invocationId: action.invocationId,
-          ticketId: action.boundary.ticketId,
-          stepId: action.boundary.stepId,
-          attemptId: action.boundary.attemptId,
-          journalStatus: action.journal.status,
-          journalSteps: action.journal.steps.map((step) => ({
-            id: step.stepId,
-            primitive: step.primitive,
-            status: step.status,
-            ...(step.status === "failed" ? { error: step.error } : {}),
+          actions: Object.values(run.actionExecutions ?? {})
+            .filter(
+              (action) => action.settledAt === undefined || action.journal.status !== "completed",
+            )
+            .map((action) => ({
+              invocationId: action.invocationId,
+              ticketId: action.boundary.ticketId,
+              stepId: action.boundary.stepId,
+              attemptId: action.boundary.attemptId,
+              journalStatus: action.journal.status,
+              journalSteps: action.journal.steps.map((step) => ({
+                id: step.stepId,
+                primitive: step.primitive,
+                status: step.status,
+                ...(step.status === "failed" ? { error: step.error } : {}),
+              })),
+              semanticResult: action.semanticResult,
+              settlement: action.settlement,
+            })),
+          gitCycles: Object.values(run.git.ticketCycles).map((cycle) => ({
+            id: cycle.cycleId,
+            ticketId: cycle.ticketId,
+            status: cycle.status,
+            blocker: cycle.blocker,
           })),
-          semanticResult: action.semanticResult,
-          settlement: action.settlement,
-        })),
-        gitCycles: Object.values(run.git.ticketCycles).map((cycle) => ({
-          id: cycle.cycleId,
-          ticketId: cycle.ticketId,
-          status: cycle.status,
-          blocker: cycle.blocker,
-        })),
-        compilationTrace: harness.compilationTrace.slice(-12).map((entry) => ({
-          attemptId: entry.attemptId,
-          assignment: entry.assignment,
-          outcome: entry.outcome,
-          changeControlSha256: entry.changeControlSha256,
-          error: entry.error,
-          pending: entry.outcome === undefined && entry.error === undefined,
-        })),
-        activity: run.activity.slice(-24).map((entry) => entry.message),
-      })}`);
+          compilationTrace: harness.compilationTrace.slice(-12).map((entry) => ({
+            attemptId: entry.attemptId,
+            assignment: entry.assignment,
+            outcome: entry.outcome,
+            changeControlSha256: entry.changeControlSha256,
+            error: entry.error,
+            pending: entry.outcome === undefined && entry.error === undefined,
+          })),
+          activity: run.activity.slice(-24).map((entry) => entry.message),
+        })}`,
+      );
     }
     expect(applied.proposal.status).toBe("completed");
     expect(applied.application).toMatchObject({
@@ -462,7 +541,12 @@ describe("composed change-control authority", () => {
     expect(applied.source.gitCycleId).not.toBe(preApplicationSourceCycleId);
     expect(applied.source.executionControl?.sourceHold).toBeUndefined();
     expect(() => assertRunRecord(structuredClone(applied.run))).not.toThrow();
-    await pauseAtFreshRevision(client, fixture.engine, runId, "pause-after-change-control-decisions");
+    await pauseAtFreshRevision(
+      client,
+      fixture.engine,
+      runId,
+      "pause-after-change-control-decisions",
+    );
     client.close();
   }, 180_000);
 
@@ -470,14 +554,15 @@ describe("composed change-control authority", () => {
     const harness = new ScriptHarness(["fail"], [], 1);
     let supersessionFaulted = false;
     const fixture = await researchAuthority(harness, {
-      git: (root) => new IsolatedGitLifecycle(root, {
-        effectFault(point) {
-          if (!supersessionFaulted && point === "after_ticket_supersession_archive") {
-            supersessionFaulted = true;
-            throw new Error("fixture crash after immutable supersession archive");
-          }
-        },
-      }),
+      git: (root) =>
+        new IsolatedGitLifecycle(root, {
+          effectFault(point) {
+            if (!supersessionFaulted && point === "after_ticket_supersession_archive") {
+              supersessionFaulted = true;
+              throw new Error("fixture crash after immutable supersession archive");
+            }
+          },
+        }),
     });
     let client = await AuthorityClient.connect({
       projectRoot: fixture.root,
@@ -487,11 +572,14 @@ describe("composed change-control authority", () => {
     const runId = await createApprovedRun(client, fixture.engine, "terminal-resolver-recovery");
     const blocked = await waitForValue(async () => {
       const run = await fixture.engine.store.getRun(runId);
-      const resolver = Object.values(run.tickets).find((ticket) =>
-        ticket.executionControl?.terminalRecovery !== undefined);
+      const resolver = Object.values(run.tickets).find(
+        (ticket) => ticket.executionControl?.terminalRecovery !== undefined,
+      );
       const attemptIds = resolver?.steps.flatMap((step) => step.attemptIds) ?? [];
-      return run.lifecycle.phase === "blocked" && resolver?.status === "blocked" &&
-        attemptIds.length === 1 && run.attempts[attemptIds[0]!]?.status === "completed"
+      return run.lifecycle.phase === "blocked" &&
+        resolver?.status === "blocked" &&
+        attemptIds.length === 1 &&
+        run.attempts[attemptIds[0]!]?.status === "completed"
         ? { run, resolver }
         : undefined;
     });
@@ -512,28 +600,40 @@ describe("composed change-control authority", () => {
     const failedResolverAttempts = blocked.resolver.steps.flatMap((step) => step.attemptIds);
     expect(failedResolverAttempts).toHaveLength(1);
     expect(blocked.run.attempts[failedResolverAttempts[0]!]!.status).toBe("completed");
-    const failedResolverAction = Object.values(blocked.run.actionExecutions ?? {}).find((action) =>
-      action.boundary.kind === "assignment_validation" &&
-      action.boundary.attemptId === failedResolverAttempts[0]);
+    const failedResolverAction = Object.values(blocked.run.actionExecutions ?? {}).find(
+      (action) =>
+        action.boundary.kind === "assignment_validation" &&
+        action.boundary.attemptId === failedResolverAttempts[0],
+    );
     expect(failedResolverAction).toMatchObject({
       semanticResult: { kind: "assignment", status: "failed" },
       settlement: { disposition: "failed" },
     });
-    const resolverFailureProof = blocked.resolver.executionControl!.terminalResolverRetryRequests?.[0]
-      ?.failureProof;
-    expect(blocked.run.terminalFailureProofs?.[
-      blocked.resolver.executionControl!.terminalRecovery!.sourceFailureProof.sha256
-    ]).toEqual(blocked.resolver.executionControl!.terminalRecovery!.sourceFailureProof);
+    const resolverFailureProof =
+      blocked.resolver.executionControl!.terminalResolverRetryRequests?.[0]?.failureProof;
+    expect(
+      blocked.run.terminalFailureProofs?.[
+        blocked.resolver.executionControl!.terminalRecovery!.sourceFailureProof.sha256
+      ],
+    ).toEqual(blocked.resolver.executionControl!.terminalRecovery!.sourceFailureProof);
     expect(resolverFailureProof).toBeUndefined();
-    expect(Object.values(blocked.run.tickets).filter((ticket) =>
-      ticket.executionControl?.terminalRecovery?.sourceTicketId === blocked.resolver.id)).toEqual([]);
+    expect(
+      Object.values(blocked.run.tickets).filter(
+        (ticket) =>
+          ticket.executionControl?.terminalRecovery?.sourceTicketId === blocked.resolver.id,
+      ),
+    ).toEqual([]);
 
     await client.request("authority.ping");
-    const requested = await client.request("terminal-resolver.retry", {
-      runId,
-      resolverTicketId: blocked.resolver.id,
-      message: "Retry only the exact reviewed resolver failure.",
-    }, { expectedRevision: client.revision, idempotencyKey: "retry-exact-terminal-resolver" });
+    const requested = await client.request(
+      "terminal-resolver.retry",
+      {
+        runId,
+        resolverTicketId: blocked.resolver.id,
+        message: "Retry only the exact reviewed resolver failure.",
+      },
+      { expectedRevision: client.revision, idempotencyKey: "retry-exact-terminal-resolver" },
+    );
     expect(requested.result).toMatchObject({
       runId,
       resolverTicketId: blocked.resolver.id,
@@ -548,12 +648,9 @@ describe("composed change-control authority", () => {
     const restartedGit = new IsolatedGitLifecycle(fixture.root);
     const recoverIntent = vi.spyOn(restartedGit, "recoverIntent");
     const supersedeTicketCycle = vi.spyOn(restartedGit, "supersedeTicketCycle");
-    const restarted = await openResearchEngine(
-      fixture.root,
-      fixture.baseline,
-      harness,
-      { git: restartedGit },
-    );
+    const restarted = await openResearchEngine(fixture.root, fixture.baseline, harness, {
+      git: restartedGit,
+    });
     client = await AuthorityClient.connect({
       projectRoot: fixture.root,
       client: "tui",
@@ -580,8 +677,9 @@ describe("composed change-control authority", () => {
       let injectedIntentId = "";
       await restarted.engine.server.mutateInternal(async ({ revision }) => {
         const current = await restarted.engine.store.getRun(runId);
-        const exact = Object.values(current.pendingGitIntents ?? {})
-          .find((intent) => intent.kind === "ticket_supersede");
+        const exact = Object.values(current.pendingGitIntents ?? {}).find(
+          (intent) => intent.kind === "ticket_supersede",
+        );
         expect(exact).toBeDefined();
         const draft = nextFixtureRun(current);
         let extra = structuredClone(exact!) as GitLifecycleIntent;
@@ -600,12 +698,20 @@ describe("composed change-control authority", () => {
       });
       await client.request("authority.ping");
       const beforeRejectedResume = await restarted.engine.store.readArtifact(runRecordArtifact);
-      await expect(client.request("run.resume", { runId }, {
-        expectedRevision: client.revision,
-        idempotencyKey: `reject-${variant}-terminal-resolver-git`,
-      })).rejects.toMatchObject({ code: "terminal_resolver_retry_git" });
+      await expect(
+        client.request(
+          "run.resume",
+          { runId },
+          {
+            expectedRevision: client.revision,
+            idempotencyKey: `reject-${variant}-terminal-resolver-git`,
+          },
+        ),
+      ).rejects.toMatchObject({ code: "terminal_resolver_retry_git" });
       await new Promise<void>((resolve) => setImmediate(resolve));
-      expect(await restarted.engine.store.readArtifact(runRecordArtifact)).toEqual(beforeRejectedResume);
+      expect(await restarted.engine.store.readArtifact(runRecordArtifact)).toEqual(
+        beforeRejectedResume,
+      );
       expect(recoverIntent).not.toHaveBeenCalled();
       expect(supersedeTicketCycle).not.toHaveBeenCalled();
 
@@ -625,86 +731,114 @@ describe("composed change-control authority", () => {
     // Restart is deliberately inert. One fresh operator resume joins the exact pending retry; the
     // original durable receipt may be replayed concurrently, but every continuation converges on
     // the same resolver ID + retry hash and may create only one successor attempt.
-    const resumed = await client.request("run.resume", { runId }, {
-      expectedRevision: client.revision,
-      idempotencyKey: "resume-faulted-terminal-resolver",
-    });
+    const resumed = await client.request(
+      "run.resume",
+      { runId },
+      {
+        expectedRevision: client.revision,
+        idempotencyKey: "resume-faulted-terminal-resolver",
+      },
+    );
     expect(resumed.result).toMatchObject({
       status: "retrying",
       resolverTicketId: blocked.resolver.id,
       retryRequestSha256: (requested.result as { retryRequestSha256: string }).retryRequestSha256,
     });
-    await Promise.all(Array.from({ length: 4 }, () => client.request("terminal-resolver.retry", {
-      runId,
-      resolverTicketId: blocked.resolver.id,
-      message: "Retry only the exact reviewed resolver failure.",
-    }, {
-      expectedRevision: client.revision,
-      idempotencyKey: "retry-exact-terminal-resolver",
-    })));
-    let recovered: { run: RunRecord; resolver: RunRecord["tickets"][string]; source: RunRecord["tickets"][string] };
+    await Promise.all(
+      Array.from({ length: 4 }, () =>
+        client.request(
+          "terminal-resolver.retry",
+          {
+            runId,
+            resolverTicketId: blocked.resolver.id,
+            message: "Retry only the exact reviewed resolver failure.",
+          },
+          {
+            expectedRevision: client.revision,
+            idempotencyKey: "retry-exact-terminal-resolver",
+          },
+        ),
+      ),
+    );
+    let recovered: {
+      run: RunRecord;
+      resolver: RunRecord["tickets"][string];
+      source: RunRecord["tickets"][string];
+    };
     try {
       recovered = await waitForValue(async () => {
         const run = await restarted.engine.store.getRun(runId);
         const resolver = run.tickets[blocked.resolver.id];
         const source = run.tickets[sourceId];
         return resolver?.status === "completed" &&
-          source !== undefined && source.status !== "blocked" && source.status !== "failed"
+          source !== undefined &&
+          source.status !== "blocked" &&
+          source.status !== "failed"
           ? { run, resolver, source }
           : undefined;
       });
     } catch (error) {
       const run = await restarted.engine.store.getRun(runId);
       const resolver = run.tickets[blocked.resolver.id];
-      throw new Error(`resolver did not recover after restart: ${JSON.stringify({
-        error: error instanceof Error ? error.message : String(error),
-        phase: run.lifecycle.phase,
-        blocker: run.lifecycle.blocker,
-        revision: run.revision,
-        pendingGitIntents: run.pendingGitIntents,
-        resolver: resolver === undefined ? undefined : {
-          id: resolver.id,
-          status: resolver.status,
-          blocker: resolver.blocker,
-          gitCycleId: resolver.gitCycleId,
-          retryRequests: resolver.executionControl?.terminalResolverRetryRequests,
-          terminalProof: resolver.executionControl?.terminalResolverTerminalProof,
-          steps: resolver.steps.map((step) => ({
-            id: step.id,
-            status: step.status,
-            attemptIds: step.attemptIds,
+      throw new Error(
+        `resolver did not recover after restart: ${JSON.stringify({
+          error: error instanceof Error ? error.message : String(error),
+          phase: run.lifecycle.phase,
+          blocker: run.lifecycle.blocker,
+          revision: run.revision,
+          pendingGitIntents: run.pendingGitIntents,
+          resolver:
+            resolver === undefined
+              ? undefined
+              : {
+                  id: resolver.id,
+                  status: resolver.status,
+                  blocker: resolver.blocker,
+                  gitCycleId: resolver.gitCycleId,
+                  retryRequests: resolver.executionControl?.terminalResolverRetryRequests,
+                  terminalProof: resolver.executionControl?.terminalResolverTerminalProof,
+                  steps: resolver.steps.map((step) => ({
+                    id: step.id,
+                    status: step.status,
+                    attemptIds: step.attemptIds,
+                  })),
+                },
+          source:
+            run.tickets[sourceId] === undefined
+              ? undefined
+              : {
+                  status: run.tickets[sourceId].status,
+                  blocker: run.tickets[sourceId].blocker,
+                },
+          attempts: Object.values(run.attempts).map((attempt) => ({
+            id: attempt.id,
+            ticketId: attempt.ticketId,
+            stepId: attempt.stepId,
+            status: attempt.status,
+            error: attempt.error,
+            terminalPolicySha256: attempt.terminalPolicy?.sha256,
           })),
-        },
-        source: run.tickets[sourceId] === undefined ? undefined : {
-          status: run.tickets[sourceId]!.status,
-          blocker: run.tickets[sourceId]!.blocker,
-        },
-        attempts: Object.values(run.attempts).map((attempt) => ({
-          id: attempt.id,
-          ticketId: attempt.ticketId,
-          stepId: attempt.stepId,
-          status: attempt.status,
-          error: attempt.error,
-          terminalPolicySha256: attempt.terminalPolicy?.sha256,
-        })),
-        actions: Object.values(run.actionExecutions ?? {}).map((action) => ({
-          invocationId: action.invocationId,
-          ticketId: action.boundary.ticketId,
-          attemptId: action.boundary.attemptId,
-          journalStatus: action.journal.status,
-          failedPrimitive: [...action.journal.steps].reverse().find((step) => step.status === "failed")?.primitive,
-          semanticResult: action.semanticResult,
-          settlement: action.settlement,
-        })),
-        gitCycles: Object.values(run.git.ticketCycles).map((cycle) => ({
-          id: cycle.cycleId,
-          ticketId: cycle.ticketId,
-          status: cycle.status,
-          archiveRef: cycle.archiveRef,
-          supersessionSha256: cycle.supersessionSha256,
-        })),
-        activity: run.activity.slice(-24).map((entry) => entry.message),
-      })}`);
+          actions: Object.values(run.actionExecutions ?? {}).map((action) => ({
+            invocationId: action.invocationId,
+            ticketId: action.boundary.ticketId,
+            attemptId: action.boundary.attemptId,
+            journalStatus: action.journal.status,
+            failedPrimitive: [...action.journal.steps]
+              .reverse()
+              .find((step) => step.status === "failed")?.primitive,
+            semanticResult: action.semanticResult,
+            settlement: action.settlement,
+          })),
+          gitCycles: Object.values(run.git.ticketCycles).map((cycle) => ({
+            id: cycle.cycleId,
+            ticketId: cycle.ticketId,
+            status: cycle.status,
+            archiveRef: cycle.archiveRef,
+            supersessionSha256: cycle.supersessionSha256,
+          })),
+          activity: run.activity.slice(-24).map((entry) => entry.message),
+        })}`,
+      );
     }
     expect(recovered.resolver.executionControl?.terminalResolverRetryRequests).toHaveLength(1);
     const retry = recovered.resolver.executionControl!.terminalResolverRetryRequests![0]!;
@@ -717,20 +851,31 @@ describe("composed change-control authority", () => {
       failedAttemptId: failedResolverAttempts[0],
       failureSettlementSha256: retry.failureProof.sha256,
     });
-    expect(recovered.run.terminalFailureProofs?.[retry.failureProof.sha256])
-      .toEqual(retry.failureProof);
+    expect(recovered.run.terminalFailureProofs?.[retry.failureProof.sha256]).toEqual(
+      retry.failureProof,
+    );
     expect(recovered.resolver.steps[0]!.attemptIds).toHaveLength(2);
-    expect(recovered.resolver.steps[0]!.attemptIds.map((attemptId) =>
-      recovered.run.attempts[attemptId]!.status)).toEqual(["completed", "completed"]);
+    expect(
+      recovered.resolver.steps[0]!.attemptIds.map(
+        (attemptId) => recovered.run.attempts[attemptId]!.status,
+      ),
+    ).toEqual(["completed", "completed"]);
     const liveResolverSettlements = Object.values(recovered.run.actionExecutions ?? {})
-      .filter((action) => action.boundary.kind === "assignment_validation" &&
-        action.boundary.ticketId === recovered.resolver.id)
+      .filter(
+        (action) =>
+          action.boundary.kind === "assignment_validation" &&
+          action.boundary.ticketId === recovered.resolver.id,
+      )
       .map((action) => action.settlement?.disposition);
-    const liveResolverFailure = recovered.run.actionExecutions?.[retry.failureProof.actionInvocationId];
-    const archivedResolverFailure = (recovered.run.actionExecutionArchive ?? []).find((entry) =>
-      entry.invocationId === retry.failureProof.actionInvocationId);
+    const liveResolverFailure =
+      recovered.run.actionExecutions?.[retry.failureProof.actionInvocationId];
+    const archivedResolverFailure = (recovered.run.actionExecutionArchive ?? []).find(
+      (entry) => entry.invocationId === retry.failureProof.actionInvocationId,
+    );
     expect(liveResolverSettlements).toContain("completed");
-    expect(Number(liveResolverFailure !== undefined) + Number(archivedResolverFailure !== undefined)).toBe(1);
+    expect(
+      Number(liveResolverFailure !== undefined) + Number(archivedResolverFailure !== undefined),
+    ).toBe(1);
     if (liveResolverFailure !== undefined) {
       expect(liveResolverFailure).toMatchObject({
         invocationId: retry.failureProof.actionInvocationId,
@@ -745,8 +890,9 @@ describe("composed change-control authority", () => {
           sha256: retry.failureProof.actionSettlementSha256,
         },
       });
-      expect(canonicalHash(liveResolverFailure.semanticResult))
-        .toBe(retry.failureProof.semanticResultSha256);
+      expect(canonicalHash(liveResolverFailure.semanticResult)).toBe(
+        retry.failureProof.semanticResultSha256,
+      );
     } else {
       expect(archivedResolverFailure).toMatchObject({
         protocol: "koni.run-action-archive.v2",
@@ -757,19 +903,26 @@ describe("composed change-control authority", () => {
       });
     }
     expect(recovered.resolver.executionControl?.terminalResolverTerminalProof).toBeDefined();
-    expect(recovered.run.terminalSuccessProofs?.[
-      recovered.resolver.executionControl!.terminalResolverTerminalProof!.sha256
-    ]).toEqual(recovered.resolver.executionControl!.terminalResolverTerminalProof);
-    expect(() => assertRunRecord(forgeRetryFromSuccessfulResolver(recovered.run, recovered.resolver.id)))
-      .toThrow();
+    expect(
+      recovered.run.terminalSuccessProofs?.[
+        recovered.resolver.executionControl!.terminalResolverTerminalProof!.sha256
+      ],
+    ).toEqual(recovered.resolver.executionControl!.terminalResolverTerminalProof);
+    expect(() =>
+      assertRunRecord(forgeRetryFromSuccessfulResolver(recovered.run, recovered.resolver.id)),
+    ).toThrow();
     expect(recovered.run.git.ticketCycles[failedResolverCycleId]).toMatchObject({
       status: "retired",
       archiveRef: expect.stringContaining("refs/koni/archive/"),
-      supersessionSha256: recovered.resolver.executionControl!
-        .terminalResolverRetryRequests![0]!.sha256,
+      supersessionSha256:
+        recovered.resolver.executionControl!.terminalResolverRetryRequests![0]!.sha256,
     });
-    expect(Object.values(recovered.run.tickets).filter((ticket) =>
-      ticket.executionControl?.terminalRecovery?.sourceTicketId === recovered.resolver.id)).toEqual([]);
+    expect(
+      Object.values(recovered.run.tickets).filter(
+        (ticket) =>
+          ticket.executionControl?.terminalRecovery?.sourceTicketId === recovered.resolver.id,
+      ),
+    ).toEqual([]);
     expect(recovered.run.pendingGitIntents).toEqual({});
     expect(recovered.source.executionControl?.sourceHold).toBeUndefined();
     expect(() => assertRunRecord(structuredClone(recovered.run))).not.toThrow();
@@ -777,26 +930,44 @@ describe("composed change-control authority", () => {
     const settledRevision = recovered.run.revision;
     const settledAttemptIds = [...recovered.resolver.steps[0]!.attemptIds];
     await Promise.all([
-      ...Array.from({ length: 4 }, () => client.request("terminal-resolver.retry", {
-        runId,
-        resolverTicketId: blocked.resolver.id,
-        message: "Retry only the exact reviewed resolver failure.",
-      }, {
-        expectedRevision: client.revision,
-        idempotencyKey: "retry-exact-terminal-resolver",
-      })),
-      ...Array.from({ length: 4 }, () => client.request("run.resume", { runId }, {
-        expectedRevision: client.revision,
-        idempotencyKey: "resume-faulted-terminal-resolver",
-      })),
+      ...Array.from({ length: 4 }, () =>
+        client.request(
+          "terminal-resolver.retry",
+          {
+            runId,
+            resolverTicketId: blocked.resolver.id,
+            message: "Retry only the exact reviewed resolver failure.",
+          },
+          {
+            expectedRevision: client.revision,
+            idempotencyKey: "retry-exact-terminal-resolver",
+          },
+        ),
+      ),
+      ...Array.from({ length: 4 }, () =>
+        client.request(
+          "run.resume",
+          { runId },
+          {
+            expectedRevision: client.revision,
+            idempotencyKey: "resume-faulted-terminal-resolver",
+          },
+        ),
+      ),
     ]);
     await new Promise<void>((resolve) => setImmediate(resolve));
     const replayed = await restarted.engine.store.getRun(runId);
     expect(replayed.revision).toBe(settledRevision);
     expect(replayed.tickets[blocked.resolver.id]!.steps[0]!.attemptIds).toEqual(settledAttemptIds);
-    expect(replayed.tickets[blocked.resolver.id]!.executionControl?.terminalResolverRetryRequests)
-      .toHaveLength(1);
-    await pauseAtFreshRevision(client, restarted.engine, runId, "pause-after-terminal-resolver-recovery");
+    expect(
+      replayed.tickets[blocked.resolver.id]!.executionControl?.terminalResolverRetryRequests,
+    ).toHaveLength(1);
+    await pauseAtFreshRevision(
+      client,
+      restarted.engine,
+      runId,
+      "pause-after-terminal-resolver-recovery",
+    );
     client.close();
   }, 120_000);
 
@@ -808,7 +979,8 @@ describe("composed change-control authority", () => {
       actionFault: async (point, input) => {
         if (point !== "before_assignment_settle" || input.ticketId === undefined) return;
         const run = await fixture.engine.store.getRun(input.runId);
-        if (run.tickets[input.ticketId]?.operationId !== "formulation.hypothesis.drill-hypothesis") return;
+        if (run.tickets[input.ticketId]?.operationId !== "formulation.hypothesis.drill-hypothesis")
+          return;
         reached.resolve();
         await release.promise;
       },
@@ -821,21 +993,34 @@ describe("composed change-control authority", () => {
     const runId = await createApprovedRun(client, fixture.engine, "pause-final-change-control-cas");
     await reached.promise;
     await client.request("authority.ping");
-    await client.request("run.pause", { runId }, {
-      expectedRevision: client.revision,
-      idempotencyKey: "pause-final-change-control-cas",
-    });
+    await client.request(
+      "run.pause",
+      { runId },
+      {
+        expectedRevision: client.revision,
+        idempotencyKey: "pause-final-change-control-cas",
+      },
+    );
     let sourceId = "";
     try {
-      await waitFor(async () => (await fixture.engine.store.getRun(runId)).lifecycle.phase === "paused");
+      await waitFor(
+        async () => (await fixture.engine.store.getRun(runId)).lifecycle.phase === "paused",
+      );
       const paused = await fixture.engine.store.getRun(runId);
-      const source = Object.values(paused.tickets).find((ticket) =>
-        ticket.operationId === "formulation.hypothesis.drill-hypothesis")!;
+      const source = Object.values(paused.tickets).find(
+        (ticket) => ticket.operationId === "formulation.hypothesis.drill-hypothesis",
+      )!;
       sourceId = source.id;
-      const validation = Object.values(paused.actionExecutions ?? {}).find((journal) =>
-        journal.boundary.kind === "assignment_validation" && journal.boundary.ticketId === source.id)!;
-      expect(Object.values(paused.tickets).filter((ticket) =>
-        ticket.executionControl?.proposalRequest !== undefined)).toEqual([]);
+      const validation = Object.values(paused.actionExecutions ?? {}).find(
+        (journal) =>
+          journal.boundary.kind === "assignment_validation" &&
+          journal.boundary.ticketId === source.id,
+      )!;
+      expect(
+        Object.values(paused.tickets).filter(
+          (ticket) => ticket.executionControl?.proposalRequest !== undefined,
+        ),
+      ).toEqual([]);
       expect(source.executionControl?.sourceHold).toBeUndefined();
       expect(source.steps[0]).toMatchObject({ status: "pending" });
       expect(validation.settledAt).toBeDefined();
@@ -847,21 +1032,23 @@ describe("composed change-control authority", () => {
       expect(paused.attempts[validation.boundary.attemptId!]?.terminalPolicy).toBeUndefined();
     } catch (error) {
       const current = await fixture.engine.store.getRun(runId);
-      throw new Error(`pause did not settle while assignment validation was gated: ${JSON.stringify({
-        error: error instanceof Error ? error.message : String(error),
-        phase: current.lifecycle.phase,
-        attempts: Object.values(current.attempts).map((attempt) => ({
-          id: attempt.id,
-          status: attempt.status,
-        })),
-        actions: Object.values(current.actionExecutions ?? {}).map((action) => ({
-          invocationId: action.invocationId,
-          kind: action.boundary.kind,
-          status: action.journal.status,
-          settledAt: action.settledAt,
-          disposition: action.settlement?.disposition,
-        })),
-      })}`);
+      throw new Error(
+        `pause did not settle while assignment validation was gated: ${JSON.stringify({
+          error: error instanceof Error ? error.message : String(error),
+          phase: current.lifecycle.phase,
+          attempts: Object.values(current.attempts).map((attempt) => ({
+            id: attempt.id,
+            status: attempt.status,
+          })),
+          actions: Object.values(current.actionExecutions ?? {}).map((action) => ({
+            invocationId: action.invocationId,
+            kind: action.boundary.kind,
+            status: action.journal.status,
+            settledAt: action.settledAt,
+            disposition: action.settlement?.disposition,
+          })),
+        })}`,
+      );
     } finally {
       // Never strand engine.stop() behind the injected finalizer gate when this regression fails.
       // Success reaches the durable paused boundary before releasing the stale continuation.
@@ -869,8 +1056,12 @@ describe("composed change-control authority", () => {
     }
     await waitFor(async () => {
       const current = await fixture.engine.store.getRun(runId);
-      return current.lifecycle.phase === "paused" &&
-        Object.values(current.tickets).every((ticket) => ticket.executionControl?.proposalRequest === undefined);
+      return (
+        current.lifecycle.phase === "paused" &&
+        Object.values(current.tickets).every(
+          (ticket) => ticket.executionControl?.proposalRequest === undefined,
+        )
+      );
     });
     const promptsBeforeRestart = harness.promptCalls;
     client.close();
@@ -878,40 +1069,60 @@ describe("composed change-control authority", () => {
     const restarted = await openResearchEngine(fixture.root, fixture.baseline, harness);
     const afterRestart = await restarted.engine.store.getRun(runId);
     expect(afterRestart.lifecycle.phase).toBe("paused");
-    expect(Object.values(afterRestart.tickets).filter((ticket) =>
-      ticket.executionControl?.proposalRequest !== undefined)).toEqual([]);
+    expect(
+      Object.values(afterRestart.tickets).filter(
+        (ticket) => ticket.executionControl?.proposalRequest !== undefined,
+      ),
+    ).toEqual([]);
     expect(harness.promptCalls).toBe(promptsBeforeRestart);
-    client = await AuthorityClient.connect({ projectRoot: fixture.root, client: "tui", version: "1.0.0" });
+    client = await AuthorityClient.connect({
+      projectRoot: fixture.root,
+      client: "tui",
+      version: "1.0.0",
+    });
     await client.request("authority.ping");
     try {
-      await client.request("run.resume", { runId }, {
-        expectedRevision: client.revision,
-        idempotencyKey: "resume-final-change-control-cas",
-      });
+      await client.request(
+        "run.resume",
+        { runId },
+        {
+          expectedRevision: client.revision,
+          idempotencyKey: "resume-final-change-control-cas",
+        },
+      );
     } catch (error) {
       const current = await restarted.engine.store.getRun(runId);
-      const currentValidation = Object.values(current.actionExecutions ?? {}).find((journal) =>
-        journal.boundary.kind === "assignment_validation" && journal.boundary.ticketId === sourceId);
-      const currentAttempt = currentValidation?.boundary.attemptId === undefined
-        ? undefined
-        : current.attempts[currentValidation.boundary.attemptId];
-      throw new Error(`resume after abandoned terminal acceptance failed: ${JSON.stringify({
-        error: error instanceof Error ? error.message : String(error),
-        phase: current.lifecycle.phase,
-        resumePhase: current.lifecycle.resumePhase,
-        attemptStatus: currentAttempt?.status,
-        terminalOutputSha256: currentAttempt?.terminalOutputSha256,
-        terminalPolicySha256: currentAttempt?.terminalPolicy?.sha256,
-        actionSettlement: currentValidation?.settlement,
-        actionSettledAt: currentValidation?.settledAt,
-        stepStatus: current.tickets[sourceId]?.steps[0]?.status,
-        ticketStatus: current.tickets[sourceId]?.status,
-      })}`);
+      const currentValidation = Object.values(current.actionExecutions ?? {}).find(
+        (journal) =>
+          journal.boundary.kind === "assignment_validation" &&
+          journal.boundary.ticketId === sourceId,
+      );
+      const currentAttempt =
+        currentValidation?.boundary.attemptId === undefined
+          ? undefined
+          : current.attempts[currentValidation.boundary.attemptId];
+      throw new Error(
+        `resume after abandoned terminal acceptance failed: ${JSON.stringify({
+          error: error instanceof Error ? error.message : String(error),
+          phase: current.lifecycle.phase,
+          resumePhase: current.lifecycle.resumePhase,
+          attemptStatus: currentAttempt?.status,
+          terminalOutputSha256: currentAttempt?.terminalOutputSha256,
+          terminalPolicySha256: currentAttempt?.terminalPolicy?.sha256,
+          actionSettlement: currentValidation?.settlement,
+          actionSettledAt: currentValidation?.settledAt,
+          stepStatus: current.tickets[sourceId]?.steps[0]?.status,
+          ticketStatus: current.tickets[sourceId]?.status,
+        })}`,
+      );
     }
     await waitFor(async () => harness.promptCalls === promptsBeforeRestart + 1);
     const resumed = await restarted.engine.store.getRun(runId);
-    expect(Object.values(resumed.tickets).filter((ticket) =>
-      ticket.executionControl?.proposalRequest !== undefined)).toEqual([]);
+    expect(
+      Object.values(resumed.tickets).filter(
+        (ticket) => ticket.executionControl?.proposalRequest !== undefined,
+      ),
+    ).toEqual([]);
     client.close();
   }, 120_000);
 
@@ -923,7 +1134,8 @@ describe("composed change-control authority", () => {
       actionFault: async (point, input) => {
         if (point !== "before_assignment_settle" || input.ticketId === undefined) return;
         const run = await fixture.engine.store.getRun(input.runId);
-        if (run.tickets[input.ticketId]?.operationId !== "formulation.hypothesis.drill-hypothesis") return;
+        if (run.tickets[input.ticketId]?.operationId !== "formulation.hypothesis.drill-hypothesis")
+          return;
         reached.resolve();
         await release.promise;
       },
@@ -933,13 +1145,19 @@ describe("composed change-control authority", () => {
       client: "tui",
       version: "1.0.0",
     });
-    const runId = await createApprovedRun(client, fixture.engine, "delete-final-change-control-cas");
+    const runId = await createApprovedRun(
+      client,
+      fixture.engine,
+      "delete-final-change-control-cas",
+    );
     await reached.promise;
     let durableControlHash = "";
     let promptsAtDelete = 0;
     try {
       await authorizeDelete(client, runId, "delete-final-change-control-cas");
-      await waitFor(async () => (await fixture.engine.store.getRun(runId)).lifecycle.phase === "deleted");
+      await waitFor(
+        async () => (await fixture.engine.store.getRun(runId)).lifecycle.phase === "deleted",
+      );
       const deleted = await fixture.engine.store.getRun(runId);
       durableControlHash = canonicalHash({
         tickets: deleted.tickets,
@@ -947,35 +1165,45 @@ describe("composed change-control authority", () => {
         actions: deleted.actionExecutions,
       });
       promptsAtDelete = harness.promptCalls;
-      expect(Object.values(deleted.tickets).filter((ticket) =>
-        ticket.executionControl?.proposalRequest !== undefined)).toEqual([]);
-      const abandonedValidation = Object.values(deleted.actionExecutions ?? {}).find((journal) =>
-        journal.boundary.kind === "assignment_validation");
+      expect(
+        Object.values(deleted.tickets).filter(
+          (ticket) => ticket.executionControl?.proposalRequest !== undefined,
+        ),
+      ).toEqual([]);
+      const abandonedValidation = Object.values(deleted.actionExecutions ?? {}).find(
+        (journal) => journal.boundary.kind === "assignment_validation",
+      );
       expect(abandonedValidation?.settlement).toMatchObject({ disposition: "abandoned" });
       expect(deleted.attempts[abandonedValidation?.boundary.attemptId ?? ""]).toMatchObject({
         terminalOutputSha256: expect.stringMatching(/^sha256:/u),
       });
-      expect(deleted.attempts[abandonedValidation?.boundary.attemptId ?? ""]?.terminalPolicy)
-        .toBeUndefined();
-      expect(Object.values(deleted.attempts).every((attempt) => attempt.status !== "running" &&
-        attempt.status !== "terminal_accepted")).toBe(true);
+      expect(
+        deleted.attempts[abandonedValidation?.boundary.attemptId ?? ""]?.terminalPolicy,
+      ).toBeUndefined();
+      expect(
+        Object.values(deleted.attempts).every(
+          (attempt) => attempt.status !== "running" && attempt.status !== "terminal_accepted",
+        ),
+      ).toBe(true);
     } catch (error) {
       const current = await fixture.engine.store.getRun(runId);
-      throw new Error(`deletion did not settle while assignment validation was gated: ${JSON.stringify({
-        error: error instanceof Error ? error.message : String(error),
-        phase: current.lifecycle.phase,
-        attempts: Object.values(current.attempts).map((attempt) => ({
-          id: attempt.id,
-          status: attempt.status,
-        })),
-        actions: Object.values(current.actionExecutions ?? {}).map((action) => ({
-          invocationId: action.invocationId,
-          kind: action.boundary.kind,
-          status: action.journal.status,
-          settledAt: action.settledAt,
-          disposition: action.settlement?.disposition,
-        })),
-      })}`);
+      throw new Error(
+        `deletion did not settle while assignment validation was gated: ${JSON.stringify({
+          error: error instanceof Error ? error.message : String(error),
+          phase: current.lifecycle.phase,
+          attempts: Object.values(current.attempts).map((attempt) => ({
+            id: attempt.id,
+            status: attempt.status,
+          })),
+          actions: Object.values(current.actionExecutions ?? {}).map((action) => ({
+            invocationId: action.invocationId,
+            kind: action.boundary.kind,
+            status: action.journal.status,
+            settledAt: action.settledAt,
+            disposition: action.settlement?.disposition,
+          })),
+        })}`,
+      );
     } finally {
       // A failed assertion must not retain the injected finalizer and hang suite teardown.
       // On success the deleted lifecycle/action tombstone is already durable.
@@ -984,11 +1212,13 @@ describe("composed change-control authority", () => {
     await new Promise((resolve) => setTimeout(resolve, 25));
     const afterRelease = await fixture.engine.store.getRun(runId);
     expect(afterRelease.lifecycle.phase).toBe("deleted");
-    expect(canonicalHash({
-      tickets: afterRelease.tickets,
-      attempts: afterRelease.attempts,
-      actions: afterRelease.actionExecutions,
-    })).toBe(durableControlHash);
+    expect(
+      canonicalHash({
+        tickets: afterRelease.tickets,
+        attempts: afterRelease.attempts,
+        actions: afterRelease.actionExecutions,
+      }),
+    ).toBe(durableControlHash);
     expect(harness.promptCalls).toBe(promptsAtDelete);
 
     client.close();
@@ -996,11 +1226,13 @@ describe("composed change-control authority", () => {
     const restarted = await openResearchEngine(fixture.root, fixture.baseline, harness);
     const recovered = await restarted.engine.store.getRun(runId);
     expect(recovered.lifecycle.phase).toBe("deleted");
-    expect(canonicalHash({
-      tickets: recovered.tickets,
-      attempts: recovered.attempts,
-      actions: recovered.actionExecutions,
-    })).toBe(durableControlHash);
+    expect(
+      canonicalHash({
+        tickets: recovered.tickets,
+        attempts: recovered.attempts,
+        actions: recovered.actionExecutions,
+      }),
+    ).toBe(durableControlHash);
     expect(harness.promptCalls).toBe(promptsAtDelete);
   }, 120_000);
 });
@@ -1027,42 +1259,51 @@ class ScriptHarness {
     private readonly resolverFailures = 0,
   ) {}
 
-  public factory(
-    input: AttemptInput,
-    prepared: PreparedManagedAttempt,
-  ): ManagedPiSessionFactory {
-    return async (spec, options) => new ScriptedAdapter(spec, options.tools, () => {
-      this.promptCalls += 1;
-      const output = this.output(input, prepared);
-      this.trace.push({
-        kind: input.kind,
-        ticketId: input.assignment?.ticketId,
-        stepId: input.assignment?.stepId,
-        operationId: input.assignment === undefined
-          ? undefined
-          : input.run.tickets[input.assignment.ticketId]?.operationId,
-        workflowId: input.assignment === undefined
-          ? undefined
-          : input.run.tickets[input.assignment.ticketId]?.executionPolicyBinding?.workflowId,
-        personaId: input.assignment === undefined
-          ? undefined
-          : input.run.tickets[input.assignment.ticketId]?.steps.find((step) =>
-            step.id === input.assignment?.stepId)?.personaId,
-        targetNodeIds: input.assignment === undefined
-          ? undefined
-          : input.run.tickets[input.assignment.ticketId]?.targetNodeIds,
-        configuredChecks: prepared.authorityGrant?.configuredChecks ?? null,
-        output,
-        schemaAccepted: output === undefined || prepared.terminalOutputSchema === undefined
-          ? undefined
-          : Value.Check(prepared.terminalOutputSchema, output),
+  public factory(input: AttemptInput, prepared: PreparedManagedAttempt): ManagedPiSessionFactory {
+    return async (spec, options) =>
+      new ScriptedAdapter(spec, options.tools, () => {
+        this.promptCalls += 1;
+        const output = this.output(input, prepared);
+        this.trace.push({
+          kind: input.kind,
+          ticketId: input.assignment?.ticketId,
+          stepId: input.assignment?.stepId,
+          operationId:
+            input.assignment === undefined
+              ? undefined
+              : input.run.tickets[input.assignment.ticketId]?.operationId,
+          workflowId:
+            input.assignment === undefined
+              ? undefined
+              : input.run.tickets[input.assignment.ticketId]?.executionPolicyBinding?.workflowId,
+          personaId:
+            input.assignment === undefined
+              ? undefined
+              : input.run.tickets[input.assignment.ticketId]?.steps.find(
+                  (step) => step.id === input.assignment?.stepId,
+                )?.personaId,
+          targetNodeIds:
+            input.assignment === undefined
+              ? undefined
+              : input.run.tickets[input.assignment.ticketId]?.targetNodeIds,
+          configuredChecks: prepared.authorityGrant?.configuredChecks ?? null,
+          output,
+          schemaAccepted:
+            output === undefined || prepared.terminalOutputSchema === undefined
+              ? undefined
+              : Value.Check(prepared.terminalOutputSchema, output),
+        });
+        if (
+          output !== undefined &&
+          prepared.terminalOutputSchema !== undefined &&
+          !Value.Check(prepared.terminalOutputSchema, output)
+        ) {
+          throw new Error(
+            `script emitted output outside ${input.kind}/${input.assignment?.ticketId ?? "run"}/${input.assignment?.stepId ?? "run"} schema`,
+          );
+        }
+        return output;
       });
-      if (output !== undefined && prepared.terminalOutputSchema !== undefined &&
-          !Value.Check(prepared.terminalOutputSchema, output)) {
-        throw new Error(`script emitted output outside ${input.kind}/${input.assignment?.ticketId ?? "run"}/${input.assignment?.stepId ?? "run"} schema`);
-      }
-      return output;
-    });
   }
 
   private output(input: AttemptInput, prepared: PreparedManagedAttempt): unknown | undefined {
@@ -1077,7 +1318,10 @@ class ScriptHarness {
     const stepId = input.assignment?.stepId;
     if (ticketId === undefined || stepId === undefined) return undefined;
     const ticket = input.run.tickets[ticketId];
-    if (ticket?.operationId === "formulation.hypothesis.drill-hypothesis" && stepId === "drill-claims") {
+    if (
+      ticket?.operationId === "formulation.hypothesis.drill-hypothesis" &&
+      stepId === "drill-claims"
+    ) {
       const ordinal = (this.#sourceAttempts.get(ticketId) ?? 0) + 1;
       this.#sourceAttempts.set(ticketId, ordinal);
       const action = this.sourcePlan[ordinal - 1];
@@ -1123,7 +1367,11 @@ class ScriptHarness {
         return { status: "failed", blocker: `Resolver failure ${ordinal} requires operator retry` };
       }
     }
-    return this.validCompletedOutput(input, prepared, `Completed ${ticket?.operationId ?? ticketId}/${stepId}`);
+    return this.validCompletedOutput(
+      input,
+      prepared,
+      `Completed ${ticket?.operationId ?? ticketId}/${stepId}`,
+    );
   }
 
   private validCompletedOutput(
@@ -1146,8 +1394,11 @@ class ScriptHarness {
         },
       },
     ];
-    return candidates.find((candidate) => prepared.terminalOutputSchema !== undefined &&
-      Value.Check(prepared.terminalOutputSchema, candidate));
+    return candidates.find(
+      (candidate) =>
+        prepared.terminalOutputSchema !== undefined &&
+        Value.Check(prepared.terminalOutputSchema, candidate),
+    );
   }
 }
 
@@ -1185,14 +1436,15 @@ class ScriptedAdapter implements PiSessionAdapter {
       throw new Error("scripted terminal output must be an object");
     }
     const terminal = this.tools.find((tool) => tool.name === this.spec.terminal.toolName);
-    if (terminal === undefined) throw new Error(`missing terminal tool ${this.spec.terminal.toolName}`);
+    if (terminal === undefined)
+      throw new Error(`missing terminal tool ${this.spec.terminal.toolName}`);
     const toolCallId = `terminal-${this.spec.identity.attemptId}`;
     this.emit({
       type: "tool_execution_start",
       toolCallId,
       toolName: this.spec.terminal.toolName,
       args: output,
-    } as AgentSessionEvent);
+    });
     const result = await terminal.execute(
       toolCallId,
       output as Record<string, unknown>,
@@ -1204,9 +1456,11 @@ class ScriptedAdapter implements PiSessionAdapter {
       toolName: this.spec.terminal.toolName,
       result,
       isError: false,
-    } as AgentSessionEvent);
+    });
   }
-  public async continue(): Promise<void> { await this.prompt(); }
+  public async continue(): Promise<void> {
+    await this.prompt();
+  }
   public async steer(): Promise<void> {}
   public async followUp(): Promise<void> {}
   public async abort(): Promise<void> {
@@ -1309,19 +1563,29 @@ async function createApprovedRun(
   label: string,
 ): Promise<string> {
   const objective = `Test ${label} with bounded factual recall`;
-  const created = await client.request("run.create", {
-    objective,
-    runTypeId: "small",
-    targetRef: "refs/heads/main",
-    intake: { goal: objective },
-  }, { expectedRevision: client.revision, idempotencyKey: `create-${label}` });
+  const created = await client.request(
+    "run.create",
+    {
+      objective,
+      runTypeId: "small",
+      targetRef: "refs/heads/main",
+      intake: { goal: objective },
+    },
+    { expectedRevision: client.revision, idempotencyKey: `create-${label}` },
+  );
   const runId = (created.result as { runId: string }).runId;
-  await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "awaiting_approval");
+  await waitFor(
+    async () => (await engine.store.getRun(runId)).lifecycle.phase === "awaiting_approval",
+  );
   await client.request("authority.ping");
-  await client.request("plan.approve", { runId }, {
-    expectedRevision: client.revision,
-    idempotencyKey: `approve-${label}`,
-  });
+  await client.request(
+    "plan.approve",
+    { runId },
+    {
+      expectedRevision: client.revision,
+      idempotencyKey: `approve-${label}`,
+    },
+  );
   return runId;
 }
 
@@ -1334,66 +1598,77 @@ async function nextProposal(
   return waitForValue(async () => {
     const run = await engine.store.getRun(runId);
     if (run.lifecycle.phase === "blocked" || run.lifecycle.phase === "failed") {
-      const terminalOutputs = Object.fromEntries(await Promise.all(
-        Object.values(run.attempts)
-          .filter((attempt) => attempt.terminalOutputSha256 !== undefined)
-          .map(async (attempt) => {
-            const bytes = await engine.store.readArtifact(
-              `runs/${run.id}/attempts/${attempt.id}/terminal-output.json`,
-              16 * 1024 * 1024,
-            );
-            return [attempt.id, JSON.parse(bytes.toString("utf8"))] as const;
-          }),
-      ));
-      throw new Error(`run stopped before the next proposal: ${JSON.stringify({
-        phase: run.lifecycle.phase,
-        blocker: run.lifecycle.blocker,
-        terminalReason: run.lifecycle.terminalReason,
-        revision: run.revision,
-        tickets: Object.values(run.tickets).map((ticket) => ({
-          id: ticket.id,
-          operationId: ticket.operationId,
-          status: ticket.status,
-          blocker: ticket.blocker,
-          steps: ticket.steps.map((step) => ({ id: step.id, status: step.status })),
-        })),
-        attempts: Object.values(run.attempts).map((attempt) => ({
-          id: attempt.id,
-          kind: attempt.kind,
-          ticketId: attempt.ticketId,
-          stepId: attempt.stepId,
-          status: attempt.status,
-          terminalOutputSha256: attempt.terminalOutputSha256,
-        })),
-        actions: Object.values(run.actionExecutions ?? {}).map((action) => ({
-          invocationId: action.invocationId,
-          kind: action.boundary.kind,
-          ticketId: action.boundary.ticketId,
-          stepId: action.boundary.stepId,
-          attemptId: action.boundary.attemptId,
-          expectedRunRevision: action.expectedRunRevision,
-          journalStatus: action.journal.status,
-          journalSteps: action.journal.steps.map((step) => ({
-            id: step.stepId,
-            primitive: step.primitive,
-            status: step.status,
-            ...(step.status === "failed" ? { error: step.error } : {}),
+      const terminalOutputs = Object.fromEntries(
+        await Promise.all(
+          Object.values(run.attempts)
+            .filter((attempt) => attempt.terminalOutputSha256 !== undefined)
+            .map(async (attempt) => {
+              const bytes = await engine.store.readArtifact(
+                `runs/${run.id}/attempts/${attempt.id}/terminal-output.json`,
+                16 * 1024 * 1024,
+              );
+              return [attempt.id, JSON.parse(bytes.toString("utf8"))] as const;
+            }),
+        ),
+      );
+      throw new Error(
+        `run stopped before the next proposal: ${JSON.stringify({
+          phase: run.lifecycle.phase,
+          blocker: run.lifecycle.blocker,
+          terminalReason: run.lifecycle.terminalReason,
+          revision: run.revision,
+          tickets: Object.values(run.tickets).map((ticket) => ({
+            id: ticket.id,
+            operationId: ticket.operationId,
+            status: ticket.status,
+            blocker: ticket.blocker,
+            steps: ticket.steps.map((step) => ({ id: step.id, status: step.status })),
           })),
-          semanticResult: action.semanticResult,
-          semanticResultSha256: action.semanticResult === undefined
-            ? undefined
-            : canonicalHash(action.semanticResult),
-          settlement: action.settlement?.disposition,
-        })),
-        terminalOutputs,
-        compilationTrace: harness?.compilationTrace,
-        materializationTrace: harness?.materializationTrace,
-        activity: run.activity.slice(-12).map((entry) => entry.message),
-      })}`);
+          attempts: Object.values(run.attempts).map((attempt) => ({
+            id: attempt.id,
+            kind: attempt.kind,
+            ticketId: attempt.ticketId,
+            stepId: attempt.stepId,
+            status: attempt.status,
+            terminalOutputSha256: attempt.terminalOutputSha256,
+          })),
+          actions: Object.values(run.actionExecutions ?? {}).map((action) => ({
+            invocationId: action.invocationId,
+            kind: action.boundary.kind,
+            ticketId: action.boundary.ticketId,
+            stepId: action.boundary.stepId,
+            attemptId: action.boundary.attemptId,
+            expectedRunRevision: action.expectedRunRevision,
+            journalStatus: action.journal.status,
+            journalSteps: action.journal.steps.map((step) => ({
+              id: step.stepId,
+              primitive: step.primitive,
+              status: step.status,
+              ...(step.status === "failed" ? { error: step.error } : {}),
+            })),
+            semanticResult: action.semanticResult,
+            semanticResultSha256:
+              action.semanticResult === undefined
+                ? undefined
+                : canonicalHash(action.semanticResult),
+            settlement: action.settlement?.disposition,
+          })),
+          terminalOutputs,
+          compilationTrace: harness?.compilationTrace,
+          materializationTrace: harness?.materializationTrace,
+          activity: run.activity.slice(-12).map((entry) => entry.message),
+        })}`,
+      );
     }
     const proposal = Object.values(run.tickets)
-      .filter((ticket) => ticket.executionControl?.proposalRequest !== undefined && !excluded.has(ticket.id))
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))[0];
+      .filter(
+        (ticket) =>
+          ticket.executionControl?.proposalRequest !== undefined && !excluded.has(ticket.id),
+      )
+      .sort(
+        (left, right) =>
+          left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+      )[0];
     return proposal?.status === "proposed" ? { run, proposal } : undefined;
   });
 }
@@ -1408,10 +1683,14 @@ async function decideProposal(
   for (let attempt = 0; attempt < 20; attempt += 1) {
     await client.request("authority.ping");
     try {
-      await client.request("proposal.decide", { runId, ticketId, decision, message }, {
-        expectedRevision: client.revision,
-        idempotencyKey: `${decision}-${ticketId}`,
-      });
+      await client.request(
+        "proposal.decide",
+        { runId, ticketId, decision, message },
+        {
+          expectedRevision: client.revision,
+          idempotencyKey: `${decision}-${ticketId}`,
+        },
+      );
       return;
     } catch (error) {
       if ((error as { code?: unknown }).code !== "revision_conflict") throw error;
@@ -1430,10 +1709,14 @@ async function pauseAtFreshRevision(
   for (let attempt = 0; attempt < 20; attempt += 1) {
     await client.request("authority.ping");
     try {
-      await client.request("run.pause", { runId }, {
-        expectedRevision: client.revision,
-        idempotencyKey,
-      });
+      await client.request(
+        "run.pause",
+        { runId },
+        {
+          expectedRevision: client.revision,
+          idempotencyKey,
+        },
+      );
       await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "paused");
       return;
     } catch (error) {
@@ -1451,11 +1734,15 @@ async function authorizeDelete(
   await client.request("authority.ping");
   const inspected = await client.request("run.deletion.inspect", { runId });
   const previewToken = (inspected.result as { previewToken: string }).previewToken;
-  await client.request("run.delete", {
-    runId,
-    mode: "preserve_branches",
-    previewToken,
-  }, { expectedRevision: client.revision, idempotencyKey });
+  await client.request(
+    "run.delete",
+    {
+      runId,
+      mode: "preserve_branches",
+      previewToken,
+    },
+    { expectedRevision: client.revision, idempotencyKey },
+  );
 }
 
 function scriptNativeProgram(
@@ -1466,7 +1753,9 @@ function scriptNativeProgram(
     get(target, property) {
       if (property === "prepareAttempt") {
         return async (input: AttemptInput) => {
-          const prepared = await target.prepareAttempt(input as Parameters<NativeRunCompilerProgram["prepareAttempt"]>[0]);
+          const prepared = await target.prepareAttempt(
+            input as Parameters<NativeRunCompilerProgram["prepareAttempt"]>[0],
+          );
           return { ...prepared, factory: harness.factory(input, prepared) };
         };
       }
@@ -1484,13 +1773,21 @@ function scriptNativeProgram(
         };
       }
       if (property === "projectChangeControlProposalTicket") {
-        return async (input: Parameters<NativeRunCompilerProgram["projectChangeControlProposalTicket"]>[0]) => {
+        return async (
+          input: Parameters<NativeRunCompilerProgram["projectChangeControlProposalTicket"]>[0],
+        ) => {
           const proposal = await target.projectChangeControlProposalTicket(input);
           const source = input.run.tickets[input.changeControl.sourceTicketId];
-          const sourceStep = source?.steps.find((step) => step.id === input.changeControl.sourceStepId);
+          const sourceStep = source?.steps.find(
+            (step) => step.id === input.changeControl.sourceStepId,
+          );
           const authority = proposal.executionControl?.controlTicketAuthority;
           const causal = authority?.causal;
-          if (source !== undefined && authority?.role === "proposal" && causal?.role === "proposal") {
+          if (
+            source !== undefined &&
+            authority?.role === "proposal" &&
+            causal?.role === "proposal"
+          ) {
             const projection = ticketImmutableProjection(proposal);
             const sourceProjection = ticketImmutableProjection(source);
             const publication = causal.publication;
@@ -1510,42 +1807,60 @@ function scriptNativeProgram(
               proposalId: proposal.id,
               sourceId: source.id,
               roles: [authority.role, causal.role, authority.operation.changeControl.role],
-              sourceProjectionMatches: canonicalHash(sourceProjection) ===
-                canonicalHash(causal.sourceTicketProjection),
-              sourceStepBindingMatches: sourceStep?.executionPolicyBinding?.sha256 ===
-                publication.sourceBinding.sha256,
+              sourceProjectionMatches:
+                canonicalHash(sourceProjection) === canonicalHash(causal.sourceTicketProjection),
+              sourceStepBindingMatches:
+                sourceStep?.executionPolicyBinding?.sha256 === publication.sourceBinding.sha256,
               runMatches: publication.runId === input.run.id,
               proposalMatches: publication.proposalTicketId === proposal.id,
-              configurationMatches: publication.configurationSha256 === authority.configurationSha256,
+              configurationMatches:
+                publication.configurationSha256 === authority.configurationSha256,
               catalogMatches: publication.catalogSha256 === authority.catalogSha256,
               requestMatches: publication.requestSha256 === requestSha256,
               operationMatches: publication.proposalOperationId === authority.operation.id,
-              proposalBindingMatches: publication.proposalBinding.sha256 ===
-                proposal.executionPolicyBinding?.sha256,
-              sourceOperationMatches: publication.sourceOperation.sha256 ===
-                publication.sourceBinding.operationSha256,
-              sourceCompilationMatches: causal.sourceTerminalProof.semanticResult.changeControlSha256 ===
+              proposalBindingMatches:
+                publication.proposalBinding.sha256 === proposal.executionPolicyBinding?.sha256,
+              sourceOperationMatches:
+                publication.sourceOperation.sha256 === publication.sourceBinding.operationSha256,
+              sourceCompilationMatches:
+                causal.sourceTerminalProof.semanticResult.changeControlSha256 ===
                 input.changeControl.sha256,
-              proofIndexed: canonicalHash(input.run.terminalSuccessProofs?.[causal.sourceTerminalProof.sha256] ?? null) ===
-                canonicalHash(causal.sourceTerminalProof),
+              proofIndexed:
+                canonicalHash(
+                  input.run.terminalSuccessProofs?.[causal.sourceTerminalProof.sha256] ?? null,
+                ) === canonicalHash(causal.sourceTerminalProof),
               proofAttemptStatus: input.run.attempts[causal.sourceTerminalProof.attemptId]?.status,
-              proofAttemptPolicyMatches: input.run.attempts[causal.sourceTerminalProof.attemptId]
-                ?.terminalPolicy?.sha256 === causal.sourceTerminalProof.terminalPolicySha256,
-              proofAttemptOutputMatches: input.run.attempts[causal.sourceTerminalProof.attemptId]
-                ?.terminalOutputSha256 === causal.sourceTerminalProof.terminalOutputSha256,
-              holdMatches: causal.sourceHold.proposalTicketId === proposal.id &&
+              proofAttemptPolicyMatches:
+                input.run.attempts[causal.sourceTerminalProof.attemptId]?.terminalPolicy?.sha256 ===
+                causal.sourceTerminalProof.terminalPolicySha256,
+              proofAttemptOutputMatches:
+                input.run.attempts[causal.sourceTerminalProof.attemptId]?.terminalOutputSha256 ===
+                causal.sourceTerminalProof.terminalOutputSha256,
+              holdMatches:
+                causal.sourceHold.proposalTicketId === proposal.id &&
                 causal.sourceHold.requestSha256 === publication.requestSha256,
-              summaryMatches: projection.summary === `${publication.summary}\n\nReason: ${publication.reason}`,
+              summaryMatches:
+                projection.summary === `${publication.summary}\n\nReason: ${publication.reason}`,
               title: projection.title,
-              expectedTitle: `Change request: ${publication.summary.trim().split(/\r?\n/u)[0] ?? publication.summary.trim()}`.slice(0, 240),
-              targetMatches: canonicalHash(projection.targetNodeIds) === canonicalHash(publication.targetNodeIds),
-              readMatches: canonicalHash(projection.readNodeIds) === canonicalHash(publication.targetNodeIds),
+              expectedTitle:
+                `Change request: ${publication.summary.trim().split(/\r?\n/u)[0] ?? publication.summary.trim()}`.slice(
+                  0,
+                  240,
+                ),
+              targetMatches:
+                canonicalHash(projection.targetNodeIds) ===
+                canonicalHash(publication.targetNodeIds),
+              readMatches:
+                canonicalHash(projection.readNodeIds) === canonicalHash(publication.targetNodeIds),
               writeNodeCount: projection.writeNodeIds.length,
               readPathCount: projection.readPaths.length,
               writePathCount: projection.writePaths.length,
-              controlScopeMatches: canonicalHash(projection.control.role === "proposal"
-                ? projection.control.changeControlScopeNodeIds
-                : []) === canonicalHash(publication.controlScopeNodeIds),
+              controlScopeMatches:
+                canonicalHash(
+                  projection.control.role === "proposal"
+                    ? projection.control.changeControlScopeNodeIds
+                    : [],
+                ) === canonicalHash(publication.controlScopeNodeIds),
               dependencyCount: projection.dependencyIds.length,
             });
           }
@@ -1553,7 +1868,9 @@ function scriptNativeProgram(
         };
       }
       if (property === "projectApprovedApplicationTicket") {
-        return async (input: Parameters<NativeRunCompilerProgram["projectApprovedApplicationTicket"]>[0]) => {
+        return async (
+          input: Parameters<NativeRunCompilerProgram["projectApprovedApplicationTicket"]>[0],
+        ) => {
           const materialization = input.materialization;
           const selectionMaterial = {
             protocol: "koni.assignment-change-control.v1" as const,
@@ -1572,19 +1889,20 @@ function scriptNativeProgram(
             scope: materialization.scope,
           };
           const reviewAttempt = input.run.attempts[materialization.reviewTerminalProof.attemptId];
-          const expectedReviewSha256 = reviewAttempt?.terminalAcceptedAt === undefined ||
-              reviewAttempt.terminalPolicy === undefined ||
-              reviewAttempt.terminalOutputSha256 === undefined
-            ? undefined
-            : canonicalHash({
-                protocol: "koni.proposal-review-authority.v1",
-                attemptId: reviewAttempt.id,
-                launchSpecHash: reviewAttempt.launchSpecHash,
-                approvalSha256: materialization.approvalSha256,
-                terminalPolicySha256: reviewAttempt.terminalPolicy.sha256,
-                terminalOutputSha256: reviewAttempt.terminalOutputSha256,
-                terminalAcceptedAt: reviewAttempt.terminalAcceptedAt,
-              });
+          const expectedReviewSha256 =
+            reviewAttempt?.terminalAcceptedAt === undefined ||
+            reviewAttempt.terminalPolicy === undefined ||
+            reviewAttempt.terminalOutputSha256 === undefined
+              ? undefined
+              : canonicalHash({
+                  protocol: "koni.proposal-review-authority.v1",
+                  attemptId: reviewAttempt.id,
+                  launchSpecHash: reviewAttempt.launchSpecHash,
+                  approvalSha256: materialization.approvalSha256,
+                  terminalPolicySha256: reviewAttempt.terminalPolicy.sha256,
+                  terminalOutputSha256: reviewAttempt.terminalOutputSha256,
+                  terminalAcceptedAt: reviewAttempt.terminalAcceptedAt,
+                });
           harness.materializationTrace.push({
             proposalTicketId: materialization.proposalTicketId,
             selectionSha256: input.selection.sha256,
@@ -1601,7 +1919,9 @@ function scriptNativeProgram(
         };
       }
       if (property === "compileAssignmentOutput") {
-        return async (input: Parameters<NativeRunCompilerProgram["compileAssignmentOutput"]>[0]) => {
+        return async (
+          input: Parameters<NativeRunCompilerProgram["compileAssignmentOutput"]>[0],
+        ) => {
           const trace: Record<string, unknown> = {
             attemptId: input.attemptId,
             assignment: structuredClone(input.assignment),
@@ -1622,32 +1942,43 @@ function scriptNativeProgram(
       const value = Reflect.get(target, property, target);
       return typeof value === "function" ? value.bind(target) : value;
     },
-  }) as unknown as RunCompilerProgram;
+  });
 }
 
 type ApprovedMaterialization = NonNullable<TicketExecutionControlRecord["approvedMaterialization"]>;
-type MutableApprovedMaterialization = Omit<ApprovedMaterialization,
-  "reviewSha256" | "reviewTerminalProof" | "applicationBinding" | "authoritySha256" | "sha256"> & {
-    reviewSha256: Sha256Digest;
-    reviewTerminalProof: ApprovedMaterialization["reviewTerminalProof"];
-    applicationBinding: ApprovedMaterialization["applicationBinding"];
-    authoritySha256: Sha256Digest;
-    sha256: Sha256Digest;
-  };
+type MutableApprovedMaterialization = Omit<
+  ApprovedMaterialization,
+  "reviewSha256" | "reviewTerminalProof" | "applicationBinding" | "authoritySha256" | "sha256"
+> & {
+  reviewSha256: Sha256Digest;
+  reviewTerminalProof: ApprovedMaterialization["reviewTerminalProof"];
+  applicationBinding: ApprovedMaterialization["applicationBinding"];
+  authoritySha256: Sha256Digest;
+  sha256: Sha256Digest;
+};
 type ResolverRetryRequest = NonNullable<
   TicketExecutionControlRecord["terminalResolverRetryRequests"]
 >[number];
 
 /** Attacker recomputes every local hash but reuses selection authority as review authority. */
-function forgeMaterializationWithOneProof(run: Readonly<RunRecord>, proposalTicketId: string): RunRecord {
+function forgeMaterializationWithOneProof(
+  run: Readonly<RunRecord>,
+  proposalTicketId: string,
+): RunRecord {
   const forged = structuredClone(run);
   const control = forged.tickets[proposalTicketId]?.executionControl;
-  if (control?.approvedMaterialization === undefined) throw new Error("fixture has no reviewed materialization");
-  const materialization = control.approvedMaterialization as unknown as MutableApprovedMaterialization;
+  if (control?.approvedMaterialization === undefined)
+    throw new Error("fixture has no reviewed materialization");
+  const materialization =
+    control.approvedMaterialization as unknown as MutableApprovedMaterialization;
   materialization.reviewTerminalProof = structuredClone(materialization.proposalTerminalProof);
   const attempt = forged.attempts[materialization.reviewTerminalProof.attemptId];
-  if (attempt?.launchSpecHash === undefined || attempt.terminalPolicy === undefined ||
-      attempt.terminalOutputSha256 === undefined || attempt.terminalAcceptedAt === undefined) {
+  if (
+    attempt?.launchSpecHash === undefined ||
+    attempt.terminalPolicy === undefined ||
+    attempt.terminalOutputSha256 === undefined ||
+    attempt.terminalAcceptedAt === undefined
+  ) {
     throw new Error("fixture proposal proof has no complete accepted attempt");
   }
   materialization.reviewSha256 = canonicalHash({
@@ -1668,11 +1999,16 @@ function forgeMaterializationWithOneProof(run: Readonly<RunRecord>, proposalTick
 }
 
 /** Attacker self-rehashes a Pi binding that no longer names the embedded application operation. */
-function forgeMaterializationBindingIdentity(run: Readonly<RunRecord>, proposalTicketId: string): RunRecord {
+function forgeMaterializationBindingIdentity(
+  run: Readonly<RunRecord>,
+  proposalTicketId: string,
+): RunRecord {
   const forged = structuredClone(run);
   const control = forged.tickets[proposalTicketId]?.executionControl;
-  if (control?.approvedMaterialization === undefined) throw new Error("fixture has no reviewed materialization");
-  const materialization = control.approvedMaterialization as unknown as MutableApprovedMaterialization;
+  if (control?.approvedMaterialization === undefined)
+    throw new Error("fixture has no reviewed materialization");
+  const materialization =
+    control.approvedMaterialization as unknown as MutableApprovedMaterialization;
   const binding = materialization.applicationBinding as unknown as Record<string, unknown>;
   binding.operationId = materialization.proposalOperation.id;
   const { sha256: _ignored, ...bindingMaterial } = binding;
@@ -1709,20 +2045,32 @@ function rehashApprovedMaterialization(materialization: MutableApprovedMateriali
  * Attacker deletes the live completed action, relabels its accepted attempt as semantic failure,
  * and appends a fully self-hashed retry after terminal resolver success.
  */
-function forgeRetryFromSuccessfulResolver(run: Readonly<RunRecord>, resolverTicketId: string): RunRecord {
+function forgeRetryFromSuccessfulResolver(
+  run: Readonly<RunRecord>,
+  resolverTicketId: string,
+): RunRecord {
   const forged = structuredClone(run);
   const resolver = forged.tickets[resolverTicketId];
   const control = resolver?.executionControl;
   const recovery = control?.terminalRecovery;
   const success = control?.terminalResolverTerminalProof;
-  if (resolver === undefined || control === undefined || recovery === undefined || success === undefined ||
-      resolver.executionPolicyBinding === undefined) {
+  if (
+    resolver === undefined ||
+    control === undefined ||
+    recovery === undefined ||
+    success === undefined ||
+    resolver.executionPolicyBinding === undefined
+  ) {
     throw new Error("fixture resolver has no complete terminal authority");
   }
   const step = resolver.steps.find((candidate) => candidate.id === success.stepId);
   const attempt = forged.attempts[success.attemptId];
-  if (step?.executionPolicyBinding === undefined || attempt?.launchSpecHash === undefined ||
-      attempt.terminalPolicy === undefined || attempt.terminalOutputSha256 === undefined) {
+  if (
+    step?.executionPolicyBinding === undefined ||
+    attempt?.launchSpecHash === undefined ||
+    attempt.terminalPolicy === undefined ||
+    attempt.terminalOutputSha256 === undefined
+  ) {
     throw new Error("fixture resolver success has no complete attempt binding");
   }
   const semanticResult = {
@@ -1805,8 +2153,9 @@ async function repository(): Promise<string> {
   await writeFile(path.join(root, "README.md"), "# Research authority fixture\n");
   await git(root, "add", "README.md");
   await git(root, "commit", "-m", "fixture");
-  expect(await readFile(path.join(root, "README.md"), "utf8"))
-    .toBe("# Research authority fixture\n");
+  expect(await readFile(path.join(root, "README.md"), "utf8")).toBe(
+    "# Research authority fixture\n",
+  );
   return root;
 }
 
@@ -1816,9 +2165,9 @@ function git(cwd: string, ...argv: string[]): Promise<void> {
     const stderr: Buffer[] = [];
     child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
     child.once("error", reject);
-    child.once("close", (code) => code === 0
-      ? resolve()
-      : reject(new Error(Buffer.concat(stderr).toString("utf8"))));
+    child.once("close", (code) =>
+      code === 0 ? resolve() : reject(new Error(Buffer.concat(stderr).toString("utf8"))),
+    );
   });
 }
 
@@ -1833,7 +2182,7 @@ function deferred<Value>() {
 }
 
 async function waitFor(predicate: () => Promise<boolean>): Promise<void> {
-  await waitForValue(async () => await predicate() ? true : undefined);
+  await waitForValue(async () => ((await predicate()) ? true : undefined));
 }
 
 async function waitForValue<Value>(
@@ -1872,12 +2221,13 @@ async function waitForDurableProgressValue<Value>(
     }
     const now = Date.now();
     if (now >= idleDeadline) {
-      throw new Error(`timed out after ${idleTimeoutMs}ms without durable composed-authority progress`);
+      throw new Error(
+        `timed out after ${idleTimeoutMs}ms without durable composed-authority progress`,
+      );
     }
-    await new Promise((resolve) => setTimeout(
-      resolve,
-      Math.min(pollIntervalMs, idleDeadline - now, hardDeadline - now),
-    ));
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(pollIntervalMs, idleDeadline - now, hardDeadline - now)),
+    );
   }
   throw new Error(`timed out after ${hardTimeoutMs}ms total composed-authority work`);
 }

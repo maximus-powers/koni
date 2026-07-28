@@ -7,6 +7,7 @@ import {
   koniToolMaxResultBytes,
   koniToolSchemaHash,
   renderKoniToolReceipt,
+  validateKoniToolArguments,
   type KoniToolInvocation,
   type KoniToolReceipt,
 } from "../src/pi/tool-catalog.js";
@@ -19,7 +20,10 @@ const accepted = (receiptId: string, summary = "accepted", value?: unknown): Kon
   ...(value === undefined ? {} : { value }),
 });
 
-const reject = async (_call: KoniToolInvocation, rejection: { code: "transcript_result_budget"; summary: string }) => ({
+const reject = async (
+  _call: KoniToolInvocation,
+  rejection: { code: "transcript_result_budget"; summary: string },
+) => ({
   protocol: KONI_TOOL_RECEIPT_PROTOCOL,
   receiptId: "receipt-rejected",
   outcome: "rejected" as const,
@@ -31,8 +35,13 @@ describe("Koni authority-backed Pi tool catalog", () => {
   it("derives an exact unique hash-bound inventory from one canonical schema catalog", () => {
     const tools = createKoniAuthorityTools({
       names: ["koni_read_file", "koni_edit_file", "koni_submit_output"],
-      terminalOutputSchema: Type.Object({ summary: Type.String() }, { additionalProperties: false }),
-      async invoke() { return accepted("receipt-one"); },
+      terminalOutputSchema: Type.Object(
+        { summary: Type.String() },
+        { additionalProperties: false },
+      ),
+      async invoke() {
+        return accepted("receipt-one");
+      },
       reject,
     });
     expect(tools.map((tool) => tool.name)).toEqual([
@@ -44,11 +53,15 @@ describe("Koni authority-backed Pi tool catalog", () => {
     expect(tools[0]!.maxResultBytes).toBe(koniToolMaxResultBytes("koni_read_file"));
     expect(tools[2]!.schemaHash).toBe(canonicalHash(tools[2]!.terminalOutputSchema));
     expect(tools[2]!.terminalOutputSchemaHash).toBe(tools[2]!.schemaHash);
-    expect(() => createKoniAuthorityTools({
-      names: ["koni_context", "koni_context"],
-      async invoke() { return accepted("receipt"); },
-      reject,
-    })).toThrow(/duplicate Koni tool/u);
+    expect(() =>
+      createKoniAuthorityTools({
+        names: ["koni_context", "koni_context"],
+        async invoke() {
+          return accepted("receipt");
+        },
+        reject,
+      }),
+    ).toThrow(/duplicate Koni tool/u);
   });
 
   it("routes execution through the authority invoker and terminates only on submission", async () => {
@@ -59,7 +72,10 @@ describe("Koni authority-backed Pi tool catalog", () => {
     });
     const tools = createKoniAuthorityTools({
       names: ["koni_read_file", "koni_submit_output"],
-      terminalOutputSchema: Type.Object({ summary: Type.String() }, { additionalProperties: false }),
+      terminalOutputSchema: Type.Object(
+        { summary: Type.String() },
+        { additionalProperties: false },
+      ),
       invoke,
       reject,
     });
@@ -79,7 +95,11 @@ describe("Koni authority-backed Pi tool catalog", () => {
     );
     expect(calls).toEqual([
       { callId: "read-one", name: "koni_read_file", arguments: { path: "src/app.ts" } },
-      { callId: "submit-one", name: "koni_submit_output", arguments: { summary: "Implemented feature" } },
+      {
+        callId: "submit-one",
+        name: "koni_submit_output",
+        arguments: { summary: "Implemented feature" },
+      },
     ]);
     expect(read.terminate).toBeUndefined();
     expect(terminal.terminate).toBe(true);
@@ -92,11 +112,62 @@ describe("Koni authority-backed Pi tool catalog", () => {
     });
   });
 
+  it("honors the immutable tool result bound instead of imposing a hidden 64 KiB cap", async () => {
+    const context = "x".repeat(40 * 1024);
+    const [tool] = createKoniAuthorityTools({
+      names: ["koni_context"],
+      async invoke() {
+        return accepted("receipt-large-context", "Compiler context returned", { content: context });
+      },
+      reject,
+    });
+
+    const result = await tool!.definition.execute(
+      "context-one",
+      { offsetChars: 0, maxChars: 40 * 1024 },
+      undefined,
+      undefined,
+      {} as never,
+    );
+
+    expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeGreaterThan(64 * 1024);
+    expect(result.details).toMatchObject({ value: { content: context } });
+  });
+
+  it("requires one recommendation and an impact class on current question calls", () => {
+    const base = {
+      prompt: "Which compatibility behavior should the run preserve?",
+      options: [
+        { id: "preserve", label: "Preserve", description: "Keep the current public behavior." },
+        { id: "replace", label: "Replace", description: "Adopt the new behavior immediately." },
+      ],
+    };
+    expect(() => validateKoniToolArguments("koni_ask_question", base)).toThrow(
+      /compiler-issued schema/u,
+    );
+    expect(
+      validateKoniToolArguments("koni_ask_question", {
+        ...base,
+        recommendedOptionId: "preserve",
+        impact: "high_impact",
+      }),
+    ).toEqual({
+      ...base,
+      recommendedOptionId: "preserve",
+      impact: "high_impact",
+    });
+  });
+
   it("renders a durable rejected outcome as an error-ready non-terminal result", async () => {
     const tools = createKoniAuthorityTools({
       names: ["koni_submit_output"],
-      terminalOutputSchema: Type.Object({ summary: Type.String() }, { additionalProperties: false }),
-      async invoke() { return accepted("unused"); },
+      terminalOutputSchema: Type.Object(
+        { summary: Type.String() },
+        { additionalProperties: false },
+      ),
+      async invoke() {
+        return accepted("unused");
+      },
       reject,
     });
     const result = await tools[0]!.reject(
@@ -110,9 +181,11 @@ describe("Koni authority-backed Pi tool catalog", () => {
       outcome: "rejected",
       code: "transcript_result_budget",
     });
-    expect(result.content).toEqual([{
-      type: "text",
-      text: renderKoniToolReceipt(result.details as KoniToolReceipt),
-    }]);
+    expect(result.content).toEqual([
+      {
+        type: "text",
+        text: renderKoniToolReceipt(result.details as KoniToolReceipt),
+      },
+    ]);
   });
 });

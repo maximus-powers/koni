@@ -12,20 +12,18 @@ import {
   type RunCompilerProgram,
 } from "../src/authority/run-engine.js";
 import { PiAttemptProcessSupervisor } from "../src/pi/attempt-process-pool.js";
-import {
-  createAgentLaunchSpec,
-  type AgentLaunchSpec,
-} from "../src/pi/launch-spec.js";
+import { createAgentLaunchSpec, type AgentLaunchSpec } from "../src/pi/launch-spec.js";
 import { koniToolMaxResultBytes, koniToolSchemaHash } from "../src/pi/tool-catalog.js";
 import { canonicalHash, rawSha256 } from "../src/shared/canonical.js";
 import type { RunRecord, TicketRecord } from "../src/state/run-record.js";
-import {
-  fixtureLaunchSpec,
-  TERMINAL_OUTPUT_SCHEMA,
-} from "./pi-managed-fixtures.js";
+import { fixtureLaunchSpec, TERMINAL_OUTPUT_SCHEMA } from "./pi-managed-fixtures.js";
 import { runBehaviorSnapshotFixture } from "./fixtures/compiled-behavior.js";
 
-const fixtureEntry = path.join(import.meta.dirname, "fixtures", "run-provider-authority-fixture.mjs");
+const fixtureEntry = path.join(
+  import.meta.dirname,
+  "fixtures",
+  "run-provider-authority-fixture.mjs",
+);
 const roots: string[] = [];
 const engines: RunAuthorityEngine[] = [];
 
@@ -41,7 +39,9 @@ describe("run authority provider reservation lifecycle", () => {
     await waitFor(async () => {
       const run = await harness.engine.store.getRun(runId);
       if (run.lifecycle.phase === "blocked" || run.lifecycle.phase === "failed") {
-        throw new Error(`synthesis run stopped: ${run.lifecycle.blocker ?? run.lifecycle.terminalReason}`);
+        throw new Error(
+          `synthesis run stopped: ${run.lifecycle.blocker ?? run.lifecycle.terminalReason}`,
+        );
       }
       return run.lifecycle.phase === "awaiting_approval" && onlyAttempt(run).status === "completed";
     });
@@ -55,14 +55,18 @@ describe("run authority provider reservation lifecycle", () => {
       instructionSha256: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
     });
     expect(attempt.authorityProviderRequests).toHaveLength(1);
-    expect(run.activity.filter((entry) => entry.message.includes("synthesis is now required"))).toHaveLength(1);
+    expect(
+      run.activity.filter((entry) => entry.message.includes("synthesis is now required")),
+    ).toHaveLength(1);
     expect(run.plan?.status).toBe("awaiting_approval");
   }, 60_000);
 
   it("durably closes planning exploration before rejecting a provider request under input pressure", async () => {
     const harness = await authorityHarness("input_pressure_synthesis");
     const runId = await createRun(harness.client);
-    await waitFor(async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked");
+    await waitFor(
+      async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked",
+    );
 
     const run = await harness.engine.store.getRun(runId);
     const attempt = onlyAttempt(run);
@@ -76,9 +80,11 @@ describe("run authority provider reservation lifecycle", () => {
       instructionSha256: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
     });
     expect(attempt.authorityProviderRequests ?? []).toHaveLength(0);
-    expect(run.activity.some((entry) =>
-      entry.message.includes("Provider input pressure closed planning exploration")
-    )).toBe(true);
+    expect(
+      run.activity.some((entry) =>
+        entry.message.includes("Provider input pressure closed planning exploration"),
+      ),
+    ).toBe(true);
   }, 60_000);
 
   it("commits exact reserve/settle totals before accepting a normal planner outcome", async () => {
@@ -87,8 +93,10 @@ describe("run authority provider reservation lifecycle", () => {
 
     await waitFor(async () => {
       const run = await harness.engine.store.getRun(runId);
-      return run.lifecycle.phase === "awaiting_approval" &&
-        Object.values(run.attempts)[0]?.status === "completed";
+      return (
+        run.lifecycle.phase === "awaiting_approval" &&
+        Object.values(run.attempts)[0]?.status === "completed"
+      );
     });
     const run = await harness.engine.store.getRun(runId);
     const attempt = onlyAttempt(run);
@@ -115,8 +123,10 @@ describe("run authority provider reservation lifecycle", () => {
 
     await waitFor(async () => {
       const run = await harness.engine.store.getRun(runId);
-      return run.lifecycle.phase === "awaiting_approval" &&
-        Object.values(run.attempts)[0]?.status === "completed";
+      return (
+        run.lifecycle.phase === "awaiting_approval" &&
+        Object.values(run.attempts)[0]?.status === "completed"
+      );
     });
     const run = await harness.engine.store.getRun(runId);
     const attempt = onlyAttempt(run);
@@ -140,9 +150,8 @@ describe("run authority provider reservation lifecycle", () => {
       });
 
       await harness.client.request("authority.ping");
-      const lifecycleParams = operation === "delete"
-        ? await guardedDeleteParams(harness.client, runId)
-        : { runId };
+      const lifecycleParams =
+        operation === "delete" ? await guardedDeleteParams(harness.client, runId) : { runId };
       await harness.client.request(`run.${operation}`, lifecycleParams, {
         expectedRevision: harness.client.revision,
         idempotencyKey: `${operation}-provider-run`,
@@ -155,7 +164,12 @@ describe("run authority provider reservation lifecycle", () => {
       const stopped = await harness.engine.store.getRun(runId);
       const attempt = onlyAttempt(stopped);
       expect(attempt.authorityProviderRequests?.[0]?.settledAt).toEqual(expect.any(String));
-      expect(providerTotals(attempt)).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 1 });
+      expect(providerTotals(attempt)).toEqual({
+        input: 10,
+        output: 5,
+        cacheRead: 2,
+        cacheWrite: 1,
+      });
       expect(attempt.status).toMatch(/aborted|interrupted/u);
     },
     60_000,
@@ -170,16 +184,17 @@ describe("run authority provider reservation lifecycle", () => {
       await waitFor(async () => {
         const attempt = Object.values((await harness.engine.store.getRun(runId)).attempts)[0];
         if (attempt === undefined) return false;
-        return attempt.status === "terminal_accepted" &&
-          attempt.authorityProviderRequests?.[0]?.settledAt !== undefined;
+        return (
+          attempt.status === "terminal_accepted" &&
+          attempt.authorityProviderRequests?.[0]?.settledAt !== undefined
+        );
       });
       const beforeStop = await harness.engine.store.getRun(runId);
       const compiledPlanHash = canonicalHash(beforeStop.plan);
 
       await harness.client.request("authority.ping");
-      const lifecycleParams = operation === "delete"
-        ? await guardedDeleteParams(harness.client, runId)
-        : { runId };
+      const lifecycleParams =
+        operation === "delete" ? await guardedDeleteParams(harness.client, runId) : { runId };
       await harness.client.request(`run.${operation}`, lifecycleParams, {
         expectedRevision: harness.client.revision,
         idempotencyKey: `${operation}-terminal-provider-run`,
@@ -208,15 +223,23 @@ describe("run authority provider reservation lifecycle", () => {
       const runId = await createRun(harness.client);
       await waitFor(async () => {
         const run = await harness.engine.store.getRun(runId);
-        return run.lifecycle.phase === "awaiting_approval" &&
-          Object.values(run.attempts).some((attempt) => attempt.kind === "planning" && attempt.status === "completed");
+        return (
+          run.lifecycle.phase === "awaiting_approval" &&
+          Object.values(run.attempts).some(
+            (attempt) => attempt.kind === "planning" && attempt.status === "completed",
+          )
+        );
       });
 
       await harness.client.request("authority.ping");
-      await harness.client.request("plan.approve", { runId }, {
-        expectedRevision: harness.client.revision,
-        idempotencyKey: `approve-${scenario}`,
-      });
+      await harness.client.request(
+        "plan.approve",
+        { runId },
+        {
+          expectedRevision: harness.client.revision,
+          idempotencyKey: `approve-${scenario}`,
+        },
+      );
       let lastObserved = "no state";
       try {
         await waitFor(async () => {
@@ -233,14 +256,22 @@ describe("run authority provider reservation lifecycle", () => {
             })),
           });
           if (run.lifecycle.phase === "blocked" || run.lifecycle.phase === "failed") {
-            throw new Error(`assignment run stopped: ${run.lifecycle.blocker ?? run.lifecycle.terminalReason}`);
+            throw new Error(
+              `assignment run stopped: ${run.lifecycle.blocker ?? run.lifecycle.terminalReason}`,
+            );
           }
-          const attempt = Object.values(run.attempts).find((candidate) => candidate.ticketId === "ticket-one");
-          return attempt?.status === "terminal_accepted" &&
-            attempt.authorityProviderRequests?.[0]?.settledAt !== undefined;
+          const attempt = Object.values(run.attempts).find(
+            (candidate) => candidate.ticketId === "ticket-one",
+          );
+          return (
+            attempt?.status === "terminal_accepted" &&
+            attempt.authorityProviderRequests?.[0]?.settledAt !== undefined
+          );
         });
       } catch (error) {
-        throw new Error(`${error instanceof Error ? error.message : String(error)}; last state: ${lastObserved}`);
+        throw new Error(
+          `${error instanceof Error ? error.message : String(error)}; last state: ${lastObserved}`,
+        );
       }
       const beforeStop = await harness.engine.store.getRun(runId);
       const compiledAssignmentHash = canonicalHash({
@@ -250,9 +281,8 @@ describe("run authority provider reservation lifecycle", () => {
       const acceptedAttemptCount = Object.keys(beforeStop.attempts).length;
 
       await harness.client.request("authority.ping");
-      const lifecycleParams = operation === "delete"
-        ? await guardedDeleteParams(harness.client, runId)
-        : { runId };
+      const lifecycleParams =
+        operation === "delete" ? await guardedDeleteParams(harness.client, runId) : { runId };
       await harness.client.request(`run.${operation}`, lifecycleParams, {
         expectedRevision: harness.client.revision,
         idempotencyKey: `${operation}-${scenario}`,
@@ -266,8 +296,9 @@ describe("run authority provider reservation lifecycle", () => {
       expect(stopped.graphHash).toBe(beforeStop.graphHash);
       expect(stopped.graphRevision).toBe(beforeStop.graphRevision);
       if (operation === "pause") {
-        expect(canonicalHash({ tickets: stopped.tickets, runGit: stopped.git.run }))
-          .toBe(compiledAssignmentHash);
+        expect(canonicalHash({ tickets: stopped.tickets, runGit: stopped.git.run })).toBe(
+          compiledAssignmentHash,
+        );
       }
       expect(harness.compileCount()).toBe(2);
       expect(Object.keys(stopped.attempts)).toHaveLength(acceptedAttemptCount);
@@ -282,7 +313,9 @@ describe("run authority provider reservation lifecycle", () => {
     const harness = await authorityHarness("failed_provider_tool_call");
     const runId = await createRun(harness.client);
 
-    await waitFor(async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked");
+    await waitFor(
+      async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked",
+    );
     const run = await harness.engine.store.getRun(runId);
     const attempt = onlyAttempt(run);
     expect(attempt.status).toBe("failed");
@@ -298,28 +331,39 @@ describe("run authority provider reservation lifecycle", () => {
       runActions: Array<{ id: string; intent: string; availability: { state: string } }>;
     };
     const resume = controls.runActions.find((action) => action.intent === "retry_blocked");
-    const acknowledge = controls.runActions.find((action) => action.intent === "retire_provider_exposure");
+    const acknowledge = controls.runActions.find(
+      (action) => action.intent === "retire_provider_exposure",
+    );
     expect(resume).toMatchObject({ id: "run:resume", availability: { state: "disabled" } });
     expect(acknowledge).toMatchObject({
       id: "run:retire-provider-exposure",
       availability: { state: "available" },
     });
-    expect(controls.stages.flatMap((stage) => stage.actions).filter((action) =>
-      action.intent === "retry_supervised_stage" && action.availability.state === "available"
-    )).toEqual([]);
+    expect(
+      controls.stages
+        .flatMap((stage) => stage.actions)
+        .filter(
+          (action) =>
+            action.intent === "retry_supervised_stage" && action.availability.state === "available",
+        ),
+    ).toEqual([]);
 
-    await harness.client.request("run.action.execute", {
-      protocol: "koni.stage-action-invocation.v1",
-      runId,
-      runRevision: controls.binding.runRevision,
-      generation: controls.binding.generation,
-      capabilityId: acknowledge!.id,
-      confirmed: true,
-      values: {},
-    }, {
-      expectedRevision: harness.client.revision,
-      idempotencyKey: "acknowledge-canonical-provider-error",
-    });
+    await harness.client.request(
+      "run.action.execute",
+      {
+        protocol: "koni.stage-action-invocation.v1",
+        runId,
+        runRevision: controls.binding.runRevision,
+        generation: controls.binding.generation,
+        capabilityId: acknowledge!.id,
+        confirmed: true,
+        values: {},
+      },
+      {
+        expectedRevision: harness.client.revision,
+        idempotencyKey: "acknowledge-canonical-provider-error",
+      },
+    );
     const acknowledged = await harness.engine.store.getRun(runId);
     expect(acknowledged.lifecycle.phase).toBe("blocked");
     expect(Object.keys(acknowledged.attempts)).toHaveLength(1);
@@ -332,36 +376,47 @@ describe("run authority provider reservation lifecycle", () => {
       responseId: "resp_fixture_provider_error",
       errorMessageSha256: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
     });
-    await expect(readFile(path.join(acknowledged.projectRoot, "never-written.txt")))
-      .rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(path.join(acknowledged.projectRoot, "never-written.txt")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
 
-    const retryControls = (await harness.client.request("run.controls", { runId })).result as typeof controls;
+    const retryControls = (await harness.client.request("run.controls", { runId }))
+      .result as typeof controls;
     const retry = retryControls.runActions.find((action) => action.intent === "retry_blocked");
     expect(retry).toMatchObject({ id: "run:resume", availability: { state: "available" } });
-    expect(retryControls.runActions.some((action) => action.intent === "retire_provider_exposure")).toBe(false);
-    await harness.client.request("run.action.execute", {
-      protocol: "koni.stage-action-invocation.v1",
-      runId,
-      runRevision: retryControls.binding.runRevision,
-      generation: retryControls.binding.generation,
-      capabilityId: retry!.id,
-      confirmed: false,
-      values: {},
-    }, {
-      expectedRevision: harness.client.revision,
-      idempotencyKey: "retry-after-canonical-provider-error",
-    });
+    expect(
+      retryControls.runActions.some((action) => action.intent === "retire_provider_exposure"),
+    ).toBe(false);
+    await harness.client.request(
+      "run.action.execute",
+      {
+        protocol: "koni.stage-action-invocation.v1",
+        runId,
+        runRevision: retryControls.binding.runRevision,
+        generation: retryControls.binding.generation,
+        capabilityId: retry!.id,
+        confirmed: false,
+        values: {},
+      },
+      {
+        expectedRevision: harness.client.revision,
+        idempotencyKey: "retry-after-canonical-provider-error",
+      },
+    );
     await waitFor(async () => {
       const recovered = await harness.engine.store.getRun(runId);
       if (recovered.lifecycle.phase === "blocked" && recovered.revision > acknowledged.revision) {
         throw new Error(`provider-error retry blocked: ${recovered.lifecycle.blocker}`);
       }
-      return recovered.lifecycle.phase === "awaiting_approval" && Object.keys(recovered.attempts).length === 2;
+      return (
+        recovered.lifecycle.phase === "awaiting_approval" &&
+        Object.keys(recovered.attempts).length === 2
+      );
     });
 
     const recovered = await harness.engine.store.getRun(runId);
     const attempts = Object.values(recovered.attempts).sort((left, right) =>
-      String(left.startedAt).localeCompare(String(right.startedAt))
+      String(left.startedAt).localeCompare(String(right.startedAt)),
     );
     expect(attempts[0]?.authorityProviderRequests?.[0]?.retirement).toMatchObject({
       protocol: "koni.provider-exposure-retirement.v1",
@@ -381,10 +436,13 @@ describe("run authority provider reservation lifecycle", () => {
         parentTranscriptSha256: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
       },
     });
-    expect(recovered.activity.some((entry) =>
-      entry.message.includes("canonical provider error") &&
-      entry.message.includes("uncertain provider exposure")
-    )).toBe(true);
+    expect(
+      recovered.activity.some(
+        (entry) =>
+          entry.message.includes("canonical provider error") &&
+          entry.message.includes("uncertain provider exposure"),
+      ),
+    ).toBe(true);
   }, 60_000);
 
   it("retires a zero-usage provider error without a response id and recovers on resume", async () => {
@@ -394,12 +452,18 @@ describe("run authority provider reservation lifecycle", () => {
     // the assistant-entry-id fallback rather than wedge the run with an unreconcilable reservation.
     const harness = await authorityHarness("uncanonical_provider_error");
     const runId = await createRun(harness.client);
-    await waitFor(async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked");
+    await waitFor(
+      async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked",
+    );
 
-    await harness.client.request("run.resume", { runId }, {
-      expectedRevision: harness.client.revision,
-      idempotencyKey: "resume-after-zero-usage-provider-error",
-    });
+    await harness.client.request(
+      "run.resume",
+      { runId },
+      {
+        expectedRevision: harness.client.revision,
+        idempotencyKey: "resume-after-zero-usage-provider-error",
+      },
+    );
     await waitFor(async () => {
       const run = await harness.engine.store.getRun(runId);
       return run.lifecycle.phase === "awaiting_approval" && Object.keys(run.attempts).length === 2;
@@ -407,7 +471,7 @@ describe("run authority provider reservation lifecycle", () => {
 
     const recovered = await harness.engine.store.getRun(runId);
     const attempts = Object.values(recovered.attempts).sort((left, right) =>
-      String(left.startedAt).localeCompare(String(right.startedAt))
+      String(left.startedAt).localeCompare(String(right.startedAt)),
     );
     expect(attempts[0]?.authorityProviderRequests?.[0]?.retirement).toMatchObject({
       protocol: "koni.provider-exposure-retirement.v1",
@@ -419,7 +483,9 @@ describe("run authority provider reservation lifecycle", () => {
   it("retires only a canonical Pi abort under explicit resume and preserves exact usage totals", async () => {
     const harness = await authorityHarness("canonical_abort_recovery");
     const runId = await createRun(harness.client);
-    await waitFor(async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked");
+    await waitFor(
+      async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked",
+    );
 
     const blocked = await harness.engine.store.getRun(runId);
     const first = onlyAttempt(blocked);
@@ -427,10 +493,14 @@ describe("run authority provider reservation lifecycle", () => {
     expect(first.authorityProviderRequests?.[0]?.retirement).toBeUndefined();
     expect(providerTotals(first)).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 
-    await harness.client.request("run.resume", { runId }, {
-      expectedRevision: harness.client.revision,
-      idempotencyKey: "resume-after-canonical-provider-abort",
-    });
+    await harness.client.request(
+      "run.resume",
+      { runId },
+      {
+        expectedRevision: harness.client.revision,
+        idempotencyKey: "resume-after-canonical-provider-abort",
+      },
+    );
     await waitFor(async () => {
       const run = await harness.engine.store.getRun(runId);
       return run.lifecycle.phase === "awaiting_approval" && Object.keys(run.attempts).length === 2;
@@ -438,7 +508,7 @@ describe("run authority provider reservation lifecycle", () => {
 
     const recovered = await harness.engine.store.getRun(runId);
     const attempts = Object.values(recovered.attempts).sort((left, right) =>
-      String(left.startedAt).localeCompare(String(right.startedAt))
+      String(left.startedAt).localeCompare(String(right.startedAt)),
     );
     expect(attempts[0]?.authorityProviderRequests?.[0]?.retirement).toMatchObject({
       protocol: "koni.provider-exposure-retirement.v1",
@@ -448,11 +518,20 @@ describe("run authority provider reservation lifecycle", () => {
       authorizationSha256: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
       sha256: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
     });
-    expect(providerTotals(attempts[0]!)).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+    expect(providerTotals(attempts[0]!)).toEqual({
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
     expect(attempts[1]?.lineage).toMatchObject({ branchEpoch: 1 });
-    expect(recovered.activity.some((entry) =>
-      entry.message.includes("retained up to") && entry.message.includes("uncertain provider exposure")
-    )).toBe(true);
+    expect(
+      recovered.activity.some(
+        (entry) =>
+          entry.message.includes("retained up to") &&
+          entry.message.includes("uncertain provider exposure"),
+      ),
+    ).toBe(true);
   }, 60_000);
 
   it("retires a canonical Pi abort on the first explicit resume from paused", async () => {
@@ -464,21 +543,31 @@ describe("run authority provider reservation lifecycle", () => {
       return request !== undefined && request.settledAt === undefined;
     });
 
-    await harness.client.request("run.pause", { runId }, {
-      expectedRevision: harness.client.revision,
-      idempotencyKey: "pause-before-canonical-provider-abort",
-    });
-    await waitFor(async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "paused");
+    await harness.client.request(
+      "run.pause",
+      { runId },
+      {
+        expectedRevision: harness.client.revision,
+        idempotencyKey: "pause-before-canonical-provider-abort",
+      },
+    );
+    await waitFor(
+      async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "paused",
+    );
 
     const paused = await harness.engine.store.getRun(runId);
     const first = onlyAttempt(paused);
     expect(first.authorityProviderRequests?.[0]?.settledAt).toBeUndefined();
     expect(first.authorityProviderRequests?.[0]?.retirement).toBeUndefined();
 
-    await harness.client.request("run.resume", { runId }, {
-      expectedRevision: harness.client.revision,
-      idempotencyKey: "resume-once-after-paused-canonical-provider-abort",
-    });
+    await harness.client.request(
+      "run.resume",
+      { runId },
+      {
+        expectedRevision: harness.client.revision,
+        idempotencyKey: "resume-once-after-paused-canonical-provider-abort",
+      },
+    );
     await waitFor(async () => {
       const run = await harness.engine.store.getRun(runId);
       return run.lifecycle.phase === "awaiting_approval" && Object.keys(run.attempts).length === 2;
@@ -486,7 +575,7 @@ describe("run authority provider reservation lifecycle", () => {
 
     const recovered = await harness.engine.store.getRun(runId);
     const attempts = Object.values(recovered.attempts).sort((left, right) =>
-      String(left.startedAt).localeCompare(String(right.startedAt))
+      String(left.startedAt).localeCompare(String(right.startedAt)),
     );
     expect(attempts[0]?.authorityProviderRequests?.[0]?.retirement).toMatchObject({
       protocol: "koni.provider-exposure-retirement.v1",
@@ -503,8 +592,10 @@ describe("run authority provider reservation lifecycle", () => {
     const runId = await createRun(harness.client);
     await waitFor(async () => {
       const run = await harness.engine.store.getRun(runId);
-      return run.lifecycle.phase === "awaiting_approval" &&
-        Object.values(run.attempts)[0]?.status === "completed";
+      return (
+        run.lifecycle.phase === "awaiting_approval" &&
+        Object.values(run.attempts)[0]?.status === "completed"
+      );
     });
     const attempt = onlyAttempt(await harness.engine.store.getRun(runId));
     expect(attempt.authorityProviderRequests?.[0]?.settledAt).toEqual(expect.any(String));
@@ -514,7 +605,9 @@ describe("run authority provider reservation lifecycle", () => {
   it("holds a reservation when the assistant entry itself is only a torn tail", async () => {
     const harness = await authorityHarness("partial_assistant");
     const runId = await createRun(harness.client);
-    await waitFor(async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked");
+    await waitFor(
+      async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked",
+    );
     const attempt = onlyAttempt(await harness.engine.store.getRun(runId));
     expect(attempt.status).toBe("failed");
     expect(attempt.authorityProviderRequests?.[0]?.settledAt).toBeUndefined();
@@ -523,7 +616,9 @@ describe("run authority provider reservation lifecycle", () => {
   it("settles one bounded response overshoot but denies the next provider request", async () => {
     const harness = await authorityHarness("response_overshoot");
     const runId = await createRun(harness.client);
-    await waitFor(async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked");
+    await waitFor(
+      async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked",
+    );
     const run = await harness.engine.store.getRun(runId);
     const attempt = onlyAttempt(run);
     expect(attempt.authorityProviderRequests).toHaveLength(1);
@@ -539,12 +634,16 @@ describe("run authority provider reservation lifecycle", () => {
       const run = await harness.engine.store.getRun(runId);
       if (run.lifecycle.phase === "blocked" || run.lifecycle.phase === "failed") {
         const attempt = onlyAttempt(run);
-        throw new Error(`context-window run stopped: ${run.lifecycle.blocker ?? run.lifecycle.terminalReason}; ${JSON.stringify({
-          status: attempt.status,
-          error: attempt.error,
-          requests: attempt.authorityProviderRequests,
-          activity: run.activity.slice(-8),
-        })}`);
+        throw new Error(
+          `context-window run stopped: ${run.lifecycle.blocker ?? run.lifecycle.terminalReason}; ${JSON.stringify(
+            {
+              status: attempt.status,
+              error: attempt.error,
+              requests: attempt.authorityProviderRequests,
+              activity: run.activity.slice(-8),
+            },
+          )}`,
+        );
       }
       return run.lifecycle.phase === "awaiting_approval" && onlyAttempt(run).status === "completed";
     });
@@ -556,7 +655,12 @@ describe("run authority provider reservation lifecycle", () => {
       prospectiveInputTokens: 53_741,
       settledAt: expect.any(String),
     });
-    expect(providerTotals(attempt)).toEqual({ input: 43_248, output: 166, cacheRead: 0, cacheWrite: 0 });
+    expect(providerTotals(attempt)).toEqual({
+      input: 43_248,
+      output: 166,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
     expect(run.lifecycle.blocker).toBeUndefined();
   }, 60_000);
 
@@ -565,8 +669,10 @@ describe("run authority provider reservation lifecycle", () => {
     const runId = await createRun(harness.client);
     await waitFor(async () => {
       const run = await harness.engine.store.getRun(runId);
-      return run.lifecycle.phase === "awaiting_approval" &&
-        Object.values(run.attempts)[0]?.status === "completed";
+      return (
+        run.lifecycle.phase === "awaiting_approval" &&
+        Object.values(run.attempts)[0]?.status === "completed"
+      );
     });
 
     await harness.engine.server.mutateInternal(async ({ revision }) => {
@@ -596,14 +702,20 @@ describe("run authority provider reservation lifecycle", () => {
     });
 
     await harness.client.request("authority.ping");
-    await harness.client.request("plan.revise", {
-      runId,
-      instructions: "Revise without replaying an ambiguous provider request.",
-    }, {
-      expectedRevision: harness.client.revision,
-      idempotencyKey: "revise-with-provider-hold",
-    });
-    await waitFor(async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked");
+    await harness.client.request(
+      "plan.revise",
+      {
+        runId,
+        instructions: "Revise without replaying an ambiguous provider request.",
+      },
+      {
+        expectedRevision: harness.client.revision,
+        idempotencyKey: "revise-with-provider-hold",
+      },
+    );
+    await waitFor(
+      async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked",
+    );
 
     const blocked = await harness.engine.store.getRun(runId);
     expect(Object.keys(blocked.attempts)).toHaveLength(1);
@@ -622,8 +734,12 @@ async function authorityHarness(scenario: string): Promise<{
   let prepared = 0;
   let compiled = 0;
   const program = providerProgram(
-    () => { prepared += 1; },
-    () => { compiled += 1; },
+    () => {
+      prepared += 1;
+    },
+    () => {
+      compiled += 1;
+    },
     scenario,
   );
   const supervisor = new PiAttemptProcessSupervisor({
@@ -641,11 +757,19 @@ async function authorityHarness(scenario: string): Promise<{
   });
   engines.push(engine);
   await engine.start();
-  const client = await AuthorityClient.connect({ projectRoot: root, client: "tui", version: "1.0.0" });
+  const client = await AuthorityClient.connect({
+    projectRoot: root,
+    client: "tui",
+    version: "1.0.0",
+  });
   return { engine, client, prepareCount: () => prepared, compileCount: () => compiled };
 }
 
-function providerProgram(onPrepare: () => void, onCompile: () => void, scenario: string): RunCompilerProgram {
+function providerProgram(
+  onPrepare: () => void,
+  onCompile: () => void,
+  scenario: string,
+): RunCompilerProgram {
   return {
     async resolveRun(request) {
       return {
@@ -668,7 +792,14 @@ function providerProgram(onPrepare: () => void, onCompile: () => void, scenario:
         ),
         workingSpecOwnerId: "lead",
         planningMode: "agent",
-        pipelineStageIds: ["intake", "combined-plan", "approval", "orchestrate", "verification", "promotion"],
+        pipelineStageIds: [
+          "intake",
+          "combined-plan",
+          "approval",
+          "orchestrate",
+          "verification",
+          "promotion",
+        ],
         pipelineStages: [
           { id: "intake", title: "Intake", kind: "action", automatic: true },
           { id: "combined-plan", title: "Combined plan", kind: "planning", automatic: true },
@@ -681,21 +812,27 @@ function providerProgram(onPrepare: () => void, onCompile: () => void, scenario:
           maxParallel: 1,
           questionPolicy: "some",
           instructions: "Produce one bounded plan.",
-          agents: { lead: { provider: "openai-codex", model: "gpt-5.6-terra", thinkingLevel: "high" } },
+          agents: {
+            lead: { provider: "openai-codex", model: "gpt-5.6-terra", thinkingLevel: "high" },
+          },
         },
       };
     },
-    async initializeDirectApproval() { throw new Error("direct approval is not used"); },
+    async initializeDirectApproval() {
+      throw new Error("direct approval is not used");
+    },
     async prepareAttempt(input) {
       onPrepare();
-      const ticketId = input.kind === "lead"
-        ? "run-orchestration"
-        : input.assignment?.ticketId ?? "run-planning";
-      const stepId = input.kind === "lead"
-        ? input.leadTrigger === "compiler_deadlock"
-          ? "lead-compiler-deadlock"
-          : "lead-orchestration-entry"
-        : input.assignment?.stepId ?? "combined-plan";
+      const ticketId =
+        input.kind === "lead"
+          ? "run-orchestration"
+          : (input.assignment?.ticketId ?? "run-planning");
+      const stepId =
+        input.kind === "lead"
+          ? input.leadTrigger === "compiler_deadlock"
+            ? "lead-compiler-deadlock"
+            : "lead-orchestration-entry"
+          : (input.assignment?.stepId ?? "combined-plan");
       const context = "Authority-bound provider lifecycle context";
       const stateRoot = (await discoverAuthorityEndpoint(input.run.projectRoot)).stateRoot;
       const grant: AuthorityGrant = {
@@ -708,9 +845,10 @@ function providerProgram(onPrepare: () => void, onCompile: () => void, scenario:
         sessionId: input.sessionId,
         epoch: 1,
         generation: input.run.generation,
-        allowedTools: scenario === "synthesis_threshold"
-          ? ["koni_read_file", "koni_submit_output"]
-          : ["koni_submit_output"],
+        allowedTools:
+          scenario === "synthesis_threshold"
+            ? ["koni_read_file", "koni_submit_output"]
+            : ["koni_submit_output"],
         readPaths: ["."],
         writePaths: [],
         expectedRevision: input.nextAuthorityRevision,
@@ -720,11 +858,12 @@ function providerProgram(onPrepare: () => void, onCompile: () => void, scenario:
         authorityRevisionStateHash(input.run.projectRoot, input.nextAuthorityRevision),
       );
       const base = fixtureLaunchSpec({
-        cwd: input.kind === "lead"
-          ? input.run.projectRoot
-          : input.assignment === undefined
-            ? input.run.git.planning.worktree
-            : input.run.git.ticketCycles[input.run.tickets[ticketId]!.gitCycleId!]!.worktree,
+        cwd:
+          input.kind === "lead"
+            ? input.run.projectRoot
+            : input.assignment === undefined
+              ? input.run.git.planning.worktree
+              : input.run.git.ticketCycles[input.run.tickets[ticketId]!.gitCycleId!]!.worktree,
         sessionDirectory: path.join(stateRoot, "runs", input.run.id, "sessions", input.attemptId),
         runId: input.run.id,
         ticketId,
@@ -791,14 +930,20 @@ function providerProgram(onPrepare: () => void, onCompile: () => void, scenario:
       return {
         spec,
         authorityGrant: grant,
-        toolNames: scenario === "synthesis_threshold"
-          ? ["koni_read_file", "koni_submit_output"]
-          : ["koni_submit_output"],
+        toolNames:
+          scenario === "synthesis_threshold"
+            ? ["koni_read_file", "koni_submit_output"]
+            : ["koni_submit_output"],
         terminalOutputSchema: TERMINAL_OUTPUT_SCHEMA,
         contextContent: context,
         compactionSnapshot: {
           objective: input.run.objective,
-          plan: { architecture: "Pending", decisions: "Pending", risk: "Pending", verification: "Pending" },
+          plan: {
+            architecture: "Pending",
+            decisions: "Pending",
+            risk: "Pending",
+            verification: "Pending",
+          },
           graphRefs: [],
           touchedFiles: [],
           receiptIds: [],
@@ -822,10 +967,18 @@ function providerProgram(onPrepare: () => void, onCompile: () => void, scenario:
             verification: "## Verification\nExercise the process boundary.",
           },
           concise: {
-            architecture: [{ title: "Authority-backed plan", description: "Compile accepted durable bytes." }],
-            decisions: [{ title: "Authority owns effects", description: "The child only projects outcomes." }],
-            risk: [{ title: "Ambiguous exposure", description: "Unsettled requests block successors." }],
-            verification: [{ title: "Process proof", description: "Exercise reserve, settle, and stop." }],
+            architecture: [
+              { title: "Authority-backed plan", description: "Compile accepted durable bytes." },
+            ],
+            decisions: [
+              { title: "Authority owns effects", description: "The child only projects outcomes." },
+            ],
+            risk: [
+              { title: "Ambiguous exposure", description: "Unsettled requests block successors." },
+            ],
+            verification: [
+              { title: "Process proof", description: "Exercise reserve, settle, and stop." },
+            ],
           },
           graphSeed: { objective: "provider lifecycle" },
           steeringHistory: [],
@@ -854,8 +1007,12 @@ function providerProgram(onPrepare: () => void, onCompile: () => void, scenario:
       expect(output).toEqual({ result: "provider-plan" });
       return { outcome: { status: "completed" as const, summary: "Provider assignment compiled" } };
     },
-    async verifyRun() { return { ok: true }; },
-    async createIntegrationTicket() { throw new Error("integration is not used"); },
+    async verifyRun() {
+      return { ok: true };
+    },
+    async createIntegrationTicket() {
+      throw new Error("integration is not used");
+    },
   };
 }
 
@@ -872,17 +1029,19 @@ function providerTicket(): TicketRecord {
     targetNodeIds: ["provider-authority"],
     readPaths: ["."],
     writePaths: [],
-    steps: [{
-      id: "implement",
-      title: "Implement",
-      personaId: "implementer",
-      kind: "production",
-      status: "pending",
-      attemptIds: [],
-      summary: undefined,
-      startedAt: undefined,
-      completedAt: undefined,
-    }],
+    steps: [
+      {
+        id: "implement",
+        title: "Implement",
+        personaId: "implementer",
+        kind: "production",
+        status: "pending",
+        attemptIds: [],
+        summary: undefined,
+        startedAt: undefined,
+        completedAt: undefined,
+      },
+    ],
     worktreePath: undefined,
     branch: undefined,
     blocker: undefined,
@@ -892,12 +1051,16 @@ function providerTicket(): TicketRecord {
 }
 
 async function createRun(client: AuthorityClient): Promise<string> {
-  const created = await client.request("run.create", {
-    objective: "Verify provider authority lifecycle",
-    runTypeId: "small",
-    targetRef: "refs/heads/main",
-    intake: { goal: "Verify provider authority lifecycle" },
-  }, { expectedRevision: client.revision, idempotencyKey: `create-${Date.now()}-${Math.random()}` });
+  const created = await client.request(
+    "run.create",
+    {
+      objective: "Verify provider authority lifecycle",
+      runTypeId: "small",
+      targetRef: "refs/heads/main",
+      intake: { goal: "Verify provider authority lifecycle" },
+    },
+    { expectedRevision: client.revision, idempotencyKey: `create-${Date.now()}-${Math.random()}` },
+  );
   return (created.result as { runId: string }).runId;
 }
 
@@ -922,7 +1085,8 @@ async function guardedDeleteParams(
     canDeleteOwnedBranches: true,
   });
   expect(preview.previewToken).toEqual(expect.stringMatching(/^sha256:[a-f0-9]{64}$/u));
-  if (typeof preview.previewToken !== "string") throw new Error("deletion preview token is missing");
+  if (typeof preview.previewToken !== "string")
+    throw new Error("deletion preview token is missing");
   return {
     runId,
     mode: "delete_owned_branches",
@@ -972,8 +1136,8 @@ function git(cwd: string, ...argv: string[]): Promise<void> {
     const stderr: Buffer[] = [];
     child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
     child.once("error", reject);
-    child.once("close", (code) => code === 0
-      ? resolve()
-      : reject(new Error(Buffer.concat(stderr).toString("utf8"))));
+    child.once("close", (code) =>
+      code === 0 ? resolve() : reject(new Error(Buffer.concat(stderr).toString("utf8"))),
+    );
   });
 }

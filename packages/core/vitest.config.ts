@@ -2,8 +2,11 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    // Profile materialization and real Git worktree proofs contend under the full parallel suite.
-    // Semantic wait helpers retain their shorter operation-specific deadlines.
+    // Profile materialization, authority sockets, and real Git worktree proofs share OS-level
+    // resources. Run files sequentially so a release gate validates their behavior instead of
+    // racing independent stateful fixtures; semantic wait helpers retain their shorter
+    // operation-specific deadlines inside each file.
+    fileParallelism: false,
     testTimeout: 20_000,
     hookTimeout: 20_000,
   },

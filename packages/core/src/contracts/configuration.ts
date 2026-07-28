@@ -1,5 +1,6 @@
 import type { Sha256Digest } from "../shared/canonical.js";
 import type { PiResourceBindingCatalog } from "./pi-resources.js";
+import type { CompiledBehaviorIr } from "./behavior.js";
 
 export const PROFILE_CONFIGURATION_SCHEMA_VERSION = "2.0" as const;
 export const COMPILED_CONFIGURATION_PROTOCOL = "koni.compiled-configuration.v1" as const;
@@ -40,9 +41,7 @@ export type ConfigurationRegistryKind = (typeof CONFIGURATION_REGISTRY_KINDS)[nu
 
 export type ConfigurationScalar = null | boolean | number | string;
 export type ConfigurationValue =
-  | ConfigurationScalar
-  | ConfigurationObject
-  | readonly ConfigurationValue[];
+  ConfigurationScalar | ConfigurationObject | readonly ConfigurationValue[];
 
 export interface ConfigurationObject {
   readonly [key: string]: ConfigurationValue;
@@ -101,9 +100,7 @@ export interface CompiledConfigurationMaterial {
   readonly effective_bundle_sha256: Sha256Digest;
   readonly profile: ConfigurationObject;
   readonly project: ConfigurationObject;
-  readonly modules: Readonly<
-    Record<ProfileImportCategory, readonly CompiledProfileModule[]>
-  >;
+  readonly modules: Readonly<Record<ProfileImportCategory, readonly CompiledProfileModule[]>>;
   readonly run_type_order: readonly string[];
   readonly run_types: Readonly<Record<string, CompiledRunType>>;
   readonly agents: Readonly<Record<string, CompiledAgentResource>>;
@@ -111,6 +108,8 @@ export interface CompiledConfigurationMaterial {
   readonly pi_resource_bindings?: PiResourceBindingCatalog;
   readonly edge_types: readonly ConfigurationObject[];
   readonly registries: CompiledConfigurationRegistries;
+  /** Exact, hash-bound execution meaning derived from the editable configuration. */
+  readonly behavior: CompiledBehaviorIr;
 }
 
 /**

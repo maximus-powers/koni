@@ -55,8 +55,7 @@ export interface DurableReplayRecord<Result> {
 }
 
 export type GrantDecision<Result> =
-  | { kind: "accepted"; replayKey: string }
-  | { kind: "replay"; result: Result };
+  { kind: "accepted"; replayKey: string } | { kind: "replay"; result: Result };
 
 export class GrantRejectedError extends Error {
   public readonly code: string;
@@ -85,7 +84,10 @@ export class GrantLedger<Result> {
       throw new GrantRejectedError("grant_expired", "the assignment grant has expired");
     }
     if (!grant.allowedTools.includes(call.tool)) {
-      throw new GrantRejectedError("tool_scope", `tool ${call.tool} is outside the assignment grant`);
+      throw new GrantRejectedError(
+        "tool_scope",
+        `tool ${call.tool} is outside the assignment grant`,
+      );
     }
     if (snapshot.generation !== grant.generation || snapshot.generation !== call.generation) {
       throw new GrantRejectedError("stale_generation", "the run generation has changed");
@@ -95,7 +97,8 @@ export class GrantLedger<Result> {
     }
     if (
       call.expectedRevision < grant.expectedRevision ||
-      (call.expectedRevision === grant.expectedRevision && call.expectedStateHash !== grant.expectedStateHash)
+      (call.expectedRevision === grant.expectedRevision &&
+        call.expectedStateHash !== grant.expectedStateHash)
     ) {
       throw new GrantRejectedError("grant_anchor", "the call predates its immutable grant anchor");
     }
@@ -171,11 +174,19 @@ function validateIdentity(grant: AuthorityGrant, call: ToolCallBinding): void {
   ];
   for (const [name, expected, actual] of pairs) {
     if (expected !== actual) {
-      throw new GrantRejectedError("identity_mismatch", `${name} identity does not match the grant`);
+      throw new GrantRejectedError(
+        "identity_mismatch",
+        `${name} identity does not match the grant`,
+      );
     }
   }
 }
 
-function replayIdentity(grantId: string, epoch: number, generation: number, callId: string): string {
+function replayIdentity(
+  grantId: string,
+  epoch: number,
+  generation: number,
+  callId: string,
+): string {
   return `${grantId}\u0000${epoch}\u0000${generation}\u0000${callId}`;
 }

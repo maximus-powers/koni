@@ -33,24 +33,28 @@ function node(id: string, paths: string[], edges: string[] = []): GraphNode {
   };
 }
 
-function graph(): TypedGraph {
-  const schema = new GraphSchema({
-    nodeTypes: [{
-      id: "work",
-      description: "work",
-      statuses: ["open"],
-      initial_status: "open",
-      fields: { paths: { type: "list", items: { type: "path" } } },
-    }],
-    edgeTypes: [{ source: "work", relation: "links", targets: ["work"] }],
-  });
-  return new TypedGraph(schema, [
+function graph(
+  nodes: GraphNode[] = [
     node("active", ["src/active.ts"], ["near"]),
     node("near", ["src/near.ts"], ["far"]),
     node("far", ["src/far.ts"]),
     node("path-match", ["src/active.ts"]),
     node("unrelated", ["other/unrelated.ts"]),
-  ]);
+  ],
+): TypedGraph {
+  const schema = new GraphSchema({
+    nodeTypes: [
+      {
+        id: "work",
+        description: "work",
+        statuses: ["open"],
+        initial_status: "open",
+        fields: { paths: { type: "list", items: { type: "path" } } },
+      },
+    ],
+    edgeTypes: [{ source: "work", relation: "links", targets: ["work"] }],
+  });
+  return new TypedGraph(schema, nodes);
 }
 
 function baseline(runId: string, prior: GraphContextualState): WorkingSpecVersionRecord {
@@ -88,7 +92,12 @@ function baseline(runId: string, prior: GraphContextualState): WorkingSpecVersio
     guidance,
     affectedNodeIds: ["active"],
     repositoryPaths: ["src/active.ts"],
-    digest: workingSpecDigest({ baselineDigest, guidance, affectedNodeIds: ["active"], repositoryPaths: ["src/active.ts"] }),
+    digest: workingSpecDigest({
+      baselineDigest,
+      guidance,
+      affectedNodeIds: ["active"],
+      repositoryPaths: ["src/active.ts"],
+    }),
     provenance: {
       kind: "baseline",
       runId,
@@ -151,12 +160,48 @@ function noteRecord(
 function contextual(runId: string, graphValue: TypedGraph): GraphContextualState {
   const empty = createGraphContextualState("run-root-test", "lead");
   const spec = baseline(runId, empty);
-  const direct = noteRecord(runId, empty, graphValue, "note-direct", "active", "2026-01-05T00:00:00.000Z");
+  const direct = noteRecord(
+    runId,
+    empty,
+    graphValue,
+    "note-direct",
+    "active",
+    "2026-01-05T00:00:00.000Z",
+  );
   const old = noteRecord(runId, empty, graphValue, "note-old", "near", "2026-01-02T00:00:00.000Z");
-  const successor = noteRecord(runId, empty, graphValue, "note-new", "near", "2026-01-03T00:00:00.000Z", { supersedes: old.id });
-  const stale = noteRecord(runId, empty, graphValue, "note-stale", "near", "2026-01-06T00:00:00.000Z", { stale: true });
-  const wrongGeneration = noteRecord(runId, empty, graphValue, "note-generation", "near", "2026-01-07T00:00:00.000Z", { generation: 2 });
-  const records = Object.fromEntries([spec, direct, old, successor, stale, wrongGeneration].map((record) => [record.id, record]));
+  const successor = noteRecord(
+    runId,
+    empty,
+    graphValue,
+    "note-new",
+    "near",
+    "2026-01-03T00:00:00.000Z",
+    { supersedes: old.id },
+  );
+  const stale = noteRecord(
+    runId,
+    empty,
+    graphValue,
+    "note-stale",
+    "near",
+    "2026-01-06T00:00:00.000Z",
+    { stale: true },
+  );
+  const wrongGeneration = noteRecord(
+    runId,
+    empty,
+    graphValue,
+    "note-generation",
+    "active",
+    "2026-01-07T00:00:00.000Z",
+    {
+      generation: 2,
+      supersedes: direct.id,
+    },
+  );
+  const records = Object.fromEntries(
+    [spec, direct, old, successor, stale, wrongGeneration].map((record) => [record.id, record]),
+  );
   return sealGraphContextualState({
     protocol: empty.protocol,
     revision: 6,
@@ -165,15 +210,37 @@ function contextual(runId: string, graphValue: TypedGraph): GraphContextualState
     canonicalWorkingSpecId: spec.id,
     records,
     links: [
-      { sourceId: spec.id, relation: "context_for", targetKind: "run_root", targetId: empty.runRootId },
+      {
+        sourceId: spec.id,
+        relation: "context_for",
+        targetKind: "run_root",
+        targetId: empty.runRootId,
+      },
       { sourceId: spec.id, relation: "affects", targetKind: "semantic_node", targetId: "active" },
+      {
+        sourceId: spec.id,
+        relation: "references_path",
+        targetKind: "repository_path",
+        targetId: "src/active.ts",
+      },
       ...[direct, old, successor, stale, wrongGeneration].map((record) => ({
         sourceId: record.id,
         relation: "context_for" as const,
         targetKind: "semantic_node" as const,
         targetId: record.subject.id,
       })),
-      { sourceId: successor.id, relation: "supersedes", targetKind: "context_record", targetId: old.id },
+      {
+        sourceId: successor.id,
+        relation: "supersedes",
+        targetKind: "context_record",
+        targetId: old.id,
+      },
+      {
+        sourceId: wrongGeneration.id,
+        relation: "supersedes",
+        targetKind: "context_record",
+        targetId: direct.id,
+      },
     ],
   });
 }
@@ -200,48 +267,55 @@ function selectionInput(selectorGraph = graph()) {
     semanticHash: selectorGraph.hash,
     contextual: context,
     graph: selectorGraph,
-    nodePaths: Object.fromEntries(selectorGraph.nodes().map((value) => [value.id, selectorGraph.repositoryPaths(value.id)])),
-    legacyNotes: [{
-      protocol: "koni.graph-note.v1" as const,
-      id: "note-legacy-current",
-      runId,
-      ticketId: "ticket",
-      stepId: "step",
-      attemptId: "attempt",
-      sessionId: "session",
-      personaId: "worker",
-      nodeId: "active",
-      kind: "rationale" as const,
-      body: "Legacy graph-native compatibility note.",
-      status: "working" as const,
-      graphSha256: selectorGraph.hash,
-      nodeSha256: digest(selectorGraph.node("active")),
-      contextSha256: digest("assignment"),
-      launchSpecSha256: digest("launch"),
-      recordedAt: "2026-01-04T00:00:00.000Z",
-    }, {
-      protocol: "koni.graph-note.v1" as const,
-      id: "note-legacy-stale",
-      runId,
-      ticketId: "ticket",
-      stepId: "step",
-      attemptId: "attempt",
-      sessionId: "session",
-      personaId: "worker",
-      nodeId: "active",
-      kind: "rationale" as const,
-      body: "Stale legacy note.",
-      status: "working" as const,
-      graphSha256: selectorGraph.hash,
-      nodeSha256: digest("old-node"),
-      contextSha256: digest("assignment"),
-      launchSpecSha256: digest("launch"),
-      recordedAt: "2026-01-09T00:00:00.000Z",
-    }],
+    nodePaths: Object.fromEntries(
+      selectorGraph.nodes().map((value) => [value.id, selectorGraph.repositoryPaths(value.id)]),
+    ),
+    legacyNotes: [
+      {
+        protocol: "koni.graph-note.v1" as const,
+        id: "note-legacy-current",
+        runId,
+        ticketId: "ticket",
+        stepId: "step",
+        attemptId: "attempt",
+        sessionId: "session",
+        personaId: "worker",
+        nodeId: "active",
+        kind: "rationale" as const,
+        body: "Legacy graph-native compatibility note.",
+        status: "working" as const,
+        graphSha256: selectorGraph.hash,
+        nodeSha256: digest(selectorGraph.node("active")),
+        contextSha256: digest("assignment"),
+        launchSpecSha256: digest("launch"),
+        recordedAt: "2026-01-04T00:00:00.000Z",
+      },
+      {
+        protocol: "koni.graph-note.v1" as const,
+        id: "note-legacy-stale",
+        runId,
+        ticketId: "ticket",
+        stepId: "step",
+        attemptId: "attempt",
+        sessionId: "session",
+        personaId: "worker",
+        nodeId: "active",
+        kind: "rationale" as const,
+        body: "Stale legacy note.",
+        status: "working" as const,
+        graphSha256: selectorGraph.hash,
+        nodeSha256: digest("old-node"),
+        contextSha256: digest("assignment"),
+        launchSpecSha256: digest("launch"),
+        recordedAt: "2026-01-09T00:00:00.000Z",
+      },
+    ],
     ticketTargetIds: ["active"],
     stepTargetIds: ["active"],
     scopedPaths: ["src/active.ts"],
-    graphActivity: selectorGraph.nodes().map((value, index) => ({ nodeId: value.id, at: `2026-01-0${index + 1}T00:00:00.000Z` })),
+    graphActivity: selectorGraph
+      .nodes()
+      .map((value, index) => ({ nodeId: value.id, at: `2026-01-0${index + 1}T00:00:00.000Z` })),
     compatibleAttemptIds: new Set(["attempt"]),
     abandonedAttemptIds: new Set<string>(),
     maxInputTokens: 400_000,
@@ -270,31 +344,113 @@ describe("dynamic graph context selection", () => {
     expect(ids).not.toContain("change_note:note-generation");
     expect(ids).not.toContain("semantic_node:unrelated");
     expect(selected.envelope.budget.utf8Bytes).toBe(Buffer.byteLength(selected.content, "utf8"));
-    expect(selected.envelope.budget.estimatedTokens).toBe(Math.ceil(Buffer.byteLength(selected.content, "utf8") / 4));
+    expect(selected.envelope.budget.estimatedTokens).toBe(
+      Math.ceil(Buffer.byteLength(selected.content, "utf8") / 4),
+    );
   });
 
-  it("recomputes every selection, reuses an unchanged index, and keys a changed contextual state separately", () => {
+  it("recomputes every selection, reuses an unchanged durable index, and keys changed semantic state separately", () => {
     const selector = new DynamicGraphContextSelector();
     const input = selectionInput();
     selector.select(input);
-    selector.select(input);
+    selector.select({
+      ...input,
+      cacheKey: digest("an untrusted cache label is not coherence state"),
+    });
     expect(selector.stats()).toMatchObject({ selections: 2, indexBuilds: 1 });
 
-    selector.select({ ...input, cacheKey: digest([input.cacheKey, "changed"]) });
+    selector.select({ ...input, semanticRevision: input.semanticRevision + 1 });
     expect(selector.stats()).toMatchObject({ selections: 3, indexBuilds: 2 });
+  });
+
+  it("reranks mutable run activity without rebuilding the revision-keyed durable graph index", () => {
+    const selectorGraph = graph([
+      node("active", ["src/active.ts"], ["neighbor-a", "neighbor-b"]),
+      node("neighbor-a", ["src/a.ts"]),
+      node("neighbor-b", ["src/b.ts"]),
+      node("near", ["src/near.ts"]),
+    ]);
+    const selector = new DynamicGraphContextSelector();
+    const input = selectionInput(selectorGraph);
+    const first = selector.select({
+      ...input,
+      graphActivity: [
+        { nodeId: "neighbor-a", at: "2026-01-10T00:00:00.000Z" },
+        { nodeId: "neighbor-b", at: "2026-01-09T00:00:00.000Z" },
+      ],
+    });
+    const second = selector.select({
+      ...input,
+      graphActivity: [
+        { nodeId: "neighbor-a", at: "2026-01-10T00:00:00.000Z" },
+        { nodeId: "neighbor-b", at: "2026-01-11T00:00:00.000Z" },
+      ],
+    });
+    const neighborOrder = (selected: typeof first) =>
+      selected.envelope.selection.selected
+        .map((entry) => entry.id)
+        .filter((id) => id.startsWith("semantic_node:neighbor-"));
+
+    expect(neighborOrder(first)).toEqual(["semantic_node:neighbor-a", "semantic_node:neighbor-b"]);
+    expect(neighborOrder(second)).toEqual(["semantic_node:neighbor-b", "semantic_node:neighbor-a"]);
+    expect(selector.stats()).toMatchObject({ selections: 2, indexBuilds: 1 });
+  });
+
+  it("selects a deterministic nearest-first slice from a graph larger than the record budget", () => {
+    const chain = Array.from({ length: 320 }, (_, index) => {
+      const id = `chain-${String(index).padStart(3, "0")}`;
+      const next = index === 319 ? [] : [`chain-${String(index + 1).padStart(3, "0")}`];
+      return node(id, [`src/chain/${String(index).padStart(3, "0")}.ts`], next);
+    });
+    const largeGraph = graph([
+      node("active", ["src/active.ts"], ["near"]),
+      node("near", ["src/near.ts"], ["far"]),
+      node("far", ["src/far.ts"], ["chain-000"]),
+      ...chain,
+      node("path-match", ["src/active.ts"]),
+      node("unrelated", ["other/unrelated.ts"]),
+    ]);
+    const selector = new DynamicGraphContextSelector();
+    const selected = selector.select({
+      ...selectionInput(largeGraph),
+      scopedPaths: ["scope/without/spec-overlap"],
+    });
+    const ids = selected.envelope.selection.selected.map((entry) => entry.id);
+
+    expect(ids.slice(0, 3)).toEqual([
+      "working_spec:spec-current",
+      "run_objective:run-root-test",
+      "semantic_node:active",
+    ]);
+    expect(ids.indexOf("semantic_node:near")).toBeLessThan(ids.indexOf("semantic_node:far"));
+    expect(ids).toContain("semantic_node:chain-000");
+    expect(ids).not.toContain("semantic_node:chain-319");
+    expect(ids).not.toContain("semantic_node:unrelated");
+    expect(selected.envelope.records).toHaveLength(256);
+    expect(selected.envelope.selection.budgetOmissionCount).toBeGreaterThan(0);
+    expect(selected.envelope.selection.filteredCount).toBeGreaterThan(0);
+    expect(selected.envelope.budget.utf8Bytes).toBe(Buffer.byteLength(selected.content, "utf8"));
+    expect(selected.envelope.budget.estimatedTokens).toBe(
+      Math.ceil(Buffer.byteLength(selected.content, "utf8") / 4),
+    );
   });
 
   it("omits whole low-ranked records under all three limits and fails deterministically when mandatory content cannot fit", () => {
     const selector = new DynamicGraphContextSelector();
     const input = selectionInput();
     const bounded = selector.select({ ...input, maxInputTokens: 4_000 });
-    expect(bounded.envelope.records.map((record) => record.kind)).toEqual(expect.arrayContaining(["working_spec", "run_objective"]));
+    expect(bounded.envelope.records.map((record) => record.kind)).toEqual(
+      expect.arrayContaining(["working_spec", "run_objective"]),
+    );
     expect(bounded.envelope.budget.selectedRecords).toBeLessThanOrEqual(256);
     expect(bounded.envelope.budget.utf8Bytes).toBeLessThanOrEqual(bounded.envelope.budget.maxBytes);
-    expect(bounded.envelope.budget.estimatedTokens).toBeLessThanOrEqual(bounded.envelope.budget.maxEstimatedTokens);
+    expect(bounded.envelope.budget.estimatedTokens).toBeLessThanOrEqual(
+      bounded.envelope.budget.maxEstimatedTokens,
+    );
     expect(bounded.envelope.selection.budgetOmissionCount).toBeGreaterThan(0);
 
-    expect(() => selector.select({ ...input, maxInputTokens: 1 }))
-      .toThrowError(DynamicGraphContextBudgetError);
+    expect(() => selector.select({ ...input, maxInputTokens: 1 })).toThrowError(
+      DynamicGraphContextBudgetError,
+    );
   });
 });

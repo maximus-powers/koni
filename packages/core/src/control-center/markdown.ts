@@ -1,9 +1,7 @@
-import type { Theme } from "@earendil-works/pi-coding-agent";
-import {
-  Markdown,
-  type Component,
-  type MarkdownTheme,
-} from "@earendil-works/pi-tui";
+import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
+import { Markdown, type Component, type MarkdownTheme } from "@earendil-works/pi-tui";
+
+export type KoniChipTone = "info" | "warning" | "accent" | "success" | "error" | "muted";
 
 export interface KoniPalette {
   text(value: string): string;
@@ -20,6 +18,10 @@ export interface KoniPalette {
   bold(value: string): string;
   italic(value: string): string;
   underline(value: string): string;
+  /** Colored-background label used for compact status badges. */
+  chip(value: string, tone: KoniChipTone): string;
+  /** Subtle full-width background wash used to delimit chat message blocks. */
+  surface(value: string): string;
 }
 
 export const plainKoniPalette: KoniPalette = Object.freeze({
@@ -37,7 +39,18 @@ export const plainKoniPalette: KoniPalette = Object.freeze({
   bold: identity,
   italic: identity,
   underline: identity,
+  chip: identity,
+  surface: identity,
 });
+
+const CHIP_THEME_COLOR: Record<KoniChipTone, ThemeColor> = {
+  info: "customMessageText",
+  warning: "warning",
+  accent: "accent",
+  success: "success",
+  error: "error",
+  muted: "muted",
+};
 
 export function paletteFromPiTheme(theme: Theme): KoniPalette {
   return {
@@ -55,13 +68,25 @@ export function paletteFromPiTheme(theme: Theme): KoniPalette {
     bold: (value) => theme.bold(value),
     italic: (value) => theme.italic(value),
     underline: (value) => theme.underline(value),
+    chip: (value, tone) => theme.inverse(theme.fg(CHIP_THEME_COLOR[tone], ` ${value} `)),
+    surface: (value) => theme.bg("customMessageBg", value),
   };
 }
 
 export function ansiKoniPalette(enabled = process.env.NO_COLOR === undefined): KoniPalette {
   if (!enabled) return plainKoniPalette;
-  const sgr = (open: number, close: number) => (value: string): string =>
-    `\u001b[${open}m${value}\u001b[${close}m`;
+  const sgr =
+    (open: number, close: number) =>
+    (value: string): string =>
+      `\u001b[${open}m${value}\u001b[${close}m`;
+  const chipColor: Record<KoniChipTone, number> = {
+    info: 35,
+    warning: 33,
+    accent: 36,
+    success: 32,
+    error: 31,
+    muted: 90,
+  };
   return {
     text: sgr(37, 39),
     muted: sgr(90, 39),
@@ -77,6 +102,10 @@ export function ansiKoniPalette(enabled = process.env.NO_COLOR === undefined): K
     bold: sgr(1, 22),
     italic: sgr(3, 23),
     underline: sgr(4, 24),
+    chip: (value, tone) => `\u001b[7;${chipColor[tone]}m ${value} \u001b[27;39m`,
+    // Reopen the wash after any full SGR reset inside the value so the block stays contiguous.
+    surface: (value) =>
+      `\u001b[48;5;236m${value.replaceAll("\u001b[0m", "\u001b[0m\u001b[48;5;236m")}\u001b[49m`,
   };
 }
 
@@ -108,11 +137,7 @@ export class KoniMarkdown implements Component {
   }
 }
 
-export function renderKoniMarkdown(
-  text: string,
-  width: number,
-  palette: KoniPalette,
-): string[] {
+export function renderKoniMarkdown(text: string, width: number, palette: KoniPalette): string[] {
   return new KoniMarkdown(text, palette).render(width);
 }
 

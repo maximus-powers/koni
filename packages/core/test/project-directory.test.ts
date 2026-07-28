@@ -17,13 +17,18 @@ const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  await Promise.all(
+    temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+  );
 });
 
 describe("authenticated project directory compiler boundary", () => {
   it("compiles exact current bytes while excluding only compiler-owned state", async () => {
     const { root, projectRoot, baseline } = await installedProject("coding-profile");
-    await writeNested(join(projectRoot, ".koni/.managed/upstream/noise.txt"), "ignored managed bytes\n");
+    await writeNested(
+      join(projectRoot, ".koni/.managed/upstream/noise.txt"),
+      "ignored managed bytes\n",
+    );
     await writeNested(join(projectRoot, ".koni/runs/legacy/run.json"), "{}\n");
 
     const compiled = await compileProjectDirectory(projectRoot, baseline);
@@ -43,12 +48,22 @@ describe("authenticated project directory compiler boundary", () => {
     expect(original.ok, diagnostics(original)).toBe(true);
     if (!original.ok) return;
 
-    await writeFile(join(projectRoot, ".koni/project.yaml"), (
-      await readFile(join(projectRoot, ".koni/project.yaml"), "utf8")
-    ).replace("title: Software project", "title: Project-local software"));
+    await writeFile(
+      join(projectRoot, ".koni/project.yaml"),
+      (await readFile(join(projectRoot, ".koni/project.yaml"), "utf8")).replace(
+        "title: Software project",
+        "title: Project-local software",
+      ),
+    );
     await writeFile(join(projectRoot, ".koni/project-local.yaml"), "project_local: true\n");
-    await writeNested(join(projectRoot, ".koni/resources/skills/project-local/SKILL.md"), "# Local skill\n");
-    await writeNested(join(projectRoot, ".koni/prompts/project-local.md"), "Project-local prompt.\n");
+    await writeNested(
+      join(projectRoot, ".koni/resources/skills/project-local/SKILL.md"),
+      "# Local skill\n",
+    );
+    await writeNested(
+      join(projectRoot, ".koni/prompts/project-local.md"),
+      "Project-local prompt.\n",
+    );
     const agent = (await readFile(join(projectRoot, ".koni/agents/lead.yaml"), "utf8"))
       .replace("id: lead", "id: project-local-agent")
       .replace("description: Supervises", "description: Locally supervises");
@@ -66,7 +81,9 @@ describe("authenticated project directory compiler boundary", () => {
 
   it("requires trusted package provenance instead of trusting managed metadata", async () => {
     const { projectRoot } = await installedProject("coding-profile");
-    const wrongPackage = await loadProfilePackage(resolve(repositoryRoot, "packages", "research-profile"));
+    const wrongPackage = await loadProfilePackage(
+      resolve(repositoryRoot, "packages", "research-profile"),
+    );
     const result = await compileProjectDirectory(projectRoot, wrongPackage);
     expect(result.ok).toBe(false);
     expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toContain(
@@ -115,8 +132,12 @@ describe("authenticated project directory compiler boundary", () => {
     const configRoot = join(projectRoot, ".koni");
     let release!: () => void;
     let acquired!: () => void;
-    const acquiredPromise = new Promise<void>((resolve) => { acquired = resolve; });
-    const releasePromise = new Promise<void>((resolve) => { release = resolve; });
+    const acquiredPromise = new Promise<void>((resolve) => {
+      acquired = resolve;
+    });
+    const releasePromise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     const publication = withProfileLifecycleLock(configRoot, async () => {
       acquired();
       await releasePromise;
@@ -138,11 +159,13 @@ describe("authenticated project directory compiler boundary", () => {
     const { projectRoot, baseline } = await installedProject("coding-profile");
     const configRoot = join(projectRoot, ".koni");
     const store = await FileTransactionStore.open(configRoot);
-    await store.prepare("profile-race", [{
-      path: ".managed/recovery-marker.json",
-      bytes: Buffer.from("{}\n", "utf8"),
-      expectedSha256: null,
-    }]);
+    await store.prepare("profile-race", [
+      {
+        path: ".managed/recovery-marker.json",
+        bytes: Buffer.from("{}\n", "utf8"),
+        expectedSha256: null,
+      },
+    ]);
 
     const pending = await compileProjectDirectory(projectRoot, baseline);
     expect(pending.ok).toBe(false);
@@ -177,5 +200,7 @@ async function writeNested(file: string, contents: string): Promise<void> {
 }
 
 function diagnostics(result: ValidationResult<unknown>): string {
-  return result.diagnostics.map((diagnostic) => `${diagnostic.code} ${diagnostic.path}: ${diagnostic.message}`).join("\n");
+  return result.diagnostics
+    .map((diagnostic) => `${diagnostic.code} ${diagnostic.path}: ${diagnostic.message}`)
+    .join("\n");
 }

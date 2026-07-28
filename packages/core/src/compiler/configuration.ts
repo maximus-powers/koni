@@ -12,7 +12,6 @@ import {
   type CompiledRunType,
   type ConfigurationObject,
   type ConfigurationRegistryKind,
-  type ConfigurationValue,
   type ProfileImportCategory,
 } from "../contracts/configuration.js";
 import type { PiResourceBindingCatalog } from "../contracts/pi-resources.js";
@@ -65,15 +64,7 @@ const REQUIRED_IMPORT_CATEGORIES: readonly ProfileImportCategory[] = [
   "cockpit",
 ];
 
-const PI_THINKING_LEVELS = new Set([
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-]);
+const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const CONFIGURATION_ENGINE_VERSION = "0.1.0";
 
 const PROFILE_TOP_LEVEL_FIELDS = [
@@ -139,12 +130,7 @@ const RUN_OVERRIDE_ROOTS = new Set<string>(RUN_BEHAVIOR_FIELDS);
 const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
 
 type MutableConfigurationValue =
-  | null
-  | boolean
-  | number
-  | string
-  | MutableConfigurationObject
-  | MutableConfigurationValue[];
+  null | boolean | number | string | MutableConfigurationObject | MutableConfigurationValue[];
 
 interface MutableConfigurationObject {
   [key: string]: MutableConfigurationValue;
@@ -294,14 +280,14 @@ export function compileProjectConfiguration(
   validateCrossReferences(profile.document, runTypes, registryState, bag);
   const behavior = actionCatalog.ok
     ? compileConfigurationBehavior({
-      profile: profile.document,
-      project: project.document,
-      runTypeOrder: project.runTypeOrder,
-      runTypes: [...runTypes.values()],
-      agents,
-      personas: registryState.records.personas,
-      actions: actionCatalog.value,
-    })
+        profile: profile.document,
+        project: project.document,
+        runTypeOrder: project.runTypeOrder,
+        runTypes: [...runTypes.values()],
+        agents,
+        personas: registryState.records.personas,
+        actions: actionCatalog.value,
+      })
     : undefined;
   if (behavior !== undefined) bag.extend(behavior.diagnostics);
   if (bag.hasErrors()) {
@@ -313,7 +299,7 @@ export function compileProjectConfiguration(
 
   const immutableModules = createCategoryRecord<readonly CompiledProfileModule[]>(() => []);
   for (const category of PROFILE_IMPORT_CATEGORIES) {
-    immutableModules[category] = modules[category] as readonly CompiledProfileModule[];
+    immutableModules[category] = modules[category];
   }
   const runTypeRecord: Record<string, CompiledRunType> = Object.create(null) as Record<
     string,
@@ -407,11 +393,19 @@ function verifyEffectiveProjectFiles(
 }> {
   const bag = new DiagnosticBag();
   if (!Array.isArray(files)) {
-    bag.error("project_files.inventory", "/project_files", "project file inventory must be an array");
+    bag.error(
+      "project_files.inventory",
+      "/project_files",
+      "project file inventory must be an array",
+    );
     return validationFailure(bag.sorted());
   }
   if (files.length === 0 || files.length > MAX_EFFECTIVE_FILES) {
-    bag.error("project_files.count", "/project_files", "project file inventory has an invalid number of entries");
+    bag.error(
+      "project_files.count",
+      "/project_files",
+      "project file inventory has an invalid number of entries",
+    );
   }
   const normalized: ProfileBaselineFile[] = [];
   const expected = new Set<string>();
@@ -424,7 +418,11 @@ function verifyEffectiveProjectFiles(
     }
     for (const key of Object.keys(unknownFile)) {
       if (!["path", "sha256", "size_bytes", "kind"].includes(key)) {
-        bag.error("project_files.unknown_field", pointer(pathRoot, key), "project file descriptor contains an unknown field");
+        bag.error(
+          "project_files.unknown_field",
+          pointer(pathRoot, key),
+          "project file descriptor contains an unknown field",
+        );
       }
     }
     const path = unknownFile.path;
@@ -432,25 +430,52 @@ function verifyEffectiveProjectFiles(
     const sizeBytes = unknownFile.size_bytes;
     const kind = unknownFile.kind;
     if (typeof path !== "string" || !isNormalizedSafeRelativePath(path)) {
-      bag.error("project_files.path", pointer(pathRoot, "path"), "project file path is not a safe normalized relative path");
+      bag.error(
+        "project_files.path",
+        pointer(pathRoot, "path"),
+        "project file path is not a safe normalized relative path",
+      );
       continue;
     }
     if (previousPath !== undefined && compareUtf8(previousPath, path) >= 0) {
-      bag.error("project_files.order", pointer(pathRoot, "path"), "project file descriptors must be unique and UTF-8 sorted");
+      bag.error(
+        "project_files.order",
+        pointer(pathRoot, "path"),
+        "project file descriptors must be unique and UTF-8 sorted",
+      );
     }
     previousPath = path;
     if (expected.has(path)) {
-      bag.error("project_files.duplicate", pointer(pathRoot, "path"), "project file path is duplicated");
+      bag.error(
+        "project_files.duplicate",
+        pointer(pathRoot, "path"),
+        "project file path is duplicated",
+      );
     }
     expected.add(path);
     if (!isSha256Digest(sha256)) {
-      bag.error("project_files.sha256", pointer(pathRoot, "sha256"), "project file digest must be canonical SHA-256");
+      bag.error(
+        "project_files.sha256",
+        pointer(pathRoot, "sha256"),
+        "project file digest must be canonical SHA-256",
+      );
     }
     if (!Number.isSafeInteger(sizeBytes) || typeof sizeBytes !== "number" || sizeBytes < 0) {
-      bag.error("project_files.size", pointer(pathRoot, "size_bytes"), "project file size must be a nonnegative safe integer");
+      bag.error(
+        "project_files.size",
+        pointer(pathRoot, "size_bytes"),
+        "project file size must be a nonnegative safe integer",
+      );
     }
-    if (typeof kind !== "string" || !EFFECTIVE_FILE_KINDS.has(kind as ProfileBaselineFile["kind"])) {
-      bag.error("project_files.kind", pointer(pathRoot, "kind"), "project file kind is not supported");
+    if (
+      typeof kind !== "string" ||
+      !EFFECTIVE_FILE_KINDS.has(kind as ProfileBaselineFile["kind"])
+    ) {
+      bag.error(
+        "project_files.kind",
+        pointer(pathRoot, "kind"),
+        "project file kind is not supported",
+      );
     }
     if (
       isSha256Digest(sha256) &&
@@ -475,25 +500,45 @@ function verifyEffectiveProjectFiles(
     for (const [path, value] of contents) {
       actualCount += 1;
       if (actualCount > MAX_EFFECTIVE_FILES) {
-        bag.error("project_files.count", "/project_files", "project file content map exceeds the configured entry limit");
+        bag.error(
+          "project_files.count",
+          "/project_files",
+          "project file content map exceeds the configured entry limit",
+        );
         break;
       }
       if (typeof path !== "string" || !isNormalizedSafeRelativePath(path)) {
-        bag.error("project_files.content_path", "/project_files", "project file content map contains an unsafe path");
+        bag.error(
+          "project_files.content_path",
+          "/project_files",
+          "project file content map contains an unsafe path",
+        );
         continue;
       }
       if (!(value instanceof Uint8Array)) {
-        bag.error("project_files.content_type", pointer("/project_files", path), "project file content must be a byte array");
+        bag.error(
+          "project_files.content_type",
+          pointer("/project_files", path),
+          "project file content must be a byte array",
+        );
         continue;
       }
       const bytes = Uint8Array.from(value);
       copied.set(path, bytes);
       if (!expected.has(path)) {
-        bag.error("project_files.unexpected", pointer("/project_files", path), "project file content is not present in the authenticated inventory");
+        bag.error(
+          "project_files.unexpected",
+          pointer("/project_files", path),
+          "project file content is not present in the authenticated inventory",
+        );
       }
     }
   } catch {
-    bag.error("project_files.contents", "/project_files", "project file content map could not be read safely");
+    bag.error(
+      "project_files.contents",
+      "/project_files",
+      "project file content map could not be read safely",
+    );
   }
 
   const descriptors = new Map(normalized.map((file) => [file.path, file] as const));
@@ -502,15 +547,27 @@ function verifyEffectiveProjectFiles(
     const bytes = copied.get(path);
     if (descriptor === undefined || bytes === undefined) {
       if (bytes === undefined) {
-        bag.error("project_files.missing", pointer("/project_files", path), "authenticated project file content is missing");
+        bag.error(
+          "project_files.missing",
+          pointer("/project_files", path),
+          "authenticated project file content is missing",
+        );
       }
       continue;
     }
     if (bytes.byteLength !== descriptor.size_bytes) {
-      bag.error("project_files.size_mismatch", pointer("/project_files", path), "project file size does not match its authenticated inventory");
+      bag.error(
+        "project_files.size_mismatch",
+        pointer("/project_files", path),
+        "project file size does not match its authenticated inventory",
+      );
     }
     if (rawSha256(bytes) !== descriptor.sha256) {
-      bag.error("project_files.hash_mismatch", pointer("/project_files", path), "project file digest does not match its authenticated inventory");
+      bag.error(
+        "project_files.hash_mismatch",
+        pointer("/project_files", path),
+        "project file digest does not match its authenticated inventory",
+      );
     }
   }
   if (bag.hasErrors()) {
@@ -531,22 +588,38 @@ function createLoader(
     if (existing !== undefined) {
       const descriptor = filesByPath.get(path);
       if (descriptor?.kind !== kind) {
-        bag.error("configuration.file_kind", fileRoot(path), "configuration file has the wrong manifest kind");
+        bag.error(
+          "configuration.file_kind",
+          fileRoot(path),
+          "configuration file has the wrong manifest kind",
+        );
         return undefined;
       }
       return existing;
     }
     if (!isNormalizedSafeRelativePath(path)) {
-      bag.error("configuration.path", fileRoot(path), "configuration path is not a safe normalized relative path");
+      bag.error(
+        "configuration.path",
+        fileRoot(path),
+        "configuration path is not a safe normalized relative path",
+      );
       return undefined;
     }
     const descriptor = filesByPath.get(path);
     if (descriptor === undefined) {
-      bag.error("configuration.unlisted_file", fileRoot(path), "configuration path is not authenticated by the package manifest");
+      bag.error(
+        "configuration.unlisted_file",
+        fileRoot(path),
+        "configuration path is not authenticated by the package manifest",
+      );
       return undefined;
     }
     if (descriptor.kind !== kind) {
-      bag.error("configuration.file_kind", fileRoot(path), "configuration file has the wrong manifest kind");
+      bag.error(
+        "configuration.file_kind",
+        fileRoot(path),
+        "configuration file has the wrong manifest kind",
+      );
       return undefined;
     }
     const bytes = baseline.files.get(path);
@@ -591,20 +664,29 @@ function validateProfileDocument(
   file: LoadedConfigurationFile,
   baseline: VerifiedProfileBaseline,
   bag: DiagnosticBag,
-): {
-  document: MutableConfigurationObject;
-  imports: Record<ProfileImportCategory, string[]>;
-} | undefined {
+):
+  | {
+      document: MutableConfigurationObject;
+      imports: Record<ProfileImportCategory, string[]>;
+    }
+  | undefined {
   const rootPath = fileRoot(file.path);
   const root = exactRecord(file.document, rootPath, PROFILE_TOP_LEVEL_FIELDS, bag);
   const schemaVersion = requiredString(root, "schema_version", rootPath, bag);
   if (schemaVersion !== undefined && schemaVersion !== PROFILE_CONFIGURATION_SCHEMA_VERSION) {
-    bag.error("configuration.schema_version", pointer(rootPath, "schema_version"), "profile schema version is not supported");
+    bag.error(
+      "configuration.schema_version",
+      pointer(rootPath, "schema_version"),
+      "profile schema version is not supported",
+    );
   }
   const engine = requiredString(root, "engine", rootPath, bag);
   if (engine !== undefined) {
     const normalizedRange = engine.replaceAll(",", " ");
-    if (validRange(normalizedRange) === null || !satisfies(CONFIGURATION_ENGINE_VERSION, normalizedRange)) {
+    if (
+      validRange(normalizedRange) === null ||
+      !satisfies(CONFIGURATION_ENGINE_VERSION, normalizedRange)
+    ) {
       bag.error(
         "configuration.engine_range",
         pointer(rootPath, "engine"),
@@ -620,20 +702,30 @@ function validateProfileDocument(
     ["id", "version", "description"],
     bag,
   );
-  const profileId = identity === undefined
-    ? undefined
-    : requiredString(identity, "id", pointer(rootPath, "profile"), bag);
-  const profileVersion = identity === undefined
-    ? undefined
-    : requiredString(identity, "version", pointer(rootPath, "profile"), bag);
+  const profileId =
+    identity === undefined
+      ? undefined
+      : requiredString(identity, "id", pointer(rootPath, "profile"), bag);
+  const profileVersion =
+    identity === undefined
+      ? undefined
+      : requiredString(identity, "version", pointer(rootPath, "profile"), bag);
   if (identity !== undefined && identity.description !== undefined) {
     optionalString(identity, "description", pointer(rootPath, "profile"), bag);
   }
   if (profileId !== undefined && profileId !== baseline.manifest.profile.id) {
-    bag.error("configuration.profile_id", `${rootPath}/profile/id`, "profile id does not match the package manifest");
+    bag.error(
+      "configuration.profile_id",
+      `${rootPath}/profile/id`,
+      "profile id does not match the package manifest",
+    );
   }
   if (profileVersion !== undefined && profileVersion !== baseline.manifest.profile.version) {
-    bag.error("configuration.profile_version", `${rootPath}/profile/version`, "profile version does not match the package manifest");
+    bag.error(
+      "configuration.profile_version",
+      `${rootPath}/profile/version`,
+      "profile version does not match the package manifest",
+    );
   }
 
   for (const field of ["initialization", "git", "orchestration"] as const) {
@@ -661,7 +753,11 @@ function validateProfileDocument(
     const value = importsRecord[category];
     if (value === undefined) {
       if (REQUIRED_IMPORT_CATEGORIES.includes(category)) {
-        bag.error("configuration.missing_import", pointer(pointer(rootPath, "imports"), category), "required profile import category is missing");
+        bag.error(
+          "configuration.missing_import",
+          pointer(pointer(rootPath, "imports"), category),
+          "required profile import category is missing",
+        );
       }
       continue;
     }
@@ -670,16 +766,28 @@ function validateProfileDocument(
       continue;
     }
     if (paths.length === 0 && REQUIRED_IMPORT_CATEGORIES.includes(category)) {
-      bag.error("configuration.empty_import", pointer(pointer(rootPath, "imports"), category), "required profile import category must not be empty");
+      bag.error(
+        "configuration.empty_import",
+        pointer(pointer(rootPath, "imports"), category),
+        "required profile import category must not be empty",
+      );
     }
     for (const [index, path] of paths.entries()) {
       const location = pointer(pointer(pointer(rootPath, "imports"), category), index);
       if (!isNormalizedSafeRelativePath(path)) {
-        bag.error("configuration.import_path", location, "profile import is not a safe normalized relative path");
+        bag.error(
+          "configuration.import_path",
+          location,
+          "profile import is not a safe normalized relative path",
+        );
         continue;
       }
       if (seenPaths.has(path)) {
-        bag.error("configuration.duplicate_import", location, "profile import path is referenced more than once");
+        bag.error(
+          "configuration.duplicate_import",
+          location,
+          "profile import path is referenced more than once",
+        );
         continue;
       }
       seenPaths.add(path);
@@ -700,12 +808,14 @@ function validateProfileDocument(
 function validateProjectDocument(
   file: LoadedConfigurationFile,
   bag: DiagnosticBag,
-): {
-  document: MutableConfigurationObject;
-  defaultRunType: string;
-  runTypeOrder: string[];
-  entries: Map<string, string>;
-} | undefined {
+):
+  | {
+      document: MutableConfigurationObject;
+      defaultRunType: string;
+      runTypeOrder: string[];
+      entries: Map<string, string>;
+    }
+  | undefined {
   const rootPath = fileRoot(file.path);
   const root = exactRecord(
     file.document,
@@ -715,9 +825,19 @@ function validateProjectDocument(
   );
   const schemaVersion = requiredString(root, "schema_version", rootPath, bag);
   if (schemaVersion !== undefined && schemaVersion !== PROFILE_CONFIGURATION_SCHEMA_VERSION) {
-    bag.error("configuration.schema_version", pointer(rootPath, "schema_version"), "project schema version is not supported");
+    bag.error(
+      "configuration.schema_version",
+      pointer(rootPath, "schema_version"),
+      "project schema version is not supported",
+    );
   }
-  const project = requiredExactRecord(root, "project", rootPath, ["id", "title", "description"], bag);
+  const project = requiredExactRecord(
+    root,
+    "project",
+    rootPath,
+    ["id", "title", "description"],
+    bag,
+  );
   if (project !== undefined) {
     requiredIdentifier(project, "id", pointer(rootPath, "project"), bag);
     requiredString(project, "title", pointer(rootPath, "project"), bag);
@@ -733,7 +853,11 @@ function validateProjectDocument(
   const runTypeOrder: string[] = [];
   if (entriesArray !== undefined) {
     if (entriesArray.length === 0) {
-      bag.error("configuration.empty_run_types", pointer(rootPath, "run_types"), "project catalog must contain at least one run type");
+      bag.error(
+        "configuration.empty_run_types",
+        pointer(rootPath, "run_types"),
+        "project catalog must contain at least one run type",
+      );
     }
     for (const [index, value] of entriesArray.entries()) {
       const entryPath = pointer(pointer(rootPath, "run_types"), index);
@@ -744,15 +868,27 @@ function validateProjectDocument(
         continue;
       }
       if (!isNormalizedSafeRelativePath(path)) {
-        bag.error("configuration.run_type_path", pointer(entryPath, "path"), "run type path is not a safe normalized relative path");
+        bag.error(
+          "configuration.run_type_path",
+          pointer(entryPath, "path"),
+          "run type path is not a safe normalized relative path",
+        );
         continue;
       }
       if (entries.has(id)) {
-        bag.error("configuration.duplicate_run_type", pointer(entryPath, "id"), "run type id is duplicated in the project catalog");
+        bag.error(
+          "configuration.duplicate_run_type",
+          pointer(entryPath, "id"),
+          "run type id is duplicated in the project catalog",
+        );
         continue;
       }
       if (seenPaths.has(path)) {
-        bag.error("configuration.duplicate_run_type_path", pointer(entryPath, "path"), "run type path is referenced more than once");
+        bag.error(
+          "configuration.duplicate_run_type_path",
+          pointer(entryPath, "path"),
+          "run type path is referenced more than once",
+        );
         continue;
       }
       entries.set(id, path);
@@ -761,7 +897,11 @@ function validateProjectDocument(
     }
   }
   if (defaultRunType !== undefined && !entries.has(defaultRunType)) {
-    bag.error("configuration.default_run_type", pointer(rootPath, "default_run_type"), "default run type is not present in the project catalog");
+    bag.error(
+      "configuration.default_run_type",
+      pointer(rootPath, "default_run_type"),
+      "default run type is not present in the project catalog",
+    );
   }
   if (
     bag.hasErrors() ||
@@ -809,25 +949,38 @@ function validateModuleDocument(
 ): MutableCompiledModule | undefined {
   const rootPath = fileRoot(file.path);
   const payloadKeys = MODULE_PAYLOADS[category];
-  const hasEnvelope = file.document.schema_version !== undefined || file.document.module !== undefined;
+  const hasEnvelope =
+    file.document.schema_version !== undefined || file.document.module !== undefined;
   const allowed = hasEnvelope ? ["schema_version", "module", ...payloadKeys] : payloadKeys;
   const root = exactRecord(file.document, rootPath, allowed, bag);
   let moduleIdentity: { id: string; version: string } | undefined;
   if (hasEnvelope) {
     const schemaVersion = requiredString(root, "schema_version", rootPath, bag);
     if (schemaVersion !== undefined && schemaVersion !== PROFILE_CONFIGURATION_SCHEMA_VERSION) {
-      bag.error("configuration.schema_version", pointer(rootPath, "schema_version"), "module schema version is not supported");
+      bag.error(
+        "configuration.schema_version",
+        pointer(rootPath, "schema_version"),
+        "module schema version is not supported",
+      );
     }
     const identity = requiredExactRecord(root, "module", rootPath, ["id", "version"], bag);
     if (identity !== undefined) {
       const id = requiredIdentifier(identity, "id", pointer(rootPath, "module"), bag);
       const version = requiredString(identity, "version", pointer(rootPath, "module"), bag);
       if (version !== undefined && valid(version) === null) {
-        bag.error("configuration.module_version", `${rootPath}/module/version`, "module version must be exact semantic versioning");
+        bag.error(
+          "configuration.module_version",
+          `${rootPath}/module/version`,
+          "module version must be exact semantic versioning",
+        );
       }
       if (id !== undefined) {
         if (moduleIds.has(id)) {
-          bag.error("configuration.duplicate_module", `${rootPath}/module/id`, "module id is duplicated across profile imports");
+          bag.error(
+            "configuration.duplicate_module",
+            `${rootPath}/module/id`,
+            "module id is duplicated across profile imports",
+          );
         } else {
           moduleIds.add(id);
         }
@@ -852,7 +1005,11 @@ function validateModuleDocument(
     registerPayloadItems(payloadKey, items, rootPath, registryState, bag);
   }
   if (payloadCount === 0) {
-    bag.error("configuration.empty_module", rootPath, "profile module contains no payload for its import category");
+    bag.error(
+      "configuration.empty_module",
+      rootPath,
+      "profile module contains no payload for its import category",
+    );
   }
   if (bag.hasErrors()) {
     return undefined;
@@ -886,7 +1043,11 @@ function registerPayloadItems(
       if (source !== undefined && relation !== undefined) {
         const key = JSON.stringify([source, relation]);
         if (state.edgeKeys.has(key)) {
-          bag.error("configuration.duplicate_edge_type", itemPath, "edge type source and relation are duplicated");
+          bag.error(
+            "configuration.duplicate_edge_type",
+            itemPath,
+            "edge type source and relation are duplicated",
+          );
         } else {
           state.edgeKeys.add(key);
           state.edgeTypes.push(edge);
@@ -912,7 +1073,11 @@ function registerPayloadItems(
       continue;
     }
     if (registry.has(id)) {
-      bag.error("configuration.duplicate_id", pointer(itemPath, "id"), `duplicate ${registryKind} id`);
+      bag.error(
+        "configuration.duplicate_id",
+        pointer(itemPath, "id"),
+        `duplicate ${registryKind} id`,
+      );
       continue;
     }
     registry.set(id, item);
@@ -955,7 +1120,11 @@ function loadAgentResources(
     );
     const schemaVersion = requiredString(root, "schema_version", rootPath, bag);
     if (schemaVersion !== undefined && schemaVersion !== PROFILE_CONFIGURATION_SCHEMA_VERSION) {
-      bag.error("configuration.schema_version", pointer(rootPath, "schema_version"), "agent schema version is not supported");
+      bag.error(
+        "configuration.schema_version",
+        pointer(rootPath, "schema_version"),
+        "agent schema version is not supported",
+      );
     }
     const id = requiredIdentifier(root, "id", rootPath, bag);
     requiredString(root, "description", rootPath, bag);
@@ -971,18 +1140,39 @@ function loadAgentResources(
       if (source === "inline") {
         requiredString(instructions, "text", pointer(rootPath, "instructions"), bag);
         if (instructions.path !== undefined) {
-          bag.error("configuration.agent_instructions", `${rootPath}/instructions/path`, "inline agent instructions must not declare a path");
+          bag.error(
+            "configuration.agent_instructions",
+            `${rootPath}/instructions/path`,
+            "inline agent instructions must not declare a path",
+          );
         }
       } else if (source === "file") {
-        const instructionPath = requiredString(instructions, "path", pointer(rootPath, "instructions"), bag);
+        const instructionPath = requiredString(
+          instructions,
+          "path",
+          pointer(rootPath, "instructions"),
+          bag,
+        );
         if (instructionPath !== undefined && !isNormalizedSafeRelativePath(instructionPath)) {
-          bag.error("configuration.agent_instruction_path", `${rootPath}/instructions/path`, "agent instruction path is not safe and normalized");
+          bag.error(
+            "configuration.agent_instruction_path",
+            `${rootPath}/instructions/path`,
+            "agent instruction path is not safe and normalized",
+          );
         }
         if (instructions.text !== undefined) {
-          bag.error("configuration.agent_instructions", `${rootPath}/instructions/text`, "file agent instructions must not contain inline text");
+          bag.error(
+            "configuration.agent_instructions",
+            `${rootPath}/instructions/text`,
+            "file agent instructions must not contain inline text",
+          );
         }
       } else if (source !== undefined) {
-        bag.error("configuration.agent_instructions", `${rootPath}/instructions/source`, "agent instruction source is not supported");
+        bag.error(
+          "configuration.agent_instructions",
+          `${rootPath}/instructions/source`,
+          "agent instruction source is not supported",
+        );
       }
     }
     requiredString(root, "provider", rootPath, bag);
@@ -1060,7 +1250,11 @@ function validateRunTypeSource(
   const root = exactRecord(file.document, rootPath, RUN_SOURCE_FIELDS, bag);
   const schemaVersion = requiredString(root, "schema_version", rootPath, bag);
   if (schemaVersion !== undefined && schemaVersion !== PROFILE_CONFIGURATION_SCHEMA_VERSION) {
-    bag.error("configuration.schema_version", pointer(rootPath, "schema_version"), "run type schema version is not supported");
+    bag.error(
+      "configuration.schema_version",
+      pointer(rootPath, "schema_version"),
+      "run type schema version is not supported",
+    );
   }
   const id = requiredIdentifier(root, "id", rootPath, bag);
   requiredString(root, "title", rootPath, bag);
@@ -1068,32 +1262,49 @@ function validateRunTypeSource(
     optionalString(root, "description", rootPath, bag);
   }
   if (id !== undefined && id !== catalogId) {
-    bag.error("configuration.run_type_id", pointer(rootPath, "id"), "run type document id does not match its catalog entry");
+    bag.error(
+      "configuration.run_type_id",
+      pointer(rootPath, "id"),
+      "run type document id does not match its catalog entry",
+    );
   }
 
-  const parent = root.extends === undefined
-    ? undefined
-    : optionalIdentifier(root, "extends", rootPath, bag);
-  const overrides = root.overrides === undefined
-    ? []
-    : expectArray(root.overrides, pointer(rootPath, "overrides"), bag);
+  const parent =
+    root.extends === undefined ? undefined : optionalIdentifier(root, "extends", rootPath, bag);
+  const overrides =
+    root.overrides === undefined
+      ? []
+      : expectArray(root.overrides, pointer(rootPath, "overrides"), bag);
   if (parent !== undefined) {
     const inline = RUN_BEHAVIOR_FIELDS.filter((field) => root[field] !== undefined);
     if (inline.length > 0) {
-      bag.error("configuration.derived_inline_behavior", rootPath, "derived run type may alter behavior only through overrides");
+      bag.error(
+        "configuration.derived_inline_behavior",
+        rootPath,
+        "derived run type may alter behavior only through overrides",
+      );
     }
     if (overrides !== undefined) {
       overrides.forEach((override, index) =>
-        validateOverrideShape(override, pointer(pointer(rootPath, "overrides"), index), bag));
+        validateOverrideShape(override, pointer(pointer(rootPath, "overrides"), index), bag),
+      );
     }
   } else {
     if (overrides !== undefined && overrides.length > 0) {
-      bag.error("configuration.base_overrides", pointer(rootPath, "overrides"), "base run type may not declare overrides");
+      bag.error(
+        "configuration.base_overrides",
+        pointer(rootPath, "overrides"),
+        "base run type may not declare overrides",
+      );
     }
     const behavior = extractBehavior(root);
     validateRunBehavior(behavior, rootPath, bag);
   }
-  if (bag.hasErrors() || schemaVersion !== PROFILE_CONFIGURATION_SCHEMA_VERSION || id !== catalogId) {
+  if (
+    bag.hasErrors() ||
+    schemaVersion !== PROFILE_CONFIGURATION_SCHEMA_VERSION ||
+    id !== catalogId
+  ) {
     return undefined;
   }
   return root;
@@ -1112,23 +1323,36 @@ function resolveRunType(
   }
   const cycleIndex = visiting.indexOf(id);
   if (cycleIndex >= 0) {
-    bag.error("configuration.run_type_cycle", "/run_types", `run type inheritance cycle: ${[...visiting.slice(cycleIndex), id].join(" -> ")}`);
+    bag.error(
+      "configuration.run_type_cycle",
+      "/run_types",
+      `run type inheritance cycle: ${[...visiting.slice(cycleIndex), id].join(" -> ")}`,
+    );
     return undefined;
   }
   const source = sources.get(id);
   if (source === undefined) {
-    bag.error("configuration.missing_run_type", pointer("/run_types", id), "run type source is missing");
+    bag.error(
+      "configuration.missing_run_type",
+      pointer("/run_types", id),
+      "run type source is missing",
+    );
     return undefined;
   }
   visiting.push(id);
   const rootPath = fileRoot(source.path);
-  const parentId = typeof source.document.extends === "string" ? source.document.extends : undefined;
+  const parentId =
+    typeof source.document.extends === "string" ? source.document.extends : undefined;
   let behavior: MutableConfigurationObject;
   let ancestry: string[];
   let description: string | undefined;
   if (parentId !== undefined) {
     if (!sources.has(parentId)) {
-      bag.error("configuration.missing_run_type_parent", pointer(rootPath, "extends"), "derived run type parent is not present in the project catalog");
+      bag.error(
+        "configuration.missing_run_type_parent",
+        pointer(rootPath, "extends"),
+        "derived run type parent is not present in the project catalog",
+      );
       visiting.pop();
       return undefined;
     }
@@ -1139,24 +1363,21 @@ function resolveRunType(
     }
     behavior = cloneObject(extractBehavior(parent.document));
     ancestry = [...parent.ancestry, parent.id];
-    description = typeof source.document.description === "string"
-      ? source.document.description
-      : typeof parent.document.description === "string"
-        ? parent.document.description
-        : undefined;
+    description =
+      typeof source.document.description === "string"
+        ? source.document.description
+        : typeof parent.document.description === "string"
+          ? parent.document.description
+          : undefined;
     const overrides = Array.isArray(source.document.overrides) ? source.document.overrides : [];
     for (const [index, override] of overrides.entries()) {
-      applyRunTypeOverride(
-        behavior,
-        override,
-        pointer(pointer(rootPath, "overrides"), index),
-        bag,
-      );
+      applyRunTypeOverride(behavior, override, pointer(pointer(rootPath, "overrides"), index), bag);
     }
   } else {
     behavior = cloneObject(extractBehavior(source.document));
     ancestry = [];
-    description = typeof source.document.description === "string" ? source.document.description : undefined;
+    description =
+      typeof source.document.description === "string" ? source.document.description : undefined;
   }
   validateRunBehavior(behavior, rootPath, bag);
   if (bag.hasErrors()) {
@@ -1205,20 +1426,36 @@ function validateOverrideShape(
   const operation = requiredString(override, "op", path, bag);
   const pointerValue = requiredString(override, "path", path, bag);
   if (operation !== undefined && !["merge", "replace", "remove"].includes(operation)) {
-    bag.error("configuration.override_operation", pointer(path, "op"), "run type override operation is not supported");
+    bag.error(
+      "configuration.override_operation",
+      pointer(path, "op"),
+      "run type override operation is not supported",
+    );
   }
   if (operation === "remove" && override.value !== undefined) {
-    bag.error("configuration.override_value", pointer(path, "value"), "remove override must not include a value");
+    bag.error(
+      "configuration.override_value",
+      pointer(path, "value"),
+      "remove override must not include a value",
+    );
   }
   if ((operation === "merge" || operation === "replace") && override.value === undefined) {
-    bag.error("configuration.override_value", pointer(path, "value"), "override operation requires a value");
+    bag.error(
+      "configuration.override_value",
+      pointer(path, "value"),
+      "override operation requires a value",
+    );
   }
   if (pointerValue !== undefined) {
     const decoded = decodeJsonPointer(pointerValue);
     if (!decoded.ok) {
       bag.error("configuration.override_path", pointer(path, "path"), decoded.message);
     } else if (!RUN_OVERRIDE_ROOTS.has(decoded.segments[0] ?? "")) {
-      bag.error("configuration.override_path", pointer(path, "path"), "override pointer root is not a run type behavior field");
+      bag.error(
+        "configuration.override_path",
+        pointer(path, "path"),
+        "override pointer root is not a run type behavior field",
+      );
     }
   }
   return override;
@@ -1251,13 +1488,21 @@ function applyRunTypeOverride(
   for (const segment of decoded.segments.slice(0, -1)) {
     const child = parent[segment];
     if (!isMutableRecord(child)) {
-      bag.error("configuration.override_target", pointer(path, "path"), "override pointer traverses a missing or non-object value");
+      bag.error(
+        "configuration.override_target",
+        pointer(path, "path"),
+        "override pointer traverses a missing or non-object value",
+      );
       return;
     }
     parent = child;
   }
   if (!Object.hasOwn(parent, final)) {
-    bag.error("configuration.override_target", pointer(path, "path"), "override target does not exist");
+    bag.error(
+      "configuration.override_target",
+      pointer(path, "path"),
+      "override target does not exist",
+    );
     return;
   }
   if (operation === "remove") {
@@ -1274,16 +1519,20 @@ function applyRunTypeOverride(
   if (operation === "merge") {
     const target = parent[final];
     if (!isMutableRecord(target) || !isMutableRecord(override.value)) {
-      bag.error("configuration.override_merge", pointer(path, "value"), "merge override requires object target and value");
+      bag.error(
+        "configuration.override_merge",
+        pointer(path, "value"),
+        "merge override requires object target and value",
+      );
       return;
     }
     recursiveObjectMerge(target, override.value);
   }
 }
 
-function decodeJsonPointer(value: string):
-  | { ok: true; segments: string[] }
-  | { ok: false; message: string } {
+function decodeJsonPointer(
+  value: string,
+): { ok: true; segments: string[] } | { ok: false; message: string } {
   if (!value.startsWith("/") || value.length < 2) {
     return { ok: false, message: "override path must be a nonempty JSON Pointer beginning with /" };
   }
@@ -1345,30 +1594,49 @@ function validateRunBehavior(
 ): void {
   for (const field of ["profile", "intake", "pipeline", "questions", "git", "run_card"] as const) {
     if (behavior[field] === undefined) {
-      bag.error("configuration.missing_run_behavior", pointer(rootPath, field), "base run type is missing a required behavior field");
+      bag.error(
+        "configuration.missing_run_behavior",
+        pointer(rootPath, field),
+        "base run type is missing a required behavior field",
+      );
     }
   }
 
-  const profile = behavior.profile === undefined
-    ? undefined
-    : exactRecord(behavior.profile, pointer(rootPath, "profile"), ["source"], bag);
+  const profile =
+    behavior.profile === undefined
+      ? undefined
+      : exactRecord(behavior.profile, pointer(rootPath, "profile"), ["source"], bag);
   if (profile !== undefined) {
     const source = requiredString(profile, "source", pointer(rootPath, "profile"), bag);
     if (source !== undefined && normalizeProfileReference(source) === undefined) {
-      bag.error("configuration.profile_source", `${rootPath}/profile/source`, "run type profile source must resolve to the authenticated profile.yaml");
+      bag.error(
+        "configuration.profile_source",
+        `${rootPath}/profile/source`,
+        "run type profile source must resolve to the authenticated profile.yaml",
+      );
     }
   }
 
-  const intake = behavior.intake === undefined
-    ? undefined
-    : exactRecord(behavior.intake, pointer(rootPath, "intake"), ["fields", "order", "objective_field"], bag);
+  const intake =
+    behavior.intake === undefined
+      ? undefined
+      : exactRecord(
+          behavior.intake,
+          pointer(rootPath, "intake"),
+          ["fields", "order", "objective_field"],
+          bag,
+        );
   if (intake !== undefined) {
     const fields = requiredRecord(intake, "fields", pointer(rootPath, "intake"), bag);
     const order = stringArray(intake.order, `${rootPath}/intake/order`, bag);
     if (fields !== undefined) {
       for (const [id, value] of Object.entries(fields)) {
         if (!isIdentifier(id)) {
-          bag.error("configuration.intake_field_id", pointer(`${rootPath}/intake/fields`, id), "intake field id is not valid");
+          bag.error(
+            "configuration.intake_field_id",
+            pointer(`${rootPath}/intake/fields`, id),
+            "intake field id is not valid",
+          );
         }
         const field = exactRecord(
           value,
@@ -1382,7 +1650,11 @@ function validateRunBehavior(
           optionalString(field, "description", pointer(`${rootPath}/intake/fields`, id), bag);
         }
         if (field.required !== undefined && typeof field.required !== "boolean") {
-          bag.error("configuration.field_type", `${pointer(`${rootPath}/intake/fields`, id)}/required`, "intake required flag must be boolean");
+          bag.error(
+            "configuration.field_type",
+            `${pointer(`${rootPath}/intake/fields`, id)}/required`,
+            "intake required flag must be boolean",
+          );
         }
         if (field.options !== undefined) {
           expectArray(field.options, `${pointer(`${rootPath}/intake/fields`, id)}/options`, bag);
@@ -1392,16 +1664,28 @@ function validateRunBehavior(
         const seen = new Set<string>();
         for (const [index, id] of order.entries()) {
           if (seen.has(id)) {
-            bag.error("configuration.duplicate_intake_order", pointer(`${rootPath}/intake/order`, index), "intake order contains a duplicate field");
+            bag.error(
+              "configuration.duplicate_intake_order",
+              pointer(`${rootPath}/intake/order`, index),
+              "intake order contains a duplicate field",
+            );
           }
           seen.add(id);
           if (!Object.hasOwn(fields, id)) {
-            bag.error("configuration.unknown_intake_field", pointer(`${rootPath}/intake/order`, index), "intake order references an unknown field");
+            bag.error(
+              "configuration.unknown_intake_field",
+              pointer(`${rootPath}/intake/order`, index),
+              "intake order references an unknown field",
+            );
           }
         }
         for (const id of Object.keys(fields)) {
           if (!seen.has(id)) {
-            bag.error("configuration.missing_intake_order", pointer(`${rootPath}/intake/fields`, id), "intake field is absent from presentation order");
+            bag.error(
+              "configuration.missing_intake_order",
+              pointer(`${rootPath}/intake/fields`, id),
+              "intake field is absent from presentation order",
+            );
           }
         }
       }
@@ -1430,11 +1714,19 @@ function validateRunPipeline(
   const seen = new Set<string>();
   for (const [index, id] of order.entries()) {
     if (seen.has(id)) {
-      bag.error("configuration.duplicate_stage", pointer(pointer(pipelinePath, "order"), index), "pipeline order contains a duplicate stage");
+      bag.error(
+        "configuration.duplicate_stage",
+        pointer(pointer(pipelinePath, "order"), index),
+        "pipeline order contains a duplicate stage",
+      );
     }
     seen.add(id);
     if (!Object.hasOwn(stages, id)) {
-      bag.error("configuration.unknown_stage", pointer(pointer(pipelinePath, "order"), index), "pipeline order references an unknown stage");
+      bag.error(
+        "configuration.unknown_stage",
+        pointer(pointer(pipelinePath, "order"), index),
+        "pipeline order references an unknown stage",
+      );
     }
   }
   for (const [id, value] of Object.entries(stages)) {
@@ -1449,7 +1741,11 @@ function validateRunPipeline(
       expectRecord(stage.config, pointer(stagePath, "config"), bag);
     }
     if (!seen.has(id)) {
-      bag.error("configuration.unordered_stage", stagePath, "pipeline stage is absent from pipeline order");
+      bag.error(
+        "configuration.unordered_stage",
+        stagePath,
+        "pipeline stage is absent from pipeline order",
+      );
     }
   }
 }
@@ -1463,14 +1759,24 @@ function validateSimpleRunRecords(
     exactRecord(behavior.questions, `${rootPath}/questions`, ["policy", "default_scope"], bag);
   }
   if (behavior.git !== undefined) {
-    exactRecord(behavior.git, `${rootPath}/git`, ["branch_template", "ticket_branch_template"], bag);
+    exactRecord(
+      behavior.git,
+      `${rootPath}/git`,
+      ["branch_template", "ticket_branch_template"],
+      bag,
+    );
   }
   if (behavior.run_card !== undefined) {
     const runCard = exactRecord(behavior.run_card, `${rootPath}/run_card`, ["sections"], bag);
     stringArray(runCard.sections, `${rootPath}/run_card/sections`, bag);
   }
   if (behavior.instructions !== undefined) {
-    const instructions = exactRecord(behavior.instructions, `${rootPath}/instructions`, ["planning"], bag);
+    const instructions = exactRecord(
+      behavior.instructions,
+      `${rootPath}/instructions`,
+      ["planning"],
+      bag,
+    );
     if (instructions.planning !== undefined) {
       optionalString(instructions, "planning", `${rootPath}/instructions`, bag);
     }
@@ -1484,18 +1790,35 @@ function validateSimpleRunRecords(
     );
   }
   if (behavior.promotion !== undefined) {
-    const promotion = exactRecord(behavior.promotion, `${rootPath}/promotion`, ["conflict_operation"], bag);
+    const promotion = exactRecord(
+      behavior.promotion,
+      `${rootPath}/promotion`,
+      ["conflict_operation"],
+      bag,
+    );
     requiredString(promotion, "conflict_operation", `${rootPath}/promotion`, bag);
   }
   if (behavior.working_spec !== undefined) {
-    const workingSpec = exactRecord(behavior.working_spec, `${rootPath}/working_spec`, ["owner"], bag);
+    const workingSpec = exactRecord(
+      behavior.working_spec,
+      `${rootPath}/working_spec`,
+      ["owner"],
+      bag,
+    );
     requiredIdentifier(workingSpec, "owner", `${rootPath}/working_spec`, bag);
   }
   if (behavior.orchestration !== undefined) {
     exactRecord(
       behavior.orchestration,
       `${rootPath}/orchestration`,
-      ["auto_start", "max_parallel", "compile_action", "lead_action", "lead_triggers", "report_action"],
+      [
+        "auto_start",
+        "max_parallel",
+        "compile_action",
+        "lead_action",
+        "lead_triggers",
+        "report_action",
+      ],
       bag,
     );
   }
@@ -1557,65 +1880,129 @@ function validateCrossReferences(
     for (const alias of aliases ?? []) {
       const existing = actionAliases.get(alias);
       if (existing !== undefined && existing !== id) {
-        bag.error("configuration.duplicate_action_alias", pointer(path, "aliases"), "action alias is ambiguous");
+        bag.error(
+          "configuration.duplicate_action_alias",
+          pointer(path, "aliases"),
+          "action alias is ambiguous",
+        );
       } else {
         actionAliases.set(alias, id);
       }
     }
   }
 
-  const initialization = profile.initialization === undefined
-    ? undefined
-    : expectRecord(profile.initialization, "/profile/initialization", bag);
+  const initialization =
+    profile.initialization === undefined
+      ? undefined
+      : expectRecord(profile.initialization, "/profile/initialization", bag);
   if (initialization !== undefined) {
-    validateReferenceField(initialization, "root_node_type", "/profile/initialization", registries.node_types, "node type", bag);
-    validateReferenceField(initialization, "planning_seed_operation", "/profile/initialization", registries.operations, "operation", bag);
+    validateReferenceField(
+      initialization,
+      "root_node_type",
+      "/profile/initialization",
+      registries.node_types,
+      "node type",
+      bag,
+    );
+    validateReferenceField(
+      initialization,
+      "planning_seed_operation",
+      "/profile/initialization",
+      registries.operations,
+      "operation",
+      bag,
+    );
   }
 
   for (const edge of state.edgeTypes) {
     const path = locationOf(state, edge, "/edge_types");
     validateReferenceField(edge, "source", path, registries.node_types, "node type", bag);
-    validateReferenceArray(edge.targets, pointer(path, "targets"), registries.node_types, "node type", bag);
+    validateReferenceArray(
+      edge.targets,
+      pointer(path, "targets"),
+      registries.node_types,
+      "node type",
+      bag,
+    );
   }
   for (const [id, query] of registries.queries) {
     const path = locationOf(state, query, pointer("/registries/queries", id));
     if (query.node_types !== undefined) {
-      validateReferenceArray(query.node_types, pointer(path, "node_types"), registries.node_types, "node type", bag);
+      validateReferenceArray(
+        query.node_types,
+        pointer(path, "node_types"),
+        registries.node_types,
+        "node type",
+        bag,
+      );
     }
   }
   for (const [id, policy] of registries.gate_policies) {
     const path = locationOf(state, policy, pointer("/registries/gate_policies", id));
     for (const field of ["gate_node_types", "candidate_node_types"] as const) {
       if (policy[field] !== undefined) {
-        validateReferenceArray(policy[field], pointer(path, field), registries.node_types, "node type", bag);
+        validateReferenceArray(
+          policy[field],
+          pointer(path, field),
+          registries.node_types,
+          "node type",
+          bag,
+        );
       }
     }
     for (const field of ["gate_subjects", "candidate_pool"] as const) {
       if (policy[field] !== undefined) {
-        validateReferenceValue(policy[field], pointer(path, field), registries.queries, "query", bag);
+        validateReferenceValue(
+          policy[field],
+          pointer(path, field),
+          registries.queries,
+          "query",
+          bag,
+        );
       }
     }
   }
 
   for (const [id, operation] of registries.operations) {
     const path = locationOf(state, operation, pointer("/registries/operations", id));
-    for (const field of ["target_types", "allowed_new_node_types", "allowed_existing_node_types"] as const) {
+    for (const field of [
+      "target_types",
+      "allowed_new_node_types",
+      "allowed_existing_node_types",
+    ] as const) {
       if (operation[field] !== undefined) {
-        validateReferenceArray(operation[field], pointer(path, field), registries.node_types, "node type", bag);
+        validateReferenceArray(
+          operation[field],
+          pointer(path, field),
+          registries.node_types,
+          "node type",
+          bag,
+        );
       }
     }
     if (operation.workflow !== undefined) {
       validateReferenceField(operation, "workflow", path, registries.workflows, "workflow", bag);
     }
     if (operation.checks !== undefined) {
-      validateReferenceArray(operation.checks, pointer(path, "checks"), registries.checks, "check", bag);
+      validateReferenceArray(
+        operation.checks,
+        pointer(path, "checks"),
+        registries.checks,
+        "check",
+        bag,
+      );
     }
   }
 
   for (const [id, workflow] of registries.workflows) {
     const path = locationOf(state, workflow, pointer("/registries/workflows", id));
     if (workflow.applies_to !== undefined) {
-      validateOperationAliasArray(workflow.applies_to, pointer(path, "applies_to"), operationAliases, bag);
+      validateOperationAliasArray(
+        workflow.applies_to,
+        pointer(path, "applies_to"),
+        operationAliases,
+        bag,
+      );
     }
     validateWorkflowSteps(workflow, path, state, actionAliases, bag);
   }
@@ -1630,20 +2017,42 @@ function validateCrossReferences(
       continue;
     }
     if (emit.operation !== undefined) {
-      validateOperationAlias(emit.operation, pointer(pointer(path, "emit"), "operation"), operationAliases, bag);
+      validateOperationAlias(
+        emit.operation,
+        pointer(pointer(path, "emit"), "operation"),
+        operationAliases,
+        bag,
+      );
     }
     if (emit.registry_entry_id !== undefined) {
-      validateReferenceValue(emit.registry_entry_id, pointer(pointer(path, "emit"), "registry_entry_id"), registries.operations, "operation", bag);
+      validateReferenceValue(
+        emit.registry_entry_id,
+        pointer(pointer(path, "emit"), "registry_entry_id"),
+        registries.operations,
+        "operation",
+        bag,
+      );
     }
     if (emit.workflow !== undefined) {
-      validateReferenceValue(emit.workflow, pointer(pointer(path, "emit"), "workflow"), registries.workflows, "workflow", bag);
+      validateReferenceValue(
+        emit.workflow,
+        pointer(pointer(path, "emit"), "workflow"),
+        registries.workflows,
+        "workflow",
+        bag,
+      );
     }
   }
 
   for (const [id, check] of registries.checks) {
     const path = locationOf(state, check, pointer("/registries/checks", id));
     if (check.applies_to !== undefined) {
-      validateOperationAliasArray(check.applies_to, pointer(path, "applies_to"), operationAliases, bag);
+      validateOperationAliasArray(
+        check.applies_to,
+        pointer(path, "applies_to"),
+        operationAliases,
+        bag,
+      );
     }
   }
 
@@ -1653,9 +2062,10 @@ function validateCrossReferences(
     const modelRole = requiredIdentifier(persona, "model_role", path, bag);
     if (modelRole !== undefined) {
       for (const runType of runTypes.values()) {
-        const roles = runType.document.agents === undefined
-          ? undefined
-          : recordField(runType.document.agents, "roles");
+        const roles =
+          runType.document.agents === undefined
+            ? undefined
+            : recordField(runType.document.agents, "roles");
         if (roles === undefined || !Object.hasOwn(roles, modelRole)) {
           bag.error(
             "configuration.missing_model_role",
@@ -1668,12 +2078,23 @@ function validateCrossReferences(
   }
 
   for (const runType of runTypes.values()) {
-    const workingSpec = runType.document.working_spec === undefined
-      ? undefined
-      : expectRecord(runType.document.working_spec, pointer(pointer("/run_types", runType.id), "working_spec"), bag);
-    const owner = workingSpec === undefined
-      ? undefined
-      : requiredIdentifier(workingSpec, "owner", pointer(pointer("/run_types", runType.id), "working_spec"), bag);
+    const workingSpec =
+      runType.document.working_spec === undefined
+        ? undefined
+        : expectRecord(
+            runType.document.working_spec,
+            pointer(pointer("/run_types", runType.id), "working_spec"),
+            bag,
+          );
+    const owner =
+      workingSpec === undefined
+        ? undefined
+        : requiredIdentifier(
+            workingSpec,
+            "owner",
+            pointer(pointer("/run_types", runType.id), "working_spec"),
+            bag,
+          );
     if (owner !== undefined && !registries.personas.has(owner)) {
       bag.error(
         "configuration.working_spec_owner",
@@ -1706,14 +2127,29 @@ function validateWorkflowSteps(
     const id = requiredIdentifier(step, "id", stepPath, bag);
     validateReferenceField(step, "persona", stepPath, state.records.personas, "persona", bag);
     if (step.validation_action !== undefined) {
-      validateActionReference(step.validation_action, pointer(stepPath, "validation_action"), actionAliases, bag);
+      validateActionReference(
+        step.validation_action,
+        pointer(stepPath, "validation_action"),
+        actionAliases,
+        bag,
+      );
     }
     if (step.checks !== undefined) {
-      validateReferenceArray(step.checks, pointer(stepPath, "checks"), state.records.checks, "check", bag);
+      validateReferenceArray(
+        step.checks,
+        pointer(stepPath, "checks"),
+        state.records.checks,
+        "check",
+        bag,
+      );
     }
     if (id !== undefined) {
       if (stepRecords.has(id)) {
-        bag.error("configuration.duplicate_workflow_step", pointer(stepPath, "id"), "workflow step id is duplicated");
+        bag.error(
+          "configuration.duplicate_workflow_step",
+          pointer(stepPath, "id"),
+          "workflow step id is duplicated",
+        );
       } else {
         stepRecords.set(id, { value: step, path: stepPath });
       }
@@ -1729,7 +2165,11 @@ function validateWorkflowSteps(
     }
     for (const [index, dependency] of dependencies.entries()) {
       if (!stepRecords.has(dependency)) {
-        bag.error("configuration.unknown_workflow_step", pointer(pointer(stepPath, "depends_on"), index), "workflow dependency references an unknown step");
+        bag.error(
+          "configuration.unknown_workflow_step",
+          pointer(pointer(stepPath, "depends_on"), index),
+          "workflow dependency references an unknown step",
+        );
       }
     }
   }
@@ -1749,7 +2189,11 @@ function validateDependencyCycle(
     const cycleStart = visiting.indexOf(id);
     if (cycleStart >= 0) {
       const step = steps.get(id);
-      bag.error("configuration.workflow_cycle", step?.path ?? "/workflows", `workflow dependency cycle: ${[...visiting.slice(cycleStart), id].join(" -> ")}`);
+      bag.error(
+        "configuration.workflow_cycle",
+        step?.path ?? "/workflows",
+        `workflow dependency cycle: ${[...visiting.slice(cycleStart), id].join(" -> ")}`,
+      );
       return;
     }
     const step = steps.get(id);
@@ -1792,15 +2236,33 @@ function validateRunTypeCrossReferences(
       const config = recordValue(stage.config);
       if (kind === "planning" || kind === "agent_dialog" || kind === "ai") {
         const persona = config?.persona;
-        validateReferenceValue(persona, `${stagePath}/config/persona`, state.records.personas, "persona", bag);
+        validateReferenceValue(
+          persona,
+          `${stagePath}/config/persona`,
+          state.records.personas,
+          "persona",
+          bag,
+        );
       } else if (kind === "agent_review") {
         const persona = config?.persona ?? "reviewer";
-        validateReferenceValue(persona, `${stagePath}/config/persona`, state.records.personas, "persona", bag);
+        validateReferenceValue(
+          persona,
+          `${stagePath}/config/persona`,
+          state.records.personas,
+          "persona",
+          bag,
+        );
       }
       if (kind === "action" && config !== undefined) {
         const compilerOwned = config.compiler_owned === true;
         if (!compilerOwned && config.action !== undefined) {
-          validateReferenceValue(config.action, `${stagePath}/config/action`, state.records.actions, "action", bag);
+          validateReferenceValue(
+            config.action,
+            `${stagePath}/config/action`,
+            state.records.actions,
+            "action",
+            bag,
+          );
         }
       }
     }
@@ -1808,20 +2270,37 @@ function validateRunTypeCrossReferences(
   const orchestration = recordValue(runType.document.orchestration);
   if (orchestration !== undefined) {
     for (const field of ["compile_action", "lead_action", "report_action"] as const) {
-      validateActionReference(orchestration[field], `${rootPath}/orchestration/${field}`, actionAliases, bag);
+      validateActionReference(
+        orchestration[field],
+        `${rootPath}/orchestration/${field}`,
+        actionAliases,
+        bag,
+      );
     }
   }
   const promotion = recordValue(runType.document.promotion);
   if (promotion?.conflict_operation !== undefined) {
     const operation = promotion.conflict_operation;
     if (typeof operation !== "string") {
-      bag.error("configuration.reference_type", `${rootPath}/promotion/conflict_operation`, "operation reference must be a string");
+      bag.error(
+        "configuration.reference_type",
+        `${rootPath}/promotion/conflict_operation`,
+        "operation reference must be a string",
+      );
     } else {
       const matches = operationAliases.get(operation) ?? [];
       if (matches.length === 0) {
-        bag.error("configuration.dangling_reference", `${rootPath}/promotion/conflict_operation`, "promotion conflict operation is not defined");
+        bag.error(
+          "configuration.dangling_reference",
+          `${rootPath}/promotion/conflict_operation`,
+          "promotion conflict operation is not defined",
+        );
       } else if (matches.length > 1) {
-        bag.error("configuration.ambiguous_reference", `${rootPath}/promotion/conflict_operation`, "promotion conflict operation is ambiguous");
+        bag.error(
+          "configuration.ambiguous_reference",
+          `${rootPath}/promotion/conflict_operation`,
+          "promotion conflict operation is ambiguous",
+        );
       }
     }
   }
@@ -1878,7 +2357,11 @@ function validateReferenceArray(
   }
   for (const [index, reference] of references.entries()) {
     if (!registry.has(reference)) {
-      bag.error("configuration.dangling_reference", pointer(path, index), `${label} reference is not defined`);
+      bag.error(
+        "configuration.dangling_reference",
+        pointer(path, index),
+        `${label} reference is not defined`,
+      );
     }
   }
 }
@@ -1894,7 +2377,8 @@ function validateOperationAliasArray(
     return;
   }
   references.forEach((reference, index) =>
-    validateOperationAlias(reference, pointer(path, index), aliases, bag));
+    validateOperationAlias(reference, pointer(path, index), aliases, bag),
+  );
 }
 
 function validateOperationAlias(
@@ -1978,7 +2462,11 @@ function exactRecord(
   const allowed = new Set(allowedFields);
   for (const key of Object.keys(record)) {
     if (!allowed.has(key)) {
-      bag.error("configuration.unknown_field", pointer(path, key), "configuration mapping contains an unknown field");
+      bag.error(
+        "configuration.unknown_field",
+        pointer(path, key),
+        "configuration mapping contains an unknown field",
+      );
     }
   }
   return record;
@@ -1992,7 +2480,11 @@ function requiredExactRecord(
   bag: DiagnosticBag,
 ): MutableConfigurationObject | undefined {
   if (parent[field] === undefined) {
-    bag.error("configuration.required_field", pointer(parentPath, field), "required configuration field is missing");
+    bag.error(
+      "configuration.required_field",
+      pointer(parentPath, field),
+      "required configuration field is missing",
+    );
     return undefined;
   }
   const record = exactRecord(parent[field], pointer(parentPath, field), allowedFields, bag);
@@ -2006,7 +2498,11 @@ function requiredRecord(
   bag: DiagnosticBag,
 ): MutableConfigurationObject | undefined {
   if (parent[field] === undefined) {
-    bag.error("configuration.required_field", pointer(parentPath, field), "required configuration field is missing");
+    bag.error(
+      "configuration.required_field",
+      pointer(parentPath, field),
+      "required configuration field is missing",
+    );
     return undefined;
   }
   return expectRecord(parent[field], pointer(parentPath, field), bag);
@@ -2024,7 +2520,9 @@ function expectRecord(
   return value;
 }
 
-function recordValue(value: MutableConfigurationValue | undefined): MutableConfigurationObject | undefined {
+function recordValue(
+  value: MutableConfigurationValue | undefined,
+): MutableConfigurationObject | undefined {
   return isMutableRecord(value) ? value : undefined;
 }
 
@@ -2059,7 +2557,11 @@ function stringArray(
   const strings: string[] = [];
   for (const [index, item] of values.entries()) {
     if (typeof item !== "string" || item.trim().length === 0) {
-      bag.error("configuration.string", pointer(path, index), "configuration array item must be a nonempty string");
+      bag.error(
+        "configuration.string",
+        pointer(path, index),
+        "configuration array item must be a nonempty string",
+      );
     } else {
       strings.push(item);
     }
@@ -2075,7 +2577,11 @@ function requiredString(
 ): string | undefined {
   const value = parent[field];
   if (typeof value !== "string" || value.trim().length === 0) {
-    bag.error("configuration.required_string", pointer(parentPath, field), "required configuration field must be a nonempty string");
+    bag.error(
+      "configuration.required_string",
+      pointer(parentPath, field),
+      "required configuration field must be a nonempty string",
+    );
     return undefined;
   }
   return value;
@@ -2095,7 +2601,11 @@ function requiredThinkingLevel(
   if (value === undefined) return undefined;
   const fieldPath = pointer(parentPath, field);
   if (value === "ultra") {
-    bag.error("configuration.legacy_thinking_level", fieldPath, "legacy ultra reasoning must be migrated to Pi max");
+    bag.error(
+      "configuration.legacy_thinking_level",
+      fieldPath,
+      "legacy ultra reasoning must be migrated to Pi max",
+    );
   } else if (!PI_THINKING_LEVELS.has(value)) {
     bag.error("configuration.thinking_level", fieldPath, `unsupported Pi thinking level ${value}`);
   }
@@ -2113,7 +2623,11 @@ function optionalString(
     return undefined;
   }
   if (typeof value !== "string" || value.trim().length === 0) {
-    bag.error("configuration.string", pointer(parentPath, field), "configuration field must be a nonempty string");
+    bag.error(
+      "configuration.string",
+      pointer(parentPath, field),
+      "configuration field must be a nonempty string",
+    );
     return undefined;
   }
   return value;
@@ -2127,7 +2641,11 @@ function requiredIdentifier(
 ): string | undefined {
   const value = requiredString(parent, field, parentPath, bag);
   if (value !== undefined && !isIdentifier(value)) {
-    bag.error("configuration.identifier", pointer(parentPath, field), "configuration identifier is not valid");
+    bag.error(
+      "configuration.identifier",
+      pointer(parentPath, field),
+      "configuration identifier is not valid",
+    );
     return undefined;
   }
   return value;
@@ -2141,18 +2659,18 @@ function optionalIdentifier(
 ): string | undefined {
   const value = optionalString(parent, field, parentPath, bag);
   if (value !== undefined && !isIdentifier(value)) {
-    bag.error("configuration.identifier", pointer(parentPath, field), "configuration identifier is not valid");
+    bag.error(
+      "configuration.identifier",
+      pointer(parentPath, field),
+      "configuration identifier is not valid",
+    );
     return undefined;
   }
   return value;
 }
 
 function isIdentifier(value: string): boolean {
-  return (
-    value.length <= 256 &&
-    value.trim() === value &&
-    !/[\s\u0000-\u001f\u007f]/u.test(value)
-  );
+  return value.length <= 256 && value.trim() === value && !/[\s\u0000-\u001f\u007f]/u.test(value);
 }
 
 function isMutableRecord(value: unknown): value is MutableConfigurationObject {

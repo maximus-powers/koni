@@ -1,10 +1,11 @@
 import type { GraphEdge, GraphNode } from "../graph/model.js";
-import {
-  projectRunSummary,
-  type RunSummary,
-} from "../authority/run-summary-page.js";
-import type { ConfigurationValue } from "../contracts/configuration.js";
+import { projectRunSummary, type RunSummary } from "../authority/run-summary-page.js";
 import { activeRuntimeMs } from "../state/run-lifecycle.js";
+import {
+  INTERRUPTED_DISPLAY_LABEL,
+  interruptedByRunBlock,
+  runExecutionHalted,
+} from "../state/effective-status.js";
 import { projectQuestionBatchCapabilities } from "../state/question-batch.js";
 import type { StageCapabilityCatalog } from "../state/stage-capability.js";
 import type {
@@ -22,8 +23,16 @@ import {
   type CompiledCockpitViewCatalog,
 } from "./cockpit-config.js";
 
-export type DetailsTab = "overview" | "plan" | "stages" | "chat";
-export const TICKET_TABS = ["all", "active", "todo", "blocked", "proposed", "closed", "other"] as const;
+export type DetailsTab = "overview" | "plan" | "chat";
+export const TICKET_TABS = [
+  "all",
+  "active",
+  "todo",
+  "blocked",
+  "proposed",
+  "closed",
+  "other",
+] as const;
 export type TicketTab = (typeof TICKET_TABS)[number];
 
 export interface ControlCenterSelection {
@@ -75,6 +84,8 @@ export interface RunRowView {
   title: string;
   runType: string;
   stage: string;
+  /** Raw lifecycle phase; drives the stage chip tone. */
+  phase: string;
   targetBranch: string;
   state: string;
   ticketProgress: string;
@@ -86,6 +97,8 @@ export interface RunRowView {
   mergeReady: boolean;
   awaitingApproval: boolean;
   paused: boolean;
+  /** True while an operator pause is scheduled for the next pausable phase. */
+  pausePending: boolean;
   provisional: boolean;
 }
 
@@ -111,12 +124,17 @@ export interface AgentRowView {
   id: string;
   label: string;
   work: string;
+  persona: string;
+  /** Step title when the attempt maps to a compiled step; used by the chat header. */
+  stepTitle?: string;
   model: string;
   thinking: string;
   status: AgentAttemptRecord["status"];
   active: boolean;
   newTokens: string;
   allTokens: string;
+  /** Nesting depth in the lineage tree (0 = root attempt). */
+  depth: number;
   lineage?: {
     reason: string;
     branch: string;
@@ -146,6 +164,8 @@ export interface ActivityView {
   timestamp: string;
   kind: RunActivityRecord["kind"];
   message: string;
+  /** Explicit effect tone recorded at the emit site; kind-based fallback applies when absent. */
+  tone?: RunActivityRecord["tone"];
 }
 
 export interface GraphNodeView {
@@ -153,6 +173,8 @@ export interface GraphNodeView {
   type: string;
   marker: string;
   label: string;
+  /** Untruncated node title, rendered only for the cursor-focused node. */
+  fullTitle: string;
   muted: boolean;
 }
 
@@ -179,12 +201,20 @@ export interface ControlCenterViewModel {
       awaitingApproval: boolean;
     };
     objective: { text: string; preview: string[]; full: string[]; expanded: boolean };
+    /** Prominent blocked/failed banner: durable reason plus the projected recovery actions. */
+    blockedBanner?: {
+      reason: string;
+      actions: { title: string; reason: string; available: boolean }[];
+    };
     overviewSections: {
-      title: "Goal" | "Run" | "Evidence";
+      title: "Run" | "Evidence";
       lines: string[];
       tone?: "neutral" | "success" | "error";
     }[];
-    plan: { mode: "activity" | "review" | "approved"; sections: { title: string; markdown: string }[] };
+    plan: {
+      mode: "activity" | "review" | "approved";
+      sections: { title: string; markdown: string }[];
+    };
     approval?: {
       revision: number;
       sections: { id: string; title: string; items: { title: string; description: string }[] }[];
@@ -205,6 +235,14 @@ export interface ControlCenterViewModel {
       status: string;
       summary: string;
       blocker?: string;
+      /** Graph-neighborhood node titles this ticket reads/writes/targets; never raw ids. */
+      interactsWith: string[];
+      /** Neighborhood ids not present in the current graph projection. */
+      unresolvedNodeCount: number;
+      /** Best-effort titles of the validation actions its steps must satisfy. */
+      mustSatisfy: string[];
+      /** Operator-grade execution policy label when the ticket is policy-bound. */
+      policy?: string;
       steps: { title: string; persona: string; status: string; summary?: string }[];
     };
     tickets: TicketRowView[];
@@ -214,7 +252,11 @@ export interface ControlCenterViewModel {
     questions?: QuestionView[];
     activity: ActivityView[];
     activeDuration?: string;
-    graph: { scope: "Run integration" | "Ticket checkout"; nodes: GraphNodeView[]; edges: GraphEdge[] };
+    graph: {
+      scope: "Run integration" | "Ticket checkout";
+      nodes: GraphNodeView[];
+      edges: GraphEdge[];
+    };
     /** Exact durable attempts that are currently capable of spending model tokens. */
     spendingTokens: boolean;
   };
@@ -232,12 +274,16 @@ export function buildControlCenterView(input: ControlCenterInput): ControlCenter
   const selectedProvisional = provisionalRows.some((run) => run.id === input.selection.runId);
   const selectedSummary = selectedProvisional
     ? undefined
-    : summaries.find((run) => run.id === input.selection.runId) ?? summaries[0];
-  const hydrated = input.selectedRun ?? compatibilityRuns.find((run) => run.id === selectedSummary?.id);
-  const selected = hydrated !== undefined && selectedSummary !== undefined &&
-      hydrated.id === selectedSummary.id && hydrated.revision === selectedSummary.runRevision
-    ? hydrated
-    : undefined;
+    : (summaries.find((run) => run.id === input.selection.runId) ?? summaries[0]);
+  const hydrated =
+    input.selectedRun ?? compatibilityRuns.find((run) => run.id === selectedSummary?.id);
+  const selected =
+    hydrated !== undefined &&
+    selectedSummary !== undefined &&
+    hydrated.id === selectedSummary.id &&
+    hydrated.revision === selectedSummary.runRevision
+      ? hydrated
+      : undefined;
   return {
     projectRoot: input.projectRoot,
     authorityRevision: input.authorityRevision,
@@ -250,18 +296,20 @@ export function buildControlCenterView(input: ControlCenterInput): ControlCenter
       hasPrevious: input.runPage?.hasPrevious ?? false,
       hasNext: input.runPage?.hasNext ?? false,
     },
-    ...(selected === undefined ? {} : {
-      selectedRun: selectedRunView(
-        selected,
-        input.selection,
-        input.graph,
-        input.controls,
-        input.lineage,
-        nowMs,
-        input.ticketTab ?? "all",
-        input.cockpit,
-      ),
-    }),
+    ...(selected === undefined
+      ? {}
+      : {
+          selectedRun: selectedRunView(
+            selected,
+            input.selection,
+            input.graph,
+            input.controls,
+            input.lineage,
+            nowMs,
+            input.ticketTab ?? "all",
+            input.cockpit,
+          ),
+        }),
   };
 }
 
@@ -272,9 +320,10 @@ function runRow(run: RunSummary): RunRowView {
     // time are what let an operator tell same-titled runs apart.
     shortId: run.id.replace(/^run-/u, "").slice(0, 8),
     createdAt: run.createdAt,
-    title: run.objectiveTitle,
+    title: run.title ?? run.objectiveTitle,
     runType: run.runType,
     stage: run.stage ?? titleCase(run.phase),
+    phase: run.phase,
     targetBranch: run.targetBranch,
     state: titleCase(run.phase),
     ticketProgress: `${run.tickets.completed}/${run.tickets.total}`,
@@ -288,6 +337,7 @@ function runRow(run: RunSummary): RunRowView {
     mergeReady: run.mergeReady,
     awaitingApproval: run.planApproval,
     paused: run.paused,
+    pausePending: run.pausePending === true,
     provisional: false,
   };
 }
@@ -306,6 +356,7 @@ function provisionalRunRow(run: ProvisionalRunView): RunRowView {
     title: objectiveTitle(run.objective),
     runType: run.runType,
     stage: "Starting",
+    phase: "starting",
     targetBranch: shortBranch(run.targetBranch),
     state: "Starting",
     ticketProgress: "0/0",
@@ -317,6 +368,7 @@ function provisionalRunRow(run: ProvisionalRunView): RunRowView {
     mergeReady: false,
     awaitingApproval: false,
     paused: false,
+    pausePending: false,
     provisional: true,
   };
 }
@@ -338,8 +390,12 @@ function selectedRunView(
   const pendingQuestions = Object.values(run.questions)
     .filter((question) => question.answeredAt === undefined)
     .sort((left, right) => {
-      if (left.batchId !== undefined && left.batchId === right.batchId &&
-          left.batchPosition !== undefined && right.batchPosition !== undefined) {
+      if (
+        left.batchId !== undefined &&
+        left.batchId === right.batchId &&
+        left.batchPosition !== undefined &&
+        right.batchPosition !== undefined
+      ) {
         return left.batchPosition - right.batchPosition;
       }
       return left.askedAt.localeCompare(right.askedAt) || left.id.localeCompare(right.id);
@@ -349,26 +405,41 @@ function selectedRunView(
   // The durable run record is the complete attempt inventory. Lineage is
   // enrichment, never a filter: a partial lineage projection must not make an
   // inactive Lead or historical worker disappear from the Agents panel.
-  const agents = Object.values(run.attempts)
-    .filter((attempt) => selectedTicket === undefined || attempt.ticketId === selectedTicket.id)
-    .sort(agentOrder)
-    .map((attempt) => agentRow(run, attempt, selectedTicket === undefined, lineageByAttempt));
+  // The Lead stays visible under a ticket filter — it orchestrates every ticket.
+  const agents = lineageOrdered(
+    Object.values(run.attempts).filter(
+      (attempt) =>
+        selectedTicket === undefined ||
+        attempt.ticketId === selectedTicket.id ||
+        attempt.kind === "lead" ||
+        attempt.ticketId === "run-orchestration",
+    ),
+    lineageByAttempt,
+  ).map(({ attempt, depth }) =>
+    agentRow(run, attempt, selectedTicket === undefined, lineageByAttempt, depth),
+  );
   const approval = approvalView(run);
   const configuredTicketView = cockpitView(cockpit, ["tabbed_table", "kanban"]);
-  const configuredTabs = cockpitStringArrayOption(configuredTicketView, "tabs")
-    ?.filter((tab): tab is TicketTab => (TICKET_TABS as readonly string[]).includes(tab));
-  const ticketTabs = configuredTabs !== undefined && configuredTabs.length > 0 ? configuredTabs : TICKET_TABS;
-  const defaultTab = cockpitStringOption(configuredTicketView, "default_tab") as TicketTab | undefined;
+  const configuredTabs = cockpitStringArrayOption(configuredTicketView, "tabs")?.filter(
+    (tab): tab is TicketTab => (TICKET_TABS as readonly string[]).includes(tab),
+  );
+  const ticketTabs =
+    configuredTabs !== undefined && configuredTabs.length > 0 ? configuredTabs : TICKET_TABS;
+  const defaultTab = cockpitStringOption(configuredTicketView, "default_tab") as
+    TicketTab | undefined;
   const effectiveTicketTab = ticketTabs.includes(ticketTab)
     ? ticketTab
-    : defaultTab !== undefined && ticketTabs.includes(defaultTab) ? defaultTab : ticketTabs[0]!;
+    : defaultTab !== undefined && ticketTabs.includes(defaultTab)
+      ? defaultTab
+      : ticketTabs[0];
   // This signal must describe the complete run, even while the Agents panel is
   // narrowed to one ticket. Waiting-for-question and accepted-terminal states
   // are intentionally excluded: neither is evidence of an in-flight provider
   // request and neither may animate a token-spend cog.
-  const spendingTokens = Object.values(run.attempts).some((attempt) =>
-    attempt.status === "queued" || attempt.status === "running"
+  const spendingTokens = Object.values(run.attempts).some(
+    (attempt) => attempt.status === "queued" || attempt.status === "running",
   );
+  const blockedBanner = blockedBannerView(run, controls);
   return {
     id: run.id,
     header: {
@@ -385,31 +456,40 @@ function selectedRunView(
       full: objectiveLines,
       expanded: selection.objectiveExpanded,
     },
+    ...(blockedBanner === undefined ? {} : { blockedBanner }),
     overviewSections: overviewSections(run, selectedTicket),
     plan: planView(run),
     ...(approval === undefined ? {} : { approval }),
     stages: stageViews(run, controls),
-    ...(selectedTicket === undefined ? {} : { ticketDetails: ticketDetails(selectedTicket) }),
-    tickets: tickets.filter((ticket) => ticketInTab(ticket, effectiveTicketTab)).map(ticketRow),
+    ...(selectedTicket === undefined
+      ? {}
+      : { ticketDetails: ticketDetails(selectedTicket, run.lifecycle, graph) }),
+    tickets: tickets
+      .filter((ticket) => ticketInTab(ticket, effectiveTicketTab, run.lifecycle))
+      .map((ticket) => ticketRow(ticket, run.lifecycle)),
     ticketTabs: ticketTabs.map((id) => ({
       id,
       title: titleCase(id),
-      count: tickets.filter((ticket) => ticketInTab(ticket, id)).length,
+      count: tickets.filter((ticket) => ticketInTab(ticket, id, run.lifecycle)).length,
     })),
     ticketTab: effectiveTicketTab,
     agents,
-    ...(pendingQuestions.length === 0 ? {} : {
-      questions: pendingQuestions.map((question, index) => ({
-        ...structuredClone(question),
-        index: index + 1,
-        total: pendingQuestions.length,
-        ...questionBatchView(run, question),
-      })),
-    }),
+    ...(pendingQuestions.length === 0
+      ? {}
+      : {
+          questions: pendingQuestions.map((question, index) => ({
+            ...structuredClone(question),
+            index: index + 1,
+            total: pendingQuestions.length,
+            ...questionBatchView(run, question),
+          })),
+        }),
     activity: activityViews(run.activity),
-    ...(run.lifecycle.approvedAtMs === undefined ? {} : {
-      activeDuration: formatDuration(activeRuntimeMs(run.lifecycle, nowMs)),
-    }),
+    ...(run.lifecycle.approvedAtMs === undefined
+      ? {}
+      : {
+          activeDuration: formatDuration(activeRuntimeMs(run.lifecycle, nowMs)),
+        }),
     graph: {
       scope: selectedTicket === undefined ? "Run integration" : "Ticket checkout",
       ...graphView(graph),
@@ -421,22 +501,36 @@ function selectedRunView(
 function questionBatchView(
   run: RunRecord,
   question: RunQuestionRecord,
-): Pick<QuestionView,
-  "batchVersion" | "batchStatus" | "batchAnsweredCount" | "batchQuestionCount" |
-  "answerSaved" | "resolvesBatchOnSubmit" | "batchPendingCount" | "batchReadyToResolve" |
-  "savedSelectedOptionId" | "savedNotes"> {
-  const batch = question.batchId === undefined ? undefined : run.questionBatches?.[question.batchId];
+): Pick<
+  QuestionView,
+  | "batchVersion"
+  | "batchStatus"
+  | "batchAnsweredCount"
+  | "batchQuestionCount"
+  | "answerSaved"
+  | "resolvesBatchOnSubmit"
+  | "batchPendingCount"
+  | "batchReadyToResolve"
+  | "savedSelectedOptionId"
+  | "savedNotes"
+> {
+  const batch =
+    question.batchId === undefined ? undefined : run.questionBatches?.[question.batchId];
   if (batch === undefined) {
     return {
       answerSaved: question.answeredAt !== undefined,
       resolvesBatchOnSubmit: true,
       batchReadyToResolve: true,
-      ...(question.selectedOptionId === undefined ? {} : { savedSelectedOptionId: question.selectedOptionId }),
+      ...(question.selectedOptionId === undefined
+        ? {}
+        : { savedSelectedOptionId: question.selectedOptionId }),
       ...(question.notes === undefined ? {} : { savedNotes: question.notes }),
     };
   }
   const capabilities = projectQuestionBatchCapabilities(batch);
-  const revision = batch.revisions.find((candidate) => candidate.revision === batch.currentRevision);
+  const revision = batch.revisions.find(
+    (candidate) => candidate.revision === batch.currentRevision,
+  );
   const answer = revision?.answers[question.id];
   const saved = answer !== undefined || question.answerRevision !== undefined;
   return {
@@ -447,11 +541,51 @@ function questionBatchView(
     answerSaved: saved,
     batchPendingCount: capabilities.pendingQuestionIds.length,
     batchReadyToResolve: capabilities.actions.queueResume.allowed,
-    resolvesBatchOnSubmit: batch.status === "pending_answers" &&
+    resolvesBatchOnSubmit:
+      batch.status === "pending_answers" &&
       capabilities.pendingQuestionIds.every((id) => id === question.id),
-    ...(answer?.selectedOptionId === undefined ? {} : { savedSelectedOptionId: answer.selectedOptionId }),
+    ...(answer?.selectedOptionId === undefined
+      ? {}
+      : { savedSelectedOptionId: answer.selectedOptionId }),
     ...(answer?.notes === undefined ? {} : { savedNotes: answer.notes }),
   };
+}
+
+const BLOCKED_RECOVERY_INTENTS = new Set([
+  "retry_blocked",
+  "resume_run",
+  "retry_supervised_stage",
+  "retry_terminal_resolver",
+  "delete_run",
+]);
+
+/** Blocked/failed runs surface their durable reason and recovery options at the top of Overview. */
+function blockedBannerView(
+  run: RunRecord,
+  controls: StageCapabilityCatalog | undefined,
+): NonNullable<ControlCenterViewModel["selectedRun"]>["blockedBanner"] {
+  if (run.lifecycle.phase !== "blocked" && run.lifecycle.phase !== "failed") return undefined;
+  const reason =
+    safeOperatorText(
+      run.lifecycle.blocker ?? run.lifecycle.terminalReason ?? "Run needs attention",
+    ) ?? "Run needs attention";
+  const currentStage = controls?.stages.find((stage) => stage.current);
+  const candidates = [...(controls?.runActions ?? []), ...(currentStage?.actions ?? [])];
+  const seen = new Set<string>();
+  const actions = candidates
+    .filter((action) => BLOCKED_RECOVERY_INTENTS.has(action.intent))
+    .filter((action) => {
+      if (seen.has(action.intent)) return false;
+      seen.add(action.intent);
+      return true;
+    })
+    .map((action) => ({
+      title: action.title,
+      reason:
+        action.availability.state === "available" ? action.description : action.availability.reason,
+      available: action.availability.state === "available",
+    }));
+  return { reason, actions };
 }
 
 function overviewSections(
@@ -463,10 +597,6 @@ function overviewSections(
   const evidence = evidenceOverview(run);
   return [
     {
-      title: "Goal",
-      lines: objectiveContext(run),
-    },
-    {
       title: "Run",
       lines: [
         `Status: ${titleCase(run.lifecycle.phase)}`,
@@ -476,8 +606,12 @@ function overviewSections(
         `Cache: ${formatTokens(Math.max(0, tokens.allTokens - tokens.newTokens))} cached input/write`,
         ...(tokens.uncertainProviderExposure === 0
           ? []
-          : [`Uncertain exposure: ≤${formatTokens(tokens.uncertainProviderExposure)} retired by operator`]),
-        ...(ticket === undefined ? [] : [`Selected ticket: ${ticket.title} · ${titleCase(ticket.status)}`]),
+          : [
+              `Uncertain exposure: ≤${formatTokens(tokens.uncertainProviderExposure)} retired by operator`,
+            ]),
+        ...(ticket === undefined
+          ? []
+          : [`Selected ticket: ${ticket.title} · ${titleCase(ticket.status)}`]),
       ],
     },
     {
@@ -493,36 +627,58 @@ function evidenceOverview(run: RunRecord): {
   lines: string[];
 } {
   const failedChecks = unresolvedFailedCheckCount(run);
-  const failedTickets = Object.values(run.tickets).filter((ticket) => ticket.status === "failed").length;
-  const blockedTickets = Object.values(run.tickets).filter((ticket) => ticket.status === "blocked").length;
+  const failedTickets = Object.values(run.tickets).filter(
+    (ticket) => ticket.status === "failed",
+  ).length;
+  const blockedTickets = Object.values(run.tickets).filter(
+    (ticket) => ticket.status === "blocked",
+  ).length;
+  // The run-level blocker itself renders in the Overview banner; Evidence keeps the
+  // per-ticket/check consequences only.
   const failureLines: string[] = [];
-  if (run.lifecycle.phase === "failed" || run.lifecycle.phase === "blocked") {
-    failureLines.push(safeOperatorText(run.lifecycle.blocker ?? run.lifecycle.terminalReason ?? "Run needs attention") ?? "Run needs attention");
-  }
-  if (failedTickets > 0) failureLines.push(`${failedTickets} failed ${failedTickets === 1 ? "ticket" : "tickets"}`);
-  if (blockedTickets > 0) failureLines.push(`${blockedTickets} blocked ${blockedTickets === 1 ? "ticket" : "tickets"}`);
-  if (failedChecks > 0) failureLines.push(`${failedChecks} failed ${failedChecks === 1 ? "check" : "checks"}`);
-  if (run.git.promotion?.status === "integration_required" || run.git.promotion?.status === "preserved") {
-    failureLines.push(safeOperatorText(run.git.promotion.blocker ?? "Target integration needs attention") ?? "Target integration needs attention");
+  if (failedTickets > 0)
+    failureLines.push(`${failedTickets} failed ${failedTickets === 1 ? "ticket" : "tickets"}`);
+  if (blockedTickets > 0)
+    failureLines.push(`${blockedTickets} blocked ${blockedTickets === 1 ? "ticket" : "tickets"}`);
+  if (failedChecks > 0)
+    failureLines.push(`${failedChecks} failed ${failedChecks === 1 ? "check" : "checks"}`);
+  if (
+    run.git.promotion?.status === "integration_required" ||
+    run.git.promotion?.status === "preserved"
+  ) {
+    failureLines.push(
+      safeOperatorText(run.git.promotion.blocker ?? "Target integration needs attention") ??
+        "Target integration needs attention",
+    );
   }
   if (failureLines.length > 0) {
-    // A blocker without a next step strands the operator; the actions palette always carries the
-    // authority-projected recovery controls for the selected run.
-    if (run.lifecycle.phase === "blocked") failureLines.push("Press [a] for recovery actions (retry, acknowledge, delete)");
     return { tone: "error", lines: ["Attention", ...failureLines] };
   }
 
   const acceptedChecks = (run.checks ?? []).filter((check) => check.accepted).length;
-  const completedTickets = Object.values(run.tickets).filter((ticket) => ticket.status === "completed").length;
-  const acceptedOutputs = Object.values(run.attempts).filter((attempt) =>
-    attempt.kind !== "planning" && attempt.kind !== "lead" && attempt.ticketId !== "run-planning" &&
-    (attempt.terminalOutputSha256 !== undefined || (attempt.status === "completed" && attempt.terminalSummary !== undefined))
+  const completedTickets = Object.values(run.tickets).filter(
+    (ticket) => ticket.status === "completed",
   ).length;
-  const verificationRecorded = new Set(["merge_ready", "merging", "completed"]).has(run.lifecycle.phase);
+  const acceptedOutputs = Object.values(run.attempts).filter(
+    (attempt) =>
+      attempt.kind !== "planning" &&
+      attempt.kind !== "lead" &&
+      attempt.ticketId !== "run-planning" &&
+      (attempt.terminalOutputSha256 !== undefined ||
+        (attempt.status === "completed" && attempt.terminalSummary !== undefined)),
+  ).length;
+  const verificationRecorded = new Set(["merge_ready", "merging", "completed"]).has(
+    run.lifecycle.phase,
+  );
   const positive: string[] = [];
-  if (acceptedChecks > 0) positive.push(`${acceptedChecks} accepted ${acceptedChecks === 1 ? "check" : "checks"}`);
-  if (completedTickets > 0) positive.push(`${completedTickets} completed ${completedTickets === 1 ? "ticket" : "tickets"}`);
-  else if (acceptedOutputs > 0) positive.push(`${acceptedOutputs} accepted agent ${acceptedOutputs === 1 ? "output" : "outputs"}`);
+  if (acceptedChecks > 0)
+    positive.push(`${acceptedChecks} accepted ${acceptedChecks === 1 ? "check" : "checks"}`);
+  if (completedTickets > 0)
+    positive.push(`${completedTickets} completed ${completedTickets === 1 ? "ticket" : "tickets"}`);
+  else if (acceptedOutputs > 0)
+    positive.push(
+      `${acceptedOutputs} accepted agent ${acceptedOutputs === 1 ? "output" : "outputs"}`,
+    );
   if (verificationRecorded) positive.push("Verification completed");
   if (positive.length > 0) return { tone: "success", lines: ["Evidence recorded", ...positive] };
   return { tone: "neutral", lines: ["No recorded issues", "Evidence pending"] };
@@ -557,37 +713,57 @@ function unresolvedFailedCheckCount(run: RunRecord): number {
   return [...latestByAttemptAndCheck.values()].filter((check) => !check.accepted).length;
 }
 
-function objectiveContext(run: RunRecord): string[] {
-  const objectiveFieldId = run.behavior?.runType.objectiveFieldId ?? "goal";
-  const entries = Object.entries(run.intake)
-    .filter(([key, value]) => key !== objectiveFieldId && !emptyIntakeValue(value))
-    .map(([key, value]) => `${titleCase(key)}: ${displayIntakeValue(value)}`);
-  return entries.length === 0 ? ["Scope follows the approved objective."] : entries;
-}
-
-function emptyIntakeValue(value: ConfigurationValue): boolean {
-  return value === null || value === "" || Array.isArray(value) && value.length === 0;
-}
-
-function displayIntakeValue(value: ConfigurationValue): string {
-  if (typeof value === "string") return value;
-  if (value === null) return "null";
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  return JSON.stringify(value);
-}
-
-function ticketDetails(ticket: TicketRecord): NonNullable<NonNullable<ControlCenterViewModel["selectedRun"]>["ticketDetails"]> {
+function ticketDetails(
+  ticket: TicketRecord,
+  lifecycle: RunRecord["lifecycle"],
+  graph: ControlCenterInput["graph"],
+): NonNullable<NonNullable<ControlCenterViewModel["selectedRun"]>["ticketDetails"]> {
   const blocker = ticket.blocker === undefined ? undefined : safeOperatorText(ticket.blocker);
+  const titleById = new Map((graph?.nodes ?? []).map((node) => [node.id, node.title]));
+  const neighborhood = [
+    ...new Set([
+      ...ticket.targetNodeIds,
+      ...(ticket.writeNodeIds ?? []),
+      ...(ticket.readNodeIds ?? []),
+    ]),
+  ];
+  // Only graph-resolved node titles are operator copy; raw node ids never render.
+  const interactsWith = neighborhood
+    .map((id) => titleById.get(id))
+    .filter((title): title is string => title !== undefined)
+    .map((title) => shortNodeTitle(title));
+  const unresolvedNodeCount = neighborhood.length - interactsWith.length;
+  // Best-effort: validation actions are compiled ids; no action-title catalog reaches this
+  // projection, so the trailing id segment is titled for display.
+  const mustSatisfy = [
+    ...new Set(
+      ticket.steps
+        .map((step) => step.validationAction)
+        .filter((action): action is string => typeof action === "string" && action.length > 0)
+        .map((action) => titleCase(action.split(/[:./]/u).at(-1) ?? action)),
+    ),
+  ];
+  const policy = ticket.executionPolicyBinding?.publicOperation;
   return {
     title: ticket.title,
-    status: titleCase(ticket.status),
+    status: interruptedByRunBlock(ticket.status, lifecycle)
+      ? INTERRUPTED_DISPLAY_LABEL
+      : titleCase(ticket.status),
     summary: ticket.summary,
     ...(blocker === undefined ? {} : { blocker }),
+    interactsWith,
+    unresolvedNodeCount,
+    mustSatisfy,
+    ...(policy === undefined ? {} : { policy }),
     steps: ticket.steps.map((step) => ({
       title: step.title,
       persona: titleCase(step.personaId),
-      status: titleCase(step.status),
-      ...(step.summary === undefined || step.summary.trim().length === 0 ? {} : { summary: step.summary }),
+      status: interruptedByRunBlock(step.status, lifecycle)
+        ? INTERRUPTED_DISPLAY_LABEL
+        : titleCase(step.status),
+      ...(step.summary === undefined || step.summary.trim().length === 0
+        ? {}
+        : { summary: step.summary }),
     })),
   };
 }
@@ -596,33 +772,39 @@ function planView(run: RunRecord): NonNullable<ControlCenterViewModel["selectedR
   if (run.plan === undefined || run.plan.status === "planning" || run.plan.status === "revising") {
     return {
       mode: "activity",
-      sections: [{
-        title: "Planning activity",
-        markdown: planningActivityMarkdown(run.activity),
-      }],
+      sections: [
+        {
+          title: "Planning activity",
+          markdown: planningActivityMarkdown(run.activity),
+        },
+      ],
     };
   }
-  if (run.plan.status === "awaiting_approval" || run.lifecycle.phase === "awaiting_approval") {
-    const preferred = ["architecture", "decisions", "risk", "verification"];
-    return {
-      mode: "review",
-      sections: preferred.map((key) => ({
-        title: titleCase(key),
-        markdown: (run.plan!.concise[key] ?? []).map((item) => `### ${item.title}\n${item.description}`).join("\n\n")
-          || "Awaiting operator review; no concise items were recorded for this section.",
-      })),
-    };
-  }
+  // The Plan tab always shows the concise operator plan — the same human-readable items the
+  // review modal surfaces. The full per-domain Markdown remains agent-facing material only.
   const preferred = ["architecture", "decisions", "risk", "verification"];
   const keys = [
-    ...preferred.filter((key) => run.plan!.full[key] !== undefined),
-    ...Object.keys(run.plan.full).filter((key) => !preferred.includes(key)).sort(),
+    ...preferred,
+    ...Object.keys(run.plan.concise)
+      .filter((key) => !preferred.includes(key))
+      .sort(),
   ];
-  const sections = keys.map((key) => ({ title: titleCase(key), markdown: run.plan!.full[key]! }));
-  const graphSeed = graphSeedReview(run.plan.graphSeed);
-  if (graphSeed.length > 0) sections.push({ title: "Graph Seed", markdown: graphSeed.join("\n") });
+  const sections = keys.map((key) => ({
+    title: titleCase(key),
+    markdown:
+      (run.plan!.concise[key] ?? [])
+        .map((item) => `### ${item.title}\n${item.description}`)
+        .join("\n\n") || "No concise items were recorded for this section.",
+  }));
+  const review =
+    run.plan.status === "awaiting_approval" || run.lifecycle.phase === "awaiting_approval";
+  if (!review) {
+    const graphSeed = graphSeedReview(run.plan.graphSeed);
+    if (graphSeed.length > 0)
+      sections.push({ title: "Graph Seed", markdown: graphSeed.join("\n") });
+  }
   return {
-    mode: "approved",
+    mode: review ? "review" : "approved",
     sections,
   };
 }
@@ -632,7 +814,8 @@ function planningActivityMarkdown(activity: readonly RunActivityRecord[]): strin
   const lines: string[] = [];
   let previous = "";
   for (const event of activity) {
-    if (event.kind !== "agent" && !event.message.toLocaleLowerCase("en-US").includes("plan")) continue;
+    if (event.kind !== "agent" && !event.message.toLocaleLowerCase("en-US").includes("plan"))
+      continue;
     const message = event.message.replace(/\s+/gu, " ").trim();
     const normalized = message.toLocaleLowerCase("en-US");
     if (message.length === 0 || generic.test(message) || normalized === previous) continue;
@@ -642,7 +825,9 @@ function planningActivityMarkdown(activity: readonly RunActivityRecord[]): strin
   return lines.slice(-40).join("\n") || "Planning is active. Semantic milestones will appear here.";
 }
 
-function approvalView(run: RunRecord): NonNullable<ControlCenterViewModel["selectedRun"]>["approval"] | undefined {
+function approvalView(
+  run: RunRecord,
+): NonNullable<ControlCenterViewModel["selectedRun"]>["approval"] | undefined {
   if (run.plan === undefined || run.plan.status !== "awaiting_approval") return undefined;
   const ids = ["architecture", "decisions", "risk", "verification"];
   return {
@@ -663,7 +848,9 @@ function graphSeedReview(value: unknown): string[] {
   const edges = Array.isArray(value.edges) ? value.edges : [];
   if (Object.keys(rootSpec).length === 0 && nodes.length === 0 && edges.length === 0) return [];
   const titles = new Map<string, string>([["$root", "Run goal"]]);
-  const lines = [`${Object.keys(rootSpec).length} goal facts · ${nodes.length} semantic nodes · ${edges.length} relationships`];
+  const lines = [
+    `${Object.keys(rootSpec).length} goal facts · ${nodes.length} semantic nodes · ${edges.length} relationships`,
+  ];
   let shownRootFacts = 0;
   for (const [key, fact] of Object.entries(rootSpec)) {
     if (shownRootFacts >= 6) break;
@@ -675,23 +862,33 @@ function graphSeedReview(value: unknown): string[] {
   for (const unknownNode of nodes.slice(0, 12)) {
     if (!isPlainRecord(unknownNode)) continue;
     const key = typeof unknownNode.key === "string" ? unknownNode.key : undefined;
-    const title = typeof unknownNode.title === "string" ? shortNodeTitle(unknownNode.title) : undefined;
+    const title =
+      typeof unknownNode.title === "string" ? shortNodeTitle(unknownNode.title) : undefined;
     const type = typeof unknownNode.type === "string" ? titleCase(unknownNode.type) : "Node";
     if (key !== undefined && title !== undefined) titles.set(key, title);
     if (title !== undefined) {
       const spec = isPlainRecord(unknownNode.spec) ? unknownNode.spec : undefined;
-      const purpose = spec === undefined ? undefined : ["purpose", "description", "summary", "intent"]
-        .map((field) => safeGraphFact(spec[field]))
-        .find((candidate) => candidate !== undefined);
+      const purpose =
+        spec === undefined
+          ? undefined
+          : ["purpose", "description", "summary", "intent"]
+              .map((field) => safeGraphFact(spec[field]))
+              .find((candidate) => candidate !== undefined);
       lines.push(`- ${type}: ${title}${purpose === undefined ? "" : ` — ${purpose}`}`);
     }
   }
   for (const unknownEdge of edges.slice(0, 16)) {
     if (!isPlainRecord(unknownEdge)) continue;
-    const source = typeof unknownEdge.source === "string" ? titles.get(unknownEdge.source) : undefined;
-    const target = typeof unknownEdge.target === "string" ? titles.get(unknownEdge.target) : undefined;
-    const relation = typeof unknownEdge.relation === "string" ? titleCase(unknownEdge.relation).toLowerCase() : undefined;
-    if (source !== undefined && target !== undefined && relation !== undefined) lines.push(`- ${source} ${relation} ${target}`);
+    const source =
+      typeof unknownEdge.source === "string" ? titles.get(unknownEdge.source) : undefined;
+    const target =
+      typeof unknownEdge.target === "string" ? titles.get(unknownEdge.target) : undefined;
+    const relation =
+      typeof unknownEdge.relation === "string"
+        ? titleCase(unknownEdge.relation).toLowerCase()
+        : undefined;
+    if (source !== undefined && target !== undefined && relation !== undefined)
+      lines.push(`- ${source} ${relation} ${target}`);
   }
   const omittedRoot = Math.max(0, Object.keys(rootSpec).length - shownRootFacts);
   const omittedNodes = Math.max(0, nodes.length - 12);
@@ -699,7 +896,9 @@ function graphSeedReview(value: unknown): string[] {
   const omitted = [
     ...(omittedRoot === 0 ? [] : [`${omittedRoot} goal ${omittedRoot === 1 ? "fact" : "facts"}`]),
     ...(omittedNodes === 0 ? [] : [`${omittedNodes} ${omittedNodes === 1 ? "node" : "nodes"}`]),
-    ...(omittedEdges === 0 ? [] : [`${omittedEdges} ${omittedEdges === 1 ? "relationship" : "relationships"}`]),
+    ...(omittedEdges === 0
+      ? []
+      : [`${omittedEdges} ${omittedEdges === 1 ? "relationship" : "relationships"}`]),
   ];
   if (omitted.length > 0) lines.push(`- ${omitted.join(", ")} omitted from this concise review.`);
   return lines;
@@ -713,8 +912,12 @@ function stageViews(
     return controls.stages.map((stage) => ({
       id: stage.id,
       title: stage.title,
-      state: stage.status === "succeeded" || stage.status === "skipped" ? "done"
-        : stage.current ? "active" : "pending",
+      state:
+        stage.status === "succeeded" || stage.status === "skipped"
+          ? "done"
+          : stage.current
+            ? "active"
+            : "pending",
       kind: stage.kind,
       category: stage.category,
       ...(stage.summary === undefined ? {} : { summary: stage.summary }),
@@ -727,58 +930,126 @@ function stageViews(
       })),
     }));
   }
-  const activeIndex = run.currentPipelineStageId === undefined
-    ? -1
-    : run.pipelineStageIds.indexOf(run.currentPipelineStageId);
+  const activeIndex =
+    run.currentPipelineStageId === undefined
+      ? -1
+      : run.pipelineStageIds.indexOf(run.currentPipelineStageId);
   return run.pipelineStageIds.map((id, index) => ({
     id,
     title: titleCase(id),
-    state: run.lifecycle.phase === "completed"
-      ? "done"
-      : index < activeIndex
-      ? "done"
-      : index === activeIndex && !new Set(["completed", "deleted", "failed"]).has(run.lifecycle.phase)
-        ? "active"
-        : "pending",
+    state:
+      run.lifecycle.phase === "completed"
+        ? "done"
+        : index < activeIndex
+          ? "done"
+          : index === activeIndex &&
+              !new Set(["completed", "deleted", "failed"]).has(run.lifecycle.phase)
+            ? "active"
+            : "pending",
     actions: [],
   }));
 }
 
-function ticketRow(ticket: TicketRecord): TicketRowView {
-  const done = ticket.steps.filter((step) => step.status === "completed" || step.status === "skipped").length;
-  const current = ticket.steps.find((step) => step.status === "running") ??
+function ticketRow(ticket: TicketRecord, lifecycle: RunRecord["lifecycle"]): TicketRowView {
+  const halted = runExecutionHalted(lifecycle);
+  const done = ticket.steps.filter(
+    (step) => step.status === "completed" || step.status === "skipped",
+  ).length;
+  const current =
+    ticket.steps.find((step) => step.status === "running") ??
     ticket.steps.find((step) => step.status !== "completed" && step.status !== "skipped");
-  const rail = ticket.steps.map((step) => {
-    if (step.status === "completed" || step.status === "skipped") return "●";
-    if (step.status === "running") return "◉";
-    if (step.status === "failed") return "!";
-    return "○";
-  }).join("─");
+  const rail = ticket.steps
+    .map((step) => {
+      if (step.status === "completed" || step.status === "skipped") return "●";
+      if (step.status === "running") return halted ? "◌" : "◉";
+      if (step.status === "failed") return "!";
+      return "○";
+    })
+    .join("─");
+  const running = ticket.steps.some((step) => step.status === "running");
   return {
     id: ticket.id,
     title: ticket.title,
-    status: titleCase(ticket.status),
+    status: interruptedByRunBlock(ticket.status, lifecycle)
+      ? INTERRUPTED_DISPLAY_LABEL
+      : titleCase(ticket.status),
     progress: `${done}/${ticket.steps.length}`,
-    active: ticket.steps.some((step) => step.status === "running"),
+    active: running && !halted,
     rail,
     ...(current === undefined ? {} : { currentPersona: titleCase(current.personaId) }),
-    recovery: ticket.status === "failed" || ticket.status === "blocked" ||
-      ticket.steps.some((step) => step.status === "failed"),
+    recovery:
+      ticket.status === "failed" ||
+      ticket.status === "blocked" ||
+      ticket.steps.some((step) => step.status === "failed") ||
+      (halted && running),
     proposalAwaitingDecision: ticket.status === "proposed",
   };
 }
 
-function ticketInTab(ticket: TicketRecord, tab: TicketTab): boolean {
+function ticketInTab(
+  ticket: TicketRecord,
+  tab: TicketTab,
+  lifecycle: RunRecord["lifecycle"],
+): boolean {
   const status = ticket.status.toLocaleLowerCase("en-US");
-  const active = ticket.steps.some((step) => step.status === "running") ||
-    new Set(["active", "running", "in_progress"]).has(status);
+  const halted = runExecutionHalted(lifecycle);
+  const active =
+    !halted &&
+    (ticket.steps.some((step) => step.status === "running") ||
+      new Set(["active", "running", "in_progress"]).has(status));
+  const interrupted =
+    halted &&
+    (ticket.steps.some((step) => step.status === "running") ||
+      new Set(["active", "running", "in_progress", "review"]).has(status));
   if (tab === "all") return true;
   if (tab === "active") return active;
   if (tab === "todo") return !active && new Set(["pending", "ready", "todo", "open"]).has(status);
-  if (tab === "blocked") return status === "blocked";
+  if (tab === "blocked") return status === "blocked" || interrupted;
   if (tab === "proposed") return status === "proposed";
-  if (tab === "closed") return new Set(["completed", "closed", "cancelled", "superseded"]).has(status);
-  return !TICKET_TABS.slice(0, -1).some((candidate) => candidate !== "all" && ticketInTab(ticket, candidate));
+  if (tab === "closed")
+    return new Set(["completed", "closed", "cancelled", "superseded"]).has(status);
+  return !TICKET_TABS.slice(0, -1).some(
+    (candidate) => candidate !== "all" && ticketInTab(ticket, candidate, lifecycle),
+  );
+}
+
+/**
+ * Orders attempts as a lineage tree: roots keep the active-first ordering, children nest
+ * under their parent in branch order. Attempts without lineage stay roots, so a partial
+ * lineage projection degrades to the flat active-first list rather than hiding rows.
+ */
+function lineageOrdered(
+  attempts: readonly AgentAttemptRecord[],
+  lineageByAttempt: ReadonlyMap<string, ControlRunAttemptLineage["attempts"][number]>,
+): { attempt: AgentAttemptRecord; depth: number }[] {
+  const included = new Set(attempts.map((attempt) => attempt.id));
+  const childrenOf = new Map<string, AgentAttemptRecord[]>();
+  const roots: AgentAttemptRecord[] = [];
+  for (const attempt of attempts) {
+    const parent = lineageByAttempt.get(attempt.id)?.parentAttemptId;
+    if (parent !== undefined && included.has(parent)) {
+      const siblings = childrenOf.get(parent);
+      if (siblings === undefined) childrenOf.set(parent, [attempt]);
+      else siblings.push(attempt);
+    } else {
+      roots.push(attempt);
+    }
+  }
+  const siblingOrder = (left: AgentAttemptRecord, right: AgentAttemptRecord): number =>
+    (lineageByAttempt.get(left.id)?.branchEpoch ?? 0) -
+      (lineageByAttempt.get(right.id)?.branchEpoch ?? 0) ||
+    (left.startedAt ?? "").localeCompare(right.startedAt ?? "") ||
+    left.id.localeCompare(right.id);
+  roots.sort(agentOrder);
+  const ordered: { attempt: AgentAttemptRecord; depth: number }[] = [];
+  const visit = (attempt: AgentAttemptRecord, depth: number): void => {
+    ordered.push({ attempt, depth });
+    for (const child of [...(childrenOf.get(attempt.id) ?? [])].sort(siblingOrder)) {
+      visit(child, depth + 1);
+    }
+  };
+  for (const root of roots) visit(root, 0);
+  return ordered;
 }
 
 function agentRow(
@@ -786,43 +1057,56 @@ function agentRow(
   attempt: AgentAttemptRecord,
   includeTicketPrefix: boolean,
   lineageByAttempt: ReadonlyMap<string, ControlRunAttemptLineage["attempts"][number]>,
+  depth = 0,
 ): AgentRowView {
   const ticket = run.tickets[attempt.ticketId];
   const lineage = lineageByAttempt.get(attempt.id);
   const persona = lineage?.persona ?? titleCase(attempt.personaId);
   const ticketLabel = lineage?.ticket ?? ticket?.title;
-  const prefix = includeTicketPrefix && ticketLabel !== undefined && attempt.ticketId !== "run-planning"
-    ? `${ticketLabel} · ` : "";
+  const prefix =
+    includeTicketPrefix && ticketLabel !== undefined && attempt.ticketId !== "run-planning"
+      ? `${ticketLabel} · `
+      : "";
   const step = ticket?.steps.find((candidate) => candidate.id === attempt.stepId);
   const active = attempt.status === "queued" || attempt.status === "running";
   const newTokens = attempt.inputTokens + attempt.outputTokens;
   const allTokens = newTokens + attempt.cacheReadTokens + attempt.cacheWriteTokens;
-  const parentLabel = lineage?.parentAttemptId === undefined
-    ? undefined
-    : lineageSemanticLabel(lineageByAttempt.get(lineage.parentAttemptId));
+  const parentLabel =
+    lineage?.parentAttemptId === undefined
+      ? undefined
+      : lineageSemanticLabel(lineageByAttempt.get(lineage.parentAttemptId));
+  const stepTitle = step?.title ?? lineage?.step;
   return {
     id: attempt.id,
     label: `${prefix}${persona}`,
     work: compactWorkTitle(
-      step?.title ?? attempt.terminalSummary ?? attemptPhaseTitle(attempt, ticket !== undefined, active),
+      step?.title ??
+        attempt.terminalSummary ??
+        attemptPhaseTitle(attempt, ticket !== undefined, active),
     ),
+    persona,
+    ...(stepTitle === undefined ? {} : { stepTitle }),
     model: attempt.modelId,
     thinking: attempt.thinkingLevel,
     status: attempt.status,
     active,
     newTokens: formatTokens(newTokens),
     allTokens: formatTokens(allTokens),
-    ...(lineage === undefined ? {} : {
-      lineage: {
-        reason: lineageReasonLabel(lineage.reason),
-        branch: lineage.branchEpoch === 0 ? "Original attempt" : `Branch ${lineage.branchEpoch + 1}`,
-        ...(parentLabel === undefined ? {} : { parent: parentLabel }),
-        children: lineage.childAttemptIds
-          .map((id) => lineageSemanticLabel(lineageByAttempt.get(id)))
-          .filter((label): label is string => label !== undefined),
-        activeLeaf: lineage.activeLeaf,
-      },
-    }),
+    depth,
+    ...(lineage === undefined
+      ? {}
+      : {
+          lineage: {
+            reason: lineageReasonLabel(lineage.reason),
+            branch:
+              lineage.branchEpoch === 0 ? "Original attempt" : `Branch ${lineage.branchEpoch + 1}`,
+            ...(parentLabel === undefined ? {} : { parent: parentLabel }),
+            children: lineage.childAttemptIds
+              .map((id) => lineageSemanticLabel(lineageByAttempt.get(id)))
+              .filter((label): label is string => label !== undefined),
+            activeLeaf: lineage.activeLeaf,
+          },
+        }),
   };
 }
 
@@ -833,7 +1117,9 @@ function lineageSemanticLabel(
   return `${lineage.persona} · ${lineage.step}`;
 }
 
-function lineageReasonLabel(reason: ControlRunAttemptLineage["attempts"][number]["reason"]): string {
+function lineageReasonLabel(
+  reason: ControlRunAttemptLineage["attempts"][number]["reason"],
+): string {
   if (reason === "initial") return "Initial attempt";
   if (reason === "retry") return "Retry";
   if (reason === "rework") return "Rework";
@@ -842,10 +1128,16 @@ function lineageReasonLabel(reason: ControlRunAttemptLineage["attempts"][number]
   return "Integration branch";
 }
 
-function attemptPhaseTitle(attempt: AgentAttemptRecord, hasTicket: boolean, active: boolean): string {
+function attemptPhaseTitle(
+  attempt: AgentAttemptRecord,
+  hasTicket: boolean,
+  active: boolean,
+): string {
   if (attempt.status === "waiting_question") return "Waiting for answer";
   if (attempt.status === "terminal_accepted") return "Finishing attempt";
-  const kind = attempt.kind ?? (attempt.ticketId === "run-planning" ? "planning" : hasTicket ? "ticket" : undefined);
+  const kind =
+    attempt.kind ??
+    (attempt.ticketId === "run-planning" ? "planning" : hasTicket ? "ticket" : undefined);
   if (kind === "planning") return active ? "Planning run" : "Planned run";
   if (kind === "lead") return active ? "Reviewing readiness" : "Readiness reviewed";
   if (kind === "verification") return active ? "Reviewing evidence" : "Reviewed evidence";
@@ -856,7 +1148,9 @@ function attemptPhaseTitle(attempt: AgentAttemptRecord, hasTicket: boolean, acti
 
 function activityViews(events: readonly RunActivityRecord[]): ActivityView[] {
   const collapsed = new Map<string, { event: RunActivityRecord; message: string; count: number }>();
-  for (const event of [...events].sort((left, right) => right.at.localeCompare(left.at) || right.id.localeCompare(left.id))) {
+  for (const event of [...events].sort(
+    (left, right) => right.at.localeCompare(left.at) || right.id.localeCompare(left.id),
+  )) {
     const semantic = semanticActivityMessage(event);
     if (semantic === undefined) continue;
     const key = `${event.kind}\u0000${semantic.toLocaleLowerCase("en-US")}`;
@@ -864,11 +1158,12 @@ function activityViews(events: readonly RunActivityRecord[]): ActivityView[] {
     if (existing === undefined) collapsed.set(key, { event, message: semantic, count: 1 });
     else existing.count += 1;
   }
-  return [...collapsed.values()].slice(0, 120).map(({ event, message, count }) => ({
+  return [...collapsed.values()].slice(0, 500).map(({ event, message, count }) => ({
     id: event.id,
     timestamp: formatTimestamp(event.at),
     kind: event.kind,
     message: count === 1 ? message : `${message} ×${count}`,
+    ...(event.tone === undefined ? {} : { tone: event.tone }),
   }));
 }
 
@@ -879,17 +1174,27 @@ function semanticActivityMessage(event: RunActivityRecord): string | undefined {
     .replace(/\b(?:sha256:)?[a-f0-9]{40,64}\b/giu, "[digest]")
     .replace(/\b[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]*/gu, "[local checkout]")
     .replace(/(^|[\s(])\/(?:[^\s/]+\/)*[^\s,;:)]*/gu, "$1[local checkout]")
-    .replace(/\b(run|ticket|attempt|session|question|claim|experiment|gate|node|step)[-_:][\p{L}\p{N}._:-]+\b/giu, (_match, kind: string) => `the ${kind.toLowerCase()}`)
+    .replace(
+      /\b(run|ticket|attempt|session|question|claim|experiment|gate|node|step)[-_:][\p{L}\p{N}._:-]+\b/giu,
+      (_match, kind: string) => `the ${kind.toLowerCase()}`,
+    )
     .replace(/\s+/gu, " ")
     .trim();
   if (message.length === 0) return undefined;
-  if (/^(?:(?:planning|compiler|agent)\s+)*(?:event|activity|working|active)[.!]?$/iu.test(message)) return undefined;
+  if (/^(?:(?:planning|compiler|agent)\s+)*(?:event|activity|working|active)[.!]?$/iu.test(message))
+    return undefined;
   if (event.kind === "compiler" && /^[a-z0-9_.:-]+$/u.test(message) && /[_.:]/u.test(message)) {
     message = "Compiler recorded an internal state transition";
   }
-  if (event.kind === "graph_added" && !/\b(?:add|added|create|created)\b/iu.test(message)) message = `Added: ${message}`;
-  if (event.kind === "graph_modified" && !/\b(?:modify|modified|update|updated|change|changed)\b/iu.test(message)) message = `Modified: ${message}`;
-  if (event.kind === "graph_deleted" && !/\b(?:delete|deleted|remove|removed)\b/iu.test(message)) message = `Deleted: ${message}`;
+  if (event.kind === "graph_added" && !/\b(?:add|added|create|created)\b/iu.test(message))
+    message = `Added: ${message}`;
+  if (
+    event.kind === "graph_modified" &&
+    !/\b(?:modify|modified|update|updated|change|changed)\b/iu.test(message)
+  )
+    message = `Modified: ${message}`;
+  if (event.kind === "graph_deleted" && !/\b(?:delete|deleted|remove|removed)\b/iu.test(message))
+    message = `Deleted: ${message}`;
   const words = message.split(/\s+/u);
   return words.length > 30 ? `${words.slice(0, 30).join(" ")}…` : message;
 }
@@ -899,19 +1204,23 @@ function graphView(graph: ControlCenterInput["graph"]): {
   edges: GraphEdge[];
 } {
   if (graph === undefined) return { nodes: [], edges: [] };
-  const nodes = [...graph.nodes].sort((left, right) => left.id.localeCompare(right.id)).map((node) => ({
-    id: node.id,
-    type: node.type,
-    marker: graphMarker(node.type),
-    label: shortNodeTitle(node.title),
-    muted: !new Set(["active", "planned", "open", "unresolved", "pending"]).has(node.status),
-  }));
+  const nodes = [...graph.nodes]
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map((node) => ({
+      id: node.id,
+      type: node.type,
+      marker: graphMarker(node.type),
+      label: shortNodeTitle(node.title),
+      fullTitle: node.title.replace(/\s+/gu, " ").trim() || "Untitled",
+      muted: !new Set(["active", "planned", "open", "unresolved", "pending"]).has(node.status),
+    }));
   return {
     nodes,
-    edges: [...graph.edges].sort((left, right) =>
-      left.source.localeCompare(right.source) ||
-      left.relation.localeCompare(right.relation) ||
-      left.target.localeCompare(right.target)
+    edges: [...graph.edges].sort(
+      (left, right) =>
+        left.source.localeCompare(right.source) ||
+        left.relation.localeCompare(right.relation) ||
+        left.target.localeCompare(right.target),
     ),
   };
 }
@@ -946,7 +1255,11 @@ export function formatTokens(value: number): string {
 }
 
 function trimDecimal(value: number): string {
-  return value >= 100 ? value.toFixed(0) : value >= 10 ? value.toFixed(1).replace(/\.0$/u, "") : value.toFixed(2).replace(/0+$/u, "").replace(/\.$/u, "");
+  return value >= 100
+    ? value.toFixed(0)
+    : value >= 10
+      ? value.toFixed(1).replace(/\.0$/u, "")
+      : value.toFixed(2).replace(/0+$/u, "").replace(/\.$/u, "");
 }
 
 function objectiveTitle(value: string): string {
@@ -955,7 +1268,11 @@ function objectiveTitle(value: string): string {
 }
 
 function compactWorkTitle(value: string): string {
-  const words = value.replace(/[^\p{L}\p{N}]+/gu, " ").trim().split(/\s+/u).filter(Boolean);
+  const words = value
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .split(/\s+/u)
+    .filter(Boolean);
   const normalized = words.join(" ").toLocaleLowerCase("en-US");
   if (normalized === "execute compiled work") return "Coordinating tickets";
   if (normalized === "combined plan" || normalized === "plan run") return "Planning run";
@@ -963,13 +1280,18 @@ function compactWorkTitle(value: string): string {
 }
 
 function shortNodeTitle(value: string): string {
-  const words = value.replace(/[^\p{L}\p{N}]+/gu, " ").trim().split(/\s+/u).filter(Boolean);
+  const words = value
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .split(/\s+/u)
+    .filter(Boolean);
   const selected = words.slice(0, 4).join(" ");
   return selected || "Untitled";
 }
 
 function safeGraphFact(value: unknown): string | undefined {
-  if (typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) return String(value);
+  if (typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value)))
+    return String(value);
   if (typeof value !== "string") return undefined;
   const safe = safeOperatorText(value);
   if (
@@ -977,7 +1299,8 @@ function safeGraphFact(value: unknown): string | undefined {
     safe.includes("[local path]") ||
     safe.includes("[redacted digest]") ||
     safe.includes("[structured detail]")
-  ) return undefined;
+  )
+    return undefined;
   const words = safe.split(/\s+/u);
   const concise = words.slice(0, 12).join(" ");
   return words.length > 12 ? `${concise}…` : concise;
@@ -993,21 +1316,27 @@ function safeOperatorText(value: string): string | undefined {
     .replace(/\b[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]*/gu, "[local path]")
     .replace(/(^|[\s(])\/(?:[^\s/]+\/)*[^\s,;:)]*/gu, "$1[local path]")
     .replace(/(?:\.\.?\/)[^\s,;:)]+/gu, "[local path]")
-    .replace(/\b(run|ticket|attempt|session|question|claim|experiment|gate|node|step)[-_:][\p{L}\p{N}._:-]+\b/giu, (_match, kind: string) => `the ${kind.toLowerCase()}`)
+    .replace(
+      /\b(run|ticket|attempt|session|question|claim|experiment|gate|node|step)[-_:][\p{L}\p{N}._:-]+\b/giu,
+      (_match, kind: string) => `the ${kind.toLowerCase()}`,
+    )
     .replace(/\s+/gu, " ")
     .trim();
   safe = safe.replace(/(?:\[structured detail\]\s*){2,}/gu, "[structured detail] ").trim();
   if (safe.length === 0) return undefined;
   const normalized = safe.toLocaleLowerCase("en-US").replace(/[.!]+$/u, "");
-  if (new Set([
-    "blocked",
-    "failed",
-    "error",
-    "unknown",
-    "needs attention",
-    "waiting",
-    "not available",
-  ]).has(normalized)) return undefined;
+  if (
+    new Set([
+      "blocked",
+      "failed",
+      "error",
+      "unknown",
+      "needs attention",
+      "waiting",
+      "not available",
+    ]).has(normalized)
+  )
+    return undefined;
   return safe;
 }
 
@@ -1016,16 +1345,26 @@ function graphMarker(type: string): string {
 }
 
 function ticketOrder(left: TicketRecord, right: TicketRecord): number {
-  return left.priority - right.priority || left.title.localeCompare(right.title) || left.id.localeCompare(right.id);
+  return (
+    left.priority - right.priority ||
+    left.title.localeCompare(right.title) ||
+    left.id.localeCompare(right.id)
+  );
 }
 
 function agentOrder(left: AgentAttemptRecord, right: AgentAttemptRecord): number {
-  const leftActive = new Set(["queued", "running", "waiting_question", "terminal_accepted"]).has(left.status);
-  const rightActive = new Set(["queued", "running", "waiting_question", "terminal_accepted"]).has(right.status);
-  return Number(rightActive) - Number(leftActive) ||
+  const leftActive = new Set(["queued", "running", "waiting_question", "terminal_accepted"]).has(
+    left.status,
+  );
+  const rightActive = new Set(["queued", "running", "waiting_question", "terminal_accepted"]).has(
+    right.status,
+  );
+  return (
+    Number(rightActive) - Number(leftActive) ||
     (right.startedAt ?? "").localeCompare(left.startedAt ?? "") ||
     left.personaId.localeCompare(right.personaId) ||
-    left.id.localeCompare(right.id);
+    left.id.localeCompare(right.id)
+  );
 }
 
 function stageTitle(stage: string | undefined, phase: string): string {
@@ -1034,9 +1373,7 @@ function stageTitle(stage: string | undefined, phase: string): string {
 }
 
 function titleCase(value: string): string {
-  return value
-    .replace(/[-_]+/gu, " ")
-    .replace(/\b\p{L}/gu, (letter) => letter.toUpperCase());
+  return value.replace(/[-_]+/gu, " ").replace(/\b\p{L}/gu, (letter) => letter.toUpperCase());
 }
 
 function shortBranch(reference: string): string {

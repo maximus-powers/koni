@@ -1,17 +1,7 @@
-import {
-  decodeKittyPrintable,
-  Key,
-  matchesKey,
-} from "@earendil-works/pi-tui";
+import { decodeKittyPrintable, Key, matchesKey } from "@earendil-works/pi-tui";
 
 export type ControlCenterPanel =
-  | "runs"
-  | "tickets"
-  | "details"
-  | "questions"
-  | "agents"
-  | "activity"
-  | "graph";
+  "runs" | "tickets" | "details" | "questions" | "agents" | "activity" | "graph";
 
 export type ControlCenterKeyAction =
   | { type: "move"; delta: -1 | 1 }
@@ -28,7 +18,7 @@ export type ControlCenterKeyAction =
   | { type: "details_tab"; delta: -1 | 1 }
   | { type: "activate" }
   | { type: "cancel" }
-  | { type: "toggle_objective" }
+  | { type: "context_toggle" }
   | { type: "toggle_pause" }
   | { type: "request_delete" }
   | { type: "merge" }
@@ -44,7 +34,6 @@ export type ControlCenterKeyAction =
   | { type: "config_document_rename" }
   | { type: "config_document_delete" }
   | { type: "config_run_type_create" }
-  | { type: "config_legacy_migration" }
   | { type: "open_conflicts" }
   | { type: "review_plan" }
   | { type: "review_proposal" }
@@ -70,7 +59,24 @@ export interface ControlCenterInputContext {
   modalOpen: boolean;
   /** Any modal/chat text editor that owns printable input. */
   editingText?: boolean;
-  modalKind?: "help" | "delete" | "merge" | "new_run" | "plan_review" | "proposal_review" | "answer_question" | "action_palette" | "action_form" | "configure" | "configure_documents" | "config_document_create" | "config_document_rename" | "config_document_delete" | "config_run_type_wizard" | "config_legacy_migration" | "profile_conflicts" | "edit_scalar";
+  modalKind?:
+    | "help"
+    | "delete"
+    | "merge"
+    | "new_run"
+    | "plan_review"
+    | "proposal_review"
+    | "answer_question"
+    | "action_palette"
+    | "action_form"
+    | "configure"
+    | "configure_documents"
+    | "config_document_create"
+    | "config_document_rename"
+    | "config_document_delete"
+    | "config_run_type_wizard"
+    | "profile_conflicts"
+    | "edit_scalar";
   chatComposer?: boolean;
   chatOpen?: boolean;
 }
@@ -119,23 +125,39 @@ export function decodeControlCenterInput(
   if (matchesKey(data, Key.escape)) return { type: "cancel" };
 
   if (context.editingNotes || context.editingText === true || context.chatComposer === true) {
-    if (context.editingNotes && matchesKey(data, Key.shift(Key.tab))) return { type: "focus", delta: -1 };
+    if (context.editingNotes && matchesKey(data, Key.shift(Key.tab)))
+      return { type: "focus", delta: -1 };
     if (context.editingNotes && matchesKey(data, Key.tab)) return { type: "focus", delta: 1 };
-    if (context.chatComposer === true && matchesKey(data, Key.tab)) return { type: "toggle_chat_mode" };
-    if (context.modalKind === "configure" && matchesKey(data, Key.up)) return { type: "focus", delta: -1 };
-    if (context.modalKind === "configure" && matchesKey(data, Key.down)) return { type: "focus", delta: 1 };
-    if ((context.modalKind === "config_document_create" || context.modalKind === "config_document_rename" ||
-        context.modalKind === "config_run_type_wizard") && matchesKey(data, Key.up)) {
+    if (context.chatComposer === true && matchesKey(data, Key.tab))
+      return { type: "toggle_chat_mode" };
+    if (context.modalKind === "configure" && matchesKey(data, Key.up))
+      return { type: "focus", delta: -1 };
+    if (context.modalKind === "configure" && matchesKey(data, Key.down))
+      return { type: "focus", delta: 1 };
+    if (
+      (context.modalKind === "config_document_create" ||
+        context.modalKind === "config_document_rename" ||
+        context.modalKind === "config_run_type_wizard") &&
+      matchesKey(data, Key.up)
+    ) {
       return { type: "focus", delta: -1 };
     }
-    if ((context.modalKind === "config_document_create" || context.modalKind === "config_document_rename" ||
-        context.modalKind === "config_run_type_wizard") && matchesKey(data, Key.down)) {
+    if (
+      (context.modalKind === "config_document_create" ||
+        context.modalKind === "config_document_rename" ||
+        context.modalKind === "config_run_type_wizard") &&
+      matchesKey(data, Key.down)
+    ) {
       return { type: "focus", delta: 1 };
     }
-    if (context.editingText === true && matchesKey(data, Key.shift(Key.tab))) return { type: "focus", delta: -1 };
-    if (context.editingText === true && matchesKey(data, Key.tab)) return { type: "focus", delta: 1 };
-    if (context.editingText === true && matchesKey(data, Key.left)) return { type: "details_tab", delta: -1 };
-    if (context.editingText === true && matchesKey(data, Key.right)) return { type: "details_tab", delta: 1 };
+    if (context.editingText === true && matchesKey(data, Key.shift(Key.tab)))
+      return { type: "focus", delta: -1 };
+    if (context.editingText === true && matchesKey(data, Key.tab))
+      return { type: "focus", delta: 1 };
+    if (context.editingText === true && matchesKey(data, Key.left))
+      return { type: "details_tab", delta: -1 };
+    if (context.editingText === true && matchesKey(data, Key.right))
+      return { type: "details_tab", delta: 1 };
     if (context.editingText === true && matchesKey(data, Key.home)) return { type: "scroll_home" };
     if (context.editingText === true && matchesKey(data, Key.end)) return { type: "scroll_end" };
     if (matchesKey(data, Key.shift(Key.enter)) || matchesKey(data, Key.alt(Key.enter))) {
@@ -152,16 +174,22 @@ export function decodeControlCenterInput(
     if (context.modalKind === "help" && data === "q") return { type: "cancel" };
     if (context.modalKind === "configure" && data === "q") return { type: "quit" };
     if (data === "h" || matchesKey(data, Key.f1)) return { type: "help" };
-    if (context.modalKind === "configure" && data === "a") return { type: "config_resource_create" };
-    if (context.modalKind === "configure" && data === "d") return { type: "config_resource_duplicate" };
-    if (context.modalKind === "configure" && data === "x") return { type: "config_resource_delete" };
+    if (context.modalKind === "configure" && data === "a")
+      return { type: "config_resource_create" };
+    if (context.modalKind === "configure" && data === "d")
+      return { type: "config_resource_duplicate" };
+    if (context.modalKind === "configure" && data === "x")
+      return { type: "config_resource_delete" };
     if (context.modalKind === "configure" && data === "u") return { type: "open_conflicts" };
     if (context.modalKind === "configure" && data === "r") return { type: "open_config_documents" };
-    if (context.modalKind === "configure_documents" && data === "a") return { type: "config_document_create" };
-    if (context.modalKind === "configure_documents" && data === "e") return { type: "config_document_rename" };
-    if (context.modalKind === "configure_documents" && data === "x") return { type: "config_document_delete" };
-    if (context.modalKind === "configure_documents" && data === "t") return { type: "config_run_type_create" };
-    if (context.modalKind === "configure_documents" && data === "l") return { type: "config_legacy_migration" };
+    if (context.modalKind === "configure_documents" && data === "a")
+      return { type: "config_document_create" };
+    if (context.modalKind === "configure_documents" && data === "e")
+      return { type: "config_document_rename" };
+    if (context.modalKind === "configure_documents" && data === "x")
+      return { type: "config_document_delete" };
+    if (context.modalKind === "configure_documents" && data === "t")
+      return { type: "config_run_type_create" };
     if (matchesKey(data, Key.shift(Key.tab))) return { type: "focus", delta: -1 };
     if (matchesKey(data, Key.tab)) return { type: "focus", delta: 1 };
     if (matchesKey(data, Key.up) || data === "k") return { type: "move", delta: -1 };
@@ -186,10 +214,18 @@ export function decodeControlCenterInput(
   if (matchesKey(data, Key.pageDown)) return { type: "page", delta: 1 };
   if (matchesKey(data, Key.home)) return { type: "scroll_home" };
   if (matchesKey(data, Key.end)) return { type: "scroll_end" };
-  if (context.chatOpen === true && context.panel === "details" &&
-      (matchesKey(data, Key.left) || data === "[")) return { type: "transcript_page", delta: -1 };
-  if (context.chatOpen === true && context.panel === "details" &&
-      (matchesKey(data, Key.right) || data === "]")) return { type: "transcript_page", delta: 1 };
+  if (
+    context.chatOpen === true &&
+    context.panel === "details" &&
+    (matchesKey(data, Key.left) || data === "[")
+  )
+    return { type: "transcript_page", delta: -1 };
+  if (
+    context.chatOpen === true &&
+    context.panel === "details" &&
+    (matchesKey(data, Key.right) || data === "]")
+  )
+    return { type: "transcript_page", delta: 1 };
   if (matchesKey(data, Key.left) || data === "[") return { type: "details_tab", delta: -1 };
   if (matchesKey(data, Key.right) || data === "]") return { type: "details_tab", delta: 1 };
   if (matchesKey(data, Key.enter)) return { type: "activate" };
@@ -205,7 +241,7 @@ export function decodeControlCenterInput(
   if (data === "?") return { type: "open_question" };
   if (data === "r") return { type: "refresh" };
   if (data === "h" || matchesKey(data, Key.f1)) return { type: "help" };
-  if (data === "o") return { type: "toggle_objective" };
+  if (matchesKey(data, Key.ctrl("o")) || data === "o") return { type: "context_toggle" };
   if (context.panel === "details" && data === "s") return { type: "toggle_chat_composer" };
   if (data === "q") return { type: "quit" };
 

@@ -95,17 +95,26 @@ export async function snapshotContainedPaths(
   const add = (entry: ContainedPathManifest["entries"][number]) => {
     entries.push(entry);
     if (entries.length > MAX_MANIFEST_FILES) {
-      throw new ContainedProcessError("manifest_limit", "configured check manifest contains too many files");
+      throw new ContainedProcessError(
+        "manifest_limit",
+        "configured check manifest contains too many files",
+      );
     }
     totalBytes += entry.sizeBytes ?? 0;
     if (totalBytes > MAX_MANIFEST_BYTES) {
-      throw new ContainedProcessError("manifest_limit", "configured check manifest contains too many bytes");
+      throw new ContainedProcessError(
+        "manifest_limit",
+        "configured check manifest contains too many bytes",
+      );
     }
   };
   const walk = async (relative: string, skipIgnoredDependencies: boolean): Promise<void> => {
     const absolute = relative === "." ? projectRoot : path.resolve(projectRoot, relative);
     if (absolute !== projectRoot && !absolute.startsWith(`${projectRoot}${path.sep}`)) {
-      throw new ContainedProcessError("manifest_path", `manifest path escapes the worktree: ${relative}`);
+      throw new ContainedProcessError(
+        "manifest_path",
+        `manifest path escapes the worktree: ${relative}`,
+      );
     }
     const metadata = await lstat(absolute).catch((error: unknown) => {
       if (isMissingPathError(error)) return undefined;
@@ -116,11 +125,17 @@ export async function snapshotContainedPaths(
       return;
     }
     if (metadata.isSymbolicLink()) {
-      throw new ContainedProcessError("manifest_symlink", `manifest path is a symbolic link: ${relative}`);
+      throw new ContainedProcessError(
+        "manifest_symlink",
+        `manifest path is a symbolic link: ${relative}`,
+      );
     }
     const canonical = await realpath(absolute);
     if (canonical !== projectRoot && !canonical.startsWith(`${projectRoot}${path.sep}`)) {
-      throw new ContainedProcessError("manifest_path", `manifest path resolves outside the worktree: ${relative}`);
+      throw new ContainedProcessError(
+        "manifest_path",
+        `manifest path resolves outside the worktree: ${relative}`,
+      );
     }
     if (metadata.isDirectory()) {
       add({ path: relative, kind: "directory", mode: metadata.mode & 0o7777 });
@@ -128,7 +143,10 @@ export async function snapshotContainedPaths(
       children.sort((left, right) => left.name.localeCompare(right.name));
       for (const child of children) {
         if (child.name.includes("\0") || child.name.includes("/") || child.name.includes("\\")) {
-          throw new ContainedProcessError("manifest_path", "manifest contains an unsafe directory entry");
+          throw new ContainedProcessError(
+            "manifest_path",
+            "manifest contains an unsafe directory entry",
+          );
         }
         if (skipIgnoredDependencies && [".git", ".koni", "node_modules"].includes(child.name)) {
           continue;
@@ -139,11 +157,17 @@ export async function snapshotContainedPaths(
       return;
     }
     if (!metadata.isFile()) {
-      throw new ContainedProcessError("manifest_type", `manifest path is not a regular file: ${relative}`);
+      throw new ContainedProcessError(
+        "manifest_type",
+        `manifest path is not a regular file: ${relative}`,
+      );
     }
     const bytes = await readFile(absolute);
     if (bytes.byteLength !== metadata.size) {
-      throw new ContainedProcessError("manifest_race", `manifest path changed while hashing: ${relative}`);
+      throw new ContainedProcessError(
+        "manifest_race",
+        `manifest path changed while hashing: ${relative}`,
+      );
     }
     add({
       path: relative,
@@ -157,7 +181,9 @@ export async function snapshotContainedPaths(
     validateRelativeGrant(root);
     await walk(root, root === ".");
   }
-  entries.sort((left, right) => left.path.localeCompare(right.path) || left.kind.localeCompare(right.kind));
+  entries.sort(
+    (left, right) => left.path.localeCompare(right.path) || left.kind.localeCompare(right.kind),
+  );
   const material = { protocol: "koni.contained-path-manifest.v1" as const, roots, entries };
   return { ...material, manifestSha256: canonicalHash(material) };
 }
@@ -197,7 +223,7 @@ export async function runContainedProcess(
       readPaths: options.readPaths,
       writePaths: options.check.effect === "workspace_write" ? options.writePaths : [],
       networkAccess: options.check.networkAccess,
-      sandboxExecutable: options.sandboxExecutable ?? await defaultSandboxExecutable(),
+      sandboxExecutable: options.sandboxExecutable ?? (await defaultSandboxExecutable()),
     });
     await assertRuntimeExecutableCurrent(sandboxed.executable);
     const result = await spawnBounded({
@@ -235,11 +261,16 @@ function validateCheck(check: ResolvedAgentCheckCommand): void {
     check.timeoutMs < 1 ||
     check.timeoutMs > 24 * 60 * 60 * 1_000
   ) {
-    throw new ContainedProcessError("check_contract", "configured check process contract is invalid");
+    throw new ContainedProcessError(
+      "check_contract",
+      "configured check process contract is invalid",
+    );
   }
 }
 
-function resolveEnvironment(source: ResolvedAgentCheckCommand["environment"]): Record<string, string> {
+function resolveEnvironment(
+  source: ResolvedAgentCheckCommand["environment"],
+): Record<string, string> {
   const output = Object.create(null) as Record<string, string>;
   for (const key of [...new Set(source.inherit)].sort()) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)) {
@@ -248,7 +279,9 @@ function resolveEnvironment(source: ResolvedAgentCheckCommand["environment"]): R
     const value = process.env[key];
     if (value !== undefined) output[key] = boundedEnvironmentValue(key, value);
   }
-  for (const [key, value] of Object.entries(source.set).sort(([left], [right]) => left.localeCompare(right))) {
+  for (const [key, value] of Object.entries(source.set).sort(([left], [right]) =>
+    left.localeCompare(right),
+  )) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)) {
       throw new ContainedProcessError("environment", `unsafe configured environment key ${key}`);
     }
@@ -259,15 +292,25 @@ function resolveEnvironment(source: ResolvedAgentCheckCommand["environment"]): R
 
 function boundedEnvironmentValue(key: string, value: string): string {
   if (value.includes("\0") || Buffer.byteLength(value, "utf8") > 64 * 1024) {
-    throw new ContainedProcessError("environment", `environment value ${key} is unsafe or oversized`);
+    throw new ContainedProcessError(
+      "environment",
+      `environment value ${key} is unsafe or oversized`,
+    );
   }
   return value;
 }
 
-async function resolveExecutable(command: string, cwd: string, pathValue: string | undefined): Promise<string> {
+async function resolveExecutable(
+  command: string,
+  cwd: string,
+  pathValue: string | undefined,
+): Promise<string> {
   const candidates = command.includes("/")
     ? [path.isAbsolute(command) ? command : path.resolve(cwd, command)]
-    : (pathValue ?? "").split(path.delimiter).filter(Boolean).map((entry) => path.resolve(entry, command));
+    : (pathValue ?? "")
+        .split(path.delimiter)
+        .filter(Boolean)
+        .map((entry) => path.resolve(entry, command));
   for (const candidate of candidates) {
     try {
       await access(candidate, constants.X_OK);
@@ -319,7 +362,10 @@ async function resolveRuntimeReadRoots(input: {
   const interpreter = await executableInterpreter(input.executable, input.cwd, input.pathValue);
   if (interpreter !== undefined) {
     await add(path.dirname(interpreter.logicalPath));
-    const interpreterRoot = externalExecutableRuntimeRoot(interpreter.resolvedPath, input.projectRoot);
+    const interpreterRoot = externalExecutableRuntimeRoot(
+      interpreter.resolvedPath,
+      input.projectRoot,
+    );
     if (interpreterRoot !== undefined) await add(interpreterRoot);
     // `/usr/bin/env` must be able to reach the exact interpreter we authenticated above even when
     // a version manager exposes it through a logical symlink that Seatbelt canonicalizes away.
@@ -328,13 +374,15 @@ async function resolveRuntimeReadRoots(input: {
     const realInterpreterDirectory = path.dirname(interpreter.resolvedPath);
     const currentPath = input.environment.PATH ?? "";
     if (!currentPath.split(path.delimiter).includes(realInterpreterDirectory)) {
-      input.environment.PATH = currentPath.length === 0
-        ? realInterpreterDirectory
-        : `${realInterpreterDirectory}${path.delimiter}${currentPath}`;
+      input.environment.PATH =
+        currentPath.length === 0
+          ? realInterpreterDirectory
+          : `${realInterpreterDirectory}${path.delimiter}${currentPath}`;
     }
   }
 
-  for (const dependencyRoot of await ensureSharedNodeDependencyLinks(input)) await add(dependencyRoot);
+  for (const dependencyRoot of await ensureSharedNodeDependencyLinks(input))
+    await add(dependencyRoot);
 
   // Corepack is part of the authenticated executable closure, but its selected package-manager
   // bytes live in a separate cache. Corepack materializes a temporary folder inside that cache on
@@ -361,12 +409,21 @@ async function ensureSharedNodeDependencyLinks(input: {
   cwd: string;
 }): Promise<string[]> {
   const gitCommonDirectory = path.dirname(input.stateRoot);
-  if (path.basename(gitCommonDirectory) !== ".git") return existingNodeDependencyRoots(input.projectRoot, input.cwd);
+  if (path.basename(gitCommonDirectory) !== ".git")
+    return existingNodeDependencyRoots(input.projectRoot, input.cwd);
   const primaryRoot = path.dirname(gitCommonDirectory);
-  if (primaryRoot === input.projectRoot) return existingNodeDependencyRoots(input.projectRoot, input.cwd);
+  if (primaryRoot === input.projectRoot)
+    return existingNodeDependencyRoots(input.projectRoot, input.cwd);
   const relativeCwd = path.relative(input.projectRoot, input.cwd);
-  if (relativeCwd === ".." || relativeCwd.startsWith(`..${path.sep}`) || path.isAbsolute(relativeCwd)) {
-    throw new ContainedProcessError("dependency_root", "configured check cwd escapes its managed worktree");
+  if (
+    relativeCwd === ".." ||
+    relativeCwd.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativeCwd)
+  ) {
+    throw new ContainedProcessError(
+      "dependency_root",
+      "configured check cwd escapes its managed worktree",
+    );
   }
   const relativeAncestors = [relativeCwd];
   let cursor = relativeCwd;
@@ -388,7 +445,10 @@ async function ensureSharedNodeDependencyLinks(input: {
     if (sourceMetadata === undefined) continue;
     const sourceResolved = await realpath(source);
     if (!(await lstat(sourceResolved)).isDirectory()) {
-      throw new ContainedProcessError("dependency_root", `shared dependency root is not a directory: ${source}`);
+      throw new ContainedProcessError(
+        "dependency_root",
+        `shared dependency root is not a directory: ${source}`,
+      );
     }
     const destination = path.join(input.projectRoot, relative, "node_modules");
     const destinationMetadata = await lstat(destination).catch((error: unknown) => {
@@ -397,8 +457,11 @@ async function ensureSharedNodeDependencyLinks(input: {
     });
     let materialized = destinationMetadata;
     if (materialized?.isSymbolicLink() === true) {
-      if (await realpath(destination) !== sourceResolved) {
-        throw new ContainedProcessError("dependency_root", `managed dependency link has an unexpected target: ${destination}`);
+      if ((await realpath(destination)) !== sourceResolved) {
+        throw new ContainedProcessError(
+          "dependency_root",
+          `managed dependency link has an unexpected target: ${destination}`,
+        );
       }
       await rm(destination);
       materialized = undefined;
@@ -406,7 +469,10 @@ async function ensureSharedNodeDependencyLinks(input: {
     if (materialized === undefined) {
       await mkdir(destination, { recursive: true });
     } else if (!materialized.isDirectory()) {
-      throw new ContainedProcessError("dependency_root", `managed dependency path is not a directory: ${destination}`);
+      throw new ContainedProcessError(
+        "dependency_root",
+        `managed dependency path is not a directory: ${destination}`,
+      );
     }
     await populateSharedNodeDependencyDirectory(
       sourceResolved,
@@ -458,9 +524,16 @@ async function reconcileManagedManifestDependencies(input: {
     if (manifest === undefined) continue;
     const dependencies = packageManifestDependencies(manifest);
     const importer = pnpmImporter(lockfile, relative);
-    for (const [name, specifier] of Object.entries(dependencies).sort(([left], [right]) => left.localeCompare(right))) {
+    for (const [name, specifier] of Object.entries(dependencies).sort(([left], [right]) =>
+      left.localeCompare(right),
+    )) {
       if (!isSafePackageName(name) || typeof specifier !== "string") continue;
-      const destination = path.join(input.managedRoot, relative, "node_modules", ...name.split("/"));
+      const destination = path.join(
+        input.managedRoot,
+        relative,
+        "node_modules",
+        ...name.split("/"),
+      );
       if (specifier.startsWith("workspace:") || specifier.startsWith("link:")) {
         const workspaceTarget = await managedWorkspaceDependencyTarget({
           managedRoot: input.managedRoot,
@@ -503,13 +576,25 @@ async function workspacePackageCatalog(root: string): Promise<Map<string, string
   const queue = [""];
   let visited = 0;
   const skipped = new Set([
-    ".git", ".koni", ".next", ".turbo", ".cache", "node_modules", "coverage", "dist", "build", "target",
+    ".git",
+    ".koni",
+    ".next",
+    ".turbo",
+    ".cache",
+    "node_modules",
+    "coverage",
+    "dist",
+    "build",
+    "target",
   ]);
   while (queue.length > 0) {
     const relative = queue.shift()!;
     visited += 1;
     if (visited > 50_000) {
-      throw new ContainedProcessError("dependency_root", "workspace package discovery exceeded its directory bound");
+      throw new ContainedProcessError(
+        "dependency_root",
+        "workspace package discovery exceeded its directory bound",
+      );
     }
     const absolute = relative.length === 0 ? root : path.join(root, relative);
     const manifest = await readPackageManifest(path.join(absolute, "package.json"));
@@ -538,36 +623,50 @@ async function managedWorkspaceDependencyTarget(input: {
   specifier: string;
   managedWorkspacePackages: ReadonlyMap<string, string>;
 }): Promise<string | undefined> {
-  if (input.specifier.startsWith("workspace:")) return input.managedWorkspacePackages.get(input.name);
-  const linked = path.resolve(input.managedRoot, input.relative, input.specifier.slice("link:".length));
+  if (input.specifier.startsWith("workspace:"))
+    return input.managedWorkspacePackages.get(input.name);
+  const linked = path.resolve(
+    input.managedRoot,
+    input.relative,
+    input.specifier.slice("link:".length),
+  );
   if (!isWithinRoot(linked, input.managedRoot)) {
-    throw new ContainedProcessError("dependency_root", `workspace dependency link escapes the worktree: ${input.name}`);
+    throw new ContainedProcessError(
+      "dependency_root",
+      `workspace dependency link escapes the worktree: ${input.name}`,
+    );
   }
   const manifest = await readPackageManifest(path.join(linked, "package.json"));
   return manifest?.name === input.name ? linked : undefined;
 }
 
-async function replaceManagedWorkspaceDependencyLink(destination: string, target: string): Promise<void> {
+async function replaceManagedWorkspaceDependencyLink(
+  destination: string,
+  target: string,
+): Promise<void> {
   const existing = await lstat(destination).catch((error: unknown) => {
     if (isMissingPathError(error)) return undefined;
     throw error;
   });
   if (existing !== undefined) {
     if (!existing.isSymbolicLink()) return;
-    if (await realpath(destination) === await realpath(target)) return;
+    if ((await realpath(destination)) === (await realpath(target))) return;
     await rm(destination);
   }
   await mkdir(path.dirname(destination), { recursive: true });
   await symlink(target, destination, "dir").catch(async (error: unknown) => {
-    if (!isAlreadyExistsError(error) || await realpath(destination) !== await realpath(target)) throw error;
+    if (!isAlreadyExistsError(error) || (await realpath(destination)) !== (await realpath(target)))
+      throw error;
   });
 }
 
 async function readPnpmLockfile(root: string): Promise<unknown> {
-  const bytes = await readFile(path.join(root, "pnpm-lock.yaml"), "utf8").catch((error: unknown) => {
-    if (isMissingPathError(error)) return undefined;
-    throw error;
-  });
+  const bytes = await readFile(path.join(root, "pnpm-lock.yaml"), "utf8").catch(
+    (error: unknown) => {
+      if (isMissingPathError(error)) return undefined;
+      throw error;
+    },
+  );
   if (bytes === undefined) return undefined;
   try {
     return parseYaml(bytes);
@@ -597,7 +696,9 @@ function pnpmDependencyReference(importer: unknown, name: string): string | unde
   return undefined;
 }
 
-async function readPackageManifest(manifestPath: string): Promise<Record<string, unknown> | undefined> {
+async function readPackageManifest(
+  manifestPath: string,
+): Promise<Record<string, unknown> | undefined> {
   const bytes = await readFile(manifestPath, "utf8").catch((error: unknown) => {
     if (isMissingPathError(error)) return undefined;
     throw error;
@@ -638,11 +739,15 @@ async function installedDependencySatisfies(
     throw error;
   });
   if (metadata === undefined) return false;
-  const manifest = await readPackageManifest(path.join(await realpath(candidatePath), "package.json"));
-  return manifest !== undefined
-    && manifest.name === intent.name
-    && typeof manifest.version === "string"
-    && dependencyVersionMatches(manifest.version, intent);
+  const manifest = await readPackageManifest(
+    path.join(await realpath(candidatePath), "package.json"),
+  );
+  return (
+    manifest !== undefined &&
+    manifest.name === intent.name &&
+    typeof manifest.version === "string" &&
+    dependencyVersionMatches(manifest.version, intent)
+  );
 }
 
 async function resolveInstalledDependencyCandidate(input: {
@@ -668,7 +773,9 @@ async function resolveInstalledDependencyCandidate(input: {
   };
 
   for (const relative of ["", ...input.primaryWorkspaceRelatives]) {
-    await inspect(path.join(input.primaryRoot, relative, "node_modules", ...input.intent.name.split("/")));
+    await inspect(
+      path.join(input.primaryRoot, relative, "node_modules", ...input.intent.name.split("/")),
+    );
   }
   const pnpmRoot = await realpath(path.join(input.primaryRoot, "node_modules", ".pnpm")).catch(
     (error: unknown) => {
@@ -680,7 +787,10 @@ async function resolveInstalledDependencyCandidate(input: {
     const prefix = `${input.intent.name.replace("/", "+")}@`;
     for (const entry of await readdir(pnpmRoot, { withFileTypes: true })) {
       if (!entry.isDirectory() || !entry.name.startsWith(prefix)) continue;
-      await inspect(path.join(pnpmRoot, entry.name, "node_modules", ...input.intent.name.split("/")), entry.name);
+      await inspect(
+        path.join(pnpmRoot, entry.name, "node_modules", ...input.intent.name.split("/")),
+        entry.name,
+      );
     }
   }
   const qualifier = input.intent.lockedReference?.match(/patch_hash=([0-9a-f]+)/u)?.[1];
@@ -709,7 +819,8 @@ async function replaceManagedDependencyLink(
   }
   await mkdir(path.dirname(destination), { recursive: true });
   await symlink(target, destination, "dir").catch(async (error: unknown) => {
-    if (!isAlreadyExistsError(error) || !(await installedDependencySatisfies(destination, intent))) throw error;
+    if (!isAlreadyExistsError(error) || !(await installedDependencySatisfies(destination, intent)))
+      throw error;
   });
 }
 
@@ -747,13 +858,25 @@ async function workspaceNodeDependencyRelatives(primaryRoot: string): Promise<st
   const queue = [""];
   let visited = 0;
   const skipped = new Set([
-    ".git", ".koni", ".next", ".turbo", ".cache", "node_modules", "coverage", "dist", "build", "target",
+    ".git",
+    ".koni",
+    ".next",
+    ".turbo",
+    ".cache",
+    "node_modules",
+    "coverage",
+    "dist",
+    "build",
+    "target",
   ]);
   while (queue.length > 0) {
     const relative = queue.shift()!;
     visited += 1;
     if (visited > 50_000) {
-      throw new ContainedProcessError("dependency_root", "workspace dependency discovery exceeded its directory bound");
+      throw new ContainedProcessError(
+        "dependency_root",
+        "workspace dependency discovery exceeded its directory bound",
+      );
     }
     const absolute = relative.length === 0 ? primaryRoot : path.join(primaryRoot, relative);
     for (const entry of await readdir(absolute, { withFileTypes: true })) {
@@ -794,9 +917,10 @@ async function populateSharedNodeDependencyDirectory(
     // Package managers can leave broken optional/filtered workspace links in an otherwise valid
     // installation. They are not usable dependency authority and must not prevent unrelated checks.
     if (sourceResolved === undefined) continue;
-    const materializeNamespace = sourceMetadata.isDirectory() && entry.name.startsWith("@") && depth < 2;
+    const materializeNamespace =
+      sourceMetadata.isDirectory() && entry.name.startsWith("@") && depth < 2;
     if (materializeNamespace && existing?.isSymbolicLink() === true) {
-      if (await realpath(destinationEntry) !== sourceResolved) {
+      if ((await realpath(destinationEntry)) !== sourceResolved) {
         throw new ContainedProcessError(
           "dependency_root",
           `managed dependency namespace has an unexpected target: ${destinationEntry}`,
@@ -822,7 +946,11 @@ async function populateSharedNodeDependencyDirectory(
       );
       continue;
     }
-    const managedTarget = await dependencyTargetForManagedWorktree(sourceResolved, primaryRoot, managedRoot);
+    const managedTarget = await dependencyTargetForManagedWorktree(
+      sourceResolved,
+      primaryRoot,
+      managedRoot,
+    );
     if (existing === undefined) {
       const targetMetadata = await lstat(managedTarget);
       await symlink(managedTarget, destinationEntry, targetMetadata.isDirectory() ? "dir" : "file");
@@ -830,7 +958,7 @@ async function populateSharedNodeDependencyDirectory(
     }
     if (existing.isSymbolicLink()) {
       const resolved = await realpath(destinationEntry);
-      if (resolved !== await realpath(managedTarget)) {
+      if (resolved !== (await realpath(managedTarget))) {
         if (!isWithinRoot(resolved, primaryRoot) && !isWithinRoot(resolved, managedRoot)) {
           throw new ContainedProcessError(
             "dependency_root",
@@ -881,11 +1009,17 @@ async function existingNodeDependencyRoots(projectRoot: string, cwd: string): Pr
   return roots;
 }
 
-function externalExecutableRuntimeRoot(executable: string, projectRoot: string): string | undefined {
-  if (executable === projectRoot || executable.startsWith(`${projectRoot}${path.sep}`)) return undefined;
+function externalExecutableRuntimeRoot(
+  executable: string,
+  projectRoot: string,
+): string | undefined {
+  if (executable === projectRoot || executable.startsWith(`${projectRoot}${path.sep}`))
+    return undefined;
   const parsed = path.parse(executable);
   const segments = executable.slice(parsed.root.length).split(path.sep);
-  const marker = segments.findIndex((segment) => segment === "bin" || segment === "lib" || segment === "libexec");
+  const marker = segments.findIndex(
+    (segment) => segment === "bin" || segment === "lib" || segment === "libexec",
+  );
   if (marker >= 1) return path.join(parsed.root, ...segments.slice(0, marker));
   return path.dirname(executable);
 }
@@ -910,7 +1044,9 @@ async function executableInterpreter(
   if (words[index] === "-S") index += 1;
   while (words[index]?.includes("=") === true) index += 1;
   const command = words[index];
-  return command === undefined ? undefined : resolveExecutableWithLogicalPath(command, cwd, pathValue);
+  return command === undefined
+    ? undefined
+    : resolveExecutableWithLogicalPath(command, cwd, pathValue);
 }
 
 async function resolveExecutableWithLogicalPath(
@@ -920,13 +1056,17 @@ async function resolveExecutableWithLogicalPath(
 ): Promise<{ logicalPath: string; resolvedPath: string }> {
   const candidates = command.includes("/")
     ? [path.isAbsolute(command) ? command : path.resolve(cwd, command)]
-    : (pathValue ?? "").split(path.delimiter).filter(Boolean).map((entry) => path.resolve(entry, command));
+    : (pathValue ?? "")
+        .split(path.delimiter)
+        .filter(Boolean)
+        .map((entry) => path.resolve(entry, command));
   for (const candidate of candidates) {
     try {
       await access(candidate, constants.X_OK);
       const resolvedPath = await realpath(candidate);
       const metadata = await lstat(resolvedPath);
-      if (metadata.isFile() && !metadata.isSymbolicLink()) return { logicalPath: candidate, resolvedPath };
+      if (metadata.isFile() && !metadata.isSymbolicLink())
+        return { logicalPath: candidate, resolvedPath };
     } catch {
       // Keep searching the exact compiled PATH.
     }
@@ -946,7 +1086,12 @@ async function sandboxCommand(input: {
   writePaths: readonly string[];
   networkAccess: boolean;
   sandboxExecutable: RuntimeExecutableIdentity;
-}): Promise<{ argv: string[]; kind: string; profileSha256: Sha256Digest; executable: RuntimeExecutableIdentity }> {
+}): Promise<{
+  argv: string[];
+  kind: string;
+  profileSha256: Sha256Digest;
+  executable: RuntimeExecutableIdentity;
+}> {
   if (process.platform === "darwin") return macOsSandboxCommand(input);
   if (process.platform === "linux") return linuxBubblewrapCommand(input);
   throw new ContainedProcessError(
@@ -967,21 +1112,38 @@ async function macOsSandboxCommand(input: {
   writePaths: readonly string[];
   networkAccess: boolean;
   sandboxExecutable: RuntimeExecutableIdentity;
-}): Promise<{ argv: string[]; kind: string; profileSha256: Sha256Digest; executable: RuntimeExecutableIdentity }> {
+}): Promise<{
+  argv: string[];
+  kind: string;
+  profileSha256: Sha256Digest;
+  executable: RuntimeExecutableIdentity;
+}> {
   if (input.sandboxExecutable.role !== "sandbox") {
-    throw new ContainedProcessError("sandbox_identity", "authority supplied a non-sandbox executable");
+    throw new ContainedProcessError(
+      "sandbox_identity",
+      "authority supplied a non-sandbox executable",
+    );
   }
   await assertRuntimeExecutableCurrent(input.sandboxExecutable);
   const launcher = input.sandboxExecutable.path;
   const readable = await resolveGrantedPaths(input.projectRoot, input.readPaths, true);
   const writable = [
-    ...await resolveGrantedPaths(input.projectRoot, input.writePaths, true),
+    ...(await resolveGrantedPaths(input.projectRoot, input.writePaths, true)),
     // Runtime write roots (corepack cache, PNPM_HOME) the package-manager shim must mutate.
     ...input.runtimeWriteRoots,
   ];
   const runtimeRoots = [
-    "/System", "/usr", "/bin", "/sbin", "/Library", "/etc", "/private/etc",
-    "/private/var/db/timezone", "/private/var/select", "/opt/homebrew", "/usr/local",
+    "/System",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/Library",
+    "/etc",
+    "/private/etc",
+    "/private/var/db/timezone",
+    "/private/var/select",
+    "/opt/homebrew",
+    "/usr/local",
     ...input.runtimeReadRoots,
   ];
   const metadata = ancestorPaths([
@@ -999,23 +1161,35 @@ async function macOsSandboxCommand(input: {
     "(allow process*)",
     "(allow signal)",
     "(allow sysctl-read)",
-    "(allow file-read-data (literal \"/\"))",
+    '(allow file-read-data (literal "/"))',
     ...metadata.map((entry) => `(allow file-read-metadata (literal "${seatbelt(entry)}"))`),
-    ...runtimeRoots.map((entry) => `(allow file-read* (literal "${seatbelt(entry)}") (subpath "${seatbelt(entry)}"))`),
+    ...runtimeRoots.map(
+      (entry) => `(allow file-read* (literal "${seatbelt(entry)}") (subpath "${seatbelt(entry)}"))`,
+    ),
     `(allow file-read* (literal "${seatbelt(input.projectRoot)}") (subpath "${seatbelt(input.projectRoot)}"))`,
     `(allow file-read* (literal "${seatbelt(input.cwd)}"))`,
     `(allow file-read* (literal "${seatbelt(input.semanticArgv[0]!)}"))`,
-    ...readable.map((entry) => `(allow file-read* (literal "${seatbelt(entry)}") (subpath "${seatbelt(entry)}"))`),
+    ...readable.map(
+      (entry) => `(allow file-read* (literal "${seatbelt(entry)}") (subpath "${seatbelt(entry)}"))`,
+    ),
     `(allow file-read* file-write* (literal "${seatbelt(input.scratch)}") (subpath "${seatbelt(input.scratch)}"))`,
-    ...writable.map((entry) => `(allow file-read* file-write* (literal "${seatbelt(entry)}") (subpath "${seatbelt(entry)}"))`),
+    ...writable.map(
+      (entry) =>
+        `(allow file-read* file-write* (literal "${seatbelt(entry)}") (subpath "${seatbelt(entry)}"))`,
+    ),
     '(allow file-read* (literal "/dev/null") (literal "/dev/urandom"))',
     '(allow file-write* (literal "/dev/null"))',
     ...(input.networkAccess ? ["(allow network*)"] : []),
-    ...secretPaths(input.projectRoot, input.cwd).map((entry) =>
-      `(deny file-read* (literal "${seatbelt(entry)}") (subpath "${seatbelt(entry)}"))`
+    ...secretPaths(input.projectRoot, input.cwd).map(
+      (entry) => `(deny file-read* (literal "${seatbelt(entry)}") (subpath "${seatbelt(entry)}"))`,
     ),
-    ...[input.stateRoot, path.join(input.projectRoot, ".git"), path.join(input.projectRoot, ".koni")].map((entry) =>
-      `(deny file-read* file-write* (literal "${seatbelt(entry)}") (subpath "${seatbelt(entry)}"))`
+    ...[
+      input.stateRoot,
+      path.join(input.projectRoot, ".git"),
+      path.join(input.projectRoot, ".koni"),
+    ].map(
+      (entry) =>
+        `(deny file-read* file-write* (literal "${seatbelt(entry)}") (subpath "${seatbelt(entry)}"))`,
     ),
   ];
   const profile = rules.join(" ");
@@ -1039,9 +1213,17 @@ async function linuxBubblewrapCommand(input: {
   writePaths: readonly string[];
   networkAccess: boolean;
   sandboxExecutable: RuntimeExecutableIdentity;
-}): Promise<{ argv: string[]; kind: string; profileSha256: Sha256Digest; executable: RuntimeExecutableIdentity }> {
+}): Promise<{
+  argv: string[];
+  kind: string;
+  profileSha256: Sha256Digest;
+  executable: RuntimeExecutableIdentity;
+}> {
   if (input.sandboxExecutable.role !== "sandbox") {
-    throw new ContainedProcessError("sandbox_identity", "authority supplied a non-sandbox executable");
+    throw new ContainedProcessError(
+      "sandbox_identity",
+      "authority supplied a non-sandbox executable",
+    );
   }
   await assertRuntimeExecutableCurrent(input.sandboxExecutable);
   const bwrap = input.sandboxExecutable.path;
@@ -1053,12 +1235,20 @@ async function linuxBubblewrapCommand(input: {
   // paths are masked below. This does not broaden the agent's own file tools.
   const mounted = minimalRoots([input.projectRoot, ...readable, ...writable]);
   const runtimeRoots = await existingPaths([
-    "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt/homebrew", "/usr/local",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+    "/etc",
+    "/opt/homebrew",
+    "/usr/local",
     ...input.runtimeReadRoots,
   ]);
   const targets = [...new Set([...runtimeRoots, ...mounted, input.scratch, input.cwd])];
-  const directories = ancestorPaths(targets)
-    .filter((entry) => entry !== "/" && !targets.includes(entry));
+  const directories = ancestorPaths(targets).filter(
+    (entry) => entry !== "/" && !targets.includes(entry),
+  );
   const protectedMounts = await linuxProtectedMounts(input.projectRoot, input.cwd);
   const policy = {
     network: input.networkAccess,
@@ -1073,18 +1263,26 @@ async function linuxBubblewrapCommand(input: {
     "--die-with-parent",
     "--new-session",
     ...(input.networkAccess ? [] : ["--unshare-net"]),
-    "--tmpfs", "/",
-    "--proc", "/proc",
-    "--dev", "/dev",
+    "--tmpfs",
+    "/",
+    "--proc",
+    "/proc",
+    "--dev",
+    "/dev",
     ...directories.flatMap((entry) => ["--dir", entry]),
     ...runtimeRoots.flatMap((entry) => ["--ro-bind", entry, entry]),
     ...mounted.flatMap((entry) => ["--ro-bind", entry, entry]),
-    "--bind", input.scratch, input.scratch,
+    "--bind",
+    input.scratch,
+    input.scratch,
     ...writable.flatMap((entry) => ["--bind", entry, entry]),
-    ...protectedMounts.flatMap((entry) => entry.kind === "directory"
-      ? ["--tmpfs", entry.path, "--chmod", "000", entry.path]
-      : ["--ro-bind", "/dev/null", entry.path]),
-    "--chdir", input.cwd,
+    ...protectedMounts.flatMap((entry) =>
+      entry.kind === "directory"
+        ? ["--tmpfs", entry.path, "--chmod", "000", entry.path]
+        : ["--ro-bind", "/dev/null", entry.path],
+    ),
+    "--chdir",
+    input.cwd,
     "--",
     ...input.semanticArgv,
   ];
@@ -1109,21 +1307,30 @@ async function existingPaths(entries: readonly string[]): Promise<string[]> {
 }
 
 function minimalRoots(entries: readonly string[]): string[] {
-  const sorted = [...new Set(entries)].sort((left, right) =>
-    left.split(path.sep).length - right.split(path.sep).length || left.localeCompare(right));
-  return sorted.filter((entry, index) => !sorted.some((other, otherIndex) =>
-    otherIndex < index && (entry === other || entry.startsWith(`${other}${path.sep}`))));
+  const sorted = [...new Set(entries)].sort(
+    (left, right) =>
+      left.split(path.sep).length - right.split(path.sep).length || left.localeCompare(right),
+  );
+  return sorted.filter(
+    (entry, index) =>
+      !sorted.some(
+        (other, otherIndex) =>
+          otherIndex < index && (entry === other || entry.startsWith(`${other}${path.sep}`)),
+      ),
+  );
 }
 
 async function linuxProtectedMounts(
   projectRoot: string,
   cwd: string,
 ): Promise<Array<{ path: string; kind: "file" | "directory" }>> {
-  const candidates = [...new Set([
-    path.join(projectRoot, ".git"),
-    path.join(projectRoot, ".koni"),
-    ...secretPaths(projectRoot, cwd),
-  ])].sort();
+  const candidates = [
+    ...new Set([
+      path.join(projectRoot, ".git"),
+      path.join(projectRoot, ".koni"),
+      ...secretPaths(projectRoot, cwd),
+    ]),
+  ].sort();
   const output: Array<{ path: string; kind: "file" | "directory" }> = [];
   for (const candidate of candidates) {
     const metadata = await lstat(candidate).catch((error: unknown) => {
@@ -1132,11 +1339,18 @@ async function linuxProtectedMounts(
     });
     if (metadata === undefined) continue;
     if (metadata.isSymbolicLink()) {
-      throw new ContainedProcessError("sandbox_secret", `protected path is a symbolic link: ${candidate}`);
+      throw new ContainedProcessError(
+        "sandbox_secret",
+        `protected path is a symbolic link: ${candidate}`,
+      );
     }
     if (metadata.isFile()) output.push({ path: candidate, kind: "file" });
     else if (metadata.isDirectory()) output.push({ path: candidate, kind: "directory" });
-    else throw new ContainedProcessError("sandbox_secret", `protected path has unsafe type: ${candidate}`);
+    else
+      throw new ContainedProcessError(
+        "sandbox_secret",
+        `protected path has unsafe type: ${candidate}`,
+      );
   }
   return output;
 }
@@ -1156,7 +1370,10 @@ async function resolveGrantedPaths(
     try {
       const resolved = await realpath(absolute);
       if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) {
-        throw new ContainedProcessError("path_grant", "command path grant resolves outside the worktree");
+        throw new ContainedProcessError(
+          "path_grant",
+          "command path grant resolves outside the worktree",
+        );
       }
       output.add(resolved);
     } catch (error) {
@@ -1168,8 +1385,13 @@ async function resolveGrantedPaths(
 }
 
 function validateRelativeGrant(entry: string): void {
-  if (entry !== "." && (path.isAbsolute(entry) || entry.includes("\\") || entry.includes("\0") ||
-    entry.split("/").some((segment) => segment === "" || segment === "." || segment === ".."))) {
+  if (
+    entry !== "." &&
+    (path.isAbsolute(entry) ||
+      entry.includes("\\") ||
+      entry.includes("\0") ||
+      entry.split("/").some((segment) => segment === "" || segment === "." || segment === ".."))
+  ) {
     throw new ContainedProcessError("path_grant", `unsafe command path grant ${entry}`);
   }
 }
@@ -1199,9 +1421,12 @@ async function createScratch(projectRoot: string, stateRoot: string): Promise<st
   const base = process.platform === "darwin" ? "/private/tmp" : "/tmp";
   const scratch = path.join(base, `.koni-check-${randomUUID()}`);
   if (
-    scratch.startsWith(projectRoot) || projectRoot.startsWith(scratch) ||
-    scratch.startsWith(stateRoot) || stateRoot.startsWith(scratch)
-  ) throw new ContainedProcessError("scratch", "private scratch overlaps Koni authority paths");
+    scratch.startsWith(projectRoot) ||
+    projectRoot.startsWith(scratch) ||
+    scratch.startsWith(stateRoot) ||
+    stateRoot.startsWith(scratch)
+  )
+    throw new ContainedProcessError("scratch", "private scratch overlaps Koni authority paths");
   await mkdir(scratch, { mode: 0o700 });
   return scratch;
 }
@@ -1223,7 +1448,8 @@ async function spawnBounded(input: {
   signal?: AbortSignal;
   executable: RuntimeExecutableIdentity;
 }): Promise<Pick<ContainedProcessResult, "exitCode" | "signal" | "stdout" | "stderr">> {
-  if (input.signal?.aborted === true) throw new ContainedProcessError("aborted", "check was aborted before launch");
+  if (input.signal?.aborted === true)
+    throw new ContainedProcessError("aborted", "check was aborted before launch");
   await assertRuntimeExecutableCurrent(input.executable);
   return new Promise((resolve, reject) => {
     const child = spawn(input.argv[0]!, input.argv.slice(1), {
@@ -1253,7 +1479,10 @@ async function spawnBounded(input: {
     };
     input.signal?.addEventListener("abort", abort, { once: true });
     const timeout = setTimeout(() => {
-      terminalError ??= new ContainedProcessError("timeout", `configured check exceeded ${input.timeoutMs}ms`);
+      terminalError ??= new ContainedProcessError(
+        "timeout",
+        `configured check exceeded ${input.timeoutMs}ms`,
+      );
       terminate();
     }, input.timeoutMs);
     timeout.unref();
@@ -1261,7 +1490,10 @@ async function spawnBounded(input: {
       if (stream === "stdout") stdoutBytes += chunk.byteLength;
       else stderrBytes += chunk.byteLength;
       if (stdoutBytes > MAX_OUTPUT_BYTES || stderrBytes > MAX_OUTPUT_BYTES) {
-        terminalError ??= new ContainedProcessError("output_limit", `configured check ${stream} exceeded ${MAX_OUTPUT_BYTES} bytes`);
+        terminalError ??= new ContainedProcessError(
+          "output_limit",
+          `configured check ${stream} exceeded ${MAX_OUTPUT_BYTES} bytes`,
+        );
         terminate();
         return;
       }
@@ -1269,13 +1501,21 @@ async function spawnBounded(input: {
     };
     child.stdout.on("data", (chunk: Buffer) => collect(stdout, chunk, "stdout"));
     child.stderr.on("data", (chunk: Buffer) => collect(stderr, chunk, "stderr"));
-    child.once("error", (error) => { terminalError ??= error; });
+    child.once("error", (error) => {
+      terminalError ??= error;
+    });
     child.once("close", (code, signal) => {
       closed = true;
       clearTimeout(timeout);
       input.signal?.removeEventListener("abort", abort);
       if (terminalError !== undefined) reject(terminalError);
-      else resolve({ exitCode: code, signal, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) });
+      else
+        resolve({
+          exitCode: code,
+          signal,
+          stdout: Buffer.concat(stdout),
+          stderr: Buffer.concat(stderr),
+        });
     });
   });
 }
@@ -1284,14 +1524,19 @@ const initialSandboxPath = process.env.PATH;
 let sandboxExecutable: Promise<RuntimeExecutableIdentity> | undefined;
 
 function defaultSandboxExecutable(): Promise<RuntimeExecutableIdentity> {
-  sandboxExecutable ??= process.platform === "darwin"
-    ? captureRuntimeExecutable("sandbox", "/usr/bin/sandbox-exec", { requireRootOwned: true })
-    : process.platform === "linux"
-      ? resolveRuntimeExecutable("sandbox", "bwrap", initialSandboxPath, { requireRootOwned: true })
-      : Promise.reject(new ContainedProcessError(
-        "sandbox_unavailable",
-        `configured commands are unsupported without an OS sandbox on ${process.platform}`,
-      ));
+  sandboxExecutable ??=
+    process.platform === "darwin"
+      ? captureRuntimeExecutable("sandbox", "/usr/bin/sandbox-exec", { requireRootOwned: true })
+      : process.platform === "linux"
+        ? resolveRuntimeExecutable("sandbox", "bwrap", initialSandboxPath, {
+            requireRootOwned: true,
+          })
+        : Promise.reject(
+            new ContainedProcessError(
+              "sandbox_unavailable",
+              `configured commands are unsupported without an OS sandbox on ${process.platform}`,
+            ),
+          );
   return sandboxExecutable;
 }
 
@@ -1317,8 +1562,18 @@ function ancestorPaths(entries: readonly string[]): string[] {
 }
 
 function secretPaths(projectRoot: string, cwd: string): string[] {
-  const names = [".env", ".env.local", ".env.development", ".env.test", ".env.production", ".npmrc", ".yarnrc.yml"];
-  return [...new Set([projectRoot, cwd].flatMap((root) => names.map((name) => path.join(root, name))))].sort();
+  const names = [
+    ".env",
+    ".env.local",
+    ".env.development",
+    ".env.test",
+    ".env.production",
+    ".npmrc",
+    ".yarnrc.yml",
+  ];
+  return [
+    ...new Set([projectRoot, cwd].flatMap((root) => names.map((name) => path.join(root, name)))),
+  ].sort();
 }
 
 function seatbelt(value: string): string {

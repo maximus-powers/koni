@@ -22,11 +22,19 @@ export function resolveCompiledRunType(
 ): ValidationResult<CompiledRunType> {
   const selected = id ?? defaultRunTypeId(configuration);
   if (selected === undefined || selected.trim().length === 0) {
-    return failure("resolution.default_run_type", "/project/default_run_type", "project has no valid default run type");
+    return failure(
+      "resolution.default_run_type",
+      "/project/default_run_type",
+      "project has no valid default run type",
+    );
   }
   const runType = configuration.run_types[selected];
   if (runType === undefined) {
-    return failure("resolution.unknown_run_type", "/run_types", `run type ${selected} is not configured`);
+    return failure(
+      "resolution.unknown_run_type",
+      "/run_types",
+      `run type ${selected} is not configured`,
+    );
   }
   return validationSuccess(runType);
 }
@@ -50,16 +58,28 @@ export function resolveCompiledPersona(
   const path = `/registries/personas/${escapePointer(personaId)}`;
   const sourceId = stringField(persona, "id", path, bag);
   if (sourceId !== undefined && sourceId !== personaId) {
-    bag.error("resolution.persona_registry_id", `${path}/id`, `persona id ${sourceId} does not match registry key ${personaId}`);
+    bag.error(
+      "resolution.persona_registry_id",
+      `${path}/id`,
+      `persona id ${sourceId} does not match registry key ${personaId}`,
+    );
   }
   const modelRole = stringField(persona, "model_role", path, bag) ?? "";
   const agentId = optionalStringField(persona, "agent", path, bag);
   const agent = agentId === undefined ? undefined : configuration.agents[agentId];
   if (agentId !== undefined && agent === undefined) {
-    bag.error("resolution.unknown_agent", `${path}/agent`, `persona ${personaId} references unknown agent ${agentId}`);
+    bag.error(
+      "resolution.unknown_agent",
+      `${path}/agent`,
+      `persona ${personaId} references unknown agent ${agentId}`,
+    );
   }
   if (agentId === undefined && persona.prompt === undefined) {
-    bag.error("resolution.persona_instructions", path, `persona ${personaId} must reference an agent or explicit prompt`);
+    bag.error(
+      "resolution.persona_instructions",
+      path,
+      `persona ${personaId} must reference an agent or explicit prompt`,
+    );
   }
 
   let runType: CompiledRunType | undefined;
@@ -71,22 +91,35 @@ export function resolveCompiledPersona(
 
   const agentDocument = agent?.document;
   const instructions = resolveInstructions(persona, agentDocument, path, bag);
-  const capabilities = objectField(persona, "capabilities", path, bag) ??
-    (agentDocument === undefined ? undefined : objectField(agentDocument, "capabilities", `/agents/${escapePointer(agentId!)}`, bag));
+  const capabilities =
+    objectField(persona, "capabilities", path, bag) ??
+    (agentDocument === undefined
+      ? undefined
+      : objectField(agentDocument, "capabilities", `/agents/${escapePointer(agentId!)}`, bag));
   if (capabilities === undefined) {
     bag.error("resolution.capabilities", path, `persona ${personaId} has no capabilities policy`);
   }
   const runSettings = resolveRunSettings(runType, personaId, modelRole, bag);
-  const description = firstNonempty([
-    optionalStringField(persona, "description", path, bag),
-    agentDocument === undefined ? undefined : optionalStringField(agentDocument, "description", `/agents/${escapePointer(agentId!)}`, bag),
-  ]) ?? "";
+  const description =
+    firstNonempty([
+      optionalStringField(persona, "description", path, bag),
+      agentDocument === undefined
+        ? undefined
+        : optionalStringField(
+            agentDocument,
+            "description",
+            `/agents/${escapePointer(agentId!)}`,
+            bag,
+          ),
+    ]) ?? "";
   const model = firstNonempty([
     options.model,
     runSettings.personaModel,
     runSettings.roleModel,
     optionalStringField(persona, "model", path, bag),
-    agentDocument === undefined ? undefined : optionalStringField(agentDocument, "model", `/agents/${escapePointer(agentId!)}`, bag),
+    agentDocument === undefined
+      ? undefined
+      : optionalStringField(agentDocument, "model", `/agents/${escapePointer(agentId!)}`, bag),
   ]);
   const thinkingLevel = firstNonempty([
     options.thinkingLevel,
@@ -94,11 +127,19 @@ export function resolveCompiledPersona(
     runSettings.roleThinking,
     optionalStringField(persona, "thinking_level", path, bag),
     optionalStringField(persona, "reasoning_effort", path, bag),
-    agentDocument === undefined ? undefined : optionalStringField(agentDocument, "thinking_level", `/agents/${escapePointer(agentId!)}`, bag),
+    agentDocument === undefined
+      ? undefined
+      : optionalStringField(
+          agentDocument,
+          "thinking_level",
+          `/agents/${escapePointer(agentId!)}`,
+          bag,
+        ),
   ]);
-  const provider = agentDocument === undefined
-    ? undefined
-    : optionalStringField(agentDocument, "provider", `/agents/${escapePointer(agentId!)}`, bag);
+  const provider =
+    agentDocument === undefined
+      ? undefined
+      : optionalStringField(agentDocument, "provider", `/agents/${escapePointer(agentId!)}`, bag);
   const skills = stringArrayField(persona, "skills", path, bag);
 
   if (bag.hasErrors() || instructions === undefined || capabilities === undefined) {
@@ -169,25 +210,72 @@ function resolveRunSettings(
 } {
   if (runType === undefined) return {};
   const root = `/run_types/${escapePointer(runType.id)}/agents`;
-  const agents = objectField(runType.document, "agents", `/run_types/${escapePointer(runType.id)}`, bag);
+  const agents = objectField(
+    runType.document,
+    "agents",
+    `/run_types/${escapePointer(runType.id)}`,
+    bag,
+  );
   if (agents === undefined) return {};
   const personas = objectField(agents, "personas", root, bag) ?? {};
   const roles = objectField(agents, "roles", root, bag) ?? {};
-  const persona = objectValue(personas[personaId], `${root}/personas/${escapePointer(personaId)}`, bag);
-  const role = modelRole.length === 0
-    ? undefined
-    : objectValue(roles[modelRole], `${root}/roles/${escapePointer(modelRole)}`, bag);
+  const persona = objectValue(
+    personas[personaId],
+    `${root}/personas/${escapePointer(personaId)}`,
+    bag,
+  );
+  const role =
+    modelRole.length === 0
+      ? undefined
+      : objectValue(roles[modelRole], `${root}/roles/${escapePointer(modelRole)}`, bag);
   return compact({
-    personaModel: persona === undefined ? undefined : optionalStringField(persona, "model", `${root}/personas/${escapePointer(personaId)}`, bag),
-    personaThinking: persona === undefined ? undefined : firstNonempty([
-      optionalStringField(persona, "thinking_level", `${root}/personas/${escapePointer(personaId)}`, bag),
-      optionalStringField(persona, "reasoning_effort", `${root}/personas/${escapePointer(personaId)}`, bag),
-    ]),
-    roleModel: role === undefined ? undefined : optionalStringField(role, "model", `${root}/roles/${escapePointer(modelRole)}`, bag),
-    roleThinking: role === undefined ? undefined : firstNonempty([
-      optionalStringField(role, "thinking_level", `${root}/roles/${escapePointer(modelRole)}`, bag),
-      optionalStringField(role, "reasoning_effort", `${root}/roles/${escapePointer(modelRole)}`, bag),
-    ]),
+    personaModel:
+      persona === undefined
+        ? undefined
+        : optionalStringField(
+            persona,
+            "model",
+            `${root}/personas/${escapePointer(personaId)}`,
+            bag,
+          ),
+    personaThinking:
+      persona === undefined
+        ? undefined
+        : firstNonempty([
+            optionalStringField(
+              persona,
+              "thinking_level",
+              `${root}/personas/${escapePointer(personaId)}`,
+              bag,
+            ),
+            optionalStringField(
+              persona,
+              "reasoning_effort",
+              `${root}/personas/${escapePointer(personaId)}`,
+              bag,
+            ),
+          ]),
+    roleModel:
+      role === undefined
+        ? undefined
+        : optionalStringField(role, "model", `${root}/roles/${escapePointer(modelRole)}`, bag),
+    roleThinking:
+      role === undefined
+        ? undefined
+        : firstNonempty([
+            optionalStringField(
+              role,
+              "thinking_level",
+              `${root}/roles/${escapePointer(modelRole)}`,
+              bag,
+            ),
+            optionalStringField(
+              role,
+              "reasoning_effort",
+              `${root}/roles/${escapePointer(modelRole)}`,
+              bag,
+            ),
+          ]),
   });
 }
 
@@ -204,7 +292,11 @@ function stringField(
 ): string | undefined {
   const value = object[field];
   if (typeof value !== "string" || value.trim().length === 0) {
-    bag.error("resolution.string", `${path}/${escapePointer(field)}`, `field ${field} must be a nonempty string`);
+    bag.error(
+      "resolution.string",
+      `${path}/${escapePointer(field)}`,
+      `field ${field} must be a nonempty string`,
+    );
     return undefined;
   }
   return value;
@@ -252,13 +344,21 @@ function stringArrayField(
   const value = object[field];
   if (value === undefined) return [];
   if (!Array.isArray(value)) {
-    bag.error("resolution.string_array", `${path}/${escapePointer(field)}`, `field ${field} must be a string array`);
+    bag.error(
+      "resolution.string_array",
+      `${path}/${escapePointer(field)}`,
+      `field ${field} must be a string array`,
+    );
     return [];
   }
   const output: string[] = [];
   for (const [index, item] of value.entries()) {
     if (typeof item !== "string" || item.trim().length === 0) {
-      bag.error("resolution.string_array", `${path}/${escapePointer(field)}/${index}`, `field ${field} contains an invalid string`);
+      bag.error(
+        "resolution.string_array",
+        `${path}/${escapePointer(field)}/${index}`,
+        `field ${field} contains an invalid string`,
+      );
     } else output.push(item);
   }
   return [...new Set(output)].sort(compareUtf8);
@@ -286,7 +386,10 @@ function cloneValue(value: ConfigurationValue): ConfigurationValue {
 }
 
 function cloneObject(value: ConfigurationObject): ConfigurationObject {
-  const output: Record<string, ConfigurationValue> = Object.create(null) as Record<string, ConfigurationValue>;
+  const output: Record<string, ConfigurationValue> = Object.create(null) as Record<
+    string,
+    ConfigurationValue
+  >;
   for (const key of Object.keys(value).sort(compareUtf8)) output[key] = cloneValue(value[key]!);
   return output;
 }

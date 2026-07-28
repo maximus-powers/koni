@@ -17,11 +17,10 @@ export class CanonicalEncodingError extends Error {
 }
 
 /**
- * Encode the JSON-compatible value using Koni's frozen Rust-oracle ordering.
+ * Encode a JSON-compatible value using Koni's stable canonical ordering.
  *
- * Object keys use UTF-8 byte order (Rust `String::cmp`), arrays retain their
- * order, and unsupported JavaScript values fail instead of being omitted.
- * `Uint8Array` follows Serde's `Vec<u8>` representation as an array of bytes.
+ * Object keys use UTF-8 byte order, arrays retain their order, and unsupported JavaScript values
+ * fail instead of being omitted. `Uint8Array` is represented as an array of bytes.
  */
 export function canonicalEncode(value: unknown): string {
   return encodeCanonical(value, "$", new Set<object>());

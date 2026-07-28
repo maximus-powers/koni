@@ -29,7 +29,7 @@ describe("canonical encoding", () => {
       "[0,1,255]",
       "sha256:41d30cae87b2949938e7b12346ec6346f4419b78f3a84bcb243b2dbc6706e824",
     ],
-  ])("matches a frozen Rust normalized-hash vector", (value, encoded, digest) => {
+  ])("matches a stable normalized-hash vector", (value, encoded, digest) => {
     expect(canonicalEncode(value)).toBe(encoded);
     expect(canonicalHash(value)).toBe(digest);
   });

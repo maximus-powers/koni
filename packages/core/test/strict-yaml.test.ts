@@ -8,10 +8,9 @@ const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
 describe("strict YAML", () => {
   it.each([
-    "profiles/research/profile.yaml",
-    "crates/koni-cli/templates/software/profile.yaml",
-    "reference/parity/normalization.yaml",
-  ])("accepts the frozen profile/oracle fixture %s", (path) => {
+    "packages/research-profile/koni/baseline/profile.yaml",
+    "packages/coding-profile/koni/baseline/profile.yaml",
+  ])("accepts the shipping profile fixture %s", (path) => {
     const parsed = parseStrictYamlObject(readFileSync(resolve(repositoryRoot, path), "utf8"));
     expect(parsed.ok, parsed.diagnostics.map((item) => item.code).join(", ")).toBe(true);
   });

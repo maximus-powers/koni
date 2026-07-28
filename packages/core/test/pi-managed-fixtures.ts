@@ -23,6 +23,9 @@ export const TERMINAL_OUTPUT_SCHEMA = Type.Object(
 );
 export const TOOL_SCHEMA_HASH = canonicalHash(TERMINAL_OUTPUT_SCHEMA);
 export const OUTPUT_SCHEMA_HASH = canonicalHash(TERMINAL_OUTPUT_SCHEMA);
+/** Exact secret-free descriptor seal for Pi 0.80.10's built-in gpt-5.6-terra catalog entry. */
+export const FIXTURE_MODEL_CATALOG_SHA256 =
+  "sha256:9a7e2648bd9e90f23733d681fa1188c763e7d8864c3f69a825c17af89421e37f" as const;
 
 export function fixtureTool(): AuthorityBackedTool {
   const acceptedReceipt = (): KoniToolReceipt => ({
@@ -78,6 +81,7 @@ export function fixtureLaunchSpec(options: {
   stepId?: string;
   attemptId?: string;
   sessionId?: string;
+  personaId?: string;
   resources?: readonly LaunchResource[];
   maxAllTokens?: number;
   lineage?: AgentAttemptLineage;
@@ -110,7 +114,7 @@ export function fixtureLaunchSpec(options: {
       sessionDirectory: options.sessionDirectory,
     },
     persona: {
-      id: "worker",
+      id: options.personaId ?? "worker",
       systemPrompt,
       systemPromptHash: rawSha256(systemPrompt),
       initialPrompt,
@@ -119,14 +123,19 @@ export function fixtureLaunchSpec(options: {
     model: {
       provider: "openai-codex",
       id: "gpt-5.6-terra",
+      api: "openai-codex-responses",
+      catalogMaxTokens: 128_000,
+      catalogSha256: FIXTURE_MODEL_CATALOG_SHA256,
       thinkingLevel: "high",
     },
-    tools: [{
-      name: TERMINAL_TOOL_NAME,
-      schemaHash: TOOL_SCHEMA_HASH,
-      executionMode: "sequential",
-      maxResultBytes: koniToolMaxResultBytes("koni_submit_output"),
-    }],
+    tools: [
+      {
+        name: TERMINAL_TOOL_NAME,
+        schemaHash: TOOL_SCHEMA_HASH,
+        executionMode: "sequential",
+        maxResultBytes: koniToolMaxResultBytes("koni_submit_output"),
+      },
+    ],
     resources: {
       setHash: computeLaunchResourceSetHash(resources),
       entries: resources,
@@ -139,8 +148,9 @@ export function fixtureLaunchSpec(options: {
         maxCacheWrite: options.maxAllTokens ?? 10_000,
         maxNew: options.maxAllTokens ?? 10_000,
         maxAll: options.maxAllTokens ?? 10_000,
+        providerOutputHeadroom: 128_000,
       },
-      retries: { maxProviderRetries: 2, baseDelayMs: 1 },
+      retries: { maxProviderRetries: 0, baseDelayMs: 1 },
       transcript: { maxBytes: 64 * 1024 * 1024 },
     },
     terminal: {

@@ -15,9 +15,7 @@ describe("Pi-aligned provider input estimation", () => {
   it("uses UTF-8 wire bytes with a provider-safe bytes/2 bound and framing reserve", () => {
     expect(estimateProviderInputTokens(140_050)).toBe(74_121);
     const identity = providerPayloadIdentity({ input: "SPICED" });
-    expect(identity.prospectiveInputTokens).toBe(
-      Math.ceil(identity.payloadSizeBytes / 2) + 4_096,
-    );
+    expect(identity.prospectiveInputTokens).toBe(Math.ceil(identity.payloadSizeBytes / 2) + 4_096);
   });
 
   it("reserves above Claude's observed live tokenization on real payload mixes", () => {
@@ -41,23 +39,27 @@ describe("Pi-aligned provider input estimation", () => {
 
 describe("Pi provider settlement projection", () => {
   it("requires complete internally consistent canonical usage", () => {
-    expect(() => deriveProviderSettlement([baseline(), assistant({ usage: undefined })], "baseline"))
-      .toThrow(/missing its canonical usage/u);
-    expect(() => deriveProviderSettlement([
-      baseline(),
-      assistant({ usage: usage({ totalTokens: -1 }) }),
-    ], "baseline")).toThrow(/invalid totalTokens/u);
-    expect(() => deriveProviderSettlement([
-      baseline(),
-      assistant({ usage: usage({ output: -1, totalTokens: 16 }) }),
-    ], "baseline")).toThrow(/invalid output/u);
+    expect(() =>
+      deriveProviderSettlement([baseline(), assistant({ usage: undefined })], "baseline"),
+    ).toThrow(/missing its canonical usage/u);
+    expect(() =>
+      deriveProviderSettlement(
+        [baseline(), assistant({ usage: usage({ totalTokens: -1 }) })],
+        "baseline",
+      ),
+    ).toThrow(/invalid totalTokens/u);
+    expect(() =>
+      deriveProviderSettlement(
+        [baseline(), assistant({ usage: usage({ output: -1, totalTokens: 16 }) })],
+        "baseline",
+      ),
+    ).toThrow(/invalid output/u);
   });
 
   it.each(["error", "aborted"])("retains the reservation for a %s assistant", (stopReason) => {
-    expect(() => deriveProviderSettlement([
-      baseline(),
-      assistant({ stopReason, usage: usage() }),
-    ], "baseline")).toThrow(/trustworthy terminal response boundary/u);
+    expect(() =>
+      deriveProviderSettlement([baseline(), assistant({ stopReason, usage: usage() })], "baseline"),
+    ).toThrow(/trustworthy terminal response boundary/u);
   });
 
   it.each(["stop", "toolUse", "length"])("settles a complete %s response", (stopReason) => {
@@ -77,10 +79,12 @@ describe("Pi provider settlement projection", () => {
   });
 
   it("treats provider-raw totalTokens as observational when all components are complete", () => {
-    expect(deriveProviderSettlement([
-      baseline(),
-      assistant({ usage: usage({ totalTokens: 15 }) }),
-    ], "baseline")?.usage.allTokens).toBe(18);
+    expect(
+      deriveProviderSettlement(
+        [baseline(), assistant({ usage: usage({ totalTokens: 15 }) })],
+        "baseline",
+      )?.usage.allTokens,
+    ).toBe(18);
   });
 
   it("re-derives an earlier response within the next durable reservation baseline", () => {
@@ -96,21 +100,31 @@ describe("Pi provider settlement projection", () => {
       parentId: "baseline-two",
       usage: usage({ input: 20, output: 7, cacheRead: 3, cacheWrite: 2, totalTokens: 32 }),
     });
-    expect(deriveProviderSettlement(
-      [baseline(), first, secondBaseline, second],
-      "baseline",
-      "baseline-two",
-    )?.assistantEntryId).toBe("assistant-one");
+    expect(
+      deriveProviderSettlement(
+        [baseline(), first, secondBaseline, second],
+        "baseline",
+        "baseline-two",
+      )?.assistantEntryId,
+    ).toBe("assistant-one");
   });
 
   it("changes the settlement digest when assistant content or tool calls are altered", () => {
     const original = assistant({ usage: usage() });
     const altered = assistant({
       usage: usage(),
-      content: [{ type: "toolCall", id: "call", name: "koni_submit_output", arguments: { result: "altered" } }],
+      content: [
+        {
+          type: "toolCall",
+          id: "call",
+          name: "koni_submit_output",
+          arguments: { result: "altered" },
+        },
+      ],
     });
-    expect(deriveProviderSettlement([baseline(), original], "baseline")?.assistantEntrySha256)
-      .not.toBe(deriveProviderSettlement([baseline(), altered], "baseline")?.assistantEntrySha256);
+    expect(
+      deriveProviderSettlement([baseline(), original], "baseline")?.assistantEntrySha256,
+    ).not.toBe(deriveProviderSettlement([baseline(), altered], "baseline")?.assistantEntrySha256);
   });
 
   it("re-derives a long ordered ledger in one bounded transcript traversal", () => {
@@ -125,12 +139,14 @@ describe("Pi provider settlement projection", () => {
         id: baselineId,
         parentId: index === 0 ? null : `assistant-${index - 1}`,
         message: { role: "user" },
-      } as PiSessionEntry);
-      entries.push(assistant({
-        id: assistantId,
-        parentId: baselineId,
-        usage: usage(),
-      }));
+      });
+      entries.push(
+        assistant({
+          id: assistantId,
+          parentId: baselineId,
+          usage: usage(),
+        }),
+      );
       boundaries.push({
         baselineEntryId: baselineId,
         ...(index + 1 === rounds ? {} : { nextBaselineEntryId: `baseline-${index + 1}` }),
@@ -152,21 +168,35 @@ describe("pinned Pi provider output-cap projection", () => {
     ["anthropic-messages", { max_tokens: 4_096 }, "/max_tokens"],
     ["google-generative-ai", { config: { maxOutputTokens: 4_096 } }, "/config/maxOutputTokens"],
     ["google-vertex", { config: { maxOutputTokens: 4_096 } }, "/config/maxOutputTokens"],
-    ["bedrock-converse-stream", { inferenceConfig: { maxTokens: 4_096 } }, "/inferenceConfig/maxTokens"],
+    [
+      "bedrock-converse-stream",
+      { inferenceConfig: { maxTokens: 4_096 } },
+      "/inferenceConfig/maxTokens",
+    ],
     ["mistral-conversations", { maxTokens: 4_096 }, "/maxTokens"],
     ["pi-messages", { options: { maxTokens: 4_096 } }, "/options/maxTokens"],
-  ] as const)("reads Pi 0.80.10 %s payload at its exact adapter path", (api, payload, expectedPath) => {
-    expect(providerApiHasSupportedOutputCap(api)).toBe(true);
-    expect(serializedProviderOutputCap(api, payload)).toEqual({ path: expectedPath, value: 4_096 });
-  });
+  ] as const)(
+    "reads Pi 0.80.10 %s payload at its exact adapter path",
+    (api, payload, expectedPath) => {
+      expect(providerApiHasSupportedOutputCap(api)).toBe(true);
+      expect(serializedProviderOutputCap(api, payload)).toEqual({
+        path: expectedPath,
+        value: 4_096,
+      });
+    },
+  );
 
   it("keeps Codex uncapped and rejects an invented field", () => {
     expect(providerApiHasSupportedOutputCap("openai-codex-responses")).toBe(false);
-    expect(serializedProviderOutputCap("openai-codex-responses", { model: "gpt-5.6-terra" })).toBeUndefined();
-    expect(() => serializedProviderOutputCap(
-      "openai-codex-responses",
-      { model: "gpt-5.6-terra", max_output_tokens: 4_096 },
-    )).toThrow(/unsupported max_output_tokens/u);
+    expect(
+      serializedProviderOutputCap("openai-codex-responses", { model: "gpt-5.6-terra" }),
+    ).toBeUndefined();
+    expect(() =>
+      serializedProviderOutputCap("openai-codex-responses", {
+        model: "gpt-5.6-terra",
+        max_output_tokens: 4_096,
+      }),
+    ).toThrow(/unsupported max_output_tokens/u);
   });
 });
 
@@ -176,7 +206,7 @@ function baseline(): PiSessionEntry {
     id: "baseline",
     parentId: null,
     message: { role: "user", content: [{ type: "text", text: "work" }] },
-  } as PiSessionEntry;
+  };
 }
 
 function assistant(options: {
@@ -197,7 +227,7 @@ function assistant(options: {
     id: options.id ?? "assistant-one",
     parentId: options.parentId ?? "baseline",
     message,
-  } as PiSessionEntry;
+  };
 }
 
 function usage(overrides: Record<string, unknown> = {}): Record<string, unknown> {

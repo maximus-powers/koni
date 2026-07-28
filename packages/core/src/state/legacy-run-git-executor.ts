@@ -176,7 +176,10 @@ export class LegacyRunGitExecutor {
         location = await this.#inspectRelocation(run, intent, "destination", false);
       }
       if (location !== "destination") {
-        throw new GitLifecycleError("recovery_ambiguous", "legacy relocation has no authoritative checkout");
+        throw new GitLifecycleError(
+          "recovery_ambiguous",
+          "legacy relocation has no authoritative checkout",
+        );
       }
       let destination = await this.#registeredAt(repository, intent.destinationWorktree);
       const expectedLockReason = relocationLockReason(intent.runId);
@@ -225,7 +228,10 @@ export class LegacyRunGitExecutor {
           path.resolve(preflight.worktree) !== path.resolve(intent.sourceWorktree) ||
           preflight.expectedOid !== intent.expectedRunOid
         ) {
-          throw new GitLifecycleError("ownership_mismatch", "legacy deletion proof changed after preparation");
+          throw new GitLifecycleError(
+            "ownership_mismatch",
+            "legacy deletion proof changed after preparation",
+          );
         }
         registration = await this.#registeredAt(repository, intent.sourceWorktree);
         await this.#assertLegacyCheckout(
@@ -236,7 +242,10 @@ export class LegacyRunGitExecutor {
         );
         if (registration.locked) {
           if (registration.lockReason !== relocationLockReason(intent.runId)) {
-            throw new GitLifecycleError("ownership_mismatch", "legacy checkout has an unrecognized lock");
+            throw new GitLifecycleError(
+              "ownership_mismatch",
+              "legacy checkout has an unrecognized lock",
+            );
           }
           await repository.unlockWorktree(intent.sourceWorktree);
         }
@@ -317,7 +326,11 @@ export class LegacyRunGitExecutor {
 
   #requiredRelocation(run: RunRecord): LegacyRunRelocationPlan {
     const migration = run.legacyGitMigration;
-    if (migration === undefined || migration.status !== "relocation_required" || migration.relocation === undefined) {
+    if (
+      migration === undefined ||
+      migration.status !== "relocation_required" ||
+      migration.relocation === undefined
+    ) {
       throw new GitLifecycleError("invalid_state", "run does not require legacy Git relocation");
     }
     assertLegacyRunGitMigrationRecord(migration, run.id, run.projectRoot, run.git);
@@ -334,7 +347,10 @@ export class LegacyRunGitExecutor {
     }
     assertLegacyRunGitMigrationRecord(migration, run.id, run.projectRoot, run.git);
     if (Object.keys(run.git.ticketCycles).length !== 0 || run.git.ticketCycleOrder.length !== 0) {
-      throw new GitLifecycleError("ownership_mismatch", "legacy deletion found new-layout ticket resources");
+      throw new GitLifecycleError(
+        "ownership_mismatch",
+        "legacy deletion found new-layout ticket resources",
+      );
     }
   }
 
@@ -379,7 +395,10 @@ export class LegacyRunGitExecutor {
       path.resolve(intent.projectRoot) !== path.resolve(run.git.projectRoot) ||
       path.resolve(intent.commonDirectory) !== path.resolve(run.git.commonDirectory)
     ) {
-      throw new GitLifecycleError("ownership_mismatch", "legacy Git intent belongs to another authority");
+      throw new GitLifecycleError(
+        "ownership_mismatch",
+        "legacy Git intent belongs to another authority",
+      );
     }
   }
 
@@ -401,9 +420,13 @@ export class LegacyRunGitExecutor {
       migration.relocation.destination.namespaceRoot !== intent.namespaceRoot ||
       migration.relocation.destination.planningWorktree !== intent.planningWorktree ||
       migration.relocation.destination.ticketRoot !== intent.ticketRoot ||
-      canonicalHash(migration.relocation.ticketProjectionIds) !== canonicalHash(intent.ticketProjectionIds)
+      canonicalHash(migration.relocation.ticketProjectionIds) !==
+        canonicalHash(intent.ticketProjectionIds)
     ) {
-      throw new GitLifecycleError("ownership_mismatch", "legacy relocation intent no longer matches its proof plan");
+      throw new GitLifecycleError(
+        "ownership_mismatch",
+        "legacy relocation intent no longer matches its proof plan",
+      );
     }
   }
 
@@ -417,7 +440,10 @@ export class LegacyRunGitExecutor {
       `refs/heads/${migration.source.runBranch}` !== intent.runRef ||
       legacyNamespaceRoot(run) !== intent.namespaceRoot
     ) {
-      throw new GitLifecycleError("ownership_mismatch", "legacy deletion intent no longer matches its source proof");
+      throw new GitLifecycleError(
+        "ownership_mismatch",
+        "legacy deletion intent no longer matches its source proof",
+      );
     }
   }
 
@@ -438,7 +464,10 @@ export class LegacyRunGitExecutor {
       repository.worktrees(),
     ]);
     if (target !== intent.observedTargetOid || selected !== intent.selectedTargetOid) {
-      throw new GitLifecycleError("ref_moved", "legacy target evidence changed before relocation settled");
+      throw new GitLifecycleError(
+        "ref_moved",
+        "legacy target evidence changed before relocation settled",
+      );
     }
     if (runHead !== intent.expectedRunOid) {
       throw new GitLifecycleError("ref_moved", "legacy run ref changed before relocation settled");
@@ -454,13 +483,22 @@ export class LegacyRunGitExecutor {
       [path.resolve(intent.destinationWorktree), "destination"],
     ]);
     const location = locations.get(path.resolve(registered.path));
-    if (location === undefined || (expectedLocation !== undefined && location !== expectedLocation)) {
-      throw new GitLifecycleError("ownership_mismatch", "legacy checkout is registered at an unexpected path");
+    if (
+      location === undefined ||
+      (expectedLocation !== undefined && location !== expectedLocation)
+    ) {
+      throw new GitLifecycleError(
+        "ownership_mismatch",
+        "legacy checkout is registered at an unexpected path",
+      );
     }
     await this.#assertLegacyCheckout(intent, registered, registered.path, intent.expectedRunOid);
     if (location === "source") {
       if (registered.locked) {
-        throw new GitLifecycleError("ownership_mismatch", "legacy source checkout is unexpectedly locked");
+        throw new GitLifecycleError(
+          "ownership_mismatch",
+          "legacy source checkout is unexpectedly locked",
+        );
       }
       await assertPathsAbsent([
         intent.stagingWorktree,
@@ -470,18 +508,31 @@ export class LegacyRunGitExecutor {
       ]);
     } else if (location === "staging") {
       if (registered.locked) {
-        throw new GitLifecycleError("ownership_mismatch", "legacy staging checkout is unexpectedly locked");
+        throw new GitLifecycleError(
+          "ownership_mismatch",
+          "legacy staging checkout is unexpectedly locked",
+        );
       }
-      await assertPathsAbsent([intent.destinationWorktree, intent.planningWorktree, intent.ticketRoot]);
-      if (await pathExists(intent.namespaceRoot)) await assertDirectoryEntries(intent.namespaceRoot, []);
+      await assertPathsAbsent([
+        intent.destinationWorktree,
+        intent.planningWorktree,
+        intent.ticketRoot,
+      ]);
+      if (await pathExists(intent.namespaceRoot))
+        await assertDirectoryEntries(intent.namespaceRoot, []);
     } else {
       await assertPathsAbsent([intent.stagingWorktree, intent.planningWorktree, intent.ticketRoot]);
-      await assertDirectoryEntries(intent.namespaceRoot, [path.basename(intent.destinationWorktree)]);
+      await assertDirectoryEntries(intent.namespaceRoot, [
+        path.basename(intent.destinationWorktree),
+      ]);
       if (
         requireDestinationLock &&
         (!registered.locked || registered.lockReason !== relocationLockReason(intent.runId))
       ) {
-        throw new GitLifecycleError("ownership_mismatch", "relocated checkout lock is absent or foreign");
+        throw new GitLifecycleError(
+          "ownership_mismatch",
+          "relocated checkout lock is absent or foreign",
+        );
       }
     }
     return location;
@@ -497,12 +548,21 @@ export class LegacyRunGitExecutor {
       repository.tryResolveRef(runRef),
       repository.worktrees(),
     ]);
-    if (runHead === undefined || (run.git.run.headOid !== undefined && runHead !== run.git.run.headOid)) {
-      throw new GitLifecycleError("ref_moved", "legacy run ref is missing or differs from its durable head");
+    if (
+      runHead === undefined ||
+      (run.git.run.headOid !== undefined && runHead !== run.git.run.headOid)
+    ) {
+      throw new GitLifecycleError(
+        "ref_moved",
+        "legacy run ref is missing or differs from its durable head",
+      );
     }
     const branchEntries = worktrees.filter((entry) => entry.branch === runRef);
     if (branchEntries.length !== 1) {
-      throw new GitLifecycleError("ownership_mismatch", "legacy deletion requires one exact run checkout");
+      throw new GitLifecycleError(
+        "ownership_mismatch",
+        "legacy deletion requires one exact run checkout",
+      );
     }
     const registered = branchEntries[0]!;
     const root = legacyNamespaceRoot(run);
@@ -513,19 +573,31 @@ export class LegacyRunGitExecutor {
       allowed.add(path.resolve(relocation.destination.runWorktree));
     }
     if (!allowed.has(path.resolve(registered.path))) {
-      throw new GitLifecycleError("ownership_mismatch", "legacy checkout moved outside every proof-owned location");
+      throw new GitLifecycleError(
+        "ownership_mismatch",
+        "legacy checkout moved outside every proof-owned location",
+      );
     }
-    await this.#assertLegacyCheckout({
-      projectRoot: run.git.projectRoot,
-      commonDirectory: run.git.commonDirectory,
-      runRef,
-    }, registered, registered.path, runHead);
+    await this.#assertLegacyCheckout(
+      {
+        projectRoot: run.git.projectRoot,
+        commonDirectory: run.git.commonDirectory,
+        runRef,
+      },
+      registered,
+      registered.path,
+      runHead,
+    );
     if (registered.locked && registered.lockReason !== relocationLockReason(run.id)) {
-      throw new GitLifecycleError("ownership_mismatch", "legacy deletion found an unrecognized worktree lock");
+      throw new GitLifecycleError(
+        "ownership_mismatch",
+        "legacy deletion found an unrecognized worktree lock",
+      );
     }
     const planning = relocation?.destination.planningWorktree ?? path.join(root, "planning");
     const destination = relocation?.destination.runWorktree ?? path.join(root, "integration");
-    const staging = relocation?.destination.stagingWorktree ?? stagingPath(run.git.commonDirectory, run.id);
+    const staging =
+      relocation?.destination.stagingWorktree ?? stagingPath(run.git.commonDirectory, run.id);
     const tickets = relocation?.destination.ticketRoot ?? path.join(root, "tickets");
     const occupiedCandidates = [planning, destination, staging, tickets].filter(
       (candidate) => path.resolve(candidate) !== path.resolve(registered.path),
@@ -541,31 +613,54 @@ export class LegacyRunGitExecutor {
     expectedOid: string,
   ): Promise<void> {
     if (path.resolve(registered.path) !== path.resolve(worktree)) {
-      throw new GitLifecycleError("ownership_mismatch", "legacy worktree registration path changed");
+      throw new GitLifecycleError(
+        "ownership_mismatch",
+        "legacy worktree registration path changed",
+      );
     }
-    if (registered.branch !== intent.runRef || registered.head !== expectedOid || registered.detached) {
+    if (
+      registered.branch !== intent.runRef ||
+      registered.head !== expectedOid ||
+      registered.detached
+    ) {
       throw new GitLifecycleError("ownership_mismatch", "legacy worktree branch or HEAD changed");
     }
     const stat = await lstat(worktree);
-    if (stat.isSymbolicLink() || !stat.isDirectory() || await realpath(worktree) !== path.resolve(worktree)) {
-      throw new GitLifecycleError("ownership_mismatch", "legacy worktree path is not one real directory");
+    if (
+      stat.isSymbolicLink() ||
+      !stat.isDirectory() ||
+      (await realpath(worktree)) !== path.resolve(worktree)
+    ) {
+      throw new GitLifecycleError(
+        "ownership_mismatch",
+        "legacy worktree path is not one real directory",
+      );
     }
     const discovered = await GitClient.discover(worktree);
     await assertRepositoryIdentity(discovered, intent.projectRoot, intent.commonDirectory, false);
     if ((await new GitClient(worktree).statusEntries()).length !== 0) {
-      throw new GitLifecycleError("dirty_checkout", `legacy worktree has local changes: ${worktree}`);
+      throw new GitLifecycleError(
+        "dirty_checkout",
+        `legacy worktree has local changes: ${worktree}`,
+      );
     }
   }
 
   async #registeredAt(repository: GitClient, expectedPath: string): Promise<GitWorktreeEntry> {
     const found = await this.#optionalRegisteredAt(repository, expectedPath);
     if (found === undefined) {
-      throw new GitLifecycleError("ownership_mismatch", `worktree is not registered: ${expectedPath}`);
+      throw new GitLifecycleError(
+        "ownership_mismatch",
+        `worktree is not registered: ${expectedPath}`,
+      );
     }
     return found;
   }
 
-  async #optionalRegisteredAt(repository: GitClient, expectedPath: string): Promise<GitWorktreeEntry | undefined> {
+  async #optionalRegisteredAt(
+    repository: GitClient,
+    expectedPath: string,
+  ): Promise<GitWorktreeEntry | undefined> {
     const normalized = path.resolve(expectedPath);
     return (await repository.worktrees()).find((entry) => path.resolve(entry.path) === normalized);
   }
@@ -723,7 +818,10 @@ async function assertRepositoryIdentity(
     realpath(expectedCommon),
   ]);
   if (actualCommon !== durableCommon) {
-    throw new GitLifecycleError("ownership_mismatch", "legacy checkout belongs to another repository");
+    throw new GitLifecycleError(
+      "ownership_mismatch",
+      "legacy checkout belongs to another repository",
+    );
   }
   if (compareRoot) {
     const [actualRoot, durableRoot] = await Promise.all([
@@ -739,20 +837,36 @@ async function assertRepositoryIdentity(
 async function assertPathsAbsent(paths: readonly string[]): Promise<void> {
   for (const candidate of paths) {
     if (await pathExists(candidate)) {
-      throw new GitLifecycleError("namespace_collision", `legacy migration destination is occupied: ${candidate}`);
+      throw new GitLifecycleError(
+        "namespace_collision",
+        `legacy migration destination is occupied: ${candidate}`,
+      );
     }
   }
 }
 
-async function assertDirectoryEntries(directory: string, expected: readonly string[]): Promise<void> {
+async function assertDirectoryEntries(
+  directory: string,
+  expected: readonly string[],
+): Promise<void> {
   const stat = await lstat(directory);
-  if (stat.isSymbolicLink() || !stat.isDirectory() || await realpath(directory) !== path.resolve(directory)) {
-    throw new GitLifecycleError("ownership_mismatch", `compiler namespace is not one real directory: ${directory}`);
+  if (
+    stat.isSymbolicLink() ||
+    !stat.isDirectory() ||
+    (await realpath(directory)) !== path.resolve(directory)
+  ) {
+    throw new GitLifecycleError(
+      "ownership_mismatch",
+      `compiler namespace is not one real directory: ${directory}`,
+    );
   }
   const actual = (await readdir(directory)).sort();
   const wanted = [...expected].sort();
   if (JSON.stringify(actual) !== JSON.stringify(wanted)) {
-    throw new GitLifecycleError("namespace_collision", `compiler namespace contains unexpected entries: ${directory}`);
+    throw new GitLifecycleError(
+      "namespace_collision",
+      `compiler namespace contains unexpected entries: ${directory}`,
+    );
   }
 }
 
@@ -760,7 +874,10 @@ async function ensureOwnedDirectory(candidate: string, commonDirectory: string):
   const common = await realpath(commonDirectory);
   const target = path.resolve(candidate);
   if (!isInside(common, target)) {
-    throw new GitLifecycleError("ownership_mismatch", `directory escapes Git common dir: ${target}`);
+    throw new GitLifecycleError(
+      "ownership_mismatch",
+      `directory escapes Git common dir: ${target}`,
+    );
   }
   const relative = path.relative(common, target);
   let cursor = common;

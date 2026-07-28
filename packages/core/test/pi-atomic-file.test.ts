@@ -7,7 +7,9 @@ import { createFileAtomicallyNoReplace } from "../src/pi/atomic-file.js";
 const temporary: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true })));
+  await Promise.all(
+    temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true })),
+  );
 });
 
 describe("atomic no-replace persistence", () => {
@@ -20,7 +22,9 @@ describe("atomic no-replace persistence", () => {
     expect(await readFile(destination, "utf8")).toBe("first\n");
     expect((await stat(destination)).mode & 0o777).toBe(0o400);
 
-    await expect(createFileAtomicallyNoReplace(destination, "second\n", 0o600)).resolves.toBe(false);
+    await expect(createFileAtomicallyNoReplace(destination, "second\n", 0o600)).resolves.toBe(
+      false,
+    );
     expect(await readFile(destination, "utf8")).toBe("first\n");
     expect((await stat(destination)).mode & 0o777).toBe(0o400);
   });

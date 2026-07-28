@@ -19,12 +19,15 @@ import {
   resolvePinnedGateAutoEvaluationContexts,
 } from "../src/compiler/run-program.js";
 import {
-  HistoricalBehaviorCompatibilityError,
+  type HistoricalBehaviorCompatibilityError,
   assertHistoricalBehaviorMatchesRun,
   projectHistoricalCompiledBehavior,
 } from "../src/compiler/historical-behavior.js";
 import { compileProjectDirectory } from "../src/compiler/project-directory.js";
-import { projectGatePolicyDefinitions, projectGraphSchemaDefinition } from "../src/compiler/graph-schema.js";
+import {
+  projectGatePolicyDefinitions,
+  projectGraphSchemaDefinition,
+} from "../src/compiler/graph-schema.js";
 import {
   RULE_AUTHORITY_EVIDENCE_PROTOCOL,
   createRuleAuthorityEvidence,
@@ -35,11 +38,19 @@ import {
   computeProfileBundleSha256,
   type VerifiedProfileBaseline,
 } from "../src/compiler/profile-package.js";
-import type { ProfileBaselineFile, ProfilePackageManifest } from "../src/contracts/profile-package.js";
+import type {
+  ProfileBaselineFile,
+  ProfilePackageManifest,
+} from "../src/contracts/profile-package.js";
 import type { CompiledConfiguration } from "../src/contracts/configuration.js";
 import { GraphSchema, TypedGraph, type GraphNode } from "../src/graph/model.js";
 import type { AgentLaunchSpec } from "../src/pi/launch-spec.js";
-import { canonicalEncode, canonicalHash, rawSha256, type Sha256Digest } from "../src/shared/canonical.js";
+import {
+  canonicalEncode,
+  canonicalHash,
+  rawSha256,
+  type Sha256Digest,
+} from "../src/shared/canonical.js";
 import { installProfile, loadProfilePackage } from "../src/profile/install.js";
 import { newRunLifecycle, reduceRunLifecycle } from "../src/state/run-lifecycle.js";
 import {
@@ -63,7 +74,9 @@ const temporaryRoots: string[] = [];
 const FIXED_NOW = new Date("2026-07-16T19:00:00.000Z");
 
 afterEach(async () => {
-  await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  await Promise.all(
+    temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+  );
 });
 
 describe("native compiler-authoritative run program", () => {
@@ -81,18 +94,24 @@ describe("native compiler-authoritative run program", () => {
   });
 
   it("rejects obvious setup failures without rejecting an ordinary expected-red assertion", () => {
-    expect(commandInfrastructureFailure(
-      "FAIL feature.test.ts > renders General\nAssertionError: expected 'Sales Notes' to be 'General'",
-      "",
-    )).toBeUndefined();
-    expect(commandInfrastructureFailure("", "Error: Cannot find module 'framer-motion'"))
-      .toContain("could not load one of its modules");
-    expect(commandInfrastructureFailure("", "ReferenceError: React is not defined"))
-      .toContain("test harness failed before its focused assertions ran");
-    expect(commandInfrastructureFailure("", "Error: Objects are not valid as a React child"))
-      .toContain("test harness failed before its focused assertions ran");
-    expect(commandInfrastructureFailure("No test files found, exiting with code 1", ""))
-      .toContain("did not execute a test");
+    expect(
+      commandInfrastructureFailure(
+        "FAIL feature.test.ts > renders General\nAssertionError: expected 'Sales Notes' to be 'General'",
+        "",
+      ),
+    ).toBeUndefined();
+    expect(commandInfrastructureFailure("", "Error: Cannot find module 'framer-motion'")).toContain(
+      "could not load one of its modules",
+    );
+    expect(commandInfrastructureFailure("", "ReferenceError: React is not defined")).toContain(
+      "test harness failed before its focused assertions ran",
+    );
+    expect(
+      commandInfrastructureFailure("", "Error: Objects are not valid as a React child"),
+    ).toContain("test harness failed before its focused assertions ran");
+    expect(commandInfrastructureFailure("No test files found, exiting with code 1", "")).toContain(
+      "did not execute a test",
+    );
   });
 
   it("admits an expected-red missing local module only when it is an exact declared input", () => {
@@ -106,23 +125,34 @@ describe("native compiler-authoritative run program", () => {
     ];
 
     expect(commandInfrastructureFailure("", localFailure, declaredInputs)).toBeUndefined();
-    expect(commandInfrastructureFailure("", [
-      localFailure,
-      "Serialized Error: { code: 'ERR_MODULE_NOT_FOUND' }",
-      "Caused by: Error: Failed to load url ./SalesNotesFields (resolved id: ./SalesNotesFields). Does the file exist?",
-    ].join("\n"), declaredInputs)).toBeUndefined();
-    expect(commandInfrastructureFailure("", localFailure, declaredInputs.slice(0, 1)))
-      .toContain("could not load one of its modules");
-    expect(commandInfrastructureFailure(
-      "",
-      `${localFailure}\nError: Cannot find module 'framer-motion'`,
-      declaredInputs,
-    )).toContain("could not load one of its modules");
-    expect(commandInfrastructureFailure(
-      "",
-      `${localFailure}\nReferenceError: React is not defined`,
-      declaredInputs,
-    )).toContain("test harness failed before its focused assertions ran");
+    expect(
+      commandInfrastructureFailure(
+        "",
+        [
+          localFailure,
+          "Serialized Error: { code: 'ERR_MODULE_NOT_FOUND' }",
+          "Caused by: Error: Failed to load url ./SalesNotesFields (resolved id: ./SalesNotesFields). Does the file exist?",
+        ].join("\n"),
+        declaredInputs,
+      ),
+    ).toBeUndefined();
+    expect(commandInfrastructureFailure("", localFailure, declaredInputs.slice(0, 1))).toContain(
+      "could not load one of its modules",
+    );
+    expect(
+      commandInfrastructureFailure(
+        "",
+        `${localFailure}\nError: Cannot find module 'framer-motion'`,
+        declaredInputs,
+      ),
+    ).toContain("could not load one of its modules");
+    expect(
+      commandInfrastructureFailure(
+        "",
+        `${localFailure}\nReferenceError: React is not defined`,
+        declaredInputs,
+      ),
+    ).toContain("test harness failed before its focused assertions ran");
   });
 
   it("rebinds current check evidence across only non-interfering graph changes", async () => {
@@ -130,9 +160,18 @@ describe("native compiler-authoritative run program", () => {
     await mkdir(path.join(project.projectRoot, "src"), { recursive: true });
     await mkdir(path.join(project.projectRoot, "tests"), { recursive: true });
     await mkdir(path.join(project.projectRoot, "test-support"), { recursive: true });
-    await writeFile(path.join(project.projectRoot, "src/feature.ts"), "export const label = 'legacy';\n");
-    await writeFile(path.join(project.projectRoot, "tests/feature.test.mjs"), "process.exitCode = 1;\n");
-    await writeFile(path.join(project.projectRoot, "test-support/vitest.config.ts"), "export default {};\n");
+    await writeFile(
+      path.join(project.projectRoot, "src/feature.ts"),
+      "export const label = 'legacy';\n",
+    );
+    await writeFile(
+      path.join(project.projectRoot, "tests/feature.test.mjs"),
+      "process.exitCode = 1;\n",
+    );
+    await writeFile(
+      path.join(project.projectRoot, "test-support/vitest.config.ts"),
+      "export default {};\n",
+    );
     const compiled = await compileProjectDirectory(project.projectRoot, project.baseline);
     if (!compiled.ok) throw new Error("coding fixture configuration did not compile");
     const projected = projectGraphSchemaDefinition(compiled.value);
@@ -148,7 +187,12 @@ describe("native compiler-authoritative run program", () => {
       intake: { goal: "Preserve current promotion evidence across review status effects" },
     });
     await persistWrites(project.projectRoot, resolved.artifactWrites ?? []);
-    const run = runRecord(project.projectRoot, runId, "Preserve current promotion evidence", resolved);
+    const run = runRecord(
+      project.projectRoot,
+      runId,
+      "Preserve current promotion evidence",
+      resolved,
+    );
     const planning = await program.compilePlanningOutput({
       run,
       attemptId: "attempt-review-evidence-plan",
@@ -159,7 +203,9 @@ describe("native compiler-authoritative run program", () => {
     run.graphRevision = planning.graphRevision ?? 0;
     materializeApprovedFixtureRun(run);
     const initialized = await program.initializeApprovedPlan(run);
-    const graphWrite = initialized.artifactWrites?.find((write) => write.path.endsWith("/program/graph.json"));
+    const graphWrite = initialized.artifactWrites?.find((write) =>
+      write.path.endsWith("/program/graph.json"),
+    );
     const graphArtifact = JSON.parse(Buffer.from(graphWrite!.bytes).toString("utf8")) as {
       nodes: Record<string, GraphNode>;
     };
@@ -167,8 +213,8 @@ describe("native compiler-authoritative run program", () => {
     const proof = nodes.find((node) => node.type === "proof")!;
     const prepared = { ...structuredClone(proof), status: "prepared" };
     const passing = { ...structuredClone(proof), status: "passing" };
-    const beforeNodes = nodes.map((node) => node.id === proof.id ? prepared : node);
-    const afterNodes = nodes.map((node) => node.id === proof.id ? passing : node);
+    const beforeNodes = nodes.map((node) => (node.id === proof.id ? prepared : node));
+    const afterNodes = nodes.map((node) => (node.id === proof.id ? passing : node));
     const before = new TypedGraph(schema, beforeNodes, { projectRoot: project.projectRoot });
     const after = new TypedGraph(schema, afterNodes, { projectRoot: project.projectRoot });
     const leaf = { op: "check_passed", subject: "$target", check: "promotion-proof-set" };
@@ -215,35 +261,57 @@ describe("native compiler-authoritative run program", () => {
       }),
     });
     const objective = nodes.find((node) => node.type === "objective")!;
-    const unrelatedAfter = new TypedGraph(schema, afterNodes.map((node) => node.id === objective.id
-      ? { ...structuredClone(node), title: "Unrelated delivery metadata changed" }
-      : node), { projectRoot: project.projectRoot });
+    const unrelatedAfter = new TypedGraph(
+      schema,
+      afterNodes.map((node) =>
+        node.id === objective.id
+          ? { ...structuredClone(node), title: "Unrelated delivery metadata changed" }
+          : node,
+      ),
+      { projectRoot: project.projectRoot },
+    );
     const unrelatedRebound = rebindRuleEvidenceAcrossNonInterferingGraphChange({
       configuration: compiled.value,
       before,
       after: unrelatedAfter,
       evidence,
     });
-    expect(unrelatedRebound?.inputGraphSha256).toBe(ruleInputGraphSha256(compiled.value, unrelatedAfter));
+    expect(unrelatedRebound?.inputGraphSha256).toBe(
+      ruleInputGraphSha256(compiled.value, unrelatedAfter),
+    );
     expect(Object.values(unrelatedRebound?.predicates ?? {})).toEqual([
       expect.objectContaining({ result: true, subjectNodeId: proof.id }),
     ]);
-    expect(rebindRuleEvidenceAcrossNonInterferingGraphChange({
-      configuration: compiled.value,
-      before,
-      after: new TypedGraph(schema, afterNodes.map((node) => node.id === proof.id
-        ? { ...structuredClone(passing), title: "Changed semantic title" }
-        : node), { projectRoot: project.projectRoot }),
-      evidence,
-    })).toBeUndefined();
-    expect(rebindRuleEvidenceAcrossNonInterferingGraphChange({
-      configuration: compiled.value,
-      before,
-      after: new TypedGraph(schema, beforeNodes.map((node) => node.id === proof.id
-        ? { ...structuredClone(prepared), status: "superseded" }
-        : node), { projectRoot: project.projectRoot }),
-      evidence,
-    })).toBeUndefined();
+    expect(
+      rebindRuleEvidenceAcrossNonInterferingGraphChange({
+        configuration: compiled.value,
+        before,
+        after: new TypedGraph(
+          schema,
+          afterNodes.map((node) =>
+            node.id === proof.id
+              ? { ...structuredClone(passing), title: "Changed semantic title" }
+              : node,
+          ),
+          { projectRoot: project.projectRoot },
+        ),
+        evidence,
+      }),
+    ).toBeUndefined();
+    expect(
+      rebindRuleEvidenceAcrossNonInterferingGraphChange({
+        configuration: compiled.value,
+        before,
+        after: new TypedGraph(
+          schema,
+          beforeNodes.map((node) =>
+            node.id === proof.id ? { ...structuredClone(prepared), status: "superseded" } : node,
+          ),
+          { projectRoot: project.projectRoot },
+        ),
+        evidence,
+      }),
+    ).toBeUndefined();
   }, 30_000);
 
   it("projects the compiler-validated project default into the operator catalog", async () => {
@@ -252,10 +320,8 @@ describe("native compiler-authoritative run program", () => {
 
     expect(await program.controlCatalog()).toMatchObject({
       protocol: "koni.control-catalog.v1",
-      defaultRunTypeId: "medium",
-      runTypes: expect.arrayContaining([
-        expect.objectContaining({ id: "medium" }),
-      ]),
+      defaultRunTypeId: "continuous-improvement",
+      runTypes: expect.arrayContaining([expect.objectContaining({ id: "medium" })]),
     });
   }, 30_000);
 
@@ -283,7 +349,9 @@ describe("native compiler-authoritative run program", () => {
 
     expect(canonicalHash(legacy)).toBe(before);
     expect(Object.keys(behavior.runTypes)).toEqual(["medium"]);
-    expect(behavior.runTypes.medium?.pipeline.map((stage) => stage.id)).toEqual(run.pipelineStageIds);
+    expect(behavior.runTypes.medium?.pipeline.map((stage) => stage.id)).toEqual(
+      run.pipelineStageIds,
+    );
 
     const customizedGit = structuredClone(legacy) as unknown as MutableConfigurationFixture;
     const medium = requiredMutableFixtureRecord(
@@ -293,15 +361,20 @@ describe("native compiler-authoritative run program", () => {
     const document = requiredMutableFixtureRecord(medium.document, "medium run type document");
     requiredMutableFixtureRecord(document.git, "medium Git policy").branch_template =
       "custom/runs/{{ run.id }}";
-    expect(() => projectHistoricalCompiledBehavior(
-      customizedGit as unknown as CompiledConfiguration,
-      "medium",
-    )).toThrow(expect.objectContaining<Partial<HistoricalBehaviorCompatibilityError>>({
-      code: "historical_behavior_git",
-    }));
+    expect(() =>
+      projectHistoricalCompiledBehavior(
+        customizedGit as unknown as CompiledConfiguration,
+        "medium",
+      ),
+    ).toThrow(
+      expect.objectContaining<Partial<HistoricalBehaviorCompatibilityError>>({
+        code: "historical_behavior_git",
+      }),
+    );
 
     const driftedRun = structuredClone(run);
-    if (driftedRun.executionConfig === undefined) throw new Error("fixture run has no execution config");
+    if (driftedRun.executionConfig === undefined)
+      throw new Error("fixture run has no execution config");
     driftedRun.executionConfig.agents.lead!.model = "gpt-drift";
     expect(() => assertHistoricalBehaviorMatchesRun(driftedRun, behavior, legacy)).toThrow(
       expect.objectContaining<Partial<HistoricalBehaviorCompatibilityError>>({
@@ -342,57 +415,68 @@ describe("native compiler-authoritative run program", () => {
       stepId: "lead-orchestration-entry",
     });
     expect(prepared.spec.workspace.cwd).toBe(project.projectRoot);
-    if (prepared.authorityGrant === undefined) throw new Error("prepared Lead attempt has no authority grant");
+    if (prepared.authorityGrant === undefined)
+      throw new Error("prepared Lead attempt has no authority grant");
     expect(prepared.authorityGrant.readPaths).toEqual([]);
     expect(prepared.authorityGrant.writePaths).toEqual([]);
     expect(prepared.toolNames).toEqual(["koni_submit_output"]);
     expect(prepared.contextContent).toContain('"kind": "lead_judgment"');
     expect(prepared.contextContent).toContain('"trigger": "orchestration_entry"');
-    expect(Value.Check(prepared.terminalOutputSchema!, {
-      protocol: "koni.lead-judgment-output.v1",
-      disposition: "proceed",
-      summary: "The approved run is ready for deterministic scheduling.",
-    })).toBe(true);
-    expect(Value.Check(prepared.terminalOutputSchema!, {
-      protocol: "koni.lead-judgment-output.v1",
-      disposition: "proceed",
-      summary: "ready",
-      ticketsToStart: ["TK-1"],
-    })).toBe(false);
+    expect(
+      Value.Check(prepared.terminalOutputSchema!, {
+        protocol: "koni.lead-judgment-output.v1",
+        disposition: "proceed",
+        summary: "The approved run is ready for deterministic scheduling.",
+      }),
+    ).toBe(true);
+    expect(
+      Value.Check(prepared.terminalOutputSchema!, {
+        protocol: "koni.lead-judgment-output.v1",
+        disposition: "proceed",
+        summary: "ready",
+        ticketsToStart: ["TK-1"],
+      }),
+    ).toBe(false);
 
     const attempt = attemptRecord(prepared.spec, "lead", "running");
     run.attempts[attempt.id] = attempt;
     await persistWrites(project.projectRoot, prepared.artifactWrites ?? []);
-    const recovered = await (await compilerProgram(project)).recoverAttempt({
+    const recovered = await (
+      await compilerProgram(project)
+    ).recoverAttempt({
       run,
       attempt,
       spec: prepared.spec,
     });
     expect(recovered.toolNames).toEqual(prepared.toolNames);
     expect(recovered.contextContent).toBe(prepared.contextContent);
-    await expect(program.compileLeadJudgmentOutput({
-      run,
-      attemptId: attempt.id,
-      output: {
-        protocol: "koni.lead-judgment-output.v1",
-        disposition: "proceed",
-        summary: "The approved run is ready for deterministic scheduling.",
-      },
-    })).resolves.toEqual({
+    await expect(
+      program.compileLeadJudgmentOutput({
+        run,
+        attemptId: attempt.id,
+        output: {
+          protocol: "koni.lead-judgment-output.v1",
+          disposition: "proceed",
+          summary: "The approved run is ready for deterministic scheduling.",
+        },
+      }),
+    ).resolves.toEqual({
       protocol: "koni.lead-judgment-output.v1",
       disposition: "proceed",
       summary: "The approved run is ready for deterministic scheduling.",
     });
-    await expect(program.compileLeadJudgmentOutput({
-      run,
-      attemptId: attempt.id,
-      output: {
-        protocol: "koni.lead-judgment-output.v1",
-        disposition: "proceed",
-        summary: "ready",
-        schedule: ["TK-1"],
-      },
-    })).rejects.toMatchObject({ code: "lead_output" });
+    await expect(
+      program.compileLeadJudgmentOutput({
+        run,
+        attemptId: attempt.id,
+        output: {
+          protocol: "koni.lead-judgment-output.v1",
+          disposition: "proceed",
+          summary: "ready",
+          schedule: ["TK-1"],
+        },
+      }),
+    ).rejects.toMatchObject({ code: "lead_output" });
   }, 30_000);
 
   it("requires and compiles the configured independent run review instead of skipping agent_review", async () => {
@@ -416,8 +500,18 @@ describe("native compiler-authoritative run program", () => {
       ...(large.artifactWrites ?? []),
       ...(small.artifactWrites ?? []),
     ]);
-    const largeRun = runRecord(project.projectRoot, "run-large-review", "Exercise the independent review stage", large);
-    const smallRun = runRecord(project.projectRoot, "run-small-no-review", "Keep a focused run proportional", small);
+    const largeRun = runRecord(
+      project.projectRoot,
+      "run-large-review",
+      "Exercise the independent review stage",
+      large,
+    );
+    const smallRun = runRecord(
+      project.projectRoot,
+      "run-small-no-review",
+      "Keep a focused run proportional",
+      small,
+    );
     expect(await program.requiresVerificationAttempt(largeRun)).toBe(true);
     expect(await program.requiresVerificationAttempt(smallRun)).toBe(false);
 
@@ -446,16 +540,22 @@ describe("native compiler-authoritative run program", () => {
       authorityCompactions: [],
       kind: "verification",
     };
-    await expect(program.compileVerificationOutput({
-      run: largeRun,
-      attemptId: "attempt-independent-review",
-      output: { status: "completed", summary: "No evidence-backed blockers remain" },
-    })).resolves.toEqual({ outcome: { status: "completed", summary: "No evidence-backed blockers remain" } });
-    await expect(program.compileVerificationOutput({
-      run: largeRun,
-      attemptId: "attempt-independent-review",
-      output: { status: "failed", blocker: "The acceptance proof is stale" },
-    })).resolves.toEqual({ outcome: { status: "failed", blocker: "The acceptance proof is stale" } });
+    await expect(
+      program.compileVerificationOutput({
+        run: largeRun,
+        attemptId: "attempt-independent-review",
+        output: { status: "completed", summary: "No evidence-backed blockers remain" },
+      }),
+    ).resolves.toEqual({
+      outcome: { status: "completed", summary: "No evidence-backed blockers remain" },
+    });
+    await expect(
+      program.compileVerificationOutput({
+        run: largeRun,
+        attemptId: "attempt-independent-review",
+        output: { status: "failed", blocker: "The acceptance proof is stale" },
+      }),
+    ).resolves.toEqual({ outcome: { status: "failed", blocker: "The acceptance proof is stale" } });
   }, 30_000);
 
   it("reloads the authenticated package baseline for each future run while preserving pinned runs", async () => {
@@ -488,10 +588,13 @@ describe("native compiler-authoritative run program", () => {
     );
 
     const projectYaml = path.join(project.projectRoot, ".koni", "project.yaml");
-    await writeFile(projectYaml, (await readFile(projectYaml, "utf8")).replace(
-      "title: Software project",
-      "title: Future-run configuration",
-    ));
+    await writeFile(
+      projectYaml,
+      (await readFile(projectYaml, "utf8")).replace(
+        "title: Software project",
+        "title: Future-run configuration",
+      ),
+    );
     const second = await program.resolveRun({
       runId: "run-after-profile-reload",
       objective: "Compile the newly edited configuration",
@@ -502,15 +605,17 @@ describe("native compiler-authoritative run program", () => {
 
     expect(loaderCalls).toBe(2);
     expect(second.compiledConfigHash).not.toBe(first.compiledConfigHash);
-    await expect(program.prepareAttempt({
-      kind: "planning",
-      run: firstRun,
-      attemptId: "attempt-from-pinned-first-run",
-      sessionId: "session-from-pinned-first-run",
-      nextAuthorityRevision: 2,
-      expectedAuthorityStateHash: digest("pinned-first-run"),
-      lineage: { branchEpoch: 0, reason: "initial" },
-    })).resolves.toMatchObject({
+    await expect(
+      program.prepareAttempt({
+        kind: "planning",
+        run: firstRun,
+        attemptId: "attempt-from-pinned-first-run",
+        sessionId: "session-from-pinned-first-run",
+        nextAuthorityRevision: 2,
+        expectedAuthorityStateHash: digest("pinned-first-run"),
+        lineage: { branchEpoch: 0, reason: "initial" },
+      }),
+    ).resolves.toMatchObject({
       spec: {
         identity: { runId: firstRun.id },
       },
@@ -521,10 +626,13 @@ describe("native compiler-authoritative run program", () => {
   it("pins coding resolution, injects answered questions once, and recovers the immutable Pi attempt", async () => {
     const project = await installedProject("coding-profile");
     const personasPath = path.join(project.projectRoot, ".koni", "personas.yaml");
-    await writeFile(personasPath, (await readFile(personasPath, "utf8")).replace(
-      "  model_role: planner\n",
-      "  model_role: planner\n  skills:\n  - configure-koni\n",
-    ));
+    await writeFile(
+      personasPath,
+      (await readFile(personasPath, "utf8")).replace(
+        "  model_role: planner\n",
+        "  model_role: planner\n  skills:\n  - configure-koni\n",
+      ),
+    );
     const program = await compilerProgram(project);
     const runId = "run-native-planning";
     const resolved = await program.resolveRun({
@@ -573,34 +681,64 @@ describe("native compiler-authoritative run program", () => {
     });
     expect(prepared.spec.lineage).toEqual({ branchEpoch: 0, reason: "initial" });
     expect(prepared.spec.resources.entries.some((entry) => entry.kind === "context")).toBe(false);
-    expect(prepared.spec.resources.entries).toEqual(expect.arrayContaining([
-      expect.objectContaining({ relativePath: "skills/configure-koni/SKILL.md" }),
-      expect.objectContaining({ relativePath: "skills/configure-koni/references/agents-and-skills.md" }),
-    ]));
-    expect(prepared.spec.persona.systemPrompt).toContain("reissues your exact bound context before every provider request");
+    expect(prepared.spec.resources.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ relativePath: "skills/configure-koni/SKILL.md" }),
+        expect.objectContaining({
+          relativePath: "skills/configure-koni/references/agents-and-skills.md",
+        }),
+      ]),
+    );
+    expect(prepared.spec.persona.systemPrompt).toContain(
+      "reissues your exact bound context before every provider request",
+    );
     expect(prepared.spec.persona.initialPrompt).toContain("literal $root");
     expect(prepared.spec.persona.initialPrompt).toContain("never invent a root alias");
     expect(prepared.contextContent).toContain("allowedNodeTypes");
     expect(prepared.contextContent).toContain("canonicalEdges");
-    expect(Value.Check(prepared.terminalOutputSchema!, planningOutput({ work_kind: "general" }))).toBe(true);
-    expect(Value.Check(prepared.terminalOutputSchema!, {
-      ...planningOutput({ work_kind: "general" }) as Record<string, unknown>,
-      graphSeed: { rootSpec: { work_kind: "general", invented: true }, nodes: [], edges: [] },
-    })).toBe(false);
-    expect(Value.Check(prepared.terminalOutputSchema!, {
-      ...planningOutput({ work_kind: "general" }) as Record<string, unknown>,
-      graphSeed: {
-        rootSpec: { work_kind: "general" },
-        nodes: [{ key: "fake-slice", type: "implementation_slice", title: "Fake slice", spec: {} }],
-        edges: [{ source: "$root", relation: "implemented_by", target: "fake-slice" }],
-      },
-    })).toBe(false);
+    expect(
+      Value.Check(prepared.terminalOutputSchema!, planningOutput({ work_kind: "general" })),
+    ).toBe(true);
+    expect(prepared.spec.persona.initialPrompt).toContain("a concise 3-4 word name for this run");
+    // The operator run name is schema-optional (frozen personas may omit it) but bounded.
+    expect(
+      Value.Check(prepared.terminalOutputSchema!, {
+        ...(planningOutput({ work_kind: "general" }) as Record<string, unknown>),
+        title: "Compact Notes Workflow",
+      }),
+    ).toBe(true);
+    expect(
+      Value.Check(prepared.terminalOutputSchema!, {
+        ...(planningOutput({ work_kind: "general" }) as Record<string, unknown>),
+        title: "ab",
+      }),
+    ).toBe(false);
+    expect(
+      Value.Check(prepared.terminalOutputSchema!, {
+        ...(planningOutput({ work_kind: "general" }) as Record<string, unknown>),
+        graphSeed: { rootSpec: { work_kind: "general", invented: true }, nodes: [], edges: [] },
+      }),
+    ).toBe(false);
+    expect(
+      Value.Check(prepared.terminalOutputSchema!, {
+        ...(planningOutput({ work_kind: "general" }) as Record<string, unknown>),
+        graphSeed: {
+          rootSpec: { work_kind: "general" },
+          nodes: [
+            { key: "fake-slice", type: "implementation_slice", title: "Fake slice", spec: {} },
+          ],
+          edges: [{ source: "$root", relation: "implemented_by", target: "fake-slice" }],
+        },
+      }),
+    ).toBe(false);
     expect(prepared.contextContent).toContain("Use local-first storage");
     expect(prepared.contextContent).toContain("Keep export reversible");
     expect(prepared.contextContent?.match(/Use local-first storage/gu)).toHaveLength(1);
     expect(prepared.toolNames).not.toContain("koni_context");
     expect(prepared.toolNames).toContain("koni_read_resource");
-    expect(prepared.spec.tools.find((tool) => tool.name === "koni_read_resource")?.executionMode).toBe("parallel");
+    expect(
+      prepared.spec.tools.find((tool) => tool.name === "koni_read_resource")?.executionMode,
+    ).toBe("parallel");
     expect(prepared.spec.budgets.transcript).toEqual({ maxBytes: 64 * 1024 * 1024 });
     expect(prepared.spec.budgets.repositoryCalls).toEqual({ max: 16 });
     expect(prepared.spec.budgets.tokens).toMatchObject({
@@ -663,7 +801,9 @@ describe("native compiler-authoritative run program", () => {
     expect(revised.spec.persona.initialPrompt).toContain("Revise the prior small plan");
     expect(revised.spec.persona.initialPrompt).toContain(revisionSteering);
     expect(revised.spec.persona.initialPrompt).toContain("do not repeat repository discovery");
-    expect(revised.spec.persona.initialPrompt.match(new RegExp(revisionSteering, "gu"))).toHaveLength(1);
+    expect(
+      revised.spec.persona.initialPrompt.match(new RegExp(revisionSteering, "gu")),
+    ).toHaveLength(1);
     expect(prepared.spec.budgets.retries).toEqual({
       maxProviderRetries: 0,
       baseDelayMs: 0,
@@ -680,17 +820,22 @@ describe("native compiler-authoritative run program", () => {
     const attempt = attemptRecord(prepared.spec, "planning", "running");
     run.attempts[attempt.id] = attempt;
     const projectYaml = path.join(project.projectRoot, ".koni", "project.yaml");
-    await writeFile(projectYaml, (await readFile(projectYaml, "utf8")).replace(
-      "title: Software project",
-      "title: Changed after this run was pinned",
-    ));
+    await writeFile(
+      projectYaml,
+      (await readFile(projectYaml, "utf8")).replace(
+        "title: Software project",
+        "title: Changed after this run was pinned",
+      ),
+    );
     const restarted = await compilerProgram(project);
     const recovered = await restarted.recoverAttempt({ run, attempt, spec: prepared.spec });
     expect(recovered.spec).toBe(prepared.spec);
     expect(recovered.contextContent).toBe(prepared.contextContent);
     expect(canonicalHash(recovered.authorityGrant!)).toBe(prepared.spec.authority.grantHash);
     expect(recovered.toolNames).toEqual(prepared.spec.tools.map((tool) => tool.name));
-    expect(await restarted.refreshCompactionSnapshot({ run, attempt, spec: prepared.spec })).toMatchObject({
+    expect(
+      await restarted.refreshCompactionSnapshot({ run, attempt, spec: prepared.spec }),
+    ).toMatchObject({
       touchedFiles: [],
       receiptIds: [],
       unresolvedQuestions: [],
@@ -703,24 +848,30 @@ describe("native compiler-authoritative run program", () => {
     };
     const receiptBytes = Buffer.from(`${JSON.stringify(receipt)}\n`, "utf8");
     const canonicalReceipt = canonicalEncode(receipt);
-    await persistWrites(project.projectRoot, [{
-      path: receiptPath,
-      bytes: receiptBytes,
-      expectedSha256: null,
-    }]);
-    attempt.authorityToolResults = [{
-      sequence: 1,
-      callId: "call-write-notes",
-      toolName: "koni_write_file",
-      outcome: "accepted",
-      argumentsSha256: rawSha256("{}"),
-      argumentsSizeBytes: 2,
-      receiptSha256: rawSha256(canonicalReceipt),
-      receiptSizeBytes: Buffer.byteLength(canonicalReceipt, "utf8"),
-      artifactPath: receiptPath,
-      recordedAt: FIXED_NOW.toISOString(),
-    }];
-    expect(await restarted.refreshCompactionSnapshot({ run, attempt, spec: prepared.spec })).toMatchObject({
+    await persistWrites(project.projectRoot, [
+      {
+        path: receiptPath,
+        bytes: receiptBytes,
+        expectedSha256: null,
+      },
+    ]);
+    attempt.authorityToolResults = [
+      {
+        sequence: 1,
+        callId: "call-write-notes",
+        toolName: "koni_write_file",
+        outcome: "accepted",
+        argumentsSha256: rawSha256("{}"),
+        argumentsSizeBytes: 2,
+        receiptSha256: rawSha256(canonicalReceipt),
+        receiptSizeBytes: Buffer.byteLength(canonicalReceipt, "utf8"),
+        artifactPath: receiptPath,
+        recordedAt: FIXED_NOW.toISOString(),
+      },
+    ];
+    expect(
+      await restarted.refreshCompactionSnapshot({ run, attempt, spec: prepared.spec }),
+    ).toMatchObject({
       touchedFiles: ["src/notes.ts"],
       receiptIds: ["receipt-write-notes"],
     });
@@ -738,11 +889,13 @@ describe("native compiler-authoritative run program", () => {
       },
     };
     const canonicalListReceipt = canonicalEncode(listReceipt);
-    await persistWrites(project.projectRoot, [{
-      path: listReceiptPath,
-      bytes: Buffer.from(`${JSON.stringify(listReceipt)}\n`, "utf8"),
-      expectedSha256: null,
-    }]);
+    await persistWrites(project.projectRoot, [
+      {
+        path: listReceiptPath,
+        bytes: Buffer.from(`${JSON.stringify(listReceipt)}\n`, "utf8"),
+        expectedSha256: null,
+      },
+    ]);
     attempt.authorityToolResults.push({
       sequence: 2,
       callId: "call-list-tree",
@@ -755,19 +908,23 @@ describe("native compiler-authoritative run program", () => {
       artifactPath: listReceiptPath,
       recordedAt: FIXED_NOW.toISOString(),
     });
-    expect(await restarted.refreshCompactionSnapshot({ run, attempt, spec: prepared.spec })).toMatchObject({
+    expect(
+      await restarted.refreshCompactionSnapshot({ run, attempt, spec: prepared.spec }),
+    ).toMatchObject({
       touchedFiles: ["src/notes.ts"],
       receiptIds: ["receipt-list-tree", "receipt-write-notes"],
     });
 
-    await expect(program.resolveRun({
-      runId: "run-invalid-thinking",
-      objective: "Reject a legacy level",
-      runTypeId: "small",
-      targetRef: "refs/heads/main",
-      intake: { goal: "Reject a legacy level" },
-      overrides: { agents: { lead: { thinkingLevel: "ultra" } } },
-    })).rejects.toBeInstanceOf(NativeRunProgramError);
+    await expect(
+      program.resolveRun({
+        runId: "run-invalid-thinking",
+        objective: "Reject a legacy level",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Reject a legacy level" },
+        overrides: { agents: { lead: { thinkingLevel: "ultra" } } },
+      }),
+    ).rejects.toBeInstanceOf(NativeRunProgramError);
   });
 
   it("uses the pinned compiled behavior as the sole launch and initialization policy", async () => {
@@ -783,11 +940,14 @@ describe("native compiler-authoritative run program", () => {
       intake: { goal: objective },
     });
     const expectedPlanning = resolved.behavior.runType.planning!;
-    const compiledWrite = resolved.artifactWrites?.find((write) =>
-      write.path === `runs/${runId}/configuration/compiled.json`
+    const compiledWrite = resolved.artifactWrites?.find(
+      (write) => write.path === `runs/${runId}/configuration/compiled.json`,
     );
     expect(compiledWrite).toBeDefined();
-    const artifact = JSON.parse(Buffer.from(compiledWrite!.bytes).toString("utf8")) as Record<string, unknown>;
+    const artifact = JSON.parse(Buffer.from(compiledWrite!.bytes).toString("utf8")) as Record<
+      string,
+      unknown
+    >;
     const configuration = artifact.configuration as Record<string, unknown>;
     const profile = configuration.profile as Record<string, unknown>;
     const initialization = profile.initialization as Record<string, unknown>;
@@ -812,7 +972,7 @@ describe("native compiler-authoritative run program", () => {
     const mutatedWrites = resolved.artifactWrites!.map((write) =>
       write === compiledWrite
         ? { ...write, bytes: Buffer.from(`${JSON.stringify(artifact)}\n`, "utf8") }
-        : write
+        : write,
     );
     const mutatedResolved = {
       ...resolved,
@@ -838,9 +998,21 @@ describe("native compiler-authoritative run program", () => {
     const compiled = await restarted.compilePlanningOutput({
       run,
       attemptId: prepared.spec.identity.attemptId,
-      output: planningOutput({ work_kind: "general" }),
+      output: {
+        ...(planningOutput({ work_kind: "general" }) as Record<string, unknown>),
+        title: "  Compact   Notes Workflow  ",
+      },
     });
     expect(compiled.graphHash).toMatch(/^sha256:[0-9a-f]{64}$/u);
+    // The planner-authored operator name is normalized and carried on the durable plan.
+    expect(compiled.plan.title).toBe("Compact Notes Workflow");
+
+    const untitled = await restarted.compilePlanningOutput({
+      run,
+      attemptId: prepared.spec.identity.attemptId,
+      output: planningOutput({ work_kind: "general" }),
+    });
+    expect(untitled.plan.title).toBeUndefined();
   });
 
   it("resumes relocated legacy planning without weakening native detached planning", async () => {
@@ -866,15 +1038,17 @@ describe("native compiler-authoritative run program", () => {
     run.git.planning.worktree = namespace.planningWorktree;
     run.git.run.worktree = namespace.runWorktree;
 
-    await expect(program.prepareAttempt({
-      kind: "planning",
-      run,
-      attemptId: "attempt-native-missing-planner",
-      sessionId: "session-native-missing-planner",
-      nextAuthorityRevision: 2,
-      expectedAuthorityStateHash: digest("native-missing-planner"),
-      lineage: { branchEpoch: 0, reason: "initial" },
-    })).rejects.toMatchObject({ code: "planning_workspace" });
+    await expect(
+      program.prepareAttempt({
+        kind: "planning",
+        run,
+        attemptId: "attempt-native-missing-planner",
+        sessionId: "session-native-missing-planner",
+        nextAuthorityRevision: 2,
+        expectedAuthorityStateHash: digest("native-missing-planner"),
+        lineage: { branchEpoch: 0, reason: "initial" },
+      }),
+    ).rejects.toMatchObject({ code: "planning_workspace" });
 
     const source = {
       targetRef: run.git.target.ref,
@@ -941,15 +1115,17 @@ describe("native compiler-authoritative run program", () => {
     };
     expect(() => assertRunRecord(run)).not.toThrow();
 
-    await expect(program.prepareAttempt({
-      kind: "planning",
-      run,
-      attemptId: "attempt-relocated-legacy-planner",
-      sessionId: "session-relocated-legacy-planner",
-      nextAuthorityRevision: 3,
-      expectedAuthorityStateHash: digest("relocated-legacy-planner"),
-      lineage: { branchEpoch: 0, reason: "initial" },
-    })).resolves.toMatchObject({
+    await expect(
+      program.prepareAttempt({
+        kind: "planning",
+        run,
+        attemptId: "attempt-relocated-legacy-planner",
+        sessionId: "session-relocated-legacy-planner",
+        nextAuthorityRevision: 3,
+        expectedAuthorityStateHash: digest("relocated-legacy-planner"),
+        lineage: { branchEpoch: 0, reason: "initial" },
+      }),
+    ).resolves.toMatchObject({
       spec: { workspace: { cwd: path.resolve(namespace.runWorktree) } },
     });
   });
@@ -977,8 +1153,18 @@ describe("native compiler-authoritative run program", () => {
       attemptId: "attempt-plan",
       output: planningOutput({ work_kind: "general" }),
     });
-    expect(Object.keys(planning.plan.full).sort()).toEqual(["architecture", "decisions", "risk", "verification"]);
-    expect(Object.keys(planning.plan.concise).sort()).toEqual(["architecture", "decisions", "risk", "verification"]);
+    expect(Object.keys(planning.plan.full).sort()).toEqual([
+      "architecture",
+      "decisions",
+      "risk",
+      "verification",
+    ]);
+    expect(Object.keys(planning.plan.concise).sort()).toEqual([
+      "architecture",
+      "decisions",
+      "risk",
+      "verification",
+    ]);
     for (const domain of ["architecture", "decisions", "risk", "verification"] as const) {
       expect(planning.plan.full[domain]).toMatch(/^## /u);
       expect(planning.plan.concise[domain]).toEqual([
@@ -988,46 +1174,58 @@ describe("native compiler-authoritative run program", () => {
     expect(planning.plan.concise.architecture?.[0]?.title).toBe("Notes ownership seam");
     const incompleteFull = fullPlans();
     delete incompleteFull.verification;
-    await expect(program.compilePlanningOutput({
-      run,
-      attemptId: "attempt-incomplete-plan",
-      output: {
-        ...planningOutput({ work_kind: "general" }) as Record<string, unknown>,
-        full: incompleteFull,
-      },
-    })).rejects.toBeInstanceOf(NativeRunProgramError);
-    await expect(program.compilePlanningOutput({
-      run,
-      attemptId: "attempt-malformed-plan",
-      output: {
-        full: fullPlans(),
-        concise: { architecture: ["Truncated prose is not a structured mini-plan"] },
-        graphSeed: { rootSpec: { work_kind: "general" }, nodes: [], edges: [] },
-      },
-    })).rejects.toBeInstanceOf(NativeRunProgramError);
-    await expect(program.compilePlanningOutput({
-      run,
-      attemptId: "attempt-invented-root-alias",
-      output: {
-        ...planningOutput({ work_kind: "general" }) as Record<string, unknown>,
-        graphSeed: {
-          rootSpec: { work_kind: "general" },
-          nodes: [{
-            key: "notes-change",
-            type: "change",
-            title: "Add note pinning",
-            spec: {},
-          }],
-          edges: [{
-            source: "notes-pinning-plan",
-            relation: "requires",
-            target: "notes-change",
-          }],
+    await expect(
+      program.compilePlanningOutput({
+        run,
+        attemptId: "attempt-incomplete-plan",
+        output: {
+          ...(planningOutput({ work_kind: "general" }) as Record<string, unknown>),
+          full: incompleteFull,
         },
-      },
-    })).rejects.toMatchObject({
+      }),
+    ).rejects.toBeInstanceOf(NativeRunProgramError);
+    await expect(
+      program.compilePlanningOutput({
+        run,
+        attemptId: "attempt-malformed-plan",
+        output: {
+          full: fullPlans(),
+          concise: { architecture: ["Truncated prose is not a structured mini-plan"] },
+          graphSeed: { rootSpec: { work_kind: "general" }, nodes: [], edges: [] },
+        },
+      }),
+    ).rejects.toBeInstanceOf(NativeRunProgramError);
+    await expect(
+      program.compilePlanningOutput({
+        run,
+        attemptId: "attempt-invented-root-alias",
+        output: {
+          ...(planningOutput({ work_kind: "general" }) as Record<string, unknown>),
+          graphSeed: {
+            rootSpec: { work_kind: "general" },
+            nodes: [
+              {
+                key: "notes-change",
+                type: "change",
+                title: "Add note pinning",
+                spec: {},
+              },
+            ],
+            edges: [
+              {
+                source: "notes-pinning-plan",
+                relation: "requires",
+                target: "notes-change",
+              },
+            ],
+          },
+        },
+      }),
+    ).rejects.toMatchObject({
       code: "graph_seed_edge_key",
-      message: expect.stringContaining("notes-pinning-plan; use $root for the existing run objective"),
+      message: expect.stringContaining(
+        "notes-pinning-plan; use $root for the existing run objective",
+      ),
     });
 
     run.plan = { ...planning.plan, status: "awaiting_approval" };
@@ -1088,13 +1286,18 @@ describe("native compiler-authoritative run program", () => {
       workflowVersion: "2.0.0",
       context: {
         outputContract: { text: expect.stringContaining("Add at least one system") },
-        reviewContract: { text: expect.stringContaining("smallest affected repository-native boundary") },
+        reviewContract: {
+          text: expect.stringContaining("smallest affected repository-native boundary"),
+        },
       },
     });
-    expect(architectureTicket.steps.every((step) =>
-      step.executionPolicyBinding?.stepId === step.id &&
-      step.executionPolicyBinding.configurationSha256 === resolved.compiledConfigHash
-    )).toBe(true);
+    expect(
+      architectureTicket.steps.every(
+        (step) =>
+          step.executionPolicyBinding?.stepId === step.id &&
+          step.executionPolicyBinding.configurationSha256 === resolved.compiledConfigHash,
+      ),
+    ).toBe(true);
     expect(architectureTicket.readNodeIds).toBeDefined();
     expect(architectureTicket.writeNodeIds).toBeDefined();
     expect(architectureTicket.steps.every((step) => step.dependsOn !== undefined)).toBe(true);
@@ -1214,54 +1417,61 @@ describe("native compiler-authoritative run program", () => {
       "Materially address every finding",
     );
     const endpoint = await discoverAuthorityEndpoint(project.projectRoot);
-    const stdout = Buffer.from("FAIL questionnaire oracle: expected Sales Notes to be General\n", "utf8");
+    const stdout = Buffer.from(
+      "FAIL questionnaire oracle: expected Sales Notes to be General\n",
+      "utf8",
+    );
     const stderr = Buffer.from("Error: Objects are not valid as a React child\n", "utf8");
     const checkRoot = `runs/${reviewRun.id}/attempts/${predecessor.id}/checks/review-fixture`;
     await mkdir(path.join(endpoint.stateRoot, checkRoot), { recursive: true });
     await writeFile(path.join(endpoint.stateRoot, checkRoot, "stdout.bin"), stdout);
     await writeFile(path.join(endpoint.stateRoot, checkRoot, "stderr.bin"), stderr);
-    reviewRun.checks = [{
-      id: "check-review-fixture",
-      attemptId: predecessor.id,
-      callId: "call-review-fixture",
-      requestedCheckId: "expected-red",
-      definitionHash: digest("expected-red-definition"),
-      kind: "command",
-      accepted: true,
-      passed: true,
-      summary: "Configured nonzero exit accepted",
-      commands: [{
-        checkId: "expected-red",
+    reviewRun.checks = [
+      {
+        id: "check-review-fixture",
+        attemptId: predecessor.id,
+        callId: "call-review-fixture",
+        requestedCheckId: "expected-red",
         definitionHash: digest("expected-red-definition"),
-        startedAt: FIXED_NOW.toISOString(),
-        completedAt: FIXED_NOW.toISOString(),
-        resolvedExecutable: "/usr/bin/test",
-        argv: ["/usr/bin/test", "focused-oracle"],
-        environmentSha256: digest("review-environment"),
-        exitCode: 1,
-        signal: null,
-        stdoutSha256: rawSha256(stdout),
-        stdoutSizeBytes: stdout.byteLength,
-        stdoutArtifactPath: `${checkRoot}/stdout.bin`,
-        stderrSha256: rawSha256(stderr),
-        stderrSizeBytes: stderr.byteLength,
-        stderrArtifactPath: `${checkRoot}/stderr.bin`,
-        preManifestSha256: digest("review-manifest"),
-        postManifestSha256: digest("review-manifest"),
-        sandboxKind: "fixture",
-        sandboxProfileSha256: digest("review-sandbox"),
-        resultSource: {
-          kind: "stdout",
-          bytesSha256: rawSha256(stdout),
-          sizeBytes: stdout.byteLength,
-        },
-        outputFiles: [],
-      }],
-      evidenceSha256: digest("review-evidence"),
-      evidenceSizeBytes: 1,
-      evidenceArtifactPath: `${checkRoot}/evidence.json`,
-      recordedAt: FIXED_NOW.toISOString(),
-    }];
+        kind: "command",
+        accepted: true,
+        passed: true,
+        summary: "Configured nonzero exit accepted",
+        commands: [
+          {
+            checkId: "expected-red",
+            definitionHash: digest("expected-red-definition"),
+            startedAt: FIXED_NOW.toISOString(),
+            completedAt: FIXED_NOW.toISOString(),
+            resolvedExecutable: "/usr/bin/test",
+            argv: ["/usr/bin/test", "focused-oracle"],
+            environmentSha256: digest("review-environment"),
+            exitCode: 1,
+            signal: null,
+            stdoutSha256: rawSha256(stdout),
+            stdoutSizeBytes: stdout.byteLength,
+            stdoutArtifactPath: `${checkRoot}/stdout.bin`,
+            stderrSha256: rawSha256(stderr),
+            stderrSizeBytes: stderr.byteLength,
+            stderrArtifactPath: `${checkRoot}/stderr.bin`,
+            preManifestSha256: digest("review-manifest"),
+            postManifestSha256: digest("review-manifest"),
+            sandboxKind: "fixture",
+            sandboxProfileSha256: digest("review-sandbox"),
+            resultSource: {
+              kind: "stdout",
+              bytesSha256: rawSha256(stdout),
+              sizeBytes: stdout.byteLength,
+            },
+            outputFiles: [],
+          },
+        ],
+        evidenceSha256: digest("review-evidence"),
+        evidenceSizeBytes: 1,
+        evidenceArtifactPath: `${checkRoot}/evidence.json`,
+        recordedAt: FIXED_NOW.toISOString(),
+      },
+    ];
     const reviewPrepared = await program.prepareAttempt({
       kind: "verification",
       run: reviewRun,
@@ -1292,7 +1502,9 @@ describe("native compiler-authoritative run program", () => {
     expect(reviewPrepared.spec.workspace.cwd).not.toBe(run.git.run.worktree);
     expect(reviewPrepared.spec.tools.map((tool) => tool.name)).not.toContain("koni_write_file");
     expect(reviewPrepared.spec.persona.initialPrompt).toContain("Independent review contract:");
-    expect(reviewPrepared.spec.persona.initialPrompt).toContain("compiler-authenticated predecessorExecution");
+    expect(reviewPrepared.spec.persona.initialPrompt).toContain(
+      "compiler-authenticated predecessorExecution",
+    );
     expect(reviewPrepared.contextContent).toContain('"predecessorExecution"');
     expect(reviewPrepared.contextContent).toContain("expected Sales Notes to be General");
     expect(reviewPrepared.contextContent).toContain("Objects are not valid as a React child");
@@ -1302,8 +1514,9 @@ describe("native compiler-authoritative run program", () => {
     const pinnedExecution = await program.projectExecutionSemanticCatalog(run);
     expect(pinnedCockpit.configurationSha256).toBe(resolved.compiledConfigHash);
     expect(pinnedLifecycle.catalog_sha256).toBe(resolved.lifecycleCatalog?.catalog_sha256);
-    expect(pinnedExecution.operations[architectureTicket.operationId]?.sha256)
-      .toBe(architectureTicket.executionPolicyBinding?.operationSha256);
+    expect(pinnedExecution.operations[architectureTicket.operationId]?.sha256).toBe(
+      architectureTicket.executionPolicyBinding?.operationSha256,
+    );
 
     await persistWrites(project.projectRoot, prepared.artifactWrites ?? []);
     const architectureAttempt = attemptRecord(prepared.spec, "ticket", "running");
@@ -1337,9 +1550,17 @@ describe("native compiler-authoritative run program", () => {
         },
       },
     });
-    expect(note.value).toMatchObject({ nodeId: initialProjection.nodes[0]!.id, kind: "rationale", status: "working" });
+    expect(note.value).toMatchObject({
+      nodeId: initialProjection.nodes[0]!.id,
+      kind: "rationale",
+      status: "working",
+    });
     expect(note.activity).toEqual([
-      expect.objectContaining({ kind: "agent", nodeId: initialProjection.nodes[0]!.id, ticketId: architectureTicket.id }),
+      expect.objectContaining({
+        kind: "agent",
+        nodeId: initialProjection.nodes[0]!.id,
+        ticketId: architectureTicket.id,
+      }),
     ]);
     expect(note.artifactWrites).toHaveLength(1);
 
@@ -1354,32 +1575,38 @@ describe("native compiler-authoritative run program", () => {
       },
     };
     expect(Value.Check(prepared.terminalOutputSchema!, forbiddenCodingHandoff)).toBe(false);
-    await expect(program.compileAssignmentOutput({
-      run,
-      assignment,
-      attemptId: "attempt-architecture",
-      output: forbiddenCodingHandoff,
-    })).rejects.toMatchObject({ code: "change_control_route_forbidden" });
-    await expect(program.compileAssignmentOutput({
-      run,
-      assignment,
-      attemptId: "attempt-architecture",
-      output: {
-        status: "completed",
-        summary: "Tried to rename the existing objective while mapping architecture",
-        graphDelta: {
-          protocol: "koni.graph-delta.v1",
-          expectedGraphHash: run.graphHash,
-          upsertNodes: [{
-            expectedNodeHash: canonicalHash(root),
-            node: { ...root, title: "Renamed objective" },
-          }],
-          deleteNodes: [],
-          addEdges: [],
-          removeEdges: [],
+    await expect(
+      program.compileAssignmentOutput({
+        run,
+        assignment,
+        attemptId: "attempt-architecture",
+        output: forbiddenCodingHandoff,
+      }),
+    ).rejects.toMatchObject({ code: "change_control_route_forbidden" });
+    await expect(
+      program.compileAssignmentOutput({
+        run,
+        assignment,
+        attemptId: "attempt-architecture",
+        output: {
+          status: "completed",
+          summary: "Tried to rename the existing objective while mapping architecture",
+          graphDelta: {
+            protocol: "koni.graph-delta.v1",
+            expectedGraphHash: run.graphHash,
+            upsertNodes: [
+              {
+                expectedNodeHash: canonicalHash(root),
+                node: { ...root, title: "Renamed objective" },
+              },
+            ],
+            deleteNodes: [],
+            addEdges: [],
+            removeEdges: [],
+          },
         },
-      },
-    })).rejects.toMatchObject({ code: "execution_policy.edge_only_non_edge_change" });
+      }),
+    ).rejects.toMatchObject({ code: "execution_policy.edge_only_non_edge_change" });
     const obsolete = structuredClone(architectureTicket);
     obsolete.id = "TK-never-started-obsolete";
     obsolete.title = "Obsolete queued follow-up";
@@ -1405,25 +1632,27 @@ describe("native compiler-authoritative run program", () => {
         graphDelta: {
           protocol: "koni.graph-delta.v1",
           expectedGraphHash: run.graphHash,
-          upsertNodes: [{
-            expectedNodeHash: null,
-            node: {
-              schema_version: "1.0",
-              id: "system-notes-app",
-              type: "system",
-              title: "Notes application",
-              status: "active",
-              spec: {
-                kind: "app",
-                responsibility: "Own note creation and pinning",
-                contract_required: false,
-                contract_reason: "Repository-local behavior is sufficient",
-                owned_paths: ["src"],
+          upsertNodes: [
+            {
+              expectedNodeHash: null,
+              node: {
+                schema_version: "1.0",
+                id: "system-notes-app",
+                type: "system",
+                title: "Notes application",
+                status: "active",
+                spec: {
+                  kind: "app",
+                  responsibility: "Own note creation and pinning",
+                  contract_required: false,
+                  contract_reason: "Repository-local behavior is sufficient",
+                  owned_paths: ["src"],
+                },
+                edges: {},
+                annotations: {},
               },
-              edges: {},
-              annotations: {},
             },
-          }],
+          ],
           deleteNodes: [],
           addEdges: [{ source: root.id, relation: "systems", target: "system-notes-app" }],
           removeEdges: [],
@@ -1435,22 +1664,36 @@ describe("native compiler-authoritative run program", () => {
       summary: "Mapped the notes application boundary",
     });
     expect(compiled.graphRevision).toBe(2);
-    expect(compiled.activity).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: "graph_added", nodeId: "system-notes-app" }),
-    ]));
-    expect(Object.values(compiled.tickets ?? {}).some((ticket) => ticket.operationId === "design.objective.plan-change")).toBe(true);
+    expect(compiled.activity).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "graph_added", nodeId: "system-notes-app" }),
+      ]),
+    );
+    expect(
+      Object.values(compiled.tickets ?? {}).some(
+        (ticket) => ticket.operationId === "design.objective.plan-change",
+      ),
+    ).toBe(true);
     expect(compiled.tickets?.[obsolete.id]).toMatchObject({
       status: "cancelled",
       blocker: "Superseded before execution by newer compiler state",
-      steps: expect.arrayContaining([expect.objectContaining({ status: "skipped", attemptIds: [] })]),
+      steps: expect.arrayContaining([
+        expect.objectContaining({ status: "skipped", attemptIds: [] }),
+      ]),
     });
     await persistWrites(project.projectRoot, compiled.artifactWrites ?? []);
     run.graphHash = compiled.graphHash;
     run.graphRevision = compiled.graphRevision!;
     run.tickets = compiled.tickets!;
     const projected = await program.projectGraph(run, architectureTicket.id);
-    expect(projected.nodes.map((node) => node.id)).toEqual(expect.arrayContaining([root.id, "system-notes-app"]));
-    expect(projected.edges).toContainEqual({ source: root.id, relation: "systems", target: "system-notes-app" });
+    expect(projected.nodes.map((node) => node.id)).toEqual(
+      expect.arrayContaining([root.id, "system-notes-app"]),
+    );
+    expect(projected.edges).toContainEqual({
+      source: root.id,
+      relation: "systems",
+      target: "system-notes-app",
+    });
 
     // Current compilers retain the originating definition after its rule stops applying. Runs
     // admitted before that retention existed must still be able to recover the definition from
@@ -1463,8 +1706,9 @@ describe("native compiler-authoritative run program", () => {
     const definitionArtifact = JSON.parse(await readFile(definitionPath, "utf8")) as {
       retainedDefinitions?: Array<{ id: string }>;
     };
-    expect(definitionArtifact.retainedDefinitions?.map((definition) => definition.id))
-      .toContain(architectureTicket.id);
+    expect(definitionArtifact.retainedDefinitions?.map((definition) => definition.id)).toContain(
+      architectureTicket.id,
+    );
     delete definitionArtifact.retainedDefinitions;
     await writeFile(definitionPath, `${JSON.stringify(definitionArtifact)}\n`);
     const issuedAttemptDirectory = path.join(
@@ -1501,8 +1745,14 @@ describe("native compiler-authoritative run program", () => {
     await mkdir(path.join(project.projectRoot, "src"), { recursive: true });
     await mkdir(path.join(project.projectRoot, "tests"), { recursive: true });
     await mkdir(path.join(project.projectRoot, "test-support"), { recursive: true });
-    await writeFile(path.join(project.projectRoot, "src/feature.ts"), "export const label = 'legacy';\n");
-    await writeFile(path.join(project.projectRoot, "tests/feature.test.mjs"), "process.exitCode = 1;\n");
+    await writeFile(
+      path.join(project.projectRoot, "src/feature.ts"),
+      "export const label = 'legacy';\n",
+    );
+    await writeFile(
+      path.join(project.projectRoot, "tests/feature.test.mjs"),
+      "process.exitCode = 1;\n",
+    );
     await writeFile(
       path.join(project.projectRoot, "test-support/vitest.config.ts"),
       "export default { test: { environment: 'node' } };\n",
@@ -1536,8 +1786,9 @@ describe("native compiler-authoritative run program", () => {
     run.graphHash = initialized.graphHash;
     run.graphRevision = initialized.graphRevision;
     run.tickets = initialized.tickets;
-    const preparation = Object.values(run.tickets).find((ticket) =>
-      ticket.operationId === "assurance.proof.prepare");
+    const preparation = Object.values(run.tickets).find(
+      (ticket) => ticket.operationId === "assurance.proof.prepare",
+    );
     expect(preparation).toBeDefined();
     if (preparation === undefined) throw new Error("fixture did not derive proof preparation");
 
@@ -1552,11 +1803,13 @@ describe("native compiler-authoritative run program", () => {
       expectedAuthorityStateHash: digest("proof-authority-five"),
       lineage: { branchEpoch: 0, reason: "initial" },
     });
-    expect(authorPrepared.authorityGrant?.readPaths).toEqual(expect.arrayContaining([
-      "src/feature.ts",
-      "tests/feature.test.mjs",
-      "test-support/vitest.config.ts",
-    ]));
+    expect(authorPrepared.authorityGrant?.readPaths).toEqual(
+      expect.arrayContaining([
+        "src/feature.ts",
+        "tests/feature.test.mjs",
+        "test-support/vitest.config.ts",
+      ]),
+    );
     expect(authorPrepared.authorityGrant?.writePaths).toEqual(["tests/feature.test.mjs"]);
     await persistWrites(project.projectRoot, authorPrepared.artifactWrites ?? []);
     const author = attemptRecord(authorPrepared.spec, "ticket", "running");
@@ -1580,10 +1833,13 @@ describe("native compiler-authoritative run program", () => {
     author.endedAt = FIXED_NOW.toISOString();
     author.terminalSummary = "Recorded the honest historical baseline.";
     author.terminalPolicy = semanticTerminalPolicy("proof-author");
-    const authorOutput = Buffer.from(`${JSON.stringify({
-      status: "completed",
-      summary: author.terminalSummary,
-    })}\n`, "utf8");
+    const authorOutput = Buffer.from(
+      `${JSON.stringify({
+        status: "completed",
+        summary: author.terminalSummary,
+      })}\n`,
+      "utf8",
+    );
     author.terminalOutputSha256 = rawSha256(authorOutput);
     author.terminalOutputSizeBytes = authorOutput.byteLength;
     author.terminalAcceptedAt = FIXED_NOW.toISOString();
@@ -1622,45 +1878,53 @@ describe("native compiler-authoritative run program", () => {
     await mkdir(path.join(endpoint.stateRoot, checkDirectory), { recursive: true });
     await writeFile(path.join(endpoint.stateRoot, checkDirectory, "stdout.bin"), stdout);
     await writeFile(path.join(endpoint.stateRoot, checkDirectory, "stderr.bin"), stderr);
-    run.checks = [{
-      id: "check-proof-baseline",
-      attemptId: author.id,
-      callId: "call-proof-baseline",
-      requestedCheckId: "baseline-proof-set",
-      definitionHash: digest("baseline-proof-set-definition"),
-      kind: "composite",
-      accepted: true,
-      passed: true,
-      summary: "baseline-proof-set passed",
-      commands: [{
-        checkId: "proof-expected-red",
-        definitionHash: digest("proof-expected-red-check"),
-        sourceManifest,
-        startedAt: FIXED_NOW.toISOString(),
-        completedAt: FIXED_NOW.toISOString(),
-        resolvedExecutable: "/usr/bin/node",
-        argv: ["/usr/bin/node", "tests/feature.test.mjs"],
-        environmentSha256: digest("proof-environment"),
-        exitCode: 1,
-        signal: null,
-        stdoutSha256: rawSha256(stdout),
-        stdoutSizeBytes: stdout.byteLength,
-        stdoutArtifactPath: `${checkDirectory}/stdout.bin`,
-        stderrSha256: rawSha256(stderr),
-        stderrSizeBytes: stderr.byteLength,
-        stderrArtifactPath: `${checkDirectory}/stderr.bin`,
-        preManifestSha256: digest("proof-workspace-manifest"),
-        postManifestSha256: digest("proof-workspace-manifest"),
-        sandboxKind: "fixture",
-        sandboxProfileSha256: digest("proof-sandbox"),
-        resultSource: { kind: "stdout", bytesSha256: rawSha256(stdout), sizeBytes: stdout.byteLength },
-        outputFiles: [],
-      }],
-      evidenceSha256: digest("proof-baseline-evidence"),
-      evidenceSizeBytes: 1,
-      evidenceArtifactPath: `${checkDirectory}/evidence.json`,
-      recordedAt: FIXED_NOW.toISOString(),
-    }];
+    run.checks = [
+      {
+        id: "check-proof-baseline",
+        attemptId: author.id,
+        callId: "call-proof-baseline",
+        requestedCheckId: "baseline-proof-set",
+        definitionHash: digest("baseline-proof-set-definition"),
+        kind: "composite",
+        accepted: true,
+        passed: true,
+        summary: "baseline-proof-set passed",
+        commands: [
+          {
+            checkId: "proof-expected-red",
+            definitionHash: digest("proof-expected-red-check"),
+            sourceManifest,
+            startedAt: FIXED_NOW.toISOString(),
+            completedAt: FIXED_NOW.toISOString(),
+            resolvedExecutable: "/usr/bin/node",
+            argv: ["/usr/bin/node", "tests/feature.test.mjs"],
+            environmentSha256: digest("proof-environment"),
+            exitCode: 1,
+            signal: null,
+            stdoutSha256: rawSha256(stdout),
+            stdoutSizeBytes: stdout.byteLength,
+            stdoutArtifactPath: `${checkDirectory}/stdout.bin`,
+            stderrSha256: rawSha256(stderr),
+            stderrSizeBytes: stderr.byteLength,
+            stderrArtifactPath: `${checkDirectory}/stderr.bin`,
+            preManifestSha256: digest("proof-workspace-manifest"),
+            postManifestSha256: digest("proof-workspace-manifest"),
+            sandboxKind: "fixture",
+            sandboxProfileSha256: digest("proof-sandbox"),
+            resultSource: {
+              kind: "stdout",
+              bytesSha256: rawSha256(stdout),
+              sizeBytes: stdout.byteLength,
+            },
+            outputFiles: [],
+          },
+        ],
+        evidenceSha256: digest("proof-baseline-evidence"),
+        evidenceSizeBytes: 1,
+        evidenceArtifactPath: `${checkDirectory}/evidence.json`,
+        recordedAt: FIXED_NOW.toISOString(),
+      },
+    ];
 
     const reviewStep = preparation.steps.find((step) => step.kind === "review")!;
     const reviewAssignment: ReadyAssignment = {
@@ -1689,10 +1953,13 @@ describe("native compiler-authoritative run program", () => {
     const review = attemptRecord(reviewPrepared.spec, "verification", "terminal_accepted");
     review.reviewedGraphHash = run.graphHash;
     review.terminalAcceptedAt = FIXED_NOW.toISOString();
-    const reviewOutput = Buffer.from(`${JSON.stringify({
-      status: "completed",
-      summary: "The historical proof is independently reviewed and complete.",
-    })}\n`, "utf8");
+    const reviewOutput = Buffer.from(
+      `${JSON.stringify({
+        status: "completed",
+        summary: "The historical proof is independently reviewed and complete.",
+      })}\n`,
+      "utf8",
+    );
     review.terminalOutputSha256 = rawSha256(reviewOutput);
     review.terminalOutputSizeBytes = reviewOutput.byteLength;
     run.attempts[review.id] = review;
@@ -1701,7 +1968,10 @@ describe("native compiler-authoritative run program", () => {
     reviewStep.startedAt = FIXED_NOW.toISOString();
     const reviewDirectory = path.join(endpoint.stateRoot, `runs/${run.id}/attempts/${review.id}`);
     await mkdir(reviewDirectory, { recursive: true });
-    await writeFile(path.join(reviewDirectory, "launch-spec.json"), `${JSON.stringify(reviewPrepared.spec)}\n`);
+    await writeFile(
+      path.join(reviewDirectory, "launch-spec.json"),
+      `${JSON.stringify(reviewPrepared.spec)}\n`,
+    );
     await writeFile(path.join(reviewDirectory, "terminal-output.json"), reviewOutput);
 
     const compiled = await program.compileAssignmentOutput({
@@ -1710,8 +1980,11 @@ describe("native compiler-authoritative run program", () => {
       attemptId: review.id,
       output: JSON.parse(reviewOutput.toString("utf8")),
     });
-    expect(Object.values(compiled.tickets ?? {}).some((ticket) =>
-      ticket.operationId === "implementation.change.red-green")).toBe(true);
+    expect(
+      Object.values(compiled.tickets ?? {}).some(
+        (ticket) => ticket.operationId === "implementation.change.red-green",
+      ),
+    ).toBe(true);
     await persistWrites(project.projectRoot, compiled.artifactWrites ?? []);
     run.graphHash = compiled.graphHash;
     run.graphRevision = compiled.graphRevision!;
@@ -1731,11 +2004,19 @@ describe("native compiler-authoritative run program", () => {
       path.join(run.git.run.worktree, "tests/feature.test.mjs"),
     );
     const current = await program.verifyRun(run);
-    expect(current).toMatchObject({ ok: false, reason: expect.stringContaining("implement-change") });
+    expect(current).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("implement-change"),
+    });
     expect(current.reason).not.toContain("Prepare the historical proof oracle");
-    expect(Object.values(current.tickets ?? {}).some((ticket) =>
-      ticket.operationId === "implementation.change.red-green")).toBe(true);
-    expect(current.artifactWrites?.some((write) => write.path.endsWith("ticket-definitions.json"))).toBe(true);
+    expect(
+      Object.values(current.tickets ?? {}).some(
+        (ticket) => ticket.operationId === "implementation.change.red-green",
+      ),
+    ).toBe(true);
+    expect(
+      current.artifactWrites?.some((write) => write.path.endsWith("ticket-definitions.json")),
+    ).toBe(true);
 
     await writeFile(
       path.join(run.git.run.worktree, "test-support/vitest.config.ts"),
@@ -1751,14 +2032,20 @@ describe("native compiler-authoritative run program", () => {
       "export default { test: { environment: 'node' } };\n",
     );
 
-    await writeFile(path.join(run.git.run.worktree, "tests/feature.test.mjs"), "process.exitCode = 2;\n");
+    await writeFile(
+      path.join(run.git.run.worktree, "tests/feature.test.mjs"),
+      "process.exitCode = 2;\n",
+    );
     const drifted = await program.verifyRun(run);
     expect(drifted).toMatchObject({
       ok: false,
       reason: expect.stringContaining("Prepare the historical proof oracle"),
     });
 
-    await writeFile(path.join(run.git.run.worktree, "tests/feature.test.mjs"), "process.exitCode = 1;\n");
+    await writeFile(
+      path.join(run.git.run.worktree, "tests/feature.test.mjs"),
+      "process.exitCode = 1;\n",
+    );
     const failedReview: AgentAttemptRecord = {
       ...structuredClone(review),
       id: "attempt-proof-review-newer-failed",
@@ -1781,12 +2068,16 @@ describe("native compiler-authoritative run program", () => {
       reason: expect.stringContaining("Prepare the historical proof oracle"),
     });
     delete run.attempts[failedReview.id];
-    preparationReviewStep.attemptIds = preparationReviewStep.attemptIds.filter((id) => id !== failedReview.id);
+    preparationReviewStep.attemptIds = preparationReviewStep.attemptIds.filter(
+      (id) => id !== failedReview.id,
+    );
 
-    const implementation = Object.values(run.tickets).find((ticket) =>
-      ticket.operationId === "implementation.change.red-green");
+    const implementation = Object.values(run.tickets).find(
+      (ticket) => ticket.operationId === "implementation.change.red-green",
+    );
     expect(implementation).toBeDefined();
-    if (implementation === undefined) throw new Error("fixture did not derive red-green implementation");
+    if (implementation === undefined)
+      throw new Error("fixture did not derive red-green implementation");
     const implementationAuthorAssignment = assignmentFor(run, implementation.id);
     const implementationAuthor: AgentAttemptRecord = {
       id: "attempt-implementation-author",
@@ -1815,8 +2106,9 @@ describe("native compiler-authoritative run program", () => {
       terminalPolicy: semanticTerminalPolicy("implementation-author"),
     };
     run.attempts[implementationAuthor.id] = implementationAuthor;
-    const implementationAuthorStep = implementation.steps.find((step) =>
-      step.id === implementationAuthorAssignment.stepId)!;
+    const implementationAuthorStep = implementation.steps.find(
+      (step) => step.id === implementationAuthorAssignment.stepId,
+    )!;
     implementationAuthorStep.status = "completed";
     implementationAuthorStep.attemptIds = [implementationAuthor.id];
     implementationAuthorStep.startedAt = FIXED_NOW.toISOString();
@@ -1843,8 +2135,14 @@ describe("native compiler-authoritative run program", () => {
     const promotionStderr = Buffer.alloc(0);
     const promotionDirectory = `runs/${run.id}/attempts/${implementationExecution.id}/checks/promotion`;
     await mkdir(path.join(endpoint.stateRoot, promotionDirectory), { recursive: true });
-    await writeFile(path.join(endpoint.stateRoot, promotionDirectory, "stdout.bin"), promotionStdout);
-    await writeFile(path.join(endpoint.stateRoot, promotionDirectory, "stderr.bin"), promotionStderr);
+    await writeFile(
+      path.join(endpoint.stateRoot, promotionDirectory, "stdout.bin"),
+      promotionStdout,
+    );
+    await writeFile(
+      path.join(endpoint.stateRoot, promotionDirectory, "stderr.bin"),
+      promotionStderr,
+    );
     run.checks.push({
       id: "check-proof-promotion",
       attemptId: implementationExecution.id,
@@ -1855,33 +2153,35 @@ describe("native compiler-authoritative run program", () => {
       accepted: true,
       passed: true,
       summary: "promotion-proof-set passed",
-      commands: [{
-        checkId: "proof-promotion",
-        definitionHash: digest("proof-promotion-check"),
-        startedAt: FIXED_NOW.toISOString(),
-        completedAt: FIXED_NOW.toISOString(),
-        resolvedExecutable: "/usr/bin/node",
-        argv: ["/usr/bin/node", "tests/feature.test.mjs"],
-        environmentSha256: digest("promotion-environment"),
-        exitCode: 0,
-        signal: null,
-        stdoutSha256: rawSha256(promotionStdout),
-        stdoutSizeBytes: promotionStdout.byteLength,
-        stdoutArtifactPath: `${promotionDirectory}/stdout.bin`,
-        stderrSha256: rawSha256(promotionStderr),
-        stderrSizeBytes: promotionStderr.byteLength,
-        stderrArtifactPath: `${promotionDirectory}/stderr.bin`,
-        preManifestSha256: digest("promotion-workspace-manifest"),
-        postManifestSha256: digest("promotion-workspace-manifest"),
-        sandboxKind: "fixture",
-        sandboxProfileSha256: digest("promotion-sandbox"),
-        resultSource: {
-          kind: "stdout",
-          bytesSha256: rawSha256(promotionStdout),
-          sizeBytes: promotionStdout.byteLength,
+      commands: [
+        {
+          checkId: "proof-promotion",
+          definitionHash: digest("proof-promotion-check"),
+          startedAt: FIXED_NOW.toISOString(),
+          completedAt: FIXED_NOW.toISOString(),
+          resolvedExecutable: "/usr/bin/node",
+          argv: ["/usr/bin/node", "tests/feature.test.mjs"],
+          environmentSha256: digest("promotion-environment"),
+          exitCode: 0,
+          signal: null,
+          stdoutSha256: rawSha256(promotionStdout),
+          stdoutSizeBytes: promotionStdout.byteLength,
+          stdoutArtifactPath: `${promotionDirectory}/stdout.bin`,
+          stderrSha256: rawSha256(promotionStderr),
+          stderrSizeBytes: promotionStderr.byteLength,
+          stderrArtifactPath: `${promotionDirectory}/stderr.bin`,
+          preManifestSha256: digest("promotion-workspace-manifest"),
+          postManifestSha256: digest("promotion-workspace-manifest"),
+          sandboxKind: "fixture",
+          sandboxProfileSha256: digest("promotion-sandbox"),
+          resultSource: {
+            kind: "stdout",
+            bytesSha256: rawSha256(promotionStdout),
+            sizeBytes: promotionStdout.byteLength,
+          },
+          outputFiles: [],
         },
-        outputFiles: [],
-      }],
+      ],
       evidenceSha256: digest("proof-promotion-evidence"),
       evidenceSizeBytes: 1,
       evidenceArtifactPath: `${promotionDirectory}/evidence.json`,
@@ -1909,7 +2209,9 @@ describe("native compiler-authoritative run program", () => {
         parentSessionId: implementationExecution.sessionId,
       },
     });
-    const implementationReviewContext = JSON.parse(implementationReviewPrepared.contextContent!) as {
+    const implementationReviewContext = JSON.parse(
+      implementationReviewPrepared.contextContent!,
+    ) as {
       historicalPreparation?: {
         protocol?: string;
         entries?: Array<{
@@ -1927,22 +2229,28 @@ describe("native compiler-authoritative run program", () => {
     );
     expect(implementationReviewContext.historicalPreparation).toMatchObject({
       protocol: "koni.review-historical-preparation.v1",
-      entries: [{
-        subjectNodeId: expect.any(String),
-        baseline: {
-          check: {
-            sourceEvidenceSha256: expect.stringMatching(/^sha256:/),
-            commands: [expect.objectContaining({ exitCode: 1 })],
+      entries: [
+        {
+          subjectNodeId: expect.any(String),
+          baseline: {
+            check: {
+              sourceEvidenceSha256: expect.stringMatching(/^sha256:/),
+              commands: [expect.objectContaining({ exitCode: 1 })],
+            },
+          },
+          sourceContinuity: {
+            current: true,
+            currentVia: "preparation_review",
           },
         },
-        sourceContinuity: {
-          current: true,
-          currentVia: "preparation_review",
-        },
-      }],
+      ],
     });
-    expect(implementationReviewPrepared.contextContent).toContain("expected legacy assertion failure");
-    expect(implementationReviewPrepared.contextContent).toContain("all focused promotion assertions passed");
+    expect(implementationReviewPrepared.contextContent).toContain(
+      "expected legacy assertion failure",
+    );
+    expect(implementationReviewPrepared.contextContent).toContain(
+      "all focused promotion assertions passed",
+    );
 
     await persistWrites(project.projectRoot, implementationReviewPrepared.artifactWrites ?? []);
     const implementationReview = attemptRecord(
@@ -1952,10 +2260,13 @@ describe("native compiler-authoritative run program", () => {
     );
     implementationReview.reviewedGraphHash = run.graphHash!;
     implementationReview.terminalAcceptedAt = FIXED_NOW.toISOString();
-    const implementationReviewOutput = Buffer.from(`${JSON.stringify({
-      status: "completed",
-      summary: "The implementation and exact focused proof are independently accepted.",
-    })}\n`, "utf8");
+    const implementationReviewOutput = Buffer.from(
+      `${JSON.stringify({
+        status: "completed",
+        summary: "The implementation and exact focused proof are independently accepted.",
+      })}\n`,
+      "utf8",
+    );
     implementationReview.terminalOutputSha256 = rawSha256(implementationReviewOutput);
     implementationReview.terminalOutputSizeBytes = implementationReviewOutput.byteLength;
     run.attempts[implementationReview.id] = implementationReview;
@@ -2001,10 +2312,12 @@ describe("native compiler-authoritative run program", () => {
       step.completedAt ??= FIXED_NOW.toISOString();
     }
 
-    const establish = Object.values(run.tickets).find((ticket) =>
-      ticket.operationId === "assurance.proof.establish");
+    const establish = Object.values(run.tickets).find(
+      (ticket) => ticket.operationId === "assurance.proof.establish",
+    );
     expect(establish).toBeDefined();
-    if (establish === undefined) throw new Error("fixture did not retain pre-effect proof establishment");
+    if (establish === undefined)
+      throw new Error("fixture did not retain pre-effect proof establishment");
     const establishExecutionAssignment = assignmentFor(run, establish.id);
     const establishExecution: AgentAttemptRecord = {
       ...structuredClone(implementationExecution),
@@ -2019,8 +2332,9 @@ describe("native compiler-authoritative run program", () => {
       terminalPolicy: semanticTerminalPolicy("establish-execution"),
     };
     run.attempts[establishExecution.id] = establishExecution;
-    const establishExecutionStep = establish.steps.find((step) =>
-      step.id === establishExecutionAssignment.stepId)!;
+    const establishExecutionStep = establish.steps.find(
+      (step) => step.id === establishExecutionAssignment.stepId,
+    )!;
     establishExecutionStep.status = "completed";
     establishExecutionStep.attemptIds = [establishExecution.id];
     establishExecutionStep.startedAt = FIXED_NOW.toISOString();
@@ -2030,27 +2344,37 @@ describe("native compiler-authoritative run program", () => {
     const establishStderr = Buffer.alloc(0);
     const establishCheckDirectory = `runs/${run.id}/attempts/${establishExecution.id}/checks/promotion`;
     await mkdir(path.join(endpoint.stateRoot, establishCheckDirectory), { recursive: true });
-    await writeFile(path.join(endpoint.stateRoot, establishCheckDirectory, "stdout.bin"), establishStdout);
-    await writeFile(path.join(endpoint.stateRoot, establishCheckDirectory, "stderr.bin"), establishStderr);
+    await writeFile(
+      path.join(endpoint.stateRoot, establishCheckDirectory, "stdout.bin"),
+      establishStdout,
+    );
+    await writeFile(
+      path.join(endpoint.stateRoot, establishCheckDirectory, "stderr.bin"),
+      establishStderr,
+    );
     run.checks.push({
       ...structuredClone(run.checks.find((check) => check.id === "check-proof-promotion")!),
       id: "check-establish-promotion",
       attemptId: establishExecution.id,
       callId: "call-establish-promotion",
-      commands: [{
-        ...structuredClone(run.checks.find((check) => check.id === "check-proof-promotion")!.commands[0]!),
-        stdoutSha256: rawSha256(establishStdout),
-        stdoutSizeBytes: establishStdout.byteLength,
-        stdoutArtifactPath: `${establishCheckDirectory}/stdout.bin`,
-        stderrSha256: rawSha256(establishStderr),
-        stderrSizeBytes: establishStderr.byteLength,
-        stderrArtifactPath: `${establishCheckDirectory}/stderr.bin`,
-        resultSource: {
-          kind: "stdout",
-          bytesSha256: rawSha256(establishStdout),
-          sizeBytes: establishStdout.byteLength,
+      commands: [
+        {
+          ...structuredClone(
+            run.checks.find((check) => check.id === "check-proof-promotion")!.commands[0]!,
+          ),
+          stdoutSha256: rawSha256(establishStdout),
+          stdoutSizeBytes: establishStdout.byteLength,
+          stdoutArtifactPath: `${establishCheckDirectory}/stdout.bin`,
+          stderrSha256: rawSha256(establishStderr),
+          stderrSizeBytes: establishStderr.byteLength,
+          stderrArtifactPath: `${establishCheckDirectory}/stderr.bin`,
+          resultSource: {
+            kind: "stdout",
+            bytesSha256: rawSha256(establishStdout),
+            sizeBytes: establishStdout.byteLength,
+          },
         },
-      }],
+      ],
     });
     const establishReviewStep = establish.steps.find((step) => step.kind === "review")!;
     const establishReviewPrepared = await program.prepareAttempt({
@@ -2088,47 +2412,54 @@ describe("native compiler-authoritative run program", () => {
       }),
     ]);
     expect(establishReviewPrepared.contextContent).toContain("expected legacy assertion failure");
-    expect(establishReviewPrepared.contextContent).toContain("all focused promotion assertions still pass");
-
+    expect(establishReviewPrepared.contextContent).toContain(
+      "all focused promotion assertions still pass",
+    );
   }, 30_000);
 
   it("uses the same native compiler program for the research profile", async () => {
     const project = await installedProject("research-profile");
     const nodesPath = path.join(project.projectRoot, ".koni", "graph", "nodes.yaml");
-    await writeFile(nodesPath, (await readFile(nodesPath, "utf8")).replace(
-      [
-        "    objective:",
-        "      type: string",
-        "      description: The bounded empirical research objective used to clarify and test the proposition.",
-      ].join("\n"),
-      [
-        "    objective:",
-        "      type: string",
-        "      description: The bounded empirical research objective used to clarify and test the proposition.",
-        "    fixture_command:",
-        "      type: json",
-        "      description: Exact provider-free verifier argv for this executable parity fixture.",
-        "    scientific_inputs:",
-        "      type: json",
-        "      description: Exact project-file prerequisites bound into the verifier argv.",
-      ].join("\n"),
-    ));
+    await writeFile(
+      nodesPath,
+      (await readFile(nodesPath, "utf8")).replace(
+        [
+          "    objective:",
+          "      type: string",
+          "      description: The bounded empirical research objective used to clarify and test the proposition.",
+        ].join("\n"),
+        [
+          "    objective:",
+          "      type: string",
+          "      description: The bounded empirical research objective used to clarify and test the proposition.",
+          "    fixture_command:",
+          "      type: json",
+          "      description: Exact provider-free verifier argv for this executable fixture.",
+          "    scientific_inputs:",
+          "      type: json",
+          "      description: Exact project-file prerequisites bound into the verifier argv.",
+        ].join("\n"),
+      ),
+    );
     const rulesPath = path.join(project.projectRoot, ".koni", "rules", "research.yaml");
-    await writeFile(rulesPath, (await readFile(rulesPath, "utf8")).replace(
-      [
-        "    target_nodes: $target",
-        "    read_scope: $target",
-        "    write_scope: $target",
-        "- id: ticket.experiment-portfolio",
-      ].join("\n"),
-      [
-        "    target_nodes: $target",
-        "    read_scope: $target",
-        "    write_scope: $target",
-        "    read_paths: [fixtures]",
-        "- id: ticket.experiment-portfolio",
-      ].join("\n"),
-    ));
+    await writeFile(
+      rulesPath,
+      (await readFile(rulesPath, "utf8")).replace(
+        [
+          "    target_nodes: $target",
+          "    read_scope: $target",
+          "    write_scope: $target",
+          "- id: ticket.experiment-portfolio",
+        ].join("\n"),
+        [
+          "    target_nodes: $target",
+          "    read_scope: $target",
+          "    write_scope: $target",
+          "    read_paths: [fixtures]",
+          "- id: ticket.experiment-portfolio",
+        ].join("\n"),
+      ),
+    );
     const workflowsPath = path.join(project.projectRoot, ".koni", "workflows", "research.yaml");
     const workflows = await readFile(workflowsPath, "utf8");
     const drillClaimStep = [
@@ -2139,71 +2470,91 @@ describe("native compiler-authoritative run program", () => {
       "    validation_action: compile-ticket",
     ].join("\n");
     expect(workflows).toContain(drillClaimStep);
-    await writeFile(workflowsPath, workflows.replace(
-      drillClaimStep,
-      `${drillClaimStep}\n    checks:\n    - scoped-probe-set\n    - exact-prerequisite-set`,
-    ));
+    await writeFile(
+      workflowsPath,
+      workflows.replace(
+        drillClaimStep,
+        `${drillClaimStep}\n    checks:\n    - scoped-probe-set\n    - exact-prerequisite-set`,
+      ),
+    );
     const checksPath = path.join(project.projectRoot, ".koni", "checks", "research.yaml");
-    await writeFile(checksPath, (await readFile(checksPath, "utf8")).replace(
-      "  receipt_type: compiler.scoped-probe\n  effect: read_only",
-      "  receipt_type: compiler.scoped-probe\n  composed_replay: never\n  effect: read_only",
-    ));
-    await writeFile(checksPath, `${await readFile(checksPath, "utf8")}\n` + [
-      "- id: scoped-probe-set",
-      "  kind: composite",
-      "  applies_to: [drill-hypothesis]",
-      "  receipt_type: compiler.scoped-probe-set",
-      "  graph_set:",
-      "    members: $target",
-      "    member_node_types: [hypothesis]",
-      "    member_check: scoped-operational-probe",
-      "    min_members: 1",
-      "",
-    ].join("\n"));
-    await writeFile(checksPath, `${await readFile(checksPath, "utf8")}` + [
-      "- id: exact-prerequisite-set",
-      "  kind: command",
-      "  applies_to: [drill-hypothesis]",
-      "  command_source:",
-      "    kind: ticket",
-      "    role: ticket",
-      "    field: fixture_command",
-      "  cwd: .",
-      "  timeout_seconds: 60",
-      "  result_protocol: koni.fixture-result.v1",
-      "  required_result_fields: [protocol, status]",
-      "  result_schema:",
-      "    type: object",
-      "    required: [protocol, status]",
-      "    properties:",
-      "      protocol: {type: string, const: koni.fixture-result.v1}",
-      "      status: {type: string, const: passed}",
-      "  argv_input_bindings:",
-      "    from: scientific_inputs",
-      "    path_field: path",
-      "    required_fields: [asset_id, role, path]",
-      "    require_nonempty: true",
-      "    require_project_file: true",
-      "    require_exact_argument: true",
-      "  receipt_type: runtime.fixture-receipt",
-      "  effect: read_only",
-      "  environment:",
-      "    inherit: [PATH]",
-      "    set: {}",
-      "  retry_policy:",
-      "    max_attempts: 1",
-      "    transient_exit_codes: []",
-      "    backoff_seconds: []",
-      "",
-    ].join("\n"));
+    await writeFile(
+      checksPath,
+      (await readFile(checksPath, "utf8")).replace(
+        "  receipt_type: compiler.scoped-probe\n  effect: read_only",
+        "  receipt_type: compiler.scoped-probe\n  composed_replay: never\n  effect: read_only",
+      ),
+    );
+    await writeFile(
+      checksPath,
+      `${await readFile(checksPath, "utf8")}\n` +
+        [
+          "- id: scoped-probe-set",
+          "  kind: composite",
+          "  applies_to: [drill-hypothesis]",
+          "  receipt_type: compiler.scoped-probe-set",
+          "  graph_set:",
+          "    members: $target",
+          "    member_node_types: [hypothesis]",
+          "    member_check: scoped-operational-probe",
+          "    min_members: 1",
+          "",
+        ].join("\n"),
+    );
+    await writeFile(
+      checksPath,
+      `${await readFile(checksPath, "utf8")}` +
+        [
+          "- id: exact-prerequisite-set",
+          "  kind: command",
+          "  applies_to: [drill-hypothesis]",
+          "  command_source:",
+          "    kind: ticket",
+          "    role: ticket",
+          "    field: fixture_command",
+          "  cwd: .",
+          "  timeout_seconds: 60",
+          "  result_protocol: koni.fixture-result.v1",
+          "  required_result_fields: [protocol, status]",
+          "  result_schema:",
+          "    type: object",
+          "    required: [protocol, status]",
+          "    properties:",
+          "      protocol: {type: string, const: koni.fixture-result.v1}",
+          "      status: {type: string, const: passed}",
+          "  argv_input_bindings:",
+          "    from: scientific_inputs",
+          "    path_field: path",
+          "    required_fields: [asset_id, role, path]",
+          "    require_nonempty: true",
+          "    require_project_file: true",
+          "    require_exact_argument: true",
+          "  receipt_type: runtime.fixture-receipt",
+          "  effect: read_only",
+          "  environment:",
+          "    inherit: [PATH]",
+          "    set: {}",
+          "  retry_policy:",
+          "    max_attempts: 1",
+          "    transient_exit_codes: []",
+          "    backoff_seconds: []",
+          "",
+        ].join("\n"),
+    );
     await mkdir(path.join(project.projectRoot, "fixtures"), { recursive: true });
     await writeFile(path.join(project.projectRoot, "fixtures", "research-input.json"), "{}\n");
     const program = await compilerProgram(project);
-    const compiledConfiguration = await compileProjectDirectory(project.projectRoot, project.baseline);
-    if (!compiledConfiguration.ok) throw new Error("research fixture configuration did not compile");
+    const compiledConfiguration = await compileProjectDirectory(
+      project.projectRoot,
+      project.baseline,
+    );
+    if (!compiledConfiguration.ok)
+      throw new Error("research fixture configuration did not compile");
     const gatePolicies = projectGatePolicyDefinitions(compiledConfiguration.value);
     if (!gatePolicies.ok) throw new Error("research fixture gate policy did not compile");
-    const gatePolicy = gatePolicies.value.find((candidate) => candidate.id === "research-capability-gates")!;
+    const gatePolicy = gatePolicies.value.find(
+      (candidate) => candidate.id === "research-capability-gates",
+    )!;
     const gateContextMaterial = {
       protocol: "koni.gate-policy-context.v1" as const,
       policy_id: gatePolicy.id,
@@ -2222,12 +2573,14 @@ describe("native compiler-authoritative run program", () => {
       ...gateContextMaterial,
       context_sha256: canonicalHash(gateContextMaterial),
     };
-    expect(resolvePinnedGateAutoEvaluationContexts({
-      configuration: compiledConfiguration.value,
-      descriptorBoundary: "scoped",
-      subjectNodeIds: ["hypothesis-fixture"],
-      contexts: [gateContext],
-    })).toEqual([
+    expect(
+      resolvePinnedGateAutoEvaluationContexts({
+        configuration: compiledConfiguration.value,
+        descriptorBoundary: "scoped",
+        subjectNodeIds: ["hypothesis-fixture"],
+        contexts: [gateContext],
+      }),
+    ).toEqual([
       expect.objectContaining({
         policyId: gatePolicy.id,
         checkId: "gate-verifier",
@@ -2238,18 +2591,43 @@ describe("native compiler-authoritative run program", () => {
         sha256: expect.stringMatching(/^sha256:/u),
       }),
     ]);
-    expect(resolvePinnedGateAutoEvaluationContexts({
-      configuration: compiledConfiguration.value,
-      descriptorBoundary: "scoped",
-      subjectNodeIds: ["unrelated-node"],
-      contexts: [gateContext],
-    })).toEqual([]);
-    expect(() => resolvePinnedGateAutoEvaluationContexts({
-      configuration: compiledConfiguration.value,
-      descriptorBoundary: "scoped",
-      subjectNodeIds: ["hypothesis-fixture"],
-      contexts: [{ ...gateContext, read_paths: ["ambient-secret"] }],
-    })).toThrow(expect.objectContaining({ code: "gate_policy_context_hash" }));
+    expect(
+      resolvePinnedGateAutoEvaluationContexts({
+        configuration: compiledConfiguration.value,
+        descriptorBoundary: "scoped",
+        subjectNodeIds: ["unrelated-node"],
+        contexts: [gateContext],
+      }),
+    ).toEqual([]);
+    // Gate auto-evaluation is an obligation of the operations its check applies to: a ticket
+    // that merely links the gate node (e.g. experiment design) compiles without it, while an
+    // applicable operation still binds it.
+    expect(
+      resolvePinnedGateAutoEvaluationContexts({
+        configuration: compiledConfiguration.value,
+        descriptorBoundary: "scoped",
+        operation: "design-experiment",
+        subjectNodeIds: ["hypothesis-fixture"],
+        contexts: [gateContext],
+      }),
+    ).toEqual([]);
+    expect(
+      resolvePinnedGateAutoEvaluationContexts({
+        configuration: compiledConfiguration.value,
+        descriptorBoundary: "scoped",
+        operation: "implement-asset",
+        subjectNodeIds: ["hypothesis-fixture"],
+        contexts: [gateContext],
+      }),
+    ).toHaveLength(1);
+    expect(() =>
+      resolvePinnedGateAutoEvaluationContexts({
+        configuration: compiledConfiguration.value,
+        descriptorBoundary: "scoped",
+        subjectNodeIds: ["hypothesis-fixture"],
+        contexts: [{ ...gateContext, read_paths: ["ambient-secret"] }],
+      }),
+    ).toThrow(expect.objectContaining({ code: "gate_policy_context_hash" }));
     const runId = "run-native-research";
     const resolved = await program.resolveRun({
       runId,
@@ -2266,29 +2644,39 @@ describe("native compiler-authoritative run program", () => {
       thinkingLevel: "xhigh",
     });
     await persistWrites(project.projectRoot, resolved.artifactWrites ?? []);
-    const run = runRecord(project.projectRoot, runId, "Test whether retrieval improves bounded factual recall", resolved);
+    const run = runRecord(
+      project.projectRoot,
+      runId,
+      "Test whether retrieval improves bounded factual recall",
+      resolved,
+    );
     const planning = await program.compilePlanningOutput({
       run,
       attemptId: "attempt-research-plan",
       output: planningOutput({
         objective: "Measure a bounded factual-recall delta",
         fixture_command: ["node", "scripts/verify-research.mjs", "fixtures/research-input.json"],
-        scientific_inputs: [{ asset_id: "fixture-input", role: "dataset", path: "fixtures/research-input.json" }],
+        scientific_inputs: [
+          { asset_id: "fixture-input", role: "dataset", path: "fixtures/research-input.json" },
+        ],
       }),
     });
     run.plan = { ...planning.plan, status: "approved" };
     run.graphHash = planning.graphHash;
     materializeApprovedFixtureRun(run);
     const approved = await program.initializeApprovedPlan(run);
-    expect(Object.values(approved.tickets)).toEqual(expect.arrayContaining([
-      expect.objectContaining({ operationId: "formulation.hypothesis.drill-hypothesis" }),
-    ]));
+    expect(Object.values(approved.tickets)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ operationId: "formulation.hypothesis.drill-hypothesis" }),
+      ]),
+    );
     await persistWrites(project.projectRoot, approved.artifactWrites ?? []);
     run.graphHash = approved.graphHash;
     run.graphRevision = approved.graphRevision;
     run.tickets = approved.tickets;
-    const ticket = Object.values(run.tickets).find((candidate) =>
-      candidate.operationId === "formulation.hypothesis.drill-hypothesis")!;
+    const ticket = Object.values(run.tickets).find(
+      (candidate) => candidate.operationId === "formulation.hypothesis.drill-hypothesis",
+    )!;
     const assignment = assignmentFor(run, ticket.id);
     const prepared = await program.prepareAttempt({
       kind: "ticket",
@@ -2311,18 +2699,21 @@ describe("native compiler-authoritative run program", () => {
       networkAccess: false,
       maxTimeoutMs: 900_000,
     });
-    expect(prepared.spec.tools.find((tool) => tool.name === "koni_run_check")?.maxResultBytes)
-      .toBeGreaterThanOrEqual(1024 * 1024);
+    expect(
+      prepared.spec.tools.find((tool) => tool.name === "koni_run_check")?.maxResultBytes,
+    ).toBeGreaterThanOrEqual(1024 * 1024);
     await persistWrites(project.projectRoot, prepared.artifactWrites ?? []);
     const attempt = attemptRecord(prepared.spec, "ticket", "running");
     run.attempts[attempt.id] = attempt;
     const prerequisitePath = path.join(ticket.worktreePath!, "fixtures", "research-input.json");
     await unlink(prerequisitePath);
-    await expect(program.resolveAgentCheck({
-      run,
-      attempt,
-      checkId: "exact-prerequisite-set",
-    })).rejects.toMatchObject({ code: "check_input_binding" });
+    await expect(
+      program.resolveAgentCheck({
+        run,
+        attempt,
+        checkId: "exact-prerequisite-set",
+      }),
+    ).rejects.toMatchObject({ code: "check_input_binding" });
     await writeFile(prerequisitePath, "{}\n");
     const exactCheck = await program.resolveAgentCheck({
       run,
@@ -2337,15 +2728,17 @@ describe("native compiler-authoritative run program", () => {
         receiptFreshness: "current",
         composedReplay: "required",
       },
-      commands: [expect.objectContaining({
-        argv: ["node", "scripts/verify-research.mjs", "fixtures/research-input.json"],
-        inputPaths: ["fixtures/research-input.json"],
-        resultProtocol: "koni.fixture-result.v1",
-        executionPolicy: expect.objectContaining({
-          checkId: "exact-prerequisite-set",
-          effect: "read_only",
+      commands: [
+        expect.objectContaining({
+          argv: ["node", "scripts/verify-research.mjs", "fixtures/research-input.json"],
+          inputPaths: ["fixtures/research-input.json"],
+          resultProtocol: "koni.fixture-result.v1",
+          executionPolicy: expect.objectContaining({
+            checkId: "exact-prerequisite-set",
+            effect: "read_only",
+          }),
         }),
-      })],
+      ],
     });
     const exactCommand = exactCheck.commands[0]!;
     if (exactCheck.executionPolicy === undefined || exactCommand.executionPolicy === undefined) {
@@ -2355,11 +2748,13 @@ describe("native compiler-authoritative run program", () => {
     const exactCommandPolicy = exactCommand.executionPolicy;
     expect(exactCheck.definitionHash).toBe(exactCheckPolicy.checkSha256);
     expect(exactCommand.definitionHash).toBe(exactCommandPolicy.checkSha256);
-    expect(decideBoundCheckRetry(exactCommandPolicy, {
-      attemptNumber: 1,
-      exitCode: 1,
-      aggregateElapsedSeconds: 1,
-    })).toMatchObject({
+    expect(
+      decideBoundCheckRetry(exactCommandPolicy, {
+        attemptNumber: 1,
+        exitCode: 1,
+        aggregateElapsedSeconds: 1,
+      }),
+    ).toMatchObject({
       checkId: "exact-prerequisite-set",
       disposition: "terminal_failure",
       backoffSeconds: 0,
@@ -2398,12 +2793,14 @@ describe("native compiler-authoritative run program", () => {
       outputFiles: [],
     };
     const { retryAuditSha256: _retryAuditSha256, ...missingRetryAuditExecution } = exactExecution;
-    await expect(program.compileAgentCheckResult({
-      run,
-      attempt,
-      check: exactCheck,
-      executions: [missingRetryAuditExecution],
-    })).rejects.toMatchObject({ code: "check_execution_retry" });
+    await expect(
+      program.compileAgentCheckResult({
+        run,
+        attempt,
+        check: exactCheck,
+        executions: [missingRetryAuditExecution],
+      }),
+    ).rejects.toMatchObject({ code: "check_execution_retry" });
     const compiledExactCheck = await program.compileAgentCheckResult({
       run,
       attempt,
@@ -2415,10 +2812,12 @@ describe("native compiler-authoritative run program", () => {
       passed: true,
       tickets: expect.any(Object),
       evidence: {
-        commands: [expect.objectContaining({
-          attemptNumber: 1,
-          retryAuditSha256: exactExecution.retryAuditSha256,
-        })],
+        commands: [
+          expect.objectContaining({
+            attemptNumber: 1,
+            retryAuditSha256: exactExecution.retryAuditSha256,
+          }),
+        ],
       },
       ruleAuthorityEvidence: { protocol: "koni.rule-authority-evidence.v1" },
     });
@@ -2433,16 +2832,18 @@ describe("native compiler-authoritative run program", () => {
         checkId: "scoped-probe-set",
         effect: "read_only",
       },
-      commands: [expect.objectContaining({
-        checkId: "scoped-operational-probe",
-        effect: "read_only",
-        expectedExitCodes: [0],
-        resultProtocol: "process-exit.v1",
-        executionPolicy: expect.objectContaining({
+      commands: [
+        expect.objectContaining({
           checkId: "scoped-operational-probe",
-          composedReplay: "never",
+          effect: "read_only",
+          expectedExitCodes: [0],
+          resultProtocol: "process-exit.v1",
+          executionPolicy: expect.objectContaining({
+            checkId: "scoped-operational-probe",
+            composedReplay: "never",
+          }),
         }),
-      })],
+      ],
     });
     const command = check.commands[0]!;
     if (check.executionPolicy === undefined || command.executionPolicy === undefined) {
@@ -2502,56 +2903,62 @@ describe("native compiler-authoritative run program", () => {
       status: "completed",
       summary: "Compiled the hypothesis drill after its current scoped check",
     };
-    await expect(program.compileAssignmentOutput({
-      run,
-      assignment,
-      attemptId: attempt.id,
-      output: completedOutput,
-    })).rejects.toMatchObject({ code: "assignment_checks_incomplete" });
-    const recordedChecks: NonNullable<RunRecord["checks"]> = [{
-      id: "check-current-scoped-probe",
-      attemptId: attempt.id,
-      callId: "call-current-scoped-probe",
-      requestedCheckId: check.requestedCheckId,
-      definitionHash: check.definitionHash,
-      kind: check.kind,
-      executionPolicy: scopedCheckPolicy,
-      accepted: compiledCheck.accepted,
-      passed: compiledCheck.passed,
-      summary: compiledCheck.summary,
-      commands: [{
-        checkId: execution.checkId,
-        definitionHash: execution.definitionHash,
-        executionPolicy: scopedCommandPolicy,
-        startedAt: execution.startedAt,
-        completedAt: execution.completedAt,
-        resolvedExecutable: execution.resolvedExecutable,
-        argv: execution.argv,
-        environmentSha256: execution.environmentSha256,
-        exitCode: execution.exitCode,
-        signal: execution.signal,
-        stdoutSha256: execution.stdoutSha256,
-        stdoutSizeBytes: execution.stdoutSizeBytes,
-        stdoutArtifactPath: "runs/run-native-research/checks/current/stdout.txt",
-        stderrSha256: execution.stderrSha256,
-        stderrSizeBytes: execution.stderrSizeBytes,
-        stderrArtifactPath: "runs/run-native-research/checks/current/stderr.txt",
-        preManifestSha256: execution.preManifestSha256,
-        postManifestSha256: execution.postManifestSha256,
-        sandboxKind: execution.sandboxKind,
-        sandboxProfileSha256: execution.sandboxProfileSha256,
-        resultSource: {
-          kind: execution.resultSource.kind,
-          bytesSha256: execution.resultSource.bytesSha256,
-          sizeBytes: execution.resultSource.sizeBytes,
-        },
-        outputFiles: [],
-      }],
-      evidenceSha256: canonicalHash(compiledCheck.evidence),
-      evidenceSizeBytes: Buffer.byteLength(JSON.stringify(compiledCheck.evidence), "utf8"),
-      evidenceArtifactPath: "runs/run-native-research/checks/current/evidence.json",
-      recordedAt: "2026-07-16T19:00:00.000Z",
-    }];
+    await expect(
+      program.compileAssignmentOutput({
+        run,
+        assignment,
+        attemptId: attempt.id,
+        output: completedOutput,
+      }),
+    ).rejects.toMatchObject({ code: "assignment_checks_incomplete" });
+    const recordedChecks: NonNullable<RunRecord["checks"]> = [
+      {
+        id: "check-current-scoped-probe",
+        attemptId: attempt.id,
+        callId: "call-current-scoped-probe",
+        requestedCheckId: check.requestedCheckId,
+        definitionHash: check.definitionHash,
+        kind: check.kind,
+        executionPolicy: scopedCheckPolicy,
+        accepted: compiledCheck.accepted,
+        passed: compiledCheck.passed,
+        summary: compiledCheck.summary,
+        commands: [
+          {
+            checkId: execution.checkId,
+            definitionHash: execution.definitionHash,
+            executionPolicy: scopedCommandPolicy,
+            startedAt: execution.startedAt,
+            completedAt: execution.completedAt,
+            resolvedExecutable: execution.resolvedExecutable,
+            argv: execution.argv,
+            environmentSha256: execution.environmentSha256,
+            exitCode: execution.exitCode,
+            signal: execution.signal,
+            stdoutSha256: execution.stdoutSha256,
+            stdoutSizeBytes: execution.stdoutSizeBytes,
+            stdoutArtifactPath: "runs/run-native-research/checks/current/stdout.txt",
+            stderrSha256: execution.stderrSha256,
+            stderrSizeBytes: execution.stderrSizeBytes,
+            stderrArtifactPath: "runs/run-native-research/checks/current/stderr.txt",
+            preManifestSha256: execution.preManifestSha256,
+            postManifestSha256: execution.postManifestSha256,
+            sandboxKind: execution.sandboxKind,
+            sandboxProfileSha256: execution.sandboxProfileSha256,
+            resultSource: {
+              kind: execution.resultSource.kind,
+              bytesSha256: execution.resultSource.bytesSha256,
+              sizeBytes: execution.resultSource.sizeBytes,
+            },
+            outputFiles: [],
+          },
+        ],
+        evidenceSha256: canonicalHash(compiledCheck.evidence),
+        evidenceSizeBytes: Buffer.byteLength(JSON.stringify(compiledCheck.evidence), "utf8"),
+        evidenceArtifactPath: "runs/run-native-research/checks/current/evidence.json",
+        recordedAt: "2026-07-16T19:00:00.000Z",
+      },
+    ];
     recordedChecks.push({
       id: "check-current-exact-prerequisite",
       attemptId: attempt.id,
@@ -2563,34 +2970,36 @@ describe("native compiler-authoritative run program", () => {
       accepted: compiledExactCheck.accepted,
       passed: compiledExactCheck.passed,
       summary: compiledExactCheck.summary,
-      commands: [{
-        checkId: exactExecution.checkId,
-        definitionHash: exactExecution.definitionHash,
-        executionPolicy: exactCommandPolicy,
-        startedAt: exactExecution.startedAt,
-        completedAt: exactExecution.completedAt,
-        resolvedExecutable: exactExecution.resolvedExecutable,
-        argv: exactExecution.argv,
-        environmentSha256: exactExecution.environmentSha256,
-        exitCode: exactExecution.exitCode,
-        signal: exactExecution.signal,
-        stdoutSha256: exactExecution.stdoutSha256,
-        stdoutSizeBytes: exactExecution.stdoutSizeBytes,
-        stdoutArtifactPath: "runs/run-native-research/checks/exact/stdout.txt",
-        stderrSha256: exactExecution.stderrSha256,
-        stderrSizeBytes: exactExecution.stderrSizeBytes,
-        stderrArtifactPath: "runs/run-native-research/checks/exact/stderr.txt",
-        preManifestSha256: exactExecution.preManifestSha256,
-        postManifestSha256: exactExecution.postManifestSha256,
-        sandboxKind: exactExecution.sandboxKind,
-        sandboxProfileSha256: exactExecution.sandboxProfileSha256,
-        resultSource: {
-          kind: exactExecution.resultSource.kind,
-          bytesSha256: exactExecution.resultSource.bytesSha256,
-          sizeBytes: exactExecution.resultSource.sizeBytes,
+      commands: [
+        {
+          checkId: exactExecution.checkId,
+          definitionHash: exactExecution.definitionHash,
+          executionPolicy: exactCommandPolicy,
+          startedAt: exactExecution.startedAt,
+          completedAt: exactExecution.completedAt,
+          resolvedExecutable: exactExecution.resolvedExecutable,
+          argv: exactExecution.argv,
+          environmentSha256: exactExecution.environmentSha256,
+          exitCode: exactExecution.exitCode,
+          signal: exactExecution.signal,
+          stdoutSha256: exactExecution.stdoutSha256,
+          stdoutSizeBytes: exactExecution.stdoutSizeBytes,
+          stdoutArtifactPath: "runs/run-native-research/checks/exact/stdout.txt",
+          stderrSha256: exactExecution.stderrSha256,
+          stderrSizeBytes: exactExecution.stderrSizeBytes,
+          stderrArtifactPath: "runs/run-native-research/checks/exact/stderr.txt",
+          preManifestSha256: exactExecution.preManifestSha256,
+          postManifestSha256: exactExecution.postManifestSha256,
+          sandboxKind: exactExecution.sandboxKind,
+          sandboxProfileSha256: exactExecution.sandboxProfileSha256,
+          resultSource: {
+            kind: exactExecution.resultSource.kind,
+            bytesSha256: exactExecution.resultSource.bytesSha256,
+            sizeBytes: exactExecution.resultSource.sizeBytes,
+          },
+          outputFiles: [],
         },
-        outputFiles: [],
-      }],
+      ],
       evidenceSha256: canonicalHash(compiledExactCheck.evidence),
       evidenceSizeBytes: Buffer.byteLength(JSON.stringify(compiledExactCheck.evidence), "utf8"),
       evidenceArtifactPath: "runs/run-native-research/checks/exact/evidence.json",
@@ -2614,10 +3023,12 @@ describe("native compiler-authoritative run program", () => {
       executionPolicyBinding: { stepId: assignment.stepId },
       validationCheckIds: ["exact-prerequisite-set", "scoped-probe-set"],
       composedReplayCheckIds: ["exact-prerequisite-set"],
-      retainedReceipts: [expect.objectContaining({
-        runCheckId: "check-current-scoped-probe",
-        checkId: "scoped-operational-probe",
-      })],
+      retainedReceipts: [
+        expect.objectContaining({
+          runCheckId: "check-current-scoped-probe",
+          checkId: "scoped-operational-probe",
+        }),
+      ],
       sourceManifestPairs: [],
     });
     expect(terminalPolicy.retainedReceipts).toEqual([
@@ -2626,27 +3037,30 @@ describe("native compiler-authoritative run program", () => {
         checkId: "scoped-operational-probe",
       }),
     ]);
-    expect(terminalPolicy.validationChecks.find((candidate) =>
-      candidate.checkId === "scoped-probe-set")).toMatchObject({
-        causalCommands: [expect.objectContaining({ checkId: "scoped-operational-probe" })],
-        resolvedCheck: { commands: [] },
-        retainedLeafPolicies: [expect.objectContaining({ checkId: "scoped-operational-probe" })],
-        replaySelection: {
-          replayCheckIds: [],
-          skipped: [{ checkId: "scoped-operational-probe", reason: "opted_out" }],
-        },
-      });
-    await expect(program.compileAssignmentTerminalReplay({
-      run,
-      assignment,
-      attemptId: attempt.id,
-      projectionSha256: terminalPolicy.sha256,
-      executions: [
-        { checkId: "scoped-probe-set", executions: [] },
-        { checkId: "exact-prerequisite-set", executions: [exactExecution] },
-      ],
-      retainedReceipts: terminalPolicy.retainedReceipts,
-    })).resolves.toMatchObject({
+    expect(
+      terminalPolicy.validationChecks.find((candidate) => candidate.checkId === "scoped-probe-set"),
+    ).toMatchObject({
+      causalCommands: [expect.objectContaining({ checkId: "scoped-operational-probe" })],
+      resolvedCheck: { commands: [] },
+      retainedLeafPolicies: [expect.objectContaining({ checkId: "scoped-operational-probe" })],
+      replaySelection: {
+        replayCheckIds: [],
+        skipped: [{ checkId: "scoped-operational-probe", reason: "opted_out" }],
+      },
+    });
+    await expect(
+      program.compileAssignmentTerminalReplay({
+        run,
+        assignment,
+        attemptId: attempt.id,
+        projectionSha256: terminalPolicy.sha256,
+        executions: [
+          { checkId: "scoped-probe-set", executions: [] },
+          { checkId: "exact-prerequisite-set", executions: [exactExecution] },
+        ],
+        retainedReceipts: terminalPolicy.retainedReceipts,
+      }),
+    ).resolves.toMatchObject({
       protocol: "koni.assignment-terminal-replay.v1",
       accepted: true,
       passed: true,
@@ -2663,12 +3077,14 @@ describe("native compiler-authoritative run program", () => {
         }),
       ]),
     });
-    await expect(program.compileAssignmentOutput({
-      run,
-      assignment,
-      attemptId: attempt.id,
-      output: completedOutput,
-    })).resolves.toMatchObject({
+    await expect(
+      program.compileAssignmentOutput({
+        run,
+        assignment,
+        attemptId: attempt.id,
+        output: completedOutput,
+      }),
+    ).resolves.toMatchObject({
       outcome: { status: "completed", summary: completedOutput.summary },
     });
 
@@ -2695,31 +3111,37 @@ describe("native compiler-authoritative run program", () => {
       },
     };
     expect(Value.Check(prepared.terminalOutputSchema!, collidingUpstreamOutput)).toBe(false);
-    await expect(program.compileAssignmentOutput({
-      run,
-      assignment,
-      attemptId: attempt.id,
-      output: collidingUpstreamOutput,
-    })).rejects.toMatchObject({ code: "change_control_graph_collision" });
-    expect(Value.Check(prepared.terminalOutputSchema!, {
-      ...upstreamOutput,
-      upstreamChangeRequest: {
-        ...upstreamOutput.upstreamChangeRequest,
-        ambientAuthority: true,
-      },
-    })).toBe(false);
-    await expect(program.compileAssignmentOutput({
-      run,
-      assignment,
-      attemptId: attempt.id,
-      output: {
+    await expect(
+      program.compileAssignmentOutput({
+        run,
+        assignment,
+        attemptId: attempt.id,
+        output: collidingUpstreamOutput,
+      }),
+    ).rejects.toMatchObject({ code: "change_control_graph_collision" });
+    expect(
+      Value.Check(prepared.terminalOutputSchema!, {
         ...upstreamOutput,
         upstreamChangeRequest: {
           ...upstreamOutput.upstreamChangeRequest,
-          targetNodeIds: ["missing-research-node"],
+          ambientAuthority: true,
         },
-      },
-    })).rejects.toMatchObject({ code: "change_control_target_missing" });
+      }),
+    ).toBe(false);
+    await expect(
+      program.compileAssignmentOutput({
+        run,
+        assignment,
+        attemptId: attempt.id,
+        output: {
+          ...upstreamOutput,
+          upstreamChangeRequest: {
+            ...upstreamOutput.upstreamChangeRequest,
+            targetNodeIds: ["missing-research-node"],
+          },
+        },
+      }),
+    ).rejects.toMatchObject({ code: "change_control_target_missing" });
     const upstream = await program.compileAssignmentOutput({
       run,
       assignment,
@@ -2745,7 +3167,8 @@ describe("native compiler-authoritative run program", () => {
     expect(upstream).not.toHaveProperty("graphHash");
     expect(upstream).not.toHaveProperty("graphRevision");
     const upstreamControl = upstream.changeControl!;
-    if (upstreamControl.kind !== "upstream_request") throw new Error("compiler omitted upstream request metadata");
+    if (upstreamControl.kind !== "upstream_request")
+      throw new Error("compiler omitted upstream request metadata");
     const sourceTerminalProof = fixtureTerminalSuccessProof({
       runId: run.id,
       ticketId: ticket.id,
@@ -2783,8 +3206,14 @@ describe("native compiler-authoritative run program", () => {
       ],
     });
     expect(proposal.steps).toHaveLength(3);
-    expect(proposal.steps.every((step) => (step.writeNodeIds ?? proposal.writeNodeIds ?? []).length === 0)).toBe(true);
-    expect(proposal.steps.every((step) => step.executionPolicyBinding?.stepId === step.id)).toBe(true);
+    expect(
+      proposal.steps.every(
+        (step) => (step.writeNodeIds ?? proposal.writeNodeIds ?? []).length === 0,
+      ),
+    ).toBe(true);
+    expect(proposal.steps.every((step) => step.executionPolicyBinding?.stepId === step.id)).toBe(
+      true,
+    );
     run.tickets[proposal.id] = proposal;
 
     const reuseCompilation = await program.compileAssignmentOutput({
@@ -2797,11 +3226,13 @@ describe("native compiler-authoritative run program", () => {
       throw new Error("compiler omitted replayed upstream request metadata");
     }
     expect(reuseCompilation.changeControl.publication.disposition).toBe("reuse");
-    await expect(program.projectChangeControlProposalTicket({
-      run,
-      changeControl: reuseCompilation.changeControl,
-      sourceTerminalProof,
-    })).resolves.toEqual(proposal);
+    await expect(
+      program.projectChangeControlProposalTicket({
+        run,
+        changeControl: reuseCompilation.changeControl,
+        sourceTerminalProof,
+      }),
+    ).resolves.toEqual(proposal);
 
     proposal.status = "ready";
     const proposalApprovalMaterial = {
@@ -2868,50 +3299,60 @@ describe("native compiler-authoritative run program", () => {
       },
     };
     expect(Value.Check(proposalPrepared.terminalOutputSchema!, applicationOutput)).toBe(true);
-    expect(Value.Check(proposalPrepared.terminalOutputSchema!, {
-      status: "completed",
-      summary: "Missing the required typed application",
-    })).toBe(false);
-    await expect(program.compileAssignmentOutput({
-      run,
-      assignment: proposalAssignment,
-      attemptId: proposalPrepared.spec.identity.attemptId,
-      output: {
+    expect(
+      Value.Check(proposalPrepared.terminalOutputSchema!, {
         status: "completed",
         summary: "Missing the required typed application",
-      },
-    })).rejects.toMatchObject({ code: "change_control_application_required" });
-    expect(Value.Check(proposalPrepared.terminalOutputSchema!, {
-      ...applicationOutput,
-      graphDelta: {
-        protocol: "koni.graph-delta.v1",
-        expectedGraphHash: run.graphHash,
-        upsertNodes: [],
-        deleteNodes: [],
-        addEdges: [],
-        removeEdges: [],
-      },
-    })).toBe(false);
-    await expect(program.compileAssignmentOutput({
-      run,
-      assignment: proposalAssignment,
-      attemptId: proposalPrepared.spec.identity.attemptId,
-      output: {
-        ...applicationOutput,
-        changeApplication: {
-          ...applicationOutput.changeApplication,
-          operation: "change-request",
+      }),
+    ).toBe(false);
+    await expect(
+      program.compileAssignmentOutput({
+        run,
+        assignment: proposalAssignment,
+        attemptId: proposalPrepared.spec.identity.attemptId,
+        output: {
+          status: "completed",
+          summary: "Missing the required typed application",
         },
-      },
-    })).rejects.toMatchObject({ code: "change_control_application_route" });
+      }),
+    ).rejects.toMatchObject({ code: "change_control_application_required" });
+    expect(
+      Value.Check(proposalPrepared.terminalOutputSchema!, {
+        ...applicationOutput,
+        graphDelta: {
+          protocol: "koni.graph-delta.v1",
+          expectedGraphHash: run.graphHash,
+          upsertNodes: [],
+          deleteNodes: [],
+          addEdges: [],
+          removeEdges: [],
+        },
+      }),
+    ).toBe(false);
+    await expect(
+      program.compileAssignmentOutput({
+        run,
+        assignment: proposalAssignment,
+        attemptId: proposalPrepared.spec.identity.attemptId,
+        output: {
+          ...applicationOutput,
+          changeApplication: {
+            ...applicationOutput.changeApplication,
+            operation: "change-request",
+          },
+        },
+      }),
+    ).rejects.toMatchObject({ code: "change_control_application_route" });
     const exactProposalScope = [...proposal.executionControl!.changeControlScopeNodeIds!];
     proposal.executionControl!.changeControlScopeNodeIds = [];
-    await expect(program.compileAssignmentOutput({
-      run,
-      assignment: proposalAssignment,
-      attemptId: proposalPrepared.spec.identity.attemptId,
-      output: applicationOutput,
-    })).rejects.toMatchObject({ code: "control_ticket_projection" });
+    await expect(
+      program.compileAssignmentOutput({
+        run,
+        assignment: proposalAssignment,
+        attemptId: proposalPrepared.spec.identity.attemptId,
+        output: applicationOutput,
+      }),
+    ).rejects.toMatchObject({ code: "control_ticket_projection" });
     proposal.executionControl!.changeControlScopeNodeIds = exactProposalScope;
     const applicationSelection = await program.compileAssignmentOutput({
       run,
@@ -2979,9 +3420,10 @@ describe("native compiler-authoritative run program", () => {
       selection: applicationSelection.changeControl,
     });
     expect(applicationTicket).toMatchObject({
-      id: applicationMaterialization.kind === "application"
-        ? applicationMaterialization.applicationTicketId
-        : expect.any(String),
+      id:
+        applicationMaterialization.kind === "application"
+          ? applicationMaterialization.applicationTicketId
+          : expect.any(String),
       operationId: "lifecycle.apply-change-request",
       status: "ready",
       dependencyIds: [proposal.id],
@@ -3051,11 +3493,13 @@ describe("native compiler-authoritative run program", () => {
       scope: noOpSelection.changeControl.scope,
     });
     expect(noOpMaterialization.kind).toBe("no_op");
-    await expect(program.projectApprovedApplicationTicket({
-      run,
-      materialization: noOpMaterialization,
-      selection: noOpSelection.changeControl,
-    })).resolves.toBeUndefined();
+    await expect(
+      program.projectApprovedApplicationTicket({
+        run,
+        materialization: noOpMaterialization,
+        selection: noOpSelection.changeControl,
+      }),
+    ).resolves.toBeUndefined();
 
     const sourceFailureAttemptId = "attempt-source-terminal-failure";
     const sourceTerminalPolicyMaterial = {
@@ -3095,7 +3539,11 @@ describe("native compiler-authoritative run program", () => {
       terminalOutputSha256: sourceTerminalOutputSha256,
     });
     run.terminalFailureProofs = { [sourceFailureProof.sha256]: sourceFailureProof };
-    const failureBindingSha256 = terminalFailureBindingFromProof(run, ticket, sourceFailureProof)?.sha256;
+    const failureBindingSha256 = terminalFailureBindingFromProof(
+      run,
+      ticket,
+      sourceFailureProof,
+    )?.sha256;
     if (failureBindingSha256 === undefined) throw new Error("fixture source failure did not bind");
     const resolverReconciliation = deriveTerminalResolverReconciliation(executionCatalog, {
       runId: run.id,
@@ -3104,7 +3552,8 @@ describe("native compiler-authoritative run program", () => {
       failureBindingSha256,
       existingResolvers: [],
     });
-    if (resolverReconciliation.chainSuppressed) throw new Error("ordinary source unexpectedly suppressed resolver");
+    if (resolverReconciliation.chainSuppressed)
+      throw new Error("ordinary source unexpectedly suppressed resolver");
     const resolver = await program.projectTerminalResolverTicket({
       run,
       reconciliation: resolverReconciliation,
@@ -3155,32 +3604,38 @@ describe("native compiler-authoritative run program", () => {
       blocker: "The bounded resolver requires explicit operator recovery",
     };
     expect(Value.Check(resolverPrepared.terminalOutputSchema!, resolverFailureOutput)).toBe(true);
-    await expect(program.compileAssignmentOutput({
-      run,
-      assignment: resolverAssignment,
-      attemptId: resolverPrepared.spec.identity.attemptId,
-      output: resolverFailureOutput,
-    })).resolves.toEqual({ outcome: resolverFailureOutput });
+    await expect(
+      program.compileAssignmentOutput({
+        run,
+        assignment: resolverAssignment,
+        attemptId: resolverPrepared.spec.identity.attemptId,
+        output: resolverFailureOutput,
+      }),
+    ).resolves.toEqual({ outcome: resolverFailureOutput });
     const resolverReuse = deriveTerminalResolverReconciliation(executionCatalog, {
       runId: run.id,
       sourceTicketId: ticket.id,
       sourceBinding: ticket.executionPolicyBinding!,
       failureBindingSha256,
-      existingResolvers: [{
-        ticketId: resolver!.id,
-        sourceTicketId: ticket.id,
-        resolverOperationId: resolver!.operationId,
-        configurationSha256: run.compiledConfigHash,
-        catalogSha256: executionCatalog.sha256,
-        failureBindingSha256s: [failureBindingSha256],
-        terminal: false,
-      }],
+      existingResolvers: [
+        {
+          ticketId: resolver!.id,
+          sourceTicketId: ticket.id,
+          resolverOperationId: resolver!.operationId,
+          configurationSha256: run.compiledConfigHash,
+          catalogSha256: executionCatalog.sha256,
+          failureBindingSha256s: [failureBindingSha256],
+          terminal: false,
+        },
+      ],
     });
-    await expect(program.projectTerminalResolverTicket({
-      run,
-      reconciliation: resolverReuse,
-      sourceFailureProof,
-    })).resolves.toEqual(resolver);
+    await expect(
+      program.projectTerminalResolverTicket({
+        run,
+        reconciliation: resolverReuse,
+        sourceFailureProof,
+      }),
+    ).resolves.toEqual(resolver);
     const suppressed = deriveTerminalResolverReconciliation(executionCatalog, {
       runId: run.id,
       sourceTicketId: resolver!.id,
@@ -3189,11 +3644,13 @@ describe("native compiler-authoritative run program", () => {
       existingResolvers: [],
     });
     expect(suppressed.chainSuppressed).toBe(true);
-    await expect(program.projectTerminalResolverTicket({
-      run,
-      reconciliation: suppressed,
-      sourceFailureProof,
-    })).resolves.toBeUndefined();
+    await expect(
+      program.projectTerminalResolverTicket({
+        run,
+        reconciliation: suppressed,
+        sourceFailureProof,
+      }),
+    ).resolves.toBeUndefined();
   });
 
   it("prepares a research small run for direct approval without launching a planner", async () => {
@@ -3229,10 +3686,14 @@ describe("native compiler-authoritative run program", () => {
     run.graphHash = reviewable.graphHash;
     materializeApprovedFixtureRun(run);
     const approved = await program.initializeApprovedPlan(run);
-    expect(Object.values(approved.tickets)).toEqual(expect.arrayContaining([
-      expect.objectContaining({ operationId: "formulation.hypothesis.drill-hypothesis" }),
-    ]));
-    const graphWrite = approved.artifactWrites?.find((write) => write.path.endsWith("/program/graph.json"));
+    expect(Object.values(approved.tickets)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ operationId: "formulation.hypothesis.drill-hypothesis" }),
+      ]),
+    );
+    const graphWrite = approved.artifactWrites?.find((write) =>
+      write.path.endsWith("/program/graph.json"),
+    );
     const directGraph = JSON.parse(Buffer.from(graphWrite!.bytes).toString("utf8")) as {
       contextual: {
         ownerPersonaId: string;
@@ -3241,8 +3702,13 @@ describe("native compiler-authoritative run program", () => {
         records: Record<string, { baseline: { acceptedPlan: unknown; source: { kind: string } } }>;
       };
     };
-    expect(directGraph.contextual).toMatchObject({ ownerPersonaId: resolved.workingSpecOwnerId, revision: 1 });
-    expect(directGraph.contextual.records[directGraph.contextual.canonicalWorkingSpecId]).toMatchObject({
+    expect(directGraph.contextual).toMatchObject({
+      ownerPersonaId: resolved.workingSpecOwnerId,
+      revision: 1,
+    });
+    expect(
+      directGraph.contextual.records[directGraph.contextual.canonicalWorkingSpecId],
+    ).toMatchObject({
       baseline: { acceptedPlan: null, source: { kind: "direct_approval" } },
     });
   });
@@ -3259,48 +3725,61 @@ describe("native compiler-authoritative run program", () => {
     });
     expect(fallback.workingSpecOwnerId).toBe("lead");
 
-    await expect(uniqueProgram.resolveRun({
-      runId: "run-owner-invalid",
-      objective: "Reject an unknown explicit owner",
-      runTypeId: "small",
-      targetRef: "refs/heads/main",
-      intake: { goal: "Reject an unknown explicit owner" },
-      overrides: { workingSpecOwner: "missing-persona" },
-    })).rejects.toMatchObject({ code: "working_spec_owner_invalid" });
+    await expect(
+      uniqueProgram.resolveRun({
+        runId: "run-owner-invalid",
+        objective: "Reject an unknown explicit owner",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Reject an unknown explicit owner" },
+        overrides: { workingSpecOwner: "missing-persona" },
+      }),
+    ).rejects.toMatchObject({ code: "working_spec_owner_invalid" });
     const uniqueEndpoint = await discoverAuthorityEndpoint(unique.projectRoot);
-    await expect(readFile(path.join(uniqueEndpoint.stateRoot, "runs/run-owner-invalid/program/graph.json")))
-      .rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(path.join(uniqueEndpoint.stateRoot, "runs/run-owner-invalid/program/graph.json")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
 
     const zero = await installedProject("coding-profile");
     const zeroPersonas = path.join(zero.projectRoot, ".koni", "personas.yaml");
-    await writeFile(zeroPersonas, (await readFile(zeroPersonas, "utf8")).replace(
-      "  model_role: lead\n",
-      "  model_role: ticket_worker\n",
-    ));
-    await expect((await compilerProgram(zero)).resolveRun({
-      runId: "run-owner-zero",
-      objective: "Reject zero leads",
-      runTypeId: "small",
-      targetRef: "refs/heads/main",
-      intake: { goal: "Reject zero leads" },
-    })).rejects.toMatchObject({
+    await writeFile(
+      zeroPersonas,
+      (await readFile(zeroPersonas, "utf8")).replace(
+        "  model_role: lead\n",
+        "  model_role: ticket_worker\n",
+      ),
+    );
+    await expect(
+      (await compilerProgram(zero)).resolveRun({
+        runId: "run-owner-zero",
+        objective: "Reject zero leads",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Reject zero leads" },
+      }),
+    ).rejects.toMatchObject({
       code: "configuration_invalid",
       details: expect.arrayContaining([expect.stringContaining("configuration.role_provider")]),
     });
 
     const multiple = await installedProject("coding-profile");
     const multiplePersonas = path.join(multiple.projectRoot, ".koni", "personas.yaml");
-    await writeFile(multiplePersonas, (await readFile(multiplePersonas, "utf8")).replace(
-      "  model_role: ticket_worker\n",
-      "  model_role: lead\n",
-    ));
-    await expect((await compilerProgram(multiple)).resolveRun({
-      runId: "run-owner-multiple",
-      objective: "Reject multiple leads",
-      runTypeId: "small",
-      targetRef: "refs/heads/main",
-      intake: { goal: "Reject multiple leads" },
-    })).rejects.toMatchObject({ code: "working_spec_owner_resolution" });
+    await writeFile(
+      multiplePersonas,
+      (await readFile(multiplePersonas, "utf8")).replace(
+        "  model_role: ticket_worker\n",
+        "  model_role: lead\n",
+      ),
+    );
+    await expect(
+      (await compilerProgram(multiple)).resolveRun({
+        runId: "run-owner-multiple",
+        objective: "Reject multiple leads",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Reject multiple leads" },
+      }),
+    ).rejects.toMatchObject({ code: "working_spec_owner_resolution" });
   }, 20_000);
 
   it("pins an explicit owner, persists the approved baseline, and isolates note/spec CAS from semantic state", async () => {
@@ -3338,7 +3817,12 @@ describe("native compiler-authoritative run program", () => {
     const shell = JSON.parse(await readFile(graphPath, "utf8")) as {
       graphSha256: Sha256Digest;
       revision: number;
-      contextual: { runRootId: string; revision: number; hash: Sha256Digest; records: Record<string, unknown> };
+      contextual: {
+        runRootId: string;
+        revision: number;
+        hash: Sha256Digest;
+        records: Record<string, unknown>;
+      };
     };
     const semanticBefore = { hash: shell.graphSha256, revision: shell.revision };
     const planningNote = await program.executeAgentTool({
@@ -3390,14 +3874,17 @@ describe("native compiler-authoritative run program", () => {
         hash: Sha256Digest;
         canonicalWorkingSpecId: string;
         ownerPersonaId: string;
-        records: Record<string, {
-          protocol: string;
-          version?: number;
-          digest?: Sha256Digest;
-          supersedes?: string;
-          baseline?: { source: { artifactPath: string; artifactSha256: Sha256Digest } };
-          provenance: Record<string, unknown>;
-        }>;
+        records: Record<
+          string,
+          {
+            protocol: string;
+            version?: number;
+            digest?: Sha256Digest;
+            supersedes?: string;
+            baseline?: { source: { artifactPath: string; artifactSha256: Sha256Digest } };
+            provenance: Record<string, unknown>;
+          }
+        >;
       };
     };
     expect(approvedArtifact.contextual.ownerPersonaId).toBe("architecture-mapper");
@@ -3406,8 +3893,9 @@ describe("native compiler-authoritative run program", () => {
     const baseline = approvedArtifact.contextual.records[baselineId]!;
     expect(baseline).toMatchObject({ protocol: "koni.working-spec.v1", version: 1 });
     expect(baseline.baseline?.source.artifactPath).toContain("planning-output.json");
-    const nativeNote = Object.values(approvedArtifact.contextual.records)
-      .find((record) => record.protocol === "koni.graph-note.v2")!;
+    const nativeNote = Object.values(approvedArtifact.contextual.records).find(
+      (record) => record.protocol === "koni.graph-note.v2",
+    )!;
     expect(nativeNote.provenance).toMatchObject({
       runId,
       generation: run.generation,
@@ -3422,24 +3910,27 @@ describe("native compiler-authoritative run program", () => {
       lineage: planning.spec.lineage,
     });
 
-    await expect(program.executeAgentTool({
-      run,
-      attempt: planningAttempt,
-      grant: planning.authorityGrant!,
-      spec: planning.spec,
-      call: {
-        callId: "call-non-owner-update",
-        name: "koni_update_working_spec",
-        arguments: {
-          expectedContextualRevision: approvedArtifact.contextual.revision,
-          expectedCanonicalDigest: baseline.digest,
-          guidance: "A non-owner must never advance canonical guidance.",
+    await expect(
+      program.executeAgentTool({
+        run,
+        attempt: planningAttempt,
+        grant: planning.authorityGrant!,
+        spec: planning.spec,
+        call: {
+          callId: "call-non-owner-update",
+          name: "koni_update_working_spec",
+          arguments: {
+            expectedContextualRevision: approvedArtifact.contextual.revision,
+            expectedCanonicalDigest: baseline.digest,
+            guidance: "A non-owner must never advance canonical guidance.",
+          },
         },
-      },
-    })).rejects.toMatchObject({ code: "working_spec_owner" });
+      }),
+    ).rejects.toMatchObject({ code: "working_spec_owner" });
 
     const ownerTicket = Object.values(run.tickets).find((ticket) =>
-      ticket.steps.some((step) => step.personaId === "architecture-mapper"));
+      ticket.steps.some((step) => step.personaId === "architecture-mapper"),
+    );
     expect(ownerTicket).toBeDefined();
     const assignment = assignmentFor(run, ownerTicket!.id);
     const ownerPrepared = await program.prepareAttempt({
@@ -3456,8 +3947,16 @@ describe("native compiler-authoritative run program", () => {
     await persistWrites(project.projectRoot, ownerPrepared.artifactWrites ?? []);
     const ownerAttempt = attemptRecord(ownerPrepared.spec, "ticket", "running");
     run.attempts[ownerAttempt.id] = ownerAttempt;
-    const firstDynamic = await program.selectDynamicGraphContext({ run, attempt: ownerAttempt, spec: ownerPrepared.spec });
-    const secondDynamic = await program.selectDynamicGraphContext({ run, attempt: ownerAttempt, spec: ownerPrepared.spec });
+    const firstDynamic = await program.selectDynamicGraphContext({
+      run,
+      attempt: ownerAttempt,
+      spec: ownerPrepared.spec,
+    });
+    const secondDynamic = await program.selectDynamicGraphContext({
+      run,
+      attempt: ownerAttempt,
+      spec: ownerPrepared.spec,
+    });
     expect(firstDynamic.envelopeHash).toBe(secondDynamic.envelopeHash);
     expect(program.dynamicContextCacheStats()).toMatchObject({ selections: 2, indexBuilds: 1 });
 
@@ -3484,10 +3983,15 @@ describe("native compiler-authoritative run program", () => {
     run.graphHash = approvedArtifact.graphSha256;
     await writeFile(graphPath, `${JSON.stringify(approvedArtifact, null, 2)}\n`);
 
-    const beforeTouch = await program.selectDynamicGraphContext({ run, attempt: ownerAttempt, spec: ownerPrepared.spec });
+    const beforeTouch = await program.selectDynamicGraphContext({
+      run,
+      attempt: ownerAttempt,
+      spec: ownerPrepared.spec,
+    });
     const beforeTouchIds = beforeTouch.envelope.selection.selected.map((entry) => entry.id);
-    expect(beforeTouchIds.indexOf("semantic_node:system-a-other"))
-      .toBeLessThan(beforeTouchIds.indexOf("semantic_node:system-z-touched"));
+    expect(beforeTouchIds.indexOf("semantic_node:system-a-other")).toBeLessThan(
+      beforeTouchIds.indexOf("semantic_node:system-z-touched"),
+    );
 
     const receiptPath = `runs/${run.id}/attempts/${ownerAttempt.id}/tool-receipts/write-touched.json`;
     const receipt = {
@@ -3497,42 +4001,53 @@ describe("native compiler-authoritative run program", () => {
     };
     const receiptBytes = Buffer.from(`${JSON.stringify(receipt)}\n`, "utf8");
     const canonicalReceipt = canonicalEncode(receipt);
-    await persistWrites(project.projectRoot, [{ path: receiptPath, bytes: receiptBytes, expectedSha256: null }]);
-    ownerAttempt.authorityToolResults = [{
-      sequence: 1,
-      callId: "call-write-touched",
-      toolName: "koni_write_file",
-      outcome: "accepted",
-      argumentsSha256: rawSha256("{}"),
-      argumentsSizeBytes: 2,
-      receiptSha256: rawSha256(canonicalReceipt),
-      receiptSizeBytes: Buffer.byteLength(canonicalReceipt, "utf8"),
-      artifactPath: receiptPath,
-      recordedAt: FIXED_NOW.toISOString(),
-    }];
-    const afterTouch = await program.selectDynamicGraphContext({ run, attempt: ownerAttempt, spec: ownerPrepared.spec });
+    await persistWrites(project.projectRoot, [
+      { path: receiptPath, bytes: receiptBytes, expectedSha256: null },
+    ]);
+    ownerAttempt.authorityToolResults = [
+      {
+        sequence: 1,
+        callId: "call-write-touched",
+        toolName: "koni_write_file",
+        outcome: "accepted",
+        argumentsSha256: rawSha256("{}"),
+        argumentsSizeBytes: 2,
+        receiptSha256: rawSha256(canonicalReceipt),
+        receiptSizeBytes: Buffer.byteLength(canonicalReceipt, "utf8"),
+        artifactPath: receiptPath,
+        recordedAt: FIXED_NOW.toISOString(),
+      },
+    ];
+    const afterTouch = await program.selectDynamicGraphContext({
+      run,
+      attempt: ownerAttempt,
+      spec: ownerPrepared.spec,
+    });
     const afterTouchIds = afterTouch.envelope.selection.selected.map((entry) => entry.id);
-    expect(afterTouchIds.indexOf("semantic_node:system-z-touched"))
-      .toBeLessThan(afterTouchIds.indexOf("semantic_node:system-a-other"));
+    expect(afterTouchIds.indexOf("semantic_node:system-z-touched")).toBeLessThan(
+      afterTouchIds.indexOf("semantic_node:system-a-other"),
+    );
     expect(afterTouch.envelopeHash).not.toBe(beforeTouch.envelopeHash);
     expect(program.dynamicContextCacheStats()).toMatchObject({ selections: 4, indexBuilds: 2 });
 
-    await expect(program.executeAgentTool({
-      run,
-      attempt: ownerAttempt,
-      grant: ownerPrepared.authorityGrant!,
-      spec: ownerPrepared.spec,
-      call: {
-        callId: "call-working-spec-scope-expansion",
-        name: "koni_update_working_spec",
-        arguments: {
-          expectedContextualRevision: approvedArtifact.contextual.revision,
-          expectedCanonicalDigest: baseline.digest,
-          guidance: "Attempt an unauthorized semantic expansion.",
-          affectedNodeIds: ["missing-node"],
+    await expect(
+      program.executeAgentTool({
+        run,
+        attempt: ownerAttempt,
+        grant: ownerPrepared.authorityGrant!,
+        spec: ownerPrepared.spec,
+        call: {
+          callId: "call-working-spec-scope-expansion",
+          name: "koni_update_working_spec",
+          arguments: {
+            expectedContextualRevision: approvedArtifact.contextual.revision,
+            expectedCanonicalDigest: baseline.digest,
+            guidance: "Attempt an unauthorized semantic expansion.",
+            affectedNodeIds: ["missing-node"],
+          },
         },
-      },
-    })).rejects.toMatchObject({ code: "working_spec_scope" });
+      }),
+    ).rejects.toMatchObject({ code: "working_spec_scope" });
 
     const update = await program.executeAgentTool({
       run,
@@ -3545,7 +4060,8 @@ describe("native compiler-authoritative run program", () => {
         arguments: {
           expectedContextualRevision: approvedArtifact.contextual.revision,
           expectedCanonicalDigest: baseline.digest,
-          guidance: "Implement only the compiler-selected architecture boundary and verify its existing contract.",
+          guidance:
+            "Implement only the compiler-selected architecture boundary and verify its existing contract.",
         },
       },
     });
@@ -3560,30 +4076,41 @@ describe("native compiler-authoritative run program", () => {
     expect(current).toMatchObject({ version: 2, supersedes: baselineId });
     expect(current.baseline?.source).toEqual(baseline.baseline?.source);
     expect(updated.contextual.records[baselineId]).toBeDefined();
-    const postUpdateDynamic = await program.selectDynamicGraphContext({ run, attempt: ownerAttempt, spec: ownerPrepared.spec });
-    expect(postUpdateDynamic.envelope.records).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        kind: "working_spec",
-        value: expect.objectContaining({ version: 2, guidance: expect.stringContaining("compiler-selected") }),
-      }),
-    ]));
-    expect(program.dynamicContextCacheStats()).toMatchObject({ selections: 5, indexBuilds: 3 });
-
-    await expect(program.executeAgentTool({
+    const postUpdateDynamic = await program.selectDynamicGraphContext({
       run,
       attempt: ownerAttempt,
-      grant: ownerPrepared.authorityGrant!,
       spec: ownerPrepared.spec,
-      call: {
-        callId: "call-working-spec-stale",
-        name: "koni_update_working_spec",
-        arguments: {
-          expectedContextualRevision: approvedArtifact.contextual.revision,
-          expectedCanonicalDigest: baseline.digest,
-          guidance: "This stale request must not commit.",
+    });
+    expect(postUpdateDynamic.envelope.records).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "working_spec",
+          value: expect.objectContaining({
+            version: 2,
+            guidance: expect.stringContaining("compiler-selected"),
+          }),
+        }),
+      ]),
+    );
+    expect(program.dynamicContextCacheStats()).toMatchObject({ selections: 5, indexBuilds: 3 });
+
+    await expect(
+      program.executeAgentTool({
+        run,
+        attempt: ownerAttempt,
+        grant: ownerPrepared.authorityGrant!,
+        spec: ownerPrepared.spec,
+        call: {
+          callId: "call-working-spec-stale",
+          name: "koni_update_working_spec",
+          arguments: {
+            expectedContextualRevision: approvedArtifact.contextual.revision,
+            expectedCanonicalDigest: baseline.digest,
+            guidance: "This stale request must not commit.",
+          },
         },
-      },
-    })).rejects.toMatchObject({ code: "working_spec_cas" });
+      }),
+    ).rejects.toMatchObject({ code: "working_spec_cas" });
     expect(JSON.parse(await readFile(graphPath, "utf8"))).toEqual(updated);
   });
 });
@@ -3620,7 +4147,14 @@ function legacySoftwareConfigurationFixture(
     work_dir: "program/work",
     receipts_dir: "program/receipts",
     reports_dir: "program/reports",
-    semantic_hash_excludes: ["annotations", "readiness", "obligations", "tickets", "receipts", "compiler"],
+    semantic_hash_excludes: [
+      "annotations",
+      "readiness",
+      "obligations",
+      "tickets",
+      "receipts",
+      "compiler",
+    ],
     filesystem_scope_excludes: ["node_modules", "target", ".next", "coverage"],
   };
   const orchestration = requiredMutableFixtureRecord(profile.orchestration, "orchestration");
@@ -3633,7 +4167,12 @@ function legacySoftwareConfigurationFixture(
   const document = requiredMutableFixtureRecord(runType.document, `run type ${runTypeId} document`);
   const planning = requiredMutableFixtureRecord(document.planning, "planning");
   planning.session_scope = "run";
-  planning.graph_seed_stage = runTypeId === "small" ? "focused-plan" : runTypeId === "large" ? "verification-plan" : "combined-plan";
+  planning.graph_seed_stage =
+    runTypeId === "small"
+      ? "focused-plan"
+      : runTypeId === "large"
+        ? "verification-plan"
+        : "combined-plan";
   const intake = requiredMutableFixtureRecord(document.intake, "intake");
   delete intake.objective_field;
   document.git = {
@@ -3646,9 +4185,10 @@ function legacySoftwareConfigurationFixture(
   const spawnLead = requiredMutableFixtureRecord(actions["spawn-lead"], "spawn-lead");
   if (!Array.isArray(spawnLead.recipe)) throw new Error("spawn-lead recipe is missing");
   const leadStep = spawnLead.recipe.find((candidate) => {
-    const record = candidate !== null && typeof candidate === "object" && !Array.isArray(candidate)
-      ? candidate as MutableConfigurationFixture
-      : undefined;
+    const record =
+      candidate !== null && typeof candidate === "object" && !Array.isArray(candidate)
+        ? (candidate as MutableConfigurationFixture)
+        : undefined;
     return record?.id === "lead";
   });
   requiredMutableFixtureRecord(leadStep, "Lead recipe step").prompt =
@@ -3696,14 +4236,16 @@ async function refreshFixtureProfileManifest(packageRoot: string): Promise<void>
   const baselineRoot = path.join(packageRoot, "koni", "baseline");
   const files: ProfileBaselineFile[] = [];
   const visit = async (directory: string): Promise<void> => {
-    for (const entry of (await readdir(directory, { withFileTypes: true }))
-      .sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name)))) {
+    for (const entry of (await readdir(directory, { withFileTypes: true })).sort((left, right) =>
+      Buffer.compare(Buffer.from(left.name), Buffer.from(right.name)),
+    )) {
       const absolute = path.join(directory, entry.name);
       if (entry.isDirectory()) {
         await visit(absolute);
         continue;
       }
-      if (!entry.isFile()) throw new Error(`fixture profile contains a non-regular entry: ${absolute}`);
+      if (!entry.isFile())
+        throw new Error(`fixture profile contains a non-regular entry: ${absolute}`);
       const relative = path.relative(baselineRoot, absolute).split(path.sep).join("/");
       const bytes = await readFile(absolute);
       files.push({
@@ -3777,7 +4319,9 @@ function runRecord(
     createdAt: FIXED_NOW.toISOString(),
     updatedAt: FIXED_NOW.toISOString(),
     lifecycle,
-    ...(resolved.lifecycleCatalog === undefined ? {} : { lifecycleCatalog: resolved.lifecycleCatalog }),
+    ...(resolved.lifecycleCatalog === undefined
+      ? {}
+      : { lifecycleCatalog: resolved.lifecycleCatalog }),
     pipelineStageIds: resolved.pipelineStageIds,
     currentPipelineStageId: resolved.pipelineStageIds.find((id) => id.includes("plan")),
     plan: undefined,
@@ -3796,11 +4340,13 @@ function answeredQuestion(): RunQuestionRecord {
     id: "question-product",
     attemptId: "attempt-before-disconnect",
     prompt: "Which storage boundary should the notes workflow use?",
-    options: [{
-      id: "local",
-      label: "Use local-first storage",
-      description: "Keep the first slice within the repository and browser.",
-    }],
+    options: [
+      {
+        id: "local",
+        label: "Use local-first storage",
+        description: "Keep the first slice within the repository and browser.",
+      },
+    ],
     allowsNotes: true,
     askedAt: "2026-07-16T18:58:00.000Z",
     answeredAt: "2026-07-16T18:59:00.000Z",
@@ -3841,14 +4387,16 @@ function attemptRecord(
   };
 }
 
-function fixtureTerminalSuccessProof(input: Readonly<{
-  runId: string;
-  ticketId: string;
-  stepId: string;
-  attemptId: string;
-  actionInvocationId: string;
-  changeControlSha256?: Sha256Digest;
-}>): TerminalSuccessSettlementProof {
+function fixtureTerminalSuccessProof(
+  input: Readonly<{
+    runId: string;
+    ticketId: string;
+    stepId: string;
+    attemptId: string;
+    actionInvocationId: string;
+    changeControlSha256?: Sha256Digest;
+  }>,
+): TerminalSuccessSettlementProof {
   const semanticResult = {
     kind: "assignment" as const,
     status: "completed" as const,
@@ -3874,15 +4422,17 @@ function fixtureTerminalSuccessProof(input: Readonly<{
   return { ...material, sha256: canonicalHash(material) };
 }
 
-function fixtureTerminalFailureProof(input: Readonly<{
-  runId: string;
-  ticketId: string;
-  stepId: string;
-  attemptId: string;
-  actionInvocationId: string;
-  terminalPolicySha256: Sha256Digest;
-  terminalOutputSha256: Sha256Digest;
-}>): TerminalFailureSettlementProof {
+function fixtureTerminalFailureProof(
+  input: Readonly<{
+    runId: string;
+    ticketId: string;
+    stepId: string;
+    attemptId: string;
+    actionInvocationId: string;
+    terminalPolicySha256: Sha256Digest;
+    terminalOutputSha256: Sha256Digest;
+  }>,
+): TerminalFailureSettlementProof {
   const semanticResult = {
     kind: "assignment" as const,
     status: "failed" as const,
@@ -3943,22 +4493,30 @@ function planningOutput(rootSpec: Record<string, unknown>): unknown {
   return {
     full: fullPlans(),
     concise: {
-      architecture: [{
-        title: "Notes ownership seam",
-        description: "Ground the work in the smallest repository-native boundary.",
-      }],
-      decisions: [{
-        title: "Preserve compatibility",
-        description: "Reuse the established contracts unless evidence requires a change.",
-      }],
-      risk: [{
-        title: "Bound the blast radius",
-        description: "Keep mutation and recovery within the selected run scope.",
-      }],
-      verification: [{
-        title: "Prove the observable outcome",
-        description: "Use the cheapest trustworthy repository-native verification seam.",
-      }],
+      architecture: [
+        {
+          title: "Notes ownership seam",
+          description: "Ground the work in the smallest repository-native boundary.",
+        },
+      ],
+      decisions: [
+        {
+          title: "Preserve compatibility",
+          description: "Reuse the established contracts unless evidence requires a change.",
+        },
+      ],
+      risk: [
+        {
+          title: "Bound the blast radius",
+          description: "Keep mutation and recovery within the selected run scope.",
+        },
+      ],
+      verification: [
+        {
+          title: "Prove the observable outcome",
+          description: "Use the cheapest trustworthy repository-native verification seam.",
+        },
+      ],
     },
     graphSeed: { rootSpec, nodes: [], edges: [] },
   };
@@ -3966,7 +4524,7 @@ function planningOutput(rootSpec: Record<string, unknown>): unknown {
 
 function proofPreparationPlanningOutput(): unknown {
   return {
-    ...planningOutput({ work_kind: "new_feature" }) as Record<string, unknown>,
+    ...(planningOutput({ work_kind: "new_feature" }) as Record<string, unknown>),
     graphSeed: {
       rootSpec: {
         work_kind: "new_feature",
@@ -3974,74 +4532,86 @@ function proofPreparationPlanningOutput(): unknown {
         scope_boundaries: ["Only the fixture feature seam is in scope."],
         success_signals: ["The focused source proof turns from red to green."],
       },
-      nodes: [{
-        key: "fixture-system",
-        type: "system",
-        title: "Fixture system",
-        spec: {
-          kind: "app",
-          responsibility: "Own the focused compatibility feature.",
-          contract_required: true,
-          contract_reason: "The existing field identity must remain stable.",
-          owned_paths: ["src"],
-          owned_packages: [],
+      nodes: [
+        {
+          key: "fixture-system",
+          type: "system",
+          title: "Fixture system",
+          spec: {
+            kind: "app",
+            responsibility: "Own the focused compatibility feature.",
+            contract_required: true,
+            contract_reason: "The existing field identity must remain stable.",
+            owned_paths: ["src"],
+            owned_packages: [],
+          },
         },
-      }, {
-        key: "fixture-contract",
-        type: "contract",
-        title: "Backward-compatible field contract",
-        spec: {
-          invariant: "The legacy field identity remains available while the new behavior is added.",
-          enforcement_point: "The exported fixture feature.",
-          observability: "A focused source test exercises the production export.",
-          failure_meaning: "Existing data would become unavailable.",
+        {
+          key: "fixture-contract",
+          type: "contract",
+          title: "Backward-compatible field contract",
+          spec: {
+            invariant:
+              "The legacy field identity remains available while the new behavior is added.",
+            enforcement_point: "The exported fixture feature.",
+            observability: "A focused source test exercises the production export.",
+            failure_meaning: "Existing data would become unavailable.",
+          },
         },
-      }, {
-        key: "fixture-change",
-        type: "change",
-        title: "Add the compatible field behavior",
-        spec: {
-          current_state: "Only the legacy behavior exists.",
-          target_state: "The legacy identity and new behavior coexist.",
-          owned_paths: ["src/feature.ts"],
-          blast_radius: "One focused source module.",
-          risk_factors: ["The legacy identity could be replaced."],
-          proof_strategy: "red_green",
-          risk_tier: "routine",
-          approval_claim: "The focused behavior preserves compatibility.",
-          commit_type: "feat(fixture)",
+        {
+          key: "fixture-change",
+          type: "change",
+          title: "Add the compatible field behavior",
+          spec: {
+            current_state: "Only the legacy behavior exists.",
+            target_state: "The legacy identity and new behavior coexist.",
+            owned_paths: ["src/feature.ts"],
+            blast_radius: "One focused source module.",
+            risk_factors: ["The legacy identity could be replaced."],
+            proof_strategy: "red_green",
+            risk_tier: "routine",
+            approval_claim: "The focused behavior preserves compatibility.",
+            commit_type: "feat(fixture)",
+          },
         },
-      }, {
-        key: "fixture-proof",
-        type: "proof",
-        title: "Verify the compatible field behavior",
-        spec: {
-          purpose: "focused",
-          layer: "unit",
-          claim: "The production export preserves the legacy identity and adds the new behavior.",
-          method: "Execute the focused repository-native source test.",
-          command: ["node", "tests/feature.test.mjs"],
-          working_directory: ".",
-          baseline_check_id: "proof-expected-red",
-          source_paths: ["tests/feature.test.mjs"],
-          covered_paths: ["src/feature.ts"],
-          support_paths: ["test-support/vitest.config.ts"],
-          oracle_cases: [{
-            id: "compatible_field",
-            condition: "The legacy field exists before implementation.",
-            claim: "The same production seam exposes both compatible behaviors.",
-            production_seam: "The exported fixture feature",
-            seam_paths: ["src/feature.ts"],
-            action: "Import and exercise the production export.",
-            assertions: ["The legacy identity remains unchanged.", "The new behavior is optional."],
-          }],
-          conditions: ["The legacy behavior is present."],
-          expected_signal: "The proof is red before implementation and green afterward.",
-          not_proven: ["Unrelated repository behavior."],
-          why: "This is the smallest trustworthy production seam.",
+        {
+          key: "fixture-proof",
+          type: "proof",
+          title: "Verify the compatible field behavior",
+          spec: {
+            purpose: "focused",
+            layer: "unit",
+            claim: "The production export preserves the legacy identity and adds the new behavior.",
+            method: "Execute the focused repository-native source test.",
+            command: ["node", "tests/feature.test.mjs"],
+            working_directory: ".",
+            baseline_check_id: "proof-expected-red",
+            source_paths: ["tests/feature.test.mjs"],
+            covered_paths: ["src/feature.ts"],
+            support_paths: ["test-support/vitest.config.ts"],
+            oracle_cases: [
+              {
+                id: "compatible_field",
+                condition: "The legacy field exists before implementation.",
+                claim: "The same production seam exposes both compatible behaviors.",
+                production_seam: "The exported fixture feature",
+                seam_paths: ["src/feature.ts"],
+                action: "Import and exercise the production export.",
+                assertions: [
+                  "The legacy identity remains unchanged.",
+                  "The new behavior is optional.",
+                ],
+              },
+            ],
+            conditions: ["The legacy behavior is present."],
+            expected_signal: "The proof is red before implementation and green afterward.",
+            not_proven: ["Unrelated repository behavior."],
+            why: "This is the smallest trustworthy production seam.",
+          },
         },
-      }],
-      edges: [{ source: "$root", relation: "systems", target: "fixture-system" },
+      ],
+      edges: [
+        { source: "$root", relation: "systems", target: "fixture-system" },
         { source: "$root", relation: "contracts", target: "fixture-contract" },
         { source: "fixture-change", relation: "realizes", target: "$root" },
         { source: "fixture-change", relation: "affects", target: "fixture-system" },
@@ -4049,7 +4619,8 @@ function proofPreparationPlanningOutput(): unknown {
         { source: "fixture-contract", relation: "applies_to", target: "fixture-system" },
         { source: "fixture-proof", relation: "verifies", target: "fixture-change" },
         { source: "fixture-proof", relation: "verifies", target: "fixture-contract" },
-        { source: "fixture-proof", relation: "uses", target: "fixture-system" }],
+        { source: "fixture-proof", relation: "uses", target: "fixture-system" },
+      ],
     },
   };
 }
@@ -4076,7 +4647,10 @@ function fullPlans(): Record<string, string> {
   };
 }
 
-async function persistWrites(projectRoot: string, writes: readonly TransactionWrite[]): Promise<void> {
+async function persistWrites(
+  projectRoot: string,
+  writes: readonly TransactionWrite[],
+): Promise<void> {
   const endpoint = await discoverAuthorityEndpoint(projectRoot);
   for (const write of writes) {
     const destination = path.join(endpoint.stateRoot, write.path);

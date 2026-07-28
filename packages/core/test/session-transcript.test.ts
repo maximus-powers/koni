@@ -1,10 +1,23 @@
-import { describe, expect, it } from "vitest";
+import { chmod, link, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import {
+  assertAutonomousPiSession,
   parsePiSession,
+  readPiSessionDurably,
   SessionTranscriptError,
   summarizeUsage,
   transcriptPath,
 } from "../src/pi/session-transcript.js";
+
+const temporary: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true })),
+  );
+});
 
 const header = { type: "session", version: 3, id: "session-one", cwd: "/repo" };
 const first = { type: "message", id: "a1", parentId: null, message: { role: "user" } };
@@ -31,6 +44,36 @@ describe("Pi session transcript", () => {
     expect(transcriptPath(session, "b2").map((entry) => entry.id)).toEqual(["a1", "b2"]);
   });
 
+  it("keeps Pi's native interactive branch tree while rejecting it for an autonomous attempt", () => {
+    const branch = { type: "message", id: "b2", parentId: "a1", message: { role: "assistant" } };
+    const interactive = parsePiSession(
+      jsonl({ ...header, parentSession: "/sessions/parent.jsonl" }, first, second, branch),
+    );
+    expect(transcriptPath(interactive, "b2").map((entry) => entry.id)).toEqual(["a1", "b2"]);
+    expect(() =>
+      assertAutonomousPiSession(interactive, {
+        sessionId: header.id,
+        cwd: header.cwd,
+      }),
+    ).toThrowError(
+      expect.objectContaining<Partial<SessionTranscriptError>>({
+        code: "autonomous_parent_session",
+      }),
+    );
+
+    const inFileBranch = parsePiSession(jsonl(header, first, second, branch));
+    expect(() =>
+      assertAutonomousPiSession(inFileBranch, {
+        sessionId: header.id,
+        cwd: header.cwd,
+      }),
+    ).toThrowError(
+      expect.objectContaining<Partial<SessionTranscriptError>>({
+        code: "autonomous_branch",
+      }),
+    );
+  });
+
   it("keeps cache-inclusive and new-token totals separate", () => {
     const session = parsePiSession(jsonl(header, first, second));
     expect(summarizeUsage(session.entries)).toEqual({
@@ -46,10 +89,7 @@ describe("Pi session transcript", () => {
   it.each([
     ["duplicate_entry", jsonl(header, first, first)],
     ["orphan_entry", jsonl(header, { ...second, parentId: "missing" })],
-    [
-      "parent_cycle",
-      jsonl(header, { ...first, parentId: "a2" }, { ...second, parentId: "a1" }),
-    ],
+    ["parent_cycle", jsonl(header, { ...first, parentId: "a2" }, { ...second, parentId: "a1" })],
   ])("fails closed on %s", (code, bytes) => {
     try {
       parsePiSession(bytes);
@@ -86,4 +126,60 @@ describe("Pi session transcript", () => {
       },
     ]);
   });
+
+  it("rejects non-UTF-8 bytes instead of replacement-decoding changed transcript meaning", () => {
+    const bytes = Buffer.concat([
+      Buffer.from(jsonl(header, first), "utf8"),
+      Buffer.from([0xff, 0x0a]),
+    ]);
+    expect(() => parsePiSession(bytes)).toThrowError(
+      expect.objectContaining<Partial<SessionTranscriptError>>({ code: "session_encoding" }),
+    );
+  });
+
+  it("rejects malformed optional header and entry metadata", () => {
+    expect(() => parsePiSession(jsonl({ ...header, cwd: 42 }, first))).toThrowError(
+      expect.objectContaining<Partial<SessionTranscriptError>>({
+        code: "invalid_metadata",
+        line: 1,
+      }),
+    );
+    expect(() =>
+      parsePiSession(jsonl(header, { ...first, timestamp: { forged: true } })),
+    ).toThrowError(
+      expect.objectContaining<Partial<SessionTranscriptError>>({
+        code: "invalid_metadata",
+        line: 2,
+      }),
+    );
+  });
+
+  it("fsyncs and parses one private owner-bound file identity", async () => {
+    const file = await durableFixture();
+    expect((await readPiSessionDurably(file)).lastEntryId).toBe("a2");
+  });
+
+  it("rejects weak permissions, hard links, and symlink paths", async () => {
+    const weak = await durableFixture();
+    await chmod(weak, 0o644);
+    await expect(readPiSessionDurably(weak)).rejects.toMatchObject({ code: "session_identity" });
+
+    const hard = await durableFixture();
+    await link(hard, `${hard}.link`);
+    await expect(readPiSessionDurably(hard)).rejects.toMatchObject({ code: "session_identity" });
+
+    const target = await durableFixture();
+    const alias = `${target}.symlink`;
+    await symlink(target, alias);
+    await expect(readPiSessionDurably(alias)).rejects.toMatchObject({ code: "session_durability" });
+  });
 });
+
+async function durableFixture(): Promise<string> {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "koni-durable-session-"));
+  temporary.push(directory);
+  const file = path.join(directory, "session.jsonl");
+  await writeFile(file, jsonl(header, first, second), { mode: 0o600 });
+  await chmod(file, 0o600);
+  return file;
+}

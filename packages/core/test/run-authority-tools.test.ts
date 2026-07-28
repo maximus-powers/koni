@@ -30,6 +30,7 @@ import {
   type KoniToolName,
 } from "../src/pi/tool-catalog.js";
 import { canonicalHash, rawSha256 } from "../src/shared/canonical.js";
+import { runBehaviorSnapshotFixture } from "./fixtures/compiled-behavior.js";
 
 const roots: string[] = [];
 const engines: RunAuthorityEngine[] = [];
@@ -50,13 +51,21 @@ describe("run authority model tools", () => {
     });
     engines.push(engine);
     await engine.start();
-    const client = await AuthorityClient.connect({ projectRoot: root, client: "tui", version: "1.0.0" });
-    const created = await client.request("run.create", {
-      objective: "Choose and build",
-      runTypeId: "small",
-      targetRef: "refs/heads/main",
-      intake: { goal: "Choose and build" },
-    }, { expectedRevision: 0, idempotencyKey: "create-question-run" });
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const created = await client.request(
+      "run.create",
+      {
+        objective: "Choose and build",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Choose and build" },
+      },
+      { expectedRevision: 0, idempotencyKey: "create-question-run" },
+    );
     const runId = (created.result as { runId: string }).runId;
 
     await waitFor(async () => {
@@ -68,37 +77,113 @@ describe("run authority model tools", () => {
     });
     const waiting = await engine.store.getRun(runId);
     const question = Object.values(waiting.questions)[0]!;
+    const batch = Object.values(waiting.questionBatches ?? {})[0]!;
     expect(question.prompt).toBe("Which behavior should be primary?");
+    expect(question.batchId).toBe(batch.id);
+    expect(question.scope).toBe("run");
+    expect(batch.scope).toBe("run");
+    expect(batch.ticketId).toBeUndefined();
     expect(Object.values(waiting.attempts)[0]!.status).toBe("waiting_question");
     expect(waiting.plan).toBeUndefined();
 
     await client.request("authority.ping");
-    await client.request("question.answer", {
-      runId,
-      questionId: question.id,
-      selectedOptionId: "recommended",
-      notes: "Keep the fallback too.",
-    }, { expectedRevision: client.revision, idempotencyKey: "answer-question" });
+    const saved = await client.request(
+      "question.answer",
+      {
+        runId,
+        batchId: batch.id,
+        questionId: question.id,
+        expectedVersion: batch.version,
+        selectedOptionId: "recommended",
+        notes: "Keep the fallback too.",
+      },
+      { expectedRevision: client.revision, idempotencyKey: "answer-question" },
+    );
+    const savedVersion = (saved.result as { batchVersion: number }).batchVersion;
+    const stillWaiting = await engine.store.getRun(runId);
+    expect(stillWaiting.lifecycle.phase).toBe("awaiting_questions");
+    expect(stillWaiting.attempts[batch.attemptId]!.status).toBe("waiting_question");
+    await client.request(
+      "question.resolve",
+      {
+        runId,
+        batchId: batch.id,
+        expectedVersion: savedVersion,
+      },
+      { expectedRevision: client.revision, idempotencyKey: "resolve-question-batch" },
+    );
     await waitFor(async () => {
       const current = await engine.store.getRun(runId);
-      return current.lifecycle.phase === "awaiting_approval" &&
-        Object.values(current.attempts)[0]?.status === "completed";
+      return (
+        current.lifecycle.phase === "awaiting_approval" &&
+        Object.values(current.attempts)[0]?.status === "completed"
+      );
     });
     const planned = await engine.store.getRun(runId);
     expect(Object.values(planned.attempts)[0]!.status).toBe("completed");
     expect(planned.plan?.concise.decisions?.[0]?.title).toBe("Use recommendation");
-    expect(Object.values(planned.attempts)[0]!.authorityToolResults?.filter(
-      (result) => result.toolName === "koni_read_file",
-    )).toEqual([
-      expect.objectContaining({ callId: "read-one", outcome: "accepted" }),
+    expect(
+      Object.values(planned.attempts)[0]!.authorityToolResults?.filter(
+        (result) => result.toolName === "koni_read_file",
+      ),
+    ).toEqual([expect.objectContaining({ callId: "read-one", outcome: "accepted" })]);
+    client.close();
+  });
+
+  it("rejects blind large-file pagination and permits search-bound targeted reads", async () => {
+    const root = await repository();
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program: questionProgram("bounded-read"),
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const created = await client.request(
+      "run.create",
+      {
+        objective: "Read one large source seam efficiently",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Read one large source seam efficiently" },
+      },
+      { expectedRevision: 0, idempotencyKey: "create-bounded-read-run" },
+    );
+    const runId = (created.result as { runId: string }).runId;
+
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      if (current.lifecycle.phase === "blocked") {
+        throw new Error(
+          `bounded read run blocked: ${current.lifecycle.blocker ?? "unknown blocker"}`,
+        );
+      }
+      return current.lifecycle.phase === "awaiting_approval";
+    });
+    const planned = await engine.store.getRun(runId);
+    const results = Object.values(planned.attempts)[0]!.authorityToolResults ?? [];
+    expect(results.map((result) => [result.callId, result.toolName, result.outcome])).toEqual([
+      ["large-first-page", "koni_read_file", "accepted"],
+      ["large-search", "koni_search_files", "accepted"],
+      ["large-targeted-page", "koni_read_file", "accepted"],
+      ["large-submit", "koni_submit_output", "accepted"],
     ]);
     client.close();
   });
 });
 
-function questionProgram(): RunCompilerProgram {
+function questionProgram(mode: "question" | "bounded-read" = "question"): RunCompilerProgram {
   const terminalSchema = Type.Object({ result: Type.String() }, { additionalProperties: false });
-  const names: KoniToolName[] = ["koni_read_file", "koni_ask_question", "koni_submit_output"];
+  const names: KoniToolName[] =
+    mode === "bounded-read"
+      ? ["koni_read_file", "koni_search_files", "koni_submit_output"]
+      : ["koni_read_file", "koni_ask_question", "koni_submit_output"];
   return {
     async resolveRun(request) {
       return {
@@ -110,9 +195,19 @@ function questionProgram(): RunCompilerProgram {
         },
         compiledConfigHash: `sha256:${"b".repeat(64)}`,
         runTypeId: request.runTypeId,
+        objective: request.objective,
+        intake: request.intake,
+        behavior: runBehaviorSnapshotFixture(request.runTypeId, "software"),
         workingSpecOwnerId: "lead",
         planningMode: "agent",
         pipelineStageIds: ["plan", "approval", "orchestrate", "verification", "promotion"],
+        pipelineStages: [
+          { id: "plan", title: "Plan", kind: "planning", automatic: true },
+          { id: "approval", title: "Approval", kind: "approval", automatic: false },
+          { id: "orchestrate", title: "Orchestrate", kind: "orchestration", automatic: true },
+          { id: "verification", title: "Verification", kind: "checkpoint", automatic: true },
+          { id: "promotion", title: "Promotion", kind: "promotion", automatic: false },
+        ],
         executionConfig: {
           maxParallel: 1,
           questionPolicy: "some",
@@ -123,7 +218,9 @@ function questionProgram(): RunCompilerProgram {
         },
       };
     },
-    async initializeDirectApproval() { throw new Error("not used"); },
+    async initializeDirectApproval() {
+      throw new Error("not used");
+    },
     async prepareAttempt(input) {
       const context = "Compiler-bound planning context";
       const grant: AuthorityGrant = {
@@ -137,12 +234,14 @@ function questionProgram(): RunCompilerProgram {
         epoch: 1,
         generation: input.run.generation,
         allowedTools: names,
-        readPaths: ["README.md"],
+        readPaths: mode === "bounded-read" ? ["large.ts"] : ["README.md"],
         writePaths: [],
         expectedRevision: input.nextAuthorityRevision,
         expectedStateHash: input.expectedAuthorityStateHash,
       };
-      expect(grant.expectedStateHash).toBe(authorityRevisionStateHash(input.run.projectRoot, input.nextAuthorityRevision));
+      expect(grant.expectedStateHash).toBe(
+        authorityRevisionStateHash(input.run.projectRoot, input.nextAuthorityRevision),
+      );
       const systemPrompt = "Ask once, wait for the answer, then submit.";
       const initialPrompt = "Plan the run.";
       const spec = createAgentLaunchSpec({
@@ -176,11 +275,21 @@ function questionProgram(): RunCompilerProgram {
           initialPrompt,
           initialPromptHash: rawSha256(initialPrompt),
         },
-        model: { provider: "openai-codex", id: "test-model", thinkingLevel: "high" },
+        model: {
+          provider: "openai-codex",
+          id: "test-model",
+          api: "openai-codex-responses",
+          catalogMaxTokens: 128_000,
+          catalogSha256: rawSha256("test-model-catalog"),
+          thinkingLevel: "high",
+        },
         tools: names.map((name) => ({
           name,
           schemaHash: koniToolSchemaHash(name, terminalSchema),
-          executionMode: name === "koni_read_file" ? "parallel" as const : "sequential" as const,
+          executionMode:
+            name === "koni_read_file" || name === "koni_search_files"
+              ? ("parallel" as const)
+              : ("sequential" as const),
           maxResultBytes: koniToolMaxResultBytes(name),
         })),
         resources: { setHash: computeLaunchResourceSetHash([]), entries: [] },
@@ -192,10 +301,11 @@ function questionProgram(): RunCompilerProgram {
             maxCacheWrite: 10_000,
             maxNew: 20_000,
             maxAll: 40_000,
+            providerOutputHeadroom: 128_000,
           },
           transcript: { maxBytes: 64 * 1024 * 1024 },
           retries: { maxProviderRetries: 0, baseDelayMs: 0 },
-          repositoryCalls: { max: 1 },
+          repositoryCalls: { max: mode === "bounded-read" ? 10 : 1 },
         },
         terminal: {
           toolName: "koni_submit_output",
@@ -211,7 +321,12 @@ function questionProgram(): RunCompilerProgram {
         contextContent: context,
         compactionSnapshot: {
           objective: input.run.objective,
-          plan: { architecture: "Pending", decisions: "Pending", risk: "Pending", verification: "Pending" },
+          plan: {
+            architecture: "Pending",
+            decisions: "Pending",
+            risk: "Pending",
+            verification: "Pending",
+          },
           graphRefs: [],
           touchedFiles: [],
           receiptIds: [],
@@ -219,7 +334,10 @@ function questionProgram(): RunCompilerProgram {
           unresolvedQuestions: [],
           nextAction: "Plan the run",
         },
-        factory: (async (_spec, options) => new QuestionAdapter(spec, options.tools)) satisfies ManagedPiSessionFactory,
+        factory: (async (_spec, options) =>
+          mode === "bounded-read"
+            ? new BoundedReadAdapter(spec, options.tools)
+            : new QuestionAdapter(spec, options.tools)) satisfies ManagedPiSessionFactory,
       };
     },
     async compilePlanningOutput() {
@@ -244,10 +362,18 @@ function questionProgram(): RunCompilerProgram {
         },
       };
     },
-    async initializeApprovedPlan() { throw new Error("not used"); },
-    async compileAssignmentOutput() { throw new Error("not used"); },
-    async verifyRun() { return { ok: true }; },
-    async createIntegrationTicket() { throw new Error("not used"); },
+    async initializeApprovedPlan() {
+      throw new Error("not used");
+    },
+    async compileAssignmentOutput() {
+      throw new Error("not used");
+    },
+    async verifyRun() {
+      return { ok: true };
+    },
+    async createIntegrationTicket() {
+      throw new Error("not used");
+    },
   };
 }
 
@@ -265,7 +391,9 @@ class QuestionAdapter implements PiSessionAdapter {
     this.sessionFile = path.join(spec.workspace.sessionDirectory, `${this.sessionId}.jsonl`);
   }
 
-  public getActiveToolNames(): readonly string[] { return this.tools.map((tool) => tool.name); }
+  public getActiveToolNames(): readonly string[] {
+    return this.tools.map((tool) => tool.name);
+  }
   public appendMapping(): void {}
   public subscribe(listener: (event: AgentSessionEvent) => void): () => void {
     this.#listeners.add(listener);
@@ -283,7 +411,10 @@ class QuestionAdapter implements PiSessionAdapter {
       await readTool.execute("read-two", readArgs, this.#abort.signal);
       throw new Error("repository-call ceiling accepted a second unique read");
     } catch (error) {
-      if (!(error instanceof Error) || (error as Error & { code?: string }).code !== "repository_call_budget") {
+      if (
+        !(error instanceof Error) ||
+        (error as Error & { code?: string }).code !== "repository_call_budget"
+      ) {
         throw error;
       }
     }
@@ -294,8 +425,15 @@ class QuestionAdapter implements PiSessionAdapter {
         { id: "legacy", label: "Legacy", description: "Keep the old behavior first." },
       ],
       allowsNotes: true,
+      recommendedOptionId: "recommended",
+      impact: "high_impact",
     };
-    this.emit({ type: "tool_execution_start", toolCallId: "ask", toolName: "koni_ask_question", args: questionArgs });
+    this.emit({
+      type: "tool_execution_start",
+      toolCallId: "ask",
+      toolName: "koni_ask_question",
+      args: questionArgs,
+    });
     const questionResult = await this.tool("koni_ask_question").execute(
       "ask",
       questionArgs,
@@ -309,7 +447,12 @@ class QuestionAdapter implements PiSessionAdapter {
       isError: false,
     });
     const terminalArgs = { result: "planned-after-answer" };
-    this.emit({ type: "tool_execution_start", toolCallId: "submit", toolName: "koni_submit_output", args: terminalArgs });
+    this.emit({
+      type: "tool_execution_start",
+      toolCallId: "submit",
+      toolName: "koni_submit_output",
+      args: terminalArgs,
+    });
     const terminalResult = await this.tool("koni_submit_output").execute(
       "submit",
       terminalArgs,
@@ -323,10 +466,14 @@ class QuestionAdapter implements PiSessionAdapter {
       isError: false,
     });
   }
-  public async continue(): Promise<void> { await this.prompt(); }
+  public async continue(): Promise<void> {
+    await this.prompt();
+  }
   public async steer(): Promise<void> {}
   public async followUp(): Promise<void> {}
-  public async abort(): Promise<void> { this.#abort.abort(); }
+  public async abort(): Promise<void> {
+    this.#abort.abort();
+  }
   public dispose(): void {}
   private tool(name: KoniToolName): AuthorityBackedTool {
     const tool = this.tools.find((candidate) => candidate.name === name);
@@ -335,6 +482,95 @@ class QuestionAdapter implements PiSessionAdapter {
   }
   private emit(event: AgentSessionEvent): void {
     for (const listener of this.#listeners) listener(event);
+  }
+}
+
+class BoundedReadAdapter implements PiSessionAdapter {
+  public readonly sessionId: string;
+  public readonly sessionFile: string;
+  readonly #abort = new AbortController();
+
+  public constructor(
+    private readonly spec: Readonly<AgentLaunchSpec>,
+    private readonly tools: readonly AuthorityBackedTool[],
+  ) {
+    this.sessionId = spec.identity.sessionId;
+    this.sessionFile = path.join(spec.workspace.sessionDirectory, `${this.sessionId}.jsonl`);
+  }
+
+  public getActiveToolNames(): readonly string[] {
+    return this.tools.map((tool) => tool.name);
+  }
+  public appendMapping(): void {}
+  public subscribe(): () => void {
+    return () => {};
+  }
+  public async prompt(): Promise<void> {
+    const read = this.tool("koni_read_file");
+    const first = (await read.execute(
+      "large-first-page",
+      { path: "large.ts", offset: 0, maxBytes: 32 * 1024 },
+      this.#abort.signal,
+    )) as { details?: { value?: { sizeBytes?: number; eof?: boolean } } };
+    expect(first.details?.value).toMatchObject({ sizeBytes: expect.any(Number), eof: false });
+    await expect(
+      read.execute(
+        "large-oversized-page",
+        { path: "large.ts", offset: 0, maxBytes: 32 * 1024 + 1 },
+        this.#abort.signal,
+      ),
+    ).rejects.toMatchObject({ code: "read_page_size" });
+    await expect(
+      read.execute(
+        "large-blind-page",
+        { path: "large.ts", offset: 32 * 1024, maxBytes: 32 * 1024 },
+        this.#abort.signal,
+      ),
+    ).rejects.toMatchObject({ code: "read_search_required" });
+
+    const search = (await this.tool("koni_search_files").execute(
+      "large-search",
+      { query: "TARGETED_SEAM", roots: ["large.ts"] },
+      this.#abort.signal,
+    )) as { details?: { value?: { matches?: Array<{ path: string; byteOffset: number }> } } };
+    const match = search.details?.value?.matches?.find(
+      (candidate) => candidate.path === "large.ts",
+    );
+    expect(match).toMatchObject({ byteOffset: expect.any(Number) });
+    const targetedOffset = Math.max(1, match!.byteOffset - 1_024);
+    const targeted = (await read.execute(
+      "large-targeted-page",
+      { path: "large.ts", offset: targetedOffset, maxBytes: 4_096 },
+      this.#abort.signal,
+    )) as { details?: { value?: { content?: string } } };
+    expect(targeted.details?.value?.content).toContain("TARGETED_SEAM");
+    await expect(
+      read.execute(
+        "large-outside-search-window",
+        { path: "large.ts", offset: match!.byteOffset - 32 * 1024 - 1, maxBytes: 1 },
+        this.#abort.signal,
+      ),
+    ).rejects.toMatchObject({ code: "read_search_required" });
+    await this.tool("koni_submit_output").execute(
+      "large-submit",
+      { result: "targeted seam inspected" },
+      this.#abort.signal,
+    );
+  }
+  public async continue(): Promise<void> {
+    await this.prompt();
+  }
+  public async steer(): Promise<void> {}
+  public async followUp(): Promise<void> {}
+  public async abort(): Promise<void> {
+    this.#abort.abort();
+  }
+  public dispose(): void {}
+
+  private tool(name: KoniToolName): AuthorityBackedTool {
+    const tool = this.tools.find((candidate) => candidate.name === name);
+    if (tool === undefined) throw new Error(`missing authority tool ${name}`);
+    return tool;
   }
 }
 
@@ -354,7 +590,11 @@ async function repository(): Promise<string> {
   await git(root, "config", "user.email", "koni@example.invalid");
   await git(root, "config", "user.name", "Koni Test");
   await writeFile(path.join(root, "README.md"), "initial\n");
-  await git(root, "add", "README.md");
+  await writeFile(
+    path.join(root, "large.ts"),
+    `${"export const filler = 1;\n".repeat(3_000)}export const TARGETED_SEAM = true;\n${"export const tail = 1;\n".repeat(1_000)}`,
+  );
+  await git(root, "add", "README.md", "large.ts");
   await git(root, "commit", "-m", "initial");
   return root;
 }
@@ -367,8 +607,10 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
     child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
     child.on("error", reject);
-    child.on("close", (code) => code === 0
-      ? resolve(Buffer.concat(stdout).toString("utf8").trim())
-      : reject(new Error(Buffer.concat(stderr).toString("utf8"))));
+    child.on("close", (code) =>
+      code === 0
+        ? resolve(Buffer.concat(stdout).toString("utf8").trim())
+        : reject(new Error(Buffer.concat(stderr).toString("utf8"))),
+    );
   });
 }

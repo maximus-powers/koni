@@ -1,13 +1,10 @@
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import type {
-  ExtensionAPI,
-  ExtensionCommandContext,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   isDirectInvocation,
@@ -17,14 +14,8 @@ import {
 } from "../src/cli.js";
 import { createKoniCoreExtension } from "../src/extension.js";
 import { AuthorityServer } from "../src/authority/server.js";
-import {
-  createProjectRun,
-  ensureProjectAuthority,
-} from "../src/operator/authority-bootstrap.js";
-import {
-  createRunFromPi,
-  projectPiModels,
-} from "../src/operator/control-center-host.js";
+import { createProjectRun, ensureProjectAuthority } from "../src/operator/authority-bootstrap.js";
+import { createRunFromPi, projectPiModels } from "../src/operator/control-center-host.js";
 import {
   installAndCacheProfile,
   loadCachedInstalledProfile,
@@ -36,13 +27,20 @@ const temporaryRoots: string[] = [];
 const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
-  await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  await Promise.all(
+    temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+  );
 });
 
 describe("Pi operator extension", () => {
   it("projects the contained runtime catalog and disables ambient-only Pi providers", async () => {
     const native = { provider: "openai-codex", id: "gpt-5.6-sol", name: "Sol", reasoning: true };
-    const extensionOnly = { provider: "community", id: "custom", name: "Community Custom", reasoning: true };
+    const extensionOnly = {
+      provider: "community",
+      id: "custom",
+      name: "Community Custom",
+      reasoning: true,
+    };
     const getAll = vi.fn(() => [native, extensionOnly]);
     const getAvailable = vi.fn(() => [native, extensionOnly]);
     const getRegisteredProviderIds = vi.fn(() => ["community"]);
@@ -50,16 +48,20 @@ describe("Pi operator extension", () => {
       getModels: vi.fn(() => [native]),
       getAvailableSnapshot: vi.fn(() => [native]),
     };
-    const models = await projectPiModels({
-      modelRegistry: { getAll, getAvailable, getRegisteredProviderIds } as never,
-    }, { runtime });
+    const models = await projectPiModels(
+      {
+        modelRegistry: { getAll, getAvailable, getRegisteredProviderIds } as never,
+      },
+      { runtime },
+    );
     expect(models).toEqual([
       { ...native, thinkingLevels: ["off", "minimal", "low", "medium", "high"], available: true },
       {
         ...extensionOnly,
         thinkingLevels: ["off", "minimal", "low", "medium", "high"] as const,
         available: false,
-        unavailableReason: "This provider comes from an ambient Pi extension; contained Koni attempts do not load ambient extensions.",
+        unavailableReason:
+          "This provider comes from an ambient Pi extension; contained Koni attempts do not load ambient extensions.",
       },
     ]);
     expect(getAll).toHaveBeenCalledOnce();
@@ -70,7 +72,10 @@ describe("Pi operator extension", () => {
   it("is inert until /koni is invoked and mounts the shared control-center host on demand", async () => {
     const extensionHandlers = new Map<string, (...arguments_: any[]) => unknown>();
     const eventHandlers = new Map<string, (payload: unknown) => void>();
-    const commands = new Map<string, { handler(args: string, context: ExtensionCommandContext): Promise<void> }>();
+    const commands = new Map<
+      string,
+      { handler(args: string, context: ExtensionCommandContext): Promise<void> }
+    >();
     const open = vi.fn(async () => undefined);
     const pi = {
       events: {
@@ -83,8 +88,12 @@ describe("Pi operator extension", () => {
         },
       },
       registerCommand(name: string, command: unknown) {
-        commands.set(name, command as { handler(args: string, context: ExtensionCommandContext): Promise<void> });
+        commands.set(
+          name,
+          command as { handler(args: string, context: ExtensionCommandContext): Promise<void> },
+        );
       },
+      registerTool() {},
       on(event: string, handler: (...arguments_: any[]) => unknown) {
         extensionHandlers.set(event, handler);
       },
@@ -145,8 +154,14 @@ describe("Pi operator extension", () => {
     const second = fakePiWithEvents(events);
     const firstOpen = vi.fn(async () => undefined);
     const secondOpen = vi.fn(async () => undefined);
-    createKoniCoreExtension({ assertPiHost: vi.fn(async () => undefined), openControlCenter: firstOpen })(first.pi);
-    createKoniCoreExtension({ assertPiHost: vi.fn(async () => undefined), openControlCenter: secondOpen })(second.pi);
+    createKoniCoreExtension({
+      assertPiHost: vi.fn(async () => undefined),
+      openControlCenter: firstOpen,
+    })(first.pi);
+    createKoniCoreExtension({
+      assertPiHost: vi.fn(async () => undefined),
+      openControlCenter: secondOpen,
+    })(second.pi);
 
     await first.commands.get("koni")!.handler("", fakeCommandContext(first.notifications));
     await second.commands.get("koni")!.handler("", fakeCommandContext(second.notifications));
@@ -160,16 +175,19 @@ describe("Pi operator extension", () => {
     }
   });
 
-  it("shuts Pi down at session start for a legacy duplicate and gives scope-correct removal", async () => {
+  it("warns about a legacy duplicate without shutting down the ordinary Pi session", async () => {
     const handlers = new Map<string, (...args: any[]) => unknown>();
     const notifications: Array<{ message: string; type: string | undefined }> = [];
     const shutdown = vi.fn();
     const pi = {
       events: {
-        on() { return () => undefined; },
+        on() {
+          return () => undefined;
+        },
         emit() {},
       },
       registerCommand() {},
+      registerTool() {},
       getCommands: () => [
         {
           name: "koni:1",
@@ -192,7 +210,9 @@ describe("Pi operator extension", () => {
           },
         },
       ],
-      on(event: string, handler: (...args: any[]) => unknown) { handlers.set(event, handler); },
+      on(event: string, handler: (...args: any[]) => unknown) {
+        handlers.set(event, handler);
+      },
     } as unknown as ExtensionAPI;
     createKoniCoreExtension()(pi);
     const context = {
@@ -201,43 +221,169 @@ describe("Pi operator extension", () => {
     } as unknown as ExtensionCommandContext;
 
     await handlers.get("session_start")!({ type: "session_start", reason: "startup" }, context);
-    expect(shutdown).toHaveBeenCalledOnce();
+    expect(shutdown).not.toHaveBeenCalled();
     expect(notifications).toHaveLength(1);
-    expect(notifications[0]?.type).toBe("error");
+    expect(notifications[0]?.type).toBe("warning");
+    expect(notifications[0]?.message).toContain("Ordinary Pi use remains available");
     expect(notifications[0]?.message).toContain("pi remove 'npm:@koni/core@0.9.0'`");
     expect(notifications[0]?.message).not.toContain("npm:@koni/core@0.9.0' --local");
     expect(notifications[0]?.message).toContain("pi remove '../koni' --local");
   });
 
-  it("shuts down before interactive work when the active Pi host is unsupported", async () => {
+  it("defers Pi-host checks until a Koni command and never shuts down Pi on incompatibility", async () => {
     const handlers = new Map<string, (...args: any[]) => unknown>();
+    const commands = new Map<
+      string,
+      { handler(args: string, context: ExtensionCommandContext): Promise<void> }
+    >();
     const notifications: Array<{ message: string; type: string | undefined }> = [];
     const shutdown = vi.fn();
     const open = vi.fn(async () => undefined);
+    const assertPiHost = vi.fn(async () => {
+      throw new Error("Pi 0.80.11 is unsupported");
+    });
     const pi = {
-      events: { on() { return () => undefined; }, emit() {} },
-      registerCommand() {},
-      getCommands: () => [{
-        name: "koni",
-        source: "extension",
-        sourceInfo: { path: "/koni/extension.js", source: "npm:@koni/core", scope: "user", origin: "package" },
-      }],
-      on(event: string, handler: (...args: any[]) => unknown) { handlers.set(event, handler); },
+      events: {
+        on() {
+          return () => undefined;
+        },
+        emit() {},
+      },
+      registerCommand(name: string, command: unknown) {
+        commands.set(
+          name,
+          command as { handler(args: string, context: ExtensionCommandContext): Promise<void> },
+        );
+      },
+      registerTool() {},
+      getCommands: () => [
+        {
+          name: "koni",
+          source: "extension",
+          sourceInfo: {
+            path: "/koni/extension.js",
+            source: "npm:@koni/core",
+            scope: "user",
+            origin: "package",
+          },
+        },
+      ],
+      on(event: string, handler: (...args: any[]) => unknown) {
+        handlers.set(event, handler);
+      },
     } as unknown as ExtensionAPI;
     createKoniCoreExtension({
-      assertPiHost: vi.fn(async () => { throw new Error("Pi 0.80.11 is unsupported"); }),
+      assertPiHost,
       openControlCenter: open,
     })(pi);
-    const context = { ...fakeCommandContext(notifications), shutdown } as unknown as ExtensionCommandContext;
+    const context = {
+      ...fakeCommandContext(notifications),
+      shutdown,
+    } as unknown as ExtensionCommandContext;
 
     await handlers.get("session_start")!({ type: "session_start", reason: "startup" }, context);
 
-    expect(shutdown).toHaveBeenCalledOnce();
+    expect(assertPiHost).not.toHaveBeenCalled();
+    expect(shutdown).not.toHaveBeenCalled();
     expect(open).not.toHaveBeenCalled();
-    expect(notifications).toEqual([expect.objectContaining({
-      type: "error",
-      message: expect.stringContaining("Pi 0.80.11 is unsupported"),
-    })]);
+    expect(notifications).toEqual([]);
+
+    await commands.get("koni")!.handler("", context);
+    expect(assertPiHost).toHaveBeenCalledOnce();
+    expect(shutdown).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
+    expect(notifications).toEqual([
+      expect.objectContaining({
+        type: "error",
+        message: expect.stringContaining("Pi 0.80.11 is unsupported"),
+      }),
+    ]);
+  });
+
+  it("shows both conflict documents before asking Pi users to keep or use an update", async () => {
+    const { pi, commands } = fakePi();
+    const ordering: string[] = [];
+    const conflict = {
+      path: "resources/pi-packages.yaml",
+      title: "Pi Packages",
+      domain: "resources",
+      reason: "modified",
+      currentSha256: `sha256:${"c".repeat(64)}`,
+      upstreamSha256: `sha256:${"d".repeat(64)}`,
+    };
+    const client = {
+      revision: 13,
+      request: vi.fn(async (method: string, params?: unknown, options?: unknown) => {
+        ordering.push(`rpc:${method}`);
+        if (method === "profile.conflicts.list")
+          return {
+            result: {
+              protocol: "koni.profile-upstream-conflict-catalog.v1",
+              lifecycleGeneration: 4,
+              profileVersion: "1.0.0",
+              conflicts: [conflict],
+            },
+          };
+        if (method === "profile.conflicts.inspect")
+          return {
+            result: {
+              protocol: "koni.profile-upstream-conflict-inspection.v1",
+              lifecycleGeneration: 4,
+              conflict,
+              currentText: "packages:\n  - project-tool\n",
+              upstreamText: "packages:\n  - upstream-tool\n",
+            },
+          };
+        if (method === "profile.conflicts.resolve") {
+          expect(params).toEqual({
+            path: conflict.path,
+            expectedLifecycleGeneration: 4,
+            expectedProjectSha256: conflict.currentSha256,
+            resolution: "accept_upstream",
+          });
+          expect(options).toMatchObject({ expectedRevision: 13 });
+          return { result: { resolved: true } };
+        }
+        throw new Error(`unexpected RPC ${method}`);
+      }),
+      close: vi.fn(),
+    };
+    createKoniCoreExtension({
+      assertPiHost: vi.fn(async () => undefined),
+      ensure: vi.fn(async () => client as never),
+    })(pi);
+    const context = {
+      cwd: "/project",
+      mode: "tui",
+      hasUI: true,
+      ui: {
+        notify(message: string) {
+          ordering.push(`notify:${message}`);
+        },
+        async select(title: string, choices: string[]) {
+          ordering.push(`select:${title}:${choices.join("|")}`);
+          return "Use upstream update";
+        },
+      },
+    } as unknown as ExtensionCommandContext;
+
+    await commands.get("koni")!.handler("conflicts resources/pi-packages.yaml", context);
+    const comparisonIndex = ordering.findIndex(
+      (entry) =>
+        entry.startsWith("notify:Project:\npackages:\n  - project-tool") &&
+        entry.includes("Upstream:\npackages:\n  - upstream-tool"),
+    );
+    const choiceIndex = ordering.findIndex((entry) =>
+      entry.startsWith("select:Pi Packages · modified:"),
+    );
+    expect(comparisonIndex).toBeGreaterThan(-1);
+    expect(choiceIndex).toBeGreaterThan(comparisonIndex);
+    expect(client.request.mock.calls.map(([method]) => method)).toEqual([
+      "profile.conflicts.list",
+      "profile.conflicts.inspect",
+      "profile.conflicts.resolve",
+    ]);
+    expect(client.close).toHaveBeenCalledOnce();
   });
 
   it("blocks an unavailable interactive default before branch lookup or run.create", async () => {
@@ -261,18 +407,25 @@ describe("Pi operator extension", () => {
       },
     } as unknown as ExtensionCommandContext;
 
-    await expect(createRunFromPi({ context, version: "1.0.0" }, {
-      ensure: vi.fn(async () => client as never),
-      loadModels: vi.fn(async () => [{
-        provider: "openai-codex",
-        id: "gpt-small",
-        name: "GPT Small",
-        reasoning: true,
-        thinkingLevels: ["off", "minimal", "low", "medium", "high"] as const,
-        available: false,
-        unavailableReason: "No Pi credential is configured.",
-      }]),
-    })).rejects.toThrow(/No Pi credential is configured/);
+    await expect(
+      createRunFromPi(
+        { context, version: "1.0.0" },
+        {
+          ensure: vi.fn(async () => client as never),
+          loadModels: vi.fn(async () => [
+            {
+              provider: "openai-codex",
+              id: "gpt-small",
+              name: "GPT Small",
+              reasoning: true,
+              thinkingLevels: ["off", "minimal", "low", "medium", "high"] as const,
+              available: false,
+              unavailableReason: "No Pi credential is configured.",
+            },
+          ]),
+        },
+      ),
+    ).rejects.toThrow(/No Pi credential is configured/);
     expect(calls).toEqual(["control.catalog"]);
     expect(client.close).toHaveBeenCalledOnce();
   });
@@ -290,13 +443,55 @@ describe("shell operator surface", () => {
     const dependencies = fakeCliDependencies();
     expect(await runKoniCli(["--version"], io, dependencies)).toBe(0);
     expect(output.pop()).toBe("1.0.0\n");
+    expect(await runKoniCli(["--help"], io, dependencies)).toBe(0);
+    const help = output.pop()!;
+    expect(help).toContain("koni run --goal TEXT [--type <run-type>]");
+    expect(help).toContain(
+      "Available run types come from the project's compiled profile and configuration.",
+    );
+    expect(help).not.toContain("--type small|medium|large");
     expect(await runKoniCli(["status", "--json"], io, dependencies)).toBe(0);
     expect(JSON.parse(output.pop()!)).toMatchObject({ running: false, projectRoot: "/project" });
     expect(dependencies.ensure).not.toHaveBeenCalled();
     expect(dependencies.standalone).not.toHaveBeenCalled();
   });
 
-  it("exposes legacy adoption as preview, explicit apply, and explicit successor resume", async () => {
+  it("opens the shared standalone control center only from an explicit interactive TUI command", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "koni-cli-tui-"));
+    temporaryRoots.push(root);
+    await execFileAsync("git", ["init", "-q"], { cwd: root });
+    const projectRoot = await realpath(root);
+    const io: KoniCliIO = {
+      stdout: () => undefined,
+      stderr: () => undefined,
+      stdinIsTTY: true,
+      stdoutIsTTY: true,
+    };
+    const dependencies = fakeCliDependencies();
+    const close = vi.fn();
+    const client = { close };
+    vi.mocked(dependencies.ensure).mockResolvedValue(client as never);
+
+    expect(await runKoniCli(["tui", "--root", projectRoot], io, dependencies)).toBe(0);
+    expect(dependencies.ensure).toHaveBeenCalledWith({
+      projectRoot,
+      version: "1.0.0",
+      client: "tui",
+    });
+    expect(dependencies.standalone).toHaveBeenCalledWith({
+      projectRoot,
+      version: "1.0.0",
+      client,
+      reconnectClient: expect.any(Function),
+    });
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("stops the running authority after updating so the change takes effect on next use", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "koni-cli-update-"));
+    temporaryRoots.push(root);
+    await execFileAsync("git", ["init", "-q"], { cwd: root });
+    const projectRoot = await realpath(root);
     const output: string[] = [];
     const io: KoniCliIO = {
       stdout: (text) => output.push(text),
@@ -305,53 +500,194 @@ describe("shell operator surface", () => {
       stdoutIsTTY: false,
     };
     const dependencies = fakeCliDependencies();
-    vi.mocked(dependencies.previewLegacyRuns).mockResolvedValue({
-      protocol: "koni.legacy-run-adoption-catalog.v1",
-      migrationId: "migration-one",
+    vi.mocked(dependencies.readInstalled).mockResolvedValue({
+      packageName: "@koni/coding-profile",
+      profileId: "software",
+      profileVersion: "0.7.0",
+      bundleSha256: `sha256:${"a".repeat(64)}`,
+    });
+    vi.mocked(dependencies.resolveProfile).mockResolvedValue("/authenticated/coding-profile");
+    vi.mocked(dependencies.previewInstall).mockResolvedValue({
+      profileVersion: "0.8.0",
+      mandatoryRetirements: [],
+      previewSha256: `sha256:${"b".repeat(64)}`,
+    } as never);
+    vi.mocked(dependencies.install).mockResolvedValue({
+      packageName: "@koni/coding-profile",
+      profileVersion: "0.8.0",
+      added: [],
+      updated: ["graph.yaml"],
+      preserved: [],
+      pendingUpstream: [],
+    } as never);
+    vi.mocked(dependencies.stop).mockResolvedValue({
+      wasRunning: true,
+      projectRoot,
+      pausedRunCount: 2,
+      pausedRunIds: ["run-a", "run-b"],
+      pausedRunIdsTruncated: false,
+    });
+
+    expect(await runKoniCli(["update", "coding", "--root", root], io, dependencies)).toBe(0);
+    expect(dependencies.stop).toHaveBeenCalledWith({ projectRoot, version: "1.0.0" });
+    const printed = output.join("");
+    expect(printed).toContain("Stopped the running authority");
+    expect(printed).toContain("paused 2 active run");
+  });
+
+  it("uses the compiled default when --type is omitted and the profile has no small run type", async () => {
+    const output: string[] = [];
+    const io: KoniCliIO = {
+      stdout: (text) => output.push(text),
+      stderr: () => undefined,
+      stdinIsTTY: false,
+      stdoutIsTTY: false,
+    };
+    const dependencies = fakeCliDependencies();
+    const client = {
+      revision: 4,
+      request: vi.fn(async (method: string) => {
+        if (method !== "control.catalog") throw new Error(`unexpected RPC ${method}`);
+        return {
+          result: {
+            ...modelAdmissionCatalog(),
+            defaultRunTypeId: "custom",
+            runTypes: [{ ...modelAdmissionCatalog().runTypes[0]!, id: "custom", title: "Custom" }],
+          },
+        };
+      }),
+      close: vi.fn(),
+    };
+    vi.mocked(dependencies.ensure).mockResolvedValue(client as never);
+    vi.mocked(dependencies.run).mockResolvedValue({ runId: "run-default", status: "starting" });
+
+    expect(
+      await runKoniCli(
+        ["run", "--goal", "Build without small", "--target", "main", "--root", "/project"],
+        io,
+        dependencies,
+      ),
+    ).toBe(0);
+    expect(dependencies.run).toHaveBeenCalledWith({
       projectRoot: "/project",
-      sourceRetained: true,
-      runs: [{ runId: "legacy-one", disposition: "ready" }],
+      version: "1.0.0",
+      objective: "Build without small",
+      runTypeId: "custom",
+      targetRef: "main",
     });
-    vi.mocked(dependencies.adoptLegacyRun).mockResolvedValue({
-      migrationId: "migration-one",
-      sourceRunId: "legacy-one",
-      successorRunId: "run-successor",
-      status: "adopted_paused",
-      phase: "paused",
-      sourceRetained: true,
-    });
+    expect(output.at(-1)).toContain("Started custom run run-default on main.");
+    expect(client.close).toHaveBeenCalledOnce();
+  });
+
+  it("resumes a paused or blocked run by id", async () => {
+    const output: string[] = [];
+    const io: KoniCliIO = {
+      stdout: (text) => output.push(text),
+      stderr: () => undefined,
+      stdinIsTTY: false,
+      stdoutIsTTY: false,
+    };
+    const dependencies = fakeCliDependencies();
     vi.mocked(dependencies.resumeRun).mockResolvedValue({
       runId: "run-successor",
       status: "draft",
     });
 
-    expect(await runKoniCli([
-      "adopt", "--migration", "migration-one", "--root", "/project", "--json",
-    ], io, dependencies)).toBe(0);
-    expect(dependencies.previewLegacyRuns).toHaveBeenCalledWith(expect.objectContaining({
-      projectRoot: "/project",
-      migrationId: "migration-one",
-    }));
-    expect(dependencies.adoptLegacyRun).not.toHaveBeenCalled();
-
-    expect(await runKoniCli([
-      "adopt", "--migration", "migration-one", "--run", "legacy-one", "--apply",
-      "--root", "/project", "--json",
-    ], io, dependencies)).toBe(0);
-    expect(dependencies.adoptLegacyRun).toHaveBeenCalledWith(expect.objectContaining({
-      migrationId: "migration-one",
-      runId: "legacy-one",
-    }));
-
-    expect(await runKoniCli([
-      "resume", "--run", "run-successor", "--root", "/project", "--json",
-    ], io, dependencies)).toBe(0);
-    expect(dependencies.resumeRun).toHaveBeenCalledWith(expect.objectContaining({ runId: "run-successor" }));
+    expect(
+      await runKoniCli(
+        ["resume", "--run", "run-successor", "--root", "/project", "--json"],
+        io,
+        dependencies,
+      ),
+    ).toBe(0);
+    expect(dependencies.resumeRun).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: "run-successor" }),
+    );
     expect(output.map((entry) => JSON.parse(entry))).toEqual([
-      expect.objectContaining({ migrationId: "migration-one" }),
-      expect.objectContaining({ successorRunId: "run-successor" }),
       expect.objectContaining({ runId: "run-successor", status: "draft" }),
     ]);
+  });
+
+  it("lists, inspects, and resolves upstream profile conflicts through revisioned authority", async () => {
+    const output: string[] = [];
+    const io: KoniCliIO = {
+      stdout: (text) => output.push(text),
+      stderr: () => undefined,
+      stdinIsTTY: false,
+      stdoutIsTTY: false,
+    };
+    const dependencies = fakeCliDependencies();
+    const calls: Array<{ method: string; params?: unknown; options?: unknown }> = [];
+    const conflict = {
+      path: "resources/pi-packages.yaml",
+      title: "Pi Packages",
+      domain: "resources",
+      reason: "modified",
+      currentSha256: `sha256:${"c".repeat(64)}`,
+      upstreamSha256: `sha256:${"d".repeat(64)}`,
+    };
+    const client = {
+      revision: 11,
+      request: vi.fn(async (method: string, params?: unknown, options?: unknown) => {
+        calls.push({ method, params, options });
+        if (method === "profile.conflicts.list")
+          return {
+            result: {
+              protocol: "koni.profile-upstream-conflict-catalog.v1",
+              lifecycleGeneration: 3,
+              profileVersion: "1.0.0",
+              conflicts: [conflict],
+            },
+          };
+        if (method === "profile.conflicts.inspect")
+          return {
+            result: {
+              protocol: "koni.profile-upstream-conflict-inspection.v1",
+              lifecycleGeneration: 3,
+              conflict,
+              currentText: "packages:\n  - project-tool\n",
+              upstreamText: "packages:\n  - upstream-tool\n",
+            },
+          };
+        if (method === "profile.conflicts.resolve") return { result: { resolved: true } };
+        throw new Error(`unexpected RPC ${method}`);
+      }),
+      close: vi.fn(),
+    };
+    vi.mocked(dependencies.ensure).mockResolvedValue(client as never);
+
+    expect(await runKoniCli(["conflicts", "--root", "/project"], io, dependencies)).toBe(0);
+    expect(output.at(-1)).toContain("resources/pi-packages.yaml · modified");
+    expect(
+      await runKoniCli(
+        ["conflicts", "resources/pi-packages.yaml", "--root", "/project"],
+        io,
+        dependencies,
+      ),
+    ).toBe(0);
+    expect(output.at(-1)).toContain("project-tool");
+    expect(output.at(-1)).toContain("upstream-tool");
+    expect(
+      await runKoniCli(
+        ["conflicts", "resources/pi-packages.yaml", "--accept-upstream", "--root", "/project"],
+        io,
+        dependencies,
+      ),
+    ).toBe(0);
+    expect(calls.at(-1)).toMatchObject({
+      method: "profile.conflicts.resolve",
+      params: {
+        path: conflict.path,
+        expectedLifecycleGeneration: 3,
+        expectedProjectSha256: conflict.currentSha256,
+        resolution: "accept_upstream",
+      },
+      options: { expectedRevision: 11 },
+    });
+    expect((calls.at(-1)?.options as { idempotencyKey?: string }).idempotencyKey).toMatch(
+      /^profile\.conflicts\.resolve:/u,
+    );
+    expect(client.close).toHaveBeenCalledTimes(3);
   });
 
   it("recognizes the npm-installed symlink as a direct executable invocation", async () => {
@@ -380,24 +716,31 @@ describe("shell operator surface", () => {
       close: vi.fn(),
     };
 
-    await expect(createProjectRun({
-      projectRoot: "/project",
-      version: "1.0.0",
-      objective: "Build notes",
-      runTypeId: "small",
-      targetRef: "main",
-    }, {
-      ensure: vi.fn(async () => client as never),
-      loadModels: vi.fn(async () => [{
-        provider: "openai-codex",
-        id: "gpt-small",
-        name: "GPT Small",
-        reasoning: true,
-        thinkingLevels: ["off", "minimal", "low", "medium", "high"] as const,
-        available: false,
-        unavailableReason: "No Pi credential is configured.",
-      }]),
-    })).rejects.toThrow(/No Pi credential is configured/);
+    await expect(
+      createProjectRun(
+        {
+          projectRoot: "/project",
+          version: "1.0.0",
+          objective: "Build notes",
+          runTypeId: "small",
+          targetRef: "main",
+        },
+        {
+          ensure: vi.fn(async () => client as never),
+          loadModels: vi.fn(async () => [
+            {
+              provider: "openai-codex",
+              id: "gpt-small",
+              name: "GPT Small",
+              reasoning: true,
+              thinkingLevels: ["off", "minimal", "low", "medium", "high"] as const,
+              available: false,
+              unavailableReason: "No Pi credential is configured.",
+            },
+          ]),
+        },
+      ),
+    ).rejects.toThrow(/No Pi credential is configured/);
     expect(calls).toEqual(["control.catalog"]);
     expect(client.close).toHaveBeenCalledOnce();
   });
@@ -412,7 +755,10 @@ describe("authenticated profile cache", () => {
     await execFileAsync("git", ["init", "-q"], { cwd: projectRoot });
     const packageRoot = path.join(repositoryRoot, "packages", "coding-profile");
 
-    const installed = await installAndCacheProfile({ projectRoot, profilePackageRoot: packageRoot });
+    const installed = await installAndCacheProfile({
+      projectRoot,
+      profilePackageRoot: packageRoot,
+    });
     const cached = await loadCachedInstalledProfile(projectRoot);
     expect(cached.manifest.bundle_sha256).toBe(installed.bundleSha256);
     expect(cached.manifest.package.name).toBe("@koni/coding-profile");
@@ -426,16 +772,23 @@ describe("authenticated profile cache", () => {
     const sourceRoot = path.join(root, "ambient-profile");
     await mkdir(projectRoot);
     await execFileAsync("git", ["init", "-q"], { cwd: projectRoot });
-    await execFileAsync("cp", ["-R", path.join(repositoryRoot, "packages", "coding-profile"), sourceRoot]);
+    await execFileAsync("cp", [
+      "-R",
+      path.join(repositoryRoot, "packages", "coding-profile"),
+      sourceRoot,
+    ]);
     let installedFrom: string | undefined;
-    const installed = await installAndCacheProfile({ projectRoot, profilePackageRoot: sourceRoot }, {
-      install: async (target, packageRoot) => {
-        installedFrom = packageRoot;
-        await rm(sourceRoot, { recursive: true, force: true });
-        const { installProfile } = await import("../src/profile/install.js");
-        return installProfile(target, packageRoot);
+    const installed = await installAndCacheProfile(
+      { projectRoot, profilePackageRoot: sourceRoot },
+      {
+        install: async (target, packageRoot) => {
+          installedFrom = packageRoot;
+          await rm(sourceRoot, { recursive: true, force: true });
+          const { installProfile } = await import("../src/profile/install.js");
+          return installProfile(target, packageRoot);
+        },
       },
-    });
+    );
     expect(installedFrom).toBe(installed.cachedPackageRoot);
     expect(installed.cachedPackageRoot).toContain(path.join(".git", "koni", "profile-cache"));
     expect(await loadCachedInstalledProfile(projectRoot)).toMatchObject({
@@ -464,32 +817,129 @@ describe("authenticated profile cache", () => {
       await server.start();
       return {};
     });
-    const authenticatePi = vi.fn(async () => ({} as never));
-    const first = await ensureProjectAuthority({
-      projectRoot: nested,
-      version: "1.0.0",
-      client: "cli",
-      launch,
-      resolvePiRuntime: authenticatePi,
-      timeoutMs: 3_000,
-    });
+    const first = await withAuthenticatedPiRuntime(() =>
+      ensureProjectAuthority({
+        projectRoot: nested,
+        version: "1.0.0",
+        client: "cli",
+        launch,
+        timeoutMs: 3_000,
+      }),
+    );
     const shouldNotLaunch = vi.fn(async () => ({}));
-    const second = await ensureProjectAuthority({
-      projectRoot,
-      version: "1.0.0",
-      client: "pi-extension",
-      launch: shouldNotLaunch,
-      resolvePiRuntime: authenticatePi,
-      timeoutMs: 3_000,
-    });
+    const second = await withAuthenticatedPiRuntime(() =>
+      ensureProjectAuthority({
+        projectRoot,
+        version: "1.0.0",
+        client: "pi-extension",
+        launch: shouldNotLaunch,
+        timeoutMs: 3_000,
+      }),
+    );
     expect(launch).toHaveBeenCalledOnce();
     expect(shouldNotLaunch).not.toHaveBeenCalled();
-    expect(authenticatePi).toHaveBeenCalledTimes(2);
     first.close();
     second.close();
     await server.stop();
   }, 30_000);
+
+  it("waits for an already-bound authority to finish recovery without launching a duplicate", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "koni-operator-starting-"));
+    temporaryRoots.push(root);
+    const projectRoot = path.join(root, "project");
+    await mkdir(projectRoot);
+    await execFileAsync("git", ["init", "-q"], { cwd: projectRoot });
+    await installAndCacheProfile({
+      projectRoot,
+      profilePackageRoot: path.join(repositoryRoot, "packages", "coding-profile"),
+    });
+
+    const server = new AuthorityServer({
+      projectRoot,
+      version: "1.0.0",
+      deferReadyUntilRecovery: true,
+    });
+    server.register("project.status", {
+      mutating: false,
+      handle: () => ({ result: { projectRoot, version: "1.0.0", revision: 0, runCount: 0 } }),
+    });
+    await server.start();
+    const launch = vi.fn(async () => ({}));
+    const ready = new Promise<void>((resolve) =>
+      setTimeout(() => {
+        server.completeStartupRecovery();
+        resolve();
+      }, 150),
+    );
+    const client = await withAuthenticatedPiRuntime(() =>
+      ensureProjectAuthority({
+        projectRoot,
+        version: "1.0.0",
+        client: "cli",
+        launch,
+        timeoutMs: 3_000,
+      }),
+    );
+    await ready;
+    expect(launch).not.toHaveBeenCalled();
+    client.close();
+    await server.stop();
+  }, 30_000);
+
+  it("does not mistake a losing child exit for failure while a cold winner binds after 500ms", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "koni-operator-cold-race-"));
+    temporaryRoots.push(root);
+    const projectRoot = path.join(root, "project");
+    await mkdir(projectRoot);
+    await execFileAsync("git", ["init", "-q"], { cwd: projectRoot });
+    await installAndCacheProfile({
+      projectRoot,
+      profilePackageRoot: path.join(repositoryRoot, "packages", "coding-profile"),
+    });
+
+    const winner = new AuthorityServer({ projectRoot, version: "1.0.0" });
+    winner.register("project.status", {
+      mutating: false,
+      handle: () => ({ result: { projectRoot, version: "1.0.0", revision: 0, runCount: 0 } }),
+    });
+    let winnerStartup: Promise<void> | undefined;
+    const launch = vi.fn(async () => {
+      winnerStartup = new Promise<void>((resolve, reject) =>
+        setTimeout(() => {
+          winner.start().then(() => resolve(), reject);
+        }, 750),
+      );
+      return { exited: Promise.resolve({ code: 1, signal: null }) };
+    });
+    const client = await withAuthenticatedPiRuntime(() =>
+      ensureProjectAuthority({
+        projectRoot,
+        version: "1.0.0",
+        client: "cli",
+        launch,
+        timeoutMs: 4_000,
+      }),
+    );
+    await winnerStartup;
+    expect(launch).toHaveBeenCalledOnce();
+    client.close();
+    await winner.stop();
+  }, 30_000);
 });
+
+async function withAuthenticatedPiRuntime<T>(operation: () => Promise<T>): Promise<T> {
+  const packageRoot = await realpath(
+    path.join(repositoryRoot, "node_modules/@earendil-works/pi-coding-agent"),
+  );
+  const previousArgv = process.argv[1];
+  process.argv[1] = path.join(packageRoot, "package.json");
+  try {
+    return await operation();
+  } finally {
+    if (previousArgv === undefined) process.argv.splice(1, 1);
+    else process.argv[1] = previousArgv;
+  }
+}
 
 describe("Pi profile source discovery", () => {
   it("rejects different manifest URLs for one package instead of accepting load-order wins", () => {
@@ -505,12 +955,13 @@ describe("Pi profile source discovery", () => {
         for (const listener of handlers.get(topic) ?? []) listener(value);
       },
     };
-    const catalog = new PiProfileSourceCatalog(events as never);
-    const announce = (manifest_url: string) => events.emit("koni.profile.available.v1", {
-      protocol: "koni.profile-source.v1",
-      package: "@koni/coding-profile",
-      manifest_url,
-    });
+    const catalog = new PiProfileSourceCatalog(events);
+    const announce = (manifest_url: string) =>
+      events.emit("koni.profile.available.v1", {
+        protocol: "koni.profile-source.v1",
+        package: "@koni/coding-profile",
+        manifest_url,
+      });
     announce("file:///one/koni/profile-manifest.json");
     announce("file:///one/koni/profile-manifest.json");
     expect(catalog.discover()).toHaveLength(1);
@@ -531,7 +982,9 @@ function fakePi(): {
       eventHandlers.set(channel, handler);
       return () => eventHandlers.delete(channel);
     },
-    emit(channel: string, payload: unknown) { eventHandlers.get(channel)?.(payload); },
+    emit(channel: string, payload: unknown) {
+      eventHandlers.get(channel)?.(payload);
+    },
   });
 }
 
@@ -543,13 +996,20 @@ function fakePiWithEvents(events: {
   commands: Map<string, { handler(args: string, context: ExtensionCommandContext): Promise<void> }>;
   notifications: Array<{ message: string; type: string | undefined }>;
 } {
-  const commands = new Map<string, { handler(args: string, context: ExtensionCommandContext): Promise<void> }>();
+  const commands = new Map<
+    string,
+    { handler(args: string, context: ExtensionCommandContext): Promise<void> }
+  >();
   const notifications: Array<{ message: string; type: string | undefined }> = [];
   const pi = {
     events,
     registerCommand(name: string, command: unknown) {
-      commands.set(name, command as { handler(args: string, context: ExtensionCommandContext): Promise<void> });
+      commands.set(
+        name,
+        command as { handler(args: string, context: ExtensionCommandContext): Promise<void> },
+      );
     },
+    registerTool() {},
     on() {},
   } as unknown as ExtensionAPI;
   return { pi, commands, notifications };
@@ -563,7 +1023,9 @@ function fakeCommandContext(
     mode: "tui",
     hasUI: true,
     ui: {
-      notify(message: string, type?: string) { notifications.push({ message, type }); },
+      notify(message: string, type?: string) {
+        notifications.push({ message, type });
+      },
     },
   } as unknown as ExtensionCommandContext;
 }
@@ -588,34 +1050,53 @@ function fakeCliDependencies(): KoniCliDependencies {
     stop: vi.fn(),
     validate: vi.fn(),
     install: vi.fn(),
+    previewInstall: vi.fn(),
     resolveProfile: vi.fn(),
     readInstalled: vi.fn(),
     run: vi.fn(),
-    previewLegacyRuns: vi.fn(),
-    adoptLegacyRun: vi.fn(),
     resumeRun: vi.fn(),
     standalone: vi.fn(),
   } as unknown as KoniCliDependencies;
 }
 
 function modelAdmissionCatalog() {
+  const intake = [
+    {
+      id: "goal",
+      label: "Goal",
+      description: "Describe the outcome Koni should deliver.",
+      kind: "text",
+      required: true,
+      options: [],
+    },
+  ];
   return {
     protocol: "koni.control-catalog.v1",
-    runTypes: [{
-      id: "small",
-      title: "Small",
-      description: "Small run",
-      questionPolicy: "none",
-      maxParallel: 1,
-      startMode: "planning",
-      stages: [],
-      roles: [{
-        id: "planner",
-        title: "Planner",
-        provider: "openai-codex",
-        model: "gpt-small",
-        thinkingLevel: "high",
-      }],
-    }],
+    defaultRunTypeId: "small",
+    runTypes: [
+      {
+        id: "small",
+        title: "Small",
+        description: "Small run",
+        questionPolicy: "none",
+        maxParallel: 1,
+        startMode: "planning",
+        objectiveFieldId: "goal",
+        intake,
+        questionDefaultScope: "run",
+        autoStart: true,
+        runCardSections: ["goal", "pipeline", "graph", "tickets", "checks", "report"],
+        stages: [],
+        roles: [
+          {
+            id: "planner",
+            title: "Planner",
+            provider: "openai-codex",
+            model: "gpt-small",
+            thinkingLevel: "high",
+          },
+        ],
+      },
+    ],
   };
 }

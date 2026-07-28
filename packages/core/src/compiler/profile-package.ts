@@ -10,6 +10,7 @@ import {
   type ProfilePackageManifest,
 } from "../contracts/profile-package.js";
 import {
+  canonicalEncode,
   compareUtf8,
   isSha256Digest,
   rawSha256,
@@ -33,6 +34,7 @@ const PROFILE_FILE_KINDS: ReadonlySet<ProfileFileKind> = new Set([
 ]);
 const MAX_MANIFEST_FILES = 16_384;
 const MAX_MIGRATIONS = 1_024;
+const MAX_MIGRATION_SOURCE_DIGESTS = 1_024;
 
 export interface VerifiedProfileBaseline {
   manifest: ProfilePackageManifest;
@@ -84,10 +86,14 @@ export function validateProfilePackageManifest(
   }
 
   const packageRecord = expectRequiredRecord(root, "package", "", ["name", "version"], bag);
-  const packageName = packageRecord === undefined ? undefined : requiredString(packageRecord, "name", "/package", bag);
-  const packageVersion = packageRecord === undefined
-    ? undefined
-    : requiredString(packageRecord, "version", "/package", bag);
+  const packageName =
+    packageRecord === undefined
+      ? undefined
+      : requiredString(packageRecord, "name", "/package", bag);
+  const packageVersion =
+    packageRecord === undefined
+      ? undefined
+      : requiredString(packageRecord, "version", "/package", bag);
   if (packageName !== undefined && !isPackageName(packageName)) {
     bag.error("manifest.package_name", "/package/name", "package name is not a canonical npm name");
   }
@@ -100,25 +106,41 @@ export function validateProfilePackageManifest(
     ["id", "display_name", "version", "lineage"],
     bag,
   );
-  const profileId = profileRecord === undefined ? undefined : requiredString(profileRecord, "id", "/profile", bag);
-  const displayName = profileRecord === undefined
-    ? undefined
-    : requiredString(profileRecord, "display_name", "/profile", bag);
-  const profileVersion = profileRecord === undefined
-    ? undefined
-    : requiredString(profileRecord, "version", "/profile", bag);
-  const lineage = profileRecord === undefined
-    ? undefined
-    : requiredString(profileRecord, "lineage", "/profile", bag);
+  const profileId =
+    profileRecord === undefined ? undefined : requiredString(profileRecord, "id", "/profile", bag);
+  const displayName =
+    profileRecord === undefined
+      ? undefined
+      : requiredString(profileRecord, "display_name", "/profile", bag);
+  const profileVersion =
+    profileRecord === undefined
+      ? undefined
+      : requiredString(profileRecord, "version", "/profile", bag);
+  const lineage =
+    profileRecord === undefined
+      ? undefined
+      : requiredString(profileRecord, "lineage", "/profile", bag);
   if (profileId !== undefined && !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(profileId)) {
-    bag.error("manifest.profile_id", "/profile/id", "profile id must be a lowercase kebab identifier");
+    bag.error(
+      "manifest.profile_id",
+      "/profile/id",
+      "profile id must be a lowercase kebab identifier",
+    );
   }
   if (displayName !== undefined && !isDisplayName(displayName)) {
-    bag.error("manifest.display_name", "/profile/display_name", "profile display name is not valid");
+    bag.error(
+      "manifest.display_name",
+      "/profile/display_name",
+      "profile display name is not valid",
+    );
   }
   validateExactSemver(profileVersion, "/profile/version", "manifest.profile_version", bag);
   if (lineage !== undefined && !isLineage(lineage)) {
-    bag.error("manifest.lineage", "/profile/lineage", "profile lineage must be one stable dotted identifier");
+    bag.error(
+      "manifest.lineage",
+      "/profile/lineage",
+      "profile lineage must be one stable dotted identifier",
+    );
   }
 
   const compatibilityRecord = expectRequiredRecord(
@@ -128,15 +150,18 @@ export function validateProfilePackageManifest(
     ["core_api_range", "profile_schema_range", "pi_range"],
     bag,
   );
-  const coreRange = compatibilityRecord === undefined
-    ? undefined
-    : requiredString(compatibilityRecord, "core_api_range", "/compatibility", bag);
-  const schemaRange = compatibilityRecord === undefined
-    ? undefined
-    : requiredString(compatibilityRecord, "profile_schema_range", "/compatibility", bag);
-  const piRange = compatibilityRecord === undefined
-    ? undefined
-    : requiredString(compatibilityRecord, "pi_range", "/compatibility", bag);
+  const coreRange =
+    compatibilityRecord === undefined
+      ? undefined
+      : requiredString(compatibilityRecord, "core_api_range", "/compatibility", bag);
+  const schemaRange =
+    compatibilityRecord === undefined
+      ? undefined
+      : requiredString(compatibilityRecord, "profile_schema_range", "/compatibility", bag);
+  const piRange =
+    compatibilityRecord === undefined
+      ? undefined
+      : requiredString(compatibilityRecord, "pi_range", "/compatibility", bag);
   const target: ProfileCompatibilityTarget = {
     ...DEFAULT_PROFILE_COMPATIBILITY_TARGET,
     ...targetOverrides,
@@ -152,30 +177,36 @@ export function validateProfilePackageManifest(
   validateRange(piRange, target.piVersion, "/compatibility/pi_range", "Pi", bag);
 
   const baselineRecord = expectRequiredRecord(root, "baseline", "", ["root", "files"], bag);
-  const baselineRoot = baselineRecord === undefined
-    ? undefined
-    : requiredString(baselineRecord, "root", "/baseline", bag);
+  const baselineRoot =
+    baselineRecord === undefined
+      ? undefined
+      : requiredString(baselineRecord, "root", "/baseline", bag);
   if (baselineRoot !== undefined && baselineRoot !== PROFILE_PACKAGE_BASELINE_ROOT) {
     bag.error("manifest.baseline_root", "/baseline/root", "baseline root must be ./baseline");
   }
-  const files = baselineRecord === undefined
-    ? undefined
-    : validateFiles(baselineRecord.files, "/baseline/files", bag);
+  const files =
+    baselineRecord === undefined
+      ? undefined
+      : validateFiles(baselineRecord.files, "/baseline/files", bag);
 
   const bundleHash = requiredString(root, "bundle_sha256", "", bag);
   if (bundleHash !== undefined && !isSha256Digest(bundleHash)) {
     bag.error("manifest.sha256", "/bundle_sha256", "bundle digest must be canonical SHA-256");
   }
+  const migrations =
+    root.migrations === undefined
+      ? undefined
+      : validateMigrations(root.migrations, "/migrations", bag);
   if (files !== undefined && bundleHash !== undefined && isSha256Digest(bundleHash)) {
-    const expected = computeProfileBundleSha256(files);
+    const expected = computeProfileBundleSha256(files, migrations ?? []);
     if (bundleHash !== expected) {
-      bag.error("manifest.bundle_hash", "/bundle_sha256", "bundle digest does not match the baseline manifest");
+      bag.error(
+        "manifest.bundle_hash",
+        "/bundle_sha256",
+        "bundle digest does not match the baseline manifest",
+      );
     }
   }
-
-  const migrations = root.migrations === undefined
-    ? undefined
-    : validateMigrations(root.migrations, "/migrations", bag);
 
   if (
     bag.hasErrors() ||
@@ -215,11 +246,21 @@ export function validateProfilePackageManifest(
 
 export function computeProfileBundleSha256(
   files: readonly ProfileBaselineFile[],
+  migrations: readonly ProfileMigration[] = [],
 ): Sha256Digest {
   const ordered = [...files].sort((left, right) => compareUtf8(left.path, right.path));
   const records = ordered.map(
     (file) => `${file.path}\u0000${file.sha256}\u0000${file.size_bytes}\u0000${file.kind}\u0000`,
   );
+  if (migrations.length > 0) {
+    records.push("koni.profile-migrations.v1\u0000");
+    const migrationRecords = migrations
+      .map((migration) => canonicalEncode(migration))
+      .sort(compareUtf8);
+    for (const migrationRecord of migrationRecords) {
+      records.push(`${migrationRecord}\u0000`);
+    }
+  }
   return rawSha256(records.join(""));
 }
 
@@ -245,7 +286,11 @@ export function verifyProfileBaseline(
   }
   for (const path of [...actualFiles.keys()].sort(compareUtf8)) {
     if (!expected.has(path)) {
-      bag.error("baseline.unexpected_file", "/baseline/files", "baseline contains an unmanifested file");
+      bag.error(
+        "baseline.unexpected_file",
+        "/baseline/files",
+        "baseline contains an unmanifested file",
+      );
     }
   }
   if (bag.hasErrors()) {
@@ -267,10 +312,16 @@ export function isNormalizedSafeRelativePath(path: string): boolean {
     return false;
   }
   const components = path.split("/");
-  return components.every((component) => component.length > 0 && component !== "." && component !== "..");
+  return components.every(
+    (component) => component.length > 0 && component !== "." && component !== "..",
+  );
 }
 
-function validateFiles(value: unknown, path: string, bag: DiagnosticBag): ProfileBaselineFile[] | undefined {
+function validateFiles(
+  value: unknown,
+  path: string,
+  bag: DiagnosticBag,
+): ProfileBaselineFile[] | undefined {
   if (!Array.isArray(value)) {
     bag.error("manifest.field_type", path, "baseline files must be an array");
     return undefined;
@@ -281,7 +332,12 @@ function validateFiles(value: unknown, path: string, bag: DiagnosticBag): Profil
   const files: ProfileBaselineFile[] = [];
   for (let index = 0; index < value.length; index += 1) {
     const itemPath = pointer(path, index);
-    const record = expectRecord(value[index], itemPath, ["path", "sha256", "size_bytes", "kind"], bag);
+    const record = expectRecord(
+      value[index],
+      itemPath,
+      ["path", "sha256", "size_bytes", "kind"],
+      bag,
+    );
     if (record === undefined) {
       continue;
     }
@@ -290,13 +346,25 @@ function validateFiles(value: unknown, path: string, bag: DiagnosticBag): Profil
     const size = requiredSafeInteger(record, "size_bytes", itemPath, bag);
     const kind = requiredString(record, "kind", itemPath, bag);
     if (filePath !== undefined && !isNormalizedSafeRelativePath(filePath)) {
-      bag.error("manifest.file_path", pointer(itemPath, "path"), "baseline path is not a normalized safe relative path");
+      bag.error(
+        "manifest.file_path",
+        pointer(itemPath, "path"),
+        "baseline path is not a normalized safe relative path",
+      );
     }
     if (digest !== undefined && !isSha256Digest(digest)) {
-      bag.error("manifest.sha256", pointer(itemPath, "sha256"), "file digest must be canonical SHA-256");
+      bag.error(
+        "manifest.sha256",
+        pointer(itemPath, "sha256"),
+        "file digest must be canonical SHA-256",
+      );
     }
     if (kind !== undefined && !PROFILE_FILE_KINDS.has(kind as ProfileFileKind)) {
-      bag.error("manifest.file_kind", pointer(itemPath, "kind"), "baseline file kind is not supported");
+      bag.error(
+        "manifest.file_kind",
+        pointer(itemPath, "kind"),
+        "baseline file kind is not supported",
+      );
     }
     if (
       filePath !== undefined &&
@@ -307,7 +375,12 @@ function validateFiles(value: unknown, path: string, bag: DiagnosticBag): Profil
       kind !== undefined &&
       PROFILE_FILE_KINDS.has(kind as ProfileFileKind)
     ) {
-      files.push({ path: filePath, sha256: digest, size_bytes: size, kind: kind as ProfileFileKind });
+      files.push({
+        path: filePath,
+        sha256: digest,
+        size_bytes: size,
+        kind: kind as ProfileFileKind,
+      });
     }
   }
   for (let index = 1; index < files.length; index += 1) {
@@ -320,13 +393,21 @@ function validateFiles(value: unknown, path: string, bag: DiagnosticBag): Profil
     if (order === 0) {
       bag.error("manifest.duplicate_file", path, "baseline file paths must be unique");
     } else if (order > 0) {
-      bag.error("manifest.file_order", path, "baseline files must be sorted lexicographically by path");
+      bag.error(
+        "manifest.file_order",
+        path,
+        "baseline files must be sorted lexicographically by path",
+      );
     }
   }
   return files;
 }
 
-function validateMigrations(value: unknown, path: string, bag: DiagnosticBag): ProfileMigration[] | undefined {
+function validateMigrations(
+  value: unknown,
+  path: string,
+  bag: DiagnosticBag,
+): ProfileMigration[] | undefined {
   if (!Array.isArray(value)) {
     bag.error("manifest.field_type", path, "migrations must be an array");
     return undefined;
@@ -336,48 +417,153 @@ function validateMigrations(value: unknown, path: string, bag: DiagnosticBag): P
   }
   const migrations: ProfileMigration[] = [];
   const ids = new Set<string>();
-  for (let index = 0; index < value.length; index += 1) {
+  const paths = new Set<string>();
+  for (let index = 0; index < Math.min(value.length, MAX_MIGRATIONS); index += 1) {
     const itemPath = pointer(path, index);
     const record = expectRecord(
       value[index],
       itemPath,
-      ["from_profile_range", "id", "path", "sha256"],
+      ["id", "kind", "from_profile_range", "from_bundle_sha256", "path", "sha256"],
       bag,
     );
     if (record === undefined) {
       continue;
     }
-    const from = requiredString(record, "from_profile_range", itemPath, bag);
     const id = requiredString(record, "id", itemPath, bag);
+    const kind = requiredString(record, "kind", itemPath, bag);
+    const from = requiredString(record, "from_profile_range", itemPath, bag);
+    let fromBundles: Sha256Digest[] | undefined;
+    if (!Object.hasOwn(record, "from_bundle_sha256")) {
+      bag.error(
+        "manifest.required_field",
+        pointer(itemPath, "from_bundle_sha256"),
+        "required manifest field is missing",
+      );
+    } else {
+      fromBundles = validateSourceBundleDigests(
+        record.from_bundle_sha256,
+        pointer(itemPath, "from_bundle_sha256"),
+        bag,
+      );
+    }
     const migrationPath = requiredString(record, "path", itemPath, bag);
     const digest = requiredString(record, "sha256", itemPath, bag);
-    validateRangeSyntax(from, pointer(itemPath, "from_profile_range"), bag);
-    if (id !== undefined && !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(id)) {
-      bag.error("manifest.migration_id", pointer(itemPath, "id"), "migration id must be a lowercase kebab identifier");
+    if (kind !== undefined && kind !== "retire_yaml_fields") {
+      bag.error(
+        "manifest.migration_kind",
+        pointer(itemPath, "kind"),
+        "only the declarative retire_yaml_fields migration kind is supported",
+      );
     }
-    if (id !== undefined && !ids.add(id)) {
-      bag.error("manifest.duplicate_migration", path, "migration ids must be unique");
+    validateRangeSyntax(from, pointer(itemPath, "from_profile_range"), bag);
+    if (id !== undefined && !isMigrationId(id)) {
+      bag.error(
+        "manifest.migration_id",
+        pointer(itemPath, "id"),
+        "migration id must be a lowercase kebab identifier",
+      );
+    }
+    if (id !== undefined) {
+      if (ids.has(id)) {
+        bag.error("manifest.duplicate_migration", path, "migration ids must be unique");
+      }
+      ids.add(id);
     }
     if (migrationPath !== undefined && !isNormalizedSafeRelativePath(migrationPath)) {
-      bag.error("manifest.migration_path", pointer(itemPath, "path"), "migration path is not a normalized safe relative path");
+      bag.error(
+        "manifest.migration_path",
+        pointer(itemPath, "path"),
+        "migration path is not a normalized safe relative path",
+      );
+    }
+    if (migrationPath !== undefined) {
+      if (paths.has(migrationPath)) {
+        bag.error("manifest.duplicate_migration_path", path, "migration paths must be unique");
+      }
+      paths.add(migrationPath);
     }
     if (digest !== undefined && !isSha256Digest(digest)) {
-      bag.error("manifest.sha256", pointer(itemPath, "sha256"), "migration digest must be canonical SHA-256");
+      bag.error(
+        "manifest.sha256",
+        pointer(itemPath, "sha256"),
+        "migration digest must be canonical SHA-256",
+      );
     }
     if (
       from !== undefined &&
       validRange(from) !== null &&
       id !== undefined &&
-      /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(id) &&
+      isMigrationId(id) &&
+      kind === "retire_yaml_fields" &&
+      fromBundles !== undefined &&
+      fromBundles.length > 0 &&
       migrationPath !== undefined &&
       isNormalizedSafeRelativePath(migrationPath) &&
       digest !== undefined &&
       isSha256Digest(digest)
     ) {
-      migrations.push({ from_profile_range: from, id, path: migrationPath, sha256: digest });
+      migrations.push({
+        id,
+        kind,
+        from_profile_range: from,
+        from_bundle_sha256: fromBundles,
+        path: migrationPath,
+        sha256: digest,
+      });
     }
   }
   return migrations;
+}
+
+function validateSourceBundleDigests(
+  value: unknown,
+  path: string,
+  bag: DiagnosticBag,
+): Sha256Digest[] | undefined {
+  if (!Array.isArray(value)) {
+    bag.error("manifest.field_type", path, "migration source bundle digests must be an array");
+    return undefined;
+  }
+  if (value.length === 0 || value.length > MAX_MIGRATION_SOURCE_DIGESTS) {
+    bag.error(
+      "manifest.migration_source_count",
+      path,
+      "migration source bundle digests must be a bounded nonempty list",
+    );
+  }
+  const digests: Sha256Digest[] = [];
+  for (let index = 0; index < Math.min(value.length, MAX_MIGRATION_SOURCE_DIGESTS); index += 1) {
+    const digest = value[index];
+    if (!isSha256Digest(digest)) {
+      bag.error(
+        "manifest.sha256",
+        pointer(path, index),
+        "migration source bundle digest must be canonical SHA-256",
+      );
+      continue;
+    }
+    digests.push(digest);
+  }
+  for (let index = 1; index < digests.length; index += 1) {
+    const previous = digests[index - 1];
+    const current = digests[index];
+    if (previous === undefined || current === undefined) continue;
+    const order = compareUtf8(previous, current);
+    if (order === 0) {
+      bag.error(
+        "manifest.duplicate_migration_source",
+        path,
+        "migration source bundle digests must be unique",
+      );
+    } else if (order > 0) {
+      bag.error(
+        "manifest.migration_source_order",
+        path,
+        "migration source bundle digests must be sorted",
+      );
+    }
+  }
+  return digests;
 }
 
 function expectRequiredRecord(
@@ -473,7 +659,11 @@ function validateRange(
     return;
   }
   if (valid(target) === null || !satisfies(target, range as string)) {
-    bag.error("manifest.incompatible", path, `profile package is incompatible with the current ${label}`);
+    bag.error(
+      "manifest.incompatible",
+      path,
+      `profile package is incompatible with the current ${label}`,
+    );
   }
 }
 
@@ -482,7 +672,11 @@ function validateRangeSyntax(range: string | undefined, path: string, bag: Diagn
     return false;
   }
   if (range === "*" || range.includes("||") || validRange(range) === null) {
-    bag.error("manifest.semver_range", path, "compatibility range must be one bounded semantic version range");
+    bag.error(
+      "manifest.semver_range",
+      path,
+      "compatibility range must be one bounded semantic version range",
+    );
     return false;
   }
   return true;
@@ -501,6 +695,10 @@ function isDisplayName(value: string): boolean {
 
 function isLineage(value: string): boolean {
   return value.length <= 128 && /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/.test(value);
+}
+
+function isMigrationId(value: string): boolean {
+  return value.length <= 128 && /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(value);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -37,7 +37,7 @@ interface ConfigSurfaceProjection {
   bindings: Map<string, ConfigFieldBinding>;
   resources: Map<string, ConfigResourceBinding>;
   templates: Map<string, ConfigTemplateBinding>;
-  sections: Map<string, ProjectConfigSemanticDomain>;
+  sections: Map<string, ConceptSectionId>;
 }
 
 interface ConfigResourceBinding {
@@ -86,23 +86,202 @@ const SECTION_ORDER: readonly ProjectConfigSemanticDomain[] = [
 ];
 
 const SECTION_COPY: Record<ProjectConfigSemanticDomain, { title: string; description: string }> = {
-  "run-type": { title: "Run Types", description: "Complexity, stages, questions, parallelism, and role defaults." },
-  agent: { title: "Agents", description: "Agent prompts, provider defaults, reasoning, skills, and capabilities." },
+  "run-type": {
+    title: "Run Types",
+    description: "Complexity, stages, questions, parallelism, and role defaults.",
+  },
+  agent: {
+    title: "Agents",
+    description: "Agent prompts, provider defaults, reasoning, skills, and capabilities.",
+  },
   personas: { title: "Personas", description: "Which agent resources execute each workflow role." },
-  workflows: { title: "Ticket Workflows", description: "Ordered ticket steps, reviewers, checks, and rework routes." },
-  graph: { title: "Context Graph", description: "Node vocabulary, metadata, statuses, and relationship definitions." },
-  rules: { title: "Compiler Rules", description: "Eligibility, validation, derivation, and completion rules." },
-  operations: { title: "Ticket Types", description: "Compiler-derived work types, scopes, and output contracts." },
-  checks: { title: "Verification", description: "Configured commands, graph checks, evidence, and receipts." },
-  actions: { title: "Actions", description: "Compiler and lifecycle actions used by the project workflow." },
-  reports: { title: "Reports", description: "Human and model-facing completion report definitions." },
-  resource: { title: "Pi Resources", description: "Opt-in skills and packages bound to Koni attempts." },
+  workflows: {
+    title: "Ticket Workflows",
+    description: "Ordered ticket steps, reviewers, checks, and rework routes.",
+  },
+  graph: {
+    title: "Context Graph",
+    description: "Node vocabulary, metadata, statuses, and relationship definitions.",
+  },
+  rules: {
+    title: "Compiler Rules",
+    description: "Eligibility, validation, derivation, and completion rules.",
+  },
+  operations: {
+    title: "Ticket Types",
+    description: "Compiler-derived work types, scopes, and output contracts.",
+  },
+  checks: {
+    title: "Verification",
+    description: "Configured commands, graph checks, evidence, and receipts.",
+  },
+  actions: {
+    title: "Actions",
+    description: "Compiler and lifecycle actions used by the project workflow.",
+  },
+  reports: {
+    title: "Reports",
+    description: "Human and model-facing completion report definitions.",
+  },
+  resource: {
+    title: "Pi Resources",
+    description: "Opt-in skills and packages bound to Koni attempts.",
+  },
   project: { title: "Project", description: "Project identity and repository-specific context." },
   profile: { title: "Profile", description: "Profile identity, imports, and shared defaults." },
-  cockpit: { title: "Control Center", description: "Project-defined dashboard presentation settings." },
-  lifecycle: { title: "Lifecycle", description: "Run lifecycle and state transition configuration." },
+  cockpit: {
+    title: "Control Center",
+    description: "Project-defined dashboard presentation settings.",
+  },
+  lifecycle: {
+    title: "Lifecycle",
+    description: "Run lifecycle and state transition configuration.",
+  },
   other: { title: "Advanced", description: "Additional structured project resources." },
 };
+
+// Operator-facing sections are organized by CONCEPT, so everything needed to configure one idea
+// lives together instead of being scattered across finer internal semantic domains. The 16
+// compiler-level ProjectConfigSemanticDomain values map onto these nine concept sections, and
+// within a section their original domain becomes a named sub-group.
+type ConceptSectionId =
+  | "project"
+  | "run-types"
+  | "agents"
+  | "skills"
+  | "workflows-tickets"
+  | "graph-rules"
+  | "actions-checks"
+  | "reports-views"
+  | "advanced";
+
+const CONCEPT_ORDER: readonly ConceptSectionId[] = [
+  "project",
+  "run-types",
+  "agents",
+  "skills",
+  "workflows-tickets",
+  "graph-rules",
+  "actions-checks",
+  "reports-views",
+  "advanced",
+];
+
+const CONCEPT_COPY: Record<ConceptSectionId, { title: string; description: string }> = {
+  project: {
+    title: "Project",
+    description: "Identity, initialization, storage, Git, and global defaults.",
+  },
+  "run-types": {
+    title: "Run Types",
+    description: "Intake, run pipelines, planning questions, and orchestration for future runs.",
+  },
+  agents: {
+    title: "Agents",
+    description: "Planner, Lead, worker, and reviewer personas, models, prompts, and policy.",
+  },
+  skills: { title: "Skills", description: "Reusable project skills bound to Koni attempts." },
+  "workflows-tickets": {
+    title: "Workflows & Tickets",
+    description: "Ticket types, per-ticket workflows, and run lifecycle.",
+  },
+  "graph-rules": {
+    title: "Graph Model & Rules",
+    description: "Node and edge schemas, gate policies, queries, and rules that derive work.",
+  },
+  "actions-checks": {
+    title: "Actions & Checks",
+    description: "Compiler-mediated actions and validation checks.",
+  },
+  "reports-views": {
+    title: "Reports & Views",
+    description: "Generated reports, run cards, and control-center views.",
+  },
+  advanced: {
+    title: "Advanced",
+    description: "Raw source files, imports, extensions, and expert configuration.",
+  },
+};
+
+const DOMAIN_CONCEPT: Record<ProjectConfigSemanticDomain, ConceptSectionId> = {
+  project: "project",
+  profile: "project",
+  "run-type": "run-types",
+  agent: "agents",
+  personas: "agents",
+  resource: "skills",
+  workflows: "workflows-tickets",
+  operations: "workflows-tickets",
+  lifecycle: "workflows-tickets",
+  graph: "graph-rules",
+  rules: "graph-rules",
+  actions: "actions-checks",
+  checks: "actions-checks",
+  reports: "reports-views",
+  cockpit: "reports-views",
+  other: "advanced",
+};
+
+// Within-section sub-group label + order rank, resolved from a resource's depth-0 ancestor so
+// whole resource trees stay together while flat arrays (e.g. graph node/edge/query items) split
+// into their natural sub-groups.
+function conceptSubGroup(
+  domain: ProjectConfigSemanticDomain,
+  rootPointer: readonly (string | number)[],
+): { label: string; rank: number } {
+  const key = typeof rootPointer[0] === "string" ? rootPointer[0] : "";
+  switch (domain) {
+    case "project":
+      return { label: "Identity", rank: 0 };
+    case "profile":
+      return { label: "Runtime", rank: 1 };
+    case "run-type":
+      return { label: "Run types", rank: 0 };
+    case "agent":
+      return { label: "Agents", rank: 0 };
+    case "personas":
+      return { label: "Personas", rank: 1 };
+    case "resource":
+      return { label: "Project skills", rank: 0 };
+    case "operations":
+      return { label: "Ticket types", rank: 0 };
+    case "workflows":
+      return { label: "Ticket workflows", rank: 1 };
+    case "lifecycle":
+      return { label: "Lifecycle", rank: 2 };
+    case "graph":
+      if (key === "gate_policies") return { label: "Gate policies", rank: 1 };
+      if (key === "queries") return { label: "Compiler logic", rank: 2 };
+      return { label: "Graph schema", rank: 0 };
+    case "rules":
+      return { label: "Compiler logic", rank: 2 };
+    case "actions":
+      return { label: "Automation", rank: 0 };
+    case "checks":
+      return { label: "Quality gates", rank: 1 };
+    case "reports":
+      return { label: "Outputs", rank: 0 };
+    case "cockpit":
+      return { label: "Control center", rank: 1 };
+    default:
+      return { label: "Sources", rank: 0 };
+  }
+}
+
+function rootResourceBinding(
+  binding: ConfigResourceBinding,
+  resources: ReadonlyMap<string, ConfigResourceBinding>,
+): ConfigResourceBinding {
+  let current = binding;
+  const visited = new Set<string>();
+  while (current.parentId !== undefined && !visited.has(current.parentId)) {
+    visited.add(current.parentId);
+    const parent = resources.get(current.parentId);
+    if (parent === undefined) break;
+    current = parent;
+  }
+  return current;
+}
 
 export async function buildConfigSurfaceCatalog(
   projectRoot: string,
@@ -128,12 +307,18 @@ export async function publishConfigSurfaceSnapshot(input: {
   const cas = parseCas(input.cas);
   const currentCas = parseCas(current.snapshot.cas);
   if (JSON.stringify(cas) !== JSON.stringify(currentCas)) {
-    throw new ConfigSurfaceError("config_source_changed", "configuration changed since the editor was opened");
+    throw new ConfigSurfaceError(
+      "config_source_changed",
+      "configuration changed since the editor was opened",
+    );
   }
   const expectedKeys = [...current.bindings.keys()].sort();
   const suppliedKeys = Object.keys(input.values).sort();
   if (JSON.stringify(expectedKeys) !== JSON.stringify(suppliedKeys)) {
-    throw new ConfigSurfaceError("config_fields_changed", "configuration fields changed since the editor was opened");
+    throw new ConfigSurfaceError(
+      "config_fields_changed",
+      "configuration fields changed since the editor was opened",
+    );
   }
   const changed = new Map<string, Record<string, unknown>>();
   for (const key of expectedKeys) {
@@ -149,11 +334,13 @@ export async function publishConfigSurfaceSnapshot(input: {
   await updateProjectAuthoredConfigDocuments({
     projectRoot: input.projectRoot,
     profilePackageRoot: input.profilePackageRoot,
-    documents: [...changed.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([path, document]) => ({
-      path,
-      expectedSourceSha256: current.documents.get(path)!.entry.sourceSha256,
-      document,
-    })),
+    documents: [...changed.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([path, document]) => ({
+        path,
+        expectedSourceSha256: current.documents.get(path)!.entry.sourceSha256,
+        document,
+      })),
   });
   return {
     snapshot: await buildConfigSurfaceSnapshot(input.projectRoot, input.profilePackageRoot),
@@ -181,11 +368,25 @@ export async function createConfigSurfaceResource(input: {
   assertCurrentCas(current, input.cas);
   const expectedDomain = current.sections.get(input.sectionId);
   const template = current.templates.get(input.templateId);
-  if (expectedDomain === undefined || template === undefined || template.sectionId !== input.sectionId ||
-      template.parentResourceId !== input.parentResourceId) {
-    throw new ConfigSurfaceError("config_template_changed", "the selected configuration template is no longer available");
+  if (
+    expectedDomain === undefined ||
+    template === undefined ||
+    template.sectionId !== input.sectionId ||
+    template.parentResourceId !== input.parentResourceId
+  ) {
+    throw new ConfigSurfaceError(
+      "config_template_changed",
+      "the selected configuration template is no longer available",
+    );
   }
-  return cloneBoundResource(current, template.resourceId, input.name, input.projectRoot, input.profilePackageRoot, input.mutationMarker);
+  return cloneBoundResource(
+    current,
+    template.resourceId,
+    input.name,
+    input.projectRoot,
+    input.profilePackageRoot,
+    input.mutationMarker,
+  );
 }
 
 export async function duplicateConfigSurfaceResource(input: {
@@ -200,9 +401,19 @@ export async function duplicateConfigSurfaceResource(input: {
   assertCurrentCas(current, input.cas);
   const binding = current.resources.get(input.resourceId);
   if (binding === undefined || !isCloneableResource(binding)) {
-    throw new ConfigSurfaceError("config_resource_changed", "the selected configuration resource cannot be duplicated");
+    throw new ConfigSurfaceError(
+      "config_resource_changed",
+      "the selected configuration resource cannot be duplicated",
+    );
   }
-  return cloneBoundResource(current, input.resourceId, input.name, input.projectRoot, input.profilePackageRoot, input.mutationMarker);
+  return cloneBoundResource(
+    current,
+    input.resourceId,
+    input.name,
+    input.projectRoot,
+    input.profilePackageRoot,
+    input.mutationMarker,
+  );
 }
 
 export async function deleteConfigSurfaceResource(input: {
@@ -216,13 +427,17 @@ export async function deleteConfigSurfaceResource(input: {
   assertCurrentCas(current, input.cas);
   const binding = current.resources.get(input.resourceId);
   if (binding === undefined || !isCloneableResource(binding)) {
-    throw new ConfigSurfaceError("config_resource_changed", "the selected configuration resource cannot be deleted");
+    throw new ConfigSurfaceError(
+      "config_resource_changed",
+      "the selected configuration resource cannot be deleted",
+    );
   }
   if (binding.kind === "document") {
     const source = current.documents.get(binding.path)!;
-    const documents = binding.semanticDomain === "run-type"
-      ? [runTypeCatalogUpdate(current, binding, undefined)]
-      : [];
+    const documents =
+      binding.semanticDomain === "run-type"
+        ? [runTypeCatalogUpdate(current, binding, undefined)]
+        : [];
     await updateProjectAuthoredConfigDocuments({
       projectRoot: input.projectRoot,
       profilePackageRoot: input.profilePackageRoot,
@@ -230,14 +445,21 @@ export async function deleteConfigSurfaceResource(input: {
       deletes: [{ path: binding.path, expectedSourceSha256: source.entry.sourceSha256 }],
       ...(input.mutationMarker === undefined ? {} : { mutationMarker: input.mutationMarker }),
     });
-    return refreshedMutationResult(input.projectRoot, input.profilePackageRoot, documents.length + 1);
+    return refreshedMutationResult(
+      input.projectRoot,
+      input.profilePackageRoot,
+      documents.length + 1,
+    );
   }
   const source = current.documents.get(binding.path)!;
   const document = structuredClone(source.document);
   const parent = pointerValue(document, binding.pointer.slice(0, -1));
   const index = binding.pointer.at(-1);
   if (!Array.isArray(parent) || typeof index !== "number" || !isRecord(parent[index])) {
-    throw new ConfigSurfaceError("config_resource_changed", "the selected configuration resource moved");
+    throw new ConfigSurfaceError(
+      "config_resource_changed",
+      "the selected configuration resource moved",
+    );
   }
   parent.splice(index, 1);
   await updateProjectAuthoredConfigDocuments({
@@ -257,13 +479,19 @@ export async function recoverConfigSurfaceResourceMutation(input: {
   const marker = await readProjectConfigMutationMarker(input.projectRoot, input.mutationMarker.id);
   if (marker === undefined) return undefined;
   if (marker.requestSha256 !== input.mutationMarker.requestSha256) {
-    throw new ConfigSurfaceError("config_mutation_replay", "configuration mutation identity was reused with different input");
+    throw new ConfigSurfaceError(
+      "config_mutation_replay",
+      "configuration mutation identity was reused with different input",
+    );
   }
   return refreshedMutationResult(input.projectRoot, input.profilePackageRoot, 0);
 }
 
 export class ConfigSurfaceError extends Error {
-  public constructor(public readonly code: string, message: string) {
+  public constructor(
+    public readonly code: string,
+    message: string,
+  ) {
     super(message);
     this.name = "ConfigSurfaceError";
   }
@@ -275,45 +503,61 @@ async function projectConfigSurface(
 ): Promise<ConfigSurfaceProjection> {
   const sourceCatalog = await catalogProjectAuthoredConfig(projectRoot, profilePackageRoot);
   const editable = sourceCatalog.entries.filter((entry) => entry.guidedEditable);
-  const reads = await Promise.all(editable.map((entry) =>
-    readProjectAuthoredConfigDocument(projectRoot, profilePackageRoot, entry.path)));
+  const reads = await Promise.all(
+    editable.map((entry) =>
+      readProjectAuthoredConfigDocument(projectRoot, profilePackageRoot, entry.path),
+    ),
+  );
   const documents = new Map(reads.map((document) => [document.entry.path, document]));
   const bindings = new Map<string, ConfigFieldBinding>();
   const resourceBindings = new Map<string, ConfigResourceBinding>();
-  const byDomain = new Map<ProjectConfigSemanticDomain, ConfigResourceDefinition[]>();
+  const byConcept = new Map<ConceptSectionId, ConfigResourceDefinition[]>();
   for (const source of reads) {
     const resources = projectResources(source, bindings, resourceBindings);
     if (resources.length === 0) continue;
-    const current = byDomain.get(source.entry.semanticDomain) ?? [];
+    const concept = DOMAIN_CONCEPT[source.entry.semanticDomain];
+    const current = byConcept.get(concept) ?? [];
     current.push(...resources);
-    byDomain.set(source.entry.semanticDomain, current);
+    byConcept.set(concept, current);
   }
-  const sectionDomains = new Map<string, ProjectConfigSemanticDomain>();
-  const sections: ConfigSectionDefinition[] = SECTION_ORDER.flatMap((domain) => {
-    const resources = byDomain.get(domain);
+  const sectionDomains = new Map<string, ConceptSectionId>();
+  const sections: ConfigSectionDefinition[] = CONCEPT_ORDER.flatMap((concept) => {
+    const resources = byConcept.get(concept);
     if (resources === undefined || resources.length === 0) return [];
-    const copy = SECTION_COPY[domain];
-    const id = opaqueId("section", domain);
-    sectionDomains.set(id, domain);
-    return [{
-      id,
-      title: copy.title,
-      description: copy.description,
-      resources: resources.sort((left, right) => {
-        const leftBinding = resourceBindings.get(left.id)!;
-        const rightBinding = resourceBindings.get(right.id)!;
-        return leftBinding.path.localeCompare(rightBinding.path) ||
-          pointerSortKey(leftBinding.pointer).localeCompare(pointerSortKey(rightBinding.pointer));
-      }),
-    }];
+    const copy = CONCEPT_COPY[concept];
+    const id = opaqueId("section", concept);
+    sectionDomains.set(id, concept);
+    const grouped = resources.map((resource) => {
+      const binding = resourceBindings.get(resource.id)!;
+      const root = rootResourceBinding(binding, resourceBindings);
+      return { resource, binding, group: conceptSubGroup(root.semanticDomain, root.pointer) };
+    });
+    grouped.sort(
+      (left, right) =>
+        left.group.rank - right.group.rank ||
+        left.binding.path.localeCompare(right.binding.path) ||
+        pointerSortKey(left.binding.pointer).localeCompare(pointerSortKey(right.binding.pointer)),
+    );
+    return [
+      {
+        id,
+        title: copy.title,
+        description: copy.description,
+        resources: grouped.map(({ resource, group }) => ({ ...resource, group: group.label })),
+      },
+    ];
   });
   const templates = applyCollectionCapabilities(sections, resourceBindings);
-  const values = Object.fromEntries([...bindings.values()]
-    .sort((left, right) => left.key.localeCompare(right.key))
-    .map((binding) => [binding.key, structuredClone(binding.value)]));
-  const documentCas = Object.fromEntries(editable
-    .sort((left, right) => left.path.localeCompare(right.path))
-    .map((entry) => [entry.path, entry.sourceSha256]));
+  const values = Object.fromEntries(
+    [...bindings.values()]
+      .sort((left, right) => left.key.localeCompare(right.key))
+      .map((binding) => [binding.key, structuredClone(binding.value)]),
+  );
+  const documentCas = Object.fromEntries(
+    editable
+      .sort((left, right) => left.path.localeCompare(right.path))
+      .map((entry) => [entry.path, entry.sourceSha256]),
+  );
   const cas: ConfigCas = {
     protocol: CONFIG_CAS_PROTOCOL,
     lifecycleGeneration: sourceCatalog.lifecycleGeneration,
@@ -342,13 +586,18 @@ function applyCollectionCapabilities(
   const templates = new Map<string, ConfigTemplateBinding>();
   const sectionByDomain = new Map<ProjectConfigSemanticDomain, ConfigSectionDefinition>();
   const definitions = new Map<string, ConfigResourceDefinition>();
+  const sectionById = new Map<string, ConfigSectionDefinition>();
   for (const section of sections) {
-    const domain = SECTION_ORDER.find((candidate) => section.id === opaqueId("section", candidate));
-    if (domain !== undefined) sectionByDomain.set(domain, section);
+    sectionById.set(section.id, section);
     for (const resource of section.resources) definitions.set(resource.id, resource);
   }
+  for (const domain of SECTION_ORDER) {
+    const section = sectionById.get(opaqueId("section", DOMAIN_CONCEPT[domain]));
+    if (section !== undefined) sectionByDomain.set(domain, section);
+  }
   for (const binding of resources.values()) {
-    const cloneableDocument = binding.kind === "document" &&
+    const cloneableDocument =
+      binding.kind === "document" &&
       (binding.semanticDomain === "run-type" || binding.semanticDomain === "agent");
     if (!cloneableDocument && collectionIdentityField(binding) === undefined) continue;
     const definition = definitions.get(binding.id);
@@ -357,15 +606,20 @@ function applyCollectionCapabilities(
     definition.canDuplicate = true;
     definition.canDelete = true;
     const templateId = opaqueId("template", binding.id);
-    const parent = binding.kind === "array_item" && binding.parentId !== undefined
-      ? definitions.get(binding.parentId)
-      : undefined;
+    const parent =
+      binding.kind === "array_item" && binding.parentId !== undefined
+        ? definitions.get(binding.parentId)
+        : undefined;
     const option = {
       id: templateId,
       title: `Based on ${binding.title}`,
       description: `Create a new ${domainNoun(binding.semanticDomain)} using ${binding.title} as its validated starting structure.`,
-      nameLabel: binding.semanticDomain === "agent" ? "Agent name" :
-        binding.semanticDomain === "run-type" ? "Run type name" : "Resource name",
+      nameLabel:
+        binding.semanticDomain === "agent"
+          ? "Agent name"
+          : binding.semanticDomain === "run-type"
+            ? "Run type name"
+            : "Resource name",
       suggestedName: `New ${binding.title}`,
     };
     if (parent === undefined) {
@@ -393,7 +647,10 @@ async function cloneBoundResource(
 ): Promise<ConfigSurfaceResourceMutationResult> {
   const binding = current.resources.get(resourceId);
   if (binding === undefined || !isCloneableResource(binding)) {
-    throw new ConfigSurfaceError("config_resource_changed", "the selected configuration resource cannot be used as a template");
+    throw new ConfigSurfaceError(
+      "config_resource_changed",
+      "the selected configuration resource cannot be used as a template",
+    );
   }
   const { title, id } = normalizedResourceName(rawName);
   if (binding.kind === "document") {
@@ -420,7 +677,10 @@ async function cloneBoundResource(
   const parent = pointerValue(document, binding.pointer.slice(0, -1));
   const index = binding.pointer.at(-1);
   if (!Array.isArray(parent) || typeof index !== "number" || !isRecord(parent[index])) {
-    throw new ConfigSurfaceError("config_resource_changed", "the selected configuration resource moved");
+    throw new ConfigSurfaceError(
+      "config_resource_changed",
+      "the selected configuration resource moved",
+    );
   }
   parent.splice(index + 1, 0, renamedResource(binding.value, title, id));
   await updateProjectAuthoredConfigDocuments({
@@ -439,15 +699,22 @@ function runTypeCatalogUpdate(
 ) {
   const project = current.documents.get("project.yaml");
   if (project === undefined || !Array.isArray(project.document.run_types)) {
-    throw new ConfigSurfaceError("config_run_type_catalog", "the project run type catalog is unavailable");
+    throw new ConfigSurfaceError(
+      "config_run_type_catalog",
+      "the project run type catalog is unavailable",
+    );
   }
   const document = structuredClone(project.document);
   const sourceId = typeof binding.value.id === "string" ? binding.value.id : undefined;
-  if (sourceId === undefined) throw new ConfigSurfaceError("config_run_type_catalog", "the run type has no stable identity");
+  if (sourceId === undefined)
+    throw new ConfigSurfaceError("config_run_type_catalog", "the run type has no stable identity");
   const entries = document.run_types as unknown[];
   if (addition === undefined) {
-    const index = entries.findIndex((entry) => isRecord(entry) && entry.id === sourceId && entry.path === binding.path);
-    if (index < 0) throw new ConfigSurfaceError("config_run_type_catalog", "the run type catalog changed");
+    const index = entries.findIndex(
+      (entry) => isRecord(entry) && entry.id === sourceId && entry.path === binding.path,
+    );
+    if (index < 0)
+      throw new ConfigSurfaceError("config_run_type_catalog", "the run type catalog changed");
     entries.splice(index, 1);
   } else {
     entries.push({ id: addition.id, path: addition.path });
@@ -459,7 +726,11 @@ function runTypeCatalogUpdate(
   };
 }
 
-function renamedResource(value: Record<string, unknown>, title: string, id: string): Record<string, unknown> {
+function renamedResource(
+  value: Record<string, unknown>,
+  title: string,
+  id: string,
+): Record<string, unknown> {
   const cloned = structuredClone(value);
   if (typeof cloned.id === "string") cloned.id = id;
   else if (typeof cloned.relation === "string") cloned.relation = id;
@@ -473,20 +744,32 @@ function renamedResource(value: Record<string, unknown>, title: string, id: stri
 function normalizedResourceName(raw: string): { title: string; id: string } {
   const title = raw.trim().replace(/\s+/gu, " ");
   if (title.length === 0 || title.length > 200) {
-    throw new ConfigSurfaceError("config_resource_name", "resource name must contain between 1 and 200 characters");
+    throw new ConfigSurfaceError(
+      "config_resource_name",
+      "resource name must contain between 1 and 200 characters",
+    );
   }
-  const id = title.normalize("NFKD").toLocaleLowerCase()
+  const id = title
+    .normalize("NFKD")
+    .toLocaleLowerCase()
     .replace(/[^a-z0-9]+/gu, "-")
     .replace(/^-+|-+$/gu, "")
     .slice(0, 100)
     .replace(/-+$/gu, "");
-  if (id.length === 0) throw new ConfigSurfaceError("config_resource_name", "resource name must contain letters or numbers");
+  if (id.length === 0)
+    throw new ConfigSurfaceError(
+      "config_resource_name",
+      "resource name must contain letters or numbers",
+    );
   return { title, id };
 }
 
 function isCloneableResource(binding: ConfigResourceBinding): boolean {
-  return collectionIdentityField(binding) !== undefined ||
-    (binding.kind === "document" && (binding.semanticDomain === "agent" || binding.semanticDomain === "run-type"));
+  return (
+    collectionIdentityField(binding) !== undefined ||
+    (binding.kind === "document" &&
+      (binding.semanticDomain === "agent" || binding.semanticDomain === "run-type"))
+  );
 }
 
 /**
@@ -501,8 +784,11 @@ function collectionIdentityField(binding: ConfigResourceBinding): "id" | "relati
   const collection = binding.pointer.at(-2);
   if (binding.semanticDomain === "project" && collection === "run_types") return undefined;
   if (typeof binding.value.id === "string" && binding.value.id.trim().length > 0) return "id";
-  if (collection === "edge_types" &&
-      typeof binding.value.relation === "string" && binding.value.relation.trim().length > 0) {
+  if (
+    collection === "edge_types" &&
+    typeof binding.value.relation === "string" &&
+    binding.value.relation.trim().length > 0
+  ) {
     return "relation";
   }
   return undefined;
@@ -512,7 +798,10 @@ function assertCurrentCas(current: ConfigSurfaceProjection, value: JsonValue): v
   const supplied = parseCas(value);
   const expected = parseCas(current.snapshot.cas);
   if (JSON.stringify(supplied) !== JSON.stringify(expected)) {
-    throw new ConfigSurfaceError("config_source_changed", "configuration changed since the editor was opened");
+    throw new ConfigSurfaceError(
+      "config_source_changed",
+      "configuration changed since the editor was opened",
+    );
   }
 }
 
@@ -540,9 +829,11 @@ function pointerValue(root: unknown, pointer: readonly (string | number)[]): unk
 }
 
 function pointerSortKey(pointer: readonly (string | number)[]): string {
-  return pointer.map((segment) => typeof segment === "number"
-    ? `#${segment.toString().padStart(10, "0")}`
-    : `.${segment}`).join("");
+  return pointer
+    .map((segment) =>
+      typeof segment === "number" ? `#${segment.toString().padStart(10, "0")}` : `.${segment}`,
+    )
+    .join("");
 }
 
 function projectResources(
@@ -571,7 +862,12 @@ function projectResources(
     for (const [name, child] of Object.entries(value)) {
       if (pointer.length === 0 && (name === "schema_version" || name === "module")) continue;
       const childPointer = [...pointer, name];
-      if (source.entry.semanticDomain === "agent" && pointer.length === 0 && name === "instructions" && isRecord(child)) {
+      if (
+        source.entry.semanticDomain === "agent" &&
+        pointer.length === 0 &&
+        name === "instructions" &&
+        isRecord(child)
+      ) {
         for (const [instructionName, instructionValue] of Object.entries(child)) {
           const instructionPointer = [...childPointer, instructionName];
           const nested = fieldDefinition(
@@ -581,7 +877,11 @@ function projectResources(
             instructionValue,
           );
           if (nested === undefined) continue;
-          if (bindings.has(nested.key)) throw new ConfigSurfaceError("config_key_collision", "configuration field identity collided");
+          if (bindings.has(nested.key))
+            throw new ConfigSurfaceError(
+              "config_key_collision",
+              "configuration field identity collided",
+            );
           bindings.set(nested.key, {
             key: nested.key,
             path: source.entry.path,
@@ -595,7 +895,11 @@ function projectResources(
       }
       const definition = fieldDefinition(source.entry, childPointer, name, child);
       if (definition !== undefined) {
-        if (bindings.has(definition.key)) throw new ConfigSurfaceError("config_key_collision", "configuration field identity collided");
+        if (bindings.has(definition.key))
+          throw new ConfigSurfaceError(
+            "config_key_collision",
+            "configuration field identity collided",
+          );
         const binding: ConfigFieldBinding = {
           key: definition.key,
           path: source.entry.path,
@@ -606,15 +910,21 @@ function projectResources(
         bindings.set(definition.key, binding);
         fields.push(definition);
       } else if (isRecord(child)) {
-        children.push({ value: child, pointer: childPointer, fallback: humanize(name), kind: "nested" });
+        children.push({
+          value: child,
+          pointer: childPointer,
+          fallback: humanize(name),
+          kind: "nested",
+        });
       } else if (Array.isArray(child) && child.some(isRecord)) {
         child.forEach((item, index) => {
-          if (isRecord(item)) children.push({
-            value: item,
-            pointer: [...childPointer, index],
-            fallback: `${humanize(name)} ${index + 1}`,
-            kind: "array_item",
-          });
+          if (isRecord(item))
+            children.push({
+              value: item,
+              pointer: [...childPointer, index],
+              fallback: `${humanize(name)} ${index + 1}`,
+              kind: "array_item",
+            });
         });
       }
     }
@@ -625,9 +935,10 @@ function projectResources(
       const definition: ConfigResourceDefinition = {
         id,
         title,
-        description: typeof value.description === "string"
-          ? value.description
-          : `Configure ${title.toLocaleLowerCase()}.`,
+        description:
+          typeof value.description === "string"
+            ? value.description
+            : `Configure ${title.toLocaleLowerCase()}.`,
         ...(parentId === undefined ? {} : { parentId }),
         depth,
         fields,
@@ -692,11 +1003,21 @@ function fieldDefinition(
   return undefined;
 }
 
-function normalizeFieldValue(value: JsonValue | undefined, field: ConfigFieldDefinition): JsonValue {
+function normalizeFieldValue(
+  value: JsonValue | undefined,
+  field: ConfigFieldDefinition,
+): JsonValue {
   if (value === undefined || value === null) {
     throw new ConfigSurfaceError("config_value", `${field.label} cannot be empty`);
   }
-  if ((field.kind === "text" || field.kind === "multiline" || field.kind === "model" || field.kind === "thinking" || field.kind === "select") && typeof value !== "string") {
+  if (
+    (field.kind === "text" ||
+      field.kind === "multiline" ||
+      field.kind === "model" ||
+      field.kind === "thinking" ||
+      field.kind === "select") &&
+    typeof value !== "string"
+  ) {
     throw new ConfigSurfaceError("config_value", `${field.label} must be text`);
   }
   if (field.kind === "integer" && (!Number.isSafeInteger(value) || typeof value !== "number")) {
@@ -705,38 +1026,54 @@ function normalizeFieldValue(value: JsonValue | undefined, field: ConfigFieldDef
   if (field.kind === "boolean" && typeof value !== "boolean") {
     throw new ConfigSurfaceError("config_value", `${field.label} must be on or off`);
   }
-  if (field.kind === "string_list" && (!Array.isArray(value) || value.some((item) => typeof item !== "string"))) {
+  if (
+    field.kind === "string_list" &&
+    (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
+  ) {
     throw new ConfigSurfaceError("config_value", `${field.label} must be a list of text values`);
   }
   return structuredClone(value);
 }
 
-function setPointer(root: Record<string, unknown>, pointer: readonly (string | number)[], value: JsonValue): void {
-  if (pointer.length === 0) throw new ConfigSurfaceError("config_pointer", "configuration field has no address");
+function setPointer(
+  root: Record<string, unknown>,
+  pointer: readonly (string | number)[],
+  value: JsonValue,
+): void {
+  if (pointer.length === 0)
+    throw new ConfigSurfaceError("config_pointer", "configuration field has no address");
   let cursor: unknown = root;
   for (const segment of pointer.slice(0, -1)) {
     if (typeof segment === "number") {
-      if (!Array.isArray(cursor) || cursor[segment] === undefined) throw new ConfigSurfaceError("config_pointer", "configuration list changed");
+      if (!Array.isArray(cursor) || cursor[segment] === undefined)
+        throw new ConfigSurfaceError("config_pointer", "configuration list changed");
       cursor = cursor[segment];
     } else {
-      if (!isRecord(cursor) || cursor[segment] === undefined) throw new ConfigSurfaceError("config_pointer", "configuration object changed");
+      if (!isRecord(cursor) || cursor[segment] === undefined)
+        throw new ConfigSurfaceError("config_pointer", "configuration object changed");
       cursor = cursor[segment];
     }
   }
   const leaf = pointer.at(-1)!;
   if (typeof leaf === "number") {
-    if (!Array.isArray(cursor) || cursor[leaf] === undefined) throw new ConfigSurfaceError("config_pointer", "configuration list changed");
+    if (!Array.isArray(cursor) || cursor[leaf] === undefined)
+      throw new ConfigSurfaceError("config_pointer", "configuration list changed");
     cursor[leaf] = structuredClone(value);
   } else {
-    if (!isRecord(cursor) || !(leaf in cursor)) throw new ConfigSurfaceError("config_pointer", "configuration object changed");
+    if (!isRecord(cursor) || !(leaf in cursor))
+      throw new ConfigSurfaceError("config_pointer", "configuration object changed");
     cursor[leaf] = structuredClone(value);
   }
 }
 
 function parseCas(value: JsonValue): ConfigCas {
-  if (!isRecord(value) || value.protocol !== CONFIG_CAS_PROTOCOL ||
-      !Number.isSafeInteger(value.lifecycleGeneration) || typeof value.configurationSha256 !== "string" ||
-      !isRecord(value.documents)) {
+  if (
+    !isRecord(value) ||
+    value.protocol !== CONFIG_CAS_PROTOCOL ||
+    !Number.isSafeInteger(value.lifecycleGeneration) ||
+    typeof value.configurationSha256 !== "string" ||
+    !isRecord(value.documents)
+  ) {
     throw new ConfigSurfaceError("config_cas", "configuration editor identity is invalid");
   }
   return structuredClone(value) as unknown as ConfigCas;
@@ -747,14 +1084,23 @@ function opaqueId(kind: string, ...parts: unknown[]): string {
 }
 
 function resourceTitle(value: Record<string, unknown>, fallback: string): string {
-  for (const candidate of [value.title, value.label, value.id, value.relation, value.type, value.kind]) {
+  for (const candidate of [
+    value.title,
+    value.label,
+    value.id,
+    value.relation,
+    value.type,
+    value.kind,
+  ]) {
     if (typeof candidate === "string" && candidate.trim().length > 0) return humanize(candidate);
   }
   return fallback;
 }
 
 function humanize(value: string): string {
-  return value.split(/[._/-]+/u).filter(Boolean)
+  return value
+    .split(/[._/-]+/u)
+    .filter(Boolean)
     .map((part) => `${part[0]?.toLocaleUpperCase() ?? ""}${part.slice(1).replaceAll("_", " ")}`)
     .join(" ");
 }

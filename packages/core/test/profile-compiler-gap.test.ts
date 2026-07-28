@@ -7,7 +7,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { compileProfileConfiguration } from "../src/compiler/configuration.js";
 import { createProductionRuleDomainAdapter } from "../src/compiler/domain-adapter.js";
 import { GraphExpressionEvaluator } from "../src/compiler/expressions.js";
-import { parseProfilePackageManifest, type VerifiedProfileBaseline } from "../src/compiler/profile-package.js";
+import {
+  parseProfilePackageManifest,
+  type VerifiedProfileBaseline,
+} from "../src/compiler/profile-package.js";
 import { evaluateConfiguredRules } from "../src/compiler/rules.js";
 import type { CompiledConfiguration, ConfigurationObject } from "../src/contracts/configuration.js";
 import type { CompilerGraphNode, CompilerGraphProjection } from "../src/contracts/rules.js";
@@ -16,7 +19,9 @@ const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  await Promise.all(
+    temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+  );
 });
 
 describe("shipped profile compiler production seams", () => {
@@ -78,7 +83,9 @@ describe("shipped profile compiler production seams", () => {
     expect(receiptBacked?.kind).not.toBe("graph");
     const evaluator = new GraphExpressionEvaluator(configuration, graph, adapter);
     evaluator.bind("target", [hypothesis.id]);
-    expect(evaluator.evaluate({ op: "check_passed", check: "scoped-operational-probe" })).toBe(false);
+    expect(evaluator.evaluate({ op: "check_passed", check: "scoped-operational-probe" })).toBe(
+      false,
+    );
   });
 });
 
@@ -88,15 +95,21 @@ async function temporaryRoot(): Promise<string> {
   return root;
 }
 
-function compileProfile(packageDirectory: "coding-profile" | "research-profile"): CompiledConfiguration {
+function compileProfile(
+  packageDirectory: "coding-profile" | "research-profile",
+): CompiledConfiguration {
   const result = compileProfileConfiguration(readBaseline(packageDirectory));
   if (!result.ok) throw new Error(diagnostics(result));
   return result.value;
 }
 
-function readBaseline(packageDirectory: "coding-profile" | "research-profile"): VerifiedProfileBaseline {
+function readBaseline(
+  packageDirectory: "coding-profile" | "research-profile",
+): VerifiedProfileBaseline {
   const packageRoot = resolve(repositoryRoot, "packages", packageDirectory, "koni");
-  const manifest = parseProfilePackageManifest(readFileSync(join(packageRoot, "profile-manifest.json"), "utf8"));
+  const manifest = parseProfilePackageManifest(
+    readFileSync(join(packageRoot, "profile-manifest.json"), "utf8"),
+  );
   if (!manifest.ok) throw new Error(diagnostics(manifest));
   return { manifest: manifest.value, files: readTree(join(packageRoot, "baseline")) };
 }
@@ -104,10 +117,13 @@ function readBaseline(packageDirectory: "coding-profile" | "research-profile"): 
 function readTree(root: string): ReadonlyMap<string, Uint8Array> {
   const files = new Map<string, Uint8Array>();
   const visit = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) =>
+      left.name.localeCompare(right.name),
+    )) {
       const candidate = join(directory, entry.name);
       if (entry.isDirectory()) visit(candidate);
-      else if (entry.isFile()) files.set(relative(root, candidate).split(sep).join("/"), readFileSync(candidate));
+      else if (entry.isFile())
+        files.set(relative(root, candidate).split(sep).join("/"), readFileSync(candidate));
     }
   };
   visit(root);
@@ -129,6 +145,8 @@ function node(
   return { id, type, title, status, spec, edges };
 }
 
-function diagnostics(result: { diagnostics: readonly { path: string; code: string; message: string }[] }): string {
+function diagnostics(result: {
+  diagnostics: readonly { path: string; code: string; message: string }[];
+}): string {
   return result.diagnostics.map((item) => `${item.path}:${item.code}:${item.message}`).join("\n");
 }

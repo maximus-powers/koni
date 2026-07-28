@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ExtensionAPI, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { DynamicGraphContextSelector } from "../src/graph/context-selector.js";
 import { GraphSchema, TypedGraph, createGraphContextualState } from "../src/graph/model.js";
-import { canonicalHash } from "../src/shared/canonical.js";
+import { canonicalHash, rawSha256 } from "../src/shared/canonical.js";
 import {
   createKoniManagedExtension,
   renderCompactionSummary,
@@ -28,6 +28,50 @@ const snapshot: KoniCompactionSnapshot = {
 };
 
 describe("Koni Pi compaction extension", () => {
+  it("reissues an authenticated planning-synthesis policy ahead of conversation history", async () => {
+    const spec = fixtureLaunchSpec({
+      cwd: "/tmp/koni-workspace",
+      sessionDirectory: "/tmp/koni-sessions/attempt-synthesis",
+    });
+    const provider = fixtureContextProvider(spec, snapshot);
+    const base = provider.loadBoundContext.bind(provider);
+    const content = "Stop repository discovery and submit the reviewable plan.";
+    provider.loadBoundContext = async (requested) => ({
+      ...(await base(requested)),
+      runtimePolicy: {
+        protocol: "koni.runtime-policy-context.v1",
+        kind: "planning_synthesis",
+        sha256: rawSha256(content),
+        sizeBytes: Buffer.byteLength(content, "utf8"),
+        content,
+      },
+    });
+    const handlers = await loadHandlers(
+      createKoniManagedExtension({ spec, contextProvider: provider }),
+    );
+    const existing = { role: "user", content: [{ type: "text", text: "existing history" }] };
+
+    const context = await handlers.get("context")!({ type: "context", messages: [existing] }, {});
+    expect(context.messages).toHaveLength(3);
+    expect(context.messages[1].content[0].text).toContain("<koni_runtime_policy");
+    expect(context.messages[1].content[0].text).toContain(content);
+    expect(context.messages[2]).toBe(existing);
+
+    provider.loadBoundContext = async (requested) => ({
+      ...(await base(requested)),
+      runtimePolicy: {
+        protocol: "koni.runtime-policy-context.v1",
+        kind: "planning_synthesis",
+        sha256: rawSha256("different"),
+        sizeBytes: Buffer.byteLength(content, "utf8"),
+        content,
+      },
+    });
+    await expect(handlers.get("context")!({ type: "context", messages: [] }, {})).rejects.toThrow(
+      /runtime policy context.*unauthenticated/u,
+    );
+  });
+
   it("creates structured checkpoints and reissues exact authoritative context", async () => {
     const spec = fixtureLaunchSpec({
       cwd: "/tmp/koni-workspace",
@@ -35,33 +79,38 @@ describe("Koni Pi compaction extension", () => {
     });
     const provider = fixtureContextProvider(spec, snapshot);
     const notices: string[] = [];
-    const handlers = await loadHandlers(createKoniManagedExtension({
-      spec,
-      contextProvider: provider,
-      onNotice: (notice) => notices.push(notice.type),
-    }));
+    const handlers = await loadHandlers(
+      createKoniManagedExtension({
+        spec,
+        contextProvider: provider,
+        onNotice: (notice) => notices.push(notice.type),
+      }),
+    );
 
     const context = await handlers.get("context")!({ type: "context", messages: [] }, {});
     expect(context.messages).toHaveLength(1);
     expect(context.messages[0].content[0].text).toContain("<koni_authoritative_context");
     expect(context.messages[0].content[0].text).toContain("authoritative context");
 
-    const compacted = await handlers.get("session_before_compact")!({
-      type: "session_before_compact",
-      reason: "threshold",
-      willRetry: false,
-      signal: new AbortController().signal,
-      branchEntries: [],
-      preparation: {
-        firstKeptEntryId: "entry-one",
-        messagesToSummarize: [],
-        turnPrefixMessages: [],
-        isSplitTurn: false,
-        tokensBefore: 12_000,
-        fileOps: { read: [], modified: [] },
-        settings: { enabled: true, reserveTokens: 1_000, keepRecentTokens: 1_000 },
+    const compacted = await handlers.get("session_before_compact")!(
+      {
+        type: "session_before_compact",
+        reason: "threshold",
+        willRetry: false,
+        signal: new AbortController().signal,
+        branchEntries: [],
+        preparation: {
+          firstKeptEntryId: "entry-one",
+          messagesToSummarize: [],
+          turnPrefixMessages: [],
+          isSplitTurn: false,
+          tokensBefore: 12_000,
+          fileOps: { read: [], modified: [] },
+          settings: { enabled: true, reserveTokens: 1_000, keepRecentTokens: 1_000 },
+        },
       },
-    }, {});
+      {},
+    );
     expect(compacted.compaction.summary).toContain("# Koni attempt checkpoint");
     expect(compacted.compaction.summary).toContain("## Files read or modified");
     expect(compacted.compaction.details).toMatchObject({
@@ -119,7 +168,9 @@ describe("Koni Pi compaction extension", () => {
       selections += 1;
       return dynamic;
     };
-    const handlers = await loadHandlers(createKoniManagedExtension({ spec, contextProvider: provider }));
+    const handlers = await loadHandlers(
+      createKoniManagedExtension({ spec, contextProvider: provider }),
+    );
 
     const first = await handlers.get("context")!({ type: "context", messages: [] }, {});
     const second = await handlers.get("context")!({ type: "context", messages: [] }, {});
@@ -130,22 +181,25 @@ describe("Koni Pi compaction extension", () => {
     expect(first.messages[1].content[0].text).toContain(`envelope_hash="${dynamic.envelopeHash}"`);
     expect(second.messages[1].content[0].text).toContain(dynamic.content);
 
-    await handlers.get("session_before_compact")!({
-      type: "session_before_compact",
-      reason: "threshold",
-      willRetry: false,
-      signal: new AbortController().signal,
-      branchEntries: [],
-      preparation: {
-        firstKeptEntryId: "entry-dynamic",
-        messagesToSummarize: [],
-        turnPrefixMessages: [],
-        isSplitTurn: false,
-        tokensBefore: 1_000,
-        fileOps: { read: [], modified: [] },
-        settings: { enabled: true, reserveTokens: 100, keepRecentTokens: 100 },
+    await handlers.get("session_before_compact")!(
+      {
+        type: "session_before_compact",
+        reason: "threshold",
+        willRetry: false,
+        signal: new AbortController().signal,
+        branchEntries: [],
+        preparation: {
+          firstKeptEntryId: "entry-dynamic",
+          messagesToSummarize: [],
+          turnPrefixMessages: [],
+          isSplitTurn: false,
+          tokensBefore: 1_000,
+          fileOps: { read: [], modified: [] },
+          settings: { enabled: true, reserveTokens: 100, keepRecentTokens: 100 },
+        },
       },
-    }, {});
+      {},
+    );
     const postCompaction = await handlers.get("context")!({ type: "context", messages: [] }, {});
     expect(selections).toBe(3);
     expect(postCompaction.messages[1].content[0].text).toContain(dynamic.content);
@@ -161,18 +215,23 @@ describe("Koni Pi compaction extension", () => {
       ...(await fixtureContextProvider(value, snapshot).loadBoundContext(value)),
       stateHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     });
-    const handlers = await loadHandlers(createKoniManagedExtension({ spec, contextProvider: provider }));
+    const handlers = await loadHandlers(
+      createKoniManagedExtension({ spec, contextProvider: provider }),
+    );
     await expect(handlers.get("context")!({ type: "context", messages: [] }, {})).rejects.toThrow(
       "does not match the immutable launch binding",
     );
-    const compacted = await handlers.get("session_before_compact")!({
-      type: "session_before_compact",
-      reason: "manual",
-      willRetry: false,
-      signal: new AbortController().signal,
-      branchEntries: [],
-      preparation: { firstKeptEntryId: "entry", tokensBefore: 1 },
-    }, {});
+    const compacted = await handlers.get("session_before_compact")!(
+      {
+        type: "session_before_compact",
+        reason: "manual",
+        willRetry: false,
+        signal: new AbortController().signal,
+        branchEntries: [],
+        preparation: { firstKeptEntryId: "entry", tokensBefore: 1 },
+      },
+      {},
+    );
     expect(compacted).toEqual({ cancel: true });
   });
 
@@ -182,16 +241,20 @@ describe("Koni Pi compaction extension", () => {
       sessionDirectory: "/tmp/koni-sessions/attempt-provider-guard",
     });
     let guards = 0;
-    const handlers = await loadHandlers(createKoniManagedExtension({
-      spec,
-      contextProvider: fixtureContextProvider(spec, snapshot),
-      beforeProviderRequest() {
-        guards += 1;
-        if (guards === 2) throw new Error("attempt budget exhausted before provider request");
-      },
-    }));
+    const handlers = await loadHandlers(
+      createKoniManagedExtension({
+        spec,
+        contextProvider: fixtureContextProvider(spec, snapshot),
+        beforeProviderRequest() {
+          guards += 1;
+          if (guards === 2) throw new Error("attempt budget exhausted before provider request");
+        },
+      }),
+    );
 
-    await expect(handlers.get("context")!({ type: "context", messages: [] }, {})).resolves.toBeDefined();
+    await expect(
+      handlers.get("context")!({ type: "context", messages: [] }, {}),
+    ).resolves.toBeDefined();
     await expect(handlers.get("context")!({ type: "context", messages: [] }, {})).rejects.toThrow(
       "attempt budget exhausted before provider request",
     );

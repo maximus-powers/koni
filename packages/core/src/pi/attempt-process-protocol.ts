@@ -5,6 +5,10 @@ import type {
   KoniAttemptRecoveryState,
   KoniCompactionSnapshot,
   KoniAuthorizedMessage,
+  KoniProviderRequestReservation,
+  KoniProviderRequestReservationInput,
+  KoniProviderRequestSettlement,
+  KoniProviderRequestSettlementInput,
 } from "./compaction.js";
 import type { SelectedDynamicGraphContext } from "../graph/context-selector.js";
 import type { AgentLaunchSpec } from "./launch-spec.js";
@@ -42,6 +46,8 @@ export interface ActivateControlAttemptFrame extends FrameBase {
   type: "control";
   controlId: string;
   action: "activate";
+  /** Parent-owned capability issued only after the exact session path is durably committed. */
+  activationToken: string;
 }
 
 export interface MessageControlAttemptFrame extends FrameBase {
@@ -64,6 +70,8 @@ export interface AuthorityResponseFrame extends FrameBase {
   ok: boolean;
   value?: unknown;
   error?: string;
+  /** Bounded machine classification from the Rust-equivalent Core authority boundary. */
+  errorCode?: string;
 }
 
 export type PiAttemptParentFrame =
@@ -117,7 +125,9 @@ export type PiAuthorityRequest =
       record: Omit<KoniAuthorizedCompaction, "sequence" | "authorizationId">;
     }
   | { operation: "acquire_recovery_claim" }
-  | { operation: "release_recovery_claim"; claimToken: string };
+  | { operation: "release_recovery_claim"; claimToken: string }
+  | { operation: "reserve_provider_request"; request: KoniProviderRequestReservationInput }
+  | { operation: "reconcile_provider_request"; settlement: KoniProviderRequestSettlementInput };
 
 export type PiAuthorityResponseValue =
   | KoniToolReceipt
@@ -126,11 +136,15 @@ export type PiAuthorityResponseValue =
   | KoniCompactionSnapshot
   | { authorizationId: string }
   | { claimToken: string; claimId: string; state: KoniAttemptRecoveryState }
-  | { released: true };
+  | { released: true }
+  | KoniProviderRequestReservation
+  | KoniProviderRequestSettlement;
 
 export interface ChildAuthorityRequestFrame extends FrameBase {
   type: "authority_request";
   requestId: string;
+  /** Required for every non-construction authority request after activation. */
+  activationToken?: string;
   request: PiAuthorityRequest;
 }
 
@@ -170,7 +184,10 @@ export class BoundedJsonLineDecoder {
 
   public constructor(maximumBytes = PI_ATTEMPT_PROCESS_MAX_FRAME_BYTES) {
     if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1) {
-      throw new PiAttemptProcessProtocolError("frame_bound", "frame bound must be a positive safe integer");
+      throw new PiAttemptProcessProtocolError(
+        "frame_bound",
+        "frame bound must be a positive safe integer",
+      );
     }
     this.#maximumBytes = maximumBytes;
   }
@@ -185,18 +202,27 @@ export class BoundedJsonLineDecoder {
       const end = newline < 0 ? incoming.byteLength : newline;
       const segment = incoming.subarray(offset, end);
       if (this.#buffer.byteLength + segment.byteLength > this.#maximumBytes) {
-        throw new PiAttemptProcessProtocolError("frame_too_large", "attempt-process frame exceeds its byte bound");
+        throw new PiAttemptProcessProtocolError(
+          "frame_too_large",
+          "attempt-process frame exceeds its byte bound",
+        );
       }
       if (segment.byteLength > 0) this.#buffer = Buffer.concat([this.#buffer, segment]);
       if (newline < 0) break;
       if (this.#buffer.byteLength === 0) {
-        throw new PiAttemptProcessProtocolError("empty_frame", "attempt-process protocol does not allow empty frames");
+        throw new PiAttemptProcessProtocolError(
+          "empty_frame",
+          "attempt-process protocol does not allow empty frames",
+        );
       }
       let value: unknown;
       try {
         value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(this.#buffer));
       } catch {
-        throw new PiAttemptProcessProtocolError("invalid_json", "attempt-process frame is not valid JSON");
+        throw new PiAttemptProcessProtocolError(
+          "invalid_json",
+          "attempt-process frame is not valid JSON",
+        );
       }
       values.push(value);
       this.#buffer = Buffer.alloc(0);
@@ -208,15 +234,23 @@ export class BoundedJsonLineDecoder {
 
   public finish(): void {
     if (this.#buffer.byteLength !== 0) {
-      throw new PiAttemptProcessProtocolError("truncated_frame", "attempt-process channel ended with a partial frame");
+      throw new PiAttemptProcessProtocolError(
+        "truncated_frame",
+        "attempt-process channel ended with a partial frame",
+      );
     }
   }
 }
 
-export function encodePiAttemptProcessFrame(frame: PiAttemptParentFrame | PiAttemptChildFrame): Buffer {
+export function encodePiAttemptProcessFrame(
+  frame: PiAttemptParentFrame | PiAttemptChildFrame,
+): Buffer {
   const encoded = Buffer.from(`${JSON.stringify(frame)}\n`, "utf8");
   if (encoded.byteLength - 1 > PI_ATTEMPT_PROCESS_MAX_FRAME_BYTES) {
-    throw new PiAttemptProcessProtocolError("frame_too_large", "attempt-process frame exceeds its byte bound");
+    throw new PiAttemptProcessProtocolError(
+      "frame_too_large",
+      "attempt-process frame exceeds its byte bound",
+    );
   }
   return encoded;
 }
@@ -230,12 +264,13 @@ export function parseParentFrame(value: unknown): PiAttemptParentFrame {
         typeof frame.deferActivation !== "boolean" ||
         !isRecord(frame.spec) ||
         !isRecord(frame.terminalOutputSchema)
-      ) failShape("launch frame is malformed");
+      )
+        failShape("launch frame is malformed");
       break;
     case "control":
       validateIdentifier(frame.controlId, "controlId");
       if (frame.action === "activate") {
-        // The immutable launch binding and ordered control identity carry all activation data.
+        validateIdentifier(frame.activationToken, "activationToken");
       } else if (frame.action === "abort") validateBoundedString(frame.reason, "reason", 64 * 1024);
       else if (frame.action === "message" && isRecord(frame.message)) {
         validateBoundedString(frame.message.content, "message.content", 1024 * 1024);
@@ -244,10 +279,16 @@ export function parseParentFrame(value: unknown): PiAttemptParentFrame {
     case "authority_response":
       validateIdentifier(frame.requestId, "requestId");
       if (typeof frame.ok !== "boolean") failShape("authority response ok must be boolean");
-      if (!frame.ok) validateBoundedString(frame.error, "error", 64 * 1024);
+      if (!frame.ok) {
+        validateBoundedString(frame.error, "error", 64 * 1024);
+        if (frame.errorCode !== undefined) validateIdentifier(frame.errorCode, "errorCode");
+      }
       break;
     default:
-      throw new PiAttemptProcessProtocolError("frame_type", `unsupported parent frame ${frame.type}`);
+      throw new PiAttemptProcessProtocolError(
+        "frame_type",
+        `unsupported parent frame ${frame.type}`,
+      );
   }
   return value as PiAttemptParentFrame;
 }
@@ -259,10 +300,12 @@ export function parseChildFrame(value: unknown): PiAttemptChildFrame {
       validateBoundedString(frame.sessionFile, "sessionFile", 16 * 1024);
       break;
     case "event":
-      if (!isRecord(frame.event) || typeof frame.event.type !== "string") failShape("managed event is malformed");
+      if (!isRecord(frame.event) || typeof frame.event.type !== "string")
+        failShape("managed event is malformed");
       break;
     case "outcome":
-      if (!isRecord(frame.outcome) || typeof frame.outcome.status !== "string") failShape("managed outcome is malformed");
+      if (!isRecord(frame.outcome) || typeof frame.outcome.status !== "string")
+        failShape("managed outcome is malformed");
       break;
     case "control_result":
       validateIdentifier(frame.controlId, "controlId");
@@ -271,6 +314,8 @@ export function parseChildFrame(value: unknown): PiAttemptChildFrame {
       break;
     case "authority_request":
       validateIdentifier(frame.requestId, "requestId");
+      if (frame.activationToken !== undefined)
+        validateIdentifier(frame.activationToken, "activationToken");
       validateAuthorityRequest(frame.request);
       break;
     case "authority_cancel":
@@ -280,7 +325,10 @@ export function parseChildFrame(value: unknown): PiAttemptChildFrame {
       validateBoundedString(frame.error, "error", 64 * 1024);
       break;
     default:
-      throw new PiAttemptProcessProtocolError("frame_type", `unsupported child frame ${frame.type}`);
+      throw new PiAttemptProcessProtocolError(
+        "frame_type",
+        `unsupported child frame ${frame.type}`,
+      );
   }
   return value as PiAttemptChildFrame;
 }
@@ -290,7 +338,10 @@ export function assertFrameBinding(
   expected: { attemptId: string; specHash: string; nextSequence: number },
 ): void {
   if (frame.attemptId !== expected.attemptId || frame.specHash !== expected.specHash) {
-    throw new PiAttemptProcessProtocolError("frame_binding", "attempt-process frame crossed an immutable attempt boundary");
+    throw new PiAttemptProcessProtocolError(
+      "frame_binding",
+      "attempt-process frame crossed an immutable attempt boundary",
+    );
   }
   if (frame.sequence !== expected.nextSequence) {
     throw new PiAttemptProcessProtocolError(
@@ -302,18 +353,30 @@ export function assertFrameBinding(
 
 function validateBase(value: unknown): FrameBase & { type: string } & Record<string, unknown> {
   if (!isRecord(value)) {
-    throw new PiAttemptProcessProtocolError("frame_shape", "attempt-process frame must be an object");
+    throw new PiAttemptProcessProtocolError(
+      "frame_shape",
+      "attempt-process frame must be an object",
+    );
   }
   if (value.protocol !== PI_ATTEMPT_PROCESS_PROTOCOL) {
-    throw new PiAttemptProcessProtocolError("frame_protocol", "unsupported attempt-process protocol");
+    throw new PiAttemptProcessProtocolError(
+      "frame_protocol",
+      "unsupported attempt-process protocol",
+    );
   }
   for (const field of ["attemptId", "specHash", "type"] as const) {
     if (typeof value[field] !== "string" || Buffer.byteLength(value[field], "utf8") < 1) {
-      throw new PiAttemptProcessProtocolError("frame_shape", `attempt-process ${field} must be a nonempty string`);
+      throw new PiAttemptProcessProtocolError(
+        "frame_shape",
+        `attempt-process ${field} must be a nonempty string`,
+      );
     }
   }
   if (!Number.isSafeInteger(value.sequence) || (value.sequence as number) < 1) {
-    throw new PiAttemptProcessProtocolError("frame_sequence", "attempt-process sequence must be a positive safe integer");
+    throw new PiAttemptProcessProtocolError(
+      "frame_sequence",
+      "attempt-process sequence must be a positive safe integer",
+    );
   }
   return value as unknown as FrameBase & { type: string } & Record<string, unknown>;
 }
@@ -323,11 +386,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function validateAuthorityRequest(value: unknown): void {
-  if (!isRecord(value) || typeof value.operation !== "string") failShape("authority request is malformed");
+  if (!isRecord(value) || typeof value.operation !== "string")
+    failShape("authority request is malformed");
   switch (value.operation) {
     case "invoke_tool":
     case "reject_tool":
-      validateIdentifier(value.callId, "callId");
+      // Pi/provider tool-call ids are opaque transport identities, not Koni-authored keys. OpenAI
+      // Responses currently composes them as `call_<id>|fc_<id>`, so applying Koni's narrower
+      // identifier grammar rejects an ordinary native Pi call before Rust/TS authority can inspect
+      // it. Keep the value bounded and free of controls while preserving the provider identity
+      // byte-for-byte for replay protection and transcript correlation.
+      validateOpaqueIdentifier(value.callId, "callId");
       validateIdentifier(value.name, "tool name");
       if (!isRecord(value.arguments)) failShape("tool arguments must be an object");
       if (value.operation === "reject_tool" && !isRecord(value.rejection)) {
@@ -345,9 +414,89 @@ function validateAuthorityRequest(value: unknown): void {
     case "release_recovery_claim":
       validateIdentifier(value.claimToken, "claimToken");
       return;
+    case "reserve_provider_request":
+      validateProviderReservationInput(value.request);
+      return;
+    case "reconcile_provider_request":
+      validateProviderSettlementInput(value.settlement);
+      return;
     default:
-      throw new PiAttemptProcessProtocolError("authority_operation", "unsupported authority request operation");
+      throw new PiAttemptProcessProtocolError(
+        "authority_operation",
+        "unsupported authority request operation",
+      );
   }
+}
+
+function validateProviderReservationInput(value: unknown): void {
+  if (
+    !isRecord(value) ||
+    !Number.isSafeInteger(value.sequence) ||
+    Number(value.sequence) < 1 ||
+    typeof value.api !== "string" ||
+    Buffer.byteLength(value.api, "utf8") < 1 ||
+    Buffer.byteLength(value.api, "utf8") > 256 ||
+    typeof value.modelId !== "string" ||
+    Buffer.byteLength(value.modelId, "utf8") < 1 ||
+    Buffer.byteLength(value.modelId, "utf8") > 512 ||
+    !isDigest(value.payloadSha256) ||
+    !isPositiveSafeInteger(value.payloadSizeBytes) ||
+    !isPositiveSafeInteger(value.prospectiveInputTokens) ||
+    !isPositiveSafeInteger(value.reservedOutputTokens)
+  )
+    failShape("provider reservation request is malformed");
+  if (value.serializedOutputCap !== undefined) {
+    if (
+      !isRecord(value.serializedOutputCap) ||
+      typeof value.serializedOutputCap.path !== "string" ||
+      !value.serializedOutputCap.path.startsWith("/") ||
+      Buffer.byteLength(value.serializedOutputCap.path, "utf8") > 256 ||
+      !isPositiveSafeInteger(value.serializedOutputCap.value) ||
+      value.serializedOutputCap.value !== value.reservedOutputTokens
+    )
+      failShape("provider serialized output cap is malformed");
+  }
+}
+
+function validateProviderSettlementInput(value: unknown): void {
+  if (
+    !isRecord(value) ||
+    !Number.isSafeInteger(value.sequence) ||
+    Number(value.sequence) < 1 ||
+    typeof value.reservationId !== "string" ||
+    typeof value.assistantEntryId !== "string" ||
+    !isDigest(value.assistantEntrySha256) ||
+    !isRecord(value.usage)
+  )
+    failShape("provider settlement request is malformed");
+  validateIdentifier(value.reservationId, "reservationId");
+  validateIdentifier(value.assistantEntryId, "assistantEntryId");
+  const usage = value.usage;
+  for (const field of [
+    "input",
+    "output",
+    "cacheRead",
+    "cacheWrite",
+    "newTokens",
+    "allTokens",
+  ] as const) {
+    if (!Number.isSafeInteger(usage[field]) || Number(usage[field]) < 0) {
+      failShape("provider settlement usage is malformed");
+    }
+  }
+  if (
+    usage.newTokens !== Number(usage.input) + Number(usage.output) ||
+    usage.allTokens !== Number(usage.newTokens) + Number(usage.cacheRead) + Number(usage.cacheWrite)
+  )
+    failShape("provider settlement usage aggregates are inconsistent");
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) > 0;
+}
+
+function isDigest(value: unknown): value is string {
+  return typeof value === "string" && /^sha256:[a-f0-9]{64}$/u.test(value);
 }
 
 function validateIdentifier(value: unknown, name: string): asserts value is string {
@@ -356,7 +505,22 @@ function validateIdentifier(value: unknown, name: string): asserts value is stri
   }
 }
 
-function validateBoundedString(value: unknown, name: string, maximumBytes: number): asserts value is string {
+function validateOpaqueIdentifier(value: unknown, name: string): asserts value is string {
+  if (
+    typeof value !== "string" ||
+    Buffer.byteLength(value, "utf8") === 0 ||
+    Buffer.byteLength(value, "utf8") > 1_024 ||
+    !/^[\x21-\x7e]+$/u.test(value)
+  ) {
+    failShape(`${name} is not a bounded printable identifier`);
+  }
+}
+
+function validateBoundedString(
+  value: unknown,
+  name: string,
+  maximumBytes: number,
+): asserts value is string {
   if (
     typeof value !== "string" ||
     Buffer.byteLength(value, "utf8") === 0 ||

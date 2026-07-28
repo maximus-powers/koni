@@ -10,10 +10,8 @@ import { canonicalHash, isSha256Digest, type Sha256Digest } from "../shared/cano
 import type { RunLifecycleState, RunPhase, ResumableRunPhase } from "./run-lifecycle.js";
 import type { RunRecord } from "./run-record.js";
 
-export const LEGACY_RUN_GIT_MIGRATION_PROTOCOL =
-  "koni.legacy-run-git-migration.v1" as const;
-export const LEGACY_RUN_RELOCATION_PROTOCOL =
-  "koni.legacy-run-relocation.v1" as const;
+export const LEGACY_RUN_GIT_MIGRATION_PROTOCOL = "koni.legacy-run-git-migration.v1" as const;
+export const LEGACY_RUN_RELOCATION_PROTOCOL = "koni.legacy-run-relocation.v1" as const;
 
 /** Exact persisted shape emitted by the pre-isolation TypeScript runtime. */
 export interface LegacyFlatRunGitRecord {
@@ -132,7 +130,11 @@ export async function migrateLegacyRunGitRecord(
   if (!isRecord(value) || value.protocol !== "koni.run-record.v1") {
     return { status: "blocked", reason: "legacy run envelope protocol is invalid" };
   }
-  if (!isNamespaceId(value.id) || !Number.isSafeInteger(value.revision) || Number(value.revision) < 0) {
+  if (
+    !isNamespaceId(value.id) ||
+    !Number.isSafeInteger(value.revision) ||
+    Number(value.revision) < 0
+  ) {
     return { status: "blocked", reason: "legacy run identity or revision is invalid" };
   }
   if (!path.isAbsolute(options.projectRoot) || !path.isAbsolute(options.commonDirectory)) {
@@ -148,7 +150,10 @@ export async function migrateLegacyRunGitRecord(
   try {
     identity = await GitClient.discover(options.projectRoot);
   } catch (error) {
-    return { status: "blocked", reason: `cannot discover legacy Git repository: ${message(error)}` };
+    return {
+      status: "blocked",
+      reason: `cannot discover legacy Git repository: ${message(error)}`,
+    };
   }
   const expectedProjectRoot = await canonicalExistingPath(options.projectRoot);
   const expectedCommon = await canonicalExistingPath(options.commonDirectory);
@@ -158,7 +163,10 @@ export async function migrateLegacyRunGitRecord(
     identity.worktreeRoot !== expectedProjectRoot ||
     identity.commonDirectory !== expectedCommon
   ) {
-    return { status: "blocked", reason: "authority repository identity does not match Git discovery" };
+    return {
+      status: "blocked",
+      reason: "authority repository identity does not match Git discovery",
+    };
   }
   const persistedProjectRoot = await canonicalExistingPath(value.projectRoot);
   if (persistedProjectRoot !== expectedProjectRoot) {
@@ -193,8 +201,12 @@ export async function migrateLegacyRunGitRecord(
   let relocation: LegacyRunRelocationPlan | undefined;
   if (
     evaluation.kind === "live_exact" &&
-    !isTerminalPhase(priorPhase) &&
-    priorPhase !== "deleting"
+    priorPhase !== "deleting" &&
+    (!isTerminalPhase(priorPhase) ||
+      priorPhase === "failed" ||
+      (priorPhase === "completed" &&
+        legacy.mergedOid !== undefined &&
+        evidence.targetContainsMerged))
   ) {
     relocation = {
       protocol: LEGACY_RUN_RELOCATION_PROTOCOL,
@@ -232,30 +244,26 @@ export async function migrateLegacyRunGitRecord(
   let reason: string | undefined;
   if (relocation !== undefined) {
     status = "relocation_required";
-    reason = "legacy live checkout requires a journaled relocation before execution can resume";
+    reason = "legacy live checkout requires journaled relocation into the canonical namespace";
   } else if (evaluation.kind === "planned_empty" && priorPhase === "draft") {
     status = "migrated";
   } else if (evaluation.kind === "cleaned_empty" && isTerminalPhase(priorPhase)) {
     status = "migrated";
-  } else if (
-    evaluation.kind === "live_exact" &&
-    isTerminalPhase(priorPhase) &&
-    (priorPhase !== "completed" || (
-      legacy.mergedOid !== undefined && evidence.targetContainsMerged
-    ))
-  ) {
-    status = "migrated";
   } else {
     status = "preserved";
-    reason = priorPhase === "deleting" && evaluation.kind === "live_exact"
-      ? "legacy run deletion requires a journaled legacy-source cleanup"
-      : evaluation.kind === "preserved"
-      ? evaluation.reason
-      : evaluation.kind === "planned_empty"
-        ? "only a draft run may own an unmaterialized legacy namespace"
-        : evaluation.kind === "cleaned_empty"
-          ? "only a terminal run may own a cleaned legacy namespace"
-          : "legacy terminal checkout lacks exact publication evidence";
+    if (priorPhase === "deleting" && evaluation.kind === "live_exact") {
+      reason = "legacy run deletion requires a journaled legacy-source cleanup";
+    } else if (priorPhase === "deleted" && evaluation.kind === "live_exact") {
+      reason = "deleted legacy run still owns a live checkout and requires operator recovery";
+    } else if (evaluation.kind === "preserved") {
+      reason = evaluation.reason;
+    } else if (evaluation.kind === "planned_empty") {
+      reason = "only a draft run may own an unmaterialized legacy namespace";
+    } else if (evaluation.kind === "cleaned_empty") {
+      reason = "only a terminal run may own a cleaned legacy namespace";
+    } else {
+      reason = "legacy terminal checkout lacks exact publication evidence";
+    }
   }
 
   const lifecycle = buildLifecycle({
@@ -304,10 +312,13 @@ export function assertLegacyRunGitMigrationRecord(
   if (
     !isRecord(value) ||
     value.protocol !== LEGACY_RUN_GIT_MIGRATION_PROTOCOL ||
-    !new Set(["migrated", "relocation_required", "relocated", "preserved", "retired"]).has(String(value.status)) ||
+    !new Set(["migrated", "relocation_required", "relocated", "preserved", "retired"]).has(
+      String(value.status),
+    ) ||
     !isSha256Digest(value.sourceGitSha256) ||
     !isTimestamp(value.migratedAt) ||
-    (value.reason !== undefined && (typeof value.reason !== "string" || value.reason.length === 0)) ||
+    (value.reason !== undefined &&
+      (typeof value.reason !== "string" || value.reason.length === 0)) ||
     (value.relocationIntentId !== undefined &&
       (typeof value.relocationIntentId !== "string" || value.relocationIntentId.length === 0)) ||
     (value.relocatedAt !== undefined && !isTimestamp(value.relocatedAt)) ||
@@ -329,10 +340,16 @@ export function assertLegacyRunGitMigrationRecord(
   ) {
     throw new Error("legacy Git migration disagrees with the migrated lifecycle");
   }
-  if ((value.status === "migrated" || value.status === "relocated" || value.status === "retired") && value.reason !== undefined) {
+  if (
+    (value.status === "migrated" || value.status === "relocated" || value.status === "retired") &&
+    value.reason !== undefined
+  ) {
     throw new Error("successful legacy Git migration has a blocker reason");
   }
-  if ((value.status === "relocation_required" || value.status === "preserved") && value.reason === undefined) {
+  if (
+    (value.status === "relocation_required" || value.status === "preserved") &&
+    value.reason === undefined
+  ) {
     throw new Error("preserved legacy Git migration is missing its blocker reason");
   }
   if (
@@ -455,29 +472,22 @@ async function inspectLegacyEvidence(
 ): Promise<LegacyEvidence> {
   const repository = new GitClient(projectRoot);
   const branchRef = `refs/heads/${legacy.runBranch}`;
-  const [
-    targetOid,
-    base,
-    branchOid,
-    candidate,
-    promotionTarget,
-    merged,
-    worktrees,
-  ] = await Promise.all([
-    repository.tryResolveRef(legacy.targetRef),
-    repository.tryResolveRef(legacy.targetBaseOid),
-    repository.tryResolveRef(branchRef),
-    legacy.candidateOid === undefined
-      ? Promise.resolve(undefined)
-      : repository.tryResolveRef(legacy.candidateOid),
-    legacy.promotionTargetOid === undefined
-      ? Promise.resolve(undefined)
-      : repository.tryResolveRef(legacy.promotionTargetOid),
-    legacy.mergedOid === undefined
-      ? Promise.resolve(undefined)
-      : repository.tryResolveRef(legacy.mergedOid),
-    repository.worktrees(),
-  ]);
+  const [targetOid, base, branchOid, candidate, promotionTarget, merged, worktrees] =
+    await Promise.all([
+      repository.tryResolveRef(legacy.targetRef),
+      repository.tryResolveRef(legacy.targetBaseOid),
+      repository.tryResolveRef(branchRef),
+      legacy.candidateOid === undefined
+        ? Promise.resolve(undefined)
+        : repository.tryResolveRef(legacy.candidateOid),
+      legacy.promotionTargetOid === undefined
+        ? Promise.resolve(undefined)
+        : repository.tryResolveRef(legacy.promotionTargetOid),
+      legacy.mergedOid === undefined
+        ? Promise.resolve(undefined)
+        : repository.tryResolveRef(legacy.mergedOid),
+      repository.worktrees(),
+    ]);
   const expected = standardNamespace(commonDirectory, runId);
   const registeredAtPath = worktrees.find(
     (entry) => path.resolve(entry.path) === path.resolve(legacy.runWorktree),
@@ -489,11 +499,13 @@ async function inspectLegacyEvidence(
   let clean = false;
   if (stat !== undefined) {
     const real = await canonicalExistingPath(legacy.runWorktree);
-    canonicalPath = canonicalPath && !stat.isSymbolicLink() && stat.isDirectory() && real === expected.root;
+    canonicalPath =
+      canonicalPath && !stat.isSymbolicLink() && stat.isDirectory() && real === expected.root;
     try {
       const discovered = await GitClient.discover(legacy.runWorktree);
       sameRepository = discovered.commonDirectory === commonDirectory;
-      clean = sameRepository && (await new GitClient(legacy.runWorktree).statusEntries()).length === 0;
+      clean =
+        sameRepository && (await new GitClient(legacy.runWorktree).statusEntries()).length === 0;
     } catch {
       sameRepository = false;
       clean = false;
@@ -505,18 +517,19 @@ async function inspectLegacyEvidence(
     expected.ticketRoot,
     stagingWorktree(commonDirectory, runId),
   ];
-  const pathStates = await Promise.all(candidatePaths.map(async (item) => ({
-    item,
-    exists: (await optionalLstat(item)) !== undefined,
-  })));
+  const pathStates = await Promise.all(
+    candidatePaths.map(async (item) => ({
+      item,
+      exists: (await optionalLstat(item)) !== undefined,
+    })),
+  );
   const targetCheckoutEntries = worktrees.filter((entry) => entry.branch === legacy.targetRef);
-  const targetCheckout = targetCheckoutEntries.length === 1
-    ? targetCheckoutEntries[0]!.path
-    : undefined;
+  const targetCheckout =
+    targetCheckoutEntries.length === 1 ? targetCheckoutEntries[0]!.path : undefined;
   const targetContainsMerged =
     targetOid !== undefined &&
     merged !== undefined &&
-    await repository.isAncestor(merged, targetOid);
+    (await repository.isAncestor(merged, targetOid));
   return {
     identityRoot: projectRoot,
     commonDirectory,
@@ -555,7 +568,10 @@ function evaluateEvidence(
     return { kind: "preserved", reason: "legacy target ref no longer resolves" };
   }
   if (legacy.runBranch !== `koni/runs/${runId}`) {
-    return { kind: "preserved", reason: "legacy run branch is outside the canonical run namespace" };
+    return {
+      kind: "preserved",
+      reason: "legacy run branch is outside the canonical run namespace",
+    };
   }
   if (!promotionFieldsCoherent(legacy)) {
     return { kind: "preserved", reason: "legacy promotion fields are incomplete or contradictory" };
@@ -564,7 +580,10 @@ function evaluateEvidence(
     return { kind: "preserved", reason: "one or more legacy promotion commits no longer resolve" };
   }
   if (legacy.mergedOid !== undefined && !evidence.targetContainsMerged) {
-    return { kind: "preserved", reason: "legacy published commit is not contained by the current target" };
+    return {
+      kind: "preserved",
+      reason: "legacy published commit is not contained by the current target",
+    };
   }
   const noResources =
     evidence.branchOid === undefined &&
@@ -572,14 +591,20 @@ function evaluateEvidence(
     evidence.registeredAtPath === undefined &&
     !evidence.worktreeExists;
   if (noResources && legacy.namespaceStatus === "cleaned") return { kind: "cleaned_empty" };
-  if (noResources && (legacy.namespaceStatus === "planned" || legacy.namespaceStatus === undefined)) {
+  if (
+    noResources &&
+    (legacy.namespaceStatus === "planned" || legacy.namespaceStatus === undefined)
+  ) {
     if (
       legacy.candidateOid !== undefined ||
       legacy.promotionTargetOid !== undefined ||
       legacy.mergeReadyAt !== undefined ||
       legacy.mergedOid !== undefined
     ) {
-      return { kind: "preserved", reason: "unmaterialized legacy namespace contains promotion state" };
+      return {
+        kind: "preserved",
+        reason: "unmaterialized legacy namespace contains promotion state",
+      };
     }
     return { kind: "planned_empty" };
   }
@@ -596,17 +621,23 @@ function evaluateEvidence(
     evidence.occupiedDestinationPaths.length === 0;
   if (exactLive) return { kind: "live_exact" };
   const reasons: string[] = [];
-  if (!evidence.canonicalPath) reasons.push("recorded worktree path is not the canonical legacy namespace");
+  if (!evidence.canonicalPath)
+    reasons.push("recorded worktree path is not the canonical legacy namespace");
   if (!evidence.worktreeExists) reasons.push("recorded worktree is missing");
   if (evidence.registeredAtPath === undefined) reasons.push("recorded worktree is not registered");
   if (evidence.branchRegistrations.length !== 1) reasons.push("run ref registration is ambiguous");
   if (evidence.branchOid === undefined) reasons.push("run ref is missing");
-  if (evidence.registeredAtPath !== undefined && evidence.branchOid !== evidence.registeredAtPath.head) {
+  if (
+    evidence.registeredAtPath !== undefined &&
+    evidence.branchOid !== evidence.registeredAtPath.head
+  ) {
     reasons.push("run ref and worktree HEAD disagree");
   }
   if (!evidence.sameRepository) reasons.push("recorded worktree belongs to another repository");
-  if (evidence.worktreeExists && !evidence.clean) reasons.push("recorded worktree has local changes");
-  if (evidence.occupiedDestinationPaths.length > 0) reasons.push("relocation destination is occupied");
+  if (evidence.worktreeExists && !evidence.clean)
+    reasons.push("recorded worktree has local changes");
+  if (evidence.occupiedDestinationPaths.length > 0)
+    reasons.push("relocation destination is occupied");
   if (legacy.namespaceStatus === "cleaned") reasons.push("cleaned state still has live resources");
   return { kind: "preserved", reason: reasons.join("; ") || "legacy Git evidence is ambiguous" };
 }
@@ -629,7 +660,6 @@ function buildLifecycle(input: {
   const empty = !input.evidence.worktreeExists && input.evidence.branchOid === undefined;
   const cleaned = empty && input.legacy.namespaceStatus === "cleaned";
   const planned = empty && !cleaned && input.status === "migrated";
-  const runWorktree = liveExact ? input.legacy.runWorktree : input.namespace.runWorktree;
   const blocker = input.status === "migrated" ? undefined : input.reason;
   const promotion = legacyPromotion(input, blocker);
   return {
@@ -642,7 +672,7 @@ function buildLifecycle(input: {
       root: input.namespace.root,
       runRef: input.namespace.runRef,
       planningWorktree: input.namespace.planningWorktree,
-      runWorktree,
+      runWorktree: input.namespace.runWorktree,
       ticketRoot: input.namespace.ticketRoot,
     },
     planning: {
@@ -650,7 +680,8 @@ function buildLifecycle(input: {
       baseOid: input.legacy.targetBaseOid,
       worktree: input.namespace.planningWorktree,
       createdAt: undefined,
-      retiredAt: cleaned || liveExact ? input.legacy.materializedAt ?? input.migratedAt : undefined,
+      retiredAt:
+        cleaned || liveExact ? (input.legacy.materializedAt ?? input.migratedAt) : undefined,
       blocker: planned || cleaned || liveExact ? undefined : blocker,
     },
     run: {
@@ -662,13 +693,17 @@ function buildLifecycle(input: {
             ? "ready"
             : "preserved",
       branchRef: input.namespace.runRef,
-      worktree: runWorktree,
+      // The lifecycle is always a projection of the compiler-owned destination.
+      // A still-live flat checkout remains authority-bound exclusively through
+      // LegacyRunGitMigrationRecord.source and its immutable relocation plan.
+      worktree: input.namespace.runWorktree,
       headOid: input.evidence.branchOid,
       materializedAt: input.legacy.materializedAt,
       retiredAt: cleaned ? input.migratedAt : undefined,
-      blocker: planned || cleaned || (liveExact && input.status === "migrated" && input.terminal)
-        ? undefined
-        : blocker,
+      blocker:
+        planned || cleaned || (liveExact && input.status === "migrated" && input.terminal)
+          ? undefined
+          : blocker,
     },
     ticketCycles: {},
     ticketCycleOrder: [],
@@ -681,11 +716,10 @@ function legacyPromotion(
   blocker: string | undefined,
 ): TargetPromotionRecord | undefined {
   const legacy = input.legacy;
-  if (legacy.candidateOid === undefined || legacy.promotionTargetOid === undefined) return undefined;
+  if (legacy.candidateOid === undefined || legacy.promotionTargetOid === undefined)
+    return undefined;
   if (input.evidence.branchOid === undefined) return undefined;
-  const published =
-    legacy.mergedOid === legacy.candidateOid &&
-    input.evidence.targetContainsMerged;
+  const published = legacy.mergedOid === legacy.candidateOid && input.evidence.targetContainsMerged;
   return {
     status: published && input.status === "migrated" ? "published" : "preserved",
     expectedTargetOid: legacy.promotionTargetOid,
@@ -694,9 +728,10 @@ function legacyPromotion(
     targetCheckout: input.evidence.targetCheckout,
     preparedAt: legacy.mergeReadyAt ?? input.migratedAt,
     publishedAt: published ? input.migratedAt : undefined,
-    blocker: published && input.status === "migrated"
-      ? undefined
-      : blocker ?? "legacy promotion requires operator review",
+    blocker:
+      published && input.status === "migrated"
+        ? undefined
+        : (blocker ?? "legacy promotion requires operator review"),
   };
 }
 
@@ -754,20 +789,29 @@ function parseLegacyGit(value: unknown): LegacyFlatRunGitRecord | string {
   if (
     value.namespaceStatus !== undefined &&
     !new Set(["planned", "ready", "cleaned"]).has(String(value.namespaceStatus))
-  ) return "legacy namespace status is invalid";
+  )
+    return "legacy namespace status is invalid";
   return {
     targetRef: value.targetRef,
     targetBaseOid: value.targetBaseOid,
     runBranch: value.runBranch,
     runWorktree: value.runWorktree,
     ...(value.candidateOid === undefined ? {} : { candidateOid: value.candidateOid as string }),
-    ...(value.promotionTargetOid === undefined ? {} : { promotionTargetOid: value.promotionTargetOid as string }),
+    ...(value.promotionTargetOid === undefined
+      ? {}
+      : { promotionTargetOid: value.promotionTargetOid as string }),
     ...(value.mergeReadyAt === undefined ? {} : { mergeReadyAt: value.mergeReadyAt as string }),
     ...(value.mergedOid === undefined ? {} : { mergedOid: value.mergedOid as string }),
     ...(value.namespaceStatus === undefined
       ? {}
-      : { namespaceStatus: value.namespaceStatus as NonNullable<LegacyFlatRunGitRecord["namespaceStatus"]> }),
-    ...(value.materializedAt === undefined ? {} : { materializedAt: value.materializedAt as string }),
+      : {
+          namespaceStatus: value.namespaceStatus as NonNullable<
+            LegacyFlatRunGitRecord["namespaceStatus"]
+          >,
+        }),
+    ...(value.materializedAt === undefined
+      ? {}
+      : { materializedAt: value.materializedAt as string }),
   };
 }
 
@@ -779,16 +823,14 @@ function promotionFieldsCoherent(legacy: LegacyFlatRunGitRecord): boolean {
   return legacy.mergedOid === undefined || (candidate && legacy.mergedOid === legacy.candidateOid);
 }
 
-function legacyTicketProjectionIds(
-  tickets: unknown,
-  legacy: LegacyFlatRunGitRecord,
-): string[] {
+function legacyTicketProjectionIds(tickets: unknown, legacy: LegacyFlatRunGitRecord): string[] {
   if (!isRecord(tickets)) return [];
   return Object.entries(tickets)
-    .filter(([id, ticket]) =>
-      isNamespaceId(id) &&
-      isRecord(ticket) &&
-      (ticket.worktreePath === legacy.runWorktree || ticket.branch === legacy.runBranch)
+    .filter(
+      ([id, ticket]) =>
+        isNamespaceId(id) &&
+        isRecord(ticket) &&
+        (ticket.worktreePath === legacy.runWorktree || ticket.branch === legacy.runBranch),
     )
     .map(([id]) => id)
     .sort();
@@ -806,14 +848,7 @@ function standardNamespace(commonDirectory: string, runId: string) {
 }
 
 function stagingWorktree(commonDirectory: string, runId: string): string {
-  return path.join(
-    commonDirectory,
-    "koni",
-    "worktrees",
-    "migrations",
-    runId,
-    "integration",
-  );
+  return path.join(commonDirectory, "koni", "worktrees", "migrations", runId, "integration");
 }
 
 function readPhase(value: unknown): RunPhase | undefined {
@@ -822,11 +857,27 @@ function readPhase(value: unknown): RunPhase | undefined {
 }
 
 function isRunPhase(value: unknown): value is RunPhase {
-  return typeof value === "string" && new Set<RunPhase>([
-    "draft", "planning", "awaiting_questions", "awaiting_approval", "approving",
-    "executing", "pausing", "paused", "verifying", "merge_ready", "merging",
-    "blocked", "completed", "failed", "deleting", "deleted",
-  ]).has(value as RunPhase);
+  return (
+    typeof value === "string" &&
+    new Set<RunPhase>([
+      "draft",
+      "planning",
+      "awaiting_questions",
+      "awaiting_approval",
+      "approving",
+      "executing",
+      "pausing",
+      "paused",
+      "verifying",
+      "merge_ready",
+      "merging",
+      "blocked",
+      "completed",
+      "failed",
+      "deleting",
+      "deleted",
+    ]).has(value as RunPhase)
+  );
 }
 
 function isTerminalPhase(value: RunPhase): boolean {
@@ -843,7 +894,8 @@ function isSafeTargetRef(value: unknown): value is string {
     !value.startsWith("refs/heads/") ||
     value.length > 1_024 ||
     /[\u0000-\u0020~^:?*\\[\]]/u.test(value)
-  ) return false;
+  )
+    return false;
   const branch = value.slice("refs/heads/".length);
   return !(
     branch === "koni" ||
@@ -851,9 +903,11 @@ function isSafeTargetRef(value: unknown): value is string {
     branch.includes("..") ||
     branch.endsWith("/") ||
     branch.endsWith(".") ||
-    branch.split("/").some((component) =>
-      component.length === 0 || component === "." || component.endsWith(".lock")
-    )
+    branch
+      .split("/")
+      .some(
+        (component) => component.length === 0 || component === "." || component.endsWith(".lock"),
+      )
   );
 }
 
@@ -862,9 +916,13 @@ function isOid(value: unknown): value is string {
 }
 
 function isNamespaceId(value: unknown): value is string {
-  return typeof value === "string" &&
+  return (
+    typeof value === "string" &&
     /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/u.test(value) &&
-    value !== "." && value !== ".." && !value.endsWith(".lock");
+    value !== "." &&
+    value !== ".." &&
+    !value.endsWith(".lock")
+  );
 }
 
 function isTimestamp(value: unknown): value is string {

@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { PathAuthorityError, WorktreePathAuthority } from "../src/authority/path-policy.js";
+import { type PathAuthorityError, WorktreePathAuthority } from "../src/authority/path-policy.js";
 import { rawSha256 } from "../src/shared/canonical.js";
 
 const roots: string[] = [];
@@ -36,13 +36,16 @@ describe("worktree path authority", () => {
       readPaths: ["value.txt", "redirect/file"],
       writePaths: ["value.txt", "redirect/file"],
     });
-    await expect(policy.write("value.txt", Buffer.from("two"), rawSha256("wrong")))
-      .rejects.toMatchObject({ code: "write_cas" } satisfies Partial<PathAuthorityError>);
-    await expect(policy.write("redirect/file", Buffer.from("bad"), null))
-      .rejects.toMatchObject({ code: "symlink" } satisfies Partial<PathAuthorityError>);
+    await expect(
+      policy.write("value.txt", Buffer.from("two"), rawSha256("wrong")),
+    ).rejects.toMatchObject({ code: "write_cas" } satisfies Partial<PathAuthorityError>);
+    await expect(policy.write("redirect/file", Buffer.from("bad"), null)).rejects.toMatchObject({
+      code: "symlink",
+    } satisfies Partial<PathAuthorityError>);
     await expect(policy.read("../outside")).rejects.toMatchObject({ code: "path_escape" });
-    await expect(WorktreePathAuthority.create(root, { readPaths: [], writePaths: [".git/config"] }))
-      .rejects.toMatchObject({ code: "compiler_owned" });
+    await expect(
+      WorktreePathAuthority.create(root, { readPaths: [], writePaths: [".git/config"] }),
+    ).rejects.toMatchObject({ code: "compiler_owned" });
   });
 
   it("lists and searches only bounded regular files inside the read grant", async () => {
@@ -65,12 +68,39 @@ describe("worktree path authority", () => {
       { path: "src/nested/two.ts", kind: "file", sizeBytes: 16 },
     ]);
     expect(await policy.search("needle", { roots: ["src"], caseSensitive: false })).toEqual([
-      { path: "src/nested/two.ts", line: 1, column: 4, preview: "// Needle again" },
-      { path: "src/one.ts", line: 1, column: 14, preview: "export const needle = 1;" },
+      { path: "src/nested/two.ts", line: 1, column: 4, byteOffset: 3, preview: "// Needle again" },
+      {
+        path: "src/one.ts",
+        line: 1,
+        column: 14,
+        byteOffset: 13,
+        preview: "export const needle = 1;",
+      },
     ]);
     await expect(policy.list(".")).rejects.toMatchObject({ code: "read_scope" });
-    await expect(policy.search("needle", { roots: ["secret.txt"] }))
-      .rejects.toMatchObject({ code: "read_scope" });
+    await expect(policy.search("needle", { roots: ["secret.txt"] })).rejects.toMatchObject({
+      code: "read_scope",
+    });
+  });
+
+  it("returns UTF-8 byte offsets that can page directly into a multibyte CRLF file", async () => {
+    const root = await temporary();
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "src", "multibyte.ts"), "α\r\nneedle here\n");
+    const policy = await WorktreePathAuthority.create(root, {
+      readPaths: ["src/multibyte.ts"],
+      writePaths: [],
+    });
+
+    expect(await policy.search("needle")).toEqual([
+      {
+        path: "src/multibyte.ts",
+        line: 2,
+        column: 1,
+        byteOffset: 4,
+        preview: "needle here",
+      },
+    ]);
   });
 });
 

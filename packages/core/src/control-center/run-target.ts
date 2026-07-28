@@ -84,9 +84,13 @@ export function validateNewBranchName(
     return "Use letters, digits, and . _ / - only.";
   }
   if (
-    name.includes("..") || name.startsWith("/") || name.endsWith("/") || name.endsWith(".") ||
+    name.includes("..") ||
+    name.startsWith("/") ||
+    name.endsWith("/") ||
+    name.endsWith(".") ||
     name.split("/").some((part) => part.length === 0 || part === "." || part.endsWith(".lock"))
-  ) return "New branch name is malformed.";
+  )
+    return "New branch name is malformed.";
   if (name === "koni" || name.startsWith("koni/")) return "Branch names under koni/ are reserved.";
   const ref = `refs/heads/${name}`;
   if (branches.some((branch) => branch.reference === ref || branch.label === name)) {

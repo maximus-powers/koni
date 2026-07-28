@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { GitLifecycleError, IsolatedGitLifecycle } from "../src/git/lifecycle.js";
+import { IsolatedGitLifecycle } from "../src/git/lifecycle.js";
 import {
   compileGitBehaviorPolicy,
   createGitRunTemplateContext,
@@ -24,11 +24,13 @@ afterEach(async () => {
 describe("run target provisioning", () => {
   it("refuses a missing target unless provisioning is explicitly requested", async () => {
     const root = await repository();
-    await expect(lifecycle(root).planRun(
-      "run-missing-target",
-      "refs/heads/feature-new",
-      admission("run-missing-target"),
-    )).rejects.toMatchObject({
+    await expect(
+      lifecycle(root).planRun(
+        "run-missing-target",
+        "refs/heads/feature-new",
+        admission("run-missing-target"),
+      ),
+    ).rejects.toMatchObject({
       code: "target_missing",
       message: expect.stringContaining("--new-target"),
     });
@@ -67,12 +69,14 @@ describe("run target provisioning", () => {
     expect(state.target.selectedOid).toBe(releaseOid);
     expect(await gitOutput(root, "rev-parse", "refs/heads/feature-from-release")).toBe(releaseOid);
 
-    await expect(lifecycle(root).planRun(
-      "run-bad-base",
-      "refs/heads/feature-bad-base",
-      admission("run-bad-base"),
-      { create: true, baseRef: "does-not-exist" },
-    )).rejects.toMatchObject({ code: "base_unresolved" });
+    await expect(
+      lifecycle(root).planRun(
+        "run-bad-base",
+        "refs/heads/feature-bad-base",
+        admission("run-bad-base"),
+        { create: true, baseRef: "does-not-exist" },
+      ),
+    ).rejects.toMatchObject({ code: "base_unresolved" });
     // A rejected plan must not leave the target half-provisioned.
     expect(await branchExists(root, "feature-bad-base")).toBe(false);
   });
@@ -129,7 +133,12 @@ async function repository(): Promise<string> {
 }
 
 async function branchExists(root: string, branch: string): Promise<boolean> {
-  const output = await gitOutput(root, "for-each-ref", "--format=%(refname)", `refs/heads/${branch}`);
+  const output = await gitOutput(
+    root,
+    "for-each-ref",
+    "--format=%(refname)",
+    `refs/heads/${branch}`,
+  );
   return output.length > 0;
 }
 
@@ -139,7 +148,10 @@ async function git(cwd: string, ...argv: string[]): Promise<void> {
 
 function gitOutput(cwd: string, ...argv: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn("git", ["-C", cwd, ...argv], { shell: false, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("git", ["-C", cwd, ...argv], {
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
@@ -147,7 +159,12 @@ function gitOutput(cwd: string, ...argv: string[]): Promise<string> {
     child.once("error", reject);
     child.once("close", (code) => {
       if (code === 0) resolve(Buffer.concat(stdout).toString("utf8").trim());
-      else reject(new Error(`git ${argv.join(" ")} failed (${code}): ${Buffer.concat(stderr).toString("utf8")}`));
+      else
+        reject(
+          new Error(
+            `git ${argv.join(" ")} failed (${code}): ${Buffer.concat(stderr).toString("utf8")}`,
+          ),
+        );
     });
   });
 }

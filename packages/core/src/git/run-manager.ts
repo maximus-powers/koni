@@ -35,7 +35,9 @@ export class RunGitManager {
     this.#projectRoot = projectRoot;
   }
 
-  public async recentTargetBranches(limit = 20): Promise<{ ref: string; name: string; oid: string }[]> {
+  public async recentTargetBranches(
+    limit = 20,
+  ): Promise<{ ref: string; name: string; oid: string }[]> {
     const client = new GitClient(this.#projectRoot);
     return (await client.recentBranches(limit)).map((branch) => ({
       ref: `refs/heads/${branch.name}`,
@@ -95,7 +97,8 @@ export class RunGitManager {
         worktreeIdentity.commonDirectory === identity.commonDirectory &&
         branchHead !== undefined &&
         head === branchHead
-      ) return;
+      )
+        return;
       throw new Error("existing run worktree does not match the persisted namespace");
     }
 
@@ -118,7 +121,10 @@ export class RunGitManager {
     return namespace;
   }
 
-  public async preparePromotion(git: LegacyRunGitRecord, message: string): Promise<IntegrationResult> {
+  public async preparePromotion(
+    git: LegacyRunGitRecord,
+    message: string,
+  ): Promise<IntegrationResult> {
     assertTargetRef(git.targetRef);
     const repository = new GitClient(this.#projectRoot);
     const worktree = new GitClient(git.runWorktree);
@@ -183,8 +189,8 @@ export class RunGitManager {
       }
       const worktreeIdentity = await GitClient.discover(git.runWorktree);
       if (
-        await realpath(worktreeIdentity.commonDirectory) !==
-        await realpath(identity.commonDirectory)
+        (await realpath(worktreeIdentity.commonDirectory)) !==
+        (await realpath(identity.commonDirectory))
       ) {
         throw new Error("run worktree belongs to another repository");
       }
@@ -207,7 +213,11 @@ async function pathExists(target: string): Promise<boolean> {
     await lstat(target);
     return true;
   } catch (error) {
-    if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    ) {
       return false;
     }
     throw error;
@@ -221,7 +231,11 @@ function assertRunId(value: string): void {
 }
 
 function assertTargetRef(value: string): void {
-  if (!value.startsWith("refs/heads/") || value.length > 1_024 || /[\u0000-\u0020~^:?*\\[\]]/u.test(value)) {
+  if (
+    !value.startsWith("refs/heads/") ||
+    value.length > 1_024 ||
+    /[\u0000-\u0020~^:?*\\[\]]/u.test(value)
+  ) {
     throw new Error(`target must be a safe local branch ref: ${value}`);
   }
 }

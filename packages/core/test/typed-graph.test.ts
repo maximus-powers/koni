@@ -38,8 +38,12 @@ const schema = new GraphSchema({
 describe("typed graph and canonical bidirectional relationships", () => {
   it("stores one canonical edge while traversing both directions", () => {
     const graph = new TypedGraph(schema, [claim(), experiment(["claim-a"])]);
-    expect(graph.edges()).toEqual([{ source: "experiment-a", relation: "tests", target: "claim-a" }]);
-    expect(graph.neighbors("claim-a", "tested_by").map((node) => node.id)).toEqual(["experiment-a"]);
+    expect(graph.edges()).toEqual([
+      { source: "experiment-a", relation: "tests", target: "claim-a" },
+    ]);
+    expect(graph.neighbors("claim-a", "tested_by").map((node) => node.id)).toEqual([
+      "experiment-a",
+    ]);
     expect(graph.neighbors("experiment-a", "tests").map((node) => node.id)).toEqual(["claim-a"]);
   });
 
@@ -61,17 +65,20 @@ describe("typed graph and canonical bidirectional relationships", () => {
   it("rejects redundant inverse storage and stale deltas", () => {
     const badClaim = claim();
     badClaim.edges.tested_by = ["experiment-a"];
-    expect(() => new TypedGraph(schema, [badClaim, experiment(["claim-a"])]))
-      .toThrowError(GraphValidationError);
+    expect(() => new TypedGraph(schema, [badClaim, experiment(["claim-a"])])).toThrowError(
+      GraphValidationError,
+    );
     const graph = new TypedGraph(schema, [claim(), experiment(["claim-a"])]);
-    expect(() => graph.apply({
-      protocol: "koni.graph-delta.v1",
-      expectedGraphHash: (`sha256:${"0".repeat(64)}`) as `sha256:${string}`,
-      upsertNodes: [],
-      deleteNodes: [],
-      addEdges: [],
-      removeEdges: [],
-    })).toThrow(/stale/);
+    expect(() =>
+      graph.apply({
+        protocol: "koni.graph-delta.v1",
+        expectedGraphHash: `sha256:${"0".repeat(64)}`,
+        upsertNodes: [],
+        deleteNodes: [],
+        addEdges: [],
+        removeEdges: [],
+      }),
+    ).toThrow(/stale/);
   });
 });
 

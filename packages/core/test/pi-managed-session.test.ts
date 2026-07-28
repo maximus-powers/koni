@@ -4,6 +4,7 @@ import { createAgentLaunchSpec, type AgentLaunchSpec } from "../src/pi/launch-sp
 import {
   assertSupportedPiRuntimeVersion,
   ManagedPiSession,
+  ManagedSessionError,
   type ManagedPiSessionFactory,
   type PiSessionAdapter,
   type RecoveredSessionState,
@@ -11,11 +12,7 @@ import {
 import { ManagedSessionSupervisor } from "../src/pi/supervisor.js";
 import type { KoniAuthorizedMessage, KoniContextProvider } from "../src/pi/compaction.js";
 import { rawSha256 } from "../src/shared/canonical.js";
-import {
-  TERMINAL_TOOL_NAME,
-  fixtureLaunchSpec,
-  fixtureTool,
-} from "./pi-managed-fixtures.js";
+import { TERMINAL_TOOL_NAME, fixtureLaunchSpec, fixtureTool } from "./pi-managed-fixtures.js";
 
 describe("managed Pi session", () => {
   it("fails closed when the private continuation seam is not the exact pinned Pi runtime", () => {
@@ -39,7 +36,14 @@ describe("managed Pi session", () => {
 
     expect(outcome).toMatchObject({
       status: "completed",
-      usage: { input: 100, output: 20, cacheRead: 900, cacheWrite: 30, newTokens: 120, allTokens: 1_050 },
+      usage: {
+        input: 100,
+        output: 20,
+        cacheRead: 900,
+        cacheWrite: 30,
+        newTokens: 120,
+        allTokens: 1_050,
+      },
     });
     expect(adapter.mappings).toEqual([
       expect.objectContaining({
@@ -73,11 +77,13 @@ describe("managed Pi session", () => {
       throw new Error("broken TUI observer");
     });
 
-    await expect(session.start()).resolves.toEqual(expect.objectContaining({
-      status: "completed",
-      terminalOutput: { result: "accepted" },
-      usage: expect.objectContaining({ allTokens: 11 }),
-    }));
+    await expect(session.start()).resolves.toEqual(
+      expect.objectContaining({
+        status: "completed",
+        terminalOutput: { result: "accepted" },
+        usage: expect.objectContaining({ allTokens: 11 }),
+      }),
+    );
   });
 
   it("rejects terminal arguments that do not match the hash-bound output schema", async () => {
@@ -86,28 +92,59 @@ describe("managed Pi session", () => {
     adapter.promptBehavior = async () => emitTerminal(adapter, { unexpected: true });
     const session = await ManagedPiSession.create(spec, runtimeOptions(adapter));
 
-    await expect(session.start()).resolves.toEqual(expect.objectContaining({
-      status: "failed",
-      error: expect.stringContaining("does not match the compiler-issued schema"),
-    }));
+    await expect(session.start()).resolves.toEqual(
+      expect.objectContaining({
+        status: "failed",
+        error: expect.stringContaining("does not match the compiler-issued schema"),
+      }),
+    );
     expect(adapter.abortCalls).toBe(1);
+  });
+
+  it("preserves a typed runtime failure code in the terminal managed outcome", async () => {
+    const spec = specFor("attempt-runtime-failure", "session-runtime-failure");
+    const adapter = new FakeSessionAdapter(spec);
+    adapter.promptBehavior = async () => {
+      throw new ManagedSessionError(
+        "provider_admission",
+        "input budget cannot reserve the prospective provider input",
+      );
+    };
+    const session = await ManagedPiSession.create(spec, runtimeOptions(adapter));
+
+    await expect(session.start()).resolves.toEqual(
+      expect.objectContaining({
+        status: "failed",
+        code: "provider_admission",
+        error: "input budget cannot reserve the prospective provider input",
+      }),
+    );
   });
 
   it("fails a mixed terminal tool batch before it can be accepted", async () => {
     const spec = specFor("attempt-terminal-batch", "session-terminal-batch");
     const adapter = new FakeSessionAdapter(spec);
     adapter.promptBehavior = async () => {
-      adapter.emit(assistantUsageEvent(1, 1, 0, 0, [
-        { type: "toolCall", id: "terminal", name: TERMINAL_TOOL_NAME, arguments: { result: "done" } },
-        { type: "toolCall", id: "other", name: "unexpected_tool", arguments: {} },
-      ]));
+      adapter.emit(
+        assistantUsageEvent(1, 1, 0, 0, [
+          {
+            type: "toolCall",
+            id: "terminal",
+            name: TERMINAL_TOOL_NAME,
+            arguments: { result: "done" },
+          },
+          { type: "toolCall", id: "other", name: "unexpected_tool", arguments: {} },
+        ]),
+      );
     };
     const session = await ManagedPiSession.create(spec, runtimeOptions(adapter));
 
-    await expect(session.start()).resolves.toEqual(expect.objectContaining({
-      status: "failed",
-      error: expect.stringContaining("must be the only call"),
-    }));
+    await expect(session.start()).resolves.toEqual(
+      expect.objectContaining({
+        status: "failed",
+        error: expect.stringContaining("must be the only call"),
+      }),
+    );
     expect(adapter.abortCalls).toBe(1);
   });
 
@@ -117,10 +154,12 @@ describe("managed Pi session", () => {
     adapter.promptBehavior = async () => emitTerminal(adapter, { result: "done" }, false);
     const session = await ManagedPiSession.create(spec, runtimeOptions(adapter));
 
-    await expect(session.start()).resolves.toEqual(expect.objectContaining({
-      status: "failed",
-      error: expect.stringContaining("did not terminate"),
-    }));
+    await expect(session.start()).resolves.toEqual(
+      expect.objectContaining({
+        status: "failed",
+        error: expect.stringContaining("did not terminate"),
+      }),
+    );
     expect(adapter.abortCalls).toBe(1);
   });
 
@@ -152,10 +191,12 @@ describe("managed Pi session", () => {
     };
     const session = await ManagedPiSession.create(spec, runtimeOptions(adapter));
 
-    await expect(session.start()).resolves.toEqual(expect.objectContaining({
-      status: "completed",
-      terminalOutput: { result: "done" },
-    }));
+    await expect(session.start()).resolves.toEqual(
+      expect.objectContaining({
+        status: "completed",
+        terminalOutput: { result: "done" },
+      }),
+    );
     expect(adapter.disposeCalls).toBe(1);
   });
 
@@ -186,10 +227,12 @@ describe("managed Pi session", () => {
     };
     const session = await ManagedPiSession.create(spec, runtimeOptions(adapter));
     const outcome = await session.start();
-    expect(outcome).toEqual(expect.objectContaining({
-      status: "aborted",
-      reason: "cache-inclusive token budget exceeded",
-    }));
+    expect(outcome).toEqual(
+      expect.objectContaining({
+        status: "aborted",
+        reason: "cache-inclusive token budget exceeded",
+      }),
+    );
     expect(adapter.abortCalls).toBe(1);
   });
 
@@ -208,6 +251,7 @@ describe("managed Pi session", () => {
       maxCacheWrite: 10_000,
       maxNew: 15,
       maxAll: 10_000,
+      providerOutputHeadroom: base.budgets.tokens.providerOutputHeadroom,
     };
     const spec = createAgentLaunchSpec(draft) as AgentLaunchSpec;
     const adapter = new FakeSessionAdapter(spec);
@@ -217,10 +261,12 @@ describe("managed Pi session", () => {
     };
     const session = await ManagedPiSession.create(spec, runtimeOptions(adapter));
 
-    await expect(session.start()).resolves.toEqual(expect.objectContaining({
-      status: "aborted",
-      reason: "new-token token budget exceeded",
-    }));
+    await expect(session.start()).resolves.toEqual(
+      expect.objectContaining({
+        status: "aborted",
+        reason: "new-token token budget exceeded",
+      }),
+    );
     expect(adapter.abortCalls).toBe(1);
   });
 
@@ -263,10 +309,12 @@ describe("managed Pi session", () => {
     adapter.promptBehavior = async () => adapter.emit(assistantUsageEvent(10, 10, 90, 0));
     const session = await ManagedPiSession.create(spec, runtimeOptions(adapter));
 
-    await expect(session.start()).resolves.toEqual(expect.objectContaining({
-      status: "failed",
-      error: expect.stringContaining("abort failed"),
-    }));
+    await expect(session.start()).resolves.toEqual(
+      expect.objectContaining({
+        status: "failed",
+        error: expect.stringContaining("abort failed"),
+      }),
+    );
   });
 
   it("memoizes disposal while still attempting adapter cleanup after abort failure", async () => {
@@ -291,10 +339,12 @@ describe("managed Pi session", () => {
       adapter.emit(assistantUsageEvent(10, 2, 0, 0));
     };
     const session = await ManagedPiSession.create(spec, runtimeOptions(adapter));
-    await expect(session.start()).resolves.toEqual(expect.objectContaining({
-      status: "failed",
-      error: expect.stringContaining("settled without calling terminal tool"),
-    }));
+    await expect(session.start()).resolves.toEqual(
+      expect.objectContaining({
+        status: "failed",
+        error: expect.stringContaining("settled without calling terminal tool"),
+      }),
+    );
   });
 
   it("recovers a crash after session creation by issuing the initial prompt exactly once", async () => {
@@ -303,7 +353,9 @@ describe("managed Pi session", () => {
     adapter.promptBehavior = async () => emitTerminal(adapter, { result: "accepted" });
 
     const session = await ManagedPiSession.recover(spec, runtimeOptions(adapter));
-    await expect(session.start()).resolves.toEqual(expect.objectContaining({ status: "completed" }));
+    await expect(session.start()).resolves.toEqual(
+      expect.objectContaining({ status: "completed" }),
+    );
     expect(adapter.promptCalls).toBe(1);
     expect(adapter.continueCalls).toBe(0);
     expect(adapter.mappings).toEqual([]);
@@ -315,7 +367,9 @@ describe("managed Pi session", () => {
     adapter.continueBehavior = async () => emitTerminal(adapter, { result: "accepted" });
 
     const session = await ManagedPiSession.recover(spec, runtimeOptions(adapter));
-    await expect(session.start()).resolves.toEqual(expect.objectContaining({ status: "completed" }));
+    await expect(session.start()).resolves.toEqual(
+      expect.objectContaining({ status: "completed" }),
+    );
     expect(adapter.promptCalls).toBe(0);
     expect(adapter.continueCalls).toBe(1);
     expect(adapter.mappings).toEqual([]);
@@ -354,10 +408,12 @@ describe("managed Pi session", () => {
     const adapter = new FakeSessionAdapter(spec, undefined, recovery);
 
     const session = await ManagedPiSession.recover(spec, runtimeOptions(adapter));
-    await expect(session.start()).resolves.toEqual(expect.objectContaining({
-      status: "aborted",
-      reason: "cache-inclusive token budget exceeded",
-    }));
+    await expect(session.start()).resolves.toEqual(
+      expect.objectContaining({
+        status: "aborted",
+        reason: "cache-inclusive token budget exceeded",
+      }),
+    );
     expect(adapter.promptCalls).toBe(0);
     expect(adapter.continueCalls).toBe(0);
     expect(adapter.abortCalls).toBe(1);
@@ -378,10 +434,12 @@ describe("managed Pi session", () => {
     const adapter = new FakeSessionAdapter(spec, undefined, recovery);
     const session = await ManagedPiSession.recover(spec, runtimeOptions(adapter));
 
-    await expect(session.start()).resolves.toEqual(expect.objectContaining({
-      status: "aborted",
-      reason: "cache-inclusive token budget exhausted",
-    }));
+    await expect(session.start()).resolves.toEqual(
+      expect.objectContaining({
+        status: "aborted",
+        reason: "cache-inclusive token budget exhausted",
+      }),
+    );
     expect(adapter.promptCalls).toBe(0);
     expect(adapter.continueCalls).toBe(0);
   });
@@ -440,15 +498,50 @@ describe("managed session supervisor", () => {
     await supervisor.launch(spec, runtimeOptions(adapter));
     await supervisor.abortByRun(spec.identity.runId);
     const second = specFor("attempt-after-pause", "session-after-pause");
-    expect(() => supervisor.launch(second, runtimeOptions(new FakeSessionAdapter(second)))).toThrowError(
-      expect.objectContaining({ code: "run_suspended" }),
-    );
+    expect(() =>
+      supervisor.launch(second, runtimeOptions(new FakeSessionAdapter(second))),
+    ).toThrowError(expect.objectContaining({ code: "run_suspended" }));
     supervisor.resumeRun(spec.identity.runId);
     const resumedAdapter = new FakeSessionAdapter(second);
-    resumedAdapter.promptBehavior = async () => emitTerminal(resumedAdapter, { result: "accepted" });
+    resumedAdapter.promptBehavior = async () =>
+      emitTerminal(resumedAdapter, { result: "accepted" });
     const resumed = await supervisor.launch(second, runtimeOptions(resumedAdapter));
-    await expect(resumed.outcome).resolves.toEqual(expect.objectContaining({ status: "completed" }));
+    await expect(resumed.outcome).resolves.toEqual(
+      expect.objectContaining({ status: "completed" }),
+    );
     expect(supervisor.get(second.identity.attemptId)).toBeUndefined();
+  });
+
+  it("installs an authority-wide admission tombstone before draining live sessions", async () => {
+    const spec = specFor("attempt-quiesce", "session-quiesce");
+    const adapter = new FakeSessionAdapter(spec);
+    const stopped = deferred<void>();
+    adapter.promptBehavior = () => stopped.promise;
+    adapter.abortBehavior = async () => stopped.resolve();
+    const supervisor = new ManagedSessionSupervisor();
+    const handle = await supervisor.launch(spec, runtimeOptions(adapter));
+
+    await supervisor.suspendAll("authority restart");
+    await expect(handle.outcome).resolves.toEqual(expect.objectContaining({ status: "aborted" }));
+    expect(adapter.abortCalls).toBe(1);
+
+    // Per-run resume cannot reopen a process-wide quiesce boundary, including for runs which had
+    // no historical session and therefore were never added to a per-run suspended set.
+    supervisor.resumeRun(spec.identity.runId);
+    for (const next of [
+      specFor("attempt-same-after-quiesce", "session-same-after-quiesce"),
+      fixtureLaunchSpec({
+        cwd: "/tmp/koni-workspace",
+        sessionDirectory: "/tmp/koni-sessions/attempt-other-after-quiesce",
+        runId: "run-other-after-quiesce",
+        attemptId: "attempt-other-after-quiesce",
+        sessionId: "session-other-after-quiesce",
+      }),
+    ]) {
+      expect(() =>
+        supervisor.launch(next, runtimeOptions(new FakeSessionAdapter(next))),
+      ).toThrowError(expect.objectContaining({ code: "authority_suspended" }));
+    }
   });
 
   it("supervises a recovered continuation without creating a fresh session", async () => {
@@ -542,7 +635,7 @@ function specFor(attemptId: string, sessionId: string): AgentLaunchSpec {
     sessionDirectory: `/tmp/koni-sessions/${attemptId}`,
     attemptId,
     sessionId,
-  }) as AgentLaunchSpec;
+  });
 }
 
 function runtimeOptions(adapter: FakeSessionAdapter) {
@@ -644,7 +737,7 @@ function emitTerminal(adapter: FakeSessionAdapter, output: unknown, terminate = 
     toolCallId: "terminal-call",
     toolName: TERMINAL_TOOL_NAME,
     args: output,
-  } as AgentSessionEvent);
+  });
   adapter.emit({
     type: "tool_execution_end",
     toolCallId: "terminal-call",
@@ -655,7 +748,7 @@ function emitTerminal(adapter: FakeSessionAdapter, output: unknown, terminate = 
       terminate,
     },
     isError: false,
-  } as AgentSessionEvent);
+  });
 }
 
 function deferred<Value>() {

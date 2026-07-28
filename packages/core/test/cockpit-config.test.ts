@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { JsonValue, RpcSuccess } from "../src/authority/protocol.js";
@@ -34,16 +34,24 @@ describe("compiled cockpit presentation", () => {
   it.each([
     ["coding-profile", "Delivery Board", "Evidence-Guided Delivery Graph"],
     ["research-profile", "Tickets", "Project Graph"],
-  ])("projects every shipped %s view into a hash-bound, frozen catalog", (packageDirectory, ticketsTitle, graphTitle) => {
-    const configuration = compiledProfile(packageDirectory);
-    const catalog = projectCompiledCockpitViewCatalog(configuration);
-    expect(catalog.configurationSha256).toBe(configuration.configuration_sha256);
-    expect(catalog.catalogSha256).toMatch(/^sha256:[0-9a-f]{64}$/u);
-    expect(cockpitView(catalog, ["tabbed_table", "kanban"])?.title).toBe(ticketsTitle);
-    expect(cockpitView(catalog, ["typed_tree", "graph"])?.title).toBe(graphTitle);
-    expect(Object.isFrozen(catalog)).toBe(true);
-    expect(parseCompiledCockpitViewCatalog(structuredClone(catalog), configuration.configuration_sha256)).toEqual(catalog);
-  });
+  ])(
+    "projects every shipped %s view into a hash-bound, frozen catalog",
+    (packageDirectory, ticketsTitle, graphTitle) => {
+      const configuration = compiledProfile(packageDirectory);
+      const catalog = projectCompiledCockpitViewCatalog(configuration);
+      expect(catalog.configurationSha256).toBe(configuration.configuration_sha256);
+      expect(catalog.catalogSha256).toMatch(/^sha256:[0-9a-f]{64}$/u);
+      expect(cockpitView(catalog, ["tabbed_table", "kanban"])?.title).toBe(ticketsTitle);
+      expect(cockpitView(catalog, ["typed_tree", "graph"])?.title).toBe(graphTitle);
+      expect(Object.isFrozen(catalog)).toBe(true);
+      expect(
+        parseCompiledCockpitViewCatalog(
+          structuredClone(catalog),
+          configuration.configuration_sha256,
+        ),
+      ).toEqual(catalog);
+    },
+  );
 
   it("rejects a catalog from any configuration other than the one pinned by the run", () => {
     const coding = projectCompiledCockpitViewCatalog(compiledProfile("coding-profile"));
@@ -54,23 +62,27 @@ describe("compiled cockpit presentation", () => {
   });
 
   it("fails closed on fields and options for which the native cockpit has no consumer", () => {
-    const configuration = structuredClone(compiledProfile("coding-profile")) as CompiledConfiguration;
+    const configuration = structuredClone(compiledProfile("coding-profile"));
     const board = configuration.registries.views.board as Record<string, unknown>;
     board.unconsumed = true;
-    expect(() => projectCompiledCockpitViewCatalog(configuration)).toThrowError(CockpitConfigurationError);
+    expect(() => projectCompiledCockpitViewCatalog(configuration)).toThrowError(
+      CockpitConfigurationError,
+    );
 
     delete board.unconsumed;
     (board.options as Record<string, unknown>).unconsumed = true;
-    expect(() => projectCompiledCockpitViewCatalog(configuration)).toThrow(/unknown field is not consumed/u);
+    expect(() => projectCompiledCockpitViewCatalog(configuration)).toThrow(
+      /unknown field is not consumed/u,
+    );
   });
 
   it("detects a self-consistent-looking DTO whose content changed after projection", () => {
     const configuration = compiledProfile("research-profile");
     const catalog = structuredClone(projectCompiledCockpitViewCatalog(configuration));
     (catalog.views[0] as { title: string }).title = "Forged title";
-    expect(() => parseCompiledCockpitViewCatalog(catalog, configuration.configuration_sha256)).toThrow(
-      /does not match its digest/u,
-    );
+    expect(() =>
+      parseCompiledCockpitViewCatalog(catalog, configuration.configuration_sha256),
+    ).toThrow(/does not match its digest/u);
   });
 
   it("lets authored source, actions, columns, and options materially change authority-backed frames", async () => {
@@ -135,9 +147,7 @@ describe("compiled cockpit presentation", () => {
     expect(controller.snapshot.modal).toMatchObject({
       kind: "action_palette",
       title: "Configured Tickets actions",
-      actions: [
-        { id: "authority-go", availability: { state: "available" } },
-      ],
+      actions: [{ id: "authority-go", availability: { state: "available" } }],
     });
     const modalFrame = component.renderFrame(120, 40).toPlainLines().join("\n");
     expect(modalFrame).toContain("Configured Tickets actions");
@@ -148,10 +158,21 @@ describe("compiled cockpit presentation", () => {
 });
 
 function compiledProfile(packageDirectory: string): CompiledConfiguration {
-  const path = packageDirectory === "coding-profile"
-    ? resolve(repositoryRoot, "packages", packageDirectory, "koni", "baseline", "cockpit.yaml")
-    : resolve(repositoryRoot, "packages", packageDirectory, "koni", "baseline", "cockpit", "research.yaml");
-  const document = YAML.parse(readFileSync(path, "utf8")) as { views: Array<Record<string, unknown>> };
+  const path =
+    packageDirectory === "coding-profile"
+      ? resolve(repositoryRoot, "packages", packageDirectory, "koni", "baseline", "cockpit.yaml")
+      : resolve(
+          repositoryRoot,
+          "packages",
+          packageDirectory,
+          "koni",
+          "baseline",
+          "cockpit",
+          "research.yaml",
+        );
+  const document = YAML.parse(readFileSync(path, "utf8")) as {
+    views: Array<Record<string, unknown>>;
+  };
   const views = Object.fromEntries(document.views.map((view) => [String(view.id), view]));
   return {
     configuration_sha256: rawSha256(packageDirectory),
@@ -177,10 +198,12 @@ function frameRegionText(
   if (region === undefined) throw new Error(`missing frame region ${name}`);
   const lines: string[] = [];
   for (let y = region.rect.y; y < region.rect.y + region.rect.height; y += 1) {
-    lines.push(frame.cells[y]!.slice(region.rect.x, region.rect.x + region.rect.width)
-      .filter((cell) => !cell.continuation)
-      .map((cell) => cell.glyph)
-      .join(""));
+    lines.push(
+      frame.cells[y]!.slice(region.rect.x, region.rect.x + region.rect.width)
+        .filter((cell) => !cell.continuation)
+        .map((cell) => cell.glyph)
+        .join(""),
+    );
   }
   return lines.join("\n");
 }
@@ -193,21 +216,27 @@ class CockpitAuthority implements ControlCenterAuthorityClient {
   public async request(method: string, params?: JsonValue): Promise<RpcSuccess> {
     let result: unknown;
     if (method === "run.page") {
-      const request = typeof params === "object" && params !== null && !Array.isArray(params)
-        ? params as Record<string, JsonValue>
-        : {};
+      const request =
+        typeof params === "object" && params !== null && !Array.isArray(params)
+          ? (params as Record<string, JsonValue>)
+          : {};
       const collector = new RunSummaryPageCollector({
         revision: this.revision,
         limit: typeof request.limit === "number" ? request.limit : 50,
         includeDeleted: request.includeDeleted === true,
         ...(request.aroundRunId === this.run.id
-          ? { around: { id: this.run.id, createdAt: this.run.createdAt, runRevision: this.run.revision } }
+          ? {
+              around: {
+                id: this.run.id,
+                createdAt: this.run.createdAt,
+                runRevision: this.run.revision,
+              },
+            }
           : {}),
       });
       collector.accept(this.run);
       result = collector.finish();
-    }
-    else if (method === "run.get") result = structuredClone(this.run);
+    } else if (method === "run.get") result = structuredClone(this.run);
     else if (method === "run.graph") {
       result = {
         nodes: [
@@ -226,29 +255,42 @@ class CockpitAuthority implements ControlCenterAuthorityClient {
       });
       result = defineStageCapabilityCatalog({
         protocol: "koni.stage-capability-catalog.v1",
-        binding: { runId: this.run.id, runRevision: this.run.revision, generation: this.run.generation, phase: this.run.lifecycle.phase },
-        stages: [{
-          id: "orchestrate",
-          title: "Orchestrate",
-          kind: "orchestration",
-          category: "execution",
-          position: 0,
-          status: "active",
-          current: true,
-          interaction: defineStageInteraction({
-            mode: "operator",
-            reason: action.availability.reason,
+        binding: {
+          runId: this.run.id,
+          runRevision: this.run.revision,
+          generation: this.run.generation,
+          phase: this.run.lifecycle.phase,
+        },
+        stages: [
+          {
+            id: "orchestrate",
+            title: "Orchestrate",
+            kind: "orchestration",
+            category: "execution",
+            position: 0,
+            status: "active",
+            current: true,
+            interaction: defineStageInteraction({
+              mode: "operator",
+              reason: action.availability.reason,
+              actions: [action],
+              primaryActionId: action.id,
+            }),
             actions: [action],
-            primaryActionId: action.id,
-          }),
-          actions: [action],
-        }],
+          },
+        ],
         runActions: [],
       });
     } else if (method === "run.lineage") {
       throw new AuthorityClientError("method_not_found", "lineage fixture omitted");
     } else throw new Error(`unexpected RPC ${method}`);
-    return { type: "response", id: "cockpit-fixture", ok: true, revision: this.revision, result: result as never };
+    return {
+      type: "response",
+      id: "cockpit-fixture",
+      ok: true,
+      revision: this.revision,
+      result: result as never,
+    };
   }
 }
 
@@ -290,7 +332,12 @@ function fixtureRun(): RunRecord {
     plan: {
       revision: 1,
       status: "approved",
-      full: { architecture: "Architecture", decisions: "Decisions", risk: "Risk", verification: "Verification" },
+      full: {
+        architecture: "Architecture",
+        decisions: "Decisions",
+        risk: "Risk",
+        verification: "Verification",
+      },
       concise: {},
       graphSeed: undefined,
       steeringHistory: [],
@@ -309,16 +356,18 @@ function fixtureRun(): RunRecord {
         targetNodeIds: [],
         readPaths: [],
         writePaths: [],
-        steps: [{
-          id: "work",
-          title: "Work",
-          personaId: "worker",
-          status: "running",
-          attemptIds: ["worker-attempt"],
-          summary: undefined,
-          startedAt: "2026-07-16T00:00:03.000Z",
-          completedAt: undefined,
-        }],
+        steps: [
+          {
+            id: "work",
+            title: "Work",
+            personaId: "worker",
+            status: "running",
+            attemptIds: ["worker-attempt"],
+            summary: undefined,
+            startedAt: "2026-07-16T00:00:03.000Z",
+            completedAt: undefined,
+          },
+        ],
         worktreePath: undefined,
         branch: undefined,
         blocker: undefined,
@@ -350,8 +399,22 @@ function fixtureRun(): RunRecord {
     },
     questions: {},
     activity: [
-      { id: "old", at: "2026-07-16T00:00:03.000Z", kind: "compiler", message: "Older event hidden by limit", ticketId: undefined, nodeId: undefined },
-      { id: "new", at: "2026-07-16T00:00:04.000Z", kind: "compiler", message: "Newest configured event", ticketId: undefined, nodeId: undefined },
+      {
+        id: "old",
+        at: "2026-07-16T00:00:03.000Z",
+        kind: "compiler",
+        message: "Older event hidden by limit",
+        ticketId: undefined,
+        nodeId: undefined,
+      },
+      {
+        id: "new",
+        at: "2026-07-16T00:00:04.000Z",
+        kind: "compiler",
+        message: "Newest configured event",
+        ticketId: undefined,
+        nodeId: undefined,
+      },
     ],
     git,
   };

@@ -7,14 +7,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import { discoverAuthorityEndpoint } from "../src/authority/endpoint.js";
 import type { TransactionWrite } from "../src/authority/file-journal.js";
 import {
-  CommunityResourceError,
+  type CommunityResourceError,
   pinCommunityResourceBundle,
   selectCommunityAttemptResources,
   validatePinnedCommunityResourceBundle,
 } from "../src/compiler/community-resources.js";
 import {
   NativeRunCompilerProgram,
-  NativeRunProgramError,
+  type NativeRunProgramError,
 } from "../src/compiler/run-program.js";
 import type { VerifiedProfileBaseline } from "../src/compiler/profile-package.js";
 import { computeLaunchResourceSetHash, type AgentLaunchSpec } from "../src/pi/launch-spec.js";
@@ -34,7 +34,9 @@ const FIXED_NOW = new Date("2026-07-16T20:00:00.000Z");
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  await Promise.all(
+    temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+  );
 });
 
 describe("compiler-selected Pi community resources", () => {
@@ -47,13 +49,19 @@ describe("compiler-selected Pi community resources", () => {
     });
 
     expect(Object.keys(bundle.bindings)).toEqual(["review-methods"]);
-    expect(bundle.bindings["review-methods"]?.files.map(({ relativePath }) => relativePath)).toEqual([
+    expect(
+      bundle.bindings["review-methods"]?.files.map(({ relativePath }) => relativePath),
+    ).toEqual([
       "prompts/review.md",
       "skills/review/SKILL.md",
       "skills/review/references/details.md",
     ]);
-    expect(bundle.bindings["review-methods"]?.files.some(({ relativePath }) =>
-      relativePath.includes("unselected") || relativePath.includes("extensions"))).toBe(false);
+    expect(
+      bundle.bindings["review-methods"]?.files.some(
+        ({ relativePath }) =>
+          relativePath.includes("unselected") || relativePath.includes("extensions"),
+      ),
+    ).toBe(false);
     await expect(readFile(fixture.marker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
 
     const ineligible = selectCommunityAttemptResources({
@@ -71,11 +79,19 @@ describe("compiler-selected Pi community resources", () => {
       networkAccess: false,
     });
     expect(selected.bindingIds).toEqual(["review-methods"]);
-    expect(selected.resources).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: "skill", relativePath: "community/review-methods/skills/review/SKILL.md" }),
-      expect.objectContaining({ kind: "prompt", relativePath: "community/review-methods/prompts/review.md" }),
-      expect.objectContaining({ kind: "append_system_prompt" }),
-    ]));
+    expect(selected.resources).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "skill",
+          relativePath: "community/review-methods/skills/review/SKILL.md",
+        }),
+        expect.objectContaining({
+          kind: "prompt",
+          relativePath: "community/review-methods/prompts/review.md",
+        }),
+        expect.objectContaining({ kind: "append_system_prompt" }),
+      ]),
+    );
     expect(computeLaunchResourceSetHash(selected.resources)).toMatch(/^sha256:[0-9a-f]{64}$/u);
   });
 
@@ -105,7 +121,9 @@ describe("compiler-selected Pi community resources", () => {
   it("fails closed for unknown extension APIs and gates Koni-owned network adapters", async () => {
     const fixture = await communityPackage();
     const catalog = parsePiResourceBindingCatalog(explicitToolCatalog());
-    await expect(pinCommunityResourceBundle({ catalog, installed: [fixture.reference] })).rejects.toMatchObject({
+    await expect(
+      pinCommunityResourceBundle({ catalog, installed: [fixture.reference] }),
+    ).rejects.toMatchObject({
       code: "adapter_unavailable",
     } satisfies Partial<CommunityResourceError>);
     await expect(readFile(fixture.marker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
@@ -113,26 +131,32 @@ describe("compiler-selected Pi community resources", () => {
     const bundle = await pinCommunityResourceBundle({
       catalog,
       installed: [fixture.reference],
-      adapters: [{
-        id: "bounded-web-check",
-        bindingId: "web-tools",
-        packageName: "fixture-community",
-        toolName: "koni_run_check",
-        requiresNetwork: true,
-      }],
+      adapters: [
+        {
+          id: "bounded-web-check",
+          bindingId: "web-tools",
+          packageName: "fixture-community",
+          toolName: "koni_run_check",
+          requiresNetwork: true,
+        },
+      ],
     });
-    expect(() => selectCommunityAttemptResources({
-      bundle,
-      personaId: "verifier",
-      stageIds: ["verification"],
-      networkAccess: false,
-    })).toThrowError(expect.objectContaining({ code: "network_grant" }) as CommunityResourceError);
-    expect(selectCommunityAttemptResources({
-      bundle,
-      personaId: "verifier",
-      stageIds: ["verification"],
-      networkAccess: true,
-    })).toEqual({
+    expect(() =>
+      selectCommunityAttemptResources({
+        bundle,
+        personaId: "verifier",
+        stageIds: ["verification"],
+        networkAccess: false,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "network_grant" }) as CommunityResourceError);
+    expect(
+      selectCommunityAttemptResources({
+        bundle,
+        personaId: "verifier",
+        stageIds: ["verification"],
+        networkAccess: true,
+      }),
+    ).toEqual({
       resources: [],
       toolNames: ["koni_run_check"],
       bindingIds: ["web-tools"],
@@ -147,11 +171,15 @@ describe("compiler-selected Pi community resources", () => {
     await mkdir(projectRoot);
     await mkdir(agentDir);
     const settingsPath = path.join(agentDir, "settings.json");
-    const settings = `${JSON.stringify({
-      packages: [fixture.root],
-      skills: [path.join(root, "ambient-skill")],
-      extensions: [path.join(root, "ambient-extension.ts")],
-    }, null, 2)}\n`;
+    const settings = `${JSON.stringify(
+      {
+        packages: [fixture.root],
+        skills: [path.join(root, "ambient-skill")],
+        extensions: [path.join(root, "ambient-extension.ts")],
+      },
+      null,
+      2,
+    )}\n`;
     await writeFile(settingsPath, settings);
     const inventory = await discoverInstalledPiPackageReferences({
       projectRoot,
@@ -166,7 +194,9 @@ describe("compiler-selected Pi community resources", () => {
       packageVersion: "1.0.0",
       packageRoot: fixture.root,
     });
-    expect(inventory[0]?.resources.map(({ kind, relativePath }) => `${kind}:${relativePath}`)).toEqual([
+    expect(
+      inventory[0]?.resources.map(({ kind, relativePath }) => `${kind}:${relativePath}`),
+    ).toEqual([
       "extension:extensions/index.ts",
       "prompt:prompts/review.md",
       "prompt:prompts/unselected.md",
@@ -211,16 +241,30 @@ describe("compiler-selected Pi community resources", () => {
       lineage: { branchEpoch: 0, reason: "initial" },
     });
     await persistWrites(project.projectRoot, first.artifactWrites ?? []);
-    expect(first.spec.resources.setHash).toBe(computeLaunchResourceSetHash(first.spec.resources.entries));
-    expect(first.spec.resources.entries).toEqual(expect.arrayContaining([
-      expect.objectContaining({ content: expect.stringContaining("Original review method") }),
-      expect.objectContaining({ content: expect.stringContaining("Original review prompt") }),
-    ]));
-    expect(first.spec.resources.entries.some(({ relativePath }) => relativePath.includes("unselected"))).toBe(false);
-    expect(first.spec.tools.find(({ name }) => name === "koni_read_resource")?.schemaHash).toMatch(/^sha256:/u);
+    expect(first.spec.resources.setHash).toBe(
+      computeLaunchResourceSetHash(first.spec.resources.entries),
+    );
+    expect(first.spec.resources.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ content: expect.stringContaining("Original review method") }),
+        expect.objectContaining({ content: expect.stringContaining("Original review prompt") }),
+      ]),
+    );
+    expect(
+      first.spec.resources.entries.some(({ relativePath }) => relativePath.includes("unselected")),
+    ).toBe(false);
+    expect(first.spec.tools.find(({ name }) => name === "koni_read_resource")?.schemaHash).toMatch(
+      /^sha256:/u,
+    );
 
-    await writeFile(path.join(fixture.root, "skills", "review", "SKILL.md"), "---\nname: review\ndescription: changed\n---\nUpgraded method.\n");
-    await writeFile(path.join(fixture.root, "prompts", "review.md"), "---\ndescription: changed\n---\nUpgraded prompt.\n");
+    await writeFile(
+      path.join(fixture.root, "skills", "review", "SKILL.md"),
+      "---\nname: review\ndescription: changed\n---\nUpgraded method.\n",
+    );
+    await writeFile(
+      path.join(fixture.root, "prompts", "review.md"),
+      "---\ndescription: changed\n---\nUpgraded prompt.\n",
+    );
 
     const restarted = await NativeRunCompilerProgram.create({
       projectRoot: project.projectRoot,
@@ -245,7 +289,9 @@ describe("compiler-selected Pi community resources", () => {
 
     const attempt = attemptRecord(first.spec);
     run.attempts[attempt.id] = attempt;
-    await expect(restarted.recoverAttempt({ run, attempt, spec: first.spec })).resolves.toMatchObject({
+    await expect(
+      restarted.recoverAttempt({ run, attempt, spec: first.spec }),
+    ).resolves.toMatchObject({
       spec: { resources: { setHash: first.spec.resources.setHash } },
     });
   });
@@ -260,13 +306,17 @@ describe("compiler-selected Pi community resources", () => {
       installedPiPackagesLoader: async () => [],
       now: () => new Date(FIXED_NOW),
     });
-    await expect(missing.resolveRun({
-      runId: "run-community-missing",
-      objective: "Fail closed on missing resources",
-      runTypeId: "small",
-      targetRef: "refs/heads/main",
-      intake: { goal: "Fail closed on missing resources" },
-    })).rejects.toMatchObject({ code: "community_resource_unavailable" } satisfies Partial<NativeRunProgramError>);
+    await expect(
+      missing.resolveRun({
+        runId: "run-community-missing",
+        objective: "Fail closed on missing resources",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Fail closed on missing resources" },
+      }),
+    ).rejects.toMatchObject({
+      code: "community_resource_unavailable",
+    } satisfies Partial<NativeRunProgramError>);
 
     await writeFile(resourcePath, interactiveCatalog());
     let inventoryReads = 0;
@@ -279,13 +329,15 @@ describe("compiler-selected Pi community resources", () => {
       },
       now: () => new Date(FIXED_NOW),
     });
-    await expect(interactive.resolveRun({
-      runId: "run-interactive-only",
-      objective: "Keep operator resources ambient",
-      runTypeId: "small",
-      targetRef: "refs/heads/main",
-      intake: { goal: "Keep operator resources ambient" },
-    })).resolves.toMatchObject({ runTypeId: "small" });
+    await expect(
+      interactive.resolveRun({
+        runId: "run-interactive-only",
+        objective: "Keep operator resources ambient",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Keep operator resources ambient" },
+      }),
+    ).resolves.toMatchObject({ runTypeId: "small" });
     expect(inventoryReads).toBe(0);
   });
 
@@ -309,11 +361,13 @@ describe("compiler-selected Pi community resources", () => {
     delete parsed.artifactSha256;
     delete parsed.community;
     const legacyArtifact = { ...parsed, artifactSha256: canonicalHash(parsed) };
-    await persistWrites(project.projectRoot, [{
-      path: write.path,
-      bytes: Buffer.from(`${JSON.stringify(legacyArtifact)}\n`, "utf8"),
-      expectedSha256: null,
-    }]);
+    await persistWrites(project.projectRoot, [
+      {
+        path: write.path,
+        bytes: Buffer.from(`${JSON.stringify(legacyArtifact)}\n`, "utf8"),
+        expectedSha256: null,
+      },
+    ]);
 
     const restarted = await NativeRunCompilerProgram.create({
       projectRoot: project.projectRoot,
@@ -323,19 +377,29 @@ describe("compiler-selected Pi community resources", () => {
       },
       now: () => new Date(FIXED_NOW),
     });
-    const run = runRecord(project.projectRoot, resolved, "Resume an artifact issued before community bindings");
-    await expect(restarted.prepareAttempt({
-      kind: "planning",
-      run,
-      attemptId: "attempt-pre-community",
-      sessionId: "session-pre-community",
-      nextAuthorityRevision: 2,
-      expectedAuthorityStateHash: digest("pre-community-authority"),
-      lineage: { branchEpoch: 0, reason: "initial" },
-    })).resolves.toMatchObject({
-      spec: { resources: { entries: expect.not.arrayContaining([
-        expect.objectContaining({ relativePath: expect.stringContaining("community/") }),
-      ]) } },
+    const run = runRecord(
+      project.projectRoot,
+      resolved,
+      "Resume an artifact issued before community bindings",
+    );
+    await expect(
+      restarted.prepareAttempt({
+        kind: "planning",
+        run,
+        attemptId: "attempt-pre-community",
+        sessionId: "session-pre-community",
+        nextAuthorityRevision: 2,
+        expectedAuthorityStateHash: digest("pre-community-authority"),
+        lineage: { branchEpoch: 0, reason: "initial" },
+      }),
+    ).resolves.toMatchObject({
+      spec: {
+        resources: {
+          entries: expect.not.arrayContaining([
+            expect.objectContaining({ relativePath: expect.stringContaining("community/") }),
+          ]),
+        },
+      },
     });
   });
 });
@@ -350,30 +414,49 @@ async function communityPackage(): Promise<{
   await mkdir(path.join(root, "extensions"));
   await mkdir(path.join(root, "skills", "review", "references"), { recursive: true });
   await mkdir(path.join(root, "prompts"));
-  await writeFile(path.join(root, "package.json"), `${JSON.stringify({
-    name: "fixture-community",
-    version: "1.0.0",
-    pi: {
-      extensions: ["extensions/index.ts"],
-      skills: ["skills"],
-      prompts: ["prompts"],
-    },
-  }, null, 2)}\n`);
+  await writeFile(
+    path.join(root, "package.json"),
+    `${JSON.stringify(
+      {
+        name: "fixture-community",
+        version: "1.0.0",
+        pi: {
+          extensions: ["extensions/index.ts"],
+          skills: ["skills"],
+          prompts: ["prompts"],
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
   await writeFile(
     path.join(root, "extensions", "index.ts"),
     `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, "executed");\n`,
   );
-  await writeFile(path.join(root, "skills", "review", "SKILL.md"), [
-    "---",
-    "name: review",
-    "description: Review a bounded plan.",
-    "---",
-    "Original review method.",
-    "",
-  ].join("\n"));
-  await writeFile(path.join(root, "skills", "review", "references", "details.md"), "Original method details.\n");
-  await writeFile(path.join(root, "prompts", "review.md"), "---\ndescription: Review\n---\nOriginal review prompt.\n");
-  await writeFile(path.join(root, "prompts", "unselected.md"), "Never inherit this ambient prompt.\n");
+  await writeFile(
+    path.join(root, "skills", "review", "SKILL.md"),
+    [
+      "---",
+      "name: review",
+      "description: Review a bounded plan.",
+      "---",
+      "Original review method.",
+      "",
+    ].join("\n"),
+  );
+  await writeFile(
+    path.join(root, "skills", "review", "references", "details.md"),
+    "Original method details.\n",
+  );
+  await writeFile(
+    path.join(root, "prompts", "review.md"),
+    "---\ndescription: Review\n---\nOriginal review prompt.\n",
+  );
+  await writeFile(
+    path.join(root, "prompts", "unselected.md"),
+    "Never inherit this ambient prompt.\n",
+  );
   return {
     root,
     marker,
@@ -533,7 +616,10 @@ function attemptRecord(spec: AgentLaunchSpec): AgentAttemptRecord {
   };
 }
 
-async function persistWrites(projectRoot: string, writes: readonly TransactionWrite[]): Promise<void> {
+async function persistWrites(
+  projectRoot: string,
+  writes: readonly TransactionWrite[],
+): Promise<void> {
   const endpoint = await discoverAuthorityEndpoint(projectRoot);
   for (const write of writes) {
     const destination = path.join(endpoint.stateRoot, write.path);

@@ -40,10 +40,10 @@ export function findPiPackageRoot() {
     throw new Error("KONI_PI_PACKAGE_ROOT does not identify @earendil-works/pi-coding-agent");
   }
 
-  const executableNames = process.platform === "win32" ? ["pi.cmd", "pi.exe", "pi"] : ["pi", "pi.cmd"];
+  const executableNames =
+    process.platform === "win32" ? ["pi.cmd", "pi.exe", "pi"] : ["pi", "pi.cmd"];
   let activeExecutable;
-  search:
-  for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
+  search: for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
     if (!directory) continue;
     for (const executableName of executableNames) {
       const executable = path.join(directory, executableName);
@@ -88,7 +88,9 @@ function firstValidPiRoot(candidates) {
 
 if (isDirectInvocation()) {
   main().then(
-    (code) => { process.exitCode = code; },
+    (code) => {
+      process.exitCode = code;
+    },
     (error) => {
       process.stderr.write(`koni: ${error instanceof Error ? error.message : String(error)}\n`);
       process.exitCode = 1;
@@ -98,7 +100,10 @@ if (isDirectInvocation()) {
 
 function isDirectInvocation() {
   try {
-    return process.argv[1] !== undefined && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+    return (
+      process.argv[1] !== undefined &&
+      realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))
+    );
   } catch {
     return false;
   }
@@ -141,7 +146,10 @@ function shimCandidates(executable) {
   }
   const directory = path.dirname(path.resolve(executable));
   const values = [];
-  const tokens = content.match(/(?:[A-Za-z]:[\\/]|\/|\$basedir[\\/]|\$\{basedir\}[\\/]|%~?dp0%?[\\/]?)[^\s"'`]+/gu) ?? [];
+  const tokens =
+    content.match(
+      /(?:[A-Za-z]:[\\/]|\/|\$basedir[\\/]|\$\{basedir\}[\\/]|%~?dp0%?[\\/]?)[^\s"'`]+/gu,
+    ) ?? [];
   for (let token of tokens) {
     token = token
       .replace(/^\$\{?basedir\}?(?:[\\/])?/u, `${directory}${path.sep}`)
@@ -149,7 +157,11 @@ function shimCandidates(executable) {
       .replaceAll("\\", path.sep)
       .replace(/[),;]+$/u, "");
     if (/^file:\/\//iu.test(token)) {
-      try { token = fileURLToPath(token); } catch { continue; }
+      try {
+        token = fileURLToPath(token);
+      } catch {
+        continue;
+      }
     }
     values.push(path.resolve(token));
   }

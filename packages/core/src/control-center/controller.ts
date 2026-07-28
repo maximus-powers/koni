@@ -27,7 +27,6 @@ import {
   cycleRunTarget,
   isCreatingNewTarget,
   resolveRunTarget,
-  runTargetSelectedLabel,
   type RunTargetDraft,
 } from "./run-target.js";
 import {
@@ -35,8 +34,6 @@ import {
   parseConfigDocumentCatalog,
   parseConfigDocumentMutation,
   parseConfigDocumentSource,
-  parseConfigLegacyMigrationPreview,
-  parseConfigLegacyMigrationResult,
   parseConfigRunTypeTemplates,
   parseConfigSnapshot,
   parseControlCatalog,
@@ -52,7 +49,6 @@ import {
   type ConfigDocumentCatalog,
   type ConfigDocumentDomain,
   type ConfigDocumentSource,
-  type ConfigLegacyMigrationPreview,
   type ConfigResourceKind,
   type ConfigRunTypeTemplates,
   type ConfigFieldDefinition,
@@ -75,7 +71,6 @@ import {
   parsePiTranscriptPage,
   TRANSCRIPT_PAGE_LIMIT,
   type TranscriptBlock,
-  type TranscriptPageProjection,
 } from "./transcript.js";
 import {
   buildControlCenterView,
@@ -250,13 +245,6 @@ export interface ConfigRunTypeWizardModalState {
   cursor: number;
 }
 
-export interface ConfigLegacyMigrationModalState {
-  kind: "config_legacy_migration";
-  returnTo: ConfigureDocumentsModalState;
-  preview: ConfigLegacyMigrationPreview;
-  selected: "cancel" | "apply";
-}
-
 export interface AnswerQuestionModalState {
   kind: "answer_question";
   questionId: string;
@@ -339,7 +327,23 @@ export interface ConfigResourceOperationState {
   name: string;
 }
 
-export type ControlCenterHelpTopic = ControlCenterPanel | "new_run" | "plan_review" | "proposal_review" | "answer_question" | "action_palette" | "action_form" | "configure" | "configure_documents" | "config_document_create" | "config_document_rename" | "config_document_delete" | "config_run_type_wizard" | "config_legacy_migration" | "profile_conflicts" | "edit_scalar" | "chat";
+export type ControlCenterHelpTopic =
+  | ControlCenterPanel
+  | "new_run"
+  | "plan_review"
+  | "proposal_review"
+  | "answer_question"
+  | "action_palette"
+  | "action_form"
+  | "configure"
+  | "configure_documents"
+  | "config_document_create"
+  | "config_document_rename"
+  | "config_document_delete"
+  | "config_run_type_wizard"
+  | "profile_conflicts"
+  | "edit_scalar"
+  | "chat";
 
 export type ControlCenterModalState =
   | { kind: "help"; topic: ControlCenterHelpTopic }
@@ -358,7 +362,6 @@ export type ControlCenterModalState =
   | ConfigDocumentRenameModalState
   | ConfigDocumentDeleteModalState
   | ConfigRunTypeWizardModalState
-  | ConfigLegacyMigrationModalState
   | ProfileConflictsModalState;
 
 export type ConfigureSurfaceState = ConfigureModalState | ConfigureDocumentsModalState;
@@ -374,6 +377,8 @@ export interface ChatProjectionState {
   attemptId: string;
   status: "loading" | "ready" | "unavailable" | "error";
   blocks: readonly TranscriptBlock[];
+  /** Whether tool call/result blocks are rendered; toggled per chat, defaults to hidden. */
+  toolsVisible: boolean;
   diagnostics: readonly string[];
   history: {
     startBlock: number;
@@ -389,6 +394,8 @@ export interface ChatProjectionState {
 export interface ControlCenterControllerSnapshot {
   view: ControlCenterViewModel;
   selection: ControlCenterSelection;
+  /** Highlight-only cursors: rows the operator is on, distinct from the committed selection. */
+  cursor: { ticketId?: string; attemptId?: string; graphIndex: number };
   focus: ControlCenterPanel;
   scroll: Readonly<Record<ControlCenterPanel, number>>;
   questionIndex: number;
@@ -478,12 +485,48 @@ const EMPTY_SCROLL: Record<ControlCenterPanel, number> = {
 };
 
 const DOCUMENT_CREATE_CHOICES: readonly ConfigDocumentCreateChoice[] = [
-  { label: "Native agent", description: "A Pi-native persona, model, reasoning, prompt, and authority policy.", domain: "agents", kind: "native_agent", format: "yaml" },
-  { label: "Skill", description: "A reusable progressive-disclosure procedure available to configured attempts.", domain: "skills", kind: "skill", format: "markdown" },
-  { label: "Prompt", description: "A reusable Markdown prompt resource selected by compiled configuration.", domain: "skills", kind: "markdown_prompt", format: "markdown" },
-  { label: "Advanced YAML", description: "A project-authored YAML source for an advanced custom resource.", domain: "advanced", kind: "raw_source", format: "yaml" },
-  { label: "Advanced TOML", description: "A project-authored TOML source for an advanced custom resource.", domain: "advanced", kind: "raw_source", format: "toml" },
-  { label: "Advanced Markdown", description: "A project-authored Markdown source for an advanced custom resource.", domain: "advanced", kind: "raw_source", format: "markdown" },
+  {
+    label: "Native agent",
+    description: "A Pi-native persona, model, reasoning, prompt, and authority policy.",
+    domain: "agents",
+    kind: "native_agent",
+    format: "yaml",
+  },
+  {
+    label: "Skill",
+    description: "A reusable progressive-disclosure procedure available to configured attempts.",
+    domain: "skills",
+    kind: "skill",
+    format: "markdown",
+  },
+  {
+    label: "Prompt",
+    description: "A reusable Markdown prompt resource selected by compiled configuration.",
+    domain: "skills",
+    kind: "markdown_prompt",
+    format: "markdown",
+  },
+  {
+    label: "Advanced YAML",
+    description: "A project-authored YAML source for an advanced custom resource.",
+    domain: "advanced",
+    kind: "raw_source",
+    format: "yaml",
+  },
+  {
+    label: "Advanced TOML",
+    description: "A project-authored TOML source for an advanced custom resource.",
+    domain: "advanced",
+    kind: "raw_source",
+    format: "toml",
+  },
+  {
+    label: "Advanced Markdown",
+    description: "A project-authored Markdown source for an advanced custom resource.",
+    domain: "advanced",
+    kind: "raw_source",
+    format: "markdown",
+  },
 ];
 
 const LEGACY_RUN_LIST_LIMIT = MAX_RUN_SUMMARY_PAGE_LIMIT;
@@ -530,6 +573,14 @@ export class ControlCenterController {
   #transcriptRequestSequence = 0;
   #profileConflictRpcAvailable: boolean | undefined;
   #selection: ControlCenterSelection = { detailsTab: "overview", objectiveExpanded: false };
+  /** Tickets-panel highlight; a ticket is only committed to the selection on Enter/click. */
+  #ticketCursor: string | undefined;
+  /** Agents-panel highlight; a chat only opens on Enter/click. */
+  #agentCursor: string | undefined;
+  /** Graph-panel node cursor (index into the rendered node order). */
+  #graphCursorIndex = 0;
+  /** Whether the open chat renders tool call/result blocks; reset per chat. */
+  #chatToolsVisible = false;
   #focus: ControlCenterPanel = "runs";
   #scroll = { ...EMPTY_SCROLL };
   #questionIndex = 0;
@@ -556,7 +607,8 @@ export class ControlCenterController {
       if (event.topic === "authority.ready") return;
       if (event.topic.startsWith("agent.")) {
         const attemptId = this.#selection.attemptId;
-        const attempt = attemptId === undefined ? undefined : this.#selectedRunRecord()?.attempts[attemptId];
+        const attempt =
+          attemptId === undefined ? undefined : this.#selectedRunRecord()?.attempts[attemptId];
         if (attemptId !== undefined && attempt !== undefined && isActiveAttempt(attempt.status)) {
           this.#reloadTranscript(attemptId);
         }
@@ -573,13 +625,22 @@ export class ControlCenterController {
     return {
       view,
       selection: { ...this.#selection },
+      cursor: {
+        ...(this.#ticketCursor === undefined ? {} : { ticketId: this.#ticketCursor }),
+        ...(this.#agentCursor === undefined ? {} : { attemptId: this.#agentCursor }),
+        graphIndex: this.#graphCursorIndex,
+      },
       focus: this.#focus,
       scroll: { ...this.#scroll },
       questionIndex: this.#questionIndex,
       ticketTab: this.#ticketTab,
-      ...(currentQuestion === undefined ? {} : { questionDraft: { ...this.#draftFor(currentQuestion) } }),
+      ...(currentQuestion === undefined
+        ? {}
+        : { questionDraft: { ...this.#draftFor(currentQuestion) } }),
       ...(this.#modal === undefined ? {} : { modal: cloneModal(this.#modal) }),
-      ...(configureSurface === undefined ? {} : { configureSurface: structuredClone(configureSurface) }),
+      ...(configureSurface === undefined
+        ? {}
+        : { configureSurface: structuredClone(configureSurface) }),
       ...(chat === undefined ? {} : { chat }),
       models: this.#models.map((model) => ({ ...model })),
       runTypes: this.#controlCatalog?.runTypes.map((runType) => structuredClone(runType)) ?? [],
@@ -591,12 +652,17 @@ export class ControlCenterController {
 
   #configureSurface(): ConfigureSurfaceState | undefined {
     const candidate = this.#modal?.kind === "help" ? this.#suspendedModal : this.#modal;
-    if (candidate?.kind === "configure" || candidate?.kind === "configure_documents") return candidate;
+    if (candidate?.kind === "configure" || candidate?.kind === "configure_documents")
+      return candidate;
     if (candidate?.kind === "edit_scalar") return candidate.returnTo;
     if (candidate?.kind === "profile_conflicts") return candidate.returnTo;
-    if (candidate?.kind === "config_document_create" || candidate?.kind === "config_document_rename" ||
-        candidate?.kind === "config_document_delete" || candidate?.kind === "config_run_type_wizard" ||
-        candidate?.kind === "config_legacy_migration") return candidate.returnTo;
+    if (
+      candidate?.kind === "config_document_create" ||
+      candidate?.kind === "config_document_rename" ||
+      candidate?.kind === "config_document_delete" ||
+      candidate?.kind === "config_run_type_wizard"
+    )
+      return candidate.returnTo;
     return undefined;
   }
 
@@ -627,20 +693,7 @@ export class ControlCenterController {
   public async handle(action: ControlCenterKeyAction): Promise<void> {
     if (this.#disposed) return;
     if (action.type === "quit") {
-      const configure = this.#configureSurface();
-      if (configure?.dirty === true) {
-        this.#notice = {
-          kind: "error",
-          message: configure.kind === "configure" && configure.rebaseRequired
-            ? "This saved draft is stale. Rebase, publish, or discard it before closing Koni."
-            : configure.kind === "configure_documents"
-              ? "Save or discard the raw source edit before closing Koni."
-              : "Publish or discard the configuration draft before closing Koni; unpublished edits were not discarded.",
-        };
-        this.#emit();
-        return;
-      }
-      this.#onQuit?.();
+      this.#requestQuit();
       return;
     }
     if (action.type === "cancel") {
@@ -658,55 +711,124 @@ export class ControlCenterController {
         this.#moveFocus(action.delta);
         break;
       }
-      case "focus_panel": this.#setFocus(action.panel); break;
-      case "select_run": await this.#selectRun(action.runId); break;
-      case "select_ticket": await this.#selectTicket(action.ticketId); break;
-      case "select_agent": this.#selectAgent(action.attemptId); break;
-      case "pointer_scroll": this.#pointerScroll(action.panel, action.delta); break;
-      case "pointer_control": this.#handlePointerControl(action.target); break;
-      case "move": await this.#move(action.delta); break;
-      case "page": this.#scrollBy(action.delta * 8); break;
-      case "scroll_home": this.#scrollToBoundary(false); break;
-      case "scroll_end": this.#scrollToBoundary(true); break;
-      case "details_tab": this.#moveHorizontal(action.delta); break;
-      case "activate": await this.#activate(); break;
-      case "toggle_objective": this.#toggleObjective(); break;
-      case "toggle_pause": await this.#togglePause(); break;
-      case "request_delete": await this.#requestDelete(); break;
-      case "merge": await this.#requestMerge(); break;
-      case "help": this.#openHelp(this.#focus === "details" && this.#selection.detailsTab === "chat" ? "chat" : this.#focus); break;
-      case "toggle_notes": this.#toggleNotes(); break;
-      case "backspace": this.#editActiveText((value) => removeLastCharacter(value)); break;
-      case "delete_forward": break;
-      case "append_text": this.#editActiveText((value) => `${value}${action.text}`); break;
-      case "open_new_run": await this.#openNewRun(); break;
-      case "open_config": await this.#openConfigure(); break;
-      case "open_config_documents": break;
+      case "focus_panel":
+        this.#setFocus(action.panel);
+        break;
+      case "select_run":
+        await this.#selectRun(action.runId);
+        break;
+      case "select_ticket":
+        await this.#selectTicket(action.ticketId);
+        break;
+      case "select_agent":
+        this.#selectAgent(action.attemptId);
+        break;
+      case "pointer_scroll":
+        this.#pointerScroll(action.panel, action.delta);
+        break;
+      case "pointer_control":
+        this.#handlePointerControl(action.target);
+        break;
+      case "move":
+        await this.#move(action.delta);
+        break;
+      case "page":
+        this.#scrollBy(action.delta * 8);
+        break;
+      case "scroll_home":
+        this.#scrollToBoundary(false);
+        break;
+      case "scroll_end":
+        this.#scrollToBoundary(true);
+        break;
+      case "details_tab":
+        this.#moveHorizontal(action.delta);
+        break;
+      case "activate":
+        await this.#activate();
+        break;
+      case "context_toggle":
+        if (this.#selection.detailsTab === "chat") this.#toggleChatTools();
+        else this.#toggleObjective();
+        break;
+      case "toggle_pause":
+        await this.#togglePause();
+        break;
+      case "request_delete":
+        await this.#requestDelete();
+        break;
+      case "merge":
+        await this.#requestMerge();
+        break;
+      case "help":
+        this.#openHelp(
+          this.#focus === "details" && this.#selection.detailsTab === "chat" ? "chat" : this.#focus,
+        );
+        break;
+      case "toggle_notes":
+        this.#toggleNotes();
+        break;
+      case "backspace":
+        this.#editActiveText((value) => removeLastCharacter(value));
+        break;
+      case "delete_forward":
+        break;
+      case "append_text":
+        this.#editActiveText((value) => `${value}${action.text}`);
+        break;
+      case "open_new_run":
+        await this.#openNewRun();
+        break;
+      case "open_config":
+        await this.#openConfigure();
+        break;
+      case "open_config_documents":
+        break;
       case "config_document_create":
       case "config_document_rename":
       case "config_document_delete":
       case "config_run_type_create":
-      case "config_legacy_migration":
         break;
-      case "open_conflicts": break;
-      case "review_plan": this.#openPlanReview(false); break;
-      case "review_proposal": await this.#openSelectedProposal(); break;
-      case "open_actions": this.#openActions(); break;
-      case "open_question": this.#openSelectedQuestion(); break;
+      case "open_conflicts":
+        break;
+      case "review_plan":
+        this.#openPlanReview(false);
+        break;
+      case "review_proposal":
+        await this.#openSelectedProposal();
+        break;
+      case "open_actions":
+        this.#openActions();
+        break;
+      case "open_question":
+        this.#openSelectedQuestion();
+        break;
       case "refresh": {
-        const chatAttemptId = this.#selection.detailsTab === "chat" ? this.#selection.attemptId : undefined;
+        const chatAttemptId =
+          this.#selection.detailsTab === "chat" ? this.#selection.attemptId : undefined;
         await this.refresh();
-        if (chatAttemptId !== undefined && this.#selection.attemptId === chatAttemptId &&
-            this.#transcriptRpcAvailable !== false) {
+        if (
+          chatAttemptId !== undefined &&
+          this.#selection.attemptId === chatAttemptId &&
+          this.#transcriptRpcAvailable !== false
+        ) {
           this.#transcripts.delete(chatAttemptId);
           await this.#replaceTranscriptWindow(chatAttemptId);
         }
         break;
       }
-      case "toggle_chat_composer": this.#toggleChatComposer(); break;
-      case "toggle_chat_mode": this.#toggleChatMode(); break;
-      case "transcript_page": await this.#moveTranscriptWindow(action.delta); break;
-      case "submit": await this.#sendChat(); break;
+      case "toggle_chat_composer":
+        this.#toggleChatComposer();
+        break;
+      case "toggle_chat_mode":
+        this.#toggleChatMode();
+        break;
+      case "transcript_page":
+        await this.#moveTranscriptWindow(action.delta);
+        break;
+      case "submit":
+        await this.#sendChat();
+        break;
       case "save_draft":
       case "publish":
       case "discard_draft":
@@ -748,9 +870,14 @@ export class ControlCenterController {
       try {
         const inventory = await this.#loadRunInventory(this.#preferredDurableRunId());
         const staged = this.#stageRunSelection(inventory.summaries);
-        const selectedRun = staged.selectedSummary === undefined
-          ? undefined
-          : await this.#hydrateRun(staged.selectedSummary, inventory.authorityRevision, inventory.mode);
+        const selectedRun =
+          staged.selectedSummary === undefined
+            ? undefined
+            : await this.#hydrateRun(
+                staged.selectedSummary,
+                inventory.authorityRevision,
+                inventory.mode,
+              );
         this.#commitRunInventory(inventory, staged, selectedRun);
         return;
       } catch (error) {
@@ -790,7 +917,9 @@ export class ControlCenterController {
       throw new RunPageRefreshError("run summary page response revision does not match its anchor");
     }
     if (preferredRunId !== undefined && page.runs[0]?.id !== preferredRunId) {
-      throw new Error("authority returned a run summary page that does not begin at its selected target");
+      throw new Error(
+        "authority returned a run summary page that does not begin at its selected target",
+      );
     }
     return this.#inventoryFromPage(page);
   }
@@ -822,16 +951,20 @@ export class ControlCenterController {
 
   async #loadLegacyRunInventory(): Promise<RunInventory> {
     const response = await this.#client.request("run.list");
-    if (!Array.isArray(response.result)) throw new Error("authority returned an invalid legacy run list");
+    if (!Array.isArray(response.result))
+      throw new Error("authority returned an invalid legacy run list");
     if (response.result.length > LEGACY_RUN_LIST_LIMIT) {
       throw new Error(
         `This older Koni authority returned more than ${LEGACY_RUN_LIST_LIMIT} full runs. Restart it with run.page support before opening the control center.`,
       );
     }
-    const summaries = response.result.map((value) => {
-      assertRunRecord(value);
-      return projectRunSummary(value);
-    }).filter((run) => run.phase !== "deleted").sort(compareRunSummaryOrder);
+    const summaries = response.result
+      .map((value) => {
+        assertRunRecord(value);
+        return projectRunSummary(value);
+      })
+      .filter((run) => run.phase !== "deleted")
+      .sort(compareRunSummaryOrder);
     return {
       authorityRevision: response.revision,
       summaries,
@@ -869,8 +1002,11 @@ export class ControlCenterController {
     let selection = { ...this.#selection };
     const durableIds = new Set(summaries.map((run) => run.id));
     for (const provisional of this.#provisionals) {
-      if (provisional.durableRunId !== undefined && durableIds.has(provisional.durableRunId) &&
-          selection.runId === provisional.id) {
+      if (
+        provisional.durableRunId !== undefined &&
+        durableIds.has(provisional.durableRunId) &&
+        selection.runId === provisional.id
+      ) {
         selection = { ...selection, runId: provisional.durableRunId };
       }
     }
@@ -882,9 +1018,10 @@ export class ControlCenterController {
     }
     const selectedSummary = summaries.find((run) => run.id === selection.runId) ?? summaries[0];
     if (selectedSummary === undefined) {
-      selection = provisionals.length > 0
-        ? { runId: provisionals[0]!.id, detailsTab: "overview", objectiveExpanded: false }
-        : { detailsTab: "overview", objectiveExpanded: false };
+      selection =
+        provisionals.length > 0
+          ? { runId: provisionals[0]!.id, detailsTab: "overview", objectiveExpanded: false }
+          : { detailsTab: "overview", objectiveExpanded: false };
       return { summaries: summaries.map((run) => structuredClone(run)), provisionals, selection };
     }
     if (selection.runId !== selectedSummary.id) {
@@ -903,15 +1040,20 @@ export class ControlCenterController {
     authorityRevision: number,
     mode: RunInventory["mode"],
   ): Promise<RunRecord> {
-    const response = await this.#client.request("run.get", mode === "page"
-      ? { runId: summary.id, authorityRevision, runRevision: summary.runRevision }
-      : { runId: summary.id });
+    const response = await this.#client.request(
+      "run.get",
+      mode === "page"
+        ? { runId: summary.id, authorityRevision, runRevision: summary.runRevision }
+        : { runId: summary.id },
+    );
     const run = parseRunRecord(response.result);
     if (run.id !== summary.id || run.revision !== summary.runRevision) {
       throw new Error("authority returned selected run details for a different summary revision");
     }
     if (mode === "page" && !sameRunSummary(projectRunSummary(run), summary)) {
-      throw new Error("authority returned selected run details that do not match the compact summary");
+      throw new Error(
+        "authority returned selected run details that do not match the compact summary",
+      );
     }
     return run;
   }
@@ -921,25 +1063,47 @@ export class ControlCenterController {
     if (selected === undefined) {
       delete this.#selection.ticketId;
       delete this.#selection.attemptId;
+      this.#ticketCursor = undefined;
+      this.#agentCursor = undefined;
+      this.#graphCursorIndex = 0;
       this.#questionIndex = 0;
       if (this.#focus === "questions") this.#focus = "details";
       return;
     }
-    if (this.#selection.ticketId !== undefined && selected.tickets[this.#selection.ticketId] === undefined) {
+    if (
+      this.#selection.ticketId !== undefined &&
+      selected.tickets[this.#selection.ticketId] === undefined
+    ) {
       delete this.#selection.ticketId;
     }
-    if (this.#selection.attemptId !== undefined && selected.attempts[this.#selection.attemptId] === undefined) {
+    if (
+      this.#selection.attemptId !== undefined &&
+      selected.attempts[this.#selection.attemptId] === undefined
+    ) {
       delete this.#selection.attemptId;
     }
-    if (this.#focus === "questions" &&
-        !Object.values(selected.questions).some((question) => question.answeredAt === undefined)) {
+    if (this.#ticketCursor !== undefined && selected.tickets[this.#ticketCursor] === undefined) {
+      this.#ticketCursor = undefined;
+    }
+    if (this.#agentCursor !== undefined && selected.attempts[this.#agentCursor] === undefined) {
+      this.#agentCursor = undefined;
+    }
+    if (
+      this.#focus === "questions" &&
+      !Object.values(selected.questions).some((question) => question.answeredAt === undefined)
+    ) {
       this.#focus = "details";
     }
   }
 
   async #refreshGraph(): Promise<void> {
     const runId = this.#selection.runId;
-    if (runId === undefined || this.#selectedRunRecord() === undefined || this.#isProvisional(runId) || this.#graphRpcAvailable === false) {
+    if (
+      runId === undefined ||
+      this.#selectedRunRecord() === undefined ||
+      this.#isProvisional(runId) ||
+      this.#graphRpcAvailable === false
+    ) {
       this.#graph = undefined;
       return;
     }
@@ -962,7 +1126,12 @@ export class ControlCenterController {
 
   async #refreshControls(): Promise<void> {
     const runId = this.#selection.runId;
-    if (runId === undefined || this.#selectedRunRecord() === undefined || this.#isProvisional(runId) || this.#controlsRpcAvailable === false) {
+    if (
+      runId === undefined ||
+      this.#selectedRunRecord() === undefined ||
+      this.#isProvisional(runId) ||
+      this.#controlsRpcAvailable === false
+    ) {
       this.#controls = undefined;
       return;
     }
@@ -970,7 +1139,11 @@ export class ControlCenterController {
       const response = await this.#client.request("run.controls", { runId });
       const controls = parseStageCapabilityCatalog(response.result);
       const selected = this.#selectedRunRecord();
-      if (controls.binding.runId !== runId || selected === undefined || controls.binding.runRevision !== selected.revision) {
+      if (
+        controls.binding.runId !== runId ||
+        selected === undefined ||
+        controls.binding.runRevision !== selected.revision
+      ) {
         throw new Error("authority returned stage controls for stale run state");
       }
       if (this.#selection.runId === runId) this.#controls = controls;
@@ -988,7 +1161,12 @@ export class ControlCenterController {
   async #refreshLineage(): Promise<void> {
     const runId = this.#selection.runId;
     const ticketId = this.#selection.ticketId;
-    if (runId === undefined || this.#selectedRunRecord() === undefined || this.#isProvisional(runId) || this.#lineageRpcAvailable === false) {
+    if (
+      runId === undefined ||
+      this.#selectedRunRecord() === undefined ||
+      this.#isProvisional(runId) ||
+      this.#lineageRpcAvailable === false
+    ) {
       this.#lineage = undefined;
       return;
     }
@@ -999,10 +1177,15 @@ export class ControlCenterController {
       });
       const lineage = parseRunAttemptLineage(response.result);
       const selected = this.#selectedRunRecord();
-      if (lineage.runId !== runId || selected === undefined || lineage.runRevision !== selected.revision) {
+      if (
+        lineage.runId !== runId ||
+        selected === undefined ||
+        lineage.runRevision !== selected.revision
+      ) {
         throw new Error("authority returned attempt lineage for stale run state");
       }
-      if (this.#selection.runId === runId && this.#selection.ticketId === ticketId) this.#lineage = lineage;
+      if (this.#selection.runId === runId && this.#selection.ticketId === ticketId)
+        this.#lineage = lineage;
       this.#lineageRpcAvailable = true;
     } catch (error) {
       if (isMissingMethod(error)) {
@@ -1015,13 +1198,22 @@ export class ControlCenterController {
   }
 
   async #refreshSelectionProjections(): Promise<void> {
-    await Promise.all([this.#refreshGraph(), this.#refreshControls(), this.#refreshLineage(), this.#refreshCockpit()]);
+    await Promise.all([
+      this.#refreshGraph(),
+      this.#refreshControls(),
+      this.#refreshLineage(),
+      this.#refreshCockpit(),
+    ]);
   }
 
   async #refreshCockpit(): Promise<void> {
     const runId = this.#selection.runId;
     const run = runId === undefined ? undefined : this.#selectedRunRecord();
-    if (run === undefined || this.#isProvisional(runId!) || this.#cockpitCatalogResolver === undefined) {
+    if (
+      run === undefined ||
+      this.#isProvisional(runId!) ||
+      this.#cockpitCatalogResolver === undefined
+    ) {
       this.#cockpit = undefined;
       this.#cockpitIssue = undefined;
       return;
@@ -1036,7 +1228,10 @@ export class ControlCenterController {
       return;
     }
     try {
-      const projected = await this.#cockpitCatalogResolver.resolve({ runId: resolvedRunId, configurationSha256 });
+      const projected = await this.#cockpitCatalogResolver.resolve({
+        runId: resolvedRunId,
+        configurationSha256,
+      });
       const catalog = parseCompiledCockpitViewCatalog(projected, configurationSha256);
       this.#cockpitCatalogs.set(configurationSha256, catalog);
       const selected = this.#selectedRunRecord();
@@ -1055,8 +1250,9 @@ export class ControlCenterController {
 
   #adoptCockpitTicketDefault(catalog: CompiledCockpitViewCatalog): void {
     const view = cockpitView(catalog, ["tabbed_table", "kanban"]);
-    const tabs = cockpitStringArrayOption(view, "tabs")
-      ?.filter((tab): tab is TicketTab => (TICKET_TABS as readonly string[]).includes(tab));
+    const tabs = cockpitStringArrayOption(view, "tabs")?.filter((tab): tab is TicketTab =>
+      (TICKET_TABS as readonly string[]).includes(tab),
+    );
     if (tabs === undefined || tabs.length === 0 || tabs.includes(this.#ticketTab)) return;
     const configured = cockpitStringOption(view, "default_tab") as TicketTab | undefined;
     this.#ticketTab = configured !== undefined && tabs.includes(configured) ? configured : tabs[0]!;
@@ -1133,6 +1329,9 @@ export class ControlCenterController {
       return;
     }
     this.#selection = { runId, detailsTab: "overview", objectiveExpanded: false };
+    this.#ticketCursor = undefined;
+    this.#agentCursor = undefined;
+    this.#graphCursorIndex = 0;
     this.#questionIndex = 0;
     this.#scroll = { ...EMPTY_SCROLL };
     await this.#hydrateCurrentSelection();
@@ -1181,17 +1380,41 @@ export class ControlCenterController {
   async #selectTicket(ticketId: string): Promise<void> {
     if (!this.#buildView().selectedRun?.tickets.some((ticket) => ticket.id === ticketId)) return;
     this.#focus = "tickets";
+    this.#ticketCursor = ticketId;
+    await this.#commitTicketCursor();
+  }
+
+  /** Commits the highlighted ticket: filters downstream panels and shows its overview. */
+  async #commitTicketCursor(): Promise<void> {
+    const ticketId = this.#ticketCursor ?? this.#selection.ticketId;
+    if (ticketId === undefined) return;
+    if (!this.#buildView().selectedRun?.tickets.some((ticket) => ticket.id === ticketId)) return;
     this.#selection.ticketId = ticketId;
     delete this.#selection.attemptId;
+    this.#selection.detailsTab = "overview";
+    this.#scroll.details = 0;
     this.#scroll.agents = 0;
+    this.#graphCursorIndex = 0;
     await this.#refreshSelectionProjections();
+    if (this.#selectedRunRecord()?.tickets[ticketId]?.status === "proposed") {
+      await this.#openSelectedProposal();
+      return;
+    }
     this.#emit();
   }
 
   #selectAgent(attemptId: string): void {
     if (!this.#buildView().selectedRun?.agents.some((agent) => agent.id === attemptId)) return;
     this.#focus = "agents";
-    if (this.#selection.detailsTab !== "chat") this.#detailsTabBeforeChat = this.#selection.detailsTab;
+    this.#agentCursor = attemptId;
+    this.#openAgentChat(attemptId);
+  }
+
+  /** Opens the chat transcript for one agent in the details panel. */
+  #openAgentChat(attemptId: string): void {
+    if (this.#selection.detailsTab !== "chat")
+      this.#detailsTabBeforeChat = this.#selection.detailsTab;
+    if (this.#selection.attemptId !== attemptId) this.#chatToolsVisible = false;
     this.#selection.attemptId = attemptId;
     this.#selection.detailsTab = "chat";
     this.#scroll.details = 0;
@@ -1202,7 +1425,9 @@ export class ControlCenterController {
   #pointerScroll(panel: ControlCenterPanel, delta: -1 | 1): void {
     if (panel === "questions" && this.#buildView().selectedRun?.questions === undefined) return;
     this.#focus = panel;
-    this.#scroll[panel] = Math.max(0, this.#scroll[panel] + delta * 3);
+    // The open chat is bottom-anchored: its scroll offset counts up from the newest line.
+    const inverted = panel === "details" && this.#selection.detailsTab === "chat";
+    this.#scroll[panel] = Math.max(0, this.#scroll[panel] + (inverted ? -delta : delta) * 3);
     this.#emit();
   }
 
@@ -1214,9 +1439,16 @@ export class ControlCenterController {
           this.#emit();
           return;
         }
-        const id = moveSelection(view.runs.map((run) => run.id), this.#selection.runId, delta);
+        const id = moveSelection(
+          view.runs.map((run) => run.id),
+          this.#selection.runId,
+          delta,
+        );
         if (id !== undefined && id !== this.#selection.runId) {
           this.#selection = { runId: id, detailsTab: "overview", objectiveExpanded: false };
+          this.#ticketCursor = undefined;
+          this.#agentCursor = undefined;
+          this.#graphCursorIndex = 0;
           this.#questionIndex = 0;
           this.#scroll = { ...EMPTY_SCROLL };
           await this.#hydrateCurrentSelection();
@@ -1225,38 +1457,59 @@ export class ControlCenterController {
         return;
       }
       case "tickets": {
-        const id = moveSelection(view.selectedRun?.tickets.map((ticket) => ticket.id) ?? [], this.#selection.ticketId, delta);
-        if (id !== undefined) {
-          this.#selection.ticketId = id;
-          delete this.#selection.attemptId;
-          this.#scroll.agents = 0;
-          await this.#refreshSelectionProjections();
+        // Moving through the list only moves the highlight; Enter commits the selection so
+        // passing through the tickets panel never re-scopes the downstream panels.
+        const id = moveSelection(
+          view.selectedRun?.tickets.map((ticket) => ticket.id) ?? [],
+          this.#ticketCursor ?? this.#selection.ticketId,
+          delta,
+        );
+        if (id !== undefined && id !== this.#ticketCursor) {
+          this.#ticketCursor = id;
           this.#emit();
         }
         return;
       }
       case "agents": {
-        const id = moveSelection(view.selectedRun?.agents.map((agent) => agent.id) ?? [], this.#selection.attemptId, delta);
-        if (id !== undefined) {
-          if (this.#selection.detailsTab !== "chat") this.#detailsTabBeforeChat = this.#selection.detailsTab;
-          this.#selection.attemptId = id;
-          this.#selection.detailsTab = "chat";
-          this.#scroll.details = 0;
-          void this.#loadTranscript(id);
+        // Highlight only; Enter (or a click) opens the chat.
+        const id = moveSelection(
+          view.selectedRun?.agents.map((agent) => agent.id) ?? [],
+          this.#agentCursor ?? this.#selection.attemptId,
+          delta,
+        );
+        if (id !== undefined && id !== this.#agentCursor) {
+          this.#agentCursor = id;
           this.#emit();
         }
         return;
       }
-      case "questions": this.#moveQuestionOption(delta); return;
+      case "questions":
+        this.#moveQuestionOption(delta);
+        return;
+      case "graph": {
+        const nodeCount = view.selectedRun?.graph.nodes.length ?? 0;
+        if (nodeCount === 0) return;
+        const next = Math.min(nodeCount - 1, Math.max(0, this.#graphCursorIndex + delta));
+        if (next !== this.#graphCursorIndex) {
+          this.#graphCursorIndex = next;
+          this.#emit();
+        }
+        return;
+      }
       case "details":
       case "activity":
-      case "graph": this.#scrollBy(delta); return;
+        this.#scrollBy(delta);
+        return;
     }
   }
 
   async #moveRunWindowAtBoundary(delta: -1 | 1): Promise<boolean> {
     const selectedId = this.#selection.runId;
-    if (selectedId === undefined || this.#isProvisional(selectedId) || this.#runPageRpcAvailable === false) {
+    if (
+      selectedId === undefined ||
+      this.#isProvisional(selectedId) ||
+      this.#runPageRpcAvailable === false
+    ) {
       return false;
     }
     const boundary = delta > 0 ? this.#runSummaries.at(-1) : this.#runSummaries[0];
@@ -1271,15 +1524,21 @@ export class ControlCenterController {
         const activeCursor = delta > 0 ? this.#runNextCursor : this.#runPreviousCursor;
         if (activeCursor === undefined) return true;
         const { page, responseRevision } = await this.#requestRunPage({ cursor: activeCursor });
-        const expectedStart = delta > 0
-          ? this.#runPageStartIndex + this.#runSummaries.length
-          : this.#runPageStartIndex - page.runs.length;
-        if (responseRevision !== page.revision || page.revision !== this.#summaryAuthorityRevision ||
-            page.totalRuns !== this.#runTotalRuns || page.startIndex !== expectedStart) {
+        const expectedStart =
+          delta > 0
+            ? this.#runPageStartIndex + this.#runSummaries.length
+            : this.#runPageStartIndex - page.runs.length;
+        if (
+          responseRevision !== page.revision ||
+          page.revision !== this.#summaryAuthorityRevision ||
+          page.totalRuns !== this.#runTotalRuns ||
+          page.startIndex !== expectedStart
+        ) {
           throw new RunPageRefreshError("adjacent run page no longer matches the selected window");
         }
         const selectedSummary = delta > 0 ? page.runs[0] : page.runs.at(-1);
-        if (selectedSummary === undefined) throw new Error("authority returned an empty adjacent run page");
+        if (selectedSummary === undefined)
+          throw new Error("authority returned an empty adjacent run page");
         const inventory = this.#inventoryFromPage(page);
         const staged: StagedRunSelection = {
           summaries: inventory.summaries,
@@ -1291,8 +1550,15 @@ export class ControlCenterController {
           },
           selectedSummary,
         };
-        const selectedRun = await this.#hydrateRun(selectedSummary, inventory.authorityRevision, "page");
+        const selectedRun = await this.#hydrateRun(
+          selectedSummary,
+          inventory.authorityRevision,
+          "page",
+        );
         this.#commitRunInventory(inventory, staged, selectedRun);
+        this.#ticketCursor = undefined;
+        this.#agentCursor = undefined;
+        this.#graphCursorIndex = 0;
         this.#questionIndex = 0;
         this.#scroll = { ...EMPTY_SCROLL };
         await this.#refreshSelectionProjections();
@@ -1308,7 +1574,11 @@ export class ControlCenterController {
         const refreshedIndex = this.#runSummaries.findIndex((run) => run.id === selectedId);
         const refreshedTarget = this.#runSummaries[refreshedIndex + delta];
         if (refreshedIndex >= 0 && refreshedTarget !== undefined) {
-          this.#selection = { runId: refreshedTarget.id, detailsTab: "overview", objectiveExpanded: false };
+          this.#selection = {
+            runId: refreshedTarget.id,
+            detailsTab: "overview",
+            objectiveExpanded: false,
+          };
           this.#questionIndex = 0;
           this.#scroll = { ...EMPTY_SCROLL };
           await this.#hydrateCurrentSelection();
@@ -1326,12 +1596,11 @@ export class ControlCenterController {
       if (available.length === 0) return;
       const index = Math.max(0, available.indexOf(this.#ticketTab));
       this.#ticketTab = available[(index + delta + available.length) % available.length]!;
+      // Tab switches only move the highlight; the committed ticket selection (and every
+      // downstream panel scoped by it) changes exclusively on Enter/click.
       const visible = this.#buildView().selectedRun?.tickets ?? [];
-      if (!visible.some((ticket) => ticket.id === this.#selection.ticketId)) {
-        if (visible[0] === undefined) delete this.#selection.ticketId;
-        else this.#selection.ticketId = visible[0].id;
-        delete this.#selection.attemptId;
-        void this.#refreshSelectionProjections().then(() => this.#emit());
+      if (!visible.some((ticket) => ticket.id === this.#ticketCursor)) {
+        this.#ticketCursor = visible[0]?.id;
       }
       this.#scroll.tickets = 0;
       this.#emit();
@@ -1348,7 +1617,7 @@ export class ControlCenterController {
     }
     if (this.#focus !== "details") return;
     if (this.#selection.detailsTab === "chat") return;
-    const tabs: DetailsTab[] = ["overview", "plan", "stages"];
+    const tabs: DetailsTab[] = ["overview", "plan"];
     const index = Math.max(0, tabs.indexOf(this.#selection.detailsTab));
     this.#selection.detailsTab = tabs[(index + delta + tabs.length) % tabs.length]!;
     this.#scroll.details = 0;
@@ -1356,23 +1625,37 @@ export class ControlCenterController {
   }
 
   async #activate(): Promise<void> {
+    if (this.#focus === "runs") {
+      // Enter re-targets the details panel to the selected run's overview — the way back
+      // from any ticket or chat drill-down.
+      const runId = this.#selection.runId;
+      if (runId === undefined) return;
+      const hadScope =
+        this.#selection.ticketId !== undefined || this.#selection.attemptId !== undefined;
+      this.#selection = { runId, detailsTab: "overview", objectiveExpanded: false };
+      this.#ticketCursor = undefined;
+      this.#agentCursor = undefined;
+      this.#graphCursorIndex = 0;
+      this.#scroll.details = 0;
+      if (hadScope) await this.#refreshSelectionProjections();
+      this.#emit();
+      return;
+    }
     if (this.#focus === "tickets") {
-      const ticketId = this.#selection.ticketId;
-      const ticket = ticketId === undefined ? undefined : this.#selectedRunRecord()?.tickets[ticketId];
-      if (ticket?.status === "proposed") await this.#openSelectedProposal();
+      await this.#commitTicketCursor();
       return;
     }
     if (this.#focus === "details" && this.#selection.detailsTab === "overview") {
-      this.#toggleObjective();
-      return;
-    }
-    if (this.#focus === "details" && this.#selection.detailsTab === "stages") {
       const stage = this.#controls?.stages.find((candidate) => candidate.current);
-      const action = stage?.actions.find((candidate) => candidate.id === stage.interaction.primaryActionId);
+      const action = stage?.actions.find(
+        (candidate) => candidate.id === stage.interaction.primaryActionId,
+      );
       if (action === undefined) {
         this.#notice = {
           kind: "info",
-          message: stage?.interaction.reason ?? "No compiler-authorized action is currently available for this stage.",
+          message:
+            stage?.interaction.reason ??
+            "No compiler-authorized action is currently available for this stage.",
         };
         this.#emit();
       } else await this.#activateCapability(action);
@@ -1382,11 +1665,13 @@ export class ControlCenterController {
       this.#toggleChatComposer();
       return;
     }
-    if (this.#focus === "agents" && this.#selection.attemptId !== undefined) {
-      if (this.#selection.detailsTab !== "chat") this.#detailsTabBeforeChat = this.#selection.detailsTab;
-      this.#selection.detailsTab = "chat";
+    if (this.#focus === "agents") {
+      const attemptId = this.#agentCursor ?? this.#selection.attemptId;
+      if (attemptId === undefined) return;
+      if (!this.#buildView().selectedRun?.agents.some((agent) => agent.id === attemptId)) return;
+      this.#agentCursor = attemptId;
+      this.#openAgentChat(attemptId);
       this.#focus = "details";
-      void this.#loadTranscript(this.#selection.attemptId);
       this.#emit();
       return;
     }
@@ -1404,6 +1689,24 @@ export class ControlCenterController {
     }
   }
 
+  #requestQuit(): void {
+    const configure = this.#configureSurface();
+    if (configure?.dirty === true) {
+      this.#notice = {
+        kind: "error",
+        message:
+          configure.kind === "configure" && configure.rebaseRequired
+            ? "This saved draft is stale. Rebase, publish, or discard it before closing Koni."
+            : configure.kind === "configure_documents"
+              ? "Save or discard the raw source edit before closing Koni."
+              : "Publish or discard the configuration draft before closing Koni; unpublished edits were not discarded.",
+      };
+      this.#emit();
+      return;
+    }
+    this.#onQuit?.();
+  }
+
   #cancel(): void {
     if (this.#modal?.kind === "help" && this.#suspendedModal !== undefined) {
       this.#modal = this.#suspendedModal;
@@ -1414,17 +1717,25 @@ export class ControlCenterController {
     if (this.#modal !== undefined) {
       if (this.#modal.kind === "configure" && this.#modal.resourceOperation !== undefined) {
         delete this.#modal.resourceOperation;
-      } else if (this.#modal.kind === "configure" && this.#modal.editing) this.#modal.editing = false;
-      else if (this.#modal.kind === "configure_documents" && this.#modal.editing) this.#modal.editing = false;
+      } else if (this.#modal.kind === "configure" && this.#modal.editing)
+        this.#modal.editing = false;
+      else if (this.#modal.kind === "configure_documents" && this.#modal.editing)
+        this.#modal.editing = false;
       else if (this.#modal.kind === "configure_documents" && this.#modal.dirty) {
-        this.#notice = { kind: "error", message: "Save or discard the raw source edit before leaving Configure resources." };
-      }
-      else if (this.#modal.kind === "configure_documents") this.#modal = this.#modal.returnTo;
+        this.#notice = {
+          kind: "error",
+          message: "Save or discard the raw source edit before leaving Configure resources.",
+        };
+      } else if (this.#modal.kind === "configure_documents") this.#modal = this.#modal.returnTo;
       else if (this.#modal.kind === "edit_scalar") this.#modal = this.#modal.returnTo;
       else if (this.#modal.kind === "profile_conflicts") this.#modal = this.#modal.returnTo;
-      else if (this.#modal.kind === "config_document_create" || this.#modal.kind === "config_document_rename" ||
-          this.#modal.kind === "config_document_delete" || this.#modal.kind === "config_run_type_wizard" ||
-          this.#modal.kind === "config_legacy_migration") this.#modal = this.#modal.returnTo;
+      else if (
+        this.#modal.kind === "config_document_create" ||
+        this.#modal.kind === "config_document_rename" ||
+        this.#modal.kind === "config_document_delete" ||
+        this.#modal.kind === "config_run_type_wizard"
+      )
+        this.#modal = this.#modal.returnTo;
       else this.#modal = undefined;
       this.#emit();
       return;
@@ -1442,18 +1753,28 @@ export class ControlCenterController {
       } else if (this.#selection.ticketId !== undefined) {
         delete this.#selection.ticketId;
         void this.#refreshSelectionProjections().then(() => this.#emit());
+      } else {
+        // Nothing left to dismiss: Esc at the top level closes the dashboard like `q`.
+        this.#requestQuit();
+        return;
       }
     }
     this.#emit();
   }
 
   #scrollBy(delta: number): void {
-    this.#scroll[this.#focus] = Math.max(0, this.#scroll[this.#focus] + delta);
+    // The open chat is bottom-anchored: its scroll offset counts up from the newest line.
+    const inverted = this.#focus === "details" && this.#selection.detailsTab === "chat";
+    this.#scroll[this.#focus] = Math.max(
+      0,
+      this.#scroll[this.#focus] + (inverted ? -delta : delta),
+    );
     this.#emit();
   }
 
   #scrollToBoundary(end: boolean): void {
-    this.#scroll[this.#focus] = end ? Number.MAX_SAFE_INTEGER : 0;
+    const inverted = this.#focus === "details" && this.#selection.detailsTab === "chat";
+    this.#scroll[this.#focus] = (inverted ? !end : end) ? Number.MAX_SAFE_INTEGER : 0;
     this.#emit();
   }
 
@@ -1463,17 +1784,38 @@ export class ControlCenterController {
     this.#emit();
   }
 
+  #toggleChatTools(): void {
+    this.#chatToolsVisible = !this.#chatToolsVisible;
+    this.#scroll.details = 0;
+    this.#emit();
+  }
+
   async #togglePause(): Promise<void> {
     const run = this.#selectedRunRecord();
     if (run === undefined) return;
-    const resolverRetry = run.lifecycle.phase === "blocked"
-      ? this.#findCapability("retry_terminal_resolver")
-      : undefined;
-    const reviewedBlockerRetry = run.lifecycle.phase === "blocked"
-      ? this.#findCapability("retry_supervised_stage")
-      : undefined;
-    const intent = run.lifecycle.phase === "paused" ? "resume_run"
-      : run.lifecycle.phase === "blocked" ? "retry_blocked" : "pause_run";
+    if (
+      run.pendingPause !== undefined &&
+      run.lifecycle.phase !== "paused" &&
+      run.lifecycle.phase !== "blocked"
+    ) {
+      // Space toggles the scheduled pause back off before it ever executes.
+      await this.#mutate("run.resume", { runId: run.id }, "Cancelling scheduled pause…");
+      return;
+    }
+    const resolverRetry =
+      run.lifecycle.phase === "blocked"
+        ? this.#findCapability("retry_terminal_resolver")
+        : undefined;
+    const reviewedBlockerRetry =
+      run.lifecycle.phase === "blocked"
+        ? this.#findCapability("retry_supervised_stage")
+        : undefined;
+    const intent =
+      run.lifecycle.phase === "paused"
+        ? "resume_run"
+        : run.lifecycle.phase === "blocked"
+          ? "retry_blocked"
+          : "pause_run";
     const capability = resolverRetry ?? reviewedBlockerRetry ?? this.#findCapability(intent);
     if (capability !== undefined) {
       await this.#activateCapability(capability);
@@ -1482,7 +1824,8 @@ export class ControlCenterController {
     if (run.lifecycle.phase === "blocked" && this.#controls !== undefined) {
       this.#notice = {
         kind: "info",
-        message: "This blocked run has no compiler-authorized retry available. Open Run actions to inspect its recovery controls.",
+        message:
+          "This blocked run has no compiler-authorized retry available. Open Run actions to inspect its recovery controls.",
       };
       this.#emit();
       return;
@@ -1493,8 +1836,7 @@ export class ControlCenterController {
         { runId: run.id },
         run.lifecycle.phase === "blocked" ? "Retrying run…" : "Resuming run…",
       );
-    }
-    else if (run.lifecycle.phase === "pausing") {
+    } else if (run.lifecycle.phase === "pausing") {
       this.#notice = { kind: "info", message: "Pause is still settling" };
       this.#emit();
     } else await this.#mutate("run.pause", { runId: run.id }, "Pausing run…");
@@ -1503,14 +1845,16 @@ export class ControlCenterController {
   async #requestDelete(): Promise<void> {
     const row = this.#selectedRunRow();
     const run = this.#selectedRunRecord();
-    if (row === undefined || row.provisional || run === undefined || this.#busy !== undefined) return;
+    if (row === undefined || row.provisional || run === undefined || this.#busy !== undefined)
+      return;
     this.#busy = "Inspecting deletion safety…";
     this.#notice = undefined;
     this.#emit();
     try {
       const response = await this.#client.request("run.deletion.inspect", { runId: run.id });
       const preview = parseRunDeletionPreview(response.result);
-      if (preview.runId !== run.id) throw new Error("authority returned a deletion preview for another run");
+      if (preview.runId !== run.id)
+        throw new Error("authority returned a deletion preview for another run");
       this.#modal = {
         kind: "delete",
         runId: preview.runId,
@@ -1539,14 +1883,16 @@ export class ControlCenterController {
   async #requestMerge(): Promise<void> {
     const row = this.#selectedRunRow();
     const run = this.#selectedRunRecord();
-    if (row === undefined || row.provisional || run === undefined || this.#busy !== undefined) return;
+    if (row === undefined || row.provisional || run === undefined || this.#busy !== undefined)
+      return;
     this.#busy = "Inspecting merge readiness…";
     this.#notice = undefined;
     this.#emit();
     try {
       const response = await this.#client.request("run.merge.inspect", { runId: run.id });
       const preview = parseRunMergePreview(response.result);
-      if (preview.runId !== run.id) throw new Error("authority returned a merge preview for another run");
+      if (preview.runId !== run.id)
+        throw new Error("authority returned a merge preview for another run");
       this.#modal = {
         kind: "merge",
         runId: preview.runId,
@@ -1571,7 +1917,8 @@ export class ControlCenterController {
   }
 
   #openHelp(topic: ControlCenterHelpTopic): void {
-    if (this.#modal !== undefined && this.#modal.kind !== "help") this.#suspendedModal = cloneModal(this.#modal);
+    if (this.#modal !== undefined && this.#modal.kind !== "help")
+      this.#suspendedModal = cloneModal(this.#modal);
     this.#modal = { kind: "help", topic };
     this.#emit();
   }
@@ -1579,12 +1926,16 @@ export class ControlCenterController {
   #openActions(): void {
     const controls = this.#controls;
     if (controls === undefined) {
-      this.#notice = { kind: "info", message: "Compiler-authored actions are not available for this run." };
+      this.#notice = {
+        kind: "info",
+        message: "Compiler-authored actions are not available for this run.",
+      };
       this.#emit();
       return;
     }
     const current = controls.stages.find((stage) => stage.current);
-    const stageFirst = this.#focus === "details" && this.#selection.detailsTab === "stages";
+    // Stage content now lives at the bottom of the Overview tab; keep its actions first there.
+    const stageFirst = this.#focus === "details" && this.#selection.detailsTab === "overview";
     const ordered = stageFirst
       ? [...(current?.actions ?? []), ...controls.runActions]
       : [...controls.runActions, ...(current?.actions ?? [])];
@@ -1593,7 +1944,8 @@ export class ControlCenterController {
       // A few singleton run controls are projected both at the current semantic stage and at run
       // scope. Present one operator action; ordering still lets the stage explanation win while
       // Stages is focused. Ticket-scoped retries deliberately retain one row per exact binding.
-      const singletonIntent = action.intent === "retry_blocked" || action.intent === "inspect_run_merge";
+      const singletonIntent =
+        action.intent === "retry_blocked" || action.intent === "inspect_run_merge";
       const key = singletonIntent ? `intent:${action.intent}` : `id:${action.id}`;
       if (seen.has(key)) return false;
       seen.add(key);
@@ -1604,26 +1956,33 @@ export class ControlCenterController {
     const byId = new Map(authorityActions.map((action) => [action.id, action]));
     // Cockpit slots without a compiled capability are pure presentation debris: showing eight
     // disabled placeholder rows ahead of the real run controls buries every actionable item.
-    const actions = configured.length === 0
-      ? authorityActions
-      : [
-        ...configured.flatMap((actionId) => {
-          const capability = byId.get(actionId);
-          return capability === undefined ? [] : [capability];
-        }),
-        ...authorityActions.filter((action) => !configured.includes(action.id)),
-      ];
+    const actions =
+      configured.length === 0
+        ? authorityActions
+        : [
+            ...configured.flatMap((actionId) => {
+              const capability = byId.get(actionId);
+              return capability === undefined ? [] : [capability];
+            }),
+            ...authorityActions.filter((action) => !configured.includes(action.id)),
+          ];
     if (actions.length === 0) {
-      this.#notice = { kind: "info", message: current?.interaction.reason ?? "No actions are available for this run." };
+      this.#notice = {
+        kind: "info",
+        message: current?.interaction.reason ?? "No actions are available for this run.",
+      };
       this.#emit();
       return;
     }
     const firstAvailable = actions.findIndex((action) => action.availability.state === "available");
     this.#modal = {
       kind: "action_palette",
-      title: configuredView?.title === undefined
-        ? stageFirst && current !== undefined ? `${current.title} actions` : "Run actions"
-        : `${configuredView.title} actions`,
+      title:
+        configuredView?.title === undefined
+          ? stageFirst && current !== undefined
+            ? `${current.title} actions`
+            : "Run actions"
+          : `${configuredView.title} actions`,
       actions,
       selectedIndex: firstAvailable < 0 ? 0 : firstAvailable,
     };
@@ -1636,7 +1995,8 @@ export class ControlCenterController {
     if (this.#focus === "agents") return cockpitView(catalog, ["status_overlay"]);
     if (this.#focus === "graph") return cockpitView(catalog, ["typed_tree", "graph", "table"]);
     if (this.#focus === "details") return cockpitView(catalog, ["nested_detail"]);
-    if (this.#focus === "activity" || this.#focus === "runs") return cockpitView(catalog, ["controls", "summary"]);
+    if (this.#focus === "activity" || this.#focus === "runs")
+      return cockpitView(catalog, ["controls", "summary"]);
     return undefined;
   }
 
@@ -1666,7 +2026,11 @@ export class ControlCenterController {
       this.#openSelectedQuestion();
       return;
     }
-    if (action.form !== undefined || action.surface === "action_form" || action.confirmation.required) {
+    if (
+      action.form !== undefined ||
+      action.surface === "action_form" ||
+      action.confirmation.required
+    ) {
       this.#openActionForm(action);
       return;
     }
@@ -1684,9 +2048,15 @@ export class ControlCenterController {
       binding: structuredClone(binding),
       action: structuredClone(action),
       values,
-      fieldIndex: Math.max(0, fields.findIndex((field) => !field.locked && field.visibility !== "hidden")),
+      fieldIndex: Math.max(
+        0,
+        fields.findIndex((field) => !field.locked && field.visibility !== "hidden"),
+      ),
       focus: fields.some((field) => !field.locked && field.visibility !== "hidden")
-        ? "fields" : action.confirmation.required ? "confirmation" : "submit",
+        ? "fields"
+        : action.confirmation.required
+          ? "confirmation"
+          : "submit",
       editing: false,
       cursor: 0,
       confirmed: false,
@@ -1696,8 +2066,10 @@ export class ControlCenterController {
 
   #findCapability(intent: StageActionCapability["intent"]): StageActionCapability | undefined {
     if (this.#controls === undefined) return undefined;
-    return [...this.#controls.runActions, ...this.#controls.stages.flatMap((stage) => stage.actions)]
-      .find((action) => action.intent === intent && action.availability.state === "available");
+    return [
+      ...this.#controls.runActions,
+      ...this.#controls.stages.flatMap((stage) => stage.actions),
+    ].find((action) => action.intent === intent && action.availability.state === "available");
   }
 
   async #executeCapability(
@@ -1707,19 +2079,26 @@ export class ControlCenterController {
     binding = this.#controls?.binding,
   ): Promise<RpcSuccess | undefined> {
     if (binding === undefined) {
-      this.#notice = { kind: "error", message: "Run action authority is unavailable; refresh and try again." };
+      this.#notice = {
+        kind: "error",
+        message: "Run action authority is unavailable; refresh and try again.",
+      };
       this.#emit();
       return undefined;
     }
-    return this.#mutate("run.action.execute", {
-      protocol: STAGE_ACTION_INVOCATION_PROTOCOL,
-      runId: binding.runId,
-      runRevision: binding.runRevision,
-      generation: binding.generation,
-      capabilityId: action.id,
-      confirmed,
-      values: structuredClone(values),
-    }, `${action.title}…`);
+    return this.#mutate(
+      "run.action.execute",
+      {
+        protocol: STAGE_ACTION_INVOCATION_PROTOCOL,
+        runId: binding.runId,
+        runRevision: binding.runRevision,
+        generation: binding.generation,
+        capabilityId: action.id,
+        confirmed,
+        values: structuredClone(values),
+      },
+      `${action.title}…`,
+    );
   }
 
   #moveQuestionOption(delta: -1 | 1): void {
@@ -1761,8 +2140,15 @@ export class ControlCenterController {
   async #openSelectedProposal(): Promise<void> {
     const run = this.#selectedRunRecord();
     const ticketId = this.#selection.ticketId;
-    if (run === undefined || ticketId === undefined || run.tickets[ticketId]?.status !== "proposed") {
-      this.#notice = { kind: "info", message: "Select a proposed ticket that is awaiting your decision" };
+    if (
+      run === undefined ||
+      ticketId === undefined ||
+      run.tickets[ticketId]?.status !== "proposed"
+    ) {
+      this.#notice = {
+        kind: "info",
+        message: "Select a proposed ticket that is awaiting your decision",
+      };
       this.#emit();
       return;
     }
@@ -1771,10 +2157,14 @@ export class ControlCenterController {
     this.#notice = undefined;
     this.#emit();
     try {
-      const proposal = parseControlProposalInspection((await this.#client.request("proposal.inspect", {
-        runId: run.id,
-        ticketId,
-      })).result);
+      const proposal = parseControlProposalInspection(
+        (
+          await this.#client.request("proposal.inspect", {
+            runId: run.id,
+            ticketId,
+          })
+        ).result,
+      );
       if (proposal.runId !== run.id || proposal.ticketId !== ticketId) {
         throw new Error("authority returned a different change proposal");
       }
@@ -1835,22 +2225,25 @@ export class ControlCenterController {
       question.batchReadyToResolve &&
       questionDraftMatchesSaved(question, draft)
     ) {
-      return this.#resolveQuestionBatch(
-        question.batchId,
-        question.batchVersion,
-        batchQuestionIds,
-      );
+      return this.#resolveQuestionBatch(question.batchId, question.batchVersion, batchQuestionIds);
     }
-    const batchParams = question.batchId === undefined || question.batchVersion === undefined
-      ? {}
-      : { batchId: question.batchId, expectedVersion: question.batchVersion };
-    const saved = await this.#mutate(question.answerSaved ? "question.revise" : "question.answer", {
-      runId: this.#selection.runId!,
-      questionId: question.id,
-      ...batchParams,
-      ...(draft.selectedOptionId === undefined ? {} : { selectedOptionId: draft.selectedOptionId }),
-      ...(notes.length === 0 ? {} : { notes }),
-    }, question.answerSaved ? "Revising answer…" : "Saving answer…");
+    const batchParams =
+      question.batchId === undefined || question.batchVersion === undefined
+        ? {}
+        : { batchId: question.batchId, expectedVersion: question.batchVersion };
+    const saved = await this.#mutate(
+      question.answerSaved ? "question.revise" : "question.answer",
+      {
+        runId: this.#selection.runId!,
+        questionId: question.id,
+        ...batchParams,
+        ...(draft.selectedOptionId === undefined
+          ? {}
+          : { selectedOptionId: draft.selectedOptionId }),
+        ...(notes.length === 0 ? {} : { notes }),
+      },
+      question.answerSaved ? "Revising answer…" : "Saving answer…",
+    );
     if (saved === undefined) return false;
     const result = asRecord(saved.result) ?? {};
     const batchVersion = typeof result.batchVersion === "number" ? result.batchVersion : undefined;
@@ -1859,12 +2252,17 @@ export class ControlCenterController {
       this.#questionIndex = 0;
       return true;
     }
-    if (question.batchId !== undefined && batchVersion !== undefined && question.resolvesBatchOnSubmit) {
+    if (
+      question.batchId !== undefined &&
+      batchVersion !== undefined &&
+      question.resolvesBatchOnSubmit
+    ) {
       return this.#resolveQuestionBatch(question.batchId, batchVersion, batchQuestionIds);
     }
     const questions = this.#buildView().selectedRun?.questions ?? [];
-    const next = questions.find((candidate) =>
-      candidate.batchId === question.batchId && !candidate.answerSaved);
+    const next = questions.find(
+      (candidate) => candidate.batchId === question.batchId && !candidate.answerSaved,
+    );
     if (next !== undefined) {
       this.#questionIndex = questions.indexOf(next);
       if (this.#modal?.kind === "answer_question") this.#modal.questionId = next.id;
@@ -1878,17 +2276,18 @@ export class ControlCenterController {
     questionIds: readonly string[],
   ): Promise<boolean> {
     const capability = this.#findCapability("resolve_questions");
-    const resolved = capability === undefined
-      ? await this.#mutate("question.resolve", {
-          runId: this.#selection.runId!,
-          batchId,
-          expectedVersion,
-        }, "Submitting answers…")
-      : await this.#executeCapability(
-          capability,
-          actionFieldValues(capability),
-          false,
-        );
+    const resolved =
+      capability === undefined
+        ? await this.#mutate(
+            "question.resolve",
+            {
+              runId: this.#selection.runId!,
+              batchId,
+              expectedVersion,
+            },
+            "Submitting answers…",
+          )
+        : await this.#executeCapability(capability, actionFieldValues(capability), false);
     if (resolved === undefined) return false;
     for (const questionId of questionIds) this.#questionDrafts.delete(questionId);
     this.#questionIndex = 0;
@@ -1939,7 +2338,7 @@ export class ControlCenterController {
         kind: "configure",
         catalog,
         snapshot,
-        draft: structuredClone(saved?.values ?? snapshot.values) as Record<string, JsonValue>,
+        draft: structuredClone(saved?.values ?? snapshot.values),
         sectionIndex: 0,
         resourceIndex: 0,
         fieldIndex: 0,
@@ -1951,7 +2350,11 @@ export class ControlCenterController {
         upstreamConflicts,
       };
       if (rebaseRequired) {
-        this.#notice = { kind: "error", message: "The saved draft predates newer project configuration. Rebase or discard it before publishing." };
+        this.#notice = {
+          kind: "error",
+          message:
+            "The saved draft predates newer project configuration. Rebase or discard it before publishing.",
+        };
       }
     } catch (error) {
       this.#notice = { kind: "error", message: errorMessage(error) };
@@ -1963,7 +2366,10 @@ export class ControlCenterController {
 
   async #openConfigDocuments(returnTo: ConfigureModalState): Promise<void> {
     if (returnTo.dirty) {
-      this.#notice = { kind: "error", message: "Publish or discard the guided configuration draft before opening raw resources." };
+      this.#notice = {
+        kind: "error",
+        message: "Publish or discard the guided configuration draft before opening raw resources.",
+      };
       this.#emit();
       return;
     }
@@ -2040,40 +2446,50 @@ export class ControlCenterController {
     } else if (action.type === "config_document_rename") {
       if (!this.#requireCleanDocumentSurface(modal)) return;
       const document = selectedConfigDocument(modal);
-      if (document === undefined) this.#notice = { kind: "info", message: "Select a resource to rename." };
-      else if (!document.capabilities.rename) this.#notice = { kind: "info", message: document.capabilities.reason ?? "This resource cannot be renamed." };
-      else this.#modal = {
-        kind: "config_document_rename",
-        returnTo: modal,
-        documentId: document.id,
-        title: document.title,
-        cursor: characterCount(document.title),
-        focus: "title",
-      };
+      if (document === undefined)
+        this.#notice = { kind: "info", message: "Select a resource to rename." };
+      else if (!document.capabilities.rename)
+        this.#notice = {
+          kind: "info",
+          message: document.capabilities.reason ?? "This resource cannot be renamed.",
+        };
+      else
+        this.#modal = {
+          kind: "config_document_rename",
+          returnTo: modal,
+          documentId: document.id,
+          title: document.title,
+          cursor: characterCount(document.title),
+          focus: "title",
+        };
     } else if (action.type === "config_document_delete") {
       if (!this.#requireCleanDocumentSurface(modal)) return;
       const document = selectedConfigDocument(modal);
-      if (document === undefined) this.#notice = { kind: "info", message: "Select a resource to delete." };
-      else this.#modal = {
-        kind: "config_document_delete",
-        returnTo: modal,
-        documentId: document.id,
-        title: document.title,
-        canDelete: document.capabilities.delete,
-        ...(document.capabilities.reason === undefined ? {} : { reason: document.capabilities.reason }),
-        selected: "cancel",
-      };
+      if (document === undefined)
+        this.#notice = { kind: "info", message: "Select a resource to delete." };
+      else
+        this.#modal = {
+          kind: "config_document_delete",
+          returnTo: modal,
+          documentId: document.id,
+          title: document.title,
+          canDelete: document.capabilities.delete,
+          ...(document.capabilities.reason === undefined
+            ? {}
+            : { reason: document.capabilities.reason }),
+          selected: "cancel",
+        };
     } else if (action.type === "config_run_type_create") {
       if (!this.#requireCleanDocumentSurface(modal)) return;
       await this.#openConfigRunTypeWizard(modal);
       return;
-    } else if (action.type === "config_legacy_migration") {
-      if (!this.#requireCleanDocumentSurface(modal)) return;
-      await this.#openConfigLegacyMigration(modal);
-      return;
     } else if (action.type === "focus") {
       modal.editing = false;
-      modal.focus = moveString(["domains", "documents", "editor"] as const, modal.focus, action.delta);
+      modal.focus = moveString(
+        ["domains", "documents", "editor"] as const,
+        modal.focus,
+        action.delta,
+      );
     } else if (action.type === "move" && !modal.editing) {
       if (modal.focus === "domains") await this.#moveConfigDocumentDomain(modal, action.delta);
       else if (modal.focus === "documents") await this.#moveConfigDocument(modal, action.delta);
@@ -2091,7 +2507,12 @@ export class ControlCenterController {
       if (modal.editing) modal.cursor = characterCount(modal.draft);
       else modal.scroll = Number.MAX_SAFE_INTEGER;
     } else if (action.type === "append_text" && modal.editing) {
-      const edit = insertBoundedAtCharacter(modal.draft, modal.cursor, action.text, 16 * 1024 * 1024);
+      const edit = insertBoundedAtCharacter(
+        modal.draft,
+        modal.cursor,
+        action.text,
+        16 * 1024 * 1024,
+      );
       modal.draft = edit.value;
       modal.cursor = edit.cursor;
       modal.dirty = modal.source !== undefined && modal.draft !== modal.source.source;
@@ -2115,7 +2536,11 @@ export class ControlCenterController {
         modal.editing = true;
         modal.cursor = characterCount(modal.draft);
       }
-    } else if (action.type === "save_draft" || action.type === "publish" || action.type === "submit") {
+    } else if (
+      action.type === "save_draft" ||
+      action.type === "publish" ||
+      action.type === "submit"
+    ) {
       await this.#publishConfigDocument(modal);
       return;
     } else if (action.type === "discard_draft") {
@@ -2137,7 +2562,10 @@ export class ControlCenterController {
     return false;
   }
 
-  async #moveConfigDocumentDomain(modal: ConfigureDocumentsModalState, delta: -1 | 1): Promise<void> {
+  async #moveConfigDocumentDomain(
+    modal: ConfigureDocumentsModalState,
+    delta: -1 | 1,
+  ): Promise<void> {
     if (!this.#requireCleanDocumentSurface(modal)) return;
     modal.domainIndex = cycleIndex(modal.domainIndex, CONFIG_DOCUMENT_DOMAINS.length, delta);
     modal.documentIndex = 0;
@@ -2156,25 +2584,38 @@ export class ControlCenterController {
     const source = modal.source;
     if (source === undefined) return;
     if (!modal.dirty) {
-      this.#notice = { kind: "info", message: "The selected resource has no unpublished source changes." };
+      this.#notice = {
+        kind: "info",
+        message: "The selected resource has no unpublished source changes.",
+      };
       this.#emit();
       return;
     }
     if (!source.document.capabilities.update) {
-      this.#notice = { kind: "error", message: source.document.capabilities.reason ?? "This resource is read-only." };
+      this.#notice = {
+        kind: "error",
+        message: source.document.capabilities.reason ?? "This resource is read-only.",
+      };
       this.#emit();
       return;
     }
-    const response = await this.#mutate("config.documents.update", {
-      documentId: source.document.id,
-      catalogToken: source.catalogToken,
-      sourceToken: source.document.sourceToken,
-      source: modal.draft,
-    }, "Validating and saving resource…");
+    const response = await this.#mutate(
+      "config.documents.update",
+      {
+        documentId: source.document.id,
+        catalogToken: source.catalogToken,
+        sourceToken: source.document.sourceToken,
+        source: modal.draft,
+      },
+      "Validating and saving resource…",
+    );
     if (response === undefined) return;
     const result = parseConfigDocumentMutation(response.result);
     await this.#applyConfigCatalogToSurface(modal, result.catalog, source.document.id);
-    this.#notice = { kind: "info", message: `${result.changedDocuments} configuration ${result.changedDocuments === 1 ? "document" : "documents"} saved.` };
+    this.#notice = {
+      kind: "info",
+      message: `${result.changedDocuments} configuration ${result.changedDocuments === 1 ? "document" : "documents"} saved.`,
+    };
     this.#emit();
   }
 
@@ -2184,11 +2625,17 @@ export class ControlCenterController {
     preferredDocumentId?: string,
   ): Promise<void> {
     modal.catalog = catalog;
-    const preferred = preferredDocumentId === undefined
-      ? undefined : catalog.documents.find((document) => document.id === preferredDocumentId);
-    if (preferred !== undefined) modal.domainIndex = CONFIG_DOCUMENT_DOMAINS.indexOf(preferred.domain);
+    const preferred =
+      preferredDocumentId === undefined
+        ? undefined
+        : catalog.documents.find((document) => document.id === preferredDocumentId);
+    if (preferred !== undefined)
+      modal.domainIndex = CONFIG_DOCUMENT_DOMAINS.indexOf(preferred.domain);
     const documents = configDocumentsInSelectedDomain(modal);
-    modal.documentIndex = Math.max(0, preferred === undefined ? 0 : documents.findIndex((document) => document.id === preferred.id));
+    modal.documentIndex = Math.max(
+      0,
+      preferred === undefined ? 0 : documents.findIndex((document) => document.id === preferred.id),
+    );
     await this.#readSelectedConfigDocument(modal);
   }
 
@@ -2198,12 +2645,20 @@ export class ControlCenterController {
   ): Promise<void> {
     if (action.type === "focus") {
       modal.focus = moveString(["choice", "title", "submit"] as const, modal.focus, action.delta);
-    } else if ((action.type === "move" || action.type === "details_tab") && modal.focus === "choice") {
+    } else if (
+      (action.type === "move" || action.type === "details_tab") &&
+      modal.focus === "choice"
+    ) {
       modal.choiceIndex = cycleIndex(modal.choiceIndex, modal.choices.length, action.delta);
     } else if (action.type === "details_tab" && modal.focus === "title") {
       modal.cursor = clampCharacterOffset(modal.title, modal.cursor + action.delta);
     } else if (action.type === "append_text" && modal.focus === "title") {
-      const edit = insertBoundedAtCharacter(modal.title, modal.cursor, action.text.replace(/\r?\n/gu, " "), 200);
+      const edit = insertBoundedAtCharacter(
+        modal.title,
+        modal.cursor,
+        action.text.replace(/\r?\n/gu, " "),
+        200,
+      );
       modal.title = edit.value;
       modal.cursor = edit.cursor;
     } else if (action.type === "backspace" && modal.focus === "title") {
@@ -2227,18 +2682,24 @@ export class ControlCenterController {
       this.#notice = { kind: "error", message: "Choose a resource type and enter a title." };
       return;
     }
-    const response = await this.#mutate("config.documents.create", {
-      catalogToken: modal.returnTo.catalog.catalogToken,
-      domain: choice.domain,
-      kind: choice.kind,
-      format: choice.format,
-      title,
-    }, "Creating configuration resource…");
+    const response = await this.#mutate(
+      "config.documents.create",
+      {
+        catalogToken: modal.returnTo.catalog.catalogToken,
+        domain: choice.domain,
+        kind: choice.kind,
+        format: choice.format,
+        title,
+      },
+      "Creating configuration resource…",
+    );
     if (response === undefined) return;
     const result = parseConfigDocumentMutation(response.result);
     const surface = modal.returnTo;
     this.#modal = surface;
-    const created = result.catalog.documents.find((document) => document.title === title && document.kind === choice.kind);
+    const created = result.catalog.documents.find(
+      (document) => document.title === title && document.kind === choice.kind,
+    );
     await this.#applyConfigCatalogToSurface(surface, result.catalog, created?.id);
   }
 
@@ -2247,16 +2708,23 @@ export class ControlCenterController {
     action: ControlCenterKeyAction,
   ): Promise<void> {
     if (action.type === "focus") modal.focus = modal.focus === "title" ? "submit" : "title";
-    else if (action.type === "details_tab" && modal.focus === "title") modal.cursor = clampCharacterOffset(modal.title, modal.cursor + action.delta);
+    else if (action.type === "details_tab" && modal.focus === "title")
+      modal.cursor = clampCharacterOffset(modal.title, modal.cursor + action.delta);
     else if (action.type === "append_text" && modal.focus === "title") {
-      const edit = insertBoundedAtCharacter(modal.title, modal.cursor, action.text.replace(/\r?\n/gu, " "), 200);
+      const edit = insertBoundedAtCharacter(
+        modal.title,
+        modal.cursor,
+        action.text.replace(/\r?\n/gu, " "),
+        200,
+      );
       modal.title = edit.value;
       modal.cursor = edit.cursor;
     } else if (action.type === "backspace" && modal.focus === "title") {
       const edit = removeCharacterBefore(modal.title, modal.cursor);
       modal.title = edit.value;
       modal.cursor = edit.cursor;
-    } else if (action.type === "delete_forward" && modal.focus === "title") modal.title = removeCharacterAt(modal.title, modal.cursor);
+    } else if (action.type === "delete_forward" && modal.focus === "title")
+      modal.title = removeCharacterAt(modal.title, modal.cursor);
     else if (action.type === "activate") {
       if (modal.focus === "title") modal.focus = "submit";
       else await this.#submitConfigDocumentRename(modal);
@@ -2265,23 +2733,31 @@ export class ControlCenterController {
   }
 
   async #submitConfigDocumentRename(modal: ConfigDocumentRenameModalState): Promise<void> {
-    const document = modal.returnTo.catalog.documents.find((candidate) => candidate.id === modal.documentId);
+    const document = modal.returnTo.catalog.documents.find(
+      (candidate) => candidate.id === modal.documentId,
+    );
     const title = modal.title.trim();
     if (document === undefined || title.length === 0) {
       this.#notice = { kind: "error", message: "Enter a new resource title." };
       return;
     }
-    const response = await this.#mutate("config.documents.rename", {
-      documentId: document.id,
-      catalogToken: modal.returnTo.catalog.catalogToken,
-      sourceToken: document.sourceToken,
-      title,
-    }, "Renaming configuration resource…");
+    const response = await this.#mutate(
+      "config.documents.rename",
+      {
+        documentId: document.id,
+        catalogToken: modal.returnTo.catalog.catalogToken,
+        sourceToken: document.sourceToken,
+        title,
+      },
+      "Renaming configuration resource…",
+    );
     if (response === undefined) return;
     const result = parseConfigDocumentMutation(response.result);
     const surface = modal.returnTo;
     this.#modal = surface;
-    const renamed = result.catalog.documents.find((candidate) => candidate.title === title && candidate.kind === document.kind);
+    const renamed = result.catalog.documents.find(
+      (candidate) => candidate.title === title && candidate.kind === document.kind,
+    );
     await this.#applyConfigCatalogToSurface(surface, result.catalog, renamed?.id);
   }
 
@@ -2299,16 +2775,26 @@ export class ControlCenterController {
   }
 
   async #submitConfigDocumentDelete(modal: ConfigDocumentDeleteModalState): Promise<void> {
-    const document = modal.returnTo.catalog.documents.find((candidate) => candidate.id === modal.documentId);
+    const document = modal.returnTo.catalog.documents.find(
+      (candidate) => candidate.id === modal.documentId,
+    );
     if (document === undefined || !document.capabilities.delete) {
-      this.#notice = { kind: "error", message: document?.capabilities.reason ?? modal.reason ?? "This resource cannot be deleted." };
+      this.#notice = {
+        kind: "error",
+        message:
+          document?.capabilities.reason ?? modal.reason ?? "This resource cannot be deleted.",
+      };
       return;
     }
-    const response = await this.#mutate("config.documents.delete", {
-      documentId: document.id,
-      catalogToken: modal.returnTo.catalog.catalogToken,
-      sourceToken: document.sourceToken,
-    }, "Deleting configuration resource…");
+    const response = await this.#mutate(
+      "config.documents.delete",
+      {
+        documentId: document.id,
+        catalogToken: modal.returnTo.catalog.catalogToken,
+        sourceToken: document.sourceToken,
+      },
+      "Deleting configuration resource…",
+    );
     if (response === undefined) return;
     const result = parseConfigDocumentMutation(response.result);
     const surface = modal.returnTo;
@@ -2322,7 +2808,8 @@ export class ControlCenterController {
     try {
       const response = await this.#client.request("config.run-types.templates", {});
       const templates = parseConfigRunTypeTemplates(response.result);
-      if (templates.templates.length === 0) throw new Error("No compiler-valid run type templates are available.");
+      if (templates.templates.length === 0)
+        throw new Error("No compiler-valid run type templates are available.");
       this.#modal = {
         kind: "config_run_type_wizard",
         returnTo,
@@ -2347,19 +2834,38 @@ export class ControlCenterController {
     modal: ConfigRunTypeWizardModalState,
     action: ControlCenterKeyAction,
   ): Promise<void> {
-    const textFocus = modal.focus === "title" || modal.focus === "slug" || modal.focus === "description";
+    const textFocus =
+      modal.focus === "title" || modal.focus === "slug" || modal.focus === "description";
     if (action.type === "focus") {
-      modal.focus = moveString(["template", "title", "slug", "description", "default", "submit"] as const, modal.focus, action.delta);
+      modal.focus = moveString(
+        ["template", "title", "slug", "description", "default", "submit"] as const,
+        modal.focus,
+        action.delta,
+      );
       modal.cursor = characterCount(runTypeWizardText(modal));
-    } else if ((action.type === "move" || action.type === "details_tab") && modal.focus === "template") {
-      modal.templateIndex = cycleIndex(modal.templateIndex, modal.templates.templates.length, action.delta);
+    } else if (
+      (action.type === "move" || action.type === "details_tab") &&
+      modal.focus === "template"
+    ) {
+      modal.templateIndex = cycleIndex(
+        modal.templateIndex,
+        modal.templates.templates.length,
+        action.delta,
+      );
     } else if (action.type === "details_tab" && textFocus) {
       modal.cursor = clampCharacterOffset(runTypeWizardText(modal), modal.cursor + action.delta);
-    } else if (action.type === "details_tab" && modal.focus === "default") modal.makeDefault = !modal.makeDefault;
+    } else if (action.type === "details_tab" && modal.focus === "default")
+      modal.makeDefault = !modal.makeDefault;
     else if (action.type === "append_text" && textFocus) {
       const source = runTypeWizardText(modal);
-      const inserted = modal.focus === "description" ? action.text : action.text.replace(/\r?\n/gu, " ");
-      const edit = insertBoundedAtCharacter(source, modal.cursor, inserted, modal.focus === "description" ? 64 * 1024 : 200);
+      const inserted =
+        modal.focus === "description" ? action.text : action.text.replace(/\r?\n/gu, " ");
+      const edit = insertBoundedAtCharacter(
+        source,
+        modal.cursor,
+        inserted,
+        modal.focus === "description" ? 64 * 1024 : 200,
+      );
       setRunTypeWizardText(modal, edit.value);
       modal.cursor = edit.cursor;
     } else if (action.type === "backspace" && textFocus) {
@@ -2375,7 +2881,12 @@ export class ControlCenterController {
         modal.cursor = edit.cursor;
       } else if (modal.focus === "default") modal.makeDefault = !modal.makeDefault;
       else if (modal.focus === "submit") await this.#submitConfigRunTypeWizard(modal);
-      else modal.focus = moveString(["template", "title", "slug", "description", "default", "submit"] as const, modal.focus, 1);
+      else
+        modal.focus = moveString(
+          ["template", "title", "slug", "description", "default", "submit"] as const,
+          modal.focus,
+          1,
+        );
     } else if (action.type === "submit") await this.#submitConfigRunTypeWizard(modal);
     this.#emit();
   }
@@ -2387,68 +2898,33 @@ export class ControlCenterController {
       this.#notice = { kind: "error", message: "Choose a template and enter a run type title." };
       return;
     }
-    const response = await this.#mutate("config.run-types.create", {
-      catalogToken: modal.templates.catalogToken,
-      templateId: template.id,
-      title,
-      ...(modal.slug.trim().length === 0 ? {} : { slug: modal.slug.trim() }),
-      ...(modal.description.trim().length === 0 ? {} : { description: modal.description.trim() }),
-      makeDefault: modal.makeDefault,
-    }, "Creating run type…");
+    const response = await this.#mutate(
+      "config.run-types.create",
+      {
+        catalogToken: modal.templates.catalogToken,
+        templateId: template.id,
+        title,
+        ...(modal.slug.trim().length === 0 ? {} : { slug: modal.slug.trim() }),
+        ...(modal.description.trim().length === 0 ? {} : { description: modal.description.trim() }),
+        makeDefault: modal.makeDefault,
+      },
+      "Creating run type…",
+    );
     if (response === undefined) return;
     const result = parseConfigDocumentMutation(response.result);
     const surface = modal.returnTo;
     this.#modal = surface;
-    const created = result.catalog.documents.find((document) => document.kind === "run_type" && document.title === title);
+    const created = result.catalog.documents.find(
+      (document) => document.kind === "run_type" && document.title === title,
+    );
     await this.#applyConfigCatalogToSurface(surface, result.catalog, created?.id);
-  }
-
-  async #openConfigLegacyMigration(returnTo: ConfigureDocumentsModalState): Promise<void> {
-    this.#busy = "Inspecting legacy project state…";
-    this.#emit();
-    try {
-      const response = await this.#client.request("config.legacy-migration.preview", { inspectRuns: true });
-      this.#modal = {
-        kind: "config_legacy_migration",
-        returnTo,
-        preview: parseConfigLegacyMigrationPreview(response.result),
-        selected: "cancel",
-      };
-    } catch (error) {
-      this.#notice = { kind: "error", message: errorMessage(error) };
-    } finally {
-      this.#busy = undefined;
-      this.#emit();
-    }
-  }
-
-  async #handleConfigLegacyMigration(
-    modal: ConfigLegacyMigrationModalState,
-    action: ControlCenterKeyAction,
-  ): Promise<void> {
-    if (action.type === "move" || action.type === "details_tab" || action.type === "focus") {
-      modal.selected = modal.selected === "cancel" ? "apply" : "cancel";
-    } else if (action.type === "activate" || action.type === "submit") {
-      if (modal.selected === "cancel") this.#modal = modal.returnTo;
-      else {
-        const response = await this.#mutate("config.legacy-migration.apply", {
-          previewToken: modal.preview.previewToken,
-        }, "Migrating legacy project state…");
-        if (response === undefined) return;
-        const result = parseConfigLegacyMigrationResult(response.result);
-        const surface = modal.returnTo;
-        this.#modal = surface;
-        await this.#applyConfigCatalogToSurface(surface, result.catalog);
-        this.#notice = { kind: "info", message: "Legacy project state migrated; the original source was retained." };
-      }
-    }
-    this.#emit();
   }
 
   #openPlanReview(manual: boolean): void {
     const run = this.#selectedRunRecord();
     if (run?.lifecycle.phase !== "awaiting_approval" || run.plan === undefined) {
-      if (manual) this.#notice = { kind: "info", message: "The selected run has no plan awaiting review" };
+      if (manual)
+        this.#notice = { kind: "info", message: "The selected run has no plan awaiting review" };
       this.#emit();
       return;
     }
@@ -2494,13 +2970,17 @@ export class ControlCenterController {
           this.#emit();
           return;
         }
-        const allowed = modal.selected === "preserve_branches"
-          ? modal.canPreserveBranches
-          : modal.canDeleteOwnedBranches;
+        const allowed =
+          modal.selected === "preserve_branches"
+            ? modal.canPreserveBranches
+            : modal.canDeleteOwnedBranches;
         if (!allowed) {
           this.#notice = {
             kind: "info",
-            message: modal.blockers[0] ?? modal.dirtyWorktreeWarnings[0] ?? "This deletion mode is not currently safe",
+            message:
+              modal.blockers[0] ??
+              modal.dirtyWorktreeWarnings[0] ??
+              "This deletion mode is not currently safe",
           };
           this.#emit();
           return;
@@ -2522,13 +3002,20 @@ export class ControlCenterController {
           return;
         }
         if (!modal.canAuthorize) {
-          this.#notice = { kind: "info", message: modal.blockers[0] ?? "This run is not ready to merge" };
+          this.#notice = {
+            kind: "info",
+            message: modal.blockers[0] ?? "This run is not ready to merge",
+          };
           this.#emit();
           return;
         }
         const { runId, targetBranch, previewToken } = modal;
         this.#modal = undefined;
-        await this.#mutate("run.merge.authorize", { runId, previewToken }, `Merging into ${targetBranch}…`);
+        await this.#mutate(
+          "run.merge.authorize",
+          { runId, previewToken },
+          `Merging into ${targetBranch}…`,
+        );
       }
       return;
     }
@@ -2540,19 +3027,23 @@ export class ControlCenterController {
     else if (modal.kind === "answer_question") await this.#handleAnswerQuestion(modal, action);
     else if (modal.kind === "edit_scalar") this.#handleEditScalar(modal, action);
     else if (modal.kind === "configure") await this.#handleConfigure(modal, action);
-    else if (modal.kind === "configure_documents") await this.#handleConfigureDocuments(modal, action);
-    else if (modal.kind === "config_document_create") await this.#handleConfigDocumentCreate(modal, action);
-    else if (modal.kind === "config_document_rename") await this.#handleConfigDocumentRename(modal, action);
-    else if (modal.kind === "config_document_delete") await this.#handleConfigDocumentDelete(modal, action);
-    else if (modal.kind === "config_run_type_wizard") await this.#handleConfigRunTypeWizard(modal, action);
-    else if (modal.kind === "config_legacy_migration") await this.#handleConfigLegacyMigration(modal, action);
+    else if (modal.kind === "configure_documents")
+      await this.#handleConfigureDocuments(modal, action);
+    else if (modal.kind === "config_document_create")
+      await this.#handleConfigDocumentCreate(modal, action);
+    else if (modal.kind === "config_document_rename")
+      await this.#handleConfigDocumentRename(modal, action);
+    else if (modal.kind === "config_document_delete")
+      await this.#handleConfigDocumentDelete(modal, action);
+    else if (modal.kind === "config_run_type_wizard")
+      await this.#handleConfigRunTypeWizard(modal, action);
     else await this.#handleProfileConflicts(modal, action);
   }
 
   #handlePointerControl(target: string): void {
     if (target.startsWith("details-tab:")) {
       const tab = target.slice("details-tab:".length);
-      if (tab === "overview" || tab === "plan" || tab === "stages") {
+      if (tab === "overview" || tab === "plan") {
         this.#selection.detailsTab = tab;
         this.#focus = "details";
         this.#scroll.details = 0;
@@ -2602,7 +3093,7 @@ export class ControlCenterController {
         const index = Number.parseInt(target.slice("action-palette:".length), 10);
         if (modal.actions[index] !== undefined) {
           modal.selectedIndex = index;
-          await this.#activateCapability(modal.actions[index]!);
+          await this.#activateCapability(modal.actions[index]);
           return;
         }
       }
@@ -2639,7 +3130,8 @@ export class ControlCenterController {
         }
       } else if (target.startsWith("new-run:questions:")) {
         const policy = target.slice("new-run:questions:".length);
-        if (policy === "none" || policy === "some" || policy === "many") modal.questionPolicy = policy;
+        if (policy === "none" || policy === "some" || policy === "many")
+          modal.questionPolicy = policy;
       } else if (target === "new-run:branch") modal.focus = "branch";
       else if (target === "new-run:parallel") modal.focus = "parallel";
       else if (target === "new-run:objective") modal.focus = "objective";
@@ -2653,14 +3145,16 @@ export class ControlCenterController {
     }
     if (modal.kind === "plan_review") {
       if (target.startsWith("plan:section:")) {
-        modal.sectionIndex = Math.max(0, Number.parseInt(target.slice("plan:section:".length), 10) || 0);
+        modal.sectionIndex = Math.max(
+          0,
+          Number.parseInt(target.slice("plan:section:".length), 10) || 0,
+        );
         modal.scroll = 0;
         modal.focus = "document";
       } else if (target === "plan:steering") {
         modal.focus = "steering";
         modal.steeringCursor = characterCount(modal.steering);
-      }
-      else if (target === "plan:action") {
+      } else if (target === "plan:action") {
         modal.focus = "action";
         await this.#submitPlanReview(modal);
         return;
@@ -2691,7 +3185,8 @@ export class ControlCenterController {
       if (target.startsWith("answer:option:") && question !== undefined) {
         const raw = target.slice("answer:option:".length);
         const option = raw === "none" ? undefined : question.options[Number.parseInt(raw, 10)]?.id;
-        if (raw === "none" || option !== undefined) this.#draftFor(question).selectedOptionId = option;
+        if (raw === "none" || option !== undefined)
+          this.#draftFor(question).selectedOptionId = option;
         modal.focus = "choices";
       } else if (target === "answer:notes") modal.focus = "notes";
       else if (target === "answer:submit") {
@@ -2705,7 +3200,10 @@ export class ControlCenterController {
     if (modal.kind === "configure_documents") {
       if (target.startsWith("config-doc:domain:")) {
         const index = Number.parseInt(target.slice("config-doc:domain:".length), 10);
-        if (CONFIG_DOCUMENT_DOMAINS[index] !== undefined && this.#requireCleanDocumentSurface(modal)) {
+        if (
+          CONFIG_DOCUMENT_DOMAINS[index] !== undefined &&
+          this.#requireCleanDocumentSurface(modal)
+        ) {
           modal.domainIndex = index;
           modal.documentIndex = 0;
           modal.focus = "domains";
@@ -2738,9 +3236,6 @@ export class ControlCenterController {
         return;
       } else if (target === "config-doc:run-type") {
         await this.#handleConfigureDocuments(modal, { type: "config_run_type_create" });
-        return;
-      } else if (target === "config-doc:migration") {
-        await this.#handleConfigureDocuments(modal, { type: "config_legacy_migration" });
         return;
       } else if (target === "config-doc:guided") {
         this.#modal = modal.returnTo;
@@ -2785,8 +3280,11 @@ export class ControlCenterController {
         const index = Number.parseInt(target.slice("config-run-type:template:".length), 10);
         if (modal.templates.templates[index] !== undefined) modal.templateIndex = index;
         modal.focus = "template";
-      } else if (target === "config-run-type:title" || target === "config-run-type:slug" ||
-          target === "config-run-type:description") {
+      } else if (
+        target === "config-run-type:title" ||
+        target === "config-run-type:slug" ||
+        target === "config-run-type:description"
+      ) {
         modal.focus = target.slice("config-run-type:".length) as "title" | "slug" | "description";
         modal.cursor = characterCount(runTypeWizardText(modal));
       } else if (target === "config-run-type:default") {
@@ -2799,27 +3297,39 @@ export class ControlCenterController {
       this.#emit();
       return;
     }
-    if (modal.kind === "config_legacy_migration") {
-      if (target === "config-migration:cancel") modal.selected = "cancel";
-      else if (target === "config-migration:apply") modal.selected = "apply";
-      this.#emit();
-      return;
-    }
     if (modal.kind === "edit_scalar") return;
     if (modal.kind === "configure") {
       if (target.startsWith("config:domain:")) {
-        modal.sectionIndex = Math.max(0, Math.min(modal.catalog.sections.length - 1, Number.parseInt(target.slice("config:domain:".length), 10) || 0));
+        modal.sectionIndex = Math.max(
+          0,
+          Math.min(
+            modal.catalog.sections.length - 1,
+            Number.parseInt(target.slice("config:domain:".length), 10) || 0,
+          ),
+        );
         modal.resourceIndex = 0;
         modal.fieldIndex = 0;
         modal.focus = "tree";
       } else if (target.startsWith("config:resource:")) {
         const resources = selectedConfigSection(modal)?.resources ?? [];
-        modal.resourceIndex = Math.max(0, Math.min(resources.length - 1, Number.parseInt(target.slice("config:resource:".length), 10) || 0));
+        modal.resourceIndex = Math.max(
+          0,
+          Math.min(
+            resources.length - 1,
+            Number.parseInt(target.slice("config:resource:".length), 10) || 0,
+          ),
+        );
         modal.fieldIndex = 0;
         modal.focus = "tree";
       } else if (target.startsWith("config:field:")) {
         const fields = selectedConfigResource(modal)?.fields ?? [];
-        modal.fieldIndex = Math.max(0, Math.min(fields.length - 1, Number.parseInt(target.slice("config:field:".length), 10) || 0));
+        modal.fieldIndex = Math.max(
+          0,
+          Math.min(
+            fields.length - 1,
+            Number.parseInt(target.slice("config:field:".length), 10) || 0,
+          ),
+        );
         modal.focus = "field";
       } else if (target === "config:publish") {
         modal.focus = "publish";
@@ -2845,7 +3355,10 @@ export class ControlCenterController {
     action: ControlCenterKeyAction,
   ): Promise<void> {
     const questions = this.#buildView().selectedRun?.questions ?? [];
-    const current = Math.max(0, questions.findIndex((question) => question.id === modal.questionId));
+    const current = Math.max(
+      0,
+      questions.findIndex((question) => question.id === modal.questionId),
+    );
     if (action.type === "details_tab" && questions.length > 0) {
       const next = questions[(current + action.delta + questions.length) % questions.length]!;
       this.#questionIndex = questions.indexOf(next);
@@ -2890,7 +3403,11 @@ export class ControlCenterController {
     action: ControlCenterKeyAction,
   ): Promise<void> {
     if (action.type === "move" || action.type === "details_tab" || action.type === "focus") {
-      modal.selectedIndex = cycleIndex(modal.selectedIndex, Math.max(1, modal.actions.length), action.delta);
+      modal.selectedIndex = cycleIndex(
+        modal.selectedIndex,
+        Math.max(1, modal.actions.length),
+        action.delta,
+      );
     } else if (action.type === "activate" || action.type === "submit") {
       const selected = modal.actions[modal.selectedIndex];
       if (selected !== undefined) await this.#activateCapability(selected);
@@ -2904,7 +3421,8 @@ export class ControlCenterController {
     action: ControlCenterKeyAction,
   ): Promise<void> {
     const fields = modal.action.form?.fields ?? [];
-    const shown = fields.map((field, index) => ({ field, index }))
+    const shown = fields
+      .map((field, index) => ({ field, index }))
       .filter(({ field }) => field.visibility !== "hidden");
     const selected = fields[modal.fieldIndex];
     if (action.type === "focus") {
@@ -2915,14 +3433,29 @@ export class ControlCenterController {
         "submit" as const,
       ];
       modal.focus = moveString(zones, modal.focus, action.delta);
-    } else if (action.type === "move" && modal.focus === "fields" && shown.length > 0 && !modal.editing) {
-      const current = Math.max(0, shown.findIndex((item) => item.index === modal.fieldIndex));
+    } else if (
+      action.type === "move" &&
+      modal.focus === "fields" &&
+      shown.length > 0 &&
+      !modal.editing
+    ) {
+      const current = Math.max(
+        0,
+        shown.findIndex((item) => item.index === modal.fieldIndex),
+      );
       modal.fieldIndex = shown[cycleIndex(current, shown.length, action.delta)]!.index;
       modal.cursor = characterCount(actionFieldText(fields[modal.fieldIndex], modal.values));
       delete modal.error;
-    } else if (action.type === "details_tab" && modal.focus === "fields" && selected !== undefined) {
+    } else if (
+      action.type === "details_tab" &&
+      modal.focus === "fields" &&
+      selected !== undefined
+    ) {
       if (modal.editing && isTextActionField(selected)) {
-        modal.cursor = clampCharacterOffset(actionFieldText(selected, modal.values), modal.cursor + action.delta);
+        modal.cursor = clampCharacterOffset(
+          actionFieldText(selected, modal.values),
+          modal.cursor + action.delta,
+        );
       } else if (!selected.locked) {
         cycleActionFieldValue(selected, modal.values, action.delta);
         delete modal.error;
@@ -2931,7 +3464,12 @@ export class ControlCenterController {
       modal.cursor = 0;
     } else if (action.type === "scroll_end" && modal.editing && selected !== undefined) {
       modal.cursor = characterCount(actionFieldText(selected, modal.values));
-    } else if (action.type === "append_text" && modal.editing && selected !== undefined && isTextActionField(selected)) {
+    } else if (
+      action.type === "append_text" &&
+      modal.editing &&
+      selected !== undefined &&
+      isTextActionField(selected)
+    ) {
       const edit = insertBoundedAtCharacter(
         actionFieldText(selected, modal.values),
         modal.cursor,
@@ -2941,20 +3479,40 @@ export class ControlCenterController {
       setActionFieldText(selected, modal.values, edit.value);
       modal.cursor = edit.cursor;
       delete modal.error;
-    } else if (action.type === "backspace" && modal.editing && selected !== undefined && isTextActionField(selected)) {
+    } else if (
+      action.type === "backspace" &&
+      modal.editing &&
+      selected !== undefined &&
+      isTextActionField(selected)
+    ) {
       const edit = removeCharacterBefore(actionFieldText(selected, modal.values), modal.cursor);
       setActionFieldText(selected, modal.values, edit.value);
       modal.cursor = edit.cursor;
       delete modal.error;
-    } else if (action.type === "delete_forward" && modal.editing && selected !== undefined && isTextActionField(selected)) {
-      setActionFieldText(selected, modal.values, removeCharacterAt(actionFieldText(selected, modal.values), modal.cursor));
+    } else if (
+      action.type === "delete_forward" &&
+      modal.editing &&
+      selected !== undefined &&
+      isTextActionField(selected)
+    ) {
+      setActionFieldText(
+        selected,
+        modal.values,
+        removeCharacterAt(actionFieldText(selected, modal.values), modal.cursor),
+      );
       delete modal.error;
     } else if (action.type === "activate") {
       if (modal.focus === "fields" && selected !== undefined) {
-        if (selected.locked) modal.error = `${selected.label} is bound by the compiler and cannot be changed.`;
+        if (selected.locked)
+          modal.error = `${selected.label} is bound by the compiler and cannot be changed.`;
         else if (isTextActionField(selected)) {
           if (modal.editing && selected.kind === "multiline") {
-            const edit = insertBoundedAtCharacter(actionFieldText(selected, modal.values), modal.cursor, "\n", selected.maxBytes ?? 1024 * 1024);
+            const edit = insertBoundedAtCharacter(
+              actionFieldText(selected, modal.values),
+              modal.cursor,
+              "\n",
+              selected.maxBytes ?? 1024 * 1024,
+            );
             setActionFieldText(selected, modal.values, edit.value);
             modal.cursor = edit.cursor;
           } else {
@@ -2984,7 +3542,10 @@ export class ControlCenterController {
           .filter((item) => item.length > 0);
       }
       const value = modal.values[field.key];
-      if (field.required && (value === undefined || value === "" || Array.isArray(value) && value.length === 0)) {
+      if (
+        field.required &&
+        (value === undefined || value === "" || (Array.isArray(value) && value.length === 0))
+      ) {
         modal.error = `${field.label} is required.`;
         modal.fieldIndex = (modal.action.form?.fields ?? []).indexOf(field);
         modal.focus = "fields";
@@ -3005,8 +3566,14 @@ export class ControlCenterController {
     } else if (action.type === "scroll_end") {
       modal.cursor = characterCount(modal.value);
     } else if (action.type === "append_text") {
-      modal.value = insertAtCharacter(modal.value, modal.cursor, action.text).slice(0, 4 * 1024 * 1024);
-      modal.cursor = Math.min(characterCount(modal.value), modal.cursor + characterCount(action.text));
+      modal.value = insertAtCharacter(modal.value, modal.cursor, action.text).slice(
+        0,
+        4 * 1024 * 1024,
+      );
+      modal.cursor = Math.min(
+        characterCount(modal.value),
+        modal.cursor + characterCount(action.text),
+      );
       delete modal.error;
     } else if (action.type === "backspace") {
       const edit = removeCharacterBefore(modal.value, modal.cursor);
@@ -3054,7 +3621,11 @@ export class ControlCenterController {
       const value = modal.target.newName;
       const cursor = modal.target.newNameCursor;
       if (action.type === "focus" || action.type === "move") {
-        modal.focus = moveString(newRunControls(modal, this.#controlCatalog), modal.focus, action.delta);
+        modal.focus = moveString(
+          newRunControls(modal, this.#controlCatalog),
+          modal.focus,
+          action.delta,
+        );
       } else if (action.type === "details_tab") {
         setNewRunTargetName(modal, value, clampCharacterOffset(value, cursor + action.delta));
       } else if (action.type === "scroll_home") {
@@ -3076,11 +3647,16 @@ export class ControlCenterController {
       return;
     }
     const intakeField = selectedNewRunIntakeField(modal, this.#controlCatalog);
-    const textField = intakeField !== undefined && isTextEditableIntake(intakeField.kind) ? intakeField : undefined;
-    const textValue = textField === undefined ? "" : modal.intakeText[textField.id] ?? "";
-    const textCursor = textField === undefined ? 0 : modal.intakeCursors[textField.id] ?? 0;
+    const textField =
+      intakeField !== undefined && isTextEditableIntake(intakeField.kind) ? intakeField : undefined;
+    const textValue = textField === undefined ? "" : (modal.intakeText[textField.id] ?? "");
+    const textCursor = textField === undefined ? 0 : (modal.intakeCursors[textField.id] ?? 0);
     if (action.type === "focus" || action.type === "move") {
-      modal.focus = moveString(newRunControls(modal, this.#controlCatalog), modal.focus, action.delta);
+      modal.focus = moveString(
+        newRunControls(modal, this.#controlCatalog),
+        modal.focus,
+        action.delta,
+      );
       this.#emit();
       return;
     }
@@ -3090,7 +3666,13 @@ export class ControlCenterController {
       return;
     }
     if (action.type === "details_tab" && textField !== undefined) {
-      setNewRunIntakeText(modal, this.#controlCatalog, textField.id, textValue, clampCharacterOffset(textValue, textCursor + action.delta));
+      setNewRunIntakeText(
+        modal,
+        this.#controlCatalog,
+        textField.id,
+        textValue,
+        clampCharacterOffset(textValue, textCursor + action.delta),
+      );
       this.#emit();
       return;
     }
@@ -3100,7 +3682,13 @@ export class ControlCenterController {
       return;
     }
     if (action.type === "scroll_end" && textField !== undefined) {
-      setNewRunIntakeText(modal, this.#controlCatalog, textField.id, textValue, characterCount(textValue));
+      setNewRunIntakeText(
+        modal,
+        this.#controlCatalog,
+        textField.id,
+        textValue,
+        characterCount(textValue),
+      );
       this.#emit();
       return;
     }
@@ -3116,7 +3704,13 @@ export class ControlCenterController {
       return;
     }
     if (action.type === "delete_forward" && textField !== undefined) {
-      setNewRunIntakeText(modal, this.#controlCatalog, textField.id, removeCharacterAt(textValue, textCursor), textCursor);
+      setNewRunIntakeText(
+        modal,
+        this.#controlCatalog,
+        textField.id,
+        removeCharacterAt(textValue, textCursor),
+        textCursor,
+      );
       this.#emit();
       return;
     }
@@ -3134,9 +3728,9 @@ export class ControlCenterController {
         } else {
           modal.focus = moveString(newRunControls(modal, this.#controlCatalog), modal.focus, 1);
         }
-      }
-      else if (modal.focus === "start") await this.#startRun(modal);
-      else if (intakeField?.kind === "multi_choice" || intakeField?.kind === "boolean") toggleNewRunIntake(modal, intakeField);
+      } else if (modal.focus === "start") await this.#startRun(modal);
+      else if (intakeField?.kind === "multi_choice" || intakeField?.kind === "boolean")
+        toggleNewRunIntake(modal, intakeField);
       else this.#adjustNewRun(modal, 1);
       this.#emit();
       return;
@@ -3169,14 +3763,18 @@ export class ControlCenterController {
       if (column === "model") {
         const models = selectableModels(this.#models, role.provider, role.model);
         if (models.length === 0) return;
-        const current = Math.max(0, models.findIndex((model) => model.provider === role.provider && model.id === role.model));
+        const current = Math.max(
+          0,
+          models.findIndex((model) => model.provider === role.provider && model.id === role.model),
+        );
         const selected = models[cycleIndex(current, models.length, delta)]!;
         role.provider = selected.provider;
         role.model = selected.id;
         role.thinkingLevel = nearestThinkingLevel(selected.thinkingLevels, role.thinkingLevel);
       } else {
-        const model = this.#models.find((candidate) =>
-          candidate.provider === role.provider && candidate.id === role.model);
+        const model = this.#models.find(
+          (candidate) => candidate.provider === role.provider && candidate.id === role.model,
+        );
         const levels = model?.thinkingLevels ?? [];
         if (levels.length === 0) return;
         role.thinkingLevel = moveOptionalString(levels, role.thinkingLevel, delta);
@@ -3230,32 +3828,45 @@ export class ControlCenterController {
     this.#notice = undefined;
     this.#emit();
     try {
-      const roles = Object.fromEntries(modal.roles.map((role) => [role.id, {
-        provider: role.provider,
-        model: role.model,
-        thinkingLevel: role.thinkingLevel,
-      }]));
-      const response = await this.#client.request("run.create", {
-        objective,
-        runTypeId: modal.runTypeId,
-        targetRef: target.targetRef,
-        ...(target.createTarget === true ? { createTarget: true } : {}),
-        ...(target.baseRef === undefined ? {} : { baseRef: target.baseRef }),
-        intake: configurationObjectToJsonObject(intake),
-        overrides: {
-          questionPolicy: modal.questionPolicy,
-          maxParallel: modal.maxParallel,
-          roles,
+      const roles = Object.fromEntries(
+        modal.roles.map((role) => [
+          role.id,
+          {
+            provider: role.provider,
+            model: role.model,
+            thinkingLevel: role.thinkingLevel,
+          },
+        ]),
+      );
+      const response = await this.#client.request(
+        "run.create",
+        {
+          objective,
+          runTypeId: modal.runTypeId,
+          targetRef: target.targetRef,
+          ...(target.createTarget === true ? { createTarget: true } : {}),
+          ...(target.baseRef === undefined ? {} : { baseRef: target.baseRef }),
+          intake: configurationObjectToJsonObject(intake),
+          overrides: {
+            questionPolicy: modal.questionPolicy,
+            maxParallel: modal.maxParallel,
+            roles,
+          },
         },
-      }, {
-        expectedRevision: this.#client.revision,
-        idempotencyKey: `run.create:${randomUUID()}`,
-      });
+        {
+          expectedRevision: this.#client.revision,
+          idempotencyKey: `run.create:${randomUUID()}`,
+        },
+      );
       const result = asRecord(response.result);
-      if (typeof result?.runId !== "string") throw new Error("authority returned an invalid run creation response");
+      if (typeof result?.runId !== "string")
+        throw new Error("authority returned an invalid run creation response");
       const provisional = this.#provisionals.find((item) => item.id === provisionalId);
       if (provisional !== undefined) provisional.durableRunId = result.runId;
       await this.refresh();
+      if (typeof result.warning === "string" && result.warning.length > 0) {
+        this.#notice = { kind: "info", message: result.warning };
+      }
     } catch (error) {
       this.#provisionals = this.#provisionals.filter((item) => item.id !== provisionalId);
       this.#modal = modal;
@@ -3266,7 +3877,10 @@ export class ControlCenterController {
     }
   }
 
-  async #handlePlanReview(modal: PlanReviewModalState, action: ControlCenterKeyAction): Promise<void> {
+  async #handlePlanReview(
+    modal: PlanReviewModalState,
+    action: ControlCenterKeyAction,
+  ): Promise<void> {
     if (action.type === "focus") {
       const values = ["document", "steering", "action"] as const;
       modal.focus = moveString(values, modal.focus, action.delta);
@@ -3274,7 +3888,10 @@ export class ControlCenterController {
       const amount = action.type === "page" ? action.delta * 8 : action.delta;
       if (modal.focus === "document") modal.scroll = Math.max(0, modal.scroll + amount);
     } else if (action.type === "details_tab" && modal.focus === "steering") {
-      modal.steeringCursor = clampCharacterOffset(modal.steering, modal.steeringCursor + action.delta);
+      modal.steeringCursor = clampCharacterOffset(
+        modal.steering,
+        modal.steeringCursor + action.delta,
+      );
     } else if (action.type === "scroll_home" && modal.focus === "steering") {
       modal.steeringCursor = 0;
     } else if (action.type === "scroll_end" && modal.focus === "steering") {
@@ -3284,7 +3901,12 @@ export class ControlCenterController {
       modal.sectionIndex = cycleIndex(modal.sectionIndex, Math.max(1, count), action.delta);
       modal.scroll = 0;
     } else if (action.type === "append_text" && modal.focus === "steering") {
-      const edit = insertBoundedAtCharacter(modal.steering, modal.steeringCursor, action.text, 1024 * 1024);
+      const edit = insertBoundedAtCharacter(
+        modal.steering,
+        modal.steeringCursor,
+        action.text,
+        1024 * 1024,
+      );
       modal.steering = edit.value;
       modal.steeringCursor = edit.cursor;
     } else if (action.type === "backspace" && modal.focus === "steering") {
@@ -3295,11 +3917,15 @@ export class ControlCenterController {
       modal.steering = removeCharacterAt(modal.steering, modal.steeringCursor);
     } else if (action.type === "activate") {
       if (modal.focus === "steering") {
-        const edit = insertBoundedAtCharacter(modal.steering, modal.steeringCursor, "\n", 1024 * 1024);
+        const edit = insertBoundedAtCharacter(
+          modal.steering,
+          modal.steeringCursor,
+          "\n",
+          1024 * 1024,
+        );
         modal.steering = edit.value;
         modal.steeringCursor = edit.cursor;
-      }
-      else if (modal.focus === "action") await this.#submitPlanReview(modal);
+      } else if (modal.focus === "action") await this.#submitPlanReview(modal);
     } else if (action.type === "submit") await this.#submitPlanReview(modal);
     this.#emit();
   }
@@ -3309,11 +3935,18 @@ export class ControlCenterController {
     action: ControlCenterKeyAction,
   ): Promise<void> {
     if (action.type === "focus") {
-      modal.focus = moveString(["document", "message", "choice", "submit"] as const, modal.focus, action.delta);
+      modal.focus = moveString(
+        ["document", "message", "choice", "submit"] as const,
+        modal.focus,
+        action.delta,
+      );
     } else if ((action.type === "move" || action.type === "page") && modal.focus === "document") {
       const amount = action.type === "page" ? action.delta * 8 : action.delta;
       modal.scroll = Math.max(0, modal.scroll + amount);
-    } else if ((action.type === "move" || action.type === "details_tab") && modal.focus === "choice") {
+    } else if (
+      (action.type === "move" || action.type === "details_tab") &&
+      modal.focus === "choice"
+    ) {
       modal.decision = modal.decision === "approval" ? "rejection" : "approval";
     } else if (action.type === "details_tab" && modal.focus === "message") {
       modal.messageCursor = clampCharacterOffset(modal.message, modal.messageCursor + action.delta);
@@ -3361,19 +3994,24 @@ export class ControlCenterController {
     }
     if (this.#busy !== undefined) return;
     const message = modal.message.trim();
-    this.#busy = modal.decision === "approval" ? "Approving change proposal…" : "Rejecting change proposal…";
+    this.#busy =
+      modal.decision === "approval" ? "Approving change proposal…" : "Rejecting change proposal…";
     this.#notice = undefined;
     this.#emit();
     try {
-      const response = await this.#client.request("proposal.decide", {
-        runId: modal.proposal.runId,
-        ticketId: modal.proposal.ticketId,
-        decision: modal.decision,
-        ...(message.length === 0 ? {} : { message }),
-      }, {
-        expectedRevision: this.#client.revision,
-        idempotencyKey: `proposal.decide:${randomUUID()}`,
-      });
+      const response = await this.#client.request(
+        "proposal.decide",
+        {
+          runId: modal.proposal.runId,
+          ticketId: modal.proposal.ticketId,
+          decision: modal.decision,
+          ...(message.length === 0 ? {} : { message }),
+        },
+        {
+          expectedRevision: this.#client.revision,
+          idempotencyKey: `proposal.decide:${randomUUID()}`,
+        },
+      );
       const decided = parseControlProposalInspection(response.result);
       if (decided.runId !== modal.proposal.runId || decided.ticketId !== modal.proposal.ticketId) {
         throw new Error("authority recorded a decision for a different proposal");
@@ -3382,7 +4020,8 @@ export class ControlCenterController {
       await this.refresh();
       this.#notice = {
         kind: "info",
-        message: modal.decision === "approval" ? "Change proposal approved" : "Change proposal rejected",
+        message:
+          modal.decision === "approval" ? "Change proposal approved" : "Change proposal rejected",
       };
     } catch (error) {
       if (isRevisionConflictError(error)) {
@@ -3390,10 +4029,14 @@ export class ControlCenterController {
         const ticket = this.#selectedRunRecord()?.tickets[modal.proposal.ticketId];
         if (ticket?.status === "proposed") {
           try {
-            modal.proposal = parseControlProposalInspection((await this.#client.request("proposal.inspect", {
-              runId: modal.proposal.runId,
-              ticketId: modal.proposal.ticketId,
-            })).result);
+            modal.proposal = parseControlProposalInspection(
+              (
+                await this.#client.request("proposal.inspect", {
+                  runId: modal.proposal.runId,
+                  ticketId: modal.proposal.ticketId,
+                })
+              ).result,
+            );
             modal.decision = undefined;
             modal.focus = "document";
             modal.scroll = 0;
@@ -3403,7 +4046,8 @@ export class ControlCenterController {
         } else this.#modal = undefined;
         this.#notice = {
           kind: "error",
-          message: "Koni changed while this proposal was open. Review the refreshed proposal and confirm again.",
+          message:
+            "Koni changed while this proposal was open. Review the refreshed proposal and confirm again.",
         };
       } else {
         this.#notice = { kind: "error", message: errorMessage(error) };
@@ -3416,7 +4060,9 @@ export class ControlCenterController {
 
   async #submitPlanReview(modal: PlanReviewModalState): Promise<void> {
     const instructions = modal.steering.trim();
-    const capability = this.#findCapability(instructions.length === 0 ? "approve_run" : "revise_run_plan");
+    const capability = this.#findCapability(
+      instructions.length === 0 ? "approve_run" : "revise_run_plan",
+    );
     this.#modal = undefined;
     if (capability !== undefined) {
       await this.#executeCapability(
@@ -3427,11 +4073,17 @@ export class ControlCenterController {
       return;
     }
     const method = instructions.length === 0 ? "plan.approve" : "plan.revise";
-    await this.#mutate(method, { runId: modal.runId, ...(instructions.length === 0 ? {} : { instructions }) },
-      instructions.length === 0 ? "Approving plan…" : "Requesting revised plan…");
+    await this.#mutate(
+      method,
+      { runId: modal.runId, ...(instructions.length === 0 ? {} : { instructions }) },
+      instructions.length === 0 ? "Approving plan…" : "Requesting revised plan…",
+    );
   }
 
-  async #handleConfigure(modal: ConfigureModalState, action: ControlCenterKeyAction): Promise<void> {
+  async #handleConfigure(
+    modal: ConfigureModalState,
+    action: ControlCenterKeyAction,
+  ): Promise<void> {
     if (action.type === "open_config_documents") {
       await this.#openConfigDocuments(modal);
       return;
@@ -3451,17 +4103,20 @@ export class ControlCenterController {
       this.#openConfigResourceOperation(modal, "delete");
     } else if (action.type === "save_draft") {
       if (modal.rebaseRequired) {
-        this.#notice = { kind: "error", message: "Rebase or discard this stale draft before saving it again" };
+        this.#notice = {
+          kind: "error",
+          message: "Rebase or discard this stale draft before saving it again",
+        };
       } else {
         this.#savedConfigDraft = {
           cas: structuredClone(modal.snapshot.cas),
-          base: structuredClone(modal.snapshot.values) as Record<string, JsonValue>,
+          base: structuredClone(modal.snapshot.values),
           values: structuredClone(modal.draft),
         };
         this.#notice = { kind: "info", message: "Draft saved in this control center" };
       }
     } else if (action.type === "discard_draft") {
-      modal.draft = structuredClone(modal.snapshot.values) as Record<string, JsonValue>;
+      modal.draft = structuredClone(modal.snapshot.values);
       modal.dirty = false;
       modal.editing = false;
       modal.rebaseRequired = false;
@@ -3470,7 +4125,11 @@ export class ControlCenterController {
       this.#notice = { kind: "info", message: "Draft restored to active configuration" };
     } else if (action.type === "rebase_draft") {
       this.#rebaseConfigurationDraft(modal);
-    } else if (action.type === "publish" || action.type === "submit" || (action.type === "activate" && modal.focus === "publish")) {
+    } else if (
+      action.type === "publish" ||
+      action.type === "submit" ||
+      (action.type === "activate" && modal.focus === "publish")
+    ) {
       await this.#publishConfiguration(modal);
     } else if (action.type === "focus") {
       modal.focus = moveString(configFocuses(modal), modal.focus, action.delta);
@@ -3479,11 +4138,22 @@ export class ControlCenterController {
     } else if (action.type === "move") {
       if (modal.focus === "tree") moveConfigResource(modal, action.delta);
       else if (modal.focus === "field") moveConfigField(modal, action.delta);
-      else if (modal.focus === "actions") modal.actionIndex = cycleIndex(modal.actionIndex, configResourceActions(modal).length, action.delta);
+      else if (modal.focus === "actions")
+        modal.actionIndex = cycleIndex(
+          modal.actionIndex,
+          configResourceActions(modal).length,
+          action.delta,
+        );
     } else if (action.type === "details_tab") {
       if (modal.focus === "tree") moveConfigSection(modal, action.delta);
-      else if (modal.focus === "field" && !modal.editing) adjustConfigField(modal, action.delta, this.#models);
-      else if (modal.focus === "actions") modal.actionIndex = cycleIndex(modal.actionIndex, configResourceActions(modal).length, action.delta);
+      else if (modal.focus === "field" && !modal.editing)
+        adjustConfigField(modal, action.delta, this.#models);
+      else if (modal.focus === "actions")
+        modal.actionIndex = cycleIndex(
+          modal.actionIndex,
+          configResourceActions(modal).length,
+          action.delta,
+        );
     } else if (action.type === "activate" && modal.focus === "field") {
       const field = selectedConfigField(modal);
       if (field !== undefined) {
@@ -3515,11 +4185,16 @@ export class ControlCenterController {
   async #loadProfileConflicts(): Promise<ControlProfileConflictCatalog> {
     if (this.#profileConflictRpcAvailable === false) return emptyProfileConflictCatalog();
     try {
-      const catalog = parseProfileConflictCatalog((await this.#client.request("profile.conflicts.list")).result);
+      const catalog = parseProfileConflictCatalog(
+        (await this.#client.request("profile.conflicts.list")).result,
+      );
       this.#profileConflictRpcAvailable = true;
       return catalog;
     } catch (error) {
-      if (isMissingMethod(error) || /unexpected RPC profile\.conflicts\.list/iu.test(errorMessage(error))) {
+      if (
+        isMissingMethod(error) ||
+        /unexpected RPC profile\.conflicts\.list/iu.test(errorMessage(error))
+      ) {
         this.#profileConflictRpcAvailable = false;
         return emptyProfileConflictCatalog();
       }
@@ -3529,7 +4204,10 @@ export class ControlCenterController {
 
   async #openProfileConflicts(configure: ConfigureModalState): Promise<void> {
     if (this.#profileConflictRpcAvailable === false) {
-      this.#notice = { kind: "info", message: "This authority build does not expose upstream profile review" };
+      this.#notice = {
+        kind: "info",
+        message: "This authority build does not expose upstream profile review",
+      };
       return;
     }
     if (configure.upstreamConflicts.conflicts.length === 0) {
@@ -3540,10 +4218,9 @@ export class ControlCenterController {
     this.#emit();
     try {
       const selected = configure.upstreamConflicts.conflicts[0]!;
-      const inspection = parseProfileConflictInspection((await this.#client.request(
-        "profile.conflicts.inspect",
-        { path: selected.path },
-      )).result);
+      const inspection = parseProfileConflictInspection(
+        (await this.#client.request("profile.conflicts.inspect", { path: selected.path })).result,
+      );
       this.#modal = {
         kind: "profile_conflicts",
         catalog: configure.upstreamConflicts,
@@ -3569,7 +4246,11 @@ export class ControlCenterController {
     if (action.type === "focus") {
       modal.focus = modal.focus === "list" ? "actions" : "list";
     } else if (action.type === "move" && modal.focus === "list") {
-      const targetIndex = cycleIndex(modal.selectedIndex, modal.catalog.conflicts.length, action.delta);
+      const targetIndex = cycleIndex(
+        modal.selectedIndex,
+        modal.catalog.conflicts.length,
+        action.delta,
+      );
       await this.#reloadProfileConflictInspection(modal, targetIndex);
     } else if (action.type === "details_tab" && modal.focus === "actions") {
       modal.actionIndex = cycleIndex(modal.actionIndex, 2, action.delta);
@@ -3591,10 +4272,9 @@ export class ControlCenterController {
     this.#busy = "Loading upstream comparison…";
     this.#emit();
     try {
-      const inspection = parseProfileConflictInspection((await this.#client.request(
-        "profile.conflicts.inspect",
-        { path: selected.path },
-      )).result);
+      const inspection = parseProfileConflictInspection(
+        (await this.#client.request("profile.conflicts.inspect", { path: selected.path })).result,
+      );
       modal.selectedIndex = targetIndex;
       modal.inspection = inspection;
       modal.scroll = 0;
@@ -3609,19 +4289,24 @@ export class ControlCenterController {
     const selected = modal.catalog.conflicts[modal.selectedIndex];
     if (selected === undefined) return;
     const resolution = modal.actionIndex === 0 ? "keep_project" : "accept_upstream";
-    this.#busy = resolution === "keep_project" ? "Keeping project version…" : "Applying upstream version…";
+    this.#busy =
+      resolution === "keep_project" ? "Keeping project version…" : "Applying upstream version…";
     this.#notice = undefined;
     this.#emit();
     try {
-      await this.#client.request("profile.conflicts.resolve", {
-        path: selected.path,
-        expectedLifecycleGeneration: modal.inspection.lifecycleGeneration,
-        expectedProjectSha256: modal.inspection.conflict.currentSha256,
-        resolution,
-      }, {
-        expectedRevision: this.#client.revision,
-        idempotencyKey: `profile.conflicts.resolve:${randomUUID()}`,
-      });
+      await this.#client.request(
+        "profile.conflicts.resolve",
+        {
+          path: selected.path,
+          expectedLifecycleGeneration: modal.inspection.lifecycleGeneration,
+          expectedProjectSha256: modal.inspection.conflict.currentSha256,
+          resolution,
+        },
+        {
+          expectedRevision: this.#client.revision,
+          idempotencyKey: `profile.conflicts.resolve:${randomUUID()}`,
+        },
+      );
       const catalog = await this.#loadProfileConflicts();
       modal.returnTo.upstreamConflicts = catalog;
       if (catalog.conflicts.length === 0) {
@@ -3636,7 +4321,10 @@ export class ControlCenterController {
         await this.#reloadProfileConflictInspection(modal);
         this.#notice = {
           kind: "info",
-          message: resolution === "keep_project" ? "Kept the project version" : "Applied the upstream version",
+          message:
+            resolution === "keep_project"
+              ? "Kept the project version"
+              : "Applied the upstream version",
         };
       }
       this.#controlCatalog = undefined;
@@ -3649,7 +4337,9 @@ export class ControlCenterController {
           modal.selectedIndex = Math.min(modal.selectedIndex, catalog.conflicts.length - 1);
           await this.#reloadProfileConflictInspection(modal);
         }
-      } catch {}
+      } catch {
+        // Keep the original mutation failure when the best-effort conflict refresh also fails.
+      }
       this.#notice = { kind: "error", message: errorMessage(error) };
     } finally {
       this.#busy = undefined;
@@ -3662,11 +4352,17 @@ export class ControlCenterController {
     kind: "create" | "duplicate" | "delete",
   ): void {
     if (modal.rebaseRequired) {
-      this.#notice = { kind: "error", message: "Rebase or discard the stale draft before changing whole resources" };
+      this.#notice = {
+        kind: "error",
+        message: "Rebase or discard the stale draft before changing whole resources",
+      };
       return;
     }
     if (modal.dirty) {
-      this.#notice = { kind: "info", message: "Publish or discard field edits before changing whole resources" };
+      this.#notice = {
+        kind: "info",
+        message: "Publish or discard field edits before changing whole resources",
+      };
       return;
     }
     const section = selectedConfigSection(modal);
@@ -3674,24 +4370,35 @@ export class ControlCenterController {
     if (section === undefined) return;
     if (kind === "create") {
       const resourceOptions = resource?.createOptions ?? [];
-      const options = resourceOptions.length > 0 ? resourceOptions : section.createOptions ?? [];
+      const options = resourceOptions.length > 0 ? resourceOptions : (section.createOptions ?? []);
       if (options.length === 0) {
-        this.#notice = { kind: "info", message: "This configuration domain has no addable resource types" };
+        this.#notice = {
+          kind: "info",
+          message: "This configuration domain has no addable resource types",
+        };
         return;
       }
       modal.resourceOperation = {
         kind,
         focus: options.length > 1 ? "template" : "name",
         sectionId: section.id,
-        ...(resourceOptions.length > 0 && resource !== undefined ? { parentResourceId: resource.id } : {}),
+        ...(resourceOptions.length > 0 && resource !== undefined
+          ? { parentResourceId: resource.id }
+          : {}),
         options,
         templateIndex: 0,
         name: options[0]!.suggestedName,
       };
       return;
     }
-    if (resource === undefined || (kind === "duplicate" ? resource.canDuplicate !== true : resource.canDelete !== true)) {
-      this.#notice = { kind: "info", message: `The selected resource cannot be ${kind === "duplicate" ? "duplicated" : "deleted"}` };
+    if (
+      resource === undefined ||
+      (kind === "duplicate" ? resource.canDuplicate !== true : resource.canDelete !== true)
+    ) {
+      this.#notice = {
+        kind: "info",
+        message: `The selected resource cannot be ${kind === "duplicate" ? "duplicated" : "deleted"}`,
+      };
       return;
     }
     modal.resourceOperation = {
@@ -3711,13 +4418,22 @@ export class ControlCenterController {
     operation: ConfigResourceOperationState,
     action: ControlCenterKeyAction,
   ): Promise<void> {
-    const focuses = operation.kind === "create"
-      ? operation.options.length > 1 ? ["template", "name", "confirm"] as const : ["name", "confirm"] as const
-      : operation.kind === "duplicate" ? ["name", "confirm"] as const : ["confirm"] as const;
+    const focuses =
+      operation.kind === "create"
+        ? operation.options.length > 1
+          ? (["template", "name", "confirm"] as const)
+          : (["name", "confirm"] as const)
+        : operation.kind === "duplicate"
+          ? (["name", "confirm"] as const)
+          : (["confirm"] as const);
     if (action.type === "focus" || action.type === "move") {
       operation.focus = moveString(focuses, operation.focus, action.delta);
     } else if (action.type === "details_tab" && operation.focus === "template") {
-      operation.templateIndex = cycleIndex(operation.templateIndex, operation.options.length, action.delta);
+      operation.templateIndex = cycleIndex(
+        operation.templateIndex,
+        operation.options.length,
+        action.delta,
+      );
       operation.name = operation.options[operation.templateIndex]?.suggestedName ?? operation.name;
     } else if (action.type === "append_text" && operation.focus === "name") {
       operation.name = `${operation.name}${action.text.replace(/[\r\n]+/gu, " ")}`.slice(0, 512);
@@ -3750,14 +4466,19 @@ export class ControlCenterController {
       params.sectionId = operation.sectionId;
       params.templateId = option.id;
       params.name = name;
-      if (operation.parentResourceId !== undefined) params.parentResourceId = operation.parentResourceId;
+      if (operation.parentResourceId !== undefined)
+        params.parentResourceId = operation.parentResourceId;
     } else {
       if (operation.resourceId === undefined) return;
       params.resourceId = operation.resourceId;
       if (operation.kind === "duplicate") params.name = name;
     }
-    this.#busy = operation.kind === "create" ? "Creating resource…"
-      : operation.kind === "duplicate" ? "Duplicating resource…" : "Deleting resource…";
+    this.#busy =
+      operation.kind === "create"
+        ? "Creating resource…"
+        : operation.kind === "duplicate"
+          ? "Duplicating resource…"
+          : "Deleting resource…";
     this.#notice = undefined;
     this.#emit();
     try {
@@ -3766,13 +4487,23 @@ export class ControlCenterController {
         idempotencyKey: `${method}:${randomUUID()}`,
       });
       await this.#reloadConfigurationModal(modal, name);
-      this.#notice = { kind: "info", message: operation.kind === "create" ? "Resource created"
-        : operation.kind === "duplicate" ? "Resource duplicated" : "Resource deleted" };
+      this.#notice = {
+        kind: "info",
+        message:
+          operation.kind === "create"
+            ? "Resource created"
+            : operation.kind === "duplicate"
+              ? "Resource duplicated"
+              : "Resource deleted",
+      };
     } catch (error) {
       if (isStaleConfiguration(error)) {
         try {
           await this.#reloadConfigurationModal(modal);
-          this.#notice = { kind: "error", message: "Configuration changed elsewhere. The resource action was not applied." };
+          this.#notice = {
+            kind: "error",
+            message: "Configuration changed elsewhere. The resource action was not applied.",
+          };
         } catch (refreshError) {
           this.#notice = { kind: "error", message: errorMessage(refreshError) };
         }
@@ -3783,7 +4514,10 @@ export class ControlCenterController {
     }
   }
 
-  async #reloadConfigurationModal(modal: ConfigureModalState, preferredTitle?: string): Promise<void> {
+  async #reloadConfigurationModal(
+    modal: ConfigureModalState,
+    preferredTitle?: string,
+  ): Promise<void> {
     const [catalogResponse, snapshotResponse, upstreamConflicts] = await Promise.all([
       this.#client.request("config.catalog"),
       this.#client.request("config.get"),
@@ -3792,7 +4526,7 @@ export class ControlCenterController {
     modal.catalog = parseConfigCatalog(catalogResponse.result);
     modal.snapshot = parseConfigSnapshot(snapshotResponse.result);
     modal.upstreamConflicts = upstreamConflicts;
-    modal.draft = structuredClone(modal.snapshot.values) as Record<string, JsonValue>;
+    modal.draft = structuredClone(modal.snapshot.values);
     modal.dirty = false;
     modal.rebaseRequired = false;
     modal.editing = false;
@@ -3802,16 +4536,28 @@ export class ControlCenterController {
     delete modal.resourceOperation;
     this.#savedConfigDraft = undefined;
     this.#controlCatalog = undefined;
-    modal.sectionIndex = Math.min(modal.sectionIndex, Math.max(0, modal.catalog.sections.length - 1));
+    modal.sectionIndex = Math.min(
+      modal.sectionIndex,
+      Math.max(0, modal.catalog.sections.length - 1),
+    );
     const resources = selectedConfigSection(modal)?.resources ?? [];
-    const preferredIndex = preferredTitle === undefined ? -1 : resources.findIndex((resource) => resource.title === preferredTitle);
-    modal.resourceIndex = preferredIndex >= 0 ? preferredIndex : Math.min(modal.resourceIndex, Math.max(0, resources.length - 1));
+    const preferredIndex =
+      preferredTitle === undefined
+        ? -1
+        : resources.findIndex((resource) => resource.title === preferredTitle);
+    modal.resourceIndex =
+      preferredIndex >= 0
+        ? preferredIndex
+        : Math.min(modal.resourceIndex, Math.max(0, resources.length - 1));
     modal.fieldIndex = 0;
   }
 
   async #publishConfiguration(modal: ConfigureModalState): Promise<void> {
     if (modal.rebaseRequired) {
-      this.#notice = { kind: "error", message: "Rebase or discard the stale draft before publishing" };
+      this.#notice = {
+        kind: "error",
+        message: "Rebase or discard the stale draft before publishing",
+      };
       return;
     }
     if (!modal.dirty) {
@@ -3821,16 +4567,20 @@ export class ControlCenterController {
     this.#busy = "Validating and publishing configuration…";
     this.#emit();
     try {
-      await this.#client.request("config.update", {
-        cas: modal.snapshot.cas,
-        values: modal.draft,
-      }, {
-        expectedRevision: this.#client.revision,
-        idempotencyKey: `config.update:${randomUUID()}`,
-      });
+      await this.#client.request(
+        "config.update",
+        {
+          cas: modal.snapshot.cas,
+          values: modal.draft,
+        },
+        {
+          expectedRevision: this.#client.revision,
+          idempotencyKey: `config.update:${randomUUID()}`,
+        },
+      );
       const refreshed = parseConfigSnapshot((await this.#client.request("config.get")).result);
       modal.snapshot = refreshed;
-      modal.draft = structuredClone(refreshed.values) as Record<string, JsonValue>;
+      modal.draft = structuredClone(refreshed.values);
       modal.dirty = false;
       modal.rebaseRequired = false;
       modal.editing = false;
@@ -3844,13 +4594,17 @@ export class ControlCenterController {
           const origin = modal.snapshot;
           this.#savedConfigDraft = {
             cas: structuredClone(origin.cas),
-            base: structuredClone(origin.values) as Record<string, JsonValue>,
+            base: structuredClone(origin.values),
             values: structuredClone(modal.draft),
           };
           modal.snapshot = parseConfigSnapshot((await this.#client.request("config.get")).result);
           modal.dirty = !jsonEqual(modal.draft, modal.snapshot.values);
           modal.rebaseRequired = true;
-          this.#notice = { kind: "error", message: "Configuration changed elsewhere. Your draft was kept; rebase or discard it before publishing." };
+          this.#notice = {
+            kind: "error",
+            message:
+              "Configuration changed elsewhere. Your draft was kept; rebase or discard it before publishing.",
+          };
         } catch (refreshError) {
           this.#notice = { kind: "error", message: errorMessage(refreshError) };
         }
@@ -3863,7 +4617,10 @@ export class ControlCenterController {
 
   #rebaseConfigurationDraft(modal: ConfigureModalState): void {
     if (!modal.rebaseRequired) {
-      this.#notice = { kind: "info", message: "Draft already uses the current project configuration" };
+      this.#notice = {
+        kind: "info",
+        message: "Draft already uses the current project configuration",
+      };
       return;
     }
     const saved = this.#savedConfigDraft;
@@ -3879,14 +4636,15 @@ export class ControlCenterController {
     delete modal.textEditor;
     this.#savedConfigDraft = {
       cas: structuredClone(modal.snapshot.cas),
-      base: structuredClone(modal.snapshot.values) as Record<string, JsonValue>,
+      base: structuredClone(modal.snapshot.values),
       values: structuredClone(modal.draft),
     };
     this.#notice = {
       kind: rebased.conflicts > 0 ? "error" : "info",
-      message: rebased.conflicts > 0
-        ? `Rebased with ${rebased.conflicts} overlapping ${rebased.conflicts === 1 ? "field" : "fields"}; your draft values were kept. Review before publishing.`
-        : "Draft rebased onto the current project configuration. Review before publishing.",
+      message:
+        rebased.conflicts > 0
+          ? `Rebased with ${rebased.conflicts} overlapping ${rebased.conflicts === 1 ? "field" : "fields"}; your draft values were kept. Review before publishing.`
+          : "Draft rebased onto the current project configuration. Review before publishing.",
     };
   }
 
@@ -3946,10 +4704,16 @@ export class ControlCenterController {
     this.#emit();
     let ownsRequest = true;
     try {
-      const projection = await this.#requestTranscriptWindow(run.id, attemptId, attempt.sessionId, cursor);
+      const projection = await this.#requestTranscriptWindow(
+        run.id,
+        attemptId,
+        attempt.sessionId,
+        cursor,
+      );
       ownsRequest = this.#transcripts.get(attemptId)?.requestId === requestId;
       if (!ownsRequest) return;
-      if (expectation !== undefined) this.#validateAdjacentTranscriptWindow(expectation, projection);
+      if (expectation !== undefined)
+        this.#validateAdjacentTranscriptWindow(expectation, projection);
       this.#transcriptRpcAvailable = true;
       this.#rememberTranscript(attemptId, projection);
     } catch (error) {
@@ -4009,9 +4773,11 @@ export class ControlCenterController {
       sessionId: page.sessionId,
       snapshotSha256: page.snapshot.sha256,
       snapshotEntryCount: page.snapshot.entryCount,
-      ...(page.snapshot.lastEntryId === undefined ? {} : {
-        snapshotLastEntryId: page.snapshot.lastEntryId,
-      }),
+      ...(page.snapshot.lastEntryId === undefined
+        ? {}
+        : {
+            snapshotLastEntryId: page.snapshot.lastEntryId,
+          }),
       startBlock: page.startBlock,
       totalBlocks: page.totalBlocks,
       ...(page.previousCursor === undefined ? {} : { previousCursor: page.previousCursor }),
@@ -4026,16 +4792,26 @@ export class ControlCenterController {
     next: TranscriptState,
   ): void {
     const current = expectation.state;
-    if (next.status !== "ready" || current.status !== "ready" ||
-        next.sessionId !== current.sessionId || next.snapshotSha256 !== current.snapshotSha256 ||
-        next.snapshotEntryCount !== current.snapshotEntryCount ||
-        next.snapshotLastEntryId !== current.snapshotLastEntryId ||
-        next.totalBlocks !== current.totalBlocks) {
-      throw new Error("adjacent Pi transcript page does not belong to the selected stable snapshot");
+    if (
+      next.status !== "ready" ||
+      current.status !== "ready" ||
+      next.sessionId !== current.sessionId ||
+      next.snapshotSha256 !== current.snapshotSha256 ||
+      next.snapshotEntryCount !== current.snapshotEntryCount ||
+      next.snapshotLastEntryId !== current.snapshotLastEntryId ||
+      next.totalBlocks !== current.totalBlocks
+    ) {
+      throw new Error(
+        "adjacent Pi transcript page does not belong to the selected stable snapshot",
+      );
     }
     const currentEnd = current.startBlock + current.blocks.length;
     const nextEnd = next.startBlock + next.blocks.length;
-    if (expectation.direction === "older" ? nextEnd !== current.startBlock : next.startBlock !== currentEnd) {
+    if (
+      expectation.direction === "older"
+        ? nextEnd !== current.startBlock
+        : next.startBlock !== currentEnd
+    ) {
       throw new Error("authority returned a non-adjacent Pi transcript history window");
     }
   }
@@ -4066,8 +4842,12 @@ export class ControlCenterController {
     }
     // Appends cannot change a cursor-pinned older prefix. Preserve the operator's reading place;
     // moving back to the head or explicitly reloading will pick up current live output.
-    if (current?.status === "ready" && current.runId === this.#selection.runId &&
-        current.previousCursor !== undefined) return;
+    if (
+      current?.status === "ready" &&
+      current.runId === this.#selection.runId &&
+      current.previousCursor !== undefined
+    )
+      return;
     this.#transcripts.delete(attemptId);
     void this.#replaceTranscriptWindow(attemptId);
   }
@@ -4076,17 +4856,21 @@ export class ControlCenterController {
     const attemptId = this.#selection.attemptId;
     if (attemptId === undefined) return undefined;
     const cached = this.#transcripts.get(attemptId);
-    const transcript = cached !== undefined && cached.runId === this.#selection.runId ? cached : {
-      status: "loading" as const,
-      startBlock: 0,
-      totalBlocks: 0,
-      blocks: [],
-      diagnostics: [],
-    };
+    const transcript =
+      cached !== undefined && cached.runId === this.#selection.runId
+        ? cached
+        : {
+            status: "loading" as const,
+            startBlock: 0,
+            totalBlocks: 0,
+            blocks: [],
+            diagnostics: [],
+          };
     return {
       attemptId,
       status: transcript.status,
       blocks: transcript.blocks.map(cloneTranscriptBlock),
+      toolsVisible: this.#chatToolsVisible,
       diagnostics: [...transcript.diagnostics],
       history: {
         startBlock: transcript.startBlock,
@@ -4104,13 +4888,13 @@ export class ControlCenterController {
     this.#transcripts.delete(attemptId);
     this.#transcripts.set(attemptId, state);
     while (this.#transcripts.size > MAX_TRANSCRIPT_WINDOWS) {
-      let oldest = this.#transcripts.keys().next().value as string | undefined;
+      let oldest = this.#transcripts.keys().next().value;
       if (oldest === undefined) break;
       if (oldest === this.#selection.attemptId && this.#transcripts.size > 1) {
         const selected = this.#transcripts.get(oldest)!;
         this.#transcripts.delete(oldest);
         this.#transcripts.set(oldest, selected);
-        oldest = this.#transcripts.keys().next().value as string | undefined;
+        oldest = this.#transcripts.keys().next().value;
         if (oldest === undefined) break;
       }
       this.#transcripts.delete(oldest);
@@ -4129,7 +4913,9 @@ export class ControlCenterController {
   }
 
   #selectedChatDraft(): ChatDraftState | undefined {
-    return this.#selection.attemptId === undefined ? undefined : this.#chatDraft(this.#selection.attemptId);
+    return this.#selection.attemptId === undefined
+      ? undefined
+      : this.#chatDraft(this.#selection.attemptId);
   }
 
   #toggleChatComposer(): void {
@@ -4180,10 +4966,14 @@ export class ControlCenterController {
     draft.text = "";
     draft.editing = false;
     this.#emit();
-    const response = await this.#mutate(mode === "steer" ? "agent.steer" : "agent.follow_up", {
-      attemptId: draft.attemptId,
-      text,
-    }, mode === "steer" ? "Steering agent…" : "Sending follow-up…");
+    const response = await this.#mutate(
+      mode === "steer" ? "agent.steer" : "agent.follow_up",
+      {
+        attemptId: draft.attemptId,
+        text,
+      },
+      mode === "steer" ? "Steering agent…" : "Sending follow-up…",
+    );
     if (response === undefined) {
       draft.mode = mode;
       draft.text = text;
@@ -4244,7 +5034,9 @@ export class ControlCenterController {
     if (draft === undefined) {
       draft = {
         questionId: question.id,
-        selectedOptionId: question.savedSelectedOptionId ?? question.selectedOptionId ??
+        selectedOptionId:
+          question.savedSelectedOptionId ??
+          question.selectedOptionId ??
           question.recommendationOptionId ??
           question.options[0]?.id,
         notes: question.savedNotes ?? question.notes ?? "",
@@ -4297,8 +5089,13 @@ function applyRunTypeDefaults(
   modal.maxParallel = runType.maxParallel;
   modal.stageScroll = 0;
   modal.roles = runType.roles.map((role) => {
-    const configured = models.find((model) => model.provider === role.provider && model.id === role.model);
-    return { ...role, ...(configured === undefined ? {} : { provider: configured.provider, model: configured.id }) };
+    const configured = models.find(
+      (model) => model.provider === role.provider && model.id === role.model,
+    );
+    return {
+      ...role,
+      ...(configured === undefined ? {} : { provider: configured.provider, model: configured.id }),
+    };
   });
   const previousText = modal.intakeText;
   const previousValues = modal.intake;
@@ -4313,7 +5110,10 @@ function applyRunTypeDefaults(
     const source = previousText[field.id] ?? editableControlIntakeText(initial, field);
     modal.intakeText[field.id] = source;
     modal.intakeCursors[field.id] = characterCount(source);
-    modal.intakeOptionIndexes[field.id] = Math.max(0, field.options.findIndex((option) => option.value === initial));
+    modal.intakeOptionIndexes[field.id] = Math.max(
+      0,
+      field.options.findIndex((option) => option.value === initial),
+    );
   }
   modal.objective = modal.intakeText[runType.objectiveFieldId] ?? "";
   modal.objectiveCursor = modal.intakeCursors[runType.objectiveFieldId] ?? 0;
@@ -4323,7 +5123,9 @@ function newRunControls(modal: NewRunModalState, catalog: ControlCatalog | undef
   const runType = catalog?.runTypes.find((candidate) => candidate.id === modal.runTypeId);
   return [
     "objective",
-    ...(runType?.intake.filter((field) => field.id !== runType.objectiveFieldId).map((field) => `intake:${field.id}`) ?? []),
+    ...(runType?.intake
+      .filter((field) => field.id !== runType.objectiveFieldId)
+      .map((field) => `intake:${field.id}`) ?? []),
     "run_type",
     "branch",
     ...(isCreatingNewTarget(modal.target) ? ["branch_name"] : []),
@@ -4349,9 +5151,12 @@ function selectedNewRunIntakeField(
 ): ControlIntakeField | undefined {
   const runType = catalog?.runTypes.find((candidate) => candidate.id === modal.runTypeId);
   if (runType === undefined) return undefined;
-  const id = modal.focus === "objective"
-    ? runType.objectiveFieldId
-    : modal.focus.startsWith("intake:") ? modal.focus.slice("intake:".length) : undefined;
+  const id =
+    modal.focus === "objective"
+      ? runType.objectiveFieldId
+      : modal.focus.startsWith("intake:")
+        ? modal.focus.slice("intake:".length)
+        : undefined;
   return id === undefined ? undefined : runType.intake.find((field) => field.id === id);
 }
 
@@ -4372,15 +5177,27 @@ function setNewRunIntakeText(
 }
 
 function isTextEditableIntake(kind: ControlIntakeField["kind"]): boolean {
-  return kind === "string" || kind === "text" || kind === "path" || kind === "integer" || kind === "number" || kind === "json";
+  return (
+    kind === "string" ||
+    kind === "text" ||
+    kind === "path" ||
+    kind === "integer" ||
+    kind === "number" ||
+    kind === "json"
+  );
 }
 
-function adjustNewRunIntake(modal: NewRunModalState, field: ControlIntakeField, delta: -1 | 1): void {
+function adjustNewRunIntake(
+  modal: NewRunModalState,
+  field: ControlIntakeField,
+  delta: -1 | 1,
+): void {
   if (field.kind === "boolean") {
     modal.intake[field.id] = !(modal.intake[field.id] === true);
     return;
   }
-  if (field.kind !== "choice" && field.kind !== "multi_choice" || field.options.length === 0) return;
+  if ((field.kind !== "choice" && field.kind !== "multi_choice") || field.options.length === 0)
+    return;
   const index = cycleIndex(modal.intakeOptionIndexes[field.id] ?? 0, field.options.length, delta);
   modal.intakeOptionIndexes[field.id] = index;
   if (field.kind === "choice") modal.intake[field.id] = field.options[index]!.value;
@@ -4395,45 +5212,80 @@ function toggleNewRunIntake(modal: NewRunModalState, field: ControlIntakeField):
   const value = field.options[modal.intakeOptionIndexes[field.id] ?? 0]?.value;
   if (value === undefined) return;
   const current = Array.isArray(modal.intake[field.id])
-    ? (modal.intake[field.id] as readonly ConfigurationValue[]).filter((item): item is string => typeof item === "string")
+    ? (modal.intake[field.id] as readonly ConfigurationValue[]).filter(
+        (item): item is string => typeof item === "string",
+      )
     : [];
-  modal.intake[field.id] = current.includes(value) ? current.filter((item) => item !== value) : [...current, value];
+  modal.intake[field.id] = current.includes(value)
+    ? current.filter((item) => item !== value)
+    : [...current, value];
 }
 
-function buildNewRunTypedIntake(modal: NewRunModalState, runType: ControlRunTypeOption): ConfigurationObject {
-  const output: Record<string, ConfigurationValue> = Object.create(null) as Record<string, ConfigurationValue>;
+function buildNewRunTypedIntake(
+  modal: NewRunModalState,
+  runType: ControlRunTypeOption,
+): ConfigurationObject {
+  const output: Record<string, ConfigurationValue> = Object.create(null) as Record<
+    string,
+    ConfigurationValue
+  >;
   for (const field of runType.intake) {
     let value: ConfigurationValue | undefined;
-    if (field.kind === "string" || field.kind === "text" || field.kind === "path") value = modal.intakeText[field.id] ?? "";
+    if (field.kind === "string" || field.kind === "text" || field.kind === "path")
+      value = modal.intakeText[field.id] ?? "";
     else if (field.kind === "integer" || field.kind === "number") {
       const source = (modal.intakeText[field.id] ?? "").trim();
       if (source.length > 0) {
         const parsed = Number(source);
-        if (!Number.isFinite(parsed) || field.kind === "integer" && !Number.isSafeInteger(parsed)) throw new Error(`${field.label} must be ${field.kind === "integer" ? "an integer" : "a number"}`);
+        if (!Number.isFinite(parsed) || (field.kind === "integer" && !Number.isSafeInteger(parsed)))
+          throw new Error(
+            `${field.label} must be ${field.kind === "integer" ? "an integer" : "a number"}`,
+          );
         value = parsed;
       }
     } else if (field.kind === "json") {
       const source = (modal.intakeText[field.id] ?? "").trim();
       if (source.length > 0) {
-        try { value = JSON.parse(source) as ConfigurationValue; }
-        catch { throw new Error(`${field.label} must be valid JSON`); }
+        try {
+          value = JSON.parse(source) as ConfigurationValue;
+        } catch {
+          throw new Error(`${field.label} must be valid JSON`);
+        }
       }
     } else value = modal.intake[field.id];
-    const empty = value === undefined || value === null || value === "" || Array.isArray(value) && value.length === 0;
+    const empty =
+      value === undefined ||
+      value === null ||
+      value === "" ||
+      (Array.isArray(value) && value.length === 0);
     if (empty) {
       if (field.required) throw new Error(`${field.label} is required`);
       continue;
     }
     if (value === undefined) continue;
-    if (field.kind === "choice" && (typeof value !== "string" || !field.options.some((option) => option.value === value))) throw new Error(`${field.label} contains an unavailable option`);
-    if (field.kind === "multi_choice" && (!Array.isArray(value) || !value.every((item) => typeof item === "string" && field.options.some((option) => option.value === item)))) throw new Error(`${field.label} contains an unavailable option`);
+    if (
+      field.kind === "choice" &&
+      (typeof value !== "string" || !field.options.some((option) => option.value === value))
+    )
+      throw new Error(`${field.label} contains an unavailable option`);
+    if (
+      field.kind === "multi_choice" &&
+      (!Array.isArray(value) ||
+        !value.every(
+          (item) =>
+            typeof item === "string" && field.options.some((option) => option.value === item),
+        ))
+    )
+      throw new Error(`${field.label} contains an unavailable option`);
     output[field.id] = structuredClone(value);
   }
   return output;
 }
 
 function configurationObjectToJsonObject(value: ConfigurationObject): { [key: string]: JsonValue } {
-  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, configurationValueToJsonValue(entry)]));
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [key, configurationValueToJsonValue(entry)]),
+  );
 }
 
 function configurationValueToJsonValue(value: ConfigurationValue): JsonValue {
@@ -4443,7 +5295,9 @@ function configurationValueToJsonValue(value: ConfigurationValue): JsonValue {
     return value;
   }
   if (Array.isArray(value)) return value.map((entry) => configurationValueToJsonValue(entry));
-  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, configurationValueToJsonValue(entry)]));
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [key, configurationValueToJsonValue(entry)]),
+  );
 }
 
 function initialControlIntakeValue(field: ControlIntakeField): ConfigurationValue | undefined {
@@ -4453,7 +5307,10 @@ function initialControlIntakeValue(field: ControlIntakeField): ConfigurationValu
   return undefined;
 }
 
-function editableControlIntakeText(value: ConfigurationValue | undefined, field: ControlIntakeField): string {
+function editableControlIntakeText(
+  value: ConfigurationValue | undefined,
+  field: ControlIntakeField,
+): string {
   if (value === undefined || value === null) return "";
   if (field.kind === "json") return JSON.stringify(value, null, 2);
   return typeof value === "string" || typeof value === "number" ? String(value) : "";
@@ -4463,7 +5320,8 @@ function parseBranches(value: unknown): Array<{ label: string; reference: string
   if (!Array.isArray(value)) throw new Error("authority returned an invalid branch list");
   return value.map((item) => {
     const row = asRecord(item);
-    const reference = typeof row?.ref === "string" ? row.ref : typeof row?.name === "string" ? row.name : undefined;
+    const reference =
+      typeof row?.ref === "string" ? row.ref : typeof row?.name === "string" ? row.name : undefined;
     if (reference === undefined) throw new Error("authority branch entry has no reference");
     const normalized = reference.startsWith("refs/heads/") ? reference : `refs/heads/${reference}`;
     return { label: normalized.replace(/^refs\/heads\//u, ""), reference: normalized };
@@ -4483,7 +5341,8 @@ export function configResourceActions(
 ): Array<"create" | "duplicate" | "delete"> {
   const section = selectedConfigSection(modal);
   const resource = selectedConfigResource(modal);
-  const canCreate = (resource?.createOptions?.length ?? 0) > 0 || (section?.createOptions?.length ?? 0) > 0;
+  const canCreate =
+    (resource?.createOptions?.length ?? 0) > 0 || (section?.createOptions?.length ?? 0) > 0;
   return [
     ...(canCreate ? ["create" as const] : []),
     ...(resource?.canDuplicate === true ? ["duplicate" as const] : []),
@@ -4531,37 +5390,49 @@ function moveConfigField(modal: ConfigureModalState, delta: -1 | 1): void {
   delete modal.textEditor;
 }
 
-function adjustConfigField(modal: ConfigureModalState, delta: -1 | 1, models: readonly ControlModelOption[]): void {
+function adjustConfigField(
+  modal: ConfigureModalState,
+  delta: -1 | 1,
+  models: readonly ControlModelOption[],
+): void {
   const field = selectedConfigField(modal);
   if (field === undefined) return;
   const current = modal.draft[field.key];
   if (field.kind === "boolean") modal.draft[field.key] = current !== true;
   else if (field.kind === "integer") {
-    const value = typeof current === "number" && Number.isSafeInteger(current) ? current : field.minimum ?? 1;
-    modal.draft[field.key] = Math.max(field.minimum ?? Number.MIN_SAFE_INTEGER, Math.min(field.maximum ?? Number.MAX_SAFE_INTEGER, value + delta));
+    const value =
+      typeof current === "number" && Number.isSafeInteger(current) ? current : (field.minimum ?? 1);
+    modal.draft[field.key] = Math.max(
+      field.minimum ?? Number.MIN_SAFE_INTEGER,
+      Math.min(field.maximum ?? Number.MAX_SAFE_INTEGER, value + delta),
+    );
   } else {
-    const modelOptions = field.kind === "model"
-      ? selectableModelsForConfig(models, typeof current === "string" ? current : undefined)
-      : [];
-    const options = field.kind === "model"
-      ? modelOptions.map((model) => ({ value: `${model.provider}/${model.id}` }))
-      : field.kind === "thinking"
-        ? configuredResourceModel(modal, models)?.thinkingLevels.map((value) => ({ value })) ?? []
-        : field.options ?? [];
+    const modelOptions =
+      field.kind === "model"
+        ? selectableModelsForConfig(models, typeof current === "string" ? current : undefined)
+        : [];
+    const options =
+      field.kind === "model"
+        ? modelOptions.map((model) => ({ value: `${model.provider}/${model.id}` }))
+        : field.kind === "thinking"
+          ? (configuredResourceModel(modal, models)?.thinkingLevels.map((value) => ({ value })) ??
+            [])
+          : (field.options ?? []);
     if (options.length === 0) return;
     const value = typeof current === "string" ? current : options[0]!.value;
     const values = options.map((option) => option.value);
-    modal.draft[field.key] = field.kind === "thinking"
-      ? moveOptionalString(values, value, delta)
-      : moveString(values, value, delta);
+    modal.draft[field.key] =
+      field.kind === "thinking"
+        ? moveOptionalString(values, value, delta)
+        : moveString(values, value, delta);
     if (field.kind === "model") {
       const resource = selectedConfigResource(modal);
       const thinkingField = resource?.fields.find((candidate) => candidate.kind === "thinking");
       const selectedValue = modal.draft[field.key];
-      const selectedModel = typeof selectedValue === "string"
-        ? configuredModel(models, selectedValue)
-        : undefined;
-      const currentThinking = thinkingField === undefined ? undefined : modal.draft[thinkingField.key];
+      const selectedModel =
+        typeof selectedValue === "string" ? configuredModel(models, selectedValue) : undefined;
+      const currentThinking =
+        thinkingField === undefined ? undefined : modal.draft[thinkingField.key];
       if (
         thinkingField !== undefined &&
         selectedModel !== undefined &&
@@ -4582,14 +5453,19 @@ function adjustConfigField(modal: ConfigureModalState, delta: -1 | 1, models: re
 function editConfigText(modal: ConfigureModalState, edit: (value: string) => string): void {
   const field = selectedConfigField(modal);
   if (field === undefined || !isTextField(field)) return;
-  const current = modal.textEditor?.key === field.key
-    ? modal.textEditor.value
-    : configEditableText(field, modal.draft[field.key]);
+  const current =
+    modal.textEditor?.key === field.key
+      ? modal.textEditor.value
+      : configEditableText(field, modal.draft[field.key]);
   const value = edit(current).slice(0, 4 * 1024 * 1024);
   modal.textEditor = { key: field.key, value };
-  modal.draft[field.key] = field.kind === "string_list"
-    ? value.split("\n").map((item) => item.trim()).filter((item) => item.length > 0)
-    : value;
+  modal.draft[field.key] =
+    field.kind === "string_list"
+      ? value
+          .split("\n")
+          .map((item) => item.trim())
+          .filter((item) => item.length > 0)
+      : value;
   modal.dirty = !jsonEqual(modal.draft, modal.snapshot.values);
 }
 
@@ -4618,22 +5494,32 @@ function parseConfigScalar(
   if (field.kind === "integer") {
     if (!/^-?\d+$/u.test(source.trim())) return `${field.label} must be a whole number.`;
     const value = Number(source.trim());
-    if (!Number.isSafeInteger(value)) return `${field.label} is outside the supported integer range.`;
-    if (field.minimum !== undefined && value < field.minimum) return `${field.label} must be at least ${field.minimum}.`;
-    if (field.maximum !== undefined && value > field.maximum) return `${field.label} must be at most ${field.maximum}.`;
+    if (!Number.isSafeInteger(value))
+      return `${field.label} is outside the supported integer range.`;
+    if (field.minimum !== undefined && value < field.minimum)
+      return `${field.label} must be at least ${field.minimum}.`;
+    if (field.maximum !== undefined && value > field.maximum)
+      return `${field.label} must be at most ${field.maximum}.`;
     return { value };
   }
   if (field.kind === "boolean") {
     const normalized = source.trim().toLocaleLowerCase("en-US");
-    if (normalized !== "true" && normalized !== "false") return `${field.label} must be true or false.`;
+    if (normalized !== "true" && normalized !== "false")
+      return `${field.label} must be true or false.`;
     return { value: normalized === "true" };
   }
   if (field.kind === "string_list") {
-    return { value: source.split("\n").map((item) => item.trim()).filter((item) => item.length > 0) };
+    return {
+      value: source
+        .split("\n")
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0),
+    };
   }
   if (field.kind === "select" || field.kind === "model" || field.kind === "thinking") {
     const options = field.options?.map((option) => option.value) ?? [];
-    if (options.length > 0 && !options.includes(source)) return `${field.label} must use one of the configured choices.`;
+    if (options.length > 0 && !options.includes(source))
+      return `${field.label} must use one of the configured choices.`;
   }
   return { value: source };
 }
@@ -4644,7 +5530,8 @@ function isTextField(field: ConfigFieldDefinition): boolean {
 
 function firstDocumentDomain(catalog: ConfigDocumentCatalog): number {
   const first = CONFIG_DOCUMENT_DOMAINS.findIndex((domain) =>
-    catalog.documents.some((document) => document.domain === domain));
+    catalog.documents.some((document) => document.domain === domain),
+  );
   return first < 0 ? 0 : first;
 }
 
@@ -4685,10 +5572,9 @@ function initialActionFieldValue(field: StageActionFieldSchema): StageActionValu
 }
 
 function actionFieldValues(action: StageActionCapability): Record<string, StageActionValue> {
-  return Object.fromEntries((action.form?.fields ?? []).map((field) => [
-    field.key,
-    initialActionFieldValue(field),
-  ]));
+  return Object.fromEntries(
+    (action.form?.fields ?? []).map((field) => [field.key, initialActionFieldValue(field)]),
+  );
 }
 
 function isTextActionField(field: StageActionFieldSchema): boolean {
@@ -4724,35 +5610,49 @@ function cycleActionFieldValue(
   }
   if (field.kind === "select") {
     const options = field.options?.map((option) => option.value) ?? [];
-    if (options.length > 0) values[field.key] = moveOptionalString(options, String(values[field.key] ?? ""), delta);
+    if (options.length > 0)
+      values[field.key] = moveOptionalString(options, String(values[field.key] ?? ""), delta);
     return;
   }
   if (field.kind === "integer" || field.kind === "number") {
-    const current = typeof values[field.key] === "number" ? values[field.key] as number : field.minimum ?? 0;
-    const minimum = field.minimum ?? (field.kind === "integer" ? Number.MIN_SAFE_INTEGER : -Number.MAX_VALUE);
-    const maximum = field.maximum ?? (field.kind === "integer" ? Number.MAX_SAFE_INTEGER : Number.MAX_VALUE);
+    const current =
+      typeof values[field.key] === "number" ? (values[field.key] as number) : (field.minimum ?? 0);
+    const minimum =
+      field.minimum ?? (field.kind === "integer" ? Number.MIN_SAFE_INTEGER : -Number.MAX_VALUE);
+    const maximum =
+      field.maximum ?? (field.kind === "integer" ? Number.MAX_SAFE_INTEGER : Number.MAX_VALUE);
     values[field.key] = Math.min(maximum, Math.max(minimum, current + delta));
   }
 }
 
 function questionDraftMatchesSaved(question: QuestionView, draft: QuestionDraftState): boolean {
-  return draft.selectedOptionId === question.savedSelectedOptionId &&
-    draft.notes.trim() === (question.savedNotes ?? "").trim();
+  return (
+    draft.selectedOptionId === question.savedSelectedOptionId &&
+    draft.notes.trim() === (question.savedNotes ?? "").trim()
+  );
 }
 
 function normalizeModels(models: readonly ControlModelOption[]): ControlModelOption[] {
   const seen = new Set<string>();
-  return models.filter((model) => {
-    const key = `${model.provider}/${model.id}`;
-    if (seen.has(key) || model.provider.trim().length === 0 || model.id.trim().length === 0) return false;
-    seen.add(key);
-    return true;
-  }).map((model) => ({
-    ...model,
-    thinkingLevels: THINKING_LEVELS.filter((level) => model.thinkingLevels.includes(level)),
-  })).sort((left, right) =>
-    Number(right.available) - Number(left.available) || left.provider.localeCompare(right.provider) || left.name.localeCompare(right.name) || left.id.localeCompare(right.id)
-  );
+  return models
+    .filter((model) => {
+      const key = `${model.provider}/${model.id}`;
+      if (seen.has(key) || model.provider.trim().length === 0 || model.id.trim().length === 0)
+        return false;
+      seen.add(key);
+      return true;
+    })
+    .map((model) => ({
+      ...model,
+      thinkingLevels: THINKING_LEVELS.filter((level) => model.thinkingLevels.includes(level)),
+    }))
+    .sort(
+      (left, right) =>
+        Number(right.available) - Number(left.available) ||
+        left.provider.localeCompare(right.provider) ||
+        left.name.localeCompare(right.name) ||
+        left.id.localeCompare(right.id),
+    );
 }
 
 function selectableModels(
@@ -4761,7 +5661,9 @@ function selectableModels(
   currentModel: string,
 ): Array<Pick<ControlModelOption, "provider" | "id" | "thinkingLevels">> {
   const available = models.filter((model) => model.available);
-  const current = models.find((model) => model.provider === currentProvider && model.id === currentModel);
+  const current = models.find(
+    (model) => model.provider === currentProvider && model.id === currentModel,
+  );
   if (available.length > 0) return [...available];
   // Keep a configured unavailable value visible when no executable alternative exists, but there
   // is no cycle that can select any other unavailable catalog entry.
@@ -4826,11 +5728,16 @@ function configuredModel(
 ): ControlModelOption | undefined {
   const split = value.indexOf("/");
   if (split < 0) return undefined;
-  return models.find((model) =>
-    model.provider === value.slice(0, split) && model.id === value.slice(split + 1));
+  return models.find(
+    (model) => model.provider === value.slice(0, split) && model.id === value.slice(split + 1),
+  );
 }
 
-function moveSelection<T>(values: readonly T[], selected: T | undefined, delta: -1 | 1): T | undefined {
+function moveSelection<T>(
+  values: readonly T[],
+  selected: T | undefined,
+  delta: -1 | 1,
+): T | undefined {
   if (values.length === 0) return undefined;
   const index = selected === undefined ? (delta > 0 ? -1 : 0) : values.indexOf(selected);
   return values[(Math.max(-1, index) + delta + values.length) % values.length];
@@ -4848,16 +5755,27 @@ function cycleIndex(index: number, length: number, delta: -1 | 1): number {
 
 function parseGraph(value: unknown): { nodes: GraphNode[]; edges: GraphEdge[] } {
   const root = asRecord(value);
-  if (root === undefined || !Array.isArray(root.nodes) || !Array.isArray(root.edges)) throw new Error("authority returned an invalid graph projection");
+  if (root === undefined || !Array.isArray(root.nodes) || !Array.isArray(root.edges))
+    throw new Error("authority returned an invalid graph projection");
   return {
     nodes: root.nodes.map((node) => {
       const row = asRecord(node);
-      if (typeof row?.id !== "string" || typeof row.type !== "string" || typeof row.title !== "string") throw new Error("authority returned an invalid graph node");
+      if (
+        typeof row?.id !== "string" ||
+        typeof row.type !== "string" ||
+        typeof row.title !== "string"
+      )
+        throw new Error("authority returned an invalid graph node");
       return row as unknown as GraphNode;
     }),
     edges: root.edges.map((edge) => {
       const row = asRecord(edge);
-      if (typeof row?.source !== "string" || typeof row.relation !== "string" || typeof row.target !== "string") throw new Error("authority returned an invalid graph edge");
+      if (
+        typeof row?.source !== "string" ||
+        typeof row.relation !== "string" ||
+        typeof row.target !== "string"
+      )
+        throw new Error("authority returned an invalid graph edge");
       return row as unknown as GraphEdge;
     }),
   };
@@ -4883,27 +5801,6 @@ function emptyProfileConflictCatalog(): ControlProfileConflictCatalog {
   };
 }
 
-function runBlockers(run: RunRecord): string[] {
-  const values = [
-    run.lifecycle.blocker,
-    run.lifecycle.terminalReason,
-    run.git.planning.blocker,
-    run.git.run.blocker,
-    run.git.promotion?.blocker,
-    ...Object.values(run.git.ticketCycles).map((cycle) => cycle.blocker),
-    ...Object.values(run.tickets).map((ticket) => ticket.blocker),
-  ];
-  const seen = new Set<string>();
-  return values.flatMap((value) => {
-    if (value === undefined) return [];
-    const safe = conciseOperatorReason(value);
-    const normalized = safe.toLocaleLowerCase("en-US");
-    if (safe.length === 0 || seen.has(normalized)) return [];
-    seen.add(normalized);
-    return [safe];
-  }).slice(0, 6);
-}
-
 function conciseOperatorReason(value: string): string {
   const safe = value
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, "")
@@ -4927,7 +5824,9 @@ function titleCaseForOperator(value: string): string {
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 function removeLastCharacter(value: string): string {
@@ -4956,7 +5855,10 @@ function insertBoundedAtCharacter(
 ): { value: string; cursor: number } {
   const characters = Array.from(value);
   const cursor = clampCharacterOffset(value, offset);
-  const admitted = Array.from(inserted).slice(0, Math.max(0, maximumCharacters - characters.length));
+  const admitted = Array.from(inserted).slice(
+    0,
+    Math.max(0, maximumCharacters - characters.length),
+  );
   characters.splice(cursor, 0, ...admitted);
   return { value: characters.join(""), cursor: cursor + admitted.length };
 }
@@ -5013,8 +5915,10 @@ class RunPageRefreshError extends Error {
 }
 
 function isRunPageStale(error: unknown): boolean {
-  return error instanceof RunPageRefreshError ||
-    error instanceof AuthorityClientError && error.code === "run_page_stale";
+  return (
+    error instanceof RunPageRefreshError ||
+    (error instanceof AuthorityClientError && error.code === "run_page_stale")
+  );
 }
 
 function isRunPageTarget(error: unknown): boolean {

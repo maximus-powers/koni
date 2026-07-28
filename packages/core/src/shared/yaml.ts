@@ -142,7 +142,10 @@ function inspectNode(
     bag.error("yaml.tag", path, "explicit YAML tags are not permitted");
   }
   if (isScalar(node)) {
-    if (typeof node.value === "string" && Buffer.byteLength(node.value, "utf8") > limits.maxScalarBytes) {
+    if (
+      typeof node.value === "string" &&
+      Buffer.byteLength(node.value, "utf8") > limits.maxScalarBytes
+    ) {
       bag.error("yaml.scalar_limit", path, "YAML scalar exceeds the configured byte limit");
     }
     return;
@@ -229,14 +232,7 @@ function normalizeYamlValue(
       bag.error("yaml.unsafe_key", path, "YAML mapping contains an unsafe key");
       continue;
     }
-    normalized[key] = normalizeYamlValue(
-      item,
-      pointer(path, key),
-      depth + 1,
-      state,
-      limits,
-      bag,
-    );
+    normalized[key] = normalizeYamlValue(item, pointer(path, key), depth + 1, state, limits, bag);
   }
   return normalized;
 }

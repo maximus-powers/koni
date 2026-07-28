@@ -1,18 +1,20 @@
 #!/usr/bin/env node
 
 import { realpathSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { KONI_CORE_API_VERSION } from "./contracts/profile-package.js";
 import { discoverAuthorityEndpoint } from "./authority/endpoint.js";
 import { GitClient } from "./git/client.js";
 import { runStandaloneControlCenter } from "./control-center/standalone.js";
+import { parseControlCatalog } from "./control-center/protocol.js";
+import { connectRunningKoniAuthority } from "./pi/interactive-tools.js";
+import { parseMonitorSnapshot, type MonitorRunSummary } from "./monitor/protocol.js";
 import {
-  adoptProjectLegacyRun,
   createProjectRun,
   ensureProjectAuthority,
   inspectProjectAuthority,
-  previewProjectLegacyRunAdoption,
   resumeProjectRun,
   serveProjectAuthority,
   stopProjectAuthority,
@@ -20,9 +22,11 @@ import {
 } from "./operator/authority-bootstrap.js";
 import {
   installAndCacheProfile,
+  previewProfileUpdate,
   readInstalledProfileReference,
   resolveProfilePackageRoot,
 } from "./operator/profile-source.js";
+import { isSha256Digest, type Sha256Digest } from "./shared/canonical.js";
 
 export interface KoniCliIO {
   stdout(text: string): void;
@@ -38,13 +42,13 @@ export interface KoniCliDependencies {
   stop: typeof stopProjectAuthority;
   validate: typeof validateProjectConfiguration;
   install: typeof installAndCacheProfile;
+  previewInstall: typeof previewProfileUpdate;
   resolveProfile: typeof resolveProfilePackageRoot;
   readInstalled: typeof readInstalledProfileReference;
   run: typeof createProjectRun;
-  previewLegacyRuns: typeof previewProjectLegacyRunAdoption;
-  adoptLegacyRun: typeof adoptProjectLegacyRun;
   resumeRun: typeof resumeProjectRun;
   standalone: typeof runStandaloneControlCenter;
+  connectReadOnly: typeof connectRunningKoniAuthority;
 }
 
 const DEFAULT_IO: KoniCliIO = {
@@ -61,13 +65,13 @@ const DEFAULT_DEPENDENCIES: KoniCliDependencies = {
   stop: stopProjectAuthority,
   validate: validateProjectConfiguration,
   install: installAndCacheProfile,
+  previewInstall: previewProfileUpdate,
   resolveProfile: resolveProfilePackageRoot,
   readInstalled: readInstalledProfileReference,
   run: createProjectRun,
-  previewLegacyRuns: previewProjectLegacyRunAdoption,
-  adoptLegacyRun: adoptProjectLegacyRun,
   resumeRun: resumeProjectRun,
   standalone: runStandaloneControlCenter,
+  connectReadOnly: connectRunningKoniAuthority,
 };
 
 export async function runKoniCli(
@@ -109,18 +113,132 @@ export async function runKoniCli(
       const installed = await dependencies.readInstalled(endpoint.identity.worktreeRoot);
       const selector = parsed.profilePackage ?? parsed.positionals[0] ?? installed.packageName;
       const packageRoot = await dependencies.resolveProfile(selector);
-      const result = await dependencies.install({
+      const preview = await dependencies.previewInstall({
         projectRoot: endpoint.identity.worktreeRoot,
         profilePackageRoot: packageRoot,
       });
-      print(io, parsed.json, result, [
+      if (preview.mandatoryRetirements.length > 0 && !parsed.apply) {
+        print(io, parsed.json, preview, [
+          `Update ${installed.profileVersion} → ${preview.profileVersion} retires configured semantics.`,
+          ...preview.mandatoryRetirements.flatMap((retirement) => [
+            `Retirement: ${retirement.id}`,
+            ...retirement.operations.map(
+              (operation) =>
+                `  ${operation.file}${operation.pointer}: ${operation.project.present ? JSON.stringify(operation.project.value) : "already absent"}`,
+            ),
+          ]),
+          `Preview: ${preview.previewSha256}`,
+          "No project files were changed. Apply this exact preview with:",
+          `  koni update ${selector} --preview ${preview.previewSha256} --apply`,
+        ]);
+        return 0;
+      }
+      if (preview.mandatoryRetirements.length > 0 && parsed.previewSha256 === undefined) {
+        throw new CliUsageError(
+          "update --apply requires --preview <sha256> from the semantic-retirement preview",
+        );
+      }
+      const result = await dependencies.install({
+        projectRoot: endpoint.identity.worktreeRoot,
+        profilePackageRoot: packageRoot,
+        ...(parsed.previewSha256 === undefined
+          ? {}
+          : { expectedPreviewSha256: parseSha256(parsed.previewSha256, "--preview") }),
+      });
+      // A live authority pins the Core build and configuration it started with, so an update is
+      // invisible until it restarts. Keeping the authority an invisible background process, stop
+      // any running one here; the next `/koni`, `koni tui`, or run transparently starts it fresh
+      // on the updated configuration. Stopping quiesces active runs rather than dropping them.
+      const authority = await dependencies.stop({
+        projectRoot: endpoint.identity.worktreeRoot,
+        version: KONI_CORE_API_VERSION,
+      });
+      print(io, parsed.json, { ...result, authority }, [
         `Updated ${result.packageName}@${result.profileVersion}`,
         `Updated ${result.updated.length}, added ${result.added.length}, preserved ${result.preserved.length}`,
+        ...(authority.wasRunning
+          ? [
+              authority.pausedRunCount === 0
+                ? "Stopped the running authority so the update takes effect; it restarts automatically on next use."
+                : `Stopped the running authority and paused ${authority.pausedRunCount} active run(s) so the update takes effect; it restarts automatically on next use.`,
+            ]
+          : []),
         ...(result.pendingUpstream.length === 0
           ? []
-          : [`${result.pendingUpstream.length} upstream change(s) staged under .koni/.managed/upstream`]),
+          : [
+              `${result.pendingUpstream.length} upstream change(s) need review.`,
+              "Run `koni conflicts` or open Configure → Upstream changes.",
+            ]),
       ]);
       return 0;
+    }
+    case "conflicts": {
+      const client = await dependencies.ensure({
+        projectRoot,
+        version: KONI_CORE_API_VERSION,
+        client: "cli",
+      });
+      try {
+        const selectedPath = parsed.positionals[0];
+        if (selectedPath === undefined) {
+          const response = await client.request("profile.conflicts.list");
+          const result = conflictCatalog(response.result);
+          print(
+            io,
+            parsed.json,
+            result,
+            result.conflicts.length === 0
+              ? ["No upstream profile changes need review."]
+              : [
+                  `${result.conflicts.length} upstream profile change(s) need review:`,
+                  ...result.conflicts.map((conflict) => `  ${conflict.path} · ${conflict.reason}`),
+                  "Inspect one with `koni conflicts <path>`.",
+                ],
+          );
+          return 0;
+        }
+        const inspected = conflictInspection(
+          (
+            await client.request("profile.conflicts.inspect", {
+              path: selectedPath,
+            })
+          ).result,
+        );
+        if (parsed.conflictResolution === undefined) {
+          print(io, parsed.json, inspected, [
+            `${inspected.conflict.title} · ${inspected.conflict.reason}`,
+            `Path: ${inspected.conflict.path}`,
+            "",
+            "Project version:",
+            inspected.currentText ?? "(deleted)",
+            "",
+            "Upstream version:",
+            inspected.upstreamText ?? "(deleted upstream)",
+            "",
+            `Resolve with --keep-project or --accept-upstream: koni conflicts ${selectedPath} --keep-project`,
+          ]);
+          return 0;
+        }
+        const response = await client.request(
+          "profile.conflicts.resolve",
+          {
+            path: inspected.conflict.path,
+            expectedLifecycleGeneration: inspected.lifecycleGeneration,
+            expectedProjectSha256: inspected.conflict.currentSha256,
+            resolution: parsed.conflictResolution,
+          },
+          {
+            expectedRevision: client.revision,
+            idempotencyKey: `profile.conflicts.resolve:${randomUUID()}`,
+          },
+        );
+        print(io, parsed.json, response.result ?? {}, [
+          `${parsed.conflictResolution === "keep_project" ? "Kept project version of" : "Accepted upstream version of"} ${selectedPath}.`,
+        ]);
+        return 0;
+      } finally {
+        client.close();
+      }
     }
     case "start": {
       const client = await dependencies.ensure({
@@ -140,9 +258,9 @@ export async function runKoniCli(
       });
       print(io, parsed.json, result, [
         result.wasRunning ? "Koni authority stopped." : "Koni authority was already stopped.",
-        ...(result.pausedRunIds.length === 0
+        ...(result.pausedRunCount === 0
           ? []
-          : [`Paused ${result.pausedRunIds.length} active run(s) before shutdown.`]),
+          : [`Paused ${result.pausedRunCount} active run(s) before shutdown.`]),
       ]);
       return 0;
     }
@@ -160,24 +278,46 @@ export async function runKoniCli(
       client.close();
       print(io, parsed.json, { stopped, authority: response.result ?? {} }, [
         "Koni authority restarted on the current Core build.",
-        ...(stopped.pausedRunIds.length === 0
+        ...(stopped.pausedRunCount === 0
           ? []
-          : [`${stopped.pausedRunIds.length} run(s) remain paused; resume them explicitly when ready.`]),
+          : [`${stopped.pausedRunCount} run(s) remain paused; resume them explicitly when ready.`]),
       ]);
       return 0;
     }
     case "status": {
       const status = await dependencies.inspect({ projectRoot, version: KONI_CORE_API_VERSION });
-      print(io, parsed.json, status, [
+      let runs: readonly MonitorRunSummary[] = [];
+      if (status.running && (status.authority?.runCount ?? 0) > 0) {
+        const client = await dependencies.connectReadOnly({
+          projectRoot,
+          version: KONI_CORE_API_VERSION,
+        });
+        if (client !== undefined) {
+          try {
+            const response = await client.request("monitor.snapshot", { limit: 50 });
+            runs = parseMonitorSnapshot(response.result).runs;
+          } finally {
+            client.close();
+          }
+        }
+      }
+      print(io, parsed.json, { ...status, runs }, [
         `Authority: ${status.running ? "running" : "stopped"}`,
         `Project: ${status.projectRoot}`,
         `Git common dir: ${status.commonDirectory}`,
-        `Profile: ${status.profile === undefined
-          ? "not installed"
-          : `${status.profile.packageName}@${status.profile.profileVersion}`}`,
+        `Profile: ${
+          status.profile === undefined
+            ? "not installed"
+            : `${status.profile.packageName}@${status.profile.profileVersion}`
+        }`,
         ...(status.authority === undefined
           ? []
           : [`Revision: ${status.authority.revision}`, `Runs: ${status.authority.runCount}`]),
+        ...runs.flatMap((run) => [
+          `  ${run.id} · ${run.runType} · ${runStatusLine(run)}`,
+          ...(run.blocker === undefined ? [] : [`    blocked: ${run.blocker}`]),
+          ...(run.failure === undefined ? [] : [`    failed: ${run.failure}`]),
+        ]),
       ]);
       return status.profile === undefined ? 2 : 0;
     }
@@ -187,18 +327,24 @@ export async function runKoniCli(
         throw new CliUsageError(`unknown config action: ${action}`);
       }
       const status = await dependencies.validate(projectRoot);
-      print(io, parsed.json, status, status.ok && status.configuration !== undefined
-        ? [
-          `Valid ${status.profile.packageName}@${status.profile.profileVersion} configuration`,
-          `Run types: ${status.configuration.runTypes.join(", ")}`,
-          `Agents: ${status.configuration.agents.join(", ")}`,
-          `Configuration: ${status.configuration.sha256}`,
-        ]
-        : [
-          "Configuration is invalid:",
-          ...status.diagnostics.map((diagnostic) =>
-            `  ${diagnostic.code} ${diagnostic.path}: ${diagnostic.message}`),
-        ]);
+      print(
+        io,
+        parsed.json,
+        status,
+        status.ok && status.configuration !== undefined
+          ? [
+              `Valid ${status.profile.packageName}@${status.profile.profileVersion} configuration`,
+              `Run types: ${status.configuration.runTypes.join(", ")}`,
+              `Agents: ${status.configuration.agents.join(", ")}`,
+              `Configuration: ${status.configuration.sha256}`,
+            ]
+          : [
+              "Configuration is invalid:",
+              ...status.diagnostics.map(
+                (diagnostic) => `  ${diagnostic.code} ${diagnostic.path}: ${diagnostic.message}`,
+              ),
+            ],
+      );
       return status.ok ? 0 : 2;
     }
     case "tui": {
@@ -216,6 +362,12 @@ export async function runKoniCli(
           projectRoot: endpoint.identity.worktreeRoot,
           version: KONI_CORE_API_VERSION,
           client,
+          reconnectClient: () =>
+            dependencies.ensure({
+              projectRoot: endpoint.identity.worktreeRoot,
+              version: KONI_CORE_API_VERSION,
+              client: "tui",
+            }),
         });
       } finally {
         client.close();
@@ -225,13 +377,28 @@ export async function runKoniCli(
     case "run": {
       const objective = parsed.goal ?? parsed.positionals.join(" ").trim();
       if (objective.length === 0) throw new CliUsageError("run requires --goal <text>");
-      const runTypeId = parsed.runType ?? "small";
+      let runTypeId = parsed.runType;
+      if (runTypeId === undefined) {
+        const client = await dependencies.ensure({
+          projectRoot,
+          version: KONI_CORE_API_VERSION,
+          client: "cli",
+        });
+        try {
+          const catalog = parseControlCatalog((await client.request("control.catalog")).result);
+          runTypeId = catalog.defaultRunTypeId;
+        } finally {
+          client.close();
+        }
+      }
       // `--from <ref>` implies branching a new target; either flag opts into provisioning.
       const createTarget = parsed.newTarget || parsed.from !== undefined;
       if (createTarget && parsed.target === undefined) {
-        throw new CliUsageError("--new-target requires --target <branch> to name the branch to create");
+        throw new CliUsageError(
+          "--new-target requires --target <branch> to name the branch to create",
+        );
       }
-      const targetRef = parsed.target ?? await defaultTargetBranch(projectRoot);
+      const targetRef = parsed.target ?? (await defaultTargetBranch(projectRoot));
       const result = await dependencies.run({
         projectRoot,
         version: KONI_CORE_API_VERSION,
@@ -245,43 +412,6 @@ export async function runKoniCli(
         ? ` on new branch ${targetRef}${parsed.from === undefined ? "" : ` from ${parsed.from}`}`
         : ` on ${targetRef}`;
       print(io, parsed.json, result, [`Started ${runTypeId} run ${result.runId}${onto}.`]);
-      return 0;
-    }
-    case "adopt": {
-      if (parsed.migrationId === undefined) {
-        throw new CliUsageError("adopt requires --migration <migration-id>");
-      }
-      if (!parsed.apply) {
-        const catalog = await dependencies.previewLegacyRuns({
-          projectRoot,
-          version: KONI_CORE_API_VERSION,
-          migrationId: parsed.migrationId,
-          ...(parsed.runId === undefined ? {} : { runId: parsed.runId }),
-        });
-        const ready = catalog.runs.filter((run) => run.disposition === "ready").length;
-        const blocked = catalog.runs.filter((run) => run.disposition === "blocked").length;
-        const adopted = catalog.runs.filter((run) => run.disposition === "adopted").length;
-        print(io, parsed.json, catalog, [
-          `Legacy migration ${catalog.migrationId}: ${catalog.runs.length} run(s)`,
-          `Ready ${ready}, blocked ${blocked}, already adopted ${adopted}`,
-          "Preview only. Add --apply --run <legacy-run-id> to create one paused successor.",
-        ]);
-        return 0;
-      }
-      if (parsed.runId === undefined) {
-        throw new CliUsageError("adopt --apply requires --run <legacy-run-id>");
-      }
-      const result = await dependencies.adoptLegacyRun({
-        projectRoot,
-        version: KONI_CORE_API_VERSION,
-        migrationId: parsed.migrationId,
-        runId: parsed.runId,
-      });
-      print(io, parsed.json, result, [
-        `${result.status === "already_adopted" ? "Found" : "Created"} paused successor ${result.successorRunId}`,
-        `Legacy source ${result.sourceRunId} remains immutable.`,
-        `Resume explicitly with: koni resume --run ${result.successorRunId}`,
-      ]);
       return 0;
     }
     case "resume": {
@@ -299,14 +429,39 @@ export async function runKoniCli(
       if (parsed.positionals[0] !== "serve") {
         throw new CliUsageError("authority is an internal command; expected `authority serve`");
       }
-      await dependencies.serve({ projectRoot, version: KONI_CORE_API_VERSION });
+      const providerFreeAdmissionProbe = process.env.KONI_PROVIDER_FREE_RELEASE_PROBE === "1";
+      if (
+        providerFreeAdmissionProbe &&
+        (process.env.NODE_ENV !== "test" || process.env.KONI_AUTHORITY_DAEMON !== "1")
+      ) {
+        throw new CliUsageError(
+          "provider-free authority admission is restricted to the packaged release probe",
+        );
+      }
+      await dependencies.serve({
+        projectRoot,
+        version: KONI_CORE_API_VERSION,
+        ...(providerFreeAdmissionProbe ? { providerFreeAdmissionProbe: true } : {}),
+      });
       return 0;
     }
   }
 }
 
 interface ParsedCli {
-  command?: "init" | "update" | "start" | "stop" | "restart" | "status" | "config" | "tui" | "run" | "adopt" | "resume" | "authority";
+  command?:
+    | "init"
+    | "update"
+    | "conflicts"
+    | "start"
+    | "stop"
+    | "restart"
+    | "status"
+    | "config"
+    | "tui"
+    | "run"
+    | "resume"
+    | "authority";
   positionals: string[];
   root?: string;
   profilePackage?: string;
@@ -315,8 +470,9 @@ interface ParsedCli {
   newTarget: boolean;
   from?: string;
   goal?: string;
-  migrationId?: string;
   runId?: string;
+  previewSha256?: string;
+  conflictResolution?: "keep_project" | "accept_upstream";
   apply: boolean;
   json: boolean;
   help: boolean;
@@ -324,21 +480,35 @@ interface ParsedCli {
 }
 
 function parseCli(argv: readonly string[]): ParsedCli {
-  const result: ParsedCli = { positionals: [], newTarget: false, apply: false, json: false, help: false, version: false };
+  const result: ParsedCli = {
+    positionals: [],
+    newTarget: false,
+    apply: false,
+    json: false,
+    help: false,
+    version: false,
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]!;
     if (argument === "--help" || argument === "-h") result.help = true;
     else if (argument === "--version" || argument === "-V") result.version = true;
     else if (argument === "--json") result.json = true;
     else if (argument === "--root") result.root = requireOptionValue(argv, ++index, argument);
-    else if (argument === "--profile-package") result.profilePackage = requireOptionValue(argv, ++index, argument);
-    else if (argument === "--type" || argument === "--run-type") result.runType = requireOptionValue(argv, ++index, argument);
+    else if (argument === "--profile-package")
+      result.profilePackage = requireOptionValue(argv, ++index, argument);
+    else if (argument === "--type" || argument === "--run-type")
+      result.runType = requireOptionValue(argv, ++index, argument);
     else if (argument === "--target") result.target = requireOptionValue(argv, ++index, argument);
     else if (argument === "--new-target") result.newTarget = true;
     else if (argument === "--from") result.from = requireOptionValue(argv, ++index, argument);
     else if (argument === "--goal") result.goal = requireOptionValue(argv, ++index, argument);
-    else if (argument === "--migration") result.migrationId = requireOptionValue(argv, ++index, argument);
     else if (argument === "--run") result.runId = requireOptionValue(argv, ++index, argument);
+    else if (argument === "--preview")
+      result.previewSha256 = requireOptionValue(argv, ++index, argument);
+    else if (argument === "--keep-project")
+      result.conflictResolution = oneConflictResolution(result, "keep_project");
+    else if (argument === "--accept-upstream")
+      result.conflictResolution = oneConflictResolution(result, "accept_upstream");
     else if (argument === "--apply") result.apply = true;
     else if (argument.startsWith("-")) throw new CliUsageError(`unknown option: ${argument}`);
     else if (result.command === undefined) {
@@ -351,19 +521,94 @@ function parseCli(argv: readonly string[]): ParsedCli {
 
 function requireOptionValue(argv: readonly string[], index: number, option: string): string {
   const value = argv[index];
-  if (value === undefined || value.startsWith("-")) throw new CliUsageError(`${option} requires a value`);
+  if (value === undefined || value.startsWith("-"))
+    throw new CliUsageError(`${option} requires a value`);
   return value;
 }
 
 function isCommand(value: string): value is NonNullable<ParsedCli["command"]> {
-  return new Set(["init", "update", "start", "stop", "restart", "status", "config", "tui", "run", "adopt", "resume", "authority"]).has(value);
+  return new Set([
+    "init",
+    "update",
+    "conflicts",
+    "start",
+    "stop",
+    "restart",
+    "status",
+    "config",
+    "tui",
+    "run",
+    "resume",
+    "authority",
+  ]).has(value);
+}
+
+function oneConflictResolution(
+  parsed: ParsedCli,
+  resolution: NonNullable<ParsedCli["conflictResolution"]>,
+): NonNullable<ParsedCli["conflictResolution"]> {
+  if (parsed.conflictResolution !== undefined && parsed.conflictResolution !== resolution) {
+    throw new CliUsageError("choose only one of --keep-project or --accept-upstream");
+  }
+  return resolution;
+}
+
+function parseSha256(value: string, option: string): Sha256Digest {
+  if (!/^sha256:[a-f0-9]{64}$/u.test(value))
+    throw new CliUsageError(`${option} must be a canonical sha256 digest`);
+  return value as Sha256Digest;
+}
+
+function conflictCatalog(value: unknown): {
+  conflicts: Array<{ path: string; reason: string }>;
+} & Record<string, unknown> {
+  if (
+    !isRecord(value) ||
+    value.protocol !== "koni.profile-upstream-conflict-catalog.v1" ||
+    !Array.isArray(value.conflicts) ||
+    value.conflicts.some(
+      (entry) =>
+        !isRecord(entry) || typeof entry.path !== "string" || typeof entry.reason !== "string",
+    )
+  ) {
+    throw new Error("authority returned an invalid upstream conflict catalog");
+  }
+  return value as { conflicts: Array<{ path: string; reason: string }> } & Record<string, unknown>;
+}
+
+function conflictInspection(value: unknown): {
+  lifecycleGeneration: number;
+  conflict: { path: string; title: string; reason: string; currentSha256: Sha256Digest | null };
+  currentText: string | null;
+  upstreamText: string | null;
+} & Record<string, unknown> {
+  if (
+    !isRecord(value) ||
+    value.protocol !== "koni.profile-upstream-conflict-inspection.v1" ||
+    !Number.isSafeInteger(value.lifecycleGeneration) ||
+    !isRecord(value.conflict) ||
+    typeof value.conflict.path !== "string" ||
+    typeof value.conflict.title !== "string" ||
+    typeof value.conflict.reason !== "string" ||
+    (value.conflict.currentSha256 !== null && !isSha256Digest(value.conflict.currentSha256)) ||
+    (value.currentText !== null && typeof value.currentText !== "string") ||
+    (value.upstreamText !== null && typeof value.upstreamText !== "string")
+  ) {
+    throw new Error("authority returned an invalid upstream conflict inspection");
+  }
+  return value as ReturnType<typeof conflictInspection>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function defaultTargetBranch(projectRoot: string): Promise<string> {
   const identity = await GitClient.discover(projectRoot);
   const branches = await new GitClient(identity.worktreeRoot).recentBranches(1);
   const branch = branches[0];
-  if (branch === undefined) throw new CliUsageError("repository has no local branch; pass --target after creating one");
+  if (branch === undefined)
+    throw new CliUsageError("repository has no local branch; pass --target after creating one");
   return branch.name;
 }
 
@@ -371,22 +616,33 @@ function print(io: KoniCliIO, json: boolean, value: unknown, lines: readonly str
   io.stdout(json ? `${JSON.stringify(value, null, 2)}\n` : `${lines.join("\n")}\n`);
 }
 
+/** One glanceable line per run; attention states shout so a wedged run is never mistaken for progress. */
+function runStatusLine(run: MonitorRunSummary): string {
+  const phase =
+    run.phase === "blocked" || run.phase === "failed" ? run.phase.toUpperCase() : run.phase;
+  const stage = run.stage === undefined ? "" : ` · ${run.stage}`;
+  return `${phase}${stage} · tickets ${run.tickets.completed}/${run.tickets.total} · agents ${run.agents.active} active`;
+}
+
 function helpText(): string {
-  return `Koni ${KONI_CORE_API_VERSION}\n\n` +
+  return (
+    `Koni ${KONI_CORE_API_VERSION}\n\n` +
     "Usage:\n" +
     "  koni init [coding|research] [--profile-package PATH] [--root PATH]\n" +
-    "  koni update [--profile-package PATH] [--root PATH]\n" +
+    "  koni update [--profile-package PATH] [--root PATH] [--preview SHA256 --apply]\n" +
+    "  koni conflicts [PATH] [--keep-project|--accept-upstream] [--root PATH]\n" +
     "  koni start [--root PATH]\n" +
     "  koni stop [--root PATH]\n" +
     "  koni restart [--root PATH]\n" +
     "  koni status [--root PATH] [--json]\n" +
     "  koni config validate [--root PATH] [--json]\n" +
-    "  koni run --goal TEXT [--type small|medium|large] [--target BRANCH] [--new-target [--from REF]]\n" +
+    "  koni run --goal TEXT [--type <run-type>] [--target BRANCH] [--new-target [--from REF]]\n" +
+    "    Available run types come from the project's compiled profile and configuration.\n" +
     "    --new-target branches a not-yet-existing --target from --from (default: current branch).\n" +
-    "  koni adopt --migration ID [--run LEGACY_RUN] [--apply] [--root PATH]\n" +
-    "  koni resume --run RUN_ID [--root PATH]\n" +
+    "  koni resume --run RUN_ID [--root PATH]  Resume a paused run or retry a blocked run\n" +
     "  koni tui [--root PATH]\n\n" +
-    "The TUI opens only in the terminal where `koni tui` is invoked; Koni never creates panes.\n";
+    "The TUI opens only in the terminal where `koni tui` is invoked; Koni never creates panes.\n"
+  );
 }
 
 export class CliUsageError extends Error {
@@ -398,7 +654,9 @@ export class CliUsageError extends Error {
 
 if (isDirectInvocation()) {
   runKoniCli(process.argv.slice(2)).then(
-    (code) => { process.exitCode = code; },
+    (code) => {
+      process.exitCode = code;
+    },
     (error: unknown) => {
       process.stderr.write(`koni: ${error instanceof Error ? error.message : String(error)}\n`);
       process.exitCode = error instanceof CliUsageError ? 2 : 1;

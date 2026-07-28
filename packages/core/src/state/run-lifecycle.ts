@@ -16,10 +16,7 @@ export type RunPhase =
   | "deleting"
   | "deleted";
 
-export type ResumableRunPhase = Exclude<
-  RunPhase,
-  "pausing" | "paused" | "deleting" | "deleted"
->;
+export type ResumableRunPhase = Exclude<RunPhase, "pausing" | "paused" | "deleting" | "deleted">;
 
 export interface PendingQuestion {
   id: string;
@@ -197,7 +194,8 @@ export function reduceRunLifecycle(
       // compilation) has no path forward except a revised plan: retry re-runs the identical compile
       // and fails identically. Allow the operator to steer a fresh planning attempt directly from
       // that block instead of dead-ending the run.
-      const blockedAtApproval = current.phase === "blocked" &&
+      const blockedAtApproval =
+        current.phase === "blocked" &&
         (current.resumePhase === "approving" || current.resumePhase === "awaiting_approval");
       if (!blockedAtApproval) requirePhase(current, event, ["awaiting_approval"]);
       state.phase = "planning";
@@ -279,9 +277,10 @@ export function reduceRunLifecycle(
       // awaiting_questions is a presentation/wait boundary layered over the exact stage in
       // resumePhase. Preserve that underlying stage across pause/restart instead of replacing it
       // with awaiting_questions and losing whether planning, execution, or verification owned it.
-      state.resumePhase = current.phase === "awaiting_questions"
-        ? current.resumePhase ?? "planning"
-        : current.phase as ResumableRunPhase;
+      state.resumePhase =
+        current.phase === "awaiting_questions"
+          ? (current.resumePhase ?? "planning")
+          : (current.phase as ResumableRunPhase);
       state.phase = "pausing";
       state.runningIntent = false;
       closeActiveInterval(state, event.atMs);
@@ -352,7 +351,10 @@ export function reduceRunLifecycle(
       state.runningIntent = false;
       state.terminalReason = event.reason;
       closeActiveInterval(state, event.atMs);
-      effects.push({ type: "stop_admission" }, { type: "abort_sessions", generation: state.generation });
+      effects.push(
+        { type: "stop_admission" },
+        { type: "abort_sessions", generation: state.generation },
+      );
       break;
     case "delete_requested":
       state.generation += 1;

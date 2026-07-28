@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { validateToolArguments } from "@earendil-works/pi-ai";
+import { validateToolArguments, type Api, type Model } from "@earendil-works/pi-ai";
 import {
   CURRENT_SESSION_VERSION,
   ModelRuntime,
@@ -15,18 +15,34 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { TSchema } from "typebox";
 import { Compile } from "typebox/compile";
-import { canonicalEncode, canonicalHash, isSha256Digest, rawSha256, type Sha256Digest } from "../shared/canonical.js";
+import {
+  canonicalEncode,
+  canonicalHash,
+  isSha256Digest,
+  rawSha256,
+  type Sha256Digest,
+} from "../shared/canonical.js";
 import {
   createKoniManagedExtension,
+  renderCompactionSummary,
   type CompactionLifecycleNotice,
   type KoniAuthorizedMessage,
   type KoniAttemptRecoveryClaim,
   type KoniAttemptRecoveryState,
+  type KoniAttemptUsage,
   type KoniContextProvider,
+  type KoniProviderRequestReservation,
 } from "./compaction.js";
 import { type AgentLaunchSpec, validateAgentLaunchSpec } from "./launch-spec.js";
 import { createContainedResourceLoader } from "./resource-loader.js";
-import { parsePiSession, summarizeUsage, type ParsedPiSession, type PiSessionEntry } from "./session-transcript.js";
+import {
+  assertAutonomousPiSession,
+  parsePiSession,
+  readPiSessionDurably,
+  summarizeUsage,
+  type ParsedPiSession,
+  type PiSessionEntry,
+} from "./session-transcript.js";
 import { createFileAtomicallyNoReplace } from "./atomic-file.js";
 import {
   koniToolResultPayloadBytes,
@@ -35,12 +51,23 @@ import {
   type KoniRuntimeToolRejection,
   type KoniToolReceipt,
 } from "./tool-catalog.js";
+import { sealPiModelDescriptor } from "./model-catalog.js";
+import {
+  deriveProviderSettlement,
+  deriveProviderSettlements,
+  isSupportedStoredProviderInputEstimate,
+  isSupportedProviderOutputCap,
+  providerApiHasSupportedOutputCap,
+  providerPayloadIdentity,
+  serializedProviderOutputCap,
+} from "./provider-request.js";
 
 const ABORT_ACK_TIMEOUT_MS = 5_000;
 const MAX_RECOVERY_SINGLE_ENTRY_OVERSHOOT_BYTES = 24 * 1024 * 1024;
 const PINNED_PI_CODING_AGENT_VERSION = "0.80.10";
 const TRANSCRIPT_TOOL_RESULT_OVERHEAD_BYTES = 4 * 1024;
 const RUNTIME_REJECTION_RESULT_BYTES = 64 * 1024;
+const OPENAI_CODEX_RESPONSES_API = "openai-codex-responses";
 
 export interface AuthorityBackedTool {
   name: string;
@@ -78,13 +105,7 @@ export interface ManagedTokenUsage {
 }
 
 export type ManagedSessionStatus =
-  | "created"
-  | "running"
-  | "aborting"
-  | "aborted"
-  | "completed"
-  | "failed"
-  | "disposed";
+  "created" | "running" | "aborting" | "aborted" | "completed" | "failed" | "disposed";
 
 export type ManagedSessionEvent =
   | { type: "status"; status: ManagedSessionStatus; detail?: string }
@@ -95,7 +116,7 @@ export type ManagedSessionEvent =
 
 export type ManagedSessionOutcome =
   | { status: "completed"; terminalOutput: unknown; usage: ManagedTokenUsage }
-  | { status: "failed"; error: string; usage: ManagedTokenUsage }
+  | { status: "failed"; error: string; code?: string; usage: ManagedTokenUsage }
   | { status: "aborted"; reason: string; usage: ManagedTokenUsage };
 
 export interface PiSessionAdapter {
@@ -107,6 +128,8 @@ export interface PiSessionAdapter {
   appendMapping(data: unknown): void;
   subscribe(listener: (event: AgentSessionEvent) => void): () => void;
   subscribeNotices?(listener: (notice: CompactionLifecycleNotice) => void): () => void;
+  /** Production emits only after the authority durably settles canonical Pi JSONL usage. */
+  subscribeAuthorityUsage?(listener: (usage: ManagedTokenUsage) => void): () => void;
   prompt(text: string): Promise<void>;
   continue(): Promise<void>;
   steer(message: KoniAuthorizedMessage): Promise<void>;
@@ -117,6 +140,8 @@ export interface PiSessionAdapter {
 
 export interface RecoveredSessionState {
   usage: ManagedTokenUsage;
+  /** Number of durable reservations already issued in this linear attempt. */
+  providerRequestCount?: number;
   pendingMessages?: readonly PendingRecoveredMessage[];
   pendingToolActions?: readonly PendingRecoveredToolAction[];
   disposition:
@@ -139,14 +164,15 @@ interface PendingRecoveredToolActionBase {
   arguments: Record<string, unknown>;
 }
 
-type PendingRecoveredToolAction = PendingRecoveredToolActionBase & (
-  | {
-      kind: "append_receipt";
-      authorizedResult: KoniAttemptRecoveryState["authorizedToolResults"][number];
-    }
-  | { kind: "execute" }
-  | { kind: "append_pi_error"; errorText: string }
-);
+type PendingRecoveredToolAction = PendingRecoveredToolActionBase &
+  (
+    | {
+        kind: "append_receipt";
+        authorizedResult: KoniAttemptRecoveryState["authorizedToolResults"][number];
+      }
+    | { kind: "execute" }
+    | { kind: "append_pi_error"; errorText: string }
+  );
 
 interface AuthenticatedRecovery {
   projection: RecoveredSessionState;
@@ -183,18 +209,22 @@ export class ManagedPiSession {
   #status: ManagedSessionStatus = "created";
   #unsubscribe: (() => void) | undefined;
   #unsubscribeNotices: (() => void) | undefined;
+  #unsubscribeAuthorityUsage: (() => void) | undefined;
+  readonly #usesAuthorityUsage: boolean;
   #startPromise: Promise<ManagedSessionOutcome> | undefined;
   #abortPromise: Promise<void> | undefined;
   #releasePromise: Promise<void> | undefined;
   #disposePromise: Promise<void> | undefined;
   #abortReason = "aborted by authority";
   #abortAsFailure = false;
+  #failureCode: string | undefined;
   #terminalCount = 0;
   #terminalOutput: unknown;
   readonly #terminalOutputSchema: TSchema;
   readonly #terminalArguments = new Map<string, unknown>();
   readonly #terminalArgumentErrors = new Map<string, string>();
   #failure: string | undefined;
+  #latestProviderError: string | undefined;
   readonly #recovery: RecoveredSessionState | undefined;
 
   private constructor(
@@ -206,28 +236,33 @@ export class ManagedPiSession {
     this.spec = spec;
     this.#adapter = adapter;
     this.#terminalOutputSchema = structuredClone(terminalTool.terminalOutputSchema!);
+    this.#usesAuthorityUsage = adapter.subscribeAuthorityUsage !== undefined;
     const recovery = adapter.recovery;
-    this.#recovery = recovery?.disposition.kind === "complete"
-      ? {
-          usage: { ...recovery.usage },
-          disposition: {
-            kind: "complete",
-            terminalOutput: validateTerminalPayload(
-              spec,
-              this.#terminalOutputSchema,
-              recovery.disposition.terminalOutput,
-              "accepted terminal output",
-            ),
-          },
-        }
-      : recovery;
+    this.#recovery =
+      recovery?.disposition.kind === "complete"
+        ? {
+            usage: { ...recovery.usage },
+            disposition: {
+              kind: "complete",
+              terminalOutput: validateTerminalPayload(
+                spec,
+                this.#terminalOutputSchema,
+                recovery.disposition.terminalOutput,
+                "accepted terminal output",
+              ),
+            },
+          }
+        : recovery;
     if (this.#recovery !== undefined) {
       validateManagedUsage(this.#recovery.usage);
       Object.assign(this.#usage, this.#recovery.usage);
     }
     assertExactToolInventory(spec, adapter.getActiveToolNames());
     if (adapter.sessionId !== spec.identity.sessionId) {
-      throw new ManagedSessionError("session_identity", "Pi created a different session identity than authorized");
+      throw new ManagedSessionError(
+        "session_identity",
+        "Pi created a different session identity than authorized",
+      );
     }
     if (appendMapping && adapter.mappingPersisted !== true) {
       adapter.appendMapping(attemptSessionMapping(spec, adapter.sessionFile));
@@ -235,6 +270,22 @@ export class ManagedPiSession {
     this.#unsubscribe = adapter.subscribe((event) => this.#onPiEvent(event));
     this.#unsubscribeNotices = adapter.subscribeNotices?.((notice) => {
       this.#emit({ type: "compaction", notice });
+    });
+    this.#unsubscribeAuthorityUsage = adapter.subscribeAuthorityUsage?.((usage) => {
+      try {
+        validateManagedUsage(usage);
+        assertMonotonicUsage(this.#usage, usage);
+        Object.assign(this.#usage, usage);
+        this.#emit({ type: "usage", usage: this.usage });
+        const violation = tokenBudgetViolation(this.spec, this.#usage);
+        if (violation !== undefined && this.#failure === undefined) {
+          this.#failure = violation;
+          this.#requestAbort(violation);
+        }
+      } catch (error) {
+        this.#failure = error instanceof Error ? error.message : String(error);
+        this.#requestAbort(this.#failure, true);
+      }
     });
   }
 
@@ -263,7 +314,10 @@ export class ManagedPiSession {
     const adapter = await (options.factory ?? recoverManagedPiSession)(spec, options);
     if (adapter.recovery === undefined) {
       await disposeRejectedAdapter(adapter);
-      throw new ManagedSessionError("recovery_projection", "recovery factory did not authenticate a durable session");
+      throw new ManagedSessionError(
+        "recovery_projection",
+        "recovery factory did not authenticate a durable session",
+      );
     }
     if (adapter.recovery.disposition.kind === "blocked") {
       const reason = adapter.recovery.disposition.reason;
@@ -301,7 +355,9 @@ export class ManagedPiSession {
       return this.#startPromise;
     }
     if (this.#status !== "created") {
-      return Promise.reject(new ManagedSessionError("start_state", `cannot start a ${this.#status} session`));
+      return Promise.reject(
+        new ManagedSessionError("start_state", `cannot start a ${this.#status} session`),
+      );
     }
     this.#startPromise = this.#runAndRelease();
     return this.#startPromise;
@@ -318,7 +374,12 @@ export class ManagedPiSession {
   }
 
   public abort(reason = "aborted by authority"): Promise<void> {
-    if (this.#status === "aborted" || this.#status === "disposed" || this.#status === "completed" || this.#status === "failed") {
+    if (
+      this.#status === "aborted" ||
+      this.#status === "disposed" ||
+      this.#status === "completed" ||
+      this.#status === "failed"
+    ) {
       return Promise.resolve();
     }
     if (this.#abortPromise !== undefined) {
@@ -372,6 +433,8 @@ export class ManagedPiSession {
     this.#unsubscribe = undefined;
     this.#unsubscribeNotices?.();
     this.#unsubscribeNotices = undefined;
+    this.#unsubscribeAuthorityUsage?.();
+    this.#unsubscribeAuthorityUsage = undefined;
     await this.#adapter.dispose();
   }
 
@@ -400,8 +463,9 @@ export class ManagedPiSession {
       }
       const failure = `Pi session runtime cleanup failed: ${detail}`;
       this.#failure = failure;
+      this.#failureCode = "runtime_cleanup";
       this.#setStatus("failed", failure);
-      return { status: "failed", error: failure, usage: this.usage };
+      return { status: "failed", error: failure, code: this.#failureCode, usage: this.usage };
     }
   }
 
@@ -410,21 +474,31 @@ export class ManagedPiSession {
     if (this.#recovery?.disposition.kind === "complete") {
       this.#terminalCount = 1;
       this.#terminalOutput = this.#recovery.disposition.terminalOutput;
-      this.#emit({ type: "terminal", toolName: this.spec.terminal.toolName, output: this.#terminalOutput });
+      this.#emit({
+        type: "terminal",
+        toolName: this.spec.terminal.toolName,
+        output: this.#terminalOutput,
+      });
       this.#setStatus("completed", "recovered accepted terminal receipt");
       return { status: "completed", terminalOutput: this.#terminalOutput, usage: this.usage };
     }
     if (this.#recovery?.disposition.kind === "blocked") {
       this.#setStatus("failed", this.#recovery.disposition.reason);
-      return { status: "failed", error: this.#recovery.disposition.reason, usage: this.usage };
+      return {
+        status: "failed",
+        error: this.#recovery.disposition.reason,
+        code: "recovery_blocked",
+        usage: this.usage,
+      };
     }
     if (this.#recovery?.disposition.kind === "revoked") {
       this.#abortReason = this.#recovery.disposition.reason;
       this.#setStatus("aborted", this.#abortReason);
       return { status: "aborted", reason: this.#abortReason, usage: this.usage };
     }
-    const recoveryBudgetViolation = tokenBudgetViolation(this.spec, this.#usage)
-      ?? (this.#recovery === undefined ? undefined : tokenBudgetExhaustion(this.spec, this.#usage));
+    const recoveryBudgetViolation =
+      tokenBudgetViolation(this.spec, this.#usage) ??
+      (this.#recovery === undefined ? undefined : tokenBudgetExhaustion(this.spec, this.#usage));
     if (this.#recovery !== undefined && recoveryBudgetViolation !== undefined) {
       await this.abort(recoveryBudgetViolation);
       return { status: "aborted", reason: recoveryBudgetViolation, usage: this.usage };
@@ -438,6 +512,7 @@ export class ManagedPiSession {
     } catch (error) {
       if (this.#status !== "aborting" && this.#status !== "aborted") {
         this.#failure = error instanceof Error ? error.message : String(error);
+        if (error instanceof ManagedSessionError) this.#failureCode = error.code;
       }
     }
 
@@ -445,14 +520,20 @@ export class ManagedPiSession {
     if (aborted !== undefined) return aborted;
     if (this.#failure !== undefined) {
       this.#setStatus("failed", this.#failure);
-      return { status: "failed", error: this.#failure, usage: this.usage };
+      return {
+        status: "failed",
+        error: this.#failure,
+        ...(this.#failureCode === undefined ? {} : { code: this.#failureCode }),
+        usage: this.usage,
+      };
     }
     if (this.#terminalCount !== 1) {
-      const error = this.#terminalCount === 0
-        ? `agent settled without calling terminal tool ${this.spec.terminal.toolName}`
-        : `agent called terminal tool ${this.spec.terminal.toolName} more than once`;
+      const error =
+        this.#terminalCount === 0
+          ? `agent settled without calling terminal tool ${this.spec.terminal.toolName}`
+          : `agent called terminal tool ${this.spec.terminal.toolName} more than once`;
       this.#setStatus("failed", error);
-      return { status: "failed", error, usage: this.usage };
+      return { status: "failed", error, code: "terminal_protocol", usage: this.usage };
     }
     this.#setStatus("completed");
     return { status: "completed", terminalOutput: this.#terminalOutput, usage: this.usage };
@@ -461,19 +542,25 @@ export class ManagedPiSession {
   #onPiEvent(event: AgentSessionEvent): void {
     this.#emit({ type: "pi_lifecycle", eventType: event.type });
     if (event.type === "message_end" && event.message.role === "assistant") {
-      const usage = event.message.usage;
-      try {
-        addUsage(this.#usage, usage.input, usage.output, usage.cacheRead, usage.cacheWrite);
-      } catch (error) {
-        this.#failure = error instanceof Error ? error.message : String(error);
-        this.#requestAbort(this.#failure, true);
-        return;
-      }
-      this.#emit({ type: "usage", usage: this.usage });
-      const violation = tokenBudgetViolation(this.spec, this.#usage);
-      if (violation !== undefined && this.#failure === undefined) {
-        this.#failure = violation;
-        this.#requestAbort(violation);
+      this.#latestProviderError =
+        event.message.stopReason === "error"
+          ? sanitizeProviderError(event.message.errorMessage)
+          : undefined;
+      if (!this.#usesAuthorityUsage) {
+        const usage = event.message.usage;
+        try {
+          addUsage(this.#usage, usage.input, usage.output, usage.cacheRead, usage.cacheWrite);
+        } catch (error) {
+          this.#failure = error instanceof Error ? error.message : String(error);
+          this.#requestAbort(this.#failure, true);
+          return;
+        }
+        this.#emit({ type: "usage", usage: this.usage });
+        const violation = tokenBudgetViolation(this.spec, this.#usage);
+        if (violation !== undefined && this.#failure === undefined) {
+          this.#failure = violation;
+          this.#requestAbort(violation);
+        }
       }
       const toolCalls = event.message.content.filter((block) => block.type === "toolCall");
       const terminalCalls = toolCalls.filter((block) => block.name === this.spec.terminal.toolName);
@@ -481,6 +568,12 @@ export class ManagedPiSession {
         this.#failure = `terminal tool ${this.spec.terminal.toolName} must be the only call in its assistant batch`;
         this.#requestAbort(this.#failure, true);
       }
+    }
+    if (event.type === "agent_settled" && this.#latestProviderError !== undefined) {
+      // Pi represents provider/onPayload failures as a persisted AssistantMessage rather than a
+      // rejected prompt promise. Wait until AgentSession has exhausted its configured retry and
+      // compaction paths, then project the final canonical error into Koni's outcome.
+      this.#failure ??= this.#latestProviderError;
     }
     if (event.type === "tool_execution_start" && event.toolName === this.spec.terminal.toolName) {
       if (this.#terminalCount > 0) {
@@ -573,7 +666,10 @@ export class ManagedPiSession {
     return { status: "aborted", reason: this.#abortReason, usage: this.usage };
   }
 
-  #assertCanMessage(operation: KoniAuthorizedMessage["mode"], message: KoniAuthorizedMessage): void {
+  #assertCanMessage(
+    operation: KoniAuthorizedMessage["mode"],
+    message: KoniAuthorizedMessage,
+  ): void {
     if (
       this.#status !== "running" ||
       this.#failure !== undefined ||
@@ -582,11 +678,17 @@ export class ManagedPiSession {
       this.#terminalArgumentErrors.size > 0 ||
       this.#abortPromise !== undefined
     ) {
-      throw new ManagedSessionError("message_state", `cannot ${operation} a ${this.#status} session`);
+      throw new ManagedSessionError(
+        "message_state",
+        `cannot ${operation} a ${this.#status} session`,
+      );
     }
     validateAuthorizedMessageRecord(message, "message_size");
     if (message.mode !== operation) {
-      throw new ManagedSessionError("message_mode", `${operation} received a ${message.mode} authority record`);
+      throw new ManagedSessionError(
+        "message_mode",
+        `${operation} received a ${message.mode} authority record`,
+      );
     }
   }
 
@@ -633,14 +735,15 @@ async function createProductionPiSession(
   const terminalTool = validateToolBindings(spec, boundTools);
   // Authenticate a recovery before resource/model/extension construction. No provider-capable
   // object exists until the persisted attempt and durable authority view agree byte-for-byte.
-  const authenticatedRecovery = mode === "recover"
-    ? await inspectRecoveredSession(
-        spec,
-        options.contextProvider,
-        terminalTool.terminalOutputSchema!,
-        boundTools,
-      )
-    : undefined;
+  const authenticatedRecovery =
+    mode === "recover"
+      ? await inspectRecoveredSession(
+          spec,
+          options.contextProvider,
+          terminalTool.terminalOutputSchema!,
+          boundTools,
+        )
+      : undefined;
   const recovery = authenticatedRecovery?.projection;
   let adapterOwnsRecoveryClaim = false;
   try {
@@ -657,9 +760,20 @@ async function createProductionPiSession(
     // Persist the immutable header+attempt mapping before materializing resources. If this process
     // dies at any later construction boundary, recovery has an authenticated session anchor and
     // can safely recreate only missing resources from the hash-bound launch spec.
-    const sessionManager = mode === "fresh"
-      ? await createFreshSessionManager(spec)
-      : SessionManager.open(expectedSessionFile(spec), spec.workspace.sessionDirectory, spec.workspace.cwd);
+    const sessionSetup: FreshSessionSetup =
+      mode === "fresh"
+        ? await createFreshSessionManager(spec)
+        : {
+            sessionManager: SessionManager.open(
+              expectedSessionFile(spec),
+              spec.workspace.sessionDirectory,
+              spec.workspace.cwd,
+            ),
+            initialPromptPreloaded: false,
+          };
+    const { sessionManager } = sessionSetup;
+    let initialPromptPreloaded = sessionSetup.initialPromptPreloaded;
+    let pendingForkCompaction = sessionSetup.pendingForkCompaction;
     const resultBudget = new TranscriptToolResultBudget(spec, sessionManager);
     let replayedTerminalOutput: unknown;
     for (const action of recovery?.pendingToolActions ?? []) {
@@ -700,21 +814,28 @@ async function createProductionPiSession(
       }
       const tool = boundTools.find((candidate) => candidate.name === action.toolName);
       if (tool === undefined) {
-        throw new ManagedSessionError("recovery_tool", `recovery tool ${action.toolName} is unavailable`);
+        throw new ManagedSessionError(
+          "recovery_tool",
+          `recovery tool ${action.toolName} is unavailable`,
+        );
       }
       const signal = new AbortController().signal;
       const budgetDisposition = await resultBudget.reserve(tool.maxResultBytes);
-      const result = budgetDisposition === "execute"
-        ? await tool.execute(action.callId, structuredClone(action.arguments), signal)
-        : await tool.reject(
-            action.callId,
-            structuredClone(action.arguments),
-            transcriptBudgetRejection(spec),
-            signal,
-          );
+      const result =
+        budgetDisposition === "execute"
+          ? await tool.execute(action.callId, structuredClone(action.arguments), signal)
+          : await tool.reject(
+              action.callId,
+              structuredClone(action.arguments),
+              transcriptBudgetRejection(spec),
+              signal,
+            );
       const receipt = validatedReceiptFromResult(result, tool.maxResultBytes);
       if (action.toolName !== spec.terminal.toolName && result.terminate === true) {
-        throw new ManagedSessionError("recovery_tool", "non-terminal authority tool attempted to terminate recovery");
+        throw new ManagedSessionError(
+          "recovery_tool",
+          "non-terminal authority tool attempted to terminate recovery",
+        );
       }
       await appendRecoveredToolResult(
         sessionManager,
@@ -725,7 +846,10 @@ async function createProductionPiSession(
       );
       if (action.toolName === spec.terminal.toolName && receipt.outcome === "accepted") {
         if (result.terminate !== true) {
-          throw new ManagedSessionError("recovery_terminal", "replayed terminal authority receipt did not terminate");
+          throw new ManagedSessionError(
+            "recovery_terminal",
+            "replayed terminal authority receipt did not terminate",
+          );
         }
         replayedTerminalOutput = validateTerminalPayload(
           spec,
@@ -744,8 +868,34 @@ async function createProductionPiSession(
       adapterOwnsRecoveryClaim = true;
       return adapter;
     }
+    if (
+      options.contextProvider.reserveProviderRequest === undefined ||
+      options.contextProvider.reconcileProviderRequest === undefined
+    ) {
+      throw new ManagedSessionError(
+        "provider_authority",
+        "production contained sessions require durable provider reservation and settlement authority",
+      );
+    }
+    const reserveProviderRequest = options.contextProvider.reserveProviderRequest.bind(
+      options.contextProvider,
+    );
+    const reconcileProviderRequest = options.contextProvider.reconcileProviderRequest.bind(
+      options.contextProvider,
+    );
     let beforeProviderRequest = async (): Promise<void> => undefined;
+    let currentProviderOutputLimit = 0;
+    let contextFailure: ManagedSessionError | undefined;
+    let providerFailure: ManagedSessionError | undefined;
+    // A reservation rejection may be Pi's signal to compact and retry the same turn. Retain its
+    // type until a successor reservation is admitted, but do not make it sticky across Pi's one
+    // provider-free compaction path.
+    let providerRequestFailure: ManagedSessionError | undefined;
     const noticeListeners = new Set<(notice: CompactionLifecycleNotice) => void>();
+    const authorityUsageListeners = new Set<(usage: ManagedTokenUsage) => void>();
+    const authorityUsage = { ...(recovery?.usage ?? emptyUsage()) };
+    let nextProviderSequence = (recovery?.providerRequestCount ?? 0) + 1;
+    let pendingReservation: KoniProviderRequestReservation | undefined;
     const extension = createKoniManagedExtension({
       spec,
       contextProvider: options.contextProvider,
@@ -767,11 +917,47 @@ async function createProductionPiSession(
       onTurnStart: () => resultBudget.reset(),
     });
     const contained = await createContainedResourceLoader({ spec, extension, mode });
+    const modelRuntime = options.modelRuntime ?? (await ModelRuntime.create());
+    const unboundedModel = modelRuntime.getModel(spec.model.provider, spec.model.id);
+    if (unboundedModel === undefined) {
+      throw new ManagedSessionError(
+        "model_missing",
+        `Pi's normal model runtime does not contain ${spec.model.provider}/${spec.model.id}`,
+      );
+    }
+    const sealedModel = sealPiModelDescriptor(unboundedModel);
+    if (
+      sealedModel.provider !== spec.model.provider ||
+      sealedModel.id !== spec.model.id ||
+      sealedModel.api !== spec.model.api ||
+      sealedModel.catalogMaxTokens !== spec.model.catalogMaxTokens ||
+      sealedModel.catalogSha256 !== spec.model.catalogSha256
+    ) {
+      throw new ManagedSessionError(
+        "model_catalog_drift",
+        "Pi's executable model descriptor differs from the compiler-sealed launch binding",
+      );
+    }
+    const hasWireOutputCap = providerApiHasSupportedOutputCap(spec.model.api);
+    const model: Model<Api> = {
+      ...unboundedModel,
+      maxTokens: hasWireOutputCap
+        ? Math.min(unboundedModel.maxTokens, providerOutputLimit(spec, authorityUsage))
+        : unboundedModel.maxTokens,
+    };
+    currentProviderOutputLimit = model.maxTokens;
     contained.settingsManager.applyOverrides({
       defaultProvider: spec.model.provider,
       defaultModel: spec.model.id,
       defaultThinkingLevel: spec.model.thinkingLevel,
-      compaction: { enabled: true },
+      ...(spec.model.api === OPENAI_CODEX_RESPONSES_API ? { transport: "sse" as const } : {}),
+      compaction: {
+        enabled: true,
+        // Koni's structured checkpoint already preserves the authoritative run/ticket state.
+        // Keep only a small recent evidence tail so an input-pressure retry is materially
+        // smaller instead of repeatedly carrying another ~20K transcript tokens.
+        keepRecentTokens: containedCompactionKeepRecentTokens(spec),
+      },
       retry: {
         enabled: spec.budgets.retries.maxProviderRetries > 0,
         maxRetries: spec.budgets.retries.maxProviderRetries,
@@ -780,23 +966,63 @@ async function createProductionPiSession(
       },
       images: { blockImages: true, autoResize: false },
     });
-    const modelRuntime = options.modelRuntime ?? await ModelRuntime.create();
-    const unboundedModel = modelRuntime.getModel(spec.model.provider, spec.model.id);
-    if (unboundedModel === undefined) {
-      throw new ManagedSessionError(
-        "model_missing",
-        `Pi's normal model runtime does not contain ${spec.model.provider}/${spec.model.id}`,
+    const notifyAuthorityUsage = (): void => {
+      const snapshot = { ...authorityUsage };
+      for (const listener of authorityUsageListeners) {
+        try {
+          listener(snapshot);
+        } catch {
+          // Durable authority accounting cannot be interrupted by observation.
+        }
+      }
+    };
+    const settlePendingProviderReservation = async (): Promise<void> => {
+      const pending = pendingReservation;
+      if (pending === undefined) return;
+      let derived;
+      try {
+        derived = deriveProviderSettlement(
+          sessionManager.getEntries() as unknown as readonly PiSessionEntry[],
+          pending.baselineEntryId,
+        );
+      } catch (error) {
+        throw new ManagedSessionError(
+          "provider_settlement",
+          `Pi provider response cannot be uniquely projected: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (derived === undefined) {
+        throw new ManagedSessionError(
+          "provider_settlement",
+          "provider reservation has no persisted canonical assistant response",
+        );
+      }
+      const expected = {
+        sequence: pending.sequence,
+        reservationId: pending.reservationId,
+        assistantEntryId: derived.assistantEntryId,
+        assistantEntrySha256: derived.assistantEntrySha256,
+        usage: derived.usage,
+      };
+      const settled = await reconcileProviderRequest(spec, expected);
+      assertExactProviderSettlement(expected, settled);
+      addUsage(
+        authorityUsage,
+        settled.usage.input,
+        settled.usage.output,
+        settled.usage.cacheRead,
+        settled.usage.cacheWrite,
       );
-    }
-    const outputLimit = providerOutputLimit(spec, recovery?.usage);
-    const model = {
-      ...unboundedModel,
-      maxTokens: Math.min(unboundedModel.maxTokens, outputLimit),
+      pendingReservation = undefined;
+      notifyAuthorityUsage();
     };
     beforeProviderRequest = async () => {
       const currentSessionFile = sessionManager.getSessionFile();
       if (currentSessionFile === undefined) {
-        throw new ManagedSessionError("session_persistence", "provider turn has no durable Pi session file");
+        throw new ManagedSessionError(
+          "session_persistence",
+          "provider turn has no durable Pi session file",
+        );
       }
       const transcript = await lstat(currentSessionFile);
       if (!transcript.isFile() || transcript.size >= spec.budgets.transcript.maxBytes) {
@@ -808,14 +1034,18 @@ async function createProductionPiSession(
       // A provider must never observe conversation state that exists only in process memory.
       // This also makes the preceding authority receipt repair a committed recovery boundary.
       await syncSessionFile(currentSessionFile);
-      const persistedUsage = recoveryUsage(
-        sessionManager.getEntries() as unknown as readonly PiSessionEntry[],
-      );
-      const violation = tokenBudgetViolation(spec, persistedUsage);
+      await settlePendingProviderReservation();
+      const violation = tokenBudgetViolation(spec, authorityUsage);
       if (violation !== undefined) throw new ManagedSessionError("token_budget", violation);
-      const exhausted = tokenBudgetExhaustion(spec, persistedUsage);
+      const exhausted = tokenBudgetExhaustion(spec, authorityUsage);
       if (exhausted !== undefined) throw new ManagedSessionError("token_budget", exhausted);
-      model.maxTokens = Math.min(unboundedModel.maxTokens, providerOutputLimit(spec, persistedUsage));
+      if (hasWireOutputCap) {
+        model.maxTokens = Math.min(
+          unboundedModel.maxTokens,
+          providerOutputLimit(spec, authorityUsage),
+        );
+        currentProviderOutputLimit = model.maxTokens;
+      }
     };
     const result = await createAgentSession({
       cwd: spec.workspace.cwd,
@@ -831,89 +1061,214 @@ async function createProductionPiSession(
       settingsManager: contained.settingsManager,
       sessionStartEvent: { type: "session_start", reason: mode === "fresh" ? "startup" : "resume" },
     });
-  if (
-    result.session.model?.provider !== spec.model.provider ||
-    result.session.model?.id !== spec.model.id ||
-    result.session.thinkingLevel !== spec.model.thinkingLevel
-  ) {
-    result.session.dispose();
-    throw new ManagedSessionError(
-      "model_clamped",
-      "Pi could not honor the exact compiler-issued model and thinking level",
-    );
-  }
-  try {
-    await result.session.bindExtensions({ mode: "rpc" });
-  } catch (error) {
-    await shutdownAgentSession(result.session);
-    throw error;
-  }
-  const sessionFile = result.session.sessionFile;
-  if (sessionFile === undefined) {
-    result.session.dispose();
-    throw new ManagedSessionError("session_persistence", "contained Pi session is not persisted");
-  }
+    if (
+      result.session.model?.provider !== spec.model.provider ||
+      result.session.model?.id !== spec.model.id ||
+      result.session.thinkingLevel !== spec.model.thinkingLevel
+    ) {
+      result.session.dispose();
+      throw new ManagedSessionError(
+        "model_clamped",
+        "Pi could not honor the exact compiler-issued model and thinking level",
+      );
+    }
+    try {
+      await result.session.bindExtensions({
+        mode: "rpc",
+        onError: (error) => {
+          if (error.event === "context") {
+            // Pi reports and otherwise swallows context-extension failures. Re-throwing from its
+            // supported error binding makes transformContext reject before ModelRuntime is entered.
+            contextFailure ??= new ManagedSessionError("provider_context", error.error);
+            throw contextFailure;
+          }
+          if (error.event === "before_provider_request") {
+            providerFailure ??= new ManagedSessionError("provider_admission", error.error);
+            throw providerFailure;
+          }
+        },
+      });
+    } catch (error) {
+      await shutdownAgentSession(result.session);
+      throw error;
+    }
+    const piPayloadHook = result.session.agent.onPayload;
+    if (piPayloadHook === undefined) {
+      await shutdownAgentSession(result.session);
+      throw new ManagedSessionError(
+        "provider_admission",
+        "Pi exposed no final provider-payload hook",
+      );
+    }
+    result.session.agent.onPayload = async (payload, selectedModel) => {
+      if (contextFailure !== undefined) throw contextFailure;
+      if (providerFailure !== undefined) throw providerFailure;
+      await settlePendingProviderReservation();
+      const admittedOutputLimit = currentProviderOutputLimit;
+      const admitted = await piPayloadHook(payload, selectedModel);
+      if (contextFailure !== undefined) throw contextFailure;
+      if (providerFailure !== undefined) throw providerFailure;
+      assertSelectedProviderModel(spec, selectedModel, admittedOutputLimit);
+      const exactPayload = exactProviderPayload(spec.model.api, admitted);
+      if (spec.model.api === OPENAI_CODEX_RESPONSES_API) {
+        assertCodexProviderPayload(spec, exactPayload.transportPayload);
+      }
+      const identity = providerPayloadIdentity(exactPayload.wirePayload);
+      const serializedOutputCap = serializedProviderOutputCap(
+        spec.model.api,
+        exactPayload.wirePayload,
+      );
+      if (serializedOutputCap !== undefined && serializedOutputCap.value > admittedOutputLimit) {
+        throw new ManagedSessionError(
+          "provider_output_cap",
+          "Pi serialized a provider output cap above the selected contained model bound",
+        );
+      }
+      const request = {
+        sequence: nextProviderSequence,
+        api: spec.model.api,
+        modelId: spec.model.id,
+        ...identity,
+        reservedOutputTokens: serializedOutputCap?.value ?? spec.model.catalogMaxTokens,
+        ...(serializedOutputCap === undefined ? {} : { serializedOutputCap }),
+      };
+      // FINAL awaited/fallible operation before transport. Once this resolves, only local scalar
+      // assignment occurs and the exact JSON-round-tripped payload is returned immediately.
+      let reservation: KoniProviderRequestReservation;
+      try {
+        reservation = await reserveProviderRequest(spec, request);
+      } catch (error) {
+        providerRequestFailure = providerAdmissionFailure(error);
+        throw providerRequestFailure;
+      }
+      providerRequestFailure = undefined;
+      pendingReservation = reservation;
+      nextProviderSequence += 1;
+      return exactPayload.transportPayload;
+    };
+    const sessionFile = result.session.sessionFile;
+    if (sessionFile === undefined) {
+      result.session.dispose();
+      throw new ManagedSessionError("session_persistence", "contained Pi session is not persisted");
+    }
     if (recovery?.disposition.kind === "continue") {
       continuationLifecycle(result.session);
     }
-    const adapter: PiSessionAdapter = {
-    sessionId: result.session.sessionId,
-    sessionFile,
-    mappingPersisted: true,
-    ...(recovery === undefined ? {} : { recovery }),
-    getActiveToolNames: () => result.session.getActiveToolNames(),
-    appendMapping: () => {
-      throw new ManagedSessionError("session_mapping", "production Pi sessions persist their mapping atomically");
-    },
-    subscribe: (listener) => result.session.subscribe(listener),
-    subscribeNotices: (listener) => {
-      noticeListeners.add(listener);
-      return () => noticeListeners.delete(listener);
-    },
-    // Compiler output is already fully expanded and hash-bound. Slash-like bytes remain literal so
-    // the persisted initial user message is exactly the launch-spec message authenticated later.
-    prompt: (text) => result.session.prompt(text, { expandPromptTemplates: false, source: "rpc" }),
-    continue: async () => {
-      for (const pending of recovery?.pendingMessages ?? []) {
-        const message = pending.message;
-        if (!pending.mappingPersisted) {
-          await appendAuthorizedMessageMapping(sessionManager, spec, message);
-        }
-        const queued = {
-          role: "user" as const,
-          content: [{ type: "text" as const, text: message.content }],
-          timestamp: Date.now(),
-        };
-        if (message.mode === "steer") result.session.agent.steer(queued);
-        else result.session.agent.followUp(queued);
-      }
-      await continueThroughAgentSession(result.session);
-    },
-    steer: async (message) => {
-      await appendAuthorizedMessageMapping(sessionManager, spec, message);
-      await result.session.prompt(message.content, {
-        expandPromptTemplates: false,
-        streamingBehavior: "steer",
-        source: "rpc",
-      });
-    },
-    followUp: async (message) => {
-      await appendAuthorizedMessageMapping(sessionManager, spec, message);
-      await result.session.prompt(message.content, {
-        expandPromptTemplates: false,
-        streamingBehavior: "followUp",
-        source: "rpc",
-      });
-    },
-    abort: () => result.session.abort(),
-    dispose: async () => {
+    const runWithCurrentContext = async (operation: () => Promise<void>): Promise<void> => {
+      const currentFailure = (): ManagedSessionError | undefined =>
+        contextFailure ?? providerFailure ?? providerRequestFailure;
+      if (currentFailure() !== undefined) throw currentFailure();
       try {
-        await shutdownAgentSession(result.session);
-      } finally {
-        await authenticatedRecovery?.release();
+        await operation();
+      } catch (error) {
+        try {
+          await settlePendingProviderReservation();
+        } catch {
+          // Preserve the primary provider error. The durable unresolved reservation remains held
+          // and authenticated recovery will reconcile or block it before any new provider turn.
+        }
+        if (currentFailure() !== undefined) throw currentFailure();
+        throw error;
       }
-    },
-  };
+      await settlePendingProviderReservation();
+      if (currentFailure() !== undefined) throw currentFailure();
+    };
+    const adapter: PiSessionAdapter = {
+      sessionId: result.session.sessionId,
+      sessionFile,
+      mappingPersisted: true,
+      ...(recovery === undefined ? {} : { recovery }),
+      getActiveToolNames: () => result.session.getActiveToolNames(),
+      appendMapping: () => {
+        throw new ManagedSessionError(
+          "session_mapping",
+          "production Pi sessions persist their mapping atomically",
+        );
+      },
+      subscribe: (listener) => result.session.subscribe(listener),
+      subscribeNotices: (listener) => {
+        noticeListeners.add(listener);
+        return () => noticeListeners.delete(listener);
+      },
+      subscribeAuthorityUsage: (listener) => {
+        authorityUsageListeners.add(listener);
+        return () => authorityUsageListeners.delete(listener);
+      },
+      // Compiler output is already fully expanded and hash-bound. Slash-like bytes remain literal so
+      // the persisted initial user message is exactly the launch-spec message authenticated later.
+      prompt: (text) =>
+        runWithCurrentContext(async () => {
+          if (initialPromptPreloaded) {
+            if (text !== spec.persona.initialPrompt) {
+              throw new ManagedSessionError(
+                "session_fork_prompt",
+                "preloaded conversation fork received a different initial prompt",
+              );
+            }
+            if (pendingForkCompaction !== undefined) {
+              await finalizeForkCompaction(
+                spec,
+                sessionManager,
+                pendingForkCompaction,
+                options.contextProvider,
+                options.onCompactionNotice,
+              );
+              // createAgentSession hydrated its in-memory agent before authority could authorize the
+              // deferred fork compaction. Mirror Pi's own compaction lifecycle so provider input uses
+              // the newly persisted compacted context rather than the inherited pre-compaction state.
+              result.session.agent.state.messages = sessionManager.buildSessionContext().messages;
+              pendingForkCompaction = undefined;
+            }
+            initialPromptPreloaded = false;
+            await continueThroughAgentSession(result.session);
+            return;
+          }
+          await result.session.prompt(text, { expandPromptTemplates: false, source: "rpc" });
+        }),
+      continue: () =>
+        runWithCurrentContext(async () => {
+          for (const pending of recovery?.pendingMessages ?? []) {
+            const message = pending.message;
+            if (!pending.mappingPersisted) {
+              await appendAuthorizedMessageMapping(sessionManager, spec, message);
+            }
+            const queued = {
+              role: "user" as const,
+              content: [{ type: "text" as const, text: message.content }],
+              timestamp: Date.now(),
+            };
+            if (message.mode === "steer") result.session.agent.steer(queued);
+            else result.session.agent.followUp(queued);
+          }
+          await continueThroughAgentSession(result.session);
+        }),
+      steer: (message) =>
+        runWithCurrentContext(async () => {
+          await appendAuthorizedMessageMapping(sessionManager, spec, message);
+          await result.session.prompt(message.content, {
+            expandPromptTemplates: false,
+            streamingBehavior: "steer",
+            source: "rpc",
+          });
+        }),
+      followUp: (message) =>
+        runWithCurrentContext(async () => {
+          await appendAuthorizedMessageMapping(sessionManager, spec, message);
+          await result.session.prompt(message.content, {
+            expandPromptTemplates: false,
+            streamingBehavior: "followUp",
+            source: "rpc",
+          });
+        }),
+      abort: () => result.session.abort(),
+      dispose: async () => {
+        try {
+          await shutdownAgentSession(result.session);
+        } finally {
+          await authenticatedRecovery?.release();
+        }
+      },
+    };
     adapterOwnsRecoveryClaim = true;
     return adapter;
   } finally {
@@ -965,7 +1320,10 @@ function createPassiveRecoveryAdapter(
   recovery: RecoveredSessionState,
 ): PiSessionAdapter {
   const inactive = async (): Promise<never> => {
-    throw new ManagedSessionError("recovery_inactive", "recovered attempt does not require an active Pi model session");
+    throw new ManagedSessionError(
+      "recovery_inactive",
+      "recovered attempt does not require an active Pi model session",
+    );
   };
   return {
     sessionId: spec.identity.sessionId,
@@ -974,7 +1332,10 @@ function createPassiveRecoveryAdapter(
     mappingPersisted: true,
     getActiveToolNames: () => spec.tools.map((tool) => tool.name),
     appendMapping: () => {
-      throw new ManagedSessionError("recovery_mapping", "recovery cannot append another attempt mapping");
+      throw new ManagedSessionError(
+        "recovery_mapping",
+        "recovery cannot append another attempt mapping",
+      );
     },
     subscribe: () => () => undefined,
     subscribeNotices: () => () => undefined,
@@ -1005,7 +1366,10 @@ async function appendRecoveredToolResult(
   });
   const sessionFile = sessionManager.getSessionFile();
   if (sessionFile === undefined) {
-    throw new ManagedSessionError("session_persistence", "recovered tool receipt has no durable session file");
+    throw new ManagedSessionError(
+      "session_persistence",
+      "recovered tool receipt has no durable session file",
+    );
   }
   await syncSessionFile(sessionFile);
 }
@@ -1022,7 +1386,10 @@ async function appendAuthorizedMessageMapping(
   );
   const sessionFile = sessionManager.getSessionFile();
   if (sessionFile === undefined) {
-    throw new ManagedSessionError("session_persistence", "authorized message map has no durable session file");
+    throw new ManagedSessionError(
+      "session_persistence",
+      "authorized message map has no durable session file",
+    );
   }
   // Commit the mode/hash binding before Pi can enqueue or persist the associated user text.
   await syncSessionFile(sessionFile);
@@ -1077,7 +1444,27 @@ async function shutdownAgentSession(
   }
 }
 
-async function createFreshSessionManager(spec: Readonly<AgentLaunchSpec>): Promise<SessionManager> {
+interface FreshSessionSetup {
+  sessionManager: SessionManager;
+  initialPromptPreloaded: boolean;
+  pendingForkCompaction?: PendingForkCompaction;
+}
+
+interface PendingForkCompaction {
+  firstKeptEntryId: string;
+}
+
+async function createFreshSessionManager(
+  spec: Readonly<AgentLaunchSpec>,
+): Promise<FreshSessionSetup> {
+  if (spec.lineage.conversationFork !== undefined) {
+    const sessionManager = await createForkedSessionManager(spec);
+    if (shouldPrecompactConversationFork(spec, sessionManager)) {
+      const pendingForkCompaction = preloadForkPromptForCompaction(spec, sessionManager);
+      return { sessionManager, initialPromptPreloaded: true, pendingForkCompaction };
+    }
+    return { sessionManager, initialPromptPreloaded: false };
+  }
   await mkdir(spec.workspace.sessionDirectory, { recursive: true, mode: 0o700 });
   const sessionFile = expectedSessionFile(spec);
   const header = {
@@ -1095,14 +1482,325 @@ async function createFreshSessionManager(spec: Readonly<AgentLaunchSpec>): Promi
     customType: "koni.attempt-session-map",
     data: attemptSessionMapping(spec, sessionFile),
   };
-  if (!await createFileAtomicallyNoReplace(
-    sessionFile,
-    `${JSON.stringify(header)}\n${JSON.stringify(mapping)}\n`,
-    0o600,
-  )) {
-    throw new ManagedSessionError("session_replay", `Pi session ${spec.identity.sessionId} already exists`);
+  if (
+    !(await createFileAtomicallyNoReplace(
+      sessionFile,
+      `${JSON.stringify(header)}\n${JSON.stringify(mapping)}\n`,
+      0o600,
+    ))
+  ) {
+    throw new ManagedSessionError(
+      "session_replay",
+      `Pi session ${spec.identity.sessionId} already exists`,
+    );
+  }
+  return {
+    sessionManager: SessionManager.open(
+      sessionFile,
+      spec.workspace.sessionDirectory,
+      spec.workspace.cwd,
+    ),
+    initialPromptPreloaded: false,
+  };
+}
+
+function shouldPrecompactConversationFork(
+  spec: Readonly<AgentLaunchSpec>,
+  sessionManager: SessionManager,
+): boolean {
+  if (spec.lineage.conversationFork === undefined) return false;
+  const threshold = Math.max(8_000, Math.min(32_000, Math.floor(spec.budgets.tokens.maxInput / 4)));
+  return estimatedSessionContextTokens(sessionManager) > threshold;
+}
+
+function preloadForkPromptForCompaction(
+  spec: Readonly<AgentLaunchSpec>,
+  sessionManager: SessionManager,
+): PendingForkCompaction {
+  // Persist the immutable child suffix while construction is still effect-free. The authority
+  // cannot authorize its compaction until the parent has committed and activated this exact
+  // session file; the ManagedPiSession start boundary finalizes it before provider entry.
+  sessionManager.appendModelChange(spec.model.provider, spec.model.id);
+  sessionManager.appendThinkingLevelChange(spec.model.thinkingLevel);
+  return {
+    firstKeptEntryId: sessionManager.appendMessage({
+      role: "user",
+      content: spec.persona.initialPrompt,
+      timestamp: Date.now(),
+    }),
+  };
+}
+
+async function finalizeForkCompaction(
+  spec: Readonly<AgentLaunchSpec>,
+  sessionManager: SessionManager,
+  pending: Readonly<PendingForkCompaction>,
+  contextProvider: KoniContextProvider,
+  onCompactionNotice?: (notice: CompactionLifecycleNotice) => void,
+): Promise<void> {
+  const tokensBefore = estimatedSessionContextTokens(sessionManager);
+  const snapshot = await contextProvider.loadCompactionSnapshot(spec);
+  const summary = renderCompactionSummary(spec, snapshot);
+  const summaryHash = rawSha256(summary);
+  const summaryBytes = Buffer.byteLength(summary, "utf8");
+  const authorization = await contextProvider.authorizeCompaction(spec, {
+    summaryHash,
+    summaryBytes,
+    firstKeptEntryId: pending.firstKeptEntryId,
+    tokensBefore,
+  });
+  if (!safeTranscriptIdentity(authorization.authorizationId, 256)) {
+    throw new ManagedSessionError(
+      "compaction_authority",
+      "authority returned an invalid pre-provider compaction identity",
+    );
+  }
+  sessionManager.appendCompaction(
+    summary,
+    pending.firstKeptEntryId,
+    tokensBefore,
+    {
+      protocol: "koni.compaction.v1",
+      specHash: spec.specHash,
+      runId: spec.identity.runId,
+      ticketId: spec.identity.ticketId,
+      stepId: spec.identity.stepId,
+      attemptId: spec.identity.attemptId,
+      grantHash: spec.authority.grantHash,
+      stateHash: spec.authority.expectedStateHash,
+      contextHash: spec.authority.authoritativeContextHash,
+      summaryHash,
+      summaryBytes,
+      authorizationId: authorization.authorizationId,
+      contextReissueRequired: true,
+    },
+    true,
+  );
+  const sessionFile = sessionManager.getSessionFile();
+  if (sessionFile === undefined) {
+    throw new ManagedSessionError(
+      "session_persistence",
+      "pre-compacted fork has no durable session file",
+    );
+  }
+  await syncSessionFile(sessionFile);
+  try {
+    onCompactionNotice?.({
+      type: "compaction_created",
+      detail: "large inherited conversation compacted before first provider request",
+    });
+  } catch {
+    // Observation cannot interrupt the durable pre-provider boundary.
+  }
+}
+
+function estimatedSessionContextTokens(sessionManager: SessionManager): number {
+  const messages = sessionManager.buildSessionContext().messages;
+  return Math.max(1, Math.ceil(Buffer.byteLength(JSON.stringify(messages), "utf8") / 4));
+}
+
+async function createForkedSessionManager(
+  spec: Readonly<AgentLaunchSpec>,
+): Promise<SessionManager> {
+  await mkdir(spec.workspace.sessionDirectory, { recursive: true, mode: 0o700 });
+  const sessionFile = expectedSessionFile(spec);
+  const parent = await authenticateConversationForkParent(spec);
+  const inherited = inheritedConversationEntries(parent.session.entries);
+  const timestamp = new Date().toISOString();
+  let parentId: string | null = null;
+  const linearInherited = inherited.map((entry) => {
+    const copy = { ...structuredClone(entry), parentId };
+    parentId = copy.id;
+    return copy;
+  });
+  const forkMap = {
+    type: "custom",
+    id: randomUUID(),
+    parentId,
+    timestamp,
+    customType: "koni.conversation-fork-map",
+    data: conversationForkMapping(spec, parent.sessionFile, linearInherited),
+  };
+  const mapping = {
+    type: "custom",
+    id: randomUUID(),
+    parentId: forkMap.id,
+    timestamp,
+    customType: "koni.attempt-session-map",
+    data: attemptSessionMapping(spec, sessionFile),
+  };
+  const header = {
+    type: "session",
+    version: CURRENT_SESSION_VERSION,
+    id: spec.identity.sessionId,
+    timestamp,
+    cwd: spec.workspace.cwd,
+    parentSession: parent.sessionFile,
+  };
+  const content =
+    [header, ...linearInherited, forkMap, mapping]
+      .map((entry) => JSON.stringify(entry))
+      .join("\n") + "\n";
+  if (!(await createFileAtomicallyNoReplace(sessionFile, content, 0o600))) {
+    throw new ManagedSessionError(
+      "session_replay",
+      `Pi session ${spec.identity.sessionId} already exists`,
+    );
   }
   return SessionManager.open(sessionFile, spec.workspace.sessionDirectory, spec.workspace.cwd);
+}
+
+async function authenticateConversationForkParent(spec: Readonly<AgentLaunchSpec>): Promise<{
+  sessionFile: string;
+  session: ParsedPiSession;
+}> {
+  const lineage = spec.lineage;
+  const fork = lineage.conversationFork;
+  if (
+    fork === undefined ||
+    lineage.parentAttemptId === undefined ||
+    lineage.parentSessionId === undefined ||
+    lineage.parentEntryId === undefined
+  ) {
+    throw new ManagedSessionError(
+      "session_fork",
+      "conversation fork is missing its parent identity",
+    );
+  }
+  const runRoot = path.dirname(path.dirname(spec.workspace.sessionDirectory));
+  const parentSpecPath = path.join(
+    runRoot,
+    "attempts",
+    lineage.parentAttemptId,
+    "launch-spec.json",
+  );
+  const parentSpec = await readParentLaunchSpec(parentSpecPath);
+  if (
+    parentSpec.specHash !== fork.parentLaunchSpecHash ||
+    parentSpec.identity.runId !== spec.identity.runId ||
+    parentSpec.identity.attemptId !== lineage.parentAttemptId ||
+    parentSpec.identity.sessionId !== lineage.parentSessionId
+  ) {
+    throw new ManagedSessionError(
+      "session_fork_spec",
+      "conversation parent launch spec does not match lineage",
+    );
+  }
+  const sessionFile = expectedSessionFile(parentSpec);
+  const sessionsRoot = await realpath(path.dirname(spec.workspace.sessionDirectory));
+  const resolvedParentDirectory = await realpath(parentSpec.workspace.sessionDirectory);
+  const expectedParentDirectory = path.join(sessionsRoot, lineage.parentAttemptId);
+  if (
+    !isPathWithin(sessionsRoot, resolvedParentDirectory) ||
+    path.resolve(resolvedParentDirectory) !== path.resolve(expectedParentDirectory)
+  ) {
+    throw new ManagedSessionError(
+      "session_fork_path",
+      "conversation parent session escapes the run session root",
+    );
+  }
+  const session = await readPiSessionDurably(sessionFile, {
+    maxBytes: parentSpec.budgets.transcript.maxBytes + MAX_RECOVERY_SINGLE_ENTRY_OVERSHOOT_BYTES,
+  });
+  assertAutonomousPiSession(session, {
+    sessionId: parentSpec.identity.sessionId,
+    cwd: parentSpec.workspace.cwd,
+    ...(parentSpec.lineage.conversationFork === undefined
+      ? {}
+      : { parentSession: expectedConversationParentSessionFile(parentSpec) }),
+  });
+  assertExactAttemptMapping(parentSpec, sessionFile, session.entries);
+  if (
+    session.entries.at(-1)?.id !== lineage.parentEntryId ||
+    transcriptSnapshotHash(session) !== fork.parentTranscriptSha256
+  ) {
+    throw new ManagedSessionError(
+      "session_fork_snapshot",
+      "conversation parent transcript differs from its launch binding",
+    );
+  }
+  return { sessionFile, session };
+}
+
+async function readParentLaunchSpec(filePath: string): Promise<Readonly<AgentLaunchSpec>> {
+  let handle;
+  try {
+    handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || metadata.size < 2 || metadata.size > 16 * 1024 * 1024) {
+      throw new ManagedSessionError(
+        "session_fork_spec",
+        "conversation parent launch spec is missing or oversized",
+      );
+    }
+    const bytes = await handle.readFile();
+    return validateAgentLaunchSpec(JSON.parse(bytes.toString("utf8")) as AgentLaunchSpec);
+  } catch (error) {
+    if (error instanceof ManagedSessionError) throw error;
+    throw new ManagedSessionError(
+      "session_fork_spec",
+      `conversation parent launch spec cannot be authenticated: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+function inheritedConversationEntries(entries: readonly PiSessionEntry[]): PiSessionEntry[] {
+  return entries
+    .filter(
+      (entry) =>
+        !(
+          entry.type === "custom" &&
+          typeof entry.customType === "string" &&
+          entry.customType.startsWith("koni.")
+        ),
+    )
+    .map((entry) => structuredClone(entry));
+}
+
+function transcriptSnapshotHash(session: ParsedPiSession): Sha256Digest {
+  return canonicalHash({ header: session.header, entries: session.entries });
+}
+
+function inheritedConversationHash(entries: readonly PiSessionEntry[]): Sha256Digest {
+  return canonicalHash(entries);
+}
+
+function expectedConversationParentSessionFile(spec: Readonly<AgentLaunchSpec>): string {
+  if (spec.lineage.parentAttemptId === undefined || spec.lineage.parentSessionId === undefined) {
+    throw new ManagedSessionError(
+      "session_fork",
+      "conversation fork has no parent session identity",
+    );
+  }
+  return path.join(
+    path.dirname(spec.workspace.sessionDirectory),
+    spec.lineage.parentAttemptId,
+    `${spec.lineage.parentSessionId}.jsonl`,
+  );
+}
+
+function conversationForkMapping(
+  spec: Readonly<AgentLaunchSpec>,
+  parentSessionFile: string,
+  inheritedEntries: readonly PiSessionEntry[],
+): Readonly<Record<string, unknown>> {
+  return {
+    protocol: "koni.conversation-fork-map.v1",
+    specHash: spec.specHash,
+    runId: spec.identity.runId,
+    attemptId: spec.identity.attemptId,
+    sessionId: spec.identity.sessionId,
+    parentAttemptId: spec.lineage.parentAttemptId,
+    parentSessionId: spec.lineage.parentSessionId,
+    parentEntryId: spec.lineage.parentEntryId,
+    parentLaunchSpecHash: spec.lineage.conversationFork?.parentLaunchSpecHash,
+    parentTranscriptSha256: spec.lineage.conversationFork?.parentTranscriptSha256,
+    parentSessionFile,
+    inheritedEntryCount: inheritedEntries.length,
+    inheritedContextSha256: inheritedConversationHash(inheritedEntries),
+  };
 }
 
 function expectedSessionFile(spec: Readonly<AgentLaunchSpec>): string {
@@ -1146,53 +1844,25 @@ async function inspectRecoveredSession(
 ): Promise<AuthenticatedRecovery> {
   const sessionFile = expectedSessionFile(spec);
   const claim = await contextProvider.acquireRecoveryClaim(spec);
-  const release = typeof claim.release === "function"
-    ? onceAsync(claim.release.bind(claim))
-    : async () => undefined;
+  const release =
+    typeof claim.release === "function"
+      ? onceAsync(claim.release.bind(claim))
+      : async () => undefined;
   try {
     validateRecoveryClaim(spec, claim);
     const recoveryState = claim.state;
     validateRecoveryAuthority(spec, recoveryState);
-
-    if (recoveryState.status === "terminal_accepted") {
+    const providerRequestCount = recoveryState.providerRequests?.length;
+    const providerProjection = providerRequestCount === undefined ? {} : { providerRequestCount };
+    if (recoveryState.providerRequests?.some((request) => request.settlement === undefined)) {
       return {
         projection: {
           usage: authorityRecoveryUsage(recoveryState),
-          disposition: {
-            kind: "complete",
-            terminalOutput: validateTerminalPayload(
-              spec,
-              terminalOutputSchema,
-              recoveryState.terminalOutput,
-              "accepted terminal output",
-            ),
-          },
-        },
-        release,
-      };
-    }
-    if (recoveryState.status === "revoked") {
-      return {
-        projection: {
-          usage: authorityRecoveryUsage(recoveryState),
-          disposition: {
-            kind: "revoked",
-            reason: recoveryReason(recoveryState.reason, "attempt revoked by authority"),
-          },
-        },
-        release,
-      };
-    }
-    if (recoveryState.status === "terminal_inflight") {
-      return {
-        projection: {
-          usage: authorityRecoveryUsage(recoveryState),
+          ...providerProjection,
           disposition: {
             kind: "blocked",
-            reason: recoveryReason(
-              recoveryState.reason,
-              "terminal submission is in flight; authority reconciliation is required before recovery",
-            ),
+            reason:
+              "provider request has no committed canonical assistant settlement; its worst-case reservation remains held",
           },
         },
         release,
@@ -1209,15 +1879,22 @@ async function inspectRecoveredSession(
       if (
         !metadata.isFile() ||
         (metadata.mode & 0o077) !== 0 ||
-        metadata.size > spec.budgets.transcript.maxBytes + MAX_RECOVERY_SINGLE_ENTRY_OVERSHOOT_BYTES ||
+        metadata.size >
+          spec.budgets.transcript.maxBytes + MAX_RECOVERY_SINGLE_ENTRY_OVERSHOOT_BYTES ||
         !isPathWithin(sessionRoot, resolvedFile)
       ) {
-        throw new ManagedSessionError("recovery_session_file", "durable Pi session file is missing, oversized, or unsafe");
+        throw new ManagedSessionError(
+          "recovery_session_file",
+          "durable Pi session file is missing, oversized, or unsafe",
+        );
       }
       const bytes = await handle.readFile();
       const after = await lstat(sessionFile);
       if (after.isSymbolicLink() || after.dev !== metadata.dev || after.ino !== metadata.ino) {
-        throw new ManagedSessionError("recovery_session_file", "durable Pi session changed during authentication");
+        throw new ManagedSessionError(
+          "recovery_session_file",
+          "durable Pi session changed during authentication",
+        );
       }
       parsed = parsePiSession(bytes, {
         allowTruncatedTail: true,
@@ -1226,7 +1903,10 @@ async function inspectRecoveredSession(
       if (parsed.diagnostics.some((entry) => entry.code === "truncated_tail")) {
         const lastCommittedLf = bytes.lastIndexOf(0x0a);
         if (lastCommittedLf < 0) {
-          throw new ManagedSessionError("recovery_transcript", "Pi session has no committed header record");
+          throw new ManagedSessionError(
+            "recovery_transcript",
+            "Pi session has no committed header record",
+          );
         }
         await handle.truncate(lastCommittedLf + 1);
         await handle.sync();
@@ -1240,15 +1920,87 @@ async function inspectRecoveredSession(
     } finally {
       await handle?.close().catch(() => undefined);
     }
-    if (parsed.header.id !== spec.identity.sessionId || parsed.header.cwd !== spec.workspace.cwd) {
-      throw new ManagedSessionError("recovery_header", "Pi session header does not match its launch binding");
+    try {
+      assertAutonomousPiSession(parsed, {
+        sessionId: spec.identity.sessionId,
+        cwd: spec.workspace.cwd,
+        ...(spec.lineage.conversationFork === undefined
+          ? {}
+          : { parentSession: expectedConversationParentSessionFile(spec) }),
+      });
+    } catch {
+      throw new ManagedSessionError(
+        "recovery_branch",
+        "contained Pi attempt has an unbound parent session or non-linear entry chain",
+      );
     }
-    assertExactAttemptMapping(spec, sessionFile, parsed.entries);
-    const usage = mergeRecoveryUsage(authorityRecoveryUsage(recoveryState), recoveryUsage(parsed.entries));
-    assertLinearTranscript(parsed);
-    const transcript = inspectTranscript(spec, parsed.entries, recoveryState, tools);
-    assertExactPersistedRuntime(spec, parsed.entries, transcript.hasInitialPrompt);
-    const replayableTerminal = transcript.terminalResults === 0 &&
+    const transcriptPartition = await currentAttemptEntries(spec, parsed);
+    const currentEntries = transcriptPartition.entries;
+    assertExactAttemptMapping(spec, sessionFile, currentEntries);
+    const authorityUsage = authorityRecoveryUsage(recoveryState);
+    const transcriptUsage = recoveryUsage(currentEntries);
+    const usage =
+      recoveryState.providerRequests === undefined
+        ? mergeRecoveryUsage(authorityUsage, transcriptUsage)
+        : exactRecoveryUsage(authorityUsage, transcriptUsage);
+    assertProviderSettlementsMatchTranscript(currentEntries, recoveryState);
+    if (recoveryState.status === "terminal_accepted") {
+      return {
+        projection: {
+          usage,
+          ...providerProjection,
+          disposition: {
+            kind: "complete",
+            terminalOutput: validateTerminalPayload(
+              spec,
+              terminalOutputSchema,
+              recoveryState.terminalOutput,
+              "accepted terminal output",
+            ),
+          },
+        },
+        release,
+      };
+    }
+    if (recoveryState.status === "revoked") {
+      return {
+        projection: {
+          usage,
+          ...providerProjection,
+          disposition: {
+            kind: "revoked",
+            reason: recoveryReason(recoveryState.reason, "attempt revoked by authority"),
+          },
+        },
+        release,
+      };
+    }
+    if (recoveryState.status === "terminal_inflight") {
+      return {
+        projection: {
+          usage,
+          ...providerProjection,
+          disposition: {
+            kind: "blocked",
+            reason: recoveryReason(
+              recoveryState.reason,
+              "terminal submission is in flight; authority reconciliation is required before recovery",
+            ),
+          },
+        },
+        release,
+      };
+    }
+    const transcript = inspectTranscript(
+      spec,
+      currentEntries,
+      recoveryState,
+      tools,
+      transcriptPartition.inheritedEntryIds,
+    );
+    assertExactPersistedRuntime(spec, currentEntries, transcript.hasInitialPrompt);
+    const replayableTerminal =
+      transcript.terminalResults === 0 &&
       transcript.pendingToolActions.some(
         (action) => action.kind === "execute" && action.toolName === spec.terminal.toolName,
       );
@@ -1256,9 +2008,11 @@ async function inspectRecoveredSession(
       return {
         projection: {
           usage,
+          ...providerProjection,
           disposition: {
             kind: "blocked",
-            reason: "Pi transcript contains a terminal submission that durable authority has not accepted",
+            reason:
+              "Pi transcript contains a terminal submission that durable authority has not accepted",
           },
         },
         release,
@@ -1271,12 +2025,16 @@ async function inspectRecoveredSession(
           "authority accepted steering before the compiler-issued initial prompt was persisted",
         );
       }
-      return { projection: { usage, disposition: { kind: "prompt" } }, release };
+      return {
+        projection: { usage, ...providerProjection, disposition: { kind: "prompt" } },
+        release,
+      };
     }
     if (transcript.mayContinue) {
       return {
         projection: {
           usage,
+          ...providerProjection,
           disposition: { kind: "continue" },
           ...(transcript.pendingMessages.length === 0
             ? {}
@@ -1291,6 +2049,7 @@ async function inspectRecoveredSession(
     return {
       projection: {
         usage,
+        ...providerProjection,
         disposition: {
           kind: "blocked",
           reason: "Pi transcript does not end at a provably safe continuation boundary",
@@ -1319,7 +2078,10 @@ function validateRecoveryClaim(
     claim.state.attemptId !== spec.identity.attemptId ||
     claim.state.sessionId !== spec.identity.sessionId
   ) {
-    throw new ManagedSessionError("recovery_claim", "authority returned an invalid or mismatched recovery claim");
+    throw new ManagedSessionError(
+      "recovery_claim",
+      "authority returned an invalid or mismatched recovery claim",
+    );
   }
 }
 
@@ -1344,17 +2106,63 @@ function assertExactPersistedRuntime(
   }
 }
 
-function assertLinearTranscript(parsed: ParsedPiSession): void {
-  let expectedParent: string | null = null;
-  for (const entry of parsed.entries) {
-    if (entry.parentId !== expectedParent) {
+async function currentAttemptEntries(
+  spec: Readonly<AgentLaunchSpec>,
+  parsed: ParsedPiSession,
+): Promise<{ entries: readonly PiSessionEntry[]; inheritedEntryIds: ReadonlySet<string> }> {
+  const forkIndexes = parsed.entries.flatMap((entry, index) =>
+    entry.type === "custom" && entry.customType === "koni.conversation-fork-map" ? [index] : [],
+  );
+  if (spec.lineage.conversationFork === undefined) {
+    if (forkIndexes.length !== 0) {
       throw new ManagedSessionError(
-        "recovery_branch",
-        "contained Pi attempt contains a branch or non-linear parent chain",
+        "recovery_fork",
+        "fresh Pi session contains an unauthorized fork boundary",
       );
     }
-    expectedParent = entry.id;
+    return { entries: parsed.entries, inheritedEntryIds: new Set() };
   }
+  if (forkIndexes.length !== 1) {
+    throw new ManagedSessionError(
+      "recovery_fork",
+      "forked Pi session must contain one immutable fork boundary",
+    );
+  }
+  const forkIndex = forkIndexes[0]!;
+  const parent = await authenticateConversationForkParent(spec);
+  let parentId: string | null = null;
+  const expectedInherited = inheritedConversationEntries(parent.session.entries).map((entry) => {
+    const copy = { ...structuredClone(entry), parentId };
+    parentId = copy.id;
+    return copy;
+  });
+  const actualInherited = parsed.entries.slice(0, forkIndex);
+  if (
+    actualInherited.length !== expectedInherited.length ||
+    canonicalHash(actualInherited) !== canonicalHash(expectedInherited)
+  ) {
+    throw new ManagedSessionError(
+      "recovery_fork_prefix",
+      "forked Pi conversation prefix differs from its parent",
+    );
+  }
+  const forkEntry = parsed.entries[forkIndex]!;
+  const expectedMapping = conversationForkMapping(spec, parent.sessionFile, expectedInherited);
+  if (
+    forkEntry.type !== "custom" ||
+    forkEntry.customType !== "koni.conversation-fork-map" ||
+    !isRecord(forkEntry.data) ||
+    !jsonEqual(forkEntry.data, expectedMapping)
+  ) {
+    throw new ManagedSessionError(
+      "recovery_fork_mapping",
+      "Pi conversation fork mapping differs from its launch spec",
+    );
+  }
+  return {
+    entries: parsed.entries.slice(forkIndex + 1),
+    inheritedEntryIds: new Set(actualInherited.map((entry) => entry.id)),
+  };
 }
 
 function assertExactAttemptMapping(
@@ -1383,7 +2191,10 @@ function assertExactAttemptMapping(
     actualKeys.some((key, index) => key !== expectedKeys[index]) ||
     expectedKeys.some((key) => !jsonEqual(data[key], expected[key]))
   ) {
-    throw new ManagedSessionError("recovery_mapping", "Pi session attempt mapping does not match the launch spec");
+    throw new ManagedSessionError(
+      "recovery_mapping",
+      "Pi session attempt mapping does not match the launch spec",
+    );
   }
 }
 
@@ -1392,6 +2203,7 @@ function inspectTranscript(
   entries: readonly PiSessionEntry[],
   authority: KoniAttemptRecoveryState,
   tools: readonly AuthorityBackedTool[],
+  inheritedEntryIds: ReadonlySet<string> = new Set(),
 ): {
   hasInitialPrompt: boolean;
   mayContinue: boolean;
@@ -1400,16 +2212,19 @@ function inspectTranscript(
   pendingMessages: readonly PendingRecoveredMessage[];
   pendingToolActions: readonly PendingRecoveredToolAction[];
 } {
-  const toolCalls = new Map<string, {
-    name: string;
-    arguments: Record<string, unknown>;
-    expectedPiError?: string;
-    order: number;
-    resolved: boolean;
-  }>();
+  const toolCalls = new Map<
+    string,
+    {
+      name: string;
+      arguments: Record<string, unknown>;
+      expectedPiError?: string;
+      order: number;
+      resolved: boolean;
+    }
+  >();
   const toolBindings = new Map(tools.map((tool) => [tool.name, tool] as const));
   const allowedTools = new Set(spec.tools.map((tool) => tool.name));
-  const seenEntryIds = new Set<string>();
+  const seenEntryIds = new Set<string>(inheritedEntryIds);
   let hasInitialPrompt = false;
   let lastBoundary: "user" | "assistant" | "toolResult" | "compaction" | "messageMap" | undefined;
   let terminalCalls = 0;
@@ -1426,7 +2241,10 @@ function inspectTranscript(
   );
   const seenAuthorizedToolResults = new Set<string>();
   if (authorizedToolResults.size !== authority.authorizedToolResults.length) {
-    throw new ManagedSessionError("recovery_authority", "authority returned duplicate tool receipt identities");
+    throw new ManagedSessionError(
+      "recovery_authority",
+      "authority returned duplicate tool receipt identities",
+    );
   }
   const authorizedCompactions = new Map(
     authority.authorizedCompactions.map((record) => [record.authorizationId, record] as const),
@@ -1436,10 +2254,14 @@ function inspectTranscript(
     if (entry.type === "custom") {
       if (entry.customType === "koni.authorized-message-map") {
         if (!hasInitialPrompt || !isRecord(entry.data)) {
-          throw new ManagedSessionError("recovery_message", "authorized message map is misplaced or malformed");
+          throw new ManagedSessionError(
+            "recovery_message",
+            "authorized message map is misplaced or malformed",
+          );
         }
         const sequence = entry.data.sequence;
-        const authorized = typeof sequence === "number" ? authorizedMessages.get(sequence) : undefined;
+        const authorized =
+          typeof sequence === "number" ? authorizedMessages.get(sequence) : undefined;
         if (
           authorized === undefined ||
           mappedMessageSequences.has(authorized.sequence) ||
@@ -1457,7 +2279,10 @@ function inspectTranscript(
         continue;
       }
       if (entry.customType !== "koni.attempt-session-map") {
-        throw new ManagedSessionError("recovery_entry", "Pi session contains an unauthorized custom entry");
+        throw new ManagedSessionError(
+          "recovery_entry",
+          "Pi session contains an unauthorized custom entry",
+        );
       }
       seenEntryIds.add(entry.id);
       continue;
@@ -1468,16 +2293,22 @@ function inspectTranscript(
     }
     if (entry.type === "compaction") {
       if (!hasInitialPrompt) {
-        throw new ManagedSessionError("recovery_compaction", "Pi compacted before the initial prompt boundary");
+        throw new ManagedSessionError(
+          "recovery_compaction",
+          "Pi compacted before the initial prompt boundary",
+        );
       }
-      const authorizationId = isRecord(entry.details) && typeof entry.details.authorizationId === "string"
-        ? entry.details.authorizationId
-        : undefined;
-      const authorized = authorizationId === undefined
-        ? undefined
-        : authorizedCompactions.get(authorizationId);
+      const authorizationId =
+        isRecord(entry.details) && typeof entry.details.authorizationId === "string"
+          ? entry.details.authorizationId
+          : undefined;
+      const authorized =
+        authorizationId === undefined ? undefined : authorizedCompactions.get(authorizationId);
       if (authorized === undefined || seenAuthorizedCompactions.has(authorized.authorizationId)) {
-        throw new ManagedSessionError("recovery_compaction", "Pi compaction has no durable authority authorization");
+        throw new ManagedSessionError(
+          "recovery_compaction",
+          "Pi compaction has no durable authority authorization",
+        );
       }
       validatePersistedCompaction(spec, entry, seenEntryIds, authorized);
       seenAuthorizedCompactions.add(authorized.authorizationId);
@@ -1493,7 +2324,10 @@ function inspectTranscript(
     }
     const message = entry.message;
     if (message.role !== "user" && message.role !== "assistant" && message.role !== "toolResult") {
-      throw new ManagedSessionError("recovery_message", "Pi session contains an unsupported persisted message role");
+      throw new ManagedSessionError(
+        "recovery_message",
+        "Pi session contains an unsupported persisted message role",
+      );
     }
     if (message.role === "user") {
       const text = userText(message.content);
@@ -1503,7 +2337,10 @@ function inspectTranscript(
         Buffer.byteLength(text, "utf8") > 1024 * 1024 ||
         text.includes("\u0000")
       ) {
-        throw new ManagedSessionError("recovery_message", "Pi user message is malformed or exceeds its bound");
+        throw new ManagedSessionError(
+          "recovery_message",
+          "Pi user message is malformed or exceeds its bound",
+        );
       }
       if (!hasInitialPrompt) {
         if (text !== spec.persona.initialPrompt) {
@@ -1530,12 +2367,18 @@ function inspectTranscript(
     }
     if (message.role === "assistant") {
       if (!Array.isArray(message.content)) {
-        throw new ManagedSessionError("recovery_message", "Pi assistant message content is malformed");
+        throw new ManagedSessionError(
+          "recovery_message",
+          "Pi assistant message content is malformed",
+        );
       }
       const batchCalls: Array<{ id: string; name: string }> = [];
       for (const block of message.content) {
         if (!isRecord(block) || !["text", "thinking", "toolCall"].includes(String(block.type))) {
-          throw new ManagedSessionError("recovery_message", "Pi assistant content contains an unsupported block");
+          throw new ManagedSessionError(
+            "recovery_message",
+            "Pi assistant content contains an unsupported block",
+          );
         }
         if (block.type !== "toolCall") continue;
         if (
@@ -1546,11 +2389,17 @@ function inspectTranscript(
           !allowedTools.has(block.name) ||
           toolCalls.has(block.id)
         ) {
-          throw new ManagedSessionError("recovery_tool", "Pi tool call is unauthorized, malformed, or duplicated");
+          throw new ManagedSessionError(
+            "recovery_tool",
+            "Pi tool call is unauthorized, malformed, or duplicated",
+          );
         }
         const binding = toolBindings.get(block.name);
         if (binding === undefined || !isRecord(block.arguments)) {
-          throw new ManagedSessionError("recovery_tool", "Pi tool call has no exact compiler binding or arguments");
+          throw new ManagedSessionError(
+            "recovery_tool",
+            "Pi tool call has no exact compiler binding or arguments",
+          );
         }
         let validatedArguments: Record<string, unknown>;
         let expectedPiError: string | undefined;
@@ -1576,10 +2425,16 @@ function inspectTranscript(
         try {
           encodedArguments = canonicalEncode(validatedArguments);
         } catch {
-          throw new ManagedSessionError("recovery_tool", "Pi tool call arguments are not canonical JSON data");
+          throw new ManagedSessionError(
+            "recovery_tool",
+            "Pi tool call arguments are not canonical JSON data",
+          );
         }
         if (Buffer.byteLength(encodedArguments, "utf8") > 16 * 1024 * 1024) {
-          throw new ManagedSessionError("recovery_tool", "Pi tool call arguments exceed the recovery bound");
+          throw new ManagedSessionError(
+            "recovery_tool",
+            "Pi tool call arguments exceed the recovery bound",
+          );
         }
         toolCalls.set(block.id, {
           name: block.name,
@@ -1595,7 +2450,10 @@ function inspectTranscript(
         batchCalls.some((call) => call.name === spec.terminal.toolName) &&
         batchCalls.some((call) => call.name !== spec.terminal.toolName)
       ) {
-        throw new ManagedSessionError("recovery_terminal", "terminal tool must be the only tool in its assistant batch");
+        throw new ManagedSessionError(
+          "recovery_terminal",
+          "terminal tool must be the only tool in its assistant batch",
+        );
       }
       terminalCalls += batchCalls.filter((call) => call.name === spec.terminal.toolName).length;
       lastBoundary = "assistant";
@@ -1611,7 +2469,10 @@ function inspectTranscript(
     }
     const call = toolCalls.get(message.toolCallId);
     if (call === undefined || call.name !== message.toolName || call.resolved) {
-      throw new ManagedSessionError("recovery_tool", "Pi tool result has no unique matching tool call");
+      throw new ManagedSessionError(
+        "recovery_tool",
+        "Pi tool result has no unique matching tool call",
+      );
     }
     call.resolved = true;
     const authorizedResult = authorizedToolResults.get(message.toolCallId);
@@ -1623,14 +2484,20 @@ function inspectTranscript(
         Object.keys(message.details).length !== 0 ||
         userText(message.content) !== call.expectedPiError
       ) {
-        throw new ManagedSessionError("recovery_tool", "Pi validation error differs from the pinned runtime outcome");
+        throw new ManagedSessionError(
+          "recovery_tool",
+          "Pi validation error differs from the pinned runtime outcome",
+        );
       }
       lastBoundary = "toolResult";
       seenEntryIds.add(entry.id);
       continue;
     }
     if (authorizedResult === undefined || seenAuthorizedToolResults.has(message.toolCallId)) {
-      throw new ManagedSessionError("recovery_tool", "Pi tool result has no durable authority receipt");
+      throw new ManagedSessionError(
+        "recovery_tool",
+        "Pi tool result has no durable authority receipt",
+      );
     }
     const receipt = validateAuthorizedToolResult(message, authorizedResult, call.arguments);
     seenAuthorizedToolResults.add(message.toolCallId);
@@ -1687,20 +2554,21 @@ function inspectTranscript(
   pendingToolActions.sort((left, right) => left.order - right.order);
   const outstandingCalls = [...toolCalls.values()].filter((call) => !call.resolved).length;
   if (terminalResults > 1 || terminalResults > terminalCalls) {
-    throw new ManagedSessionError("recovery_terminal", "Pi session contains repeated terminal submissions");
+    throw new ManagedSessionError(
+      "recovery_terminal",
+      "Pi session contains repeated terminal submissions",
+    );
   }
   return {
     hasInitialPrompt,
     mayContinue:
       hasInitialPrompt &&
       outstandingCalls === pendingToolActions.length &&
-      (
-        lastBoundary === "user" ||
+      (lastBoundary === "user" ||
         lastBoundary === "toolResult" ||
         lastBoundary === "compaction" ||
         (lastBoundary === "messageMap" && outstandingMessageMappings.length > 0) ||
-        (lastBoundary === "assistant" && pendingToolActions.length > 0)
-      ),
+        (lastBoundary === "assistant" && pendingToolActions.length > 0)),
     terminalCalls,
     terminalResults,
     pendingMessages: authority.authorizedMessages
@@ -1730,7 +2598,10 @@ function validatePersistedCompaction(
     entry.fromHook !== true ||
     !isRecord(details)
   ) {
-    throw new ManagedSessionError("recovery_compaction", "Pi compaction entry is malformed or unauthorized");
+    throw new ManagedSessionError(
+      "recovery_compaction",
+      "Pi compaction entry is malformed or unauthorized",
+    );
   }
   const expected = {
     protocol: "koni.compaction.v1",
@@ -1754,7 +2625,10 @@ function validatePersistedCompaction(
     actualKeys.some((key, index) => key !== expectedKeys[index]) ||
     expectedKeys.some((key) => details[key] !== expected[key as keyof typeof expected])
   ) {
-    throw new ManagedSessionError("recovery_compaction", "Pi compaction does not match its launch-bound digest");
+    throw new ManagedSessionError(
+      "recovery_compaction",
+      "Pi compaction does not match its launch-bound digest",
+    );
   }
   if (
     authorized.summaryHash !== expected.summaryHash ||
@@ -1762,14 +2636,19 @@ function validatePersistedCompaction(
     authorized.firstKeptEntryId !== entry.firstKeptEntryId ||
     authorized.tokensBefore !== entry.tokensBefore
   ) {
-    throw new ManagedSessionError("recovery_compaction", "Pi compaction does not match durable authority");
+    throw new ManagedSessionError(
+      "recovery_compaction",
+      "Pi compaction does not match durable authority",
+    );
   }
 }
 
 function authorizedMessageMatches(message: KoniAuthorizedMessage, text: string): boolean {
-  return message.content === text &&
+  return (
+    message.content === text &&
     message.sizeBytes === Buffer.byteLength(text, "utf8") &&
-    message.sha256 === rawSha256(text);
+    message.sha256 === rawSha256(text)
+  );
 }
 
 function nextMappedMessageForPiDelivery(
@@ -1778,8 +2657,10 @@ function nextMappedMessageForPiDelivery(
   // Pi drains steering FIFO before it considers queued follow-ups. Iterating the JSONL in order
   // means only maps durably present before this user entry participate, so a later steer cannot
   // retroactively preempt an already-persisted follow-up.
-  return outstanding.find((message) => message.mode === "steer")
-    ?? outstanding.find((message) => message.mode === "follow_up");
+  return (
+    outstanding.find((message) => message.mode === "steer") ??
+    outstanding.find((message) => message.mode === "follow_up")
+  );
 }
 
 function truncatedToolCallError(toolName: string): string {
@@ -1802,29 +2683,44 @@ function validateAuthorizedToolResult(
     message.toolName !== authorized.toolName ||
     !isRecord(message.details)
   ) {
-    throw new ManagedSessionError("recovery_tool", "Pi tool result does not match its authority receipt identity");
+    throw new ManagedSessionError(
+      "recovery_tool",
+      "Pi tool result does not match its authority receipt identity",
+    );
   }
   const encoded = canonicalEncode(message.details);
   if (
     canonicalHash(message.details) !== authorized.receiptSha256 ||
     Buffer.byteLength(encoded, "utf8") !== authorized.receiptSizeBytes
   ) {
-    throw new ManagedSessionError("recovery_tool", "Pi tool receipt details do not match durable authority");
+    throw new ManagedSessionError(
+      "recovery_tool",
+      "Pi tool receipt details do not match durable authority",
+    );
   }
   if (!jsonEqual(message.details, authorized.receipt)) {
-    throw new ManagedSessionError("recovery_tool", "Pi tool receipt object differs from durable authority");
+    throw new ManagedSessionError(
+      "recovery_tool",
+      "Pi tool receipt object differs from durable authority",
+    );
   }
   validateKoniToolReceipt(message.details);
   if (
     authorized.outcome !== message.details.outcome ||
     message.isError !== (message.details.outcome === "rejected")
   ) {
-    throw new ManagedSessionError("recovery_tool", "Pi tool error status differs from durable authority outcome");
+    throw new ManagedSessionError(
+      "recovery_tool",
+      "Pi tool error status differs from durable authority outcome",
+    );
   }
   const receiptText = userText(message.content);
   const expectedText = renderKoniToolReceipt(message.details);
   if (receiptText !== expectedText) {
-    throw new ManagedSessionError("recovery_tool", "Pi tool result text does not match its authority receipt details");
+    throw new ManagedSessionError(
+      "recovery_tool",
+      "Pi tool result text does not match its authority receipt details",
+    );
   }
   return message.details;
 }
@@ -1842,7 +2738,10 @@ function validateAuthorizedToolArguments(
     authorized.argumentsSha256 !== canonicalHash(callArguments) ||
     authorized.argumentsSizeBytes !== Buffer.byteLength(encoded, "utf8")
   ) {
-    throw new ManagedSessionError("recovery_tool", "Pi tool call arguments do not match durable authority");
+    throw new ManagedSessionError(
+      "recovery_tool",
+      "Pi tool call arguments do not match durable authority",
+    );
   }
 }
 
@@ -1872,11 +2771,175 @@ function validateRecoveryAuthority(
     }
   }
   if (!["continue", "terminal_accepted", "terminal_inflight", "revoked"].includes(state.status)) {
-    throw new ManagedSessionError("recovery_authority", "durable authority returned an unsupported recovery status");
+    throw new ManagedSessionError(
+      "recovery_authority",
+      "durable authority returned an unsupported recovery status",
+    );
   }
   validateAuthorizedMessages(state.authorizedMessages);
   validateAuthorizedToolResults(spec, state.authorizedToolResults);
   validateAuthorizedCompactions(state.authorizedCompactions);
+  validateProviderRecoveryRecords(spec, state);
+}
+
+function validateProviderRecoveryRecords(
+  spec: Readonly<AgentLaunchSpec>,
+  state: KoniAttemptRecoveryState,
+): void {
+  const requests = state.providerRequests;
+  if (requests === undefined) {
+    if (state.providerUsageBaseline !== undefined) {
+      throw new ManagedSessionError(
+        "recovery_authority",
+        "provider usage baseline has no request ledger",
+      );
+    }
+    return;
+  }
+  if (!Array.isArray(requests) || requests.length > 100_000) {
+    throw new ManagedSessionError(
+      "recovery_authority",
+      "provider request ledger is malformed or oversized",
+    );
+  }
+  const baseline = state.providerUsageBaseline ?? emptyUsage();
+  validateManagedUsage({ ...baseline });
+  let input = baseline.input;
+  let output = baseline.output;
+  let cacheRead = baseline.cacheRead;
+  let cacheWrite = baseline.cacheWrite;
+  let unresolved = false;
+  for (const [index, request] of requests.entries()) {
+    const cap = request.serializedOutputCap;
+    if (
+      request.sequence !== index + 1 ||
+      !safeTranscriptIdentity(request.reservationId, 256) ||
+      request.api !== spec.model.api ||
+      request.modelId !== spec.model.id ||
+      !isSha256Digest(request.payloadSha256) ||
+      !Number.isSafeInteger(request.payloadSizeBytes) ||
+      request.payloadSizeBytes < 1 ||
+      request.payloadSizeBytes > 64 * 1024 * 1024 ||
+      !isSupportedStoredProviderInputEstimate(
+        request.payloadSizeBytes,
+        request.prospectiveInputTokens,
+      ) ||
+      !Number.isSafeInteger(request.reservedOutputTokens) ||
+      request.reservedOutputTokens < 1 ||
+      request.reservedOutputTokens > spec.model.catalogMaxTokens ||
+      !safeTranscriptIdentity(request.baselineEntryId, 128) ||
+      (cap !== undefined &&
+        (spec.model.api === OPENAI_CODEX_RESPONSES_API ||
+          cap.value !== request.reservedOutputTokens ||
+          !isSupportedProviderOutputCap(spec.model.api, cap))) ||
+      (cap === undefined &&
+        (providerApiHasSupportedOutputCap(spec.model.api) ||
+          request.reservedOutputTokens !== spec.model.catalogMaxTokens))
+    ) {
+      throw new ManagedSessionError(
+        "recovery_authority",
+        "provider request ledger is not launch-bound",
+      );
+    }
+    const settlement = request.settlement;
+    if (settlement === undefined) {
+      if (unresolved || index !== requests.length - 1) {
+        throw new ManagedSessionError(
+          "recovery_authority",
+          "provider request ledger contains an ambiguous gap",
+        );
+      }
+      unresolved = true;
+      continue;
+    }
+    if (
+      !safeTranscriptIdentity(settlement.assistantEntryId, 128) ||
+      !isSha256Digest(settlement.assistantEntrySha256)
+    ) {
+      throw new ManagedSessionError(
+        "recovery_authority",
+        "provider settlement identity is malformed",
+      );
+    }
+    validateManagedUsage({ ...settlement.usage });
+    if (
+      safeUsageSum(
+        settlement.usage.input,
+        settlement.usage.cacheRead,
+        settlement.usage.cacheWrite,
+      ) > request.prospectiveInputTokens ||
+      settlement.usage.output > request.reservedOutputTokens
+    ) {
+      throw new ManagedSessionError(
+        "recovery_authority",
+        "provider settlement exceeds its reservation",
+      );
+    }
+    input = safeUsageSum(input, settlement.usage.input);
+    output = safeUsageSum(output, settlement.usage.output);
+    cacheRead = safeUsageSum(cacheRead, settlement.usage.cacheRead);
+    cacheWrite = safeUsageSum(cacheWrite, settlement.usage.cacheWrite);
+  }
+  const expected = {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    newTokens: safeUsageSum(input, output),
+    allTokens: safeUsageSum(input, output, cacheRead, cacheWrite),
+  };
+  if (canonicalHash(expected) !== canonicalHash(state.usage)) {
+    throw new ManagedSessionError(
+      "recovery_authority",
+      "provider ledger does not equal durable usage totals",
+    );
+  }
+}
+
+function assertProviderSettlementsMatchTranscript(
+  entries: readonly PiSessionEntry[],
+  state: KoniAttemptRecoveryState,
+): void {
+  const requests = state.providerRequests;
+  if (requests === undefined) return;
+  let derivedSettlements: ReturnType<typeof deriveProviderSettlements>;
+  try {
+    derivedSettlements = deriveProviderSettlements(
+      entries,
+      requests.map((request, index) => ({
+        baselineEntryId: request.baselineEntryId,
+        ...(requests[index + 1] === undefined
+          ? {}
+          : { nextBaselineEntryId: requests[index + 1]!.baselineEntryId }),
+      })),
+    );
+  } catch (error) {
+    throw new ManagedSessionError(
+      "recovery_provider_settlement",
+      `provider settlements cannot be re-derived from Pi JSONL: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  for (const [index, request] of requests.entries()) {
+    const settlement = request.settlement;
+    if (settlement === undefined) {
+      throw new ManagedSessionError(
+        "recovery_provider_settlement",
+        "provider reservation remains unsettled during transcript authentication",
+      );
+    }
+    const derived = derivedSettlements[index];
+    if (
+      derived === undefined ||
+      derived.assistantEntryId !== settlement.assistantEntryId ||
+      derived.assistantEntrySha256 !== settlement.assistantEntrySha256 ||
+      canonicalHash(derived.usage) !== canonicalHash(settlement.usage)
+    ) {
+      throw new ManagedSessionError(
+        "recovery_provider_settlement",
+        "provider settlement no longer matches its exact canonical Pi assistant entry",
+      );
+    }
+  }
 }
 
 function validateAuthorizedMessages(messages: readonly KoniAuthorizedMessage[]): void {
@@ -1935,7 +2998,10 @@ function validateAuthorizedToolResults(
       validateKoniToolReceipt(result.receipt);
       renderKoniToolReceipt(result.receipt);
     } catch {
-      throw new ManagedSessionError("recovery_authority", "authority tool receipt object is malformed");
+      throw new ManagedSessionError(
+        "recovery_authority",
+        "authority tool receipt object is malformed",
+      );
     }
     if (
       !safeTranscriptIdentity(result.callId, 256) ||
@@ -1962,7 +3028,10 @@ function validateAuthorizedToolResults(
           : {}),
       }) > toolBinding.maxResultBytes
     ) {
-      throw new ManagedSessionError("recovery_authority", "authority tool receipt ledger is malformed");
+      throw new ManagedSessionError(
+        "recovery_authority",
+        "authority tool receipt ledger is malformed",
+      );
     }
     calls.add(result.callId);
   }
@@ -1988,7 +3057,10 @@ function validateAuthorizedCompactions(
       !Number.isSafeInteger(compaction.tokensBefore) ||
       compaction.tokensBefore < 0
     ) {
-      throw new ManagedSessionError("recovery_authority", "authority compaction ledger is malformed");
+      throw new ManagedSessionError(
+        "recovery_authority",
+        "authority compaction ledger is malformed",
+      );
     }
     ids.add(compaction.authorizationId);
   }
@@ -1997,7 +3069,11 @@ function validateAuthorizedCompactions(
 function validateAuthoritySequences(records: readonly unknown[]): void {
   let expected = 1;
   for (const record of records) {
-    if (!isRecord(record) || !Number.isSafeInteger(record.sequence) || record.sequence !== expected) {
+    if (
+      !isRecord(record) ||
+      !Number.isSafeInteger(record.sequence) ||
+      record.sequence !== expected
+    ) {
       throw new ManagedSessionError("recovery_authority", "authority ledger sequence is invalid");
     }
     expected += 1;
@@ -2005,10 +3081,12 @@ function validateAuthoritySequences(records: readonly unknown[]): void {
 }
 
 function safeTranscriptIdentity(value: unknown, maximum: number): value is string {
-  return typeof value === "string" &&
+  return (
+    typeof value === "string" &&
     Buffer.byteLength(value, "utf8") > 0 &&
     Buffer.byteLength(value, "utf8") <= maximum &&
-    !/[\u0000-\u001f\u007f]/u.test(value);
+    !/[\u0000-\u001f\u007f]/u.test(value)
+  );
 }
 
 function validateTerminalPayload(
@@ -2026,7 +3104,10 @@ function validateTerminalPayload(
     throw new ManagedSessionError("terminal_output", `${description} is not JSON serializable`);
   }
   if (Buffer.byteLength(serialized, "utf8") > spec.terminal.maxOutputBytes) {
-    throw new ManagedSessionError("terminal_output", `${description} exceeds its launch byte budget`);
+    throw new ManagedSessionError(
+      "terminal_output",
+      `${description} exceeds its launch byte budget`,
+    );
   }
   const clone = JSON.parse(serialized) as unknown;
   let valid: boolean;
@@ -2039,7 +3120,10 @@ function validateTerminalPayload(
     );
   }
   if (!valid) {
-    throw new ManagedSessionError("terminal_output", `${description} does not match the compiler-issued schema`);
+    throw new ManagedSessionError(
+      "terminal_output",
+      `${description} does not match the compiler-issued schema`,
+    );
   }
   return clone;
 }
@@ -2080,9 +3164,25 @@ function mergeRecoveryUsage(
   };
 }
 
+function exactRecoveryUsage(
+  authority: ManagedTokenUsage,
+  transcript: ManagedTokenUsage,
+): ManagedTokenUsage {
+  if (canonicalHash(authority) !== canonicalHash(transcript)) {
+    throw new ManagedSessionError(
+      "recovery_usage",
+      "canonical Pi transcript usage differs from the durable provider settlement ledger",
+    );
+  }
+  return { ...authority };
+}
+
 function safeUsageNumber(value: bigint, field: string): number {
   if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new ManagedSessionError("recovery_usage", `persisted ${field} usage exceeds safe accounting range`);
+    throw new ManagedSessionError(
+      "recovery_usage",
+      `persisted ${field} usage exceeds safe accounting range`,
+    );
   }
   return Number(value);
 }
@@ -2162,7 +3262,10 @@ function validateToolBindings(
 ): AuthorityBackedTool {
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
   if (byName.size !== tools.length || tools.length !== spec.tools.length) {
-    throw new ManagedSessionError("tool_inventory", "authority tool bindings do not exactly match the launch inventory");
+    throw new ManagedSessionError(
+      "tool_inventory",
+      "authority tool bindings do not exactly match the launch inventory",
+    );
   }
   for (const expected of spec.tools) {
     const actual = byName.get(expected.name);
@@ -2175,7 +3278,10 @@ function validateToolBindings(
       (actual.definition.executionMode ?? "parallel") !== expected.executionMode ||
       actual.definition.prepareArguments !== undefined
     ) {
-      throw new ManagedSessionError("tool_binding", `authority tool ${expected.name} does not match its launch binding`);
+      throw new ManagedSessionError(
+        "tool_binding",
+        `authority tool ${expected.name} does not match its launch binding`,
+      );
     }
   }
   const terminal = byName.get(spec.terminal.toolName);
@@ -2186,7 +3292,10 @@ function validateToolBindings(
     terminal.terminalOutputSchemaHash !== spec.terminal.outputSchemaHash ||
     canonicalHash(terminal.terminalOutputSchema) !== spec.terminal.outputSchemaHash
   ) {
-    throw new ManagedSessionError("terminal_schema", "terminal tool output schema does not match its launch binding");
+    throw new ManagedSessionError(
+      "terminal_schema",
+      "terminal tool output schema does not match its launch binding",
+    );
   }
   try {
     Compile(terminal.terminalOutputSchema);
@@ -2201,7 +3310,10 @@ function validateToolBindings(
       tool.name !== spec.terminal.toolName &&
       (tool.terminalOutputSchema !== undefined || tool.terminalOutputSchemaHash !== undefined)
     ) {
-      throw new ManagedSessionError("terminal_schema", `non-terminal tool ${tool.name} declares a terminal schema`);
+      throw new ManagedSessionError(
+        "terminal_schema",
+        `non-terminal tool ${tool.name} declares a terminal schema`,
+      );
     }
   }
   return terminal;
@@ -2218,27 +3330,34 @@ function runtimeToolDefinitions(
     return {
       ...definition,
       ...(tool.name === spec.terminal.toolName ? { executionMode: "sequential" as const } : {}),
-      async execute(toolCallId, params, signal, onUpdate, context) {
+      async execute(toolCallId, params, signal, _onUpdate, _context) {
         const sessionFile = sessionManager.getSessionFile();
         if (sessionFile === undefined) {
-          throw new ManagedSessionError("session_persistence", "authority tool call has no durable Pi session file");
+          throw new ManagedSessionError(
+            "session_persistence",
+            "authority tool call has no durable Pi session file",
+          );
         }
         // Pi persists the assistant tool-call entry before invoking a tool. Commit that entry
         // before any authority-backed effect so recovery can always authenticate the call.
         await syncSessionFile(sessionFile);
         const argumentsRecord = params as Record<string, unknown>;
         const budgetDisposition = await resultBudget.reserve(tool.maxResultBytes);
-        const result = budgetDisposition === "execute"
-          ? await tool.execute(toolCallId, argumentsRecord, signal)
-          : await tool.reject(
-              toolCallId,
-              argumentsRecord,
-              transcriptBudgetRejection(spec),
-              signal,
-            );
+        const result =
+          budgetDisposition === "execute"
+            ? await tool.execute(toolCallId, argumentsRecord, signal)
+            : await tool.reject(
+                toolCallId,
+                argumentsRecord,
+                transcriptBudgetRejection(spec),
+                signal,
+              );
         const receipt = validatedReceiptFromResult(result, tool.maxResultBytes);
         if (tool.name !== spec.terminal.toolName && result.terminate === true) {
-          throw new ManagedSessionError("tool_result", "non-terminal authority tool attempted to terminate");
+          throw new ManagedSessionError(
+            "tool_result",
+            "non-terminal authority tool attempted to terminate",
+          );
         }
         return tool.name === spec.terminal.toolName && receipt.outcome === "accepted"
           ? { ...result, terminate: true }
@@ -2308,7 +3427,10 @@ class TranscriptToolResultBudget {
     if (this.#baseBytes === undefined) {
       const sessionFile = this.#sessionManager.getSessionFile();
       if (sessionFile === undefined) {
-        throw new ManagedSessionError("session_persistence", "tool-result reservation has no durable Pi session file");
+        throw new ManagedSessionError(
+          "session_persistence",
+          "tool-result reservation has no durable Pi session file",
+        );
       }
       this.#baseBytes = await safeRegularFileSize(sessionFile);
     }
@@ -2317,7 +3439,10 @@ class TranscriptToolResultBudget {
 
   #serialized<Value>(operation: () => Promise<Value>): Promise<Value> {
     const result = this.#lock.then(operation, operation);
-    this.#lock = result.then(() => undefined, () => undefined);
+    this.#lock = result.then(
+      () => undefined,
+      () => undefined,
+    );
     return result;
   }
 }
@@ -2366,10 +3491,16 @@ function validatedReceiptFromResult(
     result.content[0]?.type !== "text" ||
     result.content[0].text !== renderKoniToolReceipt(result.details)
   ) {
-    throw new ManagedSessionError("tool_result", "authority tool result exceeds its bound or is not canonical");
+    throw new ManagedSessionError(
+      "tool_result",
+      "authority tool result exceeds its bound or is not canonical",
+    );
   }
   if (result.details.outcome === "rejected" && result.terminate === true) {
-    throw new ManagedSessionError("tool_result", "a rejected authority tool result cannot terminate an attempt");
+    throw new ManagedSessionError(
+      "tool_result",
+      "a rejected authority tool result cannot terminate an attempt",
+    );
   }
   return result.details;
 }
@@ -2390,11 +3521,17 @@ function snapshotToolBindings(tools: readonly AuthorityBackedTool[]): AuthorityB
   }));
 }
 
-function assertExactToolInventory(spec: Readonly<AgentLaunchSpec>, active: readonly string[]): void {
+function assertExactToolInventory(
+  spec: Readonly<AgentLaunchSpec>,
+  active: readonly string[],
+): void {
   const expected = spec.tools.map((tool) => tool.name).sort();
   const actual = [...active].sort();
   if (expected.length !== actual.length || expected.some((name, index) => name !== actual[index])) {
-    throw new ManagedSessionError("ambient_tool", "Pi exposed a tool outside the compiler-issued inventory");
+    throw new ManagedSessionError(
+      "ambient_tool",
+      "Pi exposed a tool outside the compiler-issued inventory",
+    );
   }
 }
 
@@ -2432,6 +3569,20 @@ function validateManagedUsage(usage: ManagedTokenUsage): void {
   }
 }
 
+function assertMonotonicUsage(
+  prior: Readonly<ManagedTokenUsage>,
+  next: Readonly<ManagedTokenUsage>,
+): void {
+  if (
+    next.input < prior.input ||
+    next.output < prior.output ||
+    next.cacheRead < prior.cacheRead ||
+    next.cacheWrite < prior.cacheWrite
+  ) {
+    throw new ManagedSessionError("usage", "authority provider usage moved backwards");
+  }
+}
+
 function safeUsageSum(...values: number[]): number {
   const result = values.reduce((sum, value) => sum + value, 0);
   if (!Number.isSafeInteger(result)) {
@@ -2453,8 +3604,7 @@ function tokenBudgetViolation(
     [usage.newTokens, maximum.maxNew, "new-token"],
     [usage.allTokens, maximum.maxAll, "cache-inclusive"],
   ];
-  return checks.find(([actual, allowed]) => actual > allowed)?.[2]
-    .concat(" token budget exceeded");
+  return checks.find(([actual, allowed]) => actual > allowed)?.[2].concat(" token budget exceeded");
 }
 
 function tokenBudgetExhaustion(
@@ -2470,7 +3620,8 @@ function tokenBudgetExhaustion(
     [usage.newTokens, maximum.maxNew, "new-token"],
     [usage.allTokens, maximum.maxAll, "cache-inclusive"],
   ];
-  return checks.find(([actual, allowed]) => actual >= allowed)?.[2]
+  return checks
+    .find(([actual, allowed]) => actual >= allowed)?.[2]
     .concat(" token budget exhausted");
 }
 
@@ -2480,11 +3631,136 @@ function providerOutputLimit(
 ): number {
   const usage = recoveredUsage ?? emptyUsage();
   const maximum = spec.budgets.tokens;
-  return Math.max(1, Math.min(
-    maximum.maxOutput - usage.output,
-    maximum.maxNew - usage.newTokens,
-    maximum.maxAll - usage.allTokens,
-  ));
+  return Math.max(
+    1,
+    Math.min(
+      maximum.maxOutput - usage.output,
+      maximum.maxNew - usage.newTokens,
+      maximum.maxAll - usage.allTokens,
+    ),
+  );
+}
+
+function containedCompactionKeepRecentTokens(spec: Readonly<AgentLaunchSpec>): number {
+  return Math.max(2_000, Math.min(8_000, Math.floor(spec.budgets.tokens.maxInput / 32)));
+}
+
+function exactProviderPayload(
+  api: string,
+  payload: unknown,
+): { wirePayload: unknown; transportPayload: unknown } {
+  let jsonPayload = payload;
+  let abortSignal: AbortSignal | undefined;
+  if (api === "google-generative-ai" || api === "google-vertex") {
+    if (
+      !isRecord(payload) ||
+      !isRecord(payload.config) ||
+      !(payload.config.abortSignal instanceof AbortSignal)
+    ) {
+      throw new ManagedSessionError(
+        "provider_payload",
+        `Pi built a ${api} payload without its live abort control`,
+      );
+    }
+    abortSignal = payload.config.abortSignal;
+    const config = { ...payload.config };
+    delete config.abortSignal;
+    jsonPayload = { ...payload, config };
+  }
+  let encoded: string | undefined;
+  try {
+    encoded = JSON.stringify(jsonPayload);
+  } catch {
+    throw new ManagedSessionError(
+      "provider_payload",
+      "Pi built a non-serializable provider payload",
+    );
+  }
+  if (encoded === undefined) {
+    throw new ManagedSessionError("provider_payload", "Pi built an empty provider payload");
+  }
+  // The authority hashes the exact JSON body projection. Google keeps AbortSignal as a live SDK
+  // control outside those bytes, so preserve that exact object while freezing every wire field.
+  const wirePayload = JSON.parse(encoded) as unknown;
+  if (abortSignal === undefined) return { wirePayload, transportPayload: wirePayload };
+  if (!isRecord(wirePayload) || !isRecord(wirePayload.config)) {
+    throw new ManagedSessionError("provider_payload", `Pi built a malformed ${api} payload`);
+  }
+  return {
+    wirePayload,
+    transportPayload: {
+      ...wirePayload,
+      config: { ...wirePayload.config, abortSignal },
+    },
+  };
+}
+
+function assertSelectedProviderModel(
+  spec: Readonly<AgentLaunchSpec>,
+  selected: Readonly<Model<Api>>,
+  expectedMaxTokens: number,
+): void {
+  if (
+    selected.provider !== spec.model.provider ||
+    selected.id !== spec.model.id ||
+    selected.api !== spec.model.api ||
+    selected.maxTokens !== expectedMaxTokens
+  ) {
+    throw new ManagedSessionError(
+      "provider_model",
+      "Pi selected a provider model different from the authenticated contained model",
+    );
+  }
+}
+
+function assertExactProviderSettlement(
+  expected: {
+    sequence: number;
+    reservationId: string;
+    assistantEntryId: string;
+    assistantEntrySha256: Sha256Digest;
+    usage: KoniAttemptUsage;
+  },
+  settled: Awaited<ReturnType<NonNullable<KoniContextProvider["reconcileProviderRequest"]>>>,
+): void {
+  if (
+    settled.protocol !== "koni.provider-request-settlement.v1" ||
+    settled.sequence !== expected.sequence ||
+    settled.reservationId !== expected.reservationId ||
+    settled.assistantEntryId !== expected.assistantEntryId ||
+    settled.assistantEntrySha256 !== expected.assistantEntrySha256 ||
+    canonicalHash(settled.usage) !== canonicalHash(expected.usage)
+  ) {
+    throw new ManagedSessionError(
+      "provider_settlement",
+      "authority settled a different provider request or canonical assistant usage",
+    );
+  }
+}
+
+function assertCodexProviderPayload(
+  spec: Readonly<AgentLaunchSpec>,
+  payload: unknown,
+): asserts payload is Record<string, unknown> {
+  if (
+    !isRecord(payload) ||
+    payload.model !== spec.model.id ||
+    payload.store !== false ||
+    payload.stream !== true ||
+    typeof payload.instructions !== "string" ||
+    !Array.isArray(payload.input) ||
+    !isRecord(payload.text) ||
+    !Array.isArray(payload.include) ||
+    payload.parallel_tool_calls !== true ||
+    !(typeof payload.tool_choice === "string" || isRecord(payload.tool_choice)) ||
+    (payload.tools !== undefined && !Array.isArray(payload.tools)) ||
+    (payload.reasoning !== undefined && !isRecord(payload.reasoning))
+  ) {
+    throw new ManagedSessionError(
+      "provider_payload",
+      "Pi built a malformed or differently bound OpenAI Codex request payload",
+    );
+  }
 }
 
 function emptyUsage(): ManagedTokenUsage {
@@ -2496,6 +3772,28 @@ function sanitizeText(value: string): string {
   return clean.length === 0 ? "aborted by authority" : clean.slice(0, 4_096);
 }
 
-function isCode(error: unknown, code: string): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === code;
+function sanitizeProviderError(value: string | undefined): string {
+  const clean = (value ?? "provider request failed").replaceAll("\u0000", "").trim();
+  return (clean.length === 0 ? "provider request failed" : clean).slice(0, 4_096);
+}
+
+function providerAdmissionFailure(error: unknown): ManagedSessionError {
+  const failure =
+    error instanceof ManagedSessionError
+      ? error
+      : new ManagedSessionError(
+          "provider_admission",
+          error instanceof Error ? error.message : String(error),
+        );
+  if (failure.code !== "provider_input_exposure" && failure.code !== "provider_token_exposure") {
+    return failure;
+  }
+  // Pi owns the provider-free compact-and-retry lifecycle, but identifies overflow from the
+  // persisted assistant error text. Preserve Koni's typed code while projecting a stable marker
+  // that Pi recognizes instead of coupling recovery to authority wording.
+  const marker = "Koni provider admission rejected: request exceeds the context window. ";
+  return new ManagedSessionError(
+    failure.code,
+    `${marker}${sanitizeProviderError(failure.message)}`.slice(0, 4_096),
+  );
 }

@@ -9,21 +9,17 @@ import {
   type AuthenticatedProjectConfigurationSource,
 } from "../src/compiler/configuration.js";
 import {
-  computeProfileBundleSha256,
   parseProfilePackageManifest,
   type VerifiedProfileBaseline,
 } from "../src/compiler/profile-package.js";
-import type {
-  ProfileBaselineFile,
-  ProfilePackageManifest,
-} from "../src/contracts/profile-package.js";
+import type { ProfileBaselineFile } from "../src/contracts/profile-package.js";
 import { rawSha256 } from "../src/shared/canonical.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
 describe("schema-2 configuration loader", () => {
   it.each([
-    ["coding", "coding-profile", "software", 5, 10, 31],
+    ["coding", "coding-profile", "software", 6, 10, 41],
     ["research", "research-profile", "research", 3, 13, 58],
   ])(
     "compiles the frozen %s profile into a complete immutable catalog",
@@ -43,7 +39,37 @@ describe("schema-2 configuration loader", () => {
       expect(Object.isFrozen(result.value)).toBe(true);
       expect(Object.isFrozen(result.value.profile)).toBe(true);
       expect(Object.isFrozen(result.value.registries.node_types)).toBe(true);
-      expect(Object.isFrozen(result.value.run_types[result.value.run_type_order[0]!]?.document)).toBe(true);
+      expect(
+        Object.isFrozen(result.value.run_types[result.value.run_type_order[0]!]?.document),
+      ).toBe(true);
+      expect(result.value.behavior.profile).not.toHaveProperty("storage");
+      expect(result.value.behavior.profile).not.toHaveProperty("storageBackend");
+      expect(result.value.behavior.profile).not.toHaveProperty("changeControl");
+      expect(Object.keys(result.value.behavior.profile.orchestration).sort()).toEqual([
+        "disjointScopeParallelism",
+        "maxBoundariesPerLead",
+        "maxParallel",
+      ]);
+      expect(result.value.behavior.profile.orchestration.maxBoundariesPerLead).toBe(1);
+      for (const runTypeId of result.value.run_type_order) {
+        const behavior = result.value.behavior.runTypes[runTypeId]!;
+        expect(behavior.leadJudgment).toMatchObject({
+          protocol: "koni.lead-judgment.v1",
+          actionId: "spawn-lead",
+          triggers: profileId === "software" ? [] : ["orchestration_entry", "compiler_deadlock"],
+          terminal: {
+            protocol: "koni.lead-judgment-output.v1",
+            dispositions: ["proceed", "blocked"],
+          },
+        });
+        expect(behavior.leadJudgment.prompt).not.toMatch(
+          /pull\s+loop|poll(?:ing)?\s+(?:the\s+)?(?:board|tickets?)/iu,
+        );
+        if (behavior.planning !== undefined) {
+          expect(behavior.planning).not.toHaveProperty("sessionScope");
+          expect(behavior.planning).not.toHaveProperty("graphSeedStage");
+        }
+      }
     },
   );
 
@@ -101,13 +127,89 @@ describe("schema-2 configuration loader", () => {
     [
       "unknown profile fields",
       (source: AuthenticatedProjectConfigurationSource) =>
-        editYaml(source, "profile.yaml", (document) => { document.ambient_runtime = {}; }),
+        editYaml(source, "profile.yaml", (document) => {
+          document.ambient_runtime = {};
+        }),
+      "configuration.unknown_field",
+    ],
+    [
+      "retired configurable storage layout",
+      (source: AuthenticatedProjectConfigurationSource) =>
+        editYaml(source, "profile.yaml", (document) => {
+          document.storage = { backend: "tracked", graph_dir: "custom-graph" };
+        }),
+      "configuration.unknown_field",
+    ],
+    [
+      "retired orchestration field running",
+      (source: AuthenticatedProjectConfigurationSource) =>
+        editYaml(source, "profile.yaml", (document) => {
+          asRecord(document.orchestration).running = false;
+        }),
+      "configuration.unknown_field",
+    ],
+    [
+      "retired orchestration field lease_stale_seconds",
+      (source: AuthenticatedProjectConfigurationSource) =>
+        editYaml(source, "profile.yaml", (document) => {
+          asRecord(document.orchestration).lease_stale_seconds = 60;
+        }),
+      "configuration.unknown_field",
+    ],
+    [
+      "retired orchestration field max_fixpoint_passes",
+      (source: AuthenticatedProjectConfigurationSource) =>
+        editYaml(source, "profile.yaml", (document) => {
+          asRecord(document.orchestration).max_fixpoint_passes = 2;
+        }),
+      "configuration.unknown_field",
+    ],
+    [
+      "retired change-control field awaiting_approval_state",
+      (source: AuthenticatedProjectConfigurationSource) =>
+        editYaml(source, "profile.yaml", (document) => {
+          document.change_control = { awaiting_approval_state: "proposed" };
+        }),
+      "configuration.unknown_field",
+    ],
+    [
+      "retired change-control field held_source_state",
+      (source: AuthenticatedProjectConfigurationSource) =>
+        editYaml(source, "profile.yaml", (document) => {
+          document.change_control = { held_source_state: "blocked" };
+        }),
+      "configuration.unknown_field",
+    ],
+    [
+      "more than one Lead boundary per attempt",
+      (source: AuthenticatedProjectConfigurationSource) =>
+        editYaml(source, "profile.yaml", (document) => {
+          asRecord(document.orchestration).max_boundaries_per_lead = 2;
+        }),
+      "configuration.unsupported_value",
+    ],
+    [
+      "retired planning session scope",
+      (source: AuthenticatedProjectConfigurationSource) =>
+        editYaml(source, "run-types/small.yaml", (document) => {
+          asRecord(document.planning).session_scope = "stage";
+        }),
+      "configuration.unknown_field",
+    ],
+    [
+      "retired graph-seed stage selector",
+      (source: AuthenticatedProjectConfigurationSource) =>
+        editYaml(source, "run-types/small.yaml", (document) => {
+          asRecord(document.planning).graph_seed_stage = "focused-plan";
+        }),
       "configuration.unknown_field",
     ],
     [
       "unknown module fields",
       (source: AuthenticatedProjectConfigurationSource) =>
-        editYaml(source, "graph.yaml", (document) => { document.hidden_payload = []; }),
+        editYaml(source, "graph.yaml", (document) => {
+          document.hidden_payload = [];
+        }),
       "configuration.unknown_field",
     ],
     [
@@ -134,6 +236,48 @@ describe("schema-2 configuration loader", () => {
           asRecord((document.overrides as unknown[])[0]).path = "/intake/order/0";
         }),
       "configuration.override_path",
+    ],
+    [
+      "legacy reasoning in an inactive run type",
+      (source: AuthenticatedProjectConfigurationSource) =>
+        editYaml(source, "run-types/large.yaml", (document) => {
+          asRecord(asRecord(asRecord(document.agents).roles).planner).thinking_level = "ultra";
+        }),
+      "configuration.legacy_thinking_level",
+    ],
+    [
+      "graph initial status missing from its node status set",
+      (source: AuthenticatedProjectConfigurationSource) =>
+        editYaml(source, "graph.yaml", (document) => {
+          const risk = (document.node_types as unknown[]).find(
+            (node) => asRecord(node).id === "risk",
+          );
+          asRecord(risk).initial_status = "not-a-declared-risk-status";
+        }),
+      "graph_schema.semantic",
+    ],
+    [
+      "unbounded Lead pull-loop orchestration",
+      (source: AuthenticatedProjectConfigurationSource) =>
+        editYaml(source, "actions.yaml", (document) => {
+          const lead = (document.actions as unknown[]).find(
+            (action) => asRecord(action).id === "spawn-lead",
+          );
+          const spawn = (asRecord(lead).recipe as unknown[]).find(
+            (step) => asRecord(step).primitive === "agent.spawn",
+          );
+          asRecord(spawn).prompt = "Enter a pull loop and poll the ticket board until terminal.";
+        }),
+      "configuration.lead_action_unbounded",
+    ],
+    [
+      "legacy Lead agent runtime instructions",
+      (source: AuthenticatedProjectConfigurationSource) =>
+        editYaml(source, "agents/lead.yaml", (document) => {
+          asRecord(document.instructions).text =
+            "Operate the compiler pull loop with koni_runtime.wait_worker, then call koni_runtime.yield_lead.";
+        }),
+      "configuration.lead_agent_unbounded",
     ],
   ])("fails closed for %s", (_name, mutate, code) => {
     const source = mutate(toProjectSource(readBaseline("coding-profile")));
@@ -178,7 +322,9 @@ function readBaseline(packageDirectory: string): VerifiedProfileBaseline {
   return { manifest: manifestResult.value, files: readTree(join(packageRoot, "baseline")) };
 }
 
-function toProjectSource(baseline: VerifiedProfileBaseline): AuthenticatedProjectConfigurationSource {
+function toProjectSource(
+  baseline: VerifiedProfileBaseline,
+): AuthenticatedProjectConfigurationSource {
   return {
     manifest: structuredClone(baseline.manifest),
     files: structuredClone(baseline.manifest.baseline.files),
@@ -210,7 +356,8 @@ function replaceBytes(
   const files = source.files.map((file): ProfileBaselineFile =>
     file.path === path
       ? { ...file, sha256: rawSha256(bytes), size_bytes: bytes.byteLength }
-      : { ...file });
+      : { ...file },
+  );
   files.sort((left, right) => Buffer.compare(Buffer.from(left.path), Buffer.from(right.path)));
   return { manifest: source.manifest, files, contents };
 }
@@ -218,7 +365,9 @@ function replaceBytes(
 function readTree(root: string): ReadonlyMap<string, Uint8Array> {
   const files = new Map<string, Uint8Array>();
   const visit = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    )) {
       const path = join(directory, entry.name);
       if (entry.isDirectory()) {
         visit(path);
@@ -246,6 +395,8 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function diagnostics(result: { diagnostics: readonly { path: string; code: string; message: string }[] }): string {
+function diagnostics(result: {
+  diagnostics: readonly { path: string; code: string; message: string }[];
+}): string {
   return result.diagnostics.map((item) => `${item.path}:${item.code}:${item.message}`).join("\n");
 }

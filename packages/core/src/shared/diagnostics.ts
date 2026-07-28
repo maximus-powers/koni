@@ -22,22 +22,24 @@ export type ValidationResult<Value> =
 export class DiagnosticBag {
   readonly #diagnostics: CompilerDiagnostic[] = [];
 
-  public error(
-    code: string,
-    path: string,
-    message: string,
-    location?: DiagnosticLocation,
-  ): void {
-    this.add({ code, severity: "error", path, message, ...(location === undefined ? {} : { location }) });
+  public error(code: string, path: string, message: string, location?: DiagnosticLocation): void {
+    this.add({
+      code,
+      severity: "error",
+      path,
+      message,
+      ...(location === undefined ? {} : { location }),
+    });
   }
 
-  public warning(
-    code: string,
-    path: string,
-    message: string,
-    location?: DiagnosticLocation,
-  ): void {
-    this.add({ code, severity: "warning", path, message, ...(location === undefined ? {} : { location }) });
+  public warning(code: string, path: string, message: string, location?: DiagnosticLocation): void {
+    this.add({
+      code,
+      severity: "warning",
+      path,
+      message,
+      ...(location === undefined ? {} : { location }),
+    });
   }
 
   public add(diagnostic: CompilerDiagnostic): void {

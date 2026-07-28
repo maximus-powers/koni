@@ -2,13 +2,16 @@ import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ProfileBaselineFile, ProfilePackageManifest } from "../src/contracts/profile-package.js";
+import type {
+  ProfileBaselineFile,
+  ProfilePackageManifest,
+} from "../src/contracts/profile-package.js";
 import { computeProfileBundleSha256 } from "../src/compiler/profile-package.js";
 import {
   installProfile,
   previewProfileInstall,
   readProfileLifecycle,
-  ProfileInstallError,
+  type ProfileInstallError,
 } from "../src/profile/install.js";
 import { rawSha256 } from "../src/shared/canonical.js";
 
@@ -26,13 +29,22 @@ describe("profile installation and guarded upgrades", () => {
     await mkdir(path.join(project, ".agents", "skills", "community"), { recursive: true });
     await writeFile(path.join(project, ".pi", "settings.json"), '{"theme":"user-owned"}\n');
     await writeFile(path.join(project, ".pi", "auth.json"), '{"credential":"user-owned"}\n');
-    await writeFile(path.join(project, ".agents", "skills", "community", "SKILL.md"), "user owned\n");
+    await writeFile(
+      path.join(project, ".agents", "skills", "community", "SKILL.md"),
+      "user owned\n",
+    );
     const result = await installProfile(project, codingProfile);
     expect(result.packageName).toBe("@koni/coding-profile");
     expect(result.added).toContain("project.yaml");
-    expect(await readFile(path.join(project, ".pi", "settings.json"), "utf8")).toBe('{"theme":"user-owned"}\n');
-    expect(await readFile(path.join(project, ".pi", "auth.json"), "utf8")).toBe('{"credential":"user-owned"}\n');
-    expect(await readFile(path.join(project, ".agents", "skills", "community", "SKILL.md"), "utf8")).toBe("user owned\n");
+    expect(await readFile(path.join(project, ".pi", "settings.json"), "utf8")).toBe(
+      '{"theme":"user-owned"}\n',
+    );
+    expect(await readFile(path.join(project, ".pi", "auth.json"), "utf8")).toBe(
+      '{"credential":"user-owned"}\n',
+    );
+    expect(
+      await readFile(path.join(project, ".agents", "skills", "community", "SKILL.md"), "utf8"),
+    ).toBe("user owned\n");
     expect(await readFile(path.join(project, ".koni", "project.yaml"), "utf8")).toContain(
       "Software project",
     );
@@ -85,19 +97,47 @@ describe("profile installation and guarded upgrades", () => {
     await writeFile(path.join(project, ".koni", "edited.yaml"), "value: project\n");
     await rm(path.join(project, ".koni", "deleted.yaml"));
     await writeFile(path.join(project, ".koni", "custom.yaml"), "value: custom\n");
+    const compatibilityRun = path.join(project, ".koni", "runs", "active-run", "run.json");
+    const authorityRun = path.join(project, ".git", "koni", "runs", "active-run", "run.json");
+    await mkdir(path.dirname(compatibilityRun), { recursive: true });
+    await mkdir(path.dirname(authorityRun), { recursive: true });
+    await writeFile(compatibilityRun, '{"phase":"paused","revision":7}\n');
+    await writeFile(authorityRun, '{"phase":"paused","revision":7,"authority":true}\n');
 
     const result = await installProfile(project, v2);
-    expect(await readFile(path.join(project, ".koni", "profile.yaml"), "utf8")).toContain("value: two");
-    expect(await readFile(path.join(project, ".koni", "edited.yaml"), "utf8")).toBe("value: project\n");
-    await expect(stat(path.join(project, ".koni", "deleted.yaml"))).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(stat(path.join(project, ".koni", "removed.yaml"))).rejects.toMatchObject({ code: "ENOENT" });
-    expect(await readFile(path.join(project, ".koni", "custom.yaml"), "utf8")).toBe("value: custom\n");
+    expect(await readFile(path.join(project, ".koni", "profile.yaml"), "utf8")).toContain(
+      "value: two",
+    );
+    expect(await readFile(path.join(project, ".koni", "edited.yaml"), "utf8")).toBe(
+      "value: project\n",
+    );
+    await expect(stat(path.join(project, ".koni", "deleted.yaml"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(stat(path.join(project, ".koni", "removed.yaml"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(await readFile(path.join(project, ".koni", "custom.yaml"), "utf8")).toBe(
+      "value: custom\n",
+    );
     expect(await readFile(path.join(project, ".koni", "added.yaml"), "utf8")).toBe("value: new\n");
+    expect(await readFile(compatibilityRun, "utf8")).toBe('{"phase":"paused","revision":7}\n');
+    expect(await readFile(authorityRun, "utf8")).toBe(
+      '{"phase":"paused","revision":7,"authority":true}\n',
+    );
     expect(result.pendingUpstream.map(({ path: relative, reason }) => [relative, reason])).toEqual([
       ["deleted.yaml", "deleted"],
       ["edited.yaml", "modified"],
     ]);
-    expect(await readFile(path.join(project, ".koni", result.pendingUpstream[1]!.proposedPath), "utf8")).toBe("value: upstream\n");
+    expect(
+      result.pendingUpstream.find((entry) => entry.path === "edited.yaml")?.conflictPaths,
+    ).toEqual(["/value"]);
+    expect(
+      result.pendingUpstream.find((entry) => entry.path === "deleted.yaml")?.conflictPaths,
+    ).toBeUndefined();
+    expect(
+      await readFile(path.join(project, ".koni", result.pendingUpstream[1]!.proposedPath), "utf8"),
+    ).toBe("value: upstream\n");
 
     const repeated = await installProfile(project, v2);
     expect(repeated.pendingUpstream.map(({ path: relative }) => relative)).toEqual([
@@ -106,18 +146,29 @@ describe("profile installation and guarded upgrades", () => {
     ]);
     const lifecycle = await readProfileLifecycle(project);
     expect(lifecycle?.immutableBaselines).toHaveLength(2);
-    expect(lifecycle?.overlay.map(({ path: relative, disposition }) => [relative, disposition])).toEqual([
+    expect(
+      lifecycle?.overlay.map(({ path: relative, disposition }) => [relative, disposition]),
+    ).toEqual([
       ["custom.yaml", "added"],
       ["deleted.yaml", "deleted"],
       ["edited.yaml", "modified"],
     ]);
+    expect(await readFile(compatibilityRun, "utf8")).toBe('{"phase":"paused","revision":7}\n');
+    expect(await readFile(authorityRun, "utf8")).toBe(
+      '{"phase":"paused","revision":7,"authority":true}\n',
+    );
   }, 30_000);
 
   it("fails closed if immutable archived baseline bytes are changed", async () => {
     const project = await temporary("project");
     await installProfile(project, codingProfile);
     const lifecycle = (await readProfileLifecycle(project))!;
-    const archive = path.join(project, ".koni", lifecycle.immutableBaselines[0]!.root, "profile-manifest.json");
+    const archive = path.join(
+      project,
+      ".koni",
+      lifecycle.immutableBaselines[0]!.root,
+      "profile-manifest.json",
+    );
     await writeFile(archive, "corrupt\n");
     await expect(installProfile(project, codingProfile)).rejects.toMatchObject({
       code: "baseline_store_corrupt",
@@ -138,7 +189,9 @@ describe("profile installation and guarded upgrades", () => {
     );
     const result = await installProfile(project, codingProfile);
     expect(result.added).toContain("profile.yaml");
-    await expect(stat(path.join(project, ".koni", ".managed", "profile-lifecycle.lock"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      stat(path.join(project, ".koni", ".managed", "profile-lifecycle.lock")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
   }, 30_000);
 
   it("rejects path-bearing install metadata before it can be used for an upgrade read", async () => {
@@ -178,11 +231,18 @@ async function syntheticProfile(
   const baselineRoot = path.join(root, "koni", "baseline");
   await mkdir(baselineRoot, { recursive: true });
   const files: ProfileBaselineFile[] = [];
-  for (const [relative, source] of Object.entries(sources).sort(([left], [right]) => left.localeCompare(right))) {
+  for (const [relative, source] of Object.entries(sources).sort(([left], [right]) =>
+    left.localeCompare(right),
+  )) {
     const bytes = Buffer.from(source, "utf8");
     await mkdir(path.dirname(path.join(baselineRoot, relative)), { recursive: true });
     await writeFile(path.join(baselineRoot, relative), bytes);
-    files.push({ path: relative, sha256: rawSha256(bytes), size_bytes: bytes.byteLength, kind: "config" });
+    files.push({
+      path: relative,
+      sha256: rawSha256(bytes),
+      size_bytes: bytes.byteLength,
+      kind: "config",
+    });
   }
   const manifest: ProfilePackageManifest = {
     protocol: "koni.profile-package.v1",
@@ -196,6 +256,9 @@ async function syntheticProfile(
     baseline: { root: "./baseline", files },
     bundle_sha256: computeProfileBundleSha256(files),
   };
-  await writeFile(path.join(root, "koni", "profile-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+  await writeFile(
+    path.join(root, "koni", "profile-manifest.json"),
+    `${JSON.stringify(manifest, null, 2)}\n`,
+  );
   return root;
 }

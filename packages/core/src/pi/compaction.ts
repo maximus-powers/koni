@@ -1,6 +1,11 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
-import { canonicalEncode, isSha256Digest, rawSha256, type Sha256Digest } from "../shared/canonical.js";
+import {
+  canonicalEncode,
+  isSha256Digest,
+  rawSha256,
+  type Sha256Digest,
+} from "../shared/canonical.js";
 import {
   MAX_DYNAMIC_GRAPH_BYTES,
   MAX_DYNAMIC_GRAPH_RECORDS,
@@ -30,6 +35,14 @@ export interface BoundAuthoritativeContext {
   stateHash: Sha256Digest;
   contextHash: Sha256Digest;
   content: string;
+  /** Durable compiler-policy context reissued after a runtime threshold transition. */
+  runtimePolicy?: {
+    protocol: "koni.runtime-policy-context.v1";
+    kind: "planning_synthesis";
+    sha256: Sha256Digest;
+    sizeBytes: number;
+    content: string;
+  };
 }
 
 export interface KoniCompactionSnapshot {
@@ -74,6 +87,16 @@ export interface KoniContextProvider {
   ): Promise<{ authorizationId: string }>;
   /** Atomically claim one recovery owner and return its durable authority view. */
   acquireRecoveryClaim(spec: Readonly<AgentLaunchSpec>): Promise<KoniAttemptRecoveryClaim>;
+  /** Durably reserve one exact provider request before transport. Required in production. */
+  reserveProviderRequest?(
+    spec: Readonly<AgentLaunchSpec>,
+    request: KoniProviderRequestReservationInput,
+  ): Promise<KoniProviderRequestReservation>;
+  /** Settle one reservation from canonical, fsynced Pi JSONL evidence. Required in production. */
+  reconcileProviderRequest?(
+    spec: Readonly<AgentLaunchSpec>,
+    settlement: KoniProviderRequestSettlementInput,
+  ): Promise<KoniProviderRequestSettlement>;
 }
 
 export interface KoniAuthorizedMessage {
@@ -107,6 +130,50 @@ export interface KoniAuthorizedCompaction {
   tokensBefore: number;
 }
 
+export interface KoniProviderRequestReservationInput {
+  sequence: number;
+  api: string;
+  modelId: string;
+  payloadSha256: Sha256Digest;
+  payloadSizeBytes: number;
+  prospectiveInputTokens: number;
+  reservedOutputTokens: number;
+  serializedOutputCap?: {
+    path: string;
+    value: number;
+  };
+}
+
+export interface KoniProviderRequestReservation {
+  protocol: "koni.provider-request-reservation.v1";
+  sequence: number;
+  reservationId: string;
+  baselineEntryId: string;
+}
+
+export interface KoniProviderRequestSettlementInput {
+  sequence: number;
+  reservationId: string;
+  assistantEntryId: string;
+  assistantEntrySha256: Sha256Digest;
+  usage: KoniAttemptUsage;
+}
+
+export interface KoniProviderRequestSettlement {
+  protocol: "koni.provider-request-settlement.v1";
+  sequence: number;
+  reservationId: string;
+  assistantEntryId: string;
+  assistantEntrySha256: Sha256Digest;
+  usage: KoniAttemptUsage;
+}
+
+export interface KoniProviderRequestRecoveryRecord extends KoniProviderRequestReservationInput {
+  reservationId: string;
+  baselineEntryId: string;
+  settlement?: Omit<KoniProviderRequestSettlement, "protocol" | "sequence" | "reservationId">;
+}
+
 export interface KoniAttemptRecoveryClaim {
   protocol: "koni.attempt-recovery-claim.v1";
   claimId: string;
@@ -132,6 +199,10 @@ export interface KoniAttemptRecoveryState {
   authorizedMessages: readonly KoniAuthorizedMessage[];
   authorizedToolResults: readonly KoniAuthorizedToolResult[];
   authorizedCompactions: readonly KoniAuthorizedCompaction[];
+  /** Absent only on attempts issued before provider reservations existed. */
+  providerRequests?: readonly KoniProviderRequestRecoveryRecord[];
+  /** Settled authority totals imported before request-level reservations were introduced. */
+  providerUsageBaseline?: KoniAttemptUsage;
   terminalOutput?: unknown;
   reason?: string;
 }
@@ -146,7 +217,8 @@ export interface KoniAttemptUsage {
 }
 
 export interface CompactionLifecycleNotice {
-  type: "context_reissued" | "compaction_created" | "compaction_denied" | "linear_navigation_denied";
+  type:
+    "context_reissued" | "compaction_created" | "compaction_denied" | "linear_navigation_denied";
   detail: string;
 }
 
@@ -186,13 +258,19 @@ export function createKoniManagedExtension(options: {
         await options.beforeProviderRequest?.();
         const bound = await options.contextProvider.loadBoundContext(options.spec);
         validateBoundContext(options.spec, bound);
-        const dynamic = options.contextProvider.loadDynamicGraphContext === undefined
-          ? undefined
-          : await options.contextProvider.loadDynamicGraphContext(options.spec);
+        const dynamic =
+          options.contextProvider.loadDynamicGraphContext === undefined
+            ? undefined
+            : await options.contextProvider.loadDynamicGraphContext(options.spec);
         if (dynamic !== undefined) validateDynamicGraphContext(options.spec, dynamic);
+        const runtimePolicy = bound.runtimePolicy;
+        if (runtimePolicy !== undefined) validateRuntimePolicyContext(runtimePolicy);
         emitNotice(options, {
           type: "context_reissued",
-          detail: dynamic === undefined ? bound.contextHash : `${bound.contextHash}/${dynamic.envelopeHash}`,
+          detail:
+            dynamic === undefined
+              ? bound.contextHash
+              : `${bound.contextHash}/${dynamic.envelopeHash}`,
         });
         const contextMessage: AgentMessage = {
           role: "user",
@@ -211,27 +289,55 @@ export function createKoniManagedExtension(options: {
           ],
           timestamp: Date.now(),
         };
-        const dynamicMessage: AgentMessage | undefined = dynamic === undefined ? undefined : {
-          role: "user",
-          content: [{
-            type: "text",
-            text: [
-              `<koni_dynamic_graph_context protocol="koni.dynamic-graph-context.v1"`,
-              ` run="${xmlAttribute(dynamic.envelope.binding.runId)}"`,
-              ` ticket="${xmlAttribute(dynamic.envelope.binding.ticketId)}"`,
-              ` step="${xmlAttribute(dynamic.envelope.binding.stepId)}"`,
-              ` attempt="${xmlAttribute(dynamic.envelope.binding.attemptId)}"`,
-              ` semantic_hash="${dynamic.envelope.binding.semanticHash}"`,
-              ` contextual_hash="${dynamic.envelope.binding.contextualHash}"`,
-              ` envelope_hash="${dynamic.envelopeHash}">`,
-              dynamic.content,
-              "</koni_dynamic_graph_context>",
-            ].join(""),
-          }],
-          timestamp: Date.now(),
-        };
+        const dynamicMessage: AgentMessage | undefined =
+          dynamic === undefined
+            ? undefined
+            : {
+                role: "user",
+                content: [
+                  {
+                    type: "text",
+                    text: [
+                      `<koni_dynamic_graph_context protocol="koni.dynamic-graph-context.v1"`,
+                      ` run="${xmlAttribute(dynamic.envelope.binding.runId)}"`,
+                      ` ticket="${xmlAttribute(dynamic.envelope.binding.ticketId)}"`,
+                      ` step="${xmlAttribute(dynamic.envelope.binding.stepId)}"`,
+                      ` attempt="${xmlAttribute(dynamic.envelope.binding.attemptId)}"`,
+                      ` semantic_hash="${dynamic.envelope.binding.semanticHash}"`,
+                      ` contextual_hash="${dynamic.envelope.binding.contextualHash}"`,
+                      ` envelope_hash="${dynamic.envelopeHash}">`,
+                      dynamic.content,
+                      "</koni_dynamic_graph_context>",
+                    ].join(""),
+                  },
+                ],
+                timestamp: Date.now(),
+              };
+        const runtimePolicyMessage: AgentMessage | undefined =
+          runtimePolicy === undefined
+            ? undefined
+            : {
+                role: "user",
+                content: [
+                  {
+                    type: "text",
+                    text: [
+                      `<koni_runtime_policy protocol="${runtimePolicy.protocol}"`,
+                      ` kind="${runtimePolicy.kind}" sha256="${runtimePolicy.sha256}">`,
+                      runtimePolicy.content,
+                      "</koni_runtime_policy>",
+                    ].join(""),
+                  },
+                ],
+                timestamp: Date.now(),
+              };
         return {
-          messages: [contextMessage, ...(dynamicMessage === undefined ? [] : [dynamicMessage]), ...event.messages],
+          messages: [
+            contextMessage,
+            ...(dynamicMessage === undefined ? [] : [dynamicMessage]),
+            ...(runtimePolicyMessage === undefined ? [] : [runtimePolicyMessage]),
+            ...event.messages,
+          ],
         };
       });
 
@@ -323,6 +429,24 @@ export function validateBoundContext(
   if (bytes === 0 || bytes > MAX_CONTEXT_BYTES || bound.content.includes("\u0000")) {
     throw new Error("authoritative context is empty, oversized, or contains NUL");
   }
+  if (bound.runtimePolicy !== undefined) validateRuntimePolicyContext(bound.runtimePolicy);
+}
+
+function validateRuntimePolicyContext(
+  value: NonNullable<BoundAuthoritativeContext["runtimePolicy"]>,
+): void {
+  if (
+    value.protocol !== "koni.runtime-policy-context.v1" ||
+    value.kind !== "planning_synthesis" ||
+    !isSha256Digest(value.sha256) ||
+    !Number.isSafeInteger(value.sizeBytes) ||
+    value.sizeBytes < 1 ||
+    Buffer.byteLength(value.content, "utf8") !== value.sizeBytes ||
+    rawSha256(value.content) !== value.sha256 ||
+    value.content.includes("\u0000") ||
+    value.sizeBytes > 64 * 1024
+  )
+    throw new Error("runtime policy context is malformed or unauthenticated");
 }
 
 export function validateDynamicGraphContext(
@@ -344,18 +468,30 @@ export function validateDynamicGraphContext(
     binding.generation !== spec.authority.generation ||
     !isSha256Digest(binding.semanticHash) ||
     !isSha256Digest(binding.contextualHash) ||
-    !Number.isSafeInteger(binding.semanticRevision) || binding.semanticRevision < 0 ||
-    !Number.isSafeInteger(binding.contextualRevision) || binding.contextualRevision < 0
+    !Number.isSafeInteger(binding.semanticRevision) ||
+    binding.semanticRevision < 0 ||
+    !Number.isSafeInteger(binding.contextualRevision) ||
+    binding.contextualRevision < 0
   ) {
     throw new Error("dynamic graph context does not match the current immutable attempt binding");
   }
-  if (canonicalEncode(envelope) !== dynamic.content || rawSha256(dynamic.content) !== dynamic.envelopeHash) {
+  if (
+    canonicalEncode(envelope) !== dynamic.content ||
+    rawSha256(dynamic.content) !== dynamic.envelopeHash
+  ) {
     throw new Error("dynamic graph context bytes do not match their transient envelope hash");
   }
   const bytes = Buffer.byteLength(dynamic.content, "utf8");
   const estimatedTokens = Math.ceil(bytes / 4);
   const tokenLimit = Math.max(1, Math.floor(spec.budgets.tokens.maxInput / 4));
   const byteLimit = Math.min(MAX_DYNAMIC_GRAPH_BYTES, 4 * tokenLimit);
+  const projectedIds = envelope.records.map(projectedDynamicRecordId);
+  const selectedIds = envelope.selection.selected.map((entry) => entry.id);
+  const counts = [
+    envelope.selection.candidateCount,
+    envelope.selection.filteredCount,
+    envelope.selection.budgetOmissionCount,
+  ];
   if (
     dynamic.content.includes("\u0000") ||
     envelope.records.length > MAX_DYNAMIC_GRAPH_RECORDS ||
@@ -367,10 +503,62 @@ export function validateDynamicGraphContext(
     envelope.budget.selectedRecords !== envelope.records.length ||
     envelope.budget.utf8Bytes !== bytes ||
     envelope.budget.estimatedTokens !== estimatedTokens ||
-    envelope.selection.selected.length !== envelope.records.length
+    envelope.selection.selected.length !== envelope.records.length ||
+    counts.some((value) => !Number.isSafeInteger(value) || value < 0) ||
+    envelope.selection.candidateCount !==
+      envelope.records.length +
+        envelope.selection.filteredCount +
+        envelope.selection.budgetOmissionCount ||
+    new Set(projectedIds).size !== projectedIds.length ||
+    JSON.stringify(selectedIds) !== JSON.stringify(projectedIds) ||
+    envelope.selection.selected.some(
+      (entry) =>
+        Buffer.byteLength(entry.reason, "utf8") === 0 ||
+        Buffer.byteLength(entry.reason, "utf8") > 4_096 ||
+        entry.reason.includes("\u0000"),
+    ) ||
+    envelope.records.filter((record) => record.kind === "run_objective").length !== 1 ||
+    envelope.records.filter((record) => record.kind === "working_spec").length > 1 ||
+    envelope.records.some(
+      (record) => !validProjectedDynamicRecord(record, binding.runId, binding.generation),
+    )
   ) {
     throw new Error("dynamic graph context exceeds or misstates its centralized envelope budget");
   }
+}
+
+function projectedDynamicRecordId(
+  record: SelectedDynamicGraphContext["envelope"]["records"][number],
+): string {
+  return `${record.kind}:${record.id}`;
+}
+
+function validProjectedDynamicRecord(
+  record: SelectedDynamicGraphContext["envelope"]["records"][number],
+  runId: string,
+  generation: number,
+): boolean {
+  if (record.kind === "run_objective") {
+    return record.objective.length > 0 && !record.objective.includes("\u0000");
+  }
+  if (record.kind === "semantic_node") return record.node.id === record.id;
+  if (record.kind === "working_spec") {
+    return (
+      record.value.protocol === "koni.working-spec.v1" &&
+      record.value.recordType === "working_spec" &&
+      record.value.id === record.id &&
+      record.value.runId === runId &&
+      record.value.generation === generation
+    );
+  }
+  const value = record.value;
+  return (
+    value.id === record.id &&
+    value.runId === runId &&
+    (value.protocol === "koni.graph-note.v1"
+      ? value.generation === undefined || value.generation === generation
+      : value.recordType === "change_note" && value.generation === generation)
+  );
 }
 
 export function renderCompactionSummary(
@@ -388,7 +576,9 @@ export function renderCompactionSummary(
     `- Branch: ${spec.lineage.reason} (epoch ${spec.lineage.branchEpoch})`,
     ...(spec.lineage.parentAttemptId === undefined
       ? []
-      : [`- Parent attempt/session: ${spec.lineage.parentAttemptId} / ${spec.lineage.parentSessionId}`]),
+      : [
+          `- Parent attempt/session: ${spec.lineage.parentAttemptId} / ${spec.lineage.parentSessionId}`,
+        ]),
     ...(spec.lineage.parentEntryId === undefined
       ? []
       : [`- Parent Pi entry: ${spec.lineage.parentEntryId}`]),
@@ -399,19 +589,23 @@ export function renderCompactionSummary(
     "## Objective",
     snapshot.objective,
     "",
-    ...(snapshot.workingSpec === undefined ? [] : [
-      "## Active canonical working specification",
-      `- ${snapshot.workingSpec.id} v${snapshot.workingSpec.version} (${snapshot.workingSpec.digest})`,
-      snapshot.workingSpec.guidance,
-      "",
-    ]),
-    ...(snapshot.dynamicGraphContext === undefined ? [] : [
-      "## Dynamic graph context binding",
-      `- Envelope: ${snapshot.dynamicGraphContext.envelopeHash}`,
-      `- Semantic: r${snapshot.dynamicGraphContext.semanticRevision} ${snapshot.dynamicGraphContext.semanticHash}`,
-      `- Contextual: r${snapshot.dynamicGraphContext.contextualRevision} ${snapshot.dynamicGraphContext.contextualHash}`,
-      "",
-    ]),
+    ...(snapshot.workingSpec === undefined
+      ? []
+      : [
+          "## Active canonical working specification",
+          `- ${snapshot.workingSpec.id} v${snapshot.workingSpec.version} (${snapshot.workingSpec.digest})`,
+          snapshot.workingSpec.guidance,
+          "",
+        ]),
+    ...(snapshot.dynamicGraphContext === undefined
+      ? []
+      : [
+          "## Dynamic graph context binding",
+          `- Envelope: ${snapshot.dynamicGraphContext.envelopeHash}`,
+          `- Semantic: r${snapshot.dynamicGraphContext.semanticRevision} ${snapshot.dynamicGraphContext.semanticHash}`,
+          `- Contextual: r${snapshot.dynamicGraphContext.contextualRevision} ${snapshot.dynamicGraphContext.contextualHash}`,
+          "",
+        ]),
     "## Plan",
     `### Architecture\n${snapshot.plan.architecture}`,
     `### Decisions\n${snapshot.plan.decisions}`,
@@ -461,12 +655,14 @@ function validateSnapshot(snapshot: KoniCompactionSnapshot): void {
   if (snapshot.workingSpec !== undefined) {
     if (
       snapshot.workingSpec.id.length === 0 ||
-      !Number.isSafeInteger(snapshot.workingSpec.version) || snapshot.workingSpec.version < 1 ||
+      !Number.isSafeInteger(snapshot.workingSpec.version) ||
+      snapshot.workingSpec.version < 1 ||
       !isSha256Digest(snapshot.workingSpec.digest) ||
       Buffer.byteLength(snapshot.workingSpec.guidance, "utf8") === 0 ||
       Buffer.byteLength(snapshot.workingSpec.guidance, "utf8") > 1024 * 1024 ||
       snapshot.workingSpec.guidance.includes("\u0000")
-    ) throw new Error("workingSpec is malformed or oversized");
+    )
+      throw new Error("workingSpec is malformed or oversized");
   }
   if (snapshot.dynamicGraphContext !== undefined) {
     if (
@@ -476,7 +672,8 @@ function validateSnapshot(snapshot: KoniCompactionSnapshot): void {
       !Number.isSafeInteger(snapshot.dynamicGraphContext.semanticRevision) ||
       !Number.isSafeInteger(snapshot.dynamicGraphContext.contextualRevision) ||
       snapshot.dynamicGraphContext.selectedIds.length > MAX_DYNAMIC_GRAPH_RECORDS
-    ) throw new Error("dynamicGraphContext is malformed");
+    )
+      throw new Error("dynamicGraphContext is malformed");
   }
   for (const [name, values] of Object.entries({
     graphRefs: snapshot.graphRefs,
@@ -502,7 +699,11 @@ function validateSummaryText(value: string, name: string): void {
 }
 
 function renderList(title: string, items: readonly string[]): string {
-  return [`## ${title}`, ...(items.length === 0 ? ["- None"] : items.map((item) => `- ${item}`)), ""].join("\n");
+  return [
+    `## ${title}`,
+    ...(items.length === 0 ? ["- None"] : items.map((item) => `- ${item}`)),
+    "",
+  ].join("\n");
 }
 
 function xmlAttribute(value: string): string {

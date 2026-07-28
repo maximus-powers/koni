@@ -78,11 +78,18 @@ describe("grant ledger", () => {
       expectedRevision: 8,
       expectedStateHash: "state-eight",
     };
-    expect(ledger.authorize(grant, nextCall, {
-      ...snapshot,
-      revision: 8,
-      stateHash: "state-eight",
-    }, 2)).toEqual({
+    expect(
+      ledger.authorize(
+        grant,
+        nextCall,
+        {
+          ...snapshot,
+          revision: 8,
+          stateHash: "state-eight",
+        },
+        2,
+      ),
+    ).toEqual({
       kind: "accepted",
       replayKey: "grant-one\u00002\u00003\u0000call-two",
     });
@@ -106,11 +113,11 @@ describe("grant ledger", () => {
 
   it("rejects cross-session and out-of-scope calls", () => {
     const ledger = new GrantLedger<string>();
-    expect(() =>
-      ledger.authorize(grant, { ...call, sessionId: "other" }, snapshot, 1),
-    ).toThrow(/session identity/);
-    expect(() =>
-      ledger.authorize(grant, { ...call, tool: "bash" }, snapshot, 1),
-    ).toThrow(/outside the assignment grant/);
+    expect(() => ledger.authorize(grant, { ...call, sessionId: "other" }, snapshot, 1)).toThrow(
+      /session identity/,
+    );
+    expect(() => ledger.authorize(grant, { ...call, tool: "bash" }, snapshot, 1)).toThrow(
+      /outside the assignment grant/,
+    );
   });
 });

@@ -6,9 +6,15 @@ import type {
 import {
   DERIVED_FACT_PROTOCOL,
   DERIVED_TICKET_PROTOCOL,
+  GATE_POLICY_CONTEXT_PROTOCOL,
   RULE_EVALUATION_PROTOCOL,
+  STATE_MACHINE_CATALOG_PROTOCOL,
+  type CompiledGatePolicyContext,
   type CompiledRuleEvaluation,
   type CompiledRuleEvaluationMaterial,
+  type CompiledStateMachine,
+  type CompiledStateMachineCatalog,
+  type CompiledStateTransition,
   type DerivedFact,
   type DerivedGraphMutationPolicy,
   type DerivedTicketDefinition,
@@ -30,8 +36,24 @@ import {
   GraphExpressionEvaluator,
   type RuleDomainAdapter,
 } from "./expressions.js";
+import { projectGatePolicyDefinitions, type CompiledGatePolicyDefinition } from "./graph-schema.js";
 
-const RULE_FIELDS = ["id", "phase", "priority", "for_each", "bind", "when", "derive", "emit"] as const;
+const RULE_FIELDS = [
+  "id",
+  "phase",
+  "priority",
+  "for_each",
+  "bind",
+  "when",
+  "derive",
+  "emit",
+] as const;
+// Exact authenticated Coding 0.7/early-0.8 proof workflow retained by already-issued runs. It
+// incorrectly routed semantic Review failure to a read-only verifier. New configurations fail the
+// no-effect check below; this one frozen object remains compilable so paused runs can reach an
+// explicit compatibility/recovery boundary rather than being silently invalidated by upgrade.
+const LEGACY_READ_ONLY_PROOF_REWORK_SHA256 =
+  "sha256:016ea983bcad932ecbc3bb81f216d94082119f9b9ff7ba5197e1dfd915e7b880" as Sha256Digest;
 const EMIT_FIELDS = [
   "operation",
   "registry_entry_id",
@@ -154,6 +176,7 @@ interface ParsedOperation {
 interface ParsedWorkflow {
   id: string;
   appliesTo: string[];
+  definitionSha256: Sha256Digest;
   reviewFailureReopenFrom?: string;
   steps: readonly ConfigurationObject[];
 }
@@ -163,10 +186,12 @@ interface FactMaterial extends Omit<DerivedFact, "fact_sha256"> {}
 
 export interface EvaluateConfiguredRulesOptions {
   readonly adapter?: RuleDomainAdapter;
-  /** Optional focused rule subset, principally for parity fixtures and diagnostics. */
+  /** Optional focused rule subset, principally for fixtures and diagnostics. */
   readonly ruleIds?: readonly string[];
   /** Optional phase subset. Applied to both derivation and ticket passes. */
   readonly phases?: readonly string[];
+  /** Defaults on only for a complete compiler pass; focused diagnostics stay focused. */
+  readonly includeGatePolicyFacts?: boolean;
 }
 
 /**
@@ -180,16 +205,30 @@ export function evaluateConfiguredRules(
   const bag = new DiagnosticBag();
   try {
     const rules = parseRules(input.configuration, options);
-    const evaluator = new GraphExpressionEvaluator(input.configuration, input.graph, options.adapter);
+    const evaluator = new GraphExpressionEvaluator(
+      input.configuration,
+      input.graph,
+      options.adapter,
+    );
     const programState: Record<string, ConfigurationValue> = { schema_version: "1.0" };
     const facts = materializeDerivations(rules, evaluator, programState, input.configuration);
+    const includeGatePolicyFacts =
+      options.includeGatePolicyFacts ??
+      (options.ruleIds === undefined && options.phases === undefined);
+    const gatePolicies = includeGatePolicyFacts
+      ? materializeGatePolicyAuthority(evaluator, programState, input.configuration)
+      : { facts: [] as DerivedFact[], contexts: [] as CompiledGatePolicyContext[] };
+    facts.push(...gatePolicies.facts);
     const tickets = deriveTickets(rules, evaluator, input.configuration);
+    const stateMachineCatalog = requireStateMachineCatalog(input.configuration);
     const material: CompiledRuleEvaluationMaterial = {
       protocol: RULE_EVALUATION_PROTOCOL,
       configuration_sha256: input.configuration.configuration_sha256,
       input_graph_sha256: evaluator.inputGraphSha256,
       derived_graph_sha256: evaluator.graphSha256,
       facts,
+      gate_policy_contexts: gatePolicies.contexts,
+      state_machine_catalog: stateMachineCatalog,
       program_state: cloneObject(programState),
       tickets,
     };
@@ -224,16 +263,277 @@ export class RuleCompilationError extends Error {
   }
 }
 
+export type StateTransitionAuthorization =
+  | { readonly allowed: true; readonly transition: CompiledStateTransition }
+  | {
+      readonly allowed: false;
+      readonly reason:
+        | "unknown_machine"
+        | "unknown_source"
+        | "unknown_target"
+        | "actor_not_allowed"
+        | "transition_not_configured";
+    };
+
+/** Compile guards out of existence: ignored lifecycle policy is rejected, never copied. */
+export function compileStateMachineCatalog(
+  configuration: CompiledConfiguration,
+): ValidationResult<CompiledStateMachineCatalog> {
+  const bag = new DiagnosticBag();
+  try {
+    const machines: Record<string, CompiledStateMachine> = Object.create(null) as Record<
+      string,
+      CompiledStateMachine
+    >;
+    const allowedActors = new Set([
+      "human",
+      "compiler",
+      ...Object.keys(configuration.registries.personas),
+    ]);
+    for (const [registryId, raw] of Object.entries(configuration.registries.state_machines).sort(
+      ([left], [right]) => compareUtf8(left, right),
+    )) {
+      const path = `/registries/state_machines/${escapePointer(registryId)}`;
+      const source = exactRecord(
+        raw,
+        path,
+        ["id", "initial", "states", "terminal_states", "transitions"],
+        ["id", "initial", "states", "transitions"],
+      );
+      const id = lifecycleIdentifier(source.id, pointer(path, "id"));
+      if (id !== registryId)
+        fail(
+          "state_machine.registry_id",
+          pointer(path, "id"),
+          `state machine id ${id} does not match registry key ${registryId}`,
+        );
+      const states = uniqueLifecycleValues(source.states!, pointer(path, "states"), false);
+      const stateSet = new Set(states);
+      const initial = lifecycleIdentifier(source.initial, pointer(path, "initial"));
+      if (!stateSet.has(initial))
+        fail("state_machine.initial", pointer(path, "initial"), `unknown initial state ${initial}`);
+      const terminalStates = uniqueLifecycleValues(
+        source.terminal_states ?? [],
+        pointer(path, "terminal_states"),
+        true,
+      );
+      for (const terminal of terminalStates)
+        if (!stateSet.has(terminal)) {
+          fail(
+            "state_machine.terminal",
+            pointer(path, "terminal_states"),
+            `unknown terminal state ${terminal}`,
+          );
+        }
+      const rawTransitions = arrayValue(source.transitions!, pointer(path, "transitions"));
+      const transitionIds = new Set<string>();
+      const transitions: CompiledStateTransition[] = rawTransitions.map((rawTransition, index) => {
+        const transitionPath = pointer(pointer(path, "transitions"), index);
+        const transition = exactRecord(
+          rawTransition,
+          transitionPath,
+          ["id", "from", "to", "guard", "actors"],
+          ["id", "from", "to"],
+        );
+        const transitionId = lifecycleIdentifier(transition.id, pointer(transitionPath, "id"));
+        if (transitionIds.has(transitionId))
+          fail(
+            "state_machine.transition_id",
+            pointer(transitionPath, "id"),
+            `duplicate transition ${transitionId}`,
+          );
+        transitionIds.add(transitionId);
+        if (transition.guard !== undefined) {
+          fail(
+            "state_machine.guard_unsupported",
+            pointer(transitionPath, "guard"),
+            `state machine ${id} transition ${transitionId} uses an unsupported guard`,
+          );
+        }
+        const from = uniqueLifecycleValues(
+          transition.from!,
+          pointer(transitionPath, "from"),
+          false,
+        );
+        for (const state of from)
+          if (!stateSet.has(state)) {
+            fail(
+              "state_machine.source",
+              pointer(transitionPath, "from"),
+              `transition ${transitionId} references unknown source state ${state}`,
+            );
+          }
+        const to = lifecycleIdentifier(transition.to, pointer(transitionPath, "to"));
+        if (!stateSet.has(to))
+          fail(
+            "state_machine.target",
+            pointer(transitionPath, "to"),
+            `transition ${transitionId} references unknown target state ${to}`,
+          );
+        const actors = uniqueLifecycleValues(
+          transition.actors ?? [],
+          pointer(transitionPath, "actors"),
+          true,
+        );
+        for (const actor of actors)
+          if (!allowedActors.has(actor)) {
+            fail(
+              "state_machine.actor",
+              pointer(transitionPath, "actors"),
+              `transition ${transitionId} references unknown actor ${actor}`,
+            );
+          }
+        const material = { id: transitionId, from, to, actors };
+        return deepFreeze({ ...material, transition_sha256: canonicalHash(material) });
+      });
+      const reachableStates = new Set<string>([initial]);
+      let discoveredState = true;
+      while (discoveredState) {
+        discoveredState = false;
+        for (const transition of transitions) {
+          if (
+            !transition.from.some((state) => reachableStates.has(state)) ||
+            reachableStates.has(transition.to)
+          )
+            continue;
+          reachableStates.add(transition.to);
+          discoveredState = true;
+        }
+      }
+      const unreachableStates = states.filter((state) => !reachableStates.has(state));
+      if (unreachableStates.length > 0) {
+        fail(
+          "state_machine.unreachable_state",
+          pointer(path, "states"),
+          `state machine ${id} has states unreachable from ${initial}: ${unreachableStates.join(", ")}`,
+        );
+      }
+      const material = { id, initial, states, terminal_states: terminalStates, transitions };
+      machines[id] = deepFreeze({ ...material, machine_sha256: canonicalHash(material) });
+    }
+    const material = {
+      protocol: STATE_MACHINE_CATALOG_PROTOCOL,
+      configuration_sha256: configuration.configuration_sha256,
+      machines,
+    } as const;
+    return validationSuccess(
+      deepFreeze({ ...material, catalog_sha256: canonicalHash(material) }),
+      bag.sorted(),
+    );
+  } catch (error) {
+    if (error instanceof RuleCompilationError) bag.error(error.code, error.path, error.message);
+    else
+      bag.error(
+        "state_machine.internal_failure",
+        "/registries/state_machines",
+        "state-machine compilation failed at a non-diagnostic boundary",
+      );
+    return validationFailure(bag.sorted());
+  }
+}
+
+/** Pure authorization seam for ticket/run/gate/research lifecycle consumers. */
+export function authorizeStateTransition(
+  catalog: CompiledStateMachineCatalog,
+  input: {
+    readonly machineId: string;
+    readonly from: string;
+    readonly to: string;
+    readonly actor: string;
+  },
+): StateTransitionAuthorization {
+  assertCompiledStateMachineCatalog(catalog);
+  const machine = catalog.machines[input.machineId];
+  if (machine === undefined) return { allowed: false, reason: "unknown_machine" };
+  if (!machine.states.includes(input.from)) return { allowed: false, reason: "unknown_source" };
+  if (!machine.states.includes(input.to)) return { allowed: false, reason: "unknown_target" };
+  const stateMatches = machine.transitions.filter(
+    (transition) => transition.from.includes(input.from) && transition.to === input.to,
+  );
+  if (stateMatches.length === 0) return { allowed: false, reason: "transition_not_configured" };
+  const transition = stateMatches.find(
+    (candidate) => candidate.actors.length === 0 || candidate.actors.includes(input.actor),
+  );
+  return transition === undefined
+    ? { allowed: false, reason: "actor_not_allowed" }
+    : { allowed: true, transition: structuredClone(transition) };
+}
+
+function requireStateMachineCatalog(
+  configuration: CompiledConfiguration,
+): CompiledStateMachineCatalog {
+  const result = compileStateMachineCatalog(configuration);
+  if (result.ok) return result.value;
+  const diagnostic = result.diagnostics[0]!;
+  fail(diagnostic.code, diagnostic.path, diagnostic.message);
+}
+
+/** Validate every nested digest before a compiled lifecycle catalog crosses an authority seam. */
+export function assertCompiledStateMachineCatalog(catalog: CompiledStateMachineCatalog): void {
+  const machines: Record<string, CompiledStateMachine> = Object.create(null) as Record<
+    string,
+    CompiledStateMachine
+  >;
+  for (const [id, machine] of Object.entries(catalog.machines).sort(([left], [right]) =>
+    compareUtf8(left, right),
+  )) {
+    const transitions = machine.transitions.map((transition) => {
+      const { transition_sha256, ...material } = transition;
+      if (transition_sha256 !== canonicalHash(material))
+        throw new Error(
+          `state-machine transition ${id}.${transition.id} failed integrity validation`,
+        );
+      return transition;
+    });
+    const { machine_sha256, ...material } = machine;
+    if (machine_sha256 !== canonicalHash({ ...material, transitions }))
+      throw new Error(`state machine ${id} failed integrity validation`);
+    machines[id] = machine;
+  }
+  const { catalog_sha256, ...material } = catalog;
+  if (catalog_sha256 !== canonicalHash({ ...material, machines }))
+    throw new Error("state-machine catalog failed integrity validation");
+}
+
+function lifecycleIdentifier(value: ConfigurationValue | undefined, path: string): string {
+  const parsed = nonemptyString(value, path);
+  if (parsed.trim() !== parsed || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(parsed)) {
+    fail(
+      "state_machine.identifier",
+      path,
+      `invalid lifecycle identifier ${JSON.stringify(parsed)}`,
+    );
+  }
+  return parsed;
+}
+
+function uniqueLifecycleValues(
+  value: ConfigurationValue,
+  path: string,
+  allowEmpty: boolean,
+): string[] {
+  const values = arrayValue(value, path).map((entry, index) =>
+    lifecycleIdentifier(entry, pointer(path, index)),
+  );
+  if (!allowEmpty && values.length === 0)
+    fail("state_machine.empty", path, "lifecycle value list must not be empty");
+  if (new Set(values).size !== values.length)
+    fail("state_machine.duplicate", path, "lifecycle value list contains duplicates");
+  return values;
+}
+
 function parseRules(
   configuration: CompiledConfiguration,
   options: EvaluateConfiguredRulesOptions,
 ): ParsedRule[] {
-  const requestedIds = options.ruleIds === undefined
-    ? undefined
-    : new Set(uniqueSortedStrings(options.ruleIds, "/options/ruleIds"));
-  const phases = options.phases === undefined
-    ? undefined
-    : new Set(uniqueSortedStrings(options.phases, "/options/phases"));
+  const requestedIds =
+    options.ruleIds === undefined
+      ? undefined
+      : new Set(uniqueSortedStrings(options.ruleIds, "/options/ruleIds"));
+  const phases =
+    options.phases === undefined
+      ? undefined
+      : new Set(uniqueSortedStrings(options.phases, "/options/phases"));
   if (requestedIds !== undefined) {
     for (const id of requestedIds) {
       if (!Object.hasOwn(configuration.registries.rules, id)) {
@@ -247,7 +547,12 @@ function parseRules(
     const path = `/registries/rules/${escapePointer(registryId)}`;
     const rule = exactRecord(source, path, RULE_FIELDS, ["id", "for_each"]);
     const id = nonemptyString(rule.id, pointer(path, "id"));
-    if (id !== registryId) fail("rule.registry_id", pointer(path, "id"), `rule id ${id} does not match registry key ${registryId}`);
+    if (id !== registryId)
+      fail(
+        "rule.registry_id",
+        pointer(path, "id"),
+        `rule id ${id} does not match registry key ${registryId}`,
+      );
     const phase = optionalString(rule.phase, pointer(path, "phase")) ?? "";
     if (phases !== undefined && !phases.has(phase)) continue;
     const priority = optionalSignedInteger(rule.priority, pointer(path, "priority")) ?? 0;
@@ -267,10 +572,7 @@ function parseRules(
   return rules;
 }
 
-function parseDerivations(
-  value: ConfigurationValue | undefined,
-  path: string,
-): ParsedDerivation[] {
+function parseDerivations(value: ConfigurationValue | undefined, path: string): ParsedDerivation[] {
   if (value === undefined) return [];
   const sources = arrayValue(value, path);
   return sources.map((source, index) => {
@@ -278,12 +580,20 @@ function parseDerivations(
     const derivation = record(source, itemPath);
     const kind = nonemptyString(derivation.kind, pointer(itemPath, "kind"));
     if (!DERIVATION_KINDS.has(kind as DerivationKind)) {
-      fail("rule.derivation_kind", pointer(itemPath, "kind"), `unsupported derivation kind ${kind}`);
+      fail(
+        "rule.derivation_kind",
+        pointer(itemPath, "kind"),
+        `unsupported derivation kind ${kind}`,
+      );
     }
     for (const field of ["key", "target", "field", "severity", "reason"] as const) {
-      if (derivation[field] !== undefined) optionalString(derivation[field], pointer(itemPath, field));
+      if (derivation[field] !== undefined)
+        optionalString(derivation[field], pointer(itemPath, field));
     }
-    const args: Record<string, ConfigurationValue> = Object.create(null) as Record<string, ConfigurationValue>;
+    const args: Record<string, ConfigurationValue> = Object.create(null) as Record<
+      string,
+      ConfigurationValue
+    >;
     for (const key of Object.keys(derivation).sort(compareUtf8)) {
       if (!DERIVATION_FIELDS.has(key)) args[key] = cloneValue(derivation[key]!);
     }
@@ -296,28 +606,35 @@ function parseDerivations(
 }
 
 function parseEmit(value: ConfigurationValue, path: string): ParsedEmit {
-  const emit = exactRecord(
-    value,
-    path,
-    EMIT_FIELDS,
-    ["operation", "source_state", "target_state"],
-  );
+  const emit = exactRecord(value, path, EMIT_FIELDS, ["operation", "source_state", "target_state"]);
   return {
     source: cloneObject(emit),
     operation: nonemptyString(emit.operation, pointer(path, "operation")),
     ...(emit.registry_entry_id === undefined
       ? {}
-      : { registryEntryId: nonemptyString(emit.registry_entry_id, pointer(path, "registry_entry_id")) }),
+      : {
+          registryEntryId: nonemptyString(
+            emit.registry_entry_id,
+            pointer(path, "registry_entry_id"),
+          ),
+        }),
     sourceState: nonemptyString(emit.source_state, pointer(path, "source_state")),
     targetState: nonemptyString(emit.target_state, pointer(path, "target_state")),
-    obligations: uniqueSortedStrings(optionalStringArray(emit.obligations, pointer(path, "obligations")), pointer(path, "obligations")),
+    obligations: uniqueSortedStrings(
+      optionalStringArray(emit.obligations, pointer(path, "obligations")),
+      pointer(path, "obligations"),
+    ),
     targetNodes: cloneValue(emit.target_nodes ?? { variable: "target" }),
     readScope: cloneValue(emit.read_scope ?? { variable: "target" }),
     writeScope: cloneValue(emit.write_scope ?? { variable: "target" }),
     readPaths: cloneArray(emit.read_paths, pointer(path, "read_paths")),
     writePaths: cloneArray(emit.write_paths, pointer(path, "write_paths")),
-    ...(emit.workflow === undefined ? {} : { workflow: nonemptyString(emit.workflow, pointer(path, "workflow")) }),
-    ...(emit.title === undefined ? {} : { title: nonemptyString(emit.title, pointer(path, "title")) }),
+    ...(emit.workflow === undefined
+      ? {}
+      : { workflow: nonemptyString(emit.workflow, pointer(path, "workflow")) }),
+    ...(emit.title === undefined
+      ? {}
+      : { title: nonemptyString(emit.title, pointer(path, "title")) }),
   };
 }
 
@@ -383,6 +700,398 @@ function materializeDerivations(
   return facts;
 }
 
+function materializeGatePolicyAuthority(
+  evaluator: GraphExpressionEvaluator,
+  programState: Record<string, ConfigurationValue>,
+  configuration: CompiledConfiguration,
+): { facts: DerivedFact[]; contexts: CompiledGatePolicyContext[] } {
+  const projected = projectGatePolicyDefinitions(configuration);
+  if (!projected.ok) {
+    const diagnostic = projected.diagnostics[0]!;
+    fail(diagnostic.code, diagnostic.path, diagnostic.message);
+  }
+  const facts: DerivedFact[] = [];
+  const contexts: CompiledGatePolicyContext[] = [];
+  for (const policy of projected.value) {
+    const contextsByGate = new Map<string, CompiledGatePolicyContext>();
+    for (const gateId of evaluator.select(
+      policy.gateSubjects,
+      `/registries/gate_policies/${escapePointer(policy.id)}/gate_subjects`,
+    )) {
+      const context = resolveGatePolicyContext(policy, gateId, evaluator);
+      contexts.push(context);
+      contextsByGate.set(gateId, context);
+    }
+    const subjects = evaluator.select(
+      {
+        nodes: {
+          node_types: [...policy.applicability.subjectNodeTypes],
+          status_excluding: ["archived", "superseded"],
+        },
+      },
+      `/registries/gate_policies/${escapePointer(policy.id)}/applicability/subjects`,
+    );
+    for (const subjectId of subjects) {
+      const subject = evaluator.node(subjectId)!;
+      const direct = selectGateApplicability(policy, subjectId, "direct_gates", evaluator);
+      const inherited = selectGateApplicability(policy, subjectId, "inherited_gates", evaluator);
+      const applicable = [...new Set([...direct, ...inherited])].sort(compareUtf8);
+      const required = policy.applicability.requiredSubjectNodeTypes.includes(subject.type);
+      const missingRequiredGate = required && applicable.length === 0;
+      const unsatisfied = applicable.filter(
+        (gateId) => !gatePolicySatisfied(policy, gateId, evaluator),
+      );
+      let ordinal = 0;
+      if (missingRequiredGate) {
+        const key = renderGateTemplate(policy.missingGateObligationKeyTemplate, {
+          policyId: policy.id,
+          subjectId,
+        });
+        const reason = `Gate-required subject ${subjectId} has no applicable gate`;
+        const derivation: ConfigurationObject = {
+          kind: "obligation",
+          key,
+          severity: "blocking",
+          reason,
+        };
+        facts.push(
+          gateAuthorityFact(
+            policy,
+            subjectId,
+            ordinal++,
+            derivation,
+            {
+              policy_id: policy.id,
+              policy_contract_sha256: policy.contractSha256,
+              subject_id: subjectId,
+              missing_required_gate: true,
+            },
+            configuration,
+          ),
+        );
+        evaluator.materializeDerivation(
+          subjectId,
+          "obligation",
+          derivation,
+          `gate-policy.${policy.id}`,
+          programState,
+          `/registries/gate_policies/${escapePointer(policy.id)}/missing_gate_obligation_key_template`,
+        );
+      }
+      for (const gateId of unsatisfied) {
+        const key = renderGateTemplate(policy.obligationKeyTemplate, {
+          policyId: policy.id,
+          gateId,
+          subjectId,
+        });
+        const reason = `Gate ${gateId} lacks a current receipt with a passing status`;
+        const derivation: ConfigurationObject = {
+          kind: "obligation",
+          key,
+          severity: "blocking",
+          reason,
+        };
+        const context = contextsByGate.get(gateId);
+        facts.push(
+          gateAuthorityFact(
+            policy,
+            subjectId,
+            ordinal++,
+            derivation,
+            {
+              policy_id: policy.id,
+              policy_contract_sha256: policy.contractSha256,
+              subject_id: subjectId,
+              gate_id: gateId,
+              passing_receipt_statuses: [...policy.passingReceiptStatuses],
+              ...(context === undefined
+                ? {}
+                : {
+                    evaluation_context_sha256: context.context_sha256,
+                    evaluation_context: structuredClone(context) as unknown as ConfigurationValue,
+                  }),
+            },
+            configuration,
+          ),
+        );
+        evaluator.materializeDerivation(
+          subjectId,
+          "obligation",
+          derivation,
+          `gate-policy.${policy.id}`,
+          programState,
+          `/registries/gate_policies/${escapePointer(policy.id)}/obligation_key_template`,
+        );
+      }
+      if (missingRequiredGate || unsatisfied.length > 0) {
+        const reason = missingRequiredGate
+          ? "One or more gate-required subjects have no applicable gate, or an applicable gate lacks a current passing receipt"
+          : "One or more direct or inherited gates lack a current passing receipt";
+        const derivation: ConfigurationObject = { kind: "readiness", value: "blocked", reason };
+        facts.push(
+          gateAuthorityFact(
+            policy,
+            subjectId,
+            ordinal,
+            derivation,
+            {
+              policy_id: policy.id,
+              policy_contract_sha256: policy.contractSha256,
+              subject_id: subjectId,
+              blocking_gate_ids: unsatisfied,
+              missing_required_gate: missingRequiredGate,
+            },
+            configuration,
+          ),
+        );
+        evaluator.materializeDerivation(
+          subjectId,
+          "readiness",
+          derivation,
+          `gate-policy.${policy.id}`,
+          programState,
+          `/registries/gate_policies/${escapePointer(policy.id)}/readiness`,
+        );
+      }
+    }
+  }
+  return { facts, contexts };
+}
+
+function resolveGatePolicyContext(
+  policy: CompiledGatePolicyDefinition,
+  gateId: string,
+  evaluator: GraphExpressionEvaluator,
+): CompiledGatePolicyContext {
+  const path = `/registries/gate_policies/${escapePointer(policy.id)}/context`;
+  return evaluator.withBinding("gate", [gateId], () => {
+    const evaluationTargets = evaluator.select(
+      policy.evaluationTargets.select,
+      `${path}/evaluation_targets`,
+    );
+    const winners = evaluator.select(
+      {
+        policy_selection: { policy: policy.id, gate: "$gate", result: "selected" },
+      },
+      `${path}/winner`,
+    );
+    if (winners.length > 1)
+      fail(
+        "gate_policy.winner_cardinality",
+        `${path}/winner`,
+        `gate ${gateId} selected more than one winner`,
+      );
+    const winner = winners[0];
+    const ancestors = selectGateApplicabilityForSubjects(
+      policy,
+      evaluationTargets,
+      "ancestors",
+      evaluator,
+    );
+    const direct = selectGateApplicabilityForSubjects(
+      policy,
+      evaluationTargets,
+      "direct_gates",
+      evaluator,
+    );
+    const inherited = selectGateApplicabilityForSubjects(
+      policy,
+      evaluationTargets,
+      "inherited_gates",
+      evaluator,
+    );
+    const applicable = [...new Set([...direct, ...inherited])].sort(compareUtf8);
+    return withBindings(
+      evaluator,
+      [
+        ["winner", winner === undefined ? [] : [winner]],
+        ["candidate", winner === undefined ? [] : [winner]],
+        ["target", evaluationTargets],
+        ["evaluation_targets", evaluationTargets],
+        ["ancestors", ancestors],
+        ["direct_gates", direct],
+        ["inherited_gates", inherited],
+        ["applicable_gates", applicable],
+      ],
+      () => {
+        const contextNodeIds =
+          policy.context === undefined
+            ? []
+            : [...evaluator.select(policy.context.select, `${path}/select`)];
+        const readPaths =
+          policy.context === undefined
+            ? []
+            : withBindings(evaluator, [["context", contextNodeIds]], () =>
+                resolveGateContextReadPaths(
+                  policy.context!.readPaths,
+                  evaluator,
+                  `${path}/read_paths`,
+                ),
+              );
+        const material = {
+          protocol: GATE_POLICY_CONTEXT_PROTOCOL,
+          policy_id: policy.id,
+          policy_contract_sha256: policy.contractSha256,
+          gate_node_id: gateId,
+          ...(winner === undefined ? {} : { winner_node_id: winner }),
+          evaluation_target_node_ids: [...evaluationTargets],
+          ancestor_node_ids: ancestors,
+          direct_gate_node_ids: direct,
+          inherited_gate_node_ids: inherited,
+          applicable_gate_node_ids: applicable,
+          context_node_ids: contextNodeIds,
+          read_paths: readPaths,
+        } as const;
+        return deepFreeze({ ...material, context_sha256: canonicalHash(material) });
+      },
+    );
+  });
+}
+
+function selectGateApplicability(
+  policy: CompiledGatePolicyDefinition,
+  subjectId: string,
+  result: "direct_gates" | "inherited_gates" | "ancestors" | "context" | "applicable_gates",
+  evaluator: GraphExpressionEvaluator,
+): string[] {
+  return selectGateApplicabilityForSubjects(policy, [subjectId], result, evaluator);
+}
+
+function selectGateApplicabilityForSubjects(
+  policy: CompiledGatePolicyDefinition,
+  subjectIds: readonly string[],
+  result: "direct_gates" | "inherited_gates" | "ancestors" | "context" | "applicable_gates",
+  evaluator: GraphExpressionEvaluator,
+): string[] {
+  if (subjectIds.length === 0) return [];
+  return [
+    ...evaluator.select(
+      {
+        policy_applicability: {
+          policy: policy.id,
+          subject: { ids: [...subjectIds] },
+          result,
+        },
+      },
+      `/registries/gate_policies/${escapePointer(policy.id)}/applicability/${result}`,
+    ),
+  ];
+}
+
+function gatePolicySatisfied(
+  policy: CompiledGatePolicyDefinition,
+  gateId: string,
+  evaluator: GraphExpressionEvaluator,
+): boolean {
+  return withBindings(
+    evaluator,
+    [
+      ["gate", [gateId]],
+      ["target", [gateId]],
+    ],
+    () =>
+      evaluator.evaluate(
+        {
+          op: "gate_policy_satisfied",
+          gate_policy: policy.id,
+          gate_subject: "$gate",
+        },
+        `/registries/gate_policies/${escapePointer(policy.id)}/passing_receipt_statuses`,
+      ),
+  );
+}
+
+function resolveGateContextReadPaths(
+  definitions: CompiledGatePolicyDefinition["context"] extends infer Context
+    ? Context extends { readPaths: infer Paths }
+      ? Paths
+      : never
+    : never,
+  evaluator: GraphExpressionEvaluator,
+  path: string,
+): string[] {
+  const output = new Set<string>();
+  for (const [index, definition] of definitions.entries()) {
+    const itemPath = pointer(path, index);
+    if (typeof definition === "string") {
+      output.add(validateScopePath(definition, itemPath));
+      continue;
+    }
+    for (const nodeId of evaluator.select(definition.select, pointer(itemPath, "select"))) {
+      const value = evaluator.field(nodeId, definition.field);
+      if (value === undefined) continue;
+      const values =
+        typeof value === "string"
+          ? [value]
+          : Array.isArray(value)
+            ? value.map((item, valueIndex) =>
+                nonemptyString(item, pointer(pointer(itemPath, "value"), valueIndex)),
+              )
+            : fail(
+                "gate_policy.context_path",
+                itemPath,
+                `gate context projection ${nodeId}.${definition.field} must be a path string or list`,
+              );
+      for (const selected of values) output.add(validateScopePath(selected, itemPath));
+    }
+  }
+  return [...output].sort(compareUtf8);
+}
+
+function withBindings<Value>(
+  evaluator: GraphExpressionEvaluator,
+  bindings: readonly (readonly [string, readonly string[]])[],
+  evaluate: () => Value,
+): Value {
+  const visit = (index: number): Value =>
+    index >= bindings.length
+      ? evaluate()
+      : evaluator.withBinding(bindings[index]![0], bindings[index]![1], () => visit(index + 1));
+  return visit(0);
+}
+
+function renderGateTemplate(
+  template: string,
+  values: { policyId: string; gateId?: string; subjectId?: string },
+): string {
+  return template
+    .replaceAll("{{ policy.id }}", values.policyId)
+    .replaceAll("{{ gate.id }}", values.gateId ?? "")
+    .replaceAll("{{ subject.id }}", values.subjectId ?? "");
+}
+
+function gateAuthorityFact(
+  policy: CompiledGatePolicyDefinition,
+  subjectId: string,
+  ordinal: number,
+  derivation: ConfigurationObject,
+  args: ConfigurationObject,
+  configuration: CompiledConfiguration,
+): DerivedFact {
+  const ruleId = `gate-policy.${policy.id}`;
+  const idHash = canonicalHash([
+    ruleId,
+    subjectId,
+    ordinal,
+    derivation,
+    args,
+    configuration.configuration_sha256,
+  ]);
+  const material: FactMaterial = {
+    protocol: DERIVED_FACT_PROTOCOL,
+    id: `DF-${digestBody(idHash).slice(0, 16)}`,
+    rule_id: ruleId,
+    rule_phase: "gate_readiness",
+    rule_priority: 1_000,
+    anchor_node_id: subjectId,
+    ordinal,
+    kind: nonemptyString(derivation.kind, "/gate-policy/derive/kind") as DerivationKind,
+    ...optionalFactFields(derivation, "/gate-policy/derive"),
+    args: cloneObject(args),
+  };
+  return deepFreeze({ ...material, fact_sha256: canonicalHash(material) });
+}
+
 function deriveTickets(
   rules: readonly ParsedRule[],
   evaluator: GraphExpressionEvaluator,
@@ -397,16 +1106,21 @@ function deriveTickets(
       const ticket = evaluator.withBinding(
         rule.bind,
         [candidate],
-        () => evaluator.evaluate(rule.when, pointer(rulePath, "when"))
-          ? deriveTicket(rule, rule.emit!, candidate, evaluator, configuration, rulePath)
-          : undefined,
+        () =>
+          evaluator.evaluate(rule.when, pointer(rulePath, "when"))
+            ? deriveTicket(rule, rule.emit!, candidate, evaluator, configuration, rulePath)
+            : undefined,
         pointer(rulePath, "bind"),
       );
       if (ticket === undefined) continue;
       const existing = tickets.get(ticket.id);
       if (existing !== undefined) {
         if (existing.definition_sha256 !== ticket.definition_sha256) {
-          fail("rule.ticket_id_collision", pointer(rulePath, "emit"), `ticket ${ticket.id} has conflicting deterministic definitions`);
+          fail(
+            "rule.ticket_id_collision",
+            pointer(rulePath, "emit"),
+            `ticket ${ticket.id} has conflicting deterministic definitions`,
+          );
         }
         continue;
       }
@@ -432,73 +1146,92 @@ function deriveTicket(
   return evaluator.withBinding(
     "ticket_read_scope",
     readNodeIds,
-    () => evaluator.withBinding(
-      "ticket_write_scope",
-      writeNodeIds,
-      () => {
-        const readPaths = resolvePathScopes(emit.readPaths, evaluator, pointer(emitPath, "read_paths"));
-        const writePaths = resolvePathScopes(emit.writePaths, evaluator, pointer(emitPath, "write_paths"));
-        const operation = resolveOperation(rule, emit, targetNodeIds, evaluator, configuration, emitPath);
-        const workflowId = emit.workflow ?? operation.workflow;
-        const workflow = workflowId === undefined
-          ? undefined
-          : parseWorkflow(workflowId, emit.operation, configuration, emitPath);
-        const id = deterministicTicketId(
-          rule.id,
-          targetNodeIds,
-          emit.sourceState,
-          configuration.configuration_sha256,
-        );
-        const steps = workflow === undefined
-          ? []
-          : compileWorkflowSteps(
-              workflow,
-              id,
-              evaluator,
-              readNodeIds,
-              writeNodeIds,
-              readPaths,
-              writePaths,
-              configuration.configuration_sha256,
-              emitPath,
-            );
-        const anchor = evaluator.node(candidate);
-        const title = emit.title === undefined
-          ? `${emit.operation}: ${anchor?.title ?? "graph transition"}`
-          : renderTicketTitle(emit.title, anchor, emit.operation);
-        const material: TicketMaterial = {
-          protocol: DERIVED_TICKET_PROTOCOL,
-          id,
-          rule_id: rule.id,
-          rule_phase: rule.phase,
-          rule_priority: rule.priority,
-          anchor_node_id: candidate,
-          operation: emit.operation,
-          operation_registry_id: operation.id,
-          operation_dispatch_priority: operation.dispatchPriority,
-          ranking_hints: Object.freeze([...operation.rankingHints]),
-          title,
-          target_node_ids: Object.freeze(targetNodeIds),
-          scope: deepFreeze({
-            read_node_ids: readNodeIds,
-            write_node_ids: writeNodeIds,
-            read_paths: readPaths,
-            write_paths: writePaths,
-          }),
-          source_state_key: emit.sourceState,
-          target_state_key: emit.targetState,
-          obligation_keys: Object.freeze([...emit.obligations]),
-          ...(workflowId === undefined ? {} : { workflow_id: workflowId }),
-          ...(workflow?.reviewFailureReopenFrom === undefined
-            ? {}
-            : { review_failure_reopen_from: workflow.reviewFailureReopenFrom }),
-          workflow: Object.freeze(steps),
-          configuration_sha256: configuration.configuration_sha256,
-        };
-        return deepFreeze({ ...material, definition_sha256: canonicalHash(material) });
-      },
-      pointer(emitPath, "write_scope"),
-    ),
+    () =>
+      evaluator.withBinding(
+        "ticket_write_scope",
+        writeNodeIds,
+        () => {
+          const readPaths = resolvePathScopes(
+            emit.readPaths,
+            evaluator,
+            pointer(emitPath, "read_paths"),
+          );
+          const writePaths = resolvePathScopes(
+            emit.writePaths,
+            evaluator,
+            pointer(emitPath, "write_paths"),
+          );
+          const operation = resolveOperation(
+            rule,
+            emit,
+            targetNodeIds,
+            evaluator,
+            configuration,
+            emitPath,
+          );
+          const workflowId = emit.workflow ?? operation.workflow;
+          const workflow =
+            workflowId === undefined
+              ? undefined
+              : parseWorkflow(workflowId, emit.operation, configuration, emitPath);
+          const id = deterministicTicketId(
+            rule.id,
+            targetNodeIds,
+            emit.sourceState,
+            configuration.configuration_sha256,
+          );
+          const steps =
+            workflow === undefined
+              ? []
+              : compileWorkflowSteps(
+                  workflow,
+                  id,
+                  evaluator,
+                  readNodeIds,
+                  writeNodeIds,
+                  readPaths,
+                  writePaths,
+                  configuration.configuration_sha256,
+                  emitPath,
+                );
+          const anchor = evaluator.node(candidate);
+          const title =
+            emit.title === undefined
+              ? `${emit.operation}: ${anchor?.title ?? "graph transition"}`
+              : renderTicketTitle(emit.title, anchor, emit.operation);
+          const material: TicketMaterial = {
+            protocol: DERIVED_TICKET_PROTOCOL,
+            id,
+            rule_id: rule.id,
+            rule_phase: rule.phase,
+            rule_priority: rule.priority,
+            anchor_node_id: candidate,
+            operation: emit.operation,
+            operation_registry_id: operation.id,
+            operation_dispatch_priority: operation.dispatchPriority,
+            ranking_hints: Object.freeze([...operation.rankingHints]),
+            title,
+            target_node_ids: Object.freeze(targetNodeIds),
+            scope: deepFreeze({
+              read_node_ids: readNodeIds,
+              write_node_ids: writeNodeIds,
+              read_paths: readPaths,
+              write_paths: writePaths,
+            }),
+            source_state_key: emit.sourceState,
+            target_state_key: emit.targetState,
+            obligation_keys: Object.freeze([...emit.obligations]),
+            ...(workflowId === undefined ? {} : { workflow_id: workflowId }),
+            ...(workflow?.reviewFailureReopenFrom === undefined
+              ? {}
+              : { review_failure_reopen_from: workflow.reviewFailureReopenFrom }),
+            workflow: Object.freeze(steps),
+            configuration_sha256: configuration.configuration_sha256,
+          };
+          return deepFreeze({ ...material, definition_sha256: canonicalHash(material) });
+        },
+        pointer(emitPath, "write_scope"),
+      ),
     pointer(emitPath, "read_scope"),
   );
 }
@@ -525,7 +1258,11 @@ function resolveOperation(
   if (emit.registryEntryId !== undefined) {
     const source = configuration.registries.operations[emit.registryEntryId];
     if (source === undefined) {
-      fail("rule.unknown_operation", pointer(path, "registry_entry_id"), `operation registry entry ${emit.registryEntryId} is not configured`);
+      fail(
+        "rule.unknown_operation",
+        pointer(path, "registry_entry_id"),
+        `operation registry entry ${emit.registryEntryId} is not configured`,
+      );
     }
     return parseOperation(emit.registryEntryId, source);
   }
@@ -536,19 +1273,28 @@ function resolveOperation(
   }
   const candidates = Object.entries(configuration.registries.operations)
     .map(([id, source]) => parseOperation(id, source))
-    .filter((operation) =>
-      operation.publicOperation === emit.operation &&
-      [...targetTypes].every((type) => operation.targetTypes.includes(type)));
+    .filter(
+      (operation) =>
+        operation.publicOperation === emit.operation &&
+        [...targetTypes].every((type) => operation.targetTypes.includes(type)),
+    );
   const phaseMatches = candidates.filter((operation) => operation.stage === rule.phase);
   const matches = phaseMatches.length > 0 ? phaseMatches : candidates;
   if (matches.length === 0) {
-    fail("rule.unknown_operation", pointer(path, "operation"), `rule ${rule.id} emits unknown operation ${emit.operation}`);
+    fail(
+      "rule.unknown_operation",
+      pointer(path, "operation"),
+      `rule ${rule.id} emits unknown operation ${emit.operation}`,
+    );
   }
   if (matches.length > 1) {
     fail(
       "rule.ambiguous_operation",
       pointer(path, "operation"),
-      `operation ${emit.operation} is ambiguous for target types ${[...targetTypes].sort(compareUtf8).join(", ")}: ${matches.map((item) => item.id).sort(compareUtf8).join(", ")}`,
+      `operation ${emit.operation} is ambiguous for target types ${[...targetTypes].sort(compareUtf8).join(", ")}: ${matches
+        .map((item) => item.id)
+        .sort(compareUtf8)
+        .join(", ")}`,
     );
   }
   return matches[0]!;
@@ -558,14 +1304,25 @@ function parseOperation(id: string, source: ConfigurationObject): ParsedOperatio
   const path = `/registries/operations/${escapePointer(id)}`;
   const recordValue = record(source, path);
   const sourceId = nonemptyString(recordValue.id, pointer(path, "id"));
-  if (sourceId !== id) fail("rule.operation_registry_id", pointer(path, "id"), `operation id ${sourceId} does not match registry key ${id}`);
+  if (sourceId !== id)
+    fail(
+      "rule.operation_registry_id",
+      pointer(path, "id"),
+      `operation id ${sourceId} does not match registry key ${id}`,
+    );
   return {
     id,
     publicOperation: optionalString(recordValue.operation, pointer(path, "operation")) ?? id,
     stage: nonemptyString(recordValue.stage, pointer(path, "stage")),
-    targetTypes: uniqueSortedStrings(optionalStringArray(recordValue.target_types, pointer(path, "target_types")), pointer(path, "target_types")),
-    ...(recordValue.workflow === undefined ? {} : { workflow: nonemptyString(recordValue.workflow, pointer(path, "workflow")) }),
-    dispatchPriority: optionalSignedInteger(recordValue.dispatch_priority, pointer(path, "dispatch_priority")) ?? 0,
+    targetTypes: uniqueSortedStrings(
+      optionalStringArray(recordValue.target_types, pointer(path, "target_types")),
+      pointer(path, "target_types"),
+    ),
+    ...(recordValue.workflow === undefined
+      ? {}
+      : { workflow: nonemptyString(recordValue.workflow, pointer(path, "workflow")) }),
+    dispatchPriority:
+      optionalSignedInteger(recordValue.dispatch_priority, pointer(path, "dispatch_priority")) ?? 0,
     rankingHints: optionalStringArray(recordValue.ranking_hints, pointer(path, "ranking_hints")),
   };
 }
@@ -578,22 +1335,41 @@ function parseWorkflow(
 ): ParsedWorkflow {
   const source = configuration.registries.workflows[id];
   if (source === undefined) {
-    fail("rule.unknown_workflow", pointer(emitPath, "workflow"), `workflow ${id} is not configured`);
+    fail(
+      "rule.unknown_workflow",
+      pointer(emitPath, "workflow"),
+      `workflow ${id} is not configured`,
+    );
   }
   const path = `/registries/workflows/${escapePointer(id)}`;
   const workflow = exactRecord(source, path, WORKFLOW_FIELDS, ["id", "steps"]);
   const sourceId = nonemptyString(workflow.id, pointer(path, "id"));
-  if (sourceId !== id) fail("rule.workflow_registry_id", pointer(path, "id"), `workflow id ${sourceId} does not match registry key ${id}`);
-  const appliesTo = uniqueSortedStrings(optionalStringArray(workflow.applies_to, pointer(path, "applies_to")), pointer(path, "applies_to"));
+  if (sourceId !== id)
+    fail(
+      "rule.workflow_registry_id",
+      pointer(path, "id"),
+      `workflow id ${sourceId} does not match registry key ${id}`,
+    );
+  const appliesTo = uniqueSortedStrings(
+    optionalStringArray(workflow.applies_to, pointer(path, "applies_to")),
+    pointer(path, "applies_to"),
+  );
   if (appliesTo.length > 0 && !appliesTo.includes(operation)) {
-    fail("rule.workflow_operation", pointer(path, "applies_to"), `workflow ${id} does not apply to operation ${operation}`);
+    fail(
+      "rule.workflow_operation",
+      pointer(path, "applies_to"),
+      `workflow ${id} does not apply to operation ${operation}`,
+    );
   }
   const steps = arrayValue(workflow.steps!, pointer(path, "steps")).map((step, index) =>
-    exactRecord(step, pointer(pointer(path, "steps"), index), STEP_FIELDS, ["id", "persona"]));
+    exactRecord(step, pointer(pointer(path, "steps"), index), STEP_FIELDS, ["id", "persona"]),
+  );
   const reviewFailureReopenFrom = parseReviewFailureReopenFrom(workflow, path);
   if (
     reviewFailureReopenFrom !== undefined &&
-    !steps.some((step) => optionalString(step.id, pointer(path, "steps")) === reviewFailureReopenFrom)
+    !steps.some(
+      (step) => optionalString(step.id, pointer(path, "steps")) === reviewFailureReopenFrom,
+    )
   ) {
     fail(
       "rule.review_rework_step",
@@ -604,6 +1380,7 @@ function parseWorkflow(
   return {
     id,
     appliesTo,
+    definitionSha256: canonicalHash(source),
     ...(reviewFailureReopenFrom === undefined ? {} : { reviewFailureReopenFrom }),
     steps,
   };
@@ -622,7 +1399,8 @@ function parseReviewFailureReopenFrom(
   const reopen = Object.entries(routes).flatMap(([routeId, value]) => {
     const routePath = pointer(pointer(path, "review_failure_routes"), routeId);
     const route = record(value, routePath);
-    if (optionalString(route.disposition, pointer(routePath, "disposition")) !== "reopen") return [];
+    if (optionalString(route.disposition, pointer(routePath, "disposition")) !== "reopen")
+      return [];
     return [nonemptyString(route.reopen_from, pointer(routePath, "reopen_from"))];
   });
   if (new Set(reopen).size > 1) {
@@ -658,21 +1436,33 @@ function compileWorkflowSteps(
   const parsed = workflow.steps.map((step, index) => {
     const path = `/registries/workflows/${escapePointer(workflow.id)}/steps/${index}`;
     const id = nonemptyString(step.id, pointer(path, "id"));
-    if (ids.has(id)) fail("rule.duplicate_workflow_step", pointer(path, "id"), `workflow ${workflow.id} has duplicate step ${id}`);
+    if (ids.has(id))
+      fail(
+        "rule.duplicate_workflow_step",
+        pointer(path, "id"),
+        `workflow ${workflow.id} has duplicate step ${id}`,
+      );
     ids.add(id);
     return { step, path, id };
   });
   for (const { step, path } of parsed) {
     for (const dependency of optionalStringArray(step.depends_on, pointer(path, "depends_on"))) {
-      if (!ids.has(dependency)) fail("rule.unknown_workflow_step", pointer(path, "depends_on"), `workflow dependency references unknown step ${dependency}`);
+      if (!ids.has(dependency))
+        fail(
+          "rule.unknown_workflow_step",
+          pointer(path, "depends_on"),
+          `workflow dependency references unknown step ${dependency}`,
+        );
     }
   }
   validateWorkflowDag(workflow.id, parsed);
   if (
     workflow.reviewFailureReopenFrom !== undefined &&
-    !parsed.some(({ step, id }) =>
-      (optionalString(step.kind, "/kind") ?? "production") === "review" &&
-      transitivelyDependsOn(id, workflow.reviewFailureReopenFrom!, parsed))
+    !parsed.some(
+      ({ step, id }) =>
+        (optionalString(step.kind, "/kind") ?? "production") === "review" &&
+        transitivelyDependsOn(id, workflow.reviewFailureReopenFrom!, parsed),
+    )
   ) {
     fail(
       "rule.review_rework_dependency",
@@ -683,41 +1473,96 @@ function compileWorkflowSteps(
 
   const output: DerivedWorkflowStep[] = [];
   for (const { step, path, id } of parsed) {
-    const readNodeIds = [...evaluator.select(step.read_scope ?? { variable: "ticket_read_scope" }, pointer(path, "read_scope"))];
-    const writeNodeIds = [...evaluator.select(step.write_scope ?? { variable: "ticket_write_scope" }, pointer(path, "write_scope"))];
+    const readNodeIds = [
+      ...evaluator.select(
+        step.read_scope ?? { variable: "ticket_read_scope" },
+        pointer(path, "read_scope"),
+      ),
+    ];
+    const writeNodeIds = [
+      ...evaluator.select(
+        step.write_scope ?? { variable: "ticket_write_scope" },
+        pointer(path, "write_scope"),
+      ),
+    ];
     if (!isSubset(readNodeIds, ticketReadNodeIds)) {
-      fail("rule.step_scope", pointer(path, "read_scope"), `workflow ${workflow.id} step ${id} graph read scope exceeds ticket read scope`);
+      fail(
+        "rule.step_scope",
+        pointer(path, "read_scope"),
+        `workflow ${workflow.id} step ${id} graph read scope exceeds ticket read scope`,
+      );
     }
     if (!isSubset(writeNodeIds, ticketWriteNodeIds)) {
-      fail("rule.step_scope", pointer(path, "write_scope"), `workflow ${workflow.id} step ${id} graph write scope exceeds ticket write scope`);
+      fail(
+        "rule.step_scope",
+        pointer(path, "write_scope"),
+        `workflow ${workflow.id} step ${id} graph write scope exceeds ticket write scope`,
+      );
     }
-    const readPaths = step.read_paths === undefined
-      ? undefined
-      : resolvePathScopes(arrayValue(step.read_paths, pointer(path, "read_paths")), evaluator, pointer(path, "read_paths"));
-    const writePaths = step.write_paths === undefined
-      ? undefined
-      : resolvePathScopes(arrayValue(step.write_paths, pointer(path, "write_paths")), evaluator, pointer(path, "write_paths"));
+    const readPaths =
+      step.read_paths === undefined
+        ? undefined
+        : resolvePathScopes(
+            arrayValue(step.read_paths, pointer(path, "read_paths")),
+            evaluator,
+            pointer(path, "read_paths"),
+          );
+    const writePaths =
+      step.write_paths === undefined
+        ? undefined
+        : resolvePathScopes(
+            arrayValue(step.write_paths, pointer(path, "write_paths")),
+            evaluator,
+            pointer(path, "write_paths"),
+          );
     for (const selected of readPaths ?? []) {
       if (!pathCoveredByScope(selected, ticketReadPaths)) {
-        fail("rule.step_path_scope", pointer(path, "read_paths"), `workflow ${workflow.id} step ${id} read path ${selected} is outside ticket read scope`);
+        fail(
+          "rule.step_path_scope",
+          pointer(path, "read_paths"),
+          `workflow ${workflow.id} step ${id} read path ${selected} is outside ticket read scope`,
+        );
       }
     }
     for (const selected of writePaths ?? []) {
       if (!pathCoveredByScope(selected, ticketWritePaths)) {
-        fail("rule.step_path_scope", pointer(path, "write_paths"), `workflow ${workflow.id} step ${id} write path ${selected} is outside ticket write scope`);
+        fail(
+          "rule.step_path_scope",
+          pointer(path, "write_paths"),
+          `workflow ${workflow.id} step ${id} write path ${selected} is outside ticket write scope`,
+        );
       }
     }
     const kind = optionalString(step.kind, pointer(path, "kind")) ?? "production";
     if (!WORKFLOW_STEP_KINDS.has(kind as DerivedWorkflowStepKind)) {
-      fail("rule.workflow_step_kind", pointer(path, "kind"), `unsupported workflow step kind ${kind}`);
+      fail(
+        "rule.workflow_step_kind",
+        pointer(path, "kind"),
+        `unsupported workflow step kind ${kind}`,
+      );
     }
-    const graphMutation = optionalString(step.graph_mutation, pointer(path, "graph_mutation")) ?? "allowed";
+    const graphMutation =
+      optionalString(step.graph_mutation, pointer(path, "graph_mutation")) ?? "allowed";
     if (!GRAPH_MUTATION_POLICIES.has(graphMutation as DerivedGraphMutationPolicy)) {
-      fail("rule.graph_mutation", pointer(path, "graph_mutation"), `unsupported graph mutation policy ${graphMutation}`);
+      fail(
+        "rule.graph_mutation",
+        pointer(path, "graph_mutation"),
+        `unsupported graph mutation policy ${graphMutation}`,
+      );
     }
-    const preserveSourcePathsFrom = optionalString(step.preserve_source_paths_from, pointer(path, "preserve_source_paths_from"));
-    if (preserveSourcePathsFrom !== undefined && !transitivelyDependsOn(id, preserveSourcePathsFrom, parsed)) {
-      fail("rule.preserve_source_dependency", pointer(path, "preserve_source_paths_from"), `step ${id} does not transitively depend on ${preserveSourcePathsFrom}`);
+    const preserveSourcePathsFrom = optionalString(
+      step.preserve_source_paths_from,
+      pointer(path, "preserve_source_paths_from"),
+    );
+    if (
+      preserveSourcePathsFrom !== undefined &&
+      !transitivelyDependsOn(id, preserveSourcePathsFrom, parsed)
+    ) {
+      fail(
+        "rule.preserve_source_dependency",
+        pointer(path, "preserve_source_paths_from"),
+        `step ${id} does not transitively depend on ${preserveSourcePathsFrom}`,
+      );
     }
     const differsReadNodes = !arraysEqual(readNodeIds, ticketReadNodeIds);
     const differsWriteNodes = !arraysEqual(writeNodeIds, ticketWriteNodeIds);
@@ -735,30 +1580,90 @@ function compileWorkflowSteps(
       differsReadNodes ? readNodeIds : null,
       differsWriteNodes ? writeNodeIds : null,
     ];
-    output.push(deepFreeze({
-      id,
-      kind: kind as DerivedWorkflowStepKind,
-      persona_id: nonemptyString(step.persona, pointer(path, "persona")),
-      depends_on: Object.freeze(uniqueSortedStrings(optionalStringArray(step.depends_on, pointer(path, "depends_on")), pointer(path, "depends_on"))),
-      required: optionalBoolean(step.required, pointer(path, "required")) ?? true,
-      ...(differsReadNodes ? { read_node_ids: Object.freeze(readNodeIds) } : {}),
-      ...(differsWriteNodes ? { write_node_ids: Object.freeze(writeNodeIds) } : {}),
-      ...(readPaths === undefined ? {} : { read_paths: Object.freeze(readPaths) }),
-      ...(writePaths === undefined ? {} : { write_paths: Object.freeze(writePaths) }),
-      ...(preserveSourcePathsFrom === undefined ? {} : { preserve_source_paths_from: preserveSourcePathsFrom }),
-      expected_outputs: Object.freeze(step.expected_output === undefined
-        ? []
-        : [nonemptyString(step.expected_output, pointer(path, "expected_output"))]),
-      graph_mutation: graphMutation as DerivedGraphMutationPolicy,
-      ...(step.validation_action === undefined
-        ? {}
-        : { validation_action: nonemptyString(step.validation_action, pointer(path, "validation_action")) }),
-      required_receipts: Object.freeze(uniqueSortedStrings(optionalStringArray(step.required_receipts, pointer(path, "required_receipts")), pointer(path, "required_receipts"))),
-      escalation_triggers: Object.freeze(uniqueSortedStrings(optionalStringArray(step.escalation_triggers, pointer(path, "escalation_triggers")), pointer(path, "escalation_triggers"))),
-      stop_conditions: Object.freeze(uniqueSortedStrings(optionalStringArray(step.stop_conditions, pointer(path, "stop_conditions")), pointer(path, "stop_conditions"))),
-      validation_checks: Object.freeze(uniqueSortedStrings(optionalStringArray(step.checks, pointer(path, "checks")), pointer(path, "checks"))),
-      context_sha256: canonicalHash(contextMaterial),
-    }));
+    output.push(
+      deepFreeze({
+        id,
+        kind: kind as DerivedWorkflowStepKind,
+        persona_id: nonemptyString(step.persona, pointer(path, "persona")),
+        depends_on: Object.freeze(
+          uniqueSortedStrings(
+            optionalStringArray(step.depends_on, pointer(path, "depends_on")),
+            pointer(path, "depends_on"),
+          ),
+        ),
+        required: optionalBoolean(step.required, pointer(path, "required")) ?? true,
+        ...(differsReadNodes ? { read_node_ids: Object.freeze(readNodeIds) } : {}),
+        ...(differsWriteNodes ? { write_node_ids: Object.freeze(writeNodeIds) } : {}),
+        ...(readPaths === undefined ? {} : { read_paths: Object.freeze(readPaths) }),
+        ...(writePaths === undefined ? {} : { write_paths: Object.freeze(writePaths) }),
+        ...(preserveSourcePathsFrom === undefined
+          ? {}
+          : { preserve_source_paths_from: preserveSourcePathsFrom }),
+        expected_outputs: Object.freeze(
+          step.expected_output === undefined
+            ? []
+            : [nonemptyString(step.expected_output, pointer(path, "expected_output"))],
+        ),
+        graph_mutation: graphMutation as DerivedGraphMutationPolicy,
+        ...(step.validation_action === undefined
+          ? {}
+          : {
+              validation_action: nonemptyString(
+                step.validation_action,
+                pointer(path, "validation_action"),
+              ),
+            }),
+        required_receipts: Object.freeze(
+          uniqueSortedStrings(
+            optionalStringArray(step.required_receipts, pointer(path, "required_receipts")),
+            pointer(path, "required_receipts"),
+          ),
+        ),
+        escalation_triggers: Object.freeze(
+          uniqueSortedStrings(
+            optionalStringArray(step.escalation_triggers, pointer(path, "escalation_triggers")),
+            pointer(path, "escalation_triggers"),
+          ),
+        ),
+        stop_conditions: Object.freeze(
+          uniqueSortedStrings(
+            optionalStringArray(step.stop_conditions, pointer(path, "stop_conditions")),
+            pointer(path, "stop_conditions"),
+          ),
+        ),
+        validation_checks: Object.freeze(
+          uniqueSortedStrings(
+            optionalStringArray(step.checks, pointer(path, "checks")),
+            pointer(path, "checks"),
+          ),
+        ),
+        context_sha256: canonicalHash(contextMaterial),
+      }),
+    );
+  }
+  if (workflow.reviewFailureReopenFrom !== undefined) {
+    const anchorId = workflow.reviewFailureReopenFrom;
+    const repairSlice = output.filter(
+      (step) => step.id === anchorId || transitivelyDependsOn(step.id, anchorId, parsed),
+    );
+    const hasDurableRepairAuthority = repairSlice.some((step) => {
+      if (step.kind === "review") return false;
+      const writableNodes = step.write_node_ids ?? ticketWriteNodeIds;
+      const writablePaths = step.write_paths ?? ticketWritePaths;
+      return (
+        writablePaths.length > 0 ||
+        (step.graph_mutation !== "forbidden" && writableNodes.length > 0)
+      );
+    });
+    const exactLegacyCompatibility =
+      workflow.definitionSha256 === LEGACY_READ_ONLY_PROOF_REWORK_SHA256;
+    if (!hasDurableRepairAuthority && !exactLegacyCompatibility) {
+      fail(
+        "rule.review_rework_no_effect",
+        `/registries/workflows/${escapePointer(workflow.id)}/review_failure_reopen_from`,
+        `workflow ${workflow.id} sends failed Review to ${anchorId}, but that slice has no compiler-authorized graph or repository repair effect`,
+      );
+    }
   }
   void emitPath;
   return output;
@@ -774,12 +1679,20 @@ function validateWorkflowDag(
   const visit = (id: string): void => {
     const cycleIndex = visiting.indexOf(id);
     if (cycleIndex >= 0) {
-      fail("rule.workflow_cycle", `/registries/workflows/${escapePointer(workflowId)}/steps`, `workflow dependency cycle: ${[...visiting.slice(cycleIndex), id].join(" -> ")}`);
+      fail(
+        "rule.workflow_cycle",
+        `/registries/workflows/${escapePointer(workflowId)}/steps`,
+        `workflow dependency cycle: ${[...visiting.slice(cycleIndex), id].join(" -> ")}`,
+      );
     }
     if (visited.has(id)) return;
     visiting.push(id);
     const entry = byId.get(id)!;
-    for (const dependency of optionalStringArray(entry.step.depends_on, pointer(entry.path, "depends_on"))) visit(dependency);
+    for (const dependency of optionalStringArray(
+      entry.step.depends_on,
+      pointer(entry.path, "depends_on"),
+    ))
+      visit(dependency);
     visiting.pop();
     visited.add(id);
   };
@@ -820,11 +1733,18 @@ function resolvePathScopes(
     for (const nodeId of evaluator.select(projection.select!, pointer(itemPath, "select"))) {
       const value = evaluator.field(nodeId, field);
       if (value === undefined) continue;
-      const values = typeof value === "string"
-        ? [value]
-        : Array.isArray(value)
-          ? value.map((item, valueIndex) => nonemptyString(item, pointer(pointer(itemPath, "value"), valueIndex)))
-          : fail("rule.path_projection", itemPath, `path projection ${nodeId}.${field} must be a path string or list of path strings`);
+      const values =
+        typeof value === "string"
+          ? [value]
+          : Array.isArray(value)
+            ? value.map((item, valueIndex) =>
+                nonemptyString(item, pointer(pointer(itemPath, "value"), valueIndex)),
+              )
+            : fail(
+                "rule.path_projection",
+                itemPath,
+                `path projection ${nodeId}.${field} must be a path string or list of path strings`,
+              );
       for (const selected of values) output.add(validateScopePath(selected, itemPath));
     }
   }
@@ -833,14 +1753,19 @@ function resolvePathScopes(
 
 function validateScopePath(value: string, path: string): string {
   if (value.length === 0 || value.includes("\0") || value.includes("*") || value.includes("?")) {
-    fail("rule.path_scope", path, "ticket path scope must be a nonempty literal path without NUL or glob characters");
+    fail(
+      "rule.path_scope",
+      path,
+      "ticket path scope must be a nonempty literal path without NUL or glob characters",
+    );
   }
   const normalized = value.replaceAll("\\", "/");
   if (normalized.startsWith("/") || /^[A-Za-z]:/u.test(normalized)) {
     fail("rule.path_scope", path, `ticket path scope must be project-relative: ${value}`);
   }
   const segments = normalized.split("/");
-  if (segments.includes("..")) fail("rule.path_scope", path, `ticket path scope may not escape the project: ${value}`);
+  if (segments.includes(".."))
+    fail("rule.path_scope", path, `ticket path scope may not escape the project: ${value}`);
   const compact = segments.filter((segment) => segment !== "" && segment !== ".");
   return compact.length === 0 ? "." : compact.join("/");
 }
@@ -864,16 +1789,28 @@ function renderTicketTitle(
 function optionalFactFields(source: ConfigurationObject, path: string): Partial<FactMaterial> {
   return {
     ...(source.key === undefined ? {} : { key: nonemptyString(source.key, pointer(path, "key")) }),
-    ...(source.target === undefined ? {} : { target: nonemptyString(source.target, pointer(path, "target")) }),
-    ...(source.field === undefined ? {} : { field: nonemptyString(source.field, pointer(path, "field")) }),
+    ...(source.target === undefined
+      ? {}
+      : { target: nonemptyString(source.target, pointer(path, "target")) }),
+    ...(source.field === undefined
+      ? {}
+      : { field: nonemptyString(source.field, pointer(path, "field")) }),
     ...(source.value === undefined ? {} : { value: cloneValue(source.value) }),
-    ...(source.severity === undefined ? {} : { severity: nonemptyString(source.severity, pointer(path, "severity")) }),
-    ...(source.reason === undefined ? {} : { reason: nonemptyString(source.reason, pointer(path, "reason")) }),
+    ...(source.severity === undefined
+      ? {}
+      : { severity: nonemptyString(source.severity, pointer(path, "severity")) }),
+    ...(source.reason === undefined
+      ? {}
+      : { reason: nonemptyString(source.reason, pointer(path, "reason")) }),
   };
 }
 
 function compareRules(left: ParsedRule, right: ParsedRule): number {
-  return compareUtf8(left.phase, right.phase) || right.priority - left.priority || compareUtf8(left.id, right.id);
+  return (
+    compareUtf8(left.phase, right.phase) ||
+    right.priority - left.priority ||
+    compareUtf8(left.id, right.id)
+  );
 }
 
 function isSubset(left: readonly string[], right: readonly string[]): boolean {
@@ -898,10 +1835,12 @@ function exactRecord(
   const output = record(value, path);
   const permitted = new Set(allowed);
   for (const key of Object.keys(output)) {
-    if (!permitted.has(key)) fail("rule.unknown_field", pointer(path, key), `configuration contains unknown field ${key}`);
+    if (!permitted.has(key))
+      fail("rule.unknown_field", pointer(path, key), `configuration contains unknown field ${key}`);
   }
   for (const key of required) {
-    if (output[key] === undefined) fail("rule.missing_field", pointer(path, key), `required field ${key} is missing`);
+    if (output[key] === undefined)
+      fail("rule.missing_field", pointer(path, key), `required field ${key} is missing`);
   }
   return output;
 }
@@ -918,7 +1857,10 @@ function arrayValue(value: ConfigurationValue, path: string): readonly Configura
   return value;
 }
 
-function cloneArray(value: ConfigurationValue | undefined, path: string): readonly ConfigurationValue[] {
+function cloneArray(
+  value: ConfigurationValue | undefined,
+  path: string,
+): readonly ConfigurationValue[] {
   return value === undefined ? [] : arrayValue(value, path).map(cloneValue);
 }
 
@@ -939,7 +1881,10 @@ function optionalBoolean(value: ConfigurationValue | undefined, path: string): b
   return value;
 }
 
-function optionalSignedInteger(value: ConfigurationValue | undefined, path: string): number | undefined {
+function optionalSignedInteger(
+  value: ConfigurationValue | undefined,
+  path: string,
+): number | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "number" || !Number.isSafeInteger(value)) {
     fail("rule.integer", path, "expected a safe integer");
@@ -973,7 +1918,10 @@ function isConfigurationObject(value: ConfigurationValue): value is Configuratio
 }
 
 function cloneObject(value: ConfigurationObject): ConfigurationObject {
-  const output: Record<string, ConfigurationValue> = Object.create(null) as Record<string, ConfigurationValue>;
+  const output: Record<string, ConfigurationValue> = Object.create(null) as Record<
+    string,
+    ConfigurationValue
+  >;
   for (const key of Object.keys(value).sort(compareUtf8)) output[key] = cloneValue(value[key]!);
   return output;
 }

@@ -62,7 +62,8 @@ export class ResilientControlCenterClient implements ControlCenterAuthorityClien
     params?: Parameters<ControlCenterAuthorityClient["request"]>[1],
     options?: Parameters<ControlCenterAuthorityClient["request"]>[2],
   ): Promise<Awaited<ReturnType<ControlCenterAuthorityClient["request"]>>> {
-    if (this.#closed) throw new AuthorityClientError("closed", "control-center connection is closed");
+    if (this.#closed)
+      throw new AuthorityClientError("closed", "control-center connection is closed");
     const client = this.#client;
     try {
       return await client.request(method, params, options);
@@ -95,7 +96,8 @@ export class ResilientControlCenterClient implements ControlCenterAuthorityClien
   }
 
   #scheduleHeartbeat(): void {
-    if (this.#closed || this.#heartbeatTimer !== undefined || this.#reconnectPromise !== undefined) return;
+    if (this.#closed || this.#heartbeatTimer !== undefined || this.#reconnectPromise !== undefined)
+      return;
     this.#heartbeatTimer = this.#clock.setTimeout(() => {
       this.#heartbeatTimer = undefined;
       void this.#heartbeat();
@@ -156,7 +158,10 @@ export class ResilientControlCenterClient implements ControlCenterAuthorityClien
 
   #scheduleReconnect(): void {
     if (this.#closed || this.#reconnectTimer !== undefined) return;
-    const delay = this.#reconnectDelaysMs[Math.min(this.#reconnectAttempt, this.#reconnectDelaysMs.length - 1)]!;
+    const delay =
+      this.#reconnectDelaysMs[
+        Math.min(this.#reconnectAttempt, this.#reconnectDelaysMs.length - 1)
+      ]!;
     this.#reconnectAttempt += 1;
     this.#reconnectTimer = this.#clock.setTimeout(() => {
       this.#reconnectTimer = undefined;
@@ -182,12 +187,18 @@ function recoverableTransportFailure(error: unknown): boolean {
   if (error instanceof AuthorityClientError) return error.code === "closed" || error.retryable;
   if (!(error instanceof Error)) return false;
   const code = (error as NodeJS.ErrnoException).code;
-  return code === "ECONNRESET" || code === "ECONNREFUSED" || code === "EPIPE" || code === "ENOENT" ||
-    /connection (?:is )?closed|socket (?:is )?closed/iu.test(error.message);
+  return (
+    code === "ECONNRESET" ||
+    code === "ECONNREFUSED" ||
+    code === "EPIPE" ||
+    code === "ENOENT" ||
+    /connection (?:is )?closed|socket (?:is )?closed/iu.test(error.message)
+  );
 }
 
 function positiveInteger(value: number, label: string): number {
-  if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${label} must be a positive safe integer`);
+  if (!Number.isSafeInteger(value) || value < 1)
+    throw new Error(`${label} must be a positive safe integer`);
   return value;
 }
 

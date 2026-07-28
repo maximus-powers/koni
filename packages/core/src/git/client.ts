@@ -21,6 +21,11 @@ export interface RecentBranch {
   committedAtSeconds: number;
 }
 
+export interface GitBranchRef {
+  ref: string;
+  oid: string;
+}
+
 export interface GitCommandResult {
   stdout: Buffer;
   stderr: Buffer;
@@ -90,9 +95,10 @@ export class GitClient {
 
   public constructor(root: string, executable?: string) {
     this.#root = path.resolve(root);
-    this.#executable = executable === undefined
-      ? authorityGitExecutable()
-      : resolveRuntimeExecutable("git", executable, process.env.PATH);
+    this.#executable =
+      executable === undefined
+        ? authorityGitExecutable()
+        : resolveRuntimeExecutable("git", executable, process.env.PATH);
   }
 
   public static async discover(start: string, executable?: string): Promise<GitRepositoryIdentity> {
@@ -133,10 +139,9 @@ export class GitClient {
 
   public async tryResolveRef(reference: string): Promise<string | undefined> {
     assertRef(reference);
-    const result = await this.#run(
-      ["rev-parse", "--verify", "--quiet", `${reference}^{commit}`],
-      { acceptedExitCodes: [0, 1] },
-    );
+    const result = await this.#run(["rev-parse", "--verify", "--quiet", `${reference}^{commit}`], {
+      acceptedExitCodes: [0, 1],
+    });
     if (result.exitCode === 1) return undefined;
     const oid = result.stdout.toString("ascii").trim();
     assertOid(oid);
@@ -144,10 +149,7 @@ export class GitClient {
   }
 
   public async symbolicHead(): Promise<string | undefined> {
-    const result = await this.#run(
-      ["symbolic-ref", "-q", "HEAD"],
-      { acceptedExitCodes: [0, 1] },
-    );
+    const result = await this.#run(["symbolic-ref", "-q", "HEAD"], { acceptedExitCodes: [0, 1] });
     if (result.exitCode === 1) return undefined;
     const reference = result.stdout.toString("utf8").trim();
     assertRef(reference);
@@ -167,9 +169,8 @@ export class GitClient {
   }
 
   public async statusEntries(): Promise<GitStatusEntry[]> {
-    const output = (
-      await this.#run(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
-    ).stdout;
+    const output = (await this.#run(["status", "--porcelain=v1", "-z", "--untracked-files=all"]))
+      .stdout;
     const records = splitNul(output);
     const entries: GitStatusEntry[] = [];
     for (let index = 0; index < records.length; index += 1) {
@@ -189,8 +190,10 @@ export class GitClient {
       }
       entries.push({ code, path: candidate, originalPath });
     }
-    return entries.sort((left, right) =>
-      left.path.localeCompare(right.path) || (left.originalPath ?? "").localeCompare(right.originalPath ?? "")
+    return entries.sort(
+      (left, right) =>
+        left.path.localeCompare(right.path) ||
+        (left.originalPath ?? "").localeCompare(right.originalPath ?? ""),
     );
   }
 
@@ -228,18 +231,18 @@ export class GitClient {
   }
 
   public async worktreeMatchesIndex(): Promise<boolean> {
-    const result = await this.#run(
-      ["diff-files", "--quiet", "--no-ext-diff", "--"],
-      { acceptedExitCodes: [0, 1] },
-    );
+    const result = await this.#run(["diff-files", "--quiet", "--no-ext-diff", "--"], {
+      acceptedExitCodes: [0, 1],
+    });
     return result.exitCode === 0;
   }
 
   public async untrackedPaths(): Promise<string[]> {
-    const output = (
-      await this.#run(["ls-files", "--others", "--exclude-standard", "-z", "--"])
-    ).stdout;
-    return splitNul(output).map((entry) => decodeUtf8(entry, "untracked Git path")).sort();
+    const output = (await this.#run(["ls-files", "--others", "--exclude-standard", "-z", "--"]))
+      .stdout;
+    return splitNul(output)
+      .map((entry) => decodeUtf8(entry, "untracked Git path"))
+      .sort();
   }
 
   public async assertNoFilteredPaths(paths: readonly string[]): Promise<void> {
@@ -257,7 +260,9 @@ export class GitClient {
       if (value !== "unspecified" && value !== "unset") filtered.push(`${candidate} (${value})`);
     }
     if (filtered.length > 0) {
-      throw new Error(`refusing to checkpoint paths with Git content filters: ${filtered.join(", ")}`);
+      throw new Error(
+        `refusing to checkpoint paths with Git content filters: ${filtered.join(", ")}`,
+      );
     }
   }
 
@@ -305,6 +310,28 @@ export class GitClient {
       branches.push({ name, oid, committedAtSeconds });
     }
     return branches;
+  }
+
+  /** Exact local branch inventory used for pre-effect namespace-collision checks. */
+  public async branchRefs(): Promise<GitBranchRef[]> {
+    const result = await this.#run([
+      "for-each-ref",
+      "--format=%(refname)%00%(objectname)",
+      "refs/heads",
+    ]);
+    const refs: GitBranchRef[] = [];
+    for (const record of result.stdout.toString("utf8").split("\n")) {
+      if (record.length === 0) continue;
+      const [ref, oid, ...extra] = record.split("\0");
+      if (ref === undefined || oid === undefined || extra.length !== 0) {
+        throw new Error("git returned a malformed local branch record");
+      }
+      assertRef(ref);
+      if (!ref.startsWith("refs/heads/")) throw new Error("git returned a non-branch ref");
+      assertOid(oid);
+      refs.push({ ref, oid });
+    }
+    return refs.sort((left, right) => left.ref.localeCompare(right.ref));
   }
 
   public async createWorktree(
@@ -369,20 +396,13 @@ export class GitClient {
 
   public async lockWorktree(worktreePath: string, lockReason: string): Promise<void> {
     assertLockReason(lockReason);
-    await this.#run([
-      "worktree",
-      "lock",
-      "--reason",
-      lockReason,
-      path.resolve(worktreePath),
-    ]);
+    await this.#run(["worktree", "lock", "--reason", lockReason, path.resolve(worktreePath)]);
   }
 
   public async unlockWorktree(worktreePath: string): Promise<void> {
-    const result = await this.#run(
-      ["worktree", "unlock", path.resolve(worktreePath)],
-      { acceptedExitCodes: [0, 128] },
-    );
+    const result = await this.#run(["worktree", "unlock", path.resolve(worktreePath)], {
+      acceptedExitCodes: [0, 128],
+    });
     if (result.exitCode !== 0) {
       const message = result.stderr.toString("utf8");
       if (!message.includes("not locked")) {
@@ -424,10 +444,9 @@ export class GitClient {
     assertOid(ancestorOid);
     assertOid(descendantOid);
     if (ancestorOid === descendantOid) return true;
-    const result = await this.#run(
-      ["merge-base", "--is-ancestor", ancestorOid, descendantOid],
-      { acceptedExitCodes: [0, 1] },
-    );
+    const result = await this.#run(["merge-base", "--is-ancestor", ancestorOid, descendantOid], {
+      acceptedExitCodes: [0, 1],
+    });
     return result.exitCode === 0;
   }
 
@@ -476,7 +495,10 @@ export class GitClient {
     return oid;
   }
 
-  public async mergeTree(ours: string, theirs: string): Promise<{ tree?: string; conflicts: string }> {
+  public async mergeTree(
+    ours: string,
+    theirs: string,
+  ): Promise<{ tree?: string; conflicts: string }> {
     assertOid(ours);
     assertOid(theirs);
     try {
@@ -755,7 +777,10 @@ function assertLockReason(value: string): void {
 }
 
 function assertIdentity(identity: GitCommitIdentity): void {
-  for (const [label, value] of [["name", identity.name], ["email", identity.email]] as const) {
+  for (const [label, value] of [
+    ["name", identity.name],
+    ["email", identity.email],
+  ] as const) {
     if (value.length === 0 || value.length > 1_024 || /[\0\r\n<>]/u.test(value)) {
       throw new Error(`Git commit identity ${label} is malformed`);
     }

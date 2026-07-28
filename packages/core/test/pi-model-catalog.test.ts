@@ -3,47 +3,120 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  loadSealedPiModelBinding,
   projectSealedPiModelCatalog,
+  sealPiModelDescriptor,
+  sealedPiModelDescriptor,
   supportedThinkingLevels,
 } from "../src/pi/model-catalog.js";
 
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  await Promise.all(
+    temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+  );
 });
 
 describe("sealed Pi model catalog", () => {
+  it("hash-binds the secret-free transport descriptor while excluding provider headers", () => {
+    const base = fixtureModel();
+    const first = sealPiModelDescriptor(base);
+    const repeated = sealPiModelDescriptor(structuredClone(base));
+    const differentSecret = sealPiModelDescriptor({
+      ...base,
+      headers: { Authorization: "Bearer another-secret" },
+    });
+
+    expect(repeated).toEqual(first);
+    expect(differentSecret).toEqual(first);
+    expect(first).toMatchObject({
+      catalogContextWindow: base.contextWindow,
+      catalogMaxTokens: base.maxTokens,
+    });
+    expect(sealedPiModelDescriptor(base)).not.toHaveProperty("headers");
+    expect(JSON.stringify(sealedPiModelDescriptor(base))).not.toContain("disposable-secret");
+
+    expect(
+      sealPiModelDescriptor({ ...base, baseUrl: "https://different.invalid/v1" }).catalogSha256,
+    ).not.toBe(first.catalogSha256);
+    expect(
+      sealPiModelDescriptor({ ...base, maxTokens: base.maxTokens + 1 }).catalogSha256,
+    ).not.toBe(first.catalogSha256);
+    expect(
+      sealPiModelDescriptor({ ...base, compat: { supportsToolSearch: false } }).catalogSha256,
+    ).not.toBe(first.catalogSha256);
+  });
+
+  it("loads only an exact model from Pi's offline executable snapshot", async () => {
+    const model = fixtureModel();
+    const runtime = { getAvailableSnapshot: () => [model] };
+    await expect(loadSealedPiModelBinding(model.provider, model.id, { runtime })).resolves.toEqual(
+      sealPiModelDescriptor(model),
+    );
+    await expect(loadSealedPiModelBinding(model.provider, "absent", { runtime })).rejects.toEqual(
+      expect.objectContaining({ code: "model_unavailable" }),
+    );
+    await expect(
+      loadSealedPiModelBinding(model.provider, model.id, {
+        runtime: {
+          getAvailableSnapshot: () => [model, { ...model, maxTokens: model.maxTokens - 1 }],
+        },
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining({
+        code: "model_unavailable",
+        message: expect.stringContaining("ambiguous"),
+      }),
+    );
+  });
+
+  it("refuses to persist model endpoints with embedded credentials", () => {
+    expect(() =>
+      sealPiModelDescriptor({
+        ...fixtureModel(),
+        baseUrl: "https://user:secret@example.invalid/v1",
+      }),
+    ).toThrowError(expect.objectContaining({ code: "model_descriptor_invalid" }));
+  });
+
   it("projects Pi 0.80.10 thinkingLevelMap semantics per model", () => {
-    expect(supportedThinkingLevels({
-      provider: "google",
-      id: "flash-lite",
-      name: "Flash Lite",
-      reasoning: true,
-      thinkingLevelMap: {
-        off: null,
-        minimal: null,
-        low: "LOW",
-        medium: null,
-        high: "HIGH",
-      },
-    })).toEqual(["low", "high"]);
-    expect(supportedThinkingLevels({
-      provider: "openai-codex",
-      id: "max-model",
-      name: "Max Model",
-      reasoning: true,
-      thinkingLevelMap: { minimal: "low", xhigh: "xhigh", max: "max" },
-    })).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-    expect(supportedThinkingLevels({
-      provider: "plain",
-      id: "no-reasoning",
-      name: "No Reasoning",
-      reasoning: false,
-      thinkingLevelMap: { max: "max" },
-    })).toEqual(["off"]);
+    expect(
+      supportedThinkingLevels({
+        provider: "google",
+        id: "flash-lite",
+        name: "Flash Lite",
+        reasoning: true,
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: "LOW",
+          medium: null,
+          high: "HIGH",
+        },
+      }),
+    ).toEqual(["low", "high"]);
+    expect(
+      supportedThinkingLevels({
+        provider: "openai-codex",
+        id: "max-model",
+        name: "Max Model",
+        reasoning: true,
+        thinkingLevelMap: { minimal: "low", xhigh: "xhigh", max: "max" },
+      }),
+    ).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+    expect(
+      supportedThinkingLevels({
+        provider: "plain",
+        id: "no-reasoning",
+        name: "No Reasoning",
+        reasoning: false,
+        thinkingLevelMap: { max: "max" },
+      }),
+    ).toEqual(["off"]);
   });
 
   it("keeps an adversarial registerProvider model visible but unavailable and out of the child runtime", async () => {
@@ -67,33 +140,40 @@ describe("sealed Pi model catalog", () => {
       baseUrl: "https://ambient.invalid/v1",
       apiKey: "disposable-test-key",
       api: "openai-completions",
-      streamSimple: extensionStream as never,
-      models: [{
-        id: "extension-only",
-        name: "Extension Only",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 16_384,
-        maxTokens: 2_048,
-      }],
+      streamSimple: extensionStream,
+      models: [
+        {
+          id: "extension-only",
+          name: "Extension Only",
+          reasoning: true,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 16_384,
+          maxTokens: 2_048,
+        },
+      ],
     });
     await ambientRuntime.refresh({ allowNetwork: false });
 
     const ambientRegistry = new ModelRegistry(ambientRuntime);
     const standalone = projectSealedPiModelCatalog(sealedRuntime);
     const interactive = projectSealedPiModelCatalog(sealedRuntime, ambientRegistry);
-    const adversary = interactive.find((model) =>
-      model.provider === "ambient-adversary" && model.id === "extension-only");
+    const adversary = interactive.find(
+      (model) => model.provider === "ambient-adversary" && model.id === "extension-only",
+    );
 
-    expect(adversary).toEqual(expect.objectContaining({
-      available: false,
-      unavailableReason: expect.stringContaining("ambient Pi extension"),
-    }));
+    expect(adversary).toEqual(
+      expect.objectContaining({
+        available: false,
+        unavailableReason: expect.stringContaining("ambient Pi extension"),
+      }),
+    );
     expect(interactive.filter((model) => model.available)).toEqual(
       standalone.filter((model) => model.available),
     );
-    expect(interactive.filter((model) => model.provider !== "ambient-adversary")).toEqual(standalone);
+    expect(interactive.filter((model) => model.provider !== "ambient-adversary")).toEqual(
+      standalone,
+    );
     expect(sealedRuntime.getRegisteredProviderIds()).toEqual([]);
     expect(sealedRuntime.getModel("ambient-adversary", "extension-only")).toBeUndefined();
     expect(extensionStream).not.toHaveBeenCalled();
@@ -113,10 +193,12 @@ describe("sealed Pi model catalog", () => {
     });
 
     expect(interactive).toEqual(standalone);
-    expect(standalone.find((model) => model.id === "locked")).toEqual(expect.objectContaining({
-      available: false,
-      unavailableReason: expect.stringContaining("current Pi credentials"),
-    }));
+    expect(standalone.find((model) => model.id === "locked")).toEqual(
+      expect.objectContaining({
+        available: false,
+        unavailableReason: expect.stringContaining("current Pi credentials"),
+      }),
+    );
   });
 
   it("finishes an offline availability refresh without network or auth/models rewrites", async () => {
@@ -138,7 +220,8 @@ describe("sealed Pi model catalog", () => {
       server.listen(0, "127.0.0.1", resolve);
     });
     const address = server.address();
-    if (address === null || typeof address === "string") throw new Error("test server has no TCP address");
+    if (address === null || typeof address === "string")
+      throw new Error("test server has no TCP address");
     try {
       const runtime = await ModelRuntime.create({
         authPath,
@@ -149,10 +232,30 @@ describe("sealed Pi model catalog", () => {
       });
       expect(runtime.getAvailableSnapshot()).toEqual(expect.any(Array));
     } finally {
-      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
     }
     expect(requests).toBe(0);
     expect(await readFile(authPath, "utf8")).toBe(authBytes);
     expect(await readFile(modelsPath, "utf8")).toBe(modelBytes);
   });
 });
+
+function fixtureModel(): Model<Api> {
+  return {
+    provider: "openai-codex",
+    id: "gpt-fixture",
+    name: "Fixture",
+    api: "openai-codex-responses",
+    baseUrl: "https://chatgpt.com/backend-api",
+    reasoning: true,
+    thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 372_000,
+    maxTokens: 128_000,
+    headers: { Authorization: "Bearer disposable-secret" },
+    compat: { supportsToolSearch: true },
+  };
+}

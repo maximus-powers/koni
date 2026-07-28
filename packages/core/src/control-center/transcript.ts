@@ -77,15 +77,16 @@ export function parsePiTranscriptPage(value: unknown): TranscriptPageProjection 
     page.protocol !== PI_TRANSCRIPT_PAGE_PROTOCOL ||
     session === undefined ||
     typeof session.id !== "string" ||
-    session.id.length === 0 || session.id.length > MAX_TRANSCRIPT_SESSION_ID_CHARACTERS ||
+    session.id.length === 0 ||
+    session.id.length > MAX_TRANSCRIPT_SESSION_ID_CHARACTERS ||
     snapshot === undefined ||
     !Number.isSafeInteger(snapshot.entryCount) ||
     (snapshot.entryCount as number) < 0 ||
     !isSha256Digest(snapshot.sha256) ||
-    (snapshot.lastEntryId !== undefined && (
-      typeof snapshot.lastEntryId !== "string" || snapshot.lastEntryId.length === 0
-      || snapshot.lastEntryId.length > MAX_TRANSCRIPT_ID_CHARACTERS
-    )) ||
+    (snapshot.lastEntryId !== undefined &&
+      (typeof snapshot.lastEntryId !== "string" ||
+        snapshot.lastEntryId.length === 0 ||
+        snapshot.lastEntryId.length > MAX_TRANSCRIPT_ID_CHARACTERS)) ||
     !Number.isSafeInteger(page.totalBlocks) ||
     (page.totalBlocks as number) < 0 ||
     !Number.isSafeInteger(page.startBlock) ||
@@ -94,21 +95,23 @@ export function parsePiTranscriptPage(value: unknown): TranscriptPageProjection 
     page.blocks.length > TRANSCRIPT_PAGE_LIMIT ||
     !Array.isArray(page.diagnostics) ||
     page.diagnostics.length > MAX_TRANSCRIPT_DIAGNOSTICS ||
-    page.diagnostics.some((diagnostic) =>
-      typeof diagnostic !== "string" ||
-      Buffer.byteLength(diagnostic, "utf8") > MAX_TRANSCRIPT_DIAGNOSTIC_BYTES) ||
-    (page.previousCursor !== undefined && (
-      typeof page.previousCursor !== "string" || page.previousCursor.length === 0
-      || Buffer.byteLength(page.previousCursor, "utf8") > MAX_TRANSCRIPT_CURSOR_BYTES
-    )) ||
-    (page.nextCursor !== undefined && (
-      typeof page.nextCursor !== "string" || page.nextCursor.length === 0
-      || Buffer.byteLength(page.nextCursor, "utf8") > MAX_TRANSCRIPT_CURSOR_BYTES
-    ))
+    page.diagnostics.some(
+      (diagnostic) =>
+        typeof diagnostic !== "string" ||
+        Buffer.byteLength(diagnostic, "utf8") > MAX_TRANSCRIPT_DIAGNOSTIC_BYTES,
+    ) ||
+    (page.previousCursor !== undefined &&
+      (typeof page.previousCursor !== "string" ||
+        page.previousCursor.length === 0 ||
+        Buffer.byteLength(page.previousCursor, "utf8") > MAX_TRANSCRIPT_CURSOR_BYTES)) ||
+    (page.nextCursor !== undefined &&
+      (typeof page.nextCursor !== "string" ||
+        page.nextCursor.length === 0 ||
+        Buffer.byteLength(page.nextCursor, "utf8") > MAX_TRANSCRIPT_CURSOR_BYTES))
   ) {
     throw new Error("authority returned an invalid Pi transcript page");
   }
-  if (((snapshot.entryCount as number) > 0) !== (snapshot.lastEntryId !== undefined)) {
+  if ((snapshot.entryCount as number) > 0 !== (snapshot.lastEntryId !== undefined)) {
     throw new Error("authority transcript snapshot has an inconsistent terminal entry identity");
   }
 
@@ -117,7 +120,8 @@ export function parsePiTranscriptPage(value: unknown): TranscriptPageProjection 
     if (
       block === undefined ||
       typeof block.id !== "string" ||
-      block.id.length === 0 || block.id.length > MAX_TRANSCRIPT_ID_CHARACTERS ||
+      block.id.length === 0 ||
+      block.id.length > MAX_TRANSCRIPT_ID_CHARACTERS ||
       typeof block.kind !== "string" ||
       !TRANSCRIPT_BLOCK_KINDS.has(block.kind as TranscriptBlockKind) ||
       typeof block.title !== "string" ||
@@ -125,10 +129,9 @@ export function parsePiTranscriptPage(value: unknown): TranscriptPageProjection 
       typeof block.branch !== "boolean" ||
       typeof block.error !== "boolean" ||
       typeof block.truncated !== "boolean" ||
-      (block.timestamp !== undefined && (
-        typeof block.timestamp !== "string" ||
-        Buffer.byteLength(block.timestamp, "utf8") > MAX_TRANSCRIPT_TIMESTAMP_BYTES
-      ))
+      (block.timestamp !== undefined &&
+        (typeof block.timestamp !== "string" ||
+          Buffer.byteLength(block.timestamp, "utf8") > MAX_TRANSCRIPT_TIMESTAMP_BYTES))
     ) {
       throw new Error("authority returned an invalid Pi transcript block");
     }
@@ -136,17 +139,24 @@ export function parsePiTranscriptPage(value: unknown): TranscriptPageProjection 
     if (block.chunk !== undefined && chunk === undefined) {
       throw new Error("authority returned invalid Pi transcript chunk metadata");
     }
-    if (chunk !== undefined && (
-      !Number.isSafeInteger(chunk.index) || (chunk.index as number) < 1 ||
-      !Number.isSafeInteger(chunk.total) || (chunk.total as number) < 1 ||
-      (chunk.index as number) > (chunk.total as number) ||
-      !Number.isSafeInteger(chunk.totalBytes) || (chunk.totalBytes as number) < 0
-    )) throw new Error("authority returned invalid Pi transcript chunk metadata");
+    if (
+      chunk !== undefined &&
+      (!Number.isSafeInteger(chunk.index) ||
+        (chunk.index as number) < 1 ||
+        !Number.isSafeInteger(chunk.total) ||
+        (chunk.total as number) < 1 ||
+        (chunk.index as number) > (chunk.total as number) ||
+        !Number.isSafeInteger(chunk.totalBytes) ||
+        (chunk.totalBytes as number) < 0)
+    )
+      throw new Error("authority returned invalid Pi transcript chunk metadata");
     if ((block.truncated === true) !== (chunk !== undefined)) {
       throw new Error("authority transcript truncation does not expose one complete chunk path");
     }
-    if (Buffer.byteLength(block.markdown, "utf8") > MAX_PROJECTED_TRANSCRIPT_BLOCK_CHARACTERS ||
-        Buffer.byteLength(block.title, "utf8") > MAX_TRANSCRIPT_TITLE_BYTES) {
+    if (
+      Buffer.byteLength(block.markdown, "utf8") > MAX_PROJECTED_TRANSCRIPT_BLOCK_CHARACTERS ||
+      Buffer.byteLength(block.title, "utf8") > MAX_TRANSCRIPT_TITLE_BYTES
+    ) {
       throw new Error("authority returned an oversized Pi transcript block");
     }
     const title = sanitizePiTranscriptDisplayText(block.title);
@@ -165,26 +175,34 @@ export function parsePiTranscriptPage(value: unknown): TranscriptPageProjection 
       ...(block.timestamp === undefined ? {} : { timestamp: block.timestamp }),
       branch: block.branch,
       error: block.error,
-      ...(chunk === undefined ? {} : {
-        chunk: {
-          index: chunk.index as number,
-          total: chunk.total as number,
-          totalBytes: chunk.totalBytes as number,
-        },
-      }),
+      ...(chunk === undefined
+        ? {}
+        : {
+            chunk: {
+              index: chunk.index as number,
+              total: chunk.total as number,
+              totalBytes: chunk.totalBytes as number,
+            },
+          }),
     };
   });
 
   const totalBlocks = page.totalBlocks as number;
   const startBlock = page.startBlock as number;
-  if (blocks.length > totalBlocks || startBlock > totalBlocks || startBlock + blocks.length > totalBlocks) {
+  if (
+    blocks.length > totalBlocks ||
+    startBlock > totalBlocks ||
+    startBlock + blocks.length > totalBlocks
+  ) {
     throw new Error("authority transcript page exceeds its total block count");
   }
   if (blocks.length === 0 && (startBlock !== 0 || totalBlocks !== 0)) {
     throw new Error("authority returned an empty window for non-empty Pi transcript history");
   }
-  if ((page.previousCursor !== undefined) !== (startBlock + blocks.length < totalBlocks) ||
-      (page.nextCursor !== undefined) !== (startBlock > 0)) {
+  if (
+    (page.previousCursor !== undefined) !== startBlock + blocks.length < totalBlocks ||
+    (page.nextCursor !== undefined) !== startBlock > 0
+  ) {
     throw new Error("authority transcript cursors disagree with their window ordinals");
   }
   if (new Set(blocks.map((block) => block.id)).size !== blocks.length) {
@@ -192,18 +210,18 @@ export function parsePiTranscriptPage(value: unknown): TranscriptPageProjection 
   }
   validateChunkGroups(blocks);
   return {
-    sessionId: session.id as string,
+    sessionId: session.id,
     snapshot: {
       entryCount: snapshot.entryCount as number,
-      ...(snapshot.lastEntryId === undefined ? {} : { lastEntryId: snapshot.lastEntryId as string }),
-      sha256: snapshot.sha256 as Sha256Digest,
+      ...(snapshot.lastEntryId === undefined ? {} : { lastEntryId: snapshot.lastEntryId }),
+      sha256: snapshot.sha256,
     },
     totalBlocks,
     startBlock,
     blocks,
     diagnostics: (page.diagnostics as string[]).map(sanitizePiTranscriptDisplayText),
-    ...(page.previousCursor === undefined ? {} : { previousCursor: page.previousCursor as string }),
-    ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor as string }),
+    ...(page.previousCursor === undefined ? {} : { previousCursor: page.previousCursor }),
+    ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
   };
 }
 
@@ -217,18 +235,20 @@ export function assemblePiTranscriptPages(
   if (newestToOldestPages.length === 0) return { blocks: [], diagnostics: [] };
   const totalBlocks = newestToOldestPages[0]!.totalBlocks;
   const first = newestToOldestPages[0]!;
-  if (newestToOldestPages.some((page) =>
-    page.totalBlocks !== totalBlocks || page.sessionId !== first.sessionId ||
-    page.snapshot.sha256 !== first.snapshot.sha256 ||
-    page.snapshot.entryCount !== first.snapshot.entryCount ||
-    page.snapshot.lastEntryId !== first.snapshot.lastEntryId
-  )) {
+  if (
+    newestToOldestPages.some(
+      (page) =>
+        page.totalBlocks !== totalBlocks ||
+        page.sessionId !== first.sessionId ||
+        page.snapshot.sha256 !== first.snapshot.sha256 ||
+        page.snapshot.entryCount !== first.snapshot.entryCount ||
+        page.snapshot.lastEntryId !== first.snapshot.lastEntryId,
+    )
+  ) {
     throw new Error("authority transcript pages do not describe one stable snapshot");
   }
 
-  const chronological = [...newestToOldestPages]
-    .reverse()
-    .flatMap((page) => page.blocks);
+  const chronological = [...newestToOldestPages].reverse().flatMap((page) => page.blocks);
   if (chronological.length > totalBlocks) {
     throw new Error("authority transcript pages exceed their total block count");
   }
@@ -248,12 +268,16 @@ export function assemblePiTranscriptPages(
 }
 
 function validateChunkGroups(blocks: readonly TranscriptBlock[]): void {
-  const groups = new Map<string, { total: number; totalBytes: number; indexes: number[]; bytes: number }>();
+  const groups = new Map<
+    string,
+    { total: number; totalBytes: number; indexes: number[]; bytes: number }
+  >();
   for (const block of blocks) {
     if (block.chunk === undefined) continue;
     const suffix = `:chunk-${String(block.chunk.index)}`;
     const base = block.id.slice(0, -suffix.length);
-    if (base.length === 0) throw new Error("authority returned an empty Pi transcript chunk identity");
+    if (base.length === 0)
+      throw new Error("authority returned an empty Pi transcript chunk identity");
     const group = groups.get(base);
     if (group === undefined) {
       groups.set(base, {
@@ -271,19 +295,26 @@ function validateChunkGroups(blocks: readonly TranscriptBlock[]): void {
     group.bytes += Buffer.byteLength(block.markdown, "utf8");
   }
   for (const group of groups.values()) {
-    if (new Set(group.indexes).size !== group.indexes.length || group.indexes.some((value, index) =>
-      index > 0 && value !== group.indexes[index - 1]! + 1)) {
+    if (
+      new Set(group.indexes).size !== group.indexes.length ||
+      group.indexes.some((value, index) => index > 0 && value !== group.indexes[index - 1]! + 1)
+    ) {
       throw new Error("authority returned duplicate or non-contiguous Pi transcript chunks");
     }
-    if (group.indexes[0] === 1 && group.indexes.at(-1) === group.total &&
-        group.bytes !== group.totalBytes) {
-      throw new Error("authority transcript chunks do not reconstruct their declared complete content");
+    if (
+      group.indexes[0] === 1 &&
+      group.indexes.at(-1) === group.total &&
+      group.bytes !== group.totalBytes
+    ) {
+      throw new Error(
+        "authority transcript chunks do not reconstruct their declared complete content",
+      );
     }
   }
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : undefined;
 }

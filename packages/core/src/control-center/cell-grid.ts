@@ -36,7 +36,7 @@ const DEFAULT_STYLE: CellStyle = {
 };
 
 /**
- * Deterministic terminal-cell projection used by both hosts and the parity harness.
+ * Deterministic terminal-cell projection used by both hosts and exact frame tests.
  *
  * It preserves the already-rendered ANSI lines for the host while exposing normalized glyph,
  * style, semantic-region, and hit-target cells to exact tests. Non-SGR terminal controls are
@@ -49,7 +49,12 @@ export class CellGrid {
   public readonly regions: CellGridRegion[];
   readonly #ansiLines: string[];
 
-  private constructor(width: number, height: number, ansiLines: string[], cells: ControlCenterCell[][]) {
+  private constructor(
+    width: number,
+    height: number,
+    ansiLines: string[],
+    cells: ControlCenterCell[][],
+  ) {
     this.width = width;
     this.height = height;
     this.#ansiLines = ansiLines;
@@ -120,7 +125,8 @@ export class CellGrid {
           cursor += Math.max(1, visibleWidth(glyph));
         }
         if (!matches || cursor > rect.x + rect.width) continue;
-        if (seen === occurrence) return this.addHitTarget(target, { x, y, width: cursor - x, height: 1 });
+        if (seen === occurrence)
+          return this.addHitTarget(target, { x, y, width: cursor - x, height: 1 });
         seen += 1;
       }
     }
@@ -136,7 +142,9 @@ export class CellGrid {
   }
 
   public toPlainLines(): string[] {
-    return this.cells.map((row) => row.map((cell) => cell.continuation ? "" : cell.glyph).join(""));
+    return this.cells.map((row) =>
+      row.map((cell) => (cell.continuation ? "" : cell.glyph)).join(""),
+    );
   }
 
   public serialize(): {
@@ -149,21 +157,29 @@ export class CellGrid {
       width: this.width,
       height: this.height,
       regions: structuredClone(this.regions),
-      rows: this.cells.map((row) => row.map((cell) => ({
-        glyph: cell.continuation ? "<continuation>" : cell.glyph,
-        style: styleKey(cell.style),
-        ...(cell.region === undefined ? {} : { region: cell.region }),
-        ...(cell.hitTarget === undefined ? {} : { hitTarget: cell.hitTarget }),
-      }))),
+      rows: this.cells.map((row) =>
+        row.map((cell) => ({
+          glyph: cell.continuation ? "<continuation>" : cell.glyph,
+          style: styleKey(cell.style),
+          ...(cell.region === undefined ? {} : { region: cell.region }),
+          ...(cell.hitTarget === undefined ? {} : { hitTarget: cell.hitTarget }),
+        })),
+      ),
     };
   }
 }
 
-function parseAnsiLine(source: string, width: number): { safeAnsi: string; cells: ControlCenterCell[] } {
+function parseAnsiLine(
+  source: string,
+  width: number,
+): { safeAnsi: string; cells: ControlCenterCell[] } {
   const cells: ControlCenterCell[] = [];
   let safeAnsi = "";
   let style = { ...DEFAULT_STYLE };
-  const tokens = source.match(/\u001b\[[0-9;]*m|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]|[^\u001b]+|\u001b/gu) ?? [];
+  const tokens =
+    source.match(
+      /\u001b\[[0-9;]*m|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]|[^\u001b]+|\u001b/gu,
+    ) ?? [];
   for (const token of tokens) {
     if (/^\u001b\[[0-9;]*m$/u.test(token)) {
       style = applySgr(style, token);
@@ -188,7 +204,8 @@ function parseAnsiLine(source: string, width: number): { safeAnsi: string; cells
       safeAnsi += grapheme;
     }
   }
-  while (cells.length < width) cells.push({ glyph: " ", continuation: false, style: { ...DEFAULT_STYLE } });
+  while (cells.length < width)
+    cells.push({ glyph: " ", continuation: false, style: { ...DEFAULT_STYLE } });
   const visible = visibleWidth(safeAnsi);
   if (visible < width) safeAnsi += " ".repeat(width - visible);
   return { safeAnsi, cells };
@@ -206,19 +223,25 @@ function applySgr(previous: CellStyle, sequence: string): CellStyle {
     else if (code === 3) style.italic = true;
     else if (code === 4) style.underline = true;
     else if (code === 7) style.inverse = true;
-    else if (code === 22) { style.bold = false; style.dim = false; }
-    else if (code === 23) style.italic = false;
+    else if (code === 22) {
+      style.bold = false;
+      style.dim = false;
+    } else if (code === 23) style.italic = false;
     else if (code === 24) style.underline = false;
     else if (code === 27) style.inverse = false;
     else if (code === 39) style.foreground = "default";
     else if (code === 49) style.background = "default";
-    else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) style.foreground = `ansi-${code}`;
-    else if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107)) style.background = `ansi-${code}`;
+    else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97))
+      style.foreground = `ansi-${code}`;
+    else if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107))
+      style.background = `ansi-${code}`;
     else if ((code === 38 || code === 48) && codes[index + 1] === 2) {
       const red = codes[index + 2];
       const green = codes[index + 3];
       const blue = codes[index + 4];
-      if ([red, green, blue].every((value) => Number.isInteger(value) && value! >= 0 && value! <= 255)) {
+      if (
+        [red, green, blue].every((value) => Number.isInteger(value) && value! >= 0 && value! <= 255)
+      ) {
         const value = `rgb-${red}-${green}-${blue}`;
         if (code === 38) style.foreground = value;
         else style.background = value;
@@ -237,7 +260,9 @@ function applySgr(previous: CellStyle, sequence: string): CellStyle {
 function graphemes(value: string): string[] {
   const Segmenter = Intl.Segmenter;
   if (Segmenter === undefined) return Array.from(value);
-  return [...new Segmenter(undefined, { granularity: "grapheme" }).segment(value)].map((entry) => entry.segment);
+  return [...new Segmenter(undefined, { granularity: "grapheme" }).segment(value)].map(
+    (entry) => entry.segment,
+  );
 }
 
 function styleKey(style: CellStyle): string {
