@@ -1,16 +1,15 @@
 # Core Architecture Renovation Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use
-> `superpowers:subagent-driven-development` (recommended) or
-> `superpowers:executing-plans` to implement this plan task-by-task.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development`
+> (recommended) or `superpowers:executing-plans` to implement this plan task-by-task.
 
 **Goal:** Finish the TypeScript migration with clearer ownership around authority, durable state,
 compiler construction, Pi process supervision, Git transactions, and terminal presentation while
 preserving public and durable behavior.
 
 **Architecture:** Large facade classes retain orchestration. Pure validation, serialization,
-projection, and transition logic move to cohesive internal modules with explicit input/output
-types. Extracted modules depend on contracts and leaf utilities, never on their former facade.
+projection, and transition logic move to cohesive internal modules with explicit input/output types.
+Extracted modules depend on contracts and leaf utilities, never on their former facade.
 
 **Tech Stack:** TypeScript 5.9 strict mode, Node.js 22, Vitest 4, npm workspaces.
 
@@ -39,17 +38,20 @@ The test reads authored production TypeScript and rejects:
 - growth in grandfathered facades above their recorded baseline;
 - imports from leaf modules back into their owning facade.
 
-Represent grandfathered limits explicitly:
+Represent grandfathered limits explicitly. Record the limits after the one-time Prettier
+normalization, because physical line counts depend on formatting:
 
 ```js
 const grandfathered = new Map([
-  ["packages/core/src/authority/run-engine.ts", 17435],
-  ["packages/core/src/compiler/run-program.ts", 10746],
-  ["packages/core/src/control-center/controller.ts", 5097],
-  ["packages/core/src/state/run-record.ts", 5035],
-  ["packages/core/src/git/lifecycle.ts", 4142],
-  ["packages/core/src/pi/managed-session.ts", 3455],
-  ["packages/core/src/control-center/component.ts", 3242],
+  ["packages/core/src/authority/run-engine.ts", 19864],
+  ["packages/core/src/compiler/configuration.ts", 2749],
+  ["packages/core/src/compiler/run-program.ts", 13139],
+  ["packages/core/src/control-center/component.ts", 4433],
+  ["packages/core/src/control-center/controller.ts", 5957],
+  ["packages/core/src/git/lifecycle.ts", 4517],
+  ["packages/core/src/pi/attempt-process-supervisor.ts", 2584],
+  ["packages/core/src/pi/managed-session.ts", 3799],
+  ["packages/core/src/state/run-record.ts", 6134],
 ]);
 ```
 
@@ -155,8 +157,8 @@ terminal mutation, and deterministic serialization.
 **Step 2: Make `run-record.ts` the schema/compatibility facade**
 
 Move state decision logic to the named state modules. Keep record types, parsing, compatibility
-normalization, and durable serialization in `run-record.ts`. Each state module receives a record
-and returns a new record or explicit patch; it must not perform filesystem I/O.
+normalization, and durable serialization in `run-record.ts`. Each state module receives a record and
+returns a new record or explicit patch; it must not perform filesystem I/O.
 
 **Step 3: Verify**
 
@@ -327,4 +329,3 @@ Expected: PASS.
 git add packages/core/src/git packages/core/src/control-center packages/core/test
 git commit -m "refactor(core): clarify git and control center facades"
 ```
-

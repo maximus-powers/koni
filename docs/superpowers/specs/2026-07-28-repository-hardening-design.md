@@ -7,8 +7,7 @@ Date: 2026-07-28
 Bring the current Köni repository migration to release-grade correctness, consistency, and
 maintainability. Preserve the intended Rust-to-TypeScript and Pi-native transition, repair every
 reproducible defect, establish enforceable source-quality standards, and reduce structural
-complexity without weakening authenticated profile, authority, Git, process, or lifecycle
-contracts.
+complexity without weakening authenticated profile, authority, Git, process, or lifecycle contracts.
 
 The final working tree must be organized into semantic commits whose boundaries explain the
 resulting product changes.
@@ -25,8 +24,8 @@ The current baseline has these properties:
 - root profile-manifest verification passes;
 - all workspace TypeScript projects type-check;
 - `git diff --check` passes;
-- the profile release-upgrade suite has eight failures because its reconstructed Coding and
-  Research prior-release fixtures do not reproduce their pinned authenticated bundle identities;
+- the profile release-upgrade suite has eight failures because its reconstructed Coding and Research
+  prior-release fixtures do not reproduce their pinned authenticated bundle identities;
 - no repository-wide lint or format gate exists;
 - several central modules range from roughly 3k to 17k lines.
 
@@ -50,9 +49,9 @@ published release by reversing an open-ended sequence of edits against the curre
 ### 2. Tooling-first consistency
 
 Introduce a small, explicit repository-wide quality gate after existing behavior is green. Prefer
-tools that understand TypeScript and can run deterministically in the current npm workspace.
-Rules must target correctness, unsafe suppression, imports, unreachable code, promise handling, and
-stable formatting. Avoid rules that create large subjective churn without improving maintenance.
+tools that understand TypeScript and can run deterministically in the current npm workspace. Rules
+must target correctness, unsafe suppression, imports, unreachable code, promise handling, and stable
+formatting. Avoid rules that create large subjective churn without improving maintenance.
 
 Generated, bundled, fixture, archive, and authenticated baseline content must be excluded or handled
 with purpose-built verification. Formatting must never rewrite bytes that participate in a pinned
@@ -82,8 +81,8 @@ separately tested defect requires a behavior change.
 - Reproduce and repair the historical profile-upgrade fixture failures.
 - Verify current Coding and Research baseline inventories, hashes, sizes, migrations, and package
   metadata.
-- Verify upgrade, overlay preservation, replay rejection, archive tamper rejection, and
-  same-version source rejection against exact historical assets.
+- Verify upgrade, overlay preservation, replay rejection, archive tamper rejection, and same-version
+  source rejection against exact historical assets.
 - Keep release fixtures immutable and independent of future current-baseline edits.
 
 ### Source correctness and safety

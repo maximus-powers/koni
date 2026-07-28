@@ -14,7 +14,7 @@ body:
     id: outcome
     attributes:
       label: Desired outcome
-      description: Describe the behavior and acceptance criteria, not only an implementation.
+      description: Describe the behavior and acceptance criteria.
     validations:
       required: true
   - type: dropdown
@@ -22,29 +22,16 @@ body:
     attributes:
       label: Likely layer
       options:
-        - Generic engine
+        - Generic Core
         - Project profile or schema
-        - Codex agent or skill
-        - TUI or CLI
-        - Documentation site
+        - Pi agent or skill
+        - TUI, monitor, or CLI
+        - Documentation
         - Unsure
     validations:
       required: true
   - type: textarea
-    id: alternatives
-    attributes:
-      label: Alternatives considered
-  - type: textarea
     id: compatibility
     attributes:
       label: Compatibility and migration
-      description: Note effects on configuration, durable state, Git topology, or existing runs.
-  - type: checkboxes
-    id: checks
-    attributes:
-      label: Submission checks
-      options:
-        - label: I searched for an existing request.
-          required: true
-        - label: I can participate in design or testing.
-          required: false
+      description: Describe effects on configuration, durable state, Git topology, or existing runs.

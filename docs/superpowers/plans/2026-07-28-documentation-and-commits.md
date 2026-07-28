@@ -1,15 +1,14 @@
 # Documentation and Semantic Commit Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use
-> `superpowers:subagent-driven-development` (recommended) or
-> `superpowers:executing-plans` to implement this plan task-by-task.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development`
+> (recommended) or `superpowers:executing-plans` to implement this plan task-by-task.
 
 **Goal:** Make product documentation and repository contents match the shipping TypeScript/Pi-native
 system, then place every intended change into a cohesive semantic commit with a clean worktree.
 
 **Architecture:** Current public docs describe only shipping surfaces. Historical material survives
-only in explicit release fixtures or migration records. Commit boundaries follow product domains
-and keep tests with the behavior they prove.
+only in explicit release fixtures or migration records. Commit boundaries follow product domains and
+keep tests with the behavior they prove.
 
 **Tech Stack:** Markdown, npm workspaces, Git, repository shell checks.
 

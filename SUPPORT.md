@@ -1,39 +1,36 @@
 # Support
 
-Köni is maintained as an open-source project.
+Köni is an open-source project.
 
 ## Questions
 
-Read the [documentation index](README.md#documentation) first. For usage,
-profile-design, or integration questions, open a GitHub Discussion when
-available. If Discussions are not enabled, open a question issue with a small
-sanitized example and the Köni version.
+Read the [documentation index](README.md#documentation) first. Use GitHub Discussions for usage,
+profile design, or integration questions when Discussions are available.
+
+If Discussions are not available, open an issue with a small sanitized example and the Köni version.
 
 ## Bugs
 
-Use the bug-report issue form and include:
+Use the bug-report form. Include:
 
 - `koni --version`;
-- operating system and architecture;
-- storage backend and run type;
-- exact command or TUI action;
-- expected and observed behavior;
+- the operating system and architecture;
+- the run type;
+- the exact command or TUI action;
+- the expected and observed behavior;
 - the complete diagnostic;
-- a minimal sanitized reproduction.
+- a small sanitized reproduction.
 
-Search for an existing issue before filing a duplicate.
+Search existing issues before you open a new issue.
 
 ## Feature ideas
 
-Use the feature-request form. Explain the user problem and why the capability
-belongs in the generic engine, a profile, a Codex skill, or the documentation.
-Interfaces that affect configuration or durable state should include migration
-expectations.
+Use the feature-request form. Explain the user problem and the correct ownership layer. Describe
+configuration, durable-state, and migration effects.
 
 ## Security and conduct
 
-Never report vulnerabilities publicly; follow [Security](SECURITY.md).
-Report conduct incidents through the private channel in the
-[Code of Conduct](CODE_OF_CONDUCT.md#enforcement).
+Report vulnerabilities according to [Security](SECURITY.md). Report conduct incidents through the
+private channel in the [Code of Conduct](CODE_OF_CONDUCT.md#enforcement).
 
-There is no guaranteed response time for ordinary support requests.
+The project does not guarantee a response time for ordinary support requests.

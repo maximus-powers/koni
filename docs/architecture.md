@@ -1,90 +1,69 @@
 # Architecture
 
-> **Pi-native package-boundary evolution — 2026-07-16 (`profile_lifecycle_migration`):** The
-> Rust/control-plane diagrams below remain the causal history of Koni's authority design. The
-> current port expresses that boundary natively in the Pi ecosystem as one broad `@koni/core`
-> package plus broad domain packages such as `@koni/coding-profile` and
-> `@koni/research-profile`; runtime adapters and run types are internal domains, not separate
-> micro-packages. Profile registrars are passive discovery surfaces, while TypeScript Core remains
-> the compiler/state/effect authority. See [Pi-native profile lifecycle](profile-lifecycle.md).
-
-> **Full Pi-native authority supersession — 2026-07-16 (`pi-native-port`):** “TypeScript Core” is
-> now literal, not a presentation layer over the Rust implementation. `@koni/core` contains the
-> graph/config compiler, deterministic scheduler, grants, receipts, project authority, Git
-> transactions, contained `AgentSession` runner, and the shared `/koni`/`koni tui` control center.
-> Pi owns provider credentials, model execution, session JSONL, compaction primitives, and ordinary
-> interactive resources. The two profile packages contribute immutable passive baselines. Rust and
-> `runtime/pi-host` remain only as a detached, non-shipping parity oracle until every executable
-> deletion gate passes; no release artifact or runtime path may fall back to them.
-
-Köni separates a reusable control plane, a deterministic execution kernel, and
-a project-owned semantic plane. The engine understands graphs, rules, tickets,
-workflows, receipts, and Git transactions; profiles supply the domain.
+Köni separates a reusable control plane, a deterministic execution kernel, and a project-owned
+semantic plane. The engine understands graphs, rules, tickets, workflows, receipts, and Git
+transactions. Profiles supply the domain.
 
 ## System overview
 
 ```text
-                          project-owned
-┌─────────────────────────────────────────────────────────────────┐
-│ .codex/koni     .codex/agents     .agents/skills   config.toml  │
-└────────┬───────────────┬────────────────┬──────────────┬─────────┘
-         └───────────────┴───────┬────────┴──────────────┘
-                                 ▼
-                       catalog + profile compiler
-                                 │
-                       typed, hashed configuration
-                                 ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ control plane                                                   │
-│ run registry · planning · questions · pipeline · TUI · reports │
-└───────────────────────────────┬─────────────────────────────────┘
-                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ execution kernel                                                │
-│ graph · rules · tickets · actions · process · receipts · Git   │
-└─────────────────────────────────────────────────────────────────┘
+ordinary Pi installation
+├── @koni/core              TypeScript compiler, authority, sessions, effects, and control center
+├── @koni/coding-profile    passive immutable coding baseline
+└── @koni/research-profile  passive immutable research baseline
+             │
+             ▼
+project .koni overlay ──► one authority per Git common directory
+                          ├── graph + rule compiler
+                          ├── tickets + deterministic scheduler
+                          ├── grants + receipts + recovery
+                          ├── worktrees + Git integration
+                          └── questions + approval + lifecycle
+                                      │
+                                      ▼
+                           one contained Pi AgentSession
+                           per immutable Koni attempt
 ```
 
-> **Pi/schema 2 transition in progress — 2026-07-14 (`pi_product_docs_transition`):** The
-> project-owned paths in this diagram remain the executable schema-1/Codex layout before cutover
-> and the basis for reading pinned historical runs. The unreleased schema-2 target moves live Köni
-> configuration and provider-neutral agent definitions to `.koni/`, keeps repository skills in
-> `.agents/skills/`, and uses the direct Pi host described in [Direct Pi runtime](pi-runtime.md).
-> A migrated project will execute only Pi, with no Codex fallback. Publication is still blocked on
-> the schema-1-to-2 migration/security matrix, compiler-issued active-run archival evidence,
-> historical-reader compatibility, and one frozen host/Rust/CLI/TUI/profile fingerprint.
+TypeScript Core is the sole authority for configuration, graph mutations, scheduling, durable state,
+tool effects, verification, and Git. `@koni/core` contains the graph and configuration compiler, the
+deterministic scheduler, grants, receipts, project authority, Git transactions, the contained
+`AgentSession` runner, and the shared control center.
 
-> **Release-candidate supersession — 2026-07-14 (`pi_product_docs_transition`):** The preceding
-> unreleased/blocked status is historical. Current source is the schema-2/direct-Pi release
-> candidate for the supported macOS Seatbelt target, with no production Codex fallback. Its exact
-> first-cut credential TCB is the Köni Rust binary, bundled Pi host, pinned Pi SDK 0.80.7 dependency
-> closure, and official pinned Node 22.19.0 runtime; Node still has no compiler-tool, graph, Git,
-> receipt, or project-filesystem authority. Linux networked login and inference fail closed pending
-> a destination-allowlisted egress broker. Installation and live migration remain separate guarded
-> operator actions, and protected forensic Updog state authorizes neither.
+Pi `0.80.10` supplies provider credentials, model execution, session JSONL, compaction primitives,
+and ordinary interactive resources. The tested host pair is TypeBox `1.1.38` on Node `>=22.19`. Koni
+does not copy or rewrite Pi credentials or unrelated settings.
 
-The three workspace crates follow that split:
+The package boundary is deliberately coarse. Koni ships one broad `@koni/core` package plus broad
+domain packages such as `@koni/coding-profile` and `@koni/research-profile`. Runtime adapters and
+run types are internal domains, not separate micro-packages. Profile registrars are passive
+discovery surfaces, and the two profile packages contribute immutable passive baselines. See
+[Pi-native profile lifecycle](profile-lifecycle.md).
 
-- `koni-core` compiles configuration and owns durable graph, run, process,
-  and Git behavior.
-- `koni-cli` exposes automation commands, installation, and the `koni`
-  executable.
-- `koni-tui` projects core state into the Operate and Configure interfaces.
+An autonomous attempt receives only compiler-selected, content-hashed resources and least-privilege
+grants implemented by TypeScript Core. Its Pi session is immutable and linear. Retry, rework,
+review, recovery, and integration are new Koni-authorized attempts with explicit parent attempt and
+session lineage. They are not in-session branch switching. Provider admission allows one transport
+with zero automatic provider retries. An ambiguous response stays durably reserved instead of
+causing another hidden request.
 
-The TUI and CLI are clients of the same core APIs. A UI action cannot bypass a
-compiler or runtime invariant.
+## Operator surfaces
 
-> **Current package mapping — 2026-07-16:** The three Rust-crate bullets above remain the historical
-> responsibility split. Today those responsibilities are internal domains of one
-> `@koni/core` package, not separately installed packages. Both operator surfaces use the same
-> versioned local authority protocol and durable Git-common-dir state.
+Both `/koni` and explicitly invoked `koni tui [--root <path>]` use the same authority protocol and
+component model. The extension is inert until a Koni command. Multiple Core origins warn and disable
+only Koni, so ordinary Pi stays available. Profile-upgrade conflicts expose current and upstream
+documents before an operator resolves them.
+
+A second, deliberately smaller surface lives beside ordinary Pi chat. `/koni-run` opens complete
+guided intake. A passive read-only widget and the `/koni-runs` overlay observe background runs and
+surface only actionable decisions. Inert continues to forbid passive work and provider activity. It
+does not mean an initialized trusted project has no passive status presentation.
 
 ## Configuration resolution
 
-The canonical entry point is `.codex/koni/project.yaml`. It catalogs complete
-run-type peers and one default. Every run type selects the same project profile
-but owns its intake, planning pipeline, question behavior, role overrides, Git
-namespaces, and orchestration limit.
+The canonical entry point is `.koni/project.yaml`. It catalogs complete run-type peers and one
+default. Every run type selects the same project profile, but it owns its intake, planning pipeline,
+question behavior, role overrides, Git namespaces, and orchestration limit.
 
 ```text
 project catalog
@@ -101,62 +80,38 @@ project catalog
           └── reports and cockpit views
 ```
 
-> **Evolving to — Software default 0.4.0 (2026-07-14):** The diagram above records the original
-> complexity-only catalog and remains accurate for Research. The next Software baseline retains
-> Small, Medium, and Large as complexity envelopes and adds New Feature and Bug Fix as intent-aware
-> peers derived from Medium. Because a run still selects one complete type, materially large
-> feature or defect work selects Large and preserves its intent in `objective.spec.work_kind`; the
-> intent presets are not stackable modifiers. See [Software Profile Engineering](software-profile-engineering.md).
+Research catalogs Small, Medium, and Large as complexity envelopes. Coding catalogs five resolved
+run types and defaults to Medium. Its `new-feature` and `bug-fix` types inherit Medium through
+compile-time overrides, while Small, Medium, and Large stay standalone complexity envelopes. Because
+a run selects one complete type, materially large feature or defect work selects Large and preserves
+its intent in `objective.spec.work_kind`. The intent presets are not stackable modifiers. See
+[Software Profile Engineering](software-profile-engineering.md).
 
-> **Software catalog implemented — 2026-07-14:** “Next” above is retained as the design-time
-> transition. Fresh Software initialization now catalogs all five resolved run types and defaults
-> to Medium; `new-feature` and `bug-fix` inherit Medium through compile-time overrides, while Small,
-> Medium, and Large remain standalone complexity envelopes. Fresh interactive `koni init` asks the
-> operator to choose Software or Research before copying either profile. Non-interactive fresh
-> initialization requires an explicit bundled profile or custom source, and existing installation
-> protection still runs before any prompt or write.
+Interactive `koni init` asks the operator to choose Coding or Research before copying either
+profile. Non-interactive initialization requires an explicit bundled profile or custom source.
+Existing-installation protection runs before any prompt or write.
 
-The catalog compiler resolves explicit inheritance for compatibility and expert
-authoring, validates every reference, and produces one standalone run behavior.
-Inheritance does not survive into runtime.
+The catalog compiler resolves explicit inheritance for compatibility and expert authoring, validates
+every reference, and produces one standalone run behavior. Inheritance does not survive into
+runtime.
 
-Native Codex resources participate in the same hash:
-
-- `.codex/config.toml`
-- referenced `.codex/agents/*.toml`
-- referenced `.agents/skills/*` bundles
-
-See [Configuration](configuration.md) and [Codex resources](codex-resources.md).
-
-> **Pi resource transition in progress — 2026-07-14 (`pi_product_docs_transition`):** Those
-> Codex TOML resources and their hashes remain authoritative for schema-1 and already pinned runs.
-> Schema 2 converts only manifest-proven, schema-defined owned fields into provider-neutral agents
-> during an explicit transaction; unrelated `.codex` files and historical snapshot readers remain
-> untouched. The transaction is not released until ancestor-symlink rejection, field-scoped
-> conversion, validation/publication race closure, durable multi-rename recovery, and exact run-
-> registry archival authority pass the matrix in [Direct Pi runtime](pi-runtime.md).
-
-> **Resource-transition supersession — 2026-07-14 (`pi_product_docs_transition`):** Those
-> implementation and matrix holds are now closed in the current release candidate. Fresh schema-2
-> projects use `.koni`; an explicitly migrated project permanently archives active Codex-backed
-> runs, preserves unrelated `.codex` files and historical readers, and never falls back to Codex.
-> That capability does not migrate an installed project without a separate guarded operator action.
+Provider-neutral agent resources under `.koni/agents` and repository skills under `.agents/skills`
+participate in the same hash. See [Configuration](configuration.md).
 
 ## Compilation into typed state
 
 Profile compilation is fail-closed:
 
-1. locate the catalog and profile root;
-2. parse YAML modules and native Codex resources;
-3. reject contained-path escapes, duplicate IDs, unknown references, invalid
-   selectors, cycles, and unsafe action-effect ordering;
-4. normalize the configuration into typed intermediate representation;
-5. hash the normalized semantic profile and every bound native resource.
+1. Locate the catalog and profile root.
+2. Parse the YAML modules and bound agent resources.
+3. Reject contained-path escapes, duplicate IDs, unknown references, invalid selectors, cycles, and
+   unsafe action-effect ordering.
+4. Normalize the configuration into a typed intermediate representation.
+5. Hash the normalized semantic profile and every bound resource.
 
-Runtime code evaluates typed selectors and predicates. Project configuration
-does not embed arbitrary shell or Python expressions. Commands are structured
-argv recipes with declared inputs, effects, timeout, working-directory policy,
-result protocol, and receipt behavior.
+Runtime code evaluates typed selectors and predicates. Project configuration does not embed
+arbitrary shell or Python expressions. Commands are structured argv recipes with declared inputs,
+effects, timeout, working-directory policy, result protocol, and receipt behavior.
 
 ## Plan, approve, execute
 
@@ -186,20 +141,18 @@ execute
  └─ produce receipts and reports
 ```
 
-> **Planning identity transition — 2026-07-14:** “Resolve base commit” above preserves the
-> original single-identity shorthand. Current planning pins both the operator-selected target ref
-> and that ref's observed base commit before the detached planning worktree is created. Approval
-> verifies both identities before creating the permanent run namespace, so later target sync and
-> explicit promotion retain destination intent as well as source history.
+Planning pins two identities: the operator-selected target ref, and that ref's observed base commit.
+It pins both before creating the detached planning worktree. Approval verifies both identities
+before creating the permanent run namespace. Later target sync and explicit promotion therefore
+retain destination intent as well as source history.
 
-Before approval, no permanent run ref exists. Opening a pinned run later
-recompiles its captured files and rejects hash drift rather than silently using
-the project's current configuration.
+Before approval, no permanent run ref exists. Opening a pinned run later recompiles its captured
+files and rejects hash drift. It never silently uses the project's current configuration.
 
 ## Graph compilation
 
-The semantic graph stores typed nodes, typed edges, and node state. Rules bind
-selectors to predicates and effects:
+The semantic graph stores typed nodes, typed edges, and node state. Rules bind selectors to
+predicates and effects:
 
 ```text
 selector → candidate targets → predicate → unmet obligation
@@ -208,137 +161,131 @@ selector → candidate targets → predicate → unmet obligation
                                   deterministic ticket constructor
 ```
 
-Ticket identity is derived from the rule, target, operation, and relevant
-semantic inputs. Recompiling the same gap reconciles the existing ticket
-instead of multiplying work. Once an accepted transition satisfies the rule,
-the compiler retires or closes the corresponding obligation according to the
-profile.
+Ticket identity is derived from the rule, target, operation, and relevant semantic inputs.
+Recompiling the same gap reconciles the existing ticket instead of multiplying work. Once an
+accepted transition satisfies the rule, the compiler retires or closes the corresponding obligation
+according to the profile.
 
-> **Same-ID terminal reconciliation transition — 2026-07-14:** “Reconciles the existing ticket”
-> above also covers a later gap that legitimately reopens after its prior deterministic ticket was
-> integrated. Terminal outputs/reviews/blockers are archived in `prior_cycles`, while the new cycle
-> preserves the ticket ID and starts without a lease. Before that publication, the kernel now
-> proves and retires any retained completed-cycle Git/command authority through the exact durable
-> integration transaction; absent, dirty, foreign, active, ambiguous, or unintegrated authority
-> fails closed. This is namespace lifecycle reconciliation, not a profile-specific ticket-ID
-> exception. See the adjacent deterministic reopen transition in
-> [Runtime, state, and Git](runtime-and-git.md).
+Reconciliation also covers a later gap that legitimately reopens after its prior deterministic
+ticket was integrated. Terminal outputs, reviews, and blockers are archived in `prior_cycles`. The
+new cycle preserves the ticket ID and starts without a lease. Before that publication, the kernel
+proves and retires any retained completed-cycle Git or command authority through the exact durable
+integration transaction. Absent, dirty, foreign, active, ambiguous, or unintegrated authority fails
+closed. This is namespace lifecycle reconciliation, not a profile-specific ticket-ID exception. See
+the deterministic reopen transition in [Runtime, state, and Git](runtime-and-git.md).
 
-> **Scoped reconciliation release — 2026-07-14:** The generic retirement contract above is now
-> backed by **2/2** exact reopen cases and **4/4** lifecycle-relevant retirement/recovery cases; the
-> exact Software stale-delivery consumer also passes **1/1** through namespace reuse. A later
-> preparation/successor-specific rerun remains a separate integration gate because deterministic
-> ID recurrence and `prior_cycles` never authorize semantic successor state.
+A later preparation-specific or successor-specific rerun remains a separate integration gate.
+Deterministic ID recurrence and `prior_cycles` never authorize semantic successor state.
 
-> **Preparation lineage reconciliation transition — 2026-07-14 (`compiler-graph-tdd`):** The
-> separate gate named above now uses the current ticket's live last review, never `prior_cycles`,
-> as its base or successor authority. Preparation lookup first selects the newest attempt by
-> operation registry ID and compiled source node; deterministic ID reuse cannot revive an older
-> favorable review. Durable successors are replayed in strict `(reviewed_at, ticket_id, review_id)`
-> order with an older-than-current replay cutoff, and the exact in-memory application may act as
-> one prospective next link only at its own review boundary. Git-common active effects are visible
-> only while materializing that same ticket and become globally visible after terminal publication.
-> The full compiler loop authenticates this evidence once per immutable epoch and gives the same
-> typed slice to rule evaluation and source-write admission. Frozen release evidence remains an
-> adjacent integration gate, not authority inferred from namespace reconciliation.
+Preparation lineage uses the current ticket's live last review as its base or successor authority,
+never `prior_cycles`. Preparation lookup first selects the newest attempt by operation registry ID
+and compiled source node, so deterministic ID reuse cannot revive an older favorable review. Durable
+successors replay in strict `(reviewed_at, ticket_id, review_id)` order with an older-than-current
+replay cutoff. The exact in-memory application may act as one prospective next link only at its own
+review boundary. Git-common active effects are visible only while materializing that same ticket,
+and they become globally visible after terminal publication.
 
-> **Compiler evaluation-epoch refinement — 2026-07-14 (`compiler-graph-tdd`):** “Once per
-> immutable epoch” now has two explicit layers. Graph-dependent preparation truth is reused only
-> for a byte-for-byte normalized graph identity; sequential derivations that change even a
-> semantic-hash-excluded projection create another graph epoch because profile selectors are
-> allowed to observe that projection. The underlying immutable ticket/receipt evidence is loaded
-> and indexed once for all derivation graph epochs, keyed by the exact state root plus ticket and
-> receipt directories. Reconciliation closes that source epoch before emission receives a fresh
-> typed slice. This preserves generic selector semantics while bounding filesystem work, and the
-> same reentrant index scopes nested historical replay without weakening its cutoff or successor
-> authentication.
+The compiler loop authenticates this evidence once per immutable epoch and gives the same typed
+slice to rule evaluation and source-write admission. That epoch has two layers. Graph-dependent
+preparation truth is reused only for a byte-for-byte normalized graph identity. Sequential
+derivations that change even a semantic-hash-excluded projection create another graph epoch, because
+profile selectors are allowed to observe that projection. The underlying immutable ticket and
+receipt evidence is loaded and indexed once for all derivation graph epochs. The index key is the
+exact state root plus the ticket and receipt directories. Reconciliation closes that source epoch
+before emission receives a fresh typed slice. This preserves generic selector semantics while
+bounding filesystem work, and the same reentrant index scopes nested historical replay without
+weakening its cutoff or successor authentication.
 
-The engine is unaware that a node represents a package, claim, risk, or
-experiment. That vocabulary is entirely profile-owned.
+The engine is unaware that a node represents a package, claim, risk, or experiment. That vocabulary
+is entirely profile-owned, and profile ownership includes executable ontology and identity rather
+than raw retained YAML. `GraphSchema` exposes authored node annotations to bounded agent context and
+projects `semantic_fields`. It subtracts compiler-owned paths before hashing and checks
+gate-required type consistency. It evaluates the shipped finite edge predicate before accepting a
+concrete canonical edge. Rule compilation derives missing and unsatisfied gate obligations from the
+authored templates and receipt-status set. It publishes the exact selected node and path context
+under a policy-contract hash.
+
+Lifecycle modules compile into an immutable finite transition catalog with guards rejected and
+actors resolved. The catalog rejects dead declared states, so every state must be reachable from the
+configured initial state through finite transitions. Coding and Research both ship `ticket` and
+`run` machines with explicit proposal and compiler-failure paths. Research's additional `gate` and
+`research` machines stay compiler-owned graph lifecycles. The runtime integration projects its
+existing durable values through this catalog and does not add another mutable lifecycle field. Pi
+ticket and run mutation remains a named integration boundary, because its native status vocabulary
+must be mapped explicitly rather than assumed.
 
 ## Workflows, actions, and checks
 
-A ticket selects an operation, and an operation selects a workflow. Workflow
-steps form a validated directed acyclic graph. A step may call a persona,
-perform a compiler-owned action, wait at a manual boundary, or require
-structured outputs.
+A ticket selects an operation, and an operation selects a workflow. Workflow steps form a validated
+directed acyclic graph. A step may call a persona, perform a compiler-owned action, wait at a manual
+boundary, or require structured outputs.
 
-Actions are deterministic recipes composed from registered primitives. The
-compiler validates their declared effects and safety order. For example,
-candidate work must be created before it is checked, and integration cannot
-precede review. Profiles may add recipes without adding another engine.
+Actions are deterministic recipes composed from registered primitives. The compiler validates their
+declared effects and safety order. For example, candidate work must be created before it is checked,
+and integration cannot precede review. Profiles may add recipes without adding another engine.
 
-Checks have explicit handlers and produce receipts. Native command checks run
-argv-only commands under containment and timeout policy. Graph checks evaluate
-semantic state. Agent or manual checks require an explicit handler or external
-receipt; they never pass because their declaration merely exists.
+Checks have explicit handlers and produce receipts. Native command checks run argv-only commands
+under containment and timeout policy. Graph checks evaluate semantic state. Agent and manual checks
+require an explicit handler or external receipt. They never pass because their declaration merely
+exists.
 
 ## Durable control records
 
 Run-local state includes:
 
-- a manifest binding base commit and configuration hashes;
-- the pipeline and its hash-bound stage records;
-- planning transcripts and structured decisions;
-- orchestration and external-loop state;
-- ticket, step, lease, output, review, event, and action journals;
-- command, graph, checkpoint, and integration receipts.
+- a manifest binding base commit and configuration hashes
+- the pipeline and its hash-bound stage records
+- planning transcripts and structured decisions
+- orchestration and external-loop state
+- ticket, step, lease, output, review, event, and action journals
+- command, graph, checkpoint, and integration receipts
 
-Individual records publish through atomic replacement. Operations that span
-multiple records use journals and recovery markers so a restart can reconcile
-known intermediate states or stop with a precise diagnostic.
+Project authority uses exact raw run-byte anchors and a state-last crash-forward journal. Artifacts
+publish before run records, and the state anchor publishes last. Operations that span multiple
+records use journals and recovery markers, so a restart can reconcile known intermediate states or
+stop with a precise diagnostic.
+
+Strict-v2 anchored reads keep archive history cold. Pre-anchor and genuine-v1 histories are fully
+authenticated with disk-backed exact identity tracking before an anchor is installed. Run, state,
+transaction, and journal envelopes are 64 MiB, 32 MiB, 96 MiB, and 32 MiB respectively.
+Compatibility overflows fail with named, non-mutating diagnostics rather than pruning immutable
+settlement authority.
+
+A prepared journal publishes only after its staged directory entries are durable. Recovery discards
+a safe real no-journal prefix, while an exact descriptor-verified stage-to-destination temporary
+handoff can finish publication after restart. Journaled, symlinked, malformed, and hash-mismatched
+or preimage-mismatched prefixes fail closed.
 
 ## Process authority
 
-Agents and commands receive a contained working directory, explicit environment
-policy, timeout, and declared permissions. Model processes do not own run IDs,
-control metadata, Git publication, or success status.
+Agents and commands receive a contained working directory, explicit environment policy, timeout, and
+declared permissions. Model processes do not own run IDs, control metadata, Git publication, or
+success status.
 
-Köni injects a narrow runtime broker for bounded agent capabilities. The
-`koni_runtime` MCP server name is reserved so project configuration cannot
-shadow that authority boundary. Agent output is accepted only through the
-configured structured boundary.
-
-> **Pi process transition in progress — 2026-07-14 (`pi_product_docs_transition`):** The
-> paragraph above describes the current Codex-backed execution boundary and remains valid history.
-> The schema-2 target replaces that transport with a Köni-owned Pi SDK host while retaining Rust
-> as the only tool, compiler, receipt, and Git authority. Cutover remains blocked on an
-> independently pinned/race-free runtime artifact, fail-closed child and callback teardown,
-> operation-scoped credential intent, and an unresolved credential-TCB choice between a Rust-owned
-> allowlisted TLS/auth proxy and a signed/pinned host-plus-dependency TCB. Exact session/turn/tool
-> correlation, token accounting, OAuth secrecy/containment, and the complete frozen verification
-> matrix also remain gates. Source-in-progress Pi
-> behavior is not an installed capability yet; see [Direct Pi runtime](pi-runtime.md).
-
-> **Process-boundary supersession — 2026-07-14 (`pi_product_docs_transition`):** The credential-TCB
-> choice and frozen verification hold above are resolved for the release candidate: the exact Köni
-> Rust, bundled host/Pi SDK 0.80.7 closure, and pinned Node 22.19.0 image form the provider credential
-> TCB, while Rust alone retains broker, compiler, graph, receipt, Git, and project-file authority.
-> The contained networked process is supported on macOS; Linux login/inference remains fail-closed
-> pending allowlisted egress. “Release candidate” still does not mean an installed project was
-> refreshed or migrated.
+Köni injects a narrow runtime broker for bounded agent capabilities. The `koni_runtime` MCP server
+name is reserved, so project configuration cannot shadow that authority boundary. Agent output is
+accepted only through the configured structured boundary.
 
 ## Concurrency boundaries
 
-Approved runs occupy independent branch and worktree namespaces. Ticket workers
-are additionally constrained by ticket scope, graph target, dependency state,
-single-flight groups, and the run's maximum parallelism.
+Approved runs occupy independent branch and worktree namespaces. Ticket workers are also constrained
+by ticket scope, graph target, dependency state, single-flight groups, and the run's maximum
+parallelism.
 
-Project-wide operations use a shared Git-common-dir lock. Run-local control
-locks serialize transitions for one run without pausing unrelated runs.
-Integration composes Git trees in memory, reports conflicts without mutating
-the integration checkout, and publishes one squash commit after semantic and
-repository checks succeed.
+Project-wide operations use a shared Git-common-dir lock. Run-local control locks serialize
+transitions for one run without pausing unrelated runs. Integration composes Git trees in memory,
+reports conflicts without mutating the integration checkout, and publishes one squash commit after
+semantic and repository checks succeed.
+
+## Community resources
+
+Optional community packages do not create another runtime authority. Core may inspect Pi's
+already-resolved package metadata without mutation, but it copies only exact compiler-selected text
+resources into immutable run state. Contained sessions receive those copied bytes through the normal
+launch-resource hash and sealed loader. Executable package extensions stay outside autonomous
+sessions. An `explicit_tools` binding can select only a Koni-owned authority adapter, with network
+effects restricted to an already-granted configured check. A Pi package itself never gains compiler,
+filesystem, network, Git, or scheduling authority.
 
 For paths, branches, recovery, and storage modes, continue with
 [Runtime, state, and Git](runtime-and-git.md).
-
-> **Pi community-resource authority transition — 2026-07-16
-> (`community_resource_integration`):** Optional community packages do not create another runtime
-> authority. Core may inspect Pi's already-resolved package metadata without mutation, but it
-> copies only exact compiler-selected text resources into immutable run state. Contained sessions
-> receive those copied bytes through the normal launch-resource hash and sealed loader. Executable
-> package extensions remain outside autonomous sessions; an `explicit_tools` binding can select
-> only a Koni-owned authority adapter, with network effects restricted to an already-granted
-> configured check. This note supersedes any implication above that a Pi package itself can gain
-> compiler, filesystem, network, Git, or scheduling authority.

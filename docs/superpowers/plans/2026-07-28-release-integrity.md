@@ -1,8 +1,7 @@
 # Profile Release Integrity Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use
-> `superpowers:subagent-driven-development` (recommended) or
-> `superpowers:executing-plans` to implement this plan task-by-task.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development`
+> (recommended) or `superpowers:executing-plans` to implement this plan task-by-task.
 
 **Goal:** Make the authenticated Coding and Research profile upgrade tests use byte-exact immutable
 prior-release packages and restore the full release gate without weakening pinned identities.
@@ -18,8 +17,8 @@ name the exact historical bundle identities.
 
 - Do not replace the pinned Coding
   `sha256:4e955f7fb5a6bbd58542f395471d2e3f1c87364840abd218f973b8f62a5c0c7e` or Research
-  `sha256:1bc8bdb64934ccd475f50acad5b22a7b1b6f7e168a748ecd91e234be76126c60`
-  identities with reconstructed hashes.
+  `sha256:1bc8bdb64934ccd475f50acad5b22a7b1b6f7e168a748ecd91e234be76126c60` identities with
+  reconstructed hashes.
 - Do not format, normalize, or regenerate historical fixture bytes after authentication.
 - Keep production migration allowlists closed and exact.
 - Preserve all existing dirty-tree changes.
@@ -94,19 +93,21 @@ git commit -m "test(core): require exact prior profile packages"
 **Files:**
 
 - Create: `packages/core/test/fixtures/profile-prior-releases/coding-0.7.0/package.json`
-- Create: `packages/core/test/fixtures/profile-prior-releases/coding-0.7.0/koni/profile-manifest.json`
+- Create:
+  `packages/core/test/fixtures/profile-prior-releases/coding-0.7.0/koni/profile-manifest.json`
 - Create: `packages/core/test/fixtures/profile-prior-releases/coding-0.7.0/koni/baseline/**`
 - Create: `packages/core/test/fixtures/profile-prior-releases/research-1.0.11/package.json`
-- Create: `packages/core/test/fixtures/profile-prior-releases/research-1.0.11/koni/profile-manifest.json`
+- Create:
+  `packages/core/test/fixtures/profile-prior-releases/research-1.0.11/koni/profile-manifest.json`
 - Create: `packages/core/test/fixtures/profile-prior-releases/research-1.0.11/koni/baseline/**`
 - Delete: `packages/core/test/fixtures/coding-prior-release/**`
 
 **Step 1: Recover bytes from local repository provenance**
 
 Start from the committed `0.7.0` and `1.0.11` package trees and replay only the recorded profile
-edits from local Codex session logs in timestamp order. At each recorded `profiles:capture` boundary,
-compute the bundle with the repository's `computeProfileBundleSha256` implementation. Stop only when
-the result equals the pinned identity.
+edits from local Codex session logs in timestamp order. At each recorded `profiles:capture`
+boundary, compute the bundle with the repository's `computeProfileBundleSha256` implementation. Stop
+only when the result equals the pinned identity.
 
 The recovery check is:
 
@@ -119,8 +120,8 @@ the acceptance criterion; a semantically similar tree is not sufficient.
 
 **Step 2: Remove migrations from historical manifests**
 
-Historical manifests must contain the original `package`, `profile`, `baseline`, and
-`bundle_sha256` fields. They must not inherit current migrations:
+Historical manifests must contain the original `package`, `profile`, `baseline`, and `bundle_sha256`
+fields. They must not inherit current migrations:
 
 ```ts
 expect(manifest.migrations).toBeUndefined();
@@ -197,4 +198,3 @@ git add packages/core/test/fixtures/profile-prior-releases.test.ts \
   packages/coding-profile packages/research-profile
 git commit -m "test(profiles): enforce migration identity closure"
 ```
-

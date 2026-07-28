@@ -1,125 +1,71 @@
 # Configuration reference
 
-> **Pi-native lifecycle evolution — 2026-07-16 (`profile_lifecycle_migration`):** The schema-1
-> paths and historical transition notes below remain valuable migration context. Current
-> TypeScript Core installs one verified immutable profile baseline beneath `.koni`, treats the
-> materialized project tree as an upgrade-safe overlay, and exposes source-SHA-CAS structured YAML
-> edits to the shared control center. It never edits Pi's settings, credentials, or ambient
-> resources. See [Pi-native profile lifecycle](profile-lifecycle.md) and
-> [Pi community resource bindings](pi-community-resource-bindings.md).
-
-> **Community-resource compiler binding — 2026-07-16 (`community_resource_integration`):**
-> `resources/pi-packages.yaml` is now part of the authenticated compiled configuration rather than
-> a side catalog. Enabled autonomous entries require exact `select.skills`, `select.prompts`, or
-> Koni-owned `select.tools` values plus stage/persona eligibility. Selected bytes are copied and
-> hash-bound per run and per launch; ambient Pi files and extension code are never inherited.
-> Existing Pi settings and package state are read-only and remain user-owned. See the linked
-> binding reference for the fail-closed modes and network rule.
-
 A Köni project has three configuration layers:
 
-1. the **project catalog** lists selectable run types;
-2. a **run type** defines how one kind of run is planned and supervised;
-3. the **profile** defines the graph, rules, tickets, workflows, and evidence
-   model shared by every run type.
+1. The **project catalog** lists selectable run types.
+2. A **run type** defines how one kind of run is planned and supervised.
+3. The **profile** defines the graph, rules, tickets, workflows, and evidence model shared by every
+   run type.
 
-All Köni-native configuration is YAML beneath `.codex/koni/`. Codex project
-settings and custom agents remain TOML, and repository skills remain
-`SKILL.md` bundles.
+All Köni-native configuration is YAML beneath `.koni/`. Repository skills remain `SKILL.md` bundles
+beneath `.agents/skills/`.
 
-> **Pi/schema 2 transition in progress — 2026-07-14 (`pi_product_docs_transition`):** The
-> configuration contract below remains executable for schema-1 projects and readable for pinned
-> historical runs. The unreleased schema-2 target moves live configuration and provider-neutral
-> agent YAML beneath `.koni/`, retains `.agents/skills/`, and uses the direct Pi host described in
-> [Direct Pi runtime](pi-runtime.md). A migrated project has no Codex fallback. Cutover remains
-> gated by exact schema-field migration, ancestor-symlink and publication/crash safety,
-> compiler-issued active-run archival, historical readers, and the unresolved credential-TCB
-> decision between a Rust-owned allowlisted auth proxy and a signed/pinned host dependency closure.
-> Pi artifact/teardown/protocol/token security and one frozen cross-project verification matrix
-> also remain gates.
-
-> **Release-candidate supersession — 2026-07-14 (`pi_product_docs_transition`):** The preceding
-> unreleased/undecided status is historical. Current source is the schema-2/direct-Pi release
-> candidate for macOS, with `.koni` as its live root and no production Codex fallback. The accepted
-> first-cut credential TCB is the exact Köni Rust binary, bundled Pi host, pinned Pi SDK 0.80.7
-> dependency closure, and official pinned Node 22.19.0 runtime; Node has no compiler-tool, graph,
-> Git, receipt, or project-file authority. Linux login/inference fail closed until a destination-
-> allowlisted egress broker exists. Installation and live migration remain separate guarded
-> operator actions, and protected forensic Updog state authorizes neither.
+Core installs one verified immutable profile baseline beneath `.koni`. It treats the materialized
+project tree as an upgrade-safe overlay, and it exposes source-SHA compare-and-swap structured YAML
+edits to the shared control center. It never edits Pi's settings, credentials, or ambient resources.
+See [Pi-native profile lifecycle](profile-lifecycle.md) and
+[Pi community resource bindings](pi-community-resource-bindings.md).
 
 ## Directory contract
 
 ```text
-.codex/
-├── config.toml
+.koni/
+├── project.yaml
+├── run-types/
+│   ├── small.yaml
+│   ├── medium.yaml
+│   └── large.yaml
+├── profile.yaml
+├── graph.yaml
+├── rules.yaml
+├── operations.yaml
+├── workflows.yaml
+├── actions.yaml
+├── checks.yaml
+├── lifecycle.yaml
 ├── agents/
-│   ├── lead.toml
-│   └── reviewer.toml
-└── koni/
-    ├── project.yaml
-    ├── run-types/
-    │   ├── small.yaml
-    │   ├── medium.yaml
-    │   └── large.yaml
-    ├── profile.yaml
-    ├── graph/
-    ├── lifecycle/
-    ├── rules/
-    ├── operations/
-    ├── workflows/
-    ├── actions/
-    ├── checks/
-    ├── personas/
-    ├── reports/
-    └── cockpit/
+│   ├── lead.yaml
+│   └── reviewer.yaml
+├── resources/
+│   └── pi-packages.yaml
+└── .managed/
 .agents/
 └── skills/
     └── configure-koni/
 ```
 
-Files may be consolidated instead of split by directory; `profile.yaml`
-declares every imported module. Paths must remain within the configuration
-root after canonical resolution. Duplicate IDs, dangling references, unknown
-fields, invalid cycles, and unsafe action ordering fail validation.
+Files may be split by directory instead of consolidated. `profile.yaml` declares every imported
+module. Paths must stay within the configuration root after canonical resolution. Duplicate IDs,
+dangling references, unknown fields, invalid cycles, and unsafe action ordering all fail validation.
 
-> **Directory transition in progress — 2026-07-14 (`pi_product_docs_transition`):** The tree
-> above is the schema-1 layout, not a second live layout that will coexist after migration. Schema
-> 2 publishes one complete `.koni/` tree only after its staged catalog/profile and provider-neutral
-> agents compile. It must preserve unrelated `.codex` content and old snapshot readers, reject
-> redirected ancestors, and recover every interrupted rename before this directory transition may
-> be called shipped; see [Direct Pi runtime](pi-runtime.md).
-
-> **Directory-transition supersession — 2026-07-14 (`pi_product_docs_transition`):** Current
-> release-candidate source closes the staged-compilation, no-follow publication, recovery,
-> archival, and historical-reader matrix above. `.koni/` is the one live schema-2 tree; unrelated
-> `.codex` content remains untouched. Publishing it into an existing project still requires the
-> explicit guarded migration transaction rather than an implicit refresh.
+`resources/pi-packages.yaml` is part of the authenticated compiled configuration rather than a side
+catalog. Enabled autonomous entries require exact `select.skills`, `select.prompts`, or Koni-owned
+`select.tools` values, plus stage and persona eligibility. Selected bytes are copied and hash-bound
+per run and per launch. Ambient Pi files and extension code are never inherited. Existing Pi
+settings and package state are read-only and stay user-owned.
 
 ## Project catalog
 
-`.codex/koni/project.yaml` answers: “Which kinds of runs can this project
-create?”
-
-> **Catalog-path transition in progress — 2026-07-14 (`pi_product_docs_transition`):** That path
-> remains authoritative for schema 1. The schema-2 catalog lives under `.koni/` and is activated
-> only by the explicit migration transaction; historical schema-1 catalogs remain readable but
-> cannot start new work after cutover, and no Codex execution fallback exists. Catalog discovery,
-> ownership conversion, active-run archival, and rollback/recovery fixtures remain release gates
-> in [Direct Pi runtime](pi-runtime.md).
-
-> **Catalog-path supersession — 2026-07-14 (`pi_product_docs_transition`):** Those catalog,
-> conversion, archival, and recovery gates are now green for the current release candidate.
-> `.koni/project.yaml` is the schema-2 live catalog root; schema-1 catalogs remain historical
-> readers after migration and cannot supply a Codex fallback. Existing projects change roots only
-> through the separately authorized migration command.
+`.koni/project.yaml` answers one question: which kinds of runs can this project create?
 
 ```yaml
-schema_version: "1.0"
+schema_version: "2.0"
 project:
-  id: my-project
-  title: My project
-  description: Graph-first software delivery
-default_run_type: medium
+  id: software
+  title: Software project
+  description:
+    Evidence-guided vertical software delivery with selectable complexity and intent presets.
+default_run_type: continuous-improvement
 run_types:
   - id: small
     path: run-types/small.yaml
@@ -127,98 +73,62 @@ run_types:
     path: run-types/medium.yaml
   - id: large
     path: run-types/large.yaml
+  - id: new-feature
+    path: run-types/new-feature.yaml
+  - id: bug-fix
+    path: run-types/bug-fix.yaml
+  - id: continuous-improvement
+    path: run-types/continuous-improvement.yaml
 ```
 
-`default_run_type` and every catalog ID must resolve to exactly one run-type
-document. The `id` inside that document must match its catalog entry. Catalog
-order is the presentation order in the TUI.
+`default_run_type` and every catalog ID must resolve to exactly one run-type document. The `id`
+inside that document must match its catalog entry. Catalog order is the presentation order in the
+control center.
 
-Every listed run type is a complete peer. Large does not layer on Medium at
-runtime, and a custom `ui-feature` type is not a modifier applied to another
-type.
+Every listed run type is a complete peer. Large does not layer on Medium at run time, and a custom
+`ui-feature` type is not a modifier applied to another type.
 
-> **Software catalog evolution — 2026-07-14:** The statement above describes the original three
-> base types and remains the rule for combining behaviors at run time. Software 0.4 additionally
-> ships `new-feature` and `bug-fix` as source-level derivatives of `medium`: ordered JSON-Pointer
-> overrides specialize intake, planning instructions, and concurrency, then catalog compilation
-> resolves each into one complete immutable run type. They are selectable alternatives, never
-> stackable modifiers. Research retains only Small, Medium, and Large.
-
-> **Software 0.4 transition status — 2026-07-14:** “Ships” above records the accepted catalog
-> contract and staged templates, not a completed integration handoff. The five types resolve and
-> the bundled profile compiles in isolation; final release still waits for the focused Software
-> behavior gate and the generic graph-set authority review. Existing installed and pinned
-> profiles remain unchanged until installation or a separately approved coherent migration.
-
-> **Current integration-status transition — 2026-07-14:** The sentence above remains the staged
-> pre-review checkpoint. The scoped graph-TDD contract has since passed its generic 6/6 suite and
-> independent review, but that does not release the whole compiler or Software profile. Current
-> gates are review-effect input/configured-runtime provenance, proof-source/production-write
-> separation, cross-ticket preparation identity, exact ticket-pinned member selection, pre-merge
-> ticket-worktree currentness, the expanded Software matrix and independent design disposition,
-> the Pi/schema-2 cutover matrix, and one final immutable fingerprint. Installed/pinned projects
-> remain unchanged until an explicit migration transaction.
-
-> **Gate narrowing — 2026-07-14 (`pi_product_docs_transition`):** The broad active-gates list
-> above remains the causal snapshot. Current source closes the review-effect P1s, exact pinned-
-> member selection, canonical ticket-worktree/root evaluation, and same-ticket proof-source/write
-> separation. Cross-ticket preparation provenance and emission/lease admission remain under
-> adversarial review, and the complete Software matrix, Pi/schema-2 matrix, and final immutable
-> fingerprint remain active. These narrower closures do not authorize installation or migration.
+The bundled Coding profile ships six run types. Small, Medium, and Large are complexity envelopes.
+`new-feature` and `bug-fix` are source-level derivatives of `medium`: ordered JSON-Pointer overrides
+specialize intake, planning instructions, and concurrency. Catalog compilation then resolves each
+one into a complete immutable run type. They are selectable alternatives, never stackable modifiers.
+Research ships Small, Medium, and Large only.
 
 ## Run types
 
-A run type owns intake, pipeline, question policy, Git namespace, role policy,
-and orchestration behavior:
-
-> **Bounded direct-Pi planning transition — 2026-07-15:** The original example below records the
-> token-only shape. Current run types may additionally set
-> `planning.max_repository_tool_calls` from 1 through 256. The compiler counts read, list, and
-> search calls together; the final allowed result terminates exploration and a second
-> schema-constrained turn synthesizes in the same live Pi session with repository tools closed.
-> Omission remains a legacy-compatible 32 calls, while newly installed Software
-> Small/Medium/Large profiles use 16/24/48. Direct-Pi planning also bounds complete plan prose to
-> 24,000 characters and the local output allowance to 16,384 tokens. These are compiler/runtime
-> bounds, not an unsupported provider request parameter; the model must return a dense plan without
-> repeating the goal, supplied source material, repository excerpts, or schema.
-
-> **Reasoning-aware output transition — 2026-07-15:** Live Medium acceptance showed that the
-> 16,384-token local allowance above also counted hidden reasoning, so a compliant visible plan
-> could be discarded after several minutes of synthesis. Current source keeps the 24,000-character
-> plan bound, adds a 96 KiB bound over the complete visible JSON artifact, and reserves 32,768 local
-> output tokens for visible content plus hidden reasoning. This does not add an unsupported provider
-> parameter or invite longer plans; it separates the user-visible artifact bound from provider
-> reasoning accounting. An overrun now preserves the completed transcript and exact billed usage,
-> then pauses with the fixed `runtime_output_limit` diagnosis.
+A run type owns intake, pipeline, question policy, Git namespace, role policy, and orchestration
+behavior:
 
 ```yaml
-schema_version: "1.0"
+schema_version: "2.0"
 id: medium
 title: Medium
-description: Plan, implement, and verify normal project work.
+description: A standard multi-component change with one combined semantic plan.
 
 instructions:
   planning: |
-    Surface at most two decisions that materially change scope,
-    architecture, safety, or verification. Record assumptions otherwise.
+    Begin with a lightweight decision scan before broad repository inspection.
+    Ask one focused batch of one to three questions early when the answers would
+    materially change scope, architecture, safety, user experience, or
+    verification. Never ask for facts the repository can answer.
 
 planning:
-  session_scope: run
-  graph_seed_stage: plan
+  max_repository_tool_calls: 16
   token_budget:
     metric: new_tokens
-    limit: 1000000
-    synthesis_reserve: 200000
+    limit: 120000
+    synthesis_reserve: 30000
     on_exhausted: force_synthesis
 
 profile:
-  source: .codex/koni/profile.yaml
+  source: .koni/profile.yaml
 
 intake:
+  objective_field: goal
   fields:
     goal:
       label: Goal
-      description: Describe the outcome Köni should deliver.
+      description: Describe the outcome Koni should deliver.
       type: text
       required: true
   order: [goal]
@@ -228,11 +138,12 @@ pipeline:
     intake:
       kind: action
       title: Validate intake
-      config: {compiler_owned: true, action: planning.intake}
-    plan:
+      config: { compiler_owned: true, action: planning.intake }
+    combined-plan:
       kind: planning
-      title: Plan architecture, implementation, and risk
-      config: {persona: run-planner, prompt: Produce a bounded plan.}
+      title: Plan implementation, architecture, and risk
+      config:
+        { persona: run-planner, prompt: Produce one implementation-ready plan and graph seed. }
     approval:
       kind: approval
       title: Approve the plan
@@ -245,30 +156,30 @@ pipeline:
     verify:
       kind: checkpoint
       title: Verify the completed run
-      config: {checkpoint: verification}
+      config: { checkpoint: verification }
     report:
       kind: action
       title: Compile final report
-      config: {action: report, automatic: true}
-  order: [intake, plan, approval, initialize, orchestrate, verify, report]
+      config: { action: report, automatic: true }
+  order: [intake, combined-plan, approval, initialize, orchestrate, verify, report]
 
 questions:
   policy: high_impact_only
   default_scope: run
 
 git:
-  branch_template: "koni/runs/{{ run.slug }}-{{ run.short_id }}"
-  ticket_branch_template: "koni/runs/{{ run.id }}/tickets/{{ ticket.id }}"
+  branch_template: "koni/runs/{{ run.id }}/integration"
+  ticket_branch_template: "koni/runs/{{ run.id }}/tickets/{{ ticket.id }}/cycles/{{ cycle.id }}"
 
 run_card:
   sections: [goal, pipeline, graph, tickets, checks, report]
 
 agents:
   roles:
-    planner: {model: gpt-5.6-sol, reasoning_effort: xhigh}
-    lead: {model: gpt-5.6-sol, reasoning_effort: xhigh}
-    ticket_worker: {model: gpt-5.6-terra, reasoning_effort: high}
-    reviewer: {model: gpt-5.6-terra, reasoning_effort: xhigh}
+    planner: { model: gpt-5.6-sol, thinking_level: xhigh }
+    lead: { model: gpt-5.6-sol, thinking_level: xhigh }
+    ticket_worker: { model: gpt-5.6-terra, thinking_level: high }
+    reviewer: { model: gpt-5.6-terra, thinking_level: xhigh }
   personas: {}
 
 orchestration:
@@ -279,336 +190,264 @@ orchestration:
   report_action: report
 ```
 
+Compilation requires literal sibling Git ref leaves, such as `integration` and `tickets`. It rejects
+any run and ticket pair that could render as a leaf or prefix collision.
+
 ### Intake
 
-`intake.fields` is keyed by a stable field ID, and `intake.order` must name
-every field exactly once. Supported types are:
+`intake.fields` is keyed by a stable field ID, and `intake.order` must name every field exactly
+once. `intake.objective_field` names the field that carries the operator-facing Objective. Supported
+types are:
 
-- `string`, `text`, and `path`;
-- `boolean`, `integer`, and `number`;
-- `choice` and `multi_choice`, with a non-empty duplicate-free
-  `options` list;
-- `json`.
+- `string`, `text`, and `path`
+- `boolean`, `integer`, and `number`
+- `choice` and `multi_choice`, with a non-empty duplicate-free `options` list
+- `json`
 
-Defaults must match their declared type. The common `goal` field appears once
-in the new-run dialog; additional fields render in configured order.
+Defaults must match their declared type. The common `goal` field appears once in the new-run dialog.
+Additional fields render in configured order.
 
 ### Pipeline
 
-`pipeline.stages` is keyed by stable stage ID, and `pipeline.order` must name
-every stage exactly once. Supported stage kinds are:
+`pipeline.stages` is keyed by stable stage ID, and `pipeline.order` must name every stage exactly
+once. Supported stage kinds are:
 
-| Kind | Meaning |
-| --- | --- |
-| `action` | Execute a configured or compiler-owned action |
-| `planning` | Run a bounded Codex planning pass |
-| `approval` | Require explicit operator approval |
-| `initialize` | Seed pinned semantic state |
-| `orchestration` | Compile and supervise ticket work |
-| `checkpoint` | Verify or confirm a durable boundary |
-| `target_sync` | Merge the current target head into the isolated run branch |
-| `promotion` | Await exact operator authorization, then advance the target branch |
-| `manual` / `handoff` | Wait for explicit operator completion |
-| `external_loop` | Drive a configured external provider state machine |
+| Kind                 | Meaning                                                            |
+| -------------------- | ------------------------------------------------------------------ |
+| `action`             | Execute a configured or compiler-owned action                      |
+| `planning`           | Run a bounded planning pass                                        |
+| `ai`                 | Run a provider-neutral model step                                  |
+| `approval`           | Require explicit operator approval                                 |
+| `initialize`         | Seed pinned semantic state                                         |
+| `orchestration`      | Compile and supervise ticket work                                  |
+| `checkpoint`         | Verify or confirm a durable boundary                               |
+| `target_sync`        | Merge the current target head into the isolated run branch         |
+| `promotion`          | Await exact operator authorization, then advance the target branch |
+| `manual` / `handoff` | Wait for explicit operator completion                              |
+| `external_loop`      | Drive a configured external provider state machine                 |
 
-> **AI-stage transport transition in progress — 2026-07-14 (`pi_product_docs_transition`):** The
-> `planning`/Codex wording above remains the schema-1 executable behavior. Schema 2 introduces the
-> provider-neutral `ai` stage and compiles existing Planner, Lead, Worker, and Reviewer intents to
-> the same direct Pi runtime without weakening their compiler policies. This is not shipped until
-> the Rust session/turn/tool state machine, exactly-one terminal handling, fail-closed teardown,
-> enforceable token contract, and complete host/CLI/TUI/profile matrix pass; see
-> [Direct Pi runtime](pi-runtime.md).
+The `ai` stage lets a profile use the model primitive without naming a transport. Planner, Lead,
+Worker, and Reviewer intents compile into the same typed Pi runtime request with compiler-owned
+cumulative output budgeting.
 
-> **AI-stage supersession — 2026-07-14 (`pi_product_docs_transition`):** The current source
-> release candidate passes the named runtime and frozen integration matrix. `ai`, Planner, Lead,
-> Worker, and Reviewer all use the single contained Pi path with compiler-owned cumulative output
-> budgeting and no production Codex fallback. Networked execution is supported on macOS; the same
-> stages fail closed on Linux until allowlisted outbound egress is available.
-
-Only the consecutive compiler-owned intake and planning prefix may execute
-before approval. A planning stage beyond that boundary is rejected.
-
-> **Evolving to — 2026-07-14:** The pre-approval prefix rule above is retained.
-> A run type may now designate its final planning stage as the sole producer of
-> an approved typed graph seed; this adds a reviewed semantic artifact without
-> moving planning or graph publication past the approval boundary.
+Only the consecutive compiler-owned intake and planning prefix may execute before approval. A
+planning stage beyond that boundary is rejected. A run type may designate its final planning stage
+as the sole producer of an approved typed graph seed. That adds a reviewed semantic artifact without
+moving planning or graph publication past the approval boundary.
 
 ### Planning runtime
 
-`planning.session_scope` controls Codex context reuse. `run` keeps consecutive
-planning stages and question resumes in one thread, so architecture, risk, and
-verification passes reuse the same repository evidence. `stage` is supported
-for a run type with one planning stage; a multi-stage planning prefix must use
-`run` to avoid disconnected or double-counted context.
+`planning.max_repository_tool_calls` accepts 1 through 256. The compiler counts read, list, and
+search calls together. The final allowed result terminates exploration, and a second
+schema-constrained turn synthesizes in the same live Pi session with repository tools closed.
+Omission is a legacy-compatible 32 calls. Bundled Coding Small, Medium, and Large use 16, 24,
+and 48.
 
-> **Planning-session transition in progress — 2026-07-14 (`pi_product_docs_transition`):** The
-> session semantics and durable reuse rule remain part of the target contract, but schema 2 owns
-> the conversation/event log in the Köni Pi host rather than a Codex session. Pinned schema-1
-> sessions stay readable and are never resumed under Pi. Release still requires canonical event
-> ordering, request/turn correlation, cancellation/terminal cleanup, honest token accounting, and
-> historical transcript projection on one frozen fingerprint.
+Direct-Pi planning bounds complete plan prose to 24,000 characters. It bounds the complete visible
+JSON artifact to 96 KiB, and it reserves 32,768 local output tokens for visible content plus hidden
+reasoning. These are compiler and runtime bounds, not provider request parameters. The model must
+return a dense plan without repeating the goal, supplied source material, repository excerpts, or
+schema. An overrun preserves the completed transcript and exact billed usage, then pauses with the
+fixed `runtime_output_limit` diagnosis.
 
-> **Planning-session supersession — 2026-07-14 (`pi_product_docs_transition`):** Those event,
-> lifecycle, budget, reader, and frozen-fingerprint requirements are now closed in the release
-> candidate. Schema-2 planning uses a Köni-owned Pi session; migrated Codex sessions are archived
-> history and are never resumed or used as fallback. This source status alone does not migrate an
-> installed project.
+The token budget is compiler-owned and cumulative for that planning session. `new_tokens` counts
+`input - cached_input + output`. Reasoning tokens are already included in output and are not added
+twice. `processed_tokens` counts the full input-plus-output total. At `limit - synthesis_reserve`,
+Köni steers the planner to stop investigation and synthesize. If it continues spending,
+`force_synthesis` interrupts that turn and resumes the same thread with tools disabled.
 
-The token budget is compiler-owned and cumulative for that planning session.
-`new_tokens` counts `input - cached_input + output`; reasoning tokens are
-already included in output and are not added twice. `processed_tokens` counts
-the full input-plus-output total. At `limit - synthesis_reserve`, Köni steers
-the planner to stop investigation and synthesize. If it continues spending,
-`force_synthesis` interrupts that turn and resumes the same thread with tools
-disabled. The full planning text remains durable for compilation and ticket
-execution; the TUI approval dialog presents a short operator-facing projection.
+The full planning text stays durable for compilation and ticket execution. The approval modal shows
+the planner-authored concise `review` items, which are individual headings plus descriptions. It
+does not replace, truncate, or synthesize headings from the full artifact. After approval, the Plan
+tab renders every successful full planning-pass body as scrollable Markdown and retains the bounded,
+redacted Graph Seed. Compilation and execution always consume the full durable plan.
 
-> **Superseded by — 2026-07-14:** “Short operator-facing projection” described
-> the former condensed approval surface. Review Plan now keeps the complete
-> human-readable plan reachable through wrapping and scrolling, while still
-> excluding raw transcript noise and internal runtime metadata.
+The Pi-native runtime launches exactly one fresh, contained Pi session for each compiler-issued
+planning attempt. Retry and rework are authenticated attempt lineage rather than a configurable
+reuse mode.
 
-> **Projection correction — 2026-07-16:** The previous note collapsed approval review and durable
-> plan inspection into one surface. The approval modal intentionally shows the planner-authored
-> concise `review` items (individual headings plus descriptions). It does not replace, truncate,
-> or synthesize headings from the full artifact. After approval, Details' Plan tab renders every
-> successful full planning-pass body as scrollable Markdown for continued inspection and retains
-> the bounded/redacted Graph Seed. Compilation and execution always consume the full durable plan.
+### Graph seed
 
-`planning.graph_seed_stage` optionally names the final planning stage. That
-stage must return a typed `graph_seed` alongside its complete prose plan; every
-other planning stage returns no seed. The seed uses `$root` for the existing
-run root, stable plan-local keys for proposed nodes, and separate `root_spec`,
-`nodes`, and `edges` collections. Köni assigns persistent IDs, resolves the
-local references, and validates the result against the pinned graph schema and
-the profile's `initialization.planning_seed_operation` before approval can
-succeed. Initialization publishes the validated root and seed as one atomic
-state change, so tickets begin from the reviewed specification rather than
-reconstructing it from planning prose.
+The final planning stage returns a typed `graph_seed` alongside its complete prose plan. Every other
+planning stage returns no seed. The seed uses `$root` for the existing run root, stable plan-local
+keys for proposed nodes, and separate `root_spec`, `nodes`, and `edges` collections.
 
-> **Transition in progress — 2026-07-14:** Seed publication is compiler-backed,
-> but the ordinary Review Plan does not yet render its bounded semantic
-> projection. The accepted UI contract shows root enrichment, node
-> type/title/purpose, titled relationships, counts, and omitted counts without
-> internal IDs, hashes, paths, or raw `spec` payloads.
+Köni assigns persistent IDs, resolves the local references, and validates the result against the
+pinned graph schema and the profile's `initialization.planning_seed_operation`. All of that happens
+before approval can succeed. Initialization publishes the validated root and seed as one atomic
+state change, so tickets begin from the reviewed specification.
 
-> **Transition completed — 2026-07-14:** Review Plan now conditionally adds the
-> bounded Graph Seed section, and the approved Plan reuses the same projection;
-> seedless plans retain the earlier three-section view. It shows at most six
-> root facts, twelve semantic nodes, and sixteen titled relationships with
-> exact omitted counts. Adversarial coverage also prevents relationships from
-> revealing omitted nodes and suppresses local keys, IDs, hashes, UUIDs,
-> paths, storage/schema metadata, and raw `spec` content, including wrapped,
-> prefixed, or embedded forms. The released approval suite passed 25/25 after
-> that hardening; the earlier visibility handoff's full TUI suite passed
-> 279/279. The integrated tree after the adversarial projection and unrelated
-> evidence/runtime truthfulness follow-ups passes the full TUI suite 288/288.
+Review Plan conditionally adds a bounded Graph Seed section, and the approved plan reuses the same
+projection. Seedless plans keep the earlier three-section view. It shows at most six root facts,
+twelve semantic nodes, and sixteen titled relationships, with exact omitted counts. Relationships
+cannot reveal omitted nodes. Local keys, IDs, hashes, UUIDs, paths, storage and schema metadata, and
+raw `spec` content are suppressed, including wrapped, prefixed, and embedded forms.
 
 ### Questions
 
 Question policies are:
 
-- `autonomous`: select the recommendation for agent-raised questions;
-- `high_impact_only`: pause for high-impact decisions and auto-select routine
-  recommendations;
-- `interactive`: pause for valid questions.
+- `autonomous`: select the recommendation for agent-raised questions
+- `high_impact_only`: pause for high-impact decisions and auto-select routine recommendations
+- `interactive`: pause for valid questions
 
-The planning instructions control what the model should ask; the structured
-policy controls pause behavior. Questions require at least two unique choices
-and exactly one recommendation. Non-pausing resolution never invents an
-answer.
+The planning instructions control what the model should ask. The structured policy controls pause
+behavior. Questions require at least two unique choices and exactly one recommendation. Non-pausing
+resolution never invents an answer.
 
 ### Agent resolution
 
-The supported role keys are `planner`, `lead`, `ticket_worker`, and
-`reviewer`. Effective model, reasoning, instructions, and permissions resolve
-in this order:
+The supported role keys are `planner`, `lead`, `ticket_worker`, and `reviewer`. Effective model,
+reasoning, instructions, and permissions resolve in this order:
 
-1. one-run overrides;
-2. pipeline-stage overrides;
-3. run-type persona overrides;
-4. run-type role defaults;
-5. profile persona values;
-6. referenced native Codex agent values;
-7. runtime defaults.
+1. One-run overrides.
+2. Pipeline-stage overrides.
+3. Run-type persona overrides.
+4. Run-type role defaults.
+5. Profile persona values.
+6. Referenced agent resource values.
+7. Runtime defaults.
 
-The resolved result is pinned. A future edit cannot silently change an active
-run.
+The resolved result is pinned. A future edit cannot silently change an active run.
 
-In the control center, reusable role defaults belong to the Run Types domain.
-The Agents domain intentionally shows shared Codex personas, prompts,
-permissions, and skills without duplicating Small/Medium/Large model rows.
+In the control center, reusable role defaults belong to the Run Types domain. The Agents domain
+shows shared personas, prompts, permissions, and skills without duplicating per-run-type model rows.
 
-> **Persona-resolution transition in progress — 2026-07-14 (`pi_product_docs_transition`):** The
-> seven-layer resolution and Codex-persona editor remain authoritative for schema-1 projects.
-> Schema 2 replaces `codex_agent`/`reasoning_effort`/sandbox transport fields with provider-neutral
-> `agent`/`thinking_level`/capabilities while retaining the same override precedence and compiler
-> authority. Field conversion is limited to schema-owned locations, and cutover remains gated by
-> migration preservation fixtures, historical readers, Pi containment/credential intent, and the
-> frozen CLI/TUI/profile matrix; see [Direct Pi runtime](pi-runtime.md).
+Agent files are YAML under `.koni/agents/`. They express instructions, `model`, `thinking_level`,
+capabilities, and skills. They cannot carry provider-native config overrides. `thinking_level: max`
+is canonical. `ultra` is accepted only while reading a pre-migration historical snapshot.
 
-> **Persona-resolution supersession — 2026-07-14 (`pi_product_docs_transition`):** The current
-> release candidate closes those preservation, containment, credential-intent, and frozen-matrix
-> gates. Schema-2 resolution uses provider-neutral agent fields and the same compiler precedence;
-> its pinned host/SDK/Node credential TCB gains no graph, Git, receipt, or project-file authority.
-> Existing schema-1 persona resources remain unchanged until guarded migration.
+The provider is intentionally not configurable. It is the pinned Pi provider authenticated through
+Pi's own credentials. Core owns graph, Git, and receipt effects and issues exact tool capabilities.
+Pi supplies only the model loop, streaming, structured output, and provider integration.
 
 ### Target-branch promotion
 
-A Git-enabled delivery run normally places `target_sync` after orchestration
-and `promotion` last. The run type's promotion policy names the configured
-operation used when target synchronization conflicts:
+A Git-enabled delivery run normally places `target_sync` after orchestration and `promotion` last.
+The run type's promotion policy names the configured operation used when target synchronization
+conflicts:
 
 ```yaml
 promotion:
   conflict_operation: resolve-target-integration
 ```
 
-That operation should use a workflow whose steps cannot mutate the semantic
-graph. Its job is to compose the product trees, preserve functionality from
-both sides, and provide fresh verification. Promotion itself is compiler
-owned: it requires durable operator authorization bound to the run head,
-target branch, and observed target head. A moved target reopens sync; a dirty
-checked-out target blocks without moving the ref.
+That operation should use a workflow whose steps cannot mutate the semantic graph. Its job is to
+compose the product trees, preserve functionality from both sides, and provide fresh verification.
+
+Promotion itself is compiler owned. It requires durable operator authorization bound to the run
+head, target branch, and observed target head. A moved target reopens sync. A dirty checked-out
+target blocks without moving the ref.
 
 ### Orchestration
 
-`max_parallel` is a positive upper bound. Dependencies, overlapping scope,
-single-flight groups, and change-control barriers may reduce actual
-parallelism. `auto_start` allows supervision to begin after approval; it does
-not remove the approval boundary.
+`max_parallel` is a positive upper bound. Dependencies, overlapping scope, single-flight groups, and
+change-control barriers may reduce actual parallelism. `auto_start` allows supervision to begin
+after approval. It does not remove the approval boundary.
 
 ## Customize from the installed profile
 
-Every project starts from its selected Software, Research, or explicit custom
-profile. Customize that installed profile in place; it is the baseline for the
-project's semantic language. Köni does not currently layer a generated project
-overlay over a hidden bundled baseline, and customization should not recreate
-the default from memory.
+Every project starts from its selected Coding, Research, or explicit custom profile. Core installs
+that baseline as an immutable package tree plus a project-owned `.koni` overlay. Customize the
+overlay. Do not recreate the default from memory.
 
-> **Transition proposed — 2026-07-14:** In-place customization is the current
-> shipped contract and remains the compatibility path for existing installs and
-> pinned runs. A queued design would retain a versioned bundled baseline plus a
-> project-owned overlay so upgrades and local intent can be compared explicitly;
-> no generated overlay or migration behavior is implemented yet.
-
-Use the installed `configure-koni` skill for substantial changes. Before it
-writes, it should inspect repository instructions, manifests, CI, tests,
-architecture and interfaces, verification commands, Git/promotion behavior,
-and—when relevant—datasets, metrics, baselines, ablations, seed policy, and
-artifact reporting. It classifies important facts as observed, inferred, or
-missing and asks only questions whose answers change ontology, ticket scope,
+Use the installed `configure-koni` skill for substantial changes. Before it writes, it should
+inspect repository instructions, manifests, CI, tests, architecture and interfaces, verification
+commands, and Git and promotion behavior. For research work it should also inspect datasets,
+metrics, baselines, ablations, seed policy, and artifact reporting. It classifies important facts as
+observed, inferred, or missing. It asks only questions whose answers change ontology, ticket scope,
 authority, proof, or publication.
 
-The agent then presents one approval packet containing the retained baseline,
-proposed nodes and canonical relations, rule → operation → workflow mapping,
-proof and receipt policy, run/agent changes, exact files, assumptions, and
-validation plan. Explicit approval of that design is required before project
-configuration is edited. Profile changes affect future resolved snapshots;
-they do not rewrite an active run.
+The agent then presents one approval packet. That packet contains the retained baseline, proposed
+nodes and canonical relations, the rule-to-operation-to-workflow mapping, proof and receipt policy,
+run and agent changes, exact files, assumptions, and a validation plan. Explicit approval of that
+design is required before project configuration is edited. Profile changes affect future resolved
+snapshots. They do not rewrite an active run.
 
-> **Customization-skill schema-2 correction — 2026-07-14:** The proposal/approval contract above
-> is unchanged, but the shipped skills now discover `.koni/project.yaml` first, resolve each run
-> type's actual `profile.source`, validate the resolved manifest, and configure provider-neutral
-> `.koni/agents/*.yaml` through `agent`, `thinking_level`, and `capabilities`. They inspect
-> `.codex/koni`, `.codex/agents`, `reasoning_effort`, and `sandbox` only for an unmigrated schema-1
-> project and refuse to mix two live roots. `operate-koni` likewise treats `.koni` as initialized
-> instead of mistaking every schema-2 project for a fresh install.
+The shipped skills discover `.koni/project.yaml` first, resolve each run type's actual
+`profile.source`, validate the resolved manifest, and configure `.koni/agents/*.yaml` through
+`agent`, `thinking_level`, and `capabilities`. `operate-koni` treats an existing `.koni` as
+initialized rather than as a fresh install.
 
 ### Bundled semantic foundations
 
-The Software profile starts with an `objective`, maps the repository into
-`system`, `interface`, `data_model`, `contract`, and end-to-end `flow` nodes,
-then compiles missing work into dependency-ordered `change`, `migration`,
-`decision`, `risk`, and `proof` nodes. Reviewed `delivery` nodes compose the
-accepted work. A change selects `red_green`, `characterization`, or
-`current_verification`; the selected rule pins a distinct operation and
-workflow. The compiler determines the baseline kind, command/exit contract,
-write scope, receipts, and review boundary. The authored `baseline_signal`
-still carries domain meaning, so independent review must reject a failure or
-pass produced for the wrong reason unless the project configures a structured
-result protocol for that meaning. Repository-specific setup, test, typecheck,
-lint, integration, and smoke commands are discovered during project
-customization rather than assumed by the default.
+The Coding profile starts from an `objective` root. It maps the repository into `system`,
+`interface`, `data_model`, `contract`, and end-to-end `flow` nodes. It then compiles missing work
+into dependency-ordered `change`, `migration`, `decision`, `risk`, and `proof` nodes. Reviewed
+`delivery` nodes compose the accepted work.
 
-> **Software foundation evolution — 2026-07-14:** The ontology above is retained, but Software
-> 0.4 no longer emits architecture and contract work unconditionally. The approved seed records
-> the smallest sufficient existing boundary; missing material boundaries compile focused mapping
-> tickets, while known local work proceeds as one objective-facing vertical claim. Routine changes
-> need focused proof; elevated and critical changes add boundary proof and structural risk
-> disposition. Bug fixes carry expected/observed behavior and may compile one diagnosis ticket
-> before implementation when localization is honestly unresolved. Reviewed delivery is
-> `candidate_ready`; target sync, composed verification, and promotion remain compiler-owned.
+The profile does not emit architecture and contract work unconditionally. The approved seed records
+the smallest sufficient existing boundary. Missing material boundaries compile focused mapping
+tickets, while known local work proceeds as one objective-facing vertical claim. Routine changes
+need focused proof. Elevated and critical changes add boundary proof and structural risk
+disposition.
 
-> **Software 0.4 proof-path transition — 2026-07-14:** The implementation profile is still under
-> final integration review. Its current direction makes linked proof nodes the sole executable
-> baseline/promotion authority and lets the implementation verifier plus independent review close
-> those exact proofs, avoiding a second routine proof ticket. Standalone, stale, legacy, and
-> recovery proof work still uses `proof.establish`. Treat this as in progress until the focused
-> behavior suite and generic receipt/source-authority gates are green.
+A change selects `red_green`, `characterization`, or `current_verification`. The selected rule pins
+a distinct operation and workflow. The compiler determines the baseline kind, command and exit
+contract, write scope, receipts, and review boundary. A proof's `baseline_check_id`, exact argv
+`command`, `source_paths`, read-only `covered_paths`, contained working directory, conditions,
+expected signal, `why`, and `not_proven` are the sole executable and evidence authority.
 
-> **Software 0.4 final profile contract — 2026-07-14:** The two paragraphs above remain the
-> historical design and integration checkpoints. The frozen profile removes authored
-> `baseline_signal`, change/migration test-command duplicates, and `proof.owned_paths`; a proof's
-> `baseline_check_id`, exact argv `command`, `source_paths`, read-only `covered_paths`, contained
-> working directory, conditions, expected signal, `why`, and `not_proven` are the sole executable
-> and evidence authority. An unresolved defect first receives one defect-only diagnostic proof,
-> source-only preparation, and reviewed diagnosis; no speculative addressing change is seeded.
-> Routine implementation is now `establish-baseline -> implement with compiler-run promotion set
-> -> independent review`, with no duplicate Verifier or Integrator hop. Diagnostic and
-> risk-boundary proofs use the conditional `proof.prepare` lane; boundary green execution waits
-> for every introducing subject and control. `prepared` records reviewed preparation-time evidence,
-> while cross-ticket source-byte currentness remains a separately recorded generic compiler gate.
+Every red-green and characterization focused proof goes through source-only preparation and an
+independent oracle-completeness review before its change or migration becomes implementation-ready.
+The implementation ticket can re-run that baseline but cannot write the reviewed proof source, so
+ordinary final-review rework stays at the product `implement` step. Current-verification stays
+read-only and emits no authoring preparation ticket.
 
-> **Software 0.6 implementation-proof preparation — 2026-07-16:** The 0.4 paragraph above remains
-> design history. The bundled default now sends every red-green and characterization focused proof
-> through the same source-only preparation and independent oracle-completeness review before its
-> change or migration becomes implementation-ready. The implementation ticket can re-run that
-> baseline but cannot write the reviewed proof source, so ordinary final-review rework stays at the
-> product `implement` step. Current-verification remains read-only and emits no authoring
-> preparation ticket; diagnostic and risk-boundary routing is unchanged.
+Routine implementation is `establish-baseline`, then implement with the compiler-run promotion set,
+then independent review. There is no duplicate Verifier or Integrator hop. Diagnostic and
+risk-boundary proofs use the conditional `proof.prepare` lane, and boundary green execution waits
+for every introducing subject and control.
 
-The Research profile is deliberately empirical. It decomposes a `hypothesis`
-into falsifiable `claim` nodes, prior `literature`, executable `experiment` and
-`ablation` designs, explicit `method` and `metric` contracts, versioned
-`prerequisite`/`asset` inputs, predeclared `gate` checks, immutable `run`
-attempts, receipt-backed `evidence`, and reviewed `report` conclusions. Small,
-Medium, and Large all synchronize with the selected target, verify and report
-the composed head, and require explicit promotion. Literature-only synthesis
-or theorem proving needs a different customized semantic model rather than an
-unearned empirical conclusion.
+An unresolved defect first receives one defect-only diagnostic proof, source-only preparation, and
+reviewed diagnosis. No speculative addressing change is seeded. Bug fixes carry expected and
+observed behavior. Reviewed delivery is `candidate_ready`. Target sync, composed verification, and
+promotion stay compiler-owned.
+
+Repository-specific setup, test, typecheck, lint, integration, and smoke commands are discovered
+during project customization rather than assumed by the default.
+
+The Research profile is deliberately empirical. It decomposes a `hypothesis` into falsifiable
+`claim` nodes, prior `literature`, executable `experiment` and `ablation` designs, explicit `method`
+and `metric` contracts, versioned `prerequisite` and `asset` inputs, predeclared `gate` checks,
+immutable `run` attempts, receipt-backed `evidence`, and reviewed `report` conclusions. Small,
+Medium, and Large all synchronize with the selected target, verify and report the composed head, and
+require explicit promotion. Literature-only synthesis or theorem proving needs a different
+customized semantic model.
 
 ## Profile manifest
 
-`.codex/koni/profile.yaml` is the semantic entry point:
-
-> **Manifest-path transition in progress — 2026-07-14 (`pi_product_docs_transition`):** This is
-> the schema-1 semantic entry point and remains valid for its pinned readers. Schema 2 uses the
-> corresponding `.koni` manifest and refuses ambiguous catalog/profile discovery; it is published
-> only after full staged compilation, authoritative active-run archival, ownership-safe retirement
-> of legacy resources, and recoverable atomic migration. A migrated project executes Pi only.
-
-> **Manifest-path supersession — 2026-07-14 (`pi_product_docs_transition`):** Full staged
-> compilation, active-run archival, ownership-safe retirement, and recoverable publication now pass
-> for current release-candidate source. `.koni` is authoritative only after fresh schema-2 init or
-> explicit migration; an installed schema-1 project is not silently converted, and a migrated
-> project has no Codex fallback.
+`.koni/profile.yaml` is the semantic entry point. The bundled Coding baseline declares:
 
 ```yaml
-schema_version: "1.0"
-engine: ">=0.1.0,<0.2.0"
+schema_version: "2.0"
+engine: ">=0.1,<0.2"
 
 profile:
   id: software
-  version: "1.0.0"
-  description: Architecture-first software delivery.
+  version: 0.8.0
+  description: Evidence-guided vertical software delivery with risk-adaptive, compiler-current proof
 
 initialization:
-  root_node_type: project
-  goal_field: goal
+  root_node_type: objective
+  goal_field: outcome
   planning_context_field: planning_context
-  planning_seed_operation: initialization.project.seed-approved-plan
+  planning_seed_operation: initialization.objective.seed-approved-plan
   root_status: active
+
+git:
+  enabled: true
+  backend: git_cli
+  integration_branch: current
+  ticket_branch_template: koni/runs/{{ run.id }}/tickets/{{ ticket.id }}/cycles/{{ cycle.id }}
+  worktree_root: .koni-worktrees
+  integration_strategy: squash
+  commit_template: "{{ ticket.operation }}: {{ ticket.title }}"
+
+orchestration:
+  max_parallel: 5
+  max_boundaries_per_lead: 1
+  disjoint_scope_parallelism: true
 
 context:
   expansion_max_depth: 2
@@ -619,146 +458,97 @@ context:
   note_max_calls_per_step: 16
   notes_max_bundle_bytes: 32768
 
-storage:
-  backend: git_common_dir
-  graph_dir: graph
-  tickets_dir: tickets
-  work_dir: work
-  state_path: state.yaml
-  reports_dir: reports
-  receipts_dir: receipts
-  semantic_hash_excludes: [annotations]
-  filesystem_scope_excludes: [node_modules, target, .next, coverage]
-
-git:
-  enabled: true
-  backend: libgit2
-  integration_branch: main
-  ticket_branch_template: "koni/ticket/{{ ticket.id }}"
-  worktree_root: .worktrees
-  integration_strategy: squash
-  commit_template: "{{ ticket.operation }}: {{ ticket.title }}"
-  commit_trailers:
-    Koni-Ticket: "{{ ticket.id }}"
-    Koni-Profile: "{{ profile.hash }}"
-    Koni-Review: "{{ review.id }}"
-
-orchestration:
-  running: true
-  max_parallel: 8
-  lease_stale_seconds: 1800
-  max_fixpoint_passes: 8
-  max_boundaries_per_lead: 1
-  disjoint_scope_parallelism: true
-
 reporting:
   bundle_kind: report-bundle
 
 imports:
-  graph: [graph/nodes.yaml, graph/edges.yaml]
-  rules: [rules/software.yaml]
-  operations: [operations/software.yaml]
-  workflows: [workflows/software.yaml]
-  actions: [actions/software.yaml]
-  checks: [checks/software.yaml]
-  personas: [personas/software.yaml]
-  reports: [reports/software.yaml]
-  cockpit: [cockpit/software.yaml]
-  lifecycles: [lifecycle/tickets.yaml]
+  graph: [graph.yaml]
+  rules: [rules.yaml]
+  operations: [operations.yaml]
+  workflows: [workflows.yaml]
+  actions: [actions.yaml]
+  checks: [checks.yaml]
+  personas: [personas.yaml]
+  reports: [reports.yaml]
+  cockpit: [cockpit.yaml]
+  lifecycles: [lifecycle.yaml]
 ```
 
-> **Illustrative manifest history — clarified 2026-07-14.** The block above is a broad schema
-> walkthrough retained from an earlier architecture-first Software sketch; its `project` root,
-> `1.0.0` version, and example import names are not the bundled Software 0.3 or evolving 0.4
-> baseline and should not be copied as that profile. The installed profile's compiled source is
-> authoritative for its current `objective` root, version, modules, and seed operation. The field
-> explanations below remain valid for profiles that declare those fields.
+Authority state is always owner-only control-plane data beneath the authenticated Git common
+directory. Artifact paths are fixed parts of the native authority and compiler protocol. Profiles do
+not configure storage. See [Runtime and Git](runtime-and-git.md).
 
-`storage.backend` controls where mutable semantic state lives. Use `tracked`
-when graph and ticket records are product artifacts; use `git_common_dir`
-when they are control-plane state that should stay out of the product tree. See
-[Runtime and Git](runtime-and-git.md).
+Profile orchestration retains `max_parallel`, `disjoint_scope_parallelism`, and the currently fixed
+`max_boundaries_per_lead: 1` qualitative-judgment bound. Starting and stopping the authority, and
+pausing and resuming runs, are explicit operator and lifecycle actions. Stale process ownership is
+proved by native process identity rather than elapsed profile time. Compiler convergence is an exact
+native protocol rather than a configurable pass count.
 
-`reporting.bundle_kind` names the profile's compiled report bundle and is
-included in its stable report identity. It defaults to the domain-neutral
-`report-bundle`; domain profiles can choose an explicit contract name such as
-`research-ledger-bundle` without teaching the engine about that domain.
+`reporting.bundle_kind` names the profile's compiled report bundle and is part of its stable report
+identity. It defaults to the domain-neutral `report-bundle`. Domain profiles can choose an explicit
+contract name such as `research-ledger-bundle` without teaching the engine about that domain.
 
-`initialization.planning_seed_operation` is optional. When present, it names a
-compiler-only operation whose existing-root and new-node allowances are the
-complete authority envelope for an approved planning seed. It cannot carry a
-workflow, checks, review or receipt effects, deletion, gates, change control,
-or recovery behavior. A run type that sets `planning.graph_seed_stage` must use
-a profile with this operation; profiles and run types that omit both retain the
-ordinary root-only initialization path.
-
-> **Evolving to — 2026-07-14:** Earlier profiles initialized only their root
-> node. That path remains the compatibility behavior when both seed settings
-> are absent. Seed-enabled profiles extend initialization with the exact
-> operator-reviewed, profile-bounded semantic seed; planners still cannot set
-> lifecycle status or compiler-owned fields.
+`initialization.planning_seed_operation` names a compiler-only operation. Its existing-root and
+new-node allowances are the complete authority envelope for an approved planning seed. It cannot
+carry a workflow, checks, review or receipt effects, deletion, gates, change control, or recovery
+behavior. The presence of planning stages plus their terminal typed output determines whether the
+profile must provide this operation. Profiles that omit it keep the ordinary root-only
+initialization path. Planners still cannot set lifecycle status or compiler-owned fields.
 
 ### Context policy
 
-`context` owns hard runtime limits for graph-backed agent context. The values
-shown above are the defaults:
+`context` owns hard runtime limits for graph-backed agent context. The values shown above are the
+defaults:
 
-| Field | Bounds |
-| --- | --- |
-| `expansion_max_depth` | Maximum traversal depth for one graph expansion |
-| `expansion_max_nodes` | Maximum nodes selected for one expansion |
-| `expansion_max_calls_per_step` | Maximum distinct `graph_context` calls by one worker step |
-| `expansion_max_response_bytes` | Maximum serialized expansion response |
-| `note_max_bytes` | Maximum UTF-8 body size for one note |
-| `note_max_calls_per_step` | Maximum distinct `record_note` calls by one worker step |
-| `notes_max_bundle_bytes` | Maximum advisory note material included in one context bundle |
+| Field                          | Bounds                                                        |
+| ------------------------------ | ------------------------------------------------------------- |
+| `expansion_max_depth`          | Maximum traversal depth for one graph expansion               |
+| `expansion_max_nodes`          | Maximum nodes selected for one expansion                      |
+| `expansion_max_calls_per_step` | Maximum distinct `graph_context` calls by one worker step     |
+| `expansion_max_response_bytes` | Maximum serialized expansion response                         |
+| `note_max_bytes`               | Maximum UTF-8 body size for one note                          |
+| `note_max_calls_per_step`      | Maximum distinct `record_note` calls by one worker step       |
+| `notes_max_bundle_bytes`       | Maximum advisory note material included in one context bundle |
 
-Agents may request less than these limits but cannot raise them. The compiler
-also enforces absolute safety caps when validating a profile.
+Agents may request less than these limits but cannot raise them. The compiler also enforces absolute
+safety caps when validating a profile.
 
 ## Primitive families
 
-Every imported definition has a stable `id`. IDs are public interfaces within
-the profile: rules refer to selectors and checks, tickets refer to operations,
-operations refer to workflows, workflow steps refer to personas and actions,
-and reports refer to state surfaces.
+Every imported definition has a stable `id`. IDs are public interfaces within the profile. Rules
+refer to selectors and checks, tickets refer to operations, operations refer to workflows, workflow
+steps refer to personas and actions, and reports refer to state surfaces.
 
 ### Graph
 
 Graph modules define:
 
-- **node types**: required fields, statuses, descriptions, and allowed edges;
-- **edge types**: source and target types, cardinality, canonical or
-  bidirectional traversal, inverse display aliases, and ownership meaning;
-- **state machines**: states, terminal states, allowed transitions, and actors.
+- **node types**: required fields, statuses, descriptions, and allowed edges
+- **edge types**: source and target types, cardinality, canonical or bidirectional traversal,
+  inverse display aliases, and ownership meaning
+- **state machines**: states, terminal states, allowed transitions, and actors
 
-Descriptions are part of the agent contract. Explain what a node represents,
-what it does not represent, and which evidence changes its state.
+Descriptions are part of the agent contract. Explain what a node represents, what it does not
+represent, and which evidence changes its state.
 
-A bidirectional edge stores one fact. Author only the configured canonical
-direction and expose the reverse through `inverse`; do not persist a second
-reciprocal edge. Use two directed relations only when they are genuinely
-independent facts that may diverge.
-
-> **Evolving to — 2026-07-14:** The former general contract said edge types
-> define “source and target types, cardinality, inverse display, and ownership
-> meaning.” That remains the compatibility baseline. Canonical/bidirectional
-> metadata now additionally defines when one stored fact may be traversed from
-> either side, preventing reciprocal copies from diverging.
+A bidirectional edge stores one fact. Author only the configured canonical direction and expose the
+reverse through `inverse`. Do not persist a second reciprocal edge. Use two directed relations only
+when they are genuinely independent facts that may diverge. Canonical and bidirectional metadata
+defines when one stored fact may be traversed from either side.
 
 #### Collection constraints
 
-Node fields can declare three compiler-enforced collection relationships. They
-are optional, so profiles that omit them retain their existing behavior.
+Node fields can declare three compiler-enforced collection relationships. They are optional, so
+profiles that omit them keep their existing behavior.
 
 ```yaml
 fields:
   covered_paths:
     type: list
-    items: {type: path}
+    items: { type: path }
   source_paths:
     type: list
-    items: {type: path}
+    items: { type: path }
     disjoint_from: spec.covered_paths
   oracle_cases:
     type: list
@@ -766,157 +556,113 @@ fields:
     items:
       type: object
       properties:
-        id: {type: string, required: true}
+        id: { type: string, required: true }
         seam_paths:
           type: list
-          items: {type: path}
+          items: { type: path }
           subset_of: spec.covered_paths
 ```
 
-- `subset_of` applies to a list of `string` or `path` values and names a
-  compatible root field on the same node. String membership is exact. Path
-  membership uses normalized project-relative spelling. Constraints may be
-  declared on nested object/list fields while still referring to the node's
-  root field.
-- `disjoint_from` has the same declaration shape. String identity is exact.
-  Path authority overlaps on equality or ancestor/descendant containment and
-  also when existing paths resolve to the same filesystem object. Symlinked
-  components fail closed. Missing descendants under one existing directory
-  are compared conservatively across case and Unicode normalization so an
-  alias cannot gain authority before it is materialized.
-- `unique_by` applies to a list of objects and names one direct, declared,
-  required scalar property on each item. Duplicate values are rejected; the
-  diagnostic reports a count without echoing potentially sensitive values.
+- `subset_of` applies to a list of `string` or `path` values and names a compatible root field on
+  the same node. String membership is exact. Path membership uses normalized project-relative
+  spelling. Constraints may be declared on nested object or list fields while still referring to the
+  node's root field.
+- `disjoint_from` has the same declaration shape. String identity is exact. Path authority overlaps
+  on equality, on ancestor or descendant containment, and when existing paths resolve to the same
+  filesystem object. Symlinked components fail closed. Missing descendants under one existing
+  directory are compared conservatively across case and Unicode normalization, so an alias cannot
+  gain authority before it is materialized.
+- `unique_by` applies to a list of objects and names one direct, declared, required scalar property
+  on each item. Duplicate values are rejected. The diagnostic reports a count without echoing
+  potentially sensitive values.
 
-> **Filesystem-identity hardening — 2026-07-15 (`oracle_final_review`):** Earlier
-> Software contracts described path disjointness only as normalized
-> project-relative identity. That remains the lexical baseline. Current
-> validation additionally consults live filesystem identity for existing paths
-> and conservatively protects unresolved case/normalization aliases. The same
-> rule is reapplied before ticket admission, so a path alias materialized after
-> compilation revokes stale authority instead of reaching a worktree lease.
+Validation consults live filesystem identity for existing paths and conservatively protects
+unresolved case and normalization aliases. The same rule is reapplied before ticket admission, so a
+path alias materialized after compilation revokes stale authority instead of reaching a worktree
+lease.
 
 ### Ticket context and graph notes
 
-The compiled ticket document retains its graph closure, ticket, contracts,
-dependency outputs, review data, persona, and steering. By default it also
-includes three living-spec projections:
+The compiled ticket document retains its graph closure, ticket, contracts, dependency outputs,
+review data, persona, and steering. It also includes three living-spec projections:
 
-> **Evolving to — 2026-07-14:** The existing compiled ticket document remains
-> intact. The projections below are additive, bounded context layers; they do
-> not replace dependency outputs, workflow/review contracts, or the ticket's
-> compiler-issued authority.
+- `spec_slice`: the reviewed typed nodes and relations relevant to the ticket
+- `intent_updates`: applicable user and Lead steering
+- `working_memory`: bounded advisory notes attached to visible graph nodes
 
-- `spec_slice`: the reviewed typed nodes and relations relevant to the ticket;
-- `intent_updates`: applicable user and Lead steering;
-- `working_memory`: bounded advisory notes attached to visible graph nodes.
+These projections are additive, bounded context layers. They do not replace dependency outputs,
+workflow or review contracts, or the ticket's compiler-issued authority.
 
-> **Resolved default-profile parity — 2026-07-14:** The initial living-spec
-> compiler default was additive as described above, but Research still carried
-> an explicit pre-transition `include` list and therefore did not inherit the
-> three new sections. New bundled Research installs now preserve every legacy
-> section (including the separate `steering` alias) and explicitly add all
-> three living-spec layers. Existing runs retain their pinned profile snapshot.
+Ticket target, read, and write node IDs are mandatory anchors. A missing anchor fails context
+compilation instead of disappearing from a smaller slice. Anchors consume the budget first. The run
+root stays visible when space permits but is not expanded into unrelated root siblings. Raw approved
+`graph_seed` input is replaced in model context by its materialized marker, hash, and node and edge
+counts, because the typed graph is the durable specification.
 
-> **Spec-slice integrity completion — 2026-07-14:** Ticket target, read, and
-> write node IDs are mandatory anchors. A missing anchor now fails context
-> compilation instead of disappearing from a smaller slice. Anchors consume
-> the budget first; the run root remains visible when space permits but is not
-> expanded into unrelated root siblings. Raw approved `graph_seed` input is
-> replaced in model context by its materialized marker, hash, and node/edge
-> counts because the typed graph is the durable specification.
+The intact compiled document is the schema `1.0` compatibility path. It applies to graph authors,
+gate analysis, reviewers, unscoped Lead and observer reads, and any ambiguous step. A selected
+schema `1.1` `product_execution` step may use compact JSON only when graph mutation is forbidden, no
+gate-policy or gate-query contract was selected, and the compiler issued concrete file or
+compiled-check authority. Pending compiler-transition rework also falls back to `1.0`, because its
+repair instruction requires the complete graph mutation intent.
 
-> **Step-relevant context transport — 2026-07-15:** The intact compiled document
-> above remains the schema `1.0` compatibility path for graph authors, gate
-> analysis, reviewers, unscoped Lead/observer reads, and any ambiguous step. A
-> selected schema `1.1` `product_execution` step may use compact JSON only when
-> graph mutation is forbidden, no gate-policy or gate-query contract was
-> selected, and the compiler issued concrete file or compiled-check authority.
-> Pending compiler-transition rework also falls back to `1.0` because its
-> repair instruction requires the complete graph mutation intent.
-> The compiler still validates and hashes the complete mandatory-anchor spec
-> slice before presentation: duplicate graph bodies, materialized planner prose,
-> graph-authoring schemas, operational lease state, and raw review bindings may
-> be projected away, while selected step/check scope, exact dependency outputs,
-> steering, rework/acceptance, typed graph state, and source hashes remain.
-> Seedless legacy planning prose remains because no typed replacement is proven;
-> a required exact section that exceeds the inline budget still pages rather
-> than being truncated.
+The compiler validates and hashes the complete mandatory-anchor spec slice before presentation.
+Duplicate graph bodies, materialized planner prose, graph-authoring schemas, operational lease
+state, and raw review bindings may be projected away. Selected step and check scope, exact
+dependency outputs, steering, rework and acceptance, typed graph state, and source hashes remain. A
+required exact section that exceeds the inline budget pages rather than being truncated.
 
-The authority order is the pinned contracts and reviewed typed graph, then
-applicable explicit steering, then advisory working memory. Receipt-bound
-accepted outputs remain evidence under those contracts; working memory does
-not change a node, ticket scope, operation, acceptance condition, or gate.
-Its note kinds are `observation`, `implementation_detail`, `rationale`, `nit`,
-and `open_question`; records carry `working`, `confirmed`, `superseded`, or
-`invalidated` state plus run/ticket/step/persona/time provenance. New agent and
-CLI notes begin as `working`. `supersedes` preserves the prior record while
-marking that record superseded. Note state alone never promotes prose into
+The authority order is the pinned contracts and reviewed typed graph, then applicable explicit
+steering, then advisory working memory. Receipt-bound accepted outputs remain evidence under those
+contracts. Working memory does not change a node, ticket scope, operation, acceptance condition, or
+gate.
+
+Note kinds are `observation`, `implementation_detail`, `rationale`, `nit`, and `open_question`.
+Records carry `working`, `confirmed`, `superseded`, or `invalidated` state, plus run, ticket, step,
+persona, and time provenance. New agent and CLI notes begin as `working`. `supersedes` preserves the
+prior record while marking that record superseded. Note state alone never promotes prose into
 semantic authority.
 
-Working-memory bundles prioritize newest `working`/`confirmed` records and do
-not spend their byte budget on superseded or invalidated history. Each included
-record reports whether its captured node revision is current, stale, missing,
-or from a legacy unbound note; stale notes remain visible as advisory history,
-never as current graph fact.
+Working-memory bundles prioritize newest `working` and `confirmed` records. They do not spend their
+byte budget on superseded or invalidated history. Each included record reports whether its captured
+node revision is current, stale, missing, or from a legacy unbound note. Stale notes stay visible as
+advisory history, never as current graph fact.
 
 Ticket workers receive two bounded runtime broker tools:
 
-- `graph_context` reads a relation-, direction-, type-, and depth-filtered
-  neighborhood anchored inside the compiler-issued ticket scope;
-- `record_note` appends one advisory note to a node in the bounded ticket
-  neighborhood.
+- `graph_context` reads a relation-filtered, direction-filtered, type-filtered, and depth-filtered
+  neighborhood anchored inside the compiler-issued ticket scope.
+- `record_note` appends one advisory note to a node in the bounded ticket neighborhood.
 
-Neither capability expands filesystem or graph-write scope. Each successful
-call creates a compiler receipt, and the broker automatically binds those
-supplement receipts to the worker's eventual structured output.
+Neither capability expands filesystem or graph-write scope. Each successful call creates a compiler
+receipt, and the broker binds those supplement receipts to the worker's eventual structured output.
 
-> **Runtime ordering completion — 2026-07-14:** The context-first and receipt
-> binding contracts above are now enforced at the broker CAS boundary, not
-> only stated in the worker prompt. A new non-context worker call is rejected
-> until `context` succeeds, and a successful legacy `submit_output` closes new
-> supplement calls so no later receipt can fall outside its frozen output.
-> Exact durable receipt replay remains available without repeating an effect.
-
-Operators can use the same validation paths from the CLI:
-
-```sh
-koni graph-context TK-123 \
-  --anchor ND-123 --relation depends_on --direction both \
-  --max-depth 1 --node-type contract
-
-koni record-note TK-123 \
-  --step implement --persona operator --node-id ND-123 \
-  --kind implementation_detail --body "The adapter owns retry translation."
-```
-
-`graph-context` also accepts repeated `--anchor`, `--relation`, and
-`--node-type` values. `record-note` accepts `--supersedes NOTE_ID` for an
-append-only correction. The runtime MCP variants omit run, ticket, step, and
-persona identity because the compiler pins those values into the worker grant.
+The context-first and receipt-binding contracts are enforced at the broker compare-and-swap
+boundary, not only stated in the worker prompt. A new non-context worker call is rejected until
+`context` succeeds. A successful output submission closes new supplement calls, so no later receipt
+can fall outside its frozen output. Exact durable receipt replay stays available without repeating
+an effect.
 
 ### Selectors and rules
 
-Selectors identify graph targets through node type, status, fields, traversal,
-policy applicability, receipt state, or set operations. Predicates use
-structured operators such as:
+Selectors identify graph targets through node type, status, fields, traversal, policy applicability,
+receipt state, or set operations. Predicates use structured operators such as:
 
-- `all`, `any`, and `not`;
-- field presence/equality and edge counts;
-- `exists` and `for_all` over a bound selector;
-- set equality/subset/disjointness;
-- current receipt and filesystem-manifest checks;
-- gate-policy selection and satisfaction.
+- `all`, `any`, and `not`
+- field presence or equality, and edge counts
+- `exists` and `for_all` over a bound selector
+- set equality, subset, and disjointness
+- current receipt and filesystem-manifest checks
+- gate-policy selection and satisfaction
 
-Rules combine a selector and predicate with an effect. Common effects derive a
-ticket, update program state, or reconcile a terminal condition. Configuration
-cannot embed arbitrary executable expressions.
+Rules combine a selector and predicate with an effect. Common effects derive a ticket, update
+program state, or reconcile a terminal condition. Configuration cannot embed arbitrary executable
+expressions.
 
 ### Ticket constructors and operations
 
-A ticket constructor defines the deterministic title, operation, target,
-dependencies, and context scope for an unmet rule. Operations define what that
-ticket may change:
+A ticket constructor defines the deterministic title, operation, target, dependencies, and context
+scope for an unmet rule. Operations define what that ticket may change:
 
 ```yaml
 operations:
@@ -935,21 +681,15 @@ operations:
     ranking_hints: [stage, package-id, interface-gap]
 ```
 
-Keep allowed node types and filesystem scope as narrow as the transition
-permits. Use a `single_flight_group` or change-control barrier for work that
-must not overlap.
+Keep allowed node types and filesystem scope as narrow as the transition permits. Use a
+`single_flight_group` or a change-control barrier for work that must not overlap.
 
-Upstream change control is an operation role, not an untyped extension. The
-safe default is an ordinary operation that cannot request upstream work. A
-profile opts ordinary operations in and routes them to exactly one proposal
-operation; that proposal names its contract-producing step and the only
-application/disposition operations it may select:
+Upstream change control is an operation role, not an untyped extension. The safe default is an
+ordinary operation that cannot request upstream work. A profile opts ordinary operations in and
+routes them to exactly one proposal operation. That proposal names its contract-producing step and
+the only application and disposition operations it may select:
 
 ```yaml
-change_control:
-  awaiting_approval_state: awaiting_decision
-  held_source_state: waiting_upstream
-
 operations:
   - id: delivery.ordinary
     operation: deliver
@@ -970,46 +710,40 @@ operations:
 
   - id: lifecycle.apply-change-request
     operation: apply-change-request
-    change_control: {role: application}
+    change_control: { role: application }
 
   - id: lifecycle.no-op
     operation: no-op
     allowed_new_node_types: []
     allowed_existing_node_types: []
-    change_control: {role: disposition, outcome: no_op}
+    change_control: { role: disposition, outcome: no_op }
 ```
 
-An enabled ordinary output may submit
-`upstream_change_request: {target_nodes, summary, reason}` for existing nodes
-inside its complete ticket scope. The configured proposal step submits
-`change_application: {operation, target_nodes, summary}` and must emit no graph
-or filesystem delta. A passed review binds the exact proposal output; the
-compiler then records its approval hash and deterministically creates either
-one application ticket or a terminal no-op disposition. Application agents
-receive the bound request and approval in their compiler-issued context. The
-approval binds the exact Lead/human steering event (ID, normalized event hash,
-actor, and time), proposal output, and passed review. A later approval before
-work starts invalidates the earlier review; once a proposal worktree is active,
-a later approval is audit-only and cannot replace its authority.
+An enabled ordinary output may submit `upstream_change_request: {target_nodes, summary, reason}` for
+existing nodes inside its complete ticket scope. The configured proposal step submits
+`change_application: {operation, target_nodes, summary}` and must emit no graph or filesystem delta.
 
-Both configured state names must be distinct nonterminal states in the ticket
-state machine. Compiler-authorized transitions must connect awaiting approval
-to the initial state, active work to the held-source state, and held source back
-to initial. The engine never requires those states to be named `proposed` or
-`blocked`.
+A passed review binds the exact proposal output. The compiler then records its approval hash and
+deterministically creates either one application ticket or a terminal no-op disposition. Application
+agents receive the bound request and approval in their compiler-issued context. The approval binds
+the exact Lead or human steering event, including ID, normalized event hash, actor, and time, plus
+the proposal output and passed review. A later approval before work starts invalidates the earlier
+review. Once a proposal worktree is active, a later approval is audit-only and cannot replace its
+authority.
 
-Set `change_control_barrier: true` on ordinary operations whose complete
-context must not overlap an active proposal/application write scope. The
-scheduler and every guarded action recheck those barriers against canonical
-integration state, including from already-issued ticket worktrees. Legacy
-extension keys `proposal_only`, `requires_approved_change_hash`, and
-`disposition_only` are rejected.
+Change-control authority stays in typed operation roles, compiled workflow and ticket state,
+approvals, and barriers. `change_control.working_spec_owner` remains supported, because run
+compilation resolves it to exactly one managed persona. No display label may rename lifecycle
+authority.
 
-On terminal rejection, no-op, or application, a tracked source worktree is not
-discarded. The compiler validates dirty paths against its ticket scope,
-checkpoints the superseded attempt, records the exact commit under a
-deterministic run-owned archive ref, retires the old checkout/branch, and then
-issues the same source ticket fresh if its deriving gap remains. Run deletion
+Set `change_control_barrier: true` on ordinary operations whose complete context must not overlap an
+active proposal or application write scope. The scheduler and every guarded action recheck those
+barriers against canonical integration state, including from already-issued ticket worktrees.
+
+On terminal rejection, no-op, or application, a tracked source worktree is not discarded. The
+compiler validates dirty paths against its ticket scope, checkpoints the superseded attempt, records
+the exact commit under a deterministic run-owned archive ref, and retires the old checkout and
+branch. It then issues the same source ticket fresh if its deriving gap remains. Run deletion
 preserves or deletes those archive refs according to its selected branch mode.
 
 ### Workflows and personas
@@ -1041,97 +775,73 @@ workflows:
         required_receipts: [review-receipt]
 ```
 
-> **Structured review-failure routing — 2026-07-16:** The scalar
-> `review_failure_reopen_from` above remains the legacy one-domain compatibility form. New
-> workflows that need to distinguish selected-step correction from an upstream authority defect
-> declare `review_failure_routes` instead; the two forms cannot be combined. Each domain includes
-> a nonempty `description` and either `{disposition: reopen, reopen_from: <non-review-step>}` or
-> `{disposition: block, recovery: replan_from_clean_integration, recovery_instructions: <text>}`.
-> The compiler publishes only those domain IDs to the Reviewer, requires schema-1.1 output with
-> `failure_domain: none` on pass or one advertised domain on failure, and persists the choice in
-> review provenance. A block route preserves the rejected candidate and never turns its mutated
-> worktree into the baseline for upstream replanning. Persisted schema-1.0 reviewer history remains
-> readable; it retains the older bounded rework behavior.
+The scalar `review_failure_reopen_from` is the legacy one-domain compatibility form. New workflows
+that need to distinguish selected-step correction from an upstream authority defect declare
+`review_failure_routes` instead. The two forms cannot be combined.
 
-`graph_mutation` is a compiler-enforced step boundary, not a prompt hint. It is
-`allowed` by default for compatibility, `forbidden` for analysis-only steps,
-or `required` when the step must submit a nonempty semantic delta. This lets a
-workflow keep inspection and authoring separate even when both use the same
-persona.
+Each domain includes a nonempty `description` and either
+`{disposition: reopen, reopen_from: <non-review-step>}` or
+`{disposition: block, recovery: replan_from_clean_integration, recovery_instructions: <text>}`. The
+compiler publishes only those domain IDs to the Reviewer. It requires schema-1.1 output with
+`failure_domain: none` on pass, or one advertised domain on failure, and it persists the choice in
+review provenance. A block route preserves the rejected candidate and never turns its mutated
+worktree into the baseline for upstream replanning. Persisted schema-1.0 reviewer history stays
+readable and keeps the older bounded rework behavior.
 
-> **Graph-mutation authority transition — 2026-07-14:** Before this field existed, graph-delta
-> expectations were implicit in workflow shape and persona instructions; the compiler did not
-> distinguish an analysis-only empty result from a missing required mutation. That historical
-> prompt/implicit boundary remains the compatibility meaning of an omitted field, which resolves
-> to `allowed`. Profiles opt into `forbidden` or `required` explicitly; the compiler does not
-> retroactively reinterpret pinned workflows.
+`graph_mutation` is a compiler-enforced step boundary, not a prompt hint. It is `allowed` by default
+for compatibility, `forbidden` for analysis-only steps, or `required` when the step must submit a
+nonempty semantic delta. This lets a workflow keep inspection and authoring separate even when both
+use the same persona. The compiler does not retroactively reinterpret pinned workflows.
 
-Personas connect domain roles to instructions, native Codex agents, skills,
-model policy, and sandbox policy. Prefer `codex_agent` for installed projects:
-
-> **Persona-authoring transition in progress — 2026-07-14 (`pi_product_docs_transition`):**
-> Prefer `codex_agent` only for the executable schema-1 layout described here. Schema-2 projects
-> author provider-neutral agent references beneath `.koni/agents/`; the direct Pi host receives
-> only compiler-issued tools and cannot load ambient Codex/Pi extensions. The migration must
-> preserve prompt/schema data verbatim outside known fields, and runtime release still depends on
-> artifact trust, exact broker wiring, credential intent, and teardown tests.
-
-> **Persona-authoring supersession — 2026-07-14 (`pi_product_docs_transition`):** The artifact,
-> broker, credential-intent, teardown, and migration-preservation requirements now pass for the
-> release candidate. Schema-2 authoring uses `.koni/agents` and the contained pinned host; ambient
-> extensions and Codex fallback remain unavailable. Applying that contract to an installed project
-> still requires a separately approved migration.
+Personas connect domain roles to instructions, agent resources, skills, model policy, and capability
+policy:
 
 ```yaml
 personas:
   - id: reviewer
-    codex_agent: koni-reviewer
+    agent: koni-reviewer
     skills: [model-koni-work]
     model_role: reviewer
 ```
 
+The direct Pi host receives only compiler-issued tools. It cannot load ambient extensions.
+
 ### Actions and effects
 
-Actions are named recipes made from engine primitives. They may create or
-remove worktrees, issue context, run a persona, validate output, reconcile a
-scoped graph, request review, checkpoint state, integrate, and report. Each
-primitive declares its effect; compilation rejects unsafe sequences.
+Actions are named recipes made from engine primitives. They may create or remove worktrees, issue
+context, run a persona, validate output, reconcile a scoped graph, request review, checkpoint state,
+integrate, and report. Each primitive declares its effect, and compilation rejects unsafe sequences.
 
-Configured command invocations are argv arrays, never shell strings. Declare
-the working directory, environment allowlist, timeout, result protocol, retry
-policy, accepted exit codes, and receipt type. `expected_exit_codes` defaults
-to `[0]` when omitted. Declare a nonzero code only for an intentional outcome
-such as an expected-red test; the receipt records that acceptance contract and
-the actual process result.
+Configured command invocations are argv arrays, never shell strings. Declare the working directory,
+environment allowlist, timeout, result protocol, retry policy, accepted exit codes, and receipt
+type.
 
-> **Accepted-exit compatibility transition — 2026-07-14:** Historically every configured command
-> accepted exit zero only. Omitting `expected_exit_codes` deliberately preserves that exact `[0]`
-> contract for old and pinned profiles. Explicit nonzero acceptance is a later opt-in used for an
-> intentional semantic result such as an expected-red proof; the configured set and actual exit
-> are compiler-bound receipt data, not an agent assertion that any failure was acceptable.
+`expected_exit_codes` defaults to `[0]` when omitted, which preserves the exact historical contract
+for old and pinned profiles. Declare a nonzero code only for an intentional outcome such as an
+expected-red test. The configured set and the actual exit are compiler-bound receipt data, not an
+agent assertion that any failure was acceptable.
 
-> **Bounded command-evidence transition — 2026-07-16:** The accepted-exit contract remains, but a
-> configured command now runs inside one owned Unix process group and its evidence is finite by
-> construction. Stdout and stderr each retain a bounded diagnostic prefix with full-stream hash,
-> observed-byte count, retained-byte count, and explicit truncation state; their cumulative
-> retained bytes are bounded as well. A truncated expected-nonzero attempt cannot qualify as
-> intentional evidence. Typed stdout and configured result files are limited to 1 MiB and reject
-> oversize input explicitly. Timeout, stop, output-read/setup/wait failure, and a leader that exits
-> while same-group helpers remain all converge on bounded TERM/KILL cleanup before the receipt or
-> error returns.
+A configured command runs inside one owned Unix process group, and its evidence is finite by
+construction. Stdout and stderr each retain a bounded diagnostic prefix with a full-stream hash,
+observed-byte count, retained-byte count, and explicit truncation state. Their cumulative retained
+bytes are bounded as well. A truncated expected-nonzero attempt cannot qualify as intentional
+evidence. Typed stdout and configured result files are limited to 1 MiB and reject oversize input
+explicitly. Timeout, stop, output-read failure, setup failure, wait failure, and a leader that exits
+while same-group helpers remain all converge on bounded TERM and KILL cleanup before the receipt or
+error returns.
 
 ### Checks and gates
 
-`command` checks execute an explicit argv or a command resolved from an
-authorized ticket/node field. `graph` checks evaluate a structured predicate.
-Results can be validated with JSON Schema and an acceptance field:
+`command` checks execute an explicit argv, or a command resolved from an authorized ticket or node
+field. `graph` checks evaluate a structured predicate. Results can be validated with JSON Schema and
+an acceptance field:
 
 ```yaml
 checks:
   - id: unit-tests
     kind: command
     applies_to: [implement-package]
-    argv: [cargo, test, --workspace]
+    argv: [npm, run, test]
     cwd: .
     timeout_seconds: 900
     expected_exit_codes: [0]
@@ -1146,52 +856,36 @@ checks:
       backoff_seconds: []
 ```
 
-Commands in a project profile must come from that repository's CI, task
-runners, manifests, or maintained instructions. The bundled Software profile
-does not assume a package manager, dependency-install command, typecheck, or
-lint command. Add those checks during customization only when the project owns
-them, and keep setup or dependency mutation out of read-only verification.
+Commands in a project profile must come from that repository's CI, task runners, manifests, or
+maintained instructions. The bundled Coding profile does not assume a package manager, dependency
+install command, typecheck, or lint command. Add those checks during customization only when the
+project owns them. Keep setup and dependency mutation out of read-only verification.
 
-Expected-red checks are one proof strategy, not a universal prerequisite. They
-should resolve their argv from a graph-backed change or proof contract, use a
-distinct receipt type, and be required by the workflow step that authors the
-test. Set `receipt_freshness: historical` on that
-read-only command: its integrity, ticket binding, exact command, accepted exit
-code, and explicit step-output reference remain mandatory, while later
-intentional product edits may make its filesystem snapshot stale. Historical
-receipts cannot carry result-protocol or artifact evidence and are never
-treated as current graph evidence. A later green check should resolve the same
-argv with exit code `0` and retain the default `receipt_freshness: current`.
-This makes command identity, ordering, exit class, and receipt freshness a
-compiler-verifiable causal chain instead of an agent-authored claim. The
-reviewer still judges whether the observed process result has the exact
-domain-specific meaning declared in `baseline_signal`. A characterization
-strategy instead binds a passing pre-change observation and proves it remains
-intact. A current-verification strategy records why an existing check already
-covers the bounded outcome, runs it before the edit without test churn, and
-requires a fresh passing result afterward.
+Expected-red checks are one proof strategy, not a universal prerequisite. They should resolve their
+argv from a graph-backed change or proof contract, use a distinct receipt type, and be required by
+the workflow step that authors the test.
 
-> **Sole proof-oracle authority — 2026-07-14:** The `baseline_signal` sentence above is retained as
-> the earlier ticket-local contract. Current Software does not declare that field. Review reads the
-> selected proof's `baseline_check_id`, `expected_signal`, `why`, conditions, and explicit
-> `not_proven` limits, while the compiler binds its exact command, working directory, source
-> manifest, covered paths, and receipt. Custom profiles migrating to this model must remove every
-> duplicate command/oracle field coherently rather than letting two authorities drift.
+Set `receipt_freshness: historical` on that read-only command. Its integrity, ticket binding, exact
+command, accepted exit code, and explicit step-output reference stay mandatory, while later
+intentional product edits may make its filesystem snapshot stale. Historical receipts cannot carry
+result-protocol or artifact evidence and are never treated as current graph evidence. A later green
+check should resolve the same argv with exit code `0` and keep the default
+`receipt_freshness: current`. This makes command identity, ordering, exit class, and receipt
+freshness a compiler-verifiable causal chain rather than an agent-authored claim.
 
-> **Graph-local proof evolution — 2026-07-14:** The command mapping above remains the compatible
-> path for existing profiles and ticket-local baselines. The generic compiler is adding an opt-in
-> composite `graph_set` check whose finite target-anchored selector resolves every relevant proof
-> member deterministically. Each member binds a registered child check, exact semantic argv,
-> project-relative working directory, byte-causal `source_paths`, claimed product
-> `covered_paths`, semantic hashes, and the selector/check contract. Runtime must reproduce the
-> exact persisted set; current passing and adverse terminal predicates name the composite parent,
-> and composed verification safely replays required read-only members after target sync. Software
-> 0.4 adopts this contract. Research, Updog, pinned runs, and profiles that omit `graph_set` retain
-> the earlier workflow-history behavior.
+Review reads the selected proof's `baseline_check_id`, `expected_signal`, `why`, conditions, and
+explicit `not_proven` limits. The compiler binds its exact command, working directory, source
+manifest, covered paths, and receipt. Custom profiles migrating to this model must remove every
+duplicate command and oracle field coherently rather than letting two authorities drift.
 
-> **Graph-local proof implementation completed — 2026-07-14:** The transition
-> above is now implemented in the generic compiler. A minimal literal-child
-> contract is:
+A characterization strategy binds a passing pre-change observation and proves it stays intact. A
+current-verification strategy records why an existing check already covers the bounded outcome, runs
+it before the edit without test churn, and requires a fresh passing result afterward.
+
+#### Graph-selected proof sets
+
+An opt-in composite `graph_set` check resolves every relevant proof member deterministically through
+a finite target-anchored selector:
 
 ```yaml
 checks:
@@ -1216,28 +910,36 @@ checks:
       min_members: 1
 ```
 
-The selector must be target-anchored, relation-explicit, and finite. Set
-operations are permitted only when every branch retains that anchor; global
-node, query, ID, and policy selectors are rejected. `member_check_field`, when
-used, must be a typed nonempty enum of registered read-only command checks.
-Literal and field-selected children must cover every parent operation.
-Selected members must already be ticket-readable, and both path lists must fit
-the effective step read authority.
+The selector must be target-anchored, relation-explicit, and finite. Set operations are permitted
+only when every branch retains that anchor. Global node, query, ID, and policy selectors are
+rejected. `member_check_field`, when used, must be a typed nonempty enum of registered read-only
+command checks. Literal and field-selected children must cover every parent operation. Selected
+members must already be ticket-readable, and both path lists must fit the effective step read
+authority.
 
-`source_paths` identify the exact proof/test/harness bytes that make the
-receipt causal. `covered_paths` identify the product subject; they do not grant
-write authority and are not a claim of observed coverage. Compilation persists
-the sorted source/check members plus parent, selector, anchors, semantic node,
-child check, argv, cwd, and path hashes. Todo tickets may refresh; active
-tickets retain their set, and runtime/currentness requires exact reselection.
+Multi-target selection is the deduplicated union of the same selector evaluated once per target
+anchor. Explicit workflow-step `read_scope` and `write_scope` selectors compile to step-local node
+authority. Proof traversal, including intermediate nodes, cannot leave the effective step read
+scope.
 
-A green workflow step may declare
-`preserve_source_paths_from: baseline-step`. The baseline must be a transitive
-dependency and both sides must expose one compatible set. Different child
-check IDs are allowed for expected-red versus green exit classification only
-when source node, resolved argv, cwd, source paths, covered paths, and execution
-policy otherwise match. Runtime compares only the exact source-file manifest;
-covered product bytes are expected to change.
+`source_paths` identify the exact proof, test, and harness bytes that make the receipt causal.
+`covered_paths` identify the product subject. They do not grant write authority and are not a claim
+of observed coverage. Compilation persists the sorted source and check members, plus parent,
+selector, anchors, semantic node, child check, argv, working directory, and path hashes. Todo
+tickets may refresh. Active tickets retain their set, and runtime currentness requires exact
+reselection.
+
+A directly named project-local interpreter script is causal source even when it is mode `0644` and
+has no shebang. It must appear in that member's `source_paths` as well as its read authority.
+Graph-set members reject `env` command wrappers and shell `-c` or `--command` strings, because those
+forms can hide repository dependencies from the exact argv and path contract. Inline programs for
+non-shell interpreters stay permitted, because their bytes are already bound directly in argv.
+
+A green workflow step may declare `preserve_source_paths_from: baseline-step`. The baseline must be
+a transitive dependency, and both sides must expose one compatible set. Different child check IDs
+are allowed for expected-red versus green exit classification only when source node, resolved argv,
+working directory, source paths, covered paths, and execution policy otherwise match. Runtime
+compares only the exact source-file manifest. Covered product bytes are expected to change.
 
 Rules name the composite parent:
 
@@ -1247,55 +949,20 @@ Rules name the composite parent:
  statuses: [failed, timed_out, invalid_result]}
 ```
 
-The newest exact terminal is authoritative and never falls back to an older
-pass. Mechanical command status remains receipt evidence; semantic node status
-still requires the profile's reviewed effect.
+The newest exact terminal is authoritative and never falls back to an older pass. Mechanical command
+status stays receipt evidence. Semantic node status still requires the profile's reviewed effect.
 
-Gate policies select an applicable verifier deterministically and bind its
-receipt to the exact target and current inputs. A model's assertion that a
-check passed is never equivalent to a gate receipt.
+Composite `receipt_type` readiness is non-vacuous, so all exact latest members must qualify.
+Historical baseline checks must declare `historical`, and preserving green checks must declare
+`current`. The common submit-then-compile worker ordering binds a generated historical receipt to
+the already-durable step output ID and hash. Receipt-dependent target-state leaves may be deferred
+only at that output boundary. Graph facts stay strict, and the complete predicate is re-evaluated
+before review and acceptance.
 
-Target-bound runs replay every current read-only command check selected by a
-closed ticket after target synchronization. A side-effecting or intentionally
-non-repeatable command must declare `composed_replay: never`; otherwise the
-composed-verification stage fails closed rather than executing it implicitly.
-That opt-out does not make its receipt stale or historical. The workflow must
-also select a distinct repository-owned read-only currentness/integrity check,
-so promotion is still bound to fresh proof of the composed tree.
+#### Cross-ticket preparation binding
 
-> **Graph-local proof hardening transition — 2026-07-14:** The “implementation
-> completed” heading above records the first source-complete checkpoint; the
-> subsequent integration audit found authority and lifecycle details that are
-> now part of the contract. Multi-target selection is the deduplicated union of
-> the same selector evaluated once per target anchor. Explicit workflow-step
-> `read_scope` and `write_scope` selectors compile to step-local node authority,
-> and proof traversal—including intermediate nodes—cannot leave the effective
-> step read scope. A project-local executable or shebang script named by a
-> member command must appear in that member's `source_paths` as well as its read
-> authority.
-
-> **Executable-authority refinement — 2026-07-14:** The “executable or shebang
-> script” wording above records the first enforcement boundary. The current
-> contract also treats a directly named project-local interpreter script as
-> causal source even when it is mode `0644` and has no shebang. Opt-in graph-set
-> members reject `env` command wrappers and shell `-c`/`--command` strings,
-> because those forms can hide repository dependencies from the exact argv/path
-> contract. Inline programs for non-shell interpreters remain permitted: their
-> bytes are already bound directly in argv, while separately named project
-> scripts must appear in `source_paths`.
-
-> Composite `receipt_type` readiness is non-vacuous: all exact latest members
-> must qualify. Historical baseline checks must declare `historical`, preserving
-> green checks must declare `current`, and the common submit-then-compile worker
-> ordering binds a generated historical receipt to the already-durable step
-> output ID and hash. Receipt-dependent target-state leaves may be deferred only
-> at that output boundary; graph facts remain strict and the complete predicate
-> is re-evaluated before review and acceptance. This note remains marked as a
-> transition until the final full-core and independent-review evidence is
-> recorded beside it.
-
-> **Cross-ticket preparation binding — 2026-07-14:** A profile may now ask whether an exact
-> reviewed proof-only preparation remains current without freezing the covered product bytes:
+A profile may ask whether an exact reviewed proof-only preparation stays current without freezing
+the covered product bytes:
 
 ```yaml
 op: proof_preparation_current
@@ -1305,202 +972,142 @@ preparation_operation: assurance.proof.prepare
 preparation_targets:
   union:
     - $proof
-    - {traverse: {from: $proof, relation: verifies, max_depth: 1}}
+    - { traverse: { from: $proof, relation: verifies, max_depth: 1 } }
 ```
 
-> The predicate binds the configured operation, exact target universe, review, composite member,
-> proof semantics/oracle, argv, working directory, profile, and compiler-recorded `source_paths`
-> manifest. It intentionally permits `covered_paths` to change. Proof-source or semantic drift
-> returns false and should re-emit preparation. For a preparation/establishment ticket that already
-> pins the exact proof plus contextual subjects, a composite selector may use `members: $target`
-> with `member_node_types: [proof]`; global/query/ID selector roots remain forbidden and all normal
-> cardinality/read-scope checks still apply. This direct form prevents a shared subject from pulling
-> an unpinned sibling proof into the set.
+The predicate binds the configured operation, exact target universe, review, composite member, proof
+semantics and oracle, argv, working directory, profile, and compiler-recorded `source_paths`
+manifest. It intentionally permits `covered_paths` to change. Proof-source or semantic drift returns
+false and should re-emit preparation.
 
-> **Proof-source write separation — 2026-07-14:** Within one emitted workflow, a writable
-> graph-set proof source must come from the exact selected member's configured
-> `source_paths_field` projection. Ticket emission rejects equality or containment in either
-> direction between that source authority and any other write grant, plus ambiguous/invalid
-> projections. `covered_paths` remain read-only metadata. The generic compiler does not yet expose
-> a typed later-ticket enumeration of earlier preparation bindings, so early rejection of a later
-> production grant that aliases a separately prepared source remains an explicit open gate; graph
-> status and domain-edge inference are not substitutes.
+For a preparation or establishment ticket that already pins the exact proof plus contextual
+subjects, a composite selector may use `members: $target` with `member_node_types: [proof]`. Global,
+query, and ID selector roots stay forbidden, and all normal cardinality and read-scope checks still
+apply. This direct form prevents a shared subject from pulling an unpinned sibling proof into the
+set.
 
-> **Prepared-source global binding transition in progress — 2026-07-14
-> (`pi_product_docs_transition`):** The “does not yet expose” sentence above preserves the first
-> released boundary. A typed enumeration of current preparation bindings plus emission- and
-> lease-admission overlap checks is now being implemented, but it is not released and Software has
-> not consumed it. Release still requires a stable canonical review boundary that survives
-> unrelated graph growth, runtime predicate/declaration equality with no-panic validation,
-> source-only authority for every preparation operation, the real tracked and Git-common predicate
-> matrix, and the complete Software consumer matrix. `prepared` status, profile edges, or prompt
-> policy remain insufficient substitutes for compiler-owned provenance and admission.
+Within one emitted workflow, a writable graph-set proof source must come from the exact selected
+member's configured `source_paths_field` projection. Ticket emission rejects equality or containment
+in either direction between that source authority and any other write grant. It also rejects
+ambiguous and invalid projections. `covered_paths` stay read-only metadata.
 
-> **Software consumption status — 2026-07-14:** “Software has not consumed it” above is retained as
-> the checkpoint that opened the consumer work. Current bundled Software now exercises typed
-> preparation currentness and prepared-source admission through its Bug Fix lifecycle, including
-> authenticated `prepared` → `passing` succession and a later overlapping-write rejection. Whole-
-> lane release remains held on bounded operation-scoped successor/receipt evaluation and one frozen
-> current matrix; mutable proof status or prompt policy still grants no authority.
+An operation declaring `proof_source_preparation_check` may emit only exact compiler-selected
+`source_paths_field` projections for that declared check. Literal, broad, root, disjoint product,
+sibling, undeclared-source, and different-check writes are all refused. The compiler persists that
+capability, and lease admission revalidates it against the complete ticket plus explicit step write
+scopes before an existing lease can be reused. Exact same operation, check, source, and path
+re-preparation is the sole overlap exception.
 
-> **Prepared-source exact-write authority sub-gate — 2026-07-14
-> (`proof-preparation-binding`):** The transition above remains unreleased as a whole, but its
-> operation-write boundary is now source-closed. An operation declaring
-> `proof_source_preparation_check` may emit only exact compiler-selected `source_paths_field`
-> projections for that declared check—never literal, broad/root, disjoint product, sibling,
-> undeclared-source, or different-check writes. The compiler persists that capability and lease
-> admission revalidates it against the complete ticket plus explicit step write scopes before an
-> existing lease can be reused. Exact same operation/check/source/path re-preparation is the sole
-> overlap exception. Focused evidence is 8/8 preparation, 1/1 cross-ticket conflict, and 2/2
-> same-ticket graph-source authority; the historical-review and tracked/Git-common predicate
-> matrices named above remain required.
+Review admission does not claim the currentness fact early, because that fact cannot exist until the
+independent review is durable. It first proves that the matching declared preparation leaf is the
+only deferred target-state dependency. It then separately proves the exact operation, check, and
+target universe, one required compiled baseline set, current step output, every historical member
+execution and source-only manifest, the independent reviewer dependency, and the prospective
+configured review effect. Any missing, substituted, stale, or extra component fails closed. Failed
+review creates no preparation binding. Ordinary target evaluation stays mandatory after the passed
+review is persisted, and again at finish.
 
-> **Typed preparation first-review admission — 2026-07-14
-> (`proof-preparation-binding`):** The cross-ticket transition above creates one intentional
-> temporal dependency: its currentness fact cannot exist until the independent review is durable.
-> Review admission therefore does not claim that fact early. It first proves that the matching
-> declared preparation leaf is the only deferred target-state dependency, then separately proves
-> the exact operation/check/target universe, one required compiled baseline set, current step
-> output, every historical member execution and source-only manifest, independent reviewer
-> dependency, and the prospective configured review effect. Any missing, substituted, stale, or
-> extra component fails closed. Failed review creates no preparation binding, and ordinary target
-> evaluation remains mandatory after the passed review is persisted and again at finish.
+Current source selects the newest reviewed attempt by exact preparation operation registry ID plus
+compiled source node, before any caller-specific target filter. The predicate and the global source
+lock consume the same choice, so a newer failed, stale, or differently targeted attempt cannot
+reveal an older pass to only one consumer.
 
-> **Preparation succession and shared-authority transition — 2026-07-14
-> (`compiler-graph-tdd`):** The pending global-binding language above remains the history that
-> opened this seam. Current source now selects the newest reviewed attempt by exact preparation
-> operation registry ID plus compiled source node *before* any caller-specific target filter; the
-> predicate and global source lock consume the same choice, so a newer failed, stale, or differently
-> targeted attempt cannot reveal an older pass to only one consumer. A preparation may remain
-> current after a later review changes one of its effect-owned values only through a strictly
-> ordered, value-acyclic chain of exact configured review-effect applications. Each link replays
-> its stable review boundary, canonical historical input and raw receipts, actor, candidates,
-> pre/post snapshots, application hash, and durable reviewer result. Disjoint effects are not
-> successor links; an overlapping missing, forged, manually drifted, cyclic, future, or archived
-> link fails closed. `prior_cycles` remain audit-only, and returning to an earlier projection
-> requires a new preparation attempt rather than an A→B→A value cycle.
+A preparation may stay current after a later review changes one of its effect-owned values, but only
+through a strictly ordered, value-acyclic chain of exact configured review-effect applications. Each
+link replays its stable review boundary, canonical historical input and raw receipts, actor,
+candidates, pre-snapshots and post-snapshots, application hash, and durable reviewer result.
+Disjoint effects are not successor links. An overlapping missing, forged, manually drifted, cyclic,
+future, or archived link fails closed. `prior_cycles` stay audit-only, and returning to an earlier
+projection requires a new preparation attempt.
 
-> **Preparation evidence epoch transition — 2026-07-14 (`compiler-graph-tdd`):** A full compile
-> authenticates that typed preparation/successor set once against its immutable graph-and-ticket
-> epoch, then shares the exact slice between every rule predicate and prepared-source write-
-> admission check. Projected ticket, prospective review, integration, and historical replay paths
-> remain uncached and retain their ticket-local/cutoff semantics. This closes the sampled repeated
-> per-rule receipt scan in source; the final release record still requires the compile-epoch count
-> regression and frozen fingerprint to pass after the concurrently moving Pi runtime test target
-> compiles.
+A full compile authenticates that typed preparation and successor set once against its immutable
+graph and ticket epoch. It then shares the exact slice between every rule predicate and
+prepared-source write-admission check. Graph-dependent preparation truth is cached only by the
+graph's complete normalized identity, because generic selectors may read an excluded field. Every
+exact derived graph gets its own binding scan.
 
-> **Exact graph/source evidence epoch correction — 2026-07-14
-> (`compiler-graph-tdd`):** Preserve the “once” wording above as the first optimization checkpoint,
-> but do not interpret `semantic_hash_excludes` as a preparation-cache authority. Generic selectors
-> may still read an excluded field. Current source therefore caches graph-dependent preparation
-> truth only by the graph's complete normalized identity; every exact derived graph gets its own
-> binding scan. The immutable ticket/receipt source evidence beneath those scans is indexed once
-> across the whole derivation pass under the exact state-root, tickets-directory, and receipts-
-> directory identity. Change-control reconciliation ends that source epoch, and final emission plus
-> prepared-source write admission share a fresh post-reconciliation slice. Projected, prospective,
-> and historical resolver boundaries use their own local reentrant evidence epoch, including the
-> strict replay cutoff, without sharing graph results. Deterministic regressions now prove exact-
-> graph invalidation, different-ticket-store separation, one receipt-directory parse per source
-> epoch, and the initial Software compile's bounded three graph scans/two source indexes. These
-> structural counters, not a wall-clock threshold, close the sampled YAML-rescan failure mode.
+The immutable ticket and receipt source evidence beneath those scans is indexed once across the
+whole derivation pass, under the exact state-root, tickets-directory, and receipts-directory
+identity. Change-control reconciliation ends that source epoch. Final emission and prepared-source
+write admission then share a fresh post-reconciliation slice. Projected, prospective, and historical
+resolver boundaries use their own local reentrant evidence epoch, including the strict replay
+cutoff, without sharing graph results.
+
+#### Gates and composed replay
+
+Gate policies select an applicable verifier deterministically and bind its receipt to the exact
+target and current inputs. A model's assertion that a check passed is never equivalent to a gate
+receipt.
+
+Target-bound runs replay every current read-only command check selected by a closed ticket after
+target synchronization. A side-effecting or intentionally non-repeatable command must declare
+`composed_replay: never`. Otherwise the composed-verification stage fails closed rather than
+executing it implicitly. That opt-out does not make its receipt stale or historical. The workflow
+must also select a distinct repository-owned read-only currentness and integrity check, so promotion
+stays bound to fresh proof of the composed tree.
 
 ### Reports and cockpit views
 
-Reports project runs, tickets, graph nodes, receipts, and state into JSON,
-YAML, Markdown, or CSV artifacts. Cockpit views define human-facing graph
-hierarchy, preferred parent relationships, reverse-edge labels, run-card
-sections, actions, and orchestration bindings.
+Reports project runs, tickets, graph nodes, receipts, and state into JSON, YAML, Markdown, or CSV
+artifacts. Cockpit views define human-facing graph hierarchy, preferred parent relationships,
+reverse-edge labels, run-card sections, actions, and orchestration bindings.
 
-Presentation configuration may choose what to show, but it cannot alter the
-underlying runtime state.
+Presentation configuration may choose what to show, but it cannot alter the underlying runtime
+state.
+
+## Retired configuration keys
+
+Current profiles reject the following keys. Upgrades archive the old value, then remove it.
+Already-admitted runs keep their immutable historical snapshots.
+
+| Retired key                                                          | Reason                                                                                  |
+| -------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `planning.session_scope`                                             | One fresh contained Pi session per planning attempt. Reuse is not configurable          |
+| `planning.graph_seed_stage`                                          | The ordered planning prefix and its terminal output already determine the seed producer |
+| `storage` and all of its paths                                       | Authority state is always owner-only data beneath the Git common directory              |
+| `semantic_hash_excludes`                                             | Exact normalized graph identity is the only graph cache authority                       |
+| `filesystem_scope_excludes`                                          | Never implemented by the native authority                                               |
+| `orchestration.running`                                              | Starting and stopping the authority is an explicit operator action                      |
+| `orchestration.lease_stale_seconds`                                  | Stale ownership is proved by native process identity                                    |
+| `orchestration.max_fixpoint_passes`                                  | Compiler convergence is an exact native protocol                                        |
+| `change_control.awaiting_approval_state`                             | Change-control authority lives in typed operation roles                                 |
+| `change_control.held_source_state`                                   | Same as above                                                                           |
+| `proposal_only`, `requires_approved_change_hash`, `disposition_only` | Legacy untyped extension keys                                                           |
+| `baseline_signal`, `proof.owned_paths`                               | The proof contract is the sole executable and evidence authority                        |
+
+Persona transport fields also changed. `codex_agent` became `agent`, `reasoning_effort` became
+`thinking_level`, and sandbox fields became capabilities.
 
 ## Authoring workflow
 
-> **Earlier workflow — retained 2026-07-14:** “Describe the desired behavior to
-> Codex using an installed Köni skill; review the proposed resource changes; run
-> `koni validate-profile .`; open Configure and make small adjustments; save once
-> to publish the whole validated draft.”
-
-> **Evolving to — 2026-07-14:** Repository inspection and explicit semantic-
-> design approval now precede edits, and Configure separates draft save from
-> validated publication. The current six-step workflow below preserves the old
-> validate-and-refine intent while making those authority boundaries explicit.
-
 The recommended workflow is:
 
-1. describe the desired behavior to Codex using `configure-koni`;
-2. review and explicitly approve its repository-grounded semantic proposal;
-3. let the skill apply the approved project-resource changes;
-4. run `koni validate-profile .`;
-5. open Configure with `koni`, inspect the guided fields, and make small
-   adjustments;
-6. save the draft with `Ctrl-S`, then validate and publish the complete set
-   with `Ctrl-P`.
+1. Describe the desired behavior using the `configure-koni` skill.
+2. Review and explicitly approve its repository-grounded semantic proposal.
+3. Let the skill apply the approved project-resource changes.
+4. Run `koni config validate --root .`.
+5. Open Configure with `koni tui`, inspect the guided fields, and make small adjustments.
+6. Save the draft with `Ctrl-S`, then validate and publish the complete set with `Ctrl-P`.
 
-> **Authoring-surface transition in progress — 2026-07-14 (`pi_product_docs_transition`):** The
-> Codex-skill workflow remains the pre-cutover schema-1 authoring path. Schema 2 keeps the same
-> repository-owned semantic configuration and `.agents/skills` guidance, but the Köni control
-> plane invokes the direct Pi host and provider-neutral agents; it does not start a Codex chat or
-> fall back to one after migration. Do not migrate an installed project until field-scoped
-> conversion, historical-reader compatibility, security re-review, and the frozen matrix are
-> green in [Direct Pi runtime](pi-runtime.md).
+Configure keeps saved drafts distinct from publication. It publishes all staged edits only after
+complete catalog and profile validation. Raw YAML edits may normalize formatting and do not preserve
+comments. Renaming an ID does not automatically rewrite references. Stage those reference edits in
+the same transaction.
 
-> **Authoring-surface supersession — 2026-07-14 (`pi_product_docs_transition`):** Those source
-> gates are now green at the release-candidate endpoint. Schema-2 authoring and execution use
-> `.koni`, provider-neutral agents, repository skills, and the direct Pi path; Codex remains only a
-> schema-1/historical-reader concern. Migration is nevertheless a distinct guarded operator action,
-> not a side effect of building or installing the candidate.
-
-Configure keeps saved drafts distinct from publication and publishes all staged
-edits only after complete catalog/profile validation. Raw YAML edits may
-normalize formatting and do not preserve comments. Renaming an ID does not
-automatically rewrite references; stage those reference edits in the same
-transaction.
+Authoring and execution use `.koni`, provider-neutral agents, repository skills, and the contained
+direct-Pi path.
 
 Validate from automation with:
 
 ```sh
-koni validate-profile .
-koni validate --root .
+koni config validate --root . --json
 ```
-
-The first validates configuration. The second also validates the selected
-run's current graph, tickets, and receipts without deriving new work.
 
 ## Compatibility
 
-The `schema_version: "1.0"` and engine range are required boundaries, but Köni
-is pre-1.0. Pin the executable version in CI and review release notes before
-upgrading. Legacy configuration is handled through the explicit
-[migration flow](migration.md); do not maintain two live layouts.
+`schema_version: '2.0'` and the declared engine range are required boundaries. Public package and
+profile protocols are versioned, and profile upgrades preserve project overlays. Pin the executable
+version in CI and review release notes before upgrading.
 
-> **Compatibility transition in progress — 2026-07-14 (`pi_product_docs_transition`):** The
-> schema-1 compatibility boundary above remains live before cutover. Schema 2 is an explicit,
-> one-way execution migration with retained audit readers, not a dual-runtime compatibility mode.
-> The current Pi implementation is source-in-progress and may not replace installed resources
-> until migration recovery/archival and all runtime security and frozen-fingerprint gates pass.
-
-> **Compatibility supersession — 2026-07-14 (`pi_product_docs_transition`):** Current source has
-> reached that release-candidate endpoint: migration recovery/archival, runtime security, and the
-> locked frozen matrix pass for the documented macOS boundary. There is still no automatic project
-> replacement. Fresh initialization or explicit guarded migration establishes schema 2; historical
-> schema-1 readers remain, active Codex runs archive permanently, and production never falls back
-> to Codex.
-
-## Schema 2 provider-neutral runtime configuration — 2026-07-14
-
-The implemented candidate resolves live project configuration from `.koni/`. Agent files are YAML
-under `.koni/agents/` and express instructions, `model`, `thinking_level`, capabilities, and skills;
-they cannot carry Codex-native config overrides. Existing planning, ticket-worker, Lead, and
-independent-review blocks compile into one typed Pi runtime request, while the generic `ai` stage
-allows a profile to use that same primitive without naming a CLI transport.
-
-The provider is intentionally not configurable in schema 2: it is the pinned Pi
-`openai-codex` provider authenticated through the ChatGPT subscription OAuth path. Rust continues
-to own graph/Git/receipt effects and issues exact tool capabilities; Pi supplies only model loop,
-streaming, structured output, and provider integration. `thinking_level: max` is canonical;
-`ultra` is accepted only while reading a pre-migration historical snapshot.
-
-Use `koni migrate-pi --dry-run` to inspect the field-scoped conversion before publishing. The
-transaction changes known fields such as `codex_agent` → `agent` and `reasoning_effort` →
-`thinking_level`; prompt text and unrelated `.codex` resources are not search-and-replaced.
+Fresh initialization establishes the current schema. Historical readers remain for older snapshots.
+Production never falls back to a retired transport.

@@ -1,16 +1,15 @@
 # Repository Quality Tooling Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use
-> `superpowers:subagent-driven-development` (recommended) or
-> `superpowers:executing-plans` to implement this plan task-by-task.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development`
+> (recommended) or `superpowers:executing-plans` to implement this plan task-by-task.
 
-**Goal:** Add deterministic lint and formatting gates for authored TypeScript, JavaScript,
-Markdown, JSON, YAML, and shell sources without rewriting authenticated or historical bytes.
+**Goal:** Add deterministic lint and formatting gates for authored TypeScript, JavaScript, Markdown,
+JSON, YAML, and shell sources without rewriting authenticated or historical bytes.
 
-**Architecture:** ESLint owns semantic TypeScript/JavaScript correctness. Prettier owns
-non-semantic formatting checks. Root npm scripts compose these gates before the existing workspace
-checks. Authenticated baselines, frozen releases, generated output, archives, and scratch trees are
-explicit exclusions.
+**Architecture:** ESLint owns semantic TypeScript/JavaScript correctness. Prettier owns non-semantic
+formatting checks. Root npm scripts compose these gates before the existing workspace checks.
+Authenticated baselines, frozen releases, generated output, archives, and scratch trees are explicit
+exclusions.
 
 **Tech Stack:** ESLint 10.8, typescript-eslint 8.65, Prettier 3.9, TypeScript 5.9, npm 11.
 
@@ -40,47 +39,23 @@ npm install --save-dev --save-exact eslint@10.8.0 typescript-eslint@8.65.0
 
 **Step 2: Add the flat configuration**
 
-Configure:
+Configure ESLint's recommended rules plus the following type-aware, high-signal rules:
 
 ```js
 import eslint from "@eslint/js";
 import tseslint from "typescript-eslint";
 
-export default tseslint.config(
-  {
-    ignores: [
-      "**/dist/**",
-      "**/coverage/**",
-      "private/**",
-      "packages/*-profile/koni/baseline/**",
-      "packages/core/test/fixtures/profile-prior-releases/**",
-    ],
-  },
-  eslint.configs.recommended,
-  ...tseslint.configs.strictTypeChecked,
-  ...tseslint.configs.stylisticTypeChecked,
-  {
-    files: ["packages/**/*.ts", "scripts/**/*.ts"],
-    languageOptions: {
-      parserOptions: {
-        projectService: true,
-        tsconfigRootDir: import.meta.dirname,
-      },
-    },
-    rules: {
-      "@typescript-eslint/consistent-type-imports": "error",
-      "@typescript-eslint/no-floating-promises": "error",
-      "@typescript-eslint/no-misused-promises": "error",
-      "@typescript-eslint/no-unnecessary-type-assertion": "error",
-      "@typescript-eslint/only-throw-error": "error",
-      "@typescript-eslint/prefer-nullish-coalescing": "off",
-      "@typescript-eslint/restrict-template-expressions": "off",
-    },
-  },
-);
+@typescript-eslint/await-thenable
+@typescript-eslint/consistent-type-imports
+@typescript-eslint/no-floating-promises
+@typescript-eslint/no-misused-promises
+@typescript-eslint/no-unnecessary-type-assertion
+@typescript-eslint/no-unused-vars
 ```
 
-Use narrow overrides for JavaScript test/config files and declaration shims.
+Use narrow overrides for JavaScript, tests, generated output, authenticated baselines, and frozen
+release fixtures. Keep intentional control-character sanitizers and structured error conversion
+explicit in the flat configuration.
 
 **Step 3: Add scripts**
 
@@ -118,9 +93,9 @@ git commit -m "build: add type-aware eslint gate"
 Resolve findings in this order:
 
 1. unhandled promises and async callbacks;
-2. unsafe `any`, unchecked member access, and unsafe returns;
-3. impossible conditions, unnecessary assertions, and unreachable branches;
-4. type-only imports and local naming/structure findings.
+2. impossible conditions, unnecessary assertions, and unreachable branches;
+3. type-only imports and unused local symbols;
+4. JavaScript correctness findings from ESLint's recommended set.
 
 For any behavior-affecting finding, first add or identify a focused failing test. Do not replace an
 unsafe cast with a different cast; validate the boundary.
