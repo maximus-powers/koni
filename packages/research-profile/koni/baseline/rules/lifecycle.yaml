@@ -11,6 +11,12 @@ state_machines:
   terminal_states:
   - closed
   transitions:
+  - id: propose-change-request
+    from:
+    - todo
+    to: proposed
+    actors:
+    - compiler
   - id: approve-change-request
     from:
     - proposed
@@ -66,6 +72,18 @@ state_machines:
     to: todo
     actors:
     - compiler
+  - id: reopen-stale-obligation
+    from:
+    - closed
+    to: todo
+    actors:
+    - compiler
+  - id: interrupt-active
+    from:
+    - in_progress
+    to: todo
+    actors:
+    - compiler
   - id: retire-todo
     from:
     - todo
@@ -80,65 +98,64 @@ state_machines:
     to: closed
     actors:
     - compiler
-- id: gate
-  initial: pending
-  states:
-  - pending
-  - ready
-  - running
-  - complete
-  terminal_states:
-  - complete
-  transitions:
-  - id: inputs-ready
-    from:
-    - pending
-    to: ready
-    actors:
-    - compiler
-  - id: begin
-    from:
-    - ready
-    to: running
-    actors:
-    - compiler
-  - id: record-verdict
-    from:
-    - running
-    to: complete
-    actors:
-    - compiler
-  - id: invalidate-inputs
-    from:
-    - complete
-    to: pending
-    actors:
-    - compiler
-- id: research
+- id: run
   initial: active
   states:
   - active
-  - reporting
+  - paused
   - concluded
+  - stopped
+  - failed
   terminal_states:
   - concluded
+  - stopped
+  - failed
   transitions:
-  - id: conclusions-reviewed
+  - id: pause
     from:
     - active
-    to: reporting
+    to: paused
     actors:
-    - compiler
-  - id: paper-inputs-ready
+    - human
+    - lead
+  - id: resume
     from:
-    - reporting
+    - paused
+    to: active
+    actors:
+    - human
+    - lead
+  - id: conclude
+    from:
+    - active
+    - paused
     to: concluded
     actors:
     - compiler
-  - id: current-input-invalidated
+    - lead
+  - id: stop
     from:
-    - reporting
-    - concluded
-    to: active
+    - active
+    - paused
+    to: stopped
+    actors:
+    - human
+  - id: fail
+    from:
+    - active
+    - paused
+    to: failed
     actors:
     - compiler
+  - id: cleanup-concluded
+    from:
+    - concluded
+    to: stopped
+    actors:
+    - human
+  - id: cleanup-failed
+    from:
+    - failed
+    to: stopped
+    actors:
+    - human

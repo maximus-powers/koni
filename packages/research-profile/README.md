@@ -5,3 +5,11 @@ types, rules, operations, workflows, run types, personas, agent instructions, an
 
 Its extension is a non-authoritative registrar. `@koni/core` verifies the complete bundle before
 materialization and owns every compiler, workflow, state, and Git effect.
+
+Initialize it with `koni init research`. The profile stores each reciprocal scientific fact once and
+exposes inverse traversal through edge policy, avoiding redundant circular claim/experiment
+relationships. Research run types and skills remain part of this broad profile package.
+
+> Release transition (2026-07-18): Research `1.1.0` publishes the reviewed Pi-native defaults and an
+> authenticated, preview-required retirement from the exact official `1.0.11` bundle. Project edits
+> remain overlay-owned. The release never replaces a customized `.koni` tree wholesale.

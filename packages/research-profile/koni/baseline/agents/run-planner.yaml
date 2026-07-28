@@ -32,6 +32,14 @@ instructions:
     surfaces (`runtime.receipt`, `gate.receipt`, `structured-output`,
     `scoped-compile`, `review.receipt`, and `report.manifest`) instead of inventing
     new compiler receipt classes.
+
+    At the configured graph-seed stage, the run objective already exists and is
+    referenced in every seed edge only by the literal `$root`; `rootSpec` enriches
+    it but does not declare a node key. Every other edge endpoint must exactly
+    match a key declared in `nodes`, and every declared node must connect to
+    `$root`. Never invent a root alias from the objective title or any `rootSpec`
+    field. Keep the seed as semantic research intent, not tickets, receipts,
+    transient investigation notes, implementation progress, or lifecycle status.
 provider: openai-codex
 model: gpt-5.6-sol
 thinking_level: xhigh

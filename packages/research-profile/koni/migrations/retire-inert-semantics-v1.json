@@ -1,0 +1,84 @@
+{
+  "protocol": "koni.profile-retirement.v1",
+  "id": "retire-inert-semantics-v1",
+  "operations": [
+    {
+      "file": "actions/research.yaml",
+      "selectors": [
+        {
+          "array_pointer": "/actions",
+          "key": "id",
+          "equals": "compile-full"
+        },
+        {
+          "array_pointer": "/recipe",
+          "key": "primitive",
+          "equals": "rules.evaluate"
+        }
+      ],
+      "pointer": "/max_passes_from"
+    },
+    {
+      "file": "profile.yaml",
+      "pointer": "/change_control/awaiting_approval_state"
+    },
+    {
+      "file": "profile.yaml",
+      "pointer": "/change_control/held_source_state"
+    },
+    {
+      "file": "profile.yaml",
+      "pointer": "/orchestration/lease_stale_seconds"
+    },
+    {
+      "file": "profile.yaml",
+      "pointer": "/orchestration/max_fixpoint_passes"
+    },
+    {
+      "file": "profile.yaml",
+      "pointer": "/orchestration/running"
+    },
+    {
+      "file": "profile.yaml",
+      "pointer": "/storage"
+    },
+    {
+      "file": "rules/lifecycle.yaml",
+      "selectors": [
+        {
+          "array_pointer": "/state_machines",
+          "key": "id",
+          "equals": "gate"
+        }
+      ],
+      "remove_selected_item": true
+    },
+    {
+      "file": "rules/lifecycle.yaml",
+      "selectors": [
+        {
+          "array_pointer": "/state_machines",
+          "key": "id",
+          "equals": "research"
+        }
+      ],
+      "remove_selected_item": true
+    },
+    {
+      "file": "run-types/large.yaml",
+      "pointer": "/planning/graph_seed_stage"
+    },
+    {
+      "file": "run-types/large.yaml",
+      "pointer": "/planning/session_scope"
+    },
+    {
+      "file": "run-types/medium.yaml",
+      "pointer": "/planning/graph_seed_stage"
+    },
+    {
+      "file": "run-types/medium.yaml",
+      "pointer": "/planning/session_scope"
+    }
+  ]
+}

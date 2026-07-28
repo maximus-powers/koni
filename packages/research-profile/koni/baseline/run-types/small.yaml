@@ -14,6 +14,7 @@ instructions:
 profile:
   source: .koni/profile.yaml
 intake:
+  objective_field: goal
   fields:
     goal:
       label: Goal
@@ -69,8 +70,8 @@ questions:
   policy: autonomous
   default_scope: run
 git:
-  branch_template: koni/runs/{{ run.slug }}-{{ run.short_id }}
-  ticket_branch_template: koni/runs/{{ run.id }}/tickets/{{ ticket.id }}
+  branch_template: koni/runs/{{ run.id }}/integration
+  ticket_branch_template: koni/runs/{{ run.id }}/tickets/{{ ticket.id }}/cycles/{{ cycle.id }}
 promotion:
   conflict_operation: resolve-target-integration
 run_card:

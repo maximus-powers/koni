@@ -50,9 +50,15 @@ describe("research profile registrar", () => {
       path.resolve(import.meta.dirname, "../koni/baseline/graph/nodes.yaml"),
       "utf8",
     );
-    const document = YAML.parse(source) as { node_types: Array<{ id: string; description?: string }> };
+    const document = YAML.parse(source) as {
+      node_types: Array<{ id: string; description?: string }>;
+    };
     expect(document.node_types.length).toBeGreaterThan(0);
-    expect(document.node_types.filter(({ description }) => typeof description !== "string" || description.trim() === "")).toEqual([]);
+    expect(
+      document.node_types.filter(
+        ({ description }) => typeof description !== "string" || description.trim() === "",
+      ),
+    ).toEqual([]);
   });
 
   it("stores each reciprocal research fact once through canonical bidirectional edges", async () => {
@@ -69,18 +75,44 @@ describe("research profile registrar", () => {
         inverse?: string;
       }>;
     };
-    expect(document.edge_types).toEqual(expect.arrayContaining([
-      expect.objectContaining({ source: "experiment", relation: "target_claims", targets: ["claim"], bidirectional: true, inverse: "tested_by" }),
-      expect.objectContaining({ source: "ablation", relation: "target_claims", targets: ["claim"], bidirectional: true, inverse: "tested_by" }),
-      expect.objectContaining({ source: "gate", relation: "applies_to", bidirectional: true, inverse: "gates" }),
-    ]));
-    expect(document.edge_types.some(({ relation }) => relation === "tested_by" || relation === "gates")).toBe(false);
+    expect(document.edge_types).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: "experiment",
+          relation: "target_claims",
+          targets: ["claim"],
+          bidirectional: true,
+          inverse: "tested_by",
+        }),
+        expect.objectContaining({
+          source: "ablation",
+          relation: "target_claims",
+          targets: ["claim"],
+          bidirectional: true,
+          inverse: "tested_by",
+        }),
+        expect.objectContaining({
+          source: "gate",
+          relation: "applies_to",
+          bidirectional: true,
+          inverse: "gates",
+        }),
+      ]),
+    );
+    expect(
+      document.edge_types.some(({ relation }) => relation === "tested_by" || relation === "gates"),
+    ).toBe(false);
 
     const instructions = await readFile(
-      path.resolve(import.meta.dirname, "../koni/baseline/resources/skills/model-koni-work/references/empirical-research.md"),
+      path.resolve(
+        import.meta.dirname,
+        "../koni/baseline/resources/skills/model-koni-work/references/empirical-research.md",
+      ),
       "utf8",
     );
-    expect(instructions).toContain("Store one canonical `target_claims` fact with inverse `tested_by`");
+    expect(instructions).toContain(
+      "Store one canonical `target_claims` fact with inverse `tested_by`",
+    );
     expect(instructions).toContain("one canonical `gate.applies_to` fact with inverse `gates`");
   });
 
@@ -90,13 +122,35 @@ describe("research profile registrar", () => {
       "utf8",
     );
     const document = YAML.parse(source) as {
-      bindings: Array<{ enabled: boolean; select?: { skills?: unknown; prompts?: unknown; tools?: unknown } }>;
+      bindings: Array<{
+        enabled: boolean;
+        select?: { skills?: unknown; prompts?: unknown; tools?: unknown };
+      }>;
     };
     expect(document.bindings.length).toBeGreaterThan(0);
-    expect(document.bindings.every((binding) =>
-      binding.enabled === false &&
-      Array.isArray(binding.select?.skills) &&
-      Array.isArray(binding.select?.prompts) &&
-      Array.isArray(binding.select?.tools))).toBe(true);
+    expect(
+      document.bindings.every(
+        (binding) =>
+          binding.enabled === false &&
+          Array.isArray(binding.select?.skills) &&
+          Array.isArray(binding.select?.prompts) &&
+          Array.isArray(binding.select?.tools),
+      ),
+    ).toBe(true);
+  });
+
+  it("authorizes only the authenticated 1.0.11 release for inert-semantics retirement", async () => {
+    const source = await readFile(
+      path.resolve(import.meta.dirname, "../koni/profile-manifest.json"),
+      "utf8",
+    );
+    const manifest = JSON.parse(source) as {
+      migrations: Array<{ id: string; from_bundle_sha256: string[] }>;
+    };
+    const retirement = manifest.migrations.find(({ id }) => id === "retire-inert-semantics-v1");
+
+    expect(retirement?.from_bundle_sha256).toEqual([
+      "sha256:1bc8bdb64934ccd475f50acad5b22a7b1b6f7e168a748ecd91e234be76126c60",
+    ]);
   });
 });

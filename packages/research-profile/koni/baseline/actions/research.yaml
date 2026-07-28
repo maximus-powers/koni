@@ -20,7 +20,6 @@ actions:
   - primitive: project.validate
   - primitive: rules.evaluate
     mode: full_fixpoint
-    max_passes_from: orchestration.max_fixpoint_passes
     paused_mode: render_only
   - primitive: tickets.reconcile
     retire_obsolete: true
@@ -79,7 +78,7 @@ actions:
   - id: lead
     primitive: agent.spawn
     persona: lead
-    prompt: Operate the configured research Lead pull loop until compiler-verifiable terminal state.
+    prompt: Perform one bounded research orchestration-readiness judgment. Review the compiled ticket graph for unresolved material ambiguity or unsafe assumptions, ask only policy-allowed questions, then submit proceed or blocked with a concise rationale. Never poll, schedule deterministic work, or spawn workers.
     transport: compiler_broker
     duplicate_policy: reject
   - primitive: event.append

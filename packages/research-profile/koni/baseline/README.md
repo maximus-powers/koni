@@ -6,12 +6,12 @@ receipts, and reports directly inspectable and supports deterministic
 compatibility fixtures.
 
 The canonical `project.yaml` exposes three standalone run types. Small uses no
-agent planning pass and one worker at a time; Medium (the default) uses one
-combined plan and three workers; Large uses separate architecture, risk, and
+agent planning pass and one worker at a time. Medium (the default) uses one
+combined plan and three workers. Large uses separate architecture, risk, and
 verification plans, five workers, and independent review. Model and reasoning
 choices live in those run-type documents, while all three share this one
 research profile and its personas retain prompts and sandbox boundaries. Every
-run still requires explicit approval; afterward the run type's automatic
+run still requires explicit approval. Afterward the run type's automatic
 stages are supervised until the run concludes or reaches an explicit
 question/failure boundary. After ticket orchestration, every size synchronizes
 the current target branch into the isolated run, verifies the composed result,
@@ -20,7 +20,7 @@ authorization. A configured graph-forbidden recovery workflow resolves target
 integration conflicts without rewriting research semantics.
 
 Gate applicability also has one canonical stored direction. Authors persist
-only `gate.applies_to`; its bidirectional `gates` inverse is a compiler-derived
+only `gate.applies_to`. Its bidirectional `gates` inverse is a compiler-derived
 view for constrained nodes, never a second reciprocal fact.
 
 ## Modules
@@ -40,19 +40,24 @@ view for constrained nodes, never a second reciprocal fact.
 - `personas/`, `reports/`, and `cockpit/` configure worker prompts,
   deterministic ledgers, and the human projection.
 
+Only the durable ticket and run machines live in this module. Gate policies and research terminal
+derivations remain configured in their compiler-owned domains. The authenticated
+`retire-inert-semantics-v1` profile upgrade removes older inert declarations when updating an
+existing managed project.
+
 ## Experiment ontology
 
 `experiment` is reserved for a planned empirical intervention or observation
 that can later produce a runtime receipt. The node contract in
 `graph/nodes.yaml` requires an `empirical_mode`, prospective
-`execution_protocol`, and runtime `observable_outcome`; its configurable
+`execution_protocol`, and runtime `observable_outcome`. Its configurable
 ontology annotation also names excluded work and the nodes or ticket structure
 that should own it. Static proof, source inspection, traceability mapping,
 documentation audits, no-write review, and other unexecuted verification belong
 in methods, gates, prerequisites, or review work instead. Workflow output and
 review contracts repeat this boundary so creative agents enforce its meaning,
 while the generic field/enum validator enforces its structural markers without
-research-specific Rust branches.
+research-specific engine branches.
 
 ## Evidence ontology
 
@@ -61,7 +66,7 @@ scope, falsification path, evidence standard, and threats before experiments
 are designed. An evidence atom must cite exact current runtime receipts and
 carry a nonempty observed scope and limitations. It also declares the profile's
 epistemic boundary as `evidence_basis: empirical_runtime` and
-`inference_scope: bounded_empirical`; `supported` therefore means supported
+`inference_scope: bounded_empirical`. `supported` therefore means supported
 within that bounded scope. Static reasoning, proof, source inspection,
 traceability, and review output may be represented as methods, gates,
 prerequisites, or review controls, but they are not promotable scientific
@@ -72,7 +77,7 @@ promotion or acceptance fields. A configured, hash-bound passed review causes
 the compiler to apply those fields atomically, and configured receipt coverage
 requires every source run's latest receipt and explicit disposition before that
 effect is allowed. A theoretical-research profile may configure different
-evidence-basis and inference-scope values; the engine contains no
+evidence-basis and inference-scope values. The engine contains no
 research-specific proof semantics.
 
 ## Stable profile interfaces
@@ -93,8 +98,8 @@ Command checks never search the checkout for something executable. The gate
 verifier uses `research-capability-gates` to select one deterministic winner
 from the configured active asset pool by exact capability name, full SemVer
 compatibility, ordered ranks, and an ID tie break. The active ticket must
-authorize that winner plus its evaluation/applicability context and read paths;
-an unscoped winner is a contract error and never causes fallback. The scientific
+authorize that winner plus its evaluation/applicability context and read paths.
+An unscoped winner is a contract error and never causes fallback. The scientific
 runtime resolves from the virtual ticket value, which combines the ticket
 record with its single run target's typed contract. These sources are profile
 IR, participate in the profile hash, and cannot broaden ticket authority.
@@ -104,15 +109,15 @@ repository-owned read-only `composed_verification_command`, protocol, required
 measurement keys, concrete asset entrypoints, scientific input bindings, and
 optionally a narrow project-relative `output_root` with a `result_path` beneath
 it. The side-effecting empirical command produces current causal evidence but
-declares `composed_replay: never`; Koni never reruns it implicitly after target
+declares `composed_replay: never`. Koni never reruns it implicitly after target
 synchronization. The integrity command runs after the experiment and is the
 only scientific command replayed against the composed tree. It must validate
 the current inputs and any durable result artifacts without repeating the
 intervention or observation. Omitting `output_root` is the stdout-only contract: `result_path`
 must be absent and the typed result's `artifacts` array must be empty. With an
 output root, a configured result file replaces stdout as the result source and
-every result-declared artifact—either a path string or an object carrying
-`path`—must resolve beneath that same root to a regular file created or
+every result-declared artifact, either a path string or an object carrying
+`path`, must resolve beneath that same root to a regular file created or
 content-changed by the exact command attempt. Unchanged preexisting files,
 symlinks, transient caches, and scientific input paths are not produced
 artifacts. The compiler projects `required_measurements` from the same bound
@@ -137,27 +142,13 @@ runtime surfaces that exact recovery for a paused, clean tracked run. Current
 Core has no generic `koni rollback` CLI: pause the run, inspect its durable
 evidence, and use only an exact forward-compensation action presented by the
 control center. The transaction archives causal graph/ticket/worktree state
-and publishes a new forward commit; it never rewinds the integration ref or
+and publishes a new forward commit. It never rewinds the integration ref or
 erases receipts and reports.
 
-> **Pi-native command supersession — 2026-07-16:** The frozen Rust profile advised previewing
-> `koni rollback <commit-or-ticket> --reason <reason> --dry-run`. That command is retained here as
-> migration history, not a current alias; do not invoke it against the Pi package line.
-
-## Validation and parity
+## Validation
 
 Validate the immutable profile IR with:
 
 ```sh
 koni config validate --root . --json
 ```
-
-> **Pi-native validation supersession — 2026-07-16:** The frozen Rust source tree used
-> `cargo run -p koni-cli -- validate-profile profiles/research`. Installed projects validate the
-> complete authenticated effective profile through the current command above; the Cargo form is
-> retained only as oracle history.
-
-The differential corpus in `reference/parity/` defines normalization and seven
-behavior strata. A change to this profile is compatible only when those
-normalized lifecycle, state, receipt, and report outcomes remain equivalent or
-the profile version and migration policy are intentionally advanced.

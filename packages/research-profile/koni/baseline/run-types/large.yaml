@@ -19,8 +19,6 @@ instructions:
     review rather than treating them as promotable evidence or inventing
     receipt classes.
 planning:
-  session_scope: run
-  graph_seed_stage: verification-plan
   max_repository_tool_calls: 48
   token_budget:
     metric: new_tokens
@@ -30,6 +28,7 @@ planning:
 profile:
   source: .koni/profile.yaml
 intake:
+  objective_field: goal
   fields:
     goal:
       label: Goal
@@ -113,8 +112,8 @@ questions:
   policy: interactive
   default_scope: run
 git:
-  branch_template: koni/runs/{{ run.slug }}-{{ run.short_id }}
-  ticket_branch_template: koni/runs/{{ run.id }}/tickets/{{ ticket.id }}
+  branch_template: koni/runs/{{ run.id }}/integration
+  ticket_branch_template: koni/runs/{{ run.id }}/tickets/{{ ticket.id }}/cycles/{{ cycle.id }}
 promotion:
   conflict_operation: resolve-target-integration
 run_card:

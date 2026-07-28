@@ -2,12 +2,12 @@
   "protocol": "koni.profile-package.v1",
   "package": {
     "name": "@koni/research-profile",
-    "version": "1.0.11"
+    "version": "1.1.0"
   },
   "profile": {
     "id": "research",
     "display_name": "Research",
-    "version": "1.0.11",
+    "version": "1.1.0",
     "lineage": "koni.research"
   },
   "compatibility": {
@@ -20,14 +20,14 @@
     "files": [
       {
         "path": "README.md",
-        "sha256": "sha256:f3c91fc974f9504f3de236f8fbf27b254ff8e105a3caca24a15d4cdfb00460e3",
-        "size_bytes": 9259,
+        "sha256": "sha256:38f4efce82e761b84394309541ed9d1f120adcfdb6a3959a29e46b4743437582",
+        "size_bytes": 8646,
         "kind": "other"
       },
       {
         "path": "actions/research.yaml",
-        "sha256": "sha256:508c42afd344f1c4c40337f469841b2ddd0c23744a65e1a8f701a3bafa79cd6b",
-        "size_bytes": 11643,
+        "sha256": "sha256:0627c912defa4c438c9bfeaeb58f8b2875603f0bd2dedaebceb50430edcd2ba8",
+        "size_bytes": 11803,
         "kind": "config"
       },
       {
@@ -74,8 +74,8 @@
       },
       {
         "path": "agents/lead.yaml",
-        "sha256": "sha256:e03e21349eaf2b60586198cb8439e46a1385f0253ac9368908444468b77c8a64",
-        "size_bytes": 3421,
+        "sha256": "sha256:84dc2362f6cc1de1c763203217102209d12063be224b636024f8dbb4a7472139",
+        "size_bytes": 1737,
         "kind": "agent"
       },
       {
@@ -104,8 +104,8 @@
       },
       {
         "path": "agents/run-planner.yaml",
-        "sha256": "sha256:a152382d7335d75cda807347b38c61dc79462cabbbf48941e281c10403f960b4",
-        "size_bytes": 2213,
+        "sha256": "sha256:a904b87e16fca9acdf15c40036b046e66a2065e72d2731a00faab2c15c2a426b",
+        "size_bytes": 2773,
         "kind": "agent"
       },
       {
@@ -146,8 +146,8 @@
       },
       {
         "path": "profile.yaml",
-        "sha256": "sha256:319ecdab13c1345a6f78754d0e373c3149912b7614152deba29d2d3aba17c23d",
-        "size_bytes": 1906,
+        "sha256": "sha256:02c945a2275896a88e9d885e0733ad770366876d8ca128eaae0616be3eef1ade",
+        "size_bytes": 1358,
         "kind": "config"
       },
       {
@@ -170,8 +170,8 @@
       },
       {
         "path": "resources/skills/configure-koni/SKILL.md",
-        "sha256": "sha256:06e8023a18ba7b9dadfb34d12b7d7f16776e3fd2eeecc814c7144157efd58335",
-        "size_bytes": 7788,
+        "sha256": "sha256:bf7e2e89f87761d18af976f68d5bfaf1d7f3925c8631b88e82f0d447c405fb00",
+        "size_bytes": 7938,
         "kind": "skill"
       },
       {
@@ -188,8 +188,8 @@
       },
       {
         "path": "resources/skills/configure-koni/references/configuration-layers.md",
-        "sha256": "sha256:d2d158c31ba3cc0200fb6248c4ffc5a0bea7d9af13cfe6a771080efcf84d261c",
-        "size_bytes": 8130,
+        "sha256": "sha256:3a02cc2310254195e997e1b42a21f2e7f6ed9167f4a012323cdf0abcac10e47e",
+        "size_bytes": 8286,
         "kind": "skill"
       },
       {
@@ -200,8 +200,8 @@
       },
       {
         "path": "resources/skills/configure-koni/references/run-types.md",
-        "sha256": "sha256:d97a973f84f69afeb8ba2757fb2492f0111cde089c0e0ac0ccb521be6ef48ad8",
-        "size_bytes": 5103,
+        "sha256": "sha256:b015b350a2b3c546723ca2dfff4039a2eb91ce7355f7d5a44fcbfd7a953b896b",
+        "size_bytes": 5750,
         "kind": "skill"
       },
       {
@@ -248,8 +248,8 @@
       },
       {
         "path": "resources/skills/operate-koni/SKILL.md",
-        "sha256": "sha256:e364660d36d5a4e8e399edaf3f437fc05709ad9e4069284c94bc85915e220912",
-        "size_bytes": 4427,
+        "sha256": "sha256:bfaa0b95a075f77542874d99b475b4a39c79575b6ced9eedab84d348513fa6e2",
+        "size_bytes": 4618,
         "kind": "skill"
       },
       {
@@ -272,14 +272,14 @@
       },
       {
         "path": "resources/skills/operate-koni/references/run-lifecycle.md",
-        "sha256": "sha256:0c295fa0c0e2e6268236a6371d4b8ce307b47f550ec8473dd79f2eec99a4bca2",
-        "size_bytes": 3688,
+        "sha256": "sha256:0f2051857583d9c1b930a57cd4fa53099bc9781b98d2e5a0ba200265a041be66",
+        "size_bytes": 3329,
         "kind": "skill"
       },
       {
         "path": "rules/lifecycle.yaml",
-        "sha256": "sha256:2ee4f133994f5e463d4c4ba9c271fa574b5fc1f5796d17580347f9eaff83dd2b",
-        "size_bytes": 2162,
+        "sha256": "sha256:fe24fc3874f84a0fc5844dcc4d6fe3cea5f726f74d5b6d8ca5f79530396b2c64",
+        "size_bytes": 2329,
         "kind": "config"
       },
       {
@@ -290,20 +290,20 @@
       },
       {
         "path": "run-types/large.yaml",
-        "sha256": "sha256:bd3cc799e2b46c5c3bdbbc1a83d035cf496917f65f0e257f0021c0f4d59c7560",
-        "size_bytes": 4586,
+        "sha256": "sha256:964a096f0014d8951d6ed0da0d3230b1aa87ec09825985fa4df791c7cc114661",
+        "size_bytes": 4564,
         "kind": "config"
       },
       {
         "path": "run-types/medium.yaml",
-        "sha256": "sha256:085405434a1deca4942a658e532aeb8785399d28a7a4c1fa715a91aa8128feb5",
-        "size_bytes": 3640,
+        "sha256": "sha256:b8d13a985f45a8ed9249c7ba39f689c8a246e910e84ec7fbf436d093cd01c3a7",
+        "size_bytes": 3622,
         "kind": "config"
       },
       {
         "path": "run-types/small.yaml",
-        "sha256": "sha256:5b8704ee2023a717ef8faba51b58725ef5402c110de114c9981890d5d9fbc8d8",
-        "size_bytes": 2536,
+        "sha256": "sha256:7bc39dfab9a5109a3f4d44546bc67676ee0e891e4b37be25ccb5bffbfb75fe55",
+        "size_bytes": 2573,
         "kind": "config"
       },
       {
@@ -314,5 +314,17 @@
       }
     ]
   },
-  "bundle_sha256": "sha256:596591fd6123dd773100297276deb6c1ea938bf9f9629ef432f4572c26a6fe95"
+  "migrations": [
+    {
+      "id": "retire-inert-semantics-v1",
+      "kind": "retire_yaml_fields",
+      "from_profile_range": ">=1.0.11 <1.1.0",
+      "from_bundle_sha256": [
+        "sha256:1bc8bdb64934ccd475f50acad5b22a7b1b6f7e168a748ecd91e234be76126c60"
+      ],
+      "path": "migrations/retire-inert-semantics-v1.json",
+      "sha256": "sha256:c807436b04f7d44ea65cce5cfa6ed8cba3c4e5d8d571034f7fecc25c9fd117a5"
+    }
+  ],
+  "bundle_sha256": "sha256:e75e482a20d39659782edb8b0a23f3b0fc9cce27a6d97695e935e9efdd121153"
 }

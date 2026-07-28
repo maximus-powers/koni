@@ -8,6 +8,11 @@ current and legacy fields.
 
 > **Evolving to — Software default 0.4.0 (2026-07-14):** Complete standalone peers remain the safest default for independent complexity envelopes such as Small, Medium, and Large. A focused intent preset may instead inherit one stable parent through explicit JSON-Pointer overrides when the intent should receive future parent fixes. The bundled `new-feature` and `bug-fix` presets inherit Medium and override only intake, planning language, and intentional parallelism.
 
+> **Shared-profile clarification — 2026-07-17:** This reference is published for both bundled
+> profiles. Coding includes the focused `new-feature` and `bug-fix` presets described above;
+> Research intentionally includes only Small, Medium, and Large. A project-owned profile may add
+> intent presets with the same explicit inheritance rules.
+
 ## Required structure
 
 ```yaml
@@ -21,6 +26,7 @@ instructions:
 profile:
   source: .koni/profile.yaml
 intake:
+  objective_field: goal
   fields:
     goal:
       label: Goal
@@ -56,16 +62,17 @@ questions:
   policy: high_impact_only
   default_scope: run
 git:
-  branch_template: "koni/runs/{{ run.slug }}-{{ run.short_id }}"
-  ticket_branch_template: "koni/runs/{{ run.id }}/tickets/{{ ticket.id }}"
+  # Keep this on a literal sibling of the ticket namespace to avoid Git leaf/prefix collisions.
+  branch_template: "koni/runs/{{ run.id }}/integration"
+  ticket_branch_template: "koni/runs/{{ run.id }}/tickets/{{ ticket.id }}/cycles/{{ cycle.id }}"
 run_card:
   sections: [goal, pipeline, graph, tickets, checks, report]
 agents:
   roles:
-    planner: {model: gpt-5.6-sol, thinking_level: xhigh}
+    planner: {model: gpt-5.6-sol, thinking_level: max}
     lead: {model: gpt-5.6-sol, thinking_level: xhigh}
     ticket_worker: {model: gpt-5.6-terra, thinking_level: high}
-    reviewer: {model: gpt-5.6-terra, thinking_level: xhigh}
+    reviewer: {model: gpt-5.6-sol, thinking_level: max}
   personas: {}
 orchestration:
   auto_start: true
@@ -79,11 +86,11 @@ promotion:
 
 ## Authoring rules
 
-- Include every field exactly once in `intake.order`. Supported field types are `string`, `text`, `boolean`, `integer`, `number`, `choice`, `multi_choice`, `path`, and `json`. Give choice types a nonempty duplicate-free `options` list.
+- Name one required `string` or `text` field explicitly with `intake.objective_field`. Include every field exactly once in `intake.order`. Supported field types are `string`, `text`, `boolean`, `integer`, `number`, `choice`, `multi_choice`, `path`, and `json`. Give choice types a nonempty duplicate-free `options` list.
 - Include every stage exactly once in `pipeline.order`. Use canonical `action`, `planning`, `approval`, `initialize`, `orchestration`, `checkpoint`, `target_sync`, `promotion`, `manual`, `handoff`, or `external_loop` kinds.
 - Place planning stages only in the safe pre-approval prefix after compiler-owned intake and before an ordinary action or manual boundary.
 - Use `interactive`, `high_impact_only`, or `autonomous` for question policy. Use the run scope unless a project explicitly needs ticket-scoped intake decisions.
-- Include `run.id` or `run.short_id` in run branches. Include `ticket.id` in ticket branches.
+- Include `run.id`, or both `run.slug` and `run.short_id`, in run branches. Ticket branches must include `run.id`, `ticket.id`, and `cycle.id` so retries and reissues cannot collide.
 - Resolve model policy by intent: stage override, run-type persona override, run-type role, profile persona, then provider-neutral agent/default policy.
 - Set positive parallelism. Keep it low for narrow changes and increase it only when ticket scopes can be disjoint.
 - Preserve explicit approval before automatic execution.
