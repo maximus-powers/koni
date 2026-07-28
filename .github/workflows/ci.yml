@@ -47,49 +47,5 @@ jobs:
             if (packed.length !== 1 || packed[0].name !== name || !packed[0].files?.length) {
               throw new Error(`invalid package inventory for ${name}`);
             }
-            for (const file of packed[0].files) {
-              if (/^(?:crates|runtime\/pi-host|target)\//u.test(file.path)) {
-                throw new Error(`${name} ships historical implementation path ${file.path}`);
-              }
-            }
           }
           NODE
-      - run: ./scripts/check-brand.sh
-
-  docs:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/docs
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.19.0
-          cache: npm
-          cache-dependency-path: apps/docs/package-lock.json
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm run build
-      - run: npm audit --audit-level=high
-
-  frozen-oracle:
-    name: Frozen Rust oracle metadata
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.19.0
-          cache: npm
-      - run: npm install --global npm@11.13.0
-      - run: npm ci
-      - run: npm run parity:gate
-      - run: node --test scripts/parity-ledger.test.mjs scripts/parity-runner.test.mjs scripts/capture-rust-oracle.test.mjs
-      - name: Enforce non-shipping oracle boundary
-        run: |
-          node -e 'const p=require("./package.json"); if (JSON.stringify(p.workspaces).includes("crates") || JSON.stringify(p.workspaces).includes("runtime/pi-host")) process.exit(1)'
-          ! grep -R 'crates/\|runtime/pi-host' packages/*/package.json

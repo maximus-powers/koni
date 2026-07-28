@@ -4,14 +4,14 @@ import path from "node:path";
 
 const COMPLETION = ".koni-package-bundle.json";
 const PROTOCOL = "koni.dev-package-bundle.v1";
-const EXPECTED_PACKAGES = [
-  "@koni/core",
-  "@koni/coding-profile",
-  "@koni/research-profile",
-];
+const EXPECTED_PACKAGES = ["@koni/core", "@koni/coding-profile", "@koni/research-profile"];
 
 const [command, rootInput, bundleId] = process.argv.slice(2);
-if ((command !== "seal" && command !== "verify") || !rootInput || !/^[a-f0-9]{64}$/u.test(bundleId ?? "")) {
+if (
+  (command !== "seal" && command !== "verify") ||
+  !rootInput ||
+  !/^[a-f0-9]{64}$/u.test(bundleId ?? "")
+) {
   throw new Error("usage: dev-package-bundle.mjs seal|verify PACKAGE_ROOT SHA256");
 }
 const root = path.resolve(rootInput);
@@ -54,13 +54,15 @@ async function verify(root, bundleId) {
     manifest?.protocol !== PROTOCOL ||
     manifest.bundle_id !== bundleId ||
     !/^[a-f0-9]{64}$/u.test(manifest.tree_sha256 ?? "")
-  ) throw new Error("package completion manifest identity is invalid");
+  )
+    throw new Error("package completion manifest identity is invalid");
   const packages = await validatePackages(root);
   if (JSON.stringify(packages) !== JSON.stringify(manifest.packages)) {
     throw new Error("package completion manifest does not match the installed package identities");
   }
   const treeSha256 = await hashTree(root);
-  if (treeSha256 !== manifest.tree_sha256) throw new Error("package root content differs from its completion manifest");
+  if (treeSha256 !== manifest.tree_sha256)
+    throw new Error("package root content differs from its completion manifest");
 }
 
 async function validatePackages(root) {
@@ -74,7 +76,11 @@ async function validatePackages(root) {
       throw new Error(`${name} has an unsafe package manifest`);
     }
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-    if (manifest.name !== name || typeof manifest.version !== "string" || manifest.version.length === 0) {
+    if (
+      manifest.name !== name ||
+      typeof manifest.version !== "string" ||
+      manifest.version.length === 0
+    ) {
       throw new Error(`package root identity mismatch for ${name}`);
     }
     packages.push({ name, version: manifest.version });
@@ -107,11 +113,15 @@ async function collectFiles(root, current = root) {
     const metadata = await lstat(absolute);
     if (metadata.isSymbolicLink()) throw new Error(`package root contains symlink: ${relative}`);
     if (metadata.isDirectory()) {
-      result.push(...await collectFiles(root, absolute));
+      result.push(...(await collectFiles(root, absolute)));
       continue;
     }
     if (!metadata.isFile()) throw new Error(`package root contains unsupported entry: ${relative}`);
-    if (/node_modules\/(?:@earendil-works\/pi-(?:agent-core|ai|coding-agent|tui)|typebox)(?:\/|$)/u.test(relative)) {
+    if (
+      /node_modules\/(?:@earendil-works\/pi-(?:agent-core|ai|coding-agent|tui)|typebox)(?:\/|$)/u.test(
+        relative,
+      )
+    ) {
       throw new Error(`package root contains Pi-owned host peer: ${relative}`);
     }
     result.push(relative);

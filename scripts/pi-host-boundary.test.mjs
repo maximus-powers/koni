@@ -28,13 +28,15 @@ function fixture() {
         "@earendil-works/pi-tui": "*",
         typebox: "*",
       },
-      peerDependenciesMeta: Object.fromEntries([
-        "@earendil-works/pi-agent-core",
-        "@earendil-works/pi-ai",
-        "@earendil-works/pi-coding-agent",
-        "@earendil-works/pi-tui",
-        "typebox",
-      ].map((name) => [name, { optional: true }])),
+      peerDependenciesMeta: Object.fromEntries(
+        [
+          "@earendil-works/pi-agent-core",
+          "@earendil-works/pi-ai",
+          "@earendil-works/pi-coding-agent",
+          "@earendil-works/pi-tui",
+          "typebox",
+        ].map((name) => [name, { optional: true }]),
+      ),
     },
     { name: "@koni/coding-profile" },
     { name: "@koni/research-profile" },

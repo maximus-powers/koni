@@ -1,50 +1,51 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import {
-  copyFile,
-  lstat,
-  mkdir,
-  readFile,
-  readdir,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { lstat, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const ORACLE_COMMIT = "fcc425e51114bcedb9aeae44d6e8c8418a525e6b";
-export const ORACLE_TAG = "rust-oracle-baseline";
 export const PROFILE_PACKAGE_PROTOCOL = "koni.profile-package.v1";
 
 export const PROFILE_DEFINITIONS = Object.freeze([
   Object.freeze({
-    captureDirectory: "coding",
     packageDirectory: "coding-profile",
     packageName: "@koni/coding-profile",
-    packageVersion: "0.7.0",
+    packageVersion: "0.8.0",
     profileId: "software",
     displayName: "Coding",
-    profileVersion: "0.7.0",
+    profileVersion: "0.8.0",
     lineage: "koni.software",
-    expectedFileCount: 46,
+    expectedFileCount: 47,
+    migration: Object.freeze({
+      id: "retire-inert-semantics-v1",
+      kind: "retire_yaml_fields",
+      fromProfileRange: ">=0.7.0 <0.8.0",
+      fromBundleSha256: Object.freeze([
+        "sha256:4e955f7fb5a6bbd58542f395471d2e3f1c87364840abd218f973b8f62a5c0c7e",
+      ]),
+      path: "migrations/retire-inert-semantics-v1.json",
+    }),
   }),
   Object.freeze({
-    captureDirectory: "research",
     packageDirectory: "research-profile",
     packageName: "@koni/research-profile",
-    packageVersion: "1.0.11",
+    packageVersion: "1.1.0",
     profileId: "research",
     displayName: "Research",
-    profileVersion: "1.0.11",
+    profileVersion: "1.1.0",
     lineage: "koni.research",
     expectedFileCount: 49,
+    migration: Object.freeze({
+      id: "retire-inert-semantics-v1",
+      kind: "retire_yaml_fields",
+      fromProfileRange: ">=1.0.11 <1.1.0",
+      fromBundleSha256: Object.freeze([
+        "sha256:1bc8bdb64934ccd475f50acad5b22a7b1b6f7e168a748ecd91e234be76126c60",
+      ]),
+      path: "migrations/retire-inert-semantics-v1.json",
+    }),
   }),
-]);
-
-const GENERATED_ORACLE_FILES = new Set([
-  "migration-receipt.json",
-  "resource-manifest.json",
 ]);
 
 const COMPATIBILITY = Object.freeze({
@@ -98,18 +99,6 @@ async function collectRegularFiles(root, current = root) {
   return files;
 }
 
-async function copyTree(sourceRoot, destinationRoot, shouldInclude = () => true) {
-  for (const source of await collectRegularFiles(sourceRoot)) {
-    const relativePath = portablePath(relative(sourceRoot, source));
-    if (!shouldInclude(relativePath)) {
-      continue;
-    }
-    const destination = join(destinationRoot, ...relativePath.split("/"));
-    await mkdir(dirname(destination), { recursive: true });
-    await copyFile(source, destination);
-  }
-}
-
 export async function inspectBaseline(baselineRoot) {
   const files = [];
   for (const absolute of await collectRegularFiles(baselineRoot)) {
@@ -126,7 +115,7 @@ export async function inspectBaseline(baselineRoot) {
   return files;
 }
 
-export function digestBaseline(files) {
+export function digestBaseline(files, migrations = []) {
   const hash = createHash("sha256");
   for (const file of files) {
     hash.update(file.path, "utf8");
@@ -138,10 +127,15 @@ export function digestBaseline(files) {
     hash.update(file.kind, "utf8");
     hash.update("\0");
   }
+  if (migrations.length > 0) {
+    hash.update("koni.profile-migrations.v1\0", "utf8");
+    const records = migrations.map((migration) => canonicalJson(migration)).sort(compareUtf8);
+    for (const record of records) hash.update(`${record}\0`, "utf8");
+  }
   return `sha256:${hash.digest("hex")}`;
 }
 
-function manifestFor(definition, files) {
+function manifestFor(definition, files, migrations = []) {
   return {
     protocol: PROFILE_PACKAGE_PROTOCOL,
     package: {
@@ -159,99 +153,86 @@ function manifestFor(definition, files) {
       root: "./baseline",
       files,
     },
-    bundle_sha256: digestBaseline(files),
+    ...(migrations.length === 0 ? {} : { migrations }),
+    bundle_sha256: digestBaseline(files, migrations),
   };
 }
 
-async function validateCapturedProfile(definition, capturedConfigRoot) {
-  const profile = await readFile(join(capturedConfigRoot, "profile.yaml"), "utf8");
+function compareUtf8(left, right) {
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
+}
+
+function canonicalJson(value) {
+  if (value === null || typeof value === "boolean" || typeof value === "string")
+    return JSON.stringify(value);
+  if (typeof value === "number" && Number.isFinite(value)) return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (typeof value !== "object")
+    throw new Error("profile migration descriptor is not canonical JSON data");
+  const keys = Object.keys(value).sort(compareUtf8);
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+}
+
+async function releaseMigrations(packageRoot, definition) {
+  const migration = definition.migration;
+  if (migration === undefined) return [];
+  const resource = await readFile(join(packageRoot, "koni", migration.path));
+  return [
+    {
+      id: migration.id,
+      kind: migration.kind,
+      from_profile_range: migration.fromProfileRange,
+      from_bundle_sha256: [...migration.fromBundleSha256].sort(compareUtf8),
+      path: migration.path,
+      sha256: sha256(resource),
+    },
+  ];
+}
+
+async function validateBaselineProfile(definition, configRoot) {
+  const profile = await readFile(join(configRoot, "profile.yaml"), "utf8");
   if (!/^schema_version: ['"]2\.0['"]/m.test(profile)) {
-    throw new Error(`${definition.profileId} oracle capture is not schema 2`);
+    throw new Error(`${definition.profileId} baseline is not schema 2`);
   }
   if (!profile.includes(`  id: ${definition.profileId}`)) {
-    throw new Error(`${definition.profileId} oracle capture has a different profile id`);
+    throw new Error(`${definition.profileId} baseline has a different profile id`);
   }
   if (!profile.includes(`  version: ${definition.profileVersion}`)) {
-    throw new Error(`${definition.profileId} oracle capture has a different profile version`);
+    throw new Error(`${definition.profileId} baseline has a different profile version`);
   }
 }
 
-export async function captureProfileBundle(captureRoot, definition) {
-  const capturedProject = join(captureRoot, definition.captureDirectory);
-  const capturedConfigRoot = join(capturedProject, ".koni");
-  const capturedSkillsRoot = join(capturedProject, ".agents", "skills");
-  await validateCapturedProfile(definition, capturedConfigRoot);
-
+/** Publish a reviewed in-tree profile without copying or replacing any baseline byte. */
+export async function publishCurrentProfileBundle(definition) {
   const packageRoot = join(repositoryRoot, "packages", definition.packageDirectory);
   const koniRoot = join(packageRoot, "koni");
   const baselineRoot = join(koniRoot, "baseline");
-  await rm(baselineRoot, { recursive: true, force: true });
-  await mkdir(baselineRoot, { recursive: true });
-  await copyTree(
-    capturedConfigRoot,
-    baselineRoot,
-    (path) => !GENERATED_ORACLE_FILES.has(path),
-  );
-  await copyTree(capturedSkillsRoot, join(baselineRoot, "resources", "skills"));
-
+  await validateBaselineProfile(definition, baselineRoot);
   const files = await inspectBaseline(baselineRoot);
   if (files.length !== definition.expectedFileCount) {
     throw new Error(
       `${definition.profileId} baseline contains ${files.length} files; expected ${definition.expectedFileCount}`,
     );
   }
-  const manifest = manifestFor(definition, files);
+  const migrations = await releaseMigrations(packageRoot, definition);
+  const manifest = manifestFor(definition, files, migrations);
   await writeFile(
     join(koniRoot, "profile-manifest.json"),
     `${JSON.stringify(manifest, null, 2)}\n`,
-  );
-  await writeFile(
-    join(koniRoot, "oracle-provenance.json"),
-    `${JSON.stringify(
-      {
-        oracle_tag: ORACLE_TAG,
-        oracle_commit: ORACLE_COMMIT,
-        capture_kind: "pi-native-profile-evolution",
-        captured_profile: {
-          id: definition.profileId,
-          version: definition.profileVersion,
-        },
-        evolution: [
-          "Preserve the frozen schema-2 oracle baseline while adding an opt-in, non-installing Pi community resource catalog.",
-          "Expose explicit empty skill, prompt, and tool selectors so the guided editor can configure exact resources before enablement.",
-          "Replace removed Rust-era operator commands in shared skills with the shipping Pi /koni, koni tui, status, config validate, run, and guarded overlay lifecycle surfaces.",
-          "Correct the remaining initializer, recovery, deletion, rollback, and Research validation guidance so native Pi skills invoke only shipping Core surfaces.",
-        ],
-        excluded_generated_paths: [...GENERATED_ORACLE_FILES].sort(),
-      },
-      null,
-      2,
-    )}\n`,
   );
   return manifest;
 }
 
 function parseArguments(argv) {
-  let captureRoot;
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index];
-    if (argument === "--capture-root") {
-      captureRoot = argv[index + 1];
-      index += 1;
-    } else {
-      throw new Error(`unknown argument: ${argument}`);
-    }
+  if (argv.length !== 1 || argv[0] !== "--publish-current") {
+    throw new Error("usage: capture-profile-bundles.mjs --publish-current");
   }
-  if (!captureRoot) {
-    throw new Error("usage: npm run profiles:capture -- --capture-root <oracle-install-root>");
-  }
-  return { captureRoot: resolve(captureRoot) };
 }
 
 export async function main(argv = process.argv.slice(2)) {
-  const { captureRoot } = parseArguments(argv);
+  parseArguments(argv);
   for (const definition of PROFILE_DEFINITIONS) {
-    const manifest = await captureProfileBundle(captureRoot, definition);
+    const manifest = await publishCurrentProfileBundle(definition);
     process.stdout.write(
       `${manifest.package.name} ${manifest.profile.version}: ${manifest.baseline.files.length} files, ${manifest.bundle_sha256}\n`,
     );

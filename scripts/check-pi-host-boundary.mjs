@@ -17,12 +17,10 @@ const PI_PACKAGES = [
 const CODING_AGENT_LOCK_PATH = `node_modules/${CODING_AGENT}`;
 
 function resolveFromCodingAgent(lock, name) {
-  const paths = name === CODING_AGENT
-    ? [CODING_AGENT_LOCK_PATH]
-    : [
-        `${CODING_AGENT_LOCK_PATH}/node_modules/${name}`,
-        `node_modules/${name}`,
-      ];
+  const paths =
+    name === CODING_AGENT
+      ? [CODING_AGENT_LOCK_PATH]
+      : [`${CODING_AGENT_LOCK_PATH}/node_modules/${name}`, `node_modules/${name}`];
   for (const lockPath of paths) {
     const entry = lock.packages?.[lockPath];
     if (entry) return { entry, lockPath };
@@ -44,7 +42,9 @@ export function verifyPiHostBoundary({ lock, manifests }) {
     }
     const found = resolveFromCodingAgent(lock, name);
     if (found.entry.version !== EXACT_PI_VERSION) {
-      throw new Error(`${name} lock is ${found.entry.version ?? "missing"}, expected ${EXACT_PI_VERSION}`);
+      throw new Error(
+        `${name} lock is ${found.entry.version ?? "missing"}, expected ${EXACT_PI_VERSION}`,
+      );
     }
     resolved[name] = { version: found.entry.version, lock_path: found.lockPath };
   }
@@ -54,14 +54,18 @@ export function verifyPiHostBoundary({ lock, manifests }) {
   }
   const typebox = resolveFromCodingAgent(lock, "typebox");
   if (typebox.entry.version !== EXACT_TYPEBOX_VERSION) {
-    throw new Error(`typebox lock is ${typebox.entry.version ?? "missing"}, expected ${EXACT_TYPEBOX_VERSION}`);
+    throw new Error(
+      `typebox lock is ${typebox.entry.version ?? "missing"}, expected ${EXACT_TYPEBOX_VERSION}`,
+    );
   }
   resolved.typebox = { version: typebox.entry.version, lock_path: typebox.lockPath };
 
   for (const manifest of manifests) {
     for (const [name, range] of Object.entries(manifest.peerDependencies ?? {})) {
-      if ((PI_PACKAGES.includes(name) || name === "typebox") &&
-          (range !== "*" || manifest.peerDependenciesMeta?.[name]?.optional !== true)) {
+      if (
+        (PI_PACKAGES.includes(name) || name === "typebox") &&
+        (range !== "*" || manifest.peerDependenciesMeta?.[name]?.optional !== true)
+      ) {
         throw new Error(`${manifest.name}: ${name} must be an optional native '*' host peer`);
       }
     }
@@ -72,10 +76,14 @@ export function verifyPiHostBoundary({ lock, manifests }) {
   if (root.devDependencies?.[CODING_AGENT] !== EXACT_PI_VERSION) {
     throw new Error(`the tested Pi SDK must remain locked to ${EXACT_PI_VERSION}`);
   }
-  if (root.devDependencies?.typebox !== EXACT_TYPEBOX_VERSION ||
-      core.peerDependencies?.typebox !== "*" ||
-      core.peerDependenciesMeta?.typebox?.optional !== true) {
-    throw new Error(`Core must consume Pi's bundled typebox peer and test against typebox@${EXACT_TYPEBOX_VERSION}`);
+  if (
+    root.devDependencies?.typebox !== EXACT_TYPEBOX_VERSION ||
+    core.peerDependencies?.typebox !== "*" ||
+    core.peerDependenciesMeta?.typebox?.optional !== true
+  ) {
+    throw new Error(
+      `Core must consume Pi's bundled typebox peer and test against typebox@${EXACT_TYPEBOX_VERSION}`,
+    );
   }
 
   return {
@@ -92,12 +100,14 @@ async function readJson(file) {
 }
 
 export async function verifyRepositoryPiHostBoundary(root = process.cwd()) {
-  const manifests = await Promise.all([
-    "package.json",
-    "packages/core/package.json",
-    "packages/coding-profile/package.json",
-    "packages/research-profile/package.json",
-  ].map((file) => readJson(path.join(root, file))));
+  const manifests = await Promise.all(
+    [
+      "package.json",
+      "packages/core/package.json",
+      "packages/coding-profile/package.json",
+      "packages/research-profile/package.json",
+    ].map((file) => readJson(path.join(root, file))),
+  );
   return verifyPiHostBoundary({
     lock: await readJson(path.join(root, "package-lock.json")),
     manifests,

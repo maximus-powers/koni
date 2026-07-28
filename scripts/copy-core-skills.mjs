@@ -25,7 +25,9 @@ assert.deepEqual(
 );
 assert.equal(codingInventory.length, 18, "the shared Koni skill bundle must contain 18 files");
 assert.deepEqual(
-  codingInventory.filter(({ relative }) => relative.endsWith("/SKILL.md")).map(({ relative }) => relative),
+  codingInventory
+    .filter(({ relative }) => relative.endsWith("/SKILL.md"))
+    .map(({ relative }) => relative),
   ["configure-koni/SKILL.md", "model-koni-work/SKILL.md", "operate-koni/SKILL.md"],
   "Core must publish exactly the three general Koni skills",
 );
@@ -33,7 +35,11 @@ assert.deepEqual(
 await rm(destination, { recursive: true, force: true });
 await mkdir(path.dirname(destination), { recursive: true });
 await cp(codingSkills, destination, { recursive: true });
-assert.deepEqual(await inventory(destination), codingInventory, "the published Core skill bundle must be exact");
+assert.deepEqual(
+  await inventory(destination),
+  codingInventory,
+  "the published Core skill bundle must be exact",
+);
 
 async function inventory(root, current = root) {
   const entries = await readdir(current, { withFileTypes: true });
@@ -42,7 +48,7 @@ async function inventory(root, current = root) {
   for (const entry of entries) {
     const absolute = path.join(current, entry.name);
     if (entry.isDirectory()) {
-      files.push(...await inventory(root, absolute));
+      files.push(...(await inventory(root, absolute)));
     } else if (entry.isFile()) {
       files.push({
         relative: path.relative(root, absolute).split(path.sep).join("/"),

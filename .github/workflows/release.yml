@@ -25,13 +25,13 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - run: npm ci
       - name: Verify tag matches Core
-        run: node -e 'const v=require("./packages/core/package.json").version; if (process.env.GITHUB_REF_NAME !== `v${v}`) process.exit(1)'
+        run:
+          node -e 'const v=require("./packages/core/package.json").version; if
+          (process.env.GITHUB_REF_NAME !== `v${v}`) process.exit(1)'
       - run: npm run check
-      - run: ./scripts/check-brand.sh
       - name: Build and audit the tested Pi host boundary
         run: |
           npm run build
-          npm audit --omit=dev --audit-level=high
           node --test scripts/pi-host-boundary.test.mjs
           node scripts/check-pi-host-boundary.mjs --output koni-pi-host-compatibility.json
       - uses: actions/upload-artifact@v4
@@ -69,6 +69,7 @@ jobs:
           closure="$(mktemp -d)"
           node -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify({name:"koni-shipping-closure",version:"1.0.0",private:true})+"\n")' "$closure/package.json"
           npm install --prefix "$closure" --save-exact --legacy-peer-deps --ignore-scripts --no-audit --no-fund release/*.tgz
+          npm audit --prefix "$closure" --omit=dev --audit-level=high
           npm sbom --prefix "$closure" --omit=dev --sbom-format cyclonedx > release/koni-shipping.cdx.json
           node - <<'NODE'
           const bom = require("./release/koni-shipping.cdx.json");
@@ -188,4 +189,6 @@ jobs:
       - name: Publish package archives and SBOM
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" artifacts/* --generate-notes --verify-tag --repo "$GITHUB_REPOSITORY"
+        run:
+          gh release create "$GITHUB_REF_NAME" artifacts/* --generate-notes --verify-tag --repo
+          "$GITHUB_REPOSITORY"

@@ -89,8 +89,12 @@ package_tmp="$(mktemp -d "${TMPDIR:-/tmp}/koni-packages.XXXXXX")"
 
 (
   cd "$repo_root"
-  npm ci
-  npm run check
+  if [[ "${KONI_DEV_FAST_INSTALL:-0}" != "1" ]]; then
+    npm ci
+    npm run check
+  else
+    echo "Fast development activation: using the caller's already-verified working tree." >&2
+  fi
   npm run build
   npm pack --workspace @koni/coding-profile --pack-destination "$package_tmp" >/dev/null
   npm pack --workspace @koni/research-profile --pack-destination "$package_tmp" >/dev/null

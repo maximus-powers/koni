@@ -1,0 +1,23 @@
+**/.koni/**
+**/coverage/**
+**/dist/**
+**/node_modules/**
+private/**
+
+# Authentication and migration inputs are byte-sensitive protocol artifacts.
+packages/*-profile/koni/**
+packages/core/test/fixtures/profile-prior-releases/**
+
+# Generated dependency state and binary/archive payloads.
+package-lock.json
+**/package-lock.json
+*.lock
+*.min.*
+*.snap
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+
+# Tool-owned metadata.
+.git/**
