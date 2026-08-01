@@ -1,5 +1,5 @@
 import { readFileSync, readdirSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -317,6 +317,98 @@ describe("provider-free domain flows", () => {
     });
     expect(exactReplay.changes).toEqual([]);
     expect(exactReplay.graph.hash).toBe(replayed.graph.hash);
+  });
+
+  it("compiler-accepts a reviewed asset manifest and invalidates it only when bytes drift", async () => {
+    const root = await temporaryRoot();
+    const assetRoot = join(root, "program", "assets", "fixture-tool");
+    await mkdir(assetRoot, { recursive: true });
+    await writeFile(join(assetRoot, "run.py"), "print('ready')\n");
+    const configuration = structuredClone(compileProfile("research-profile"));
+    const assetType = configuration.registries.node_types.asset as {
+      filesystem_manifest?: Record<string, unknown>;
+    };
+    delete assetType.filesystem_manifest?.files_field;
+    const asset = node("asset-reviewed", "asset", "Reviewed fixture tool", "active", {
+      capabilities: [{ name: "fixture.tool", protocol_version: "1.0.0" }],
+      implementation_plan: {
+        root: "program/assets/fixture-tool",
+        files: ["program/assets/fixture-tool/run.py"],
+      },
+      implementation: {
+        kind: "script",
+        entrypoints: ["program/assets/fixture-tool/run.py"],
+      },
+      source_strategy: "generated",
+    });
+    const graph = typedGraph(configuration, [asset]);
+    const ticket = assetReviewTicket(configuration, asset.id);
+    const applied = await applyReviewEffects({
+      configuration,
+      graph,
+      ticket,
+      step: ticket.workflow[0]!,
+      reviewId: "attempt-asset-review",
+      actor: "reviewer",
+      candidateNodeIds: [asset.id],
+      projectRoot: root,
+    });
+
+    expect(applied.changes).toEqual([
+      expect.objectContaining({ kind: "modified", nodeId: asset.id }),
+    ]);
+    expect(applied.graph.node(asset.id)).toMatchObject({
+      asset_manifest: {
+        vendor_status: "vendored",
+        implementation_status: "ready",
+        content_hash: expect.stringMatching(/^sha256:/u),
+        accepted_content_hash: expect.stringMatching(/^sha256:/u),
+        implementation_errors: [],
+      },
+    });
+
+    const currentAdapter = await createProductionRuleDomainAdapter({
+      configuration,
+      graph: applied.graph,
+      projectRoot: root,
+    });
+    const current = new GraphExpressionEvaluator(configuration, applied.graph, currentAdapter);
+    current.bind("target", [asset.id]);
+    expect(current.evaluate({ op: "filesystem_manifest_current" })).toBe(true);
+    expect(
+      current.evaluate({
+        op: "field_equals",
+        field: "asset_manifest.implementation_status",
+        value: "ready",
+      }),
+    ).toBe(true);
+    expect(
+      current.evaluate({
+        op: "field_equals",
+        field: "asset_manifest.vendor_status",
+        value: "vendored",
+      }),
+    ).toBe(true);
+
+    await writeFile(join(assetRoot, "sibling.py"), "print('independent sibling')\n");
+    const siblingAdapter = await createProductionRuleDomainAdapter({
+      configuration,
+      graph: applied.graph,
+      projectRoot: root,
+    });
+    const sibling = new GraphExpressionEvaluator(configuration, applied.graph, siblingAdapter);
+    sibling.bind("target", [asset.id]);
+    expect(sibling.evaluate({ op: "filesystem_manifest_current" })).toBe(true);
+
+    await writeFile(join(assetRoot, "run.py"), "print('changed')\n");
+    const staleAdapter = await createProductionRuleDomainAdapter({
+      configuration,
+      graph: applied.graph,
+      projectRoot: root,
+    });
+    const stale = new GraphExpressionEvaluator(configuration, applied.graph, staleAdapter);
+    stale.bind("target", [asset.id]);
+    expect(stale.evaluate({ op: "filesystem_manifest_current" })).toBe(false);
   });
 
   it("accepts research conclusions only with exact current citations, dispositions, and limitations", async () => {
@@ -772,6 +864,33 @@ function reviewTicket(
     workflow: [step],
     configuration_sha256: configuration.configuration_sha256,
     definition_sha256: configuration.configuration_sha256,
+  };
+}
+
+function assetReviewTicket(
+  configuration: CompiledConfiguration,
+  assetId: string,
+): DerivedTicketDefinition {
+  const review = reviewTicket(configuration, assetId);
+  return {
+    ...review,
+    id: "ticket-review-asset",
+    rule_id: "ticket.implement-asset",
+    anchor_node_id: assetId,
+    operation: "implement-asset",
+    operation_registry_id: "asset-resolution.asset.implement-asset",
+    title: "Review implemented asset",
+    target_node_ids: [assetId],
+    scope: {
+      read_node_ids: [assetId],
+      write_node_ids: [assetId],
+      read_paths: ["program/assets/fixture-tool"],
+      write_paths: ["program/assets/fixture-tool"],
+    },
+    source_state_key: "asset-incomplete",
+    target_state_key: "asset-ready",
+    obligation_keys: ["asset.implementation"],
+    workflow_id: "implement-asset",
   };
 }
 

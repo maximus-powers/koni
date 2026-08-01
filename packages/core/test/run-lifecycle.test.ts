@@ -35,6 +35,28 @@ describe("run lifecycle", () => {
     expect(activeRuntimeMs(state, 120)).toBe(40);
   });
 
+  it("clears a stale execution blocker when an explicitly paused run resumes", () => {
+    let state = apply(
+      newRunLifecycle("run-resume-clears-blocker"),
+      { type: "planning_started", atMs: 10 },
+      { type: "plan_submitted", atMs: 20 },
+      { type: "plan_approval_requested", atMs: 30 },
+      { type: "plan_approved", atMs: 31 },
+      { type: "verification_started", atMs: 35 },
+      {
+        type: "integration_required",
+        atMs: 40,
+        reason: "previous deterministic orchestration boundary",
+      },
+      { type: "pause_requested", atMs: 50 },
+      { type: "pause_settled", atMs: 60 },
+    );
+    expect(state.blocker).toBe("previous deterministic orchestration boundary");
+
+    state = reduceRunLifecycle(state, { type: "resume_requested", atMs: 70 }).state;
+    expect(state).toMatchObject({ phase: "executing", blocker: undefined, runningIntent: true });
+  });
+
   it("answers all pending questions before resuming the attempt", () => {
     let state = apply(newRunLifecycle("run-one"), { type: "planning_started", atMs: 10 });
     state = apply(state, {
@@ -130,6 +152,31 @@ describe("run lifecycle", () => {
       runningIntent: true,
     });
     expect(reduction.effects).toEqual([{ type: "launch_planner", planRevision: 1 }]);
+  });
+
+  it("allows a fresh plan revision after an execution-time graph contradiction", () => {
+    const blocked = apply(
+      newRunLifecycle("run-plan-revision"),
+      { type: "planning_started", atMs: 10 },
+      { type: "plan_submitted", atMs: 20 },
+      { type: "plan_approval_requested", atMs: 30 },
+      { type: "plan_approved", atMs: 31 },
+      { type: "blocked", atMs: 40, reason: "causal ordering contradiction" },
+    );
+    expect(blocked).toMatchObject({ phase: "blocked", resumePhase: "executing" });
+
+    const revision = reduceRunLifecycle(blocked, {
+      type: "plan_revision_requested",
+      atMs: 50,
+    });
+    expect(revision.state).toMatchObject({
+      phase: "planning",
+      planRevision: 2,
+      blocker: undefined,
+      resumePhase: undefined,
+      runningIntent: false,
+    });
+    expect(revision.effects).toEqual([{ type: "request_plan_revision", planRevision: 2 }]);
   });
 
   it("increments generation before deleting and rejects resurrection", () => {

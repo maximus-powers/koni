@@ -443,7 +443,7 @@ export function createKoniInteractiveReadTools(
 
 /**
  * Pi-chat proposal tools. Inspection is inert; decision always performs a fresh authority read,
- * requires Pi's native interactive confirmation, and then sends one exact CAS-bound mutation.
+ * requires Pi's native interactive confirmation, and then sends one exact semantic-CAS mutation.
  */
 export function createKoniInteractiveProposalTools(
   dependencies: KoniInteractiveReadToolDependencies,
@@ -559,11 +559,11 @@ export function createKoniInteractiveProposalTools(
               {
                 runId: args.runId,
                 ticketId: args.ticketId,
+                requestSha256: proposal.requestSha256,
                 decision: args.decision,
                 ...(message === undefined || message.length === 0 ? {} : { message }),
               },
               {
-                expectedRevision: client.revision,
                 idempotencyKey: `interactive:proposal.decide:${randomUUID()}`,
               },
             );

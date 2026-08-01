@@ -440,17 +440,34 @@ export interface AgentProviderRequestRecord {
    * exact token totals remain unchanged and the original reservation remains the conservative
    * exposure bound.
    */
-  retirement?: {
-    protocol: "koni.provider-exposure-retirement.v1";
-    disposition: "operator_acknowledged_canonical_abort" | "operator_acknowledged_provider_error";
-    assistantEntryId: string;
-    assistantEntrySha256: Sha256Digest;
-    responseId: string;
-    errorMessageSha256?: Sha256Digest;
-    authorizationSha256: Sha256Digest;
-    retiredAt: string;
-    sha256: Sha256Digest;
-  };
+  retirement?:
+    | {
+        protocol: "koni.provider-exposure-retirement.v1";
+        disposition: "operator_acknowledged_canonical_abort" | "operator_acknowledged_provider_error";
+        assistantEntryId: string;
+        assistantEntrySha256: Sha256Digest;
+        responseId: string;
+        errorMessageSha256?: Sha256Digest;
+        authorizationSha256: Sha256Digest;
+        retiredAt: string;
+        sha256: Sha256Digest;
+      }
+    | {
+        protocol: "koni.provider-exposure-retirement.v1";
+        disposition: "operator_acknowledged_authority_pause";
+        pauseReasonSha256: Sha256Digest;
+        authorizationSha256: Sha256Digest;
+        retiredAt: string;
+        sha256: Sha256Digest;
+      }
+    | {
+        protocol: "koni.provider-exposure-retirement.v1";
+        disposition: "operator_acknowledged_unreconciled_request";
+        failureReasonSha256: Sha256Digest;
+        authorizationSha256: Sha256Digest;
+        retiredAt: string;
+        sha256: Sha256Digest;
+      };
 }
 
 /** Settled totals imported from an attempt that predates request-level reservations. */
@@ -1770,10 +1787,13 @@ function assertLeadJudgments(
   attempts: Readonly<Record<string, AgentAttemptRecord>>,
 ): void {
   if (value === undefined) return;
-  if (!Array.isArray(value) || value.length > 2 || behavior === undefined) {
+  // Two triggers may be issued for each immutable graph/run binding. Keep prior bindings as audit
+  // history across a plan revision, rather than making a valid replacement Lead judgment corrupt
+  // the whole run record. The cap still bounds a pathological revision loop.
+  if (!Array.isArray(value) || value.length > 64 || behavior === undefined) {
     throw new Error("run Lead judgment history is invalid");
   }
-  const triggers = new Set<string>();
+  const bindingTriggers = new Set<string>();
   const orchestrationStageId = behavior.runType.pipeline.find(
     (stage) => stage.kind === "orchestration",
   )?.id;
@@ -1782,7 +1802,6 @@ function assertLeadJudgments(
       !isRecord(raw) ||
       raw.protocol !== "koni.lead-judgment-record.v1" ||
       (raw.trigger !== "orchestration_entry" && raw.trigger !== "compiler_deadlock") ||
-      triggers.has(raw.trigger) ||
       !isId(raw.attemptId) ||
       raw.behaviorSha256 !== behavior.sha256 ||
       raw.stageId !== orchestrationStageId ||
@@ -1799,6 +1818,10 @@ function assertLeadJudgments(
     ) {
       throw new Error("run Lead judgment record is invalid");
     }
+    const bindingTrigger = `${raw.graphHash}\u0000${raw.runOid}\u0000${raw.trigger}`;
+    if (bindingTriggers.has(bindingTrigger)) {
+      throw new Error("run Lead judgment record is invalid");
+    }
     const attempt = attempts[raw.attemptId];
     const expectedStep =
       raw.trigger === "orchestration_entry" ? "lead-orchestration-entry" : "lead-compiler-deadlock";
@@ -1810,7 +1833,7 @@ function assertLeadJudgments(
     ) {
       throw new Error("run Lead judgment attempt binding is invalid");
     }
-    triggers.add(raw.trigger);
+    bindingTriggers.add(bindingTrigger);
   }
 }
 
@@ -5245,6 +5268,16 @@ function proposalHasReleasedSourceAuthority(
   proposal: Readonly<TicketRecord>,
 ): boolean {
   const disposition = proposal.executionControl?.proposalDisposition;
+  const request = proposal.executionControl?.proposalRequest;
+  if (proposal.status === "cancelled" && disposition === undefined && request !== undefined) {
+    return Object.values(run.git.ticketCycles).some(
+      (cycle) =>
+        cycle.ticketId === request.sourceTicketId &&
+        cycle.status === "retired" &&
+        cycle.supersessionSha256 === request.requestSha256 &&
+        cycle.archiveRef !== undefined,
+    );
+  }
   if (proposal.status !== "completed" || disposition === undefined) return false;
   if (disposition.kind === "rejected" || disposition.kind === "no_op") return true;
   if (disposition.kind !== "application" || disposition.applicationTicketId === undefined)
@@ -6027,18 +6060,27 @@ function assertProviderRequestRecords(id: string, attempt: AgentAttemptRecord): 
         !new Set([
           "operator_acknowledged_canonical_abort",
           "operator_acknowledged_provider_error",
+          "operator_acknowledged_authority_pause",
+          "operator_acknowledged_unreconciled_request",
         ]).has(String(retirement.disposition)) ||
-        !isBoundedRecordText(retirement.assistantEntryId, 128) ||
-        !isSha256Digest(retirement.assistantEntrySha256) ||
-        !isBoundedRecordText(retirement.responseId, 512) ||
-        (retirement.disposition === "operator_acknowledged_provider_error"
-          ? !isSha256Digest(retirement.errorMessageSha256)
-          : retirement.errorMessageSha256 !== undefined) ||
         !isSha256Digest(retirement.authorizationSha256) ||
         typeof retirement.retiredAt !== "string" ||
         !isSha256Digest(retirement.sha256)
       )
         throw new Error(`invalid attempt provider exposure retirement: ${id}`);
+      if (
+        retirement.disposition === "operator_acknowledged_authority_pause"
+          ? !isSha256Digest(retirement.pauseReasonSha256)
+          : retirement.disposition === "operator_acknowledged_unreconciled_request"
+            ? !isSha256Digest(retirement.failureReasonSha256)
+          : !isBoundedRecordText(retirement.assistantEntryId, 128) ||
+            !isSha256Digest(retirement.assistantEntrySha256) ||
+            !isBoundedRecordText(retirement.responseId, 512) ||
+            (retirement.disposition === "operator_acknowledged_provider_error"
+              ? !isSha256Digest(retirement.errorMessageSha256)
+              : retirement.errorMessageSha256 !== undefined)
+      )
+        throw new Error(`invalid attempt provider exposure retirement fields: ${id}`);
       const { sha256, ...material } = retirement;
       if (canonicalHash(material) !== sha256 || index !== records.length - 1) {
         throw new Error(`invalid attempt provider exposure retirement identity: ${id}`);

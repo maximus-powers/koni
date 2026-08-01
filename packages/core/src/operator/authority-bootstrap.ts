@@ -12,7 +12,9 @@ import { compileProjectDirectory } from "../compiler/project-directory.js";
 import { parseControlCatalog } from "../control-center/protocol.js";
 import {
   assertSealedModelAdmission,
+  describeRoleModelSubstitutions,
   loadSealedPiModelCatalog,
+  resolveRoleModelSelections,
   sealPiModelDescriptor,
 } from "../pi/model-catalog.js";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -36,6 +38,14 @@ import {
 } from "../runtime/identity.js";
 import { pinAuthorityGitExecutable } from "../git/client.js";
 import { resolvePiPeerRuntime } from "../runtime/pi-peer-runtime.js";
+import {
+  activeInstallationEnvironment,
+  activeInstallationFromEnvironment,
+  assertActiveInstallationCurrent,
+  bindVersionedActiveInstallation,
+  type ActiveInstallationBinding,
+  waitForActiveInstallationSupersession,
+} from "../runtime/active-installation.js";
 
 // A first launch from an exact packed Pi installation has to materialize and verify the complete
 // content-addressed runtime stage before the authority may bind its socket. Cold filesystems and
@@ -84,6 +94,41 @@ export interface ProjectAuthorityStopResult {
   /** Bounded compatibility sample; use pausedRunCount for operator totals. */
   pausedRunIds: readonly string[];
   pausedRunIdsTruncated: boolean;
+}
+
+export async function stopAuthorityWhenInstallationSuperseded(
+  options: {
+    binding: ActiveInstallationBinding;
+    projectRoot: string;
+    version: string;
+    pollIntervalMs?: number;
+    retryIntervalMs?: number;
+    signal?: AbortSignal;
+  },
+  dependencies: { stop?: typeof stopProjectAuthority } = {},
+): Promise<ProjectAuthorityStopResult> {
+  await waitForActiveInstallationSupersession(options.binding, {
+    ...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  });
+  const retryIntervalMs = options.retryIntervalMs ?? 250;
+  if (!Number.isSafeInteger(retryIntervalMs) || retryIntervalMs < 1) {
+    throw new RangeError("upgrade handoff retry interval must be a positive integer");
+  }
+  while (true) {
+    if (options.signal?.aborted === true) {
+      throw new DOMException("active installation handoff aborted", "AbortError");
+    }
+    try {
+      return await (dependencies.stop ?? stopProjectAuthority)({
+        projectRoot: options.projectRoot,
+        version: options.version,
+      });
+    } catch (error) {
+      if (!isRetryableAuthorityStop(error)) throw error;
+      await wait(retryIntervalMs);
+    }
+  }
 }
 
 export interface ProjectConfigurationStatus {
@@ -320,12 +365,19 @@ export async function serveProjectAuthority(options: {
   projectRoot: string;
   version: string;
   shutdown?: Promise<void>;
+  /** Daemon binding supplied by the authenticated launcher environment. */
+  activeInstallation?: ActiveInstallationBinding;
   /**
    * Provider-free packaged-release evidence only: construct the exact production Pi child and
    * persist its session mapping, but require the test to pause/delete it before activation.
    */
   providerFreeAdmissionProbe?: true;
 }): Promise<void> {
+  const activeInstallation =
+    options.activeInstallation ?? activeInstallationFromEnvironment(process.env);
+  if (activeInstallation !== undefined) {
+    await assertActiveInstallationCurrent(activeInstallation);
+  }
   const parentRuntimeClosure = await assertRuntimeClosureFromEnvironment(import.meta.url);
   const piPeerRuntime = await resolvePiPeerRuntime();
   const runtimeClosure = await captureRuntimeClosure(import.meta.url, piPeerRuntime.packageRoot);
@@ -339,7 +391,12 @@ export async function serveProjectAuthority(options: {
   await pinAuthorityGitExecutable(gitExecutable);
   const endpoint = await discoverAuthorityEndpoint(options.projectRoot);
   const runtimeClosurePin = await persistRuntimeClosurePin(endpoint.stateRoot, runtimeClosure);
-  const runtimeGuard = () => assertRuntimeClosureCurrent(runtimeClosure);
+  const runtimeGuard = async () => {
+    await assertRuntimeClosureCurrent(runtimeClosure);
+    if (activeInstallation !== undefined) {
+      await assertActiveInstallationCurrent(activeInstallation);
+    }
+  };
   const cached = await loadCachedInstalledProfile(endpoint.identity.worktreeRoot);
   const baseline = await loadProfilePackage(cached.packageRoot);
   const program = await NativeRunCompilerProgram.create({
@@ -373,9 +430,24 @@ export async function serveProjectAuthority(options: {
       (await loadCachedInstalledProfile(endpoint.identity.worktreeRoot)).packageRoot,
   });
   await engine.start();
+  const activeInstallationMonitor = new AbortController();
+  const upgradeHandoff =
+    activeInstallation === undefined
+      ? undefined
+      : stopAuthorityWhenInstallationSuperseded({
+          binding: activeInstallation,
+          projectRoot: endpoint.identity.worktreeRoot,
+          version: options.version,
+          signal: activeInstallationMonitor.signal,
+        });
   try {
-    await Promise.race([options.shutdown ?? processShutdown(), requestedShutdown.promise]);
+    await Promise.race([
+      options.shutdown ?? processShutdown(),
+      requestedShutdown.promise,
+      ...(upgradeHandoff === undefined ? [] : [upgradeHandoff]),
+    ]);
   } finally {
+    activeInstallationMonitor.abort();
     await engine.stop();
   }
 }
@@ -383,12 +455,22 @@ export async function serveProjectAuthority(options: {
 export async function launchAuthorityDaemon(input: {
   projectRoot: string;
   version: string;
+  /** Exact installed-generation binding; production discovers it from Core's launcher path. */
+  activeInstallation?: ActiveInstallationBinding;
   /**
    * Packaged-release evidence only. The daemon still crosses the exact authenticated bootstrap,
    * but its attempt sessions stop after durable admission so the smoke cannot call a provider.
    */
   providerFreeAdmissionProbe?: true;
 }): Promise<AuthorityDaemonLaunch> {
+  const activeInstallation =
+    input.activeInstallation ??
+    (await bindVersionedActiveInstallation(
+      fileURLToPath(new URL("../../bin/koni.js", import.meta.url)),
+    ));
+  if (activeInstallation !== undefined) {
+    await assertActiveInstallationCurrent(activeInstallation);
+  }
   if (input.providerFreeAdmissionProbe === true && process.env.NODE_ENV !== "test") {
     throw new AuthorityBootstrapError(
       "provider_free_probe",
@@ -421,6 +503,9 @@ export async function launchAuthorityDaemon(input: {
         stdio: ["ignore", log.fd, log.fd],
         env: authorityDaemonEnvironment({
           ...piPeerRuntime.environment,
+          ...(activeInstallation === undefined
+            ? {}
+            : activeInstallationEnvironment(activeInstallation)),
           [KONI_RUNTIME_CLOSURE_ENV]: runtimeClosurePin.closureSha256,
           [KONI_RUNTIME_PIN_PATH_ENV]: runtimeClosurePin.path,
           [KONI_RUNTIME_PIN_SHA256_ENV]: runtimeClosurePin.pinSha256,
@@ -504,7 +589,7 @@ export async function createProjectRun(
     ensure?: typeof ensureProjectAuthority;
     loadModels?: typeof loadSealedPiModelCatalog;
   } = {},
-): Promise<{ runId: string; status: string }> {
+): Promise<{ runId: string; status: string; modelNotice?: string }> {
   const client = await (dependencies.ensure ?? ensureProjectAuthority)({
     projectRoot: options.projectRoot,
     version: options.version,
@@ -521,7 +606,21 @@ export async function createProjectRun(
       );
     }
     const models = await (dependencies.loadModels ?? loadSealedPiModelCatalog)();
-    assertSealedModelAdmission(runType.roles, models);
+    // The non-interactive path has no selector to correct a profile default that this Pi
+    // installation cannot execute, so bind each role to an authenticated model and report it.
+    const resolved = resolveRoleModelSelections(runType.roles, models);
+    assertSealedModelAdmission(resolved.roles, models);
+    const modelNotice = describeRoleModelSubstitutions(resolved.substitutions);
+    const roleOverrides = Object.fromEntries(
+      resolved.substitutions.map((substitution) => [
+        substitution.roleId,
+        {
+          provider: substitution.to.provider,
+          model: substitution.to.model,
+          thinkingLevel: substitution.to.thinkingLevel,
+        },
+      ]),
+    );
     const response = await client.request(
       "run.create",
       {
@@ -531,13 +630,17 @@ export async function createProjectRun(
         intake: options.intake ?? { goal: options.objective },
         ...(options.createTarget === true ? { createTarget: true } : {}),
         ...(options.baseRef === undefined ? {} : { baseRef: options.baseRef }),
+        ...(resolved.substitutions.length === 0 ? {} : { overrides: { roles: roleOverrides } }),
       },
       {
         expectedRevision: client.revision,
         idempotencyKey: `operator-run-create:${randomUUID()}`,
       },
     );
-    return parseRunCreation(response);
+    return {
+      ...parseRunCreation(response),
+      ...(modelNotice === undefined ? {} : { modelNotice }),
+    };
   } finally {
     client.close();
   }
@@ -561,6 +664,37 @@ export async function resumeProjectRun(options: {
       {
         expectedRevision: client.revision,
         idempotencyKey: `operator-run-resume:${options.runId}:${randomUUID()}`,
+      },
+    );
+    return parseRunCreation(response);
+  } finally {
+    client.close();
+  }
+}
+
+/**
+ * Approve a run parked at its approval gate.
+ *
+ * Without this the approval gate is reachable only from the TUI, so a headless or scripted
+ * operator can start a run and then has no way to advance it.
+ */
+export async function approveProjectRun(options: {
+  projectRoot: string;
+  version: string;
+  runId: string;
+}): Promise<{ runId: string; status: string }> {
+  const client = await ensureProjectAuthority({
+    projectRoot: options.projectRoot,
+    version: options.version,
+    client: "cli",
+  });
+  try {
+    const response = await client.request(
+      "plan.approve",
+      { runId: options.runId },
+      {
+        expectedRevision: client.revision,
+        idempotencyKey: `operator-plan-approve:${options.runId}:${randomUUID()}`,
       },
     );
     return parseRunCreation(response);
@@ -607,6 +741,14 @@ function authorityUnavailable(error: unknown): boolean {
     );
   }
   return false;
+}
+
+function isRetryableAuthorityStop(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "retryable" in error &&
+    (error as Error & { retryable?: unknown }).retryable === true
+  );
 }
 
 function parseProjectStatus(

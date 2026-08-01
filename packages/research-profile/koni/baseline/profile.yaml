@@ -2,11 +2,11 @@ schema_version: '2.0'
 engine: '>=0.1.0,<0.2.0'
 profile:
   id: research
-  version: 1.1.0
+  version: 1.1.9
   description: Graph-first academic research workflow with gate-first validation, scientific receipt provenance, and reviewed evidence promotion.
 initialization:
   root_node_type: hypothesis
-  goal_field: hypothesis
+  goal_field: objective
   planning_context_field: planning_context
   planning_seed_operation: initialization.hypothesis.seed-approved-plan
   root_status: active

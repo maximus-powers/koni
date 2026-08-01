@@ -60,6 +60,32 @@ describe("bounded run summary pages", () => {
     expect(summary.phase).toBe("blocked");
   });
 
+  it("does not count a compiler-held source ticket as an actionable blocker", () => {
+    const run = fixtureRun("run-source-hold", "2026-07-18T00:00:00.000Z", "executing");
+    const held = fixtureTicket("ticket-held", "blocked");
+    held.executionControl = {
+      sourceHold: {
+        proposalTicketId: "proposal-one",
+        requestSha256: canonicalHash("proposal request"),
+      },
+    };
+    run.tickets[held.id] = held;
+
+    expect(projectRunSummary(run).tickets).toMatchObject({
+      active: 0,
+      blocked: 0,
+      total: 1,
+    });
+
+    const ordinary = fixtureTicket("ticket-ordinary", "blocked");
+    run.tickets[ordinary.id] = ordinary;
+    expect(projectRunSummary(run).tickets).toMatchObject({
+      active: 0,
+      blocked: 1,
+      total: 2,
+    });
+  });
+
   it("round-trips the planner-authored title and the scheduled-pause flag through page parsing", () => {
     const titled = fixtureRun("run-titled", "2026-07-18T00:00:00.000Z", "merging");
     titled.plan = {

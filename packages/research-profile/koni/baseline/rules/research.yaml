@@ -22,12 +22,7 @@ queries:
   - superseded
 - id: gate-required-nodes
   node_types:
-  - claim
   - experiment
-  - prerequisite
-  - metric
-  - method
-  - ablation
   status_excluding:
   - satisfied
   - archived
@@ -276,9 +271,6 @@ rules:
     - op: field_equals
       field: asset_manifest.vendor_status
       value: vendored
-    - op: edge_count
-      relation: validates
-      min: 1
     - op: field_present
       field: spec.gate_contracts
   derive:
@@ -510,21 +502,16 @@ rules:
   priority: 100
   for_each: active-hypotheses
   when:
-    any:
-    - op: edge_count
-      relation: claims
-      exact: 0
-    - op: edge_count
-      relation: literature
-      exact: 0
+    op: edge_count
+    relation: claims
+    exact: 0
   emit:
     operation: drill-hypothesis
     registry_entry_id: formulation.hypothesis.drill-hypothesis
-    source_state: hypothesis-missing-claims-or-literature
-    target_state: hypothesis-has-claims-and-related-work
+    source_state: hypothesis-missing-claims
+    target_state: hypothesis-has-falsifiable-claims
     obligations:
     - hypothesis.claims
-    - hypothesis.literature
     target_nodes: $target
     read_scope: $target
     write_scope: $target
@@ -536,9 +523,6 @@ rules:
     all:
     - op: edge_count
       relation: claims
-      min: 1
-    - op: edge_count
-      relation: literature
       min: 1
     - any:
       - op: edge_count
@@ -674,7 +658,11 @@ rules:
     obligations:
     - gate.applies_to
     target_nodes: $target
-    read_scope: $target
+    read_scope:
+      union:
+      - $target
+      - active-assets
+      - gate-evaluation-subjects
     write_scope: $target
 - id: ticket.resolve-prerequisite-asset
   phase: ticket_emission
@@ -726,6 +714,45 @@ rules:
       field: spec.implementation_plan.root
     - any:
       - not:
+          op: field_present
+          field: spec.capabilities
+      - for_all:
+          select: gate-required-nodes
+          bind: gate_subject
+          satisfies:
+            all:
+            - exists:
+                policy_applicability:
+                  policy: research-capability-gates
+                  subject: $gate_subject
+                  result: direct_gates
+            - for_all:
+                select:
+                  policy_applicability:
+                    policy: research-capability-gates
+                    subject: $gate_subject
+                    result: direct_gates
+                bind: declared_gate
+                satisfies:
+                  all:
+                  - op: field_present
+                    subject: $declared_gate
+                    field: spec.command_result_contract
+                  - op: field_present
+                    subject: $declared_gate
+                    field: spec.oracle_semantics
+                  - op: field_present
+                    subject: $declared_gate
+                    field: spec.applicability
+                  - op: field_present
+                    subject: $declared_gate
+                    field: spec.failure_meaning
+                  - op: field_equals
+                    subject: $declared_gate
+                    field: spec.expected_red
+                    value: true
+    - any:
+      - not:
           op: filesystem_manifest_current
       - not:
           op: field_equals
@@ -735,44 +762,52 @@ rules:
           op: field_equals
           field: asset_manifest.vendor_status
           value: vendored
-      - op: edge_count
-        relation: validates
-        exact: 0
-      - not:
-          op: field_present
-          field: spec.gate_contracts
-      - not:
-          for_all:
-            select: gate-evaluation-subjects
-            bind: candidate_gate
-            satisfies:
-              any:
-              - not:
-                  op: gate_policy_selected
-                  subject: $target
+      - all:
+        - not:
+            for_all:
+              select: gate-evaluation-subjects
+              bind: candidate_gate
+              satisfies:
+                not:
+                  op: gate_policy_compatible
                   gate_policy: research-capability-gates
                   gate_subject: $candidate_gate
-              - op: gate_policy_command_available
-                gate_policy: research-capability-gates
-                gate_subject: $candidate_gate
-      - not:
-          for_all:
-            select: gate-evaluation-subjects
-            bind: candidate_gate
-            satisfies:
-              any:
-              - not:
-                  op: gate_policy_selected
-                  subject: $target
-                  gate_policy: research-capability-gates
-                  gate_subject: $candidate_gate
-              - not:
-                  op: gate_policy_has_current_terminal
-                  gate_policy: research-capability-gates
-                  gate_subject: $candidate_gate
-              - op: gate_policy_satisfied
-                gate_policy: research-capability-gates
-                gate_subject: $candidate_gate
+        - any:
+          - not:
+              op: field_present
+              field: spec.gate_contracts
+          - not:
+              for_all:
+                select: gate-evaluation-subjects
+                bind: candidate_gate
+                satisfies:
+                  any:
+                  - not:
+                      op: gate_policy_selected
+                      subject: $target
+                      gate_policy: research-capability-gates
+                      gate_subject: $candidate_gate
+                  - op: gate_policy_command_available
+                    gate_policy: research-capability-gates
+                    gate_subject: $candidate_gate
+          - not:
+              for_all:
+                select: gate-evaluation-subjects
+                bind: candidate_gate
+                satisfies:
+                  any:
+                  - not:
+                      op: gate_policy_selected
+                      subject: $target
+                      gate_policy: research-capability-gates
+                      gate_subject: $candidate_gate
+                  - not:
+                      op: gate_policy_has_current_terminal
+                      gate_policy: research-capability-gates
+                      gate_subject: $candidate_gate
+                  - op: gate_policy_satisfied
+                    gate_policy: research-capability-gates
+                    gate_subject: $candidate_gate
   emit:
     operation: implement-asset
     registry_entry_id: asset-resolution.asset.implement-asset
@@ -782,7 +817,10 @@ rules:
     - asset.implementation
     - asset.gates
     target_nodes: $target
-    read_scope: $target
+    read_scope:
+      union:
+      - $target
+      - gate-evaluation-subjects
     write_scope: $target
     read_paths:
     - select: $target
@@ -806,9 +844,18 @@ rules:
     target_state: gate-has-compatible-asset
     obligations:
     - gate.asset-capability
-    target_nodes: $target
-    read_scope: $target
-    write_scope: $target
+    target_nodes:
+      union:
+      - $target
+      - active-assets
+    read_scope:
+      union:
+      - $target
+      - active-assets
+    write_scope:
+      union:
+      - $target
+      - active-assets
 - id: ticket.run-gate
   phase: ticket_emission
   priority: 170

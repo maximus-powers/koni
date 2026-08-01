@@ -130,12 +130,17 @@ export class MonitorDecisionClient {
     )
       throw new Error("this change proposal is no longer awaiting a decision");
     const message = normalizeDecisionText(input.message, MAX_PROPOSAL_MESSAGE_CODE_POINTS, true);
-    await this.#mutate("proposal.decide", {
-      runId: requiredIdentity(input.runId, "run"),
-      ticketId: requiredIdentity(input.proposal.ticketId, "proposal"),
-      decision: input.decision,
-      ...(message === undefined ? {} : { message }),
-    });
+    await this.#mutate(
+      "proposal.decide",
+      {
+        runId: requiredIdentity(input.runId, "run"),
+        ticketId: requiredIdentity(input.proposal.ticketId, "proposal"),
+        requestSha256: input.proposal.requestSha256,
+        decision: input.decision,
+        ...(message === undefined ? {} : { message }),
+      },
+      true,
+    );
   }
 
   async #mutate(
@@ -147,10 +152,11 @@ export class MonitorDecisionClient {
       | "plan.revise"
       | "proposal.decide",
     params: JsonValue,
+    semanticCas = false,
   ): Promise<RpcSuccess> {
     try {
       return await this.#connection.request(method, params, {
-        expectedRevision: this.#connection.revision,
+        ...(semanticCas ? {} : { expectedRevision: this.#connection.revision }),
         idempotencyKey: this.#idempotencyKey(method),
       });
     } catch (error) {

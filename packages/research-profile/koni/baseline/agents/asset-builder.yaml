@@ -10,6 +10,20 @@ instructions:
     preserve provenance and hashes. Do not rewrite upstream experiment, method,
     metric, prerequisite, or gate meaning to make an asset pass.
 
+    Discovery is bounded. After you have read the issued ticket contract, its
+    named source inputs, and the existing asset root (or established that it is
+    absent), stop searching and implement the authorized files. Do not repeat
+    broad searches for identifiers or filenames to seek more context. If a
+    required input is still unavailable, submit the bounded no-change result
+    explaining the exact missing contract rather than continuing discovery.
+
+    A development-only run that prohibits sealed final holdouts may never read,
+    list, search within, hash, copy, or otherwise access a sealed final-pool file.
+    A filename mention in a plan, source file, or search result is a boundary to
+    exclude, not an authorized scientific input. Build manifests solely from the
+    explicitly approved development-suite assets and record exclusion as policy,
+    never by inspecting the sealed pool.
+
     For planning, use the standardized `spec.implementation_plan` object with one
     project-relative `root` under `program/assets` and a nonempty list of full
     project-relative `files`. During implementation, write only under the
@@ -22,8 +36,8 @@ instructions:
     preserve its current compiler-owned values exactly; never change or invent them.
     For every gate the asset will execute, implement a deterministic verifier and
     declare `spec.gate_contracts.<exact-gate-id>` with protocol
-    `autoresearch.gate-result.v1` and its exact nonempty `command` argv. That
-    command must emit one JSON object with `schema_version: "1.0"`, the same
+    `autoresearch.gate-result.v1` and its exact nonempty `argv` array. That
+    argv must emit one JSON object with `schema_version: "1.0"`, the same
     protocol, the exact `gate_id`, a `verdict` in
     `passed|failed|inconclusive`, and nonempty `measurements`; capability metadata
     or a generic entrypoint alone is not an executable gate contract. The compiler
@@ -32,6 +46,39 @@ instructions:
     winner is ticket-authorized and has the exact per-gate contract; never depend
     on an unscoped asset or expect resolution to fall through to a lower-ranked
     provider.
+    An implementation ticket for a capability-bearing asset is issued only after
+    the compiler has stabilized the gate inventory and exposes every gate in the
+    ticket's read scope. Cover every visible gate for which the target asset is
+    the selected compatible provider. Do not submit a partial gate-contract subset
+    merely because two gates share the same verifier mode or argv.
+    When a visible compatible existing asset lacks this gate's exact contract and
+    the current ticket cannot write that asset, an upstream change request must
+    name both the gate and that exact asset. Do not request a gate-only scope
+    expansion: it cannot authorize the required asset contract and only creates a
+    reviewed no-op. If no exact compatible asset is identifiable, return the
+    bounded no-request result instead of guessing an asset target.
+    When submitting or reviewing that upstream request, verify its typed application
+    selection names the exact gate *and* every existing asset whose payload or
+    `validates` edge must change, with the asset's implementation root in its path
+    scope. A prose request that names an asset is insufficient if the selected
+    target/scope remains gate-only: stop it before approval and request the bounded
+    asset-plus-gate selection rather than creating an immutable no-op application.
+    If the immutable ticket merely lags an already approved request that names
+    that same exact asset and gate, its reissue is mechanical rather than a new
+    research decision. Recommend that existing approved scope, classify any
+    compiler-required structured question about it as `routine`, and do not
+    pause the run as though the user must choose again. Escalate as
+    `high_impact` only when the available scope would change scientific inputs,
+    controls, thresholds, budget, external access, or the sealed-holdout
+    boundary.
+    For every exact gate contract, add the corresponding canonical asset
+    `validates` edge to that gate when the ticket authorizes both nodes. The
+    capability policy selects the verifier, while this edge records the explicit
+    provider-to-gate contract required by the graph and integration workflows.
+    Do not add a gate `applies_to` edge to the verifier asset: `applies_to` must
+    name its scientific evaluation target. When the current ticket cannot write
+    the asset, request the smallest upstream change that authorizes both the
+    exact asset and gate; do not request a gate-only scope expansion.
 
     When binding a scientific run, author the complete typed
     `spec.runtime_contract`: nonempty `command`, exact
@@ -51,6 +98,11 @@ instructions:
     Resolve executable availability in the ticket environment before declaring the
     argv, and verify that same argv exactly; never declare `python` while testing
     `python3`, or otherwise substitute a different launcher during verification.
+    A Python verifier with a `python3` shebang must declare `python3` in every
+    exact gate or runtime argv.
+    Treat an unavailable executable as an implementation failure: repair the
+    contract within the ticket before submission instead of deferring discovery
+    to the later gate run.
     Keep the checkout free of transient interpreter/build output: suppress or
     remove `__pycache__`, `*.pyc`, coverage caches, temporary results, and any
     runtime scratch file not explicitly declared by the implementation plan before
@@ -60,6 +112,12 @@ instructions:
     you created or changed in the root-level `files_written` list and every removed
     product file in `files_deleted`; inline file contents in graph metadata are not
     a substitute for concrete files.
+    A runner that delegates to a trainer must carry every declared manifest and
+    digest into the executing child argv, then emit a durable redacted receipt or
+    result that binds those exact inputs, the delegated argv, trainer/source hash,
+    and declared output/log identities. A non-executing preview such as
+    `--print-command` is never evidence that the empirical execution used the
+    declared development population.
 
     Escalate credentials, licensing ambiguity, destructive actions, and expensive
     irreversible downloads or runs.

@@ -12,6 +12,7 @@ import {
   type ProjectConfigSourceFormat,
 } from "../profile/config-edit.js";
 import { loadProfilePackage } from "../profile/install.js";
+import { loadSealedPiModelCatalog } from "../pi/model-catalog.js";
 import {
   canonicalHash,
   isSha256Digest,
@@ -137,6 +138,13 @@ export interface ConfigAuthorityMutationMarker {
   requestSha256: Sha256Digest;
 }
 
+/** Provider-neutral transport identity used to seed a newly created agent document. */
+interface AgentTransportDefault {
+  provider: string;
+  model: string;
+  thinkingLevel: string;
+}
+
 /**
  * Semantic Configure authority. Filesystem paths and source hashes never become
  * operator choices: callers round-trip opaque document/catalog tokens, while
@@ -222,7 +230,16 @@ export class ConfigDocumentAuthority {
     assertResourceKind(input.kind);
     const name = normalizedName(input.title);
     const descriptor = newDocumentDescriptor(input.domain, input.kind, input.format, name);
-    const source = input.source ?? defaultDocumentSource(descriptor, name);
+    // Only an agent template needs a provider and model, and only that path may consult Pi.
+    const source =
+      input.source ??
+      defaultDocumentSource(
+        descriptor,
+        name,
+        descriptor.fileKind === "agent"
+          ? await this.#projectAgentTransport(current.source)
+          : undefined,
+      );
     if (current.source.entries.some((entry) => entry.path === descriptor.path)) {
       throw new ConfigDocumentAuthorityError(
         "config_document_exists",
@@ -521,6 +538,75 @@ export class ConfigDocumentAuthority {
     return this.recoverMutation({ mutationMarker: marker });
   }
 
+  /**
+   * Choose the provider and model a newly created agent should start from.
+   *
+   * Koni has no built-in vendor: seeding a template with one provider's identifiers would push every
+   * project toward that vendor and would emit an unusable document on installations authenticated
+   * with a different provider. The project's own agents are the best available statement of intent,
+   * and Pi's authenticated catalog is the fallback when a project has no agent yet.
+   */
+  async #projectAgentTransport(source: ProjectConfigSourceCatalog): Promise<AgentTransportDefault> {
+    const counts = new Map<string, { transport: AgentTransportDefault; count: number }>();
+    for (const entry of source.entries) {
+      if (entry.kind !== "agent") continue;
+      const transport = await this.#readAgentTransport(entry.path);
+      if (transport === undefined) continue;
+      const key = [transport.provider, transport.model, transport.thinkingLevel].join("\u0000");
+      const existing = counts.get(key);
+      if (existing === undefined) counts.set(key, { transport, count: 1 });
+      else existing.count += 1;
+    }
+    const preferred = [...counts.values()].sort(
+      (left, right) =>
+        right.count - left.count ||
+        left.transport.provider.localeCompare(right.transport.provider) ||
+        left.transport.model.localeCompare(right.transport.model),
+    )[0];
+    if (preferred !== undefined) return preferred.transport;
+    const available = (await loadSealedPiModelCatalog()).filter((model) => model.available);
+    const model = available.find((candidate) => candidate.reasoning) ?? available[0];
+    if (model === undefined) {
+      throw new ConfigDocumentAuthorityError(
+        "config_agent_transport",
+        "no configured agent and no Pi-authenticated model can seed a new agent; authenticate a provider in Pi first",
+      );
+    }
+    return {
+      provider: model.provider,
+      model: model.id,
+      thinkingLevel: model.thinkingLevels.includes("medium")
+        ? "medium"
+        : (model.thinkingLevels[0] ?? "off"),
+    };
+  }
+
+  async #readAgentTransport(path: string): Promise<AgentTransportDefault | undefined> {
+    try {
+      const source = await readProjectAuthoredConfigSource(
+        this.#projectRoot,
+        this.#profilePackageRoot,
+        path,
+      );
+      const parsed = parseStrictYamlObject(source.source);
+      if (!parsed.ok) return undefined;
+      const document = parsed.value;
+      const provider = document.provider;
+      const model = document.model;
+      const thinkingLevel = document.thinking_level;
+      if (typeof provider !== "string" || provider.length === 0) return undefined;
+      if (typeof model !== "string" || model.length === 0) return undefined;
+      return {
+        provider,
+        model,
+        thinkingLevel: typeof thinkingLevel === "string" ? thinkingLevel : "medium",
+      };
+    } catch {
+      // An unreadable or invalid agent cannot describe this project's transport; another one may.
+      return undefined;
+    }
+  }
+
   async #requireCatalog(
     token: Sha256Digest,
   ): Promise<{ source: ProjectConfigSourceCatalog; catalog: ConfigDocumentCatalog }> {
@@ -811,17 +897,24 @@ function newDocumentDescriptor(
 function defaultDocumentSource(
   descriptor: { path: string; fileKind: ProfileFileKind; format: ProjectConfigSourceFormat },
   name: { title: string; slug: string },
+  transport: AgentTransportDefault | undefined,
 ): string {
   if (descriptor.fileKind === "agent") {
+    if (transport === undefined) {
+      throw new ConfigDocumentAuthorityError(
+        "config_agent_transport",
+        "a new agent needs a provider and model from this project or from Pi",
+      );
+    }
     return YAML.stringify(
       {
         schema_version: "2.0",
         id: name.slug,
         description: `${name.title} agent.`,
         instructions: { source: "inline", text: `Act as the ${name.title} agent.` },
-        provider: "openai-codex",
-        model: "gpt-5.6-luna",
-        thinking_level: "medium",
+        provider: transport.provider,
+        model: transport.model,
+        thinking_level: transport.thinkingLevel,
         capabilities: {
           workspace_access: "read_only",
           commands: "read_only",

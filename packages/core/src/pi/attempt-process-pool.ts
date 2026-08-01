@@ -42,6 +42,7 @@ export interface PiAttemptProcessSessionView {
 export interface PiAttemptProcessHandle {
   session: PiAttemptProcessSessionView;
   outcome: Promise<ManagedSessionOutcome>;
+  cleanupFailure: Promise<PiAttemptProcessError>;
 }
 
 export type PiAttemptPoolEvent =
@@ -340,7 +341,11 @@ export class PiAttemptProcessSupervisor {
       throw new PiAttemptProcessError("session_file", "ready child omitted its session file");
     }
     const view = new MutableSessionView(process, sessionFile);
-    const handle: PiAttemptProcessHandle = { session: view, outcome: process.outcome };
+    const handle: PiAttemptProcessHandle = {
+      session: view,
+      outcome: process.outcome,
+      cleanupFailure: process.cleanupFailure,
+    };
     entry = { process, handle, view, unsubscribe };
     const admittedEntry = entry;
     this.#sessions.set(attemptId, admittedEntry);

@@ -47,17 +47,20 @@ checks:
     backoff_seconds: []
 - id: gate-verifier
   kind: command
+  # Not bound to implement-asset: that operation authors the per-gate contract this check
+  # resolves its command from, so binding it at dispatch deadlocks the very ticket that would
+  # satisfy it. Gates stay covered by run-gate (which executes them) and validate-asset
+  # (which checks an asset that already exists).
   applies_to:
   - run-gate
   - validate-asset
-  - implement-asset
   command_source:
     kind: node
     gate_policy: research-capability-gates
     node_types:
     - asset
     role: asset
-    field: spec.gate_contracts[$gate.id].command
+    field: spec.gate_contracts[$gate.id].argv
   cwd: .
   timeout_seconds: 900
   result_protocol: autoresearch.gate-result.v1
@@ -265,13 +268,9 @@ checks:
   cwd: .
   receipt_type: graph.check
   predicate:
-    any:
-    - op: edge_count
-      relation: claims
-      exact: 0
-    - op: edge_count
-      relation: literature
-      exact: 0
+    op: edge_count
+    relation: claims
+    exact: 0
 - id: gap.experiment-portfolio
   kind: graph
   applies_to:
@@ -282,9 +281,6 @@ checks:
     all:
     - op: edge_count
       relation: claims
-      min: 1
-    - op: edge_count
-      relation: literature
       min: 1
     - any:
       - op: edge_count

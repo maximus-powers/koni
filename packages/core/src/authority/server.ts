@@ -41,6 +41,12 @@ export interface AuthorityMethodResult {
 
 export interface AuthorityMethod {
   mutating: boolean;
+  /**
+   * Global CAS is the default. Semantic-CAS mutations bind authority to an exact resource digest
+   * in their request and validate that digest in the handler, so unrelated authority revisions
+   * must not make an already-reviewed operator action stale while it waits in the mutation lane.
+   */
+  revisionPolicy?: "global" | "semantic";
   handle(context: AuthorityRequestContext): Promise<AuthorityMethodResult> | AuthorityMethodResult;
   /** Join an already-authorized continuation after an exact cached response is flushed. */
   afterIdempotentReplay?(context: AuthorityRequestContext, response: RpcSuccess): void;
@@ -745,6 +751,7 @@ export class AuthorityServer {
       // this serialized lane and receives the exact current revision.
       if (
         method.mutating &&
+        method.revisionPolicy !== "semantic" &&
         request.method !== "authority.quiesce" &&
         request.expectedRevision !== this.#revision
       ) {

@@ -338,6 +338,120 @@ export function assertSealedModelAdmission(
   if (issue !== undefined) throw new SealedModelAdmissionError(issue);
 }
 
+export interface RoleModelSubstitution {
+  roleId: string;
+  roleTitle: string;
+  from: { provider: string; model: string; thinkingLevel: ControlThinkingLevel };
+  to: { provider: string; model: string; thinkingLevel: ControlThinkingLevel };
+}
+
+export interface ResolvedRoleModelSelections {
+  roles: SealedRoleModelSelection[];
+  substitutions: RoleModelSubstitution[];
+}
+
+/**
+ * Project a profile's declared role defaults onto the models this Pi installation can actually run.
+ *
+ * A profile ships one concrete provider and model per role, but the operator's Pi credentials decide
+ * which providers exist at all. Koni is provider-agnostic by construction, so an installation that
+ * authenticated a different provider than the profile author used must still be able to open a run
+ * without hand-editing configuration first. The declared default always wins when it is executable.
+ * Otherwise this prefers the same provider, then any executable model, and reports every
+ * substitution so the operator sees which selections are not the configured ones.
+ *
+ * Only unavailability is substituted. A declared model that Pi can run but that does not support the
+ * declared reasoning level is a real configuration error, so it stays visible for
+ * `sealedModelAdmissionIssue` to reject rather than being silently downgraded. With no executable
+ * catalog entry at all, the declared defaults are likewise returned unchanged.
+ */
+export function resolveRoleModelSelections(
+  roles: readonly SealedRoleModelSelection[],
+  models: readonly ControlModelOption[],
+): ResolvedRoleModelSelections {
+  const available = models.filter((model) => model.available);
+  const substitutions: RoleModelSubstitution[] = [];
+  // Every entry is a fresh copy: callers own their selections and edit them in place, so the
+  // resolver must never hand back an alias of the catalog's role defaults.
+  const resolved = roles.map((role) => {
+    const declared = available.find(
+      (model) => model.provider === role.provider && model.id === role.model,
+    );
+    if (declared !== undefined) return { ...role };
+    const replacement = substituteRoleModel(role, available);
+    if (replacement === undefined) return { ...role };
+    const thinkingLevel = nearestSupportedThinkingLevel(
+      replacement.thinkingLevels,
+      role.thinkingLevel,
+    );
+    substitutions.push({
+      roleId: role.id,
+      roleTitle: role.title,
+      from: { provider: role.provider, model: role.model, thinkingLevel: role.thinkingLevel },
+      to: { provider: replacement.provider, model: replacement.id, thinkingLevel },
+    });
+    return { ...role, provider: replacement.provider, model: replacement.id, thinkingLevel };
+  });
+  return { roles: resolved, substitutions };
+}
+
+/** One sentence per substituted role, suitable for a CLI warning or a control-center notice. */
+export function describeRoleModelSubstitutions(
+  substitutions: readonly RoleModelSubstitution[],
+): string | undefined {
+  if (substitutions.length === 0) return undefined;
+  const detail = substitutions
+    .map(
+      (entry) =>
+        `${entry.roleTitle}: ${entry.from.provider}/${entry.from.model} → ${entry.to.provider}/${entry.to.model}`,
+    )
+    .join("; ");
+  return `Configured role models are unavailable under this Pi installation's credentials; using authenticated models instead (${detail}).`;
+}
+
+/** Prefer the configured provider, then a reasoning-capable peer, then any executable model. */
+function substituteRoleModel(
+  role: SealedRoleModelSelection,
+  available: readonly ControlModelOption[],
+): ControlModelOption | undefined {
+  if (available.length === 0) return undefined;
+  const sameProvider = available.filter((model) => model.provider === role.provider);
+  const wantsReasoning = role.thinkingLevel !== "off";
+  for (const pool of [sameProvider, available]) {
+    if (pool.length === 0) continue;
+    const supportsLevel = pool.find((model) => model.thinkingLevels.includes(role.thinkingLevel));
+    if (supportsLevel !== undefined) return supportsLevel;
+    const reasoning = pool.find((model) => model.reasoning);
+    if (wantsReasoning && reasoning !== undefined) return reasoning;
+    return pool[0];
+  }
+  return undefined;
+}
+
+/**
+ * Choose the closest Pi-supported reasoning level without ever inventing an unsupported one.
+ *
+ * Ties resolve upward: a model that cannot honor the requested level should not quietly think less
+ * than the configuration asked for when a higher supported level exists.
+ */
+export function nearestSupportedThinkingLevel(
+  supported: readonly ControlThinkingLevel[],
+  requested: ControlThinkingLevel,
+): ControlThinkingLevel {
+  if (supported.length === 0) return requested;
+  if (supported.includes(requested)) return requested;
+  const requestedIndex = THINKING_LEVELS.indexOf(requested);
+  for (let index = requestedIndex; index < THINKING_LEVELS.length; index += 1) {
+    const candidate = THINKING_LEVELS[index]!;
+    if (supported.includes(candidate)) return candidate;
+  }
+  for (let index = requestedIndex - 1; index >= 0; index -= 1) {
+    const candidate = THINKING_LEVELS[index]!;
+    if (supported.includes(candidate)) return candidate;
+  }
+  return supported[0]!;
+}
+
 /** Pi 0.80.10 `getSupportedThinkingLevels()` semantics, projected without provider functions. */
 export function supportedThinkingLevels(model: PiModelDescriptor): ControlThinkingLevel[] {
   if (!model.reasoning) return ["off"];

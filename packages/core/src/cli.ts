@@ -15,6 +15,7 @@ import {
   createProjectRun,
   ensureProjectAuthority,
   inspectProjectAuthority,
+  approveProjectRun,
   resumeProjectRun,
   serveProjectAuthority,
   stopProjectAuthority,
@@ -47,6 +48,7 @@ export interface KoniCliDependencies {
   readInstalled: typeof readInstalledProfileReference;
   run: typeof createProjectRun;
   resumeRun: typeof resumeProjectRun;
+  approveRun: typeof approveProjectRun;
   standalone: typeof runStandaloneControlCenter;
   connectReadOnly: typeof connectRunningKoniAuthority;
 }
@@ -70,6 +72,7 @@ const DEFAULT_DEPENDENCIES: KoniCliDependencies = {
   readInstalled: readInstalledProfileReference,
   run: createProjectRun,
   resumeRun: resumeProjectRun,
+  approveRun: approveProjectRun,
   standalone: runStandaloneControlCenter,
   connectReadOnly: connectRunningKoniAuthority,
 };
@@ -405,13 +408,19 @@ export async function runKoniCli(
         objective,
         runTypeId,
         targetRef,
+        // Run types may declare required intake beyond the objective; without this the CLI
+        // cannot start them at all and the TUI is the only way in.
+        ...(parsed.fields === undefined ? {} : { intake: { goal: objective, ...parsed.fields } }),
         ...(createTarget ? { createTarget: true } : {}),
         ...(parsed.from === undefined ? {} : { baseRef: parsed.from }),
       });
       const onto = createTarget
         ? ` on new branch ${targetRef}${parsed.from === undefined ? "" : ` from ${parsed.from}`}`
         : ` on ${targetRef}`;
-      print(io, parsed.json, result, [`Started ${runTypeId} run ${result.runId}${onto}.`]);
+      print(io, parsed.json, result, [
+        `Started ${runTypeId} run ${result.runId}${onto}.`,
+        ...(result.modelNotice === undefined ? [] : [result.modelNotice]),
+      ]);
       return 0;
     }
     case "resume": {
@@ -423,6 +432,17 @@ export async function runKoniCli(
         runId,
       });
       print(io, parsed.json, result, [`Resumed run ${result.runId} into ${result.status}.`]);
+      return 0;
+    }
+    case "approve": {
+      const runId = parsed.runId ?? parsed.positionals[0];
+      if (runId === undefined) throw new CliUsageError("approve requires --run <run-id>");
+      const result = await dependencies.approveRun({
+        projectRoot,
+        version: KONI_CORE_API_VERSION,
+        runId,
+      });
+      print(io, parsed.json, result, [`Approved run ${result.runId} into ${result.status}.`]);
       return 0;
     }
     case "authority": {
@@ -461,6 +481,7 @@ interface ParsedCli {
     | "tui"
     | "run"
     | "resume"
+    | "approve"
     | "authority";
   positionals: string[];
   root?: string;
@@ -470,6 +491,8 @@ interface ParsedCli {
   newTarget: boolean;
   from?: string;
   goal?: string;
+  /** Additional intake answers for run types that require more than the objective field. */
+  fields?: Record<string, string>;
   runId?: string;
   previewSha256?: string;
   conflictResolution?: "keep_project" | "accept_upstream";
@@ -502,7 +525,17 @@ function parseCli(argv: readonly string[]): ParsedCli {
     else if (argument === "--new-target") result.newTarget = true;
     else if (argument === "--from") result.from = requireOptionValue(argv, ++index, argument);
     else if (argument === "--goal") result.goal = requireOptionValue(argv, ++index, argument);
-    else if (argument === "--run") result.runId = requireOptionValue(argv, ++index, argument);
+    else if (argument === "--field") {
+      const entry = requireOptionValue(argv, ++index, argument);
+      const separator = entry.indexOf("=");
+      if (separator < 1) {
+        throw new CliUsageError(`--field expects <id>=<value>, received ${entry}`);
+      }
+      result.fields = {
+        ...result.fields,
+        [entry.slice(0, separator)]: entry.slice(separator + 1),
+      };
+    } else if (argument === "--run") result.runId = requireOptionValue(argv, ++index, argument);
     else if (argument === "--preview")
       result.previewSha256 = requireOptionValue(argv, ++index, argument);
     else if (argument === "--keep-project")
@@ -539,6 +572,7 @@ function isCommand(value: string): value is NonNullable<ParsedCli["command"]> {
     "tui",
     "run",
     "resume",
+    "approve",
     "authority",
   ]).has(value);
 }
@@ -636,10 +670,12 @@ function helpText(): string {
     "  koni restart [--root PATH]\n" +
     "  koni status [--root PATH] [--json]\n" +
     "  koni config validate [--root PATH] [--json]\n" +
-    "  koni run --goal TEXT [--type <run-type>] [--target BRANCH] [--new-target [--from REF]]\n" +
+    "  koni run --goal TEXT [--field ID=VALUE]... [--type <run-type>] [--target BRANCH] [--new-target [--from REF]]\n" +
     "    Available run types come from the project's compiled profile and configuration.\n" +
+    "    --field answers additional required intake (repeatable), e.g. --field hypothesis='...'.\n" +
     "    --new-target branches a not-yet-existing --target from --from (default: current branch).\n" +
     "  koni resume --run RUN_ID [--root PATH]  Resume a paused run or retry a blocked run\n" +
+    "  koni approve --run RUN_ID [--root PATH] Approve a run waiting at its approval gate\n" +
     "  koni tui [--root PATH]\n\n" +
     "The TUI opens only in the terminal where `koni tui` is invoked; Koni never creates panes.\n"
   );

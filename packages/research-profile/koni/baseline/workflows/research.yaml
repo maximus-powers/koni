@@ -73,7 +73,7 @@ workflows:
   - id: map-related-work
     persona: research-scout
     depends_on: []
-    expected_output: literature graph delta with provenance
+    expected_output: literature graph delta with provenance, or a bounded no-op when no permitted source is available
     validation_action: compile-ticket
     required_receipts:
     - context-pack
@@ -90,7 +90,7 @@ workflows:
     depends_on:
     - drill-claims
     - map-related-work
-    expected_output: integrated claims and literature transition
+    expected_output: integrated claims and optional provenance-backed literature transition
     validation_action: compile-ticket
     required_receipts:
     - context-pack
@@ -515,24 +515,9 @@ workflows:
   - implement-asset
   review_failure_reopen_from: implement
   steps:
-  - id: inspect-contracts
-    persona: gate-designer
-    depends_on: []
-    expected_output: implementation and gate contract analysis
-    graph_mutation: forbidden
-    validation_action: compile-ticket
-    required_receipts:
-    - context-pack
-    - structured-output
-    - scoped-compile
-    escalation_triggers:
-    - gate-contract-defect
-    stop_conditions:
-    - stale-context
   - id: implement
     persona: asset-builder
-    depends_on:
-    - inspect-contracts
+    depends_on: []
     expected_output: concrete nonempty payload plus spec.implementation.kind and unique project-relative entrypoints under the authorized root, including deterministic autoresearch.gate-result.v1 verifier commands for every target gate; preserve existing compiler-owned values exactly and never author them on new nodes
     validation_action: compile-ticket
     required_receipts:
@@ -547,7 +532,7 @@ workflows:
     - gate-weakening
     - compiler-owned-field-authorship
   - id: verify
-    persona: run-operator
+    persona: asset-builder
     depends_on:
     - implement
     expected_output: typed validation receipts
@@ -1091,7 +1076,7 @@ workflows:
     persona: integrator
     depends_on:
     - inspect-approved-change
-    expected_output: exact approved existing-node semantic delta
+    expected_output: exact approved semantic graph delta, including only bounded approved new nodes when required
     validation_action: compile-ticket
     required_receipts:
     - context-pack
@@ -1100,7 +1085,7 @@ workflows:
     escalation_triggers:
     - scope-broadening
     stop_conditions:
-    - new-node-creation
+    - unapproved-new-node-creation
     - asset-payload-mutation
   - id: verify
     kind: review

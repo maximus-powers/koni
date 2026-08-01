@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -14,7 +14,13 @@ import {
 } from "../src/cli.js";
 import { createKoniCoreExtension } from "../src/extension.js";
 import { AuthorityServer } from "../src/authority/server.js";
-import { createProjectRun, ensureProjectAuthority } from "../src/operator/authority-bootstrap.js";
+import {
+  createProjectRun,
+  ensureProjectAuthority,
+  launchAuthorityDaemon,
+  serveProjectAuthority,
+  stopAuthorityWhenInstallationSuperseded,
+} from "../src/operator/authority-bootstrap.js";
 import { createRunFromPi, projectPiModels } from "../src/operator/control-center-host.js";
 import {
   installAndCacheProfile,
@@ -445,10 +451,14 @@ describe("shell operator surface", () => {
     expect(output.pop()).toBe("1.0.0\n");
     expect(await runKoniCli(["--help"], io, dependencies)).toBe(0);
     const help = output.pop()!;
-    expect(help).toContain("koni run --goal TEXT [--type <run-type>]");
+    expect(help).toContain("koni run --goal TEXT [--field ID=VALUE]... [--type <run-type>]");
     expect(help).toContain(
       "Available run types come from the project's compiled profile and configuration.",
     );
+    // Run types may require intake beyond the objective, and a started run has to be advanceable
+    // without the TUI; both are headless-operator entry points.
+    expect(help).toContain("--field answers additional required intake");
+    expect(help).toContain("koni approve --run RUN_ID");
     expect(help).not.toContain("--type small|medium|large");
     expect(await runKoniCli(["status", "--json"], io, dependencies)).toBe(0);
     expect(JSON.parse(output.pop()!)).toMatchObject({ running: false, projectRoot: "/project" });
@@ -843,6 +853,139 @@ describe("authenticated profile cache", () => {
     await server.stop();
   }, 30_000);
 
+  it("refuses to launch an authority from a superseded versioned installation", async () => {
+    const prefix = await realpath(await mkdtemp(path.join(tmpdir(), "koni-stale-launch-")));
+    temporaryRoots.push(prefix);
+    const firstLauncher = versionedLauncher(prefix, "bundle-a");
+    const secondLauncher = versionedLauncher(prefix, "bundle-b");
+    await Promise.all(
+      [firstLauncher, secondLauncher].map(async (launcher) => {
+        await mkdir(path.dirname(launcher), { recursive: true });
+        await writeFile(launcher, "#!/usr/bin/env node\n", "utf8");
+      }),
+    );
+    const activeLauncher = path.join(prefix, "bin", "koni");
+    await mkdir(path.dirname(activeLauncher), { recursive: true });
+    await symlink(secondLauncher, activeLauncher);
+
+    await expect(
+      launchAuthorityDaemon({
+        projectRoot: "/authority-launch-must-not-reach-project-discovery",
+        version: "1.0.0",
+        activeInstallation: {
+          activeLauncherPath: activeLauncher,
+          expectedLauncherPath: firstLauncher,
+        },
+      }),
+    ).rejects.toMatchObject({ code: "core_install_superseded" });
+    await expect(
+      serveProjectAuthority({
+        projectRoot: "/authority-serve-must-not-reach-runtime-staging",
+        version: "1.0.0",
+        activeInstallation: {
+          activeLauncherPath: activeLauncher,
+          expectedLauncherPath: firstLauncher,
+        },
+      }),
+    ).rejects.toMatchObject({ code: "core_install_superseded" });
+  });
+
+  it("routes an active installation change through the durable authority stop boundary", async () => {
+    const prefix = await realpath(await mkdtemp(path.join(tmpdir(), "koni-upgrade-handoff-")));
+    temporaryRoots.push(prefix);
+    const firstLauncher = versionedLauncher(prefix, "bundle-a");
+    const secondLauncher = versionedLauncher(prefix, "bundle-b");
+    await Promise.all(
+      [firstLauncher, secondLauncher].map(async (launcher) => {
+        await mkdir(path.dirname(launcher), { recursive: true });
+        await writeFile(launcher, "#!/usr/bin/env node\n", "utf8");
+      }),
+    );
+    const activeLauncher = path.join(prefix, "bin", "koni");
+    await mkdir(path.dirname(activeLauncher), { recursive: true });
+    await symlink(firstLauncher, activeLauncher);
+
+    const handoff = stopAuthorityWhenInstallationSuperseded(
+      {
+        binding: {
+          activeLauncherPath: activeLauncher,
+          expectedLauncherPath: firstLauncher,
+        },
+        projectRoot: "/project",
+        version: "1.0.0",
+        pollIntervalMs: 5,
+      },
+      {
+        stop: async () => ({
+          wasRunning: true,
+          projectRoot: "/project",
+          pausedRunCount: 1,
+          pausedRunIds: ["run-1"],
+          pausedRunIdsTruncated: false,
+        }),
+      },
+    );
+    const replacement = `${activeLauncher}.new`;
+    await symlink(secondLauncher, replacement);
+    await rename(replacement, activeLauncher);
+
+    await expect(handoff).resolves.toEqual({
+      wasRunning: true,
+      projectRoot: "/project",
+      pausedRunCount: 1,
+      pausedRunIds: ["run-1"],
+      pausedRunIdsTruncated: false,
+    });
+  });
+
+  it("retries a transient upgrade quiesce race without reopening stale work", async () => {
+    const prefix = await realpath(await mkdtemp(path.join(tmpdir(), "koni-upgrade-retry-")));
+    temporaryRoots.push(prefix);
+    const firstLauncher = versionedLauncher(prefix, "bundle-a");
+    const secondLauncher = versionedLauncher(prefix, "bundle-b");
+    await Promise.all(
+      [firstLauncher, secondLauncher].map(async (launcher) => {
+        await mkdir(path.dirname(launcher), { recursive: true });
+        await writeFile(launcher, "#!/usr/bin/env node\n", "utf8");
+      }),
+    );
+    const activeLauncher = path.join(prefix, "bin", "koni");
+    await mkdir(path.dirname(activeLauncher), { recursive: true });
+    await symlink(secondLauncher, activeLauncher);
+    let attempts = 0;
+
+    const result = await stopAuthorityWhenInstallationSuperseded(
+      {
+        binding: {
+          activeLauncherPath: activeLauncher,
+          expectedLauncherPath: firstLauncher,
+        },
+        projectRoot: "/project",
+        version: "1.0.0",
+        pollIntervalMs: 1,
+        retryIntervalMs: 1,
+      },
+      {
+        stop: async () => {
+          attempts += 1;
+          if (attempts === 1) {
+            throw Object.assign(new Error("authority is settling a merge"), { retryable: true });
+          }
+          return {
+            wasRunning: true,
+            projectRoot: "/project",
+            pausedRunCount: 1,
+            pausedRunIds: ["run-1"],
+            pausedRunIdsTruncated: false,
+          };
+        },
+      },
+    );
+
+    expect(result.pausedRunIds).toEqual(["run-1"]);
+    expect(attempts).toBe(2);
+  });
+
   it("waits for an already-bound authority to finish recovery without launching a duplicate", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "koni-operator-starting-"));
     temporaryRoots.push(root);
@@ -1055,8 +1198,25 @@ function fakeCliDependencies(): KoniCliDependencies {
     readInstalled: vi.fn(),
     run: vi.fn(),
     resumeRun: vi.fn(),
+    approveRun: vi.fn(),
     standalone: vi.fn(),
   } as unknown as KoniCliDependencies;
+}
+
+function versionedLauncher(prefix: string, bundle: string): string {
+  return path.join(
+    prefix,
+    "share",
+    "koni",
+    "versions",
+    bundle,
+    "package-root",
+    "node_modules",
+    "@koni",
+    "core",
+    "bin",
+    "koni.js",
+  );
 }
 
 function modelAdmissionCatalog() {

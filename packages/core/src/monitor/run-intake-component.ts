@@ -383,6 +383,9 @@ export class GuidedRunModalComponent implements Component, Focusable {
         `${this.#palette.text(role.title)}  ${modelSelector(role.model, modelFocused, this.#palette)}  ${reasoningSelector(role.thinkingLevel, reasoningFocused, this.#palette)}`,
       );
     });
+    if (this.#state.modelNotice !== undefined) {
+      lines.push(this.#palette.warning(this.#state.modelNotice));
+    }
     lines.push("");
     focusLines.set("start", lines.length);
     if (this.#state.busy) {

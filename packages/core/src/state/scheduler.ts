@@ -551,6 +551,10 @@ function schedulerPolicyConflicts(
     byIdentity.set(policyConflictIdentity(conflict), conflict);
   }
   for (const control of controlTickets) {
+    // A ready proposal/application is itself present in the durable control set. It must not
+    // manufacture a change-control conflict against its own admission; the barrier is for
+    // competing tickets touching the same controlled scope.
+    if (control.ticketId === candidate.ticketId) continue;
     for (const conflict of deriveExecutionAdmissionConflicts(catalog, projectRoot, candidate, [
       control,
     ])) {
@@ -649,6 +653,133 @@ export function finishAssignment(
   return {
     disposition: ticket.status === "completed" ? "ticket_completed" : "advanced",
   };
+}
+
+export interface LegacyCompletedReviewRejectionCandidate {
+  reviewAttemptId: string;
+  blocker: string;
+}
+
+export function reviewReworkAppliesToStep(ticket: TicketRecord, stepId: string): boolean {
+  const rework = ticket.reviewReworks?.at(-1);
+  if (rework === undefined) return false;
+  if (rework.scope === "review_only") return stepId === rework.reopenFromStepId;
+  return (
+    stepId === rework.reopenFromStepId ||
+    stepTransitivelyDependsOn(ticket, stepId, rework.reopenFromStepId)
+  );
+}
+
+/**
+ * Identify the first attempt for a compiler-configured review-rework slice. Its immutable parent
+ * remains in lineage, but the new attempt should use the injected blocker/evidence as a fresh
+ * conversation root instead of replaying the rejected producer transcript.
+ */
+export function beginsBoundedReviewRework(
+  ticket: TicketRecord,
+  stepId: string,
+  latestSameScopeAttemptStartedAt: string | undefined,
+): boolean {
+  const rework = ticket.reviewReworks?.at(-1);
+  if (
+    rework === undefined ||
+    (latestSameScopeAttemptStartedAt !== undefined &&
+      latestSameScopeAttemptStartedAt >= rework.openedAt)
+  ) {
+    return false;
+  }
+  return reviewReworkAppliesToStep(ticket, stepId);
+}
+
+/**
+ * Recognize only the legacy terminal shape that could misclassify an explicit rejection. Typed
+ * review output is authoritative and is never interpreted from prose.
+ */
+export function legacyCompletedReviewRejectionCandidate(
+  ticket: Readonly<TicketRecord>,
+  terminalOutput: unknown,
+): LegacyCompletedReviewRejectionCandidate | undefined {
+  if (
+    terminalOutput === null ||
+    typeof terminalOutput !== "object" ||
+    Array.isArray(terminalOutput) ||
+    Object.hasOwn(terminalOutput, "reviewVerdict")
+  ) {
+    return undefined;
+  }
+  const output = terminalOutput as Record<string, unknown>;
+  const summary = typeof output.summary === "string" ? output.summary.trim() : "";
+  const prefix = "Review rejected:";
+  const review = [...ticket.steps].reverse().find((step) => step.kind === "review");
+  const reviewAttemptId = review?.attemptIds.at(-1);
+  if (
+    output.status !== "completed" ||
+    !summary.startsWith(prefix) ||
+    reviewAttemptId === undefined ||
+    ticket.status !== "completed" ||
+    review?.status !== "completed"
+  ) {
+    return undefined;
+  }
+  const blocker = summary.slice(prefix.length).trim();
+  return blocker.length === 0 ? undefined : { reviewAttemptId, blocker };
+}
+
+/**
+ * Recover the pre-typed-verdict compatibility case where a reviewer durably described a rejection
+ * but the legacy terminal contract classified the review attempt as completed. Detection of that
+ * legacy output shape belongs to the authority; this scheduler transition only reopens the exact
+ * compiler-configured producer slice once, under the workflow's existing bounded rework allowance.
+ */
+export function recoverLegacyCompletedReviewRejection(
+  ticket: TicketRecord,
+  reviewAttemptId: string,
+  blocker: string,
+  at: string,
+): boolean {
+  const reopenFrom = ticket.reviewFailureReopenFrom;
+  const limit = ticket.reviewReworkLimit;
+  const count = ticket.reviewReworkCount;
+  const review = [...ticket.steps].reverse().find((step) => step.kind === "review");
+  if (
+    ticket.status !== "completed" ||
+    reopenFrom === undefined ||
+    limit === undefined ||
+    count === undefined ||
+    count >= limit ||
+    review?.status !== "completed" ||
+    review.attemptIds.at(-1) !== reviewAttemptId ||
+    blocker.trim().length === 0
+  ) {
+    return false;
+  }
+  const anchor = ticket.steps.find((step) => step.id === reopenFrom);
+  if (anchor === undefined || !stepTransitivelyDependsOn(ticket, review.id, reopenFrom)) {
+    return false;
+  }
+  for (const step of ticket.steps.filter(
+    (candidate) =>
+      candidate.id === anchor.id || stepTransitivelyDependsOn(ticket, candidate.id, anchor.id),
+  )) {
+    step.status = "pending";
+    step.summary = undefined;
+    step.startedAt = undefined;
+    step.completedAt = undefined;
+  }
+  ticket.reviewReworkCount = count + 1;
+  ticket.reviewReworks ??= [];
+  ticket.reviewReworks.push({
+    ordinal: ticket.reviewReworks.length + 1,
+    mode: "automatic",
+    failedReviewAttemptId: reviewAttemptId,
+    reopenFromStepId: reopenFrom,
+    blocker,
+    openedAt: at,
+  });
+  ticket.status = "ready";
+  ticket.blocker = blocker;
+  ticket.updatedAt = at;
+  return true;
 }
 
 /**

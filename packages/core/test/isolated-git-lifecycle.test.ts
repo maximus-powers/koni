@@ -1340,6 +1340,28 @@ describe("pure TypeScript isolated Git lifecycle", () => {
     expect(await gitOutput(root, "rev-parse", state.target.ref)).toBe(targetBefore);
   });
 
+  it("retires clean owned worktrees while preserving abandoned run branches", async () => {
+    const root = await repository();
+    const authority = lifecycle(root);
+    const journal = new MemoryJournal();
+    let state = await approvedRun(authority, journal, "run-preserve-branches");
+    state = await authority.openTicketCycle(state, ticket("TK-P", "P-1"), journal);
+    const cycle = state.ticketCycles["P-1"]!;
+
+    const result = await authority.retireAbandonedRun(state, journal, {
+      preserveBranches: true,
+    });
+
+    expect(result.status).toBe("retired");
+    expect(await exists(cycle.worktree)).toBe(false);
+    expect(await exists(state.run.worktree)).toBe(false);
+    expect(await gitOutput(root, "rev-parse", cycle.branchRef)).toBe(cycle.ticketHeadOid);
+    expect(await gitOutput(root, "rev-parse", state.run.branchRef)).toBe(state.run.headOid);
+    expect(result.lifecycle.ticketCycles["P-1"]!.status).toBe("preserved");
+    expect(result.lifecycle.run.status).toBe("preserved");
+    expect(journal.pending.size).toBe(0);
+  });
+
   it("retires only clean, integrated compiler namespaces and leaves user worktrees alone", async () => {
     const root = await repository();
     await git(root, "branch", "user-work");

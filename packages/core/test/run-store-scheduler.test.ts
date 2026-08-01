@@ -8,11 +8,15 @@ import { DurableRunStore, RunRevisionConflictError } from "../src/state/run-stor
 import {
   authorizeBlockedReviewRetry,
   beginAssignment,
+  beginsBoundedReviewRework,
   blockedIndependentReviewRetryCandidate,
   blockedReviewRetryCandidate,
   canRetryBlockedReviewOnly,
   deriveReadyAssignments,
   finishAssignment,
+  legacyCompletedReviewRejectionCandidate,
+  recoverLegacyCompletedReviewRejection,
+  reviewReworkAppliesToStep,
 } from "../src/state/scheduler.js";
 import { fixtureRunGit } from "./run-record-fixtures.js";
 
@@ -168,6 +172,74 @@ describe("durable run store and deterministic scheduler", () => {
     ).toEqual({ disposition: "ticket_completed" });
     expect(ticket.status).toBe("completed");
     expect(ticket.steps[1]!.attemptIds).toEqual(["attempt-review-one", "attempt-review-two"]);
+  });
+
+  it("recovers one legacy review rejection that was misclassified as completed", () => {
+    const run = runRecord();
+    const ticket = reviewTicket("ticket-legacy-review-rejection");
+    run.tickets[ticket.id] = ticket;
+
+    const implementation = deriveReadyAssignments(run, 1).ready[0]!;
+    beginAssignment(run, implementation, "attempt-implementation", "2026-07-16T00:00:01.000Z");
+    finishAssignment(
+      run,
+      implementation,
+      { status: "completed", summary: "Unsafe candidate" },
+      "2026-07-16T00:00:02.000Z",
+    );
+    const review = deriveReadyAssignments(run, 1).ready[0]!;
+    beginAssignment(run, review, "attempt-legacy-review", "2026-07-16T00:00:03.000Z");
+    finishAssignment(
+      run,
+      review,
+      { status: "completed", summary: "Review rejected: unsafe execution path." },
+      "2026-07-16T00:00:04.000Z",
+    );
+
+    expect(
+      legacyCompletedReviewRejectionCandidate(ticket, {
+        status: "completed",
+        reviewVerdict: "approved",
+        summary: "Review rejected: misleading typed output.",
+      }),
+    ).toBeUndefined();
+    const candidate = legacyCompletedReviewRejectionCandidate(ticket, {
+      status: "completed",
+      summary: "Review rejected: unsafe execution path.",
+    });
+    expect(candidate).toEqual({
+      reviewAttemptId: "attempt-legacy-review",
+      blocker: "unsafe execution path.",
+    });
+    expect(
+      recoverLegacyCompletedReviewRejection(
+        ticket,
+        candidate!.reviewAttemptId,
+        candidate!.blocker,
+        "2026-07-16T00:00:05.000Z",
+      ),
+    ).toBe(true);
+    expect(ticket.status).toBe("ready");
+    expect(ticket.reviewReworkCount).toBe(1);
+    expect(ticket.blocker).toBe("unsafe execution path.");
+    expect(ticket.steps.map((step) => [step.id, step.status, step.attemptIds])).toEqual([
+      ["implement", "pending", ["attempt-implementation"]],
+      ["review", "pending", ["attempt-legacy-review"]],
+    ]);
+    expect(ticket.reviewReworks).toEqual([
+      {
+        ordinal: 1,
+        mode: "automatic",
+        failedReviewAttemptId: "attempt-legacy-review",
+        reopenFromStepId: "implement",
+        blocker: "unsafe execution path.",
+        openedAt: "2026-07-16T00:00:05.000Z",
+      },
+    ]);
+    expect(beginsBoundedReviewRework(ticket, "implement", "2026-07-16T00:00:01.000Z")).toBe(true);
+    expect(beginsBoundedReviewRework(ticket, "implement", "2026-07-16T00:00:06.000Z")).toBe(false);
+    expect(reviewReworkAppliesToStep(ticket, "implement")).toBe(true);
+    expect(reviewReworkAppliesToStep(ticket, "review")).toBe(true);
   });
 
   it("never spends an author rework cycle on a Review infrastructure failure", () => {

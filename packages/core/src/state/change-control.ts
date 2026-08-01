@@ -573,7 +573,12 @@ export interface SourceReleaseDecision {
   readonly proposalTicketId: string;
   readonly disposition: "hold" | "release";
   readonly reason:
-    "proposal_pending" | "application_pending" | "rejected" | "no_op" | "application_completed";
+    | "proposal_pending"
+    | "application_pending"
+    | "cancelled"
+    | "rejected"
+    | "no_op"
+    | "application_completed";
   readonly retirePriorExecutionAuthority: boolean;
   readonly sha256: Sha256Digest;
 }
@@ -586,6 +591,7 @@ export function deriveSourceReleaseDecision(
     proposalTerminalSha256?: Sha256Digest;
     proposalDisposition:
       | { kind: "pending" }
+      | { kind: "cancelled" }
       | { kind: "rejected"; authoritySha256: Sha256Digest }
       | { kind: "no_op"; authoritySha256: Sha256Digest }
       | {
@@ -610,7 +616,19 @@ export function deriveSourceReleaseDecision(
   }
   let disposition: SourceReleaseDecision["disposition"] = "hold";
   let reason: SourceReleaseDecision["reason"] = "proposal_pending";
-  if (input.proposalDisposition.kind === "rejected" || input.proposalDisposition.kind === "no_op") {
+  if (input.proposalDisposition.kind === "cancelled") {
+    if (!input.proposalTerminal) {
+      fail(
+        "change_control.nonterminal_disposition",
+        "cancelled proposal must be terminal before source release",
+      );
+    }
+    disposition = "release";
+    reason = "cancelled";
+  } else if (
+    input.proposalDisposition.kind === "rejected" ||
+    input.proposalDisposition.kind === "no_op"
+  ) {
     requireDigest(input.proposalDisposition.authoritySha256, "proposal disposition authority hash");
     if (!input.proposalTerminal) {
       fail(

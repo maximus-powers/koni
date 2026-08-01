@@ -10,6 +10,11 @@ import {
 } from "../control-center/protocol.js";
 import type { ConfigurationObject, ConfigurationValue } from "../contracts/configuration.js";
 import {
+  describeRoleModelSubstitutions,
+  nearestSupportedThinkingLevel,
+  resolveRoleModelSelections,
+} from "../pi/model-catalog.js";
+import {
   createRunTargetDraft,
   cycleRunTarget,
   isCreatingNewTarget,
@@ -55,6 +60,8 @@ export interface GuidedRunState {
   scroll: number;
   busy: boolean;
   error: string | undefined;
+  /** Set when configured role defaults were replaced by models this Pi installation can run. */
+  modelNotice: string | undefined;
 }
 
 export interface GuidedRunCreateInput {
@@ -236,6 +243,7 @@ export function createGuidedRunState(input: {
       requested !== undefined && !input.runTypes.some((runType) => runType.id === requested)
         ? `Run type ${requested} is unavailable; using ${selected.title}.`
         : undefined,
+    modelNotice: undefined,
   } satisfies GuidedRunState;
   applyRunTypeDefaults(state, selected);
   return state;
@@ -360,7 +368,11 @@ export function parseRunIntakeBranches(value: JsonValue | undefined | unknown): 
 function applyRunTypeDefaults(state: GuidedRunState, runType: ControlRunTypeOption): void {
   state.questionPolicy = runType.questionPolicy;
   state.maxParallel = runType.maxParallel;
-  state.roles = structuredClone(runType.roles);
+  // The profile declares one provider and model per role, but only Pi's authenticated catalog
+  // decides what this installation can execute. Open the modal on selections that can actually run.
+  const resolved = resolveRoleModelSelections(structuredClone(runType.roles), state.models);
+  state.roles = resolved.roles;
+  state.modelNotice = describeRoleModelSubstitutions(resolved.substitutions);
   const previousText = state.intakeText;
   const previousValues = state.intake;
   state.intake = {};
@@ -570,7 +582,7 @@ function adjustRoleModel(state: GuidedRunState, role: GuidedRunRoleSelection, de
   role.provider = selected.provider;
   role.model = selected.id;
   if (!selected.thinkingLevels.includes(role.thinkingLevel)) {
-    role.thinkingLevel = nearestThinkingLevel(selected.thinkingLevels, role.thinkingLevel);
+    role.thinkingLevel = nearestSupportedThinkingLevel(selected.thinkingLevels, role.thinkingLevel);
   }
 }
 
@@ -585,27 +597,6 @@ function adjustRoleReasoning(
   if (model === undefined || model.thinkingLevels.length === 0) return;
   const current = Math.max(0, model.thinkingLevels.indexOf(role.thinkingLevel));
   role.thinkingLevel = model.thinkingLevels[cycle(current, delta, model.thinkingLevels.length)]!;
-}
-
-function nearestThinkingLevel(
-  supported: readonly ControlThinkingLevel[],
-  current: ControlThinkingLevel,
-): ControlThinkingLevel {
-  if (supported.length === 0) return current;
-  const order: readonly ControlThinkingLevel[] = [
-    "off",
-    "minimal",
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-    "max",
-  ];
-  const position = order.indexOf(current);
-  return [...supported].sort(
-    (left, right) =>
-      Math.abs(order.indexOf(left) - position) - Math.abs(order.indexOf(right) - position),
-  )[0]!;
 }
 
 function cycle(index: number, delta: number, length: number): number {

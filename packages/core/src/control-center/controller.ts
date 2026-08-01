@@ -10,7 +10,12 @@ import {
 import type { JsonValue, RpcEvent, RpcSuccess } from "../authority/protocol.js";
 import type { ConfigurationObject, ConfigurationValue } from "../contracts/configuration.js";
 import type { GraphEdge, GraphNode } from "../graph/model.js";
-import { sealedModelAdmissionIssue } from "../pi/model-catalog.js";
+import {
+  describeRoleModelSubstitutions,
+  nearestSupportedThinkingLevel,
+  resolveRoleModelSelections,
+  sealedModelAdmissionIssue,
+} from "../pi/model-catalog.js";
 import { canonicalEncode } from "../shared/canonical.js";
 import { assertRunRecord, type RunRecord } from "../state/run-record.js";
 import {
@@ -127,6 +132,8 @@ export interface NewRunModalState {
   roles: readonly NewRunRoleSelection[];
   focus: string;
   stageScroll: number;
+  /** Set when configured role defaults were replaced by models this Pi installation can run. */
+  modelNotice?: string;
 }
 
 export interface PlanReviewModalState {
@@ -531,6 +538,8 @@ const DOCUMENT_CREATE_CHOICES: readonly ConfigDocumentCreateChoice[] = [
 
 const LEGACY_RUN_LIST_LIMIT = MAX_RUN_SUMMARY_PAGE_LIMIT;
 const MAX_RUN_PAGE_RESTARTS = 3;
+const MAX_SYNCHRONOUS_REFRESH_PASSES = 2;
+const STALE_REFRESH_RETRY_MS = 250;
 /** Retain a finite recent-agent working set; every entry contains at most one 64-block window. */
 const MAX_TRANSCRIPT_WINDOWS = 4;
 
@@ -593,6 +602,7 @@ export class ControlCenterController {
   #notice: ControlCenterControllerSnapshot["notice"];
   #refreshPromise: Promise<void> | undefined;
   #refreshAgain = false;
+  #staleRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   #disposed = false;
 
   public constructor(options: ControlCenterControllerOptions) {
@@ -843,6 +853,8 @@ export class ControlCenterController {
   public dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
+    if (this.#staleRefreshTimer !== undefined) clearTimeout(this.#staleRefreshTimer);
+    this.#staleRefreshTimer = undefined;
     this.#unsubscribeAuthority?.();
     this.#unsubscribeAuthority = undefined;
     this.#listeners.clear();
@@ -850,6 +862,8 @@ export class ControlCenterController {
   }
 
   async #refreshLoop(): Promise<void> {
+    let staleRetries = 0;
+    let successfulPasses = 0;
     do {
       this.#refreshAgain = false;
       try {
@@ -857,11 +871,41 @@ export class ControlCenterController {
         await this.#refreshSelectionProjections();
         this.#maybeOpenApproval();
         this.#notice = undefined;
+        staleRetries = 0;
+        successfulPasses += 1;
       } catch (error) {
-        this.#notice = { kind: "error", message: errorMessage(error) };
+        // The inventory and its auxiliary projections are revisioned independently. A normal
+        // orchestration transition can invalidate the latter after the former has hydrated.
+        // Re-read the bounded run page instead of surfacing an alarming, non-actionable error.
+        if (isRunPageStale(error)) {
+          if (staleRetries + 1 < MAX_RUN_PAGE_RESTARTS) {
+            staleRetries += 1;
+            this.#refreshAgain = true;
+          } else {
+            this.#scheduleStaleRefresh();
+          }
+        } else {
+          this.#notice = { kind: "error", message: errorMessage(error) };
+        }
+      }
+      // Authority events coalesce into one immediate follow-up snapshot. Do not let continuous
+      // orchestration keep the shared refresh promise—and therefore a completed operator
+      // action's busy state—alive forever. A short background refresh preserves eventual
+      // freshness without making UI completion depend on a quiet revision interval.
+      if (this.#refreshAgain && successfulPasses >= MAX_SYNCHRONOUS_REFRESH_PASSES) {
+        this.#refreshAgain = false;
+        this.#scheduleStaleRefresh();
       }
       this.#emit();
     } while (this.#refreshAgain && !this.#disposed);
+  }
+
+  #scheduleStaleRefresh(): void {
+    if (this.#staleRefreshTimer !== undefined || this.#disposed) return;
+    this.#staleRefreshTimer = setTimeout(() => {
+      this.#staleRefreshTimer = undefined;
+      void this.refresh();
+    }, STALE_REFRESH_RETRY_MS);
   }
 
   async #refreshRunInventory(): Promise<void> {
@@ -1144,7 +1188,12 @@ export class ControlCenterController {
         selected === undefined ||
         controls.binding.runRevision !== selected.revision
       ) {
-        throw new Error("authority returned stage controls for stale run state");
+        // Controls are an auxiliary read projection. During active orchestration it can lag the
+        // selected record by one revision; omit it until the next refresh instead of blocking
+        // ticket selection or proposal review. Every control mutation still carries its own
+        // strict expected revision and is rejected/reloaded if it became stale.
+        this.#controls = undefined;
+        return;
       }
       if (this.#selection.runId === runId) this.#controls = controls;
       this.#controlsRpcAvailable = true;
@@ -1182,7 +1231,8 @@ export class ControlCenterController {
         selected === undefined ||
         lineage.runRevision !== selected.revision
       ) {
-        throw new Error("authority returned attempt lineage for stale run state");
+        this.#lineage = undefined;
+        return;
       }
       if (this.#selection.runId === runId && this.#selection.ticketId === ticketId)
         this.#lineage = lineage;
@@ -1395,7 +1445,18 @@ export class ControlCenterController {
     this.#scroll.details = 0;
     this.#scroll.agents = 0;
     this.#graphCursorIndex = 0;
-    await this.#refreshSelectionProjections();
+    try {
+      await this.#refreshSelectionProjections();
+    } catch (error) {
+      // Ticket activation races with orchestration often enough that this must be recoverable.
+      // Refresh the selected record, retain the cursor when it still exists, and let the user
+      // activate it again only if the proposal itself actually changed.
+      if (isRunPageStale(error)) {
+        await this.refresh();
+        return;
+      }
+      throw error;
+    }
     if (this.#selectedRunRecord()?.tickets[ticketId]?.status === "proposed") {
       await this.#openSelectedProposal();
       return;
@@ -3735,7 +3796,9 @@ export class ControlCenterController {
       this.#emit();
       return;
     }
-    if (action.type === "submit" && modal.focus === "start") await this.#startRun(modal);
+    // A new-run form has many optional controls. Ctrl-Enter is an explicit submit gesture,
+    // so do not require users to traverse every role selector merely to reach the visual button.
+    if (action.type === "submit") await this.#startRun(modal);
   }
 
   #adjustNewRun(modal: NewRunModalState, delta: -1 | 1): void {
@@ -3770,7 +3833,10 @@ export class ControlCenterController {
         const selected = models[cycleIndex(current, models.length, delta)]!;
         role.provider = selected.provider;
         role.model = selected.id;
-        role.thinkingLevel = nearestThinkingLevel(selected.thinkingLevels, role.thinkingLevel);
+        role.thinkingLevel = nearestSupportedThinkingLevel(
+          selected.thinkingLevels,
+          role.thinkingLevel,
+        );
       } else {
         const model = this.#models.find(
           (candidate) => candidate.provider === role.provider && candidate.id === role.model,
@@ -3998,21 +4064,44 @@ export class ControlCenterController {
       modal.decision === "approval" ? "Approving change proposal…" : "Rejecting change proposal…";
     this.#notice = undefined;
     this.#emit();
-    try {
+    const reviewedProposal = modal.proposal;
+    const decide = async (): Promise<ControlProposalInspection> => {
       const response = await this.#client.request(
         "proposal.decide",
         {
           runId: modal.proposal.runId,
           ticketId: modal.proposal.ticketId,
-          decision: modal.decision,
+          requestSha256: modal.proposal.requestSha256,
+          decision: modal.decision!,
           ...(message.length === 0 ? {} : { message }),
         },
         {
-          expectedRevision: this.#client.revision,
           idempotencyKey: `proposal.decide:${randomUUID()}`,
         },
       );
-      const decided = parseControlProposalInspection(response.result);
+      return parseControlProposalInspection(response.result);
+    };
+    try {
+      let decided: ControlProposalInspection;
+      try {
+        decided = await decide();
+      } catch (error) {
+        if (!isRevisionConflictError(error)) throw error;
+        await this.refresh();
+        const ticket = this.#selectedRunRecord()?.tickets[modal.proposal.ticketId];
+        if (ticket?.status !== "proposed") throw error;
+        const refreshed = parseControlProposalInspection(
+          (
+            await this.#client.request("proposal.inspect", {
+              runId: modal.proposal.runId,
+              ticketId: modal.proposal.ticketId,
+            })
+          ).result,
+        );
+        if (!sameControlProposalInspection(reviewedProposal, refreshed)) throw error;
+        modal.proposal = refreshed;
+        decided = await decide();
+      }
       if (decided.runId !== modal.proposal.runId || decided.ticketId !== modal.proposal.ticketId) {
         throw new Error("authority recorded a decision for a different proposal");
       }
@@ -5088,15 +5177,13 @@ function applyRunTypeDefaults(
   modal.questionPolicy = runType.questionPolicy;
   modal.maxParallel = runType.maxParallel;
   modal.stageScroll = 0;
-  modal.roles = runType.roles.map((role) => {
-    const configured = models.find(
-      (model) => model.provider === role.provider && model.id === role.model,
-    );
-    return {
-      ...role,
-      ...(configured === undefined ? {} : { provider: configured.provider, model: configured.id }),
-    };
-  });
+  // Profile role defaults name one provider and model. Pi's authenticated catalog decides what this
+  // installation can execute, so open the modal on runnable selections and say what changed.
+  const resolved = resolveRoleModelSelections(runType.roles, models);
+  modal.roles = resolved.roles;
+  const notice = describeRoleModelSubstitutions(resolved.substitutions);
+  if (notice === undefined) delete modal.modelNotice;
+  else modal.modelNotice = notice;
   const previousText = modal.intakeText;
   const previousValues = modal.intake;
   modal.intake = {};
@@ -5440,7 +5527,7 @@ function adjustConfigField(
         THINKING_LEVELS.includes(currentThinking as ControlThinkingLevel) &&
         !selectedModel.thinkingLevels.includes(currentThinking as ControlThinkingLevel)
       ) {
-        modal.draft[thinkingField.key] = nearestThinkingLevel(
+        modal.draft[thinkingField.key] = nearestSupportedThinkingLevel(
           selectedModel.thinkingLevels,
           currentThinking as ControlThinkingLevel,
         );
@@ -5671,23 +5758,6 @@ function selectableModels(
   return currentProvider.length > 0 && currentModel.length > 0
     ? [{ provider: currentProvider, id: currentModel, thinkingLevels: [] }]
     : [];
-}
-
-function nearestThinkingLevel(
-  supported: readonly ControlThinkingLevel[],
-  requested: ControlThinkingLevel,
-): ControlThinkingLevel {
-  if (supported.includes(requested)) return requested;
-  const requestedIndex = THINKING_LEVELS.indexOf(requested);
-  for (let index = requestedIndex; index < THINKING_LEVELS.length; index += 1) {
-    const candidate = THINKING_LEVELS[index]!;
-    if (supported.includes(candidate)) return candidate;
-  }
-  for (let index = requestedIndex - 1; index >= 0; index -= 1) {
-    const candidate = THINKING_LEVELS[index]!;
-    if (supported.includes(candidate)) return candidate;
-  }
-  return supported[0] ?? "off";
 }
 
 function moveOptionalString<T extends string>(
@@ -5931,6 +6001,13 @@ function parseRunRecord(value: unknown): RunRecord {
 }
 
 function sameRunSummary(left: RunSummary, right: RunSummary): boolean {
+  return canonicalEncode(left) === canonicalEncode(right);
+}
+
+function sameControlProposalInspection(
+  left: ControlProposalInspection,
+  right: ControlProposalInspection,
+): boolean {
   return canonicalEncode(left) === canonicalEncode(right);
 }
 

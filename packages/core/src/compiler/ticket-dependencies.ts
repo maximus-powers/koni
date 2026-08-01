@@ -13,11 +13,12 @@ export class TicketDependencyProjectionError extends Error {
 }
 
 /**
- * Project a stable, acyclic ticket dependency DAG from compiler-issued write authority.
+ * Project a stable, acyclic ticket dependency DAG from compiler-issued authority.
  *
- * Higher-ranked tickets own a conflicting scope first. A later ticket waits on the closest
- * conflicting predecessors; transitively implied predecessors are removed to keep the durable
- * graph meaningful rather than recording a dense all-pairs ordering.
+ * Higher-ranked and more narrowly scoped tickets own conflicting authority first. A later ticket
+ * records every conflicting predecessor rather than a transitive reduction: definitions are
+ * reconciled incrementally, so a newly inserted predecessor must remain a direct durable barrier
+ * even when an already-completed ticket now appears between the two in the projected order.
  */
 export function deriveCompilerTicketDependencies(
   definitions: readonly DerivedTicketDefinition[],
@@ -43,13 +44,7 @@ export function deriveCompilerTicketDependencies(
       }
       if (conflict) conflicting.push(predecessor.id);
     }
-    const direct = conflicting.filter(
-      (candidate) =>
-        !conflicting.some(
-          (other) => other !== candidate && transitivelyDependsOn(other, candidate, dependencies),
-        ),
-    );
-    dependencies.set(definition.id, Object.freeze(direct.sort(compareUtf8)));
+    dependencies.set(definition.id, Object.freeze(conflicting.sort(compareUtf8)));
   }
   return dependencies;
 }
@@ -90,28 +85,24 @@ function compareTicketDefinitions(
   left: DerivedTicketDefinition,
   right: DerivedTicketDefinition,
 ): number {
-  return ticketPriority(left) - ticketPriority(right) || compareUtf8(left.id, right.id);
+  return (
+    ticketPriority(left) - ticketPriority(right) ||
+    writePathSpecificity(right) - writePathSpecificity(left) ||
+    compareUtf8(left.id, right.id)
+  );
 }
 
 function ticketPriority(definition: DerivedTicketDefinition): number {
   return -(definition.rule_priority * 1_000 + definition.operation_dispatch_priority);
 }
 
-function transitivelyDependsOn(
-  source: string,
-  target: string,
-  dependencies: ReadonlyMap<string, readonly string[]>,
-): boolean {
-  const pending = [...(dependencies.get(source) ?? [])];
-  const visited = new Set<string>();
-  while (pending.length > 0) {
-    const candidate = pending.pop()!;
-    if (candidate === target) return true;
-    if (visited.has(candidate)) continue;
-    visited.add(candidate);
-    pending.push(...(dependencies.get(candidate) ?? []));
-  }
-  return false;
+function writePathSpecificity(definition: DerivedTicketDefinition): number {
+  if (definition.scope.write_paths.length === 0) return 0;
+  return Math.min(
+    ...definition.scope.write_paths.map(
+      (value) => value.split(/[\\/]+/u).filter((segment) => segment.length > 0).length,
+    ),
+  );
 }
 
 function intersects(left: readonly string[], right: readonly string[]): boolean {

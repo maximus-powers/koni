@@ -176,7 +176,7 @@ describe("production compiler rule-domain adapter", () => {
     );
     const preferred = node("asset-preferred", "asset", "Preferred verifier", "active", {
       capabilities: [{ name: "verifier", protocol_version: "1.3.0" }],
-      gate_contracts: { "gate-a": { command: ["node", "verify.mjs"] } },
+      gate_contracts: { "gate-a": { argv: ["node", "verify.mjs"] } },
     });
     const fallback = node("asset-fallback", "asset", "Fallback verifier", "active", {
       capabilities: [{ name: "verifier", protocol_version: "1.4.0" }],

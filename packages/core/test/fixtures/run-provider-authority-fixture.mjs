@@ -59,7 +59,10 @@ function onFrame(frame) {
       controlId: frame.controlId,
       ok: true,
     });
-    if (scenario === "pause_canonical_abort" && launch.spec.lineage.branchEpoch === 0) {
+    if (
+      (scenario === "pause_canonical_abort" || scenario === "provider_liveness_timeout") &&
+      launch.spec.lineage.branchEpoch === 0
+    ) {
       appendCanonicalAbort();
     }
     send({
@@ -105,13 +108,42 @@ function onFrame(frame) {
       finish(23);
       return;
     }
-    if (scenario === "pause_canonical_abort" && launch.spec.lineage.branchEpoch === 0) return;
+    if (scenario === "canonical_abort_after_prior_assistant" && launch.spec.lineage.branchEpoch === 0) {
+      appendAssistant();
+      appendCanonicalAbort(assistantEntry.id);
+      finish(23);
+      return;
+    }
+    if (
+      (scenario === "pause_canonical_abort" || scenario === "provider_liveness_timeout") &&
+      launch.spec.lineage.branchEpoch === 0
+    )
+      return;
     appendAssistant();
     if (
       (scenario === "failed_provider" ||
         scenario === "failed_provider_tool_call" ||
         scenario === "uncanonical_provider_error") &&
       launch.spec.lineage.branchEpoch === 0
+    ) {
+      finish(23);
+      return;
+    }
+    if (
+      scenario === "assignment_provider_error" &&
+      launch.spec.identity.ticketId === "ticket-one" &&
+      launch.spec.lineage.branchEpoch === 0
+    ) {
+      finish(23);
+      return;
+    }
+    if (
+      scenario.startsWith("lead_sol_fallback") &&
+      launch.spec.identity.ticketId === "run-orchestration" &&
+      (launch.spec.model.id === "gpt-5.6-sol" ||
+        (scenario === "lead_sol_fallback_resume" &&
+          launch.spec.model.id === "gpt-5.6-terra" &&
+          launch.spec.lineage.branchEpoch === 4))
     ) {
       finish(23);
       return;
@@ -153,7 +185,8 @@ function onFrame(frame) {
     frame.requestId === "settle" &&
     (scenario === "normal" ||
       scenario === "torn_after_assistant" ||
-      scenario.startsWith("assignment_terminal_"))
+      scenario.startsWith("assignment_") ||
+      scenario.startsWith("lead_sol_fallback"))
   ) {
     if (!frame.ok || frame.value?.protocol !== "koni.provider-request-settlement.v1")
       process.exit(94);
@@ -338,8 +371,17 @@ function appendAssistant() {
   const failed =
     (scenario === "failed_provider" ||
       scenario === "failed_provider_tool_call" ||
+      scenario === "assignment_provider_error" ||
       scenario === "uncanonical_provider_error") &&
-    launch.spec.lineage.branchEpoch === 0;
+    launch.spec.lineage.branchEpoch === 0 &&
+    (scenario !== "assignment_provider_error" ||
+      launch.spec.identity.ticketId === "ticket-one") ||
+    (scenario.startsWith("lead_sol_fallback") &&
+      launch.spec.identity.ticketId === "run-orchestration" &&
+      (launch.spec.model.id === "gpt-5.6-sol" ||
+        (scenario === "lead_sol_fallback_resume" &&
+          launch.spec.model.id === "gpt-5.6-terra" &&
+          launch.spec.lineage.branchEpoch === 4)));
   const content =
     scenario === "response_overshoot"
       ? [{ type: "text", text: "x".repeat(1_100_000) }]
@@ -395,7 +437,10 @@ function appendAssistant() {
       stopReason: failed ? "error" : content[0].type === "toolCall" ? "toolUse" : "stop",
       ...(failed
         ? {
-            ...(scenario === "failed_provider" || scenario === "failed_provider_tool_call"
+            ...(scenario === "failed_provider" ||
+            scenario === "failed_provider_tool_call" ||
+            scenario === "assignment_provider_error" ||
+            scenario.startsWith("lead_sol_fallback")
               ? { responseId: "resp_fixture_provider_error" }
               : {}),
             errorMessage: "Codex error: simulated terminal provider failure",
@@ -411,11 +456,11 @@ function appendAssistant() {
   syncFile();
 }
 
-function appendCanonicalAbort() {
+function appendCanonicalAbort(parentId = "baseline") {
   assistantEntry = {
     type: "message",
     id: "assistant-aborted",
-    parentId: "baseline",
+    parentId,
     message: {
       role: "assistant",
       content: [{ type: "thinking", thinking: "partial streamed reasoning" }],
@@ -425,7 +470,10 @@ function appendCanonicalAbort() {
       usage: emptyPiUsage(),
       stopReason: "aborted",
       responseId: "resp_fixture_canonical_abort",
-      errorMessage: "Request was aborted",
+      errorMessage:
+        scenario === "canonical_abort_after_prior_assistant"
+          ? "authority effects are closed for this attempt"
+          : "Request was aborted",
       timestamp: Date.now(),
     },
   };

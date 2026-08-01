@@ -177,7 +177,7 @@ describe("Pi companion monitor controller", () => {
     controller.dispose();
   });
 
-  it("uses only revisioned idempotent decisions and never replays on CAS conflict", async () => {
+  it("uses idempotent decisions with semantic proposal CAS and never replays on conflict", async () => {
     const connection = new FakeMonitorConnection();
     const keys = ["answer-key", "approve-key", "revise-key", "proposal-key"];
     const controller = new MonitorController({
@@ -220,11 +220,12 @@ describe("Pi companion monitor controller", () => {
       { expectedRevision: 12, idempotencyKey: "answer-key" },
       { expectedRevision: 13, idempotencyKey: "approve-key" },
       { expectedRevision: 14, idempotencyKey: "revise-key" },
-      { expectedRevision: 15, idempotencyKey: "proposal-key" },
+      { idempotencyKey: "proposal-key" },
     ]);
     expect(mutations.at(-1)?.params).toEqual({
       runId: "run-a",
       ticketId: "proposal-a",
+      requestSha256: `sha256:${"7".repeat(64)}`,
       decision: "rejection",
       message: "Keep the current storage boundary.",
     });

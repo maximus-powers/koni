@@ -50,6 +50,12 @@ export interface ProductionRuleDomainAdapterOptions {
   evidence?: RuleAuthorityEvidence;
 }
 
+export interface FilesystemManifestAcceptance {
+  outputField: string;
+  manifest: ConfigurationObject;
+  blockingErrors: readonly string[];
+}
+
 export interface RulePredicateEvidenceKeyInput {
   configurationSha256: Sha256Digest;
   inputGraphSha256: Sha256Digest;
@@ -907,6 +913,50 @@ async function snapshotFilesystemManifests(
   return output;
 }
 
+/**
+ * Compile the exact filesystem projection that a successful scoped review may accept.
+ *
+ * The content hash is derived from repository bytes and the authored node contract. The caller
+ * remains responsible for proving that the review owns this node and for publishing the returned
+ * compiler-owned field through graph CAS.
+ */
+export async function prepareFilesystemManifestAcceptance(
+  configuration: CompiledConfiguration,
+  node: CompilerGraphNode,
+  projectRoot: string,
+): Promise<FilesystemManifestAcceptance | undefined> {
+  const canonicalRoot = await canonicalProjectRoot(projectRoot);
+  const definition = recordValue(
+    configuration.registries.node_types[node.type]?.filesystem_manifest,
+  );
+  if (definition === undefined) return undefined;
+  const projected = await deriveFilesystemManifest(node, definition, canonicalRoot);
+  const acceptanceError = "filesystem content hash requires scoped compiler acceptance";
+  const blockingErrors = stringArray(projected.implementation_errors).filter(
+    (error) => error !== acceptanceError,
+  );
+  if (blockingErrors.length > 0) {
+    return {
+      outputField: stringValue(definition.output_field),
+      manifest: projected,
+      blockingErrors,
+    };
+  }
+  const contentHash = stringValue(projected.content_hash);
+  const { hash: _priorHash, ...projectedWithoutHash } = projected;
+  const material: ConfigurationObject = {
+    ...projectedWithoutHash,
+    accepted_content_hash: contentHash,
+    implementation_status: "ready",
+    implementation_errors: [],
+  };
+  return {
+    outputField: stringValue(definition.output_field),
+    manifest: { ...material, hash: canonicalHash(material) },
+    blockingErrors: [],
+  };
+}
+
 async function deriveFilesystemManifest(
   node: CompilerGraphNode,
   definition: ConfigurationObject,
@@ -936,7 +986,31 @@ async function deriveFilesystemManifest(
     if (!(await safePathExists(projectRoot, relativeRoot))) {
       errors.add(`filesystem root does not exist: ${relativeRoot}`);
     } else {
-      await scanManifestRoot(root, relativeRoot, scan, rows, errors);
+      const inferredFilesField = rootField.endsWith(".root")
+        ? `${rootField.slice(0, -".root".length)}.files`
+        : undefined;
+      // Older durable Research runs predate the explicit files_field compiler option but already
+      // carry the same implementation_plan.files contract. Honor that existing exact boundary so
+      // a core upgrade can resume them without rehashing unrelated siblings under the shared root.
+      const filesField =
+        optionalString(definition.files_field) ??
+        (inferredFilesField !== undefined && nodeField(node, inferredFilesField) !== undefined
+          ? inferredFilesField
+          : undefined);
+      if (filesField === undefined) {
+        await scanManifestRoot(root, relativeRoot, scan, rows, errors);
+      } else {
+        await scanManifestFiles(
+          projectRoot,
+          root,
+          relativeRoot,
+          nodeField(node, filesField),
+          filesField,
+          scan,
+          rows,
+          errors,
+        );
+      }
     }
   }
   rows.sort((left, right) => compareUtf8(String(left.path), String(right.path)));
@@ -1010,6 +1084,88 @@ async function deriveFilesystemManifest(
     files: rows,
   };
   return { ...material, hash: canonicalHash(material) };
+}
+
+/**
+ * Inventory only the files owned by this manifest contract.
+ *
+ * Multiple assets may intentionally share a workspace root. Hashing every sibling under that
+ * root makes a disjoint asset integration invalidate all previously accepted assets and causes
+ * deterministic tickets to be reissued forever. An explicit files field is the compiler-owned
+ * independence boundary: additions outside it are unrelated, while any owned-byte drift still
+ * invalidates the acceptance hash.
+ */
+async function scanManifestFiles(
+  projectRoot: string,
+  root: string,
+  relativeRoot: string,
+  configuredFiles: ConfigurationValue | undefined,
+  filesField: string,
+  scan: ConfigurationObject,
+  rows: ConfigurationObject[],
+  errors: Set<string>,
+): Promise<void> {
+  if (
+    !Array.isArray(configuredFiles) ||
+    configuredFiles.length === 0 ||
+    configuredFiles.some((item) => typeof item !== "string")
+  ) {
+    errors.add(`${filesField} must be a nonempty list of project-relative files`);
+    return;
+  }
+  const rootReal = await realpath(root);
+  let totalBytes = 0;
+  for (const raw of [...new Set(configuredFiles as string[])].sort(compareUtf8)) {
+    const normalized = normalizedRelativePath(raw);
+    if (
+      normalized === undefined ||
+      !(normalized === relativeRoot || normalized.startsWith(`${relativeRoot}/`))
+    ) {
+      errors.add(`filesystem planned file is outside ${relativeRoot}: ${raw}`);
+      continue;
+    }
+    const relativeParts = normalized
+      .slice(relativeRoot.length)
+      .replace(/^\/+/u, "")
+      .split("/")
+      .filter(Boolean);
+    if (relativeParts.length === 0 || manifestIgnored(relativeParts, scan)) {
+      errors.add(`filesystem planned file is excluded or not a file: ${raw}`);
+      continue;
+    }
+    const absolute = path.join(projectRoot, ...normalized.split("/"));
+    try {
+      const metadata = await lstat(absolute);
+      if (metadata.isSymbolicLink() || !metadata.isFile()) {
+        errors.add(`filesystem planned file is not a regular file: ${normalized}`);
+        continue;
+      }
+      const resolved = await realpath(absolute);
+      const relativeToRoot = path.relative(rootReal, resolved);
+      if (
+        relativeToRoot === "" ||
+        relativeToRoot === ".." ||
+        relativeToRoot.startsWith(`..${path.sep}`) ||
+        path.isAbsolute(relativeToRoot)
+      ) {
+        errors.add(`filesystem planned file escapes its configured root: ${normalized}`);
+        continue;
+      }
+      if (rows.length >= MAX_MANIFEST_FILES || totalBytes + metadata.size > MAX_MANIFEST_BYTES) {
+        errors.add("filesystem inventory exceeds its bounded file or byte limit");
+        return;
+      }
+      const bytes = await readFile(resolved);
+      totalBytes += bytes.byteLength;
+      rows.push({
+        path: normalized,
+        bytes: bytes.byteLength,
+        sha256: rawSha256(bytes),
+      });
+    } catch {
+      errors.add(`filesystem planned file is missing or unreadable: ${normalized}`);
+    }
+  }
 }
 
 async function scanManifestRoot(
@@ -1167,7 +1323,9 @@ function isWithin(root: string, candidate: string): boolean {
 
 function nodeField(node: CompilerGraphNode, field: string): ConfigurationValue | undefined {
   if (field === "id") return node.id;
+  const { fields: _embeddedFields, ...material } = node as unknown as ConfigurationObject;
   const root: ConfigurationObject = {
+    ...material,
     ...(node.fields ?? {}),
     id: node.id,
     type: node.type,

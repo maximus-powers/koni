@@ -8,7 +8,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthorityClient } from "../src/authority/client.js";
 import {
   authorityRevisionStateHash,
+  isExactSettledLeadLaunchReplay,
+  needsHistoricalPreservedDeletionWorktreeRetirement,
   RunAuthorityEngine,
+  tokenBudgetRecoveryCount,
   type PreparedManagedAttempt,
   type RuntimeAssignmentTerminalPolicyProjection,
   type RunCompilerProgram,
@@ -37,6 +40,7 @@ import type {
   PiSessionAdapter,
 } from "../src/pi/managed-session.js";
 import { ManagedSessionError } from "../src/pi/managed-session.js";
+import { readAutonomousPiTranscriptPage } from "../src/pi/transcript-page.js";
 import {
   AGENT_LAUNCH_SPEC_PROTOCOL,
   computeLaunchResourceSetHash,
@@ -105,6 +109,206 @@ afterEach(async () => {
 });
 
 describe("run authority engine", () => {
+  it("recognizes only historical branch-preservation records that still own worktrees", () => {
+    const git = fixtureRunGit("/tmp/koni-historical-delete", "run-historical-delete");
+    git.planning.status = "preserved";
+    git.planning.blocker = "Operator selected branch preservation during deletion";
+    const historical = {
+      lifecycle: { phase: "deleted" },
+      deletion: { mode: "preserve_branches" },
+      git,
+    } as Pick<RunRecord, "lifecycle" | "deletion" | "legacyGitMigration" | "git">;
+
+    expect(needsHistoricalPreservedDeletionWorktreeRetirement(historical)).toBe(true);
+    expect(
+      needsHistoricalPreservedDeletionWorktreeRetirement({
+        ...historical,
+        deletion: { mode: "delete_owned_branches" },
+      } as typeof historical),
+    ).toBe(false);
+    expect(
+      needsHistoricalPreservedDeletionWorktreeRetirement({
+        ...historical,
+        lifecycle: { ...historical.lifecycle, phase: "paused" },
+      }),
+    ).toBe(false);
+    git.planning.blocker = "Operator preserved owned branches after clean worktree retirement";
+    expect(needsHistoricalPreservedDeletionWorktreeRetirement(historical)).toBe(false);
+  });
+
+  it("does not charge a new review-rework epoch for recovery lineage inherited across its boundary", () => {
+    const historicalFailure = {
+      id: "attempt-historical-budget-failure",
+      ticketId: "ticket-one",
+      stepId: "implement",
+      status: "aborted",
+      error: "input token budget exceeded",
+      startedAt: "2026-07-30T13:00:00.000Z",
+    } as AgentAttemptRecord;
+    const firstReworkAttempt = {
+      id: "attempt-first-supervised-rework",
+      ticketId: "ticket-one",
+      stepId: "implement",
+      status: "aborted",
+      error: "new-token token budget exceeded",
+      startedAt: "2026-07-30T13:02:00.000Z",
+      lineage: {
+        branchEpoch: 3,
+        reason: "recovery",
+        parentAttemptId: historicalFailure.id,
+        parentSessionId: "session-parent",
+      },
+    } as AgentAttemptRecord;
+    const run = {
+      tickets: {
+        "ticket-one": {
+          id: "ticket-one",
+          steps: [
+            {
+              id: "implement",
+              kind: "production",
+              dependsOn: [],
+            },
+            {
+              id: "review",
+              kind: "review",
+              dependsOn: ["implement"],
+            },
+          ],
+          reviewReworks: [
+            {
+              ordinal: 2,
+              mode: "supervised",
+              failedReviewAttemptId: "attempt-review",
+              reopenFromStepId: "implement",
+              blocker: "reviewer blocker",
+              openedAt: "2026-07-30T13:01:00.000Z",
+            },
+          ],
+        },
+      },
+      attempts: {
+        [historicalFailure.id]: historicalFailure,
+        [firstReworkAttempt.id]: firstReworkAttempt,
+      },
+      activity: [
+        {
+          at: "2026-07-30T13:00:30.000Z",
+          ticketId: "ticket-one",
+          message:
+            "Automatically retrying Implement feature step implement after bounded token-budget recovery",
+        },
+      ],
+    } as unknown as RunRecord;
+
+    expect(
+      tokenBudgetRecoveryCount(
+        run,
+        firstReworkAttempt,
+        "Automatically retrying Implement feature step implement after bounded token-budget recovery",
+      ),
+    ).toBe(0);
+  });
+
+  it("recognizes only an exact settled Lead launch replay as already consumed", () => {
+    const attemptId = "attempt-lead-replay";
+    const invocationId = "action-lead-replay";
+    const stepId = "lead-orchestration-entry";
+    const productSha256 = rawSha256("lead-product");
+    const run = {
+      attempts: {
+        [attemptId]: {
+          id: attemptId,
+          kind: "lead",
+          ticketId: "run-orchestration",
+          stepId,
+          launchActionInvocationId: invocationId,
+        },
+      },
+    } as unknown as Pick<RunRecord, "attempts">;
+    const action = {
+      invocationId,
+      boundary: {
+        kind: "lead_launch",
+        attemptId,
+        ticketId: "run-orchestration",
+        stepId,
+        productSha256,
+      },
+      journal: { status: "completed" },
+      settlement: { disposition: "completed" },
+      settledAt: "2026-07-30T10:25:00.662Z",
+    } as Pick<
+      RunActionExecutionRecord,
+      "invocationId" | "boundary" | "journal" | "settlement" | "settledAt"
+    >;
+
+    expect(
+      isExactSettledLeadLaunchReplay(run, action, {
+        attemptId,
+        stepId,
+        productSha256,
+      }),
+    ).toBe(true);
+    expect(
+      isExactSettledLeadLaunchReplay(run, action, {
+        attemptId,
+        stepId,
+        productSha256: rawSha256("different-product"),
+      }),
+    ).toBe(false);
+    expect(
+      isExactSettledLeadLaunchReplay(
+        run,
+        {
+          ...action,
+          settlement: { ...action.settlement!, disposition: "abandoned" },
+        },
+        { attemptId, stepId, productSha256 },
+      ),
+    ).toBe(false);
+  });
+
+  it("accepts a pause intent after unrelated authority revision churn", async () => {
+    const root = await repository();
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program: fakeProgram(),
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const created = await client.request(
+      "run.create",
+      {
+        objective: "Pause this run after unrelated authority churn",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Pause this run after unrelated authority churn" },
+      },
+      { expectedRevision: 0, idempotencyKey: "create-semantic-pause-run" },
+    );
+    const runId = (created.result as { runId: string }).runId;
+
+    const paused = await client.request(
+      "run.pause",
+      { runId },
+      {
+        expectedRevision: 0,
+        idempotencyKey: "pause-after-unrelated-authority-churn",
+      },
+    );
+
+    expect(paused.result).toMatchObject({ runId });
+    client.close();
+  });
+
   it("runs the sealed runtime guard under the lease before authority-store recovery or migration", async () => {
     const root = await repository();
     await expect(
@@ -288,6 +492,78 @@ describe("run authority engine", () => {
     client.close();
   }, 30_000);
 
+  it("uses fresh run anchors after startup recovery admits mutable continuations", async () => {
+    const root = await repository();
+    const program = fakeProgram();
+    const run = await recoveryDraftRun(
+      root,
+      "run-startup-fresh-anchor",
+      "Keep startup reads current",
+      program,
+    );
+    run.lifecycle = reduceRunLifecycle(run.lifecycle, {
+      type: "blocked",
+      atMs: Date.parse("2026-07-18T00:00:01.000Z"),
+      reason: "inert startup fixture",
+    }).state;
+    const seed = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(seed);
+    await seed.store.commit({
+      expectedRevision: 0,
+      runWrites: [{ record: run, expectedRevision: null }],
+    });
+    await seed.stop();
+    engines.splice(engines.indexOf(seed), 1);
+
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.1",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    let mutated = false;
+    let scanCalls = 0;
+    let idCalls = 0;
+    const mutateRunAfterSecondStartupScan = async (): Promise<void> => {
+      if (mutated) return;
+      mutated = true;
+      const state = await engine.store.state();
+      const current = await engine.store.getRun(run.id);
+      const draft = structuredClone(current);
+      draft.revision += 1;
+      draft.updatedAt = "2026-07-18T00:00:02.000Z";
+      await engine.store.commit({
+        expectedRevision: state.revision,
+        runWrites: [{ record: draft, expectedRevision: current.revision }],
+      });
+    };
+    const originalScan = engine.store.runScanSnapshot.bind(engine.store);
+    vi.spyOn(engine.store, "runScanSnapshot").mockImplementation(async () => {
+      const snapshot = await originalScan();
+      scanCalls += 1;
+      if (scanCalls === 2) await mutateRunAfterSecondStartupScan();
+      return snapshot;
+    });
+    const originalIds = engine.store.runIdSnapshot.bind(engine.store);
+    vi.spyOn(engine.store, "runIdSnapshot").mockImplementation(async () => {
+      const snapshot = await originalIds();
+      idCalls += 1;
+      if (idCalls === 2) await mutateRunAfterSecondStartupScan();
+      return snapshot;
+    });
+
+    await engine.start();
+    expect(mutated).toBe(true);
+    expect((await engine.store.getRun(run.id)).revision).toBe(1);
+    expect((await engine.store.state()).authorityStartup?.status).toBe("ready");
+  });
+
   it("inherits a startup-failure marker that crashed before its first draft read", async () => {
     const root = await repository();
     const seedProgram = fakeProgram();
@@ -341,7 +617,7 @@ describe("run authority engine", () => {
     let scans = 0;
     const scan = vi.spyOn(engine.store, "runScanSnapshot").mockImplementation(async () => {
       scans += 1;
-      if (scans === 2) throw new Error("crash before startup-failure draft read");
+      if (scans === 1) throw new Error("crash before startup-failure draft read");
       return originalScan();
     });
     await expect(engine.start()).rejects.toThrowError(/injected dirty startup failure/);
@@ -787,15 +1063,30 @@ describe("run authority engine", () => {
     engines.push(restarted);
     await restarted.start();
     client = await AuthorityClient.connect({ projectRoot: root, client: "tui", version: "1.0.0" });
+    const requestSha256 = proposal.executionControl!.proposalRequest!.requestSha256;
+    await expect(
+      client.request(
+        "proposal.decide",
+        {
+          runId,
+          ticketId: proposal.id,
+          requestSha256: `sha256:${"f".repeat(64)}`,
+          decision: "approval",
+          message: "This reviewed digest is stale.",
+        },
+        { idempotencyKey: "reject-stale-proposal-review" },
+      ),
+    ).rejects.toMatchObject({ code: "proposal_revision_conflict" });
     const approved = await client.request(
       "proposal.decide",
       {
         runId,
         ticketId: proposal.id,
+        requestSha256,
         decision: "approval",
         message: "Proceed with the bounded reviewed change.",
       },
-      { expectedRevision: client.revision, idempotencyKey: "approve-proposal-one" },
+      { expectedRevision: 0, idempotencyKey: "approve-proposal-one" },
     );
     expect(approved.result).toMatchObject({ status: "ready", decision: { decision: "approval" } });
     const afterApproval = await engine.store.getRun(runId);
@@ -810,6 +1101,7 @@ describe("run authority engine", () => {
       {
         runId,
         ticketId: proposal.id,
+        requestSha256,
         decision: "rejection",
         message: "Record this concern without revoking active approval.",
       },
@@ -826,6 +1118,7 @@ describe("run authority engine", () => {
       {
         runId,
         ticketId: proposal.id,
+        requestSha256,
         decision: "rejection",
         message: "Record this concern without revoking active approval.",
       },
@@ -845,6 +1138,7 @@ describe("run authority engine", () => {
         {
           runId,
           ticketId: proposal.id,
+          requestSha256,
           decision: "rejection",
           message: "This must not mutate a deleted run.",
         },
@@ -1654,6 +1948,48 @@ describe("run authority engine", () => {
     client.close();
   }, 30_000);
 
+  it("executes a legacy automatic report recipe with a redundant compiler lock prelude", async () => {
+    const root = await repository();
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program: directApprovalProgram({ legacyReportLock: true }),
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(client, engine, "legacy-report-lock");
+
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      if (current.lifecycle.phase === "blocked" || current.lifecycle.phase === "failed") {
+        throw new Error(
+          `legacy report stopped before merge ready: ${
+            current.lifecycle.blocker ?? current.lifecycle.terminalReason
+          }`,
+        );
+      }
+      return current.lifecycle.phase === "merge_ready";
+    });
+
+    const ready = await engine.store.getRun(runId);
+    const report = Object.values(ready.actionExecutions ?? {}).find(
+      (action) => action.boundary.kind === "post_orchestration_report",
+    );
+    expect(ready.behavior?.actions.actions.report?.recipe.map(({ primitive }) => primitive)).toEqual([
+      "lock.acquire",
+      "project.validate",
+      "report.render",
+    ]);
+    expect(report?.settlement?.disposition).toBe("completed");
+    client.close();
+  }, 30_000);
+
   it("blocks before ticket admission when the bounded entry Lead rejects orchestration", async () => {
     const root = await repository();
     const base = directApprovalProgram();
@@ -1992,7 +2328,9 @@ describe("run authority engine", () => {
       values: {},
     };
     await client.request("run.action.execute", invocation, {
-      expectedRevision: client.revision,
+      // The capability binding carries the strict run revision. Unrelated authority churn must
+      // not make the operator action impossible to submit.
+      expectedRevision: 0,
       idempotencyKey: "approve-through-stage-capability",
     });
     await expect(
@@ -2135,6 +2473,11 @@ describe("run authority engine", () => {
         "prospective provider input plus reserved output exceeds the authenticated model context window",
     },
     {
+      label: "legacy authority shutdown",
+      failureCode: undefined,
+      failureMessage: "authority stopping",
+    },
+    {
       label: "terminal protocol",
       failureCode: "terminal_protocol",
       failureMessage: "agent settled without calling terminal tool koni_submit_output",
@@ -2236,7 +2579,260 @@ describe("run authority engine", () => {
     },
   );
 
-  it("retries a token-budget-aborted ticket only after an explicit operator resume", async () => {
+  it("automatically retries a context-window admission failure from a fresh contained root", async () => {
+    const root = await repository();
+    const base = directApprovalProgram();
+    const prepareAttempt = base.prepareAttempt.bind(base);
+    let failFirstTicket = true;
+    const program: RunCompilerProgram = {
+      ...base,
+      async prepareAttempt(input) {
+        const prepared = await prepareAttempt(input);
+        if (input.kind !== "ticket" || !failFirstTicket) return prepared;
+        failFirstTicket = false;
+        return {
+          ...prepared,
+          factory: async () =>
+            new InfrastructureFailingAdapter(
+              prepared.spec,
+              "provider_input_exposure",
+              "Koni provider admission rejected: request exceeds the context window. prospective provider input plus reserved output exceeds the authenticated model context window",
+            ),
+        };
+      },
+    };
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(client, engine, "automatic-context-recovery");
+
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      return (
+        current.lifecycle.phase === "merge_ready" &&
+        Object.values(current.attempts).filter((attempt) => attempt.kind === "ticket").length === 2
+      );
+    });
+
+    const settled = await engine.store.getRun(runId);
+    const attempts = Object.values(settled.attempts)
+      .filter((attempt) => attempt.kind === "ticket")
+      .sort((left, right) => (left.lineage?.branchEpoch ?? 0) - (right.lineage?.branchEpoch ?? 0));
+    expect(attempts[0]).toMatchObject({
+      status: "failed",
+      failureCode: "provider_input_exposure",
+    });
+    expect(attempts[1]).toMatchObject({
+      status: "completed",
+      lineage: {
+        branchEpoch: 1,
+        reason: "retry",
+        parentAttemptId: attempts[0]!.id,
+      },
+    });
+    expect(attempts[1]?.lineage?.conversationFork).toBeUndefined();
+    expect(
+      settled.activity.some((entry) =>
+        entry.message.includes("automatic provider-admission recovery"),
+      ),
+    ).toBe(true);
+    client.close();
+  });
+
+  it("bounds provider-admission recovery cycles rather than raw failed admissions", async () => {
+    const root = await repository();
+    const base = directApprovalProgram();
+    const prepareAttempt = base.prepareAttempt.bind(base);
+    let remainingAdmissionFailures = 3;
+    const program: RunCompilerProgram = {
+      ...base,
+      async prepareAttempt(input) {
+        const prepared = await prepareAttempt(input);
+        if (input.kind !== "ticket" || remainingAdmissionFailures === 0) return prepared;
+        remainingAdmissionFailures -= 1;
+        return {
+          ...prepared,
+          factory: async () =>
+            new InfrastructureFailingAdapter(
+              prepared.spec,
+              "provider_input_exposure",
+              "Koni provider admission rejected: request exceeds the context window. prospective provider input plus reserved output exceeds the authenticated model context window",
+            ),
+        };
+      },
+    };
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(client, engine, "bounded-admission-recovery");
+
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      return (
+        current.lifecycle.phase === "merge_ready" &&
+        Object.values(current.attempts).filter((attempt) => attempt.kind === "ticket").length === 4
+      );
+    });
+
+    const settled = await engine.store.getRun(runId);
+    expect(
+      settled.activity.filter((entry) =>
+        entry.message.includes("automatic provider-admission recovery"),
+      ),
+    ).toHaveLength(3);
+    client.close();
+  });
+
+  it("automatically retries a terminal-contract failure without an operator resume", async () => {
+    const root = await repository();
+    const base = directApprovalProgram();
+    const prepareAttempt = base.prepareAttempt.bind(base);
+    let failFirstTicket = true;
+    const program: RunCompilerProgram = {
+      ...base,
+      async prepareAttempt(input) {
+        const prepared = await prepareAttempt(input);
+        if (input.kind !== "ticket" || !failFirstTicket) return prepared;
+        failFirstTicket = false;
+        return {
+          ...prepared,
+          factory: async () =>
+            new InfrastructureFailingAdapter(
+              prepared.spec,
+              "terminal_protocol",
+              "agent settled without calling terminal tool koni_submit_output",
+            ),
+        };
+      },
+    };
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(
+      client,
+      engine,
+      "automatic-terminal-contract-retry",
+    );
+    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "merge_ready");
+
+    const completed = await engine.store.getRun(runId);
+    const attempts = Object.values(completed.attempts).filter(
+      (attempt) => attempt.kind === "ticket",
+    );
+    expect(attempts).toHaveLength(2);
+    expect(attempts.some((attempt) => attempt.failureCode === "terminal_protocol")).toBe(true);
+    expect(
+      completed.activity.some((entry) =>
+        entry.message.includes("Auto-retrying an effect-free terminal-contract failure"),
+      ),
+    ).toBe(true);
+    client.close();
+  });
+
+  it("keeps independent ticket work executable after a sibling launch failure", async () => {
+    const root = await repository();
+    const base = directApprovalProgram();
+    const prepareAttempt = base.prepareAttempt.bind(base);
+    let failTicketOne = true;
+    const program: RunCompilerProgram = {
+      ...base,
+      async resolveRun(request) {
+        const resolved = await base.resolveRun(request);
+        return {
+          ...resolved,
+          executionConfig: { ...resolved.executionConfig, maxParallel: 2 },
+        };
+      },
+      async initializeApprovedPlan() {
+        const first = ticket();
+        const second = structuredClone(first);
+        second.id = "ticket-two";
+        second.title = "Implement independent feature";
+        second.targetNodeIds = ["change-two"];
+        second.writePaths = ["CHANGELOG.md"];
+        return {
+          graphHash: `sha256:${"c".repeat(64)}`,
+          graphRevision: 1,
+          tickets: { [first.id]: first, [second.id]: second },
+        };
+      },
+      async prepareAttempt(input) {
+        const prepared = await prepareAttempt(input);
+        if (
+          input.kind !== "ticket" ||
+          input.assignment?.ticketId !== "ticket-one" ||
+          !failTicketOne
+        ) {
+          return prepared;
+        }
+        failTicketOne = false;
+        return {
+          ...prepared,
+          factory: async () =>
+            new InfrastructureFailingAdapter(
+              prepared.spec,
+              "terminal_protocol",
+              "agent settled without calling terminal tool koni_submit_output",
+            ),
+        };
+      },
+    };
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(client, engine, "independent-ticket-failure");
+
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      return current.tickets["ticket-two"]?.status === "completed";
+    });
+    const current = await engine.store.getRun(runId);
+    expect(current.tickets["ticket-one"]).toMatchObject({ status: "blocked" });
+    expect(current.tickets["ticket-two"]).toMatchObject({ status: "completed" });
+    client.close();
+  });
+
+  it("automatically retries a token-budget-aborted ticket once without an operator resume", async () => {
     const root = await repository();
     const base = directApprovalProgram();
     const prepareAttempt = base.prepareAttempt.bind(base);
@@ -2271,23 +2867,34 @@ describe("run authority engine", () => {
       engine,
       "operator-confirmed-budget-abort-retry",
     );
-    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "blocked");
+    await waitFor(async () =>
+      Object.values((await engine.store.getRun(runId)).attempts).some(
+        (attempt) => attempt.kind === "ticket" && attempt.status === "aborted",
+      ),
+    );
 
     const blocked = await engine.store.getRun(runId);
     const first = Object.values(blocked.attempts).find((attempt) => attempt.kind === "ticket")!;
     expect(first).toMatchObject({ status: "aborted", error: "input token budget exceeded" });
     expect(first.terminalAcceptedAt).toBeUndefined();
     expect(first.terminalOutputSha256).toBeUndefined();
-
-    await client.request("authority.ping");
-    await client.request(
-      "run.resume",
-      { runId },
-      {
-        expectedRevision: client.revision,
-        idempotencyKey: "retry-token-budget-aborted-ticket",
-      },
+    const firstSpec = validateAgentLaunchSpec(
+      JSON.parse(
+        (
+          await engine.store.readArtifact(
+            `runs/${runId}/attempts/${first.id}/launch-spec.json`,
+            16 * 1024 * 1024,
+          )
+        ).toString("utf8"),
+      ) as AgentLaunchSpec,
     );
+    await expect(
+      readAutonomousPiTranscriptPage(first.sessionFile!, {
+        sessionId: first.sessionId,
+        cwd: firstSpec.workspace.cwd,
+      }),
+    ).resolves.toMatchObject({ snapshot: { lastEntryId: "budget-anchor" } });
+
     await waitFor(async () => {
       const current = await engine.store.getRun(runId);
       return (
@@ -2310,14 +2917,166 @@ describe("run authority engine", () => {
         parentSessionId: first.sessionId,
       },
     });
+    expect(attempts[1]!.lineage?.conversationFork).toMatchObject({
+      parentLaunchSpecHash: first.launchSpecHash,
+    });
     expect(
       ready.activity.some(
         (entry) =>
-          entry.message === "Retrying Implement feature after operator-confirmed runtime recovery",
+          entry.message ===
+          "Automatically retrying Implement feature step implement after bounded token-budget recovery",
       ),
     ).toBe(true);
     client.close();
   });
+
+  it("bounds automatic token-budget recovery per workflow step rather than per ticket", async () => {
+    const root = await repository();
+    const base = directApprovalProgram();
+    const prepareAttempt = base.prepareAttempt.bind(base);
+    const exhaustedSteps = new Set<string>();
+    const program: RunCompilerProgram = {
+      ...base,
+      async initializeApprovedPlan() {
+        const configured = ticket();
+        configured.steps.unshift({
+          id: "inspect",
+          title: "Inspect",
+          personaId: "inspector",
+          kind: "production",
+          status: "pending",
+          attemptIds: [],
+          summary: undefined,
+          startedAt: undefined,
+          completedAt: undefined,
+        });
+        configured.steps[1]!.dependsOn = ["inspect"];
+        return {
+          graphHash: `sha256:${"c".repeat(64)}`,
+          graphRevision: 1,
+          tickets: { [configured.id]: configured },
+        };
+      },
+      async prepareAttempt(input) {
+        const prepared = await prepareAttempt(input);
+        const stepId = input.assignment?.stepId;
+        if (input.kind !== "ticket" || stepId === undefined || exhaustedSteps.has(stepId)) {
+          return prepared;
+        }
+        exhaustedSteps.add(stepId);
+        return {
+          ...prepared,
+          factory: async () => new BudgetExhaustingAdapter(prepared.spec),
+        };
+      },
+    };
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(client, engine, "per-step-budget-abort-retry");
+
+    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "merge_ready");
+    const ready = await engine.store.getRun(runId);
+    for (const stepId of ["inspect", "implement"]) {
+      const attempts = Object.values(ready.attempts)
+        .filter((attempt) => attempt.kind === "ticket" && attempt.stepId === stepId)
+        .sort(
+          (left, right) => (left.lineage?.branchEpoch ?? 0) - (right.lineage?.branchEpoch ?? 0),
+        );
+      expect(attempts).toHaveLength(2);
+      expect(attempts[0]).toMatchObject({
+        status: "aborted",
+        error: "input token budget exceeded",
+      });
+      expect(attempts[1]).toMatchObject({
+        status: "completed",
+        lineage: {
+          reason: "recovery",
+          parentAttemptId: attempts[0]!.id,
+        },
+      });
+      expect(attempts[1]!.lineage?.conversationFork).toMatchObject({
+        parentLaunchSpecHash: attempts[0]!.launchSpecHash,
+      });
+    }
+    client.close();
+  });
+
+  it("renews bounded token-budget recovery for an explicitly reopened review-rework slice", async () => {
+    const root = await repository();
+    const base = reviewReworkProgram();
+    const prepareAttempt = base.prepareAttempt.bind(base);
+    let exhaustedInitialAuthor = false;
+    let exhaustedReworkAuthor = false;
+    const program: RunCompilerProgram = {
+      ...base,
+      async prepareAttempt(input) {
+        const prepared = await prepareAttempt(input);
+        if (input.kind !== "ticket" || input.assignment?.stepId !== "implement") return prepared;
+        const inReviewRework =
+          (input.run.tickets[input.assignment.ticketId]?.reviewReworks?.length ?? 0) > 0;
+        if (
+          (!inReviewRework && exhaustedInitialAuthor) ||
+          (inReviewRework && exhaustedReworkAuthor)
+        ) {
+          return prepared;
+        }
+        if (inReviewRework) exhaustedReworkAuthor = true;
+        else exhaustedInitialAuthor = true;
+        return {
+          ...prepared,
+          factory: async () => new BudgetExhaustingAdapter(prepared.spec),
+        };
+      },
+    };
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(
+      client,
+      engine,
+      "review-rework-budget-abort-retry",
+    );
+
+    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "merge_ready");
+    const ready = await engine.store.getRun(runId);
+    const ticket = ready.tickets["ticket-one"]!;
+    const implementation = ticket.steps.find((step) => step.id === "implement")!;
+    const review = ticket.steps.find((step) => step.id === "review")!;
+    expect(implementation.attemptIds).toHaveLength(4);
+    expect(review.attemptIds).toHaveLength(2);
+    expect(implementation.attemptIds.map((attemptId) => ready.attempts[attemptId]?.status)).toEqual(
+      ["aborted", "completed", "aborted", "completed"],
+    );
+    expect(
+      ready.attempts[implementation.attemptIds[2]!]!.lineage?.conversationFork,
+    ).toBeUndefined();
+    expect(ready.attempts[implementation.attemptIds[3]!]!.lineage?.conversationFork).toMatchObject({
+      parentLaunchSpecHash: ready.attempts[implementation.attemptIds[2]!]!.launchSpecHash,
+    });
+    expect(ticket.reviewReworks?.map((record) => record.mode)).toEqual(["automatic"]);
+    client.close();
+  }, 30_000);
 
   it("does not reinterpret compiler-reviewed semantic failure as retryable infrastructure", async () => {
     const root = await repository();
@@ -2594,6 +3353,18 @@ describe("run authority engine", () => {
     expect(review.summary).toBe("Fresh review passed");
     expect(settled.status).toBe("completed");
     expect(ready.git.ticketCycles[settled.gitCycleId!]?.status).toBe("retired");
+    expect(ready.attempts[implementation.attemptIds[1]!]!.lineage).toMatchObject({
+      reason: "rework",
+      parentAttemptId: implementation.attemptIds[0],
+    });
+    expect(
+      ready.attempts[implementation.attemptIds[1]!]!.lineage?.conversationFork,
+    ).toBeUndefined();
+    expect(ready.attempts[review.attemptIds[1]!]!.lineage).toMatchObject({
+      reason: "rework",
+      parentAttemptId: review.attemptIds[0],
+    });
+    expect(ready.attempts[review.attemptIds[1]!]!.lineage?.conversationFork).toBeUndefined();
     const lineage = (await client.request("run.lineage", { runId, ticketId: "ticket-one" }))
       .result as {
       protocol: string;
@@ -3024,6 +3795,78 @@ describe("run authority engine", () => {
     expect(ticketAttempts.filter((attempt) => attempt.status === "running")).toHaveLength(1);
     expect(harness.promptCalls).toBe(pausedPrompts + 1);
     client.close();
+  });
+
+  it("keeps an active assignment durable when normal authority shutdown aborts its adapter", async () => {
+    const root = await repository();
+    const harness = new LifecycleHarness();
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program: lifecycleProgram(harness),
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(client, engine, "durable normal shutdown");
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      return (
+        harness.adapters.length === 1 &&
+        Object.values(current.attempts).some((attempt) => attempt.status === "running")
+      );
+    });
+    client.close();
+
+    await engine.stop();
+    engines.splice(engines.indexOf(engine), 1);
+
+    const stopped = await engine.store.getRun(runId);
+    expect(stopped.lifecycle.phase).toBe("executing");
+    expect(stopped.tickets["ticket-one"]?.status).toBe("running");
+    expect(stopped.tickets["ticket-one"]?.blocker).toBeUndefined();
+    const ticketAttempts = Object.values(stopped.attempts).filter(
+      (attempt) => attempt.kind === "ticket",
+    );
+    expect(ticketAttempts).toHaveLength(1);
+    expect(ticketAttempts[0]?.status).toBe("running");
+    expect(ticketAttempts[0]?.error).toBeUndefined();
+
+    const successorHarness = new LifecycleHarness();
+    const successor = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.1",
+      program: lifecycleProgram(successorHarness),
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(successor);
+    await successor.start();
+    await waitFor(async () => {
+      const recovered = await successor.store.getRun(runId);
+      return (
+        successorHarness.adapters.length === 1 &&
+        recovered.tickets["ticket-one"]?.status === "running"
+      );
+    });
+    const recovered = await successor.store.getRun(runId);
+    const recoveredTicketAttempts = Object.values(recovered.attempts).filter(
+      (attempt) => attempt.kind === "ticket",
+    );
+    expect(recoveredTicketAttempts).toEqual([
+      expect.objectContaining({ id: ticketAttempts[0]!.id, status: "interrupted" }),
+      expect.objectContaining({
+        status: "running",
+        lineage: expect.objectContaining({
+          reason: "recovery",
+          parentAttemptId: ticketAttempts[0]!.id,
+        }),
+      }),
+    ]);
   });
 
   it("quiesces active sessions through the cross-build restart control before daemon exit", async () => {
@@ -3475,7 +4318,7 @@ describe("run authority engine", () => {
     client.close();
   });
 
-  it("preserves every owned Git resource when the reviewed deletion mode says preserve", async () => {
+  it("preserves branches but retires clean owned worktrees when deletion chooses preservation", async () => {
     const root = await repository();
     const engine = await RunAuthorityEngine.open({
       projectRoot: root,
@@ -3494,10 +4337,10 @@ describe("run authority engine", () => {
     const created = await client.request(
       "run.create",
       {
-        objective: "Preserve reviewed run branches and worktrees",
+        objective: "Preserve reviewed run branches without retaining worktrees",
         runTypeId: "small",
         targetRef: "refs/heads/main",
-        intake: { goal: "Preserve reviewed run branches and worktrees" },
+        intake: { goal: "Preserve reviewed run branches without retaining worktrees" },
       },
       { expectedRevision: 0, idempotencyKey: "create-preserve-delete" },
     );
@@ -3518,13 +4361,12 @@ describe("run authority engine", () => {
     const deleted = await engine.store.getRun(runId);
     expect(deleted.deletion).toMatchObject({ mode: "preserve_branches" });
     expect(deleted.git.planning.status).toBe("preserved");
-    await git(before.git.planning.worktree, "status", "--porcelain");
-    expect(await readFile(path.join(before.git.planning.worktree, "README.md"), "utf8")).toBe(
-      "initial\n",
-    );
+    await expect(
+      readFile(path.join(before.git.planning.worktree, "README.md"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
     expect(
       deleted.activity.some((entry) =>
-        entry.message.includes("Operator selected branch preservation during deletion"),
+        entry.message.includes("Retired clean Koni worktrees and preserved owned branches"),
       ),
     ).toBe(true);
     client.close();
@@ -4132,6 +4974,59 @@ describe("run authority engine", () => {
     client.close();
   }, 30_000);
 
+  it("retries finalization from a settled terminal artifact without replaying the agent", async () => {
+    const root = await repository();
+    let failFinalize = true;
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program: configuredValidationDirectProgram(),
+      supervisor: new ManagedSessionSupervisor(),
+      actionFault: async (point, input) => {
+        if (
+          point !== "before_attempt_finalize" ||
+          input.ticketId !== "ticket-one" ||
+          !failFinalize
+        ) {
+          return;
+        }
+        failFinalize = false;
+        throw new Error("simulated transient attempt finalization failure");
+      },
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(
+      client,
+      engine,
+      "recover-settled-terminal-finalization",
+    );
+
+    await waitFor(async () => {
+      const run = await engine.store.getRun(runId);
+      const attempts = Object.values(run.attempts).filter(
+        (attempt) => attempt.ticketId === "ticket-one",
+      );
+      return (
+        attempts.length === 1 &&
+        attempts[0]?.status === "completed" &&
+        run.lifecycle.phase === "merge_ready"
+      );
+    });
+    const completed = await engine.store.getRun(runId);
+    expect(
+      completed.activity.some((entry) =>
+        entry.message.includes("Retrying durable terminal finalization"),
+      ),
+    ).toBe(true);
+    client.close();
+  }, 30_000);
+
   it("replays a failed first-step compiler validation from accepted terminal bytes without another agent", async () => {
     const root = await repository();
     const base = configuredValidationDirectProgram();
@@ -4329,6 +5224,44 @@ describe("run authority engine", () => {
     expect(
       recovered.activity.some((entry) => entry.message.includes("reissuing the step fresh")),
     ).toBe(true);
+    client.close();
+  }, 30_000);
+
+  it("records a durable blocker when compensated validation reissues are exhausted", async () => {
+    const root = await repository();
+    const base = configuredValidationDirectProgram("compile-with-compensation");
+    const program: RunCompilerProgram = {
+      ...base,
+      async compileAssignmentOutput() {
+        throw new Error("agent graph delta targets a stale graph hash");
+      },
+    };
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(client, engine, "exhaust-compensated-validation");
+
+    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "blocked");
+    const blocked = await engine.store.getRun(runId);
+    expect(blocked.lifecycle.blocker).toContain("ticket validation action did not complete");
+    const attempts = Object.values(blocked.attempts).filter(
+      (attempt) => attempt.ticketId === "ticket-one",
+    );
+    // The bounded budget is three *compensated recoveries*. The final accepted attempt is
+    // therefore the fourth launch; unrelated prior failures/restarts must not consume it.
+    expect(attempts).toHaveLength(4);
+    expect(attempts.filter((attempt) => attempt.status === "interrupted")).toHaveLength(3);
+    expect(attempts.at(-1)).toMatchObject({ status: "terminal_accepted" });
     client.close();
   }, 30_000);
 
@@ -6009,8 +6942,10 @@ function proposalTicketFromDefinition(
   };
 }
 
-function directApprovalProgram(): RunCompilerProgram {
-  const planned = fakeProgram();
+function directApprovalProgram(
+  overrides: Readonly<{ legacyReportLock?: boolean }> = {},
+): RunCompilerProgram {
+  const planned = fakeProgram(overrides);
   return {
     ...planned,
     async resolveRun(request) {
@@ -6765,10 +7700,10 @@ function gitConflictProgram(harness: GitConflictHarness): RunCompilerProgram {
   };
 }
 
-function fakeProgram(): RunCompilerProgram {
+function fakeProgram(overrides: Readonly<{ legacyReportLock?: boolean }> = {}): RunCompilerProgram {
   return {
     async resolveRun(request) {
-      const behavior = runBehaviorSnapshotFixture(request.runTypeId, "software");
+      const behavior = runBehaviorSnapshotFixture(request.runTypeId, "software", overrides);
       return {
         profile: {
           packageName: "@koni/coding-profile",
@@ -7142,6 +8077,7 @@ class BudgetExhaustingAdapter implements PiSessionAdapter {
   public readonly sessionId: string;
   public readonly sessionFile: string;
   readonly #listeners = new Set<(event: AgentSessionEvent) => void>();
+  #mapping: unknown;
 
   public constructor(private readonly spec: AgentLaunchSpec) {
     this.sessionId = spec.identity.sessionId;
@@ -7151,13 +8087,63 @@ class BudgetExhaustingAdapter implements PiSessionAdapter {
   public getActiveToolNames(): readonly string[] {
     return [TERMINAL_TOOL_NAME];
   }
-  public appendMapping(): void {}
+  public appendMapping(data: unknown): void {
+    this.#mapping = data;
+  }
   public subscribe(listener: (event: AgentSessionEvent) => void): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
   }
   public async prompt(): Promise<void> {
+    await mkdir(path.dirname(this.sessionFile), { recursive: true });
+    const timestamp = new Date().toISOString();
     const input = this.spec.budgets.tokens.maxInput + 1;
+    await writeFile(
+      this.sessionFile,
+      `${[
+        {
+          type: "session",
+          version: 3,
+          id: this.sessionId,
+          timestamp,
+          cwd: this.spec.workspace.cwd,
+        },
+        {
+          type: "custom",
+          id: "budget-mapping",
+          parentId: null,
+          timestamp,
+          customType: "koni.attempt-session-map",
+          data: this.#mapping,
+        },
+        {
+          type: "message",
+          id: "budget-anchor",
+          parentId: "budget-mapping",
+          timestamp,
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "budget boundary" }],
+            api: "openai-codex-responses",
+            provider: "openai-codex",
+            model: "test-model",
+            usage: {
+              input,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: input,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: "stop",
+            timestamp: Date.now(),
+          },
+        },
+      ]
+        .map((entry) => JSON.stringify(entry))
+        .join("\n")}\n`,
+      { mode: 0o600 },
+    );
     const event = {
       type: "message_end",
       message: {

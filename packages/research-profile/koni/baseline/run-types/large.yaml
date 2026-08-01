@@ -130,8 +130,8 @@ agents:
       model: gpt-5.6-sol
       thinking_level: max
     lead:
-      model: gpt-5.4-mini
-      thinking_level: low
+      model: gpt-5.6-sol
+      thinking_level: xhigh
     ticket_worker:
       model: gpt-5.6-terra
       thinking_level: xhigh

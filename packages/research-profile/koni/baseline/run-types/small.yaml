@@ -21,8 +21,24 @@ intake:
       description: Describe the research outcome Koni should deliver.
       type: text
       required: true
+    hypothesis:
+      label: Hypothesis
+      description: >-
+        State the concise, declarative, falsifiable scientific proposition this run
+        tests, derived from the goal above. It must name the specific mechanism or
+        quantity under study and assert something that a bounded experiment could
+        contradict - for example "matched fixed-probe activation signatures encode
+        instance-specific behavioral information that enables controlled weight-space
+        interpretation and decoding". A restatement of the goal, a statement about
+        tooling or readiness rather than the subject of study, or a proposition no
+        observation could falsify is not a hypothesis and will produce a meaningless
+        evidence graph. This run type has no agent planning pass, so nothing refines
+        this text: use the medium run type to have the hypothesis derived for you.
+      type: text
+      required: true
   order:
   - goal
+  - hypothesis
 pipeline:
   stages:
     intake:
@@ -88,8 +104,8 @@ agents:
       model: gpt-5.6-terra
       thinking_level: high
     lead:
-      model: gpt-5.4-mini
-      thinking_level: low
+      model: gpt-5.6-sol
+      thinking_level: xhigh
     ticket_worker:
       model: gpt-5.6-terra
       thinking_level: high

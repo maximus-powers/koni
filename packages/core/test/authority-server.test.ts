@@ -62,6 +62,41 @@ describe("repository authority service", () => {
     client.close();
   });
 
+  it("executes a semantic-CAS mutation at the current revision after unrelated churn", async () => {
+    const root = await repository();
+    const server = new AuthorityServer({ projectRoot: root, version: "1.0.0" });
+    servers.push(server);
+    server.register("counter.increment", {
+      mutating: true,
+      handle: () => ({ result: { incremented: true } }),
+    });
+    server.register("proposal.decide", {
+      mutating: true,
+      revisionPolicy: "semantic",
+      handle: ({ revision }) => ({ result: { handledAtRevision: revision } }),
+    });
+    await server.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+
+    await client.request("counter.increment", undefined, {
+      expectedRevision: 0,
+      idempotencyKey: "unrelated-churn",
+    });
+    const decided = await client.request(
+      "proposal.decide",
+      { requestSha256: `sha256:${"a".repeat(64)}` },
+      { idempotencyKey: "semantic-decision" },
+    );
+
+    expect(decided.result).toEqual({ handledAtRevision: 1 });
+    expect(decided.revision).toBe(2);
+    client.close();
+  });
+
   it("joins only successful idempotent continuations after replay response flush", async () => {
     const root = await repository();
     const server = new AuthorityServer({ projectRoot: root, version: "1.0.0" });

@@ -12,9 +12,12 @@ import type { TransactionWrite } from "../src/authority/file-journal.js";
 import { decideBoundCheckRetry } from "../src/authority/execution-policy.js";
 import {
   commandInfrastructureFailure,
+  gatePolicyCommandSubjectIds,
   NativeRunCompilerProgram,
   NativeRunProgramError,
   orderedReviewPredecessorStepIds,
+  reconcileNeverStartedTicketNodeScope,
+  remapPlanningSeedGateContractKeys,
   rebindRuleEvidenceAcrossNonInterferingGraphChange,
   resolvePinnedGateAutoEvaluationContexts,
 } from "../src/compiler/run-program.js";
@@ -42,7 +45,7 @@ import type {
   ProfileBaselineFile,
   ProfilePackageManifest,
 } from "../src/contracts/profile-package.js";
-import type { CompiledConfiguration } from "../src/contracts/configuration.js";
+import type { CompiledConfiguration, ConfigurationObject } from "../src/contracts/configuration.js";
 import { GraphSchema, TypedGraph, type GraphNode } from "../src/graph/model.js";
 import type { AgentLaunchSpec } from "../src/pi/launch-spec.js";
 import {
@@ -63,9 +66,11 @@ import {
   type AgentAttemptRecord,
   type RunQuestionRecord,
   type RunRecord,
+  type TicketRecord,
   type TerminalFailureSettlementProof,
   type TerminalSuccessSettlementProof,
 } from "../src/state/run-record.js";
+import type { DerivedTicketDefinition } from "../src/contracts/rules.js";
 import type { ReadyAssignment } from "../src/state/scheduler.js";
 import { attachFixtureTicketCycle, fixtureRunGit } from "./run-record-fixtures.js";
 
@@ -80,6 +85,118 @@ afterEach(async () => {
 });
 
 describe("native compiler-authoritative run program", () => {
+  it("binds policy-backed check commands to pinned gates instead of the ticket asset", () => {
+    expect(
+      gatePolicyCommandSubjectIds(
+        "gate-verifier",
+        ["asset-verifier"],
+        [
+          { checkId: "gate-verifier", gateNodeId: "gate-b" },
+          { checkId: "other-check", gateNodeId: "gate-ignored" },
+          { checkId: "gate-verifier", gateNodeId: "gate-a" },
+          { checkId: "gate-verifier", gateNodeId: "gate-b" },
+        ],
+      ),
+    ).toEqual(["gate-a", "gate-b"]);
+    expect(gatePolicyCommandSubjectIds("gate-verifier", ["gate-direct"], [])).toEqual([
+      "gate-direct",
+    ]);
+  });
+
+  it("refreshes queued ticket node scope before issuance while preserving issued scope", () => {
+    const ticket = {
+      status: "ready",
+      targetNodeIds: ["metric-old"],
+      readNodeIds: ["asset-existing", "metric-old"],
+      writeNodeIds: ["metric-old"],
+      worktreePath: undefined,
+      branch: undefined,
+      gitCycleId: undefined,
+      steps: [
+        {
+          id: "write-contracts",
+          status: "pending",
+          attemptIds: [],
+          readNodeIds: ["asset-existing", "metric-old"],
+          writeNodeIds: ["metric-old"],
+          startedAt: undefined,
+          completedAt: undefined,
+        },
+      ],
+    } as unknown as TicketRecord;
+    const definition = {
+      target_node_ids: ["metric-old"],
+      scope: {
+        read_node_ids: ["asset-existing", "gate-new", "metric-old"],
+        write_node_ids: ["metric-old"],
+      },
+      workflow: [
+        {
+          id: "write-contracts",
+          read_node_ids: ["asset-existing", "gate-new", "metric-old"],
+          write_node_ids: ["metric-old"],
+        },
+      ],
+    } as unknown as DerivedTicketDefinition;
+
+    expect(reconcileNeverStartedTicketNodeScope(ticket, definition)).toBe(true);
+    expect(ticket.readNodeIds).toEqual(["asset-existing", "gate-new", "metric-old"]);
+    expect(ticket.steps[0]!.readNodeIds).toEqual([
+      "asset-existing",
+      "gate-new",
+      "metric-old",
+    ]);
+
+    ticket.status = "running";
+    const laterDefinition = {
+      ...definition,
+      scope: {
+        ...definition.scope,
+        read_node_ids: [...definition.scope.read_node_ids, "gate-later"],
+      },
+      workflow: [
+        {
+          ...definition.workflow[0],
+          read_node_ids: [...definition.workflow[0]!.read_node_ids!, "gate-later"],
+        },
+      ],
+    } as unknown as DerivedTicketDefinition;
+    expect(reconcileNeverStartedTicketNodeScope(ticket, laterDefinition)).toBe(false);
+    expect(ticket.readNodeIds).not.toContain("gate-later");
+    expect(ticket.steps[0]!.readNodeIds).not.toContain("gate-later");
+  });
+
+  it("materializes planning gate-contract aliases to their final gate ids", () => {
+    const finalGateId = "gate-9d9a514b2b3b0d0a3d38";
+    const nodes = remapPlanningSeedGateContractKeys(
+      [
+        {
+          key: "asset.scope_verifier",
+          type: "asset",
+          title: "Scope verifier",
+          spec: {
+            gate_contracts: {
+              "gate.decode_readiness": {
+                protocol: "autoresearch.gate-result.v1",
+                argv: ["python3", "program/assets/verify.py"],
+              },
+              "unrelated-key": { argv: ["false"] },
+            },
+          },
+        },
+      ],
+      new Map([["gate.decode_readiness", finalGateId]]),
+    );
+
+    expect(nodes[0]!.spec.gate_contracts).toEqual({
+      [finalGateId]: {
+        protocol: "autoresearch.gate-result.v1",
+        argv: ["python3", "program/assets/verify.py"],
+      },
+      "unrelated-key": { argv: ["false"] },
+    });
+  });
+
   it("gives review the ordered transitive execution evidence, not only its immediate parent", () => {
     const workflow = [
       { id: "establish-baseline", depends_on: [] },
@@ -389,12 +506,14 @@ describe("native compiler-authoritative run program", () => {
     const project = await installedProject("research-profile");
     const program = await compilerProgram(project);
     const objective = "Prepare a bounded ticket orchestration run";
+    const hypothesis =
+      "A bounded ticket orchestration preserves compiler authority while completing its scoped work.";
     const resolved = await program.resolveRun({
       runId: "run-lead-judgment",
       objective,
       runTypeId: "small",
       targetRef: "refs/heads/main",
-      intake: { goal: objective },
+      intake: { goal: objective, hypothesis },
     });
     await persistWrites(project.projectRoot, resolved.artifactWrites ?? []);
     const run = runRecord(project.projectRoot, "run-lead-judgment", objective, resolved);
@@ -556,6 +675,109 @@ describe("native compiler-authoritative run program", () => {
         output: { status: "failed", blocker: "The acceptance proof is stale" },
       }),
     ).resolves.toEqual({ outcome: { status: "failed", blocker: "The acceptance proof is stale" } });
+  }, 30_000);
+
+  it("requires a typed rejection verdict for ticket reviews", async () => {
+    const project = await installedProject("coding-profile");
+    const program = await compilerProgram(project);
+    const runId = "run-typed-ticket-review";
+    const resolved = await program.resolveRun({
+      runId,
+      objective: "Reject defective work without closing its producer ticket",
+      runTypeId: "small",
+      targetRef: "refs/heads/main",
+      intake: { goal: "Reject defective work without closing its producer ticket" },
+    });
+    await persistWrites(project.projectRoot, resolved.artifactWrites ?? []);
+    const run = runRecord(
+      project.projectRoot,
+      runId,
+      "Reject defective work without closing its producer ticket",
+      resolved,
+    );
+    const planning = await program.compilePlanningOutput({
+      run,
+      attemptId: "attempt-typed-review-plan",
+      output: planningOutput({ work_kind: "general" }),
+    });
+    run.plan = { ...planning.plan, status: "approved" };
+    run.graphHash = planning.graphHash;
+    run.graphRevision = planning.graphRevision ?? 0;
+    materializeApprovedFixtureRun(run);
+    const initialized = await program.initializeApprovedPlan(run);
+    await persistWrites(project.projectRoot, initialized.artifactWrites ?? []);
+    run.graphHash = initialized.graphHash;
+    run.graphRevision = initialized.graphRevision;
+    run.tickets = initialized.tickets;
+
+    const ticket = Object.values(run.tickets).find((candidate) =>
+      candidate.steps.some((step) => step.kind === "review"),
+    );
+    if (ticket === undefined) throw new Error("fixture did not compile a reviewed ticket");
+    const review = ticket.steps.find((step) => step.kind === "review")!;
+    const assignment: ReadyAssignment = {
+      runId,
+      ticketId: ticket.id,
+      stepId: review.id,
+      personaId: review.personaId,
+      priority: ticket.priority,
+    };
+    const attempt: AgentAttemptRecord = {
+      id: "attempt-typed-ticket-review",
+      sessionId: "session-typed-ticket-review",
+      ticketId: ticket.id,
+      stepId: review.id,
+      personaId: review.personaId,
+      modelProvider: "openai-codex",
+      modelId: "review-model",
+      thinkingLevel: "xhigh",
+      status: "running",
+      launchSpecHash: digest("typed-ticket-review-launch"),
+      sessionFile: undefined,
+      startedAt: FIXED_NOW.toISOString(),
+      endedAt: undefined,
+      terminalSummary: undefined,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      lineage: { branchEpoch: 0, reason: "review" },
+      authorityMessages: [],
+      authorityToolResults: [],
+      authorityCompactions: [],
+      kind: "verification",
+    };
+    run.attempts[attempt.id] = attempt;
+    review.status = "running";
+    review.attemptIds = [attempt.id];
+    review.startedAt = FIXED_NOW.toISOString();
+
+    await expect(
+      program.compileAssignmentOutput({
+        run,
+        assignment,
+        attemptId: attempt.id,
+        output: {
+          status: "completed",
+          summary: "Review rejected: the implementation is unsafe.",
+        },
+      }),
+    ).rejects.toMatchObject({ code: "review_verdict" });
+    const rejection = {
+      status: "failed",
+      reviewVerdict: "rejected",
+      blocker: "The implementation is unsafe.",
+    };
+    await expect(
+      program.compileAssignmentOutput({
+        run,
+        assignment,
+        attemptId: attempt.id,
+        output: rejection,
+      }),
+    ).resolves.toEqual({
+      outcome: { status: "failed", blocker: "The implementation is unsafe." },
+    });
   }, 30_000);
 
   it("reloads the authenticated package baseline for each future run while preserving pinned runs", async () => {
@@ -746,6 +968,9 @@ describe("native compiler-authoritative run program", () => {
       providerOutputHeadroom: 128_000,
     });
 
+    const exhaustedParent = attemptRecord(prepared.spec, "planning", "aborted");
+    exhaustedParent.error = "input token budget exceeded";
+    run.attempts[exhaustedParent.id] = exhaustedParent;
     const retried = await program.prepareAttempt({
       kind: "planning",
       run,
@@ -771,6 +996,16 @@ describe("native compiler-authoritative run program", () => {
     expect(retried.spec.persona.initialPrompt).toContain(
       "Discard any speculative reasoning from that failed turn",
     );
+    expect(retried.spec.persona.initialPrompt).toContain(
+      "A terminal-tool receipt visible in inherited history belongs to the parent attempt",
+    );
+    expect(retried.spec.persona.initialPrompt).toContain(
+      "Do not reissue an exact repository discovery call that already succeeded or was rejected as a duplicate",
+    );
+    expect(retried.spec.lineage.conversationFork).toEqual({
+      parentLaunchSpecHash: prepared.spec.specHash,
+      parentTranscriptSha256: digest("planning-parent-transcript"),
+    });
 
     const revisionSteering =
       "Keep the existing Sales Notes record unchanged and store optional fields in sibling records.";
@@ -1015,7 +1250,7 @@ describe("native compiler-authoritative run program", () => {
     expect(untitled.plan.title).toBeUndefined();
   });
 
-  it("resumes relocated legacy planning without weakening native detached planning", async () => {
+  it("uses the approved run workspace for a plan revision after detached planning retires", async () => {
     const project = await installedProject("coding-profile");
     const program = await compilerProgram(project);
     const runId = "run-relocated-legacy-planning";
@@ -1048,7 +1283,9 @@ describe("native compiler-authoritative run program", () => {
         expectedAuthorityStateHash: digest("native-missing-planner"),
         lineage: { branchEpoch: 0, reason: "initial" },
       }),
-    ).rejects.toMatchObject({ code: "planning_workspace" });
+    ).resolves.toMatchObject({
+      spec: { workspace: { cwd: path.resolve(namespace.runWorktree) } },
+    });
 
     const source = {
       targetRef: run.git.target.ref,
@@ -1227,6 +1464,27 @@ describe("native compiler-authoritative run program", () => {
         "notes-pinning-plan; use $root for the existing run objective",
       ),
     });
+
+    const developmentOnlyRun = structuredClone(run);
+    developmentOnlyRun.objective = "Development-only research; never access sealed final holdouts.";
+    await expect(
+      program.compilePlanningOutput({
+        run: developmentOnlyRun,
+        attemptId: "attempt-prohibited-holdout-seed",
+        output: planningOutput(
+          { work_kind: "general" },
+          [
+            {
+              key: "development-boundary",
+              type: "change",
+              title: "Final holdouts remain excluded",
+              spec: {},
+            },
+          ],
+          [{ source: "$root", relation: "requires", target: "development-boundary" }],
+        ),
+      }),
+    ).rejects.toMatchObject({ code: "graph_seed_sealed_holdout" });
 
     run.plan = { ...planning.plan, status: "awaiting_approval" };
     run.graphHash = planning.graphHash;
@@ -1622,6 +1880,85 @@ describe("native compiler-authoritative run program", () => {
       step.summary = undefined;
     }
     run.tickets[obsolete.id] = obsolete;
+    const embeddedRelationshipCompiled = await program.compileAssignmentOutput({
+      run,
+      assignment,
+      attemptId: "attempt-architecture",
+      output: {
+        status: "completed",
+        summary: "Mapped the notes application boundary through the node relationship view",
+        graphDelta: {
+          protocol: "koni.graph-delta.v1",
+          expectedGraphHash: run.graphHash,
+          upsertNodes: [
+            {
+              expectedNodeHash: canonicalHash(root),
+              node: {
+                ...root,
+                edges: {
+                  ...root.edges,
+                  systems: ["system-notes-app"],
+                },
+              },
+            },
+            {
+              expectedNodeHash: null,
+              node: {
+                schema_version: "1.0",
+                id: "system-notes-app",
+                type: "system",
+                title: "Notes application",
+                status: "active",
+                spec: {
+                  kind: "app",
+                  responsibility: "Own note creation and pinning",
+                  contract_required: false,
+                  contract_reason: "Repository-local behavior is sufficient",
+                  owned_paths: ["src"],
+                },
+                edges: {},
+                annotations: {},
+              },
+            },
+          ],
+          deleteNodes: [],
+          addEdges: [],
+          removeEdges: [],
+        },
+      },
+    });
+    expect(embeddedRelationshipCompiled.outcome).toEqual({
+      status: "completed",
+      summary: "Mapped the notes application boundary through the node relationship view",
+    });
+    expect(embeddedRelationshipCompiled.graphRevision).toBe(2);
+    await expect(
+      program.compileAssignmentOutput({
+        run,
+        assignment,
+        attemptId: "attempt-architecture",
+        output: {
+          status: "completed",
+          summary: "Tried to smuggle an annotation through the node snapshot",
+          graphDelta: {
+            protocol: "koni.graph-delta.v1",
+            expectedGraphHash: run.graphHash,
+            upsertNodes: [
+              {
+                expectedNodeHash: canonicalHash(root),
+                node: {
+                  ...root,
+                  annotations: { unauthorized: "annotation" },
+                },
+              },
+            ],
+            deleteNodes: [],
+            addEdges: [],
+            removeEdges: [],
+          },
+        },
+      }),
+    ).rejects.toMatchObject({ code: "graph_delta_embedded_state" });
     const compiled = await program.compileAssignmentOutput({
       run,
       assignment,
@@ -1956,6 +2293,7 @@ describe("native compiler-authoritative run program", () => {
     const reviewOutput = Buffer.from(
       `${JSON.stringify({
         status: "completed",
+        reviewVerdict: "approved",
         summary: "The historical proof is independently reviewed and complete.",
       })}\n`,
       "utf8",
@@ -2263,6 +2601,7 @@ describe("native compiler-authoritative run program", () => {
     const implementationReviewOutput = Buffer.from(
       `${JSON.stringify({
         status: "completed",
+        reviewVerdict: "approved",
         summary: "The implementation and exact focused proof are independently accepted.",
       })}\n`,
       "utf8",
@@ -2640,8 +2979,8 @@ describe("native compiler-authoritative run program", () => {
     expect(resolved.executionConfig.maxParallel).toBe(3);
     expect(resolved.executionConfig.disjointScopeParallelism).toBe(true);
     expect(resolved.executionConfig.agents["run-planner"]).toMatchObject({
-      model: "gpt-5.6-sol",
-      thinkingLevel: "xhigh",
+      model: "gpt-5.6-terra",
+      thinkingLevel: "high",
     });
     await persistWrites(project.projectRoot, resolved.artifactWrites ?? []);
     const run = runRecord(
@@ -2653,13 +2992,25 @@ describe("native compiler-authoritative run program", () => {
     const planning = await program.compilePlanningOutput({
       run,
       attemptId: "attempt-research-plan",
-      output: planningOutput({
-        objective: "Measure a bounded factual-recall delta",
-        fixture_command: ["node", "scripts/verify-research.mjs", "fixtures/research-input.json"],
-        scientific_inputs: [
-          { asset_id: "fixture-input", role: "dataset", path: "fixtures/research-input.json" },
+      output: planningOutput(
+        {
+          hypothesis:
+            "Retrieval improves bounded factual recall under the fixed evaluation protocol.",
+          fixture_command: ["node", "scripts/verify-research.mjs", "fixtures/research-input.json"],
+          scientific_inputs: [
+            { asset_id: "fixture-input", role: "dataset", path: "fixtures/research-input.json" },
+          ],
+        },
+        [
+          {
+            key: "related-literature",
+            type: "literature",
+            title: "Fixture related work",
+            spec: { summary: "Existing context that may need a bounded change-control repair." },
+          },
         ],
-      }),
+        [{ source: "$root", target: "related-literature", relation: "literature" }],
+      ),
     });
     run.plan = { ...planning.plan, status: "approved" };
     run.graphHash = planning.graphHash;
@@ -3089,11 +3440,14 @@ describe("native compiler-authoritative run program", () => {
     });
 
     const controlTarget = ticket.targetNodeIds[0]!;
+    const externalTarget = (await program.projectGraph(run)).nodes.find(
+      (node) => node.type === "literature",
+    )!.id;
     const upstreamOutput = {
       status: "completed",
       summary: "The hypothesis requires a bounded upstream semantic correction",
       upstreamChangeRequest: {
-        targetNodeIds: [controlTarget],
+        targetNodeIds: [externalTarget, controlTarget],
         summary: "Correct the bounded hypothesis contract",
         reason: "The current formulation cannot represent the verified constraint",
       },
@@ -3156,7 +3510,7 @@ describe("native compiler-authoritative run program", () => {
         sourceTicketId: ticket.id,
         sourceStepId: assignment.stepId,
         sourceBindingSha256: ticket.steps[0]!.executionPolicyBinding!.sha256,
-        targetNodeIds: [controlTarget],
+        targetNodeIds: [externalTarget, controlTarget],
         publication: {
           protocol: "koni.change-control-publication.v1",
           initialStatus: "proposed",
@@ -3186,13 +3540,13 @@ describe("native compiler-authoritative run program", () => {
       id: upstreamControl.publication.proposalTicketId,
       operationId: "lifecycle.change-request",
       status: "proposed",
-      targetNodeIds: [controlTarget],
-      readNodeIds: [controlTarget],
+      targetNodeIds: [externalTarget, controlTarget],
+      readNodeIds: [externalTarget, controlTarget],
       writeNodeIds: [],
       readPaths: [],
       writePaths: [],
       executionControl: {
-        changeControlScopeNodeIds: [controlTarget],
+        changeControlScopeNodeIds: [externalTarget, controlTarget],
         proposalRequest: {
           requestSha256: upstreamControl.publication.requestSha256,
           sourceTicketId: ticket.id,
@@ -3283,6 +3637,12 @@ describe("native compiler-authoritative run program", () => {
         reason: "initial",
       },
     });
+    expect(proposalPrepared.spec.persona.initialPrompt).toContain(
+      "Do not select no-op while the approved request remains unsatisfied",
+    );
+    expect(proposalPrepared.spec.persona.initialPrompt).toContain(
+      'Use changeApplication.operation "apply-change-request"',
+    );
     await persistWrites(project.projectRoot, proposalPrepared.artifactWrites ?? []);
     run.attempts[proposalPrepared.spec.identity.attemptId] = attemptRecord(
       proposalPrepared.spec,
@@ -3443,6 +3803,42 @@ describe("native compiler-authoritative run program", () => {
       "apply-approved-delta",
       "verify",
     ]);
+    if (applicationTicket === undefined) throw new Error("missing approved application ticket");
+    run.tickets[applicationTicket.id] = applicationTicket;
+    const applicationCycle = attachFixtureTicketCycle(run, applicationTicket);
+    materializeFixtureCheckout(run.git.run.worktree, applicationCycle.worktree);
+    const applicationStep = applicationTicket.steps.find(
+      (step) => step.id === "apply-approved-delta",
+    )!;
+    const applicationPrepared = await program.prepareAttempt({
+      kind: "ticket",
+      run,
+      assignment: {
+        runId: run.id,
+        ticketId: applicationTicket.id,
+        stepId: applicationStep.id,
+        personaId: applicationStep.personaId,
+        priority: applicationTicket.priority,
+      },
+      attemptId: "attempt-approved-change-application",
+      sessionId: "session-approved-change-application",
+      nextAuthorityRevision: 15,
+      expectedAuthorityStateHash: digest("authority-fifteen"),
+      lineage: {
+        branchEpoch: 0,
+        reason: "initial",
+      },
+    });
+    expect(applicationPrepared.spec.persona.initialPrompt).toContain(
+      "The approved change request defines the required state for this application",
+    );
+    expect(applicationPrepared.spec.persona.initialPrompt).toContain(
+      "Correct the bounded hypothesis contract",
+    );
+    expect(applicationPrepared.spec.persona.initialPrompt).toContain(
+      "it is not an instruction to replay an empty delta",
+    );
+    delete run.tickets[applicationTicket.id];
 
     const noOpOutput = {
       status: "completed",
@@ -3658,16 +4054,21 @@ describe("native compiler-authoritative run program", () => {
     const program = await compilerProgram(project);
     const runId = "run-native-research-direct";
     const objective = "Measure whether retrieval improves bounded factual recall";
+    const hypothesis =
+      "Matched retrieval contexts improve bounded factual recall relative to matched non-retrieval controls.";
     const resolved = await program.resolveRun({
       runId,
       objective,
       runTypeId: "small",
       targetRef: "refs/heads/main",
-      intake: { goal: objective },
+      intake: { goal: objective, hypothesis },
     });
     expect(resolved.planningMode).toBe("direct");
     await persistWrites(project.projectRoot, resolved.artifactWrites ?? []);
-    const run = runRecord(project.projectRoot, runId, objective, resolved);
+    const run = runRecord(project.projectRoot, runId, objective, resolved, {
+      goal: objective,
+      hypothesis,
+    });
     run.workingSpecOwnerId = resolved.workingSpecOwnerId!;
     const reviewable = await program.initializeDirectApproval(run);
     expect(reviewable.plan).toMatchObject({
@@ -3677,6 +4078,22 @@ describe("native compiler-authoritative run program", () => {
       graphSeed: undefined,
     });
     expect(reviewable.graphHash).toMatch(/^sha256:[0-9a-f]{64}$/u);
+    const directGraphWrite = reviewable.artifactWrites?.find((write) =>
+      write.path.endsWith("/direct-approval-graph.json"),
+    );
+    const initialDirectGraph = JSON.parse(
+      Buffer.from(directGraphWrite!.bytes).toString("utf8"),
+    ) as {
+      nodes: Record<string, unknown>;
+    };
+    expect(Object.values(initialDirectGraph.nodes)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "hypothesis",
+          spec: expect.objectContaining({ objective, hypothesis }),
+        }),
+      ]),
+    );
     expect(reviewable.artifactWrites?.map((write) => write.path)).toEqual([
       `runs/${runId}/direct-approval.json`,
       `runs/${runId}/direct-approval-graph.json`,
@@ -4297,6 +4714,7 @@ function runRecord(
   id: string,
   objective: string,
   resolved: Awaited<ReturnType<NativeRunCompilerProgram["resolveRun"]>>,
+  intake: ConfigurationObject = { goal: objective },
 ): RunRecord {
   const lifecycle = reduceRunLifecycle(newRunLifecycle(id), {
     type: "planning_started",
@@ -4314,7 +4732,7 @@ function runRecord(
     planningMode: resolved.planningMode,
     behavior: resolved.behavior,
     objective,
-    intake: { goal: objective },
+    intake,
     executionConfig: resolved.executionConfig,
     createdAt: FIXED_NOW.toISOString(),
     updatedAt: FIXED_NOW.toISOString(),
@@ -4489,7 +4907,11 @@ function materializeFixtureCheckout(source: string, destination: string): void {
   }
 }
 
-function planningOutput(rootSpec: Record<string, unknown>): unknown {
+function planningOutput(
+  rootSpec: Record<string, unknown>,
+  nodes: unknown[] = [],
+  edges: unknown[] = [],
+): unknown {
   return {
     full: fullPlans(),
     concise: {
@@ -4518,7 +4940,7 @@ function planningOutput(rootSpec: Record<string, unknown>): unknown {
         },
       ],
     },
-    graphSeed: { rootSpec, nodes: [], edges: [] },
+    graphSeed: { rootSpec, nodes, edges },
   };
 }
 

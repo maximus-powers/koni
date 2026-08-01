@@ -433,6 +433,19 @@ describe("deterministic change-control reconciliation", () => {
         heldByProposalTicketId: "proposal",
         proposalTerminal: true,
         proposalTerminalSha256: digest("proposal-terminal"),
+        proposalDisposition: { kind: "cancelled" },
+      }),
+    ).toMatchObject({
+      disposition: "release",
+      reason: "cancelled",
+      retirePriorExecutionAuthority: true,
+    });
+    expect(
+      deriveSourceReleaseDecision({
+        sourceTicketId: "source",
+        heldByProposalTicketId: "proposal",
+        proposalTerminal: true,
+        proposalTerminalSha256: digest("proposal-terminal"),
         proposalDisposition: {
           kind: "application",
           authoritySha256: digest("application-authority"),

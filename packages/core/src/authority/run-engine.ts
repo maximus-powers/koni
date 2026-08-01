@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { TSchema } from "typebox";
 import type { TransactionWrite } from "./file-journal.js";
@@ -72,6 +73,7 @@ import {
 import {
   canonicalEncode,
   canonicalHash,
+  compareUtf8,
   isSha256Digest,
   rawSha256,
   type Sha256Digest,
@@ -231,11 +233,15 @@ import {
 import {
   authorizeBlockedReviewRetry,
   beginAssignment,
+  beginsBoundedReviewRework,
   blockedIndependentReviewRetryCandidate,
   blockedReviewRetryCandidate,
   canRetryBlockedReviewOnly,
   deriveReadyAssignments,
   finishAssignment,
+  legacyCompletedReviewRejectionCandidate,
+  recoverLegacyCompletedReviewRejection,
+  reviewReworkAppliesToStep,
   type ReadyAssignment,
   type SchedulerExecutionAuthority,
 } from "../state/scheduler.js";
@@ -265,7 +271,67 @@ const MAX_PROVIDER_RESPONSE_TRANSCRIPT_OVERSHOOT_BYTES = 24 * 1024 * 1024;
  * moves under every launch) while absorbing the ordinary one-off CAS race.
  */
 const MAX_COMPENSATED_VALIDATION_REISSUES = 3;
+// A rejection normally reissues the held source so it can produce a corrected request. Bound
+// that semantic retry separately from infrastructure recovery: repeated denied scope requests
+// must eventually preserve the completed source evidence and let the ticket continue.
+const MAX_REJECTED_SOURCE_REISSUES = 3;
+// A terminal resolver may diagnose a source authority mismatch, but completing that diagnosis
+// does not itself widen the source's immutable grant. Reissuing the same source more than once
+// just replays an identical no-op application; retain the evidence and let normal change control
+// project a distinct scoped successor instead.
+const MAX_TERMINAL_RESOLVER_SOURCE_REISSUES = 1;
+// A blocked run whose only obstacle is a retireable provider-exposure hold (an aborted/errored
+// provider request that can never settle) is auto-recovered without an operator resume. This caps
+// how many times one run may auto-retire-and-continue before it stays blocked for the operator, so
+// a pathological abort-every-time loop cannot churn provider spend indefinitely.
+const MAX_PROVIDER_EXPOSURE_AUTO_RECOVERIES = 3;
+// A provider admission rejection occurs before a canonical assistant turn exists. Re-drive it
+// from a fresh contained root, bounded just like provider-exposure recovery, so an oversized
+// inherited transcript never turns into an operator-only retry loop.
+const MAX_PROVIDER_ADMISSION_AUTO_RECOVERIES = 3;
+const MAX_TOKEN_BUDGET_AUTO_RECOVERIES_PER_STEP = 1;
+// A configured action can settle its semantic product before the provider outcome callback closes
+// the durable attempt. Retry that final, effect-free status transition in-process so a transient
+// mutation/CAS exception cannot orphan a terminal artifact until the next authority restart.
+const MAX_TERMINAL_FINALIZATION_RECOVERIES = 3;
+// A contained provider can persist its terminal JSONL entry a moment after the process outcome
+// reaches the authority. Re-probe that narrow propagation window rather than requiring the user
+// to restart or resume a run whose canonical error is already becoming durable.
+const MAX_PROVIDER_TERMINAL_PROPAGATION_PROBES = 3;
+const PROVIDER_TERMINAL_PROPAGATION_PROBE_DELAY_MS = 250;
+// A contained session that reaches a terminal turn without submitting is a Koni/Pi protocol
+// failure, not research work product. Re-drive it automatically, but retain a hard cap so an
+// agent that repeatedly ignores its terminal contract cannot churn indefinitely.
+const MAX_TERMINAL_PROTOCOL_AUTO_RECOVERIES = 3;
+const DEFAULT_PROVIDER_REQUEST_LIVENESS_TIMEOUT_MS = 180_000;
+// Codex Responses has no supported wire-level output cap in the pinned Pi runtime. Its advertised
+// maximum must therefore remain reserved, while provider framing still consumes context capacity
+// beyond Koni's serialized-payload estimate. Reserve a fixed transport margin so admission asks Pi
+// for its existing provider-free compaction path before the remote endpoint aborts the turn.
+const UNCAPPED_PROVIDER_CONTEXT_FRAMING_RESERVE = 16 * 1024;
 const AGENT_FILE_READ_PAGE_BYTES = 32 * 1024;
+// A single built-in tool result must never flood a contained attempt's context window. koni
+// deliberately seals attempts from ambient Pi context-management extensions (see
+// attempt-process-supervisor), so bounding tool results is koni's own responsibility. A listing or
+// search over a large repository is capped to this many structured items with an explicit
+// truncation marker instead of returning thousands of entries the model must then carry forever.
+const AGENT_LIST_RESULT_MAX_ENTRIES = 200;
+const AGENT_SEARCH_RESULT_MAX_MATCHES = 100;
+
+/** Cap a structured discovery result to a window-appropriate item count, marking any truncation. */
+function boundDiscoveryItems<T>(
+  items: readonly T[],
+  max: number,
+): { items: T[]; truncated: boolean; returned: number; omitted: number } {
+  const returned = Math.min(items.length, max);
+  return {
+    items: items.slice(0, returned),
+    truncated: items.length > returned,
+    returned,
+    omitted: Math.max(0, items.length - returned),
+  };
+}
+
 const REPOSITORY_DISCOVERY_TOOLS = new Set<KoniToolName>([
   "koni_read_file",
   "koni_list_files",
@@ -851,7 +917,7 @@ export interface RunAuthorityEngineOptions {
   ) => Promise<void> | void;
   /** Provider-free crash injection after a primitive receipt but before its journal transition. */
   actionFault?: (
-    point: "before_journal" | "before_assignment_settle",
+    point: "before_journal" | "before_assignment_settle" | "before_attempt_finalize",
     input: Readonly<{
       runId: string;
       invocationId: string;
@@ -860,6 +926,12 @@ export interface RunAuthorityEngineOptions {
       attemptId?: string;
     }>,
   ) => Promise<void> | void;
+  /**
+   * Maximum wall time for one durably reserved provider request before Koni asks the contained
+   * session to abort it.  The default is deliberately generous; this seam exists so the
+   * liveness boundary can be tested without shortening real research turns.
+   */
+  providerRequestLivenessTimeoutMs?: number;
 }
 
 interface RunAdvancementToken {
@@ -936,6 +1008,12 @@ export class RunAuthorityEngine {
   readonly #gitExecutableSha256: RunAuthorityEngineOptions["gitExecutableSha256"];
   readonly #sandboxExecutable: RunAuthorityEngineOptions["sandboxExecutable"];
   readonly #requestAuthorityShutdown: () => void;
+  readonly #providerRequestLivenessTimeoutMs: number;
+  readonly #providerRequestLivenessTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  readonly #providerTerminalPropagationProbes = new Map<
+    string,
+    { attempts: number; timer: ReturnType<typeof setTimeout> }
+  >();
   readonly #attachedOutcomes = new Set<string>();
   readonly #activeActionExecutions = new Map<string, Promise<ActionExecutionJournal>>();
   readonly #activeAssignmentSettlements = new Map<string, Promise<void>>();
@@ -999,8 +1077,14 @@ export class RunAuthorityEngine {
     this.#gitExecutableSha256 = options.gitExecutableSha256;
     this.#sandboxExecutable = options.sandboxExecutable;
     this.#requestAuthorityShutdown = options.requestAuthorityShutdown ?? (() => undefined);
+    this.#providerRequestLivenessTimeoutMs = validatedProviderRequestLivenessTimeout(
+      options.providerRequestLivenessTimeoutMs,
+    );
     this.#registerMethods();
     const observe = (event: SupervisorEvent | PiAttemptProcessSupervisorEvent) => {
+      if (event.event.type === "outcome") {
+        this.#clearProviderRequestLivenessForAttempt(event.attemptId);
+      }
       if (event.event.type !== "outcome")
         void this.#recordSupervisorEvent(event).catch(() => undefined);
     };
@@ -1145,6 +1229,7 @@ export class RunAuthorityEngine {
             this.#assertStartupMayContinue();
           }
           this.#server.completeRecoveredQuiesce();
+          await this.#recoverAutomaticInfrastructureAfterStartup();
         });
         this.#startupRecoveryActive = false;
         return;
@@ -1159,6 +1244,7 @@ export class RunAuthorityEngine {
       await this.#markStartupEpochReady(epoch);
       this.#assertStartupMayContinue();
       this.#server.completeStartupRecovery();
+      await this.#recoverAutomaticInfrastructureAfterStartup();
       this.#startupRecoveryActive = false;
     } catch (error) {
       this.#startupRecoveryActive = false;
@@ -1185,11 +1271,18 @@ export class RunAuthorityEngine {
   public stop(): Promise<void> {
     if (this.#stopPromise !== undefined) return this.#stopPromise;
     this.#stopRequested = true;
+    // Normal process shutdown owns the live adapters from this point forward. Close detached
+    // outcome settlement synchronously, before suspendAll resolves their prompt promises, so an
+    // upgrade cannot turn its own abort reason into a durable ticket failure. The still-running
+    // attempt remains the recovery cursor for the successor authority.
+    this.#quiesceOutcomeSettlementClosed = true;
     this.#stopPromise = this.#settleStop(true);
     return this.#stopPromise;
   }
 
   async #settleStop(joinStart: boolean): Promise<void> {
+    this.#clearAllProviderRequestLiveness();
+    this.#clearAllProviderTerminalPropagationProbes();
     this.#unsubscribeSupervisor?.();
     this.#unsubscribeSupervisor = undefined;
     // Reject operator work synchronously, then let already-authorized outcome/action/Git
@@ -1352,11 +1445,24 @@ export class RunAuthorityEngine {
   /** Resume every persisted two-phase intent without inventing new semantic state. */
   public async recover(): Promise<void> {
     this.#assertStartupMayContinue();
-    const scan = await this.#store.runScanSnapshot();
+    // Startup owns external admission, so the bounded run-ID set is stable while recovery runs.
+    // Run records are not: admitting an earlier durable continuation can settle provider or action
+    // state before a later record is visited. Read each record against the current authority anchor
+    // instead of retaining hashes that startup itself is allowed to supersede.
+    const scan = await this.#store.runIdSnapshot();
     this.#assertStartupMayContinue();
     for (const runId of scan.runIds) {
       this.#assertStartupMayContinue();
-      let observed: RunRecord | undefined = await scan.getRun(runId);
+      let observed: RunRecord | undefined;
+      try {
+        observed = await this.#store.getRun(runId);
+      } catch {
+        // A historical record can fail its current immutable-anchor check before it can be safely
+        // loaded or transitioned. It is already ineligible for recovery; do not let that one inert
+        // record prevent healthy runs from resuming. The store/daemon diagnostic retains the exact
+        // failure for repair.
+        continue;
+      }
       this.#assertStartupMayContinue();
       const initialPhase = observed.lifecycle.phase;
       const hasPendingGit = Object.keys(observed.pendingGitIntents ?? {}).length > 0;
@@ -1365,18 +1471,20 @@ export class RunAuthorityEngine {
         initialPhase !== "deleting" &&
         initialPhase !== "deleted";
       observed = undefined;
-      // Blocked is a durable human boundary, including an already-authorized terminal-resolver
-      // retry. Startup never replays Git, actions, provider settlement, scheduling, or launches
-      // for it; one explicit run.resume consumes the pending retry or performs the normal retry.
-      // Ordinary blocked work is an inert human boundary. A legacy relocation is the one narrow
-      // exception: migration deliberately blocks the old admission path before startup performs
-      // its proof-gated Git move, and the exact relocation settlement restores the prior phase.
+      // Blocked is ordinarily a durable human boundary, including an already-authorized
+      // terminal-resolver retry. Provider-exposure holds are picked up only after startup reopens
+      // admission, so their re-drive cannot be lost while the authority is still quiescing. All
+      // other blocked work remains inert. A legacy relocation is the one narrow exception:
+      // migration deliberately blocks the old admission path before startup performs its
+      // proof-gated Git move, and the exact relocation settlement restores the prior phase.
       if (initialPhase === "blocked" && !relocationRequired) continue;
       if (initialPhase === "deleted") {
         if (hasPendingGit) {
           await this.#recoverGitIntents(runId);
           this.#assertStartupMayContinue();
         }
+        await this.#retireHistoricalPreservedDeletionWorktrees(runId);
+        this.#assertStartupMayContinue();
         await this.#supervisor.deleteRun(runId);
         this.#assertStartupMayContinue();
         continue;
@@ -1453,6 +1561,25 @@ export class RunAuthorityEngine {
         this.#assertStartupMayContinue();
         await this.#tick(runId);
         this.#assertStartupMayContinue();
+      }
+    }
+  }
+
+  /** Re-drive bounded, effect-free infrastructure holds once startup has reopened admission. */
+  async #recoverAutomaticInfrastructureAfterStartup(): Promise<void> {
+    // Provider outcomes may begin settling as soon as recover() reattaches a session. Keep the
+    // bounded ID snapshot, but validate every run against the authority state current at its read.
+    const scan = await this.#store.runIdSnapshot();
+    for (const runId of scan.runIds) {
+      const run = await this.#store.getRun(runId);
+      if (
+        run.lifecycle.phase === "blocked" &&
+        isProviderExposureHoldBlocker(run.lifecycle.blocker)
+      ) {
+        await this.#autoRecoverProviderExposure(runId);
+      }
+      for (const attempt of Object.values(run.attempts)) {
+        if (isTokenBudgetFailure(attempt)) await this.#autoRecoverTokenBudget(runId, attempt.id);
       }
     }
   }
@@ -1539,6 +1666,15 @@ export class RunAuthorityEngine {
         }
       } catch (error) {
         if (error instanceof RunAdvancementStoppedError) throw error;
+        if (
+          error instanceof RunActionAuthorityError &&
+          error.code === "lead_product_drift" &&
+          current !== undefined &&
+          current.boundary.kind === "lead_launch"
+        ) {
+          await this.#retireDriftedLeadAction(runId, current.invocationId);
+          continue;
+        }
         await this.#recordRunBlocker(
           runId,
           `Configured action recovery failed: ${errorMessage(error)}`,
@@ -1546,6 +1682,46 @@ export class RunAuthorityEngine {
         return;
       }
     }
+  }
+
+  /** A Lead admission is a snapshot of the graph; graph evolution makes that snapshot obsolete. */
+  async #retireDriftedLeadAction(runId: string, invocationId: string): Promise<void> {
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const current = await this.#store.getRun(runId);
+      const action = current.actionExecutions?.[invocationId];
+      if (
+        action === undefined ||
+        action.settledAt !== undefined ||
+        action.boundary.kind !== "lead_launch"
+      )
+        return this.#noOpInternal(revision);
+      const trigger = leadJudgmentTriggerFromStepId(action.boundary.stepId);
+      if (
+        trigger === undefined ||
+        action.boundary.productSha256 === leadActionProductSha256(current, trigger)
+      )
+        return this.#noOpInternal(revision);
+      const draft = nextRun(current, this.#timestamp());
+      const mutable = requiredRunActionExecution(draft, invocationId);
+      const reason =
+        "Retired stale Lead action after graph/run-product evolution; issuing a fresh judgment";
+      settleRunAction(mutable, "abandoned", reason, draft.updatedAt, draft.revision);
+      draft.activity.push(
+        activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "compiler",
+          reason,
+          undefined,
+          "info",
+        ),
+      );
+      const result = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: current.revision }],
+      });
+      return { revision: result.state.revision };
+    });
   }
 
   /**
@@ -2696,6 +2872,7 @@ export class RunAuthorityEngine {
     });
     this.#server.register("proposal.decide", {
       mutating: true,
+      revisionPolicy: "semantic",
       handle: async ({ request, revision }) => this.#decideProposal(request, revision),
     });
     this.#server.register("terminal-resolver.retry", {
@@ -2813,10 +2990,12 @@ export class RunAuthorityEngine {
     });
     this.#server.register("run.pause", {
       mutating: true,
+      revisionPolicy: "semantic",
       handle: async ({ request, revision }) => this.#pauseRun(request, revision),
     });
     this.#server.register("run.resume", {
       mutating: true,
+      revisionPolicy: "semantic",
       handle: async ({ request, revision }) => this.#resumeRun(request, revision),
       afterIdempotentReplay: ({ request }, response) => {
         const runId = requiredString(request.params, "runId");
@@ -2837,6 +3016,7 @@ export class RunAuthorityEngine {
     });
     this.#server.register("run.action.execute", {
       mutating: true,
+      revisionPolicy: "semantic",
       handle: async ({ request, revision }) => this.#executeStageAction(request, revision),
     });
     this.#server.register("run.deletion.inspect", {
@@ -2852,6 +3032,7 @@ export class RunAuthorityEngine {
     });
     this.#server.register("run.delete", {
       mutating: true,
+      revisionPolicy: "semantic",
       handle: async ({ request, revision }) => this.#deleteRun(request, revision),
     });
     this.#server.register("plan.approve", {
@@ -3603,20 +3784,16 @@ export class RunAuthorityEngine {
           defineBuiltInStageAction({
             id: `stage:${stage.id}:revise`,
             intent: "revise_run_plan",
-            // Also offered when the approved plan failed deterministic compilation and blocked the
-            // run at this boundary: retrying re-fails identically, so a steered revision is the
-            // only real recovery.
+            // Also offered when an approved plan blocks at any later phase: retrying preserves
+            // the same graph, while a steered revision can repair a structural contradiction.
             available:
               current &&
-              (run.lifecycle.phase === "awaiting_approval" ||
-                (run.lifecycle.phase === "blocked" && run.lifecycle.resumePhase === "approving")),
+              (run.lifecycle.phase === "awaiting_approval" || run.lifecycle.phase === "blocked"),
             reason:
               current && run.lifecycle.phase === "awaiting_approval"
                 ? "Steering can request a fresh immutable planning attempt."
-                : current &&
-                    run.lifecycle.phase === "blocked" &&
-                    run.lifecycle.resumePhase === "approving"
-                  ? "The approved plan failed deterministic compilation; steer a revised plan to recover."
+                : current && run.lifecycle.phase === "blocked"
+                  ? "The approved plan is blocked; steer a revised plan to repair its durable graph."
                   : "Plan revision is available only while this approval stage is waiting.",
             form: {
               title: "Revise plan",
@@ -5544,11 +5721,17 @@ export class RunAuthorityEngine {
       ) {
         return this.#noOpInternal(revision);
       }
-      const priorAttempts = Object.values(run.attempts).filter(
+      const priorCompensatedReissues = Object.values(run.attempts).filter(
         (candidate) =>
-          candidate.ticketId === assignment.ticketId && candidate.stepId === assignment.stepId,
+          candidate.ticketId === assignment.ticketId &&
+          candidate.stepId === assignment.stepId &&
+          candidate.status === "interrupted" &&
+          candidate.terminalSummary?.startsWith(
+            "Retired accepted output after a compensated validation",
+          ) === true,
       ).length;
-      if (priorAttempts >= MAX_COMPENSATED_VALIDATION_REISSUES) return this.#noOpInternal(revision);
+      if (priorCompensatedReissues >= MAX_COMPENSATED_VALIDATION_REISSUES)
+        return this.#noOpInternal(revision);
       const failedStep = [...action.journal.steps]
         .reverse()
         .find((step) => step.status === "failed");
@@ -5569,7 +5752,7 @@ export class RunAuthorityEngine {
           this.#createId("activity"),
           draft.updatedAt,
           "compiler",
-          `${reason}: ${assignment.ticketId}/${assignment.stepId} (attempt ${priorAttempts} of ${MAX_COMPENSATED_VALIDATION_REISSUES})`,
+          `${reason}: ${assignment.ticketId}/${assignment.stepId} (recovery ${priorCompensatedReissues + 1} of ${MAX_COMPENSATED_VALIDATION_REISSUES})`,
           assignment.ticketId,
         ),
       );
@@ -6005,6 +6188,58 @@ export class RunAuthorityEngine {
     return changed;
   }
 
+  /** Settle a ticket whose already-completed configured steps need no further scheduler assignment. */
+  async #settleReadyCompletedTicket(
+    runId: string,
+    advancement: RunAdvancementToken,
+  ): Promise<boolean> {
+    const run = await this.#store.getRun(runId);
+    if (!this.#matchesAdvancement(run, advancement)) return false;
+    const ticket = Object.values(run.tickets)
+      .filter(
+        (candidate) =>
+          candidate.status === "ready" &&
+          candidate.steps.every((step) => step.status === "completed" || step.status === "skipped"),
+      )
+      .sort(
+        (left, right) =>
+          left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+      )[0];
+    if (ticket === undefined) return false;
+    let settled = false;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const current = await this.#store.getRun(runId);
+      const mutable = current.tickets[ticket.id];
+      if (
+        !this.#matchesAdvancement(current, advancement) ||
+        mutable?.status !== "ready" ||
+        !mutable.steps.every((step) => step.status === "completed" || step.status === "skipped")
+      )
+        return this.#noOpInternal(revision);
+      const draft = nextRun(current, this.#timestamp());
+      const completed = draft.tickets[ticket.id]!;
+      completed.status = "completed";
+      completed.blocker = undefined;
+      completed.updatedAt = draft.updatedAt;
+      draft.activity.push(
+        activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "compiler",
+          `Settled completed ticket without replay: ${completed.title}`,
+          completed.id,
+        ),
+      );
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: current.revision }],
+      });
+      settled = true;
+      return { revision: committed.state.revision, events: [] };
+    });
+    return settled;
+  }
+
   /** Archive one superseded source checkout and return the held ticket to a fresh execution cycle. */
   async #releaseHeldSource(runId: string, advancement: RunAdvancementToken): Promise<boolean> {
     let run = await this.#store.getRun(runId);
@@ -6052,7 +6287,8 @@ export class RunAuthorityEngine {
     const { source, hold, proposal, release } = selected;
 
     const cycleId = source.gitCycleId;
-    if (cycleId !== undefined) {
+    const archivedCycle = cycleId === undefined ? undefined : run.git.ticketCycles[cycleId];
+    if (cycleId !== undefined && archivedCycle?.status !== "retired") {
       const lifecycle = await this.#withGit(runId, async () => {
         const current = await this.#store.getRun(runId);
         if (!this.#matchesAdvancement(current, advancement)) throw new RunAdvancementStoppedError();
@@ -6090,10 +6326,19 @@ export class RunAuthorityEngine {
       run = await this.#store.getRun(runId);
       if (!this.#matchesAdvancement(run, advancement)) return false;
     } else if (source.worktreePath !== undefined || source.branch !== undefined) {
-      throw new AuthorityRpcError(
-        "change_control_source_git",
-        `held source ${source.id} has checkout metadata without an owned Git cycle`,
+      const recoveredArchive = Object.values(run.git.ticketCycles).some(
+        (cycle) =>
+          cycle.ticketId === source.id &&
+          cycle.status === "retired" &&
+          cycle.supersessionSha256 === hold.requestSha256 &&
+          cycle.archiveRef !== undefined,
       );
+      if (!recoveredArchive) {
+        throw new AuthorityRpcError(
+          "change_control_source_git",
+          `held source ${source.id} has checkout metadata without an owned Git cycle`,
+        );
+      }
     }
 
     let changed = false;
@@ -6129,11 +6374,30 @@ export class RunAuthorityEngine {
       }
       const draft = nextRun(current, this.#timestamp());
       const mutable = draft.tickets[source.id]!;
-      resetTicketForFreshCycle(
-        mutable,
-        draft.updatedAt,
-        currentTicketExecutionEpoch(current, currentSource),
-      );
+      const rejectionLimitReached =
+        currentRelease.reason === "rejected" &&
+        rejectedSourceReissueCount(current, currentSource) > MAX_REJECTED_SOURCE_REISSUES;
+      if (rejectionLimitReached) {
+        // The current source output was accepted before it requested the held change. Do not erase
+        // that evidence or replay the same operation; a fresh checkout will be prepared only for
+        // the next pending step.
+        delete mutable.gitCycleId;
+        mutable.worktreePath = undefined;
+        mutable.branch = undefined;
+        mutable.status = mutable.steps.every(
+          (step) => step.status === "completed" || step.status === "skipped",
+        )
+          ? "completed"
+          : "ready";
+        mutable.blocker = undefined;
+        mutable.updatedAt = draft.updatedAt;
+      } else {
+        resetTicketForFreshCycle(
+          mutable,
+          draft.updatedAt,
+          currentTicketExecutionEpoch(current, currentSource),
+        );
+      }
       delete mutable.executionControl!.sourceHold;
       if (Object.keys(mutable.executionControl!).length === 0) delete mutable.executionControl;
       draft.activity.push(
@@ -6141,7 +6405,9 @@ export class RunAuthorityEngine {
           this.#createId("activity"),
           draft.updatedAt,
           "compiler",
-          `Released source ticket after ${currentRelease.reason.replaceAll("_", " ")}: ${mutable.title}`,
+          rejectionLimitReached
+            ? `Preserved source progress after ${MAX_REJECTED_SOURCE_REISSUES} rejected reissues: ${mutable.title}`
+            : `Released source ticket after ${currentRelease.reason.replaceAll("_", " ")}: ${mutable.title}`,
           mutable.id,
         ),
       );
@@ -6591,6 +6857,13 @@ export class RunAuthorityEngine {
       }
       const draft = nextRun(current, this.#timestamp());
       const mutable = draft.tickets[source.id]!;
+      const priorResolverReissues = current.activity.filter(
+        (entry) =>
+          entry.ticketId === source.id &&
+          entry.message === `Resolver completed; reissued source ticket: ${source.title}`,
+      ).length;
+      if (priorResolverReissues >= MAX_TERMINAL_RESOLVER_SOURCE_REISSUES)
+        return this.#noOpInternal(revision);
       resetTicketForFreshCycle(
         mutable,
         draft.updatedAt,
@@ -6773,9 +7046,16 @@ export class RunAuthorityEngine {
 
   async #decideProposal(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
     requireIdempotency(request);
-    assertAllowedParams(request.params, ["runId", "ticketId", "decision", "message"]);
+    assertAllowedParams(request.params, [
+      "runId",
+      "ticketId",
+      "requestSha256",
+      "decision",
+      "message",
+    ]);
     const runId = requiredString(request.params, "runId");
     const ticketId = requiredString(request.params, "ticketId");
+    const requestSha256 = requiredSha256(request.params, "requestSha256");
     const decisionValue = requiredString(request.params, "decision");
     if (decisionValue !== "approval" && decisionValue !== "rejection") {
       throw new AuthorityRpcError("proposal_decision", "decision must be approval or rejection");
@@ -6806,6 +7086,12 @@ export class RunAuthorityEngine {
     }
     const control = ticket.executionControl;
     const proposalRequest = control.proposalRequest!;
+    if (proposalRequest.requestSha256 !== requestSha256) {
+      throw new AuthorityRpcError(
+        "proposal_revision_conflict",
+        "the reviewed proposal request changed before the decision was recorded",
+      );
+    }
     const authorityMaterial = {
       protocol: PROPOSAL_DECISION_AUTHORITY_PROTOCOL,
       runId,
@@ -6887,6 +7173,21 @@ export class RunAuthorityEngine {
         kind: "approved",
         authoritySha256: authority.sha256,
       };
+      // A blocked entry judgment can be correct for the pre-approval board while the missing
+      // executable authority is still absent. Approval makes that judgment stale even before the
+      // derived application ticket changes the graph hash, so retire only this matching blocked
+      // entry disposition and let the scheduler obtain a fresh Lead judgment.
+      const remainingJudgments = (draft.leadJudgments ?? []).filter(
+        (judgment) =>
+          !(
+            judgment.trigger === "orchestration_entry" &&
+            judgment.disposition === "blocked" &&
+            judgment.graphHash === run.graphHash &&
+            judgment.runOid === run.git.run.headOid
+          ),
+      );
+      if (remainingJudgments.length === 0) delete draft.leadJudgments;
+      else draft.leadJudgments = remainingJudgments;
     } else if (decision.disposition === "reject") {
       if (decision.transition === undefined) {
         throw new AuthorityRpcError(
@@ -7535,13 +7836,17 @@ export class RunAuthorityEngine {
       const terminalKind =
         candidate.retirement.disposition === "operator_acknowledged_provider_error"
           ? "provider error"
-          : "Pi abort";
+          : candidate.retirement.disposition === "operator_acknowledged_authority_pause"
+            ? "authority pause"
+            : candidate.retirement.disposition === "operator_acknowledged_unreconciled_request"
+              ? "unreconciled provider request"
+              : "Pi abort";
       draft.activity.push(
         activity(
           this.#createId("activity"),
           retiredAt,
           "compiler",
-          `Operator acknowledged a canonical ${terminalKind}; retained up to ${exposure} tokens of uncertain provider exposure without resuming work`,
+          `Operator acknowledged ${terminalKind}; retained up to ${exposure} tokens of uncertain provider exposure without resuming work`,
           mutable.ticketId,
         ),
       );
@@ -7563,6 +7868,64 @@ export class RunAuthorityEngine {
       revision: committed.state.revision,
       events: [{ topic: "run.provider-exposure.acknowledged", payload: result }],
     };
+  }
+
+  async #legacyCompletedReviewRejectionCandidates(
+    run: Readonly<RunRecord>,
+  ): Promise<Array<{ ticketId: string; reviewAttemptId: string; blocker: string }>> {
+    const candidates: Array<{
+      ticketId: string;
+      reviewAttemptId: string;
+      blocker: string;
+    }> = [];
+    for (const ticket of Object.values(run.tickets).sort((left, right) =>
+      compareUtf8(left.id, right.id),
+    )) {
+      if (ticket.status !== "completed") continue;
+      const review = [...ticket.steps].reverse().find((step) => step.kind === "review");
+      const reviewAttemptId = review?.attemptIds.at(-1);
+      const attempt = reviewAttemptId === undefined ? undefined : run.attempts[reviewAttemptId];
+      if (
+        attempt === undefined ||
+        attempt.terminalOutputSha256 === undefined ||
+        attempt.terminalOutputSizeBytes === undefined
+      ) {
+        continue;
+      }
+      let bytes: Buffer;
+      try {
+        bytes = await readFile(
+          path.join(
+            this.#stateRoot,
+            "runs",
+            run.id,
+            "attempts",
+            attempt.id,
+            "terminal-output.json",
+          ),
+        );
+      } catch {
+        continue;
+      }
+      if (
+        bytes.byteLength !== attempt.terminalOutputSizeBytes ||
+        rawSha256(bytes) !== attempt.terminalOutputSha256
+      ) {
+        continue;
+      }
+      let output: unknown;
+      try {
+        output = JSON.parse(bytes.toString("utf8"));
+      } catch {
+        continue;
+      }
+      const candidate = legacyCompletedReviewRejectionCandidate(ticket, output);
+      if (candidate === undefined || candidate.reviewAttemptId !== reviewAttemptId) {
+        continue;
+      }
+      candidates.push({ ticketId: ticket.id, ...candidate });
+    }
+    return candidates;
   }
 
   async #resumeRun(request: RpcRequest, revision: number): Promise<AuthorityMethodResult> {
@@ -7682,6 +8045,38 @@ export class RunAuthorityEngine {
     }
     const resumedAt = this.#timestamp();
     const retryingBlockedRun = run.lifecycle.phase === "blocked";
+    // A historical profile could approve a graph containing a generated verifier while
+    // omitting its only implementation ticket. Before any work has started, rebuilding the
+    // deterministic board from the same approved graph and pinned configuration is safe and
+    // lets the compiler's narrow compatibility projection supply that missing authority.
+    const unstartedBoard =
+      retryingBlockedRun &&
+      // Planning runs have no approved graph or ticket board to rebuild. Their
+      // resume boundary must re-drive the existing planner instead of trying to
+      // initialize an approval artifact that cannot exist yet.
+      run.plan !== undefined &&
+      Object.values(run.tickets).every((ticket) =>
+        ticket.steps.every((step) => step.attemptIds.length === 0),
+      );
+    const rebuiltBoard = unstartedBoard
+      ? await this.#program.initializeApprovedPlan(run)
+      : undefined;
+    const compatibilityRepair =
+      rebuiltBoard !== undefined &&
+      Object.keys(rebuiltBoard.tickets).length > Object.keys(run.tickets).length
+        ? rebuiltBoard
+        : undefined;
+    const legacyReviewRejections = retryingBlockedRun
+      ? await this.#legacyCompletedReviewRejectionCandidates(run)
+      : [];
+    const restoredGeneratedAssetAuthority =
+      compatibilityRepair !== undefined ||
+      (unstartedBoard &&
+        Object.values(run.tickets).some(
+          (ticket) =>
+            ticket.id.startsWith("TK-compat-") &&
+            ticket.operationId === "asset-resolution.asset.implement-asset",
+        ));
     const compilerValidationRetries = retryingBlockedRun
       ? await this.#prepareCompilerValidationRetries(run, resumedAt)
       : [];
@@ -7696,7 +8091,84 @@ export class RunAuthorityEngine {
     const draft = nextRun(run, resumedAt);
     // An explicit operator resume or blocked retry supersedes any stale scheduled pause.
     delete draft.pendingPause;
-    let resumeActionArchiveWrites: TransactionWrite[] = [];
+    let resumeActionArchiveWrites: TransactionWrite[] = [
+      ...(compatibilityRepair?.artifactWrites ?? []),
+    ];
+    if (compatibilityRepair !== undefined) {
+      draft.graphHash = compatibilityRepair.graphHash;
+      draft.graphRevision = compatibilityRepair.graphRevision;
+      draft.tickets = structuredClone(compatibilityRepair.tickets);
+    }
+    for (const candidate of legacyReviewRejections) {
+      const ticket = draft.tickets[candidate.ticketId];
+      if (
+        ticket === undefined ||
+        !recoverLegacyCompletedReviewRejection(
+          ticket,
+          candidate.reviewAttemptId,
+          candidate.blocker,
+          resumedAt,
+        )
+      ) {
+        throw new AuthorityRpcError(
+          "legacy_review_recovery_conflict",
+          `legacy review recovery changed before resume for ${candidate.ticketId}`,
+        );
+      }
+      draft.activity.push(
+        activity(
+          this.#createId("activity"),
+          resumedAt,
+          "compiler",
+          "Recovered a legacy typed-review rejection and reopened its exact bounded producer slice",
+          candidate.ticketId,
+          "warning",
+        ),
+      );
+    }
+    if (restoredGeneratedAssetAuthority || legacyReviewRejections.length > 0) {
+      // Lead judgments are normally keyed by the approved graph and run commit. This repair
+      // changes neither, but it does add the exact executable authority the prior entry
+      // judgment found missing. Retire only that now-stale blocked disposition; the immutable
+      // attempt and activity records remain available for diagnosis, and the scheduler will
+      // obtain a fresh judgment before issuing work.
+      const remainingJudgments = (draft.leadJudgments ?? []).filter(
+        (judgment) =>
+          !(
+            judgment.trigger === "orchestration_entry" &&
+            judgment.disposition === "blocked" &&
+            judgment.graphHash === run.graphHash &&
+            judgment.runOid === run.git.run.headOid
+          ),
+      );
+      if (remainingJudgments.length === 0) delete draft.leadJudgments;
+      else draft.leadJudgments = remainingJudgments;
+    }
+    if (compatibilityRepair !== undefined) {
+      draft.activity.push(...structuredClone(compatibilityRepair.activity ?? []));
+      draft.activity.push(
+        activity(
+          this.#createId("activity"),
+          resumedAt,
+          "compiler",
+          "Rebuilt the unstarted approved board with the pinned generated-asset compatibility repair",
+          undefined,
+          "warning",
+        ),
+      );
+    }
+    if (restoredGeneratedAssetAuthority || legacyReviewRejections.length > 0) {
+      draft.activity.push(
+        activity(
+          this.#createId("activity"),
+          resumedAt,
+          "compiler",
+          "Invalidated the stale blocked Lead entry judgment after executable ticket authority was restored",
+          undefined,
+          "warning",
+        ),
+      );
+    }
     for (const retry of compilerValidationRetries) {
       const failed = draft.actionExecutions?.[retry.failedInvocationId];
       if (
@@ -7750,13 +8222,17 @@ export class RunAuthorityEngine {
       const terminalKind =
         candidate.retirement.disposition === "operator_acknowledged_provider_error"
           ? "provider error"
-          : "Pi abort";
+          : candidate.retirement.disposition === "operator_acknowledged_authority_pause"
+            ? "authority pause"
+            : candidate.retirement.disposition === "operator_acknowledged_unreconciled_request"
+              ? "unreconciled provider request"
+              : "Pi abort";
       draft.activity.push(
         activity(
           this.#createId("activity"),
           resumedAt,
           "compiler",
-          `Operator resumed after a canonical ${terminalKind}; retained up to ${requestRecord.prospectiveInputTokens + requestRecord.reservedOutputTokens} tokens of uncertain provider exposure`,
+          `Operator resumed after acknowledging ${terminalKind}; retained up to ${requestRecord.prospectiveInputTokens + requestRecord.reservedOutputTokens} tokens of uncertain provider exposure`,
           mutable.ticketId,
         ),
       );
@@ -8260,15 +8736,15 @@ export class RunAuthorityEngine {
       // Read under the Git lane. A relocation accepted just before deletion
       // must not let cleanup act on the stale pre-relocation path projection.
       const current = await this.#store.getRun(runId);
-      if (preserveBranches) {
+      if (preserveBranches && current.legacyGitMigration !== undefined) {
         return {
-          legacy: current.legacyGitMigration !== undefined,
+          legacy: true,
           status: "preserved" as const,
           lifecycle: preservedGitLifecycle(
             current.git,
-            "Operator selected branch preservation during deletion",
+            "Legacy workspace preserved because branch-only retirement is unavailable",
           ),
-          reason: "Operator selected branch preservation during deletion",
+          reason: "Legacy workspace preserved because branch-only retirement is unavailable",
           settledWithoutIntent: false,
         };
       }
@@ -8285,7 +8761,9 @@ export class RunAuthorityEngine {
           settledWithoutIntent: result.status === "preserved" && result.lifecycle === undefined,
         };
       }
-      const result = await this.#git.retireAbandonedRun(current.git, this.#gitJournal(runId));
+      const result = await this.#git.retireAbandonedRun(current.git, this.#gitJournal(runId), {
+        preserveBranches,
+      });
       return { legacy: false as const, ...result, settledWithoutIntent: false };
     });
     if (!retired.legacy || preserveBranches)
@@ -8303,6 +8781,16 @@ export class RunAuthorityEngine {
         draft.updatedAt,
       );
       interruptStoppedAttempts(draft, "Run deleted", draft.updatedAt);
+      if (preserveBranches && retired.status === "retired") {
+        draft.activity.push(
+          activity(
+            this.#createId("activity"),
+            draft.updatedAt,
+            "git",
+            "Retired clean Koni worktrees and preserved owned branches during deletion",
+          ),
+        );
+      }
       if (retired.status === "preserved") {
         draft.activity.push(
           activity(
@@ -8322,6 +8810,45 @@ export class RunAuthorityEngine {
         revision: committed.state.revision,
         events: [{ topic: "run.deleted", payload: { runId } }],
       };
+    });
+  }
+
+  /**
+   * Older `preserve_branches` deletion treated branch retention as whole-workspace retention.
+   * The operator contract names only branches, so startup safely finishes the missing clean
+   * worktree retirement once per historical record. Dirty or ownership-ambiguous data remains
+   * preserved by the same effect-time Git proof used for a current deletion.
+   */
+  async #retireHistoricalPreservedDeletionWorktrees(runId: string): Promise<void> {
+    const observed = await this.#store.getRun(runId);
+    if (!needsHistoricalPreservedDeletionWorktreeRetirement(observed)) return;
+    const retired = await this.#withGit(runId, async () => {
+      const current = await this.#store.getRun(runId);
+      if (!needsHistoricalPreservedDeletionWorktreeRetirement(current)) return undefined;
+      return this.#git.retireAbandonedRun(current.git, this.#gitJournal(runId), {
+        preserveBranches: true,
+      });
+    });
+    if (retired === undefined) return;
+    await this.#persistGitLifecycle(runId, retired.lifecycle);
+    if (retired.status !== "retired") return;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(runId);
+      if (run.lifecycle.phase !== "deleted") return this.#noOpInternal(revision);
+      const draft = nextRun(run, this.#timestamp());
+      draft.activity.push(
+        activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "git",
+          "Retired historical clean Koni worktrees while preserving owned branches",
+        ),
+      );
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+      });
+      return { revision: committed.state.revision };
     });
   }
 
@@ -9098,13 +9625,31 @@ export class RunAuthorityEngine {
     const sessionId = this.#createId("session");
     let prepared: PreparedManagedAttempt | undefined;
     let providerHoldDetected = false;
+    let readmitLeadAction = false;
     await this.#server.mutateInternal(async ({ revision }) => {
       const current = await this.#store.getRun(run.id);
       if (!this.#matchesAdvancement(current, admission)) return this.#noOpInternal(revision);
       let leadAction: RunActionExecutionRecord | undefined;
       if (kind === "lead") {
         leadAction = requiredRunActionExecution(current, leadActionAdmission!.invocationId);
-        assertRunActionCurrent(current, leadAction);
+        if (
+          isExactSettledLeadLaunchReplay(current, leadAction, {
+            attemptId,
+            stepId: leadJudgmentStepId(leadTrigger!),
+            productSha256: leadActionProductSha256(current, leadTrigger!),
+          })
+        ) {
+          return this.#noOpInternal(revision);
+        }
+        try {
+          assertRunActionCurrent(current, leadAction);
+        } catch (error) {
+          if (isReadmittableLeadActionDrift(error)) {
+            readmitLeadAction = true;
+            return this.#noOpInternal(revision);
+          }
+          throw error;
+        }
         assertActionBoundaryCurrent(current, leadAction);
         if (
           leadAction.boundary.kind !== "lead_launch" ||
@@ -9158,9 +9703,14 @@ export class RunAuthorityEngine {
           "plan revision cannot authenticate the prior Pi conversation; refusing a wasteful empty-session replan",
         );
       }
+      const recoveryModel = exhaustedLeadRecoveryModel(current, kind);
+      const attemptRun =
+        recoveryModel === undefined
+          ? current
+          : withRecoveryModelSelection(current, "lead", recoveryModel);
       prepared = await this.#program.prepareAttempt({
         kind,
-        run: current,
+        run: attemptRun,
         ...(assignment === undefined ? {} : { assignment }),
         ...(kind === "lead" ? { leadTrigger: leadTrigger! } : {}),
         attemptId,
@@ -9280,6 +9830,10 @@ export class RunAuthorityEngine {
         "A prior provider request remains unsettled; its worst-case exposure blocks a successor attempt",
         admission,
       );
+      return;
+    }
+    if (readmitLeadAction) {
+      this.#background(() => this.#tick(run.id), run.id);
       return;
     }
     if (prepared === undefined) return;
@@ -9424,6 +9978,7 @@ export class RunAuthorityEngine {
     });
     const assignmentStep = assignmentTicket?.steps.find((step) => step.id === assignment?.stepId);
     const latestReviewRework = assignmentTicket?.reviewReworks?.at(-1);
+    const latestSameScopeAttempt = newest(sameScope);
     const beginsIndependentRereview =
       kind === "verification" &&
       assignment !== undefined &&
@@ -9436,7 +9991,7 @@ export class RunAuthorityEngine {
     // not a continuation of the failed review conversation. Starting its first attempt at a
     // fresh Pi root avoids paying to replay or compact the rejected transcript. If this new root
     // itself needs an infrastructure retry, its newly appended attempt becomes the normal parent.
-    let parent = beginsIndependentRereview ? undefined : newest(sameScope);
+    let parent = beginsIndependentRereview ? undefined : latestSameScopeAttempt;
     let firstEdgeReason: AgentAttemptLineage["reason"] | undefined;
 
     if (parent === undefined && kind === "verification" && !beginsIndependentRereview) {
@@ -9519,6 +10074,29 @@ export class RunAuthorityEngine {
             : "rework");
     const parentAnchor = await this.#attemptTranscriptAnchor(run, parent);
     const mayForkConversation = ["retry", "rework", "recovery"].includes(reason);
+    // Admission rejected before a canonical assistant turn. Keeping the audit parent is useful,
+    // but replaying its transcript recreates the same context-window overflow.
+    const freshAfterAdmissionFailure = isProviderAdmissionFailure(parent);
+    // A budget-aborted parent still contains authenticated repository evidence. Fork it so the
+    // managed session can replace the oversized history with its compiler-authorized structured
+    // checkpoint before the child's first provider request. Starting from an empty session made
+    // the retry repeat the same discovery loop and exhaust the same step budget again.
+    // A lead judgment accepted for an earlier graph/run binding is durable audit evidence, not
+    // conversation context for the replacement judgment. Forking it makes Pi see an already
+    // accepted terminal submission and (correctly for that old binding) decline to submit again.
+    // Keep the immutable attempt lineage, but start the replacement lead in a fresh session.
+    const supersededLeadTerminal =
+      kind === "lead" &&
+      leadTrigger !== undefined &&
+      this.#hasSupersededLeadJudgmentAncestor(run, parent, leadTrigger);
+    const freshForBoundedReviewRework =
+      assignmentTicket !== undefined &&
+      assignment !== undefined &&
+      beginsBoundedReviewRework(
+        assignmentTicket,
+        assignment.stepId,
+        latestSameScopeAttempt?.startedAt,
+      );
     return {
       branchEpoch: (parent.lineage?.branchEpoch ?? Math.max(0, sameScope.length - 1)) + 1,
       reason,
@@ -9528,7 +10106,10 @@ export class RunAuthorityEngine {
         ? {}
         : {
             parentEntryId: parentAnchor.leafEntryId,
-            ...(mayForkConversation
+            ...(mayForkConversation &&
+            !supersededLeadTerminal &&
+            !freshAfterAdmissionFailure &&
+            !freshForBoundedReviewRework
               ? {
                   conversationFork: {
                     parentLaunchSpecHash: parentAnchor.launchSpecHash,
@@ -9538,6 +10119,48 @@ export class RunAuthorityEngine {
               : {}),
           }),
     };
+  }
+
+  #hasSupersededLeadJudgmentAncestor(
+    run: RunRecord,
+    attempt: AgentAttemptRecord,
+    trigger: LeadJudgmentTrigger,
+  ): boolean {
+    const seen = new Set<string>();
+    let cursor: AgentAttemptRecord | undefined = attempt;
+    while (cursor !== undefined && !seen.has(cursor.id)) {
+      seen.add(cursor.id);
+      // The generated-asset compatibility repair may retire a stale Lead judgment record so a
+      // replacement can be recorded for the same graph binding. Its completed terminal attempt
+      // remains in lineage, however, and must still force a fresh session: inheriting that
+      // transcript makes Pi correctly believe the old terminal submission is exactly-once
+      // complete and decline to submit the replacement judgment.
+      if (
+        cursor.kind === "lead" &&
+        cursor.status === "completed" &&
+        trigger === "orchestration_entry" &&
+        Object.values(run.tickets).some(
+          (ticket) =>
+            ticket.id.startsWith("TK-compat-") &&
+            ticket.operationId === "asset-resolution.asset.implement-asset",
+        )
+      ) {
+        return true;
+      }
+      if (
+        run.leadJudgments?.some(
+          (judgment) =>
+            judgment.attemptId === cursor!.id &&
+            judgment.trigger === trigger &&
+            (judgment.graphHash !== run.graphHash || judgment.runOid !== run.git.run.headOid),
+        )
+      ) {
+        return true;
+      }
+      const parentId: string | undefined = cursor.lineage?.parentAttemptId;
+      cursor = parentId === undefined ? undefined : run.attempts[parentId];
+    }
+    return false;
   }
 
   async #attemptTranscriptAnchor(
@@ -9864,6 +10487,7 @@ export class RunAuthorityEngine {
     if (rejectionAfterSynthesisTransition !== undefined) {
       throw rejectionAfterSynthesisTransition;
     }
+    this.#scheduleProviderRequestLiveness(spec, response!.reservationId);
     return response!;
   }
 
@@ -9910,7 +10534,158 @@ export class RunAuthorityEngine {
         ],
       };
     });
+    this.#clearProviderRequestLiveness(spec, expected.reservationId);
     return response!;
+  }
+
+  #providerRequestLivenessKey(spec: Readonly<AgentLaunchSpec>, reservationId: string): string {
+    return `${spec.identity.runId}:${spec.identity.attemptId}:${reservationId}`;
+  }
+
+  #scheduleProviderRequestLiveness(
+    spec: Readonly<AgentLaunchSpec>,
+    reservationId: string,
+    delayMs = this.#providerRequestLivenessTimeoutMs,
+  ): void {
+    const key = this.#providerRequestLivenessKey(spec, reservationId);
+    this.#clearProviderRequestLiveness(spec, reservationId);
+    const timer = setTimeout(() => {
+      this.#providerRequestLivenessTimers.delete(key);
+      this.#background(
+        () => this.#abortStalledProviderRequest(spec, reservationId),
+        spec.identity.runId,
+      );
+    }, delayMs);
+    timer.unref?.();
+    this.#providerRequestLivenessTimers.set(key, timer);
+  }
+
+  /** Recreate liveness protection for a durable in-flight request after authority recovery. */
+  #restoreProviderRequestLiveness(
+    spec: Readonly<AgentLaunchSpec>,
+    attempt: Readonly<AgentAttemptRecord>,
+  ): void {
+    for (const request of attempt.authorityProviderRequests ?? []) {
+      if (!isOpenProviderRequest(request)) continue;
+      const elapsedMs = Math.max(0, this.#now().getTime() - Date.parse(request.reservedAt));
+      const remainingMs = this.#providerRequestLivenessTimeoutMs - elapsedMs;
+      if (remainingMs <= 0) {
+        this.#background(
+          () => this.#abortStalledProviderRequest(spec, request.reservationId),
+          spec.identity.runId,
+        );
+      } else {
+        this.#scheduleProviderRequestLiveness(spec, request.reservationId, remainingMs);
+      }
+    }
+  }
+
+  #clearProviderRequestLiveness(spec: Readonly<AgentLaunchSpec>, reservationId: string): void {
+    const key = this.#providerRequestLivenessKey(spec, reservationId);
+    const timer = this.#providerRequestLivenessTimers.get(key);
+    if (timer !== undefined) clearTimeout(timer);
+    this.#providerRequestLivenessTimers.delete(key);
+  }
+
+  #clearProviderRequestLivenessForAttempt(attemptId: string): void {
+    for (const [key, timer] of this.#providerRequestLivenessTimers) {
+      if (!key.includes(`:${attemptId}:`)) continue;
+      clearTimeout(timer);
+      this.#providerRequestLivenessTimers.delete(key);
+    }
+  }
+
+  #clearAllProviderRequestLiveness(): void {
+    for (const timer of this.#providerRequestLivenessTimers.values()) clearTimeout(timer);
+    this.#providerRequestLivenessTimers.clear();
+  }
+
+  /**
+   * Retry only the read-only canonical-terminal derivation after a contained outcome races its
+   * fsynced JSONL tail. The reservation remains held until a later probe proves a canonical
+   * abort/error, and the small in-memory cap prevents a missing tail from becoming a retry loop.
+   */
+  #scheduleProviderTerminalPropagationProbe(run: Readonly<RunRecord>, attempts: number): void {
+    if (
+      run.lifecycle.phase !== "blocked" ||
+      !isProviderExposureHoldBlocker(run.lifecycle.blocker) ||
+      !Object.values(run.attempts).some(
+        // A terminal submission is durable before its final provider settlement can reach the
+        // authority.  `terminal_accepted` is therefore a safe predecessor here too: the probe
+        // only re-reads accounting and never admits a successor until the reservation is settled
+        // or retired.  Excluding it stranded a short settlement race behind an operator Retry.
+        (attempt) => isProviderPredecessor(attempt.status) && hasUnsettledProviderRequest(attempt),
+      )
+    ) {
+      this.#clearProviderTerminalPropagationProbe(run.id);
+      return;
+    }
+    if (attempts > MAX_PROVIDER_TERMINAL_PROPAGATION_PROBES) return;
+    if (this.#providerTerminalPropagationProbes.has(run.id)) return;
+    const timer = setTimeout(() => {
+      this.#providerTerminalPropagationProbes.delete(run.id);
+      this.#background(async () => {
+        await this.#autoRecoverProviderExposure(run.id, attempts);
+      }, run.id);
+    }, PROVIDER_TERMINAL_PROPAGATION_PROBE_DELAY_MS);
+    timer.unref?.();
+    this.#providerTerminalPropagationProbes.set(run.id, { attempts, timer });
+  }
+
+  #clearProviderTerminalPropagationProbe(runId: string): void {
+    const pending = this.#providerTerminalPropagationProbes.get(runId);
+    if (pending !== undefined) clearTimeout(pending.timer);
+    this.#providerTerminalPropagationProbes.delete(runId);
+  }
+
+  #clearAllProviderTerminalPropagationProbes(): void {
+    for (const { timer } of this.#providerTerminalPropagationProbes.values()) clearTimeout(timer);
+    this.#providerTerminalPropagationProbes.clear();
+  }
+
+  async #abortStalledProviderRequest(
+    spec: Readonly<AgentLaunchSpec>,
+    reservationId: string,
+  ): Promise<void> {
+    if (this.#stopRequested || this.#quiesceOutcomeSettlementClosed) return;
+    const observed = await this.#store.getRun(spec.identity.runId);
+    const attempt = observed.attempts[spec.identity.attemptId];
+    const open = attempt?.authorityProviderRequests?.find(
+      (request) => request.reservationId === reservationId && isOpenProviderRequest(request),
+    );
+    if (attempt === undefined || open === undefined || isTerminalAttempt(attempt.status)) return;
+
+    const reason = `Provider request exceeded the ${this.#providerRequestLivenessTimeoutMs}ms liveness boundary; aborting its contained Pi session`;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(spec.identity.runId);
+      const current = run.attempts[spec.identity.attemptId];
+      const request = current?.authorityProviderRequests?.find(
+        (candidate) =>
+          candidate.reservationId === reservationId && isOpenProviderRequest(candidate),
+      );
+      if (current === undefined || request === undefined || isTerminalAttempt(current.status)) {
+        return this.#noOpInternal(revision);
+      }
+      const draft = nextRun(run, this.#timestamp());
+      draft.activity.push(
+        activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "compiler",
+          reason,
+          current.ticketId,
+          "warning",
+        ),
+      );
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+      });
+      return { revision: committed.state.revision };
+    });
+    const handle = this.#supervisor.get(spec.identity.attemptId);
+    if (handle === undefined) return;
+    await handle.session.abort(reason);
   }
 
   /**
@@ -10013,14 +10788,26 @@ export class RunAuthorityEngine {
     }> = [];
     for (const attempt of Object.values(run.attempts)) {
       if (!isProviderPredecessor(attempt.status) || !hasUnsettledProviderRequest(attempt)) continue;
-      const spec = await this.#loadStoredLaunchSpec(run, attempt);
-      const retirement = await deriveCanonicalProviderExposureRetirement(
-        spec,
-        run,
-        attempt,
-        authorizationSha256,
-        retiredAt,
-      );
+      let spec: Readonly<AgentLaunchSpec>;
+      try {
+        spec = await this.#loadStoredLaunchSpec(run, attempt);
+      } catch {
+        // Preserve this request's conservative hold, but do not let an unrecoverable older
+        // predecessor hide a later independently recoverable request.
+        continue;
+      }
+      let retirement: NonNullable<AgentProviderRequestRecord["retirement"]> | undefined;
+      try {
+        retirement = await deriveCanonicalProviderExposureRetirement(
+          spec,
+          run,
+          attempt,
+          authorizationSha256,
+          retiredAt,
+        );
+      } catch {
+        continue;
+      }
       if (retirement !== undefined) retirements.push({ attemptId: attempt.id, retirement });
     }
     return retirements;
@@ -12159,7 +12946,9 @@ export class RunAuthorityEngine {
       );
     }
     const trigger = leadJudgmentTriggerForAttempt(attempt);
-    const priorTriggers = (run.leadJudgments ?? []).map((judgment) => judgment.trigger);
+    const priorTriggers = (run.leadJudgments ?? [])
+      .filter((judgment) => judgment.graphHash === graphHash && judgment.runOid === runOid)
+      .map((judgment) => judgment.trigger);
     if (!shouldIssueLeadJudgment(behavior.runType, trigger, priorTriggers)) {
       throw new AuthorityRpcError(
         "lead_replay",
@@ -12621,30 +13410,54 @@ export class RunAuthorityEngine {
     }
     if (call.name === "koni_list_files") {
       const root = typeof args.path === "string" ? args.path : ".";
+      // Over-fetch by one item past the context cap only to detect truncation, then bound the
+      // result so a survey of a large tree cannot flood the attempt's context window.
+      const requested = Math.min(
+        toolInteger(args, "limit", AGENT_LIST_RESULT_MAX_ENTRIES),
+        AGENT_LIST_RESULT_MAX_ENTRIES,
+      );
+      const listed = await paths.list(root, {
+        recursive: args.recursive === true,
+        limit: requested + 1,
+      });
+      const bounded = boundDiscoveryItems(listed, requested);
       return {
-        summary: `Listed ${root}`,
+        summary: `Listed ${root}${bounded.truncated ? ` (first ${bounded.returned}, more available)` : ""}`,
         value: {
-          entries: (
-            await paths.list(root, {
-              recursive: args.recursive === true,
-              limit: toolInteger(args, "limit", 1_000),
-            })
-          ).map((entry) => ({ ...entry })),
+          entries: bounded.items.map((entry) => ({ ...entry })),
+          ...(bounded.truncated
+            ? {
+                truncated: true,
+                returnedEntries: bounded.returned,
+                note: `Result capped at ${bounded.returned} entries to protect the context window. Narrow the path or use koni_search_files for targeted discovery.`,
+              }
+            : {}),
         },
       };
     }
     if (call.name === "koni_search_files") {
       const roots = Array.isArray(args.roots) ? (args.roots as string[]) : undefined;
+      const requested = Math.min(
+        toolInteger(args, "limit", AGENT_SEARCH_RESULT_MAX_MATCHES),
+        AGENT_SEARCH_RESULT_MAX_MATCHES,
+      );
+      const matched = await paths.search(toolString(args, "query"), {
+        ...(roots === undefined ? {} : { roots }),
+        caseSensitive: args.caseSensitive !== false,
+        limit: requested + 1,
+      });
+      const bounded = boundDiscoveryItems(matched, requested);
       return {
-        summary: `Searched for ${toolString(args, "query")}`,
+        summary: `Searched for ${toolString(args, "query")}${bounded.truncated ? ` (first ${bounded.returned}, more available)` : ""}`,
         value: {
-          matches: await paths
-            .search(toolString(args, "query"), {
-              ...(roots === undefined ? {} : { roots }),
-              caseSensitive: args.caseSensitive !== false,
-              limit: toolInteger(args, "limit", 200),
-            })
-            .then((matches) => matches.map((match) => ({ ...match }))),
+          matches: bounded.items.map((match) => ({ ...match })),
+          ...(bounded.truncated
+            ? {
+                truncated: true,
+                returnedMatches: bounded.returned,
+                note: `Result capped at ${bounded.returned} matches to protect the context window. Refine the query or roots.`,
+              }
+            : {}),
         },
       };
     }
@@ -12694,11 +13507,77 @@ export class RunAuthorityEngine {
     this.#attachedOutcomes.add(attemptId);
     const completion = handle.outcome
       .then(
-        (outcome) => this.#finishAttempt(runId, attemptId, assignment, outcome),
+        (outcome) => this.#finishAttemptWithRecovery(runId, attemptId, assignment, outcome),
         (error) => this.#failLaunch(runId, attemptId, assignment, errorMessage(error)),
       )
       .finally(() => this.#attachedOutcomes.delete(attemptId));
-    this.#trackBackground(completion);
+    this.#background(() => completion, runId);
+    if ("cleanupFailure" in handle) {
+      // This signal is intentionally not a shutdown-joined background task: on every healthy
+      // process it remains pending forever. Only exhausted cleanup resolves it.
+      void handle.cleanupFailure
+        .then((error) =>
+          this.#recordRunBlocker(
+            runId,
+            `Attempt process cleanup exhausted bounded observation recovery: ${error.message}`,
+          ),
+        )
+        .catch(() => undefined);
+    }
+  }
+
+  async #finishAttemptWithRecovery(
+    runId: string,
+    attemptId: string,
+    assignment: ReadyAssignment | undefined,
+    outcome: ManagedSessionOutcome,
+  ): Promise<void> {
+    for (let recovery = 0; ; recovery += 1) {
+      try {
+        await this.#finishAttempt(runId, attemptId, assignment, outcome);
+        return;
+      } catch (error) {
+        const run = await this.#store.getRun(runId);
+        const attempt = run.attempts[attemptId];
+        const recoverable =
+          recovery < MAX_TERMINAL_FINALIZATION_RECOVERIES &&
+          new Set<RunPhase>(["executing", "verifying"]).has(run.lifecycle.phase) &&
+          attempt?.status === "terminal_accepted" &&
+          attempt.terminalAcceptedAt !== undefined &&
+          attempt.terminalOutputSha256 !== undefined &&
+          attempt.terminalPolicy !== undefined &&
+          providerOutcomeAccountingIssue(attempt, outcome.usage, false) === undefined;
+        if (!recoverable) throw error;
+        await this.#server.mutateInternal(async ({ revision }) => {
+          const current = await this.#store.getRun(runId);
+          const currentAttempt = current.attempts[attemptId];
+          if (
+            currentAttempt?.status !== "terminal_accepted" ||
+            currentAttempt.terminalPolicy === undefined ||
+            !new Set<RunPhase>(["executing", "verifying"]).has(current.lifecycle.phase)
+          ) {
+            return this.#noOpInternal(revision);
+          }
+          const draft = nextRun(current, this.#timestamp());
+          draft.activity.push(
+            activity(
+              this.#createId("activity"),
+              draft.updatedAt,
+              "compiler",
+              `Retrying durable terminal finalization after a transient authority error (${recovery + 1} of ${MAX_TERMINAL_FINALIZATION_RECOVERIES})`,
+              assignment?.ticketId,
+              "info",
+            ),
+          );
+          const committed = await this.#store.commit({
+            expectedRevision: revision,
+            runWrites: [{ record: draft, expectedRevision: current.revision }],
+          });
+          return { revision: committed.state.revision };
+        });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    }
   }
 
   async #finishAttempt(
@@ -12961,7 +13840,15 @@ export class RunAuthorityEngine {
       );
       if (this.#quiesceOutcomeSettlementClosed) return;
       if (invocationId === undefined) return;
-      await this.#settleAssignmentValidation(runId, invocationId);
+      try {
+        await this.#settleAssignmentValidation(runId, invocationId);
+      } catch (error) {
+        // The outcome listener is tracked for shutdown but deliberately does not itself turn
+        // rejected promises into lifecycle state. Preserve a bounded validation exhaustion as a
+        // durable, actionable run blocker instead of leaving its accepted attempt orphaned.
+        await this.#recordRunBlocker(runId, errorMessage(error));
+        return;
+      }
       if (this.#quiesceOutcomeSettlementClosed) return;
       await this.#finalizeAcceptedAttempt(runId, attemptId, outcome);
       return;
@@ -13158,6 +14045,12 @@ export class RunAuthorityEngine {
       if (this.#quiesceOutcomeSettlementClosed) return;
     }
     let shouldTick = false;
+    await this.#actionFault?.("before_attempt_finalize", {
+      runId,
+      invocationId: `attempt-finalize:${attemptId}`,
+      attemptId,
+      ...(assignment?.ticketId === undefined ? {} : { ticketId: assignment.ticketId }),
+    });
     await this.#server.mutateInternal(async ({ revision }) => {
       const run = await this.#store.getRun(runId);
       const attempt = run.attempts[attemptId];
@@ -13266,16 +14159,6 @@ export class RunAuthorityEngine {
           },
           draft.updatedAt,
         );
-        if (
-          accountingIssue === undefined &&
-          new Set<RunPhase>(["executing", "verifying"]).has(draft.lifecycle.phase)
-        ) {
-          applyLifecycle(draft, {
-            type: "blocked",
-            atMs: this.#now().getTime(),
-            reason: error,
-          });
-        }
       } else if (draft.lifecycle.phase === "planning" && accountingIssue === undefined) {
         applyLifecycle(draft, { type: "blocked", atMs: this.#now().getTime(), reason: error });
       } else if (
@@ -13343,6 +14226,238 @@ export class RunAuthorityEngine {
     if (assignment !== undefined) {
       const current = await this.#store.getRun(runId);
       if (current.lifecycle.phase === "executing") await this.#tick(runId);
+    }
+    // An aborted/errored provider request leaves the run blocked on a held reservation. Recover it
+    // automatically instead of requiring an operator resume (self-gates on a derivable retirement).
+    const settled = await this.#store.getRun(runId);
+    if (
+      settled.lifecycle.phase === "blocked" &&
+      isProviderExposureHoldBlocker(settled.lifecycle.blocker)
+    ) {
+      this.#background(() => this.#autoRecoverProviderExposure(runId), runId);
+    }
+    if (isProviderAdmissionFailure(settled.attempts[attemptId])) {
+      // Ticket failure may synchronously trigger a fresh Lead judgment before the lifecycle is
+      // durably marked blocked. Give that deterministic deadlock projection one short turn, then
+      // recover the exact effect-free admission failure without an operator resume.
+      this.#background(async () => {
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, PROVIDER_TERMINAL_PROPAGATION_PROBE_DELAY_MS),
+        );
+        await this.#autoRecoverProviderAdmission(runId, attemptId);
+      }, runId);
+    }
+    if (
+      settled.lifecycle.phase === "blocked" &&
+      settled.attempts[attemptId]?.failureCode === "terminal_protocol"
+    ) {
+      this.#background(() => this.#autoRecoverTerminalProtocol(runId, attemptId), runId);
+    }
+    if (isTokenBudgetFailure(settled.attempts[attemptId])) {
+      this.#background(() => this.#autoRecoverTokenBudget(runId, attemptId), runId);
+    }
+  }
+
+  /**
+   * Give an effect-free token-budget abort one fresh contained attempt. A ticket can exhaust a
+   * provider turn after completing no authority-accepted work; leaving it blocked in a parallel
+   * run makes the whole board depend on an operator pressing Retry. The per-step cap prevents a
+   * deterministic prompt or model loop from repeatedly spending the Medium envelope without
+   * making an earlier inspection/design step consume the implementation step's recovery.
+   */
+  async #autoRecoverTokenBudget(runId: string, failedAttemptId: string): Promise<void> {
+    let redrive = false;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(runId);
+      const failed = run.attempts[failedAttemptId];
+      if (
+        !isTokenBudgetFailure(failed) ||
+        failed.terminalAcceptedAt !== undefined ||
+        failed.terminalOutputSha256 !== undefined ||
+        providerOutcomeAccountingIssue(failed, undefined, false) !== undefined
+      ) {
+        return this.#noOpInternal(revision);
+      }
+      const recoveryMessage = tokenBudgetRecoveryMessage(run, failed);
+      const recoveries = tokenBudgetRecoveryCount(run, failed, recoveryMessage);
+      if (recoveries >= MAX_TOKEN_BUDGET_AUTO_RECOVERIES_PER_STEP) {
+        return this.#noOpInternal(revision);
+      }
+      const draft = nextRun(run, this.#timestamp());
+      if (draft.lifecycle.phase === "blocked") {
+        applyLifecycle(draft, {
+          type: "retry_requested",
+          atMs: this.#now().getTime(),
+          phase: run.lifecycle.resumePhase ?? "executing",
+        });
+      }
+      if (draft.lifecycle.phase !== "executing") return this.#noOpInternal(revision);
+      const retried = resetRetryableInfrastructureAssignment(
+        draft,
+        failed.ticketId,
+        draft.updatedAt,
+      );
+      if (retried === undefined) return this.#noOpInternal(revision);
+      draft.activity.push(
+        activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "compiler",
+          recoveryMessage,
+          retried.ticketId,
+          "info",
+        ),
+      );
+      redrive = true;
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+      });
+      return {
+        revision: committed.state.revision,
+        events: [
+          { topic: "agent.token_budget.auto_recovered", payload: { runId, failedAttemptId } },
+        ],
+      };
+    });
+    if (redrive) await this.#tick(runId);
+  }
+
+  /** Re-drive a bounded provider admission failure without preserving its oversized transcript. */
+  async #autoRecoverProviderAdmission(runId: string, failedAttemptId: string): Promise<void> {
+    let redrive = false;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(runId);
+      const failed = run.attempts[failedAttemptId];
+      if (
+        !isProviderAdmissionFailure(failed) ||
+        failed.terminalAcceptedAt !== undefined ||
+        failed.terminalOutputSha256 !== undefined ||
+        providerOutcomeAccountingIssue(failed, undefined, false) !== undefined
+      ) {
+        return this.#noOpInternal(revision);
+      }
+      // One recovery can reset several independently failed assignments in the same blocked run.
+      // Bound the number of *re-drives*, not the historical number of failed admissions, or those
+      // preserved failures can exhaust the recovery budget before a fresh root is ever attempted.
+      const recoveries = run.activity.filter(
+        (entry) =>
+          entry.message === "Auto-retrying provider admission from a fresh contained attempt",
+      ).length;
+      if (recoveries >= MAX_PROVIDER_ADMISSION_AUTO_RECOVERIES) {
+        return this.#noOpInternal(revision);
+      }
+      const draft = nextRun(run, this.#timestamp());
+      applyLifecycle(draft, {
+        type: "retry_requested",
+        atMs: this.#now().getTime(),
+        phase: run.lifecycle.resumePhase ?? "executing",
+      });
+      if (draft.lifecycle.phase !== "executing") return this.#noOpInternal(revision);
+      for (const retried of resetRetryableInfrastructureAssignments(draft, draft.updatedAt)) {
+        draft.activity.push(
+          activity(
+            this.#createId("activity"),
+            draft.updatedAt,
+            "compiler",
+            `Retrying ${retried.ticketTitle} after automatic provider-admission recovery`,
+            retried.ticketId,
+            "info",
+          ),
+        );
+      }
+      draft.activity.push(
+        activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "compiler",
+          "Auto-retrying provider admission from a fresh contained attempt",
+          undefined,
+          "info",
+        ),
+      );
+      redrive = true;
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+      });
+      return {
+        revision: committed.state.revision,
+        events: [
+          { topic: "agent.provider_admission.auto_recovered", payload: { runId, failedAttemptId } },
+        ],
+      };
+    });
+    if (redrive) await this.#tick(runId);
+  }
+
+  /** Re-drive a bounded, effect-free terminal-contract failure without operator intervention. */
+  async #autoRecoverTerminalProtocol(runId: string, failedAttemptId: string): Promise<void> {
+    let redrivePhase: RunPhase | undefined;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(runId);
+      const failed = run.attempts[failedAttemptId];
+      if (
+        run.lifecycle.phase !== "blocked" ||
+        failed?.status !== "failed" ||
+        failed.failureCode !== "terminal_protocol" ||
+        failed.terminalAcceptedAt !== undefined ||
+        failed.terminalOutputSha256 !== undefined ||
+        providerOutcomeAccountingIssue(failed, undefined, false) !== undefined
+      ) {
+        return this.#noOpInternal(revision);
+      }
+      const recoveries = Object.values(run.attempts).filter(
+        (attempt) => attempt.failureCode === "terminal_protocol",
+      ).length;
+      if (recoveries > MAX_TERMINAL_PROTOCOL_AUTO_RECOVERIES) {
+        return this.#noOpInternal(revision);
+      }
+      const draft = nextRun(run, this.#timestamp());
+      applyLifecycle(draft, {
+        type: "retry_requested",
+        atMs: this.#now().getTime(),
+        phase: run.lifecycle.resumePhase ?? "executing",
+      });
+      if (draft.lifecycle.phase === "executing") {
+        for (const retried of resetRetryableInfrastructureAssignments(draft, draft.updatedAt)) {
+          draft.activity.push(
+            activity(
+              this.#createId("activity"),
+              draft.updatedAt,
+              "compiler",
+              `Retrying ${retried.ticketTitle} after automatic terminal-contract recovery`,
+              retried.ticketId,
+              "info",
+            ),
+          );
+        }
+      }
+      draft.activity.push(
+        activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "compiler",
+          "Auto-retrying an effect-free terminal-contract failure with a fresh contained attempt",
+          undefined,
+          "info",
+        ),
+      );
+      redrivePhase = draft.lifecycle.phase;
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+      });
+      return {
+        revision: committed.state.revision,
+        events: [
+          { topic: "agent.terminal_protocol.auto_recovered", payload: { runId, failedAttemptId } },
+        ],
+      };
+    });
+    if (redrivePhase === "executing" || redrivePhase === "verifying") {
+      await this.#recoverConfiguredActions(runId);
+      await this.#tick(runId);
     }
   }
 
@@ -13473,13 +14588,111 @@ export class RunAuthorityEngine {
     if (behavior === undefined || !("leadJudgment" in behavior.runType)) return "proceed";
     if (!behavior.runType.leadJudgment.triggers.includes(trigger)) return "proceed";
     const prior = run.leadJudgments ?? [];
-    const accepted = prior.find((judgment) => judgment.trigger === trigger);
-    if (accepted !== undefined) return accepted.disposition;
+    const accepted =
+      prior.find(
+        (judgment) =>
+          judgment.trigger === trigger &&
+          judgment.graphHash === run.graphHash &&
+          judgment.runOid === run.git.run.headOid,
+      ) ??
+      // Integrating a ticket advances the run head without changing the semantic graph the Lead
+      // just judged, so the exact-OID key misses and the next tick re-asks the most expensive
+      // role about identical inputs. An existing `proceed` on this graph stays authoritative.
+      // `blocked` deliberately keeps the exact-OID key: its invalidation paths below re-judge
+      // only on the specific material changes they name.
+      prior.find(
+        (judgment) =>
+          judgment.trigger === trigger &&
+          judgment.graphHash === run.graphHash &&
+          judgment.disposition === "proceed",
+      );
+    const restoredGeneratedAssetAuthority =
+      trigger === "orchestration_entry" &&
+      accepted?.disposition === "blocked" &&
+      Object.values(run.tickets).some(
+        (ticket) =>
+          ticket.id.startsWith("TK-compat-") &&
+          ticket.operationId === "asset-resolution.asset.implement-asset",
+      );
+    const approvedPendingProposalAuthority =
+      trigger === "orchestration_entry" &&
+      accepted?.disposition === "blocked" &&
+      Object.values(run.tickets).some(
+        (ticket) =>
+          ticket.status === "ready" &&
+          ticket.executionControl?.proposalDecision?.decision === "approval" &&
+          ticket.executionControl.proposalDisposition?.kind === "approved",
+      );
+    const retriedProviderAdmissionAuthority =
+      trigger === "orchestration_entry" &&
+      accepted?.disposition === "blocked" &&
+      Object.values(run.tickets).some(
+        (ticket) =>
+          ticket.status === "ready" &&
+          ticket.steps.some((step) =>
+            step.attemptIds.some((attemptId) =>
+              isProviderAdmissionFailure(run.attempts[attemptId]),
+            ),
+          ),
+      );
+    if (
+      accepted !== undefined &&
+      !restoredGeneratedAssetAuthority &&
+      !approvedPendingProposalAuthority &&
+      !retriedProviderAdmissionAuthority
+    )
+      return accepted.disposition;
+    if (
+      restoredGeneratedAssetAuthority ||
+      approvedPendingProposalAuthority ||
+      retriedProviderAdmissionAuthority
+    ) {
+      const invalidated = await this.#server.mutateInternal(async ({ revision }) => {
+        const current = await this.#store.getRun(run.id);
+        if (!this.#matchesAdvancement(current, advancement)) return this.#noOpInternal(revision);
+        const draft = nextRun(current, this.#timestamp());
+        const remaining = (draft.leadJudgments ?? []).filter(
+          (judgment) =>
+            !(
+              judgment.attemptId === accepted.attemptId &&
+              judgment.trigger === accepted.trigger &&
+              judgment.graphHash === accepted.graphHash &&
+              judgment.runOid === accepted.runOid
+            ),
+        );
+        if (remaining.length === 0) delete draft.leadJudgments;
+        else draft.leadJudgments = remaining;
+        draft.activity.push(
+          activity(
+            this.#createId("activity"),
+            draft.updatedAt,
+            "compiler",
+            retriedProviderAdmissionAuthority
+              ? "Invalidated stale blocked Lead entry judgment after provider-admission recovery"
+              : "Invalidated stale blocked Lead entry judgment after generated-asset authority changed",
+            undefined,
+            "warning",
+          ),
+        );
+        const committed = await this.#store.commit({
+          expectedRevision: revision,
+          runWrites: [{ record: draft, expectedRevision: current.revision }],
+        });
+        return { revision: committed.state.revision };
+      });
+      if (invalidated !== undefined) await this.#tick(run.id);
+      return "waiting";
+    }
     if (
       !shouldIssueLeadJudgment(
         behavior.runType,
         trigger,
-        prior.map((judgment) => judgment.trigger),
+        prior
+          .filter(
+            (judgment) =>
+              judgment.graphHash === run.graphHash && judgment.runOid === run.git.run.headOid,
+          )
+          .map((judgment) => judgment.trigger),
       )
     ) {
       throw new AuthorityRpcError(
@@ -13620,6 +14833,10 @@ export class RunAuthorityEngine {
       return;
     }
     const advancement = this.#advancementToken(run, "executing")!;
+    if (await this.#rearmSupersededProposals(runId, advancement)) {
+      await this.#tick(runId, advancement);
+      return;
+    }
     if (await this.#materializeApprovedProposal(runId, advancement)) {
       await this.#tick(runId, advancement);
       return;
@@ -13629,6 +14846,10 @@ export class RunAuthorityEngine {
       return;
     }
     if (await this.#releaseResolvedTerminalSource(runId, advancement)) {
+      await this.#tick(runId, advancement);
+      return;
+    }
+    if (await this.#settleReadyCompletedTicket(runId, advancement)) {
       await this.#tick(runId, advancement);
       return;
     }
@@ -14267,12 +15488,19 @@ export class RunAuthorityEngine {
       );
     }
     const reportAction = catalog.actions[stageActionId];
+    // Compiler actions already run in the single project-mutation lane. Older profiles encoded
+    // that boundary once more as a leading receipt-only lock primitive, so normalize that exact
+    // redundant prelude while keeping every executable report primitive strictly constrained.
+    const reportRecipe =
+      reportAction?.recipe[0]?.primitive === "lock.acquire"
+        ? reportAction.recipe.slice(1)
+        : reportAction?.recipe;
     if (
       reportAction === undefined ||
       reportAction.actor !== "compiler" ||
       reportAction.parameters.some((parameter) => parameter.required) ||
-      !reportAction.recipe.some((step) => step.primitive === "report.render") ||
-      reportAction.recipe.some(
+      !reportRecipe?.some((step) => step.primitive === "report.render") ||
+      reportRecipe.some(
         (step) => step.primitive !== "project.validate" && step.primitive !== "report.render",
       )
     ) {
@@ -14289,6 +15517,44 @@ export class RunAuthorityEngine {
       reportAction,
       promotion,
     };
+  }
+
+  /** Recover never-started durable proposals cancelled by pre-fix reconciliation. */
+  async #rearmSupersededProposals(
+    runId: string,
+    advancement: RunAdvancementToken,
+  ): Promise<boolean> {
+    let rearmed = false;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const current = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(current, advancement)) return this.#noOpInternal(revision);
+      const draft = nextRun(current, this.#timestamp());
+      for (const ticket of Object.values(draft.tickets)) {
+        const control = ticket.executionControl;
+        if (
+          control?.proposalRequest === undefined ||
+          ticket.status !== "cancelled" ||
+          ticket.blocker !== "Superseded before execution by newer compiler state" ||
+          !Object.values(draft.tickets).some(
+            (source) => source.executionControl?.sourceHold?.proposalTicketId === ticket.id,
+          ) ||
+          !ticket.steps.every((step) => step.status === "skipped" && step.attemptIds.length === 0)
+        )
+          continue;
+        ticket.status = control.proposalApprovalSha256 === undefined ? "proposed" : "ready";
+        ticket.blocker = undefined;
+        ticket.updatedAt = draft.updatedAt;
+        for (const step of ticket.steps) step.status = "pending";
+        rearmed = true;
+      }
+      if (!rearmed) return this.#noOpInternal(revision);
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: current.revision }],
+      });
+      return { revision: committed.state.revision };
+    });
+    return rearmed;
   }
 
   async #tickBehaviorPostOrchestration(
@@ -15031,6 +16297,7 @@ export class RunAuthorityEngine {
         const handle = await this.#launchPreparedSession(prepared, "recover");
         this.#assertStartupMayContinue();
         await this.#markAttemptRunning(runId, attempt.id, handle);
+        this.#restoreProviderRequestLiveness(prepared.spec, currentAttempt);
         this.#assertStartupMayContinue();
         this.#attachOutcome(
           runId,
@@ -15149,6 +16416,233 @@ export class RunAuthorityEngine {
         events: [{ topic: "run.blocked", payload: { runId, reason } }],
       };
     });
+    if (isProviderExposureHoldBlocker(reason)) {
+      this.#background(() => this.#autoRecoverProviderExposure(runId), runId);
+    }
+  }
+
+  /**
+   * Recover a run blocked solely by a retireable provider-exposure hold, with no operator resume.
+   * koni cannot settle an aborted/errored provider request — there is no canonical assistant
+   * response to reconcile — so the run would otherwise wedge holding its worst-case reservation and
+   * require a manual `koni resume`. This performs the exact retire-and-re-drive the operator resume
+   * does (#resumeRun), gated by the same `deriveCanonicalProviderExposureRetirement` safety check:
+   * a retirement is derived ONLY from a durably-committed aborted/errored terminal, so a genuinely
+   * in-flight request yields no candidate and the run correctly stays blocked. Retirement retains
+   * the conservative exposure bound (it is not a usage settlement), so nothing is double-billed.
+   * Bounded by MAX_PROVIDER_EXPOSURE_AUTO_RECOVERIES so an abort-every-time loop cannot churn.
+   */
+  async #autoRecoverProviderExposure(runId: string, propagationAttempts = 0): Promise<void> {
+    const observed = await this.#store.getRun(runId);
+    if (
+      observed.lifecycle.phase !== "blocked" ||
+      !isProviderExposureHoldBlocker(observed.lifecycle.blocker)
+    ) {
+      return;
+    }
+    // A sibling launch can observe a terminal-accepted predecessor in the small interval before
+    // its provider-settlement transaction commits. It correctly blocks conservatively, but once
+    // the settlement has arrived there is no exposure left to retire. Clear that stale hold and
+    // re-drive exactly as a normal retry would, rather than leaving the operator to press Retry.
+    if (!Object.values(observed.attempts).some(hasUnsettledProviderRequest)) {
+      let redrivePhase: RunPhase | undefined;
+      await this.#server.mutateInternal(async ({ revision }) => {
+        const run = await this.#store.getRun(runId);
+        if (
+          run.lifecycle.phase !== "blocked" ||
+          !isProviderExposureHoldBlocker(run.lifecycle.blocker) ||
+          Object.values(run.attempts).some(hasUnsettledProviderRequest)
+        ) {
+          return this.#noOpInternal(revision);
+        }
+        const draft = nextRun(run, this.#timestamp());
+        applyLifecycle(draft, {
+          type: "retry_requested",
+          atMs: this.#now().getTime(),
+          phase: run.lifecycle.resumePhase ?? "executing",
+        });
+        if (draft.lifecycle.phase === "executing") {
+          for (const retried of resetRetryableInfrastructureAssignments(draft, draft.updatedAt)) {
+            draft.activity.push(
+              activity(
+                this.#createId("activity"),
+                draft.updatedAt,
+                "compiler",
+                `Retrying ${retried.ticketTitle} after automatic provider-hold recovery`,
+                retried.ticketId,
+                "info",
+              ),
+            );
+          }
+        }
+        draft.activity.push(
+          activity(
+            this.#createId("activity"),
+            draft.updatedAt,
+            "compiler",
+            "Auto-cleared a stale provider-exposure hold after the canonical settlement arrived; continued without an operator retry",
+          ),
+        );
+        redrivePhase = draft.lifecycle.phase;
+        const committed = await this.#store.commit({
+          expectedRevision: revision,
+          runWrites: [{ record: draft, expectedRevision: run.revision }],
+        });
+        return {
+          revision: committed.state.revision,
+          events: [{ topic: "run.provider.auto_recovered", payload: { runId } }],
+        };
+      });
+      if (redrivePhase === "executing" || redrivePhase === "verifying") {
+        this.#background(async () => {
+          await this.#recoverConfiguredActions(runId);
+          await this.#tick(runId);
+        }, runId);
+      }
+      return;
+    }
+    // A successful Lead judgment establishes a new semantic orchestration epoch. Provider
+    // exposure failures before that boundary must not consume the bounded recovery allowance
+    // for a later graph revision: doing so turns an unrelated transient into a manual Retry
+    // requirement immediately after valid graph work has changed the board.
+    const alreadyRetired = providerRecoveryEpochAttempts(observed).reduce(
+      (total, attempt) =>
+        total +
+        (attempt.authorityProviderRequests ?? []).filter(isAutomaticProviderRecoveryRetirement)
+          .length,
+      0,
+    );
+    const recoveredAt = this.#timestamp();
+    const retirements = await this.#canonicalProviderExposureRetirements(
+      observed,
+      canonicalHash({
+        protocol: "koni.provider-exposure-auto-recovery.v1",
+        runId: observed.id,
+        revision: observed.revision,
+        generation: observed.generation,
+      }),
+      recoveredAt,
+    );
+    // Auto-recover a canonical Pi abort (e.g. a context-window overflow) OR a canonical provider
+    // error (e.g. a transient "servers overloaded, try again later"). koni performs zero automatic
+    // provider retries by design, so an ordinary transient turns a fresh reservation straight into
+    // a held block; retire-and-re-drive is the retry. The MAX_PROVIDER_EXPOSURE_AUTO_RECOVERIES cap
+    // bounds this: a genuinely persistent error stops after a few tries and stays blocked for the
+    // operator. A request with no derivable retirement is genuinely in-flight and also stays
+    // blocked. Both retirement dispositions retain the conservative exposure bound (never billed).
+    const autoRetireable = retirements.filter(
+      (candidate) =>
+        candidate.retirement.disposition === "operator_acknowledged_canonical_abort" ||
+        candidate.retirement.disposition === "operator_acknowledged_provider_error" ||
+        candidate.retirement.disposition === "operator_acknowledged_authority_pause" ||
+        candidate.retirement.disposition === "operator_acknowledged_unreconciled_request",
+    );
+    if (autoRetireable.length === 0) {
+      this.#scheduleProviderTerminalPropagationProbe(observed, propagationAttempts + 1);
+      return;
+    }
+    this.#clearProviderTerminalPropagationProbe(runId);
+    const leadFallbackModel =
+      alreadyRetired >= MAX_PROVIDER_EXPOSURE_AUTO_RECOVERIES
+        ? exhaustedLeadProviderFailureFallback(observed, autoRetireable)
+        : undefined;
+    if (alreadyRetired >= MAX_PROVIDER_EXPOSURE_AUTO_RECOVERIES && leadFallbackModel === undefined)
+      return;
+    let redrivePhase: RunPhase | undefined;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(runId);
+      if (
+        run.lifecycle.phase !== "blocked" ||
+        !isProviderExposureHoldBlocker(run.lifecycle.blocker)
+      ) {
+        return this.#noOpInternal(revision);
+      }
+      const draft = nextRun(run, recoveredAt);
+      for (const candidate of autoRetireable) {
+        const mutable = draft.attempts[candidate.attemptId];
+        const requestRecord = mutable?.authorityProviderRequests?.at(-1);
+        if (
+          mutable === undefined ||
+          requestRecord === undefined ||
+          !isOpenProviderRequest(requestRecord)
+        ) {
+          // Exposure changed under us (a real settlement or concurrent retire won); do not clobber.
+          return this.#noOpInternal(revision);
+        }
+        requestRecord.retirement = structuredClone(candidate.retirement);
+        const terminalKind =
+          candidate.retirement.disposition === "operator_acknowledged_provider_error"
+            ? "a canonical provider error"
+            : candidate.retirement.disposition === "operator_acknowledged_authority_pause"
+              ? "authority pause"
+              : candidate.retirement.disposition === "operator_acknowledged_unreconciled_request"
+                ? "unreconciled provider request"
+                : "a canonical Pi abort";
+        draft.activity.push(
+          activity(
+            this.#createId("activity"),
+            recoveredAt,
+            "compiler",
+            `Auto-recovered after ${terminalKind}: retired the held reservation and continued without an operator retry (retained up to ${requestRecord.prospectiveInputTokens + requestRecord.reservedOutputTokens} tokens of uncertain provider exposure)${leadFallbackModel === undefined ? "" : `; exhausted the configured lead model's recovery budget and switched the next lead recovery to ${leadFallbackModel}`}`,
+            mutable.ticketId,
+          ),
+        );
+      }
+      applyLifecycle(draft, {
+        type: "retry_requested",
+        atMs: this.#now().getTime(),
+        phase: run.lifecycle.resumePhase ?? "executing",
+      });
+      if (draft.lifecycle.phase === "executing") {
+        for (const retried of resetRetryableInfrastructureAssignments(draft, draft.updatedAt)) {
+          draft.activity.push(
+            activity(
+              this.#createId("activity"),
+              draft.updatedAt,
+              "compiler",
+              `Retrying ${retried.ticketTitle} after automatic provider-hold recovery`,
+              retried.ticketId,
+              "info",
+            ),
+          );
+        }
+      }
+      for (const action of Object.values(draft.actionExecutions ?? {})) {
+        if (
+          action.settledAt !== undefined ||
+          action.boundary.generation !== draft.generation ||
+          action.boundary.stageId !== draft.currentPipelineStageId
+        )
+          continue;
+        action.expectedRunRevision = draft.revision;
+        action.updatedAt = draft.updatedAt;
+      }
+      redrivePhase = draft.lifecycle.phase;
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+      });
+      return {
+        revision: committed.state.revision,
+        events: [{ topic: "run.provider.auto_recovered", payload: { runId } }],
+      };
+    });
+    if (redrivePhase === undefined) return;
+    this.#supervisor.resumeRun(runId);
+    if (redrivePhase === "draft") {
+      this.#background(() => this.#initializeRun(runId), runId);
+    } else if (redrivePhase === "planning") {
+      this.#background(() => this.#launchPlanning(runId), runId);
+    } else if (redrivePhase === "approving") {
+      this.#background(() => this.#settleApprove(runId), runId);
+    } else if (redrivePhase === "executing" || redrivePhase === "verifying") {
+      this.#background(async () => {
+        await this.#recoverConfiguredActions(runId);
+        await this.#tick(runId);
+      }, runId);
+    } else if (redrivePhase === "merging") {
+      this.#background(() => this.#settleMerge(runId), runId);
+    }
   }
 
   #noOpInternal(revision: number): AuthorityMethodResult {
@@ -15574,6 +17068,26 @@ function deletionGitWarnings(run: RunRecord): string[] {
   return uniqueStrings(warnings);
 }
 
+const HISTORICAL_PRESERVE_BRANCHES_WORKSPACE_REASON =
+  "Operator selected branch preservation during deletion";
+
+export function needsHistoricalPreservedDeletionWorktreeRetirement(
+  run: Pick<RunRecord, "lifecycle" | "deletion" | "legacyGitMigration" | "git">,
+): boolean {
+  if (
+    run.lifecycle.phase !== "deleted" ||
+    run.deletion?.mode !== "preserve_branches" ||
+    run.legacyGitMigration !== undefined
+  ) {
+    return false;
+  }
+  return [run.git.planning, run.git.run, ...Object.values(run.git.ticketCycles)].some(
+    (resource) =>
+      resource.status === "preserved" &&
+      resource.blocker === HISTORICAL_PRESERVE_BRANCHES_WORKSPACE_REASON,
+  );
+}
+
 function preservedGitLifecycle(
   value: RunGitLifecycleRecord,
   reason: string,
@@ -15935,6 +17449,133 @@ function proposalLifecycleActor(
     );
   }
   return actors[0]!;
+}
+
+/**
+ * Provider retry allowance begins again after a canonical provider settlement.  A planner or
+ * worker can make real progress over several provider turns before one response stalls; counting
+ * that late transient against failures from an earlier, already-settled turn wrongly exhausts
+ * the recovery budget and leaves an otherwise healthy run blocked.  Conversely, an attempt with
+ * no settled provider response remains in the same epoch, so a persistent abort-every-time loop
+ * is still bounded.
+ */
+function providerRecoveryEpochAttempts(run: RunRecord): readonly AgentAttemptRecord[] {
+  const attempts = Object.values(run.attempts);
+  let boundary = -1;
+  for (const [index, attempt] of attempts.entries()) {
+    if (
+      attempt.authorityProviderRequests?.some((request) => request.settledAt !== undefined) ||
+      (attempt.kind === "lead" && attempt.status === "completed")
+    ) {
+      boundary = index;
+    }
+  }
+  return attempts.slice(boundary + 1);
+}
+
+/**
+ * Return the only sanctioned lead recovery downgrade, after its bounded error series is durable.
+ *
+ * The fallback is never a vendor Koni picked: it is another model this same run already authorized
+ * for one of its own personas on the lead's provider. That keeps the downgrade inside the operator's
+ * authenticated provider and configured selections, so the behavior is identical whichever provider
+ * a project runs on, and a single-model run simply has no downgrade available.
+ */
+function exhaustedLeadRecoveryModel(
+  run: RunRecord,
+  kind: "planning" | "lead" | "ticket" | "verification" | "integration",
+): string | undefined {
+  if (kind !== "lead") return undefined;
+  const lead = run.executionConfig?.agents.lead;
+  if (lead === undefined) return undefined;
+  const fallback = authorizedLeadFallbackModel(run, lead);
+  if (fallback === undefined) return undefined;
+  // Once the bounded lead series is exhausted, later failed/aborted fallback attempts must not make
+  // the compiler forget that decision. Only a canonical settlement or completed Lead judgment
+  // starts a new provider-recovery epoch (see providerRecoveryEpochAttempts).
+  return providerRecoveryEpochAttempts(run).filter((attempt) =>
+    isRetiredLeadRecoveryAttempt(attempt, lead),
+  ).length > MAX_PROVIDER_EXPOSURE_AUTO_RECOVERIES
+    ? fallback
+    : undefined;
+}
+
+/**
+ * Pick the run's own alternate model on the lead's provider: the most widely authorized one,
+ * with a deterministic identifier tie-break so one run always resolves the same downgrade.
+ */
+function authorizedLeadFallbackModel(
+  run: RunRecord,
+  lead: Readonly<{ provider: string; model: string }>,
+): string | undefined {
+  const counts = new Map<string, number>();
+  for (const [personaId, selection] of Object.entries(run.executionConfig?.agents ?? {})) {
+    if (personaId === "lead") continue;
+    if (selection.provider !== lead.provider || selection.model === lead.model) continue;
+    counts.set(selection.model, (counts.get(selection.model) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort(
+    (left, right) => right[1] - left[1] || left[0].localeCompare(right[0]),
+  )[0]?.[0];
+}
+
+/** Model choice is injected into the immutable compiler input; the original run default stays pinned. */
+function withRecoveryModelSelection(run: RunRecord, personaId: string, model: string): RunRecord {
+  const draft = structuredClone(run);
+  const selected = draft.executionConfig?.agents[personaId];
+  if (selected === undefined) throw new Error(`missing recovery persona selection: ${personaId}`);
+  selected.model = model;
+  return draft;
+}
+
+/** Return the fallback model when these failures exhaust the configured lead's recovery budget. */
+function exhaustedLeadProviderFailureFallback(
+  run: RunRecord,
+  candidates: readonly { attemptId: string }[],
+): string | undefined {
+  const lead = run.executionConfig?.agents.lead;
+  if (lead === undefined) return undefined;
+  const fallback = authorizedLeadFallbackModel(run, lead);
+  if (fallback === undefined) return undefined;
+  const candidateIds = new Set(candidates.map((candidate) => candidate.attemptId));
+  const current = Object.values(run.attempts).filter((attempt) => candidateIds.has(attempt.id));
+  if (
+    current.length === 0 ||
+    current.some(
+      (attempt) =>
+        attempt.kind !== "lead" ||
+        attempt.modelProvider !== lead.provider ||
+        attempt.modelId !== lead.model,
+    )
+  )
+    return undefined;
+  return providerRecoveryEpochAttempts(run).filter((attempt) =>
+    isRetiredLeadRecoveryAttempt(attempt, lead),
+  ).length >= MAX_PROVIDER_EXPOSURE_AUTO_RECOVERIES
+    ? fallback
+    : undefined;
+}
+
+function isRetiredLeadRecoveryAttempt(
+  attempt: AgentAttemptRecord,
+  lead: Readonly<{ provider: string; model: string }>,
+): boolean {
+  return (
+    attempt.kind === "lead" &&
+    attempt.modelProvider === lead.provider &&
+    attempt.modelId === lead.model &&
+    attempt.authorityProviderRequests?.some(isAutomaticProviderRecoveryRetirement) === true
+  );
+}
+
+/** Authority pause accounting remains visible but must not consume the bounded provider-error budget. */
+function isAutomaticProviderRecoveryRetirement(
+  request: Readonly<AgentProviderRequestRecord>,
+): boolean {
+  return (
+    request.retirement?.disposition === "operator_acknowledged_provider_error" ||
+    request.retirement?.disposition === "operator_acknowledged_canonical_abort"
+  );
 }
 
 function restoreLegacyLifecycle(run: RunRecord, at: string): void {
@@ -16470,6 +18111,47 @@ function currentRunActionCursor(
   return rebased;
 }
 
+/** Only an ordinary concurrent run-revision advance may re-admit a Lead action. */
+export function isReadmittableLeadActionDrift(error: unknown): boolean {
+  return error instanceof RunActionAuthorityError && error.code === "stale_revision";
+}
+
+/**
+ * Recognize the harmless loser of a concurrent Lead-launch race.
+ *
+ * The configured action and its exact attempt are committed atomically. A second orchestration
+ * tick may already hold the same admission when that commit lands. Only the byte-bound action
+ * identity may make that replay a no-op; a changed attempt, step, product, or disposition must
+ * continue through the strict action checks and fail closed.
+ */
+export function isExactSettledLeadLaunchReplay(
+  run: Pick<RunRecord, "attempts">,
+  action: Pick<
+    RunActionExecutionRecord,
+    "invocationId" | "boundary" | "journal" | "settlement" | "settledAt"
+  >,
+  expected: Readonly<{
+    attemptId: string;
+    stepId: string;
+    productSha256: Sha256Digest;
+  }>,
+): boolean {
+  const attempt = run.attempts[expected.attemptId];
+  return (
+    action.boundary.kind === "lead_launch" &&
+    action.boundary.attemptId === expected.attemptId &&
+    action.boundary.stepId === expected.stepId &&
+    action.boundary.productSha256 === expected.productSha256 &&
+    action.journal.status === "completed" &&
+    action.settledAt !== undefined &&
+    action.settlement?.disposition === "completed" &&
+    attempt?.kind === "lead" &&
+    attempt.ticketId === action.boundary.ticketId &&
+    attempt.stepId === expected.stepId &&
+    attempt.launchActionInvocationId === action.invocationId
+  );
+}
+
 function isActionSemanticCompilerStep(
   record: Readonly<RunActionExecutionRecord>,
   stepId: string,
@@ -16922,6 +18604,15 @@ function runSourceReleaseDecision(
     proposal.status === "failed" ||
     proposal.status === "cancelled";
   const disposition = proposal.executionControl?.proposalDisposition;
+  if (proposal.status === "cancelled" && disposition === undefined) {
+    return deriveSourceReleaseDecision({
+      sourceTicketId: source.id,
+      heldByProposalTicketId: proposal.id,
+      proposalTerminal: true,
+      proposalTerminalSha256: terminalTicketAuthoritySha256(proposal),
+      proposalDisposition: { kind: "cancelled" },
+    });
+  }
   if (disposition?.kind === "rejected") {
     return deriveSourceReleaseDecision({
       sourceTicketId: source.id,
@@ -16984,6 +18675,17 @@ function runSourceReleaseDecision(
       : {}),
     proposalDisposition: { kind: "pending" },
   });
+}
+
+function rejectedSourceReissueCount(
+  run: Readonly<RunRecord>,
+  source: Readonly<TicketRecord>,
+): number {
+  return Object.values(run.tickets).filter(
+    (ticket) =>
+      ticket.executionControl?.proposalRequest?.sourceTicketId === source.id &&
+      ticket.executionControl.proposalDisposition?.kind === "rejected",
+  ).length;
 }
 
 function proposalReviewAuthoritySha256(
@@ -17360,30 +19062,40 @@ function resetRetryableInfrastructureAssignments(
 ): Array<{ ticketId: string; ticketTitle: string }> {
   const retried: Array<{ ticketId: string; ticketTitle: string }> = [];
   for (const ticket of Object.values(run.tickets)) {
-    if (ticket.status !== "blocked") continue;
-    const step = ticket.steps.find((candidate) => candidate.status === "failed");
-    const attemptId = step?.attemptIds.at(-1);
-    const attempt = attemptId === undefined ? undefined : run.attempts[attemptId];
-    if (
-      step === undefined ||
-      attempt === undefined ||
-      !new Set<AttemptStatus>(["failed", "aborted"]).has(attempt.status) ||
-      attempt.terminalAcceptedAt !== undefined ||
-      attempt.terminalOutputSha256 !== undefined ||
-      providerOutcomeAccountingIssue(attempt, undefined, false) !== undefined ||
-      !isRetryableInfrastructureAttempt(attempt)
-    )
-      continue;
-    step.status = "pending";
-    step.startedAt = undefined;
-    step.completedAt = undefined;
-    step.summary = undefined;
-    ticket.status = "ready";
-    ticket.blocker = undefined;
-    ticket.updatedAt = at;
-    retried.push({ ticketId: ticket.id, ticketTitle: ticket.title });
+    const retriedTicket = resetRetryableInfrastructureAssignment(run, ticket.id, at);
+    if (retriedTicket !== undefined) retried.push(retriedTicket);
   }
   return retried;
+}
+
+function resetRetryableInfrastructureAssignment(
+  run: RunRecord,
+  ticketId: string,
+  at: string,
+): { ticketId: string; ticketTitle: string } | undefined {
+  const ticket = run.tickets[ticketId];
+  if (ticket?.status !== "blocked") return undefined;
+  const step = ticket.steps.find((candidate) => candidate.status === "failed");
+  const attemptId = step?.attemptIds.at(-1);
+  const attempt = attemptId === undefined ? undefined : run.attempts[attemptId];
+  if (
+    step === undefined ||
+    attempt === undefined ||
+    !new Set<AttemptStatus>(["failed", "aborted"]).has(attempt.status) ||
+    attempt.terminalAcceptedAt !== undefined ||
+    attempt.terminalOutputSha256 !== undefined ||
+    providerOutcomeAccountingIssue(attempt, undefined, false) !== undefined ||
+    !isRetryableInfrastructureAttempt(attempt)
+  )
+    return undefined;
+  step.status = "pending";
+  step.startedAt = undefined;
+  step.completedAt = undefined;
+  step.summary = undefined;
+  ticket.status = "ready";
+  ticket.blocker = undefined;
+  ticket.updatedAt = at;
+  return { ticketId: ticket.id, ticketTitle: ticket.title };
 }
 
 function isRetryableInfrastructureAttempt(attempt: AgentAttemptRecord): boolean {
@@ -17418,6 +19130,14 @@ function isRetryableInfrastructureAttempt(attempt: AgentAttemptRecord): boolean 
     /prospective provider input plus reserved output exceeds the authenticated model context window/u,
     /authority tool result .* exceeds its .* launch bound/u,
     /simulated contained session cold-start timeout/u,
+    // The supervisor's bounded provider-outcome watchdog is infrastructure containment, not an
+    // agent-authored semantic failure. Once all provider turns are settled, a fresh attempt is
+    // safe to issue through the ordinary retryable-assignment recovery path.
+    /activated attempt exceeded the bounded provider outcome deadline/u,
+    // A provider-outcome watchdog can fail the attempt after the authority has already retired
+    // its uncertain reservation. The caller above separately proves no provider exposure remains
+    // before resetting the ticket, so this durable infrastructure outcome is safe to re-drive.
+    /^Provider request remains reserved without a canonical assistant settlement; worst-case exposure is held$/u,
     /worker exited with code [0-9]+/u,
     // Provider-reservation containment: a request was reserved but its terminal never reconciled
     // (a transient upstream error or abort left the reservation held). This is Koni/Pi accounting
@@ -17429,7 +19149,100 @@ function isRetryableInfrastructureAttempt(attempt: AgentAttemptRecord): boolean 
     // versioning skew — an attempt issued around an engine deploy — never agent work product. A
     // fresh attempt gets a consistent spec from the current authority.
     /does not (?:exactly )?match (?:its|the) launch (?:binding|inventory)/iu,
+    // Compatibility for releases that settled a supervisor abort as an assignment failure during
+    // ordinary authority shutdown. New authorities close outcome settlement before aborting, but
+    // an explicit operator Resume may safely re-drive this exact historical infrastructure marker.
+    /^authority stopping$/iu,
   ].some((pattern) => pattern.test(error));
+}
+
+function isTokenBudgetFailure(
+  attempt: AgentAttemptRecord | undefined,
+): attempt is AgentAttemptRecord {
+  return (
+    attempt !== undefined &&
+    new Set<AttemptStatus>(["failed", "aborted"]).has(attempt.status) &&
+    /^(?:input|output|cache-read|cache-write|new-token|cache-inclusive) token budget (?:exceeded|exhausted)$/u.test(
+      attempt.error ?? "",
+    )
+  );
+}
+
+function tokenBudgetRecoveryMessage(
+  run: Readonly<RunRecord>,
+  failed: Readonly<AgentAttemptRecord>,
+): string {
+  const ticketTitle = run.tickets[failed.ticketId]?.title ?? "ticket";
+  return `Automatically retrying ${ticketTitle} step ${failed.stepId} after bounded token-budget recovery`;
+}
+
+export function tokenBudgetRecoveryCount(
+  run: Readonly<RunRecord>,
+  failed: Readonly<AgentAttemptRecord>,
+  recoveryMessage: string,
+): number {
+  const ticket = run.tickets[failed.ticketId];
+  const latestRework = ticket?.reviewReworks?.at(-1);
+  // Review rework is a newly compiler-authorized semantic slice. It gets the same single,
+  // bounded infrastructure recovery as the original step; otherwise one historical budget abort
+  // can make an explicit supervised retry immediately depend on another operator action. Bind the
+  // renewal to the durable rework timestamp and only when this failed attempt actually belongs to
+  // that slice, so startup scans cannot reinterpret an older abort under a newer rework epoch.
+  const recoveryEpochStartedAt =
+    ticket !== undefined &&
+    latestRework !== undefined &&
+    reviewReworkAppliesToStep(ticket, failed.stepId) &&
+    failed.startedAt !== undefined &&
+    failed.startedAt >= latestRework.openedAt
+      ? latestRework.openedAt
+      : undefined;
+  const inRecoveryEpoch = (at: string | undefined): boolean =>
+    recoveryEpochStartedAt === undefined || (at !== undefined && at >= recoveryEpochStartedAt);
+  const durableMarkers = run.activity.filter(
+    (entry) =>
+      entry.ticketId === failed.ticketId &&
+      entry.message === recoveryMessage &&
+      inRecoveryEpoch(entry.at),
+  ).length;
+  // Runs created before step-scoped markers used one ticket-wide activity message. Recover the
+  // actual scope from immutable attempt lineage so an upgrade cannot silently grant an already
+  // retried step another automatic spend.
+  const issuedRecoveries = Object.values(run.attempts).filter((attempt) => {
+    if (
+      attempt.ticketId !== failed.ticketId ||
+      attempt.stepId !== failed.stepId ||
+      attempt.lineage?.reason !== "recovery" ||
+      attempt.lineage.parentAttemptId === undefined
+    ) {
+      return false;
+    }
+    const parent = run.attempts[attempt.lineage.parentAttemptId];
+    return (
+      inRecoveryEpoch(attempt.startedAt) &&
+      // The first attempt of a newly authorized rework can retain a budget-failed parent from the
+      // preceding slice for audit lineage. It was authorized by the rework action, not by this
+      // epoch's automatic recovery allowance, so both sides of a counted recovery edge must live
+      // inside the same epoch.
+      inRecoveryEpoch(parent?.startedAt) &&
+      isTokenBudgetFailure(parent)
+    );
+  }).length;
+  return Math.max(durableMarkers, issuedRecoveries);
+}
+
+function isProviderAdmissionFailure(
+  attempt: AgentAttemptRecord | undefined,
+): attempt is AgentAttemptRecord {
+  if (attempt === undefined || !new Set<AttemptStatus>(["failed", "aborted"]).has(attempt.status))
+    return false;
+  if (
+    attempt.failureCode === "provider_input_exposure" ||
+    attempt.failureCode === "provider_token_exposure"
+  )
+    return true;
+  return /Koni provider admission rejected: request exceeds the context window/u.test(
+    attempt.error ?? "",
+  );
 }
 
 interface SettledProviderRequest {
@@ -17515,7 +19328,11 @@ function assertProviderExposureBudget(
   const providerInputHeadroom =
     spec.model.catalogContextWindow === undefined
       ? maximum.maxInput
-      : spec.model.catalogContextWindow - request.reservedOutputTokens;
+      : spec.model.catalogContextWindow -
+        request.reservedOutputTokens -
+        (providerApiHasSupportedOutputCap(spec.model.api)
+          ? 0
+          : UNCAPPED_PROVIDER_CONTEXT_FRAMING_RESERVE);
   if (providerInputHeadroom < 1 || request.prospectiveInputTokens > providerInputHeadroom) {
     throw new AuthorityRpcError(
       "provider_input_exposure",
@@ -17740,6 +19557,19 @@ async function deriveCanonicalProviderExposureRetirement(
 ): Promise<NonNullable<AgentProviderRequestRecord["retirement"]> | undefined> {
   const record = attempt.authorityProviderRequests?.at(-1);
   if (record === undefined || !isOpenProviderRequest(record)) return undefined;
+  // The authority itself has stopped this attempt, so a successor cannot overlap it. Provider
+  // usage remains unknowable and is retained as worst-case exposure, but a synthetic assistant
+  // terminal must not be required after a normal authority restart.
+  if (attempt.status === "interrupted" && attempt.error === "Run paused") {
+    const material = {
+      protocol: "koni.provider-exposure-retirement.v1" as const,
+      disposition: "operator_acknowledged_authority_pause" as const,
+      pauseReasonSha256: rawSha256(attempt.error),
+      authorizationSha256,
+      retiredAt,
+    };
+    return { ...material, sha256: canonicalHash(material) };
+  }
   const transcript = await readDurableAttemptTranscript(spec, attempt, {
     allowCommittedResponseTail: true,
   });
@@ -17752,8 +19582,32 @@ async function deriveCanonicalProviderExposureRetirement(
     (entry) =>
       entry.type === "message" && isRecord(entry.message) && entry.message.role === "assistant",
   );
-  const assistant = assistants[0];
-  if (assistants.length !== 1 || assistant === undefined || suffix.at(-1)?.id !== assistant.id) {
+  // A contained session can terminate after Koni reserved a request but before Pi persisted any
+  // canonical assistant terminal. The durable transcript must prove that absence; this prevents
+  // the fallback from shadowing a canonical provider error that remains reconcilable.
+  if (
+    assistants.length === 0 &&
+    new Set<AttemptStatus>(["failed", "aborted"]).has(attempt.status) &&
+    attempt.error ===
+      "Provider request remains reserved without a canonical assistant settlement; worst-case exposure is held" &&
+    attempt.terminalAcceptedAt == null &&
+    attempt.terminalOutputSha256 == null &&
+    record.assistantEntryId == null
+  ) {
+    const material = {
+      protocol: "koni.provider-exposure-retirement.v1" as const,
+      disposition: "operator_acknowledged_unreconciled_request" as const,
+      failureReasonSha256: rawSha256(attempt.error),
+      authorizationSha256,
+      retiredAt,
+    };
+    return { ...material, sha256: canonicalHash(material) };
+  }
+  // A tool result can be durably recorded before Pi appends its canonical abort/error terminal
+  // for the same provider request. The final assistant entry is the accounting boundary; earlier
+  // assistant entries remain auditable attempt history and do not make that terminal ambiguous.
+  const assistant = assistants.at(-1);
+  if (assistant === undefined || suffix.at(-1)?.id !== assistant.id) {
     return undefined;
   }
   const message = assistant.message;
@@ -17796,11 +19650,7 @@ async function deriveCanonicalProviderExposureRetirement(
     message.provider === spec.model.provider &&
     message.model === spec.model.id &&
     responseId !== undefined;
-  const canonicalAbort =
-    commonTerminalBoundary &&
-    message.stopReason === "aborted" &&
-    typeof message.errorMessage === "string" &&
-    /\baborted\b/iu.test(message.errorMessage);
+  const canonicalAbort = commonTerminalBoundary && message.stopReason === "aborted";
   const errorMessage =
     typeof message.errorMessage === "string" &&
     message.errorMessage.length > 0 &&
@@ -18095,6 +19945,15 @@ function hasUnsettledProviderRequest(attempt: AgentAttemptRecord): boolean {
 
 function isOpenProviderRequest(record: AgentProviderRequestRecord): boolean {
   return record.settledAt === undefined && record.retirement === undefined;
+}
+
+/** True when a run's blocker is only a held provider-exposure reservation (auto-recoverable). */
+function isProviderExposureHoldBlocker(blocker: string | undefined): boolean {
+  return (
+    blocker !== undefined &&
+    (blocker.includes("worst-case exposure is held") ||
+      blocker.includes("worst-case exposure blocks a successor attempt"))
+  );
 }
 
 function isProviderPredecessor(status: AgentAttemptRecord["status"]): boolean {
@@ -18484,6 +20343,29 @@ function enforceRepositoryCallBudget(
         },
       },
     );
+  }
+  if (REPOSITORY_DISCOVERY_TOOLS.has(call.name)) {
+    const argumentsSha256 = rawSha256(canonicalEncode(call.arguments));
+    const duplicate = (attempt.authorityToolResults ?? []).find(
+      (result) =>
+        result.outcome === "accepted" &&
+        result.toolName === call.name &&
+        result.argumentsSha256 === argumentsSha256,
+    );
+    if (duplicate !== undefined) {
+      // Naming the exact earlier receipt turns recovery into a lookup instead of a re-plan:
+      // the observed cost of this rejection was one wasted provider turn per occurrence.
+      throw new AuthorityRpcError(
+        "duplicate_repository_discovery",
+        `this exact ${call.name} request already succeeded as authority call ${duplicate.sequence} in this attempt (receipt ${duplicate.receiptSha256}); that result is retained in this transcript. Reuse it, or make a narrower, non-duplicate request.`,
+        {
+          details: {
+            priorSequence: duplicate.sequence,
+            priorReceiptSha256: duplicate.receiptSha256,
+          },
+        },
+      );
+    }
   }
   const limit = spec.budgets.repositoryCalls?.max;
   if (limit === undefined || !REPOSITORY_DISCOVERY_TOOLS.has(call.name)) return;
@@ -19832,6 +21714,16 @@ function toolInteger(object: Record<string, unknown>, key: string, fallback: num
   if (value === undefined) return fallback;
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     throw new AuthorityRpcError("tool_arguments", `${key} must be a non-negative integer`);
+  }
+  return value;
+}
+
+function validatedProviderRequestLivenessTimeout(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_PROVIDER_REQUEST_LIVENESS_TIMEOUT_MS;
+  if (!Number.isSafeInteger(value) || value < 10 || value > 24 * 60 * 60 * 1_000) {
+    throw new Error(
+      "provider request liveness timeout must be an integer between 10ms and 24 hours",
+    );
   }
   return value;
 }

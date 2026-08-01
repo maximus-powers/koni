@@ -5,6 +5,7 @@ import {
   assertSupportedPiRuntimeVersion,
   ManagedPiSession,
   ManagedSessionError,
+  providerOutputLimit,
   type ManagedPiSessionFactory,
   type PiSessionAdapter,
   type RecoveredSessionState,
@@ -15,6 +16,25 @@ import { rawSha256 } from "../src/shared/canonical.js";
 import { TERMINAL_TOOL_NAME, fixtureLaunchSpec, fixtureTool } from "./pi-managed-fixtures.js";
 
 describe("managed Pi session", () => {
+  it("reserves output headroom below the authenticated context window", () => {
+    const fixture = specFor("attempt-context-headroom", "session-context-headroom");
+    const spec = {
+      ...fixture,
+      model: { ...fixture.model, catalogContextWindow: 272_000 },
+      budgets: {
+        ...fixture.budgets,
+        tokens: {
+          ...fixture.budgets.tokens,
+          maxOutput: 1_000_000,
+          maxNew: 1_000_000,
+          maxAll: 1_000_000,
+        },
+      },
+    };
+
+    expect(providerOutputLimit(spec, undefined)).toBe(68_000);
+  });
+
   it("fails closed when the private continuation seam is not the exact pinned Pi runtime", () => {
     expect(() => assertSupportedPiRuntimeVersion("0.80.11")).toThrowError(
       expect.objectContaining({ code: "pi_runtime_version" }),

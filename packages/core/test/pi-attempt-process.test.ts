@@ -430,7 +430,7 @@ describe("supervised autonomous Pi attempt process", () => {
     expect(kill).not.toHaveBeenCalled();
   });
 
-  it("withholds outcome and retries observation after the cleanup coordinator cannot prove absence", async () => {
+  it("automatically re-drives bounded cleanup proof after the coordinator cannot prove absence", async () => {
     const { spec, options } = await fixture("normal_descendant");
     options.runtime = {
       ...options.runtime,
@@ -446,16 +446,7 @@ describe("supervised autonomous Pi attempt process", () => {
     await child.ready;
     await waitUntil(() => descendantPid !== undefined);
     await waitUntil(() => !processExists(descendantPid!));
-    let settled = false;
-    void child.outcome.then(() => {
-      settled = true;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(settled).toBe(false);
-    expect(child.pid).toBeGreaterThan(0);
-
-    await child.delete("retry cleanup proof");
-    await expect(child.outcome).resolves.toMatchObject({ status: "failed" });
+    await expect(child.outcome).resolves.toMatchObject({ status: "completed" });
     expect(child.pid).toBeUndefined();
   });
 
@@ -471,7 +462,7 @@ describe("supervised autonomous Pi attempt process", () => {
     });
     await child.ready;
     await waitUntil(() => descendantPid !== undefined);
-    await expect(child.outcome).resolves.toMatchObject({ status: "failed" });
+    await expect(child.outcome).resolves.toMatchObject({ status: "completed" });
     expect(processExists(descendantPid!)).toBe(false);
     expect(child.pid).toBeUndefined();
   });
@@ -587,7 +578,7 @@ describe("supervised autonomous Pi attempt process", () => {
     expect(child.pid).toBeUndefined();
   });
 
-  it("retains retry authority when the first parent-supervised fallback observer crashes", async () => {
+  it("automatically retries observation when the first fallback observer crashes", async () => {
     const { spec, options } = await fixture("normal_descendant");
     options.runtime = {
       ...options.runtime,
@@ -603,18 +594,31 @@ describe("supervised autonomous Pi attempt process", () => {
     });
     await child.ready;
     await waitUntil(() => descendantPid !== undefined);
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    let settled = false;
-    void child.outcome.then(() => {
-      settled = true;
-    });
-    expect(settled).toBe(false);
-    expect(child.pid).toBeGreaterThan(0);
-
-    await child.delete("retry fallback ESRCH proof");
-    await expect(child.outcome).resolves.toMatchObject({ status: "failed" });
+    await expect(child.outcome).resolves.toMatchObject({ status: "completed" });
     expect(processExists(descendantPid!)).toBe(false);
     expect(child.pid).toBeUndefined();
+  });
+
+  it("surfaces cleanup failure after bounded observation-only recovery is exhausted", async () => {
+    const { spec, options } = await fixture("normal_descendant");
+    options.runtime = {
+      ...options.runtime,
+      cleanupOwnerFault: "exit_after_absence_once",
+      fallbackObserverFault: "exit_always",
+    };
+    const child = new SupervisedPiAttemptProcess(spec, options);
+    await child.ready;
+
+    await expect(child.cleanupFailure).resolves.toMatchObject({
+      code: "termination_unconfirmed",
+    });
+    let outcomeSettled = false;
+    void child.outcome.then(() => {
+      outcomeSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(outcomeSettled).toBe(false);
+    expect(child.pid).toBeGreaterThan(0);
   });
 
   it("accepts a proven-absence acknowledgement that arrives after the caller timeout", async () => {
@@ -623,11 +627,11 @@ describe("supervised autonomous Pi attempt process", () => {
     options.runtime = { ...options.runtime, cleanupOwnerFault: "delay_first_ack" };
     const child = new SupervisedPiAttemptProcess(spec, options);
     await child.ready;
-    await expect(child.outcome).resolves.toMatchObject({ status: "failed" });
+    await expect(child.outcome).resolves.toMatchObject({ status: "completed" });
     expect(child.pid).toBeUndefined();
   });
 
-  it("does not treat EPERM as absence and resumes proof only on a later authority attempt", async () => {
+  it("does not treat EPERM as absence and automatically re-drives a later proof attempt", async () => {
     const { spec, options } = await fixture("normal_descendant");
     options.timings = { ...options.timings, killGraceMs: 25 };
     options.runtime = { ...options.runtime, cleanupOwnerFault: "eperm_first_attempt" };
@@ -641,16 +645,7 @@ describe("supervised autonomous Pi attempt process", () => {
     await child.ready;
     await waitUntil(() => descendantPid !== undefined);
     await waitUntil(() => !processExists(descendantPid!));
-    let settled = false;
-    void child.outcome.then(() => {
-      settled = true;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 40));
-    expect(settled).toBe(false);
-    expect(child.pid).toBeGreaterThan(0);
-
-    await child.delete("retry after unproven EPERM observation");
-    await expect(child.outcome).resolves.toMatchObject({ status: "failed" });
+    await expect(child.outcome).resolves.toMatchObject({ status: "completed" });
     expect(child.pid).toBeUndefined();
   });
 

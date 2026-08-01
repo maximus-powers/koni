@@ -1069,10 +1069,32 @@ function snapshotNode(source: CompilerGraphNode, path: string): MutableGraphNode
     source.annotations === undefined
       ? undefined
       : cloneMutableObject(record(source.annotations, pointer(path, "annotations")));
-  const fields =
-    source.fields === undefined
-      ? (Object.create(null) as MutableConfigurationObject)
-      : cloneMutableObject(record(source.fields, pointer(path, "fields")));
+  const structuralFields = new Set([
+    "schema_version",
+    "id",
+    "type",
+    "title",
+    "status",
+    "spec",
+    "edges",
+    "annotations",
+    "fields",
+  ]);
+  const fields = Object.fromEntries(
+    Object.entries(source as unknown as ConfigurationObject)
+      .filter(([field]) => !structuralFields.has(field))
+      .map(([field, value]) => [field, cloneValue(value)]),
+  );
+  for (const [field, value] of Object.entries(source.fields ?? {})) {
+    if (fields[field] !== undefined && canonicalHash(fields[field]) !== canonicalHash(value)) {
+      fail(
+        "expression.ambiguous_node_field",
+        pointer(pointer(path, "fields"), field),
+        `node field ${field} differs between its graph projection and fields map`,
+      );
+    }
+    fields[field] = cloneValue(value);
+  }
   return {
     id,
     type,

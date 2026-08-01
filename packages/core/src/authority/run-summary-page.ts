@@ -7,7 +7,10 @@ import {
 } from "../shared/canonical.js";
 import type { RunPhase, ResumableRunPhase } from "../state/run-lifecycle.js";
 import type { AgentAttemptRecord, RunRecord, TicketRecord } from "../state/run-record.js";
-import { runExecutionHalted } from "../state/effective-status.js";
+import {
+  runExecutionHalted,
+  ticketWaitingForCompilerGrant,
+} from "../state/effective-status.js";
 import { terminalSafeText } from "../monitor/terminal.js";
 
 export const RUN_SUMMARY_PAGE_PROTOCOL = "koni.run-summary-page.v2" as const;
@@ -385,8 +388,11 @@ export function projectRunSummary(run: Readonly<RunRecord>): RunSummary {
       // A blocked run executes nothing: nominally in-flight tickets are blocked, not active.
       active: halted ? 0 : tickets.filter(inFlightTicket).length,
       blocked:
-        tickets.filter((ticket) => ticket.status === "blocked" || ticket.status === "failed")
-          .length + (halted ? tickets.filter(inFlightTicket).length : 0),
+        tickets.filter(
+          (ticket) =>
+            ticket.status === "failed" ||
+            (ticket.status === "blocked" && !ticketWaitingForCompilerGrant(ticket)),
+        ).length + (halted ? tickets.filter(inFlightTicket).length : 0),
       total: tickets.length,
     },
     agents: {

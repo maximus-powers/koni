@@ -6,6 +6,7 @@ import {
   replayRunActionEffect,
   RunActionAuthorityError,
 } from "../src/authority/action-execution.js";
+import { isReadmittableLeadActionDrift } from "../src/authority/run-engine.js";
 import type { RunRecord } from "../src/state/run-record.js";
 import { runBehaviorSnapshotFixture } from "./fixtures/compiled-behavior.js";
 
@@ -110,6 +111,15 @@ describe("configured action authority", () => {
       },
       execution,
       "run_deleted",
+    );
+  });
+
+  it("re-admits only a stale Lead action cursor", () => {
+    expect(isReadmittableLeadActionDrift(new RunActionAuthorityError("stale_revision", "stale"))).toBe(
+      true,
+    );
+    expect(isReadmittableLeadActionDrift(new RunActionAuthorityError("stale_generation", "stale"))).toBe(
+      false,
     );
   });
 

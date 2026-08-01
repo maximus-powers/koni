@@ -1963,6 +1963,43 @@ function validateCrossReferences(
     }
   }
 
+  // A report source resolves its query only while a report is being compiled against a live run,
+  // so a dangling id used to pass configuration validation and then hard-block the run at its
+  // reporting stage. Bind the same references statically instead.
+  for (const [id, report] of registries.reports) {
+    const path = locationOf(state, report, pointer("/registries/reports", id));
+    const source = recordValue(report.source);
+    if (source === undefined) continue;
+    const sourcePath = pointer(path, "source");
+    if (source.query !== undefined) {
+      validateReferenceValue(
+        source.query,
+        pointer(sourcePath, "query"),
+        registries.queries,
+        "query",
+        bag,
+      );
+    }
+    const union = source.union;
+    if (Array.isArray(union)) {
+      union.forEach((item, index) => {
+        const itemPath = pointer(sourcePath, `union/${index}`);
+        const entry = recordValue(item);
+        if (typeof item === "string") {
+          validateReferenceValue(item, itemPath, registries.queries, "query", bag);
+        } else if (entry?.query !== undefined) {
+          validateReferenceValue(
+            entry.query,
+            pointer(itemPath, "query"),
+            registries.queries,
+            "query",
+            bag,
+          );
+        }
+      });
+    }
+  }
+
   for (const [id, operation] of registries.operations) {
     const path = locationOf(state, operation, pointer("/registries/operations", id));
     for (const field of [

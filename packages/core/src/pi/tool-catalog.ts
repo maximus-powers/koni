@@ -347,7 +347,10 @@ const CATALOG: Readonly<Record<KoniToolName, Omit<CatalogEntry, "name">>> = {
       {
         path: pathField,
         content: Type.String({ maxLength: 16 * 1024 * 1024 }),
-        expectedSha256: Type.Union([sha256Field, Type.Null()]),
+        expectedSha256: Type.Union([sha256Field, Type.Null()], {
+          description:
+            "Required precondition: the `sha256` returned by your most recent accepted read of this exact path. Use null only to create a file that does not exist yet. The authority never volunteers this value; it proves you are replacing the bytes you actually observed.",
+        }),
       },
       { additionalProperties: false },
     ),
@@ -364,7 +367,11 @@ const CATALOG: Readonly<Record<KoniToolName, Omit<CatalogEntry, "name">>> = {
         path: pathField,
         oldText: Type.String({ minLength: 1, maxLength: 8 * 1024 * 1024 }),
         newText: Type.String({ maxLength: 8 * 1024 * 1024 }),
-        expectedSha256: sha256Field,
+        expectedSha256: Type.String({
+          pattern: "^sha256:[0-9a-f]{64}$",
+          description:
+            "Required precondition: the `sha256` returned by your most recent accepted read of this exact path. Supply it rather than falling back to a whole-file write; the authority never volunteers this value, because it proves you are editing the bytes you actually observed.",
+        }),
       },
       { additionalProperties: false },
     ),

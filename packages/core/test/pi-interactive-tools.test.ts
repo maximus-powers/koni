@@ -420,11 +420,11 @@ describe("Pi interactive Koni change-proposal tools", () => {
       params: {
         runId: "run-one",
         ticketId: "proposal-one",
+        requestSha256: `sha256:${"7".repeat(64)}`,
         decision: "rejection",
         message: "Preserve the current storage boundary.",
       },
       options: {
-        expectedRevision: 23,
         idempotencyKey: expect.stringMatching(/^interactive:proposal\.decide:/u),
       },
     });
@@ -482,7 +482,9 @@ describe("Pi interactive Koni change-proposal tools", () => {
           };
         }
         if (method === "proposal.decide") {
-          throw new AuthorityClientError("revision_conflict", "proposal changed", { revision: 24 });
+          throw new AuthorityClientError("proposal_revision_conflict", "proposal changed", {
+            revision: 24,
+          });
         }
         throw new Error(`unexpected method ${method}`);
       },
@@ -652,6 +654,7 @@ function proposalProjection() {
     runId: "run-one",
     ticketId: "proposal-one",
     sourceTicketId: "ticket-source",
+    requestSha256: `sha256:${"7".repeat(64)}`,
     status: "proposed",
     title: "Revise the storage contract",
     summary: "Permit encrypted drafts while keeping the public notes API stable.",

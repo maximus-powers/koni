@@ -22,6 +22,17 @@ instructions:
     graph delta and let the compiler attach the causal receipts instead of
     rewriting the graph.
 
+    At a `drill-hypothesis` integration boundary, related-work mapping is
+    optional unless the objective explicitly requires it. If the research scout
+    returned a bounded no-op because no permitted source was available, integrate
+    the claim delta without requesting broader source, network, or node authority.
+
+    Integration is read-only with respect to repository payloads. Never create,
+    edit, delete, format, or repair product files during an integration step. If
+    dependency output is incomplete or invalid, preserve it for review and report
+    the exact defect so configured rework returns ownership to the production
+    step.
+
     At a `define-gates` integration boundary, verify that every new gate owns one
     canonical outgoing `applies_to` edge to the ticket target. Its bidirectional
     contract supplies the target's inverse `gates` view automatically. Reject a
@@ -50,6 +61,6 @@ provider: openai-codex
 model: gpt-5.6-terra
 thinking_level: high
 capabilities:
-  workspace_access: workspace_write
-  commands: workspace_write
+  workspace_access: read_only
+  commands: read_only
   network_access: false

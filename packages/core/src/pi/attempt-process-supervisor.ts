@@ -57,8 +57,13 @@ import {
 // bounded construction timeout only; provider activation and every model request are separately
 // authorized after readiness.
 const DEFAULT_LAUNCH_TIMEOUT_MS = 120_000;
+// A provider turn may legitimately span many settled model responses. Bound silence after the
+// last provider-boundary activity rather than the whole attempt lifetime, otherwise a productive
+// multi-turn worker is killed mid-task and its work is needlessly reissued.
+const DEFAULT_ACTIVATED_OUTCOME_TIMEOUT_MS = 120_000;
 const DEFAULT_ABORT_GRACE_MS = 5_000;
 const DEFAULT_KILL_GRACE_MS = 2_000;
+const MAX_AUTOMATIC_RETIREMENT_RECOVERY_ATTEMPTS = 3;
 const MAX_CONTROL_TEXT_BYTES = 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
 const MAX_CONCURRENT_AUTHORITY_CALLS = 64;
@@ -593,6 +598,7 @@ export interface PiAttemptProcessTimings {
   abortGraceMs?: number;
   termGraceMs?: number;
   killGraceMs?: number;
+  activatedOutcomeTimeoutMs?: number;
 }
 
 export interface PiAttemptProcessRuntime {
@@ -615,7 +621,7 @@ export interface PiAttemptProcessRuntime {
     | "exit_after_dispatch_once"
     | "exit_after_absence_once";
   /** Provider-free seam for the parent-supervised observation-only fallback. */
-  fallbackObserverFault?: "exit_once";
+  fallbackObserverFault?: "exit_once" | "exit_always";
   /** Provider-free seam proving outcome remains withheld until fallback ESRCH observation. */
   fallbackObservationDelayMs?: number;
   /** Provider-free seam: the first in-group guardian exits at an authenticated lifecycle boundary. */
@@ -658,6 +664,7 @@ export class SupervisedPiAttemptProcess {
   public readonly spec: Readonly<AgentLaunchSpec>;
   public readonly ready: Promise<void>;
   public readonly outcome: Promise<ManagedSessionOutcome>;
+  public readonly cleanupFailure: Promise<PiAttemptProcessError>;
 
   readonly #options: PiAttemptProcessOptions;
   readonly #child: ChildProcessWithoutNullStreams;
@@ -672,6 +679,7 @@ export class SupervisedPiAttemptProcess {
   readonly #topologyReadyDeferred = deferred<void>();
   readonly #readyDeferred = deferred<void>();
   readonly #outcomeDeferred = deferred<ManagedSessionOutcome>();
+  readonly #cleanupFailureDeferred = deferred<PiAttemptProcessError>();
   readonly #closedDeferred = deferred<void>();
   readonly #workerExitDeferred = deferred<AttemptWorkerExit>();
   #writeChain: Promise<void> = Promise.resolve();
@@ -691,6 +699,8 @@ export class SupervisedPiAttemptProcess {
   #activationPromise: Promise<void> | undefined;
   #activationControlId: string | undefined;
   #activationToken: string | undefined;
+  #preActivationTimeout: NodeJS.Timeout | undefined;
+  #activatedOutcomeTimeout: NodeJS.Timeout | undefined;
   #admissionPhase: AttemptAdmissionPhase = "constructing";
   #processGroupId: number | undefined;
   #processGroupRetirementProven = false;
@@ -700,6 +710,8 @@ export class SupervisedPiAttemptProcess {
   #retirementSignalObserved = false;
   #retirementSignalAttempt: number | undefined;
   #retirementFailureObserved = false;
+  #retirementRecoveryAttempts = 0;
+  #retirementRecoveryPromise: Promise<void> | undefined;
   #fallbackObservationPromise: Promise<void> | undefined;
   #fallbackObserverFaultConsumed = false;
   #sentinelBuffer = Buffer.alloc(0);
@@ -757,6 +769,7 @@ export class SupervisedPiAttemptProcess {
     this.#processGroupId = child.pid;
     this.ready = this.#readyDeferred.promise;
     this.outcome = this.#outcomeDeferred.promise;
+    this.cleanupFailure = this.#cleanupFailureDeferred.promise;
 
     child.stdout.on("data", (chunk: Buffer) => this.#onStdout(chunk));
     child.stderr.on("data", (chunk: Buffer) => this.#onStderr(chunk));
@@ -810,6 +823,7 @@ export class SupervisedPiAttemptProcess {
     ).catch((error) =>
       this.#failProtocol(new PiAttemptProcessError("launch_timeout", errorText(error))),
     );
+    void this.ready.then(() => this.#armPreActivationDeadline()).catch(() => undefined);
     if (options.runtime?.closeRetirementChannelAfterReady === true) {
       void this.ready
         .then(() => this.#startRetirement(true))
@@ -894,6 +908,10 @@ export class SupervisedPiAttemptProcess {
       throw new PiAttemptProcessError("attempt_aborted", "cannot activate an aborted attempt");
     }
     await this.ready;
+    if (this.#preActivationTimeout !== undefined) {
+      clearTimeout(this.#preActivationTimeout);
+      this.#preActivationTimeout = undefined;
+    }
     if (this.#closed)
       throw new PiAttemptProcessError("attempt_closed", "cannot activate an exited attempt");
     if (this.#admissionPhase !== "ready") {
@@ -917,6 +935,7 @@ export class SupervisedPiAttemptProcess {
       this.#admissionPhase = "activated";
       await this.#send({ type: "control", controlId, action: "activate", activationToken });
       await pending.promise;
+      this.#refreshActivatedOutcomeDeadline();
     } catch (error) {
       this.#admissionPhase = "terminal";
       await this.delete("activation handshake failed").catch(() => undefined);
@@ -925,6 +944,37 @@ export class SupervisedPiAttemptProcess {
       this.#controls.delete(controlId);
       this.#activationControlId = undefined;
     }
+  }
+
+  #refreshActivatedOutcomeDeadline(): void {
+    if (this.#closed || this.#requestedAbort !== undefined) return;
+    if (this.#activatedOutcomeTimeout !== undefined) clearTimeout(this.#activatedOutcomeTimeout);
+    this.#activatedOutcomeTimeout = setTimeout(() => {
+      this.#activatedOutcomeTimeout = undefined;
+      void this.abort("activated attempt exceeded the bounded provider outcome deadline");
+    }, this.#options.timings?.activatedOutcomeTimeoutMs ?? DEFAULT_ACTIVATED_OUTCOME_TIMEOUT_MS);
+    this.#activatedOutcomeTimeout.unref();
+    void this.outcome.finally(() => {
+      if (this.#activatedOutcomeTimeout !== undefined) {
+        clearTimeout(this.#activatedOutcomeTimeout);
+        this.#activatedOutcomeTimeout = undefined;
+      }
+    });
+  }
+
+  #armPreActivationDeadline(): void {
+    if (this.#closed || this.#requestedAbort !== undefined || this.#admissionPhase !== "ready") return;
+    this.#preActivationTimeout = setTimeout(() => {
+      this.#preActivationTimeout = undefined;
+      void this.abort("ready attempt exceeded the bounded activation deadline");
+    }, this.#options.timings?.launchTimeoutMs ?? DEFAULT_LAUNCH_TIMEOUT_MS);
+    this.#preActivationTimeout.unref();
+    void this.outcome.finally(() => {
+      if (this.#preActivationTimeout !== undefined) {
+        clearTimeout(this.#preActivationTimeout);
+        this.#preActivationTimeout = undefined;
+      }
+    });
   }
 
   #queueAuthorizedMessage(message: KoniAuthorizedMessage): Promise<void> {
@@ -1344,6 +1394,7 @@ export class SupervisedPiAttemptProcess {
         return { released: true };
       }
       case "reserve_provider_request": {
+        this.#refreshActivatedOutcomeDeadline();
         if (provider.reserveProviderRequest === undefined) {
           throw new PiAttemptProcessError(
             "provider_reservation",
@@ -1358,6 +1409,7 @@ export class SupervisedPiAttemptProcess {
         return structuredClone(reserved);
       }
       case "reconcile_provider_request": {
+        this.#refreshActivatedOutcomeDeadline();
         if (provider.reconcileProviderRequest === undefined) {
           throw new PiAttemptProcessError(
             "provider_settlement",
@@ -1830,7 +1882,13 @@ export class SupervisedPiAttemptProcess {
     const attempt = ++this.#retirementAttempt;
     const result = deferred<void>();
     this.#retirementPending = { attempt, result };
-    if (this.#transportClosed) {
+    if (this.#retirementSignalObserved) {
+      // The in-group guardian already crossed the sole destructive boundary. Every retry from
+      // here is observation-only, so automatic recovery can never signal a recycled numeric PGID.
+      void this.#startFallbackObservation()
+        .then(() => result.resolve())
+        .catch((error) => result.reject(error));
+    } else if (this.#transportClosed) {
       void this.#observeAfterTransportClose(attempt).catch(() => undefined);
     } else {
       await new Promise<void>((resolve, reject) => {
@@ -1868,11 +1926,42 @@ export class SupervisedPiAttemptProcess {
   }
 
   #recordRetirementFailure(error: unknown): void {
+    if (
+      this.#reportedOutcome !== undefined &&
+      !this.#closed &&
+      this.#retirementRecoveryAttempts < MAX_AUTOMATIC_RETIREMENT_RECOVERY_ATTEMPTS
+    ) {
+      if (this.#retirementRecoveryPromise !== undefined) return;
+      this.#retirementRecoveryAttempts += 1;
+      const recovery = new Promise<void>((resolve) => setImmediate(resolve)).then(async () => {
+        // Let the rejected single-flight retirement release its slot before re-driving it.
+        await this.#retirementPromise?.catch(() => undefined);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        await this.#startRetirement(false);
+      });
+      this.#retirementRecoveryPromise = recovery;
+      void recovery.then(
+        () => {
+          if (this.#retirementRecoveryPromise === recovery) {
+            this.#retirementRecoveryPromise = undefined;
+          }
+        },
+        (recoveryError) => {
+          if (this.#retirementRecoveryPromise === recovery) {
+            this.#retirementRecoveryPromise = undefined;
+          }
+          this.#recordRetirementFailure(recoveryError);
+        },
+      );
+      return;
+    }
     this.#retirementFailureObserved = true;
-    this.#protocolFailure ??= new PiAttemptProcessError(
+    const failure = new PiAttemptProcessError(
       "termination_unconfirmed",
       errorText(error),
     );
+    this.#protocolFailure ??= failure;
+    this.#cleanupFailureDeferred.resolve(failure);
     this.#readyDeferred.reject(this.#protocolFailure);
   }
 
@@ -1909,8 +1998,9 @@ export class SupervisedPiAttemptProcess {
         ? Math.min(configuredDelay, timeoutMs - 1)
         : 0;
     const injectFault =
-      this.#options.runtime?.fallbackObserverFault === "exit_once" &&
-      !this.#fallbackObserverFaultConsumed;
+      this.#options.runtime?.fallbackObserverFault === "exit_always" ||
+      (this.#options.runtime?.fallbackObserverFault === "exit_once" &&
+        !this.#fallbackObserverFaultConsumed);
     if (injectFault) this.#fallbackObserverFaultConsumed = true;
     const observation = new Promise<void>((resolve, reject) => {
       const observer = spawn(

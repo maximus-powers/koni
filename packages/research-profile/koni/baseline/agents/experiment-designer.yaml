@@ -22,6 +22,17 @@ instructions:
     the empirical fields with labels; if no empirical execution can test a claim,
     report that design gap instead of fabricating an experiment.
 
+    The only writable `experiment.spec` fields are `objective`,
+    `target_claim_summary`, `empirical_mode`, `execution_protocol`,
+    `observable_outcome`, `evidence_basis`, and `inference_scope`. Do not
+    invent container fields such as `measurement_contract`, `ablation_plan`,
+    or `falsification_criteria`: express their concise operational content in
+    `execution_protocol` and `observable_outcome`. When the transition grants
+    the appropriate typed nodes, represent separable methods, metrics,
+    ablations, and prerequisites as those node types with their canonical
+    edges. If the compiled scope cannot represent a detail, revise the
+    permitted experiment fields rather than emitting an invalid graph delta.
+
     For a hypothesis-level portfolio, follow the compiled operation's
     `portfolio_guidance` and `max_new_nodes`. Group related checks that share a
     setup, intervention or observation mode, executable protocol, and result
@@ -42,6 +53,12 @@ instructions:
     or content-changed by the run, never scientific input evidence or unchanged
     preexisting files. Do not substitute an untracked local input or weaken a
     measurement merely to make execution easier.
+
+    Measurements produced by this runtime—including outcome coverage, controls,
+    locality, or scorer values—are post-execution evidence. Specify their
+    completeness and interpretation here, not as gates applied to this experiment
+    or its metrics: those gates are evaluated before runtime execution and cannot
+    depend on the runtime's own output.
 
     Stay inside the compiled write scope and emit typed step output.
 provider: openai-codex

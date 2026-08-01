@@ -190,14 +190,11 @@ export function reduceRunLifecycle(
       closeActiveInterval(state, event.atMs);
       break;
     case "plan_revision_requested": {
-      // A run blocked at the approval/compile boundary (an approved plan that fails deterministic
-      // compilation) has no path forward except a revised plan: retry re-runs the identical compile
-      // and fails identically. Allow the operator to steer a fresh planning attempt directly from
-      // that block instead of dead-ending the run.
-      const blockedAtApproval =
-        current.phase === "blocked" &&
-        (current.resumePhase === "approving" || current.resumePhase === "awaiting_approval");
-      if (!blockedAtApproval) requirePhase(current, event, ["awaiting_approval"]);
+      // A blocked approved plan can be structurally unsound even when compilation succeeded
+      // (for example, a runtime-produced receipt modeled as its own prerequisite). Retrying
+      // preserves that graph and replays the same blocker, so permit an explicit fresh plan
+      // revision from any blocked phase while retaining the prior plan/attempts for audit.
+      if (current.phase !== "blocked") requirePhase(current, event, ["awaiting_approval"]);
       state.phase = "planning";
       state.planRevision += 1;
       state.blocker = undefined;
@@ -294,6 +291,7 @@ export function reduceRunLifecycle(
       requirePhase(current, event, ["paused"]);
       state.phase = state.resumePhase ?? "executing";
       state.resumePhase = undefined;
+      state.blocker = undefined;
       state.runningIntent = true;
       if (new Set<RunPhase>(["planning", "executing", "verifying"]).has(state.phase)) {
         state.activeSinceMs = event.atMs;

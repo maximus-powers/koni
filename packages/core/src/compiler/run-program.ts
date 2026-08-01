@@ -188,6 +188,7 @@ import {
   RULE_AUTHORITY_EVIDENCE_PROTOCOL,
   createProductionRuleDomainAdapter,
   createRuleAuthorityEvidence,
+  prepareFilesystemManifestAcceptance,
   ruleInputGraphSha256,
   rulePredicateBindingNames,
   rulePredicateEvidenceKey,
@@ -363,6 +364,7 @@ interface PlanningGraphSeed {
 
 interface AssignmentOutput {
   status: "completed" | "failed";
+  reviewVerdict?: "approved" | "rejected" | "changes_requested";
   summary?: string;
   blocker?: string;
   graphDelta?: GraphDelta | null;
@@ -1036,7 +1038,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         "persona_invalid",
         `persona ${personaId} is not executable`,
       );
-      const provider = selected?.provider ?? persona.provider ?? "openai-codex";
+      const provider = requiredPersonaProvider(selected?.provider ?? persona.provider, personaId);
       const model = requiredNonempty(persona.model, `persona ${personaId} model`);
       const thinkingLevel = requireThinkingLevel(persona.thinking_level, `persona ${personaId}`);
       agents[personaId] = { provider, model, thinkingLevel };
@@ -1224,7 +1226,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       `persona ${descriptor.personaId} is not executable`,
     );
     const selection = input.run.executionConfig?.agents[descriptor.personaId];
-    const provider = selection?.provider ?? persona.provider ?? "openai-codex";
+    const provider = requiredPersonaProvider(
+      selection?.provider ?? persona.provider,
+      descriptor.personaId,
+    );
     const model = requiredNonempty(
       selection?.model ?? persona.model,
       `persona ${descriptor.personaId} model`,
@@ -1667,14 +1672,27 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
           relations.add(edge.inverse);
       }
       for (const relation of request.relations) {
-        if (!relations.has(relation))
-          fail("graph_context_relation", `unknown configured graph relation ${relation}`);
+        if (!relations.has(relation)) {
+          // Enumerate the configured set: a guessed relation name otherwise costs a whole
+          // provider turn to discover something the compiler already knows exactly.
+          fail(
+            "graph_context_relation",
+            `unknown configured graph relation ${relation}; configured relations are ${[...relations].sort(compareText).join(", ")}`,
+          );
+        }
       }
     }
     if (request?.nodeTypes !== undefined) {
       for (const type of request.nodeTypes) {
         if (pinned.configuration.registries.node_types[type] === undefined) {
-          fail("graph_context_node_type", `unknown configured graph node type ${type}`);
+          fail(
+            "graph_context_node_type",
+            `unknown configured graph node type ${type}; configured node types are ${Object.keys(
+              pinned.configuration.registries.node_types,
+            )
+              .sort(compareText)
+              .join(", ")}`,
+          );
         }
       }
     }
@@ -1951,6 +1969,25 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
+    let priorDefinitionsSha256: Sha256Digest | undefined;
+    try {
+      // A revised approved plan deliberately supersedes definitions bound to the
+      // prior graph revision. We need their byte hash for CAS replacement, not a
+      // semantic read that would (correctly) reject the obsolete binding.
+      priorDefinitionsSha256 = rawSha256(
+        await readFile(path.join(this.#stateRoot, ticketDefinitionsPath(run.id))),
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    let priorEvaluationSha256: Sha256Digest | undefined;
+    try {
+      priorEvaluationSha256 = rawSha256(
+        await readFile(path.join(this.#stateRoot, evaluationPath(run.id, graphRevision))),
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
     const priorContext =
       priorGraph === undefined
         ? createGraphContextualState(runRootContextId(run.id), run.workingSpecOwnerId)
@@ -1986,12 +2023,12 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         {
           path: ticketDefinitionsPath(run.id),
           bytes: encodeArtifact(definitions),
-          expectedSha256: null,
+          expectedSha256: priorDefinitionsSha256 ?? null,
         },
         {
           path: evaluationPath(run.id, graphRevision),
           bytes: encodeArtifact(evaluation),
-          expectedSha256: null,
+          expectedSha256: priorEvaluationSha256 ?? null,
         },
       ],
     };
@@ -2044,6 +2081,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       input.output,
       step.graph_mutation,
       assignmentChangeControlContract(executionCatalog, executionBinding, step.id),
+      step.kind,
     );
     if (result.status === "failed") {
       return { outcome: { status: "failed", blocker: result.blocker! } };
@@ -2078,13 +2116,14 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       title: string;
     }> = [];
     if (result.graphDelta !== undefined && result.graphDelta !== null) {
-      validateAgentGraphDelta(pinned.configuration, graph, synthetic, step, result.graphDelta);
+      const normalizedDelta = normalizeAgentGraphRelationships(graph, result.graphDelta);
+      validateAgentGraphDelta(pinned.configuration, graph, synthetic, step, normalizedDelta);
       const effectiveDelta = materializeCompilerFieldSources(
         pinned.configuration,
         input.run,
-        result.graphDelta,
+        normalizedDelta,
       );
-      const applied = graph.apply(effectiveDelta);
+      const applied = graph.applyRebased(effectiveDelta);
       assertOperationGraphMutationPolicy(
         executionCatalog,
         executionBinding,
@@ -2444,7 +2483,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     assertExistingControlTargets(
       graph,
       input.changeControl.targetNodeIds,
-      new Set([...(source.readNodeIds ?? []), ...(source.writeNodeIds ?? [])]),
+      new Set(graph.nodes().map((node) => node.id)),
       "proposal request",
     );
     const definition = configuredControlTicketDefinition({
@@ -2992,10 +3031,16 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const ownerPersonaId = run.workingSpecOwnerId;
     if (ownerPersonaId === undefined) return prior;
     if (prior.canonicalWorkingSpecId !== undefined) {
-      fail(
-        "working_spec_baseline_exists",
-        "approved run graph already has a canonical working-spec baseline",
-      );
+      // A plan revision recompiles an already-approved run. Its existing canonical
+      // baseline is immutable provenance for the prior approval and must be reused,
+      // not treated as a duplicate initialization attempt.
+      if (prior.ownerPersonaId !== undefined && prior.ownerPersonaId !== ownerPersonaId) {
+        fail(
+          "working_spec_owner_drift",
+          "durable graph owner differs from the owner pinned at run creation",
+        );
+      }
+      return prior;
     }
     if (prior.ownerPersonaId !== undefined && prior.ownerPersonaId !== ownerPersonaId) {
       fail(
@@ -3882,7 +3927,15 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       projectRoot: path.resolve(run.git.run.worktree),
       ...(evidence === undefined ? {} : { evidence }),
     });
-    return evaluateConfiguredRules({ configuration, graph }, { adapter });
+    const evaluated = evaluateConfiguredRules({ configuration, graph }, { adapter });
+    if (!evaluated.ok) return evaluated;
+    const repaired = generatedAssetImplementationFallback(configuration, graph, evaluated.value);
+    return repaired === undefined
+      ? evaluated
+      : {
+          ...evaluated,
+          value: repaired,
+        };
   }
 
   /**
@@ -4397,7 +4450,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     }
     if (optionalRecord(terminalValue)?.status !== "completed") return undefined;
     if (!Array.isArray(context.graph)) return undefined;
-    const reviewedNodes = context.graph.map((value) => parseGraphNode(value));
+    const reviewedNodes = context.graph.map((value) => parseContextGraphNode(value));
     if (new Set(reviewedNodes.map((node) => node.id)).size !== reviewedNodes.length)
       return undefined;
     return { definition, step: contextStep, reviewedNodes, context };
@@ -4425,6 +4478,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       );
     }
     const executionCatalog = requireExecutionSemanticCatalog(configuration);
+    // A gate-policy binding can name a gate whose per-gate contract this very step is supposed to
+    // author, so resolving it eagerly deadlocks the ticket that would satisfy it: the run blocks
+    // before the authoring attempt can start. Checks the step declares itself still fail closed;
+    // a purely auto-bound gate check degrades to an explicit instruction instead.
     const plans = await Promise.all(
       ids.map((requestedCheckId) =>
         resolveConfiguredAgentCheck({
@@ -5343,6 +5400,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         parsed,
         step.graph_mutation,
         assignmentChangeControlContract(executionCatalog, binding, step.id),
+        step.kind,
       );
       if (
         output.status !== "completed" ||
@@ -5447,7 +5505,8 @@ function sameScopeContinuationPrompt(
   return [
     initialPrompt,
     "This is an authenticated same-scope continuation. The inherited Pi conversation is the repository and execution ledger: reuse its successful reads, searches, checks, and decisions instead of repeating them.",
-    "The parent terminal or provider-error turn was not accepted output. Discard any speculative reasoning from that failed turn, resolve the remaining action directly from the already-retained evidence and current objective, then submit the exact required terminal object. Perform another repository call only when one specific missing fact makes correct completion impossible.",
+    "Discard any speculative reasoning from that failed turn; retain only authenticated repository results, compiler constraints, and the unfinished objective.",
+    "The parent terminal or provider-error turn was not accepted output. A terminal-tool receipt visible in inherited history belongs to the parent attempt and is invalid for this attempt: do not answer that it was already submitted. Resolve the remaining action directly from the already-retained evidence and current objective, then invoke the required terminal tool exactly once in this attempt. Perform another repository call only when one specific missing fact makes correct completion impossible.",
     // The authority-classified cause of the parent's death is metadata the inherited transcript
     // never contains — without it, forks re-derived the failure from scratch or repeated it
     // (observed live: identical 40-turn loops across fork generations). Name it explicitly.
@@ -5455,6 +5514,11 @@ function sameScopeContinuationPrompt(
       ? []
       : [
           `The parent attempt ended for this authority-recorded reason: ${parentFailure}. Account for it directly instead of re-deriving it: an exhausted budget means finish minimal remaining work and submit immediately; a transient provider failure means your prior work is intact, so proceed straight to submission; a tool-contract rejection means correct that exact call rather than retrying variations.`,
+          ...(parentFailure.includes("input token budget exceeded")
+            ? [
+                "Do not reissue an exact repository discovery call that already succeeded or was rejected as a duplicate. Treat its retained result or rejection as final; make at most one narrower request only for one decisive missing fact.",
+              ]
+            : []),
         ]),
   ].join("\n\n");
 }
@@ -6321,7 +6385,8 @@ function ticketAttempt(
   const writeNodeIds = [...(step.write_node_ids ?? definition.scope.write_node_ids)];
   const contextNodes = graph
     .nodes()
-    .filter((node) => new Set([...readNodeIds, ...writeNodeIds]).has(node.id));
+    .filter((node) => new Set([...readNodeIds, ...writeNodeIds]).has(node.id))
+    .map((node) => ({ ...node, nodeHash: canonicalHash(node) }));
   const mutationContract = assignmentMutationContract(configuration, definition);
   const compilerOwnedFields = assignmentCompilerOwnedFields(configuration, definition);
   const predecessorHasCommandEvidence = reviewPredecessorHasCommandEvidence(predecessorExecution);
@@ -6349,6 +6414,16 @@ function ticketAttempt(
           approvalSha256: proposalControl.proposalApprovalSha256,
           event: structuredClone(proposalControl.proposalDecision),
         }
+      : undefined;
+  const proposalOperation = executionCatalog.operations[definition.operation_registry_id];
+  const proposalApplicationOperations =
+    proposalOperation?.changeControl.role === "proposal"
+      ? proposalOperation.changeControl.applicationOperations
+      : [];
+  const approvedApplicationProposal =
+    proposalOperation?.changeControl.role === "application" &&
+    durableTicket?.executionControl?.sourceProposalTicketId !== undefined
+      ? run.tickets[durableTicket.executionControl.sourceProposalTicketId]
       : undefined;
   if (
     executionCatalog.operations[definition.operation_registry_id]?.changeControl.role ===
@@ -6429,12 +6504,34 @@ function ticketAttempt(
         ? []
         : [
             `Operator approval (${proposalApproval.approvalSha256}): ${proposalApproval.event.message ?? "Approved."}`,
+            "For this approved proposal, submit the exact authorized changeApplication when the request remains unsatisfied. Do not select no-op while the approved request remains unsatisfied; no-op is allowed only when the requested state is already satisfied in the current scoped graph.",
+            ...(proposalApplicationOperations.length === 0
+              ? []
+              : [
+                  `Use changeApplication.operation ${proposalApplicationOperations.map((operation) => `\"${operation}\"`).join(" or ")}; do not use the proposal operation name as an application operation.`,
+                ]),
+          ]),
+      ...(approvedApplicationProposal === undefined
+        ? []
+        : [
+            `The approved change request defines the required state for this application: ${approvedApplicationProposal.summary}\n\nAuthorized target nodes: ${approvedApplicationProposal.targetNodeIds.join(", ")}.`,
+            "Apply a non-empty scoped semantic graph delta that makes that request true unless the current scoped graph already satisfies it. A prior proposal-selection summary may describe its read-only proposal boundary; it is not an instruction to replay an empty delta. Do not treat an unsatisfied request as a no-op.",
           ]),
       ...(compilerOwnedFields.length === 0
         ? []
         : [
             `Compiler-owned graph fields are materialized automatically. Omit these fields entirely from every node you author; never guess or copy them from context: ${compilerOwnedFields.join(", ")}.`,
           ]),
+      ...(step.graph_mutation === "allowed"
+        ? [
+            "For each existing node upsert, use that node's exact nodeHash from the injected context as expectedNodeHash. Never guess or derive a node hash; if it is absent, use koni_graph_context before submitting.",
+          ]
+        : []),
+      ...(step.kind === "review"
+        ? [
+            'Return an explicit typed review verdict. Use status "completed" with reviewVerdict "approved" only when the work passes. If any material finding remains, use status "failed" with reviewVerdict "rejected" and put the precise repair contract in blocker. For a genuinely out-of-scope repair, use reviewVerdict "changes_requested" with the authorized upstreamChangeRequest.',
+          ]
+        : []),
       "Use the automatically injected authority context. Return a short outcome summary and only the graph delta permitted by this step. Do not author compiler-owned state.",
     ].join("\n\n"),
     context: {
@@ -6471,6 +6568,7 @@ function ticketAttempt(
     terminalSchema: assignmentTerminalSchema(
       step.graph_mutation,
       assignmentChangeControlContract(executionCatalog, executionPolicyBinding, step.id),
+      step.kind,
     ),
     executionPolicyBinding,
     gatePolicyContexts: boundGateContexts,
@@ -8004,6 +8102,7 @@ function assignmentTerminalSchema(
     allowUpstreamRequest: false,
     requireChangeApplication: false,
   },
+  stepKind: DerivedWorkflowStep["kind"] = "agent",
 ): TSchema {
   const graphDelta = Type.Object(
     {
@@ -8068,6 +8167,12 @@ function assignmentTerminalSchema(
     }),
   };
   const normalFields = { ...baseCompleteFields };
+  if (stepKind === "review") {
+    normalFields.reviewVerdict = Type.Literal("approved", {
+      description:
+        'Required for a passing review. Use "approved" only when no material finding remains.',
+    });
+  }
   if (policy === "required") normalFields.graphDelta = graphDelta;
   else if (policy === "allowed")
     normalFields.graphDelta = Type.Optional(Type.Union([graphDelta, Type.Null()]));
@@ -8080,6 +8185,14 @@ function assignmentTerminalSchema(
       Type.Object(
         {
           ...baseCompleteFields,
+          ...(stepKind === "review"
+            ? {
+                reviewVerdict: Type.Literal("changes_requested", {
+                  description:
+                    "Required when a review identifies a repair outside the current grant and requests upstream authority.",
+                }),
+              }
+            : {}),
           upstreamChangeRequest: Type.Object(
             {
               targetNodeIds: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), {
@@ -8102,6 +8215,7 @@ function assignmentTerminalSchema(
       Type.Object(
         {
           ...baseCompleteFields,
+          ...(stepKind === "review" ? { reviewVerdict: Type.Literal("approved") } : {}),
           changeApplication: Type.Object(
             {
               operation: Type.String({ minLength: 1, maxLength: 128 }),
@@ -8125,6 +8239,14 @@ function assignmentTerminalSchema(
         description:
           'Required. The exact literal string "failed" — use it only when the objective is genuinely impossible within this grant, not to probe the schema.',
       }),
+      ...(stepKind === "review"
+        ? {
+            reviewVerdict: Type.Literal("rejected", {
+              description:
+                "Required for a rejected review. The blocker is the deterministic repair contract.",
+            }),
+          }
+        : {}),
       blocker: Type.String({
         minLength: 1,
         maxLength: 64 * 1024,
@@ -8266,6 +8388,50 @@ function parsePlanningSeed(value: unknown): PlanningGraphSeed {
   return { rootSpec, nodes, edges };
 }
 
+export function remapPlanningSeedGateContractKeys(
+  nodes: readonly PlanningGraphSeed["nodes"][number][],
+  gateIds: ReadonlyMap<string, string>,
+): PlanningGraphSeed["nodes"] {
+  return nodes.map((node) => {
+    const contracts = node.spec.gate_contracts;
+    if (!isRecord(contracts)) return structuredClone(node);
+    const remapped: Record<string, ConfigurationValue> = {};
+    for (const [key, contract] of Object.entries(contracts)) {
+      const resolved = gateIds.get(key) ?? key;
+      if (Object.hasOwn(remapped, resolved)) {
+        fail(
+          "graph_seed_gate_contract",
+          `graph seed node ${node.key} defines duplicate gate contract ${resolved}`,
+        );
+      }
+      remapped[resolved] = structuredClone(contract);
+    }
+    return {
+      ...structuredClone(node),
+      spec: { ...structuredClone(node.spec), gate_contracts: remapped as JsonValue },
+    };
+  });
+}
+
+function assertDevelopmentOnlySeedScope(run: RunRecord, seed: PlanningGraphSeed): void {
+  const developmentOnly = /\bdevelopment(?:-|\s)only\b/iu.test(run.objective);
+  const sealedFinalHoldout = /\bsealed\s+final\s+holdouts?\b/iu.test(run.objective);
+  if (!developmentOnly || !sealedFinalHoldout) return;
+
+  const prohibited =
+    /\bholdouts?\b|\bheld[-\s]?out\b|\bheldout\b|\bfinal[-_\s]?(?:split|subjects?)\b/iu;
+  const graphText = JSON.stringify({
+    rootSpec: seed.rootSpec,
+    nodes: seed.nodes,
+    edges: seed.edges,
+  });
+  if (!prohibited.test(graphText)) return;
+  fail(
+    "graph_seed_sealed_holdout",
+    "development-only objectives that prohibit sealed final holdouts may not seed holdout or final-split graph content",
+  );
+}
+
 function compilePlanningSeed(
   configuration: CompiledConfiguration,
   run: RunRecord,
@@ -8273,6 +8439,7 @@ function compilePlanningSeed(
   fullPlan: Record<PlanDomain, string>,
   projectRoot: string,
 ): TypedGraph {
+  assertDevelopmentOnlySeedScope(run, seed);
   const schema = requireGraphSchema(configuration);
   const initialization = configuration.behavior.profile.initialization;
   const rootType = requiredNonempty(
@@ -8319,6 +8486,14 @@ function compilePlanningSeed(
       `${node.type}-${digestBody(canonicalHash([run.id, node.key, node.type])).slice(0, 20)}`,
     );
   }
+  const materializedNodes = remapPlanningSeedGateContractKeys(
+    seed.nodes,
+    new Map(
+      seed.nodes
+        .filter((node) => node.type === "gate")
+        .map((node) => [node.key, ids.get(node.key)!]),
+    ),
+  );
   const nodes: GraphNode[] = [
     {
       schema_version: "1.0",
@@ -8339,7 +8514,7 @@ function compilePlanningSeed(
       annotations: {},
     },
   ];
-  for (const source of seed.nodes) {
+  for (const source of materializedNodes) {
     const definition = schema.nodeTypes.get(source.type)!;
     rejectCompilerOwnedSpec(
       definition.compiler_owned_fields ?? [],
@@ -8407,6 +8582,19 @@ function compileDirectInitialGraph(
   const rootDefinition = schema.nodeTypes.get(rootType);
   if (rootDefinition === undefined)
     fail("direct_approval_root_type", `unknown root node type ${rootType}`);
+  // Direct runs intentionally skip the planner, but Research roots still require a
+  // declarative scientific field. Preserve the compiler-owned intake objective and
+  // use the separately collected proposition when the run type provides one.
+  const directScientificField =
+    rootDefinition.fields.hypothesis !== undefined
+      ? "hypothesis"
+      : rootDefinition.fields.statement !== undefined
+        ? "statement"
+        : undefined;
+  const directScientificProposition =
+    typeof run.intake.hypothesis === "string" && run.intake.hypothesis.trim().length > 0
+      ? run.intake.hypothesis.trim()
+      : run.objective;
   const rootId = `root-${digestBody(canonicalHash([run.id, rootType])).slice(0, 20)}`;
   try {
     const graph = new TypedGraph(
@@ -8421,7 +8609,12 @@ function compileDirectInitialGraph(
             initialization.rootStatus,
             "compiled initialization root status",
           ),
-          spec: { [goalField]: run.objective },
+          spec: {
+            [goalField]: run.objective,
+            ...(directScientificField === undefined
+              ? {}
+              : { [directScientificField]: directScientificProposition }),
+          },
           edges: {},
           annotations: { run_root: true },
         },
@@ -8442,6 +8635,75 @@ function compileDirectInitialGraph(
   }
 }
 
+/**
+ * Collapse the graph delta's redundant relationship views into the canonical edge mutation lane.
+ *
+ * A node upsert must carry a complete node for strict per-node CAS, so models naturally express a
+ * relationship change both by editing `node.edges` and by using `addEdges`/`removeEdges`. Treat the
+ * former as an ergonomic view of the latter, then restore the authoritative stored edge snapshot
+ * before applying the upsert. The node hash check remains exact, while edge scope, direction,
+ * deletion policy, predicates, and graph validation still run through their existing compiler
+ * path. Annotations are deliberately not normalized because they have separate authority.
+ */
+function normalizeAgentGraphRelationships(graph: TypedGraph, delta: GraphDelta): GraphDelta {
+  const normalized = structuredClone(delta);
+  const explicitAdds = new Set(normalized.addEdges.map(graphEdgeKey));
+  const explicitRemovals = new Set(normalized.removeEdges.map(graphEdgeKey));
+  const addKeys = new Set(explicitAdds);
+  const removeKeys = new Set(explicitRemovals);
+
+  const addEdge = (edge: GraphEdge): void => {
+    const key = graphEdgeKey(edge);
+    if (explicitRemovals.has(key)) {
+      fail(
+        "graph_delta_edge_conflict",
+        `relationship ${edge.source}.${edge.relation} -> ${edge.target} is both added and removed`,
+      );
+    }
+    if (!addKeys.has(key)) {
+      normalized.addEdges.push(edge);
+      addKeys.add(key);
+    }
+  };
+  const removeEdge = (edge: GraphEdge): void => {
+    const key = graphEdgeKey(edge);
+    if (explicitAdds.has(key)) {
+      fail(
+        "graph_delta_edge_conflict",
+        `relationship ${edge.source}.${edge.relation} -> ${edge.target} is both added and removed`,
+      );
+    }
+    if (!removeKeys.has(key)) {
+      normalized.removeEdges.push(edge);
+      removeKeys.add(key);
+    }
+  };
+
+  for (const mutation of normalized.upsertNodes) {
+    const existing = graph.node(mutation.node.id);
+    const priorEdges = existing?.edges ?? {};
+    const requestedEdges = mutation.node.edges;
+    const relations = new Set([...Object.keys(priorEdges), ...Object.keys(requestedEdges)]);
+    for (const relation of [...relations].sort(compareText)) {
+      const priorTargets = new Set(priorEdges[relation] ?? []);
+      const requestedTargets = new Set(requestedEdges[relation] ?? []);
+      for (const target of [...requestedTargets].sort(compareText)) {
+        if (!priorTargets.has(target)) addEdge({ source: mutation.node.id, relation, target });
+      }
+      for (const target of [...priorTargets].sort(compareText)) {
+        if (!requestedTargets.has(target))
+          removeEdge({ source: mutation.node.id, relation, target });
+      }
+    }
+    mutation.node.edges = structuredClone(priorEdges);
+  }
+  return normalized;
+}
+
+function graphEdgeKey(edge: GraphEdge): string {
+  return `${edge.source}\0${edge.relation}\0${edge.target}`;
+}
+
 function validateAgentGraphDelta(
   configuration: CompiledConfiguration,
   graph: TypedGraph,
@@ -8449,8 +8711,15 @@ function validateAgentGraphDelta(
   step: DerivedWorkflowStep,
   delta: GraphDelta,
 ): void {
-  if (delta.expectedGraphHash !== graph.hash)
-    fail("graph_delta_cas", "agent graph delta targets a stale graph hash");
+  // The whole-graph hash may have moved while the worker was in flight (a disjoint sibling ticket
+  // committed its own compile). That is not a conflict: every check below validates each mutation
+  // against the CURRENT `graph`, and `applyRebased` re-runs the per-node expectedNodeHash CAS, so a
+  // node this delta actually touches changing underneath it still fails. The scheduler forbids a
+  // concurrent ticket from writing any node in this delta's read/write scope, so a moved
+  // whole-graph hash reflects only untouched sibling work — rebase instead of wedging the run.
+  if (delta.expectedGraphHash !== graph.hash && !isSha256Digest(delta.expectedGraphHash)) {
+    fail("graph_delta_cas", "agent graph delta carries no valid expected graph hash");
+  }
   const operation = configuration.registries.operations[ticket.operation_registry_id];
   if (operation === undefined && !ticket.rule_id.startsWith("compiler."))
     fail("operation_missing", "ticket operation disappeared from pinned config");
@@ -8613,10 +8882,53 @@ export async function applyReviewEffects(input: {
   const { configuration, graph, ticket, step } = input;
   if (step.kind !== "review") return { graph, changes: [] };
   const operation = configuration.registries.operations[ticket.operation_registry_id];
-  if (operation === undefined || !Array.isArray(operation.review_effects))
-    return { graph, changes: [] };
+  if (operation === undefined) return { graph, changes: [] };
   let current = graph;
   const changes: Array<{ kind: "modified"; nodeId: string; nodeType: string; title: string }> = [];
+  if (operation.operation === "implement-asset") {
+    for (const nodeId of input.candidateNodeIds) {
+      const node = current.node(nodeId);
+      if (node === undefined) continue;
+      const acceptance = await prepareFilesystemManifestAcceptance(
+        configuration,
+        node,
+        input.projectRoot,
+      );
+      if (acceptance === undefined) continue;
+      if (acceptance.blockingErrors.length > 0) {
+        fail(
+          "filesystem_manifest_acceptance",
+          `review cannot accept ${node.id}: ${acceptance.blockingErrors.join("; ")}`,
+        );
+      }
+      const owned = new Set(
+        stringArray(
+          configuration.registries.node_types[node.type]?.compiler_owned_fields,
+          `node type ${node.type} compiler-owned fields`,
+        ),
+      );
+      if (!owned.has(acceptance.outputField)) {
+        fail(
+          "filesystem_manifest_authority",
+          `filesystem manifest output ${acceptance.outputField} is not compiler-owned for ${node.type}`,
+        );
+      }
+      const updated = structuredClone(node);
+      setNodeField(updated, acceptance.outputField, acceptance.manifest as unknown as JsonValue);
+      if (canonicalHash(updated) === canonicalHash(node)) continue;
+      const applied = current.apply({
+        protocol: "koni.graph-delta.v1",
+        expectedGraphHash: current.hash,
+        upsertNodes: [{ node: updated, expectedNodeHash: canonicalHash(node) }],
+        deleteNodes: [],
+        addEdges: [],
+        removeEdges: [],
+      });
+      current = applied.graph;
+      changes.push({ kind: "modified", nodeId: node.id, nodeType: node.type, title: node.title });
+    }
+  }
+  if (!Array.isArray(operation.review_effects)) return { graph: current, changes };
   for (const rawEffect of operation.review_effects) {
     const effect = requiredRecord(
       rawEffect,
@@ -8982,6 +9294,27 @@ function setNestedSpec(spec: Record<string, JsonValue>, field: string, value: Js
   cursor[segments.at(-1)!] = structuredClone(value);
 }
 
+function setNodeField(node: GraphNode, field: string, value: JsonValue): void {
+  const segments = field.split(".");
+  if (segments.some((segment) => segment.length === 0)) {
+    fail("compiler_field_path", `compiler-owned field path ${field} is invalid`);
+  }
+  let current = node as unknown as Record<string, JsonValue>;
+  for (const segment of segments.slice(0, -1)) {
+    const existing = current[segment];
+    if (
+      existing === undefined ||
+      existing === null ||
+      Array.isArray(existing) ||
+      typeof existing !== "object"
+    ) {
+      current[segment] = {};
+    }
+    current = current[segment] as Record<string, JsonValue>;
+  }
+  current[segments.at(-1)!] = structuredClone(value);
+}
+
 function parseAssignmentOutput(
   value: unknown,
   policy: DerivedWorkflowStep["graph_mutation"],
@@ -8990,12 +9323,21 @@ function parseAssignmentOutput(
     allowUpstreamRequest: false,
     requireChangeApplication: false,
   },
+  stepKind: DerivedWorkflowStep["kind"] = "agent",
 ): AssignmentOutput {
   const root = requiredRecord(value, "assignment output");
   if (root.status === "failed") {
-    assertExactFields(root, ["status", "blocker"], "failed assignment output");
+    assertExactFields(
+      root,
+      stepKind === "review" ? ["status", "reviewVerdict", "blocker"] : ["status", "blocker"],
+      "failed assignment output",
+    );
+    if (stepKind === "review" && root.reviewVerdict !== "rejected") {
+      fail("review_verdict", 'a failed review must declare reviewVerdict "rejected"');
+    }
     return {
       status: "failed",
+      ...(stepKind === "review" ? { reviewVerdict: "rejected" as const } : {}),
       blocker: boundedText(root.blocker, "assignment blocker", 64 * 1024),
     };
   }
@@ -9033,13 +9375,29 @@ function parseAssignmentOutput(
       "typed change-control output cannot also contain graphDelta",
     );
   }
+  if (stepKind === "review") {
+    const expectedVerdict = hasUpstreamRequest ? "changes_requested" : "approved";
+    if (root.reviewVerdict !== expectedVerdict) {
+      fail("review_verdict", `a completed review must declare reviewVerdict "${expectedVerdict}"`);
+    }
+  }
   const allowed = hasUpstreamRequest
-    ? ["status", "summary", "upstreamChangeRequest"]
+    ? [
+        "status",
+        "summary",
+        "upstreamChangeRequest",
+        ...(stepKind === "review" ? ["reviewVerdict"] : []),
+      ]
     : hasChangeApplication
-      ? ["status", "summary", "changeApplication"]
+      ? [
+          "status",
+          "summary",
+          "changeApplication",
+          ...(stepKind === "review" ? ["reviewVerdict"] : []),
+        ]
       : policy === "forbidden"
-        ? ["status", "summary"]
-        : ["status", "summary", "graphDelta"];
+        ? ["status", "summary", ...(stepKind === "review" ? ["reviewVerdict"] : [])]
+        : ["status", "summary", "graphDelta", ...(stepKind === "review" ? ["reviewVerdict"] : [])];
   assertAllowedFields(root, allowed, "completed assignment output");
   const summary = boundedText(root.summary, "assignment summary", 1_024).trim();
   const upstreamChangeRequest = hasUpstreamRequest
@@ -9064,6 +9422,11 @@ function parseAssignmentOutput(
     fail("graph_delta_forbidden", "assignment forbids graph mutation");
   return {
     status: "completed",
+    ...(stepKind === "review"
+      ? hasUpstreamRequest
+        ? { reviewVerdict: "changes_requested" as const }
+        : { reviewVerdict: "approved" as const }
+      : {}),
     summary,
     ...(graphDelta === undefined ? {} : { graphDelta }),
     ...(upstreamChangeRequest === undefined ? {} : { upstreamChangeRequest }),
@@ -9124,14 +9487,10 @@ function compileAssignmentChangeControl(input: {
         `operation ${input.binding.operationId} cannot issue upstream requests`,
       );
     }
-    const boundedSourceScope = new Set([
-      ...input.definition.scope.read_node_ids,
-      ...input.definition.scope.write_node_ids,
-    ]);
     assertExistingControlTargets(
       input.graph,
       request.targetNodeIds,
-      boundedSourceScope,
+      new Set(input.graph.nodes().map((node) => node.id)),
       "upstream request",
     );
     const sourceOutputMaterial = {
@@ -9423,6 +9782,28 @@ function parseGraphNode(value: unknown): GraphNode {
   };
 }
 
+/**
+ * Attempt context includes the compiler-authored per-node CAS witness beside each graph node.
+ * Authenticate and strip that witness before comparing reviewed semantic nodes. Submitted graph
+ * deltas continue through parseGraphNode(), where nodeHash remains forbidden agent input.
+ */
+function parseContextGraphNode(value: unknown): GraphNode {
+  const contextNode = requiredRecord(value, "context graph node");
+  assertExactFields(
+    contextNode,
+    ["schema_version", "id", "type", "title", "status", "spec", "edges", "annotations", "nodeHash"],
+    "context graph node",
+  );
+  const expectedNodeHash = requireDigest(contextNode.nodeHash, "context graph node hash");
+  const semanticNode = structuredClone(contextNode);
+  delete semanticNode.nodeHash;
+  const node = parseGraphNode(semanticNode);
+  if (canonicalHash(node) !== expectedNodeHash) {
+    fail("graph_node_hash", `context graph node ${node.id} differs from its compiler CAS witness`);
+  }
+  return node;
+}
+
 function parseGraphEdge(value: unknown): { source: string; relation: string; target: string } {
   const edge = requiredRecord(value, "graph edge");
   assertExactFields(edge, ["source", "relation", "target"], "graph edge");
@@ -9487,6 +9868,88 @@ function assertOrBackfillExecutionPolicyBinding(
   }
 }
 
+/**
+ * Repair the one historical research-profile deadlock where a generated gate verifier
+ * had a complete implementation plan but its own implementation ticket was withheld
+ * until the verifier was already policy-selected. This is deliberately narrower than
+ * normal ticket derivation: it preserves the pinned graph and uses only the pinned
+ * implement-asset operation and workflow. Newer profiles derive this ticket normally.
+ */
+function generatedAssetImplementationFallback(
+  configuration: CompiledConfiguration,
+  graph: TypedGraph,
+  evaluation: CompiledRuleEvaluation,
+): CompiledRuleEvaluation | undefined {
+  const operationId = "asset-resolution.asset.implement-asset";
+  const operation = configuration.registries.operations[operationId];
+  if (operation?.operation !== "implement-asset") return undefined;
+
+  const additions: DerivedTicketDefinition[] = [];
+  for (const node of graph.nodes()) {
+    if (node.type !== "asset" || node.spec.source_strategy !== "generated") continue;
+    const plan = optionalRecord(node.spec.implementation_plan);
+    const root = typeof plan?.root === "string" ? plan.root : undefined;
+    const files = Array.isArray(plan?.files)
+      ? plan.files.filter((file): file is string => typeof file === "string" && file.length > 0)
+      : [];
+    const contracts = optionalRecord(node.spec.gate_contracts);
+    if (
+      root === undefined ||
+      files.length === 0 ||
+      contracts === undefined ||
+      Object.keys(contracts).length === 0 ||
+      (node.edges.validates?.length ?? 0) === 0
+    ) {
+      continue;
+    }
+    const alreadyMaterialized = evaluation.tickets.some(
+      (ticket) =>
+        ticket.operation_registry_id === operationId &&
+        ticket.target_node_ids.includes(node.id) &&
+        ticket.scope.write_paths.includes(root),
+    );
+    if (alreadyMaterialized) continue;
+
+    const id = `TK-compat-${digestBody(
+      canonicalHash({
+        configuration_sha256: configuration.configuration_sha256,
+        asset_id: node.id,
+        root,
+        files: [...files].sort(compareText),
+      }),
+    ).slice(0, 24)}`;
+    additions.push(
+      configuredControlTicketDefinition({
+        configuration,
+        catalog: requireExecutionSemanticCatalog(configuration),
+        graph,
+        id,
+        operationId,
+        title: `implement-asset: ${node.title}`,
+        targetNodeIds: [node.id],
+        readNodeIds: [node.id],
+        writeNodeIds: [node.id],
+        readPaths: [root],
+        writePaths: [root],
+        sourceStateKey: "generated-asset-unmaterialized",
+        targetStateKey: "generated-asset-materialized",
+        obligationKeys: ["asset.implementation", "asset.gates"],
+        forceGraphMutationForbidden: false,
+        ruleId: "compiler.compatibility.generated-asset-implementation",
+      }),
+    );
+  }
+  if (additions.length === 0) return undefined;
+  const material = {
+    ...evaluation,
+    tickets: [...evaluation.tickets, ...additions],
+  };
+  return deepFreeze({
+    ...material,
+    evaluation_sha256: canonicalHash(withoutField(material, "evaluation_sha256")),
+  });
+}
+
 function reconcileTickets(
   run: RunRecord,
   definitions: readonly DerivedTicketDefinition[],
@@ -9497,6 +9960,32 @@ function reconcileTickets(
   const tickets = structuredClone(run.tickets);
   const applicableIds = new Set(definitions.map((definition) => definition.id));
   for (const ticket of Object.values(tickets)) {
+    // Change proposals are durable control-plane records projected from an accepted
+    // source settlement, not ordinary rule-derived tickets. They can legitimately
+    // be absent from the next compiler definition set while awaiting the operator's
+    // decision or their approved application workflow. Cancelling one here loses
+    // its only materialization path and strands the source hold.
+    if (ticket.executionControl?.proposalRequest !== undefined) {
+      // Repair records produced by an older compiler that cancelled a never-started
+      // proposal during reconciliation. The source remains durably held by this
+      // exact request, so re-arm only that same immutable proposal; do not invent
+      // a replacement request or widen its authority.
+      if (
+        ticket.status === "cancelled" &&
+        ticket.blocker === COMPILER_SUPERSEDED_BEFORE_EXECUTION &&
+        Object.values(tickets).some(
+          (source) => source.executionControl?.sourceHold?.proposalTicketId === ticket.id,
+        ) &&
+        ticket.steps.every((step) => step.status === "skipped" && step.attemptIds.length === 0)
+      ) {
+        ticket.status =
+          ticket.executionControl.proposalApprovalSha256 === undefined ? "proposed" : "ready";
+        ticket.blocker = undefined;
+        ticket.updatedAt = at;
+        for (const step of ticket.steps) step.status = "pending";
+      }
+      continue;
+    }
     if (applicableIds.has(ticket.id) || !ticketIsNeverStarted(ticket)) continue;
     // Rules are predicates over the current compiler graph/evidence. If a later accepted effect
     // satisfies that predicate before a queued ticket starts, the queued work has ceased to
@@ -9522,6 +10011,7 @@ function reconcileTickets(
     const semantic = resolveDefinitionExecutionBindings(executionCatalog, definition);
     const existing = tickets[definition.id];
     if (existing !== undefined) {
+      reconcileNeverStartedTicketNodeScope(existing, definition);
       assertTicketDefinitionStable(existing, definition);
       if (
         existing.status === "cancelled" &&
@@ -9707,6 +10197,43 @@ function assertTicketDefinitionStable(
       "ticket_definition_drift",
       `ticket ${ticket.id} changed under the same deterministic identity`,
     );
+}
+
+/**
+ * A queued ticket is a projection of the current compiler graph until authority issues its first
+ * attempt. Dynamic selectors may legitimately add or remove nodes from that projection while
+ * sibling graph work settles. Refresh only that unissued node scope; once work starts, the durable
+ * grant and per-node CAS remain pinned to the exact scope the agent received.
+ */
+export function reconcileNeverStartedTicketNodeScope(
+  ticket: TicketRecord,
+  definition: DerivedTicketDefinition,
+): boolean {
+  if (!ticketIsNeverStarted(ticket)) return false;
+  const scopeHash = (): Sha256Digest =>
+    canonicalHash({
+      targetNodeIds: ticket.targetNodeIds,
+      readNodeIds: ticket.readNodeIds ?? null,
+      writeNodeIds: ticket.writeNodeIds ?? null,
+      steps: ticket.steps.map((step) => ({
+        id: step.id,
+        readNodeIds: step.readNodeIds ?? null,
+        writeNodeIds: step.writeNodeIds ?? null,
+      })),
+    });
+  const before = scopeHash();
+  ticket.targetNodeIds = [...definition.target_node_ids];
+  ticket.readNodeIds = [...definition.scope.read_node_ids];
+  ticket.writeNodeIds = [...definition.scope.write_node_ids];
+  for (const [index, step] of ticket.steps.entries()) {
+    const compiled = definition.workflow[index];
+    if (compiled === undefined) continue;
+    if (compiled.read_node_ids === undefined) delete step.readNodeIds;
+    else step.readNodeIds = [...compiled.read_node_ids];
+    if (compiled.write_node_ids === undefined) delete step.writeNodeIds;
+    else step.writeNodeIds = [...compiled.write_node_ids];
+  }
+  return before !== scopeHash();
 }
 
 function runRootContextId(runId: string): string {
@@ -11105,6 +11632,23 @@ async function resolveCheckRecursive(
   return { kind, definitionHash, commands };
 }
 
+/**
+ * Policy-backed commands execute once per compiler-pinned gate context. Ticket targets can be
+ * verifier assets or evaluation subjects, so treating descriptor targets as gate ids asks the
+ * policy selector to rank the wrong node type. Direct/manual checks without pinned contexts retain
+ * the caller's explicit subjects.
+ */
+export function gatePolicyCommandSubjectIds(
+  checkId: string,
+  subjectIds: readonly string[],
+  contexts: readonly Pick<ResolvedGateAutoEvaluationContextBinding, "checkId" | "gateNodeId">[],
+): string[] {
+  const pinnedGateIds = contexts
+    .filter((binding) => binding.checkId === checkId)
+    .map((binding) => binding.gateNodeId);
+  return [...new Set(pinnedGateIds.length > 0 ? pinnedGateIds : subjectIds)].sort(compareText);
+}
+
 async function resolveCommandCheck(
   input: ResolveConfiguredCheckInput & { evaluator: GraphExpressionEvaluator },
   checkId: string,
@@ -11138,7 +11682,11 @@ async function resolveCommandCheck(
       );
       const gatePolicy = optionalString(source!.gate_policy);
       if (gatePolicy !== undefined) {
-        for (const gateId of [...new Set(subjectIds)].sort(compareText)) {
+        for (const gateId of gatePolicyCommandSubjectIds(
+          checkId,
+          subjectIds,
+          input.gatePolicyContexts,
+        )) {
           const winners = input.evaluator.select({
             policy_selection: { policy: gatePolicy, gate: { ids: [gateId] }, result: "winner" },
           });
@@ -11161,7 +11709,11 @@ async function resolveCommandCheck(
             [`${winner.type}.id`]: winner.id,
           };
           bindings.push({
-            argv: exactArgv(dynamicValuePath(graphNodeRoot(winner), field, variables), checkId),
+            argv: exactArgv(
+              dynamicValuePath(graphNodeRoot(winner), field, variables),
+              checkId,
+              `${winner.id}.${field} (gate.id=${gateId})`,
+            ),
             root: winner.spec,
             variables,
           });
@@ -11188,7 +11740,11 @@ async function resolveCommandCheck(
           [`${candidate.type}.id`]: candidate.id,
         };
         bindings.push({
-          argv: exactArgv(dynamicValuePath(graphNodeRoot(candidate), field, variables), checkId),
+          argv: exactArgv(
+            dynamicValuePath(graphNodeRoot(candidate), field, variables),
+            checkId,
+            `${candidate.id}.${field}`,
+          ),
           root: candidate.spec,
           variables,
         });
@@ -11397,7 +11953,7 @@ function dynamicValuePath(
   return current;
 }
 
-function exactArgv(value: unknown, checkId: string): string[] {
+function exactArgv(value: unknown, checkId: string, source?: string): string[] {
   if (
     !Array.isArray(value) ||
     value.length === 0 ||
@@ -11410,7 +11966,16 @@ function exactArgv(value: unknown, checkId: string): string[] {
         item.includes("\r"),
     )
   ) {
-    fail("check_argv", `check ${checkId} command must be one exact nonempty argv array`);
+    // A node-sourced command resolves through a per-gate contract map, so the usual failure is an
+    // absent entry for one gate rather than a malformed array. Naming the node, the resolved path,
+    // and what was actually found is the difference between a fixable report and a hunt.
+    const found = value === undefined ? "no value" : String(JSON.stringify(value)).slice(0, 120);
+    fail(
+      "check_argv",
+      `check ${checkId} command must be one exact nonempty argv array${
+        source === undefined ? "" : `; resolved ${source} to ${found}`
+      }`,
+    );
   }
   const argv = value as string[];
   if (/\s/u.test(argv[0]!))
@@ -13088,14 +13653,10 @@ function attemptWorkspace(
 ): string {
   if (kind === "lead") return path.resolve(run.projectRoot);
   if (kind === "planning") {
-    // Legacy flat-layout runs already planned in their permanent checkout. Once the
-    // authority has proof-settled relocation, that locked checkout is their only
-    // resumable workspace. Native runs still require the detached planner below.
-    if (
-      run.legacyGitMigration?.status === "relocated" &&
-      run.git.run.status === "ready" &&
-      run.git.run.headOid !== undefined
-    ) {
+    // The initial plan uses a detached checkout. Once approval has materialized the
+    // permanent run workspace and retired that checkout, a plan revision must inspect
+    // the current durable run state there rather than attempting to resurrect planning.
+    if (run.git.run.status === "ready" && run.git.run.headOid !== undefined) {
       return path.resolve(run.git.run.worktree);
     }
     if (run.git.planning.status !== "ready") {
@@ -13136,4 +13697,19 @@ function deepFreeze<Value>(value: Value): Value {
 
 function fail(code: string, message: string, details: readonly string[] = []): never {
   throw new NativeRunProgramError(code, message, details);
+}
+
+/**
+ * Koni binds whichever Pi provider the configuration names; it has no built-in vendor.
+ *
+ * Defaulting a missing provider to one vendor would silently execute a persona against a provider
+ * the project never chose, and would hide the configuration gap behind an unrelated
+ * `model_unavailable` failure on installations authenticated with a different provider.
+ */
+function requiredPersonaProvider(provider: string | undefined, personaId: string): string {
+  if (provider !== undefined && provider.trim().length > 0) return provider;
+  return fail(
+    "persona_provider",
+    `persona ${personaId} has no configured provider; declare one on its agent resource, its persona, or the run-type role`,
+  );
 }

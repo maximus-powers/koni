@@ -38,7 +38,7 @@ node_types:
   fields:
     hypothesis:
       type: json
-      description: The primary falsifiable proposition supplied as the run goal.
+      description: The primary falsifiable proposition that the run objective asks to evaluate.
     statement:
       type: json
       description: An alternate concise statement of the proposition when hypothesis is not used.
@@ -231,6 +231,14 @@ node_types:
       type: string
       required: true
       description: The runtime-produced measurement or observation and how different values distinguish claim outcomes; a review opinion or proof conclusion is not an observable outcome.
+    evidence_basis:
+      type: string
+      required: false
+      description: Evidence category the experiment may produce; empirical runtime evidence must remain scoped to its declared execution.
+    inference_scope:
+      type: string
+      required: false
+      description: Bound on the population, interface, and conditions to which this experiment's conclusions apply.
 - id: prerequisite
   description: A capability, dataset, dependency, or condition that must be resolved before a research operation can proceed safely.
   stage: preparation
@@ -264,6 +272,15 @@ node_types:
   - evidence
   - reports
   - compiler
+  fields:
+    required_asset_type:
+      type: string
+      required: false
+      description: The capability, dataset, dependency, or condition required before the dependent research operation may proceed.
+    validation_approach:
+      type: string
+      required: false
+      description: The deterministic check that establishes whether the prerequisite is satisfied.
 - id: metric
   description: An operationally defined measure used to evaluate experimental outcomes consistently.
   stage: preparation
@@ -297,6 +314,15 @@ node_types:
   - evidence
   - reports
   - compiler
+  fields:
+    name:
+      type: string
+      required: false
+      description: Stable name of the operational measure.
+    definition:
+      type: string
+      required: false
+      description: How the measure is calculated and interpreted.
 - id: method
   description: A reproducible analytical or experimental procedure used to produce interpretable results.
   stage: preparation
@@ -331,6 +357,31 @@ node_types:
   - evidence
   - reports
   - compiler
+  fields:
+    approach:
+      type: string
+      required: false
+      description: Reproducible analytical or experimental procedure.
+    summary:
+      type: string
+      required: false
+      description: Concise description of the method.
+    method:
+      type: string
+      required: false
+      description: Alternate concise method description.
+    evidence_basis:
+      type: string
+      required: false
+      description: Evidence category produced by this method, if any.
+    inference_scope:
+      type: string
+      required: false
+      description: Bound on conclusions supported by this method.
+    limitation:
+      type: string
+      required: false
+      description: Limitation that constrains interpretation of method outputs.
 - id: ablation
   description: A controlled comparison that isolates the consequence of one deliberate methodological difference.
   stage: preparation
@@ -365,6 +416,19 @@ node_types:
   - evidence
   - reports
   - compiler
+  fields:
+    controlled_difference:
+      type: string
+      required: false
+      description: The single deliberate difference isolated by this comparison.
+    decision_key:
+      type: string
+      required: false
+      description: Stable identifier for the compared design decision.
+    summary:
+      type: string
+      required: false
+      description: Concise statement of what the ablation discriminates.
 - id: asset
   description: A materialized research resource such as code, data, a model, or a tool that provides declared capabilities.
   stage: asset_resolution
@@ -400,6 +464,7 @@ node_types:
   - asset_manifest
   filesystem_manifest:
     root_field: spec.implementation_plan.root
+    files_field: spec.implementation_plan.files
     implementation_contract_field: spec.implementation
     implementation_kind_field: spec.implementation.kind
     implementation_entrypoints_field: spec.implementation.entrypoints

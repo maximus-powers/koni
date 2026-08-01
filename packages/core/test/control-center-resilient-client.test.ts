@@ -46,7 +46,11 @@ describe("resilient full control-center connection", () => {
     await clock.runNext();
 
     expect(reconnect).toHaveBeenCalledTimes(1);
-    expect(first.closed).toBe(true);
+    // A control center refresh can have independent reads in flight when the heartbeat
+    // discovers transport loss. Closing the old client here would reject those reads outside
+    // the reconnecting request path and can terminate the terminal UI. The authority retires
+    // this idle socket itself, so the wrapper must simply stop using it.
+    expect(first.closed).toBe(false);
     expect(resilient.revision).toBe(23);
     expect(topics).toEqual(["authority.reconnected"]);
     expect(clock.delays).toEqual([20_000]);

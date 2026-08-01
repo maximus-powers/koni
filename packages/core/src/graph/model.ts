@@ -728,6 +728,21 @@ export class TypedGraph {
     return output;
   }
 
+  /**
+   * Apply an agent-authored delta, rebasing it onto the current graph when it was authored against
+   * an older whole-graph hash. Every per-node `expectedNodeHash` check in `apply` still runs, so a
+   * genuine conflict (a node the delta adds/modifies/deletes changed underneath it) still throws.
+   * Only the coarse whole-graph-hash equality is relaxed. This is safe because the scheduler forbids
+   * a concurrent ticket from writing any node in this delta's read/write scope
+   * (`assignmentScopesConflict` checks write/write, write/read, and read/write), so a moved
+   * whole-graph hash during a worker's flight reflects only disjoint sibling work on untouched nodes.
+   */
+  public applyRebased(delta: GraphDelta): AppliedGraphDelta {
+    return this.apply(
+      delta.expectedGraphHash === this.hash ? delta : { ...delta, expectedGraphHash: this.hash },
+    );
+  }
+
   public apply(delta: GraphDelta): AppliedGraphDelta {
     if (delta.protocol !== "koni.graph-delta.v1" || delta.expectedGraphHash !== this.hash) {
       throw new GraphValidationError(["graph delta expected hash is stale or unsupported"]);
@@ -802,13 +817,13 @@ export class TypedGraph {
             diagnostics.push(`${node.id}.${definition.relation} targets missing node ${targetId}`);
           else if (!definition.targets.includes(target.type)) {
             diagnostics.push(`${node.id}.${definition.relation} cannot target ${target.type}`);
-          } else if (
-            definition.when !== undefined &&
-            !edgePredicateSatisfied(definition.when, node, target)
-          ) {
-            diagnostics.push(
-              `${node.id}.${definition.relation} -> ${target.id} violates configured edge predicate`,
-            );
+          } else if (definition.when !== undefined) {
+            const failure = edgePredicateFailure(definition.when, node, target);
+            if (failure !== undefined) {
+              diagnostics.push(
+                `${node.id}.${definition.relation} -> ${target.id} violates configured edge predicate: ${failure}`,
+              );
+            }
           }
         }
       }
@@ -1197,25 +1212,48 @@ function validateEdgePredicate(edge: GraphEdgeTypeDefinition, diagnostics: strin
   }
 }
 
-function edgePredicateSatisfied(
+/**
+ * Return why this capability edge is rejected, in terms the author can act on.
+ *
+ * "violates configured edge predicate" alone does not say which field is missing, so an agent
+ * that adds a `validates` link without the matching capability contract re-submits the same
+ * invalid edge every recovery cycle (observed live: five compensated attempts on one step).
+ */
+function edgePredicateFailure(
   predicate: GraphEdgePredicateDefinition,
   source: GraphNode,
   target: GraphNode,
-): boolean {
+): string | undefined {
   const capability = predicate.capability;
-  if (
-    !capability.candidate_node_types.includes(source.type) ||
-    !capability.gate_node_types.includes(target.type)
-  )
-    return false;
+  if (!capability.candidate_node_types.includes(source.type)) {
+    return `${source.type} is not a candidate node type for gate policy ${predicate.gate_policy} (expected ${capability.candidate_node_types.join(", ")})`;
+  }
+  if (!capability.gate_node_types.includes(target.type)) {
+    return `${target.type} is not a gate node type for gate policy ${predicate.gate_policy} (expected ${capability.gate_node_types.join(", ")})`;
+  }
   const requiredName = firstStringAtNodePaths(target, capability.required_name_fields);
   const requiredVersion = firstStringAtNodePaths(target, capability.required_version_req_fields);
-  if (
-    requiredName === undefined ||
-    requiredVersion === undefined ||
-    validRange(requiredVersion) === null
-  )
-    return false;
+  if (requiredName === undefined) {
+    return `${target.id} declares no required capability name at ${capability.required_name_fields.join(" or ")}`;
+  }
+  if (requiredVersion === undefined) {
+    return `${target.id} declares no required capability version range at ${capability.required_version_req_fields.join(" or ")}`;
+  }
+  if (validRange(requiredVersion) === null) {
+    return `${target.id} required capability version range ${requiredVersion} is not a valid semantic-version range`;
+  }
+  if (!edgeCapabilityProvided(capability, source, requiredName, requiredVersion)) {
+    return `${source.id} provides no capability named ${requiredName} satisfying ${requiredVersion} at ${capability.provider_collection_fields.join(" or ")}; add that capability entry (and the matching per-gate contract) before linking it to ${target.id}`;
+  }
+  return undefined;
+}
+
+function edgeCapabilityProvided(
+  capability: GraphEdgePredicateDefinition["capability"],
+  source: GraphNode,
+  requiredName: string,
+  requiredVersion: string,
+): boolean {
   for (const field of capability.provider_collection_fields) {
     const collection = valueAtDottedPath(source as unknown as Record<string, JsonValue>, field);
     if (!Array.isArray(collection)) continue;

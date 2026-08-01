@@ -1,4 +1,5 @@
 import type { RunLifecycleState } from "./run-lifecycle.js";
+import type { TicketRecord } from "./run-record.js";
 
 /**
  * A blocked run executes nothing. Durable ticket/step records legitimately keep their
@@ -30,3 +31,13 @@ export function effectiveStatus(
 
 /** Human display label for interrupted work in the control center and overlays. */
 export const INTERRUPTED_DISPLAY_LABEL = "Interrupted — run blocked";
+
+/**
+ * A source hold is fail-closed durable state while compiler change control resolves an exact
+ * follow-on grant. The proposal, not the held source, is the actionable operator surface.
+ */
+export function ticketWaitingForCompilerGrant(
+  ticket: Pick<TicketRecord, "status" | "executionControl">,
+): boolean {
+  return ticket.status === "blocked" && ticket.executionControl?.sourceHold !== undefined;
+}

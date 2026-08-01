@@ -55,6 +55,7 @@ export function runBehaviorSnapshotFixture(
   profileId = "fixture",
   overrides: Readonly<{
     autoStart?: boolean;
+    legacyReportLock?: boolean;
     questions?: Readonly<{ defaultScope?: "run" | "ticket" }>;
     planning?: Readonly<{ limit?: number; synthesisReserve?: number }>;
   }> = {},
@@ -88,6 +89,9 @@ export function runBehaviorSnapshotFixture(
         actor: "compiler",
         requires_main_checkout: true,
         recipe: [
+          ...(overrides.legacyReportLock === true
+            ? [{ id: "acquire-lock", primitive: "lock.acquire" as const }]
+            : []),
           { id: "validate-project", primitive: "project.validate" },
           {
             id: "render",

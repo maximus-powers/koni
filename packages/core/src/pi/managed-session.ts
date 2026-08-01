@@ -3625,18 +3625,32 @@ function tokenBudgetExhaustion(
     .concat(" token budget exhausted");
 }
 
-function providerOutputLimit(
+/**
+ * Bound one request's output reservation independently of the run-wide token budget.
+ *
+ * A model can advertise an output maximum large enough to consume most of its context
+ * window. Reserving that entire maximum alongside an already-large prompt leaves no
+ * allowance for provider framing or context reissue messages, which can turn an otherwise
+ * admissible synthesis turn into a canonical provider abort. Keep at least three quarters of
+ * an authenticated context window available for prompt and transport overhead.
+ */
+export function providerOutputLimit(
   spec: Readonly<AgentLaunchSpec>,
   recoveredUsage: ManagedTokenUsage | undefined,
 ): number {
   const usage = recoveredUsage ?? emptyUsage();
   const maximum = spec.budgets.tokens;
+  const contextOutputCap =
+    spec.model.catalogContextWindow === undefined
+      ? Number.MAX_SAFE_INTEGER
+      : Math.floor(spec.model.catalogContextWindow / 4);
   return Math.max(
     1,
     Math.min(
       maximum.maxOutput - usage.output,
       maximum.maxNew - usage.newTokens,
       maximum.maxAll - usage.allTokens,
+      contextOutputCap,
     ),
   );
 }

@@ -281,7 +281,9 @@ export class GitClient {
     }
     const result = await this.#run([
       "for-each-ref",
-      `--count=${limit}`,
+      // Koni-owned worktree refs can dominate the newest entries. Fetch the bounded local
+      // inventory first, then apply the caller's limit after filtering those internal refs.
+      "--count=1000",
       "--sort=-committerdate",
       "--format=%(refname:short)%00%(objectname)%00%(committerdate:unix)",
       "refs/heads",
@@ -308,6 +310,7 @@ export class GitClient {
         throw new Error("git returned an invalid branch timestamp");
       }
       branches.push({ name, oid, committedAtSeconds });
+      if (branches.length >= limit) break;
     }
     return branches;
   }

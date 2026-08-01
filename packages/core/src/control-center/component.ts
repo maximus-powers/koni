@@ -1932,7 +1932,12 @@ export class ControlCenterComponent implements Component, Focusable {
         ? []
         : newRunAdditionalIntakeLines(modal, runType, inner, this.#palette);
     const runTypeBadges = this.#snapshot.runTypes.map((item) =>
-      runTypeBadge(item.title, item.id === modal.runTypeId, this.#palette),
+      runTypeBadge(
+        item.title,
+        item.id === modal.runTypeId,
+        modal.focus === "run_type" && item.id === modal.runTypeId,
+        this.#palette,
+      ),
     );
     const runTypeLines = wrapSegments(runTypeBadges, inner);
     const fixedRows =
@@ -2936,8 +2941,13 @@ function selectorLine(
   return `${selected ? palette.accent("›") : " "} ${label}: ${inputBadge(value, selected, palette)}`;
 }
 
-function runTypeBadge(value: string, selected: boolean, palette: KoniPalette): string {
-  return selectorBadge(value, selected, palette, modelStyle);
+function runTypeBadge(
+  value: string,
+  selected: boolean,
+  focused: boolean,
+  palette: KoniPalette,
+): string {
+  return `${focused ? palette.accent("›") : " "}${selectorBadge(value, selected, palette, modelStyle)}`;
 }
 
 function newRunAdditionalIntakeLines(
@@ -3255,7 +3265,9 @@ function selectedModelWarning(
   modal: NewRunModalState,
   models: readonly ControlModelOption[],
 ): string | undefined {
-  return sealedModelAdmissionIssue(modal.roles, models)?.message;
+  // An unexecutable selection is the more urgent message; a substitution notice explains why the
+  // visible models are not the ones the profile declared.
+  return sealedModelAdmissionIssue(modal.roles, models)?.message ?? modal.modelNotice;
 }
 
 function isConfigTextField(field: ConfigFieldDefinition): boolean {

@@ -5,6 +5,7 @@ import {
   TypedGraph,
   type GraphNode,
 } from "../src/graph/model.js";
+import { canonicalHash } from "../src/shared/canonical.js";
 
 const schema = new GraphSchema({
   nodeTypes: [
@@ -79,6 +80,76 @@ describe("typed graph and canonical bidirectional relationships", () => {
         removeEdges: [],
       }),
     ).toThrow(/stale/);
+  });
+
+  it("rebases a delta authored against an older whole-graph hash when its own nodes are untouched", () => {
+    // Simulate a disjoint sibling ticket moving the whole-graph hash: the worker authored its
+    // delta against `staleHash`, but by settlement the committed graph added an unrelated node.
+    const base = new TypedGraph(schema, [claim()]);
+    const staleHash = base.hash;
+    const current = base.apply({
+      protocol: "koni.graph-delta.v1",
+      expectedGraphHash: staleHash,
+      upsertNodes: [{ node: { ...claim(), id: "claim-b", title: "Claim B" }, expectedNodeHash: null }],
+      deleteNodes: [],
+      addEdges: [],
+      removeEdges: [],
+    }).graph;
+    expect(current.hash).not.toBe(staleHash);
+    const staleDelta = {
+      protocol: "koni.graph-delta.v1" as const,
+      expectedGraphHash: staleHash,
+      upsertNodes: [{ node: experiment([]), expectedNodeHash: null }],
+      deleteNodes: [],
+      addEdges: [{ source: "claim-a", relation: "tested_by", target: "experiment-a" }],
+      removeEdges: [],
+    };
+    // Strict apply refuses the moved hash; rebase applies it because the worker's own nodes
+    // (experiment-a add, its edge to claim-a) are untouched by the sibling's claim-b add.
+    expect(() => current.apply(staleDelta)).toThrow(/stale/);
+    const rebased = current.applyRebased(staleDelta);
+    expect(rebased.graph.node("experiment-a")?.id).toBe("experiment-a");
+    expect(rebased.graph.node("claim-b")?.id).toBe("claim-b");
+    expect(rebased.graph.edges()).toContainEqual({
+      source: "experiment-a",
+      relation: "tests",
+      target: "claim-a",
+    });
+  });
+
+  it("still rejects a rebased delta when a node it modifies changed underneath it", () => {
+    const base = new TypedGraph(schema, [claim()]);
+    const staleHash = base.hash;
+    const staleNodeHash = canonicalHash(base.node("claim-a")!);
+    // The worker modifies claim-a; meanwhile the committed graph already changed claim-a's spec.
+    const current = base.apply({
+      protocol: "koni.graph-delta.v1",
+      expectedGraphHash: staleHash,
+      upsertNodes: [
+        {
+          node: { ...claim(), spec: { statement: "A changed by someone else" } },
+          expectedNodeHash: staleNodeHash,
+        },
+      ],
+      deleteNodes: [],
+      addEdges: [],
+      removeEdges: [],
+    }).graph;
+    const conflictingDelta = {
+      protocol: "koni.graph-delta.v1" as const,
+      expectedGraphHash: staleHash,
+      upsertNodes: [
+        {
+          node: { ...claim(), spec: { statement: "A changed by the worker" } },
+          expectedNodeHash: staleNodeHash,
+        },
+      ],
+      deleteNodes: [],
+      addEdges: [],
+      removeEdges: [],
+    };
+    // Rebase re-targets the whole-graph hash but the per-node expectedNodeHash CAS still fires.
+    expect(() => current.applyRebased(conflictingDelta)).toThrow(/node changed/);
   });
 });
 

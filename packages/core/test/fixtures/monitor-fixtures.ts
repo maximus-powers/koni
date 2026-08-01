@@ -83,6 +83,7 @@ export function monitorProposalFixture(): any {
     runId: "run-a",
     ticketId: "proposal-a",
     sourceTicketId: "ticket-source",
+    requestSha256: `sha256:${"7".repeat(64)}`,
     status: "proposed",
     title: "Revise the storage contract",
     summary: "Allow the notes repository to retain encrypted drafts before final publication.",

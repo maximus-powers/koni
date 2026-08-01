@@ -13,6 +13,13 @@ instructions:
     only records allowed by the active operation and emit a structured output bound
     to the context pack. Do not create downstream constitution or asset nodes.
 
+    When the grant has neither a permitted scholarly source nor an existing
+    literature record in scope, return a bounded no-op explaining that no
+    provenance-backed mapping can be made. Do not request broader formulation,
+    node-creation, network, or citation authority merely to populate related
+    work; that mapping is optional unless the objective explicitly makes it a
+    required empirical deliverable.
+
     If valid completion requires changing an existing upstream node, emit the typed
     bounded upstream-change request and stop.
 provider: openai-codex

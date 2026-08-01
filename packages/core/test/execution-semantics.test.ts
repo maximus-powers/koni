@@ -13,7 +13,7 @@ import { canonicalHash } from "../src/shared/canonical.js";
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const EXPECTED_CATALOG_SHA256 = {
   "coding-profile": "sha256:10b389b5b785f7196769f01373827192b533180c65314c70468ef328e201a0b2",
-  "research-profile": "sha256:b1e764b9a95f4416dcfaae0b593247f8e884388adec2958c416a2c6e6e83a224",
+  "research-profile": "sha256:dd872bb81b06a849ce1f2724e9cbf1f69aded7a2f35bd28b6a5b5134f8e51eeb",
 } as const;
 
 describe("operation/workflow/check semantic catalog", () => {
@@ -37,6 +37,20 @@ describe("operation/workflow/check semantic catalog", () => {
       );
       expect(Object.isFrozen(catalog)).toBe(true);
       expect(Object.isFrozen(Object.values(catalog.workflows)[0]?.steps)).toBe(true);
+      if (packageDirectory === "research-profile") {
+        expect(
+          configuration.registries.operations["lifecycle.apply-change-request"]
+            ?.allowed_existing_node_types,
+        ).toContain("asset");
+        expect(
+          configuration.registries.operations[
+            "asset-resolution.prerequisite.plan-build-asset"
+          ],
+        ).toMatchObject({
+          max_new_nodes: 1,
+          allowed_new_node_types: ["asset"],
+        });
+      }
       for (const workflow of Object.values(catalog.workflows)) {
         expect(workflow.version).toMatch(/^\d+\.\d+\.\d+$/u);
         expect(workflow.steps.every((step) => step.required)).toBe(true);

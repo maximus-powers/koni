@@ -5,6 +5,7 @@ import {
   INTERRUPTED_DISPLAY_LABEL,
   interruptedByRunBlock,
   runExecutionHalted,
+  ticketWaitingForCompilerGrant,
 } from "../state/effective-status.js";
 import { projectQuestionBatchCapabilities } from "../state/question-batch.js";
 import type { StageCapabilityCatalog } from "../state/stage-capability.js";
@@ -631,7 +632,7 @@ function evidenceOverview(run: RunRecord): {
     (ticket) => ticket.status === "failed",
   ).length;
   const blockedTickets = Object.values(run.tickets).filter(
-    (ticket) => ticket.status === "blocked",
+    (ticket) => ticket.status === "blocked" && !ticketWaitingForCompilerGrant(ticket),
   ).length;
   // The run-level blocker itself renders in the Overview banner; Evidence keeps the
   // per-ticket/check consequences only.
@@ -952,6 +953,7 @@ function stageViews(
 
 function ticketRow(ticket: TicketRecord, lifecycle: RunRecord["lifecycle"]): TicketRowView {
   const halted = runExecutionHalted(lifecycle);
+  const waitingForCompilerGrant = ticketWaitingForCompilerGrant(ticket);
   const done = ticket.steps.filter(
     (step) => step.status === "completed" || step.status === "skipped",
   ).length;
@@ -970,16 +972,18 @@ function ticketRow(ticket: TicketRecord, lifecycle: RunRecord["lifecycle"]): Tic
   return {
     id: ticket.id,
     title: ticket.title,
-    status: interruptedByRunBlock(ticket.status, lifecycle)
-      ? INTERRUPTED_DISPLAY_LABEL
-      : titleCase(ticket.status),
+    status: waitingForCompilerGrant
+      ? "Waiting for compiler grant"
+      : interruptedByRunBlock(ticket.status, lifecycle)
+        ? INTERRUPTED_DISPLAY_LABEL
+        : titleCase(ticket.status),
     progress: `${done}/${ticket.steps.length}`,
     active: running && !halted,
     rail,
     ...(current === undefined ? {} : { currentPersona: titleCase(current.personaId) }),
     recovery:
       ticket.status === "failed" ||
-      ticket.status === "blocked" ||
+      (ticket.status === "blocked" && !waitingForCompilerGrant) ||
       ticket.steps.some((step) => step.status === "failed") ||
       (halted && running),
     proposalAwaitingDecision: ticket.status === "proposed",
@@ -992,6 +996,7 @@ function ticketInTab(
   lifecycle: RunRecord["lifecycle"],
 ): boolean {
   const status = ticket.status.toLocaleLowerCase("en-US");
+  const waitingForCompilerGrant = ticketWaitingForCompilerGrant(ticket);
   const halted = runExecutionHalted(lifecycle);
   const active =
     !halted &&
@@ -1003,8 +1008,12 @@ function ticketInTab(
       new Set(["active", "running", "in_progress", "review"]).has(status));
   if (tab === "all") return true;
   if (tab === "active") return active;
-  if (tab === "todo") return !active && new Set(["pending", "ready", "todo", "open"]).has(status);
-  if (tab === "blocked") return status === "blocked" || interrupted;
+  if (tab === "todo")
+    return (
+      waitingForCompilerGrant ||
+      (!active && new Set(["pending", "ready", "todo", "open"]).has(status))
+    );
+  if (tab === "blocked") return (!waitingForCompilerGrant && status === "blocked") || interrupted;
   if (tab === "proposed") return status === "proposed";
   if (tab === "closed")
     return new Set(["completed", "closed", "cancelled", "superseded"]).has(status);

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AuthorityClientError } from "../src/authority/client.js";
 import type { JsonValue, RpcSuccess } from "../src/authority/protocol.js";
 import { RunSummaryPageCollector } from "../src/authority/run-summary-page.js";
@@ -156,6 +156,29 @@ describe("bounded control-center run pagination", () => {
     controller.dispose();
   });
 
+  it("automatically retries a selected page after sustained active orchestration churn", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new PagedAuthority(makeRuns(4));
+      const controller = new ControlCenterController({ projectRoot: "/project", client });
+      await controller.initialize();
+      const selected = controller.snapshot.view.runs[2]!;
+      await controller.handle({ type: "select_run", runId: selected.id });
+      client.staleHydrationCount = 9;
+
+      await controller.refresh();
+
+      expect(controller.snapshot.notice).toBeUndefined();
+      expect(controller.snapshot.view.selectedRun?.id).toBe(selected.id);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(controller.snapshot.notice).toBeUndefined();
+      expect(controller.snapshot.view.selectedRun?.id).toBe(selected.id);
+      controller.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("recovers once to the first page when the selected durable run disappears", async () => {
     const client = new PagedAuthority(makeRuns(4));
     const controller = new ControlCenterController({ projectRoot: "/project", client });
@@ -246,6 +269,7 @@ class PagedAuthority implements ControlCenterAuthorityClient {
   public revision = 17;
   public staleNextCursorOnce = false;
   public mismatchNextHydration = false;
+  public staleHydrationCount = 0;
   public staleCursorCount = 0;
   public maximumReturnedRows = 0;
   public readonly calls: RecordedCall[] = [];
@@ -335,6 +359,13 @@ class PagedAuthority implements ControlCenterAuthorityClient {
       const request = record(params);
       const run = this.#runs.find((candidate) => candidate.id === request.runId);
       if (run === undefined) throw new Error("selected fixture run is missing");
+      if (this.staleHydrationCount > 0) {
+        this.staleHydrationCount -= 1;
+        this.bumpRunRevision(run.id);
+        throw new AuthorityClientError("run_page_stale", "selected row changed during refresh", {
+          revision: this.revision,
+        });
+      }
       if (
         !this.#legacy &&
         (request.authorityRevision !== this.revision || request.runRevision !== run.revision)

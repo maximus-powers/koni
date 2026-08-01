@@ -415,7 +415,6 @@ actions:
 - id: report
   requires_main_checkout: true
   recipe:
-  - primitive: lock.acquire
   - primitive: project.validate
   - primitive: report.render
     deterministic: true

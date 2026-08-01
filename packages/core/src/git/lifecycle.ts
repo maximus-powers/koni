@@ -293,6 +293,12 @@ export type GitLifecycleIntent =
     })
   | (GitIntentBase & {
       kind: "abandoned_run_retire";
+      /**
+       * Worktrees are always retirement targets. Refs are a separate operator policy so
+       * "preserve branches" never retains heavyweight registered checkouts. Missing means
+       * `delete` for compatibility with intents prepared before this field existed.
+       */
+      branchDisposition?: "preserve" | "delete";
       planning: { baseOid: string; worktree: string } | undefined;
       run: { expectedOid: string; ref: string; worktree: string } | undefined;
       tickets: Array<{
@@ -829,6 +835,13 @@ export function assertGitLifecycleIntent(value: unknown): asserts value is GitLi
     }
   }
   if (kind === "abandoned_run_retire") {
+    if (
+      value.branchDisposition !== undefined &&
+      value.branchDisposition !== "preserve" &&
+      value.branchDisposition !== "delete"
+    ) {
+      throw new Error("abandoned-run branch disposition is invalid");
+    }
     for (const resource of value.tickets as unknown[]) {
       if (!isObject(resource)) throw new Error("abandoned ticket resource is invalid");
       for (const field of ["cycleId", "expectedOid", "ref", "worktree"] as const) {
@@ -2447,6 +2460,7 @@ export class IsolatedGitLifecycle {
   public async retireAbandonedRun(
     lifecycle: RunGitLifecycleRecord,
     journal: GitIntentJournal,
+    options: { preserveBranches?: boolean } = {},
   ): Promise<AbandonedRunRetirementResult> {
     await this.#assertLifecycle(lifecycle);
     let resources: Omit<
@@ -2477,11 +2491,18 @@ export class IsolatedGitLifecycle {
     const intent: Extract<GitLifecycleIntent, { kind: "abandoned_run_retire" }> = {
       ...this.#intentBase(lifecycle),
       kind: "abandoned_run_retire",
+      branchDisposition: options.preserveBranches === true ? "preserve" : "delete",
       ...resources,
     };
     await journal.prepare(intent);
     await this.#applyAbandonedRetirement(lifecycle, intent);
-    const next = retiredAbandonedLifecycle(lifecycle, this.#timestamp());
+    const next =
+      intent.branchDisposition === "preserve"
+        ? preserveAbandonedLifecycle(
+            lifecycle,
+            "Operator preserved owned branches after clean worktree retirement",
+          )
+        : retiredAbandonedLifecycle(lifecycle, this.#timestamp());
     await this.#settle(journal, intent, next);
     return { status: "retired", lifecycle: next };
   }
@@ -3046,7 +3067,13 @@ export class IsolatedGitLifecycle {
         case "abandoned_run_retire": {
           await this.#assertAbandonedResources(lifecycle, intent);
           await this.#applyAbandonedRetirement(lifecycle, intent);
-          const next = retiredAbandonedLifecycle(lifecycle, this.#timestamp());
+          const next =
+            intent.branchDisposition === "preserve"
+              ? preserveAbandonedLifecycle(
+                  lifecycle,
+                  "Operator preserved owned branches after clean worktree retirement",
+                )
+              : retiredAbandonedLifecycle(lifecycle, this.#timestamp());
           await this.#settle(journal, intent, next);
           return { status: "completed", lifecycle: next };
         }
@@ -3463,6 +3490,7 @@ export class IsolatedGitLifecycle {
       await repository.removeWorktree(intent.run.worktree);
     }
     this.#fault("after_abandoned_worktrees_retired", intent);
+    if (intent.branchDisposition === "preserve") return;
     for (const resource of intent.tickets) {
       const oid = await repository.tryResolveRef(resource.ref);
       if (oid === resource.expectedOid) await repository.deleteRef(resource.ref, oid);

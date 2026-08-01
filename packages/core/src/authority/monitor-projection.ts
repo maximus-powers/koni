@@ -291,6 +291,7 @@ export function projectControlProposalInspection(
     runId: run.id,
     ticketId: ticket.id,
     sourceTicketId: request.sourceTicketId,
+    requestSha256: request.requestSha256,
     status: ticket.status,
     title: safe(ticket.title, 4_096, "Change proposal"),
     summary: safe(ticket.summary, 32_768, "Review the proposed upstream change."),

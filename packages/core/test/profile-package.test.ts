@@ -18,6 +18,16 @@ import { rawSha256 } from "../src/shared/canonical.js";
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
 describe("profile package manifests", () => {
+  it("assigns gate contracts and validates links only to compatible verifier assets", () => {
+    const operations = readFileSync(
+      resolve(repositoryRoot, "packages/research-profile/koni/baseline/operations/research.yaml"),
+      "utf8",
+    );
+    expect(operations).toContain(
+      "only when the target asset is capability-compatible with one or more research gates",
+    );
+  });
+
   it.each([
     [
       "coding",
@@ -30,7 +40,7 @@ describe("profile package manifests", () => {
       "research",
       "packages/research-profile/koni/profile-manifest.json",
       "packages/research-profile/koni/baseline",
-      "sha256:e75e482a20d39659782edb8b0a23f3b0fc9cce27a6d97695e935e9efdd121153",
+      "sha256:1dc80e1c35b44e1df16ffad9ff5b09e634b0718a62dab501f9123f7c36448f81",
       49,
     ],
   ])(

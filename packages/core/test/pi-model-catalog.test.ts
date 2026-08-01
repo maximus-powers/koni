@@ -6,12 +6,16 @@ import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  describeRoleModelSubstitutions,
   loadSealedPiModelBinding,
+  nearestSupportedThinkingLevel,
   projectSealedPiModelCatalog,
+  resolveRoleModelSelections,
   sealPiModelDescriptor,
   sealedPiModelDescriptor,
   supportedThinkingLevels,
 } from "../src/pi/model-catalog.js";
+import type { ControlModelOption } from "../src/control-center/protocol.js";
 
 const temporaryRoots: string[] = [];
 
@@ -241,6 +245,95 @@ describe("sealed Pi model catalog", () => {
     expect(await readFile(modelsPath, "utf8")).toBe(modelBytes);
   });
 });
+
+describe("authenticated role model resolution", () => {
+  it("keeps declared defaults that this Pi installation can execute", () => {
+    const resolved = resolveRoleModelSelections(
+      [role("lead", "anthropic", "claude-opus", "high")],
+      [option("anthropic", "claude-opus"), option("openai-codex", "gpt-sol")],
+    );
+    expect(resolved.substitutions).toEqual([]);
+    expect(resolved.roles[0]).toMatchObject({ provider: "anthropic", model: "claude-opus" });
+  });
+
+  it("prefers another model from the same provider before crossing providers", () => {
+    const resolved = resolveRoleModelSelections(
+      [role("lead", "anthropic", "claude-retired", "high")],
+      [option("openai-codex", "gpt-sol"), option("anthropic", "claude-sonnet")],
+    );
+    expect(resolved.roles[0]).toMatchObject({ provider: "anthropic", model: "claude-sonnet" });
+    expect(resolved.substitutions[0]).toMatchObject({
+      roleId: "lead",
+      from: { provider: "anthropic", model: "claude-retired" },
+      to: { provider: "anthropic", model: "claude-sonnet" },
+    });
+  });
+
+  it("crosses providers when the configured provider is not authenticated at all", () => {
+    const resolved = resolveRoleModelSelections(
+      [role("lead", "openai-codex", "gpt-sol", "high")],
+      [option("anthropic", "claude-opus")],
+    );
+    expect(resolved.roles[0]).toMatchObject({ provider: "anthropic", model: "claude-opus" });
+    expect(describeRoleModelSubstitutions(resolved.substitutions)).toContain(
+      "openai-codex/gpt-sol → anthropic/claude-opus",
+    );
+  });
+
+  it("lowers reasoning only to a level the substituted model supports", () => {
+    const resolved = resolveRoleModelSelections(
+      [role("lead", "openai-codex", "gpt-sol", "max")],
+      [{ ...option("anthropic", "claude-opus"), thinkingLevels: ["off", "low", "medium"] }],
+    );
+    expect(resolved.roles[0]?.thinkingLevel).toBe("medium");
+  });
+
+  it("leaves an unsupported reasoning level on an executable model for admission to reject", () => {
+    const resolved = resolveRoleModelSelections(
+      [role("lead", "anthropic", "claude-opus", "max")],
+      [{ ...option("anthropic", "claude-opus"), thinkingLevels: ["off", "low"] }],
+    );
+    expect(resolved.substitutions).toEqual([]);
+    expect(resolved.roles[0]).toMatchObject({ model: "claude-opus", thinkingLevel: "max" });
+  });
+
+  it("returns the declared defaults unchanged when nothing is executable", () => {
+    const resolved = resolveRoleModelSelections(
+      [role("lead", "openai-codex", "gpt-sol", "high")],
+      [{ ...option("anthropic", "claude-opus"), available: false }],
+    );
+    expect(resolved.substitutions).toEqual([]);
+    expect(resolved.roles[0]).toMatchObject({ provider: "openai-codex", model: "gpt-sol" });
+    expect(describeRoleModelSubstitutions(resolved.substitutions)).toBeUndefined();
+  });
+
+  it("resolves an unsupported reasoning level upward before downward", () => {
+    expect(nearestSupportedThinkingLevel(["off", "medium", "xhigh"], "high")).toBe("xhigh");
+    expect(nearestSupportedThinkingLevel(["off", "low"], "max")).toBe("low");
+    expect(nearestSupportedThinkingLevel([], "high")).toBe("high");
+  });
+});
+
+function role(id: string, provider: string, model: string, thinkingLevel: "high" | "max") {
+  return {
+    id,
+    title: id.replace(/^./u, (first) => first.toLocaleUpperCase("en-US")),
+    provider,
+    model,
+    thinkingLevel,
+  } as const;
+}
+
+function option(provider: string, id: string): ControlModelOption {
+  return {
+    provider,
+    id,
+    name: id,
+    reasoning: true,
+    thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+    available: true,
+  };
+}
 
 function fixtureModel(): Model<Api> {
   return {

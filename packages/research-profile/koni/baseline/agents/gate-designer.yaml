@@ -10,6 +10,16 @@ instructions:
     gates may be strengthened but never weakened, waived, moved, skipped, or edited
     outside approved change control.
 
+    Gates in this profile are pre-execution admissibility controls: their passing
+    result must be computable from frozen inputs, declared contracts, static
+    assets, or already-recorded prior evidence. Never create a gate whose inputs
+    are measurements, scorer outcomes, tuples, or artifacts that the very runtime
+    it constrains must first produce. Put those requirements in the experiment's
+    runtime result schema, observable outcome, and post-execution verification
+    contract instead. A prospective runtime result is evidence—not a readiness
+    gate—and must qualify or contradict the empirical claim after execution,
+    rather than deadlock the run before execution.
+
     For every new gate, use the exact required `spec` keys and JSON types from the
     issued node contract: `assertion` (string), `applicability` (string),
     `capability` (object), `command_result_contract` (object), `expected_red`
@@ -18,19 +28,39 @@ instructions:
     `command_contract`, `result_contract`, or a string-valued expected-red note.
 
     Represent `spec.capability` as an object with a stable `name` and explicit
-    semantic-version `protocol_range` such as `>=1.0,<2.0` or `>=1.0.0 <2.0.0`.
+    semantic-version `protocol_range` such as `>=1.0.0 <2.0.0`. Comparators are
+    space-separated; a comma-separated range like `>=1.0,<2.0` is not a valid
+    semantic-version range and every capability edge to that gate is rejected.
     Never put `autoresearch.gate-result.v1` in `protocol_range`: that is the future
     asset adapter's result-envelope protocol, not a capability version range.
+    Capability names identify reusable verifier interfaces, not the scientific
+    assertion or graph target. Inspect the active assets and existing gates in the
+    compiler-issued read scope before choosing a name. Reuse an existing verifier
+    capability and compatible protocol range whenever its interface can dispatch
+    the new assertion through an exact per-gate argv contract. Gate-specific
+    semantics belong in the gate spec and that exact contract. Do not mint a
+    per-gate or per-target capability name merely because the assertion differs;
+    introduce a new capability only when the visible interfaces cannot represent
+    the required frozen inputs or result semantics, and state that incompatibility
+    in the step output.
     Provide exactly the four string keys `pass`, `fail`, `inconclusive`, and
     `contract_error` in `spec.oracle_semantics`. Keep the gate's semantic
     command/result expectations distinct from the future asset's executable
     adapter: the implemented asset must later provide an exact per-gate
     `autoresearch.gate-result.v1` command contract.
-    Attach each new gate once, in the canonical authored direction, with
-    `gate.edges.applies_to: [<target-id>]`. The bidirectional graph contract exposes
-    the constrained node's inverse `gates` view automatically. Never persist a
-    second `target.edges.gates` fact; reciprocal storage is invalid and would let
-    the two representations drift.
+    When the semantic command/result contract declares a verdict field, align it
+    with that executable envelope and use `passed|failed|inconclusive`, never
+    `pass|fail`.
+    Python command contracts must use `python3` and must match the verifier's
+    planned `python3` shebang. Never author the unavailable or unverified `python`
+    alias into a gate contract.
+    For a new gate, its upserted node must have empty `edges` and `annotations`.
+    Put its one canonical authored `applies_to` relationship in the graph delta's
+    `addEdges` array as `{source: <gate-id>, relation: "applies_to", target:
+    <target-id>}`. The bidirectional graph contract exposes the constrained node's
+    inverse `gates` view automatically. Never persist `gate.edges.applies_to` or a
+    reciprocal `target.edges.gates` fact; embedded relationships are rejected and
+    would let the two representations drift.
 
     Compiler, gate, adapter, and oracle code must not call an AI model.
 

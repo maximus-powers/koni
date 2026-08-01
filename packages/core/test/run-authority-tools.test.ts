@@ -515,6 +515,13 @@ class BoundedReadAdapter implements PiSessionAdapter {
     expect(first.details?.value).toMatchObject({ sizeBytes: expect.any(Number), eof: false });
     await expect(
       read.execute(
+        "large-duplicate-first-page",
+        { path: "large.ts", offset: 0, maxBytes: 32 * 1024 },
+        this.#abort.signal,
+      ),
+    ).rejects.toMatchObject({ code: "duplicate_repository_discovery" });
+    await expect(
+      read.execute(
         "large-oversized-page",
         { path: "large.ts", offset: 0, maxBytes: 32 * 1024 + 1 },
         this.#abort.signal,

@@ -64,6 +64,7 @@ export interface ControlProposalInspection {
   runId: string;
   ticketId: string;
   sourceTicketId: string;
+  requestSha256: Sha256Digest;
   status: TicketStatus;
   title: string;
   summary: string;
@@ -638,6 +639,7 @@ export function parseControlProposalInspection(value: unknown): ControlProposalI
       "runId",
       "ticketId",
       "sourceTicketId",
+      "requestSha256",
       "status",
       "title",
       "summary",
@@ -650,6 +652,10 @@ export function parseControlProposalInspection(value: unknown): ControlProposalI
   );
   const status = proposalTicketStatus(root.status, "proposal ticket status");
   const targetNodeIds = boundedIdentityArray(root.targetNodeIds, "proposal target node", 256);
+  if (!isSha256Digest(root.requestSha256)) {
+    throw new Error("authority returned an invalid proposal request digest");
+  }
+  const requestSha256 = root.requestSha256;
   const disposition = parseProposalDisposition(root.disposition);
   const decision = root.decision === undefined ? undefined : parseProposalDecision(root.decision);
   if (decision?.decision === "rejection" && disposition.kind !== "rejected") {
@@ -677,6 +683,7 @@ export function parseControlProposalInspection(value: unknown): ControlProposalI
     runId: boundedRequiredText(root.runId, "proposal run id", 256),
     ticketId: boundedRequiredText(root.ticketId, "proposal ticket id", 256),
     sourceTicketId: boundedRequiredText(root.sourceTicketId, "proposal source ticket id", 256),
+    requestSha256,
     status,
     title: boundedRequiredText(root.title, "proposal title", 4_096),
     summary: boundedRequiredText(root.summary, "proposal summary", 32_768),

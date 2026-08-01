@@ -21,7 +21,7 @@ afterEach(async () => {
 });
 
 describe("compiler ticket dependency projection", () => {
-  it("derives a sparse deterministic DAG from conflicting write authority", async () => {
+  it("derives a deterministic conflict closure that survives incremental reconciliation", async () => {
     const root = await projectRoot();
     const definitions = [
       definition("ticket-a", 30, scope({ writeNodes: ["node-shared"] })),
@@ -33,12 +33,39 @@ describe("compiler ticket dependency projection", () => {
     expect(Object.fromEntries(dependencies)).toEqual({
       "ticket-a": [],
       "ticket-b": ["ticket-a"],
-      "ticket-c": ["ticket-b"],
+      "ticket-c": ["ticket-a", "ticket-b"],
       "ticket-d": [],
     });
     expect(
       Object.fromEntries(deriveCompilerTicketDependencies([...definitions].reverse(), root)),
     ).toEqual(Object.fromEntries(dependencies));
+  });
+
+  it("settles narrower equal-priority path authority before an overlapping broad scope", async () => {
+    const root = await projectRoot();
+    const definitions = [
+      definition(
+        "ticket-a-broad-consumer",
+        20,
+        scope({
+          readPaths: ["program/assets"],
+          writePaths: ["program/assets"],
+        }),
+      ),
+      definition(
+        "ticket-z-specific-producer",
+        20,
+        scope({
+          readPaths: ["program/assets/dev_suite"],
+          writePaths: ["program/assets/dev_suite"],
+        }),
+      ),
+    ];
+
+    expect(Object.fromEntries(deriveCompilerTicketDependencies(definitions, root))).toEqual({
+      "ticket-a-broad-consumer": ["ticket-z-specific-producer"],
+      "ticket-z-specific-producer": [],
+    });
   });
 
   it("serializes hard-link aliases and fails closed when path authority is unsafe", async () => {

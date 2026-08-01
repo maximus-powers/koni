@@ -27,7 +27,7 @@ reports:
   - markdown
   source:
     query: active-claims
-    join: current-promoted-evidence
+    join: promoted-current-evidence
   columns:
   - id: claim_id
     title: claim
@@ -132,7 +132,7 @@ reports:
   - markdown
   source:
     union:
-    - query: current-promoted-evidence
+    - query: promoted-current-evidence
     - receipt_type: gate.receipt
     - receipt_type: runtime.receipt
     negative_only: true

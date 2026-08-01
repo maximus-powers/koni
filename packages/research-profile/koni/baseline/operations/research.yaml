@@ -26,6 +26,7 @@ operations:
   allowed_new_node_types:
   - claim
   - literature
+  max_new_nodes: 8
   allowed_existing_node_types:
   - hypothesis
   allow_node_deletion: false
@@ -37,7 +38,7 @@ operations:
     allow_upstream_requests: true
     proposal_operation: change-request
   review_contract: pre-commit graph transition review
-  output_contract: claims and related-work graph delta plus structured step outputs
+  output_contract: claim graph delta plus optional provenance-backed related-work graph delta and structured step outputs
   dispatch_priority: 830
   ranking_hints:
   - stage
@@ -52,6 +53,7 @@ operations:
   workflow: standard-research-transition
   allowed_new_node_types:
   - literature
+  max_new_nodes: 8
   allowed_existing_node_types:
   - hypothesis
   - literature
@@ -80,6 +82,7 @@ operations:
   allowed_new_node_types:
   - claim
   - literature
+  max_new_nodes: 8
   allowed_existing_node_types:
   - claim
   - hypothesis
@@ -106,6 +109,7 @@ operations:
   workflow: design-claim-experiment
   allowed_new_node_types:
   - experiment
+  max_new_nodes: 8
   allowed_existing_node_types:
   - claim
   allow_node_deletion: false
@@ -170,6 +174,7 @@ operations:
   - method
   - metric
   - prerequisite
+  max_new_nodes: 16
   allowed_existing_node_types:
   - experiment
   allow_node_deletion: false
@@ -197,6 +202,7 @@ operations:
   workflow: standard-research-transition
   allowed_new_node_types:
   - metric
+  max_new_nodes: 8
   allowed_existing_node_types:
   - experiment
   - method
@@ -226,6 +232,7 @@ operations:
   workflow: standard-research-transition
   allowed_new_node_types:
   - prerequisite
+  max_new_nodes: 8
   allowed_existing_node_types:
   - experiment
   - method
@@ -249,15 +256,17 @@ operations:
   operation: define-gates
   stage: graph_compilation
   target_types:
-  - ablation
-  - claim
   - experiment
-  - method
-  - metric
-  - prerequisite
+  # Generic gate synthesis is safe only at the experiment boundary.  Methods,
+  # claims, metrics, and prerequisites inherit that experiment's explicitly
+  # planned verifier gates; giving each a new capability-backed gate can create
+  # an unowned verifier contract with no authorized asset ticket.
   workflow: define-gates
   allowed_new_node_types:
   - gate
+  # The write-gate-contracts workflow must create exactly one typed gate and
+  # its canonical gate.applies_to edge for the selected target node.
+  max_new_nodes: 1
   allowed_existing_node_types: []
   allow_node_deletion: false
   allow_gate_contract_edits: false
@@ -268,7 +277,7 @@ operations:
     allow_upstream_requests: true
     proposal_operation: change-request
   review_contract: independent expected-red gate semantics review; require the configured typed command/result, capability, oracle, applicability, failure, and canonical gate.applies_to contract, but because this operation is gate-blocking-exempt and asset creation is a stop condition, do not require a downstream executable asset, runtime execution, or passing gate receipt at this boundary
-  output_contract: expected-red gate contract graph delta with one canonical gate.applies_to fact whose inverse gates view is compiler-derived, plus structured step outputs
+  output_contract: expected-red gate contract graph delta that reuses a visible compatible verifier capability whenever one exists, with one canonical gate.applies_to fact whose inverse gates view is compiler-derived, plus structured step outputs; a new capability requires an explicit incompatibility with every visible verifier interface
   dispatch_priority: 530
   ranking_hints:
   - stage
@@ -287,6 +296,7 @@ operations:
   workflow: compile-gate-package
   allowed_new_node_types:
   - gate
+  max_new_nodes: 8
   allowed_existing_node_types: []
   allow_node_deletion: false
   allow_gate_contract_edits: false
@@ -317,6 +327,7 @@ operations:
   workflow: compile-gate-package
   allowed_new_node_types:
   - gate
+  max_new_nodes: 8
   allowed_existing_node_types: []
   allow_node_deletion: false
   allow_gate_contract_edits: false
@@ -345,6 +356,7 @@ operations:
   workflow: compile-run-plan
   allowed_new_node_types:
   - run
+  max_new_nodes: 4
   allowed_existing_node_types:
   - ablation
   - experiment
@@ -373,6 +385,7 @@ operations:
   workflow: resolve-assets
   allowed_new_node_types:
   - asset
+  max_new_nodes: 4
   allowed_existing_node_types:
   - prerequisite
   - asset
@@ -401,6 +414,7 @@ operations:
   workflow: resolve-assets
   allowed_new_node_types:
   - asset
+  max_new_nodes: 1
   allowed_existing_node_types:
   - prerequisite
   - gate
@@ -429,6 +443,7 @@ operations:
   allowed_new_node_types:
   - asset
   - run
+  max_new_nodes: 4
   allowed_existing_node_types:
   - asset
   - prerequisite
@@ -458,6 +473,7 @@ operations:
   allowed_new_node_types:
   - asset
   - run
+  max_new_nodes: 4
   allowed_existing_node_types:
   - asset
   - prerequisite
@@ -471,7 +487,7 @@ operations:
     allow_upstream_requests: true
     proposal_operation: change-request
   review_contract: pre-commit asset implementation review
-  output_contract: concrete nonempty files under spec.implementation_plan.root plus authored spec.implementation.kind and project-relative spec.implementation.entrypoints, exact per-gate spec.gate_contracts, and validates links; new nodes omit compiler-owned fields and existing upserts preserve them byte-for-byte without claiming readiness
+  output_contract: concrete nonempty files under spec.implementation_plan.root plus authored spec.implementation.kind and project-relative spec.implementation.entrypoints; only when the target asset is capability-compatible with one or more research gates, add exact per-gate spec.gate_contracts and canonical validates links. Runner-only assets must not own verifier contracts or validates links. New nodes omit compiler-owned fields and existing upserts preserve them byte-for-byte without claiming readiness
   dispatch_priority: 410
   ranking_hints:
   - stage
@@ -485,6 +501,7 @@ operations:
   workflow: run-gate-runtime
   allowed_new_node_types:
   - run
+  max_new_nodes: 1
   allowed_existing_node_types:
   - gate
   - run
@@ -512,6 +529,7 @@ operations:
   allowed_new_node_types:
   - evidence
   - report
+  max_new_nodes: 2
   allowed_existing_node_types:
   - gate
   - evidence
@@ -539,6 +557,7 @@ operations:
   workflow: run-experiment-runtime
   allowed_new_node_types:
   - run
+  max_new_nodes: 1
   allowed_existing_node_types:
   - run
   allow_node_deletion: false
@@ -568,6 +587,7 @@ operations:
   allowed_new_node_types:
   - evidence
   - report
+  max_new_nodes: 16
   allowed_existing_node_types:
   - claim
   - evidence
@@ -665,6 +685,7 @@ operations:
   workflow: compile-report
   allowed_new_node_types:
   - report
+  max_new_nodes: 4
   allowed_existing_node_types:
   - evidence
   - report
@@ -691,6 +712,7 @@ operations:
   workflow: conclude-hypothesis
   allowed_new_node_types:
   - report
+  max_new_nodes: 1
   allowed_existing_node_types:
   - report
   allow_node_deletion: false
@@ -830,7 +852,21 @@ operations:
   target_types:
   - report
   workflow: draft-paper-input
-  allowed_new_node_types: []
+  allowed_new_node_types:
+  - hypothesis
+  - literature
+  - claim
+  - experiment
+  - prerequisite
+  - metric
+  - method
+  - ablation
+  - asset
+  - gate
+  - run
+  - evidence
+  - report
+  max_new_nodes: 16
   allowed_existing_node_types:
   - report
   allow_node_deletion: false
@@ -903,7 +939,21 @@ operations:
   - evidence
   - report
   workflow: apply-change-request
-  allowed_new_node_types: []
+  allowed_new_node_types:
+  - hypothesis
+  - literature
+  - claim
+  - experiment
+  - prerequisite
+  - metric
+  - method
+  - ablation
+  - asset
+  - gate
+  - run
+  - evidence
+  - report
+  max_new_nodes: 16
   allowed_existing_node_types:
   - hypothesis
   - literature
@@ -913,6 +963,7 @@ operations:
   - metric
   - method
   - ablation
+  - asset
   - gate
   - run
   - evidence
@@ -962,6 +1013,7 @@ operations:
   - run
   - evidence
   - report
+  max_new_nodes: 16
   allowed_existing_node_types:
   - hypothesis
   - literature

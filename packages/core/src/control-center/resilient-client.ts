@@ -125,7 +125,6 @@ export class ResilientControlCenterClient implements ControlCenterAuthorityClien
     this.#clearHeartbeat();
     this.#reconnectPromise = (async () => {
       try {
-        const previous = this.#client;
         const next = await this.#connect();
         if (this.#closed) {
           next.close?.();
@@ -133,9 +132,13 @@ export class ResilientControlCenterClient implements ControlCenterAuthorityClien
         }
         this.#unsubscribe?.();
         this.#unsubscribe = undefined;
-        previous.close?.();
         this.#client = next;
         this.#attach();
+        // Do not close `previous` here. A heartbeat can discover a broken transport while
+        // independent dashboard reads are still pending on it; AuthorityClient.close() rejects
+        // every pending request and can surface as an unhandled TUI failure. The authority's
+        // idle retirement bounds the abandoned connection, while this wrapper immediately stops
+        // issuing work through it.
         this.#reconnectAttempt = 0;
         const event: RpcEvent = {
           type: "event",

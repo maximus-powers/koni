@@ -15,6 +15,7 @@ import { PiAttemptProcessSupervisor } from "../src/pi/attempt-process-pool.js";
 import { createAgentLaunchSpec, type AgentLaunchSpec } from "../src/pi/launch-spec.js";
 import { koniToolMaxResultBytes, koniToolSchemaHash } from "../src/pi/tool-catalog.js";
 import { canonicalHash, rawSha256 } from "../src/shared/canonical.js";
+import { reduceRunLifecycle } from "../src/state/run-lifecycle.js";
 import type { RunRecord, TicketRecord } from "../src/state/run-record.js";
 import { fixtureLaunchSpec, TERMINAL_OUTPUT_SCHEMA } from "./pi-managed-fixtures.js";
 import { runBehaviorSnapshotFixture } from "./fixtures/compiled-behavior.js";
@@ -33,6 +34,64 @@ afterEach(async () => {
 });
 
 describe("run authority provider reservation lifecycle", () => {
+  it("auto-clears a stale provider hold after its terminal settlement arrives", async () => {
+    const harness = await authorityHarness("normal");
+    const runId = await createRun(harness.client);
+    await waitFor(async () => {
+      const run = await harness.engine.store.getRun(runId);
+      return run.lifecycle.phase === "awaiting_approval" && onlyAttempt(run).status === "completed";
+    });
+
+    await harness.engine.server.mutateInternal(async ({ revision }) => {
+      const run = await harness.engine.store.getRun(runId);
+      const draft = structuredClone(run);
+      draft.revision += 1;
+      draft.updatedAt = new Date(Date.parse(run.updatedAt) + 1).toISOString();
+      draft.lifecycle = reduceRunLifecycle(draft.lifecycle, {
+        type: "blocked",
+        atMs: Date.parse(draft.updatedAt),
+        reason:
+          "A prior provider request remains unsettled; its worst-case exposure blocks a successor attempt",
+      }).state;
+      const committed = await harness.engine.store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+      });
+      return { revision: committed.state.revision };
+    });
+
+    // Startup recovery models the real race: the launch path set its hold before the sibling
+    // settlement committed, so the durable attempt is now settled even though the run is blocked.
+    await harness.engine.stop();
+    harness.client.close();
+    const restarted = await RunAuthorityEngine.open({
+      projectRoot: harness.root,
+      version: "1.0.0",
+      program: providerProgram(
+        () => {},
+        () => {},
+        "normal",
+      ),
+      supervisor: new PiAttemptProcessSupervisor({
+        deferActivationUntilAuthorityCommit: true,
+        runtime: {
+          childEntry: fixtureEntry,
+          additionalEnvironment: { KONI_TEST_PROVIDER_SCENARIO: "normal" },
+        },
+      }),
+    });
+    engines.push(restarted);
+    await restarted.start();
+
+    await waitFor(async () => {
+      const recovered = await restarted.store.getRun(runId);
+      return (
+        recovered.lifecycle.phase === "awaiting_approval" &&
+        recovered.lifecycle.blocker === undefined
+      );
+    });
+  }, 60_000);
+
   it("crosses once into authenticated synthesis and closes repository discovery", async () => {
     const harness = await authorityHarness("synthesis_threshold");
     const runId = await createRun(harness.client);
@@ -309,104 +368,18 @@ describe("run authority provider reservation lifecycle", () => {
     60_000,
   );
 
-  it("acknowledges a canonical provider error with an inert tool call before a separate retry", async () => {
+  it("auto-recovers a canonical provider error with an inert tool call and never writes its effects", async () => {
     const harness = await authorityHarness("failed_provider_tool_call");
     const runId = await createRun(harness.client);
 
-    await waitFor(
-      async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked",
-    );
-    const run = await harness.engine.store.getRun(runId);
-    const attempt = onlyAttempt(run);
-    expect(attempt.status).toBe("failed");
-    expect(attempt.endedAt).toEqual(expect.any(String));
-    expect(attempt.authorityProviderRequests?.[0]?.settledAt).toBeUndefined();
-    expect(providerTotals(attempt)).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-    expect(run.lifecycle.blocker).toContain("worst-case exposure");
-
-    const controlsResponse = await harness.client.request("run.controls", { runId });
-    const controls = controlsResponse.result as {
-      binding: { runId: string; runRevision: number; generation: number };
-      stages: Array<{ actions: Array<{ intent: string; availability: { state: string } }> }>;
-      runActions: Array<{ id: string; intent: string; availability: { state: string } }>;
-    };
-    const resume = controls.runActions.find((action) => action.intent === "retry_blocked");
-    const acknowledge = controls.runActions.find(
-      (action) => action.intent === "retire_provider_exposure",
-    );
-    expect(resume).toMatchObject({ id: "run:resume", availability: { state: "disabled" } });
-    expect(acknowledge).toMatchObject({
-      id: "run:retire-provider-exposure",
-      availability: { state: "available" },
-    });
-    expect(
-      controls.stages
-        .flatMap((stage) => stage.actions)
-        .filter(
-          (action) =>
-            action.intent === "retry_supervised_stage" && action.availability.state === "available",
-        ),
-    ).toEqual([]);
-
-    await harness.client.request(
-      "run.action.execute",
-      {
-        protocol: "koni.stage-action-invocation.v1",
-        runId,
-        runRevision: controls.binding.runRevision,
-        generation: controls.binding.generation,
-        capabilityId: acknowledge!.id,
-        confirmed: true,
-        values: {},
-      },
-      {
-        expectedRevision: harness.client.revision,
-        idempotencyKey: "acknowledge-canonical-provider-error",
-      },
-    );
-    const acknowledged = await harness.engine.store.getRun(runId);
-    expect(acknowledged.lifecycle.phase).toBe("blocked");
-    expect(Object.keys(acknowledged.attempts)).toHaveLength(1);
-    expect(acknowledged.pendingEffects).toEqual({});
-    expect(onlyAttempt(acknowledged).authorityToolResults ?? []).toHaveLength(0);
-    expect(onlyAttempt(acknowledged).authorityProviderRequests?.[0]?.retirement).toMatchObject({
-      protocol: "koni.provider-exposure-retirement.v1",
-      disposition: "operator_acknowledged_provider_error",
-      assistantEntryId: "assistant",
-      responseId: "resp_fixture_provider_error",
-      errorMessageSha256: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
-    });
-    await expect(
-      readFile(path.join(acknowledged.projectRoot, "never-written.txt")),
-    ).rejects.toMatchObject({ code: "ENOENT" });
-
-    const retryControls = (await harness.client.request("run.controls", { runId }))
-      .result as typeof controls;
-    const retry = retryControls.runActions.find((action) => action.intent === "retry_blocked");
-    expect(retry).toMatchObject({ id: "run:resume", availability: { state: "available" } });
-    expect(
-      retryControls.runActions.some((action) => action.intent === "retire_provider_exposure"),
-    ).toBe(false);
-    await harness.client.request(
-      "run.action.execute",
-      {
-        protocol: "koni.stage-action-invocation.v1",
-        runId,
-        runRevision: retryControls.binding.runRevision,
-        generation: retryControls.binding.generation,
-        capabilityId: retry!.id,
-        confirmed: false,
-        values: {},
-      },
-      {
-        expectedRevision: harness.client.revision,
-        idempotencyKey: "retry-after-canonical-provider-error",
-      },
-    );
+    // A transient provider error (e.g. "servers overloaded, try again later") holds a reservation
+    // koni cannot settle. koni does zero automatic provider retries, so without auto-recovery the
+    // run would wedge needing an operator resume. It must instead retire the held reservation and
+    // re-drive planning on its own, reaching approval with a second attempt — no operator action.
     await waitFor(async () => {
       const recovered = await harness.engine.store.getRun(runId);
-      if (recovered.lifecycle.phase === "blocked" && recovered.revision > acknowledged.revision) {
-        throw new Error(`provider-error retry blocked: ${recovered.lifecycle.blocker}`);
+      if (recovered.lifecycle.phase === "blocked" && Object.keys(recovered.attempts).length >= 2) {
+        throw new Error(`provider-error auto-recovery blocked: ${recovered.lifecycle.blocker}`);
       }
       return (
         recovered.lifecycle.phase === "awaiting_approval" &&
@@ -415,9 +388,15 @@ describe("run authority provider reservation lifecycle", () => {
     });
 
     const recovered = await harness.engine.store.getRun(runId);
+    expect(recovered.lifecycle.blocker).toBeUndefined();
     const attempts = Object.values(recovered.attempts).sort((left, right) =>
       String(left.startedAt).localeCompare(String(right.startedAt)),
     );
+    // The inert terminal tool call from the errored attempt must never have been applied.
+    await expect(
+      readFile(path.join(recovered.projectRoot, "never-written.txt")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(attempts[0]?.authorityToolResults ?? []).toHaveLength(0);
     expect(attempts[0]?.authorityProviderRequests?.[0]?.retirement).toMatchObject({
       protocol: "koni.provider-exposure-retirement.v1",
       disposition: "operator_acknowledged_provider_error",
@@ -426,6 +405,13 @@ describe("run authority provider reservation lifecycle", () => {
       errorMessageSha256: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
       authorizationSha256: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
       sha256: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+    });
+    // Retirement is not a settlement: exposure is retained, not billed.
+    expect(providerTotals(attempts[0]!)).toEqual({
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
     });
     expect(attempts[1]?.lineage).toMatchObject({
       branchEpoch: 1,
@@ -439,31 +425,216 @@ describe("run authority provider reservation lifecycle", () => {
     expect(
       recovered.activity.some(
         (entry) =>
-          entry.message.includes("canonical provider error") &&
-          entry.message.includes("uncertain provider exposure"),
+          entry.message.includes("Auto-recovered after a canonical provider error") &&
+          entry.message.includes("without an operator retry"),
       ),
     ).toBe(true);
   }, 60_000);
 
-  it("retires a zero-usage provider error without a response id and recovers on resume", async () => {
-    // A transient upstream error (observed live: an Anthropic api_error "Internal server error")
-    // reports all-zero usage and frequently carries no response id. It is provably unbilled and its
-    // content is durably inert, so it has no worst-case exposure to hold; resume must recover it via
-    // the assistant-entry-id fallback rather than wedge the run with an unreconcilable reservation.
-    const harness = await authorityHarness("uncanonical_provider_error");
+  it("auto-recovers a ticket provider error by resetting the failed assignment", async () => {
+    const harness = await authorityHarness("assignment_provider_error");
     const runId = await createRun(harness.client);
     await waitFor(
-      async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked",
+      async () =>
+        (await harness.engine.store.getRun(runId)).lifecycle.phase === "awaiting_approval",
     );
-
+    await harness.client.request("authority.ping");
     await harness.client.request(
-      "run.resume",
+      "plan.approve",
       { runId },
       {
         expectedRevision: harness.client.revision,
-        idempotencyKey: "resume-after-zero-usage-provider-error",
+        idempotencyKey: "approve-ticket-provider-error",
       },
     );
+
+    await waitFor(async () => {
+      const run = await harness.engine.store.getRun(runId);
+      const ticketAttempts = Object.values(run.attempts).filter(
+        (attempt) => attempt.kind === "ticket" && attempt.ticketId === "ticket-one",
+      );
+      return (
+        ticketAttempts.length === 2 &&
+        ticketAttempts.some((attempt) => attempt.status === "completed")
+      );
+    });
+
+    const recovered = await harness.engine.store.getRun(runId);
+    expect(recovered.tickets["ticket-one"]?.status).not.toBe("blocked");
+    expect(recovered.tickets["ticket-one"]?.steps[0]).toMatchObject({ status: "completed" });
+    const attempts = Object.values(recovered.attempts)
+      .filter((attempt) => attempt.kind === "ticket" && attempt.ticketId === "ticket-one")
+      .sort((left, right) => String(left.startedAt).localeCompare(String(right.startedAt)));
+    expect(attempts[0]).toMatchObject({
+      status: "failed",
+      error:
+        "Provider request remains reserved without a canonical assistant settlement; worst-case exposure is held",
+    });
+    expect(attempts[0]?.authorityProviderRequests?.[0]?.retirement).toMatchObject({
+      disposition: "operator_acknowledged_provider_error",
+    });
+    expect(attempts[1]).toMatchObject({
+      status: "completed",
+      lineage: {
+        branchEpoch: 1,
+        reason: "retry",
+        parentAttemptId: attempts[0]?.id,
+      },
+    });
+  }, 60_000);
+
+  it("fails over an exhausted Sol lead recovery to Terra without an operator retry", async () => {
+    const harness = await authorityHarness("lead_sol_fallback");
+    const runId = await createRun(harness.client);
+    await waitFor(async () => {
+      const run = await harness.engine.store.getRun(runId);
+      return run.lifecycle.phase === "awaiting_approval";
+    });
+
+    await harness.client.request("authority.ping");
+    await harness.client.request(
+      "plan.approve",
+      { runId },
+      {
+        expectedRevision: harness.client.revision,
+        idempotencyKey: "approve-lead-sol-fallback",
+      },
+    );
+
+    await waitFor(async () => {
+      const run = await harness.engine.store.getRun(runId);
+      return Object.values(run.attempts).some(
+        (attempt) => attempt.kind === "lead" && attempt.status === "completed",
+      );
+    }, 60_000);
+
+    const run = await harness.engine.store.getRun(runId);
+    const leadAttempts = Object.values(run.attempts)
+      .filter((attempt) => attempt.kind === "lead")
+      .sort((left, right) => String(left.startedAt).localeCompare(String(right.startedAt)));
+    expect(leadAttempts.slice(0, 4).map((attempt) => attempt.modelId)).toEqual([
+      "gpt-5.6-sol",
+      "gpt-5.6-sol",
+      "gpt-5.6-sol",
+      "gpt-5.6-sol",
+    ]);
+    expect(leadAttempts[4]).toMatchObject({
+      modelProvider: "openai-codex",
+      modelId: "gpt-5.6-terra",
+      status: "completed",
+    });
+    expect(
+      run.activity.some((entry) =>
+        entry.message.includes("switched the next lead recovery to gpt-5.6-terra"),
+      ),
+    ).toBe(true);
+  }, 60_000);
+
+  it("keeps the exhausted Sol lead fallback after a failed Terra turn is acknowledged", async () => {
+    const harness = await authorityHarness("lead_sol_fallback_resume");
+    const runId = await createRun(harness.client);
+    await waitFor(async () => {
+      const run = await harness.engine.store.getRun(runId);
+      return run.lifecycle.phase === "awaiting_approval";
+    });
+
+    await harness.client.request("authority.ping");
+    await harness.client.request(
+      "plan.approve",
+      { runId },
+      {
+        expectedRevision: harness.client.revision,
+        idempotencyKey: "approve-lead-sol-fallback-resume",
+      },
+    );
+
+    await waitFor(async () => {
+      const run = await harness.engine.store.getRun(runId);
+      const leadAttempts = Object.values(run.attempts).filter((attempt) => attempt.kind === "lead");
+      return (
+        run.lifecycle.phase === "blocked" &&
+        leadAttempts.length === 5 &&
+        leadAttempts.at(-1)?.modelId === "gpt-5.6-terra"
+      );
+    }, 60_000);
+
+    const blockedControls = (await harness.client.request("run.controls", { runId })).result as {
+      binding: { runRevision: number; generation: number };
+      runActions: Array<{
+        id: string;
+        intent: string;
+        availability: { state: string };
+      }>;
+    };
+    const acknowledge = blockedControls.runActions.find(
+      (action) => action.intent === "retire_provider_exposure",
+    )!;
+    expect(acknowledge.availability.state).toBe("available");
+    await harness.client.request(
+      "run.action.execute",
+      {
+        protocol: "koni.stage-action-invocation.v1",
+        runId,
+        runRevision: blockedControls.binding.runRevision,
+        generation: blockedControls.binding.generation,
+        capabilityId: acknowledge.id,
+        confirmed: true,
+        values: {},
+      },
+      {
+        expectedRevision: harness.client.revision,
+        idempotencyKey: "acknowledge-failed-terra-fallback",
+      },
+    );
+
+    const retryControls = (await harness.client.request("run.controls", { runId })).result as {
+      binding: { runRevision: number; generation: number };
+      runActions: Array<{
+        id: string;
+        intent: string;
+        availability: { state: string };
+      }>;
+    };
+    const retry = retryControls.runActions.find((action) => action.intent === "retry_blocked")!;
+    expect(retry.availability.state).toBe("available");
+    await harness.client.request(
+      "run.action.execute",
+      {
+        protocol: "koni.stage-action-invocation.v1",
+        runId,
+        runRevision: retryControls.binding.runRevision,
+        generation: retryControls.binding.generation,
+        capabilityId: retry.id,
+        confirmed: false,
+        values: {},
+      },
+      {
+        expectedRevision: harness.client.revision,
+        idempotencyKey: "retry-after-failed-terra-fallback",
+      },
+    );
+
+    await waitFor(async () => {
+      const leadAttempts = Object.values(
+        (await harness.engine.store.getRun(runId)).attempts,
+      ).filter((attempt) => attempt.kind === "lead");
+      return leadAttempts.length >= 6;
+    }, 60_000);
+    const resumed = await harness.engine.store.getRun(runId);
+    const leadAttempts = Object.values(resumed.attempts)
+      .filter((attempt) => attempt.kind === "lead")
+      .sort((left, right) => String(left.startedAt).localeCompare(String(right.startedAt)));
+    expect(leadAttempts.at(-1)?.modelId).toBe("gpt-5.6-terra");
+  }, 60_000);
+
+  it("retries terminal propagation and auto-recovers a zero-usage provider error without a response id", async () => {
+    // A transient upstream error (observed live: an Anthropic api_error "Internal server error")
+    // reports all-zero usage and frequently carries no response id. It is provably unbilled and its
+    // content is durably inert, so it has no worst-case exposure to hold. The contained outcome can
+    // race its JSONL tail, so the authority must re-probe that bounded propagation window and
+    // recover via the assistant-entry-id fallback without an operator resume.
+    const harness = await authorityHarness("uncanonical_provider_error");
+    const runId = await createRun(harness.client);
     await waitFor(async () => {
       const run = await harness.engine.store.getRun(runId);
       return run.lifecycle.phase === "awaiting_approval" && Object.keys(run.attempts).length === 2;
@@ -480,27 +651,96 @@ describe("run authority provider reservation lifecycle", () => {
     });
   }, 60_000);
 
-  it("retires only a canonical Pi abort under explicit resume and preserves exact usage totals", async () => {
-    const harness = await authorityHarness("canonical_abort_recovery");
+  it("auto-recovers a zero-usage provider error when authority startup finds the held run", async () => {
+    const harness = await authorityHarness("uncanonical_provider_error");
     const runId = await createRun(harness.client);
     await waitFor(
       async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked",
     );
 
-    const blocked = await harness.engine.store.getRun(runId);
-    const first = onlyAttempt(blocked);
-    expect(first.authorityProviderRequests?.[0]?.settledAt).toBeUndefined();
-    expect(first.authorityProviderRequests?.[0]?.retirement).toBeUndefined();
-    expect(providerTotals(first)).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+    // The live recovery hook has already declined this held request. Simulate the only remaining
+    // path: an authority restart after the canonical zero-usage error was durably recorded.
+    await harness.engine.stop();
+    harness.client.close();
+    const attemptsAtShutdown = Object.keys(
+      (await harness.engine.store.getRun(runId)).attempts,
+    ).length;
+    const restarted = await RunAuthorityEngine.open({
+      projectRoot: harness.root,
+      version: "1.0.0",
+      program: providerProgram(
+        () => {},
+        () => {},
+        "uncanonical_provider_error",
+      ),
+      supervisor: new PiAttemptProcessSupervisor({
+        deferActivationUntilAuthorityCommit: true,
+        runtime: {
+          childEntry: fixtureEntry,
+          additionalEnvironment: { KONI_TEST_PROVIDER_SCENARIO: "uncanonical_provider_error" },
+        },
+      }),
+    });
+    engines.push(restarted);
+    await restarted.start();
 
-    await harness.client.request(
-      "run.resume",
-      { runId },
-      {
-        expectedRevision: harness.client.revision,
-        idempotencyKey: "resume-after-canonical-provider-abort",
-      },
+    await waitFor(async () => {
+      const run = await restarted.store.getRun(runId);
+      return (
+        run.lifecycle.phase === "awaiting_approval" &&
+        Object.keys(run.attempts).length > attemptsAtShutdown
+      );
+    });
+    expect((await restarted.store.getRun(runId)).lifecycle.blocker).toBeUndefined();
+  }, 60_000);
+
+  it("auto-recovers a canonical Pi abort without an operator resume and preserves exact usage totals", async () => {
+    const harness = await authorityHarness("canonical_abort_recovery");
+    const runId = await createRun(harness.client);
+    // No operator resume: a canonical Pi abort holds a reservation koni can never settle, so the
+    // authority auto-retires it and re-drives planning on its own. The run must reach approval with
+    // a second (retry) attempt entirely autonomously.
+    await waitFor(async () => {
+      const run = await harness.engine.store.getRun(runId);
+      return run.lifecycle.phase === "awaiting_approval" && Object.keys(run.attempts).length === 2;
+    });
+
+    const recovered = await harness.engine.store.getRun(runId);
+    expect(recovered.lifecycle.blocker).toBeUndefined();
+    const attempts = Object.values(recovered.attempts).sort((left, right) =>
+      String(left.startedAt).localeCompare(String(right.startedAt)),
     );
+    expect(attempts[0]?.authorityProviderRequests?.[0]?.retirement).toMatchObject({
+      protocol: "koni.provider-exposure-retirement.v1",
+      disposition: "operator_acknowledged_canonical_abort",
+      assistantEntryId: "assistant-aborted",
+      responseId: "resp_fixture_canonical_abort",
+      authorizationSha256: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+      sha256: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+    });
+    // Retirement is not a settlement: the conservative worst-case exposure is retained, not billed.
+    expect(providerTotals(attempts[0]!)).toEqual({
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
+    expect(attempts[1]?.lineage).toMatchObject({ branchEpoch: 1 });
+    expect(
+      recovered.activity.some(
+        (entry) =>
+          entry.message.includes("Auto-recovered after a canonical") &&
+          entry.message.includes("without an operator retry"),
+      ),
+    ).toBe(true);
+  }, 60_000);
+
+  it("auto-recovers a canonical Pi abort after an earlier assistant entry", async () => {
+    // A tool-result race can leave an earlier assistant entry followed by Pi's canonical abort
+    // terminal for the same reserved request. The abort still proves the provider did not settle;
+    // Koni must retain its worst-case exposure and re-drive without operator intervention.
+    const harness = await authorityHarness("canonical_abort_after_prior_assistant");
+    const runId = await createRun(harness.client);
     await waitFor(async () => {
       const run = await harness.engine.store.getRun(runId);
       return run.lifecycle.phase === "awaiting_approval" && Object.keys(run.attempts).length === 2;
@@ -515,22 +755,30 @@ describe("run authority provider reservation lifecycle", () => {
       disposition: "operator_acknowledged_canonical_abort",
       assistantEntryId: "assistant-aborted",
       responseId: "resp_fixture_canonical_abort",
-      authorizationSha256: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
-      sha256: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
     });
-    expect(providerTotals(attempts[0]!)).toEqual({
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
+  }, 60_000);
+
+  it("aborts and re-drives a provider request that exceeds the liveness boundary", async () => {
+    const harness = await authorityHarness("provider_liveness_timeout", {
+      providerRequestLivenessTimeoutMs: 25,
     });
-    expect(attempts[1]?.lineage).toMatchObject({ branchEpoch: 1 });
+    const runId = await createRun(harness.client);
+
+    await waitFor(async () => {
+      const run = await harness.engine.store.getRun(runId);
+      return run.lifecycle.phase === "awaiting_approval" && Object.keys(run.attempts).length === 2;
+    });
+
+    const recovered = await harness.engine.store.getRun(runId);
+    const attempts = Object.values(recovered.attempts).sort((left, right) =>
+      String(left.startedAt).localeCompare(String(right.startedAt)),
+    );
+    expect(attempts[0]?.status).toBe("aborted");
+    expect(attempts[0]?.authorityProviderRequests?.[0]?.retirement).toMatchObject({
+      disposition: "operator_acknowledged_canonical_abort",
+    });
     expect(
-      recovered.activity.some(
-        (entry) =>
-          entry.message.includes("retained up to") &&
-          entry.message.includes("uncertain provider exposure"),
-      ),
+      recovered.activity.some((entry) => entry.message.includes("Provider request exceeded")),
     ).toBe(true);
   }, 60_000);
 
@@ -724,7 +972,11 @@ describe("run authority provider reservation lifecycle", () => {
   }, 60_000);
 });
 
-async function authorityHarness(scenario: string): Promise<{
+async function authorityHarness(
+  scenario: string,
+  options: { providerRequestLivenessTimeoutMs?: number } = {},
+): Promise<{
+  root: string;
   engine: RunAuthorityEngine;
   client: AuthorityClient;
   prepareCount(): number;
@@ -754,6 +1006,7 @@ async function authorityHarness(scenario: string): Promise<{
     version: "1.0.0",
     program,
     supervisor,
+    ...options,
   });
   engines.push(engine);
   await engine.start();
@@ -762,7 +1015,7 @@ async function authorityHarness(scenario: string): Promise<{
     client: "tui",
     version: "1.0.0",
   });
-  return { engine, client, prepareCount: () => prepared, compileCount: () => compiled };
+  return { root, engine, client, prepareCount: () => prepared, compileCount: () => compiled };
 }
 
 function providerProgram(
@@ -813,7 +1066,18 @@ function providerProgram(
           questionPolicy: "some",
           instructions: "Produce one bounded plan.",
           agents: {
-            lead: { provider: "openai-codex", model: "gpt-5.6-terra", thinkingLevel: "high" },
+            lead: {
+              provider: "openai-codex",
+              model: scenario.startsWith("lead_sol_fallback") ? "gpt-5.6-sol" : "gpt-5.6-terra",
+              thinkingLevel: "high",
+            },
+            // The lead downgrade is drawn from another model this run already authorized on the
+            // lead's provider, so a real run's worker selection is part of the fixture.
+            implementer: {
+              provider: "openai-codex",
+              model: "gpt-5.6-terra",
+              thinkingLevel: "high",
+            },
           },
         },
       };
@@ -926,6 +1190,9 @@ function providerProgram(
         authoritativeContextHash: rawSha256(context),
       };
       draft.persona.id = input.assignment?.personaId ?? "lead";
+      if (scenario.startsWith("lead_sol_fallback")) {
+        draft.model.id = input.run.executionConfig!.agents.lead!.model;
+      }
       const spec = createAgentLaunchSpec(draft) as AgentLaunchSpec;
       return {
         spec,
@@ -997,9 +1264,7 @@ function providerProgram(
       return {
         graphHash: rawSha256("approved-provider-graph"),
         graphRevision: 1,
-        tickets: scenario.startsWith("assignment_terminal_")
-          ? { "ticket-one": providerTicket() }
-          : {},
+        tickets: scenario.startsWith("assignment_") ? { "ticket-one": providerTicket() } : {},
       };
     },
     async compileAssignmentOutput({ output }) {
@@ -1109,8 +1374,8 @@ function providerTotals(attempt: ReturnType<typeof onlyAttempt>) {
   };
 }
 
-async function waitFor(predicate: () => Promise<boolean>): Promise<void> {
-  const deadline = Date.now() + 15_000;
+async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 10));

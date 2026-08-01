@@ -76,7 +76,11 @@ describe("composed change-control authority", () => {
         objective: "Test whether retrieval improves bounded factual recall",
         runTypeId: "small",
         targetRef: "refs/heads/main",
-        intake: { goal: "Test whether retrieval improves bounded factual recall" },
+        intake: {
+          goal: "Test whether retrieval improves bounded factual recall",
+          hypothesis:
+            "Matched retrieval contexts improve bounded factual recall relative to matched non-retrieval controls.",
+        },
       },
       { expectedRevision: 0, idempotencyKey: "create-research-change-control" },
     );
@@ -546,6 +550,73 @@ describe("composed change-control authority", () => {
       fixture.engine,
       runId,
       "pause-after-change-control-decisions",
+    );
+    client.close();
+  }, 180_000);
+
+  it("bounds repeated rejected source reissues and preserves completed source steps", async () => {
+    const harness = new ScriptHarness(["request", "request", "request", "request"]);
+    const fixture = await researchAuthority(harness);
+    const client = await AuthorityClient.connect({
+      projectRoot: fixture.root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createApprovedRun(
+      client,
+      fixture.engine,
+      "bounded-rejected-source-reissues",
+    );
+
+    let proposal = await nextProposal(fixture.engine, runId, new Set(), harness);
+    const sourceId = proposal.proposal.executionControl!.proposalRequest!.sourceTicketId;
+    const rejected = new Set<string>();
+    for (let ordinal = 1; ordinal <= 4; ordinal += 1) {
+      rejected.add(proposal.proposal.id);
+      await decideProposal(
+        client,
+        runId,
+        proposal.proposal.id,
+        "rejection",
+        `Reject bounded reissue ${ordinal}`,
+      );
+      if (ordinal < 4) {
+        proposal = await nextProposal(fixture.engine, runId, rejected, harness);
+      }
+    }
+
+    const settled = await waitForDurableProgressValue(async () => {
+      const run = await fixture.engine.store.getRun(runId);
+      const source = run.tickets[sourceId];
+      if (source === undefined) return { progress: run.revision };
+      const relatedWork = source.steps.find((step) => step.id === "map-related-work");
+      const rejectedCount = Object.values(run.tickets).filter(
+        (ticket) =>
+          ticket.executionControl?.proposalRequest?.sourceTicketId === sourceId &&
+          ticket.executionControl.proposalDisposition?.kind === "rejected",
+      ).length;
+      const value =
+        rejectedCount === 4 &&
+        source.executionControl?.sourceHold === undefined &&
+        relatedWork?.status === "completed"
+          ? { run, source }
+          : undefined;
+      return value === undefined ? { progress: run.revision } : { progress: run.revision, value };
+    });
+    expect(settled.source.steps.find((step) => step.id === "map-related-work")).toMatchObject({
+      status: "completed",
+    });
+    expect(settled.source.executionControl?.sourceHold).toBeUndefined();
+    expect(
+      Object.values(settled.run.tickets).filter(
+        (ticket) => ticket.executionControl?.proposalRequest?.sourceTicketId === sourceId,
+      ),
+    ).toHaveLength(4);
+    await pauseAtFreshRevision(
+      client,
+      fixture.engine,
+      runId,
+      "pause-bounded-rejected-source-reissues",
     );
     client.close();
   }, 180_000);
@@ -1563,13 +1634,15 @@ async function createApprovedRun(
   label: string,
 ): Promise<string> {
   const objective = `Test ${label} with bounded factual recall`;
+  const hypothesis =
+    "Matched retrieval contexts improve bounded factual recall relative to matched non-retrieval controls.";
   const created = await client.request(
     "run.create",
     {
       objective,
       runTypeId: "small",
       targetRef: "refs/heads/main",
-      intake: { goal: objective },
+      intake: { goal: objective, hypothesis },
     },
     { expectedRevision: client.revision, idempotencyKey: `create-${label}` },
   );
@@ -1680,23 +1753,13 @@ async function decideProposal(
   decision: "approval" | "rejection",
   message: string,
 ): Promise<void> {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    await client.request("authority.ping");
-    try {
-      await client.request(
-        "proposal.decide",
-        { runId, ticketId, decision, message },
-        {
-          expectedRevision: client.revision,
-          idempotencyKey: `${decision}-${ticketId}`,
-        },
-      );
-      return;
-    } catch (error) {
-      if ((error as { code?: unknown }).code !== "revision_conflict") throw error;
-    }
-  }
-  throw new Error(`proposal decision never acquired a stable authority revision: ${ticketId}`);
+  const inspected = await client.request("proposal.inspect", { runId, ticketId });
+  const requestSha256 = (inspected.result as { requestSha256: string }).requestSha256;
+  await client.request(
+    "proposal.decide",
+    { runId, ticketId, requestSha256, decision, message },
+    { idempotencyKey: `${decision}-${ticketId}` },
+  );
 }
 
 async function pauseAtFreshRevision(

@@ -47,8 +47,73 @@ import {
   type StageActionCapability,
 } from "../src/state/stage-capability.js";
 import { attachCanonicalProposalFixture } from "./fixtures/canonical-control-ticket.js";
+import { buildControlCenterView } from "../src/control-center/view-model.js";
 
 describe("control center controller", () => {
+  it("presents a compiler-held source as waiting without hiding ordinary blockers", () => {
+    const run = fixtureRun();
+    const held = run.tickets["ticket-one"]!;
+    held.status = "blocked";
+    held.blocker = "Awaiting upstream change proposal proposal-one";
+    held.steps[0]!.status = "completed";
+    held.executionControl = {
+      sourceHold: {
+        proposalTicketId: "proposal-one",
+        requestSha256: canonicalHash("proposal request"),
+      },
+    };
+    const waiting = buildControlCenterView({
+      projectRoot: run.projectRoot,
+      authorityRevision: 1,
+      runs: [run],
+      selection: { runId: run.id, detailsTab: "overview", objectiveExpanded: false },
+      nowMs: 20_000,
+    });
+
+    expect(waiting.selectedRun?.tickets[0]).toMatchObject({
+      status: "Waiting for compiler grant",
+      recovery: false,
+    });
+    expect(
+      waiting.selectedRun?.overviewSections.find((section) => section.title === "Evidence"),
+    ).not.toMatchObject({ tone: "error" });
+    expect(waiting.selectedRun?.ticketTabs.find((tab) => tab.id === "blocked")?.count).toBe(0);
+    expect(waiting.selectedRun?.ticketTabs.find((tab) => tab.id === "todo")?.count).toBe(1);
+
+    const ordinary = structuredClone(held);
+    ordinary.id = "ticket-ordinary-blocker";
+    ordinary.title = "Ordinary blocker";
+    delete ordinary.executionControl;
+    run.tickets[ordinary.id] = ordinary;
+    const withFailure = buildControlCenterView({
+      projectRoot: run.projectRoot,
+      authorityRevision: 1,
+      runs: [run],
+      selection: { runId: run.id, detailsTab: "overview", objectiveExpanded: false },
+      nowMs: 20_000,
+    });
+
+    expect(
+      withFailure.selectedRun?.overviewSections.find((section) => section.title === "Evidence"),
+    ).toMatchObject({ tone: "error", lines: ["Attention", "1 blocked ticket"] });
+    expect(withFailure.selectedRun?.ticketTabs.find((tab) => tab.id === "blocked")?.count).toBe(1);
+  });
+
+  it("recovers ticket activation when stage controls race a run revision", async () => {
+    const client = new FakeAuthority([fixtureRun()]);
+    const controller = new ControlCenterController({ projectRoot: "/project", client });
+    client.returnStaleControlsOnce();
+    await controller.initialize();
+
+    await controller.handle({ type: "focus_panel", panel: "tickets" });
+    await controller.handle({ type: "move", delta: 1 });
+    await controller.handle({ type: "activate" });
+
+    expect(controller.snapshot.selection.ticketId).toBe("ticket-one");
+    expect(client.calls.filter((call) => call.method === "run.controls")).toHaveLength(2);
+    expect(controller.snapshot.notice).toBeUndefined();
+  });
+
   it("selects through the shared view model and sends effects only over revisioned RPC", async () => {
     const client = new FakeAuthority([fixtureRun()]);
     const controller = new ControlCenterController({
@@ -299,14 +364,16 @@ describe("control center controller", () => {
 
     await controller.handle({ type: "submit" });
     const decision = client.calls.find((call) => call.method === "proposal.decide");
+    const requestSha256 = run.tickets[proposalId]!.executionControl!.proposalRequest!.requestSha256;
     expect(decision).toMatchObject({
       params: {
         runId: "run-one",
         ticketId: proposalId,
+        requestSha256,
         decision: "rejection",
         message: "Keep the public API stable.",
       },
-      expectedRevision: 7,
+      expectedRevision: undefined,
       idempotencyKey: expect.stringMatching(/^proposal\.decide:/u),
     });
     expect(decision?.params).not.toHaveProperty("actor");
@@ -314,7 +381,7 @@ describe("control center controller", () => {
     controller.dispose();
   });
 
-  it("refreshes a stale proposal after a CAS conflict without replaying the operator decision", async () => {
+  it("retries an unchanged proposal once after a CAS conflict", async () => {
     const run = fixtureRun();
     run.questions = {};
     const proposalId = await attachFixtureProposal(run);
@@ -338,14 +405,44 @@ describe("control center controller", () => {
     client.failNextProposalDecisionWithRevisionConflict();
     await controller.handle({ type: "submit" });
 
-    expect(client.calls.filter((call) => call.method === "proposal.decide")).toHaveLength(1);
+    expect(client.calls.filter((call) => call.method === "proposal.decide")).toHaveLength(2);
     expect(client.calls.filter((call) => call.method === "proposal.inspect")).toHaveLength(2);
-    expect(controller.snapshot.modal).toMatchObject({
-      kind: "proposal_review",
-      focus: "document",
-      decision: undefined,
-    });
-    expect(controller.snapshot.notice?.message).toContain("Review the refreshed proposal");
+    expect(controller.snapshot.modal).toBeUndefined();
+    expect(controller.snapshot.notice?.message).toContain("Change proposal approved");
+    controller.dispose();
+  });
+
+  it("finishes a proposal decision after one coalesced refresh under continuous authority churn", async () => {
+    const run = fixtureRun();
+    run.questions = {};
+    const proposalId = await attachFixtureProposal(run);
+    const client = new FakeAuthority([run]);
+    const controller = new ControlCenterController({ projectRoot: "/project", client });
+    await controller.initialize();
+    await controller.handle({ type: "focus_panel", panel: "tickets" });
+    for (
+      let index = 0;
+      index < 3 && controller.snapshot.cursor.ticketId !== proposalId;
+      index += 1
+    ) {
+      await controller.handle({ type: "move", delta: 1 });
+    }
+    await controller.handle({ type: "activate" });
+    await controller.handle({ type: "focus", delta: 1 });
+    await controller.handle({ type: "focus", delta: 1 });
+    await controller.handle({ type: "move", delta: 1 });
+    await controller.handle({ type: "focus", delta: 1 });
+    const pagesBeforeDecision = client.calls.filter((call) => call.method === "run.page").length;
+    client.churnRunPages(10);
+
+    await controller.handle({ type: "submit" });
+
+    const decisionPages =
+      client.calls.filter((call) => call.method === "run.page").length - pagesBeforeDecision;
+    expect(decisionPages).toBeLessThanOrEqual(2);
+    expect(client.calls.filter((call) => call.method === "proposal.decide")).toHaveLength(1);
+    expect(controller.snapshot.busy).toBeUndefined();
+    expect(controller.snapshot.modal).toBeUndefined();
     controller.dispose();
   });
 
@@ -564,10 +661,42 @@ describe("control center controller", () => {
     controller.dispose();
   });
 
-  it("explains and refuses a configured model that the contained Pi runtime cannot execute", async () => {
+  it("substitutes an authenticated model for a configured default this Pi installation cannot execute", async () => {
     const models = fixtureModels();
     models[0]!.available = false;
     models[0]!.unavailableReason = "This provider comes from an ambient Pi extension.";
+    const client = new FakeAuthority([]);
+    const controller = new ControlCenterController({ projectRoot: "/project", client, models });
+    await controller.initialize();
+    await controller.handle({ type: "open_new_run" });
+    await controller.handle({ type: "append_text", text: "Build the notes route" });
+
+    const modal = controller.snapshot.modal;
+    expect(modal?.kind).toBe("new_run");
+    if (modal?.kind !== "new_run") throw new Error("expected the new-run modal");
+    // Planner and Lead are configured on the unavailable model; both move to an executable one.
+    expect(modal.roles.map((role) => role.model)).toEqual([
+      "gpt-review",
+      "gpt-review",
+      "gpt-worker",
+      "gpt-review",
+    ]);
+    const component = new ControlCenterComponent({
+      controller,
+      palette: plainKoniPalette,
+      viewportRows: () => 40,
+    });
+    expect(component.render(120).join("\n")).toContain("openai-codex/gpt-small → openai-codex");
+    component.dispose();
+    controller.dispose();
+  });
+
+  it("explains and refuses a configured model when Pi can execute no model at all", async () => {
+    const models = fixtureModels().map((model) => ({
+      ...model,
+      available: false,
+      unavailableReason: "This provider comes from an ambient Pi extension.",
+    }));
     const client = new FakeAuthority([]);
     const controller = new ControlCenterController({ projectRoot: "/project", client, models });
     await controller.initialize();
@@ -2643,6 +2772,8 @@ class FakeAuthority implements ControlCenterAuthorityClient {
   #configDocumentMutation = 0;
   #failedConflictInspectionPath: string | undefined;
   #failNextProposalDecision = false;
+  #returnStaleControlsOnce = false;
+  #runPageChurnRemaining = 0;
 
   public constructor(runs: RunRecord[]) {
     this.#runs = structuredClone(runs);
@@ -2733,6 +2864,14 @@ class FakeAuthority implements ControlCenterAuthorityClient {
     this.#failNextProposalDecision = true;
   }
 
+  public returnStaleControlsOnce(): void {
+    this.#returnStaleControlsOnce = true;
+  }
+
+  public churnRunPages(count: number): void {
+    this.#runPageChurnRemaining = count;
+  }
+
   public emit(topic: string): void {
     const event: RpcEvent = {
       type: "event",
@@ -2797,6 +2936,10 @@ class FakeAuthority implements ControlCenterAuthorityClient {
     await this.#requestGates.get(method);
     let result: JsonValue | undefined;
     if (method === "run.page") {
+      if (this.#runPageChurnRemaining > 0) {
+        this.#runPageChurnRemaining -= 1;
+        this.emit("run.updated");
+      }
       const request = isRecord(params) ? params : {};
       const aroundRunId = typeof request.aroundRunId === "string" ? request.aroundRunId : undefined;
       const aroundRun =
@@ -2839,7 +2982,14 @@ class FakeAuthority implements ControlCenterAuthorityClient {
         (candidate) => candidate.id === (isRecord(params) ? params.runId : undefined),
       );
       if (run === undefined) throw new Error("stage control run fixture is missing");
-      result = fixtureStageControls(run) as unknown as JsonValue;
+      const controls = fixtureStageControls(run);
+      if (this.#returnStaleControlsOnce) {
+        this.#returnStaleControlsOnce = false;
+        result = {
+          ...controls,
+          binding: { ...controls.binding, runRevision: controls.binding.runRevision + 1 },
+        } as unknown as JsonValue;
+      } else result = controls as unknown as JsonValue;
     } else if (method === "run.lineage") {
       const run = this.#runs.find(
         (candidate) => candidate.id === (isRecord(params) ? params.runId : undefined),

@@ -12,6 +12,20 @@ instructions:
     evidence. Call out any decision that requires explicit human input under the
     configured question policy.
 
+    Keep the terminal planning artifact compact. The `full` sections are an
+    executable specification, not a duplicated research paper: use short
+    paragraphs and concrete lists, omit background already present in the
+    intake, and keep each full section below 3,000 characters. The `concise`
+    fields must summarize rather than repeat `full`. Do not emit large copied
+    source excerpts, repeated control inventories, or a second narrative of
+    the same plan. This bound is required for reliable terminal submission.
+
+    Before submitting a plan, enumerate every experiment node required by the
+    objective and make each one independently schedulable through a design and
+    execution path. Never let a shared method, gate, or asset ticket stand in for
+    an omitted experiment: paired frontiers require explicit coverage of both
+    experiment nodes, their controls, and their result/evidence dependencies.
+
     This is an empirical receipt-driven profile. Runtime receipts may support or
     contradict a claim only within their declared observed population, interface,
     conditions, and implementation scope. Static reasoning, source inspection, or
@@ -33,13 +47,67 @@ instructions:
     `scoped-compile`, `review.receipt`, and `report.manifest`) instead of inventing
     new compiler receipt classes.
 
-    At the configured graph-seed stage, the run objective already exists and is
-    referenced in every seed edge only by the literal `$root`; `rootSpec` enriches
-    it but does not declare a node key. Every other edge endpoint must exactly
+    Separate pre-execution gates from post-execution scientific checks. A gate may
+    only require inputs that exist before the governed runtime starts. Required
+    runtime measurements (including control, locality, or scorer outcomes) belong
+    in that runtime's result contract and evidence interpretation, never in a
+    gate that applies to the same experiment or metric.
+
+    At the configured graph-seed stage, the root title and `spec.objective` are
+    compiler-owned verbatim intake: they are the research brief, not the
+    hypothesis. `rootSpec` must therefore always supply a concise, declarative,
+    falsifiable `hypothesis` or `statement` grounded in the project's stated
+    scientific mechanism. Never repeat the execution brief as the hypothesis
+    and never put scripts, paths, run types, controls, gates, evidence policy,
+    or operational constraints in that proposition. Put those details in the
+    plan and downstream nodes. For MUAT, phrase the proposition in the form
+    "Matched fixed-probe activation signatures encode instance-specific
+    behavioral information that enables controlled weight-space
+    interpretation/decoding"; the four-behavior suite, V42 edit, controls, and
+    locality threshold are the bounded test of that proposition, not the
+    proposition itself. The root is referenced in every seed edge only by the literal
+    `$root`; `rootSpec` does not declare a node key. Every other edge endpoint must exactly
     match a key declared in `nodes`, and every declared node must connect to
     `$root`. Never invent a root alias from the objective title or any `rootSpec`
     field. Keep the seed as semantic research intent, not tickets, receipts,
     transient investigation notes, implementation progress, or lifecycle status.
+
+    A development-only brief that says not to access sealed final holdouts is a
+    hard graph boundary. Do not create any node, title, metric, gate, capability,
+    asset, contract, or evaluation whose key or text refers to a holdout,
+    held-out/held out data, a final split, or final-subject artifacts. Those words
+    describe prohibited material, never a research target. Express all permitted
+    evaluation and controls as development-suite evidence only.
+
+    For every capability-backed gate, its `applies_to` edge must name exactly one
+    scientific evaluation target, never its verifier asset. For every exact
+    gate contract, also add the reciprocal verifier-asset `validates` edge to
+    that gate: the capability policy selects a compatible provider, while the
+    edge records the explicit provider-to-gate contract. When creating a
+    verifier asset, key `spec.gate_contracts` by each exact declared gate node
+    id and use a nonempty `argv` array (not `command`) under each key.
+    Seed this verifier coverage completely: for every predeclared capability-backed
+    gate that the same verifier implementation can serve, declare its capability,
+    exact contract, and `validates` edge in the initial graph. Do not defer known
+    sibling gate contracts to sequential change requests; that creates avoidable
+    blocked tickets and wastes provider turns.
+    Capability provider `protocol_version` values must use full semantic versions
+    such as `1.0.0`; `1.0` is not accepted by the capability matcher.
+    Keep every capability-backed gate's result vocabulary aligned with its future
+    adapter: when declaring a verdict field, use the executable verdict vocabulary
+    `passed|failed|inconclusive`, never the aliases `pass|fail`.
+    Python command contracts must use `python3` and must match the verifier's
+    planned `python3` shebang. Never seed the unavailable or unverified `python`
+    alias into a gate contract or runtime command.
+
+    A prerequisite that declares `spec.required_asset_type` is not satisfied by a
+    gate alone. Seed one canonical asset for that required artifact, link the
+    asset to the prerequisite with the schema's canonical relation, and give the
+    asset a concrete `spec.implementation_plan` rooted under `program/assets`.
+    A verifier asset may validate the resulting gate, but it never substitutes
+    for the prerequisite's required asset. This is mandatory for corpus manifests
+    and other safety boundaries: the asset must exist and be linked before its
+    gate can become passing.
 provider: openai-codex
 model: gpt-5.6-sol
 thinking_level: xhigh
