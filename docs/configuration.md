@@ -174,12 +174,13 @@ git:
 run_card:
   sections: [goal, pipeline, graph, tickets, checks, report]
 
+# Any Pi provider and model may appear here; these identifiers are examples, not built-in defaults.
 agents:
   roles:
-    planner: { model: gpt-5.6-sol, thinking_level: xhigh }
-    lead: { model: gpt-5.6-sol, thinking_level: xhigh }
-    ticket_worker: { model: gpt-5.6-terra, thinking_level: high }
-    reviewer: { model: gpt-5.6-terra, thinking_level: xhigh }
+    planner: { provider: anthropic, model: claude-opus-4-5, thinking_level: xhigh }
+    lead: { provider: anthropic, model: claude-opus-4-5, thinking_level: xhigh }
+    ticket_worker: { provider: anthropic, model: claude-sonnet-4-5, thinking_level: high }
+    reviewer: { provider: anthropic, model: claude-sonnet-4-5, thinking_level: xhigh }
   personas: {}
 
 orchestration:
@@ -313,13 +314,50 @@ The resolved result is pinned. A future edit cannot silently change an active ru
 In the control center, reusable role defaults belong to the Run Types domain. The Agents domain
 shows shared personas, prompts, permissions, and skills without duplicating per-run-type model rows.
 
-Agent files are YAML under `.koni/agents/`. They express instructions, `model`, `thinking_level`,
-capabilities, and skills. They cannot carry provider-native config overrides. `thinking_level: max`
-is canonical. `ultra` is accepted only while reading a pre-migration historical snapshot.
+Agent files are YAML under `.koni/agents/`. They express instructions, `provider`, `model`,
+`thinking_level`, capabilities, and skills. They cannot carry provider-native config overrides.
+`thinking_level: max` is canonical. `ultra` is accepted only while reading a pre-migration
+historical snapshot.
 
-The provider is intentionally not configurable. It is the pinned Pi provider authenticated through
-Pi's own credentials. Core owns graph, Git, and receipt effects and issues exact tool capabilities.
-Pi supplies only the model loop, streaming, structured output, and provider integration.
+Core owns graph, Git, and receipt effects and issues exact tool capabilities. Pi supplies the model
+loop, streaming, structured output, and provider integration.
+
+### Providers and models
+
+Köni has no built-in vendor. Every role executes whichever Pi provider and model the configuration
+names, and Pi's authenticated catalog decides what is executable. Anthropic Claude, OpenAI Codex,
+and any other provider Pi can reach are the same kind of value to the compiler. The engine has no
+vendor-specific behavior beyond the transport adaptation Pi's own API shapes require, such as an API
+that publishes no wire-level output cap.
+
+`provider` may be set on an agent resource, a persona, or a run-type role. A persona with no
+provider anywhere in that chain is a configuration error rather than a silent vendor default.
+
+```yaml
+# .koni/agents/lead.yaml
+provider: anthropic
+model: claude-opus-4-5
+thinking_level: xhigh
+```
+
+Selectable and executable models are always the current Pi catalog, never a list Köni ships:
+
+- The run form and the CLI both read Pi's offline `ModelRuntime` snapshot built from your normal Pi
+  credentials, `models.json`, and cached inventory.
+- When a profile's declared role model is not executable under your credentials, Köni binds that
+  role to an authenticated model instead and reports the substitution. It prefers another model from
+  the same provider, then any executable model, and it never lowers reasoning below a level the
+  substituted model supports. The one-run override is recorded; the profile default is not
+  rewritten.
+- A configured model that Pi _can_ execute but that does not support the configured reasoning level
+  stays visible and blocks before `run.create`. That is a configuration error, not a credential
+  mismatch, so Köni does not silently downgrade it.
+- With no executable model at all, run creation refuses with the exact Pi reason instead of
+  guessing.
+
+Automatic provider-error recovery is provider-neutral in the same way. When a lead exhausts its
+bounded provider-error budget, Köni may retry once on another model the same run already authorized
+on that lead's provider. It never introduces a model or vendor the run did not choose.
 
 ### Target-branch promotion
 

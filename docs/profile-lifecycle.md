@@ -27,7 +27,8 @@ Koni discovery events. Core verifies every manifest path, byte count, file hash,
 package identity, profile lineage, and compatibility range before use.
 
 Installation owns only `<project>/.koni`. It never mutates `.pi`, `.agents`, credentials, settings,
-community packages, prompts, themes, sessions, or unrelated `.codex` content.
+community packages, prompts, themes, sessions, or unrelated agent-tool content such as `.claude` and
+`.codex`.
 
 ## Baseline plus project overlay
 

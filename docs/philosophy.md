@@ -85,6 +85,26 @@ bounded authoritative spec slice, explicit steering, and advisory graph-bound wo
 worker may request another bounded neighborhood when needed, but that read cannot enlarge its
 semantic or filesystem authority.
 
+## No built-in vendor
+
+Köni runs on Pi rather than on one vendor's coding CLI, and that choice is load-bearing rather than
+incidental. Pi owns credentials, providers, and the model loop, so Köni can treat a provider and
+model as ordinary configuration instead of an assumption compiled into the engine.
+
+The consequences are deliberate:
+
+- A role names a `provider` and `model`. Anthropic Claude, OpenAI Codex, and every other provider Pi
+  can reach are the same kind of value, and one run may mix them across roles.
+- The engine holds no vendor default. A missing provider is a configuration error, not an implicit
+  choice of somebody's favorite model.
+- What is selectable is whatever the operator authenticated in Pi. A profile ships concrete role
+  defaults, but a project whose credentials cannot execute them binds authenticated models instead
+  and says so, rather than demanding configuration edits before the first run.
+- Provider-specific behavior is confined to transport adaptation that a provider's own API shape
+  requires, and to recovery that stays inside the models a run already authorized.
+
+A harness that is honest about topology should not quietly hardcode which model walks it.
+
 ## The graph is a living specification
 
 An approved plan should not disappear into prose that every later worker must reinterpret. A run

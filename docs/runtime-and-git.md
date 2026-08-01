@@ -248,7 +248,8 @@ Git, and project-filesystem authority itself.
 Each workflow step records structured output, files read, written, and deleted, findings, risks,
 receipt references, and a recommended next step. Leases prevent duplicate live workers. Agent
 history records starting, running, waiting, completed, failed, and interrupted attempts. Pi-native
-sessions are the only executable records. Historical Codex attempts stay readable archival history.
+sessions are the only executable records. Attempts recorded by the pre-Pi-native Codex CLI runtime
+stay readable archival history; today every provider executes through the same Pi-native path.
 
 ### Deterministic reopen
 

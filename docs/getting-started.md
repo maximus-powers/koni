@@ -64,7 +64,8 @@ for running authorities and preserves authentication plus every unrelated packag
 setting.
 
 Provider login and model discovery stay in Pi. Core installs no second credential store and no
-second runtime host.
+second runtime host. Whichever providers you authenticated in Pi — Anthropic Claude, OpenAI Codex,
+or any other — are the providers Köni can run, and each role picks from that same catalog.
 
 ### Upgrades
 
@@ -120,9 +121,10 @@ without prompting.
 Before publishing any files, initialization stages a complete installation, validates all catalog
 and profile references, and checks its owned-file manifest.
 
-Repeated initialization is safe. Köni preserves unrelated `.codex` content and refuses to overwrite
-an owned resource that changed after installation. Restore or reconcile that resource first. Move
-durable local customization into a project-owned resource where appropriate.
+Repeated initialization is safe. Köni preserves unrelated agent-tool content such as `.claude` and
+`.codex`, and refuses to overwrite an owned resource that changed after installation. Restore or
+reconcile that resource first. Move durable local customization into a project-owned resource where
+appropriate.
 
 If init reports an unmanaged `.koni` or ambiguous profile state, do not copy files manually. Resolve
 the ambiguity by hand (move or remove the conflicting directory) before initializing.

@@ -27,11 +27,13 @@ goal → semantic graph → missing obligations → tickets → isolated work
 - **Pinned runs** do not change when future configuration is edited.
 - **Isolated workers** use run- and ticket-specific branches and worktrees.
 - **Receipts and gates** make completion an auditable state transition.
+- **Provider-neutral execution** runs any Pi provider and model, per role.
 - **One control center** covers planning, configuration, questions, agents, and recovery.
 
 Köni keeps canonical project configuration under `.koni/`. It keeps authority and run state under
-the repository Git common directory. It preserves your existing Pi and `.codex` resources rather
-than making either one a second Koni configuration authority.
+the repository Git common directory. It preserves the agent-tool resources already in your
+repository, such as `.pi`, `.claude`, and `.codex`, rather than making any of them a second Koni
+configuration authority.
 
 The name comes from the Königsberg bridge problem. The useful abstraction is the topology (what
 connects to what), not a prematurely chosen route through it. Read the
@@ -105,6 +107,13 @@ command. Interactive and autonomous sessions use the credentials and provider se
 owns. Koni stores only non-secret model and provider selections in a compiled run. It never imports,
 exports, migrates, or rewrites your Pi authentication.
 
+Because Pi owns the providers, Köni is provider-neutral by construction. Anthropic Claude, OpenAI
+Codex, and every other provider Pi can reach are equally first-class, selectable per role, and
+mixable inside one run. The run form and `koni run` offer exactly the models your Pi installation
+can execute, and a profile default that your credentials cannot run is replaced by an authenticated
+model with a visible notice instead of a hard failure. See
+[Providers and models](docs/configuration.md#providers-and-models).
+
 The shipping `koni` command exposes:
 
 ```sh
@@ -138,8 +147,9 @@ koni tui                     # opens only in this terminal
 ```
 
 The selected verified package is materialized under `.koni`. A later `koni update` performs an
-explicit three-way baseline and overlay upgrade. Existing project configuration and all unrelated Pi
-and `.codex` resources stay project-owned.
+explicit three-way baseline and overlay upgrade. Existing project configuration and every unrelated
+agent-tool resource — `.pi`, `.claude`, `.codex`, and anything else in the repository — stay
+project-owned.
 
 Bare `koni` prints help. Koni never creates a terminal, tmux, or cmux pane on your behalf. The TUI
 opens only in the terminal where you invoke `koni tui`.
@@ -166,8 +176,8 @@ my-project/
 
 The installed `.koni/` tree is the project contract. The `koni` executable supplies the compiler,
 runtime, TUI, schemas, bundled templates, migrations, and validation machinery. Initialized projects
-do not depend on a Köni source checkout. Unrelated `.codex`, Pi, and project resources stay
-project-owned and untouched.
+do not depend on a Köni source checkout. Unrelated agent-tool and project resources — `.pi`,
+`.claude`, `.codex`, and the rest of the repository — stay project-owned and untouched.
 
 ## Documentation
 

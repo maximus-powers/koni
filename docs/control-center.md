@@ -144,7 +144,8 @@ source. Provider total may legitimately exceed Pi's visible buckets, so that saf
 counted.
 
 Rows are projected from durable Pi message, tool, retry, compaction, usage, and terminal events.
-Historical Codex turns remain historical-reader input only and never provide an execution fallback.
+Turns recorded by the pre-Pi-native Codex CLI runtime remain historical-reader input only and never
+provide an execution fallback.
 
 ### Chat and history
 
@@ -216,9 +217,17 @@ CLI flag name.
 
 Selectable models come from a fresh offline Pi `ModelRuntime` using your normal Pi credentials,
 `models.json`, and cached model inventory. That is the same substrate a contained attempt
-constructs. In `/koni`, models supplied only by another ambient extension appear as unavailable
-diagnostics rather than selectable entries. Koni does not copy that extension's provider functions
-into autonomous sessions. Standalone `koni tui` applies the same executable-catalog rule.
+constructs. Whichever providers you authenticated in Pi are the providers you can select here:
+Anthropic Claude, OpenAI Codex, and any other Pi provider appear on equal terms. In `/koni`, models
+supplied only by another ambient extension appear as unavailable diagnostics rather than selectable
+entries. Koni does not copy that extension's provider functions into autonomous sessions. Standalone
+`koni tui` applies the same executable-catalog rule.
+
+When the profile's declared role model is not executable under your credentials, the form opens on
+an authenticated model instead and shows which selections were substituted. `koni run` performs the
+same substitution and prints the same notice. You can still cycle any role to any executable model
+before starting. When Pi can execute nothing, the configured value stays visible and Start refuses
+with Pi's exact reason.
 
 Changing run type refreshes its effective defaults. Edits in this dialog are one-run overrides. They
 do not mutate the reusable run type. The base commit, configuration files, effective role policy,

@@ -34,6 +34,12 @@ Pi `0.80.10` supplies provider credentials, model execution, session JSONL, comp
 and ordinary interactive resources. The tested host pair is TypeBox `1.1.38` on Node `>=22.19`. Koni
 does not copy or rewrite Pi credentials or unrelated settings.
 
+Building on Pi rather than on one vendor's coding CLI is what makes Koni provider-neutral: every
+provider Pi can reach is selectable per role, and the engine holds no vendor default. Provider
+knowledge inside Core is limited to transport adaptation that a Pi API shape requires — for example
+an API that publishes no wire-level output cap must reserve its authenticated catalog maximum
+instead. See [Providers and models](configuration.md#providers-and-models).
+
 The package boundary is deliberately coarse. Koni ships one broad `@koni/core` package plus broad
 domain packages such as `@koni/coding-profile` and `@koni/research-profile`. Runtime adapters and
 run types are internal domains, not separate micro-packages. Profile registrars are passive
