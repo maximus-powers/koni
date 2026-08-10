@@ -61,13 +61,11 @@ export interface RunPipelineStageRecord {
 
 export type TicketStatus =
   | "proposed"
-  | "todo"
-  | "ready"
+  | "queued"
   | "running"
   | "review"
   | "blocked"
   | "completed"
-  | "failed"
   | "cancelled";
 
 export type TicketStepStatus = "pending" | "running" | "completed" | "failed" | "skipped";
@@ -3296,13 +3294,11 @@ function assertTicketRecord(id: string, value: unknown): asserts value is Ticket
   if (
     ![
       "proposed",
-      "todo",
-      "ready",
+      "queued",
       "running",
       "review",
       "blocked",
       "completed",
-      "failed",
       "cancelled",
     ].includes(value.status)
   )

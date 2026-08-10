@@ -27,6 +27,43 @@ afterEach(async () => {
 });
 
 describe("durable run store and deterministic scheduler", () => {
+  it("accepts queued tickets and rejects legacy ticket states", async () => {
+    for (const legacyStatus of ["todo", "ready", "failed"] as const) {
+      const store = await DurableRunStore.open(await temporaryRoot());
+      const legacy = runRecord();
+      const legacyTicket = ticket(`ticket-legacy-${legacyStatus}`, 0, []);
+      legacyTicket.status = legacyStatus as unknown as TicketRecord["status"];
+      legacy.tickets[legacyTicket.id] = legacyTicket;
+
+      await expect(store.create(legacy)).rejects.toThrow(/invalid ticket status/u);
+    }
+
+    const queuedStore = await DurableRunStore.open(await temporaryRoot());
+    const queuedRun = runRecord();
+    const queuedTicket = ticket("ticket-queued", 0, []);
+    queuedTicket.status = "queued";
+    queuedRun.tickets[queuedTicket.id] = queuedTicket;
+    await expect(queuedStore.create(queuedRun)).resolves.toMatchObject({
+      tickets: { "ticket-queued": { status: "queued" } },
+    });
+
+    const blockedStore = await DurableRunStore.open(await temporaryRoot());
+    const blockedRun = runRecord();
+    const blockedTicket = ticket("ticket-blocked", 0, []);
+    blockedTicket.status = "blocked";
+    blockedTicket.blocker = "The boundary case is missing.";
+    blockedTicket.steps[0]!.status = "failed";
+    blockedRun.tickets[blockedTicket.id] = blockedTicket;
+    await expect(blockedStore.create(blockedRun)).resolves.toMatchObject({
+      tickets: {
+        "ticket-blocked": {
+          status: "blocked",
+          steps: [expect.objectContaining({ status: "failed" })],
+        },
+      },
+    });
+  });
+
   it("persists CAS mutations and rejects stale writers", async () => {
     const root = await temporaryRoot();
     const store = await DurableRunStore.open(root);

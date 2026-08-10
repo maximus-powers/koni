@@ -12,14 +12,13 @@ import {
   ConfiguredLifecycleError,
 } from "../src/authority/configured-lifecycle.js";
 import { canonicalHash, rawSha256 } from "../src/shared/canonical.js";
-import { LEGACY_SOFTWARE_TICKET_LIFECYCLE_MACHINE_SHA256 } from "../src/contracts/historical-compatibility.js";
 
 describe("configured durable lifecycle authority", () => {
-  it("treats scheduler-only ticket movement as a no-op and authorizes semantic transitions", () => {
+  it("authorizes queued ticket lifecycle transitions", () => {
     const catalog = lifecycleCatalog();
     expect(
       authorizeConfiguredTicketTransition(catalog, {
-        from: "todo",
+        from: "queued",
         to: "proposed",
         actor: "compiler",
       }).transition?.id,
@@ -27,24 +26,17 @@ describe("configured durable lifecycle authority", () => {
     expect(
       authorizeConfiguredTicketTransition(catalog, {
         from: "proposed",
-        to: "todo",
+        to: "queued",
         actor: "compiler",
       }).transition?.id,
     ).toBe("approve-change");
-    expect(
-      authorizeConfiguredTicketTransition(catalog, {
-        from: "todo",
-        to: "ready",
-        actor: "compiler",
-      }),
-    ).toMatchObject({ changed: false, from: "todo", to: "todo" });
 
     const started = authorizeConfiguredTicketTransition(catalog, {
-      from: "ready",
+      from: "queued",
       to: "running",
       actor: "compiler",
     });
-    expect(started).toMatchObject({ changed: true, from: "todo", to: "in_progress" });
+    expect(started).toMatchObject({ changed: true, from: "queued", to: "in_progress" });
     expect(started.transition?.id).toBe("start");
 
     expect(
@@ -67,7 +59,7 @@ describe("configured durable lifecycle authority", () => {
     const catalog = lifecycleCatalog();
     expect(() =>
       authorizeConfiguredTicketTransition(catalog, {
-        from: "ready",
+        from: "queued",
         to: "running",
         actor: "human",
       }),
@@ -81,45 +73,25 @@ describe("configured durable lifecycle authority", () => {
     ).toThrow(/transition_not_configured/u);
   });
 
-  it("reopens only the exact stock pre-reissue lifecycle for the compiler", () => {
-    const legacy = legacySoftwareLifecycleCatalog();
-    expect(legacy.machines.ticket?.machine_sha256).toBe(
-      LEGACY_SOFTWARE_TICKET_LIFECYCLE_MACHINE_SHA256,
-    );
+  it("reopens the configured queued lifecycle only for the compiler", () => {
+    const catalog = lifecycleCatalog();
     expect(
-      authorizeConfiguredTicketTransition(legacy, {
+      authorizeConfiguredTicketTransition(catalog, {
         from: "completed",
-        to: "ready",
+        to: "queued",
         actor: "compiler",
       }),
     ).toMatchObject({
       changed: true,
-      compatibility: "legacy_compiler_reissue",
-      transition: { id: "compatibility-reopen-compiler-obligation" },
+      transition: { id: "reopen-stale-obligation" },
     });
     expect(() =>
-      authorizeConfiguredTicketTransition(legacy, {
+      authorizeConfiguredTicketTransition(catalog, {
         from: "completed",
-        to: "ready",
+        to: "queued",
         actor: "human",
       }),
     ).toThrow(/actor_not_allowed|transition_not_configured/u);
-
-    const ticket = legacy.machines.ticket!;
-    const customized = catalogWith({
-      ...legacy.machines,
-      ticket: machine(ticket.id, ticket.initial, ticket.states, ticket.terminal_states, [
-        ...ticket.transitions,
-        transition("custom-noop", ["todo"], "todo", ["compiler"]),
-      ]),
-    });
-    expect(() =>
-      authorizeConfiguredTicketTransition(customized, {
-        from: "completed",
-        to: "ready",
-        actor: "compiler",
-      }),
-    ).toThrow(/transition_not_configured/u);
   });
 
   it("maps pause, resume, conclusion, failure, and deletion onto the run machine", () => {
@@ -182,13 +154,23 @@ describe("configured durable lifecycle authority", () => {
         }),
       ),
     ).toThrow(/initialize durable runs as active/u);
+
+    const wrongTicket = machine("ticket", "legacy-waiting", ["legacy-waiting", "closed"], ["closed"], []);
+    expect(() =>
+      assertRuntimeLifecycleCatalog(
+        catalogWith({
+          ticket: wrongTicket,
+          run: catalog.machines.run!,
+        }),
+      ),
+    ).toThrow(/initialize durable work as queued/u);
   });
 });
 
 function lifecycleCatalog(): CompiledStateMachineCatalog {
   const ticketStates = [
     "proposed",
-    "todo",
+    "queued",
     "in_progress",
     "integrating",
     "blocked",
@@ -197,20 +179,21 @@ function lifecycleCatalog(): CompiledStateMachineCatalog {
   ];
   const ticket = machine(
     "ticket",
-    "todo",
+    "queued",
     ticketStates,
     ["closed", "retired"],
     [
-      transition("propose-change", ["todo"], "proposed", ["compiler"]),
-      transition("approve-change", ["proposed"], "todo", ["compiler"]),
-      transition("start", ["todo"], "in_progress", ["compiler"]),
+      transition("propose-change", ["queued"], "proposed", ["compiler"]),
+      transition("approve-change", ["proposed"], "queued", ["compiler"]),
+      transition("start", ["queued"], "in_progress", ["compiler"]),
       transition("request-review", ["in_progress"], "integrating", ["compiler"]),
       transition("review-failed", ["integrating"], "in_progress", ["compiler"]),
-      transition("block-todo", ["todo"], "blocked", ["compiler"]),
+      transition("block-queued", ["queued"], "blocked", ["compiler"]),
       transition("block-active", ["in_progress", "integrating"], "blocked", ["compiler"]),
-      transition("release", ["blocked"], "todo", ["compiler"]),
+      transition("release", ["blocked"], "queued", ["compiler"]),
+      transition("reopen-stale-obligation", ["closed"], "queued", ["compiler"]),
       transition("finish-reviewed", ["integrating"], "closed", ["compiler"]),
-      transition("retire", ["todo", "in_progress", "integrating", "blocked"], "retired", [
+      transition("retire", ["queued", "in_progress", "integrating", "blocked"], "retired", [
         "compiler",
       ]),
     ],
@@ -230,31 +213,6 @@ function lifecycleCatalog(): CompiledStateMachineCatalog {
     ],
   );
   return catalogWith({ ticket, run });
-}
-
-function legacySoftwareLifecycleCatalog(): CompiledStateMachineCatalog {
-  const ticket = machine(
-    "ticket",
-    "todo",
-    ["proposed", "todo", "in_progress", "integrating", "blocked", "closed", "retired"],
-    ["closed", "retired"],
-    [
-      transition("propose-change", ["todo"], "proposed", ["lead", "compiler"]),
-      transition("approve", ["proposed"], "todo", ["lead"]),
-      transition("reject-proposal", ["proposed"], "closed", ["lead", "compiler"]),
-      transition("start", ["todo"], "in_progress", ["lead", "compiler"]),
-      transition("request-review", ["in_progress"], "integrating", ["lead", "compiler"]),
-      transition("rework", ["integrating"], "in_progress", ["reviewer", "compiler"]),
-      transition("block-todo", ["todo"], "blocked", ["compiler"]),
-      transition("block-active", ["in_progress", "integrating"], "blocked", ["compiler"]),
-      transition("release", ["blocked"], "todo", ["compiler", "lead"]),
-      transition("interrupt-active", ["in_progress"], "todo", ["compiler"]),
-      transition("finish", ["integrating", "in_progress"], "closed", ["compiler"]),
-      transition("resolve-blocked", ["blocked"], "closed", ["compiler"]),
-      transition("retire", ["proposed", "todo", "blocked"], "retired", ["compiler"]),
-    ],
-  );
-  return catalogWith({ ticket, run: lifecycleCatalog().machines.run! });
 }
 
 function transition(

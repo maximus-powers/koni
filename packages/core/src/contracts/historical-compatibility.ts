@@ -21,17 +21,3 @@ export const LEGACY_SOFTWARE_LEAD_IDENTITY_SHA256 =
   "sha256:5c68014a603aa83d717bf966dc7ac6a864daecb80f6b6489d18c5018ee3fe841" as const;
 export const CURRENT_SOFTWARE_LEAD_IDENTITY_SHA256 =
   "sha256:f1ce476adf4c682859a77aff44d740716b5450be3be374c0753c2096cf723d2a" as const;
-
-/**
- * Exact pre-reissue lifecycle machines shipped by Koni's stock Coding and Research profiles.
- *
- * Those profiles declared `closed` terminal but predated the compiler fixpoint behavior that can
- * discover a completed obligation whose evidence has become stale. Current profiles configure the
- * compiler-only `closed -> todo` transition explicitly. These hashes let already-pinned stock runs
- * receive that one additive correction without granting the same transition to customized lifecycle
- * machines or reinterpreting any other state/actor pair.
- */
-export const LEGACY_SOFTWARE_TICKET_LIFECYCLE_MACHINE_SHA256 =
-  "sha256:4d6f5e51a8d3604b1f97cfc3aa0cf39c1783e6dc0cc421cbeee4fb810c42be44" as const;
-export const LEGACY_RESEARCH_TICKET_LIFECYCLE_MACHINE_SHA256 =
-  "sha256:472f815e8ef223eb648139ec76063739dcbf9cd599075ab8aca1b7cb92fdea33" as const;

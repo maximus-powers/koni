@@ -3,12 +3,7 @@ import type {
   CompiledStateMachineCatalog,
   CompiledStateTransition,
 } from "../contracts/rules.js";
-import {
-  LEGACY_RESEARCH_TICKET_LIFECYCLE_MACHINE_SHA256,
-  LEGACY_SOFTWARE_TICKET_LIFECYCLE_MACHINE_SHA256,
-} from "../contracts/historical-compatibility.js";
 import { authorizeStateTransition } from "../compiler/rules.js";
-import { canonicalHash } from "../shared/canonical.js";
 import type { RunPhase } from "../state/run-lifecycle.js";
 import type { TicketStatus } from "../state/run-record.js";
 
@@ -26,8 +21,6 @@ export type ConfiguredLifecycleAuthorization = Readonly<{
   /** Internal status changes that retain one configured state need no configured transition. */
   changed: boolean;
   transition?: CompiledStateTransition;
-  /** Exact stock-profile compatibility correction; never available to customized machines. */
-  compatibility?: "legacy_compiler_reissue";
 }>;
 
 export class ConfiguredLifecycleError extends Error {
@@ -62,10 +55,10 @@ export function assertRuntimeLifecycleCatalog(
       "compiled profile has no run state machine for durable run authority",
     );
   }
-  if (ticket.initial !== "todo") {
+  if (ticket.initial !== "queued") {
     throw new ConfiguredLifecycleError(
       "lifecycle.ticket_initial",
-      `ticket state machine must initialize durable work as todo, not ${ticket.initial}`,
+      `ticket state machine must initialize durable work as queued, not ${ticket.initial}`,
     );
   }
   if (run.initial !== "active") {
@@ -82,15 +75,13 @@ export function configuredTicketState(machine: CompiledStateMachine, status: Tic
   switch (status) {
     case "proposed":
       return "proposed";
-    case "todo":
-    case "ready":
-      return "todo";
+    case "queued":
+      return "queued";
     case "running":
       return "in_progress";
     case "review":
       return "integrating";
     case "blocked":
-    case "failed":
       return "blocked";
     case "completed":
       return "closed";
@@ -153,27 +144,6 @@ export function authorizeConfiguredTicketTransition(
       transition: authorization.transition,
     });
   }
-  if (
-    authorization.reason === "transition_not_configured" &&
-    projected.from === "closed" &&
-    projected.to === "todo" &&
-    projected.actor === "compiler" &&
-    LEGACY_REISSUE_MACHINE_SHA256S.has(machine.machine_sha256)
-  ) {
-    const material = {
-      id: "compatibility-reopen-compiler-obligation",
-      from: ["closed"],
-      to: "todo",
-      actors: ["compiler"],
-    } as const;
-    return Object.freeze({
-      protocol: CONFIGURED_LIFECYCLE_AUTHORIZATION_PROTOCOL,
-      ...projected,
-      changed: true,
-      transition: Object.freeze({ ...material, transition_sha256: canonicalHash(material) }),
-      compatibility: "legacy_compiler_reissue",
-    });
-  }
   throw new ConfiguredLifecycleError(
     `lifecycle.${authorization.reason}`,
     `${projected.actor} may not move configured ${projected.machineId} lifecycle from ${projected.from} to ${projected.to}: ${authorization.reason}`,
@@ -223,8 +193,3 @@ function authorizeConfiguredTransition(
     transition: Object.freeze(structuredClone(authorization.transition)),
   });
 }
-
-const LEGACY_REISSUE_MACHINE_SHA256S = new Set<string>([
-  LEGACY_SOFTWARE_TICKET_LIFECYCLE_MACHINE_SHA256,
-  LEGACY_RESEARCH_TICKET_LIFECYCLE_MACHINE_SHA256,
-]);

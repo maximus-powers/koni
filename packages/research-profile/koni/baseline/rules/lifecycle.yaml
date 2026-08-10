@@ -1,9 +1,9 @@
 state_machines:
 - id: ticket
-  initial: todo
+  initial: queued
   states:
   - proposed
-  - todo
+  - queued
   - in_progress
   - integrating
   - closed
@@ -13,14 +13,14 @@ state_machines:
   transitions:
   - id: propose-change-request
     from:
-    - todo
+    - queued
     to: proposed
     actors:
     - compiler
   - id: approve-change-request
     from:
     - proposed
-    to: todo
+    to: queued
     actors:
     - compiler
   - id: reject-change-request
@@ -32,12 +32,12 @@ state_machines:
   - id: make-actionable
     from:
     - proposed
-    to: todo
+    to: queued
     actors:
     - compiler
   - id: start
     from:
-    - todo
+    - queued
     to: in_progress
     actors:
     - compiler
@@ -69,24 +69,24 @@ state_machines:
   - id: release-blocker
     from:
     - blocked
-    to: todo
+    to: queued
     actors:
     - compiler
   - id: reopen-stale-obligation
     from:
     - closed
-    to: todo
+    to: queued
     actors:
     - compiler
   - id: interrupt-active
     from:
     - in_progress
-    to: todo
+    to: queued
     actors:
     - compiler
-  - id: retire-todo
+  - id: retire-queued
     from:
-    - todo
+    - queued
     to: closed
     actors:
     - compiler

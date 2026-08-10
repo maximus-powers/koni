@@ -4,10 +4,10 @@ module:
   version: 0.3.0
 state_machines:
 - id: ticket
-  initial: todo
+  initial: queued
   states:
   - proposed
-  - todo
+  - queued
   - in_progress
   - integrating
   - blocked
@@ -19,7 +19,7 @@ state_machines:
   transitions:
   - id: propose-change
     from:
-    - todo
+    - queued
     to: proposed
     actors:
     - lead
@@ -27,7 +27,7 @@ state_machines:
   - id: approve
     from:
     - proposed
-    to: todo
+    to: queued
     actors:
     - lead
   - id: reject-proposal
@@ -39,7 +39,7 @@ state_machines:
     - compiler
   - id: start
     from:
-    - todo
+    - queued
     to: in_progress
     actors:
     - lead
@@ -58,9 +58,9 @@ state_machines:
     actors:
     - reviewer
     - compiler
-  - id: block-todo
+  - id: block-queued
     from:
-    - todo
+    - queued
     to: blocked
     actors:
     - compiler
@@ -74,14 +74,14 @@ state_machines:
   - id: release
     from:
     - blocked
-    to: todo
+    to: queued
     actors:
     - compiler
     - lead
   - id: interrupt-active
     from:
     - in_progress
-    to: todo
+    to: queued
     actors:
     - compiler
   - id: finish
@@ -100,13 +100,13 @@ state_machines:
   - id: reopen-stale-obligation
     from:
     - closed
-    to: todo
+    to: queued
     actors:
     - compiler
   - id: retire
     from:
     - proposed
-    - todo
+    - queued
     - blocked
     to: retired
     actors:
