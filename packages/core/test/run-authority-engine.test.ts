@@ -102,7 +102,11 @@ import { STATE_MACHINE_CATALOG_PROTOCOL } from "../src/contracts/rules.js";
 import { parseConfigCatalog, parseConfigSnapshot } from "../src/control-center/protocol.js";
 import { installProfile } from "../src/profile/install.js";
 import { IsolatedGitLifecycle } from "../src/git/lifecycle.js";
-import { createGitRunTemplateContext } from "../src/git/behavior-policy.js";
+import {
+  createGitRunTemplateContext,
+  createGitTicketTemplateContext,
+  renderTicketRef,
+} from "../src/git/behavior-policy.js";
 import type {
   AgentAttemptRecord,
   RunActionExecutionRecord,
@@ -1822,6 +1826,247 @@ describe("run authority engine", () => {
       factory: async () => new HangingAdapter(admissionSpec),
     });
     expect(admitted.session.spec.identity.runId).toBe(runId);
+    client.close();
+  }, 30_000);
+
+  it("routes a compiler-owned planned asset repair before the first Lead judgment can block", async () => {
+    const root = await repository();
+    const direct = directApprovalProgram({ autoStart: false });
+    const leadProposalStatuses: Array<string | undefined> = [];
+    const sourceStatesAtLead: Array<{
+      status: TicketRecord["status"];
+      executionEpoch: number | undefined;
+      gitCycleId: string | undefined;
+      executionControl: TicketRecord["executionControl"];
+      retiredCycleStatus: string | undefined;
+    }> = [];
+    let proposalInstalled = false;
+    let proposalReconciliations = 0;
+    let sourceTicketId: string | undefined;
+    let retiredCycleId: string | undefined;
+    const program: RunCompilerProgram = {
+      ...direct,
+      async reconcileTicketBoard(run) {
+        const tickets = structuredClone(run.tickets);
+        const proposal = Object.values(tickets).find(
+          (ticket) =>
+            ticket.executionControl?.proposalRequest?.fulfillment === "planned_asset_repair",
+        );
+        if (proposalInstalled) proposalReconciliations += 1;
+        // Explicit resume performs the first ordinary board refresh. The regression is the next
+        // automatic tick: compiler-owned repair routing must still happen before Lead review.
+        if (proposal?.status === "proposed" && proposalReconciliations >= 2) {
+          proposal.status = "cancelled";
+          proposal.blocker = "Superseded by the existing planned asset implementation workflow";
+          for (const step of proposal.steps) step.status = "skipped";
+        }
+        return { tickets };
+      },
+      async prepareAttempt(input) {
+        if (proposalInstalled && input.kind === "lead") {
+          leadProposalStatuses.push(
+            Object.values(input.run.tickets).find(
+              (ticket) =>
+                ticket.executionControl?.proposalRequest?.fulfillment === "planned_asset_repair",
+            )?.status,
+          );
+          const source =
+            sourceTicketId === undefined ? undefined : input.run.tickets[sourceTicketId];
+          sourceStatesAtLead.push({
+            status: source!.status,
+            executionEpoch: source!.executionEpoch,
+            gitCycleId: source!.gitCycleId,
+            executionControl: source!.executionControl,
+            retiredCycleStatus:
+              retiredCycleId === undefined
+                ? undefined
+                : input.run.git.ticketCycles[retiredCycleId]?.status,
+          });
+        }
+        return direct.prepareAttempt(input);
+      },
+      async projectExecutionSemanticCatalog(run) {
+        return proposalSemanticCatalog(run.compiledConfigHash);
+      },
+    };
+    let engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    let client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const created = await client.request(
+      "run.create",
+      {
+        objective: "Route one planned asset repair without an operator boundary",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Route one planned asset repair without an operator boundary" },
+      },
+      { expectedRevision: 0, idempotencyKey: "create-planned-asset-repair-routing" },
+    );
+    const runId = (created.result as { runId: string }).runId;
+    await waitFor(
+      async () => (await engine.store.getRun(runId)).lifecycle.phase === "awaiting_approval",
+    );
+    await client.request("authority.ping");
+    await client.request(
+      "plan.approve",
+      { runId },
+      {
+        expectedRevision: client.revision,
+        idempotencyKey: "approve-paused-planned-asset-repair-routing",
+      },
+    );
+    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "paused");
+
+    const paused = await engine.store.getRun(runId);
+    const draft = structuredClone(paused);
+    draft.revision += 1;
+    draft.updatedAt = "2026-08-12T00:00:00.000Z";
+    const proposal = await addCanonicalProposalFixture(draft, {
+      fulfillment: "planned_asset_repair",
+    });
+    const request = proposal.executionControl!.proposalRequest!;
+    const source = draft.tickets[request.sourceTicketId]!;
+    const cycleId = "cycle-planned-asset-repair-source";
+    sourceTicketId = source.id;
+    retiredCycleId = cycleId;
+    const templateContext = createGitTicketTemplateContext({
+      id: source.id,
+      cycleId,
+      operation: source.operationId,
+      title: source.title,
+    });
+    const branchRef = renderTicketRef(draft.git.policy!, draft.git.runTemplate!, templateContext);
+    const worktree = path.join(
+      draft.git.namespace.ticketRoot,
+      ...branchRef.slice("refs/heads/".length).split("/"),
+    );
+    const archiveRef = `refs/koni/archive/${runId}/tickets/${source.id}/cycles/${cycleId}/${request.requestSha256.slice("sha256:".length)}`;
+    source.gitCycleId = cycleId;
+    source.worktreePath = worktree;
+    source.branch = branchRef;
+    draft.git.ticketCycles[cycleId] = {
+      cycleId,
+      ticketId: source.id,
+      ordinal: 1,
+      status: "retired",
+      baseRunOid: draft.git.run.headOid!,
+      branchRef,
+      worktree,
+      ticketHeadOid: draft.git.run.headOid!,
+      integratedRunOid: undefined,
+      squashCommitOid: undefined,
+      createdAt: draft.updatedAt,
+      integratedAt: undefined,
+      retiredAt: draft.updatedAt,
+      blocker: undefined,
+      archiveRef,
+      supersessionSha256: request.requestSha256,
+      supersededAt: draft.updatedAt,
+      templateContext,
+    };
+    draft.git.ticketCycleOrder.push(cycleId);
+    const state = await engine.store.state();
+    await engine.store.commit({
+      expectedRevision: state.revision,
+      runWrites: [{ record: draft, expectedRevision: paused.revision }],
+    });
+    proposalInstalled = true;
+    client.close();
+    await engine.stop();
+    engines.splice(engines.indexOf(engine), 1);
+    let interruptAfterRoute = true;
+    engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.1",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+      lifecycleFault(point) {
+        if (point !== "after_planned_asset_repair_route" || !interruptAfterRoute) return;
+        interruptAfterRoute = false;
+        throw new Error("simulated crash after planned asset repair routing");
+      },
+    });
+    engines.push(engine);
+    await engine.start();
+    client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.1",
+    });
+
+    await client.request(
+      "run.resume",
+      { runId },
+      {
+        expectedRevision: client.revision,
+        idempotencyKey: "resume-planned-asset-repair-routing",
+      },
+    );
+    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "blocked");
+    const interrupted = await engine.store.getRun(runId);
+    expect(interrupted.tickets[proposal.id]).toMatchObject({
+      status: "cancelled",
+      blocker: "Superseded by the existing planned asset implementation workflow",
+    });
+    expect(interrupted.tickets[source.id]?.executionControl?.sourceHold).toMatchObject({
+      proposalTicketId: proposal.id,
+      requestSha256: request.requestSha256,
+    });
+    expect(interrupted.git.ticketCycles[cycleId]).toMatchObject({
+      status: "retired",
+      supersessionSha256: request.requestSha256,
+      archiveRef,
+    });
+
+    client.close();
+    await engine.stop();
+    engines.splice(engines.indexOf(engine), 1);
+    engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.2",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.2",
+    });
+    await client.request(
+      "run.resume",
+      { runId },
+      {
+        expectedRevision: client.revision,
+        idempotencyKey: "resume-routed-planned-asset-repair",
+      },
+    );
+    await waitFor(async () => leadProposalStatuses.length > 0);
+
+    expect(leadProposalStatuses[0]).toBe("cancelled");
+    expect(proposalReconciliations).toBeGreaterThanOrEqual(2);
+    expect(sourceStatesAtLead[0]).toMatchObject({
+      status: "queued",
+      executionEpoch: 1,
+      gitCycleId: undefined,
+      executionControl: undefined,
+      retiredCycleStatus: "retired",
+    });
+    expect((await engine.store.getRun(runId)).tickets[proposal.id]).toMatchObject({
+      status: "cancelled",
+      blocker: "Superseded by the existing planned asset implementation workflow",
+    });
     client.close();
   }, 30_000);
 
@@ -9296,7 +9541,12 @@ async function moveRunToConfiguredStage(engine: RunAuthorityEngine, runId: strin
   });
 }
 
-async function addCanonicalProposalFixture(run: RunRecord): Promise<TicketRecord> {
+async function addCanonicalProposalFixture(
+  run: RunRecord,
+  options: Readonly<{
+    fulfillment?: "planned_asset_repair" | "dynamic_scope_change";
+  }> = {},
+): Promise<TicketRecord> {
   const catalog = proposalSemanticCatalog(run.compiledConfigHash);
   const at = run.updatedAt;
   const source = proposalSourceTicket(catalog, at);
@@ -9322,6 +9572,7 @@ async function addCanonicalProposalFixture(run: RunRecord): Promise<TicketRecord
     sourceBindingSha256: sourceBinding.sha256,
     sourceOutputSha256: publication.sourceOutputSha256,
     targetNodeIds: publication.targetNodeIds,
+    ...(options.fulfillment === undefined ? {} : { fulfillment: options.fulfillment }),
     summary: publication.summary,
     reason: publication.reason,
     publication,
@@ -9430,6 +9681,7 @@ async function addCanonicalProposalFixture(run: RunRecord): Promise<TicketRecord
       sourceTicketId: publication.sourceTicketId,
       sourceStepId: publication.sourceStepId,
       sourceOutputSha256: publication.sourceOutputSha256,
+      ...(options.fulfillment === undefined ? {} : { fulfillment: options.fulfillment }),
     },
   };
   const proposal = proposalTicketFromDefinition(
@@ -9714,7 +9966,7 @@ function proposalTicketFromDefinition(
 }
 
 function directApprovalProgram(
-  overrides: Readonly<{ legacyReportLock?: boolean }> = {},
+  overrides: Readonly<{ legacyReportLock?: boolean; autoStart?: boolean }> = {},
 ): RunCompilerProgram {
   const planned = fakeProgram(overrides);
   return {
@@ -10500,7 +10752,9 @@ function gitConflictProgram(harness: GitConflictHarness): RunCompilerProgram {
   };
 }
 
-function fakeProgram(overrides: Readonly<{ legacyReportLock?: boolean }> = {}): RunCompilerProgram {
+function fakeProgram(
+  overrides: Readonly<{ legacyReportLock?: boolean; autoStart?: boolean }> = {},
+): RunCompilerProgram {
   return {
     async resolveRun(request) {
       const behavior = runBehaviorSnapshotFixture(request.runTypeId, "software", overrides);

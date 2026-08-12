@@ -252,6 +252,7 @@ import {
   blockedReviewRetryCandidate,
   canRetryBlockedReviewOnly,
   COMPILER_INAPPLICABLE_TICKET,
+  COMPILER_ROUTED_TO_PLANNED_ASSET_REPAIR,
   deriveReadyAssignments,
   finishAssignment,
   legacyCompletedReviewRejectionCandidate,
@@ -999,6 +1000,7 @@ export interface RunAuthorityEngineOptions {
       | "before_run_materialization_settle"
       | "after_ticket_checkpoint"
       | "before_publication_settle"
+      | "after_planned_asset_repair_route"
       | "after_verification",
     input: Readonly<{ runId: string; ticketId?: string }>,
   ) => Promise<void> | void;
@@ -16746,6 +16748,10 @@ export class RunAuthorityEngine {
       await this.#tick(runId, advancement);
       return;
     }
+    if (await this.#routePlannedAssetRepairBeforeLead(runId, advancement)) {
+      await this.#tick(runId, advancement);
+      return;
+    }
     if (await this.#materializeApprovedProposal(runId, advancement)) {
       await this.#tick(runId, advancement);
       return;
@@ -17649,6 +17655,106 @@ export class RunAuthorityEngine {
       return { revision: committed.state.revision };
     });
     return rearmed;
+  }
+
+  /**
+   * Let the pinned compiler consume a pristine planned-asset repair before qualitative Lead
+   * review. These requests do not widen the approved plan: reconciliation cancels the transient
+   * proposal and leaves its exact held source for the ordinary release/reissue path. A genuine
+   * dynamic-scope proposal, an operator-touched proposal, or a compiler projection that keeps the
+   * proposal active remains an explicit change-control boundary.
+   */
+  async #routePlannedAssetRepairBeforeLead(
+    runId: string,
+    advancement: RunAdvancementToken,
+  ): Promise<boolean> {
+    const run = await this.#store.getRun(runId);
+    if (
+      !this.#matchesAdvancement(run, advancement) ||
+      hasUnfinalizedAcceptedAssignment(run) ||
+      this.#program.reconcileTicketBoard === undefined
+    )
+      return false;
+    const candidate = Object.values(run.tickets)
+      .filter((ticket) => {
+        const control = ticket.executionControl;
+        const request = control?.proposalRequest;
+        const source = request === undefined ? undefined : run.tickets[request.sourceTicketId];
+        const hold = source?.executionControl?.sourceHold;
+        return (
+          ticket.status === "proposed" &&
+          request?.fulfillment === "planned_asset_repair" &&
+          control?.proposalApprovalSha256 === undefined &&
+          control?.proposalDecision === undefined &&
+          (control?.proposalDecisionHistory?.length ?? 0) === 0 &&
+          ticket.steps.every((step) => step.status === "pending" && step.attemptIds.length === 0) &&
+          hold?.proposalTicketId === ticket.id &&
+          hold.requestSha256 === request.requestSha256
+        );
+      })
+      .sort(
+        (left, right) =>
+          left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+      )[0];
+    if (candidate === undefined) return false;
+
+    const board = await this.#program.reconcileTicketBoard(run);
+    const projected = board.tickets[candidate.id];
+    if (
+      projected?.status !== "cancelled" ||
+      projected.blocker !== COMPILER_ROUTED_TO_PLANNED_ASSET_REPAIR ||
+      projected.steps.some((step) => step.status !== "skipped" || step.attemptIds.length !== 0)
+    )
+      return false;
+
+    let routed = false;
+    let retry = false;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const current = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(current, advancement)) return this.#noOpInternal(revision);
+      if (current.revision !== run.revision) {
+        retry = true;
+        return this.#noOpInternal(revision);
+      }
+      const exact = current.tickets[candidate.id];
+      if (exact === undefined || canonicalHash(exact) !== canonicalHash(candidate)) {
+        return this.#noOpInternal(revision);
+      }
+      const draft = nextRun(current, this.#timestamp());
+      draft.tickets = retainTicketAuthorityFields(current, structuredClone(board.tickets));
+      draft.activity.push(...structuredClone(board.activity ?? []));
+      draft.activity.push(
+        activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "compiler",
+          `Routed planned asset repair through the existing implementation workflow: ${candidate.title}`,
+          candidate.id,
+          "info",
+        ),
+      );
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: current.revision }],
+        ...(board.artifactWrites === undefined || board.artifactWrites.length === 0
+          ? {}
+          : { writes: board.artifactWrites }),
+      });
+      routed = true;
+      return {
+        revision: committed.state.revision,
+        events: [
+          {
+            topic: "proposal.planned_asset_repair.routed",
+            payload: { runId, proposalTicketId: candidate.id },
+          },
+        ],
+      };
+    });
+    if (routed) {
+      await this.#lifecycleRacePoint("after_planned_asset_repair_route", runId, candidate.id);
+    }
+    return routed || retry;
   }
 
   async #tickBehaviorPostOrchestration(
@@ -18896,6 +19002,7 @@ export class RunAuthorityEngine {
       | "before_run_materialization_settle"
       | "after_ticket_checkpoint"
       | "before_publication_settle"
+      | "after_planned_asset_repair_route"
       | "after_verification",
     runId: string,
     ticketId?: string,
