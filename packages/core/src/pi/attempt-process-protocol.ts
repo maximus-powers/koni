@@ -513,14 +513,18 @@ function validateIdentifier(value: unknown, name: string): asserts value is stri
 }
 
 function validateOpaqueIdentifier(value: unknown, name: string): asserts value is string {
-  if (
-    typeof value !== "string" ||
-    Buffer.byteLength(value, "utf8") === 0 ||
-    Buffer.byteLength(value, "utf8") > 1_024 ||
-    !/^[\x21-\x7e]+$/u.test(value)
-  ) {
+  if (!isBoundedOpaqueToolCallId(value)) {
     failShape(`${name} is not a bounded printable identifier`);
   }
+}
+
+export function isBoundedOpaqueToolCallId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    Buffer.byteLength(value, "utf8") > 0 &&
+    Buffer.byteLength(value, "utf8") <= 1_024 &&
+    /^[\x21-\x7e]+$/u.test(value)
+  );
 }
 
 function validateBoundedString(

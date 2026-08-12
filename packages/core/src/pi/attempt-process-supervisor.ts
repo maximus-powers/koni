@@ -21,6 +21,7 @@ import {
   BoundedJsonLineDecoder,
   assertFrameBinding,
   encodePiAttemptProcessFrame,
+  isBoundedOpaqueToolCallId,
   parseChildFrame,
   type PiAttemptChildFrame,
   type PiAttemptParentFrame,
@@ -2326,7 +2327,7 @@ function validateRecoveryClaimForAdmission(
     if (
       !Number.isSafeInteger(result.sequence) ||
       result.sequence < 1 ||
-      !isSafeIdentifier(result.callId) ||
+      !isBoundedOpaqueToolCallId(result.callId) ||
       !spec.tools.some((tool) => tool.name === result.toolName) ||
       (result.outcome !== "accepted" && result.outcome !== "rejected") ||
       !isSha256Digest(result.argumentsSha256) ||

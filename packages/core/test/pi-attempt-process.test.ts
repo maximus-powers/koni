@@ -18,7 +18,7 @@ import {
 import { PiAttemptProcessSupervisor } from "../src/pi/attempt-process-pool.js";
 import { TERMINAL_OUTPUT_SCHEMA, fixtureLaunchSpec } from "./pi-managed-fixtures.js";
 import { createAgentLaunchSpec } from "../src/pi/launch-spec.js";
-import { rawSha256 } from "../src/shared/canonical.js";
+import { canonicalEncode, canonicalHash, rawSha256 } from "../src/shared/canonical.js";
 import { KONI_TOOL_RECEIPT_PROTOCOL } from "../src/pi/tool-catalog.js";
 
 const fixtureEntry = fileURLToPath(
@@ -779,6 +779,61 @@ describe("supervised autonomous Pi attempt process", () => {
         terminalOutput: { result: "recovery-gated" },
       });
       expect(invokeTool).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["recover", "planning_revision"] as const)(
+    "admits %s claims containing native provider tool-call identities",
+    async (mode) => {
+      const { spec, options } = await fixture("recovery_admission");
+      const contextProvider = options.authority.contextProvider;
+      const acquireRecoveryClaim = contextProvider.acquireRecoveryClaim.bind(contextProvider);
+      const callId =
+        "call_uFEFdD6HHZGqXrYjOXrmhs9B|fc_0026f017a57d688a016a5aa2f8f1848198aeb6563c26633a5d";
+      const args = { result: "prior-authorized-result" };
+      const receipt = {
+        protocol: KONI_TOOL_RECEIPT_PROTOCOL,
+        receiptId: "prior-authorized-receipt",
+        outcome: "accepted" as const,
+        summary: "accepted before process restoration",
+      };
+      contextProvider.acquireRecoveryClaim = async (requested) => {
+        const claim = await acquireRecoveryClaim(requested);
+        return {
+          ...claim,
+          state: {
+            ...claim.state,
+            authorizedToolResults: [
+              {
+                sequence: 1,
+                callId,
+                toolName: spec.terminal.toolName,
+                outcome: receipt.outcome,
+                argumentsSha256: canonicalHash(args),
+                argumentsSizeBytes: Buffer.byteLength(canonicalEncode(args), "utf8"),
+                receiptSha256: canonicalHash(receipt),
+                receiptSizeBytes: Buffer.byteLength(canonicalEncode(receipt), "utf8"),
+                receipt,
+              },
+            ],
+          },
+        };
+      };
+      const child = new SupervisedPiAttemptProcess(spec, {
+        ...options,
+        mode,
+        deferActivation: true,
+        ...(mode === "planning_revision"
+          ? { priorTranscriptSha256: rawSha256("prior planning transcript") }
+          : {}),
+      });
+
+      await child.ready;
+      await child.activate();
+      await expect(child.outcome).resolves.toMatchObject({
+        status: "completed",
+        terminalOutput: { result: "recovery-gated" },
+      });
     },
   );
 
