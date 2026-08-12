@@ -16,7 +16,7 @@ import type {
   RunRecord,
   TicketRecord,
 } from "../state/run-record.js";
-import type { ControlRunAttemptLineage } from "./protocol.js";
+import type { ControlModelOption, ControlRunAttemptLineage } from "./protocol.js";
 import {
   cockpitStringArrayOption,
   cockpitStringOption,
@@ -24,17 +24,55 @@ import {
   type CompiledCockpitViewCatalog,
 } from "./cockpit-config.js";
 
-export type DetailsTab = "overview" | "plan" | "chat";
+export type DetailsTab = "graph" | "plan" | "overview" | "chat";
 export const TICKET_TABS = [
   "all",
   "active",
-  "todo",
+  "queued",
   "blocked",
   "proposed",
   "closed",
   "other",
 ] as const;
 export type TicketTab = (typeof TICKET_TABS)[number];
+
+/**
+ * Runs-panel filter tabs. `active` is the default working set: everything alive that is not
+ * parked (paused), stuck (blocked/failed), or concluded — old runs stop crowding the list while
+ * every other lifecycle state remains one tab away.
+ */
+export const RUN_TABS = ["active", "attention", "paused", "done", "all"] as const;
+export type RunTab = (typeof RUN_TABS)[number];
+
+export interface RunTabView {
+  id: RunTab;
+  title: string;
+  count: number;
+}
+
+export function runInTab(run: RunRowView, tab: RunTab): boolean {
+  const stuck = run.phase === "blocked" || run.phase === "failed";
+  const concluded = run.phase === "completed" || run.phase === "deleting";
+  const parked = run.paused || run.phase === "paused";
+  switch (tab) {
+    case "all":
+      return true;
+    case "active":
+      return !stuck && !concluded && !parked;
+    case "attention":
+      return (
+        stuck ||
+        run.questionCount > 0 ||
+        run.proposalCount > 0 ||
+        run.awaitingApproval ||
+        run.mergeReady
+      );
+    case "paused":
+      return parked || run.pausePending || run.phase === "pausing";
+    case "done":
+      return concluded;
+  }
+}
 
 export interface ControlCenterSelection {
   runId?: string;
@@ -65,7 +103,10 @@ export interface ControlCenterInput {
   controls?: StageCapabilityCatalog;
   lineage?: ControlRunAttemptLineage;
   ticketTab?: TicketTab;
+  runTab?: RunTab;
   cockpit?: CompiledCockpitViewCatalog;
+  /** Host model registry projection; lets agent rows render catalog names instead of raw ids. */
+  models?: readonly ControlModelOption[];
   nowMs?: number;
 }
 
@@ -143,6 +184,24 @@ export interface AgentRowView {
     children: readonly string[];
     activeLeaf: boolean;
   };
+  /** One stable planner identity with its immutable revision checkpoints. */
+  planning?: PlanningSessionView;
+}
+
+export interface PlanningUsageView {
+  new: number;
+  cache: number;
+  total: number;
+}
+
+export interface PlanningSessionView {
+  sessionId: string;
+  attemptId: string;
+  currentRevision: number;
+  checkpoints: { revision: number; status: string }[];
+  cumulativeUsage: PlanningUsageView;
+  revisionUsage: PlanningUsageView;
+  detail: "Same planner session; token allowance reset for this revision";
 }
 
 export interface QuestionView extends RunQuestionRecord {
@@ -177,6 +236,46 @@ export interface GraphNodeView {
   /** Untruncated node title, rendered only for the cursor-focused node. */
   fullTitle: string;
   muted: boolean;
+  /** Durable node status; drives the metadata dialog chip. */
+  status?: string;
+  /** Operator-safe spec facts for the node metadata dialog; raw structures never render. */
+  facts?: { label: string; value: string }[];
+}
+
+export interface GraphFeedAgentView {
+  id: string;
+  persona: string;
+  /** Friendly catalog name when the host injected a model registry; raw model id otherwise. */
+  model: string;
+  thinking: string;
+  /** Provider-total tokens (new + cache): the feed shows one honest spend number. */
+  tokens: string;
+  /** True only for running attempts; queued agents render without the working animation. */
+  working: boolean;
+}
+
+export interface GraphFeedTicketView {
+  id: string;
+  title: string;
+  status: string;
+  /** Accent tone for the card status bar. */
+  tone: "running" | "review" | "interrupted";
+  /** Graph-resolved authorship neighborhood (targets ∪ writes); drives connector lanes. */
+  nodeIds: string[];
+  /** Graph-resolved read context; joins the focus highlight but never gets a lane. */
+  readNodeIds: string[];
+  /** Linked node ids absent from the current graph projection. */
+  offGraphCount: number;
+  agents: GraphFeedAgentView[];
+}
+
+export interface GraphFeedView {
+  /** In-flight tickets only (running/review); queued work is a count, not a card. */
+  tickets: GraphFeedTicketView[];
+  /** Active run-level cognition: attempts not attached to any durable ticket. */
+  runAgents: GraphFeedAgentView[];
+  queuedCount: number;
+  blockedCount: number;
 }
 
 export interface ControlCenterViewModel {
@@ -184,6 +283,8 @@ export interface ControlCenterViewModel {
   authorityRevision: number;
   cockpit?: CompiledCockpitViewCatalog;
   runs: RunRowView[];
+  runTabs: RunTabView[];
+  runTab: RunTab;
   runPage: {
     startIndex: number;
     visibleRuns: number;
@@ -212,8 +313,23 @@ export interface ControlCenterViewModel {
       lines: string[];
       tone?: "neutral" | "success" | "error";
     }[];
+    /** Structured Run vitals for graphical overview components (bars, chips, gauges). */
+    stats: {
+      phase: string;
+      statusLabel: string;
+      targetBranch: string;
+      tickets: { completed: number; total: number };
+      agents: { active: number; total: number };
+      tokens: { fresh: number; cached: number; total: number };
+      uncertainExposure: number;
+      questionCount: number;
+      selectedTicket?: { title: string; status: string };
+    };
     plan: {
       mode: "activity" | "review" | "approved";
+      revision?: number;
+      planningSessionId?: string;
+      planningAttemptId?: string;
       sections: { title: string; markdown: string }[];
     };
     approval?: {
@@ -244,7 +360,17 @@ export interface ControlCenterViewModel {
       mustSatisfy: string[];
       /** Operator-grade execution policy label when the ticket is policy-bound. */
       policy?: string;
-      steps: { title: string; persona: string; status: string; summary?: string }[];
+      steps: {
+        title: string;
+        persona: string;
+        status: string;
+        summary?: string;
+        attemptCount: number;
+        /** Operator-facing step titles, never compiler step ids. */
+        dependsOn: string[];
+        /** Best-effort title of the compiler validation action for this step. */
+        validation?: string;
+      }[];
     };
     tickets: TicketRowView[];
     ticketTabs: TicketTabView[];
@@ -258,6 +384,8 @@ export interface ControlCenterViewModel {
       nodes: GraphNodeView[];
       edges: GraphEdge[];
     };
+    /** Live-feed projection for the Graph tab: in-flight tickets wired to their graph nodes. */
+    graphFeed: GraphFeedView;
     /** Exact durable attempts that are currently capable of spending model tokens. */
     spendingTokens: boolean;
   };
@@ -285,11 +413,21 @@ export function buildControlCenterView(input: ControlCenterInput): ControlCenter
     hydrated.revision === selectedSummary.runRevision
       ? hydrated
       : undefined;
+  const allRunRows = [...provisionalRows, ...summaries.map(runRow)];
+  const runTab = input.runTab ?? "all";
   return {
     projectRoot: input.projectRoot,
     authorityRevision: input.authorityRevision,
     ...(input.cockpit === undefined ? {} : { cockpit: input.cockpit }),
-    runs: [...provisionalRows, ...summaries.map(runRow)],
+    // The selected run stays pinned in the visible list: a lifecycle change (say, pausing it)
+    // must never make the selection vanish mid-action or strand run-scoped controls.
+    runs: allRunRows.filter((run) => runInTab(run, runTab) || run.id === input.selection.runId),
+    runTabs: RUN_TABS.map((id) => ({
+      id,
+      title: titleCase(id),
+      count: allRunRows.filter((run) => runInTab(run, id)).length,
+    })),
+    runTab,
     runPage: {
       startIndex: input.runPage?.startIndex ?? 0,
       visibleRuns: summaries.length,
@@ -309,6 +447,7 @@ export function buildControlCenterView(input: ControlCenterInput): ControlCenter
             nowMs,
             input.ticketTab ?? "all",
             input.cockpit,
+            input.models,
           ),
         }),
   };
@@ -383,6 +522,7 @@ function selectedRunView(
   nowMs: number,
   ticketTab: TicketTab,
   cockpit: CompiledCockpitViewCatalog | undefined,
+  models: readonly ControlModelOption[] | undefined,
 ): NonNullable<ControlCenterViewModel["selectedRun"]> {
   const tokens = runTokens(run);
   const tickets = Object.values(run.tickets).sort(ticketOrder);
@@ -459,6 +599,36 @@ function selectedRunView(
     },
     ...(blockedBanner === undefined ? {} : { blockedBanner }),
     overviewSections: overviewSections(run, selectedTicket),
+    stats: {
+      phase: run.lifecycle.phase,
+      statusLabel: titleCase(run.lifecycle.phase),
+      targetBranch: shortBranch(run.git.target.ref),
+      tickets: {
+        completed: tickets.filter((ticket) => ticket.status === "completed").length,
+        total: tickets.length,
+      },
+      agents: {
+        active: Object.values(run.attempts).filter(
+          (attempt) => attempt.status === "queued" || attempt.status === "running",
+        ).length,
+        total: Object.keys(run.attempts).length,
+      },
+      tokens: {
+        fresh: tokens.newTokens,
+        cached: Math.max(0, tokens.allTokens - tokens.newTokens),
+        total: tokens.allTokens,
+      },
+      uncertainExposure: tokens.uncertainProviderExposure,
+      questionCount: pendingQuestions.length,
+      ...(selectedTicket === undefined
+        ? {}
+        : {
+            selectedTicket: {
+              title: selectedTicket.title,
+              status: titleCase(selectedTicket.status),
+            },
+          }),
+    },
     plan: planView(run),
     ...(approval === undefined ? {} : { approval }),
     stages: stageViews(run, controls),
@@ -492,9 +662,11 @@ function selectedRunView(
           activeDuration: formatDuration(activeRuntimeMs(run.lifecycle, nowMs)),
         }),
     graph: {
+      // Scope is a label for the selection context; the projection itself is run-wide.
       scope: selectedTicket === undefined ? "Run integration" : "Ticket checkout",
       ...graphView(graph),
     },
+    graphFeed: graphFeedView(run, graph, models),
     spendingTokens,
   };
 }
@@ -628,17 +800,12 @@ function evidenceOverview(run: RunRecord): {
   lines: string[];
 } {
   const failedChecks = unresolvedFailedCheckCount(run);
-  const failedTickets = Object.values(run.tickets).filter(
-    (ticket) => ticket.status === "failed",
-  ).length;
   const blockedTickets = Object.values(run.tickets).filter(
     (ticket) => ticket.status === "blocked" && !ticketWaitingForCompilerGrant(ticket),
   ).length;
   // The run-level blocker itself renders in the Overview banner; Evidence keeps the
   // per-ticket/check consequences only.
   const failureLines: string[] = [];
-  if (failedTickets > 0)
-    failureLines.push(`${failedTickets} failed ${failedTickets === 1 ? "ticket" : "tickets"}`);
   if (blockedTickets > 0)
     failureLines.push(`${blockedTickets} blocked ${blockedTickets === 1 ? "ticket" : "tickets"}`);
   if (failedChecks > 0)
@@ -745,6 +912,7 @@ function ticketDetails(
     ),
   ];
   const policy = ticket.executionPolicyBinding?.publicOperation;
+  const stepTitleById = new Map(ticket.steps.map((step) => [step.id, step.title]));
   return {
     title: ticket.title,
     status: interruptedByRunBlock(ticket.status, lifecycle)
@@ -765,6 +933,17 @@ function ticketDetails(
       ...(step.summary === undefined || step.summary.trim().length === 0
         ? {}
         : { summary: step.summary }),
+      attemptCount: step.attemptIds.length,
+      dependsOn: (step.dependsOn ?? [])
+        .map((stepId) => stepTitleById.get(stepId))
+        .filter((title): title is string => title !== undefined),
+      ...(step.validationAction === undefined
+        ? {}
+        : {
+            validation: titleCase(
+              step.validationAction.split(/[:./]/u).at(-1) ?? step.validationAction,
+            ),
+          }),
     })),
   };
 }
@@ -797,6 +976,18 @@ function planView(run: RunRecord): NonNullable<ControlCenterViewModel["selectedR
         .map((item) => `### ${item.title}\n${item.description}`)
         .join("\n\n") || "No concise items were recorded for this section.",
   }));
+  const planning = planningSessionView(run);
+  if (planning !== undefined) {
+    sections.unshift({
+      title: `Revision ${planning.currentRevision}`,
+      markdown: [
+        planning.detail,
+        `Current revision: ${formatTokens(planning.revisionUsage.new)} new · ${formatTokens(planning.revisionUsage.total)} provider total`,
+        `Cumulative: ${formatTokens(planning.cumulativeUsage.new)} new · ${formatTokens(planning.cumulativeUsage.total)} provider total`,
+        `Checkpoints: ${planning.checkpoints.map((checkpoint) => `Revision ${checkpoint.revision} — ${checkpoint.status}`).join(" · ")}`,
+      ].join("\n\n"),
+    });
+  }
   const review =
     run.plan.status === "awaiting_approval" || run.lifecycle.phase === "awaiting_approval";
   if (!review) {
@@ -806,6 +997,13 @@ function planView(run: RunRecord): NonNullable<ControlCenterViewModel["selectedR
   }
   return {
     mode: review ? "review" : "approved",
+    revision: run.plan.revision,
+    ...(planning === undefined
+      ? {}
+      : {
+          planningSessionId: planning.sessionId,
+          planningAttemptId: planning.attemptId,
+        }),
     sections,
   };
 }
@@ -982,7 +1180,6 @@ function ticketRow(ticket: TicketRecord, lifecycle: RunRecord["lifecycle"]): Tic
     rail,
     ...(current === undefined ? {} : { currentPersona: titleCase(current.personaId) }),
     recovery:
-      ticket.status === "failed" ||
       (ticket.status === "blocked" && !waitingForCompilerGrant) ||
       ticket.steps.some((step) => step.status === "failed") ||
       (halted && running),
@@ -1008,10 +1205,9 @@ function ticketInTab(
       new Set(["active", "running", "in_progress", "review"]).has(status));
   if (tab === "all") return true;
   if (tab === "active") return active;
-  if (tab === "todo")
+  if (tab === "queued")
     return (
-      waitingForCompilerGrant ||
-      (!active && new Set(["pending", "ready", "todo", "open"]).has(status))
+      waitingForCompilerGrant || (!active && new Set(["pending", "queued", "open"]).has(status))
     );
   if (tab === "blocked") return (!waitingForCompilerGrant && status === "blocked") || interrupted;
   if (tab === "proposed") return status === "proposed";
@@ -1102,6 +1298,9 @@ function agentRow(
     newTokens: formatTokens(newTokens),
     allTokens: formatTokens(allTokens),
     depth,
+    ...(run.planningSession?.attemptId === attempt.id
+      ? { planning: planningSessionView(run)! }
+      : {}),
     ...(lineage === undefined
       ? {}
       : {
@@ -1116,6 +1315,42 @@ function agentRow(
             activeLeaf: lineage.activeLeaf,
           },
         }),
+  };
+}
+
+function planningSessionView(run: RunRecord): PlanningSessionView | undefined {
+  const session = run.planningSession;
+  if (session === undefined) return undefined;
+  const attempt = run.attempts[session.attemptId];
+  const revision = session.revisions[session.currentRevision];
+  if (attempt === undefined || revision === undefined) return undefined;
+  const cumulativeNew = attempt.inputTokens + attempt.outputTokens;
+  const cumulativeCache = attempt.cacheReadTokens + attempt.cacheWriteTokens;
+  const revisionNew =
+    Math.max(0, attempt.inputTokens - revision.budgetBaseline.inputTokens) +
+    Math.max(0, attempt.outputTokens - revision.budgetBaseline.outputTokens);
+  const revisionCache =
+    Math.max(0, attempt.cacheReadTokens - revision.budgetBaseline.cacheReadTokens) +
+    Math.max(0, attempt.cacheWriteTokens - revision.budgetBaseline.cacheWriteTokens);
+  return {
+    sessionId: session.sessionId,
+    attemptId: session.attemptId,
+    currentRevision: session.currentRevision,
+    checkpoints: session.revisions.map((checkpoint) => ({
+      revision: checkpoint.revision,
+      status: titleCase(checkpoint.status),
+    })),
+    cumulativeUsage: {
+      new: cumulativeNew,
+      cache: cumulativeCache,
+      total: cumulativeNew + cumulativeCache,
+    },
+    revisionUsage: {
+      new: revisionNew,
+      cache: revisionCache,
+      total: revisionNew + revisionCache,
+    },
+    detail: "Same planner session; token allowance reset for this revision",
   };
 }
 
@@ -1222,6 +1457,8 @@ function graphView(graph: ControlCenterInput["graph"]): {
       label: shortNodeTitle(node.title),
       fullTitle: node.title.replace(/\s+/gu, " ").trim() || "Untitled",
       muted: !new Set(["active", "planned", "open", "unresolved", "pending"]).has(node.status),
+      status: node.status,
+      facts: graphNodeFacts(node),
     }));
   return {
     nodes,
@@ -1232,6 +1469,117 @@ function graphView(graph: ControlCenterInput["graph"]): {
         left.target.localeCompare(right.target),
     ),
   };
+}
+
+function graphFeedView(
+  run: RunRecord,
+  graph: ControlCenterInput["graph"],
+  models: readonly ControlModelOption[] | undefined,
+): GraphFeedView {
+  const halted = runExecutionHalted(run.lifecycle);
+  const graphIds = new Set((graph?.nodes ?? []).map((node) => node.id));
+  const attempts = Object.values(run.attempts);
+  const tickets = Object.values(run.tickets)
+    .filter((ticket) => ticket.status === "running" || ticket.status === "review")
+    .sort(
+      (left, right) =>
+        feedToneRank(left, halted) - feedToneRank(right, halted) || ticketOrder(left, right),
+    )
+    .map((ticket) => feedTicketView(ticket, run.lifecycle, halted, graphIds, attempts, models));
+  // Run-level cognition: active attempts with no durable ticket (planning, lead, verification,
+  // integration). Ticket-resolved attempts belong to their card, never to the header line.
+  const runAgents = attempts
+    .filter(
+      (attempt) =>
+        (attempt.status === "queued" || attempt.status === "running") &&
+        run.tickets[attempt.ticketId] === undefined,
+    )
+    .sort(feedAgentOrder)
+    .map((attempt) => feedAgentView(attempt, models));
+  const durableTickets = Object.values(run.tickets);
+  return {
+    tickets,
+    runAgents,
+    queuedCount: durableTickets.filter((ticket) => ticket.status === "queued").length,
+    blockedCount: durableTickets.filter((ticket) => ticket.status === "blocked").length,
+  };
+}
+
+function feedToneRank(ticket: TicketRecord, halted: boolean): number {
+  if (halted) return 2;
+  return ticket.status === "review" ? 1 : 0;
+}
+
+function feedTicketView(
+  ticket: TicketRecord,
+  lifecycle: RunRecord["lifecycle"],
+  halted: boolean,
+  graphIds: ReadonlySet<string>,
+  attempts: readonly AgentAttemptRecord[],
+  models: readonly ControlModelOption[] | undefined,
+): GraphFeedTicketView {
+  const wired = [...new Set([...ticket.targetNodeIds, ...(ticket.writeNodeIds ?? [])])];
+  const nodeIds = wired.filter((id) => graphIds.has(id));
+  const wiredSet = new Set(nodeIds);
+  const readNodeIds = [...new Set(ticket.readNodeIds ?? [])].filter(
+    (id) => graphIds.has(id) && !wiredSet.has(id),
+  );
+  const linked = new Set([...wired, ...(ticket.readNodeIds ?? [])]);
+  const offGraphCount = [...linked].filter((id) => !graphIds.has(id)).length;
+  const agents = attempts
+    .filter(
+      (attempt) =>
+        attempt.ticketId === ticket.id &&
+        (attempt.status === "queued" || attempt.status === "running"),
+    )
+    .sort(feedAgentOrder)
+    .map((attempt) => feedAgentView(attempt, models));
+  return {
+    id: ticket.id,
+    title: ticket.title,
+    status: interruptedByRunBlock(ticket.status, lifecycle)
+      ? INTERRUPTED_DISPLAY_LABEL
+      : titleCase(ticket.status),
+    tone: halted ? "interrupted" : ticket.status === "review" ? "review" : "running",
+    nodeIds,
+    readNodeIds,
+    offGraphCount,
+    agents,
+  };
+}
+
+function feedAgentOrder(left: AgentAttemptRecord, right: AgentAttemptRecord): number {
+  return (
+    Number(right.status === "running") - Number(left.status === "running") ||
+    (left.startedAt ?? "").localeCompare(right.startedAt ?? "") ||
+    left.id.localeCompare(right.id)
+  );
+}
+
+function feedAgentView(
+  attempt: AgentAttemptRecord,
+  models: readonly ControlModelOption[] | undefined,
+): GraphFeedAgentView {
+  const allTokens =
+    attempt.inputTokens + attempt.outputTokens + attempt.cacheReadTokens + attempt.cacheWriteTokens;
+  return {
+    id: attempt.id,
+    persona: titleCase(attempt.personaId),
+    model: friendlyModelName(models, attempt.modelProvider, attempt.modelId),
+    thinking: attempt.thinkingLevel,
+    tokens: formatTokens(allTokens),
+    working: attempt.status === "running",
+  };
+}
+
+export function friendlyModelName(
+  models: readonly ControlModelOption[] | undefined,
+  provider: string,
+  modelId: string,
+): string {
+  return (
+    models?.find((model) => model.provider === provider && model.id === modelId)?.name ?? modelId
+  );
 }
 
 function runTokens(run: RunRecord): {
@@ -1351,6 +1699,68 @@ function safeOperatorText(value: string): string | undefined {
 
 function graphMarker(type: string): string {
   return type.match(/[\p{L}\p{N}]/u)?.[0]?.toUpperCase() ?? "N";
+}
+
+const MAX_GRAPH_NODE_FACTS = 16;
+const MAX_GRAPH_FACT_WORDS = 48;
+
+/** Operator-safe authored leaf facts for the node metadata dialog. */
+function graphNodeFacts(node: { spec?: Record<string, unknown> }): {
+  label: string;
+  value: string;
+}[] {
+  const spec = node.spec ?? {};
+  const facts: { label: string; value: string }[] = [];
+  for (const [key, raw] of Object.entries(spec)) appendGraphFacts(facts, [key], raw, 0);
+  return facts;
+}
+
+function appendGraphFacts(
+  facts: { label: string; value: string }[],
+  path: string[],
+  raw: unknown,
+  depth: number,
+): void {
+  if (facts.length >= MAX_GRAPH_NODE_FACTS) return;
+  const value = graphScalarFactValue(raw);
+  if (value !== undefined) {
+    facts.push({ label: path.map(titleCase).join(" "), value });
+    return;
+  }
+  if (depth >= 5) return;
+  if (Array.isArray(raw)) {
+    for (const [index, entry] of raw.entries()) {
+      appendGraphFacts(facts, [...path, String(index + 1)], entry, depth + 1);
+    }
+    return;
+  }
+  if (isPlainRecord(raw)) {
+    for (const [key, entry] of Object.entries(raw)) {
+      appendGraphFacts(facts, [...path, key], entry, depth + 1);
+    }
+  }
+}
+
+function graphScalarFactValue(raw: unknown): string | undefined {
+  if (typeof raw === "boolean" || (typeof raw === "number" && Number.isFinite(raw)))
+    return String(raw);
+  if (typeof raw === "string") return boundedFactText(raw);
+  if (
+    Array.isArray(raw) &&
+    raw.every(
+      (item) => typeof item === "string" || typeof item === "number" || typeof item === "boolean",
+    )
+  )
+    return raw.length === 0 ? undefined : boundedFactText(raw.map(String).join(" · "));
+  return undefined;
+}
+
+function boundedFactText(value: string): string | undefined {
+  const safe = safeOperatorText(value);
+  if (safe === undefined) return undefined;
+  const words = safe.split(/\s+/u);
+  const concise = words.slice(0, MAX_GRAPH_FACT_WORDS).join(" ");
+  return words.length > MAX_GRAPH_FACT_WORDS ? `${concise}…` : concise;
 }
 
 function ticketOrder(left: TicketRecord, right: TicketRecord): number {

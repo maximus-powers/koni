@@ -89,7 +89,7 @@ export interface DynamicGraphSelectionInput {
 }
 
 export type DynamicGraphProjectedRecord =
-  | { kind: "working_spec"; id: string; value: WorkingSpecVersionRecord }
+  | { kind: "working_spec"; id: string; value: DynamicWorkingSpecProjection }
   | { kind: "run_objective"; id: string; objective: string }
   | {
       kind: "semantic_node";
@@ -109,6 +109,16 @@ export type DynamicGraphProjectedRecord =
       };
     }
   | { kind: "change_note"; id: string; value: GraphChangeNoteRecord | LegacyGraphNoteRecord };
+
+export type DynamicWorkingSpecProjection = Omit<WorkingSpecVersionRecord, "baseline"> & {
+  /** Immutable provenance remains visible when the canonical baseline body is deduplicated. */
+  baselineSource: WorkingSpecVersionRecord["baseline"]["source"];
+  /**
+   * Owner guidance normally renders the immutable baseline verbatim. Keep only one copy in the
+   * transient prompt; retain the baseline when guidance has diverged so neither authority is lost.
+   */
+  baseline?: WorkingSpecVersionRecord["baseline"];
+};
 
 export interface DynamicGraphContextEnvelope {
   protocol: typeof DYNAMIC_GRAPH_CONTEXT_PROTOCOL;
@@ -287,7 +297,7 @@ export class DynamicGraphContextSelector {
         projected: {
           kind: "working_spec",
           id: compatibleSpec.id,
-          value: structuredClone(compatibleSpec),
+          value: projectWorkingSpec(compatibleSpec),
         },
       });
     }
@@ -483,6 +493,26 @@ export class DynamicGraphContextSelector {
     while (this.#indexes.size > 8) this.#indexes.delete(this.#indexes.keys().next().value!);
     return built;
   }
+}
+
+function projectWorkingSpec(record: WorkingSpecVersionRecord): DynamicWorkingSpecProjection {
+  const canonicalBaselineGuidance = JSON.stringify(
+    {
+      objective: record.baseline.objective,
+      intake: record.baseline.intake,
+      acceptedPlan: record.baseline.acceptedPlan,
+      resolvedDecisions: record.baseline.resolvedDecisions,
+      verificationIntent: record.baseline.verificationIntent,
+    },
+    null,
+    2,
+  );
+  const { baseline, ...metadata } = structuredClone(record);
+  return {
+    ...metadata,
+    baselineSource: structuredClone(baseline.source),
+    ...(record.guidance === canonicalBaselineGuidance ? {} : { baseline }),
+  };
 }
 
 function projectNodeTypeContract(

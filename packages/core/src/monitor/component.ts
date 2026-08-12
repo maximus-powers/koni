@@ -65,8 +65,6 @@ export class CompactMonitorWidget implements Component {
       ];
     }
     const activeAgents = monitor.runs.reduce((sum, run) => sum + run.agents.active, 0);
-    const completedTickets = monitor.runs.reduce((sum, run) => sum + run.tickets.completed, 0);
-    const totalTickets = monitor.runs.reduce((sum, run) => sum + run.tickets.total, 0);
     const newTokens = monitor.runs.reduce((sum, run) => sum + run.tokens.new, 0);
     const questions = monitor.runs.reduce((sum, run) => sum + run.questionCount, 0);
     const proposals = monitor.runs.reduce((sum, run) => sum + run.proposalCount, 0);
@@ -83,17 +81,45 @@ export class CompactMonitorWidget implements Component {
       this.#palette.bold(this.#palette.accent("Koni")),
       this.#palette.text(`${monitor.totalRuns} run${monitor.totalRuns === 1 ? "" : "s"}`),
       this.#palette.text(`${activeAgents} active agent${activeAgents === 1 ? "" : "s"}`),
-      this.#palette.text(`${completedTickets}/${totalTickets} tickets`),
       this.#palette.text(`${formatTokenCount(newTokens)} new tks`),
       ...(attention.length === 0 ? [] : [this.#palette.warning(`! ${attention.join(" ")}`)]),
     ].join(this.#palette.muted(" · "));
     if (safeWidth < 58) return [fitTerminalLine(first, safeWidth)];
-    const selected =
-      monitor.runs.find((run) => run.id === this.#snapshot.selectedRunId) ?? monitor.runs[0]!;
-    const second = `${this.#palette.accent("›")} ${this.#palette.text(selected.objectivePreview)}  ${this.#palette.muted(
-      `${phaseLabel(selected.phase)} · ${selected.tickets.completed}/${selected.tickets.total} tickets · ${selected.agents.active}/${selected.agents.total} agents · /koni-runs`,
-    )}`;
-    return [fitTerminalLine(first, safeWidth), fitTerminalLine(second, safeWidth)];
+    // One line per ongoing run: the chat stays a usable textual interface for Koni work
+    // without the operator ever opening the full dashboard.
+    const ordered = [...monitor.runs].sort(compareWidgetRuns);
+    const visible = ordered.slice(0, MAX_WIDGET_RUN_LINES);
+    const lines = [fitTerminalLine(first, safeWidth)];
+    for (const run of visible) {
+      const selected = run.id === this.#snapshot.selectedRunId;
+      const name = truncateToWidth(run.title ?? run.objectivePreview, 34, "…");
+      const detail = [
+        runWidgetPhase(run),
+        `${run.tickets.completed}/${run.tickets.total} tickets`,
+        ...(run.agents.active > 0
+          ? [`${run.agents.active} agent${run.agents.active === 1 ? "" : "s"}`]
+          : []),
+      ].join(" · ");
+      const badge = attentionBadge(run);
+      lines.push(
+        fitTerminalLine(
+          `${this.#palette.accent(selected ? "›" : " ")} ${phaseGlyph(run, this.#palette)} ${this.#palette.text(
+            name,
+          )}  ${this.#palette.muted(detail)}${badge.length === 0 ? "" : this.#palette.warning(badge)}`,
+          safeWidth,
+        ),
+      );
+    }
+    const hidden = monitor.totalRuns - visible.length;
+    if (hidden > 0) {
+      lines.push(
+        fitTerminalLine(
+          this.#palette.dim(`  +${hidden} more run${hidden === 1 ? "" : "s"} · /koni-runs`),
+          safeWidth,
+        ),
+      );
+    }
+    return lines;
   }
 
   public dispose(): void {
@@ -594,7 +620,7 @@ export class RunsOverlayComponent implements Component, Focusable {
     for (const run of monitor.runs) {
       const selected = run.id === this.#snapshot.selectedRunId;
       const attention = attentionBadge(run);
-      const title = `${selected ? "›" : " "} ${phaseMark(run)} ${run.objectivePreview}`;
+      const title = `${selected ? "›" : " "} ${phaseMark(run)} ${run.title ?? run.objectivePreview}`;
       lines.push(selected ? this.#palette.selected(title) : title);
       lines.push(
         this.#palette.muted(
@@ -704,6 +730,15 @@ export class RunsOverlayComponent implements Component, Focusable {
     }
     if (document.length === 0)
       document.push(this.#palette.muted("No authored summary for this section."));
+    const revisionSummary = [this.#palette.bold(`Revision ${plan.revision}`)];
+    if (plan.revisionUsage !== undefined) {
+      revisionSummary.push(
+        this.#palette.muted("Same planner session; token allowance reset for this revision"),
+        this.#palette.muted(
+          `${formatTokenCount(plan.revisionUsage.currentRevision.new)} current-revision new tks · ${formatTokenCount(plan.revisionUsage.cumulative.new)} cumulative new tks`,
+        ),
+      );
+    }
     const primary = mode.steering.trim().length === 0 ? "Approve" : "Revise plan";
     const actions = [primary, "Later"]
       .map((label, index) =>
@@ -713,12 +748,18 @@ export class RunsOverlayComponent implements Component, Focusable {
       )
       .join("  ");
     return [
+      ...revisionSummary,
+      "",
       tabs,
       "",
       ...document.slice(mode.scroll, mode.scroll + 12),
       sectionLabel("Steering instructions", width, this.#palette),
       ...terminalSafeLines(
-        mode.steering.length === 0 ? "Add steering to request a revised plan…" : mode.steering,
+        mode.steering.length === 0
+          ? plan.planningSessionId === undefined
+            ? "Add steering to request a revised plan…"
+            : "Revise the current plan with steering…"
+          : mode.steering,
         width,
         { maxLines: 5 },
       ).map((line) => (mode.steering.length === 0 ? this.#palette.dim(line) : line)),
@@ -809,12 +850,33 @@ export function compactMonitorStatus(snapshot: MonitorControllerSnapshot): strin
   if (snapshot.connection === "stopped" || snapshot.connection === "error") return "Koni · stopped";
   const monitor = snapshot.monitor;
   if (monitor === undefined || monitor.runs.length === 0) return "Koni · no runs";
+  // Shape of the fleet at a glance: working, paused, stuck, and pending decisions.
+  const working = monitor.runs.filter((run) => widgetRunRank(run) === 2).length;
+  const paused = monitor.runs.filter(
+    (run) => run.phase === "paused" || run.phase === "pausing",
+  ).length;
+  const stuck = monitor.runs.filter(
+    (run) => run.blocker !== undefined || run.failure !== undefined,
+  ).length;
   const needsInput = monitor.runs.reduce(
-    (sum, run) => sum + run.questionCount + run.proposalCount + (run.planApproval ? 1 : 0),
+    (sum, run) =>
+      sum +
+      run.questionCount +
+      run.proposalCount +
+      (run.planApproval ? 1 : 0) +
+      (run.mergeReady ? 1 : 0),
     0,
   );
-  return `Koni ${monitor.totalRuns}${needsInput === 0 ? "" : ` · !${needsInput}`}`;
+  const parts = [
+    ...(working === 0 ? [] : [`${working}⚙`]),
+    ...(paused === 0 ? [] : [`${paused}Ⅱ`]),
+    ...(stuck === 0 ? [] : [`${stuck}×`]),
+    ...(needsInput === 0 ? [] : [`!${needsInput}`]),
+  ];
+  return parts.length === 0 ? `Koni ${monitor.totalRuns}` : `Koni ${parts.join(" ")}`;
 }
+
+const MAX_WIDGET_RUN_LINES = 3;
 
 function phaseMark(run: MonitorRunSummary): string {
   if (run.failure !== undefined) return "×";
@@ -824,6 +886,41 @@ function phaseMark(run: MonitorRunSummary): string {
     return "⚙";
   if (run.phase === "paused") return "Ⅱ";
   return "●";
+}
+
+function phaseGlyph(run: MonitorRunSummary, palette: MonitorPalette): string {
+  const mark = phaseMark(run);
+  if (mark === "×") return palette.error(mark);
+  if (mark === "!") return palette.warning(mark);
+  if (mark === "◆") return palette.success(mark);
+  if (mark === "⚙") return palette.accent(mark);
+  return palette.muted(mark);
+}
+
+/** Stuck runs first, then pending decisions, then working, then idle, then paused. */
+function widgetRunRank(run: MonitorRunSummary): number {
+  if (run.failure !== undefined || run.blocker !== undefined) return 0;
+  if (run.questionCount > 0 || run.planApproval || run.proposalCount > 0 || run.mergeReady)
+    return 1;
+  if (run.phase === "paused" || run.phase === "pausing") return 4;
+  if (
+    run.agents.active > 0 ||
+    ["planning", "approving", "executing", "verifying", "merging", "awaiting_questions"].includes(
+      run.phase,
+    )
+  )
+    return 2;
+  return 3;
+}
+
+function compareWidgetRuns(left: MonitorRunSummary, right: MonitorRunSummary): number {
+  return (
+    widgetRunRank(left) - widgetRunRank(right) || right.updatedAt.localeCompare(left.updatedAt)
+  );
+}
+
+function runWidgetPhase(run: MonitorRunSummary): string {
+  return run.stage ?? phaseLabel(run.phase);
 }
 
 function attentionBadge(run: MonitorRunSummary): string {

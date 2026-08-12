@@ -21,7 +21,11 @@ import {
 } from "../src/monitor/protocol.js";
 import { rawSha256 } from "../src/shared/canonical.js";
 import { newRunLifecycle } from "../src/state/run-lifecycle.js";
-import type { RunRecord } from "../src/state/run-record.js";
+import type {
+  AgentProviderTokenTotals,
+  PlanningRevisionRecord,
+  RunRecord,
+} from "../src/state/run-record.js";
 import { fixtureRunGit } from "./run-record-fixtures.js";
 
 const roots: string[] = [];
@@ -111,6 +115,71 @@ describe("durable Pi companion authority projections", () => {
         revision: 2,
         graphSeedCounts: { change: 1, verification: 1 },
         sections: { architecture: [{ title: "Reuse persistence" }] },
+      },
+    });
+  });
+
+  it("projects cumulative and current usage for one continuous planning identity", () => {
+    const run = runRecord("/tmp/koni-monitor-continuous-planning");
+    run.lifecycle.phase = "awaiting_approval";
+    run.plan = {
+      revision: 1,
+      status: "awaiting_approval",
+      full: {},
+      concise: { architecture: [], decisions: [], risk: [], verification: [] },
+      graphSeed: undefined,
+      steeringHistory: [],
+    };
+    run.attempts["planner-a"] = {
+      id: "planner-a",
+      sessionId: "session-a",
+      kind: "planning",
+      ticketId: "run-planning",
+      stepId: "combined-plan",
+      personaId: "run-planner",
+      modelProvider: "openai-codex",
+      modelId: "gpt-5.6-sol",
+      thinkingLevel: "high",
+      status: "waiting_plan_review",
+      launchSpecHash: rawSha256("launch"),
+      sessionFile: "/sessions/session-a.jsonl",
+      startedAt: run.createdAt,
+      endedAt: undefined,
+      terminalSummary: undefined,
+      inputTokens: 1_000,
+      outputTokens: 500,
+      cacheReadTokens: 8_000,
+      cacheWriteTokens: 0,
+    };
+    run.planningSession = {
+      protocol: "koni.planning-session.v1",
+      attemptId: "planner-a",
+      sessionId: "session-a",
+      status: "awaiting_review",
+      currentRevision: 1,
+      revisions: [
+        planningRevision(0, "superseded", {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        }),
+        planningRevision(1, "awaiting_review", {
+          inputTokens: 600,
+          outputTokens: 300,
+          cacheReadTokens: 6_000,
+          cacheWriteTokens: 0,
+        }),
+      ],
+    };
+
+    expect(parseMonitorAttention(projectMonitorAttention(run)).plan).toMatchObject({
+      revision: 1,
+      planningSessionId: "session-a",
+      planningAttemptId: "planner-a",
+      revisionUsage: {
+        cumulative: { new: 1_500, cache: 8_000, total: 9_500 },
+        currentRevision: { new: 600, cache: 2_000, total: 2_600 },
       },
     });
   });
@@ -279,5 +348,33 @@ function runRecord(root: string): RunRecord {
     questions: {},
     activity: [],
     git: fixtureRunGit(root, "run-one"),
+  };
+}
+
+function planningRevision(
+  revision: number,
+  status: PlanningRevisionRecord["status"],
+  budgetBaseline: AgentProviderTokenTotals,
+): PlanningRevisionRecord {
+  return {
+    protocol: "koni.planning-revision.v1",
+    revision,
+    status,
+    launchSpecSha256: rawSha256(`launch ${revision}`),
+    grantSha256: rawSha256(`grant ${revision}`),
+    budgetBaseline,
+    budgetPolicy: {
+      metric: "new_tokens",
+      limit: 20_000,
+      synthesisReserve: 2_000,
+      synthesisThreshold: 18_000,
+      onExhausted: "force_synthesis",
+    },
+    startedAt: "2026-07-17T12:00:00.000Z",
+    artifactSha256: rawSha256(`artifact ${revision}`),
+    graphSha256: rawSha256(`graph ${revision}`),
+    transcriptSha256: rawSha256(`transcript ${revision}`),
+    checkpointPath: `planning/revisions/${revision}/checkpoint.json`,
+    completedAt: "2026-07-17T12:01:00.000Z",
   };
 }

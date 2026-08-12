@@ -9,7 +9,7 @@ export interface ControlCenterRect {
 }
 
 export type OperateRegionName =
-  "runs" | "tickets" | "agents" | "details" | "questions" | "activity" | "graph" | "footer";
+  "runs" | "tickets" | "agents" | "details" | "questions" | "activity" | "footer";
 
 export interface OperateLayout {
   kind: "operate";
@@ -21,7 +21,6 @@ export interface OperateLayout {
   details: ControlCenterRect;
   questions?: ControlCenterRect;
   activity: ControlCenterRect;
-  graph: ControlCenterRect;
   footer: ControlCenterRect;
 }
 
@@ -37,9 +36,11 @@ export type ControlCenterLayout = OperateLayout | ResizeLayout;
 /**
  * Stable dashboard geometry.
  *
- * The three peer columns are equal to within one cell. The left remainder is assigned to Runs /
- * Tickets / Agents; pending questions split the middle 67/33; Activity is always eight rows above
- * Graph. This is the only source of panel geometry for drawing, frame regions, and hit testing.
+ * The left column keeps one third of the width (plus the division remainder) for Runs / Tickets /
+ * Agents / Activity; the remaining two thirds are one tall Details section, split 67/33 over
+ * Questions when the run has any. Activity sits last in the left column so it absorbs the
+ * rounding slack. This is the only source of panel geometry for drawing, frame regions, and hit
+ * testing.
  */
 export function operateLayout(
   width: number,
@@ -60,23 +61,19 @@ export function operateLayout(
   const footer = rect(0, safeHeight - 1, safeWidth, 1);
   const bodyY = 0;
   const bodyHeight = safeHeight - footer.height;
-  const peerWidth = Math.floor(safeWidth / 3);
-  const peerRemainder = safeWidth % 3;
-  const leftWidth = peerWidth + Number(peerRemainder > 0);
-  const middleWidth = peerWidth + Number(peerRemainder > 1);
-  const rightWidth = safeWidth - leftWidth - middleWidth;
+  const leftWidth = Math.floor(safeWidth / 3) + Number(safeWidth % 3 > 0);
+  const rightWidth = safeWidth - leftWidth;
   const leftX = 0;
-  const middleX = leftWidth;
-  const rightX = leftWidth + middleWidth;
+  const rightX = leftWidth;
 
-  const left = percentageSplit(bodyHeight, [30, 42, 28]);
+  const left = percentageSplit(bodyHeight, [28, 34, 22, 16]);
   const runsHeight = left[0]!;
   const ticketsHeight = left[1]!;
   const agentsHeight = left[2]!;
-  const middle = showQuestions ? percentageSplit(bodyHeight, [67, 33]) : [bodyHeight, 0];
-  const detailsHeight = middle[0]!;
-  const questionsHeight = middle[1]!;
-  const activityHeight = Math.min(8, bodyHeight);
+  const activityHeight = left[3]!;
+  const right = showQuestions ? percentageSplit(bodyHeight, [67, 33]) : [bodyHeight, 0];
+  const detailsHeight = right[0]!;
+  const questionsHeight = right[1]!;
 
   return {
     kind: "operate",
@@ -85,14 +82,18 @@ export function operateLayout(
     runs: rect(leftX, bodyY, leftWidth, runsHeight),
     tickets: rect(leftX, bodyY + runsHeight, leftWidth, ticketsHeight),
     agents: rect(leftX, bodyY + runsHeight + ticketsHeight, leftWidth, agentsHeight),
-    details: rect(middleX, bodyY, middleWidth, detailsHeight),
+    activity: rect(
+      leftX,
+      bodyY + runsHeight + ticketsHeight + agentsHeight,
+      leftWidth,
+      activityHeight,
+    ),
+    details: rect(rightX, bodyY, rightWidth, detailsHeight),
     ...(showQuestions
       ? {
-          questions: rect(middleX, bodyY + detailsHeight, middleWidth, questionsHeight),
+          questions: rect(rightX, bodyY + detailsHeight, rightWidth, questionsHeight),
         }
       : {}),
-    activity: rect(rightX, bodyY, rightWidth, activityHeight),
-    graph: rect(rightX, bodyY + activityHeight, rightWidth, bodyHeight - activityHeight),
     footer,
   };
 }

@@ -782,8 +782,17 @@ export class TypedGraph {
         title: existing.title,
       });
     }
-    for (const edge of delta.removeEdges) graph.#mutateEdge(edge, false);
-    for (const edge of delta.addEdges) graph.#mutateEdge(edge, true);
+    const recordEdgeChange = (node: GraphNode | undefined): void => {
+      if (node === undefined || changes.some((change) => change.nodeId === node.id)) return;
+      changes.push({
+        kind: "modified",
+        nodeId: node.id,
+        nodeType: node.type,
+        title: node.title,
+      });
+    };
+    for (const edge of delta.removeEdges) recordEdgeChange(graph.#mutateEdge(edge, false));
+    for (const edge of delta.addEdges) recordEdgeChange(graph.#mutateEdge(edge, true));
     graph.validate();
     return { graph, hash: graph.hash, changes };
   }
@@ -838,7 +847,7 @@ export class TypedGraph {
     return output;
   }
 
-  #mutateEdge(edge: GraphEdge, add: boolean): void {
+  #mutateEdge(edge: GraphEdge, add: boolean): GraphNode | undefined {
     const source = this.#nodes.get(edge.source);
     const target = this.#nodes.get(edge.target);
     if (source === undefined || target === undefined) {
@@ -852,12 +861,15 @@ export class TypedGraph {
     const relation = resolved.definition.relation;
     const targets = canonicalSource.edges[relation] ?? [];
     if (add) {
-      if (!targets.includes(canonicalTarget.id)) targets.push(canonicalTarget.id);
+      if (targets.includes(canonicalTarget.id)) return undefined;
+      targets.push(canonicalTarget.id);
       targets.sort();
       canonicalSource.edges[relation] = targets;
     } else {
+      if (!targets.includes(canonicalTarget.id)) return undefined;
       canonicalSource.edges[relation] = targets.filter((id) => id !== canonicalTarget.id);
     }
+    return canonicalSource;
   }
 }
 

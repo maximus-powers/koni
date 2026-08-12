@@ -1,6 +1,10 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
-import { CompactMonitorWidget, RunsOverlayComponent } from "../src/monitor/component.js";
+import {
+  CompactMonitorWidget,
+  RunsOverlayComponent,
+  compactMonitorStatus,
+} from "../src/monitor/component.js";
 import type { MonitorController, MonitorControllerSnapshot } from "../src/monitor/controller.js";
 import { parseMonitorAttention, parseMonitorSnapshot } from "../src/monitor/protocol.js";
 import { plainMonitorPalette } from "../src/monitor/presentation.js";
@@ -40,6 +44,84 @@ describe("compact Pi companion components", () => {
       [...narrow, ...wide].every((line, index) => visibleWidth(line) <= (index === 0 ? 28 : 112)),
     ).toBe(true);
     widget.dispose();
+  });
+
+  it("gives each ongoing run its own widget line, preferring planner titles", () => {
+    const raw = monitorSnapshotFixture();
+    const base = raw.runs[0];
+    raw.runs = [
+      {
+        ...base,
+        id: "run-a",
+        title: "Notes Editor Port",
+        phase: "executing",
+        stage: "Work",
+        planApproval: false,
+      },
+      {
+        ...base,
+        id: "run-b",
+        phase: "blocked",
+        stage: null,
+        planApproval: false,
+        questionCount: 0,
+        blocker: "ticket validation did not complete",
+      },
+      { ...base, id: "run-c", phase: "paused", stage: null, planApproval: false },
+      { ...base, id: "run-d", phase: "executing", stage: "Work", planApproval: false },
+      { ...base, id: "run-e", phase: "executing", stage: "Work", planApproval: false },
+    ];
+    raw.totalRuns = 5;
+    const snapshot = activeSnapshot();
+    snapshot.monitor = parseMonitorSnapshot(raw);
+    snapshot.selectedRunId = "run-a";
+    const fake = new FakeComponentController(snapshot);
+    const widget = new CompactMonitorWidget({
+      controller: fake as unknown as MonitorController,
+      palette: plainMonitorPalette,
+    });
+    const wide = widget.render(120);
+    const text = wide.join("\n");
+    // Header + three run lines + the bounded remainder hint.
+    expect(wide).toHaveLength(5);
+    expect(text).toContain("Notes Editor Port");
+    expect(text).not.toContain("run-a");
+    // The blocked run outranks every working run.
+    expect(wide[1]).toContain("!");
+    expect(wide[1]).toContain("Blocked");
+    expect(text).toContain("+2 more runs · /koni-runs");
+    expect(wide.every((line) => visibleWidth(line) <= 120)).toBe(true);
+    widget.dispose();
+  });
+
+  it("summarizes fleet shape in the compact status text", () => {
+    const raw = monitorSnapshotFixture();
+    const base = raw.runs[0];
+    raw.runs = [
+      {
+        ...base,
+        id: "run-a",
+        phase: "executing",
+        stage: "Work",
+        planApproval: false,
+        questionCount: 0,
+        agents: { active: 1, total: 1 },
+      },
+      {
+        ...base,
+        id: "run-b",
+        phase: "blocked",
+        stage: null,
+        planApproval: false,
+        questionCount: 0,
+        blocker: "stuck",
+      },
+      { ...base, id: "run-c", phase: "paused", stage: null, planApproval: false, questionCount: 1 },
+    ];
+    raw.totalRuns = 3;
+    const snapshot = activeSnapshot();
+    snapshot.monitor = parseMonitorSnapshot(raw);
+    expect(compactMonitorStatus(snapshot)).toBe("Koni 1⚙ 1Ⅱ 1× !1");
   });
 
   it("shows wrapped options, None of these, optional notes, and an explicit Send action", () => {
@@ -109,6 +191,11 @@ describe("compact Pi companion components", () => {
     revise.handleInput("\r");
     const initialPlan = revise.render(72).join("\n");
     expect(initialPlan).toContain("Stable boundary");
+    expect(initialPlan).toContain("Revision 2");
+    expect(initialPlan).toContain("Same planner session; token allowance reset for this revision");
+    expect(initialPlan).toContain("400 current-revision new tks");
+    expect(initialPlan).toContain("1.5K cumulative new tks");
+    expect(initialPlan).toContain("Revise the current plan");
     expect(initialPlan).toContain("Approve");
     expect(initialPlan).not.toContain("Revise plan");
     revise.handleInput("\t");

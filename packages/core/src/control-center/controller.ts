@@ -84,9 +84,12 @@ import {
   type DetailsTab,
   type ProvisionalRunView,
   type QuestionView,
+  RUN_TABS,
+  type RunTab,
   TICKET_TABS,
   type TicketTab,
 } from "./view-model.js";
+import { configuredGraphOptions, graphOutlineNodes } from "./graph-view.js";
 import {
   cockpitStringArrayOption,
   cockpitStringOption,
@@ -336,6 +339,8 @@ export interface ConfigResourceOperationState {
 
 export type ControlCenterHelpTopic =
   | ControlCenterPanel
+  /** The Graph feed is a details tab, not a panel, but keeps its own help topic. */
+  | "graph"
   | "new_run"
   | "plan_review"
   | "proposal_review"
@@ -352,8 +357,15 @@ export type ControlCenterHelpTopic =
   | "edit_scalar"
   | "chat";
 
+export interface GraphNodeModalState {
+  kind: "graph_node";
+  nodeId: string;
+  scroll: number;
+}
+
 export type ControlCenterModalState =
-  | { kind: "help"; topic: ControlCenterHelpTopic }
+  | { kind: "help"; topic: ControlCenterHelpTopic; scroll: number }
+  | GraphNodeModalState
   | DeleteRunModalState
   | MergeRunModalState
   | NewRunModalState
@@ -402,11 +414,19 @@ export interface ControlCenterControllerSnapshot {
   view: ControlCenterViewModel;
   selection: ControlCenterSelection;
   /** Highlight-only cursors: rows the operator is on, distinct from the committed selection. */
-  cursor: { ticketId?: string; attemptId?: string; graphIndex: number };
+  cursor: {
+    ticketId?: string;
+    attemptId?: string;
+    graphIndex: number;
+    /** Graph-feed sub-column focus and its id-based ticket-card cursor. */
+    graphFeed: { column: "graph" | "tickets"; ticketId?: string };
+  };
   focus: ControlCenterPanel;
-  scroll: Readonly<Record<ControlCenterPanel, number>>;
+  /** Panel scrolls plus the Graph feed's two sub-column scrolls (`graph`, `feedTickets`). */
+  scroll: Readonly<Record<ControlCenterPanel | "graph" | "feedTickets", number>>;
   questionIndex: number;
   ticketTab: TicketTab;
+  runTab: RunTab;
   questionDraft?: QuestionDraftState;
   modal?: ControlCenterModalState;
   /** Configure remains the visual underlay while contextual Help owns the modal layer. */
@@ -481,7 +501,7 @@ interface SavedConfigDraft {
   values: Record<string, JsonValue>;
 }
 
-const EMPTY_SCROLL: Record<ControlCenterPanel, number> = {
+const EMPTY_SCROLL: Record<ControlCenterPanel | "graph" | "feedTickets", number> = {
   runs: 0,
   tickets: 0,
   details: 0,
@@ -489,12 +509,14 @@ const EMPTY_SCROLL: Record<ControlCenterPanel, number> = {
   agents: 0,
   activity: 0,
   graph: 0,
+  /** The Graph feed's tickets sub-column scrolls independently of its graph sub-column. */
+  feedTickets: 0,
 };
 
 const DOCUMENT_CREATE_CHOICES: readonly ConfigDocumentCreateChoice[] = [
   {
     label: "Native agent",
-    description: "A Pi-native persona, model, reasoning, prompt, and authority policy.",
+    description: "A Pi-native agent, model, reasoning, instructions, and Koni authority policy.",
     domain: "agents",
     kind: "native_agent",
     format: "yaml",
@@ -581,20 +603,26 @@ export class ControlCenterController {
   #transcriptRpcAvailable: boolean | undefined;
   #transcriptRequestSequence = 0;
   #profileConflictRpcAvailable: boolean | undefined;
-  #selection: ControlCenterSelection = { detailsTab: "overview", objectiveExpanded: false };
+  #selection: ControlCenterSelection = { detailsTab: "graph", objectiveExpanded: false };
   /** Tickets-panel highlight; a ticket is only committed to the selection on Enter/click. */
   #ticketCursor: string | undefined;
   /** Agents-panel highlight; a chat only opens on Enter/click. */
   #agentCursor: string | undefined;
   /** Graph-panel node cursor (index into the rendered node order). */
   #graphCursorIndex = 0;
+  /** Graph-feed sub-column focus: ←/→ toggles between the graph and the ticket cards. */
+  #graphFeedColumn: "graph" | "tickets" = "graph";
+  /** Graph-feed ticket-card cursor by id; the feed reorders live, so an index would drift. */
+  #graphFeedTicketId: string | undefined;
   /** Whether the open chat renders tool call/result blocks; reset per chat. */
   #chatToolsVisible = false;
   #focus: ControlCenterPanel = "runs";
   #scroll = { ...EMPTY_SCROLL };
   #questionIndex = 0;
   #ticketTab: TicketTab = "all";
-  #detailsTabBeforeChat: DetailsTab = "overview";
+  /** Runs-panel filter; `active` keeps stale, paused, and blocked runs one tab away by default. */
+  #runTab: RunTab = "active";
+  #detailsTabBeforeChat: DetailsTab = "graph";
   #modal: ControlCenterModalState | undefined;
   #suspendedModal: ControlCenterModalState | undefined;
   #savedConfigDraft: SavedConfigDraft | undefined;
@@ -639,11 +667,16 @@ export class ControlCenterController {
         ...(this.#ticketCursor === undefined ? {} : { ticketId: this.#ticketCursor }),
         ...(this.#agentCursor === undefined ? {} : { attemptId: this.#agentCursor }),
         graphIndex: this.#graphCursorIndex,
+        graphFeed: {
+          column: this.#graphFeedColumn,
+          ...(this.#graphFeedTicketId === undefined ? {} : { ticketId: this.#graphFeedTicketId }),
+        },
       },
       focus: this.#focus,
       scroll: { ...this.#scroll },
       questionIndex: this.#questionIndex,
       ticketTab: this.#ticketTab,
+      runTab: this.#runTab,
       ...(currentQuestion === undefined
         ? {}
         : { questionDraft: { ...this.#draftFor(currentQuestion) } }),
@@ -743,7 +776,8 @@ export class ControlCenterController {
         await this.#move(action.delta);
         break;
       case "page":
-        this.#scrollBy(action.delta * 8);
+        if (this.#graphFeedActive()) await this.#moveFeedCursor(action.delta * 8);
+        else this.#scrollBy(action.delta * 8);
         break;
       case "scroll_home":
         this.#scrollToBoundary(false);
@@ -752,7 +786,13 @@ export class ControlCenterController {
         this.#scrollToBoundary(true);
         break;
       case "details_tab":
-        this.#moveHorizontal(action.delta);
+        this.#moveHorizontal(action.delta, "bracket");
+        break;
+      case "move_horizontal":
+        this.#moveHorizontal(action.delta, "arrow");
+        break;
+      case "focus_graph":
+        this.#focusGraphFeed();
         break;
       case "activate":
         await this.#activate();
@@ -772,7 +812,11 @@ export class ControlCenterController {
         break;
       case "help":
         this.#openHelp(
-          this.#focus === "details" && this.#selection.detailsTab === "chat" ? "chat" : this.#focus,
+          this.#focus === "details" && this.#selection.detailsTab === "chat"
+            ? "chat"
+            : this.#focus === "details" && this.#selection.detailsTab === "graph"
+              ? "graph"
+              : this.#focus,
         );
         break;
       case "toggle_notes":
@@ -1062,14 +1106,16 @@ export class ControlCenterController {
     }
     const selectedSummary = summaries.find((run) => run.id === selection.runId) ?? summaries[0];
     if (selectedSummary === undefined) {
+      // Startup and auto-recovery selection default to the Graph live feed, not Overview:
+      // only an explicit operator commit (Enter/click) retargets the details tab.
       selection =
         provisionals.length > 0
-          ? { runId: provisionals[0]!.id, detailsTab: "overview", objectiveExpanded: false }
-          : { detailsTab: "overview", objectiveExpanded: false };
+          ? { runId: provisionals[0]!.id, detailsTab: "graph", objectiveExpanded: false }
+          : { detailsTab: "graph", objectiveExpanded: false };
       return { summaries: summaries.map((run) => structuredClone(run)), provisionals, selection };
     }
     if (selection.runId !== selectedSummary.id) {
-      selection = { runId: selectedSummary.id, detailsTab: "overview", objectiveExpanded: false };
+      selection = { runId: selectedSummary.id, detailsTab: "graph", objectiveExpanded: false };
     }
     return {
       summaries: summaries.map((run) => structuredClone(run)),
@@ -1109,7 +1155,7 @@ export class ControlCenterController {
       delete this.#selection.attemptId;
       this.#ticketCursor = undefined;
       this.#agentCursor = undefined;
-      this.#graphCursorIndex = 0;
+      this.#resetGraphFeedCursor();
       this.#questionIndex = 0;
       if (this.#focus === "questions") this.#focus = "details";
       return;
@@ -1152,10 +1198,10 @@ export class ControlCenterController {
       return;
     }
     try {
-      const response = await this.#client.request("run.graph", {
-        runId,
-        ...(this.#selection.ticketId === undefined ? {} : { ticketId: this.#selection.ticketId }),
-      });
+      // Always run scope: the Graph feed narrows a committed ticket visually (highlight and
+      // grey-out), never by re-projecting the graph to the ticket's neighborhood. The feed
+      // renderer bounds its own output, so the unbounded run projection stays safe to draw.
+      const response = await this.#client.request("run.graph", { runId });
       this.#graph = parseGraph(response.result);
       this.#graphRpcAvailable = true;
     } catch (error) {
@@ -1328,8 +1374,10 @@ export class ControlCenterController {
       ...(this.#controls === undefined ? {} : { controls: this.#controls }),
       ...(this.#lineage === undefined ? {} : { lineage: this.#lineage }),
       ...(this.#cockpit === undefined ? {} : { cockpit: this.#cockpit }),
+      models: this.#models,
       nowMs: this.#now(),
       ticketTab: this.#ticketTab,
+      runTab: this.#runTab,
     });
   }
 
@@ -1365,10 +1413,60 @@ export class ControlCenterController {
   }
 
   #focusOrder(): ControlCenterPanel[] {
-    const panels: ControlCenterPanel[] = ["runs", "tickets", "agents", "details"];
+    const panels: ControlCenterPanel[] = ["runs", "tickets", "agents", "activity", "details"];
     if (this.#buildView().selectedRun?.questions !== undefined) panels.push("questions");
-    panels.push("activity", "graph");
     return panels;
+  }
+
+  /** True while keys should route to the Graph feed's two-column cursor model. */
+  #graphFeedActive(): boolean {
+    return this.#focus === "details" && this.#selection.detailsTab === "graph";
+  }
+
+  /** Selection-scope changes park the feed back on the graph column with fresh cursors. */
+  #resetGraphFeedCursor(): void {
+    this.#graphCursorIndex = 0;
+    this.#graphFeedColumn = "graph";
+    this.#graphFeedTicketId = undefined;
+    this.#scroll.graph = 0;
+    this.#scroll.feedTickets = 0;
+  }
+
+  /** Key 6: the old graph-panel hotkey still means “take me to the graph”. */
+  #focusGraphFeed(): void {
+    this.#focus = "details";
+    if (this.#selection.detailsTab !== "chat" && this.#selection.detailsTab !== "graph") {
+      this.#selection.detailsTab = "graph";
+      this.#scroll.details = 0;
+    }
+    this.#emit();
+  }
+
+  /** Moves the Graph feed's active column cursor (nodes or ticket cards) by `delta`. */
+  async #moveFeedCursor(delta: number): Promise<void> {
+    const view = this.#buildView();
+    if (this.#graphFeedColumn === "tickets") {
+      const tickets = view.selectedRun?.graphFeed.tickets ?? [];
+      if (tickets.length === 0) return;
+      const index = Math.max(
+        0,
+        tickets.findIndex((ticket) => ticket.id === this.#graphFeedTicketId),
+      );
+      const next = Math.min(tickets.length - 1, Math.max(0, index + delta));
+      const id = tickets[next]?.id;
+      if (id !== undefined && id !== this.#graphFeedTicketId) {
+        this.#graphFeedTicketId = id;
+        this.#emit();
+      }
+      return;
+    }
+    const nodeCount = view.selectedRun?.graph.nodes.length ?? 0;
+    if (nodeCount === 0) return;
+    const next = Math.min(nodeCount - 1, Math.max(0, this.#graphCursorIndex + delta));
+    if (next !== this.#graphCursorIndex) {
+      this.#graphCursorIndex = next;
+      this.#emit();
+    }
   }
 
   async #selectRun(runId: string): Promise<void> {
@@ -1381,7 +1479,7 @@ export class ControlCenterController {
     this.#selection = { runId, detailsTab: "overview", objectiveExpanded: false };
     this.#ticketCursor = undefined;
     this.#agentCursor = undefined;
-    this.#graphCursorIndex = 0;
+    this.#resetGraphFeedCursor();
     this.#questionIndex = 0;
     this.#scroll = { ...EMPTY_SCROLL };
     await this.#hydrateCurrentSelection();
@@ -1444,7 +1542,7 @@ export class ControlCenterController {
     this.#selection.detailsTab = "overview";
     this.#scroll.details = 0;
     this.#scroll.agents = 0;
-    this.#graphCursorIndex = 0;
+    this.#resetGraphFeedCursor();
     try {
       await this.#refreshSelectionProjections();
     } catch (error) {
@@ -1486,6 +1584,13 @@ export class ControlCenterController {
   #pointerScroll(panel: ControlCenterPanel, delta: -1 | 1): void {
     if (panel === "questions" && this.#buildView().selectedRun?.questions === undefined) return;
     this.#focus = panel;
+    if (panel === "details" && this.#selection.detailsTab === "graph") {
+      // The wheel scrolls the feed column the cursor lives in; the feed clamps and follows.
+      const key = this.#graphFeedColumn === "tickets" ? "feedTickets" : "graph";
+      this.#scroll[key] = Math.max(0, this.#scroll[key] + delta * 3);
+      this.#emit();
+      return;
+    }
     // The open chat is bottom-anchored: its scroll offset counts up from the newest line.
     const inverted = panel === "details" && this.#selection.detailsTab === "chat";
     this.#scroll[panel] = Math.max(0, this.#scroll[panel] + (inverted ? -delta : delta) * 3);
@@ -1506,10 +1611,17 @@ export class ControlCenterController {
           delta,
         );
         if (id !== undefined && id !== this.#selection.runId) {
-          this.#selection = { runId: id, detailsTab: "overview", objectiveExpanded: false };
+          // Arrowing through runs is browsing, not committing: the current tab stays up so the
+          // Graph feed keeps streaming while the operator surveys runs. Chat cannot survive the
+          // run change (its attempt is dropped), so it collapses to the tab beneath it.
+          this.#selection = {
+            runId: id,
+            detailsTab: this.#preservedDetailsTab(),
+            objectiveExpanded: false,
+          };
           this.#ticketCursor = undefined;
           this.#agentCursor = undefined;
-          this.#graphCursorIndex = 0;
+          this.#resetGraphFeedCursor();
           this.#questionIndex = 0;
           this.#scroll = { ...EMPTY_SCROLL };
           await this.#hydrateCurrentSelection();
@@ -1547,17 +1659,13 @@ export class ControlCenterController {
       case "questions":
         this.#moveQuestionOption(delta);
         return;
-      case "graph": {
-        const nodeCount = view.selectedRun?.graph.nodes.length ?? 0;
-        if (nodeCount === 0) return;
-        const next = Math.min(nodeCount - 1, Math.max(0, this.#graphCursorIndex + delta));
-        if (next !== this.#graphCursorIndex) {
-          this.#graphCursorIndex = next;
-          this.#emit();
-        }
-        return;
-      }
       case "details":
+        if (this.#graphFeedActive()) {
+          await this.#moveFeedCursor(delta);
+          return;
+        }
+        this.#scrollBy(delta);
+        return;
       case "activity":
         this.#scrollBy(delta);
         return;
@@ -1606,7 +1714,7 @@ export class ControlCenterController {
           provisionals: this.#provisionals.map((run) => ({ ...run })),
           selection: {
             runId: selectedSummary.id,
-            detailsTab: "overview",
+            detailsTab: this.#preservedDetailsTab(),
             objectiveExpanded: false,
           },
           selectedSummary,
@@ -1619,7 +1727,7 @@ export class ControlCenterController {
         this.#commitRunInventory(inventory, staged, selectedRun);
         this.#ticketCursor = undefined;
         this.#agentCursor = undefined;
-        this.#graphCursorIndex = 0;
+        this.#resetGraphFeedCursor();
         this.#questionIndex = 0;
         this.#scroll = { ...EMPTY_SCROLL };
         await this.#refreshSelectionProjections();
@@ -1637,7 +1745,7 @@ export class ControlCenterController {
         if (refreshedIndex >= 0 && refreshedTarget !== undefined) {
           this.#selection = {
             runId: refreshedTarget.id,
-            detailsTab: "overview",
+            detailsTab: this.#preservedDetailsTab(),
             objectiveExpanded: false,
           };
           this.#questionIndex = 0;
@@ -1650,8 +1758,17 @@ export class ControlCenterController {
     return true;
   }
 
-  #moveHorizontal(delta: -1 | 1): void {
+  #moveHorizontal(delta: -1 | 1, source: "arrow" | "bracket" = "bracket"): void {
     const view = this.#buildView();
+    if (this.#focus === "runs") {
+      // Tab switches only re-filter the visible rows; the committed run selection (and every
+      // panel scoped by it) is unchanged until the operator picks another run.
+      const index = Math.max(0, RUN_TABS.indexOf(this.#runTab));
+      this.#runTab = RUN_TABS[(index + delta + RUN_TABS.length) % RUN_TABS.length]!;
+      this.#scroll.runs = 0;
+      this.#emit();
+      return;
+    }
     if (this.#focus === "tickets") {
       const available = view.selectedRun?.ticketTabs.map((tab) => tab.id) ?? [...TICKET_TABS];
       if (available.length === 0) return;
@@ -1678,11 +1795,38 @@ export class ControlCenterController {
     }
     if (this.#focus !== "details") return;
     if (this.#selection.detailsTab === "chat") return;
-    const tabs: DetailsTab[] = ["overview", "plan"];
+    if (this.#selection.detailsTab === "graph" && source === "arrow") {
+      // On the Graph feed, arrows move the column focus between the graph and the ticket
+      // cards; brackets keep cycling tabs. Switching to an empty tickets column is a no-op.
+      const tickets = view.selectedRun?.graphFeed.tickets ?? [];
+      const next = this.#graphFeedColumn === "graph" ? "tickets" : "graph";
+      if (next === "tickets") {
+        if (tickets.length === 0) return;
+        if (
+          this.#graphFeedTicketId === undefined ||
+          !tickets.some((ticket) => ticket.id === this.#graphFeedTicketId)
+        ) {
+          this.#graphFeedTicketId = tickets[0]!.id;
+        }
+      }
+      this.#graphFeedColumn = next;
+      this.#emit();
+      return;
+    }
+    // Tabs stay reachable with a committed ticket: the Graph feed highlights the ticket
+    // visually while Overview keeps its ticket takeover.
+    const tabs: DetailsTab[] = ["graph", "plan", "overview"];
     const index = Math.max(0, tabs.indexOf(this.#selection.detailsTab));
     this.#selection.detailsTab = tabs[(index + delta + tabs.length) % tabs.length]!;
     this.#scroll.details = 0;
     this.#emit();
+  }
+
+  /** The tab run browsing carries along; chat collapses to the tab it was opened from. */
+  #preservedDetailsTab(): DetailsTab {
+    return this.#selection.detailsTab === "chat"
+      ? this.#detailsTabBeforeChat
+      : this.#selection.detailsTab;
   }
 
   async #activate(): Promise<void> {
@@ -1696,7 +1840,7 @@ export class ControlCenterController {
       this.#selection = { runId, detailsTab: "overview", objectiveExpanded: false };
       this.#ticketCursor = undefined;
       this.#agentCursor = undefined;
-      this.#graphCursorIndex = 0;
+      this.#resetGraphFeedCursor();
       this.#scroll.details = 0;
       if (hadScope) await this.#refreshSelectionProjections();
       this.#emit();
@@ -1704,6 +1848,31 @@ export class ControlCenterController {
     }
     if (this.#focus === "tickets") {
       await this.#commitTicketCursor();
+      return;
+    }
+    if (this.#focus === "details" && this.#selection.detailsTab === "graph") {
+      if (this.#graphFeedColumn === "tickets") {
+        // Enter on a ticket card commits it — the same semantics as the Tickets panel,
+        // including the switch to its Overview takeover.
+        const tickets = this.#buildView().selectedRun?.graphFeed.tickets ?? [];
+        const ticketId =
+          this.#graphFeedTicketId !== undefined &&
+          tickets.some((ticket) => ticket.id === this.#graphFeedTicketId)
+            ? this.#graphFeedTicketId
+            : tickets[0]?.id;
+        if (ticketId === undefined) return;
+        this.#ticketCursor = ticketId;
+        await this.#commitTicketCursor();
+        return;
+      }
+      const graph = this.#buildView().selectedRun?.graph;
+      if (graph === undefined || graph.nodes.length === 0) return;
+      const options = configuredGraphOptions(cockpitView(this.#cockpit, ["typed_tree", "graph"]));
+      const ordered = graphOutlineNodes(graph.nodes, graph.edges, options);
+      const node = ordered[Math.min(ordered.length - 1, Math.max(0, this.#graphCursorIndex))];
+      if (node === undefined) return;
+      this.#modal = { kind: "graph_node", nodeId: node.id, scroll: 0 };
+      this.#emit();
       return;
     }
     if (this.#focus === "details" && this.#selection.detailsTab === "overview") {
@@ -1747,6 +1916,7 @@ export class ControlCenterController {
         };
         this.#emit();
       }
+      return;
     }
   }
 
@@ -1980,7 +2150,7 @@ export class ControlCenterController {
   #openHelp(topic: ControlCenterHelpTopic): void {
     if (this.#modal !== undefined && this.#modal.kind !== "help")
       this.#suspendedModal = cloneModal(this.#modal);
-    this.#modal = { kind: "help", topic };
+    this.#modal = { kind: "help", topic, scroll: 0 };
     this.#emit();
   }
 
@@ -2054,8 +2224,10 @@ export class ControlCenterController {
     const catalog = this.#cockpit;
     if (this.#focus === "tickets") return cockpitView(catalog, ["tabbed_table", "kanban"]);
     if (this.#focus === "agents") return cockpitView(catalog, ["status_overlay"]);
-    if (this.#focus === "graph") return cockpitView(catalog, ["typed_tree", "graph", "table"]);
-    if (this.#focus === "details") return cockpitView(catalog, ["nested_detail"]);
+    if (this.#focus === "details")
+      return this.#selection.detailsTab === "graph"
+        ? cockpitView(catalog, ["typed_tree", "graph", "table"])
+        : cockpitView(catalog, ["nested_detail"]);
     if (this.#focus === "activity" || this.#focus === "runs")
       return cockpitView(catalog, ["controls", "summary"]);
     return undefined;
@@ -3010,11 +3182,32 @@ export class ControlCenterController {
     }
     if (action.type === "help") {
       if (modal.kind === "help") this.#restoreSuspendedModal();
-      else this.#openHelp(modal.kind === "delete" || modal.kind === "merge" ? "runs" : modal.kind);
+      else
+        this.#openHelp(
+          modal.kind === "delete" || modal.kind === "merge"
+            ? "runs"
+            : modal.kind === "graph_node"
+              ? "graph"
+              : modal.kind,
+        );
       return;
     }
     if (modal.kind === "help") {
       if (action.type === "activate") this.#restoreSuspendedModal();
+      else if (action.type === "move") modal.scroll = Math.max(0, modal.scroll + action.delta);
+      else if (action.type === "page") modal.scroll = Math.max(0, modal.scroll + action.delta * 8);
+      else if (action.type === "scroll_home") modal.scroll = 0;
+      else if (action.type === "scroll_end") modal.scroll = Number.MAX_SAFE_INTEGER;
+      this.#emit();
+      return;
+    }
+    if (modal.kind === "graph_node") {
+      if (action.type === "activate" || action.type === "submit") this.#modal = undefined;
+      else if (action.type === "move") modal.scroll = Math.max(0, modal.scroll + action.delta);
+      else if (action.type === "page") modal.scroll = Math.max(0, modal.scroll + action.delta * 8);
+      else if (action.type === "scroll_home") modal.scroll = 0;
+      else if (action.type === "scroll_end") modal.scroll = Number.MAX_SAFE_INTEGER;
+      this.#emit();
       return;
     }
     if (modal.kind === "delete") {
@@ -3104,13 +3297,17 @@ export class ControlCenterController {
   #handlePointerControl(target: string): void {
     if (target.startsWith("details-tab:")) {
       const tab = target.slice("details-tab:".length);
-      if (tab === "overview" || tab === "plan") {
+      if (tab === "graph" || tab === "overview" || tab === "plan") {
         this.#selection.detailsTab = tab;
         this.#focus = "details";
         this.#scroll.details = 0;
       }
     } else if (target === "ticket-tab:previous" || target === "ticket-tab:next") {
       this.#focus = "tickets";
+      this.#moveHorizontal(target.endsWith("previous") ? -1 : 1);
+      return;
+    } else if (target === "run-tab:previous" || target === "run-tab:next") {
+      this.#focus = "runs";
       this.#moveHorizontal(target.endsWith("previous") ? -1 : 1);
       return;
     } else if (target.startsWith("question-option:")) {
@@ -4149,6 +4346,8 @@ export class ControlCenterController {
 
   async #submitPlanReview(modal: PlanReviewModalState): Promise<void> {
     const instructions = modal.steering.trim();
+    const continuingPlanningSession =
+      this.snapshot.view.selectedRun?.plan.planningSessionId !== undefined;
     const capability = this.#findCapability(
       instructions.length === 0 ? "approve_run" : "revise_run_plan",
     );
@@ -4165,7 +4364,11 @@ export class ControlCenterController {
     await this.#mutate(
       method,
       { runId: modal.runId, ...(instructions.length === 0 ? {} : { instructions }) },
-      instructions.length === 0 ? "Approving plan…" : "Requesting revised plan…",
+      instructions.length === 0
+        ? "Approving plan…"
+        : continuingPlanningSession
+          ? "Continuing planning session…"
+          : "Requesting revised plan…",
     );
   }
 

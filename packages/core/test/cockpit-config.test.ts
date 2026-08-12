@@ -129,7 +129,9 @@ describe("compiled cockpit presentation", () => {
     const frame = component.renderFrame(120, 40);
     const tickets = frameRegionText(frame, "tickets");
     const activity = frameRegionText(frame, "activity");
-    const graph = frameRegionText(frame, "graph");
+    // The graph is the details panel's default tab; its configured view title and options
+    // surface through the feed's header line inside the details region.
+    const details = frameRegionText(frame, "details");
     expect(tickets).toContain("Configured Tickets");
     expect(tickets).toContain("Running");
     expect(tickets).not.toContain("◉");
@@ -137,8 +139,8 @@ describe("compiled cockpit presentation", () => {
     expect(activity).toContain("Configured Activity");
     expect(activity).toContain("Newest configured event");
     expect(activity).not.toContain("Older event hidden by limit");
-    expect(graph).toContain("Configured Graph · main checkout");
-    expect(graph).not.toContain("Configured objective title");
+    expect(details).toContain("Configured Graph · main checkout");
+    expect(details).not.toContain("Configured objective title");
 
     await controller.handle({ type: "focus_panel", panel: "tickets" });
     await controller.handle({ type: "open_actions" });

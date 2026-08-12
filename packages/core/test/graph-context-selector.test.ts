@@ -453,4 +453,68 @@ describe("dynamic graph context selection", () => {
       DynamicGraphContextBudgetError,
     );
   });
+
+  it("does not spend the prompt budget twice when canonical guidance renders the immutable baseline", () => {
+    const selector = new DynamicGraphContextSelector();
+    const input = selectionInput();
+    const currentId = input.contextual.canonicalWorkingSpecId!;
+    const current = input.contextual.records[currentId] as WorkingSpecVersionRecord;
+    const repeated = "approved behavior ".repeat(1_800);
+    const baseline = {
+      ...current.baseline,
+      acceptedPlan: {
+        ...current.baseline.acceptedPlan!,
+        architecture: repeated,
+      },
+    };
+    const guidance = JSON.stringify(
+      {
+        objective: baseline.objective,
+        intake: baseline.intake,
+        acceptedPlan: baseline.acceptedPlan,
+        resolvedDecisions: baseline.resolvedDecisions,
+        verificationIntent: baseline.verificationIntent,
+      },
+      null,
+      2,
+    );
+    const baselineDigest = digest(baseline);
+    const record: WorkingSpecVersionRecord = {
+      ...current,
+      baseline,
+      baselineDigest,
+      guidance,
+      digest: workingSpecDigest({
+        baselineDigest,
+        guidance,
+        affectedNodeIds: current.affectedNodeIds,
+        repositoryPaths: current.repositoryPaths,
+      }),
+    };
+    const { hash: _priorHash, ...contextualDraft } = input.contextual;
+    const contextual = sealGraphContextualState({
+      ...contextualDraft,
+      records: { ...contextualDraft.records, [record.id]: record },
+    });
+
+    const selected = selector.select({
+      ...input,
+      contextual,
+      maxInputTokens: 60_000,
+    });
+    const projected = selected.envelope.records.find(
+      (candidate) => candidate.kind === "working_spec",
+    );
+
+    expect(projected).toMatchObject({
+      kind: "working_spec",
+      value: {
+        guidance,
+        baselineDigest,
+        baselineSource: baseline.source,
+      },
+    });
+    expect(projected).not.toHaveProperty("value.baseline");
+    expect(selected.envelope.budget.utf8Bytes).toBeLessThan(60_000);
+  });
 });

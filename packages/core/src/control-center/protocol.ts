@@ -283,6 +283,7 @@ export type ControlAttemptLineageStatus =
   | "queued"
   | "running"
   | "waiting_question"
+  | "waiting_plan_review"
   | "terminal_accepted"
   | "completed"
   | "failed"
@@ -941,6 +942,7 @@ const ATTEMPT_LINEAGE_STATUSES = new Set<ControlAttemptLineageStatus>([
   "queued",
   "running",
   "waiting_question",
+  "waiting_plan_review",
   "terminal_accepted",
   "completed",
   "failed",
@@ -959,13 +961,11 @@ const ATTEMPT_LINEAGE_REASONS = new Set<ControlAttemptLineageReason>([
 
 const PROPOSAL_TICKET_STATUSES = new Set<TicketStatus>([
   "proposed",
-  "todo",
-  "ready",
+  "queued",
   "running",
   "review",
   "blocked",
   "completed",
-  "failed",
   "cancelled",
 ]);
 

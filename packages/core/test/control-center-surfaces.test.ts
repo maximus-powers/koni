@@ -78,7 +78,8 @@ describe("control center controller", () => {
       waiting.selectedRun?.overviewSections.find((section) => section.title === "Evidence"),
     ).not.toMatchObject({ tone: "error" });
     expect(waiting.selectedRun?.ticketTabs.find((tab) => tab.id === "blocked")?.count).toBe(0);
-    expect(waiting.selectedRun?.ticketTabs.find((tab) => tab.id === "todo")?.count).toBe(1);
+    expect(waiting.selectedRun?.ticketTabs.find((tab) => tab.id === "queued")?.count).toBe(1);
+    expect(waiting.selectedRun?.ticketTabs.some((tab) => String(tab.id) === "todo")).toBe(false);
 
     const ordinary = structuredClone(held);
     ordinary.id = "ticket-ordinary-blocker";
@@ -133,17 +134,24 @@ describe("control center controller", () => {
     expect(controller.snapshot.cursor.ticketId).toBe("ticket-one");
     await controller.handle({ type: "activate" });
     expect(controller.snapshot.selection.ticketId).toBe("ticket-one");
+    // The graph projection stays run-wide after a ticket commit: the Graph feed narrows the
+    // committed ticket visually, never through the RPC.
     expect(
-      client.calls.find(
-        (call) =>
-          call.method === "run.graph" &&
-          isRecord(call.params) &&
-          call.params.ticketId === "ticket-one",
-      ),
-    ).toMatchObject({
-      method: "run.graph",
-      params: { runId: "run-one", ticketId: "ticket-one" },
+      client.calls.filter((call) => call.method === "run.graph").map((call) => call.params),
+    ).not.toContainEqual(expect.objectContaining({ ticketId: expect.anything() }));
+    expect(client.calls.filter((call) => call.method === "run.graph").at(-1)?.params).toEqual({
+      runId: "run-one",
     });
+
+    await controller.handle({ type: "focus_panel", panel: "details" });
+    // Tabs stay reachable with a committed ticket: Overview wraps around to the Graph feed.
+    await controller.handle({ type: "details_tab", delta: 1 });
+    expect(controller.snapshot.selection).toMatchObject({
+      ticketId: "ticket-one",
+      detailsTab: "graph",
+    });
+    await controller.handle({ type: "details_tab", delta: -1 });
+    expect(controller.snapshot.selection.detailsTab).toBe("overview");
 
     await controller.handle({ type: "toggle_pause" });
     const pause = client.calls.find(
@@ -234,6 +242,7 @@ describe("control center controller", () => {
       type: "blocked",
       atMs: 4_000,
       reason: "The configured terminal resolver needs an exact retry decision.",
+      remedy: "resume",
     }).state;
     const client = new FakeAuthority([run]);
     const controller = new ControlCenterController({ projectRoot: "/project", client });
@@ -486,7 +495,6 @@ describe("control center controller", () => {
     expect(form).not.toContain("What should Koni build?");
 
     await controller.handle({ type: "append_text", text: "Build a note editor" });
-    await controller.handle({ type: "submit" });
     expect(controller.snapshot.modal).toMatchObject({ kind: "new_run", focus: "objective" });
     expect(client.calls.some((call) => call.method === "run.create")).toBe(false);
     for (
@@ -501,30 +509,33 @@ describe("control center controller", () => {
     expect(controller.snapshot.modal).toMatchObject({ kind: "new_run", focus: "start" });
     const pending = controller.handle({ type: "submit" });
     await Promise.resolve();
-    expect(controller.snapshot.modal).toBeUndefined();
-    expect(controller.snapshot.view.runs[0]).toMatchObject({
-      state: "Starting",
-      title: "Build a note editor",
-      targetBranch: "main",
-      provisional: true,
-    });
-    const create = client.calls.find((call) => call.method === "run.create");
-    expect(create?.params).toMatchObject({
-      objective: "Build a note editor",
-      runTypeId: "medium",
-      targetRef: "refs/heads/main",
-      overrides: {
-        questionPolicy: "some",
-        maxParallel: 3,
-        roles: {
-          planner: { model: "gpt-small", thinkingLevel: "high" },
-          lead: { model: "gpt-small", thinkingLevel: "high" },
-          ticket_worker: { model: "gpt-worker", thinkingLevel: "medium" },
-          reviewer: { model: "gpt-review", thinkingLevel: "max" },
+    try {
+      expect(controller.snapshot.modal).toBeUndefined();
+      expect(controller.snapshot.view.runs[0]).toMatchObject({
+        state: "Starting",
+        title: "Build a note editor",
+        targetBranch: "main",
+        provisional: true,
+      });
+      const create = client.calls.find((call) => call.method === "run.create");
+      expect(create?.params).toMatchObject({
+        objective: "Build a note editor",
+        runTypeId: "medium",
+        targetRef: "refs/heads/main",
+        overrides: {
+          questionPolicy: "some",
+          maxParallel: 3,
+          roles: {
+            planner: { model: "gpt-small", thinkingLevel: "high" },
+            lead: { model: "gpt-small", thinkingLevel: "high" },
+            ticket_worker: { model: "gpt-worker", thinkingLevel: "medium" },
+            reviewer: { model: "gpt-review", thinkingLevel: "max" },
+          },
         },
-      },
-    });
-    release();
+      });
+    } finally {
+      release();
+    }
     await pending;
     expect(controller.snapshot.view.runs[0]?.provisional).toBe(false);
     component.dispose();
@@ -2097,18 +2108,27 @@ describe("control center component", () => {
       palette: plainKoniPalette,
       viewportRows: () => 48,
     });
+    // The details panel opens on the Graph feed with its run-scope header line and node rows.
+    const feedText = component.render(150).join("\n");
+    expect(feedText).toContain("Graph · Run integration");
+    expect(feedText).toContain("Claim result");
+    expect(feedText).not.toContain("claim-one");
+    // Overview is one bracket-step to the left of the default Graph tab.
+    await controller.handle({ type: "focus_panel", panel: "details" });
+    await controller.handle({ type: "details_tab", delta: -1 });
     const lines = component.render(150);
     const text = lines.join("\n");
 
     expect(lines).toHaveLength(48);
     expect(lines.every((line) => visibleWidth(line) === 150)).toBe(true);
-    const columnTop = lines.find(
-      (line) => line.includes("Runs") && line.includes("Details:") && line.includes("Activity"),
-    );
+    const columnTop = lines.find((line) => line.includes("Runs") && line.includes("Details:"));
     expect(columnTop).toBeDefined();
-    expect(columnTop!.slice(0, 50)).toContain("Runs");
-    expect(columnTop!.slice(50, 100)).toContain("Details: Overview - Plan");
-    expect(columnTop!.slice(100, 150)).toContain("Activity");
+    expect(columnTop!.slice(0, 51)).toContain("Runs");
+    expect(columnTop!.slice(51, 150)).toContain("Details: Graph - Plan - Overview");
+    // Activity now closes out the left column, under the squished Agents panel.
+    const activityTop = lines.find((line) => line.includes("Activity"));
+    expect(activityTop).toBeDefined();
+    expect(activityTop!.slice(0, 51)).toContain("Activity");
     expect(text).toContain("Agents");
     expect(text).toContain("Objective");
     expect(text).not.toContain("Goal");
@@ -2118,17 +2138,16 @@ describe("control center component", () => {
     expect(text).toContain("Activity · 17s active");
     expect(text).toContain("Lead");
     expect(text).toContain("Architecture boundary mapped");
-    expect(text).toContain("Claim result");
-    expect(text).not.toContain("claim-one");
-    expect(text).toContain("Graph · Run integration");
 
     await controller.handle({ type: "focus_panel", panel: "questions" });
     const questionText = component.render(84).join("\n");
     expect(questionText).toContain("How should existing notes");
     expect(questionText).toContain("transition to the new");
     expect(questionText).toContain("Preserve existing");
-    expect(questionText).toContain("in the first field.");
-    expect(questionText).toContain("←→/[] ↑↓/jk Enter");
+    // The merged right section widens Questions, so the description wraps later than before.
+    expect(questionText).toContain("expose it in the");
+    expect(questionText).toContain("first field.");
+    expect(questionText).toContain("←→/[] · ↑↓/jk · Enter · [n] notes");
     await controller.handle({ type: "activate" });
     const answerModal = component.render(84).join("\n");
     expect(answerModal).toContain("None of the above");
@@ -2137,7 +2156,7 @@ describe("control center component", () => {
     await controller.handle({ type: "cancel" });
 
     await controller.handle({ type: "focus_panel", panel: "details" });
-    await controller.handle({ type: "details_tab", delta: 1 });
+    await controller.handle({ type: "details_tab", delta: -1 });
     const plan = component.render(84).join("\n");
     expect(plan).toContain("Architecture");
     // The Plan tab shows only the concise operator plan; this fixture recorded none.
@@ -2147,6 +2166,13 @@ describe("control center component", () => {
     await controller.handle({ type: "focus_panel", panel: "tickets" });
     await controller.handle({ type: "move", delta: 1 });
     await controller.handle({ type: "activate" });
+    const ticketView = component.render(120).join("\n");
+    // The full tab strip stays reachable while a ticket is committed.
+    expect(ticketView).toContain("Details: Graph - Plan - Overview");
+    expect(ticketView).toContain("1 attempt");
+    // Stepping back to the Graph tab shows the committed ticket's checkout scope label.
+    await controller.handle({ type: "focus_panel", panel: "details" });
+    await controller.handle({ type: "details_tab", delta: 1 });
     expect(component.render(120).join("\n")).toContain("Graph · Ticket checkout");
 
     component.dispose();
@@ -2214,21 +2240,24 @@ describe("control center component", () => {
 
     expect(regions).toMatchObject({
       runs: { x: 0, y: 0, width: 28, height: 5 },
-      tickets: { x: 0, y: 5, width: 28, height: 7 },
-      agents: { x: 0, y: 12, width: 28, height: 7 },
-      details: { x: 28, y: 0, width: 27, height: 12 },
-      questions: { x: 28, y: 12, width: 27, height: 7 },
-      activity: { x: 55, y: 0, width: 27, height: 8 },
-      graph: { x: 55, y: 8, width: 27, height: 11 },
+      tickets: { x: 0, y: 5, width: 28, height: 6 },
+      agents: { x: 0, y: 11, width: 28, height: 4 },
+      activity: { x: 0, y: 15, width: 28, height: 4 },
+      details: { x: 28, y: 0, width: 54, height: 12 },
+      questions: { x: 28, y: 12, width: 54, height: 7 },
     });
+    expect(regions).not.toHaveProperty("graph");
     expect(minimumLines.every((line) => visibleWidth(line) === 82)).toBe(true);
-    expect(minimumLines[0]).toContain("Activity · 17s");
-    expect(minimumLines[2]).toContain("main");
-    expect(minimumLines[2]).toContain("Orchestrate");
-    expect(minimumLines[17]).toContain("←→/[] ↑↓/jk Enter");
+    expect(minimumLines[15]).toContain("Activity · 17s");
+    // Row 1 is the runs filter tab line; the selected run's detail row follows its title row.
+    expect(minimumLines[1]).toContain("‹ Active");
+    expect(minimumLines[3]).toContain("main");
+    expect(minimumLines[3]).toContain("Orchestrate");
+    // The merged right section is twice as wide, so the questions footer fits its full hints.
+    expect(minimumLines[17]).toContain("←→/[] · ↑↓/jk · Enter · [n] notes");
     expect(minimumLines[17]).not.toContain("…");
 
-    expect(normalText).toContain("Details: Overview - Plan");
+    expect(normalText).toContain("Details: Graph - Plan - Overview");
     expect(normalText).toContain("Questions");
     expect(normalText).toContain("Implement feature · Implementer");
     expect(normalText).toContain("Lead");
@@ -2242,8 +2271,10 @@ describe("control center component", () => {
     expect(roomyText).toContain("Modified: Verification boundary refined");
     expect(roomyText).toContain("Obsolete assumption removed");
 
-    expect(styleAtText(normal, "Overview", "details")).toMatchObject({ foreground: "ansi-37" });
+    // Graph is the default (active) tab; the other tab labels stay muted.
+    expect(styleAtText(normal, "Graph", "details")).toMatchObject({ foreground: "ansi-37" });
     expect(styleAtText(normal, "Plan", "details")).toMatchObject({ foreground: "ansi-90" });
+    expect(styleAtText(normal, "Overview", "details")).toMatchObject({ foreground: "ansi-90" });
     expect(styleAtText(roomy, "Added: Architecture boundary mapped", "activity")).toMatchObject({
       foreground: "ansi-32",
     });
@@ -2253,7 +2284,7 @@ describe("control center component", () => {
     expect(styleAtText(roomy, "Obsolete assumption removed", "activity")).toMatchObject({
       foreground: "ansi-31",
     });
-    expect(styleAtText(roomy, "Claim result", "graph")).toMatchObject({ foreground: "ansi-90" });
+    expect(styleAtText(roomy, "Claim result", "details")).toMatchObject({ foreground: "ansi-90" });
     expect(styleAtText(normal, "Lead", "agents")).toMatchObject({ foreground: "ansi-90" });
 
     await controller.handle({ type: "focus_panel", panel: "questions" });
@@ -2262,6 +2293,185 @@ describe("control center component", () => {
     expect(help).toContain("open the answer dialog");
     expect(help).toContain("←/→ or [ ]");
 
+    component.dispose();
+    controller.dispose();
+  });
+
+  it("filters the Runs panel with tabs while pinning the selected run", async () => {
+    const working = fixtureRun();
+    const concluded = fixtureRun();
+    concluded.id = "run-two";
+    concluded.lifecycle.runId = concluded.id;
+    concluded.git.runId = concluded.id;
+    concluded.createdAt = "2026-07-15T00:00:00.000Z";
+    concluded.lifecycle.phase = "completed";
+    const client = new FakeAuthority([working, concluded]);
+    const controller = new ControlCenterController({
+      projectRoot: "/project",
+      client,
+      now: () => 20_000,
+    });
+    await controller.initialize();
+
+    // Active is the default working set: the concluded run stays one tab away.
+    expect(controller.snapshot.runTab).toBe("active");
+    expect(controller.snapshot.view.runs.map((run) => run.id)).toEqual(["run-one"]);
+    expect(
+      Object.fromEntries(controller.snapshot.view.runTabs.map((tab) => [tab.id, tab.count])),
+    ).toMatchObject({ active: 1, done: 1, all: 2 });
+
+    await controller.handle({ type: "focus_panel", panel: "runs" });
+    await controller.handle({ type: "details_tab", delta: -1 });
+    expect(controller.snapshot.runTab).toBe("all");
+    expect(controller.snapshot.view.runs.map((run) => run.id)).toEqual(["run-one", "run-two"]);
+
+    await controller.handle({ type: "details_tab", delta: -1 });
+    expect(controller.snapshot.runTab).toBe("done");
+    // The selected run stays pinned even though it does not match the Done filter.
+    expect(controller.snapshot.view.runs.map((run) => run.id)).toEqual(["run-one", "run-two"]);
+    expect(controller.snapshot.selection.runId).toBe("run-one");
+
+    const component = new ControlCenterComponent({
+      controller,
+      palette: plainKoniPalette,
+      viewportRows: () => 40,
+    });
+    expect(component.render(122).join("\n")).toContain("‹ Done 1 ›");
+    component.dispose();
+    controller.dispose();
+  });
+
+  it("opens the focused graph node's card with Enter and closes it with Esc", async () => {
+    const client = new FakeAuthority([fixtureRun()]);
+    const controller = new ControlCenterController({
+      projectRoot: "/project",
+      client,
+      now: () => 20_000,
+    });
+    await controller.initialize();
+    const component = new ControlCenterComponent({
+      controller,
+      palette: plainKoniPalette,
+      viewportRows: () => 40,
+    });
+
+    // The Graph feed is the details panel's default tab; key 6 focuses it directly.
+    await controller.handle({ type: "focus_graph" });
+    expect(controller.snapshot.cursor.graphFeed.column).toBe("graph");
+    await controller.handle({ type: "activate" });
+    expect(controller.snapshot.modal).toMatchObject({
+      kind: "graph_node",
+      nodeId: "claim-one",
+      scroll: 0,
+    });
+    const card = component.render(122).join("\n");
+    expect(card).toContain("Graph node · claim");
+    expect(card).toContain("Claim result supports architecture boundary");
+    expect(card).toContain("Status");
+    expect(card).toContain("Active");
+    expect(card).toContain("Purpose");
+    expect(card).toContain("Verify the architecture boundary");
+    expect(card).toContain("tests");
+    expect(card).toContain("Test claim result");
+    expect(card).not.toContain("claim-one");
+    expect(card).not.toContain("experiment-one");
+
+    await controller.handle({ type: "cancel" });
+    expect(controller.snapshot.modal).toBeUndefined();
+    component.dispose();
+    controller.dispose();
+  });
+
+  it("drives the Graph feed: key 6 jump, arrow column focus, bracket tabs, Enter commit", async () => {
+    const client = new FakeAuthority([fixtureRun()]);
+    const controller = new ControlCenterController({
+      projectRoot: "/project",
+      client,
+      now: () => 20_000,
+    });
+    await controller.initialize();
+
+    await controller.handle({ type: "focus_panel", panel: "runs" });
+    await controller.handle({ type: "focus_graph" });
+    expect(controller.snapshot.focus).toBe("details");
+    expect(controller.snapshot.selection.detailsTab).toBe("graph");
+
+    // Arrows move the feed's column focus; brackets keep cycling the tabs.
+    await controller.handle({ type: "move_horizontal", delta: 1 });
+    expect(controller.snapshot.cursor.graphFeed).toEqual({
+      column: "tickets",
+      ticketId: "ticket-one",
+    });
+    await controller.handle({ type: "move_horizontal", delta: -1 });
+    expect(controller.snapshot.cursor.graphFeed.column).toBe("graph");
+    await controller.handle({ type: "details_tab", delta: 1 });
+    expect(controller.snapshot.selection.detailsTab).toBe("plan");
+    await controller.handle({ type: "details_tab", delta: -1 });
+    expect(controller.snapshot.selection.detailsTab).toBe("graph");
+
+    // Enter on the tickets column commits the hovered ticket — Overview takeover included.
+    await controller.handle({ type: "move_horizontal", delta: 1 });
+    await controller.handle({ type: "activate" });
+    expect(controller.snapshot.selection).toMatchObject({
+      ticketId: "ticket-one",
+      detailsTab: "overview",
+    });
+    controller.dispose();
+  });
+
+  it("keeps the Graph feed up while arrowing runs and resets its cursors per selection", async () => {
+    const client = new FakeAuthority([fixtureRun(), fixtureRunWithId("run-two")]);
+    const controller = new ControlCenterController({
+      projectRoot: "/project",
+      client,
+      now: () => 20_000,
+    });
+    await controller.initialize();
+    expect(controller.snapshot.selection).toMatchObject({ runId: "run-one", detailsTab: "graph" });
+
+    // Move the node cursor off zero, then browse to the next run: the tab survives while
+    // both feed cursors reset for the new selection.
+    await controller.handle({ type: "focus_graph" });
+    await controller.handle({ type: "move", delta: 1 });
+    expect(controller.snapshot.cursor.graphIndex).toBe(1);
+    await controller.handle({ type: "focus_panel", panel: "runs" });
+    await controller.handle({ type: "move", delta: 1 });
+    expect(controller.snapshot.selection).toMatchObject({ runId: "run-two", detailsTab: "graph" });
+    expect(controller.snapshot.cursor.graphIndex).toBe(0);
+    expect(controller.snapshot.cursor.graphFeed).toEqual({ column: "graph" });
+
+    // An explicit Enter on the run row commits to its Overview.
+    await controller.handle({ type: "activate" });
+    expect(controller.snapshot.selection.detailsTab).toBe("overview");
+    controller.dispose();
+  });
+
+  it("renders contextual help as scrollable docs with diagrams and philosophy", async () => {
+    const client = new FakeAuthority([fixtureRun()]);
+    const controller = new ControlCenterController({
+      projectRoot: "/project",
+      client,
+      now: () => 20_000,
+    });
+    await controller.initialize();
+    const component = new ControlCenterComponent({
+      controller,
+      palette: plainKoniPalette,
+      viewportRows: () => 44,
+    });
+
+    await controller.handle({ type: "help" });
+    const help = component.render(150).join("\n");
+    expect(help).toContain("Help · Runs");
+    expect(help).toContain("How it fits");
+    expect(help).toContain("merge ready");
+    expect(help).toContain("Why it works this way");
+    expect(help).toContain("worktree");
+    expect(help).toContain("Available here");
+    expect(help).toContain("↑↓ scroll");
+
+    await controller.handle({ type: "move", delta: 1 });
+    expect(controller.snapshot.modal).toMatchObject({ kind: "help", scroll: 1 });
     component.dispose();
     controller.dispose();
   });
@@ -2413,6 +2623,8 @@ describe("control center component", () => {
     });
     await controller.initialize();
     await controller.handle({ type: "focus_panel", panel: "details" });
+    // The Objective renders on the Overview tab (one bracket-step left of the default Graph).
+    await controller.handle({ type: "details_tab", delta: -1 });
     const component = new ControlCenterComponent({
       controller,
       palette: plainKoniPalette,
@@ -2488,7 +2700,7 @@ describe("control center component", () => {
     await controller.handle({ type: "toggle_chat_composer" });
     expect(controller.snapshot.chat?.draft.editing).toBe(false);
     await controller.handle({ type: "help" });
-    expect(controller.snapshot.modal).toEqual({ kind: "help", topic: "chat" });
+    expect(controller.snapshot.modal).toEqual({ kind: "help", topic: "chat", scroll: 0 });
     await controller.handle({ type: "cancel" });
     await controller.handle({ type: "cancel" });
     expect(controller.snapshot.selection).toMatchObject({ detailsTab: "plan" });
@@ -3091,7 +3303,7 @@ class FakeAuthority implements ControlCenterAuthorityClient {
         message: message ?? "",
       } as const;
       const authority = { ...authorityMaterial, sha256: canonicalHash(authorityMaterial) };
-      ticket.status = decision === "approval" ? "ready" : "completed";
+      ticket.status = decision === "approval" ? "queued" : "completed";
       ticket.executionControl = {
         ...ticket.executionControl,
         proposalDecision: authority,
@@ -4083,7 +4295,7 @@ function fixtureGraph(): { nodes: JsonValue[]; edges: JsonValue[] } {
         type: "claim",
         title: "Claim result supports architecture boundary",
         status: "active",
-        spec: {},
+        spec: { purpose: "Verify the architecture boundary end to end" },
         edges: { tested_by: ["experiment-one"] },
         annotations: {},
       },

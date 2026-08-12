@@ -21,23 +21,28 @@ describe("control-center geometry", () => {
     [100, 30],
     [122, 40],
     [180, 52],
-  ])("keeps equal peer columns and the complete dashboard at %dx%d", (width, height) => {
-    const layout = operateLayout(width, height, true);
-    expect(layout.kind).toBe("operate");
-    if (layout.kind !== "operate") return;
-    expect(
-      Math.max(layout.runs.width, layout.details.width, layout.activity.width) -
-        Math.min(layout.runs.width, layout.details.width, layout.activity.width),
-    ).toBeLessThanOrEqual(1);
-    expect(layout.footer).toEqual({ x: 0, y: height - 1, width, height: 1 });
-    expect(layout.runs).toMatchObject({ x: 0, y: 0 });
-    expect(layout.runs.height + layout.tickets.height + layout.agents.height).toBe(height - 1);
-    expect(layout.details.height + layout.questions!.height).toBe(height - 1);
-    expect(layout.activity.height).toBe(8);
-    expect(layout.activity.height + layout.graph.height).toBe(height - 1);
-    expect(layout.agents.x).toBe(0);
-    expect(layout.activity.x).toBe(layout.runs.width + layout.details.width);
-  });
+  ])(
+    "keeps the third-width left column and the merged details section at %dx%d",
+    (width, height) => {
+      const layout = operateLayout(width, height, true);
+      expect(layout.kind).toBe("operate");
+      if (layout.kind !== "operate") return;
+      // Left column takes a third (plus the division remainder); details takes the rest.
+      expect(layout.runs.width).toBe(Math.floor(width / 3) + (width % 3 > 0 ? 1 : 0));
+      expect(layout.details.width).toBe(width - layout.runs.width);
+      expect(layout.footer).toEqual({ x: 0, y: height - 1, width, height: 1 });
+      expect(layout.runs).toMatchObject({ x: 0, y: 0 });
+      expect(
+        layout.runs.height + layout.tickets.height + layout.agents.height + layout.activity.height,
+      ).toBe(height - 1);
+      expect(layout.details.height + layout.questions!.height).toBe(height - 1);
+      expect(layout.agents.x).toBe(0);
+      // Activity is the left column's fourth panel, directly under the squished Agents panel.
+      expect(layout.activity.x).toBe(0);
+      expect(layout.activity.y).toBe(layout.agents.y + layout.agents.height);
+      expect(layout).not.toHaveProperty("graph");
+    },
+  );
 
   it("uses the explicit viewport minimum instead of silently changing information architecture", () => {
     expect(operateLayout(CONTROL_CENTER_MIN_WIDTH - 1, CONTROL_CENTER_MIN_HEIGHT, false).kind).toBe(
@@ -96,18 +101,18 @@ describe("deterministic CellGrid frame contract", () => {
     const regions = Object.fromEntries(frame.regions.map((region) => [region.name, region.rect]));
     expect(regions).toMatchObject({
       runs: { x: 0, y: 0, width: 28, height: 5 },
-      tickets: { x: 0, y: 5, width: 28, height: 7 },
-      agents: { x: 0, y: 12, width: 28, height: 7 },
-      details: { x: 28, y: 0, width: 27, height: 19 },
-      activity: { x: 55, y: 0, width: 27, height: 8 },
-      graph: { x: 55, y: 8, width: 27, height: 11 },
+      tickets: { x: 0, y: 5, width: 28, height: 6 },
+      agents: { x: 0, y: 11, width: 28, height: 4 },
+      activity: { x: 0, y: 15, width: 28, height: 4 },
+      details: { x: 28, y: 0, width: 54, height: 19 },
       footer: { x: 0, y: 19, width: 82, height: 1 },
     });
     expect(regions).not.toHaveProperty("header");
+    expect(regions).not.toHaveProperty("graph");
     expect(frame.toPlainLines()[0]).toContain("Runs");
     expect(frame.toPlainLines()[0]).toContain("Details:");
-    expect(frame.toPlainLines()[0]).toContain("Activity");
-    expect(frame.toPlainLines()[12]).toContain("Agents");
+    expect(frame.toPlainLines()[15]).toContain("Activity");
+    expect(frame.toPlainLines()[11]).toContain("Agents");
     expect(frame.toAnsiLines()).toEqual(component.render(82));
     expect(frame.toAnsiLines().every((line) => line.length > 0)).toBe(true);
     component.dispose();
@@ -150,7 +155,22 @@ describe("control-center focus order", () => {
       type: "focus_panel",
       panel: "activity",
     });
-    expect(decodeControlCenterInput("6", context)).toEqual({ type: "focus_panel", panel: "graph" });
+    // 6 was the graph panel; it now jumps to the Details panel's Graph feed.
+    expect(decodeControlCenterInput("6", context)).toEqual({ type: "focus_graph" });
+  });
+
+  it("splits arrows from brackets so the Graph feed can own horizontal movement", () => {
+    const context = { panel: "details" as const, editingNotes: false, modalOpen: false };
+    expect(decodeControlCenterInput("\u001b[C", context)).toEqual({
+      type: "move_horizontal",
+      delta: 1,
+    });
+    expect(decodeControlCenterInput("\u001b[D", context)).toEqual({
+      type: "move_horizontal",
+      delta: -1,
+    });
+    expect(decodeControlCenterInput("]", context)).toEqual({ type: "details_tab", delta: 1 });
+    expect(decodeControlCenterInput("[", context)).toEqual({ type: "details_tab", delta: -1 });
   });
 });
 

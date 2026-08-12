@@ -9,6 +9,7 @@ import {
   type MonitorEvent,
   type MonitorEventKind,
   type MonitorEvents,
+  type MonitorPlanAttention,
   type MonitorPlanSectionId,
   type MonitorRunSummary,
   type MonitorSnapshot,
@@ -248,10 +249,23 @@ export function projectMonitorAttention(run: RunRecord): MonitorAttention {
             capabilities!.pendingQuestionIds.every((id) => id === question.id)),
       };
     });
+  const planningSession = run.planningSession;
+  const planningAttempt =
+    planningSession === undefined ? undefined : run.attempts[planningSession.attemptId];
+  const planningRevision = planningSession?.revisions[planningSession.currentRevision];
   const plan =
     run.lifecycle.phase === "awaiting_approval" && run.plan?.status === "awaiting_approval"
       ? {
           revision: run.plan.revision,
+          ...(planningSession === undefined ||
+          planningAttempt === undefined ||
+          planningRevision === undefined
+            ? {}
+            : {
+                planningSessionId: planningSession.sessionId,
+                planningAttemptId: planningSession.attemptId,
+                revisionUsage: planningUsage(planningAttempt, planningRevision.budgetBaseline),
+              }),
           sections: Object.fromEntries(
             PLAN_SECTIONS.map((section) => [
               section,
@@ -271,6 +285,39 @@ export function projectMonitorAttention(run: RunRecord): MonitorAttention {
     questions,
     proposals: projectActionableProposals(run),
     plan,
+  };
+}
+
+function planningUsage(
+  attempt: AgentAttemptRecord,
+  baseline: Readonly<{
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+  }>,
+): NonNullable<MonitorPlanAttention["revisionUsage"]> {
+  const cumulativeNew = safeAdd(attempt.inputTokens, attempt.outputTokens);
+  const cumulativeCache = safeAdd(attempt.cacheReadTokens, attempt.cacheWriteTokens);
+  const revisionNew = safeAdd(
+    Math.max(0, attempt.inputTokens - baseline.inputTokens),
+    Math.max(0, attempt.outputTokens - baseline.outputTokens),
+  );
+  const revisionCache = safeAdd(
+    Math.max(0, attempt.cacheReadTokens - baseline.cacheReadTokens),
+    Math.max(0, attempt.cacheWriteTokens - baseline.cacheWriteTokens),
+  );
+  return {
+    cumulative: {
+      new: cumulativeNew,
+      cache: cumulativeCache,
+      total: safeAdd(cumulativeNew, cumulativeCache),
+    },
+    currentRevision: {
+      new: revisionNew,
+      cache: revisionCache,
+      total: safeAdd(revisionNew, revisionCache),
+    },
   };
 }
 
@@ -371,10 +418,12 @@ function projectRunSummary(run: RunRecord): MonitorRunSummary {
     run.lifecycle.phase === "merge_ready" &&
     run.git.promotion?.status === "ready" &&
     run.git.promotion.candidateOid !== undefined;
+  const plannerTitle = optionalSafe(run.plan?.title, 60);
   return {
     id: run.id,
     runRevision: run.revision,
     objectivePreview: objectivePreview(run.objective),
+    ...(plannerTitle === undefined ? {} : { title: plannerTitle }),
     runType: safe(humanize(run.runTypeId), 128, "Run"),
     phase: run.lifecycle.phase,
     stage:
@@ -396,6 +445,9 @@ function projectRunSummary(run: RunRecord): MonitorRunSummary {
     proposalCount: tickets.filter(actionableProposal).length,
     planApproval,
     blocker: optionalSafe(run.lifecycle.blocker, 1_024),
+    ...(run.lifecycle.blockerRemedy === undefined
+      ? {}
+      : { blockerRemedy: run.lifecycle.blockerRemedy }),
     failure:
       run.lifecycle.phase === "failed"
         ? safe(
@@ -413,6 +465,7 @@ function projectPagedMonitorSummary(run: RunSummary): MonitorRunSummary {
     id: run.id,
     runRevision: run.runRevision,
     objectivePreview: run.objectivePreview,
+    ...(run.title === undefined ? {} : { title: run.title }),
     runType: run.runType,
     phase: run.phase,
     stage: run.stage,
@@ -424,6 +477,7 @@ function projectPagedMonitorSummary(run: RunSummary): MonitorRunSummary {
     proposalCount: run.pendingProposals,
     planApproval: run.planApproval,
     blocker: run.blocker,
+    ...(run.blockerRemedy === undefined ? {} : { blockerRemedy: run.blockerRemedy }),
     failure: run.failure,
     mergeReady: run.mergeReady,
   };

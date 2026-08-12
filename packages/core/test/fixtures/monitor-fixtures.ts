@@ -61,6 +61,12 @@ export function monitorAttentionFixture(): any {
     proposals: [],
     plan: {
       revision: 2,
+      planningSessionId: "session-planner",
+      planningAttemptId: "attempt-planner",
+      revisionUsage: {
+        cumulative: { new: 1_500, cache: 8_000, total: 9_500 },
+        currentRevision: { new: 400, cache: 2_000, total: 2_400 },
+      },
       sections: {
         architecture: item(
           "Stable boundary",

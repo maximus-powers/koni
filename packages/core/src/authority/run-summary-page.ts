@@ -5,12 +5,9 @@ import {
   isSha256Digest,
   type Sha256Digest,
 } from "../shared/canonical.js";
-import type { RunPhase, ResumableRunPhase } from "../state/run-lifecycle.js";
+import type { RunBlockerRemedy, RunPhase, ResumableRunPhase } from "../state/run-lifecycle.js";
 import type { AgentAttemptRecord, RunRecord, TicketRecord } from "../state/run-record.js";
-import {
-  runExecutionHalted,
-  ticketWaitingForCompilerGrant,
-} from "../state/effective-status.js";
+import { runExecutionHalted, ticketWaitingForCompilerGrant } from "../state/effective-status.js";
 import { terminalSafeText } from "../monitor/terminal.js";
 
 export const RUN_SUMMARY_PAGE_PROTOCOL = "koni.run-summary-page.v2" as const;
@@ -73,6 +70,8 @@ export interface RunSummary {
   planApproval: boolean;
   tokens: RunSummaryTokenCounts;
   blocker?: string;
+  /** What actually clears the blocker; absent on pre-typed-remedy records. */
+  blockerRemedy?: RunBlockerRemedy;
   failure?: string;
   paused: boolean;
   /** True when an operator pause is durably scheduled for the next pausable phase. */
@@ -389,9 +388,7 @@ export function projectRunSummary(run: Readonly<RunRecord>): RunSummary {
       active: halted ? 0 : tickets.filter(inFlightTicket).length,
       blocked:
         tickets.filter(
-          (ticket) =>
-            ticket.status === "failed" ||
-            (ticket.status === "blocked" && !ticketWaitingForCompilerGrant(ticket)),
+          (ticket) => ticket.status === "blocked" && !ticketWaitingForCompilerGrant(ticket),
         ).length + (halted ? tickets.filter(inFlightTicket).length : 0),
       total: tickets.length,
     },

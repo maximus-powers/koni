@@ -1,5 +1,5 @@
 import type { JsonValue } from "../authority/protocol.js";
-import type { RunPhase } from "../state/run-lifecycle.js";
+import type { RunBlockerRemedy, RunPhase } from "../state/run-lifecycle.js";
 import {
   parseControlProposalInspection,
   type ControlProposalInspection,
@@ -39,6 +39,8 @@ export interface MonitorRunSummary {
   id: string;
   runRevision: number;
   objectivePreview: string;
+  /** Planner-authored short run name; absent until an agent plan compiles. */
+  title?: string;
   runType: string;
   phase: RunPhase;
   stage: string | undefined;
@@ -51,6 +53,8 @@ export interface MonitorRunSummary {
   proposalCount: number;
   planApproval: boolean;
   blocker: string | undefined;
+  /** What actually clears the blocker; absent on pre-typed-remedy records. */
+  blockerRemedy?: RunBlockerRemedy;
   failure: string | undefined;
   mergeReady: boolean;
 }
@@ -128,6 +132,14 @@ export interface MonitorPlanItem {
 
 export interface MonitorPlanAttention {
   revision: number;
+  /** Stable Pi session identity for new continuous-planning runs; absent for legacy runs. */
+  planningSessionId?: string;
+  /** Stable planner attempt identity for new continuous-planning runs; absent for legacy runs. */
+  planningAttemptId?: string;
+  revisionUsage?: {
+    cumulative: MonitorTokenCounts;
+    currentRevision: MonitorTokenCounts;
+  };
   sections: Readonly<Record<MonitorPlanSectionId, readonly MonitorPlanItem[]>>;
   graphSeedCounts: Readonly<Record<string, number>>;
 }
@@ -181,6 +193,24 @@ const PLAN_SECTIONS: readonly MonitorPlanSectionId[] = [
   "verification",
 ];
 
+const BLOCKER_REMEDIES = new Set<string>([
+  "auto",
+  "resume",
+  "stop",
+  "fresh_epoch",
+  "new_run",
+  "change_request",
+]);
+
+/** An unknown remedy is a protocol mismatch, not a value to render; fail closed like every peer. */
+function optionalBlockerRemedy(value: unknown): RunBlockerRemedy | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !BLOCKER_REMEDIES.has(value)) {
+    throw new Error("run blocker remedy is invalid");
+  }
+  return value as RunBlockerRemedy;
+}
+
 export function parseMonitorSnapshot(value: JsonValue | undefined | unknown): MonitorSnapshot {
   const root = record(value, "monitor snapshot");
   if (root.protocol !== MONITOR_SNAPSHOT_PROTOCOL)
@@ -215,6 +245,7 @@ export function parseMonitorSnapshot(value: JsonValue | undefined | unknown): Mo
       id: text(row.id, "run id", 256),
       runRevision: integer(row.runRevision, "run revision"),
       objectivePreview: safeText(row.objectivePreview, "objective preview", 1_024),
+      ...(row.title === undefined ? {} : { title: safeText(row.title, "run title", 80) }),
       runType: safeText(row.runType, "run type", 128),
       phase: phase as RunPhase,
       stage: optionalSafeText(row.stage, "run stage", 256),
@@ -226,6 +257,9 @@ export function parseMonitorSnapshot(value: JsonValue | undefined | unknown): Mo
       proposalCount,
       planApproval,
       blocker: optionalSafeText(row.blocker, "run blocker", 1_024),
+      ...(optionalBlockerRemedy(row.blockerRemedy) === undefined
+        ? {}
+        : { blockerRemedy: optionalBlockerRemedy(row.blockerRemedy)! }),
       failure: optionalSafeText(row.failure, "run failure", 1_024),
       mergeReady,
     } satisfies MonitorRunSummary;
@@ -420,7 +454,43 @@ function parsePlanAttention(value: unknown): MonitorPlanAttention {
       throw new Error("monitor graph seed count key is invalid");
     graphSeedCounts[key] = integer(rawValue, `graph seed count ${key}`);
   }
-  return { revision: integer(row.revision, "plan revision"), sections: parsed, graphSeedCounts };
+  const planningSessionId = optionalText(row.planningSessionId, "planning session id", 256);
+  const planningAttemptId = optionalText(row.planningAttemptId, "planning attempt id", 256);
+  const revisionUsage =
+    row.revisionUsage === undefined ? undefined : planningRevisionUsage(row.revisionUsage);
+  if (
+    (planningSessionId === undefined) !== (planningAttemptId === undefined) ||
+    (planningSessionId === undefined) !== (revisionUsage === undefined)
+  ) {
+    throw new Error("monitor plan attention has incomplete planning-session metadata");
+  }
+  return {
+    revision: integer(row.revision, "plan revision"),
+    ...(planningSessionId === undefined
+      ? {}
+      : {
+          planningSessionId,
+          planningAttemptId: planningAttemptId!,
+          revisionUsage: revisionUsage!,
+        }),
+    sections: parsed,
+    graphSeedCounts,
+  };
+}
+
+function planningRevisionUsage(value: unknown): NonNullable<MonitorPlanAttention["revisionUsage"]> {
+  const row = record(value, "planning revision usage");
+  const cumulative = tokenCounts(row.cumulative, "cumulative planning usage");
+  const currentRevision = tokenCounts(row.currentRevision, "current planning revision usage");
+  if (
+    cumulative.total !== cumulative.new + cumulative.cache ||
+    currentRevision.total !== currentRevision.new + currentRevision.cache ||
+    currentRevision.new > cumulative.new ||
+    currentRevision.cache > cumulative.cache
+  ) {
+    throw new Error("monitor planning revision token totals are inconsistent");
+  }
+  return { cumulative, currentRevision };
 }
 
 function completedCounts(value: unknown, name: string): MonitorCounts {

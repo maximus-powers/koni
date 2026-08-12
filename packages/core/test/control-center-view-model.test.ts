@@ -204,6 +204,128 @@ describe("control center view model", () => {
     );
   });
 
+  it("projects one continuous planner row with checkpoint and revision-local usage", () => {
+    const run = fixtureRun();
+    const planner = run.attempts["attempt-lead"]!;
+    planner.kind = "planning";
+    planner.status = "waiting_plan_review";
+    planner.inputTokens = 1_000;
+    planner.outputTokens = 500;
+    planner.cacheReadTokens = 8_000;
+    planner.cacheWriteTokens = 0;
+    planner.endedAt = undefined;
+    run.lifecycle.phase = "awaiting_approval";
+    run.lifecycle.planRevision = 1;
+    run.plan!.revision = 1;
+    run.plan!.status = "awaiting_approval";
+    run.planningSession = {
+      protocol: "koni.planning-session.v1",
+      attemptId: planner.id,
+      sessionId: planner.sessionId,
+      status: "awaiting_review",
+      currentRevision: 1,
+      revisions: [
+        {
+          protocol: "koni.planning-revision.v1",
+          revision: 0,
+          status: "superseded",
+          launchSpecSha256: `sha256:${"1".repeat(64)}`,
+          grantSha256: `sha256:${"2".repeat(64)}`,
+          budgetBaseline: {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
+          budgetPolicy: {
+            metric: "new_tokens",
+            limit: 20_000,
+            synthesisReserve: 2_000,
+            synthesisThreshold: 18_000,
+            onExhausted: "force_synthesis",
+          },
+          startedAt: "2026-07-16T00:00:01.000Z",
+          artifactSha256: `sha256:${"3".repeat(64)}`,
+          graphSha256: `sha256:${"4".repeat(64)}`,
+          transcriptSha256: `sha256:${"5".repeat(64)}`,
+          checkpointPath: "planning/revisions/0/checkpoint.json",
+          completedAt: "2026-07-16T00:00:02.000Z",
+        },
+        {
+          protocol: "koni.planning-revision.v1",
+          revision: 1,
+          status: "awaiting_review",
+          launchSpecSha256: `sha256:${"6".repeat(64)}`,
+          grantSha256: `sha256:${"7".repeat(64)}`,
+          budgetBaseline: {
+            inputTokens: 600,
+            outputTokens: 300,
+            cacheReadTokens: 6_000,
+            cacheWriteTokens: 0,
+          },
+          budgetPolicy: {
+            metric: "new_tokens",
+            limit: 20_000,
+            synthesisReserve: 2_000,
+            synthesisThreshold: 18_000,
+            onExhausted: "force_synthesis",
+          },
+          startedAt: "2026-07-16T00:00:03.000Z",
+          steering: {
+            sequence: 1,
+            instructionsSha256: `sha256:${"8".repeat(64)}`,
+            instructionsSizeBytes: 32,
+            artifactPath: "planning/revisions/1/steering.txt",
+            recordedAt: "2026-07-16T00:00:03.000Z",
+          },
+          patchSha256: `sha256:${"9".repeat(64)}`,
+          artifactSha256: `sha256:${"a".repeat(64)}`,
+          graphSha256: `sha256:${"b".repeat(64)}`,
+          transcriptSha256: `sha256:${"c".repeat(64)}`,
+          checkpointPath: "planning/revisions/1/checkpoint.json",
+          completedAt: "2026-07-16T00:00:04.000Z",
+        },
+      ],
+    };
+    run.activity.push({
+      id: "planning-revision-one",
+      at: "2026-07-16T00:00:03.000Z",
+      kind: "agent",
+      message: "Planning session continued",
+      ticketId: undefined,
+      nodeId: undefined,
+    });
+
+    const selected = viewFor(run).selectedRun!;
+    const planningRows = selected.agents.filter((agent) => agent.id === planner.id);
+    expect(planningRows).toHaveLength(1);
+    expect(planningRows[0]?.planning).toEqual({
+      sessionId: planner.sessionId,
+      attemptId: planner.id,
+      currentRevision: 1,
+      checkpoints: [
+        { revision: 0, status: "Superseded" },
+        { revision: 1, status: "Awaiting Review" },
+      ],
+      cumulativeUsage: { new: 1_500, cache: 8_000, total: 9_500 },
+      revisionUsage: { new: 600, cache: 2_000, total: 2_600 },
+      detail: "Same planner session; token allowance reset for this revision",
+    });
+    expect(selected.plan).toMatchObject({
+      revision: 1,
+      planningSessionId: planner.sessionId,
+      planningAttemptId: planner.id,
+    });
+    expect(selected.plan.sections[0]?.title).toBe("Revision 1");
+    expect(selected.activity.map((event) => event.message)).toContain("Planning session continued");
+  });
+
+  it("does not fabricate continuous-session metadata for legacy planner attempts", () => {
+    const selected = viewFor(fixtureRun()).selectedRun!;
+    expect(selected.plan).not.toHaveProperty("planningSessionId");
+    expect(selected.agents.every((agent) => agent.planning === undefined)).toBe(true);
+  });
+
   it("deduplicates planning noise and never exposes full agent plans before approval", () => {
     const planning = fixtureRun();
     planning.lifecycle.phase = "planning";
@@ -372,10 +494,12 @@ describe("control center view model", () => {
       lines: ["Evidence recorded", "1 completed ticket"],
     });
 
-    proven.tickets["ticket-one"]!.status = "failed";
+    proven.tickets["ticket-one"]!.status = "blocked";
+    proven.tickets["ticket-one"]!.blocker = "Verification failed";
+    proven.tickets["ticket-one"]!.steps[0]!.status = "failed";
     expect(viewFor(proven).selectedRun?.overviewSections.at(-1)).toMatchObject({
       tone: "error",
-      lines: ["Attention", "1 failed ticket"],
+      lines: ["Attention", "1 blocked ticket"],
     });
   });
 
@@ -481,6 +605,259 @@ describe("control center view model", () => {
     expect(details?.blocker).not.toContain("/Users/max");
     expect(details?.blocker).not.toContain("sha256:");
     expect(details?.blocker).not.toContain("\u001b");
+  });
+
+  it("projects deliberate execution metadata for each selected ticket step", () => {
+    const run = fixtureRun();
+    const ticket = run.tickets["ticket-one"]!;
+    ticket.steps = [
+      {
+        id: "design",
+        title: "Design the bounded change",
+        personaId: "architect",
+        status: "completed",
+        attemptIds: ["attempt-design"],
+        summary: "The repository seam is selected.",
+        startedAt: "2026-07-16T00:00:01.000Z",
+        completedAt: "2026-07-16T00:00:02.000Z",
+      },
+      {
+        id: "implement",
+        title: "Implement feature",
+        personaId: "implementer",
+        status: "running",
+        dependsOn: ["design"],
+        validationAction: "research.compile-ticket",
+        attemptIds: ["attempt-worker", "attempt-worker-retry"],
+        summary: "The retry is correcting the compiler finding.",
+        startedAt: "2026-07-16T00:00:03.000Z",
+        completedAt: undefined,
+      },
+    ];
+    const details = buildControlCenterView({
+      projectRoot: "/project",
+      authorityRevision: 1,
+      runs: [run],
+      selection: {
+        runId: run.id,
+        ticketId: "ticket-one",
+        detailsTab: "overview",
+        objectiveExpanded: false,
+      },
+    }).selectedRun?.ticketDetails;
+
+    expect(details?.steps[1]).toEqual({
+      title: "Implement feature",
+      persona: "Implementer",
+      status: "Running",
+      summary: "The retry is correcting the compiler finding.",
+      attemptCount: 2,
+      dependsOn: ["Design the bounded change"],
+      validation: "Compile Ticket",
+    });
+  });
+
+  it("filters runs by tab, counts every tab, and pins the selected run", () => {
+    const working = fixtureRun();
+    const concluded = fixtureRun();
+    concluded.id = "run-done";
+    concluded.createdAt = "2026-07-10T00:00:00.000Z";
+    concluded.lifecycle = { ...concluded.lifecycle, phase: "completed" };
+    const active = buildControlCenterView({
+      projectRoot: "/project",
+      authorityRevision: 1,
+      runs: [working, concluded],
+      selection: { runId: working.id, detailsTab: "overview", objectiveExpanded: false },
+      runTab: "active",
+    });
+    expect(active.runTab).toBe("active");
+    expect(active.runs.map((run) => run.id)).toEqual([working.id]);
+    expect(Object.fromEntries(active.runTabs.map((tab) => [tab.id, tab.count]))).toMatchObject({
+      active: 1,
+      done: 1,
+      all: 2,
+    });
+    // The committed selection stays visible even when the filter would drop it.
+    const pinned = buildControlCenterView({
+      projectRoot: "/project",
+      authorityRevision: 1,
+      runs: [working, concluded],
+      selection: { runId: concluded.id, detailsTab: "overview", objectiveExpanded: false },
+      runTab: "active",
+    });
+    expect(pinned.runs.map((run) => run.id)).toEqual([working.id, concluded.id]);
+  });
+
+  it("projects structured Run vitals for the overview components", () => {
+    const view = viewFor(fixtureRun());
+    expect(view.selectedRun?.stats).toMatchObject({
+      targetBranch: "main",
+      tokens: { fresh: 1_100, cached: 10_000, total: 11_100 },
+    });
+    expect(view.selectedRun?.stats.tickets.total).toBeGreaterThan(0);
+  });
+
+  it("projects operator-safe graph node facts for the node card", () => {
+    const run = fixtureRun();
+    const view = buildControlCenterView({
+      projectRoot: "/project",
+      authorityRevision: 1,
+      runs: [run],
+      selection: { runId: run.id, detailsTab: "overview", objectiveExpanded: false },
+      graph: {
+        nodes: [
+          {
+            schema_version: "1.0",
+            id: "claim-one",
+            type: "claim",
+            title: "Claim result",
+            status: "active",
+            spec: {
+              purpose: "Bound the regression",
+              owners: ["alice", "bob"],
+              budget: 12,
+              nested: { deep: true, label: "bounded" },
+              capabilities: [{ name: "activation.signature", protocol_version: "1.0.0" }],
+            },
+            edges: {},
+            annotations: {},
+          },
+        ],
+        edges: [],
+      },
+    });
+    const node = view.selectedRun?.graph.nodes[0];
+    expect(node?.status).toBe("active");
+    expect(node?.facts).toEqual([
+      { label: "Purpose", value: "Bound the regression" },
+      { label: "Owners", value: "alice \u00b7 bob" },
+      { label: "Budget", value: "12" },
+      { label: "Nested Deep", value: "true" },
+      { label: "Nested Label", value: "bounded" },
+      { label: "Capabilities 1 Name", value: "activation.signature" },
+      { label: "Capabilities 1 Protocol Version", value: "1.0.0" },
+    ]);
+  });
+
+  it("feeds only in-flight tickets and counts queued and blocked work", () => {
+    const run = fixtureRun();
+    run.tickets["ticket-review"] = {
+      ...structuredClone(run.tickets["ticket-one"]!),
+      id: "ticket-review",
+      title: "Verify feature",
+      status: "review",
+      priority: 1,
+    };
+    run.tickets["ticket-queued"] = {
+      ...structuredClone(run.tickets["ticket-one"]!),
+      id: "ticket-queued",
+      title: "Queued work",
+      status: "queued",
+      priority: 2,
+    };
+    run.tickets["ticket-blocked"] = {
+      ...structuredClone(run.tickets["ticket-one"]!),
+      id: "ticket-blocked",
+      title: "Blocked work",
+      status: "blocked",
+      priority: 3,
+    };
+    const feed = viewFor(run).selectedRun?.graphFeed;
+    expect(feed?.tickets.map((ticket) => ticket.id)).toEqual(["ticket-one", "ticket-review"]);
+    expect(feed?.tickets.map((ticket) => ticket.tone)).toEqual(["running", "review"]);
+    expect(feed?.queuedCount).toBe(1);
+    expect(feed?.blockedCount).toBe(1);
+  });
+
+  it("presents feed tickets as interrupted while the run is blocked", () => {
+    const run = fixtureRun();
+    run.lifecycle.phase = "blocked";
+    run.lifecycle.blocker = "validation stalled";
+    const feed = viewFor(run).selectedRun?.graphFeed;
+    expect(feed?.tickets[0]).toMatchObject({
+      tone: "interrupted",
+      status: "Interrupted \u2014 run blocked",
+    });
+  });
+
+  it("nests active agents in their ticket card with friendly model names and raw-id fallback", () => {
+    const run = fixtureRun();
+    const feed = buildControlCenterView({
+      projectRoot: "/project",
+      authorityRevision: 1,
+      runs: [run],
+      selection: { runId: run.id, detailsTab: "overview", objectiveExpanded: false },
+      models: [
+        {
+          provider: "openai-codex",
+          id: "gpt-5.6-terra",
+          name: "GPT-5.6 Terra",
+          reasoning: true,
+          thinkingLevels: ["high"],
+          available: true,
+        },
+      ],
+    }).selectedRun?.graphFeed;
+    const card = feed?.tickets.find((ticket) => ticket.id === "ticket-one");
+    expect(card?.agents).toEqual([
+      {
+        id: "attempt-worker",
+        persona: "Implementer",
+        model: "GPT-5.6 Terra",
+        thinking: "high",
+        tokens: "9.95K",
+        working: true,
+      },
+    ]);
+    // Without a registry entry the raw model id renders \u2014 honesty over prettiness.
+    const fallback = viewFor(run).selectedRun?.graphFeed;
+    expect(fallback?.tickets[0]?.agents[0]?.model).toBe("gpt-5.6-terra");
+  });
+
+  it("excludes finished and question-parked agents from feed cards", () => {
+    const run = fixtureRun();
+    run.attempts["attempt-worker"]!.status = "waiting_question";
+    const feed = viewFor(run).selectedRun?.graphFeed;
+    expect(feed?.tickets[0]?.agents).toEqual([]);
+  });
+
+  it("wires only graph-resolved authorship nodes and counts off-graph links", () => {
+    const run = fixtureRun();
+    const ticket = run.tickets["ticket-one"]!;
+    ticket.targetNodeIds = ["node-present", "node-missing"];
+    ticket.writeNodeIds = ["node-write"];
+    ticket.readNodeIds = ["node-read", "node-present", "node-gone"];
+    const node = (id: string) => ({
+      schema_version: "1.0" as const,
+      id,
+      type: "system",
+      title: id,
+      status: "active",
+      spec: {},
+      edges: {},
+      annotations: {},
+    });
+    const feed = buildControlCenterView({
+      projectRoot: "/project",
+      authorityRevision: 1,
+      runs: [run],
+      selection: { runId: run.id, detailsTab: "overview", objectiveExpanded: false },
+      graph: { nodes: [node("node-present"), node("node-write"), node("node-read")], edges: [] },
+    }).selectedRun?.graphFeed;
+    const card = feed?.tickets[0];
+    expect(card?.nodeIds).toEqual(["node-present", "node-write"]);
+    expect(card?.readNodeIds).toEqual(["node-read"]);
+    expect(card?.offGraphCount).toBe(2);
+  });
+
+  it("lists active run-level cognition separately from ticket cards", () => {
+    const run = fixtureRun();
+    run.attempts["attempt-lead"]!.status = "running";
+    const feed = viewFor(run).selectedRun?.graphFeed;
+    expect(feed?.runAgents.map((agent) => agent.persona)).toEqual(["Lead"]);
+    expect(feed?.tickets.flatMap((ticket) => ticket.agents.map((agent) => agent.id))).toEqual([
+      "attempt-worker",
+    ]);
   });
 });
 

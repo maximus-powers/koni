@@ -1,7 +1,7 @@
 import { decodeKittyPrintable, Key, matchesKey } from "@earendil-works/pi-tui";
 
 export type ControlCenterPanel =
-  "runs" | "tickets" | "details" | "questions" | "agents" | "activity" | "graph";
+  "runs" | "tickets" | "details" | "questions" | "agents" | "activity";
 
 export type ControlCenterKeyAction =
   | { type: "move"; delta: -1 | 1 }
@@ -16,6 +16,10 @@ export type ControlCenterKeyAction =
   | { type: "pointer_scroll"; panel: ControlCenterPanel; delta: -1 | 1 }
   | { type: "pointer_control"; target: string }
   | { type: "details_tab"; delta: -1 | 1 }
+  /** Arrow-key horizontal movement; the controller resolves it per focus and details tab. */
+  | { type: "move_horizontal"; delta: -1 | 1 }
+  /** Jump straight to the Details panel's Graph feed (key 6, the old graph-panel hotkey). */
+  | { type: "focus_graph" }
   | { type: "activate" }
   | { type: "cancel" }
   | { type: "context_toggle" }
@@ -61,6 +65,7 @@ export interface ControlCenterInputContext {
   editingText?: boolean;
   modalKind?:
     | "help"
+    | "graph_node"
     | "delete"
     | "merge"
     | "new_run"
@@ -226,8 +231,12 @@ export function decodeControlCenterInput(
     (matchesKey(data, Key.right) || data === "]")
   )
     return { type: "transcript_page", delta: 1 };
-  if (matchesKey(data, Key.left) || data === "[") return { type: "details_tab", delta: -1 };
-  if (matchesKey(data, Key.right) || data === "]") return { type: "details_tab", delta: 1 };
+  // Arrows and brackets split on the Graph feed: arrows move the feed's column focus while
+  // brackets always cycle the details tabs. Everywhere else the controller treats them alike.
+  if (matchesKey(data, Key.left)) return { type: "move_horizontal", delta: -1 };
+  if (matchesKey(data, Key.right)) return { type: "move_horizontal", delta: 1 };
+  if (data === "[") return { type: "details_tab", delta: -1 };
+  if (data === "]") return { type: "details_tab", delta: 1 };
   if (matchesKey(data, Key.enter)) return { type: "activate" };
   if (matchesKey(data, Key.space)) return { type: "toggle_pause" };
   if (data === "d") return { type: "request_delete" };
@@ -244,6 +253,8 @@ export function decodeControlCenterInput(
   if (matchesKey(data, Key.ctrl("o")) || data === "o") return { type: "context_toggle" };
   if (context.panel === "details" && data === "s") return { type: "toggle_chat_composer" };
   if (data === "q") return { type: "quit" };
+  // The old graph-panel hotkey keeps its meaning: take me to the graph.
+  if (data === "6") return { type: "focus_graph" };
 
   const panel = PANEL_KEYS[data];
   return panel === undefined ? undefined : { type: "focus_panel", panel };
@@ -263,7 +274,6 @@ const PANEL_KEYS: Readonly<Record<string, ControlCenterPanel | undefined>> = {
   "3": "agents",
   "4": "details",
   "5": "activity",
-  "6": "graph",
 };
 
 function plainPrintable(data: string): string | undefined {

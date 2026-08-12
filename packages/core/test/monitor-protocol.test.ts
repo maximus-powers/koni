@@ -107,6 +107,26 @@ describe("monitor bounded protocols", () => {
       title: "Stable boundary",
       description: "Keep note persistence behind the existing repository interface.",
     });
+    expect(attention.plan).toMatchObject({
+      revision: 2,
+      planningSessionId: "session-planner",
+      planningAttemptId: "attempt-planner",
+      revisionUsage: {
+        cumulative: { new: 1_500, cache: 8_000, total: 9_500 },
+        currentRevision: { new: 400, cache: 2_000, total: 2_400 },
+      },
+    });
+  });
+
+  it("preserves legacy plan attention without fabricating planning continuity", () => {
+    const value = monitorAttentionFixture();
+    delete value.plan.planningSessionId;
+    delete value.plan.planningAttemptId;
+    delete value.plan.revisionUsage;
+    const plan = parseMonitorAttention(value).plan;
+    expect(plan).not.toHaveProperty("planningSessionId");
+    expect(plan).not.toHaveProperty("planningAttemptId");
+    expect(plan).not.toHaveProperty("revisionUsage");
   });
 
   it("accepts only bounded actionable proposal attention from the same run", () => {
@@ -148,6 +168,22 @@ describe("monitor bounded protocols", () => {
   });
 
   it("rejects invented proposal fields and inconsistent durable decisions", () => {
+    expect(() =>
+      parseControlProposalInspection({
+        ...monitorProposalFixture(),
+        status: "queued",
+      }),
+    ).not.toThrow();
+
+    for (const status of ["todo", "ready", "failed"]) {
+      expect(() =>
+        parseControlProposalInspection({
+          ...monitorProposalFixture(),
+          status,
+        }),
+      ).toThrow(/proposal ticket status is invalid/u);
+    }
+
     expect(() =>
       parseControlProposalInspection({
         ...monitorProposalFixture(),

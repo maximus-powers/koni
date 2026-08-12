@@ -8,7 +8,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import type { ControlCenterViewModel, GraphNodeView } from "./view-model.js";
+import { formatTokens, type ControlCenterViewModel } from "./view-model.js";
 import { sealedModelAdmissionIssue } from "../pi/model-catalog.js";
 import {
   decodeControlCenterPointer,
@@ -40,6 +40,7 @@ import {
   type ControlCenterHelpTopic,
   type EditScalarModalState,
   configResourceActions,
+  type GraphNodeModalState,
   type DeleteRunModalState,
   type MergeRunModalState,
   type NewRunModalState,
@@ -57,14 +58,23 @@ import {
   type ConfigureLayout as ConfigureScreenLayout,
   type OperateLayout,
 } from "./layout.js";
+import { cockpitView } from "./cockpit-config.js";
 import {
-  cockpitBooleanOption,
-  cockpitStringArrayMapOption,
-  cockpitStringArrayOption,
-  cockpitStringMapOption,
-  cockpitView,
-  type CompiledCockpitView,
-} from "./cockpit-config.js";
+  configuredGraphOptions,
+  graphBadge,
+  graphNodeStyle,
+  formatGraphRelation,
+} from "./graph-view.js";
+import { feedLayout, renderGraphFeed } from "./graph-feed.js";
+
+export {
+  configuredGraphOptions,
+  graphOutlineNodes,
+  renderGraphLines,
+  renderGraphView,
+  type GraphRenderOptions,
+  type GraphViewResult,
+} from "./graph-view.js";
 
 export interface ControlCenterComponentOptions {
   controller: ControlCenterController;
@@ -85,6 +95,8 @@ export class ControlCenterComponent implements Component, Focusable {
   #snapshot: ControlCenterControllerSnapshot;
   #lastFrame: CellGrid | undefined;
   #animationFrame = 0;
+  /** Viewport-relative card title rows from the last Graph-feed render, for pointer targets. */
+  #graphFeedTicketLines: readonly { id: string; row: number }[] = [];
 
   public constructor(options: ControlCenterComponentOptions) {
     this.#controller = options.controller;
@@ -249,7 +261,6 @@ export class ControlCenterComponent implements Component, Focusable {
     if (layout.questions !== undefined)
       frame.addRegion("questions", layout.questions, "panel:questions");
     frame.addRegion("activity", layout.activity, "panel:activity");
-    frame.addRegion("graph", layout.graph, "panel:graph");
     frame.addRegion("footer", layout.footer);
     annotateOperateHitTargets(frame, layout, this.#snapshot);
     if (this.#snapshot.modal !== undefined) {
@@ -257,6 +268,7 @@ export class ControlCenterComponent implements Component, Focusable {
       annotateModalHitTargets(frame, this.#snapshot);
     } else {
       annotateOperateControlHitTargets(frame, layout, this.#snapshot);
+      this.#annotateGraphFeedHitTargets(frame, layout);
     }
     this.#lastFrame = frame;
     return frame;
@@ -290,25 +302,18 @@ export class ControlCenterComponent implements Component, Focusable {
       ...this.#runsPanel(layout.runs.width, layout.runs.height),
       ...this.#ticketsPanel(layout.tickets.width, layout.tickets.height),
       ...this.#agentsPanel(layout.agents.width, layout.agents.height),
+      ...this.#activityPanel(layout.activity.width, layout.activity.height),
     ];
-    const middle =
+    const right =
       layout.questions === undefined
         ? this.#detailsPanel(layout.details.width, layout.details.height)
         : [
             ...this.#detailsPanel(layout.details.width, layout.details.height),
             ...this.#questionsPanel(layout.questions.width, layout.questions.height),
           ];
-    const right = [
-      ...this.#activityPanel(layout.activity.width, layout.activity.height),
-      ...this.#graphPanel(layout.graph.width, layout.graph.height),
-    ];
     const bodyHeight = layout.footer.y;
     return [
-      ...joinColumns(
-        [left, middle, right],
-        [layout.runs.width, layout.details.width, layout.activity.width],
-        bodyHeight,
-      ),
+      ...joinColumns([left, right], [layout.runs.width, layout.details.width], bodyHeight),
       ...this.#footer(layout.width),
     ];
   }
@@ -658,7 +663,6 @@ export class ControlCenterComponent implements Component, Focusable {
   }
 
   #runsPanel(width: number, height: number): string[] {
-    const lines: string[] = [];
     const page = this.#snapshot.view.runPage;
     const hiddenAbove = page.startIndex;
     const hiddenBelow = page.totalRuns - page.startIndex - page.visibleRuns;
@@ -668,8 +672,18 @@ export class ControlCenterComponent implements Component, Focusable {
             hiddenAbove > 0 ? ` · ↑${hiddenAbove} more` : ""
           }${hiddenBelow > 0 ? ` · ↓${hiddenBelow} more` : ""}`
         : "Runs";
-    let selectedLine = 0;
     const innerWidth = Math.max(1, width - 2);
+    const activeTab = this.#snapshot.view.runTabs.find(
+      (tab) => tab.id === this.#snapshot.view.runTab,
+    );
+    const lines: string[] = [
+      centerLine(
+        `‹ ${activeTab?.title ?? "All"} ${activeTab?.count ?? 0} ›`,
+        innerWidth,
+        this.#palette.accent,
+      ),
+    ];
+    let selectedLine = 0;
     for (const row of this.#snapshot.view.runs) {
       const selected = row.id === this.#snapshot.selection.runId;
       if (selected) selectedLine = lines.length;
@@ -705,12 +719,20 @@ export class ControlCenterComponent implements Component, Focusable {
       lines.push(selected ? this.#palette.selected(primary) : primary);
       lines.push(`    ${detail}`);
     }
-    if (lines.length === 0) {
-      lines.push(
-        this.#palette.muted("No runs"),
-        this.#palette.dim("Start a run from Koni's New Run flow."),
-        this.#palette.accent("[n] New run"),
-      );
+    if (this.#snapshot.view.runs.length === 0) {
+      const total = this.#snapshot.view.runTabs.find((tab) => tab.id === "all")?.count ?? 0;
+      if (total > 0) {
+        lines.push(
+          this.#palette.muted(`No ${(activeTab?.title ?? "matching").toLowerCase()} runs.`),
+          this.#palette.dim(`${total} in other tabs · [←→] switch`),
+        );
+      } else {
+        lines.push(
+          this.#palette.muted("No runs"),
+          this.#palette.dim("Start a run from Koni's New Run flow."),
+          this.#palette.accent("[n] New run"),
+        );
+      }
     }
     return panel(
       pageTitle,
@@ -791,11 +813,16 @@ export class ControlCenterComponent implements Component, Focusable {
     const configured = cockpitView(this.#snapshot.view.cockpit, ["nested_detail"]);
     const title = detailsTitle(this.#snapshot, this.#palette, configured?.title);
     const run = this.#snapshot.view.selectedRun;
+    const tab = this.#snapshot.selection.detailsTab;
+    // Stale card targets from a previous frame must never survive a run/tab change.
+    this.#graphFeedTicketLines = [];
+    const capacity = Math.max(1, height - 3);
     const lines =
       run === undefined
         ? [this.#palette.muted("Select or start a run to inspect its work.")]
-        : this.#detailsLines(run, innerWidth);
-    const tab = this.#snapshot.selection.detailsTab;
+        : tab === "graph"
+          ? this.#graphFeedTab(run, innerWidth, capacity)
+          : this.#detailsLines(run, innerWidth);
     const footer =
       tab === "chat"
         ? completeFooter(
@@ -806,22 +833,35 @@ export class ControlCenterComponent implements Component, Focusable {
             ],
             innerWidth,
           )
-        : tab === "plan"
-          ? completeFooter(["[←→] tabs"], innerWidth)
-          : completeFooter(
+        : tab === "graph"
+          ? completeFooter(
               [
-                "[Ctrl-O] objective · [←→] tabs · [Enter] stage action",
-                "[Ctrl-O] objective · [←→] tabs",
-                "[Ctrl-O] objective",
+                "[←→] graph/tickets · [↑↓] cursor · [Enter] open · [[/]] tabs",
+                "[←→] columns · [Enter] open",
+                "[Enter] open",
               ],
               innerWidth,
-            );
+            )
+          : this.#snapshot.selection.ticketId !== undefined
+            ? completeFooter(["[Enter] stage action"], innerWidth)
+            : tab === "plan"
+              ? completeFooter(["[[/]] tabs"], innerWidth)
+              : completeFooter(
+                  [
+                    "[Ctrl-O] objective · [[/]] tabs · [Enter] stage action",
+                    "[Ctrl-O] objective · [[/]] tabs",
+                    "[Ctrl-O] objective",
+                  ],
+                  innerWidth,
+                );
     // The open chat is bottom-anchored: scroll.details counts up from the newest line.
-    const capacity = Math.max(1, height - 3);
+    // The graph feed scrolls its two columns internally, so the panel never re-scrolls it.
     const scroll =
       tab === "chat"
         ? Math.max(0, lines.length - capacity - this.#snapshot.scroll.details)
-        : this.#snapshot.scroll.details;
+        : tab === "graph"
+          ? 0
+          : this.#snapshot.scroll.details;
     return panelWithFooter(
       title,
       lines,
@@ -834,8 +874,78 @@ export class ControlCenterComponent implements Component, Focusable {
     );
   }
 
+  /** Ticket-card rows in the Graph feed are clickable: a click commits the ticket. */
+  #annotateGraphFeedHitTargets(frame: CellGrid, layout: OperateLayout): void {
+    if (this.#snapshot.selection.detailsTab !== "graph") return;
+    if (this.#graphFeedTicketLines.length === 0) return;
+    const inner = Math.max(1, layout.details.width - 2);
+    const columns = feedLayout(inner);
+    if (columns.stacked) return;
+    const xStart = layout.details.x + 1 + columns.graphW + columns.gutterW;
+    for (const entry of this.#graphFeedTicketLines) {
+      frame.addHitTarget(`ticket:${entry.id}`, {
+        x: xStart,
+        // +1 for the panel border, +1 for the feed's configured header line.
+        y: layout.details.y + 2 + entry.row,
+        width: columns.ticketsW,
+        height: 1,
+      });
+    }
+  }
+
+  /** The Graph tab body: a configured header line above the live feed compositor. */
+  #graphFeedTab(
+    run: NonNullable<ControlCenterViewModel["selectedRun"]>,
+    innerWidth: number,
+    capacity: number,
+  ): string[] {
+    const configured = cockpitView(this.#snapshot.view.cockpit, ["typed_tree", "graph"]);
+    const scope =
+      configured?.source.kind === "graph" && configured.source.scope === "main_checkout"
+        ? "main checkout"
+        : run.graph.scope;
+    const header = this.#palette.muted(
+      truncateToWidth(`${configured?.title ?? "Graph"} · ${scope}`, innerWidth, "…"),
+    );
+    const focused = this.#snapshot.focus === "details";
+    const feed = renderGraphFeed({
+      nodes: run.graph.nodes,
+      edges: run.graph.edges,
+      feed: run.graphFeed,
+      width: innerWidth,
+      height: Math.max(1, capacity - 1),
+      palette: this.#palette,
+      graphOptions: configuredGraphOptions(configured),
+      ...(focused
+        ? {
+            focus: {
+              column: this.#snapshot.cursor.graphFeed.column,
+              nodeIndex: this.#snapshot.cursor.graphIndex,
+              ...(this.#snapshot.cursor.graphFeed.ticketId === undefined
+                ? {}
+                : { ticketId: this.#snapshot.cursor.graphFeed.ticketId }),
+            },
+          }
+        : {}),
+      ...(this.#snapshot.selection.ticketId === undefined
+        ? {}
+        : { selectedTicketId: this.#snapshot.selection.ticketId }),
+      scroll: {
+        graph: this.#snapshot.scroll.graph,
+        tickets: this.#snapshot.scroll.feedTickets,
+      },
+      animationFrame: this.#animationFrame,
+    });
+    this.#graphFeedTicketLines = feed.ticketLines;
+    return [header, ...feed.lines];
+  }
+
   #detailsLines(run: NonNullable<ControlCenterViewModel["selectedRun"]>, width: number): string[] {
     switch (this.#snapshot.selection.detailsTab) {
+      case "graph": {
+        // The Graph tab is composed by #graphFeedTab before #detailsLines is consulted.
+        return [];
+      }
       case "overview": {
         const lines: string[] = [];
         if (run.blockedBanner !== undefined) {
@@ -877,10 +987,18 @@ export class ControlCenterComponent implements Component, Focusable {
                   : this.#palette.muted("○");
             const state = complete ? "" : ` · ${step.status}`;
             lines.push(`${marker} ${step.title} · ${this.#palette.muted(step.persona)}${state}`);
-            if (complete) {
+            const metadata = [
+              `${step.attemptCount} ${step.attemptCount === 1 ? "attempt" : "attempts"}`,
+              ...(step.dependsOn.length === 0 ? [] : [`after ${step.dependsOn.join(" · ")}`]),
+              ...(step.validation === undefined ? [] : [`must satisfy ${step.validation}`]),
+            ];
+            lines.push(`  ${this.#palette.muted(metadata.join(" · "))}`);
+            if (step.summary !== undefined) {
               lines.push(
-                `  ${step.summary === undefined ? this.#palette.muted("No outcome summary recorded") : this.#palette.success(step.summary)}`,
+                `  ${complete ? this.#palette.success(step.summary) : this.#palette.text(step.summary)}`,
               );
+            } else if (complete) {
+              lines.push(`  ${this.#palette.muted("No outcome summary recorded")}`);
             }
           }
           if (
@@ -927,27 +1045,15 @@ export class ControlCenterComponent implements Component, Focusable {
             run.objective.expanded ? "[Ctrl-O] collapse objective" : "[Ctrl-O] full objective",
           ),
         );
+        lines.push("", sectionHeading("Run", this.#palette), ...this.#runVitalLines(run, width));
         for (const section of run.overviewSections) {
+          // Run vitals render as structured components above; the plain lines remain the
+          // view-model contract for tests and non-visual consumers.
+          if (section.title === "Run") continue;
           lines.push("", sectionHeading(section.title, this.#palette));
-          for (const [index, value] of section.lines.entries()) {
-            const style =
-              section.tone === "error"
-                ? this.#palette.error
-                : section.tone === "success"
-                  ? this.#palette.success
-                  : this.#palette.text;
-            lines.push(
-              ...wrapStyled(
-                value,
-                width,
-                index === 0 && section.tone !== undefined
-                  ? (line) => this.#palette.bold(style(line))
-                  : style,
-              ),
-            );
-          }
+          lines.push(...this.#evidenceLines(section, width));
         }
-        lines.push("", sectionHeading("Stages", this.#palette), ...this.#stageLines(run, width));
+        lines.push("", this.#stagesHeading(run), ...this.#stageLines(run, width));
         return lines;
       }
       case "plan": {
@@ -1060,6 +1166,94 @@ export class ControlCenterComponent implements Component, Focusable {
         return lines;
       }
     }
+  }
+
+  /** Structured Run vitals: labeled chips, meters, and counters instead of plain key/value text. */
+  #runVitalLines(run: NonNullable<ControlCenterViewModel["selectedRun"]>, width: number): string[] {
+    const stats = run.stats;
+    const label = (text: string): string => this.#palette.muted(text.padEnd(9));
+    const rows: string[] = [
+      `${label("Status")}${this.#palette.chip(stats.statusLabel, stageTone(stats.phase))}`,
+      `${label("Target")}${this.#palette.accent(`⎇ ${stats.targetBranch}`)}`,
+      `${label("Tickets")}${meterBar(stats.tickets.completed, stats.tickets.total, this.#palette)} ${this.#palette.text(
+        `${stats.tickets.completed}/${stats.tickets.total}`,
+      )}${stats.questionCount > 0 ? ` ${this.#palette.warning(`· ${stats.questionCount} question${stats.questionCount === 1 ? "" : "s"} pending`)}` : ""}`,
+      `${label("Agents")}${
+        stats.agents.active > 0
+          ? `${this.#animatedCog()} ${this.#palette.text(`${stats.agents.active} active`)} ${this.#palette.muted(
+              `of ${stats.agents.total}`,
+            )}`
+          : this.#palette.muted(
+              stats.agents.total === 0 ? "none yet" : `${stats.agents.total} concluded`,
+            )
+      }`,
+      `${label("Tokens")}${this.#palette.text(`${formatTokens(stats.tokens.fresh)} fresh`)} ${this.#palette.muted(
+        `· ${formatTokens(stats.tokens.total)} provider total`,
+      )}`,
+      `${label("Cache")}${meterBar(stats.tokens.cached, stats.tokens.total, this.#palette)} ${this.#palette.muted(
+        `${stats.tokens.total === 0 ? 0 : Math.round((stats.tokens.cached / stats.tokens.total) * 100)}% cached input/write`,
+      )}`,
+    ];
+    if (stats.uncertainExposure > 0) {
+      rows.push(
+        `${label("Exposure")}${this.#palette.warning(
+          `≤${formatTokens(stats.uncertainExposure)} retired by operator`,
+        )}`,
+      );
+    }
+    if (stats.selectedTicket !== undefined) {
+      rows.push(
+        `${label("Ticket")}${this.#palette.text(
+          truncateToWidth(stats.selectedTicket.title, Math.max(1, width - 20), "…"),
+        )} ${this.#palette.muted(`· ${stats.selectedTicket.status}`)}`,
+      );
+    }
+    return rows.map((row) => truncateToWidth(row, width, "…", true));
+  }
+
+  /** Evidence keeps its exact operator copy but each line leads with a tone glyph. */
+  #evidenceLines(
+    section: NonNullable<ControlCenterViewModel["selectedRun"]>["overviewSections"][number],
+    width: number,
+  ): string[] {
+    const style =
+      section.tone === "error"
+        ? this.#palette.error
+        : section.tone === "success"
+          ? this.#palette.success
+          : this.#palette.text;
+    const glyph =
+      section.tone === "error"
+        ? this.#palette.error("!")
+        : section.tone === "success"
+          ? this.#palette.success("✓")
+          : this.#palette.muted("○");
+    return section.lines.flatMap((value, index) =>
+      index === 0
+        ? wrapStyled(value, Math.max(1, width - 2), (line) =>
+            section.tone === undefined ? style(line) : this.#palette.bold(style(line)),
+          ).map((line, part) => (part === 0 ? `${glyph} ${line}` : `  ${line}`))
+        : wrapStyled(value, Math.max(1, width - 2), style).map((line, part) =>
+            part === 0 ? `${this.#palette.dim("•")} ${line}` : `  ${line}`,
+          ),
+    );
+  }
+
+  /** Stage progress at a glance: the section heading carries a dot rail and a counter. */
+  #stagesHeading(run: NonNullable<ControlCenterViewModel["selectedRun"]>): string {
+    const done = run.stages.filter((stage) => stage.state === "done").length;
+    const rail = run.stages
+      .map((stage) =>
+        stage.state === "done"
+          ? this.#palette.success("●")
+          : stage.state === "active"
+            ? this.#palette.accent(run.spendingTokens ? "◉" : "◐")
+            : this.#palette.dim("○"),
+      )
+      .join("");
+    return `${sectionHeading("Stages", this.#palette)}  ${rail}  ${this.#palette.muted(
+      `${done}/${run.stages.length}`,
+    )}`;
   }
 
   #stageLines(run: NonNullable<ControlCenterViewModel["selectedRun"]>, width: number): string[] {
@@ -1199,7 +1393,11 @@ export class ControlCenterComponent implements Component, Focusable {
         onCursor ? this.#palette.selected(row) : agent.active ? row : this.#palette.muted(row),
       );
       const leaf = agent.lineage?.activeLeaf === true ? ` · ${this.#palette.success("leaf")}` : "";
-      const detail = `    ${indent}${modelStyle(agent.model, this.#palette)} · ${thinkingStyle(agent.thinking, this.#palette)} · ${agent.newTokens} new${leaf}`;
+      const planning =
+        agent.planning === undefined
+          ? ""
+          : ` · Revision ${agent.planning.currentRevision} · ${formatTokens(agent.planning.revisionUsage.new)} revision new / ${formatTokens(agent.planning.cumulativeUsage.new)} cumulative new`;
+      const detail = `    ${indent}${modelStyle(agent.model, this.#palette)} · ${thinkingStyle(agent.thinking, this.#palette)} · ${agent.newTokens} new${planning}${leaf}`;
       lines.push(agent.active ? detail : this.#palette.dim(detail));
     }
     if (lines.length === 0) lines.push(this.#palette.muted("No agent attempts yet."));
@@ -1243,46 +1441,9 @@ export class ControlCenterComponent implements Component, Focusable {
     );
   }
 
-  #graphPanel(width: number, height: number): string[] {
-    const graph = this.#snapshot.view.selectedRun?.graph;
-    const configured = cockpitView(this.#snapshot.view.cockpit, ["typed_tree", "graph"]);
-    const graphOptions = configuredGraphOptions(configured);
-    const cursorIndex = Math.min(
-      Math.max(0, (graph?.nodes.length ?? 1) - 1),
-      Math.max(0, this.#snapshot.cursor.graphIndex),
-    );
-    const view =
-      graph === undefined || graph.nodes.length === 0
-        ? undefined
-        : renderGraphView(graph.nodes, graph.edges, Math.max(1, width - 2), this.#palette, {
-            ...graphOptions,
-            // The node cursor (full title + highlight) appears only while the panel is focused.
-            ...(this.#snapshot.focus === "graph" ? { focusedIndex: cursorIndex } : {}),
-          });
-    const lines = view?.lines ?? [this.#palette.muted("No graph nodes yet.")];
-    const scope =
-      configured?.source.kind === "graph" && configured.source.scope === "main_checkout"
-        ? "main checkout"
-        : graph?.scope;
-    return panel(
-      configured === undefined
-        ? graph === undefined
-          ? "Graph"
-          : `Graph · ${graph.scope}`
-        : scope === undefined
-          ? configured.title
-          : `${configured.title} · ${scope}`,
-      lines,
-      width,
-      height,
-      this.#snapshot.focus === "graph",
-      this.#palette,
-      visibleOffset(this.#snapshot.scroll.graph, view?.nodeLines[cursorIndex] ?? 0, height - 2),
-    );
-  }
-
   #renderModal(width: number, height: number): string[] {
     const modal = this.#snapshot.modal!;
+    if (modal.kind === "graph_node") return this.#renderGraphNode(modal, width, height);
     if (modal.kind === "delete") {
       return this.#renderDeleteRun(modal, width, height);
     }
@@ -1315,27 +1476,141 @@ export class ControlCenterComponent implements Component, Focusable {
     }
     if (modal.kind === "profile_conflicts")
       return this.#renderProfileConflicts(modal, width, height);
-    const help = HELP[modal.topic];
-    return panel(
-      `Help · ${help.title}`,
-      [
-        sectionHeading("What this is", this.#palette),
-        ...wrapStyled(help.description, width - 2, this.#palette.text),
-        "",
-        sectionHeading("In the workflow", this.#palette),
-        ...wrapStyled(helpWorkflow(modal.topic), width - 2, this.#palette.muted),
-        "",
-        sectionHeading("Available here", this.#palette),
-        ...help.actions.map(
-          ([keys, meaning]) => `${this.#palette.accent(keys.padEnd(16))}${meaning}`,
+    return this.#renderHelp(modal.topic, modal.scroll, width, height);
+  }
+
+  /**
+   * Contextual help is the documentation operators actually read: what the surface is, how it
+   * fits the run pipeline (with the same text diagrams the repository docs use), why it behaves
+   * the way it does, and only then the key list.
+   */
+  #renderHelp(
+    topic: ControlCenterHelpTopic,
+    scroll: number,
+    width: number,
+    height: number,
+  ): string[] {
+    const help = HELP[topic];
+    const inner = Math.max(1, width - 2);
+    const lines: string[] = [...wrapStyled(help.description, inner, this.#palette.text)];
+    if (help.diagram !== undefined && help.diagram.length > 0) {
+      lines.push("", centeredDivider("How it fits", inner, this.#palette));
+      lines.push(
+        ...help.diagram.map((row) =>
+          truncateToWidth(` ${this.#palette.info(row)}`, inner, "…", true),
         ),
-        "",
-        this.#palette.muted("[h/F1/Esc/Enter/q] close"),
-      ],
+      );
+    }
+    lines.push("", centeredDivider("In the workflow", inner, this.#palette));
+    lines.push(...wrapStyled(helpWorkflow(topic), inner, this.#palette.muted));
+    if (help.philosophy !== undefined && help.philosophy.length > 0) {
+      lines.push("", centeredDivider("Why it works this way", inner, this.#palette));
+      help.philosophy.forEach((paragraph, index) => {
+        if (index > 0) lines.push("");
+        lines.push(...wrapStyled(paragraph, inner, this.#palette.text));
+      });
+    }
+    lines.push("", centeredDivider("Available here", inner, this.#palette));
+    lines.push(
+      ...help.actions.map(
+        ([keys, meaning]) => `${this.#palette.accent(keys.padEnd(16))}${meaning}`,
+      ),
+    );
+    return panelWithFooter(
+      `Help · ${help.title}`,
+      lines,
+      "↑↓ scroll · [h/F1/Esc/Enter/q] close",
       width,
-      Math.min(height, Math.min(22, 13 + help.actions.length)),
+      Math.min(height, lines.length + 3),
       true,
       this.#palette,
+      scroll,
+    );
+  }
+
+  /** Enter on a graph node: its complete title, status, authored facts, and relationships. */
+  #renderGraphNode(modal: GraphNodeModalState, width: number, height: number): string[] {
+    const inner = Math.max(1, width - 2);
+    const graph = this.#snapshot.view.selectedRun?.graph;
+    const node = graph?.nodes.find((candidate) => candidate.id === modal.nodeId);
+    if (graph === undefined || node === undefined) {
+      return panel(
+        "Graph node",
+        [
+          this.#palette.muted("This node is no longer part of the selected graph view."),
+          "",
+          this.#palette.dim("[Esc] close"),
+        ],
+        width,
+        Math.min(height, 7),
+        true,
+        this.#palette,
+      );
+    }
+    const label = (text: string): string => this.#palette.muted(text.padEnd(9));
+    const lines: string[] = [
+      ...wrapStyled(node.fullTitle, inner, (line) => this.#palette.bold(this.#palette.text(line))),
+      "",
+      `${label("Type")}${this.#palette.bold(
+        graphNodeStyle(node.type, `[${node.type.replace(/_/gu, "-")}]`, this.#palette),
+      )}`,
+      `${label("Status")}${
+        node.status === undefined
+          ? this.#palette.muted("unknown")
+          : this.#palette.chip(titleCaseLabel(node.status), node.muted ? "muted" : "success")
+      }`,
+    ];
+    if (node.facts !== undefined && node.facts.length > 0) {
+      lines.push("", centeredDivider("Authored facts", inner, this.#palette));
+      for (const fact of node.facts) {
+        const factLabel = truncateToWidth(fact.label, 14, "…");
+        const valueWidth = Math.max(1, inner - 16);
+        const wrapped = wrapTextWithAnsi(fact.value, valueWidth);
+        wrapped.forEach((line, index) => {
+          lines.push(
+            index === 0
+              ? `${this.#palette.muted(factLabel.padEnd(15))} ${this.#palette.text(line)}`
+              : `${" ".repeat(16)}${this.#palette.text(line)}`,
+          );
+        });
+      }
+    }
+    const titleById = new Map(graph.nodes.map((candidate) => [candidate.id, candidate]));
+    const relationRow = (direction: "→" | "←", relation: string, otherId: string): string => {
+      const other = titleById.get(otherId);
+      const otherLabel =
+        other === undefined
+          ? this.#palette.dim("outside this view")
+          : `${this.#palette.bold(graphNodeStyle(other.type, graphBadge(other.type, 20), this.#palette))} ${
+              other.muted ? this.#palette.dim(other.label) : this.#palette.text(other.label)
+            }`;
+      return truncateToWidth(
+        `${this.#palette.accent(direction)} ${this.#palette.info(
+          formatGraphRelation(relation).padEnd(14),
+        )} ${otherLabel}`,
+        inner,
+        "…",
+        true,
+      );
+    };
+    const outgoing = graph.edges.filter((edge) => edge.source === node.id);
+    const incoming = graph.edges.filter((edge) => edge.target === node.id);
+    lines.push("", centeredDivider("Relationships", inner, this.#palette));
+    if (outgoing.length === 0 && incoming.length === 0) {
+      lines.push(this.#palette.muted("No relationships in this view."));
+    } else {
+      for (const edge of outgoing) lines.push(relationRow("→", edge.relation, edge.target));
+      for (const edge of incoming) lines.push(relationRow("←", edge.relation, edge.source));
+    }
+    return panelWithFooter(
+      `Graph node · ${node.type.replace(/_/gu, "-")}`,
+      lines,
+      "↑↓ scroll · Enter/Esc close · h help",
+      width,
+      Math.min(height, lines.length + 3),
+      true,
+      this.#palette,
+      modal.scroll,
     );
   }
 
@@ -2089,7 +2364,9 @@ export class ControlCenterComponent implements Component, Focusable {
       modal.focus === "steering"
         ? insertCaret(modal.steering, modal.steeringCursor)
         : modal.steering.length === 0
-          ? "Add steering here to request a revised plan…"
+          ? selectedRun?.plan.planningSessionId === undefined
+            ? "Add steering here to request a revised plan…"
+            : "Revise the current plan with steering…"
           : modal.steering;
     const steeringLines = wrapTextWithAnsi(steeringSource, inner - 2);
     const editorRows = Math.max(2, Math.min(4, Math.floor(height / 5)));
@@ -2112,6 +2389,12 @@ export class ControlCenterComponent implements Component, Focusable {
     const lines = [
       `${this.#palette.muted("Objective")} ${truncateToWidth(selectedRun?.objective.text ?? "Selected run", Math.max(1, inner - 10), "…")}`,
       `${this.#palette.muted("Run type")} ${selectedRun?.header.runType ?? "Unknown"}`,
+      ...(selectedRun?.plan.revision === undefined
+        ? []
+        : [`${this.#palette.muted("Checkpoint")} Revision ${selectedRun.plan.revision}`]),
+      ...(selectedRun?.plan.planningSessionId === undefined
+        ? []
+        : [this.#palette.muted("Same planner session; token allowance reset for this revision")]),
       "",
       tabs,
       ...visibleDocument,
@@ -2599,9 +2882,22 @@ export function createPiControlCenterComponent(options: {
   return new ControlCenterComponent({
     controller: options.controller,
     palette: paletteFromPiTheme(options.theme),
-    viewportRows: () => options.tui.terminal.rows,
+    // Pi mounts this component in place of its editor but keeps its own footer (and any
+    // footer/status extensions) below it. Rendering the full terminal height therefore pushes
+    // the dashboard's top rows off-screen; reserve the chrome rows instead.
+    viewportRows: () =>
+      Math.max(CONTROL_CENTER_MIN_HEIGHT, options.tui.terminal.rows - reservedPiChromeRows()),
     requestRender: () => options.tui.requestRender(),
   });
+}
+
+/**
+ * Rows Pi keeps below the mounted dashboard. One row covers Pi's standard footer; operators with
+ * taller footer/status extensions can widen the reserve with KONI_COCKPIT_RESERVED_ROWS.
+ */
+function reservedPiChromeRows(): number {
+  const raw = Number.parseInt(process.env.KONI_COCKPIT_RESERVED_ROWS ?? "", 10);
+  return Number.isSafeInteger(raw) && raw >= 0 && raw <= 12 ? raw : 1;
 }
 
 function panel(
@@ -2710,9 +3006,9 @@ function detailsTitle(
     ].join(palette.muted(" · "));
   }
   const active = snapshot.selection.detailsTab;
-  const label = (id: "overview" | "plan", title: string): string =>
+  const label = (id: "graph" | "plan" | "overview", title: string): string =>
     id === active ? palette.text(title) : palette.muted(title);
-  const tabs = [label("overview", "Overview"), label("plan", "Plan")];
+  const tabs = [label("graph", "Graph"), label("plan", "Plan"), label("overview", "Overview")];
   return `${palette.muted(`${configuredTitle ?? "Details"}:`)} ${tabs.join(palette.muted(" - "))}`;
 }
 
@@ -2799,6 +3095,22 @@ function framedLine(value: string, width: number, palette: KoniPalette): string 
 
 function wrapStyled(value: string, width: number, style: (line: string) => string): string[] {
   return wrapTextWithAnsi(value, Math.max(1, width)).map(style);
+}
+
+/**
+ * Compact horizontal meter. A nonzero value always lights at least one cell and a partial value
+ * never fills the meter, so progress reads truthfully at both boundaries.
+ */
+function meterBar(value: number, total: number, palette: KoniPalette, cells = 10): string {
+  if (!Number.isFinite(value) || !Number.isFinite(total) || total <= 0) {
+    return palette.dim("▱".repeat(cells));
+  }
+  const bounded = Math.max(0, Math.min(total, value));
+  let filled = Math.round((bounded / total) * cells);
+  if (bounded > 0 && filled === 0) filled = 1;
+  if (bounded < total && filled === cells) filled = cells - 1;
+  const tone = bounded >= total ? palette.success : palette.accent;
+  return `${tone("▰".repeat(filled))}${palette.dim("▱".repeat(cells - filled))}`;
 }
 
 function centerLine(value: string, width: number, style: (value: string) => string): string {
@@ -3341,548 +3653,6 @@ function activityStyle(
   return palette.text(message);
 }
 
-interface GraphDisplayEdge {
-  source: string;
-  target: string;
-  relation: string;
-}
-
-export interface GraphRenderOptions {
-  hierarchy?: readonly string[];
-  primaryParentPreferences?: Readonly<Record<string, readonly string[]>>;
-  reverseDisplayEdges?: Readonly<Record<string, string>>;
-  showTitles?: boolean;
-}
-
-function configuredGraphOptions(view: CompiledCockpitView | undefined): GraphRenderOptions {
-  const hierarchy = cockpitStringArrayOption(view, "hierarchy");
-  const primaryParentPreferences = cockpitStringArrayMapOption(view, "primary_parent_preferences");
-  const reverseDisplayEdges = cockpitStringMapOption(view, "reverse_display_edges");
-  return {
-    ...(hierarchy === undefined ? {} : { hierarchy }),
-    ...(primaryParentPreferences === undefined ? {} : { primaryParentPreferences }),
-    ...(reverseDisplayEdges === undefined ? {} : { reverseDisplayEdges }),
-    showTitles: cockpitBooleanOption(view, "show_titles", true),
-  };
-}
-
-interface NestedGraphRow {
-  node: GraphNodeView;
-  structural: string;
-  prefix: string;
-  isRoot: boolean;
-  isLast: boolean;
-  markerStart: number;
-  markerEnd: number;
-  titleStart: number;
-}
-
-interface ExpandedGraphRow {
-  structural: string;
-  nodeRow?: NestedGraphRow;
-  /** Cursor-focused title overlay: pre-truncated text painted in place of the short label. */
-  focusTitle?: { start: number; end: number; text: string };
-}
-
-export interface GraphViewResult {
-  lines: string[];
-  /** Display line index of each node row, in outline order (parallel to the node cursor). */
-  nodeLines: number[];
-}
-
-/**
- * Autoresearch-v2 relationship outline with Koni's one deliberate addition: concise titles are
- * painted after every connector, so title letters replace a line cell while topology continues
- * underneath. Primary relationships form the nested outline; secondary relationships get their
- * own labeled endpoint rows and shared vertical lanes.
- */
-export function renderGraphLines(
-  nodes: readonly GraphNodeView[],
-  edges: readonly { source: string; target: string; relation?: string }[],
-  width: number,
-  palette: KoniPalette,
-  options: GraphRenderOptions = {},
-): string[] {
-  return renderGraphView(nodes, edges, width, palette, options).lines;
-}
-
-/** Full graph projection: rendered lines plus the node-cursor line map. */
-export function renderGraphView(
-  nodes: readonly GraphNodeView[],
-  edges: readonly { source: string; target: string; relation?: string }[],
-  width: number,
-  palette: KoniPalette,
-  options: GraphRenderOptions & { focusedIndex?: number } = {},
-): GraphViewResult {
-  if (nodes.length === 0 || width < 3) return { lines: [], nodeLines: [] };
-  const compareNodes = (left: GraphNodeView, right: GraphNodeView): number =>
-    graphNodeCompare(left, right, options.hierarchy);
-  const ordered = [...nodes].sort(compareNodes);
-  const byId = new Map(ordered.map((node) => [node.id, node]));
-  const normalized = normalizeGraphEdges(edges, byId, options.reverseDisplayEdges, compareNodes);
-  const primaryByChild = choosePrimaryGraphEdges(
-    normalized,
-    byId,
-    compareNodes,
-    options.primaryParentPreferences,
-  );
-  const primaryKeys = new Set([...primaryByChild.values()].map(graphEdgeKey));
-  const secondary = normalized.filter((edge) => !primaryKeys.has(graphEdgeKey(edge)));
-  const children = new Map<string, GraphDisplayEdge[]>();
-  for (const edge of primaryByChild.values()) {
-    const list = children.get(edge.source) ?? [];
-    list.push(edge);
-    children.set(edge.source, list);
-  }
-  for (const list of children.values()) {
-    list.sort(
-      (left, right) =>
-        compareNodes(byId.get(left.target)!, byId.get(right.target)!) ||
-        left.relation.localeCompare(right.relation),
-    );
-  }
-
-  const rows: NestedGraphRow[] = [];
-  const emitted = new Set<string>();
-  const append = (
-    node: GraphNodeView,
-    rawPrefix: string,
-    isLast: boolean,
-    isRoot: boolean,
-    incoming?: GraphDisplayEdge,
-  ): void => {
-    if (emitted.has(node.id)) return;
-    emitted.add(node.id);
-    const prefix = compactGraphPrefix(rawPrefix, width);
-    const branch = isRoot ? "" : isLast ? "└─" : "├─";
-    const edgeBranch = isRoot
-      ? ""
-      : `${branch}<${formatGraphRelation(incoming?.relation ?? "related")}>─`;
-    const badge = graphBadge(node.type, width);
-    const structural = `${prefix}${edgeBranch}${badge}`;
-    const markerStart = visibleWidth(`${prefix}${edgeBranch}`);
-    const markerEnd = markerStart + visibleWidth(badge);
-    rows.push({
-      node,
-      structural,
-      prefix,
-      isRoot,
-      isLast,
-      markerStart,
-      markerEnd,
-      titleStart: markerEnd + 1,
-    });
-    const outgoing = children.get(node.id) ?? [];
-    const childPrefix = isRoot ? "" : `${prefix}${isLast ? "   " : "│  "}`;
-    outgoing.forEach((edge, index) => {
-      const child = byId.get(edge.target);
-      if (child !== undefined)
-        append(child, childPrefix, index + 1 === outgoing.length, false, edge);
-    });
-  };
-
-  const roots = ordered.filter((node) => !primaryByChild.has(node.id));
-  const rootList = roots.length === 0 ? ordered.slice(0, 1) : roots;
-  rootList.forEach((node, index) => append(node, "", index + 1 === rootList.length, true));
-  for (const node of ordered) append(node, "", true, true);
-
-  const rowByNode = new Map(rows.map((row, index) => [row.node.id, index]));
-  const endpoints = new Map<number, { edgeIndex: number; source: boolean }[]>();
-  secondary.forEach((edge, edgeIndex) => {
-    const source = rowByNode.get(edge.source);
-    const target = rowByNode.get(edge.target);
-    if (source === undefined || target === undefined || source === target) return;
-    const sourceList = endpoints.get(source) ?? [];
-    sourceList.push({ edgeIndex, source: true });
-    endpoints.set(source, sourceList);
-    const targetList = endpoints.get(target) ?? [];
-    targetList.push({ edgeIndex, source: false });
-    endpoints.set(target, targetList);
-  });
-
-  const expanded: ExpandedGraphRow[] = [];
-  const nodeLines: number[] = [];
-  const endpointRows = new Map<string, number>();
-  const endpointStarts = new Map<string, number>();
-  rows.forEach((row, rowIndex) => {
-    nodeLines.push(expanded.length);
-    if (options.focusedIndex === rowIndex && options.showTitles !== false) {
-      // The cursor row shows the complete title: the first segment replaces the short label
-      // and up to two continuation rows carry the rest between the tree rails.
-      const available = Math.max(1, width - row.titleStart);
-      const segments = wrapTextWithAnsi(row.node.fullTitle, available).slice(0, 3);
-      const overlay = (text: string): NonNullable<ExpandedGraphRow["focusTitle"]> => {
-        const clipped = truncateToWidth(text, available, "…");
-        return {
-          start: row.titleStart,
-          end: row.titleStart + visibleWidth(clipped),
-          text: clipped,
-        };
-      };
-      expanded.push({
-        structural: row.structural,
-        nodeRow: row,
-        focusTitle: overlay(segments[0] ?? row.node.fullTitle),
-      });
-      const continuationPrefix = row.isRoot ? "" : `${row.prefix}${row.isLast ? "   " : "│  "}`;
-      for (const segment of segments.slice(1)) {
-        expanded.push({ structural: continuationPrefix, focusTitle: overlay(segment) });
-      }
-    } else {
-      expanded.push({ structural: row.structural, nodeRow: row });
-    }
-    const rowEndpoints = (endpoints.get(rowIndex) ?? []).sort(
-      (left, right) =>
-        left.edgeIndex - right.edgeIndex || Number(right.source) - Number(left.source),
-    );
-    for (const endpoint of rowEndpoints) {
-      const edge = secondary[endpoint.edgeIndex]!;
-      const childPrefix = row.isRoot ? "" : `${row.prefix}${row.isLast ? "   " : "│  "}`;
-      const local = endpoint.source ? `├─<${formatGraphRelation(edge.relation)}>─` : "├────";
-      const structural = `${childPrefix}${local}`;
-      const key = `${endpoint.edgeIndex}:${endpoint.source ? "source" : "target"}`;
-      endpointRows.set(key, expanded.length);
-      endpointStarts.set(key, Math.max(0, visibleWidth(structural) - 1));
-      expanded.push({ structural });
-    }
-  });
-
-  const canvas = Array.from({ length: Math.max(1, expanded.length) }, () =>
-    Array.from({ length: width }, () => " "),
-  );
-  const usedLanes: number[] = [];
-  secondary.forEach((edge, edgeIndex) => {
-    const sourceY = endpointRows.get(`${edgeIndex}:source`);
-    const targetY = endpointRows.get(`${edgeIndex}:target`);
-    if (sourceY === undefined || targetY === undefined) return;
-    const sourceStart = endpointStarts.get(`${edgeIndex}:source`) ?? 0;
-    const targetStart = endpointStarts.get(`${edgeIndex}:target`) ?? 0;
-    const sourceNodeRow = rows[rowByNode.get(edge.source)!]!;
-    const targetNodeRow = rows[rowByNode.get(edge.target)!]!;
-    const base = Math.min(
-      width - 1,
-      Math.max(
-        sourceStart,
-        targetStart,
-        visibleWidth(sourceNodeRow.structural),
-        visibleWidth(targetNodeRow.structural),
-      ) + 2,
-    );
-    let lane = base;
-    while (lane < width - 1 && usedLanes.some((candidate) => Math.abs(candidate - lane) < 2))
-      lane += 1;
-    usedLanes.push(lane);
-    drawGraphHorizontal(canvas, sourceY, sourceStart, lane);
-    drawGraphHorizontal(canvas, targetY, targetStart, lane);
-    drawGraphVertical(canvas, lane, sourceY, targetY);
-  });
-
-  expanded.forEach((row, y) => writeGraphText(canvas[y]!, 0, row.structural));
-  expanded.forEach((row, y) => {
-    if (options.showTitles === false) return;
-    if (row.focusTitle !== undefined) {
-      writeGraphText(canvas[y]!, row.focusTitle.start, row.focusTitle.text);
-      return;
-    }
-    if (row.nodeRow === undefined) return;
-    const available = Math.max(0, width - row.nodeRow.titleStart);
-    writeGraphText(
-      canvas[y]!,
-      row.nodeRow.titleStart,
-      truncateToWidth(row.nodeRow.node.label, available, "…"),
-    );
-  });
-
-  const lines = canvas.map((cells, y) => {
-    const nodeRow = expanded[y]?.nodeRow;
-    const focus = expanded[y]?.focusTitle;
-    let output = "";
-    let mode: "edge" | "marker" | "title" | "muted-title" | "focus-title" = "edge";
-    let segment = "";
-    const flush = (): void => {
-      if (segment.length === 0) return;
-      output +=
-        mode === "marker"
-          ? palette.bold(graphNodeStyle(nodeRow?.node.type ?? "", segment, palette))
-          : mode === "title"
-            ? palette.muted(segment)
-            : mode === "muted-title"
-              ? palette.dim(segment)
-              : mode === "focus-title"
-                ? palette.selected(segment)
-                : palette.border(segment);
-      segment = "";
-    };
-    cells.forEach((cell, x) => {
-      const nextMode =
-        focus !== undefined && x >= focus.start && x < focus.end
-          ? "focus-title"
-          : nodeRow === undefined || x < nodeRow.markerStart
-            ? "edge"
-            : x < nodeRow.markerEnd
-              ? "marker"
-              : x >= nodeRow.titleStart && cell.trim().length > 0
-                ? nodeRow.node.muted
-                  ? "muted-title"
-                  : "title"
-                : "edge";
-      if (nextMode !== mode) {
-        flush();
-        mode = nextMode;
-      }
-      segment += cell;
-    });
-    flush();
-    return truncateToWidth(output.trimEnd(), width, "…");
-  });
-  return { lines, nodeLines };
-}
-
-function drawGraphHorizontal(canvas: string[][], y: number, from: number, to: number): void {
-  const left = Math.min(from, to);
-  const right = Math.max(from, to);
-  for (let x = left; x <= right; x += 1) mergeGraphCell(canvas, y, x, "─");
-}
-
-function drawGraphVertical(canvas: string[][], x: number, from: number, to: number): void {
-  const top = Math.min(from, to);
-  const bottom = Math.max(from, to);
-  for (let y = top; y <= bottom; y += 1) mergeGraphCell(canvas, y, x, "│");
-}
-
-function mergeGraphCell(canvas: string[][], y: number, x: number, value: string): void {
-  const row = canvas[y];
-  if (row === undefined || x < 0 || x >= row.length) return;
-  const previous = row[x];
-  row[x] = previous === " " || previous === value ? value : "┼";
-}
-
-function writeGraphText(row: string[], start: number, value: string): void {
-  let x = start;
-  for (const grapheme of graphGraphemes(value)) {
-    const cells = Math.max(0, visibleWidth(grapheme));
-    if (cells === 0 || x + cells > row.length) break;
-    row[x] = grapheme;
-    for (let offset = 1; offset < cells; offset += 1) row[x + offset] = "";
-    x += cells;
-  }
-}
-
-function normalizeGraphEdges(
-  edges: readonly { source: string; target: string; relation?: string }[],
-  byId: ReadonlyMap<string, GraphNodeView>,
-  reverseDisplayEdges: Readonly<Record<string, string>> | undefined,
-  compareNodes: (left: GraphNodeView, right: GraphNodeView) => number,
-): GraphDisplayEdge[] {
-  const valid = edges
-    .filter((edge) => edge.source !== edge.target && byId.has(edge.source) && byId.has(edge.target))
-    .map((edge) => {
-      const relation = edge.relation ?? "related";
-      const sourceType = byId.get(edge.source)!.type;
-      const reversed = reverseDisplayEdges?.[`${sourceType}.${relation}`];
-      return reversed === undefined
-        ? { source: edge.source, target: edge.target, relation }
-        : { source: edge.target, target: edge.source, relation: reversed };
-    })
-    .sort((left, right) => graphEdgeKey(left).localeCompare(graphEdgeKey(right)));
-  const byPair = new Map<string, GraphDisplayEdge[]>();
-  for (const edge of valid) {
-    const pair = [edge.source, edge.target].sort().join("\u0000");
-    const list = byPair.get(pair) ?? [];
-    list.push(edge);
-    byPair.set(pair, list);
-  }
-  const output: GraphDisplayEdge[] = [];
-  for (const pairEdges of byPair.values()) {
-    const directions = new Set(pairEdges.map((edge) => `${edge.source}\u0000${edge.target}`));
-    const reciprocal = directions.size > 1;
-    if (!reciprocal) {
-      const seen = new Set<string>();
-      for (const edge of pairEdges) {
-        const key = graphEdgeKey(edge);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        output.push(edge);
-      }
-      continue;
-    }
-    const [leftId, rightId] = [pairEdges[0]!.source, pairEdges[0]!.target].sort((left, right) =>
-      compareNodes(byId.get(left)!, byId.get(right)!),
-    );
-    const forward = pairEdges.filter((edge) => edge.source === leftId && edge.target === rightId);
-    const labels = [
-      ...new Set((forward.length > 0 ? forward : pairEdges).map((edge) => edge.relation)),
-    ].sort();
-    output.push({ source: leftId!, target: rightId!, relation: labels.join("/") || "related" });
-  }
-  return output.sort((left, right) => graphEdgeKey(left).localeCompare(graphEdgeKey(right)));
-}
-
-function choosePrimaryGraphEdges(
-  edges: readonly GraphDisplayEdge[],
-  byId: ReadonlyMap<string, GraphNodeView>,
-  compareNodes: (left: GraphNodeView, right: GraphNodeView) => number,
-  primaryParentPreferences: Readonly<Record<string, readonly string[]>> | undefined,
-): Map<string, GraphDisplayEdge> {
-  const output = new Map<string, GraphDisplayEdge>();
-  const sorted = [...edges].sort(
-    (left, right) =>
-      compareNodes(byId.get(left.target)!, byId.get(right.target)!) ||
-      parentPreferenceRank(left, byId, primaryParentPreferences) -
-        parentPreferenceRank(right, byId, primaryParentPreferences) ||
-      compareNodes(byId.get(left.source)!, byId.get(right.source)!) ||
-      left.relation.localeCompare(right.relation),
-  );
-  for (const edge of sorted) {
-    if (output.has(edge.target)) continue;
-    let ancestor: string | undefined = edge.source;
-    let cyclic = false;
-    while (ancestor !== undefined) {
-      if (ancestor === edge.target) {
-        cyclic = true;
-        break;
-      }
-      ancestor = output.get(ancestor)?.source;
-    }
-    if (!cyclic) output.set(edge.target, edge);
-  }
-  return output;
-}
-
-function parentPreferenceRank(
-  edge: GraphDisplayEdge,
-  byId: ReadonlyMap<string, GraphNodeView>,
-  preferences: Readonly<Record<string, readonly string[]>> | undefined,
-): number {
-  const childType = byId.get(edge.target)?.type;
-  const parentType = byId.get(edge.source)?.type;
-  if (childType === undefined || parentType === undefined) return Number.MAX_SAFE_INTEGER;
-  const order = preferences?.[childType];
-  const index = order?.indexOf(parentType) ?? -1;
-  return index < 0 ? Number.MAX_SAFE_INTEGER : index;
-}
-
-function graphNodeCompare(
-  left: GraphNodeView,
-  right: GraphNodeView,
-  hierarchy?: readonly string[],
-): number {
-  return (
-    graphTypeRank(left.type, hierarchy) - graphTypeRank(right.type, hierarchy) ||
-    left.type.localeCompare(right.type) ||
-    left.label.localeCompare(right.label) ||
-    left.id.localeCompare(right.id)
-  );
-}
-
-function graphTypeRank(type: string, configured?: readonly string[]): number {
-  const normalized = type.toLocaleLowerCase("en-US");
-  const order = configured ?? [
-    "goal",
-    "objective",
-    "problem",
-    "requirement",
-    "architecture",
-    "decision",
-    "change",
-    "hypothesis",
-    "claim",
-    "literature",
-    "method",
-    "experiment",
-    "ablation",
-    "implementation",
-    "metric",
-    "evidence",
-    "result",
-    "verification",
-    "gate",
-    "report",
-  ];
-  const index = order.findIndex(
-    (candidate) => normalized === candidate || normalized.includes(candidate),
-  );
-  return index < 0 ? order.length : index;
-}
-
-function graphEdgeKey(edge: GraphDisplayEdge): string {
-  return `${edge.source}\u0000${edge.relation}\u0000${edge.target}`;
-}
-
-function formatGraphRelation(value: string): string {
-  const normalized = value
-    .replace(/^target_claims$/u, "claims")
-    .replace(/^tested_by$/u, "tests")
-    .replace(/^applies_to$/u, "applies")
-    .replace(/^negative_evidence$/u, "neg-evidence")
-    .replace(/^change_requests$/u, "changes")
-    .replace(/_/gu, "-");
-  return truncateToWidth(normalized, 18, "…");
-}
-
-function compactGraphPrefix(prefix: string, width: number): string {
-  const budget = Math.max(3, Math.min(12, Math.floor(width / 3)));
-  if (visibleWidth(prefix) <= budget) return prefix;
-  return `…${truncateToWidth(prefix.slice(-(budget - 1)), budget - 1, "")}`;
-}
-
-function graphBadge(type: string, width: number): string {
-  if (width >= 48)
-    return `[${truncateToWidth(type.replace(/_/gu, "-"), Math.max(1, width - 2), "…")}]`;
-  const known: Readonly<Record<string, string | undefined>> = {
-    hypothesis: "hy",
-    literature: "li",
-    paper: "pa",
-    claim: "cl",
-    experiment: "ex",
-    method: "mt",
-    metric: "me",
-    prerequisite: "pr",
-    decision: "de",
-    ablation: "ab",
-    asset: "as",
-    gate: "gt",
-    implementation: "im",
-    run: "rn",
-    evidence: "ev",
-    report: "rp",
-    "change-request": "cr",
-  };
-  const normalized = type.toLocaleLowerCase("en-US").replace(/_/gu, "-");
-  const initials = normalized
-    .split("-")
-    .map((part) => part[0] ?? "")
-    .join("")
-    .slice(0, 2);
-  const fallback = Array.from(normalized)
-    .filter((character) => /[\p{L}\p{N}]/u.test(character))
-    .slice(0, 2)
-    .join("");
-  return `[${known[normalized] ?? initials.padEnd(2, fallback[1] ?? fallback[0] ?? "?")}]`;
-}
-
-function graphNodeStyle(type: string, value: string, palette: KoniPalette): string {
-  const styles = [
-    palette.accent,
-    palette.info,
-    palette.success,
-    palette.warning,
-    palette.error,
-  ] as const;
-  const hash = Array.from(type).reduce(
-    (total, character) => total + (character.codePointAt(0) ?? 0),
-    0,
-  );
-  return styles[hash % styles.length]!(value);
-}
-
-function graphGraphemes(value: string): string[] {
-  if (Intl.Segmenter === undefined) return Array.from(value);
-  return [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(value)].map(
-    (entry) => entry.segment,
-  );
-}
-
 function overlayModal(base: readonly string[], modal: readonly string[], width: number): string[] {
   const output = [...base];
   const modalWidth = Math.min(width, Math.max(...modal.map(visibleWidth), 1));
@@ -3908,10 +3678,10 @@ function annotateOperateHitTargets(
     frame,
     rect: layout.runs,
     ids: snapshot.view.runs.map((run) => `run:${run.id}`),
-    selectedLine: selectedRunIndex * 2,
+    selectedLine: 1 + selectedRunIndex * 2,
     scroll: snapshot.scroll.runs,
     fixedFooter: false,
-    leadingLines: 0,
+    leadingLines: 1,
   });
 
   const tickets = snapshot.view.selectedRun?.tickets ?? [];
@@ -3952,11 +3722,13 @@ function annotateOperateControlHitTargets(
   layout: OperateLayout,
   snapshot: ControlCenterControllerSnapshot,
 ): void {
-  for (const tab of ["overview", "plan"] as const) {
+  for (const tab of ["graph", "plan", "overview"] as const) {
     frame.addTextHitTarget(`details-tab:${tab}`, titleCaseLabel(tab), layout.details);
   }
   frame.addTextHitTarget("ticket-tab:previous", "‹", layout.tickets);
   frame.addTextHitTarget("ticket-tab:next", "›", layout.tickets);
+  frame.addTextHitTarget("run-tab:previous", "‹", layout.runs);
+  frame.addTextHitTarget("run-tab:next", "›", layout.runs);
   const question = snapshot.view.selectedRun?.questions?.[snapshot.questionIndex];
   if (question === undefined || layout.questions === undefined) return;
   question.options.forEach((option, index) => {
@@ -4175,7 +3947,6 @@ function panelFromHitTarget(target: string): ControlCenterPanel | undefined {
     "details",
     "questions",
     "activity",
-    "graph",
   ]).has(panel as ControlCenterPanel)
     ? (panel as ControlCenterPanel)
     : undefined;
@@ -4187,6 +3958,10 @@ const HELP: Readonly<
     {
       title: string;
       description: string;
+      /** Repository-docs-style text diagram rendered under “How it fits”. */
+      diagram?: readonly string[];
+      /** Short paragraphs explaining why the surface behaves the way it does. */
+      philosophy?: readonly string[];
       actions: readonly (readonly [string, string])[];
     }
   >
@@ -4195,8 +3970,18 @@ const HELP: Readonly<
     title: "Runs",
     description:
       "Each run is a durable, isolated execution against the target branch shown in its row. Koni plans and works in its run worktree; only you publish a merge-ready result.",
+    diagram: [
+      "new ─▶ plan ─▶ approve ─▶ execute ─▶ verify ─▶ merge ready",
+      "         │         ▲          │                    │",
+      "     questions ────┘       blocked ─▶ retry     you merge",
+    ],
+    philosophy: [
+      "A run owns its worktree and branch, so Koni can plan and work continuously without touching your checkout. Nothing reaches the target branch until you authorize the merge.",
+      "The tab line filters the list — Active is the working set; paused, blocked, and concluded runs wait one tab away instead of crowding it. Rows are projections, never controls: selecting, filtering, and scrolling cannot mutate a run.",
+    ],
     actions: [
       ["↑/↓ or j/k", "select run"],
+      ["←/→ or [ ]", "switch filter tab"],
       ["Enter", "focus the run overview"],
       ["Space", "pause or resume"],
       ["m", "merge a ready run"],
@@ -4207,6 +3992,14 @@ const HELP: Readonly<
     title: "Tickets",
     description:
       "The compiler derives tickets from the typed graph. Arrows only move the highlight; Enter selects the ticket and filters Details, Agents, and Graph to it. Esc returns to the run-wide view.",
+    diagram: [
+      "typed graph ─▶ compiler ─▶ tickets ─▶ steps ─▶ attempts",
+      "     ▲                                            │",
+      "     └────── receipts · checks · evidence ◀───────┘",
+    ],
+    philosophy: [
+      "Tickets are compiled, never hand-written: the board always reflects the current specification, and finished work flows back into the graph as receipts and evidence. Committing a ticket scopes every downstream panel to its graph neighborhood.",
+    ],
     actions: [
       ["↑/↓ or j/k", "highlight ticket"],
       ["Enter", "select and inspect ticket"],
@@ -4216,18 +4009,35 @@ const HELP: Readonly<
   details: {
     title: "Details",
     description:
-      "Overview keeps Objective, Run, Evidence, and Stages together; a blocked run leads with its reason and recovery options. Plan shows live planning activity until submission, then the concise human-readable plan.",
+      "Graph is the live feed of the run: its graph, active tickets, and working agents. Overview keeps Objective, Run, Evidence, and Stages together; a blocked run leads with its reason and recovery options. Plan shows live planning activity until submission, then the concise human-readable plan.",
+    diagram: [
+      "Graph ─▶ Plan ─▶ Overview",
+      "Objective ─▶ Run vitals ─▶ Evidence ─▶ Stages",
+      "                                      ● done ◐ current ○ pending",
+    ],
+    philosophy: [
+      "Overview is one scrollable document, not nested mini-views, so the run's state reads top to bottom. Enter runs only the compiler-authorized action of the current stage — the panel can explain everything but can only do what authority projected.",
+    ],
     actions: [
-      ["←/→ or [ ]", "switch tab"],
+      ["[ ]", "switch tab (←/→ on Plan/Overview)"],
       ["↑/↓ or j/k", "scroll"],
       ["Ctrl-O/o", "expand objective"],
       ["Enter", "run the current stage action"],
+      ["6", "jump to the Graph feed"],
     ],
   },
   questions: {
     title: "Questions",
     description:
       "Pending questions pause the responsible attempt. The inline panel previews the same choices, descriptions, None option, and notes used by the complete answer dialog.",
+    diagram: [
+      "agent hits ambiguity ─▶ durable question ─▶ your answer",
+      "                                                │",
+      "                        work resumes ◀──────────┘",
+    ],
+    philosophy: [
+      "A question is a durable decision boundary: the responsible work stops, your answer is recorded first, and only then does execution continue. Ambiguity never silently resolves itself.",
+    ],
     actions: [
       ["↑/↓ or j/k", "choose option"],
       ["←/→ or [ ]", "switch question"],
@@ -4239,6 +4049,14 @@ const HELP: Readonly<
     title: "Agents",
     description:
       "Active and past attempts remain visible as a semantic lineage tree. Run-wide rows include their ticket prefix; selecting a ticket narrows the list. Retry, rework, review, recovery, parent/child, and active-leaf context never exposes internal IDs.",
+    diagram: [
+      "Lead ─┬─ design-experiment · attempt 1",
+      "      │    └─ retry ─ attempt 2  ◀ active leaf",
+      "      └─ implement-asset · attempt 1",
+    ],
+    philosophy: [
+      "History is part of the record: failed and superseded attempts stay visible as lineage instead of disappearing, because recovery decisions need the whole tree. Every attempt keeps its complete Pi session for inspection.",
+    ],
     actions: [
       ["↑/↓ or j/k", "highlight attempt"],
       ["Enter", "open attempt chat"],
@@ -4250,24 +4068,47 @@ const HELP: Readonly<
     title: "Activity",
     description:
       "This durable feed combines compiler, graph, Git, and agent events. Green adds graph knowledge, yellow changes it, red deletes it, and timestamps show when each event happened.",
+    philosophy: [
+      "Activity is the human audit trail: it answers “what just happened and when” without asking you to reconstruct it from raw logs. Identifiers, paths, and digests are redacted so every row stays safe operator copy.",
+    ],
     actions: [
       ["↑/↓ or j/k", "scroll"],
       ["PgUp/PgDn", "scroll a page"],
     ],
   },
   graph: {
-    title: "Graph",
+    title: "Graph feed",
     description:
-      "The typed context graph is Koni's shared specification. Markers replace relationship lines at each node, while concise muted titles preserve topology without IDs or dense prose.",
+      "The Graph tab is the run's live feed: the typed context graph on the left, the active tickets exploring it on the right, and the agents working each ticket nested in its card. Connector lanes wire every active ticket to the exact nodes it changes.",
+    diagram: [
+      "[hypothesis] Continue research     ╭ ▍ Probe extraction",
+      " ├─<claims>─[claim] Signatures ────┤   ⚙ implementer",
+      " └─<methods>─[method] Probe ───────╯   opus · high · 48K",
+    ],
+    philosophy: [
+      "The graph is what the compiler compiles: every ticket, check, and gate is derived from these nodes and relationships, so reading it is reading the run's real contract. The feed adds the present tense: which tickets embody the plan right now, and which cognition is spending tokens on them.",
+      "Focusing a node or a ticket lights up its whole neighborhood — nodes, edges, lanes, and cards — while everything irrelevant greys out; Enter opens the node card or commits the ticket.",
+    ],
     actions: [
-      ["↑/↓ or j/k", "move between nodes"],
-      ["PgUp/PgDn", "scroll a page"],
+      ["←/→", "switch between graph and tickets"],
+      ["↑/↓ or j/k", "move the cursor"],
+      ["Enter", "open node card / commit ticket"],
+      ["[ ]", "switch details tab"],
+      ["PgUp/PgDn", "move a page"],
     ],
   },
   new_run: {
     title: "New Run",
     description:
       "A run pins one target branch, run type, and set of run-local overrides. Skipped stages remain visible in muted text; publishing the form asks authority to validate everything again and immediately creates a provisional Runs row.",
+    diagram: [
+      "goal prompt ─▶ run type ─▶ target branch ─▶ models",
+      "                                              │",
+      "        provisional row ◀── authority ◀── Start",
+    ],
+    philosophy: [
+      "Everything a run needs is pinned at creation — provider, models, stages, and target — so the run stays reproducible even while the project configuration moves on underneath it.",
+    ],
     actions: [
       ["Tab or ↑/↓", "move between controls"],
       ["←/→", "change a selector"],
@@ -4278,7 +4119,15 @@ const HELP: Readonly<
   plan_review: {
     title: "Review Plan",
     description:
-      "The four sections are independently authored concise review summaries. Empty steering approves; any steering changes the one action to Revise. After approval, Details → Plan keeps these concise review summaries available.",
+      "The four sections are independently authored concise review summaries. Empty steering approves; steering revises the current plan in the same planning session. After approval, Details → Plan keeps these concise review summaries available.",
+    diagram: [
+      "objective ─▶ planner ─▶ architecture · decisions · risk · verification",
+      "                              │",
+      "     steering ─▶ revise ◀─────┴────▶ approve ─▶ work begins",
+    ],
+    philosophy: [
+      "Work starts only after an explicit approval, so the exact revision you review is the contract execution receives. Steering continues the same planner session with a reset revision allowance and an immutable prior checkpoint.",
+    ],
     actions: [
       ["←/→ or [ ]", "switch section"],
       ["↑/↓ or j/k", "scroll"],
@@ -4290,6 +4139,9 @@ const HELP: Readonly<
     title: "Review Change Proposal",
     description:
       "A model may propose an upstream graph or specification change, but only the compiler publishes this bounded review and only you may approve or reject it. The surface starts with no selected outcome.",
+    philosophy: [
+      "Agents can propose but never decide: a specification change waits at this durable boundary until you record a decision, and Enter deliberately cannot record one — only Ctrl-Enter does.",
+    ],
     actions: [
       ["↑/↓ or j/k", "read the complete proposal"],
       ["Tab", "move through message, choice, and action"],
@@ -4432,6 +4284,9 @@ const HELP: Readonly<
     title: "Agent Chat",
     description:
       "This is the persisted Pi session itself: complete assistant messages, reasoning, calls, results, compaction, and branch points. Large items remain complete as ordered bounded parts. Only terminal and invisible-direction controls are stripped or replaced for safe display; canonical Pi JSONL is unchanged. Image bytes stay private while an ordered type-and-size attachment row remains visible. Steering and follow-ups still cross Koni authority before Pi receives them.",
+    philosophy: [
+      "You are reading the agent's real session, not a summary — which is why history is windowed instead of truncated. Messages you send cross Koni authority first, so steering an agent is as durable and auditable as any other operator action.",
+    ],
     actions: [
       ["←/→ or [ ]", "move to adjacent older/newer history windows"],
       ["PgUp/PgDn", "scroll within the current bounded window"],

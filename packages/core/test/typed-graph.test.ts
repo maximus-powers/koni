@@ -63,6 +63,36 @@ describe("typed graph and canonical bidirectional relationships", () => {
     ]);
   });
 
+  it("reports an edge-only delta as a modification of its canonical source node", () => {
+    const graph = new TypedGraph(schema, [
+      claim(),
+      { ...claim(), id: "claim-b", title: "Claim B" },
+      experiment(["claim-a"]),
+    ]);
+
+    const applied = graph.apply({
+      protocol: "koni.graph-delta.v1",
+      expectedGraphHash: graph.hash,
+      upsertNodes: [],
+      deleteNodes: [],
+      addEdges: [{ source: "claim-b", relation: "tested_by", target: "experiment-a" }],
+      removeEdges: [],
+    });
+
+    expect(applied.graph.edges()).toEqual([
+      { source: "experiment-a", relation: "tests", target: "claim-a" },
+      { source: "experiment-a", relation: "tests", target: "claim-b" },
+    ]);
+    expect(applied.changes).toEqual([
+      {
+        kind: "modified",
+        nodeId: "experiment-a",
+        nodeType: "experiment",
+        title: "Experiment A",
+      },
+    ]);
+  });
+
   it("rejects redundant inverse storage and stale deltas", () => {
     const badClaim = claim();
     badClaim.edges.tested_by = ["experiment-a"];
@@ -90,7 +120,9 @@ describe("typed graph and canonical bidirectional relationships", () => {
     const current = base.apply({
       protocol: "koni.graph-delta.v1",
       expectedGraphHash: staleHash,
-      upsertNodes: [{ node: { ...claim(), id: "claim-b", title: "Claim B" }, expectedNodeHash: null }],
+      upsertNodes: [
+        { node: { ...claim(), id: "claim-b", title: "Claim B" }, expectedNodeHash: null },
+      ],
       deleteNodes: [],
       addEdges: [],
       removeEdges: [],

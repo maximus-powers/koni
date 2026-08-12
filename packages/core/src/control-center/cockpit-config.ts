@@ -518,7 +518,7 @@ function compileOption(
       const supported = new Set([
         "all",
         "active",
-        "todo",
+        "queued",
         "blocked",
         "proposed",
         "closed",
@@ -547,7 +547,7 @@ function compileOption(
     upward_edge_policy: ["mapped_only"],
     secondary_edge_style: ["independent_right_lanes"],
     completion_marker: ["task_complete"],
-    default_tab: ["all", "active", "todo", "blocked", "proposed", "closed", "other"],
+    default_tab: ["all", "active", "queued", "blocked", "proposed", "closed", "other"],
     scope_mode: ["write_only"],
     gate_preview: ["compact"],
     compiler_effect: ["paused-full-compile-is-read-only"],
