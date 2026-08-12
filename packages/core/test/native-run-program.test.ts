@@ -4077,6 +4077,19 @@ describe("native compiler-authoritative run program", () => {
       maxNew: 120_000,
       providerOutputHeadroom: 128_000,
     });
+    expect(prepared.compactionSnapshot).toMatchObject({
+      plan: {
+        architecture: "See the authenticated context reissued after this checkpoint.",
+        decisions: "See the authenticated context reissued after this checkpoint.",
+        risk: "See the authenticated context reissued after this checkpoint.",
+        verification: "See the authenticated context reissued after this checkpoint.",
+      },
+      nextAction: prepared.spec.persona.initialPrompt,
+    });
+    expect(prepared.contextContent).toContain('"requiredOutput"');
+    expect(JSON.stringify(prepared.compactionSnapshot?.plan)).not.toContain(
+      "Planning is still in progress.",
+    );
 
     const exhaustedParent = attemptRecord(prepared.spec, "planning", "aborted");
     exhaustedParent.error = "input token budget exceeded";
@@ -4166,6 +4179,12 @@ describe("native compiler-authoritative run program", () => {
     });
     expect(prepared.spec.persona.systemPrompt).toContain("bounded to 16 total");
     expect(prepared.spec.persona.systemPrompt).toContain("narrowest objective-derived source root");
+    expect(prepared.spec.persona.systemPrompt).toContain(
+      "After compaction, use the checkpoint's exact repair findings as causal authority",
+    );
+    expect(prepared.spec.persona.systemPrompt).toContain(
+      "Do not reread immutable evidence inputs merely to reconstruct the finding's rationale",
+    );
     await persistWrites(project.projectRoot, prepared.artifactWrites ?? []);
 
     const attempt = attemptRecord(prepared.spec, "planning", "running");

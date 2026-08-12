@@ -1495,6 +1495,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       renderPathGrant(descriptor.readPaths, descriptor.writePaths),
       "Your attempt is incomplete until koni_submit_output returns an accepted receipt. After the final check or edit, call it immediately as the only tool in that assistant turn. A plain final assistant message is discarded and fails the attempt.",
       "Reason briefly, then act: once you have decided the next tool call, emit it in the same turn instead of continuing to deliberate. A turn that spends its whole output budget on reasoning is cut off before any tool call and the entire turn is lost. Never re-derive a conclusion you already reached in an earlier turn.",
+      "After compaction, use the checkpoint's exact repair findings as causal authority. Re-read only the mutable target files or one specific missing fact needed to apply and verify the repair. Do not reread immutable evidence inputs merely to reconstruct the finding's rationale; the authenticated finding already preserves that decision-relevant result.",
       "Read the koni_submit_output schema from its tool definition before calling it, and submit your real result on the first call. Never send placeholder, probing, or schema-discovery payloads: an accepted failed submission is terminal, cannot be retried, and permanently fails this assignment even if your actual work succeeded.",
       'Do the concrete work this step requires before you submit — author the proof, make the edit and run the check, or assemble and verify the candidate as the step demands; do not submit failed with little or no tool use. A failed submission is a genuine-impossibility last resort, and its blocker must be a specific self-contained diagnosis: the exact obstacle, what you tried, and why nothing within your grant can resolve it. An accepted failed submission is terminal and strands the whole run for operator recovery, so a terse or placeholder blocker (for example "test", "probe", "blocked") is never acceptable — never submit one.',
       ...implementationWriteGrantInstructions(
@@ -15465,14 +15466,19 @@ function toolExecutionMode(name: KoniToolName): "sequential" | "parallel" {
 }
 
 function compactionSnapshot(run: RunRecord, descriptor: AttemptDescriptor): KoniCompactionSnapshot {
-  const full = run.plan?.full ?? {};
+  // The context provider reissues the complete authenticated attempt context and current graph
+  // before the first request after every compaction. Repeating the full plan here makes that same
+  // authority appear twice and can consume a bounded worker's input allowance before it can finish
+  // a repair. The exact task-specific initial prompt is intentionally retained as nextAction: it
+  // contains unique planning, rework, approval, evidence, and recovery instructions.
+  const planReference = "See the authenticated context reissued after this checkpoint.";
   return {
     objective: run.objective,
     plan: {
-      architecture: full.architecture ?? "Planning is still in progress.",
-      decisions: full.decisions ?? "Planning is still in progress.",
-      risk: full.risk ?? "Planning is still in progress.",
-      verification: full.verification ?? "Planning is still in progress.",
+      architecture: planReference,
+      decisions: planReference,
+      risk: planReference,
+      verification: planReference,
     },
     graphRefs: descriptor.graph?.nodes().map((node) => `${node.type}: ${node.title}`) ?? [],
     touchedFiles: [],
