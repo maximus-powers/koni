@@ -26,9 +26,12 @@ complete immutable `koni/baseline/` tree. Pi-loaded registrars announce their ma
 Koni discovery events. Core verifies every manifest path, byte count, file hash, bundle digest,
 package identity, profile lineage, and compatibility range before use.
 
-Installation owns only `<project>/.koni`. It never mutates `.pi`, `.agents`, credentials, settings,
-community packages, prompts, themes, sessions, or unrelated agent-tool content such as `.claude` and
-`.codex`.
+Installation owns `<project>/.koni` plus one merge-owned entry in `<project>/.pi/settings.json`:
+`git:github.com/obra/superpowers`. It preserves every unrelated Pi setting and package entry and
+never reads or changes Pi credentials, sessions, `.agents`, `.claude`, or `.codex` content. Koni
+records whether it added the package entry in `.koni/.managed/pi-settings.json`. A later edit,
+filter, pin, removal, or duplicate of that owned entry is a conflict; update fails instead of
+replacing the user's bytes.
 
 ## Baseline plus project overlay
 
@@ -96,14 +99,12 @@ effect, pending-conflict removal, resolution history, and lifecycle generation i
 > therefore survive either resolution. Historical conflicts without field provenance and explicit
 > `/` whole-document fallbacks retain the verified-byte replacement behavior described above.
 
-> **Stock ticket-reissue compatibility: 2026-07-19 (`primary-integrator/root`):** Compiler fixpoint
-> verification may prove that a previously closed ticket's obligation is applicable again after its
-> evidence becomes stale. Current Coding and Research profiles now configure a compiler-only
-> `closed -> todo` transition named `reopen-stale-obligation`. Runs pinned to the exact
-> pre-transition stock lifecycle-machine hashes receive only that same additive transition in
-> memory. Customized lifecycle machines, human actors, and every other source/target pair continue
-> to fail closed. The pinned configuration, catalog bytes, historical attempts, and terminal
-> receipts are not rewritten.
+> **Ticket reissue: 2026-08-10:** Compiler fixpoint verification may prove that a previously closed
+> ticket's obligation is applicable again after its evidence becomes stale. Current Coding and
+> Research profiles configure a compiler-only `closed -> queued` transition named
+> `reopen-stale-obligation`. Customized lifecycle machines, human actors, and every other
+> source/target pair continue to fail closed. Koni does not rewrite pinned configuration, catalog
+> bytes, historical attempts, or terminal receipts, and it does not add a legacy state alias.
 
 > **Raw Configure-document transition: 2026-07-17 (`config_document_authority/root`):** The
 > structured-YAML editor above remains supported, and is now joined by one raw authored-source
@@ -160,9 +161,9 @@ snapshots remain immutable. The retirement applies only to future compilation of
 > no version-only or wildcard migration authority.
 
 > **Fresh conversational roots for reissued obligations: 2026-07-19 (`primary-integrator/root`):**
-> The compiler-only `closed -> todo` transition above reopens the semantic obligation and preserves
-> every historical attempt, transcript, receipt, and step link. It does not mean that the old
-> terminal Pi conversation remains suitable context. Tickets and assignment attempts now carry a
+> The compiler-only `closed -> queued` transition above reopens the semantic obligation and
+> preserves every historical attempt, transcript, receipt, and step link. It does not mean that the
+> old terminal Pi conversation remains suitable context. Tickets and assignment attempts now carry a
 > monotonic execution epoch. The first attempt of a new epoch is an independent Pi session root,
 > while retries and rework inside that epoch may still branch from its current conversation.
 > Existing records remain readable. When an already-reissued legacy ticket has no explicit epoch,

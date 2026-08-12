@@ -21,8 +21,8 @@ project .koni overlay ──► one authority per Git common directory
                           └── questions + approval + lifecycle
                                       │
                                       ▼
-                           one contained Pi AgentSession
-                           per immutable Koni attempt
+                           contained Pi runtime hosts
+                           for authenticated Koni sessions
 ```
 
 TypeScript Core is the sole authority for configuration, graph mutations, scheduling, durable state,
@@ -47,11 +47,13 @@ discovery surfaces, and the two profile packages contribute immutable passive ba
 [Pi-native profile lifecycle](profile-lifecycle.md).
 
 An autonomous attempt receives only compiler-selected, content-hashed resources and least-privilege
-grants implemented by TypeScript Core. Its Pi session is immutable and linear. Retry, rework,
-review, recovery, and integration are new Koni-authorized attempts with explicit parent attempt and
-session lineage. They are not in-session branch switching. Provider admission allows one transport
-with zero automatic provider retries. An ambiguous response stays durably reserved instead of
-causing another hidden request.
+grants implemented by TypeScript Core. Ordinary retry, rework, review, recovery, and integration are
+new Koni-authorized attempts with explicit parent attempt and session lineage. New planned runs have
+one deliberate exception: initial planning through approval is one authenticated attempt and Pi
+session with append-only revision checkpoints. Its disposable runtime host may be released and
+restored from the same authenticated session file. Provider admission allows one transport with zero
+automatic provider retries. An ambiguous response stays durably reserved instead of causing another
+hidden request.
 
 ## Operator surfaces
 
@@ -154,6 +156,19 @@ retain destination intent as well as source history.
 
 Before approval, no permanent run ref exists. Opening a pinned run later recompiles its captured
 files and rejects hash drift. It never silently uses the project's current configuration.
+
+For a new agent-planned run, the planning boundary also pins one planning attempt ID and one Pi
+session ID. Revision 0 submits the complete planning artifact. Explicit operator steering appends a
+new revision under those same identities and submits a patch against the latest compiler-valid
+artifact. Each validated artifact is an immutable, hash-bound checkpoint; approval binds the exact
+latest checkpoint. Compiler rejection remains correctable inside the current revision and does not
+reset its allowance. Only explicit steering starts another revision and captures a new token-budget
+baseline. Provider usage, cost, transcript history, repository discovery, questions, evidence, and
+duplicate-call detection remain cumulative across the session.
+
+Runs created before this contract have no `planningSession` marker. They retain their historical
+multi-attempt planning lineage, session files, conversation forks, revise behavior, and approval
+checks without migration or fabricated checkpoints.
 
 ## Graph compilation
 

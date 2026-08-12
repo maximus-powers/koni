@@ -48,6 +48,25 @@ terminal worker sessions with no durable output open a no-output blocker before 
 Neither circuit invents completion or discards the failed evidence, and operator recovery stays
 explicit.
 
+### Continuous planning sessions
+
+A newly admitted planner pins one attempt ID, one Pi session ID, and revision 0 before provider
+work. The live provider process is a disposable host rather than the session identity. Köni releases
+that host while waiting for plan review or an operator answer and restores it from the same
+authenticated session JSONL when work continues.
+
+Revision 0 publishes a complete planning artifact. Explicit steering appends an authority-bound
+message and a contiguous revision record, captures cumulative provider totals as the revision's
+budget baseline, and asks for a patch against the latest validated artifact. Compiler failures and
+follow-up corrections remain in that revision. Repository discovery, question/evidence records,
+duplicate-call detection, transcript history, provider usage, and cost ledgers remain cumulative.
+Every validated revision is an immutable checkpoint whose artifact, graph, transcript, launch spec,
+and grant hashes remain bound in the run record. Approval seals only the latest checkpoint.
+
+The `planningSession` marker is the compatibility boundary. Historical runs without it keep their
+existing multi-attempt launch specs, session files, conversation forks, terminal artifacts, revise
+path, and approval rules byte-for-byte. Runtime code never infers continuity from attempt count.
+
 The compiler carries each profile's `review_failure_reopen_from`, including the equivalent
 structured reopen route, into the immutable derived ticket and durable run record. The authority
 records the failed reviewer attempt ID and blocker. It reopens the configured owner plus its
@@ -197,7 +216,7 @@ retired or missing planning checkout does not activate the exception and still f
 A compiled ticket normally moves through:
 
 ```text
-proposed → todo → in_progress → integrating → closed
+proposed → queued → in_progress → integrating → closed
              ▲          │             │
              └──────────┴── blocked ◄─┘
 ```
@@ -649,8 +668,8 @@ fresh model prompt. The model sees ordered semantic stage titles and content, by
 truncation, and resolved human decisions. It does not see compiler hashes, run, stage, session, or
 batch IDs, or absolute paths.
 
-Git-common projection roots are state-dependent. Before `start`, in `todo`, and after integration in
-a terminal state, the integration checkout is authoritative because no private ticket checkout
+Git-common projection roots are state-dependent. Before `start`, in `queued`, and after integration
+in a terminal state, the integration checkout is authoritative because no private ticket checkout
 exists. Once a ticket enters an active state, ticket-local projection, context, review, worker, and
 acceptance paths require its exact canonical worktree lease. Missing, relative, redirected,
 wrong-repository, and wrong-branch leases fail closed. No active agent or evaluation path falls back

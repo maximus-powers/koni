@@ -1,20 +1,35 @@
 # Simplify Ticket Status Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans and superpowers:test-driven-development. Complete tasks in order and do not write production code before the task's focused test has failed for the expected reason.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans and
+> superpowers:test-driven-development. Complete tasks in order and do not write production code
+> before the task's focused test has failed for the expected reason.
 
-**Goal:** Replace the ticket-specific `todo` and `ready` states with one `queued` state, remove ticket-level `failed`, and delete the five disposable smoke runs that can contain the legacy values.
+**Goal:** Replace the ticket-specific `todo` and `ready` states with one `queued` state, remove
+ticket-level `failed`, and delete the five disposable smoke runs that can contain the legacy values.
 
-**Architecture:** `TicketStatus` is the fail-closed durable boundary and contains exactly `proposed | queued | running | review | blocked | completed | cancelled`. Profile lifecycle configuration, compilation, scheduling, authority, protocol, and TUI presentation all use the same vocabulary. Assignment failure remains a failed step inside a blocked ticket. There are no compatibility aliases or migrations.
+**Architecture:** `TicketStatus` is the fail-closed durable boundary and contains exactly
+`proposed | queued | running | review | blocked | completed | cancelled`. Profile lifecycle
+configuration, compilation, scheduling, authority, protocol, and TUI presentation all use the same
+vocabulary. Assignment failure remains a failed step inside a blocked ticket. There are no
+compatibility aliases or migrations.
 
-**Tech Stack:** TypeScript 5.9, Node.js 22+, Vitest, YAML profile bundles, Koni authority RPC/TUI, Git managed worktrees and refs.
+**Tech Stack:** TypeScript 5.9, Node.js 22+, Vitest, YAML profile bundles, Koni authority RPC/TUI,
+Git managed worktrees and refs.
 
 ## Global Constraints
 
-- Preserve `failed` for ticket steps, attempts, provider outcomes, checks, actions, journals, settlements, planning revisions, and run lifecycle phases.
-- Preserve unrelated `ready` vocabularies such as Git lifecycle, authority readiness, provider/session readiness, transcript state, and graph/domain fields that are not ticket statuses.
-- Delete only the five named smoke runs and their Koni-owned resources. Do not resume, merge, push, or publish them.
-- Do not add a loader fallback, record migration, deprecated union member, protocol alias, or schema-version branch.
-- Inspect `git status --short` and relevant diffs before every task. Preserve pre-existing changes and stage only task-owned hunks. Leave overlapping changes unstaged when safe isolation is impossible.
+- Preserve `failed` for ticket steps, attempts, provider outcomes, checks, actions, journals,
+  settlements, planning revisions, and run lifecycle phases.
+- Preserve unrelated `ready` vocabularies such as Git lifecycle, authority readiness,
+  provider/session readiness, transcript state, and graph/domain fields that are not ticket
+  statuses.
+- Delete only the five named smoke runs and their Koni-owned resources. Do not resume, merge, push,
+  or publish them.
+- Do not add a loader fallback, record migration, deprecated union member, protocol alias, or
+  schema-version branch.
+- Inspect `git status --short` and relevant diffs before every task. Preserve pre-existing changes
+  and stage only task-owned hunks. Leave overlapping changes unstaged when safe isolation is
+  impossible.
 - Keep the Koni TUI visible in the left cmux panel.
 
 ---
@@ -39,9 +54,13 @@
 - [ ] Confirm all five authority deletions settled as `deleted`.
 - [ ] Inventory exact run directories, Koni refs, and registered/managed worktrees before cleanup.
 - [ ] Stop only the smoke-root TUI/authority process when necessary to reset its runtime namespace.
-- [ ] Remove only worktrees and refs bound to the five exact run IDs. Preserve target branches and ordinary repository state.
-- [ ] Move retained `.git/koni` runtime state to a recoverable backup location, recreate only the empty runtime layout required by Koni, and leave working-tree `.koni` profile configuration untouched.
-- [ ] Restart the visible left-panel TUI and prove neither smoke root has a run record, Koni run ref, or managed run worktree for any of the five IDs.
+- [ ] Remove only worktrees and refs bound to the five exact run IDs. Preserve target branches and
+      ordinary repository state.
+- [ ] Move retained `.git/koni` runtime state to a recoverable backup location, recreate only the
+      empty runtime layout required by Koni, and leave working-tree `.koni` profile configuration
+      untouched.
+- [ ] Restart the visible left-panel TUI and prove neither smoke root has a run record, Koni run
+      ref, or managed run worktree for any of the five IDs.
 
 No code commit is created for this operator-state task.
 
@@ -59,12 +78,20 @@ No code commit is created for this operator-state task.
 - Modify: `packages/research-profile/koni/baseline/rules/lifecycle.yaml`
 - Modify: profile tests that assert lifecycle state names
 
-- [ ] Add a durable-boundary test proving that `todo`, `ready`, and ticket-level `failed` are rejected, `queued` is accepted, and a blocked ticket with a failed step remains valid.
-- [ ] Change configured-lifecycle tests to require `queued` as the initial state, the approval destination, the runnable semantic state, the unblock/interrupt/reopen destination, and a retiring state.
+- [ ] Add a durable-boundary test proving that `todo`, `ready`, and ticket-level `failed` are
+      rejected, `queued` is accepted, and a blocked ticket with a failed step remains valid.
+- [ ] Change configured-lifecycle tests to require `queued` as the initial state, the approval
+      destination, the runnable semantic state, the unblock/interrupt/reopen destination, and a
+      retiring state.
 - [ ] Run only those new assertions and verify RED against the legacy vocabulary.
-- [ ] Make `TicketStatus` and its parser allow-list exactly `proposed | queued | running | review | blocked | completed | cancelled`; keep the ticket-step allow-list unchanged.
-- [ ] Rename only the profile-configured ticket lifecycle state `todo` to `queued`, including transitions and retirement rules. Update configured lifecycle mapping and validation accordingly.
-- [ ] Run the focused store, configured-lifecycle, coding-profile, and research-profile tests and verify GREEN.
+- [ ] Make `TicketStatus` and its parser allow-list exactly
+      `proposed | queued | running | review | blocked | completed | cancelled`; keep the ticket-step
+      allow-list unchanged.
+- [ ] Rename only the profile-configured ticket lifecycle state `todo` to `queued`, including
+      transitions and retirement rules. Update configured lifecycle mapping and validation
+      accordingly.
+- [ ] Run the focused store, configured-lifecycle, coding-profile, and research-profile tests and
+      verify GREEN.
 - [ ] Commit only isolated task-owned hunks when safe.
 
 ---
@@ -82,13 +109,19 @@ No code commit is created for this operator-state task.
 - Modify: `packages/core/src/compiler/run-program.ts`
 - Modify additional compiler/scheduler fixtures identified by typecheck
 
-- [ ] Convert representative admission tests from both legacy waiting states to `queued`, and assert that queued tickets remain dependency-, grant-, and concurrency-gated exactly as before.
-- [ ] Add or update compiler assertions proving executable, control, integration, proposal-approved, retry, rework, and reopened tickets are emitted or returned as `queued`.
+- [ ] Convert representative admission tests from both legacy waiting states to `queued`, and assert
+      that queued tickets remain dependency-, grant-, and concurrency-gated exactly as before.
+- [ ] Add or update compiler assertions proving executable, control, integration, proposal-approved,
+      retry, rework, and reopened tickets are emitted or returned as `queued`.
 - [ ] Run the focused assertions and verify RED before production edits.
-- [ ] Replace ticket-specific `todo`/`ready` predicates and assignments with `queued` across scheduler, change control, project-store ticket snapshots, and compiler output.
-- [ ] Remove ticket-level `failed` from terminal/source predicates; terminal failure evidence is a blocked ticket with a failed step.
-- [ ] Preserve projection property names such as `ReadyAssignment` and `.ready` when they mean scheduler output rather than durable ticket status.
-- [ ] Run focused scheduler, change-control, compiler, graph-rule, and typecheck checks and verify GREEN.
+- [ ] Replace ticket-specific `todo`/`ready` predicates and assignments with `queued` across
+      scheduler, change control, project-store ticket snapshots, and compiler output.
+- [ ] Remove ticket-level `failed` from terminal/source predicates; terminal failure evidence is a
+      blocked ticket with a failed step.
+- [ ] Preserve projection property names such as `ReadyAssignment` and `.ready` when they mean
+      scheduler output rather than durable ticket status.
+- [ ] Run focused scheduler, change-control, compiler, graph-rule, and typecheck checks and verify
+      GREEN.
 - [ ] Commit only isolated task-owned hunks when safe.
 
 ---
@@ -104,11 +137,17 @@ No code commit is created for this operator-state task.
 - Modify: `packages/core/src/authority/run-engine.ts`
 - Modify: `packages/core/src/compiler/run-program.ts` if authority compilation paths overlap
 
-- [ ] Update representative tests to prove approval, retry, bounded rework, resolver release, compiler revalidation, and interruption return tickets to `queued`.
-- [ ] Prove failed assignment settlement remains `{ ticket.status: "blocked", step.status: "failed" }` and terminal recovery consumes that evidence.
-- [ ] Run those focused assertions and core typecheck to verify RED from remaining legacy ticket comparisons/assignments.
-- [ ] Replace ticket-specific waiting-state reads/writes with `queued` and remove ticket-level failed branches throughout run authority.
-- [ ] Preserve attempt/provider/action/planning/run `failed` and Git/promotion `ready` state machines.
+- [ ] Update representative tests to prove approval, retry, bounded rework, resolver release,
+      compiler revalidation, and interruption return tickets to `queued`.
+- [ ] Prove failed assignment settlement remains
+      `{ ticket.status: "blocked", step.status: "failed" }` and terminal recovery consumes that
+      evidence.
+- [ ] Run those focused assertions and core typecheck to verify RED from remaining legacy ticket
+      comparisons/assignments.
+- [ ] Replace ticket-specific waiting-state reads/writes with `queued` and remove ticket-level
+      failed branches throughout run authority.
+- [ ] Preserve attempt/provider/action/planning/run `failed` and Git/promotion `ready` state
+      machines.
 - [ ] Run focused authority integration tests and core typecheck; verify GREEN.
 - [ ] Commit only isolated task-owned hunks when safe.
 
@@ -129,11 +168,14 @@ No code commit is created for this operator-state task.
 - Modify: `packages/core/src/pi/interactive-tools.ts`
 - Modify public docs only where they name a ticket state
 
-- [ ] Add/update protocol tests proving `queued` is accepted and `todo`, `ready`, and ticket-level `failed` are rejected.
+- [ ] Add/update protocol tests proving `queued` is accepted and `todo`, `ready`, and ticket-level
+      `failed` are rejected.
 - [ ] Update surface tests to require a `queued` ticket tab and prove there is no `todo` tab option.
-- [ ] Represent failure attention as a blocked ticket and failed step, retaining recovery/error presentation.
+- [ ] Represent failure attention as a blocked ticket and failed step, retaining recovery/error
+      presentation.
 - [ ] Run the focused assertions and verify RED.
-- [ ] Update ticket-only parsing, summary counts, view-model filters, tab IDs/defaults/labels, interactive tools, and public ticket-state documentation.
+- [ ] Update ticket-only parsing, summary counts, view-model filters, tab IDs/defaults/labels,
+      interactive tools, and public ticket-state documentation.
 - [ ] Preserve transcript/controller/Git uses of `ready` and all non-ticket failure presentation.
 - [ ] Run focused protocol, summary, control-center, and operator tests and verify GREEN.
 - [ ] Commit only isolated task-owned hunks when safe.
@@ -142,8 +184,10 @@ No code commit is created for this operator-state task.
 
 ### Task 6: Complete repository verification and the invariant audit
 
-- [ ] Search production and tests for ticket-status comparisons, assignments, parser lists, lifecycle states, TUI tabs, and fixtures containing `todo`, `ready`, or `failed`.
-- [ ] Classify every remaining match. Fix only matches that are ticket-status vocabulary; preserve unrelated state machines and ordinary prose.
+- [ ] Search production and tests for ticket-status comparisons, assignments, parser lists,
+      lifecycle states, TUI tabs, and fixtures containing `todo`, `ready`, or `failed`.
+- [ ] Classify every remaining match. Fix only matches that are ticket-status vocabulary; preserve
+      unrelated state machines and ordinary prose.
 - [ ] Run all focused tests from Tasks 2-5.
 - [ ] Run:
 
@@ -157,7 +201,8 @@ npm run build
 git diff --check
 ```
 
-- [ ] Repeat the two smoke-root inventories and prove no deleted run or owned resource reappeared; confirm `/Users/max/Desktop/updog` was untouched.
+- [ ] Repeat the two smoke-root inventories and prove no deleted run or owned resource reappeared;
+      confirm `/Users/max/Desktop/updog` was untouched.
 - [ ] Report the following invariant audit explicitly:
 
 ```text
@@ -174,4 +219,5 @@ Five smoke runs and owned resources are absent: PASS/FAIL
 No migration or compatibility alias was added: PASS/FAIL
 ```
 
-- [ ] Commit any isolated audit-only correction when safe; otherwise leave overlapping changes unstaged and report them.
+- [ ] Commit any isolated audit-only correction when safe; otherwise leave overlapping changes
+      unstaged and report them.

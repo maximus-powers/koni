@@ -18,9 +18,16 @@ start an authority, mutate Pi settings or resources, or stop Pi. Inert means no 
 start, recovery, provider request, model load, or durable effect.
 
 In a trusted initialized project, Pi TUI sessions attach a bounded read-only background-run widget
-even when the authority is stopped and there are no runs. `/koni-run` owns guided creation.
-`/koni-runs` owns the compact actionable overlay. Both stay separate from autonomous-agent steering
-and from the full `/koni` dashboard.
+even when the authority is stopped and there are no runs. With runs present, the widget gives each
+ongoing run its own line — planner-authored short name, phase glyph, stage, ticket progress, and
+attention badges — ordered stuck-first and bounded to three rows plus a `+N more` hint, so the chat
+stays a usable textual interface for Koni work. The one-slot status text summarizes fleet shape
+(`Koni 2⚙ 1Ⅱ !1`). `/koni-run` owns guided creation. `/koni-runs` owns the compact actionable
+overlay. Both stay separate from autonomous-agent steering and from the full `/koni` dashboard.
+
+Inside Pi the mounted dashboard reserves one row for Pi's footer so its top border is never pushed
+off-screen; operators with taller footer or status-line extensions can widen the reserve with
+`KONI_COCKPIT_RESERVED_ROWS`.
 
 Duplicate Core origins produce a warning and disable only Koni commands. Ordinary Pi stays available
 while the operator removes one source and reloads.
@@ -36,15 +43,19 @@ the surface, while body content is reserved for project state, choices, and expl
 
 Operate is the default view:
 
-| Surface         | Contents                                                           |
-| --------------- | ------------------------------------------------------------------ |
-| Runs            | Every planning, active, paused, blocked, failed, and concluded run |
-| Tickets         | The selected run's compiled board, filtered by lifecycle state     |
-| Details         | `Overview`, the phase-aware `Plan`, and pipeline `Stages`          |
-| Questions       | Appears only while the selected run needs a decision               |
-| Agents          | Live model work followed by durable agent history                  |
-| Recent Activity | Timestamped graph changes and compiler lifecycle work              |
-| Project graph   | The profile-defined typed hierarchy and relationships              |
+| Surface         | Contents                                                                                            |
+| --------------- | --------------------------------------------------------------------------------------------------- |
+| Runs            | Filter tabs over every run: Active by default, with Attention, Paused, Done, and All one arrow away |
+| Tickets         | The selected run's compiled board, filtered by lifecycle state                                      |
+| Agents          | Live model work followed by durable agent history                                                   |
+| Recent Activity | Timestamped graph changes and compiler lifecycle work, closing out the left column                  |
+| Details         | The `Graph` live feed (default), the phase-aware `Plan`, and `Overview` with pipeline stages        |
+| Questions       | Appears under Details only while the selected run needs a decision                                  |
+
+The Runs panel opens on its Active tab, so paused, blocked, and concluded runs stop crowding the
+working set. `←`/`→` cycles the filter, tab counts stay visible, and the committed selection stays
+pinned in the list even when a lifecycle change (for example pausing it) moves it out of the active
+filter. Filtering never mutates a run.
 
 Selecting another run replaces all dependent panels as one projection. It does not pause, mutate, or
 hide the previously selected run.
@@ -56,11 +67,20 @@ then hydrates only that run with exact authority and run revisions. The title ex
 ordinal range and the total. Global first and last arrows clamp. Provisional intake rows stay
 immediate. Neither a compact row nor its readiness badges authorize a mutation.
 
-At roomy terminal widths, the three dashboard columns have equal width. The left-aligned Details
-title exposes all of its tabs on one line as `Details: Overview - Plan - Stages`. The active tab is
-white and the inactive tabs are light grey. Run Overview is one vertically scrollable document:
-Objective first, followed by Run and Evidence. Its collapsed Objective preview uses four lines.
-Focusing it makes the complete wrapped Objective reachable without switching to a nested mini-view.
+The left column keeps one third of the terminal width for Runs, Tickets, Agents, and Activity; the
+remaining two thirds are one tall Details section. The left-aligned Details title exposes all of its
+tabs on one line as `Details: Graph - Plan - Overview`. The active tab is white and the inactive
+tabs are light grey. Graph is the default tab and stays up while arrowing through runs; committing a
+run or a ticket with `Enter` or a click switches to Overview. Run Overview is one vertically
+scrollable document: Objective first, followed by Run and Evidence. Its collapsed Objective preview
+uses four lines. Focusing it makes the complete wrapped Objective reachable without switching to a
+nested mini-view.
+
+The Run section renders as labeled components rather than plain key/value text: a status chip toned
+by lifecycle phase, the target branch, ticket and cache meters, live agent and token counters, and
+the operator-retired exposure line when it exists. Evidence keeps its exact operator copy behind a
+tone glyph per line, and the Stages heading carries a compact dot rail with a done counter above the
+numbered stage list.
 
 ### Blockers
 
@@ -78,8 +98,8 @@ explanation.
 
 ### Evidence
 
-Evidence is trivalent. Recorded issues, failed or blocked run, ticket, or pipeline state, and a
-failed current review produce red **Attention**. Those take precedence over positive evidence.
+Evidence is trivalent. Recorded issues, failed or blocked run or pipeline state, a blocked ticket,
+and a failed current review produce red **Attention**. Those take precedence over positive evidence.
 
 Green **Evidence recorded** appears only when every monitored telemetry channel is explicitly
 present and zero, and Köni also has one durable positive basis. A qualifying basis is current ticket
@@ -112,6 +132,37 @@ the 82x24 dashboard minimum. It falls back to identity-only `Activity` when an e
 duration cannot fit. Every significant unit and anchored `0s` is preserved. The title omits an
 overlong suffix instead of clipping, clamping, or approximating it.
 
+### Graph live feed
+
+The Graph tab is the run's live feed: the typed context graph on the left, the active tickets
+exploring it in a column of cards on the right, and the agents working each ticket nested inside its
+card — persona, catalog model name, thinking level, and provider-total tokens, with an animated gear
+only while an attempt is actually running. Connector lanes in the shared gutter wire every in-flight
+ticket (running or review) to the exact nodes it targets or writes; read context joins the focus
+highlight but never gets a lane. Queued work is a count under the cards, not a card, and a blocked
+run keeps its interrupted tickets visible with a warning bar instead of letting the feed go blank.
+The projection is always run-wide: committing a ticket narrows nothing — it highlights.
+
+Primary relationships form the nested outline; secondary relationships travel labeled vertical lanes
+inside the graph column, turning with clean corner glyphs (`╮`, `╯`) instead of stamping a crossing
+at every joint. `←`/`→` moves the feed's focus between the graph column and the ticket cards, and
+`↑`/`↓` moves the cursor within the focused column. Focusing a node or a ticket lights up its whole
+neighborhood — nodes, edges, lanes, and cards adopt the accent tone — while every unrelated node
+title, marker, card, and lane drops to the dim tier, so the focus's local topology reads at a
+glance. `[` and `]` still switch the details tabs from anywhere in the feed.
+
+`Enter` on a focused node opens its card: the complete title, a status chip, the node's authored
+spec facts (scalars and scalar lists as operator-safe text; nested structures reduce to a size
+note), and every relationship in this view with direction arrows and title-resolved endpoints. Raw
+node identifiers never render. `Enter` on a focused ticket card commits that ticket, exactly like
+the Tickets panel.
+
+### Contextual help
+
+`h` opens documentation for the focused surface, not just a key list: what the surface is, a
+repository-docs-style text diagram of how it fits the run pipeline, why it behaves the way it does,
+and then the available keys. Long topics scroll with `↑`/`↓`.
+
 ### Agent activity and tokens
 
 An animated cog means a model is starting, running, or resuming and may be spending tokens. A quiet
@@ -125,7 +176,9 @@ output. Cache reads therefore do not inflate the primary work measure. The heade
 render `250K new tks` rather than an unlabeled abbreviation, so the cache-excluding meaning is
 visible without opening Overview. Overview keeps the full uncached input, output, reasoning,
 cached-input, and provider-total breakdown as separately labeled secondary telemetry. A planning
-budget follows its configured metric and says `processed` when that metric includes cache reads.
+allowance follows its configured metric and says `processed` when that metric includes cache reads.
+For a continuous planning run, the planner row and Plan view distinguish cumulative totals from the
+current revision's baseline-relative usage.
 
 The durable source covers every compiler-owned runtime path. The run scan recursively admits only
 agent `stdout.jsonl` and resume logs, legacy `worker.log`, and validated
@@ -175,26 +228,28 @@ are run-scoped, and `Esc` closes composition before leaving Chat.
 
 ### Main keys
 
-| Key                    | Effect                                                                                 |
-| ---------------------- | -------------------------------------------------------------------------------------- |
-| `q`                    | Save valid configuration drafts, then quit                                             |
-| `r`                    | Refresh                                                                                |
-| `Tab` / `Shift-Tab`    | Move focus through visible panels                                                      |
-| `1` … `6`              | Focus Runs, Tickets, Agents, Details, Activity, or Graph when unclaimed by the profile |
-| `↑` / `↓` or `j` / `k` | Move or scroll in the focused surface                                                  |
-| `PageUp` / `PageDown`  | Scroll by a page                                                                       |
-| `←` / `→` or `[` / `]` | Change the active tab, detail view, or question                                        |
-| `h`                    | Open help for the focused panel                                                        |
-| `F1`                   | Open help while a text editor needs literal `h` input                                  |
-| `n`                    | Open New run                                                                           |
-| `a`                    | Open configured actions for the current selection                                      |
-| `c`                    | Switch between Operate and Configure                                                   |
-| `?`                    | Answer the selected pending question                                                   |
-| `Space` on Runs        | Pause or resume the selected run                                                       |
-| `m` on Runs            | Review and authorize a ready run's merge into its target branch                        |
-| `v`                    | Open the selected planning run's review whenever approval is ready                     |
-| `d` on Runs            | Open run-deletion choices                                                              |
-| `Enter`                | Activate the focused, explicit action                                                  |
+| Key                    | Effect                                                                           |
+| ---------------------- | -------------------------------------------------------------------------------- |
+| `q`                    | Save valid configuration drafts, then quit                                       |
+| `r`                    | Refresh                                                                          |
+| `Tab` / `Shift-Tab`    | Move focus through visible panels                                                |
+| `1` … `5`              | Focus Runs, Tickets, Agents, Details, or Activity when unclaimed by the profile  |
+| `6`                    | Jump to the Details panel's Graph feed                                           |
+| `↑` / `↓` or `j` / `k` | Move or scroll in the focused surface                                            |
+| `PageUp` / `PageDown`  | Scroll by a page                                                                 |
+| `←` / `→`              | Change the active tab or question; on the Graph feed, switch graph/tickets focus |
+| `[` / `]`              | Change the active tab everywhere, including the Graph feed                       |
+| `h`                    | Open help for the focused panel                                                  |
+| `F1`                   | Open help while a text editor needs literal `h` input                            |
+| `n`                    | Open New run                                                                     |
+| `a`                    | Open configured actions for the current selection                                |
+| `c`                    | Switch between Operate and Configure                                             |
+| `?`                    | Answer the selected pending question                                             |
+| `Space` on Runs        | Pause or resume the selected run                                                 |
+| `m` on Runs            | Review and authorize a ready run's merge into its target branch                  |
+| `v`                    | Open the selected planning run's review whenever approval is ready               |
+| `d` on Runs            | Open run-deletion choices                                                        |
+| `Enter`                | Activate the focused, explicit action                                            |
 
 Ordinary contextual actions use lowercase keys, and approval and promotion stay distinct actions.
 Profiles may add orchestration keybindings. Protected panel keys win, and the footer and contextual
@@ -258,7 +313,9 @@ and `]` characters available for typing.
 
 Planning agents run in a detached read-only worktree through a structured output boundary. Their
 durable activity appears in the Plan tab of Details. A valid question pauses the originating stage,
-appears in Questions, and resumes the same Pi session after an answer.
+appears in Questions, and resumes the same authenticated planning session and revision after an
+answer. The live provider process may be absent while the run waits; the stable attempt, Pi session
+file, cumulative transcript, usage, evidence, and repository discovery remain durable.
 
 Review Plan is an informed review surface, not a confirmation prompt. It shows the complete
 human-readable plan as wrapped, vertically scrollable Markdown, and all plan content stays
@@ -272,9 +329,11 @@ section, scrolling, focus, activation, and dismissal handlers at compact width.
 
 **Review plan** uses the planning agent's separately authored, concise heading-and-description
 objects, so approval is fast to skim. It never derives headings by truncating the execution prose.
-The complete durable planning-pass bodies stay unchanged for compilation and execution. Once
-approved, **Details, then Plan** renders each successful full planning body once as scrollable
-Markdown, followed by the same bounded and redacted Graph Seed.
+The complete current planning artifact stays unchanged for compilation and execution. Revision 0 is
+a complete artifact; later revisions are patches against the latest validated artifact. Each
+validated result is retained as an immutable checkpoint. The Plan view labels the current **Revision
+N**, shows current-revision and cumulative token totals, and keeps the same bounded and redacted
+Graph Seed.
 
 When planning produced a Graph Seed, Review Plan conditionally appends a **Graph Seed** section
 after Architecture, Risk, and Verification. It starts with the total root fact, semantic-node, and
@@ -290,8 +349,15 @@ The action row has one primary action. With no steering text it reads **Approve 
 the approval boundary. As soon as the multiline steering editor contains text, the same action reads
 **Revise plan** and sends those requested changes instead. Enter adds a line in the editor, while
 `Ctrl-Enter` invokes the adaptive action directly. Revision steering is stored durably, reopens the
-planning prefix, resumes the same Pi thread where available, regenerates dependent plans, and
-presents the review again.
+same authenticated planning session, resets only the new revision's token allowance, patches the
+current compiler-valid plan, and presents the review again. The prior checkpoint remains immutable
+and superseded. Compiler failures stay correctable within the current revision and do not reset its
+budget. The activity stream says **Planning session continued**, and planner history remains one row
+with revision checkpoints rather than one row per revision.
+
+Approval binds the exact latest validated checkpoint. Runs without a `planningSession` marker keep
+their existing multi-attempt review and revise presentation; the control center does not coalesce or
+rewrite their historical attempt lineage.
 
 Approval is disabled while required planning passes or questions are incomplete.
 

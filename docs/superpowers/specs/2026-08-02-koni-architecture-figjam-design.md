@@ -5,7 +5,8 @@
 Create one editable FigJam architecture map that supports two reading depths:
 
 - a fast onboarding path that explains how a goal becomes verified, integrated work; and
-- a contributor-level map of the major Koni domains, their ownership boundaries, and their interactions.
+- a contributor-level map of the major Koni domains, their ownership boundaries, and their
+  interactions.
 
 The diagram describes the current `pi-native-port` working tree. It is explanatory documentation,
 not a proposal to change runtime behavior.
@@ -15,8 +16,10 @@ not a proposal to change runtime behavior.
 The content is derived from the current `pi-native-port` branch, including its current uncommitted
 working-tree changes, with emphasis on:
 
-- `README.md` and the architecture, configuration, runtime, Git, profile lifecycle, and control-center documentation;
-- `packages/core/src/compiler`, `graph`, `state`, `authority`, `pi`, `git`, `profile`, `control-center`, `monitor`, and `operator`; and
+- `README.md` and the architecture, configuration, runtime, Git, profile lifecycle, and
+  control-center documentation;
+- `packages/core/src/compiler`, `graph`, `state`, `authority`, `pi`, `git`, `profile`,
+  `control-center`, `monitor`, and `operator`; and
 - the coding and research profile packages under `packages/`.
 
 The destination is the empty FigJam board with file key `VlRK6W4eUatMc7ThV4wUat`.
@@ -50,8 +53,8 @@ The detailed reading layer uses nine visually distinct clusters:
 
 1. **Configuration and profiles** — project catalog, run types, graph schema, rules, operations,
    workflows, personas, actions, checks, reports, and profile overlays.
-2. **Compiler** — resolution, fail-closed validation, typed intermediate state, hashing, deterministic
-   identity, rule evaluation, and execution semantics.
+2. **Compiler** — resolution, fail-closed validation, typed intermediate state, hashing,
+   deterministic identity, rule evaluation, and execution semantics.
 3. **Semantic graph** — typed nodes, canonical edges, state machines, graph deltas, working-spec
    records, and advisory graph notes.
 4. **Tickets and scheduling** — deterministic tickets, dependencies, step DAGs, leases, scope
@@ -74,9 +77,10 @@ monospace path labels identify the most relevant `packages/core/src/*` domain wh
 
 Three horizontal rails run across the detailed layer:
 
-- **Compiler-owned authority:** agents propose; Core validates, grants, admits, mutates, and publishes.
-- **Pinned and hash-bound identity:** configuration, graph epochs, ticket projections, context, grants,
-  attempts, outputs, and receipts are tied to exact identities.
+- **Compiler-owned authority:** agents propose; Core validates, grants, admits, mutates, and
+  publishes.
+- **Pinned and hash-bound identity:** configuration, graph epochs, ticket projections, context,
+  grants, attempts, outputs, and receipts are tied to exact identities.
 - **Explicit failure and recovery:** ambiguity, drift, conflicts, failed checks, and crashes do not
   silently advance lifecycle state.
 

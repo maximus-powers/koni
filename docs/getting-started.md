@@ -121,6 +121,12 @@ without prompting.
 Before publishing any files, initialization stages a complete installation, validates all catalog
 and profile references, and checks its owned-file manifest.
 
+Initialization also merges the official Superpowers Pi package into the repository's ordinary
+`.pi/settings.json` package list. It does not copy those skills into `.koni`, and it preserves all
+other Pi settings. Pi resolves the package exactly as it does in any other repository. Koni agents
+inherit that resolved environment by default; use `.koni/agents/<id>.yaml` only to narrow a specific
+agent.
+
 Repeated initialization is safe. Köni preserves unrelated agent-tool content such as `.claude` and
 `.codex`, and refuses to overwrite an owned resource that changed after installation. Restore or
 reconcile that resource first. Move durable local customization into a project-owned resource where
@@ -140,6 +146,13 @@ It inspects the repository and asks only for material missing decisions. It then
 proposed ontology, compiler rules, ticket and proof model, and file plan for explicit approval. It
 edits the installed profile only after that approval. The skill uses `.koni/project.yaml`, resolved
 `.koni` profile sources, and provider-neutral `.koni/agents`.
+
+Inspect the exact Pi-native environment for an agent with:
+
+```sh
+koni config resolve-agent run-planner --root .
+koni config resolve-agent reviewer --run-type medium --root . --json
+```
 
 ## Open the control center
 
@@ -172,6 +185,17 @@ koni status --root . --json
 5. Answer any decision-bearing questions.
 6. Review the durable planning output.
 7. Focus **Approve run** and press Enter.
+
+If the plan needs a change, enter steering instead of approving. New runs continue the same planner
+attempt and authenticated Pi session, create **Revision N**, and reset only that revision's token
+allowance. The revised submission patches the latest validated plan; the prior checkpoint, session
+history, provider usage, cost, repository discovery, questions, and evidence remain cumulative.
+Compiler feedback is corrected within the same revision. Approval always binds the exact latest
+validated checkpoint.
+
+Runs created by an older Koni version may have no continuous-planning marker. They keep their
+historical multi-attempt revise and approval behavior; Koni does not rewrite or merge those
+sessions.
 
 Planning resolves the selected target branch and its observed base commit, then pins the complete
 effective configuration. Runs name the destination branch as well as its observed commit, because
