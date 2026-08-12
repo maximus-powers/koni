@@ -7998,6 +7998,14 @@ function ticketAttempt(
     .nodes()
     .filter((node) => new Set([...readNodeIds, ...writeNodeIds]).has(node.id))
     .map((node) => ({ ...node, nodeHash: canonicalHash(node) }));
+  const plannedAssetRepairHistory = plannedAssetRepairHistoryForAttempt(
+    run,
+    graph
+      .nodes()
+      .filter((node) =>
+        new Set([...definition.target_node_ids, ...configuredWriteNodeIds]).has(node.id),
+      ),
+  );
   const mutationContract = assignmentMutationContract(configuration, definition);
   const compilerOwnedFields = assignmentCompilerOwnedFields(configuration, definition);
   const predecessorHasCommandEvidence = reviewPredecessorHasCommandEvidence(predecessorExecution);
@@ -8157,6 +8165,16 @@ function ticketAttempt(
                 ]),
             "This is a fresh attempt. Any koni_submit_output call or accepted terminal result in the inherited parent transcript belongs only to that parent and does not settle this attempt. Finish this attempt with a newly accepted koni_submit_output call, even when the correct graph delta is empty or repeats the parent's candidate.",
           ]),
+      ...(plannedAssetRepairHistory.length === 0
+        ? []
+        : [
+            [
+              "The compiler-authenticated planned asset repair history is cumulative for this workflow boundary.",
+              "Correct every named finding that remains unsatisfied, and preserve established fixes plus unrelated valid state.",
+              "A later repair request does not erase an earlier finding; the current graph value is not a preservation instruction when an authenticated finding proves that value defective.",
+              `Repair history: ${JSON.stringify(plannedAssetRepairHistory)}`,
+            ].join(" "),
+          ]),
       ...upstreamChangeRequestInstructions(proposalOperation?.changeControl),
       ...rejectedSourceProposalPrompts,
       ...(proposalApproval === undefined
@@ -8238,6 +8256,7 @@ function ticketAttempt(
       gatePolicyContexts: boundGateContexts,
       ...(compatibility.length === 0 ? {} : { executionPolicyCompatibility: compatibility }),
       ...(activeReviewRework === undefined ? {} : { reviewRework: activeReviewRework }),
+      ...(plannedAssetRepairHistory.length === 0 ? {} : { plannedAssetRepairHistory }),
       ...(proposalApproval === undefined ? {} : { proposalApproval }),
       ...(terminalRecoveryContext === undefined
         ? {}
@@ -12515,6 +12534,90 @@ export function plannedAssetRepairRequestForNode(
         requestSha256: request.requestSha256,
         title: proposal.title,
       };
+}
+
+export interface PlannedAssetRepairHistoryEntry {
+  readonly proposalTicketId: string;
+  readonly requestSha256: Sha256Digest;
+  readonly sourceTicketId: string;
+  readonly sourceStepId: string;
+  readonly sourceOutputSha256: Sha256Digest;
+  readonly targetNodeIds: readonly string[];
+  readonly summary: string;
+  readonly reason: string;
+  readonly routedAt: string;
+}
+
+/**
+ * Project immutable review findings that the compiler already routed back through an asset's
+ * planned implementation workflow. The history is cumulative: a later request can add a repair
+ * obligation, but cannot silently erase an earlier accepted finding. Only exact compiler-routed
+ * proposal authority is admitted, and a gate-targeted request reaches only an asset that declares
+ * that gate in its canonical validates relation.
+ */
+export function plannedAssetRepairHistoryForAttempt(
+  run: Pick<RunRecord, "id" | "tickets">,
+  subjectNodes: readonly Pick<GraphNode, "id" | "type" | "edges">[],
+): PlannedAssetRepairHistoryEntry[] {
+  const subjects = new Map(subjectNodes.map((node) => [node.id, node]));
+  const history: PlannedAssetRepairHistoryEntry[] = [];
+  for (const proposal of Object.values(run.tickets)) {
+    const control = proposal.executionControl;
+    const request = control?.proposalRequest;
+    const authority = control?.controlTicketAuthority;
+    if (
+      proposal.status !== "cancelled" ||
+      proposal.blocker !== COMPILER_ROUTED_TO_PLANNED_ASSET_REPAIR ||
+      request?.fulfillment !== "planned_asset_repair" ||
+      authority?.runId !== run.id ||
+      authority.role !== "proposal" ||
+      authority.ticketId !== proposal.id ||
+      authority.causal.role !== "proposal"
+    ) {
+      continue;
+    }
+    const { publication, sourceTicketProjection, sourceTerminalProof } = authority.causal;
+    if (
+      publication.proposalTicketId !== proposal.id ||
+      publication.requestSha256 !== request.requestSha256 ||
+      publication.sourceTicketId !== request.sourceTicketId ||
+      publication.sourceStepId !== request.sourceStepId ||
+      publication.sourceOutputSha256 !== request.sourceOutputSha256 ||
+      sourceTicketProjection.id !== request.sourceTicketId ||
+      sourceTerminalProof.runId !== run.id ||
+      sourceTerminalProof.ticketId !== request.sourceTicketId ||
+      sourceTerminalProof.stepId !== request.sourceStepId
+    ) {
+      continue;
+    }
+    const targetNodeIds = new Set(publication.targetNodeIds);
+    if (sourceTicketProjection.operationId === "asset-resolution.asset.implement-asset") {
+      for (const nodeId of sourceTicketProjection.targetNodeIds) targetNodeIds.add(nodeId);
+    }
+    const affectsSubject = [...subjects.values()].some(
+      (subject) =>
+        targetNodeIds.has(subject.id) ||
+        (subject.type === "asset" &&
+          (subject.edges.validates ?? []).some((gateId) => targetNodeIds.has(gateId))),
+    );
+    if (!affectsSubject) continue;
+    history.push({
+      proposalTicketId: proposal.id,
+      requestSha256: request.requestSha256,
+      sourceTicketId: request.sourceTicketId,
+      sourceStepId: request.sourceStepId,
+      sourceOutputSha256: request.sourceOutputSha256,
+      targetNodeIds: [...targetNodeIds].sort(compareText),
+      summary: publication.summary,
+      reason: publication.reason,
+      routedAt: proposal.updatedAt,
+    });
+  }
+  return history.sort(
+    (left, right) =>
+      left.routedAt.localeCompare(right.routedAt) ||
+      left.proposalTicketId.localeCompare(right.proposalTicketId),
+  );
 }
 
 /**

@@ -47,6 +47,7 @@ import {
   NativeRunProgramError,
   orderedReviewPredecessorStepIds,
   plannedAssetRepairProposalTargetNodeIds,
+  plannedAssetRepairHistoryForAttempt,
   plannedAssetRepairRequestForNode,
   routablePlannedAssetRepairProposalIds,
   routePlannedAssetRepairProposals,
@@ -1268,6 +1269,128 @@ describe("native compiler-authoritative run program", () => {
         definitions,
       ),
     ).toEqual(new Set());
+  });
+
+  it("projects cumulative authenticated planned-asset repair findings to the affected asset", () => {
+    const runId = "run-planned-repair-history";
+    const sourceTicketId = "TK-source-review";
+    const sourceStepId = "review";
+    const assetId = "asset-verifier";
+    const gateId = "gate-readiness";
+    const proposal = (
+      id: string,
+      requestSeed: string,
+      summary: string,
+      reason: string,
+      targetNodeIds: string[],
+      updatedAt: string,
+    ) => {
+      const requestSha256 = digest(requestSeed);
+      const sourceOutputSha256 = digest(`${requestSeed}-output`);
+      const sourceTerminalProof = fixtureTerminalSuccessProof({
+        runId,
+        ticketId: sourceTicketId,
+        stepId: sourceStepId,
+        attemptId: `attempt-${requestSeed}`,
+        actionInvocationId: `action-${requestSeed}`,
+      });
+      return {
+        id,
+        title: `Change request: ${summary}`,
+        summary: `${summary}\n\nReason: ${reason}`,
+        status: "cancelled",
+        blocker: "Superseded by the existing planned asset implementation workflow",
+        targetNodeIds,
+        updatedAt,
+        executionControl: {
+          proposalRequest: {
+            requestSha256,
+            sourceTicketId,
+            sourceStepId,
+            sourceOutputSha256,
+            fulfillment: "planned_asset_repair",
+          },
+          controlTicketAuthority: {
+            runId,
+            role: "proposal",
+            ticketId: id,
+            causal: {
+              role: "proposal",
+              publication: {
+                proposalTicketId: id,
+                requestSha256,
+                sourceTicketId,
+                sourceStepId,
+                sourceOutputSha256,
+                targetNodeIds,
+                summary,
+                reason,
+              },
+              sourceTicketProjection: {
+                id: sourceTicketId,
+                operationId: "gates.gate.run-gate",
+                targetNodeIds: [gateId],
+              },
+              sourceTerminalProof,
+            },
+          },
+        },
+      } as unknown as TicketRecord;
+    };
+    const earlier = proposal(
+      "TK-change-earlier",
+      "earlier-repair",
+      "Preserve the verified result protocol",
+      "The prior integration omitted the established result protocol.",
+      [assetId],
+      "2026-07-16T18:00:00.000Z",
+    );
+    const later = proposal(
+      "TK-change-later",
+      "later-repair",
+      "Correct the remaining verifier contract",
+      "The current verifier contract has the wrong structured shape.",
+      [gateId],
+      "2026-07-16T18:30:00.000Z",
+    );
+    const malformed = structuredClone(later);
+    malformed.id = "TK-change-malformed";
+    (
+      malformed.executionControl!.controlTicketAuthority as unknown as { ticketId: string }
+    ).ticketId = "TK-other";
+
+    const history = plannedAssetRepairHistoryForAttempt(
+      {
+        id: runId,
+        tickets: {
+          [earlier.id]: earlier,
+          [later.id]: later,
+          [malformed.id]: malformed,
+        },
+      },
+      [
+        {
+          id: assetId,
+          type: "asset",
+          edges: { validates: [gateId] },
+        },
+      ],
+    );
+
+    expect(history).toEqual([
+      expect.objectContaining({
+        proposalTicketId: earlier.id,
+        requestSha256: earlier.executionControl!.proposalRequest!.requestSha256,
+        summary: "Preserve the verified result protocol",
+        reason: "The prior integration omitted the established result protocol.",
+      }),
+      expect.objectContaining({
+        proposalTicketId: later.id,
+        requestSha256: later.executionControl!.proposalRequest!.requestSha256,
+        summary: "Correct the remaining verifier contract",
+        reason: "The current verifier contract has the wrong structured shape.",
+      }),
+    ]);
   });
 
   it("routes a pristine gate-targeted request through its exact source-owned asset ticket", () => {
@@ -4920,6 +5043,53 @@ describe("native compiler-authoritative run program", () => {
     );
     expect(prepared.spec.persona.initialPrompt).toContain(
       "Any koni_submit_output call or accepted terminal result in the inherited parent transcript",
+    );
+
+    const repairRun = structuredClone(run);
+    const repairTargetNodeId = architectureTicket.targetNodeIds[0]!;
+    const repairProposal = plannedAssetRepairProposalFixture({
+      runId: repairRun.id,
+      proposalId: "TK-change-cumulative-repair-context",
+      sourceTicketId: architectureTicket.id,
+      sourceStepId: "review",
+      targetNodeIds: [repairTargetNodeId],
+      summary: "Preserve the established repository boundary",
+      reason:
+        "A prior review proved that replacing the established boundary loses required behavior.",
+      updatedAt: "2026-07-16T18:45:00.000Z",
+    });
+    repairRun.tickets[repairProposal.id] = repairProposal;
+    const repairPrepared = await program.prepareAttempt({
+      kind: "ticket",
+      run: repairRun,
+      assignment: assignmentFor(repairRun, architectureTicket.id),
+      attemptId: "attempt-architecture-cumulative-repair",
+      sessionId: "session-architecture-cumulative-repair",
+      nextAuthorityRevision: 10,
+      expectedAuthorityStateHash: digest("authority-cumulative-repair"),
+      lineage: { branchEpoch: 0, reason: "initial" },
+    });
+    const repairContext = JSON.parse(repairPrepared.contextContent!) as {
+      plannedAssetRepairHistory?: Array<{ summary: string; reason: string }>;
+    };
+    expect(repairContext.plannedAssetRepairHistory).toEqual([
+      expect.objectContaining({
+        summary: "Preserve the established repository boundary",
+        reason:
+          "A prior review proved that replacing the established boundary loses required behavior.",
+      }),
+    ]);
+    expect(repairPrepared.spec.persona.initialPrompt).toContain(
+      "compiler-authenticated planned asset repair history is cumulative",
+    );
+    expect(repairPrepared.spec.persona.initialPrompt).toContain(
+      "A later repair request does not erase an earlier finding",
+    );
+    expect(repairPrepared.spec.persona.initialPrompt).toContain(
+      "Preserve the established repository boundary",
+    );
+    expect(repairPrepared.spec.persona.initialPrompt).toContain(
+      "replacing the established boundary loses required behavior",
     );
 
     const recoveryRun = structuredClone(run);
@@ -8961,6 +9131,71 @@ function fixtureTerminalSuccessProof(
     terminalOutputSha256: digest(`${input.attemptId}-terminal-output`),
   };
   return { ...material, sha256: canonicalHash(material) };
+}
+
+function plannedAssetRepairProposalFixture(
+  input: Readonly<{
+    runId: string;
+    proposalId: string;
+    sourceTicketId: string;
+    sourceStepId: string;
+    targetNodeIds: string[];
+    summary: string;
+    reason: string;
+    updatedAt: string;
+  }>,
+): TicketRecord {
+  const requestSha256 = digest(`${input.proposalId}-request`);
+  const sourceOutputSha256 = digest(`${input.proposalId}-output`);
+  return {
+    id: input.proposalId,
+    title: `Change request: ${input.summary}`,
+    summary: `${input.summary}\n\nReason: ${input.reason}`,
+    status: "cancelled",
+    blocker: "Superseded by the existing planned asset implementation workflow",
+    targetNodeIds: input.targetNodeIds,
+    updatedAt: input.updatedAt,
+    steps: [],
+    executionControl: {
+      proposalRequest: {
+        requestSha256,
+        sourceTicketId: input.sourceTicketId,
+        sourceStepId: input.sourceStepId,
+        sourceOutputSha256,
+        fulfillment: "planned_asset_repair",
+      },
+      controlTicketAuthority: {
+        runId: input.runId,
+        role: "proposal",
+        ticketId: input.proposalId,
+        causal: {
+          role: "proposal",
+          publication: {
+            proposalTicketId: input.proposalId,
+            requestSha256,
+            sourceTicketId: input.sourceTicketId,
+            sourceStepId: input.sourceStepId,
+            sourceOutputSha256,
+            targetNodeIds: input.targetNodeIds,
+            summary: input.summary,
+            reason: input.reason,
+          },
+          sourceTicketProjection: {
+            id: input.sourceTicketId,
+            operationId: "asset-resolution.asset.implement-asset",
+            targetNodeIds: input.targetNodeIds,
+          },
+          sourceTerminalProof: fixtureTerminalSuccessProof({
+            runId: input.runId,
+            ticketId: input.sourceTicketId,
+            stepId: input.sourceStepId,
+            attemptId: `attempt-${input.proposalId}`,
+            actionInvocationId: `action-${input.proposalId}`,
+          }),
+        },
+      },
+    },
+  } as unknown as TicketRecord;
 }
 
 function fixtureTerminalFailureProof(
