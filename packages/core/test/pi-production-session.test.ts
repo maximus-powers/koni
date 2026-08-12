@@ -1260,6 +1260,74 @@ describe("Pi 0.80.10 production session construction", () => {
     await recovered.dispose();
   });
 
+  it("recovers a settled assistant turn when authority has queued a bounded follow-up", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "koni-production-assistant-follow-up-"));
+    temporary.push(root);
+    const cwd = path.join(root, "worktree");
+    await mkdir(cwd);
+    const spec = fixtureLaunchSpec({
+      cwd,
+      sessionDirectory: path.join(root, "sessions", "attempt-assistant-follow-up"),
+      attemptId: "attempt-assistant-follow-up",
+      sessionId: "session-assistant-follow-up",
+    });
+    const modelRuntime = await isolatedModelRuntime(root);
+    const followUp = authorizedMessageRecord(
+      1,
+      "follow_up",
+      "Continue and submit the required terminal artifact.",
+    );
+    const options = {
+      tools: [fixtureTool()],
+      modelRuntime,
+      contextProvider: recoveryProvider(spec, { authorizedMessages: [followUp] }),
+    };
+    const fresh = await ManagedPiSession.create(spec, options);
+    const file = fresh.sessionFile;
+    await fresh.dispose();
+    const manager = SessionManager.open(file, spec.workspace.sessionDirectory, cwd);
+    manager.appendMessage({
+      role: "user",
+      content: spec.persona.initialPrompt,
+      timestamp: Date.now(),
+    });
+    manager.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: " \n" }],
+      api: spec.model.api,
+      provider: spec.model.provider,
+      model: spec.model.id,
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    });
+
+    const blocked = await recoverManagedPiSession(spec, {
+      tools: [fixtureTool()],
+      modelRuntime,
+      contextProvider: recoveryProvider(spec),
+    });
+    expect(blocked.recovery?.disposition).toEqual({
+      kind: "blocked",
+      reason: "Pi transcript does not end at a provably safe continuation boundary",
+    });
+    await blocked.dispose();
+
+    const recovered = await recoverManagedPiSession(spec, options);
+    expect(recovered.recovery).toMatchObject({
+      disposition: { kind: "continue" },
+      pendingMessages: [{ message: followUp, mappingPersisted: false }],
+    });
+    await recovered.dispose();
+  });
+
   it("rejects user steering text that has no exact preceding authority map", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "koni-production-unmapped-message-"));
     temporary.push(root);

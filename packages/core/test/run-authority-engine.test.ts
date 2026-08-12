@@ -4517,6 +4517,14 @@ describe("run authority engine", () => {
       currentRevision: 0,
       status: "awaiting_review",
     });
+    expect(planningAttempts[0]?.authorityMessages).toEqual([
+      expect.objectContaining({ sequence: 1, mode: "follow_up" }),
+    ]);
+    const recoveryMessage = planningAttempts[0]?.authorityMessages?.[0];
+    expect(recoveryMessage).toBeDefined();
+    expect(
+      (await engine.store.readArtifact(recoveryMessage!.artifactPath)).toString("utf8"),
+    ).toContain("submit the required terminal artifact");
     expect(
       planned.activity.some((entry) =>
         entry.message.includes("Auto-retrying an effect-free terminal-contract failure"),
@@ -4589,6 +4597,7 @@ describe("run authority engine", () => {
 
     const blocked = await engine.store.getRun(runId);
     expect(plannerLaunches).toBe(4);
+    expect(blocked.attempts[blocked.planningSession!.attemptId]?.authorityMessages).toHaveLength(3);
     expect(
       Object.values(blocked.attempts).filter((attempt) => attempt.kind === "planning"),
     ).toEqual([expect.objectContaining({ status: "failed", failureCode: "terminal_protocol" })]);

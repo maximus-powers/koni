@@ -345,6 +345,8 @@ const PROVIDER_TERMINAL_PROPAGATION_PROBE_DELAY_MS = 250;
 // failure, not research work product. Re-drive it automatically, but retain a hard cap so an
 // agent that repeatedly ignores its terminal contract cannot churn indefinitely.
 const MAX_TERMINAL_PROTOCOL_AUTO_RECOVERIES = 3;
+const PLANNING_TERMINAL_PROTOCOL_FOLLOW_UP =
+  "The previous provider turn ended without an authority-accepted terminal submission. Continue the same planning revision from the authenticated findings already in context and submit the required terminal artifact. Do not restart the plan or create a new revision.";
 // Bounds one durably reserved provider request so a genuinely hung transport cannot hold worst-case
 // exposure forever. It was 180s, which is shorter than the work: a research planner reasoning at
 // high thinking over a large repository context needs longer than that to reach its first tool call,
@@ -16305,6 +16307,11 @@ export class RunAuthorityEngine {
       }
       const recoveryMessage = terminalProtocolRecoveryMessage(run, failed);
       const draft = nextRun(run, this.#timestamp());
+      const recoveryWrites: Array<{
+        path: string;
+        bytes: Buffer;
+        expectedSha256: null;
+      }> = [];
       if (draft.lifecycle.phase === "blocked") {
         applyLifecycle(draft, {
           type: "retry_requested",
@@ -16331,6 +16338,25 @@ export class RunAuthorityEngine {
         clearPlanningRevisionTerminalState(planningAttempt);
         delete planningAttempt.error;
         delete planningAttempt.failureCode;
+        const followUpBytes = Buffer.from(PLANNING_TERMINAL_PROTOCOL_FOLLOW_UP, "utf8");
+        const followUpSha256 = rawSha256(followUpBytes);
+        planningAttempt.authorityMessages ??= [];
+        const sequence = planningAttempt.authorityMessages.length + 1;
+        const artifactPath = authorityMessagePath(
+          run.id,
+          planningAttempt.id,
+          sequence,
+          followUpSha256,
+        );
+        planningAttempt.authorityMessages.push({
+          sequence,
+          mode: "follow_up",
+          sha256: followUpSha256,
+          sizeBytes: followUpBytes.byteLength,
+          artifactPath,
+          recordedAt: draft.updatedAt,
+        });
+        recoveryWrites.push({ path: artifactPath, bytes: followUpBytes, expectedSha256: null });
         session.status = "running";
         planningRevision.status = "running";
         delete planningRevision.completedAt;
@@ -16362,6 +16388,7 @@ export class RunAuthorityEngine {
       const committed = await this.#store.commit({
         expectedRevision: revision,
         runWrites: [{ record: draft, expectedRevision: run.revision }],
+        ...(recoveryWrites.length === 0 ? {} : { writes: recoveryWrites }),
       });
       return {
         revision: committed.state.revision,

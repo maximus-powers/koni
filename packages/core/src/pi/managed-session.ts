@@ -2945,6 +2945,8 @@ function inspectTranscript(
   }
   pendingToolActions.sort((left, right) => left.order - right.order);
   const outstandingCalls = [...toolCalls.values()].filter((call) => !call.resolved).length;
+  const pendingAuthorizedMessages =
+    authority.authorizedMessages.length - consumedMessageSequences.size;
   if (terminalResults > 1 || terminalResults > terminalCalls) {
     throw new ManagedSessionError(
       "recovery_terminal",
@@ -2961,7 +2963,9 @@ function inspectTranscript(
         lastBoundary === "compaction" ||
         (lastBoundary === "messageMap" && outstandingMessageMappings.length > 0) ||
         (lastBoundary === "assistant" &&
-          (pendingToolActions.length > 0 || lastAssistantIsRetryableLocalInterruption))),
+          (pendingToolActions.length > 0 ||
+            pendingAuthorizedMessages > 0 ||
+            lastAssistantIsRetryableLocalInterruption))),
     terminalCalls,
     terminalResults,
     pendingMessages: authority.authorizedMessages
