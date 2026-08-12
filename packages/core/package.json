@@ -52,7 +52,7 @@
     "core_api_version": "1.0.0",
     "authority_protocol": "koni.authority.v1",
     "profile_package_protocol": "koni.profile-package.v1",
-    "profile_schema_range": ">=2.0.0 <3.0.0",
+    "profile_schema_range": ">=3.0.0 <4.0.0",
     "pi_range": "0.80.10"
   },
   "scripts": {

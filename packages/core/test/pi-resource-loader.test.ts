@@ -71,15 +71,21 @@ describe("contained Pi resource loader", () => {
       "issued-prompt",
     ]);
     expect(result.loader.getThemes().themes).toEqual([]);
-    expect(result.loader.getAgentsFiles().agentsFiles).toEqual([
-      expect.objectContaining({ content: skill }),
-    ]);
+    expect(result.loader.getAgentsFiles().agentsFiles).toEqual([]);
     expect(result.loader.getAgentsFiles().agentsFiles).not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({ content: "Authoritative ticket context." }),
       ]),
     );
-    expect(result.loader.getAppendSystemPrompt()).toEqual(["Preserve receipts."]);
+    expect(result.loader.getAppendSystemPrompt()).toEqual([
+      "Preserve receipts.",
+      expect.stringContaining("<name>issued-skill</name>"),
+    ]);
+    expect(result.loader.getAppendSystemPrompt()[1]).toContain(
+      "<location>skills/issued-skill/SKILL.md</location>",
+    );
+    expect(result.loader.getAppendSystemPrompt()[1]).toContain("koni_read_resource");
+    expect(result.loader.getAppendSystemPrompt()[1]).not.toContain("Follow the ticket exactly.");
     expect(result.loader.getSystemPrompt()).toBe(spec.persona.systemPrompt);
     expect(
       await readFile(

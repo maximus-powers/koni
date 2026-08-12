@@ -222,12 +222,12 @@ describe("schema-2 configuration loader", () => {
       "configuration.duplicate_id",
     ],
     [
-      "dangling agent references",
+      "dangling agent parent references",
       (source: AuthenticatedProjectConfigurationSource) =>
-        editYaml(source, "personas.yaml", (document) => {
-          asRecord((document.personas as unknown[])[0]).agent = "absent-agent";
+        editYaml(source, "agents/lead.yaml", (document) => {
+          document.extends = "absent-agent";
         }),
-      "configuration.dangling_reference",
+      "configuration.agent_parent",
     ],
     [
       "array-style inheritance overrides",
@@ -274,7 +274,7 @@ describe("schema-2 configuration loader", () => {
       "legacy Lead agent runtime instructions",
       (source: AuthenticatedProjectConfigurationSource) =>
         editYaml(source, "agents/lead.yaml", (document) => {
-          asRecord(document.instructions).text =
+          document.instructions =
             "Operate the compiler pull loop with koni_runtime.wait_worker, then call koni_runtime.yield_lead.";
         }),
       "configuration.lead_agent_unbounded",

@@ -1,4 +1,4 @@
-schema_version: '2.0'
+schema_version: '3.0'
 module:
   id: software.actions
   version: 0.2.0
@@ -46,7 +46,7 @@ actions:
   - primitive: project.validate
   - id: lead
     primitive: agent.spawn
-    persona: lead
+    agent: lead
     prompt: Perform one bounded software orchestration-readiness judgment. Review the compiled ticket graph for unresolved material ambiguity or unsafe assumptions, ask only policy-allowed questions, then submit proceed or blocked with a concise rationale. Never poll, schedule deterministic work, or spawn workers.
     transport: compiler_broker
     duplicate_policy: reject
@@ -63,7 +63,7 @@ actions:
       type: ticket_id
       required: true
   allowed_ticket_states:
-  - todo
+  - queued
   requires_main_checkout: true
   recipe:
   - primitive: project.validate
@@ -117,7 +117,7 @@ actions:
     step:
       type: string
       required: true
-    persona:
+    agent:
       type: string
       required: true
     payload:
@@ -134,7 +134,7 @@ actions:
   - primitive: output.record
     ticket: ${params.ticket}
     step: ${params.step}
-    persona: ${params.persona}
+    agent: ${params.agent}
     payload: ${params.payload}
   - primitive: project.validate
   - primitive: git.commit

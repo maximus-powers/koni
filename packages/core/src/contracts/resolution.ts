@@ -4,11 +4,10 @@ import type {
   ConfigurationObject,
 } from "./configuration.js";
 
-export interface ResolvedCompiledPersona {
+export interface ResolvedCompiledAgent {
   readonly id: string;
-  readonly model_role: string;
-  readonly agent_id?: string;
-  readonly agent_resource?: CompiledAgentResource;
+  readonly role: string;
+  readonly resource: CompiledAgentResource;
   readonly description: string;
   readonly instructions: string;
   readonly instruction_source: string;
@@ -16,11 +15,10 @@ export interface ResolvedCompiledPersona {
   readonly model?: string;
   readonly thinking_level?: string;
   readonly capabilities: ConfigurationObject;
-  readonly skills: readonly string[];
   readonly run_type?: CompiledRunType;
 }
 
-export interface ResolveCompiledPersonaOptions {
+export interface ResolveCompiledAgentOptions {
   readonly runTypeId?: string;
   /** Highest-precedence stage or one-run model override. */
   readonly model?: string;

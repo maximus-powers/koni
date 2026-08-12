@@ -1,4 +1,4 @@
-schema_version: '2.0'
+schema_version: '3.0'
 module:
   id: software.workflows
   version: 0.6.0
@@ -10,13 +10,13 @@ workflows:
   review_failure_reopen_from: map-affected-boundary
   steps:
   - id: map-affected-boundary
-    persona: architecture-mapper
+    agent: architecture-mapper
     graph_mutation: required
     write_paths: []
     expected_output: Smallest repository-grounded affected system plus only material canonical interface, data, contract, and flow facts
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     graph_mutation: forbidden
     depends_on:
     - map-affected-boundary
@@ -30,13 +30,13 @@ workflows:
   review_failure_reopen_from: specify-material-contract
   steps:
   - id: specify-material-contract
-    persona: contract-designer
+    agent: contract-designer
     graph_mutation: required
     write_paths: []
     expected_output: Fewest observable invariants needed for the explicitly contract-requiring boundary, linked through canonical relationships
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     graph_mutation: forbidden
     depends_on:
     - specify-material-contract
@@ -50,13 +50,13 @@ workflows:
   review_failure_reopen_from: plan-vertical-change
   steps:
   - id: plan-vertical-change
-    persona: change-designer
+    agent: change-designer
     graph_mutation: required
     write_paths: []
     expected_output: Fewest one-sentence vertical change claims with exact scope, honest baseline strategy, adaptive proof purposes, causal defects, explicit risk tier, and structurally legal treatment
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     graph_mutation: forbidden
     depends_on:
     - plan-vertical-change
@@ -70,13 +70,13 @@ workflows:
   review_failure_reopen_from: ground-diagnostic-seam
   steps:
   - id: ground-diagnostic-seam
-    persona: change-designer
+    agent: change-designer
     graph_mutation: required
     write_paths: []
     expected_output: Honest unresolved defect when required plus exactly one focused diagnostic proof per uncovered active defect, or a zero-mutation report naming every conflicting proof ID and requesting human-authorized oracle selection; no speculative change or product edit
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     graph_mutation: forbidden
     depends_on:
     - ground-diagnostic-seam
@@ -90,7 +90,7 @@ workflows:
   review_failure_reopen_from: author-historical-baseline
   steps:
   - id: author-historical-baseline
-    persona: implementer
+    agent: implementer
     graph_mutation: forbidden
     read_paths:
     - select:
@@ -121,7 +121,7 @@ workflows:
     - proof_baseline_set
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     graph_mutation: forbidden
     depends_on:
     - author-historical-baseline
@@ -135,7 +135,7 @@ workflows:
   review_failure_reopen_from: diagnose-cause
   steps:
   - id: diagnose-cause
-    persona: change-designer
+    agent: change-designer
     graph_mutation: required
     read_paths:
     - select:
@@ -152,7 +152,7 @@ workflows:
     expected_output: Evidence-backed first invalid state, root cause, causal chain, and ruled-out alternatives from the prepared diagnostic proof without product or proof-source modification
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     graph_mutation: forbidden
     depends_on:
     - diagnose-cause
@@ -166,13 +166,13 @@ workflows:
   review_failure_reopen_from: repair-treatment
   steps:
   - id: repair-treatment
-    persona: risk-analyst
+    agent: risk-analyst
     graph_mutation: required
     write_paths: []
     expected_output: Narrow repair of only the selected risk's contradictory disposition edges or missing boundary proof
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     graph_mutation: forbidden
     depends_on:
     - repair-treatment
@@ -186,13 +186,13 @@ workflows:
   review_failure_reopen_from: validate-approved-choice
   steps:
   - id: validate-approved-choice
-    persona: change-designer
+    agent: change-designer
     graph_mutation: forbidden
     write_paths: []
     expected_output: Evidence-backed validation of the already populated approved-seed choice, rationale, alternatives, and reversibility with no graph delta
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     graph_mutation: forbidden
     depends_on:
     - validate-approved-choice
@@ -216,7 +216,7 @@ workflows:
       recovery_instructions: Preserve the rejected product candidate, replan and independently prepare the corrected oracle from clean integration state, then issue fresh implementation work only after that preparation passes; never re-prepare against the rejected candidate worktree.
   steps:
   - id: establish-baseline
-    persona: implementer
+    agent: implementer
     graph_mutation: forbidden
     read_paths:
     - select: $target
@@ -246,7 +246,7 @@ workflows:
     stop_conditions:
     - Do not modify production behavior before the compiler records the complete graph-selected baseline set
   - id: implement
-    persona: implementer
+    agent: implementer
     graph_mutation: forbidden
     depends_on:
     - establish-baseline
@@ -280,7 +280,7 @@ workflows:
     - proof_set
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     graph_mutation: forbidden
     depends_on:
     - implement
@@ -304,7 +304,7 @@ workflows:
       recovery_instructions: Preserve the rejected product candidate, replan and independently prepare the corrected characterization from clean integration state, then issue fresh implementation work only after that preparation passes; never re-prepare against the rejected candidate worktree.
   steps:
   - id: establish-baseline
-    persona: implementer
+    agent: implementer
     graph_mutation: forbidden
     read_paths:
     - select: $target
@@ -334,7 +334,7 @@ workflows:
     stop_conditions:
     - Do not modify production behavior before the compiler records the complete passing characterization baseline
   - id: implement
-    persona: implementer
+    agent: implementer
     graph_mutation: forbidden
     depends_on:
     - establish-baseline
@@ -368,7 +368,7 @@ workflows:
     - proof_set
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     graph_mutation: forbidden
     depends_on:
     - implement
@@ -383,7 +383,7 @@ workflows:
   review_failure_reopen_from: implement
   steps:
   - id: establish-baseline
-    persona: verifier
+    agent: verifier
     graph_mutation: forbidden
     read_paths:
     - select: $target
@@ -413,7 +413,7 @@ workflows:
     stop_conditions:
     - Stop and replan if an existing proof does not actually exercise the bounded outcome
   - id: implement
-    persona: implementer
+    agent: implementer
     graph_mutation: forbidden
     depends_on:
     - establish-baseline
@@ -447,7 +447,7 @@ workflows:
     - proof_set
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     graph_mutation: forbidden
     depends_on:
     - implement
@@ -460,7 +460,7 @@ workflows:
   - establish-proof
   steps:
   - id: execute-proof
-    persona: verifier
+    agent: verifier
     graph_mutation: forbidden
     write_paths: []
     expected_output: Semantic readback of the targeted proof plus its current exact member in the compiler-selected promotion set
@@ -470,7 +470,7 @@ workflows:
     - proof_set
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     graph_mutation: forbidden
     depends_on:
     - execute-proof
@@ -485,13 +485,13 @@ workflows:
   steps:
   - id: assemble-candidate
     kind: integration
-    persona: integrator
+    agent: integrator
     graph_mutation: required
     write_paths: []
     expected_output: One delivery node exact-covering the objective-local active closure and acknowledging every introduced risk, with no product-tree edit or promotion claim
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     graph_mutation: forbidden
     depends_on:
     - assemble-candidate
@@ -505,18 +505,18 @@ workflows:
   - resolve-target-integration
   steps:
   - id: resolve-conflicts
-    persona: integrator
+    agent: integrator
     graph_mutation: forbidden
     expected_output: Conflict-resolved product tree preserving both the run and target changes
   - id: verify-composed-tree
-    persona: verifier
+    agent: verifier
     graph_mutation: forbidden
     depends_on:
     - resolve-conflicts
     expected_output: Focused regression evidence for the composed product tree
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     graph_mutation: forbidden
     depends_on:
     - verify-composed-tree
@@ -529,13 +529,13 @@ workflows:
   review_failure_reopen_from: decompose
   steps:
   - id: decompose
-    persona: change-designer
+    agent: change-designer
     graph_mutation: required
     write_paths: []
     expected_output: Disjoint improvement targets covering the objective's domain, each with an observable improvement outcome, a bounded domain slice, and exact slice_paths
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     graph_mutation: forbidden
     depends_on:
     - decompose
@@ -549,7 +549,7 @@ workflows:
   review_failure_reopen_from: explore-and-select
   steps:
   - id: explore-and-select
-    persona: implementer
+    agent: implementer
     graph_mutation: required
     write_paths:
     - select:
@@ -560,7 +560,7 @@ workflows:
     expected_output: One selection_criteria with a decision rule; at least two distinct candidate approaches each prototyped and checked within slice_paths for evidence; one evaluation per approach scored against every criterion; an accepted selection of the winner; and one design-ready change adopting the winner and realizing the objective, with no prototype code left committed
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     graph_mutation: forbidden
     depends_on:
     - explore-and-select

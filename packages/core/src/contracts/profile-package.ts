@@ -3,7 +3,7 @@ import type { Sha256Digest } from "../shared/canonical.js";
 export const PROFILE_PACKAGE_PROTOCOL = "koni.profile-package.v1" as const;
 export const PROFILE_PACKAGE_BASELINE_ROOT = "./baseline" as const;
 export const KONI_CORE_API_VERSION = "1.0.0" as const;
-export const KONI_PROFILE_SCHEMA_VERSION = "2.0.0" as const;
+export const KONI_PROFILE_SCHEMA_VERSION = "3.0.0" as const;
 export const KONI_PI_VERSION = "0.80.10" as const;
 
 export type ProfileFileKind = "config" | "agent" | "skill" | "prompt" | "other";

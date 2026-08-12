@@ -1,4 +1,4 @@
-schema_version: '2.0'
+schema_version: '3.0'
 id: new-feature
 title: New Feature
 description: A Medium-derived capability preset centered on observable acceptance, a walking skeleton, and thin vertical slices.

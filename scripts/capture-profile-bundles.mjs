@@ -16,7 +16,7 @@ export const PROFILE_DEFINITIONS = Object.freeze([
     displayName: "Coding",
     profileVersion: "0.8.0",
     lineage: "koni.software",
-    expectedFileCount: 47,
+    expectedFileCount: 27,
     migration: Object.freeze({
       id: "retire-inert-semantics-v1",
       kind: "retire_yaml_fields",
@@ -35,7 +35,7 @@ export const PROFILE_DEFINITIONS = Object.freeze([
     displayName: "Research",
     profileVersion: "1.1.9",
     lineage: "koni.research",
-    expectedFileCount: 49,
+    expectedFileCount: 29,
     migration: Object.freeze({
       id: "retire-inert-semantics-v1",
       kind: "retire_yaml_fields",
@@ -50,7 +50,7 @@ export const PROFILE_DEFINITIONS = Object.freeze([
 
 const COMPATIBILITY = Object.freeze({
   core_api_range: ">=1.0.0 <2.0.0",
-  profile_schema_range: ">=2.0.0 <3.0.0",
+  profile_schema_range: ">=3.0.0 <4.0.0",
   pi_range: ">=0.80.10 <0.81.0",
 });
 
@@ -191,8 +191,8 @@ async function releaseMigrations(packageRoot, definition) {
 
 async function validateBaselineProfile(definition, configRoot) {
   const profile = await readFile(join(configRoot, "profile.yaml"), "utf8");
-  if (!/^schema_version: ['"]2\.0['"]/m.test(profile)) {
-    throw new Error(`${definition.profileId} baseline is not schema 2`);
+  if (!/^schema_version: ['"]3\.0['"]/m.test(profile)) {
+    throw new Error(`${definition.profileId} baseline is not schema 3`);
   }
   if (!profile.includes(`  id: ${definition.profileId}`)) {
     throw new Error(`${definition.profileId} baseline has a different profile id`);

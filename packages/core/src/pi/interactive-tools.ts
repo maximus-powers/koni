@@ -810,8 +810,8 @@ function runSummary(run: RunRecord): KoniSemanticRunSummary {
       // A blocked run executes nothing: nominally in-flight tickets count as blocked, not active.
       active: halted ? 0 : tickets.filter(inFlight).length,
       blocked:
-        tickets.filter((ticket) => ticket.status === "blocked" || ticket.status === "failed")
-          .length + (halted ? tickets.filter(inFlight).length : 0),
+        tickets.filter((ticket) => ticket.status === "blocked").length +
+        (halted ? tickets.filter(inFlight).length : 0),
       total: tickets.length,
     },
     agents: {

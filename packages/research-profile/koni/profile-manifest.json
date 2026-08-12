@@ -12,7 +12,7 @@
   },
   "compatibility": {
     "core_api_range": ">=1.0.0 <2.0.0",
-    "profile_schema_range": ">=2.0.0 <3.0.0",
+    "profile_schema_range": ">=3.0.0 <4.0.0",
     "pi_range": ">=0.80.10 <0.81.0"
   },
   "baseline": {
@@ -26,110 +26,110 @@
       },
       {
         "path": "actions/research.yaml",
-        "sha256": "sha256:785843f62b48a148e846782af2de23d2bb2fc2295bd498d332876d1ce93a8cfe",
-        "size_bytes": 11775,
+        "sha256": "sha256:5c5988dabc62037407b028ec1b06cec3f3c876c7aec95a7272d7a9f8f695e09e",
+        "size_bytes": 11761,
         "kind": "config"
       },
       {
         "path": "agents/asset-builder.yaml",
-        "sha256": "sha256:9dbb606356aef006c9968f7c04ccfbc92c5a1ca98532a6057d571f51012c91f9",
-        "size_bytes": 8689,
+        "sha256": "sha256:3c19dc30b5c05baf24c88706757d9a714aa6b0bd992163de2bf075a6f5216513",
+        "size_bytes": 3999,
         "kind": "agent"
       },
       {
         "path": "agents/dashboard-reporter.yaml",
-        "sha256": "sha256:56946c6fb1dc3788ed7041ceabc3a65c27b698bde2d1c5f9a71b1df291482895",
-        "size_bytes": 739,
+        "sha256": "sha256:895da8c6d0e87416053753dd4963a2ec0fb9ff89af7dfa5331eaa96d48c12a34",
+        "size_bytes": 1544,
         "kind": "agent"
       },
       {
         "path": "agents/evidence-analyst.yaml",
-        "sha256": "sha256:a2b81a42e766a5b71321ffe9d92bfa6f368f27dce8b35784f730ac2ddce39810",
-        "size_bytes": 1475,
+        "sha256": "sha256:eb9d523e25cb53dd2a58b04297264a56a7775ca067bf379981815e575c695b21",
+        "size_bytes": 2146,
         "kind": "agent"
       },
       {
         "path": "agents/experiment-designer.yaml",
-        "sha256": "sha256:cb2c7624f3e229435219ab058e17853a4dd8a676ff526407672e17c6d615d45a",
-        "size_bytes": 4211,
+        "sha256": "sha256:73a6a3c885da93de121399824d187cd05b5c2c47e17d7b9ae8d317a08dbaff8b",
+        "size_bytes": 2747,
         "kind": "agent"
       },
       {
         "path": "agents/gate-designer.yaml",
-        "sha256": "sha256:ad0e01c6c1e167ab1962de2c3c52ba88c0859962dd28463b3ad17b254f1e17f7",
-        "size_bytes": 4673,
+        "sha256": "sha256:48c0dd612314e636bac7edfa9e773416b10215d96563963e52f62cb80524246a",
+        "size_bytes": 2748,
         "kind": "agent"
       },
       {
         "path": "agents/hypothesis-planner.yaml",
-        "sha256": "sha256:a1f3184a9b38375d47027f356ea10d6c3fd393afdc34ef97e6aefcefa42133f3",
-        "size_bytes": 1732,
+        "sha256": "sha256:9e7096f634bc52961b8ee2b8d1b51f05ce7db5c1c68b37e01550ae16e8727a80",
+        "size_bytes": 2449,
         "kind": "agent"
       },
       {
         "path": "agents/integrator.yaml",
-        "sha256": "sha256:b1a92151a6b2c0fdd92ce9bc2676f662a214e3e194b9da17ba45c662e63a0603",
-        "size_bytes": 3901,
+        "sha256": "sha256:aacc4bb933942fb24db8cecdcde60f56a1ee620bfd439d6c4792e37eaa158427",
+        "size_bytes": 2901,
         "kind": "agent"
       },
       {
         "path": "agents/lead.yaml",
-        "sha256": "sha256:f6454d63dfd2bb49e3c10ce19329bd453e1a9858bb503f75a898543b5d7980c3",
-        "size_bytes": 2326,
+        "sha256": "sha256:b23537cfb568937665014373216cc5b14c7bb8f502a7234341bbf020b983ae4d",
+        "size_bytes": 3056,
         "kind": "agent"
       },
       {
         "path": "agents/report-writer.yaml",
-        "sha256": "sha256:da07bd17ff8274e19fbbe8da3ee98833b902361d735e5c1cab032ee74e1359a1",
-        "size_bytes": 1687,
+        "sha256": "sha256:fcea6e3b708d277ccb1af2806fcd28f573bff2d4f48ca7449def935daa69d312",
+        "size_bytes": 2210,
         "kind": "agent"
       },
       {
         "path": "agents/research-scout.yaml",
-        "sha256": "sha256:ae3daa02814756dfb7ce451f1e83bd3fb6217fa6c2b0e35a7c3ddcbc76f931cc",
-        "size_bytes": 1574,
+        "sha256": "sha256:0fe7406d241538ec7ed44080469abe04fbb030842435124a1dc3169987c13cd5",
+        "size_bytes": 2325,
         "kind": "agent"
       },
       {
         "path": "agents/reviewer.yaml",
-        "sha256": "sha256:8d8dc30f3772eb392ce11bd7b82477f468a97d7e3361b7dfbe0b5c3c0a58533f",
-        "size_bytes": 4021,
+        "sha256": "sha256:ff6e5482e98a346785e2f0fdde456bbe13501a08f7c5150f33c6fdb3889b3de1",
+        "size_bytes": 4257,
         "kind": "agent"
       },
       {
         "path": "agents/run-operator.yaml",
-        "sha256": "sha256:7db237969902fb52a6b1ce664c27edf3262cbe5c3f94028443ce098b00f84eb9",
-        "size_bytes": 3141,
+        "sha256": "sha256:b4146a3fbde0cc3fca0ccb5c6aff6de8c1e09e652006d3979666b21b630d65b3",
+        "size_bytes": 2822,
         "kind": "agent"
       },
       {
         "path": "agents/run-planner.yaml",
-        "sha256": "sha256:3b38d5451cce0e5bfc34bc901833fd0f6e223038a6b5ca8f2e64892e732272e4",
-        "size_bytes": 7484,
+        "sha256": "sha256:bdd4ba0cf12bca56811ce3d8cd91d00b205663299e042e952fc627e72ab1d146",
+        "size_bytes": 4162,
         "kind": "agent"
       },
       {
         "path": "checks/research.yaml",
-        "sha256": "sha256:d99639c800dcace071939d6a2496a70d305137b7b120d182e656543de83531aa",
-        "size_bytes": 11488,
+        "sha256": "sha256:275f6da8af180fcd2c70ecbaf19c012261e0c76b96bc48d9514feca91b5ba97c",
+        "size_bytes": 11896,
         "kind": "config"
       },
       {
         "path": "cockpit/research.yaml",
-        "sha256": "sha256:af4c97e9d6540507af66d212aff42da71c581c293371cd8884965cf1e8640bb4",
-        "size_bytes": 4917,
+        "sha256": "sha256:b6e26dffb01b8226cb9bcd3d4149195730f2d378cced9201a6862e295dad1b18",
+        "size_bytes": 4921,
         "kind": "config"
       },
       {
         "path": "graph/edges.yaml",
-        "sha256": "sha256:f3593cb9b8d8a68ebd41e7233650c6624c7c4462c90e9e647f2ed1659397a92f",
-        "size_bytes": 9428,
+        "sha256": "sha256:c994c9ac8eeefab6d14f8ba3b7f743a232d9e2e7adc32ce8b1a973b361e93860",
+        "size_bytes": 9798,
         "kind": "config"
       },
       {
         "path": "graph/nodes.yaml",
-        "sha256": "sha256:e65fcd72c55e71967d1379819431184f4a96777d70ff33f10aa73bd5f0e70ee5",
-        "size_bytes": 29775,
+        "sha256": "sha256:4e44feb227b0f8375fc27db01a40fc27e50891bec2c260309deeaf526773ebbd",
+        "size_bytes": 31736,
         "kind": "config"
       },
       {
@@ -139,20 +139,14 @@
         "kind": "config"
       },
       {
-        "path": "personas/research.yaml",
-        "sha256": "sha256:94f965f289fe2c5e4fd37829d3292f294bb73f4e03e50cbc220bef63d3f20f97",
-        "size_bytes": 2296,
-        "kind": "config"
-      },
-      {
         "path": "profile.yaml",
-        "sha256": "sha256:2c15a63edaa4839ba843712ff11b46c760291ac6e7d1e0aab2324d9142d86747",
-        "size_bytes": 1357,
+        "sha256": "sha256:ca3ec061b466731ac0b437273074f93181699e6d336a5c418f79aa685371f543",
+        "size_bytes": 1318,
         "kind": "config"
       },
       {
         "path": "project.yaml",
-        "sha256": "sha256:b21c3818cbd9309241eb7ec6be694bdcc1ca993b673f607e684e527ffd643bdf",
+        "sha256": "sha256:9904b7202d9f32679b74a762e855483c91cdb15805fde2a7a962470a4a8359ae",
         "size_bytes": 310,
         "kind": "config"
       },
@@ -163,153 +157,39 @@
         "kind": "config"
       },
       {
-        "path": "resources/pi-packages.yaml",
-        "sha256": "sha256:f62f72746871594d5d28247af8340a32d45663884d41a6ac6d0994d126024e50",
-        "size_bytes": 2263,
-        "kind": "config"
-      },
-      {
-        "path": "resources/skills/configure-koni/SKILL.md",
-        "sha256": "sha256:bf7e2e89f87761d18af976f68d5bfaf1d7f3925c8631b88e82f0d447c405fb00",
-        "size_bytes": 7938,
-        "kind": "skill"
-      },
-      {
-        "path": "resources/skills/configure-koni/agents/openai.yaml",
-        "sha256": "sha256:c3abb7d1dee3d28eada9f19e2d311261d72f04154337cbc0f65fe68c7f019179",
-        "size_bytes": 231,
-        "kind": "skill"
-      },
-      {
-        "path": "resources/skills/configure-koni/references/agents-and-skills.md",
-        "sha256": "sha256:e396ecde64813d15e534c5ba95ea468c16dcdd01bb9bee11b3a5a93ad1b70d2e",
-        "size_bytes": 2745,
-        "kind": "skill"
-      },
-      {
-        "path": "resources/skills/configure-koni/references/configuration-layers.md",
-        "sha256": "sha256:3a02cc2310254195e997e1b42a21f2e7f6ed9167f4a012323cdf0abcac10e47e",
-        "size_bytes": 8286,
-        "kind": "skill"
-      },
-      {
-        "path": "resources/skills/configure-koni/references/discovery-and-approval.md",
-        "sha256": "sha256:3be8c4515b6577aa10177125134ed3471896fa2969ca914768ee29375e1fde3d",
-        "size_bytes": 7791,
-        "kind": "skill"
-      },
-      {
-        "path": "resources/skills/configure-koni/references/run-types.md",
-        "sha256": "sha256:b015b350a2b3c546723ca2dfff4039a2eb91ce7355f7d5a44fcbfd7a953b896b",
-        "size_bytes": 5750,
-        "kind": "skill"
-      },
-      {
-        "path": "resources/skills/model-koni-work/SKILL.md",
-        "sha256": "sha256:4e252e69cf1c80052a5dfbe801f672cb2f654302e92b984e77c39cccaa246697",
-        "size_bytes": 6476,
-        "kind": "skill"
-      },
-      {
-        "path": "resources/skills/model-koni-work/agents/openai.yaml",
-        "sha256": "sha256:e52261f24f6c70a5df7b8dcfce0854332b393b1287b922d7ee04233476d60722",
-        "size_bytes": 232,
-        "kind": "skill"
-      },
-      {
-        "path": "resources/skills/model-koni-work/references/empirical-research.md",
-        "sha256": "sha256:3811dfe30192b7a774b02585bd7660f1e196630a4b00c414e667962e891d4ee0",
-        "size_bytes": 5580,
-        "kind": "skill"
-      },
-      {
-        "path": "resources/skills/model-koni-work/references/execution-contracts.md",
-        "sha256": "sha256:fb5387389c824682eebba24db66b4c2c3f40c6bef552064c7f72fbf0a7d9f03a",
-        "size_bytes": 10690,
-        "kind": "skill"
-      },
-      {
-        "path": "resources/skills/model-koni-work/references/graph-model.md",
-        "sha256": "sha256:ea1c137678a62411dec1060d12b9f2405ad381143a84b93edf945c5e123625dd",
-        "size_bytes": 3958,
-        "kind": "skill"
-      },
-      {
-        "path": "resources/skills/model-koni-work/references/rules-and-tickets.md",
-        "sha256": "sha256:3245ff171eebcd3beca93248e8ea2f3b8054146ffae1472aa67369a8d3b9d1f5",
-        "size_bytes": 3420,
-        "kind": "skill"
-      },
-      {
-        "path": "resources/skills/model-koni-work/references/software-projects.md",
-        "sha256": "sha256:18f318f9553fbe48681887fe3cf244ee30132c37aa350673dafcffa405666d8c",
-        "size_bytes": 28598,
-        "kind": "skill"
-      },
-      {
-        "path": "resources/skills/operate-koni/SKILL.md",
-        "sha256": "sha256:bfaa0b95a075f77542874d99b475b4a39c79575b6ced9eedab84d348513fa6e2",
-        "size_bytes": 4618,
-        "kind": "skill"
-      },
-      {
-        "path": "resources/skills/operate-koni/agents/openai.yaml",
-        "sha256": "sha256:8a178defbf524583d0e373081070a35a748c41d0c89a99bc97d00374981663b6",
-        "size_bytes": 199,
-        "kind": "skill"
-      },
-      {
-        "path": "resources/skills/operate-koni/references/operator-surfaces.md",
-        "sha256": "sha256:e492a5640e7f692362733dc96980ef2a8d53e2b6a4bd22d1b4ae4a47a8cdda51",
-        "size_bytes": 1908,
-        "kind": "skill"
-      },
-      {
-        "path": "resources/skills/operate-koni/references/recovery.md",
-        "sha256": "sha256:e45635acdc06bba503ea21db32cd12b81b2e705d4c43844620890a50fbd8801a",
-        "size_bytes": 4155,
-        "kind": "skill"
-      },
-      {
-        "path": "resources/skills/operate-koni/references/run-lifecycle.md",
-        "sha256": "sha256:0f2051857583d9c1b930a57cd4fa53099bc9781b98d2e5a0ba200265a041be66",
-        "size_bytes": 3329,
-        "kind": "skill"
-      },
-      {
         "path": "rules/lifecycle.yaml",
-        "sha256": "sha256:fe24fc3874f84a0fc5844dcc4d6fe3cea5f726f74d5b6d8ca5f79530396b2c64",
-        "size_bytes": 2329,
+        "sha256": "sha256:4f7ea9414cd3022f4490390134a6c05fd22e33eea1b56c67b018d40988b667e2",
+        "size_bytes": 2351,
         "kind": "config"
       },
       {
         "path": "rules/research.yaml",
-        "sha256": "sha256:8bd8d0ed4dd2808481f134da3b6a2219f5de319785e0f3c0da4fb2761f506577",
-        "size_bytes": 34143,
+        "sha256": "sha256:ad57c250b28cf020458f30c0b0290449901094443f8b68eda9a7e0bafdc080fc",
+        "size_bytes": 39574,
         "kind": "config"
       },
       {
         "path": "run-types/large.yaml",
-        "sha256": "sha256:80c47bc2199048fffd07f7a62f1a315e6072bf5ce8ce8c89291ca251d0fa4e07",
-        "size_bytes": 4565,
+        "sha256": "sha256:47779bd81933830ffe62ce2e020d8f6ccfdd5785d945807feb6952d928053d56",
+        "size_bytes": 4558,
         "kind": "config"
       },
       {
         "path": "run-types/medium.yaml",
-        "sha256": "sha256:1e0205c51ca2bbdeb1a40378612de12fae4cf696caf761fceaafa5a8d7ef8178",
-        "size_bytes": 4003,
+        "sha256": "sha256:6b892b127d928f1b5e4ffa65e5ecf18d8bc84f460c5bf1c09d3c65f21f5421ec",
+        "size_bytes": 4002,
         "kind": "config"
       },
       {
         "path": "run-types/small.yaml",
-        "sha256": "sha256:ff3a36dfd18aaf1aa56d0a469160eb1ce47cf4a1e2eff771dd74bbfb0b55afa1",
-        "size_bytes": 3526,
+        "sha256": "sha256:9d40810ea337cc3ab559cd1e2bd3214047be6680e20aa142739a2fa18855387c",
+        "size_bytes": 3527,
         "kind": "config"
       },
       {
         "path": "workflows/research.yaml",
-        "sha256": "sha256:db0e532573ae9bc8da1058e6685bbdcb0c40c091393281a5a99dd2f1e17fd569",
-        "size_bytes": 36119,
+        "sha256": "sha256:bd4b905fcae337fe5b237ef6e77a4f40dfd32b938c6804c8ba70483bf6ac910d",
+        "size_bytes": 35934,
         "kind": "config"
       }
     ]
@@ -326,5 +206,5 @@
       "sha256": "sha256:c807436b04f7d44ea65cce5cfa6ed8cba3c4e5d8d571034f7fecc25c9fd117a5"
     }
   ],
-  "bundle_sha256": "sha256:bb6c3aac0e3b3b0eedb01ce99d445fd6bce0aaeecda9a53fcc77c21f7bda551f"
+  "bundle_sha256": "sha256:348e93f17bd295bc96b9a71894d8cc9c12054fbe78673f948c00f491780c82ef"
 }

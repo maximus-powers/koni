@@ -9,7 +9,7 @@ workflows:
   review_failure_reopen_from: work
   steps:
   - id: work
-    persona: experiment-designer
+    agent: experiment-designer
     depends_on: []
     expected_output: structured findings risks graph delta receipt refs and next recommendation
     validation_action: compile-ticket
@@ -26,7 +26,7 @@ workflows:
     - out-of-scope-write
   - id: integrate
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on:
     - work
     expected_output: integrated bounded graph delta
@@ -41,7 +41,7 @@ workflows:
     - structural-validation-failure
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     depends_on:
     - integrate
     expected_output: typed review receipt
@@ -57,7 +57,7 @@ workflows:
   - drill-hypothesis
   steps:
   - id: drill-claims
-    persona: hypothesis-planner
+    agent: hypothesis-planner
     depends_on: []
     expected_output: claim graph delta within formulation scope
     validation_action: compile-ticket
@@ -71,7 +71,7 @@ workflows:
     - stage-skip
     - concrete-asset-creation
   - id: map-related-work
-    persona: research-scout
+    agent: research-scout
     depends_on: []
     expected_output: literature graph delta with provenance, or a bounded no-op when no permitted source is available
     validation_action: compile-ticket
@@ -86,7 +86,7 @@ workflows:
     - concrete-asset-creation
   - id: integrate
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on:
     - drill-claims
     - map-related-work
@@ -102,7 +102,7 @@ workflows:
     - structural-validation-failure
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     depends_on:
     - integrate
     expected_output: typed review receipt
@@ -119,7 +119,7 @@ workflows:
   review_failure_reopen_from: design-experiment-portfolio
   steps:
   - id: map-claim-portfolio
-    persona: research-scout
+    agent: research-scout
     depends_on: []
     expected_output: claim portfolio and coverage gaps
     validation_action: compile-ticket
@@ -132,7 +132,7 @@ workflows:
     stop_conditions:
     - stage-skip
   - id: design-experiment-portfolio
-    persona: experiment-designer
+    agent: experiment-designer
     depends_on:
     - map-claim-portfolio
     expected_output: a small cohesive empirical experiment-only portfolio grouping related claim checks into shared executable programs within the configured max_new_nodes; every experiment declares meaningful empirical_mode execution_protocol and observable_outcome and excludes static proof inspection traceability audit or review work
@@ -150,7 +150,7 @@ workflows:
     - non-empirical-experiment
   - id: integrate
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on:
     - design-experiment-portfolio
     expected_output: integrated cohesive empirical experiment portfolio within the configured node budget with executable protocols and runtime-observable outcomes
@@ -166,7 +166,7 @@ workflows:
     - ontology-drift
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     depends_on:
     - integrate
     expected_output: typed ontology granularity and transition review receipt rejecting non-empirical experiment nodes placeholder empirical fields and needless one-node-per-check atomization
@@ -184,7 +184,7 @@ workflows:
   review_failure_reopen_from: design-experiment
   steps:
   - id: map-claim-context
-    persona: research-scout
+    agent: research-scout
     depends_on: []
     expected_output: claim context and experiment-only constraints
     validation_action: compile-ticket
@@ -197,7 +197,7 @@ workflows:
     stop_conditions:
     - stage-skip
   - id: design-experiment
-    persona: experiment-designer
+    agent: experiment-designer
     depends_on:
     - map-claim-context
     expected_output: empirical experiment graph delta for target claim declaring meaningful empirical_mode execution_protocol and observable_outcome and excluding static proof inspection traceability audit or review work
@@ -215,7 +215,7 @@ workflows:
     - non-empirical-experiment
   - id: integrate
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on:
     - design-experiment
     expected_output: integrated empirical experiment transition with an executable protocol and runtime-observable outcome
@@ -231,7 +231,7 @@ workflows:
     - ontology-drift
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     depends_on:
     - integrate
     expected_output: typed ontology and transition review receipt rejecting non-empirical experiment nodes and placeholder empirical fields
@@ -249,7 +249,7 @@ workflows:
   review_failure_reopen_from: design-methods
   steps:
   - id: design-methods
-    persona: experiment-designer
+    agent: experiment-designer
     depends_on: []
     expected_output: method graph delta
     validation_action: compile-ticket
@@ -262,7 +262,7 @@ workflows:
     stop_conditions:
     - concrete-asset-creation
   - id: define-metrics
-    persona: experiment-designer
+    agent: experiment-designer
     depends_on:
     - design-methods
     expected_output: metric definitions and thresholds
@@ -276,7 +276,7 @@ workflows:
     stop_conditions:
     - concrete-asset-creation
   - id: map-prerequisites
-    persona: gate-designer
+    agent: gate-designer
     depends_on:
     - design-methods
     expected_output: prerequisite needs without concrete assets
@@ -290,7 +290,7 @@ workflows:
     stop_conditions:
     - concrete-asset-creation
   - id: plan-ablations
-    persona: experiment-designer
+    agent: experiment-designer
     depends_on:
     - define-metrics
     expected_output: controlled ablation graph delta
@@ -305,7 +305,7 @@ workflows:
     - concrete-asset-creation
   - id: integrate
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on:
     - map-prerequisites
     - plan-ablations
@@ -321,7 +321,7 @@ workflows:
     - stage-skip
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     depends_on:
     - integrate
     expected_output: typed review receipt
@@ -338,7 +338,7 @@ workflows:
   review_failure_reopen_from: write-gate-contracts
   steps:
   - id: compile-gate-stack
-    persona: gate-designer
+    agent: gate-designer
     depends_on: []
     expected_output: direct and inherited gate analysis
     graph_mutation: forbidden
@@ -352,7 +352,7 @@ workflows:
     stop_conditions:
     - gate-weakening
   - id: write-gate-contracts
-    persona: gate-designer
+    agent: gate-designer
     depends_on:
     - compile-gate-stack
     expected_output: expected-red typed gate contract with one canonical gate.applies_to link and no reciprocal stored target.gates fact
@@ -370,7 +370,7 @@ workflows:
     - reciprocal-edge-storage
   - id: integrate
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on:
     - write-gate-contracts
     expected_output: integrated expected-red gate transition whose compiler-derived inverse gates view comes from the single canonical gate.applies_to fact
@@ -386,7 +386,7 @@ workflows:
     - reciprocal-edge-storage
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     depends_on:
     - integrate
     expected_output: typed review receipt
@@ -404,7 +404,7 @@ workflows:
   review_failure_reopen_from: work
   steps:
   - id: work
-    persona: experiment-designer
+    agent: experiment-designer
     depends_on: []
     expected_output: expected-red executable gate package or test contract
     validation_action: compile-ticket
@@ -418,7 +418,7 @@ workflows:
     - protected-tooling-write
   - id: integrate
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on:
     - work
     expected_output: integrated executable contract surface
@@ -433,7 +433,7 @@ workflows:
     - structural-validation-failure
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     depends_on:
     - integrate
     expected_output: typed review receipt
@@ -451,7 +451,7 @@ workflows:
   review_failure_reopen_from: plan-asset
   steps:
   - id: map-capability
-    persona: gate-designer
+    agent: gate-designer
     depends_on: []
     expected_output: capability and protocol analysis with an empty graph delta
     graph_mutation: forbidden
@@ -466,7 +466,7 @@ workflows:
     - scope-broadening
     - asset-creation
   - id: plan-asset
-    persona: asset-builder
+    agent: asset-builder
     depends_on:
     - map-capability
     expected_output: one planned asset with spec.implementation_plan.root and nonempty project-relative files plus validates links; new nodes omit every compiler-owned field and existing upserts preserve current compiler-owned values exactly
@@ -483,7 +483,7 @@ workflows:
     - compiler-owned-field-authorship
   - id: integrate
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on:
     - plan-asset
     expected_output: linked asset delta or bounded build recommendation
@@ -498,7 +498,7 @@ workflows:
     - upstream-semantic-rewrite
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     depends_on:
     - integrate
     expected_output: typed review receipt
@@ -516,7 +516,7 @@ workflows:
   review_failure_reopen_from: implement
   steps:
   - id: implement
-    persona: asset-builder
+    agent: asset-builder
     depends_on: []
     expected_output: concrete nonempty payload plus spec.implementation.kind and unique project-relative entrypoints under the authorized root, including deterministic autoresearch.gate-result.v1 verifier commands for every target gate; preserve existing compiler-owned values exactly and never author them on new nodes
     validation_action: compile-ticket
@@ -532,7 +532,7 @@ workflows:
     - gate-weakening
     - compiler-owned-field-authorship
   - id: verify
-    persona: asset-builder
+    agent: asset-builder
     depends_on:
     - implement
     expected_output: typed validation receipts
@@ -547,7 +547,7 @@ workflows:
     - invalid-contract
   - id: integrate
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on:
     - verify
     expected_output: canonical existing-asset upsert preserving current compiler-owned fields exactly while adding authored implementation kind, entrypoints, exact gate_contracts, and validates links; new nodes omit compiler-owned fields
@@ -566,7 +566,7 @@ workflows:
     - compiler-owned-field-authorship
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     depends_on:
     - integrate
     expected_output: typed review receipt
@@ -583,7 +583,7 @@ workflows:
   review_failure_reopen_from: design-runtime-contract
   steps:
   - id: design-runtime-contract
-    persona: experiment-designer
+    agent: experiment-designer
     depends_on: []
     expected_output: executable scientific contract with exact autoresearch.research-result.v1 protocol nonempty unique required_measurements an explicit stdout-with-empty-artifacts or durable-output requirement and a distinct read-only composed-result integrity strategy that never reruns the empirical intervention
     validation_action: compile-ticket
@@ -597,7 +597,7 @@ workflows:
     - missing-result-protocol
     - implicit-empirical-rerun
   - id: bind-concrete-assets
-    persona: asset-builder
+    agent: asset-builder
     depends_on:
     - design-runtime-contract
     expected_output: typed asset_entrypoints and prerequisite-complete scientific_inputs whose project-relative paths are exact items in both the empirical command and the repository-owned composed_verification_command plus a narrow output_root whenever result_path or nonempty produced artifacts are possible; omitting output_root requires stdout and artifacts empty
@@ -612,7 +612,7 @@ workflows:
     - unbound-input
     - missing-read-only-integrity-command
   - id: validate-result-protocol
-    persona: run-operator
+    agent: run-operator
     depends_on:
     - bind-concrete-assets
     expected_output: validated research result protocol with dynamic required measurement keys result_path beneath its predeclared output_root and only fresh created-or-content-changed artifact files; omitting output_root requires stdout and artifacts empty
@@ -627,7 +627,7 @@ workflows:
     - invalid-contract
   - id: integrate
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on:
     - validate-result-protocol
     expected_output: linked run with the complete typed runtime_contract and uses edges for every bound asset
@@ -642,7 +642,7 @@ workflows:
     - asset-mutation
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     depends_on:
     - integrate
     expected_output: typed review receipt
@@ -658,7 +658,7 @@ workflows:
   - run-gate
   steps:
   - id: run
-    persona: run-operator
+    agent: run-operator
     depends_on: []
     expected_output: compiler-executed typed gate receipt from the policy-selected ticket-authorized asset gate contract
     validation_action: compile-ticket
@@ -676,7 +676,7 @@ workflows:
     - unauthorized-policy-winner
     - stop-steering
   - id: analyze
-    persona: evidence-analyst
+    agent: evidence-analyst
     depends_on:
     - run
     expected_output: receipt interpretation as audit or evidence candidate
@@ -692,7 +692,7 @@ workflows:
     - invalid-scientific-binding
   - id: integrate
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on:
     - analyze
     expected_output: integrated receipt and graph state
@@ -710,7 +710,7 @@ workflows:
   - run-experiment
   steps:
   - id: run
-    persona: run-operator
+    agent: run-operator
     depends_on: []
     expected_output: typed causal scientific runtime receipt plus a passing repository-owned read-only integrity receipt; the empirical runtime never replays implicitly, while the distinct integrity command is safe to rerun after target synchronization; no output_root means a stdout result with empty artifacts while result_path and artifacts require fresh produced files beneath the predeclared root
     validation_action: compile-ticket
@@ -731,7 +731,7 @@ workflows:
     - nonpassing-integrity-check
     - stop-steering
   - id: analyze
-    persona: evidence-analyst
+    agent: evidence-analyst
     depends_on:
     - run
     expected_output: receipt interpretation as an evidence candidate
@@ -747,7 +747,7 @@ workflows:
     - invalid-scientific-binding
   - id: integrate
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on:
     - analyze
     expected_output: integrated receipt and graph state
@@ -766,7 +766,7 @@ workflows:
   review_failure_reopen_from: work
   steps:
   - id: work
-    persona: experiment-designer
+    agent: experiment-designer
     depends_on: []
     expected_output: candidate evidence covering every preflight run and exact receipt disposition
     validation_action: compile-ticket
@@ -781,7 +781,7 @@ workflows:
     - stale-provenance
   - id: integrate
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on:
     - work
     expected_output: integrated evidence candidate graph delta
@@ -796,7 +796,7 @@ workflows:
     - incomplete-run-coverage
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     depends_on:
     - integrate
     expected_output: Lead review and promotion decision
@@ -813,7 +813,7 @@ workflows:
   review_failure_reopen_from: analyze-evidence
   steps:
   - id: analyze-evidence
-    persona: evidence-analyst
+    agent: evidence-analyst
     depends_on: []
     expected_output: current promoted evidence synthesis with threats
     validation_action: compile-ticket
@@ -826,7 +826,7 @@ workflows:
     stop_conditions:
     - unpromoted-evidence-use
   - id: draft-report
-    persona: report-writer
+    agent: report-writer
     depends_on:
     - analyze-evidence
     expected_output: report citing promoted current evidence
@@ -841,7 +841,7 @@ workflows:
     - missing-citation-provenance
   - id: integrate
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on:
     - draft-report
     expected_output: integrated report graph delta
@@ -856,7 +856,7 @@ workflows:
     - stale-evidence
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     depends_on:
     - integrate
     expected_output: typed review receipt
@@ -873,7 +873,7 @@ workflows:
   review_failure_reopen_from: synthesize-claims
   steps:
   - id: synthesize-claims
-    persona: evidence-analyst
+    agent: evidence-analyst
     depends_on: []
     expected_output: every claim paired with current promoted evidence
     validation_action: compile-ticket
@@ -886,7 +886,7 @@ workflows:
     stop_conditions:
     - stale-evidence
   - id: adjudicate-hypothesis
-    persona: evidence-analyst
+    agent: evidence-analyst
     depends_on:
     - synthesize-claims
     expected_output: bounded disposition for every claim and hypothesis
@@ -900,7 +900,7 @@ workflows:
     stop_conditions:
     - unsupported-certainty
   - id: draft-conclusion
-    persona: report-writer
+    agent: report-writer
     depends_on:
     - adjudicate-hypothesis
     expected_output: conclusion report citing every current evidence atom
@@ -915,7 +915,7 @@ workflows:
     - incomplete-evidence-citation
   - id: integrate
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on:
     - draft-conclusion
     expected_output: integrated conclusion report
@@ -930,7 +930,7 @@ workflows:
     - stale-evidence
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     depends_on:
     - integrate
     expected_output: Lead-bound conclusion acceptance
@@ -947,7 +947,7 @@ workflows:
   review_failure_reopen_from: draft-paper-input
   steps:
   - id: map-paper-role
-    persona: report-writer
+    agent: report-writer
     depends_on: []
     expected_output: nonempty paper_context_role plus useful paper_input_role and paper_section for the accepted report
     validation_action: compile-ticket
@@ -960,7 +960,7 @@ workflows:
     stop_conditions:
     - stale-report
   - id: draft-paper-input
-    persona: report-writer
+    agent: report-writer
     depends_on:
     - map-paper-role
     expected_output: paper fragment grounded in the reviewed conclusion with exact paper_input_status ready
@@ -975,7 +975,7 @@ workflows:
     - uncited-evidence
   - id: integrate
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on:
     - draft-paper-input
     expected_output: update the accepted report while preserving compiler-owned conclusion fields and its exact evidence citations
@@ -990,7 +990,7 @@ workflows:
     - stale-report
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     depends_on:
     - integrate
     expected_output: typed review receipt
@@ -1009,7 +1009,7 @@ workflows:
   steps:
   - id: scope-change
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on: []
     expected_output: bounded analysis with zero semantic or asset payload mutation
     graph_mutation: forbidden
@@ -1024,7 +1024,7 @@ workflows:
     - payload-mutation
   - id: propose-graph-delta
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on:
     - scope-change
     expected_output: typed application operation targets summary risks and proposal
@@ -1040,7 +1040,7 @@ workflows:
     - target-outside-source-scope
   - id: risk-review
     kind: review
-    persona: reviewer
+    agent: reviewer
     depends_on:
     - propose-graph-delta
     expected_output: review bound to exact proposal hash
@@ -1058,7 +1058,7 @@ workflows:
   steps:
   - id: inspect-approved-change
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on: []
     expected_output: approved proposal and contract provenance
     graph_mutation: forbidden
@@ -1073,7 +1073,7 @@ workflows:
     - approval-hash-mismatch
   - id: apply-approved-delta
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on:
     - inspect-approved-change
     expected_output: exact approved semantic graph delta, including only bounded approved new nodes when required
@@ -1086,10 +1086,9 @@ workflows:
     - scope-broadening
     stop_conditions:
     - unapproved-new-node-creation
-    - asset-payload-mutation
   - id: verify
     kind: review
-    persona: reviewer
+    agent: reviewer
     depends_on:
     - apply-approved-delta
     expected_output: review of exact approved delta
@@ -1107,7 +1106,7 @@ workflows:
   steps:
   - id: diagnose
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on: []
     expected_output: conflict diagnosis preserving original worktree and base
     validation_action: compile-ticket
@@ -1122,7 +1121,7 @@ workflows:
     - destructive-history-rewrite
   - id: resolve
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on:
     - diagnose
     expected_output: bounded resolution and original-ticket release plan
@@ -1138,7 +1137,7 @@ workflows:
     - out-of-scope-write
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     depends_on:
     - resolve
     expected_output: typed recovery review
@@ -1156,7 +1155,7 @@ workflows:
   steps:
   - id: inspect-conflict
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on: []
     graph_mutation: forbidden
     expected_output: bounded target/run conflict map preserving both original heads and every empirical artifact
@@ -1173,7 +1172,7 @@ workflows:
     - semantic-graph-mutation
   - id: resolve-conflicts
     kind: integration
-    persona: integrator
+    agent: integrator
     depends_on:
     - inspect-conflict
     graph_mutation: forbidden
@@ -1191,7 +1190,7 @@ workflows:
     - out-of-scope-write
     - semantic-graph-mutation
   - id: verify-composed-tree
-    persona: run-operator
+    agent: run-operator
     depends_on:
     - resolve-conflicts
     graph_mutation: forbidden
@@ -1210,7 +1209,7 @@ workflows:
     - semantic-graph-mutation
   - id: review
     kind: review
-    persona: reviewer
+    agent: reviewer
     depends_on:
     - verify-composed-tree
     graph_mutation: forbidden
@@ -1230,7 +1229,7 @@ workflows:
   steps:
   - id: inspect
     kind: review
-    persona: reviewer
+    agent: reviewer
     depends_on: []
     expected_output: strict transition checklist inspection
     validation_action: review
@@ -1242,7 +1241,7 @@ workflows:
     - active-worker
   - id: record-review
     kind: review
-    persona: reviewer
+    agent: reviewer
     depends_on:
     - inspect
     expected_output: passed or failed typed review receipt

@@ -1,4 +1,4 @@
-schema_version: '2.0'
+schema_version: '3.0'
 id: medium
 title: Medium
 description: A standard multi-component change with one combined semantic plan, targeted questions, and safely parallel vertical slices.
@@ -57,7 +57,7 @@ pipeline:
       kind: planning
       title: Plan implementation, architecture, and risk
       config:
-        persona: run-planner
+        agent: run-planner
         prompt: >-
           Produce one concise, implementation-ready plan and the smallest sufficient root-connected graph seed. Define the observable outcome, explicit non-goals, success signals, objective.work_kind, affected repository-native systems, and the fewest dependency-ordered vertical changes, each expressible as one approval sentence. Lock the first complete repository-native design supported by the evidence and stop exploring alternatives. Preserving an existing compatible identity while adding optional sibling values is routine additive work; do not invent serialization, version markers, migrations, rollback systems, or elevated risk unless concrete repository evidence proves an unavoidable destructive or interpretive transition. Classify each change as routine, elevated, or critical from concrete risk factors; give every change a primary focused proof that verifies exactly that implementation subject, adding another only for a distinct remaining evidence gap. Only elevated or critical work introduces a material risk whose distinct boundary proof verifies the risk plus structural treatment. Choose an honest red_green, characterization, or current_verification baseline and exact repository-native argv. For every proof, bind condition and claim through structured oracle_cases to the callable production seam, exact seam_paths, action, assertions, and material environment/recipe; every seam path must resolve to the same normalized project-relative identity present in read-only covered_paths. Model interfaces, data, flows, contracts, migrations, decisions, and risks only when material. Keep each full human-readable plan domain to at most six compact Markdown bullets, each concise domain to at most three authored title/description items, and the graph to normally no more than twelve non-root nodes. Before submission, close every configured required relation already known in the seed: in particular, every system with contract_required true must already have its semantically complete contract linked through canonical contract.applies_to, reusing the existing fact rather than leaving a fallback ticket or duplicate. Use canonical edges and exact paths; never seed compiler-owned status, tickets, receipts, or implementation progress.
     approval:
@@ -126,7 +126,7 @@ agents:
     reviewer:
       model: gpt-5.6-sol
       thinking_level: max
-  personas: {}
+  overrides: {}
 orchestration:
   auto_start: true
   max_parallel: 3

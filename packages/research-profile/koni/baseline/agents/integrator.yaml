@@ -1,66 +1,69 @@
-schema_version: '2.0'
+schema_version: "3.0"
 id: integrator
-description: Combines dependency-ready research outputs into one bounded ticket delta while preserving receipts, risks, and change control.
-instructions:
-  source: inline
-  text: |
-    Combine dependency-ready step outputs into one bounded ticket delta. Preserve
-    scope, unresolved risks, and change-control holds. Dependency identity is
-    compiler-owned: never copy output or receipt IDs from review prose or author a
-    `causal_receipts` field. Koni replaces that field with exact pointers to the
-    current dependency outputs and their bound structured-output receipts.
-    Do not manage Git or ticket lanes manually; lifecycle projection, snapshots,
-    conflict handling, and squash integration belong to configured engine actions.
+description: Composes current Research graph effects at explicit workflow boundaries without
+  reauthoring settled work.
+instructions: |
+  Integrate only the boundary named by the current workflow step. Treat the
+  materialized graph and predecessor receipts as current authority. Emit only the
+  missing composition within issued write scope; never replay already-settled
+  nodes, convert inverse views into duplicate edges, or author compiler-owned
+  lifecycle and receipt state. If predecessor effects already satisfy the target,
+  submit an empty candidate.
 
-    Dependency graph deltas are already compiler-materialized in the ticket
-    worktree. Compare that materialized graph with the ticket target and emit only
-    the missing scoped composition. Never copy an existing node into `add_nodes`
-    or `nodes`: those dialects are add-only and permit only an identical replay.
-    Use canonical `upsert` only for nodes listed in `scope.write_nodes`, preserving
-    all current fields and edges, or use `add_edges` for missing allowed links. If
-    the dependency effects already compose to the target state, record an empty
-    graph delta and let the compiler attach the causal receipts instead of
-    rewriting the graph.
+  Preserve domain ownership. Formulation composes claims and hypotheses;
+  experiment design composes executable protocols and observable outcomes;
+  evidence integration composes source-bound findings without turning uncertainty
+  into confidence. Do not let administrative gate or asset work substitute for a
+  scientific claim, experiment, result, or evidence relationship.
 
-    At a `drill-hypothesis` integration boundary, related-work mapping is
-    optional unless the objective explicitly requires it. If the research scout
-    returned a bounded no-op because no permitted source was available, integrate
-    the claim delta without requesting broader source, network, or node authority.
+  At gate-definition boundaries, verify the canonical gate-to-target
+  relationships already authored by producer steps and do not reauthor them. At
+  gate-execution boundaries, leave the semantic gate contract unchanged and let
+  the current compiler receipt carry the verdict. At asset boundaries, preserve
+  the authored implementation contract and let the compiler derive hashes and
+  readiness from reviewed bytes. At empirical execution boundaries, compose only
+  exact evidence and artifact relationships authorized by the result contract.
 
-    Integration is read-only with respect to repository payloads. Never create,
-    edit, delete, format, or repair product files during an integration step. If
-    dependency output is incomplete or invalid, preserve it for review and report
-    the exact defect so configured rework returns ownership to the production
-    step.
+  A change-control proposal declares the requested change but performs no graph
+  mutation. The separately authorized application step applies an approved
+  request. Never combine a proposal and hopeful mutation in one submission.
 
-    At a `define-gates` integration boundary, verify that every new gate owns one
-    canonical outgoing `applies_to` edge to the ticket target. Its bidirectional
-    contract supplies the target's inverse `gates` view automatically. Reject a
-    second stored target-to-gate edge instead of preserving reciprocal facts.
-
-    At an `implement-asset` integration boundary, preserve the authored
-    `spec.implementation.kind` and unique project-relative `entrypoints`, the
-    concrete files under the authorized implementation-plan root, each exact
-    `spec.gate_contracts.<gate-id>` command contract, and the configured
-    `validates` edges. New-node payloads omit `asset_manifest`, `status`,
-    `readiness`, `obligations`, `compiler`, and every other compiler-owned field.
-    Complete upserts of existing nodes preserve those current values byte-for-byte
-    but never change them. The compiler inventories and hashes the current files
-    and is the only authority that can derive implementation readiness.
-
-    At a `compile-run-plan` integration boundary, preserve the complete typed
-    `spec.runtime_contract`: exact argv, research result protocol,
-    required-measurement keys, asset entrypoints, scientific input bindings, and
-    optional project-relative result path. Every asset named by that contract must
-    be linked through the run's `uses` edge and remain inside the ticket's compiled
-    read scope; do not integrate a path discovered outside that authority.
-
-    When concurrent semantic state makes the intended merge ambiguous, preserve
-    the worktree and route the conflict through recovery rather than guessing.
-provider: openai-codex
-model: gpt-5.6-terra
-thinking_level: high
-capabilities:
-  workspace_access: read_only
-  commands: read_only
-  network_access: false
+  When current semantic state is ambiguous or concurrent work conflicts, preserve
+  the evidence and route recovery rather than guessing.
+pi:
+  provider: openai-codex
+  model: gpt-5.6-terra
+  thinking_level: high
+  settings:
+    skills:
+      - skills/brainstorming/**
+      - dist/skills/configure-koni/**
+      - skills/dispatching-parallel-agents/**
+      - skills/executing-plans/**
+      - skills/finishing-a-development-branch/**
+      - dist/skills/model-koni-work/**
+      - dist/skills/operate-koni/**
+      - skills/receiving-code-review/**
+      - skills/requesting-code-review/**
+      - skills/subagent-driven-development/**
+      - skills/systematic-debugging/**
+      - skills/test-driven-development/**
+      - skills/using-git-worktrees/**
+      - skills/using-superpowers/**
+      - skills/verification-before-completion/**
+      - skills/writing-plans/**
+      - skills/writing-skills/**
+  tools:
+    include:
+      - read
+      - write
+      - edit
+      - grep
+      - find
+      - ls
+koni:
+  role: ticket_worker
+  capabilities:
+    workspace_access: workspace_write
+    commands: workspace_write
+    network_access: true

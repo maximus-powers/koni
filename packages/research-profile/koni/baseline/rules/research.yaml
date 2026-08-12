@@ -63,7 +63,7 @@ queries:
   - superseded
   where:
     op: field_equals
-    field: readiness.state
+    field: compiler.constitution_state
     value: ready
 - id: active-runs
   node_types:
@@ -72,6 +72,19 @@ queries:
   - satisfied
   - archived
   - superseded
+  # Experiment/ablation-owned runs and explicitly authored standalone scientific support runs are
+  # execution targets. Gate workflows may record a verifier invocation as a run node for
+  # provenance, but that record emits autoresearch.gate-result.v1 and must never be routed through
+  # compile-run-plan. Approved change applications can author a bounded support run before any
+  # experiment owns it, so its scientific result protocol is the typed execution discriminator.
+  where:
+    any:
+    - op: incoming_count
+      relation: runs
+      min: 1
+    - op: field_equals
+      field: spec.runtime_contract.result_protocol
+      value: autoresearch.research-result.v1
 - id: promoted-current-evidence
   node_types:
   - evidence
@@ -242,6 +255,10 @@ rules:
   - kind: readiness
     value: ready
     reason: Experiment constitution is complete
+  - kind: projection
+    field: constitution_state
+    value: ready
+    reason: Experiment constitution is complete independently of gate readiness
 - id: readiness.ablation-constitution
   phase: readiness
   priority: 11
@@ -249,15 +266,27 @@ rules:
   when:
     all:
     - op: edge_count
-      relation: method
-      min: 1
-    - op: edge_count
       relation: metrics
       min: 1
+    - any:
+      - op: edge_count
+        relation: method
+        min: 1
+      - all:
+        - op: edge_count
+          relation: baseline
+          min: 1
+        - op: edge_count
+          relation: variant
+          min: 1
   derive:
   - kind: readiness
     value: ready
     reason: Ablation has method and metric bindings
+  - kind: projection
+    field: constitution_state
+    value: ready
+    reason: Ablation constitution is complete independently of gate readiness
 - id: readiness.asset-implementation
   phase: readiness
   priority: 12
@@ -337,6 +366,14 @@ rules:
       field: spec.runtime_contract.command
     - op: field_present
       field: spec.runtime_contract.composed_verification_command
+    - op: field_present
+      field: spec.runtime_contract.result_protocol
+    - op: field_present
+      field: spec.runtime_contract.required_measurements
+    - op: field_present
+      field: spec.runtime_contract.asset_entrypoints
+    - op: field_present
+      field: spec.runtime_contract.scientific_inputs
   derive:
   - kind: readiness
     value: ready
@@ -663,7 +700,20 @@ rules:
       - $target
       - active-assets
       - gate-evaluation-subjects
-    write_scope: $target
+    # A planner may seed fully typed gates as experiment requirements before their canonical
+    # gate.applies_to facts exist. The repair ticket must own those exact causal gate sources so it
+    # can add the canonical outgoing edges; unrelated visible gates remain read-only.
+    write_scope:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relation: requires
+          direction: outgoing
+          min_depth: 1
+          max_depth: 1
+          node_types:
+          - gate
 - id: ticket.resolve-prerequisite-asset
   phase: ticket_emission
   priority: 140
@@ -686,6 +736,16 @@ rules:
     target_nodes: $target
     read_scope: $target
     write_scope: $target
+    # Deciding whether an existing asset already satisfies this prerequisite means reading that
+    # asset's files; with no path grant the attempt holds "Readable: none" and can only record
+    # fixture stand-ins for entrypoints it was never able to look at. Grant the fixed payload root
+    # rather than projecting `active-assets` implementation roots: that projection is a live
+    # selector, so every asset this run materializes changes the path set and drifts the ticket's
+    # deterministic identity under it (see the same trap in ticket.implement-asset's gate subjects).
+    # The literal root is stable across the run and no wider than the union of asset roots, which
+    # the node schema already constrains to `^program/assets(?:/.*)?$`.
+    read_paths:
+    - program/assets
 - id: ticket.repair-asset-plan
   phase: ticket_emission
   priority: 150
@@ -774,9 +834,6 @@ rules:
                   gate_subject: $candidate_gate
         - any:
           - not:
-              op: field_present
-              field: spec.gate_contracts
-          - not:
               for_all:
                 select: gate-evaluation-subjects
                 bind: candidate_gate
@@ -808,6 +865,26 @@ rules:
                   - op: gate_policy_satisfied
                     gate_policy: research-capability-gates
                     gate_subject: $candidate_gate
+          # A gate whose selected verifier produced a receipt that failed its configured result
+          # contract cannot go green by re-running the gate: the verifier itself is defective and
+          # only this operation holds write access to repair it. Reopen the implementation; the
+          # repair updates the asset manifest, which invalidates the refused evidence and lets
+          # ticket.run-gate re-emit against the corrected contract.
+          - not:
+              for_all:
+                select: gate-evaluation-subjects
+                bind: candidate_gate
+                satisfies:
+                  any:
+                  - not:
+                      op: gate_policy_selected
+                      subject: $target
+                      gate_policy: research-capability-gates
+                      gate_subject: $candidate_gate
+                  - not:
+                      op: gate_policy_receipt_refused
+                      gate_policy: research-capability-gates
+                      gate_subject: $candidate_gate
   emit:
     operation: implement-asset
     registry_entry_id: asset-resolution.asset.implement-asset
@@ -825,6 +902,11 @@ rules:
     read_paths:
     - select: $target
       field: spec.implementation_plan.root
+    # An entrypoint that imports a canonical builder or fixture it does not own can only reach it
+    # when that path is granted here. Without this the entrypoint degrades to a placeholder payload
+    # and every gate verifying that payload stays red with no reachable remedy.
+    - select: $target
+      field: spec.support_paths
     write_paths:
     - select: $target
       field: spec.implementation_plan.root
@@ -858,7 +940,14 @@ rules:
       - active-assets
 - id: ticket.run-gate
   phase: ticket_emission
-  priority: 170
+  # Below implement-asset (155) and plan-build-asset (160) on purpose. Ticket dependencies are
+  # derived from scope conflicts against predecessors in priority order, and a run-gate reads the
+  # asset node that implement-asset writes — so ordering gates first meant the edge could never be
+  # derived and a gate could execute a verifier whose file did not exist yet. Observed live: argv
+  # `python3 program/assets/.../build_manifest.py --verify` against a missing script, exiting 1 with
+  # no JSON, which then read as a broken verifier rather than as work done out of order. Verify
+  # after the thing being verified is built.
+  priority: 150
   for_each: gate-evaluation-subjects
   when:
     all:
@@ -876,6 +965,13 @@ rules:
       gate_subject: $target
     - not:
         op: gate_policy_has_current_terminal
+        gate_policy: research-capability-gates
+        gate_subject: $target
+    # A refused receipt means the selected verifier itself cannot satisfy its result contract.
+    # Re-running the gate replays the same defect forever; the asset-reopen alternative in
+    # ticket.implement-asset owns recovery, and this ticket returns once the repair lands.
+    - not:
+        op: gate_policy_receipt_refused
         gate_policy: research-capability-gates
         gate_subject: $target
   emit:
@@ -959,6 +1055,18 @@ rules:
     - not:
         op: field_present
         field: spec.runtime_contract.composed_verification_command
+    - not:
+        op: field_present
+        field: spec.runtime_contract.result_protocol
+    - not:
+        op: field_present
+        field: spec.runtime_contract.required_measurements
+    - not:
+        op: field_present
+        field: spec.runtime_contract.asset_entrypoints
+    - not:
+        op: field_present
+        field: spec.runtime_contract.scientific_inputs
   emit:
     operation: compile-run-plan
     registry_entry_id: execution.node.compile-run-plan

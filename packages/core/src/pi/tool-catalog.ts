@@ -1,7 +1,12 @@
 import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type TSchema } from "typebox";
 import { Value } from "typebox/value";
-import { canonicalEncode, canonicalHash, type Sha256Digest } from "../shared/canonical.js";
+import {
+  canonicalEncode,
+  canonicalHash,
+  compareUtf8,
+  type Sha256Digest,
+} from "../shared/canonical.js";
 import type { AuthorityBackedTool } from "./managed-session.js";
 import { renderKoniToolCall, renderKoniToolResult } from "./tool-renderer.js";
 
@@ -245,10 +250,11 @@ const CATALOG: Readonly<Record<KoniToolName, Omit<CatalogEntry, "name">>> = {
   },
   koni_read_resource: {
     label: "Read resource",
-    description: "Read a bounded page of one immutable compiler-issued skill or prompt resource.",
+    description:
+      "Read a bounded page of one immutable compiler-issued skill or prompt by its resource ID or relative Pi path.",
     schema: Type.Object(
       {
-        resourceId: Type.String({ minLength: 1, maxLength: 256 }),
+        resourceId: Type.String({ minLength: 1, maxLength: 1024 }),
         offsetChars: Type.Optional(Type.Integer({ minimum: 0 })),
         maxChars: Type.Optional(Type.Integer({ minimum: 1, maximum: 131_072 })),
       },
@@ -418,7 +424,13 @@ const CATALOG: Readonly<Record<KoniToolName, Omit<CatalogEntry, "name">>> = {
   koni_submit_output: {
     label: "Submit output",
     description:
-      'Submit the one terminal structured result and end this attempt. status is a literal string: exactly "completed" on success (with a one-sentence summary and any step-specific fields the schema requires) or exactly "failed" only when the objective is genuinely impossible (with a specific blocker diagnosis). Do not guess other status values or send placeholder/probe content. Send the arguments as a JSON object.',
+      // The batch rule was enforced but never stated, so agents kept pairing the submission with a
+      // last read or note. That is not a recoverable tool error: it aborts the whole turn and costs
+      // the entire attempt. Say it where the model reads the contract.
+      // The exact compiler-selected terminal schema is appended when the tool is constructed. Do
+      // not state a universal `status` contract here: planning artifacts intentionally have no
+      // status field, and small models followed this prose instead of the contradictory schema.
+      "Submit the one terminal structured result and end this attempt. Call this tool ALONE: it must be the only tool call in its batch, so finish every other call in an earlier turn and never pair this submission with another tool. Do not send placeholder or schema-probing content. Send the arguments as one JSON object.",
     schema: jsonObject,
     executionMode: "sequential",
     terminal: true,
@@ -440,6 +452,13 @@ export function createKoniAuthorityTools(options: KoniToolCatalogOptions): Autho
       options.terminalOutputSchema,
       options.schemaHashes?.[name],
     );
+    const terminalSchema = options.terminalOutputSchema ?? parameters;
+    const nestedContracts = source.terminal
+      ? describeNestedDiscriminatedContracts(terminalSchema)
+      : [];
+    const description = source.terminal
+      ? `${source.description} Exact compiler-issued shape: ${describeSchemaShape(terminalSchema)}.${nestedContracts.length === 0 ? "" : ` ${nestedContracts.join(". ")}.`} On every validation retry, resubmit the complete object instead of only the corrected section. Never add status, summary, or any other field unless it appears in that exact shape.`
+      : source.description;
     const schemaHash = canonicalHash(parameters);
     const maxResultBytes = source.maxResultBytes;
     const resultFromReceipt = (
@@ -492,8 +511,8 @@ export function createKoniAuthorityTools(options: KoniToolCatalogOptions): Autho
     const definition: ToolDefinition = {
       name,
       label: source.label,
-      description: source.description,
-      promptSnippet: source.description,
+      description,
+      promptSnippet: description,
       parameters,
       executionMode: source.executionMode,
       async execute(callId, args, signal): Promise<AgentToolResult<unknown>> {
@@ -613,30 +632,49 @@ function transportToolSchema(name: KoniToolName, schema: TSchema): TSchema {
   if (!Array.isArray(branches) || branches.length === 0) return schema;
   const byKey = new Map<
     string,
-    { variants: TSchema[]; hashes: Set<string>; occurrences: number }
+    { variants: TSchema[]; hashes: Set<string>; requiredOccurrences: number }
   >();
   for (const branch of branches) {
     const properties = (branch as { properties?: Record<string, TSchema> }).properties;
     if (properties === undefined) return schema;
+    const required = new Set((branch as { required?: string[] }).required ?? []);
     for (const [key, property] of Object.entries(properties)) {
-      const slot = byKey.get(key) ?? { variants: [], hashes: new Set<string>(), occurrences: 0 };
+      const slot = byKey.get(key) ?? {
+        variants: [],
+        hashes: new Set<string>(),
+        requiredOccurrences: 0,
+      };
       const hash = canonicalHash(property);
       if (!slot.hashes.has(hash)) {
         slot.hashes.add(hash);
         slot.variants.push(structuredClone(property));
       }
-      slot.occurrences += 1;
+      if (required.has(key)) slot.requiredOccurrences += 1;
       byKey.set(key, slot);
     }
   }
   const merged: Record<string, TSchema> = {};
   for (const [key, slot] of byKey) {
     const single = slot.variants.length === 1 ? slot.variants[0]! : Type.Union(slot.variants);
-    merged[key] = slot.occurrences === branches.length ? single : Type.Optional(single);
+    merged[key] = slot.requiredOccurrences === branches.length ? single : Type.Optional(single);
   }
+  // Merging costs the one thing the union expressed for free: that branch fields are mutually
+  // exclusive. Every branch-specific field arrives as an optional sibling of every other, so a
+  // schema-reading agent sees `graphDelta` and `upstreamChangeRequest` as combinable and pairing
+  // them reads as thorough rather than invalid. The authority then refuses the pair and discards
+  // the whole attempt. Observed across two runs and traced to this flattening rather than to any
+  // persona, because 23 configured operations permit both a graph mutation and an upstream
+  // request. State the exclusion where the fields are declared; prose elsewhere loses to shape.
+  const exclusions = mutuallyExclusiveFieldGroups(branches);
   return Type.Object(merged, {
     additionalProperties: false,
-    description: `Send exactly one of these shapes, omitting every other branch's fields: ${describeSchemaShape(schema)}`,
+    description:
+      `Send exactly one of these shapes, omitting every other branch's fields: ${describeSchemaShape(schema)}` +
+      (exclusions.length === 0
+        ? ""
+        : `. Optional fields above belong to different shapes and must never be combined: ${exclusions
+            .map((group) => group.map((field) => `\`${field}\``).join(" + "))
+            .join("; ")} — sending fields from two shapes is refused and discards the attempt`),
   });
 }
 
@@ -689,6 +727,86 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** Compact rendering of the allowed shapes (union branches, required fields, consts, limits). */
+/**
+ * Field groups that never co-occur in any branch, so the merged object can name the combinations
+ * its flattened shape would otherwise advertise as legal. Only groups of two or more are worth
+ * stating: a lone branch-specific field cannot be combined with a sibling from its own branch.
+ */
+function mutuallyExclusiveFieldGroups(branches: readonly TSchema[]): string[][] {
+  const shared = new Set<string>();
+  const perBranch = branches.map((branch) =>
+    Object.keys((branch as { properties?: Record<string, TSchema> }).properties ?? {}),
+  );
+  for (const key of perBranch.flat()) {
+    if (perBranch.every((keys) => keys.includes(key))) shared.add(key);
+  }
+  const groups = perBranch
+    .map((keys) => keys.filter((key) => !shared.has(key)).sort(compareUtf8))
+    .filter((group) => group.length > 0);
+  const seen = new Set<string>();
+  return groups.filter((group) => {
+    const identity = group.join(" ");
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+
+/**
+ * Provider validation reports a nested discriminated-union mismatch as repeated "type must equal
+ * constant" and "spec must not have additional properties" lines without naming either the valid
+ * type or the offending field. Planning Graph Seed nodes are exactly such a union. Summarize each
+ * type's allowed spec keys in the tool description so a small model can correct the next complete
+ * submission without reverse-engineering opaque validator output.
+ */
+function describeNestedDiscriminatedContracts(schema: TSchema): string[] {
+  const descriptions: string[] = [];
+  const visit = (candidate: unknown, path: string): void => {
+    if (!isRecord(candidate)) return;
+    const properties = isRecord(candidate.properties) ? candidate.properties : undefined;
+    if (properties !== undefined) {
+      for (const [key, property] of Object.entries(properties)) {
+        visit(property, path.length === 0 ? key : `${path}.${key}`);
+      }
+    }
+    if (candidate.type === "array" && isRecord(candidate.items)) {
+      const branches = Array.isArray(candidate.items.anyOf) ? candidate.items.anyOf : undefined;
+      if (branches !== undefined) {
+        const variants = branches.flatMap((branch) => {
+          if (!isRecord(branch) || !isRecord(branch.properties)) return [];
+          const discriminator = branch.properties.type;
+          const spec = branch.properties.spec;
+          if (
+            !isRecord(discriminator) ||
+            typeof discriminator.const !== "string" ||
+            !isRecord(spec) ||
+            spec.additionalProperties !== false ||
+            !isRecord(spec.properties)
+          ) {
+            return [];
+          }
+          const fields = Object.keys(spec.properties).sort(compareUtf8);
+          return [
+            `type ${JSON.stringify(discriminator.const)} allows only spec {${fields.length === 0 ? "" : ` ${fields.join(", ")} `}}`,
+          ];
+        });
+        if (variants.length === branches.length && variants.length > 0) {
+          descriptions.push(
+            `${path}[] uses these exact type/spec contracts: ${variants.join("; ")}`,
+          );
+          return;
+        }
+      }
+      visit(candidate.items, `${path}[]`);
+    }
+    if (Array.isArray(candidate.anyOf)) {
+      for (const branch of candidate.anyOf) visit(branch, path);
+    }
+  };
+  visit(schema, "");
+  return descriptions;
+}
+
 function describeSchemaShape(schema: TSchema): string {
   const branches = Array.isArray((schema as { anyOf?: TSchema[] }).anyOf)
     ? (schema as { anyOf: TSchema[] }).anyOf

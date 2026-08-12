@@ -43,7 +43,7 @@ actions:
       type: ticket_id
       required: true
   allowed_ticket_states:
-  - todo
+  - queued
   requires_main_checkout: true
   recipe:
   - primitive: lock.acquire
@@ -77,7 +77,7 @@ actions:
   - primitive: project.validate
   - id: lead
     primitive: agent.spawn
-    persona: lead
+    agent: lead
     prompt: Perform one bounded research orchestration-readiness judgment. Review the compiled ticket graph for unresolved material ambiguity or unsafe assumptions, ask only policy-allowed questions, then submit proceed or blocked with a concise rationale. Never poll, schedule deterministic work, or spawn workers.
     transport: compiler_broker
     duplicate_policy: reject
@@ -107,7 +107,7 @@ actions:
   - primitive: agent.spawn
     ticket: ${params.ticket_id}
     prompt: Execute only the next dependency-ready configured ticket step, record structured output, run scoped compile, then stop before review and finish.
-    persona_from: next_dependency_ready_step
+    agent_from: next_dependency_ready_step
     transport: compiler_broker
     request_fields:
     - request_id
@@ -127,7 +127,7 @@ actions:
     step:
       type: string
       required: false
-    persona:
+    agent:
       type: string
       required: false
   allowed_ticket_states:
@@ -209,7 +209,7 @@ actions:
     step:
       type: string
       required: true
-    persona:
+    agent:
       type: string
       required: true
     payload:
@@ -231,14 +231,14 @@ actions:
   - primitive: output.record
     ticket: ${params.ticket_id}
     step: ${params.step}
-    persona: ${params.persona}
+    agent: ${params.agent}
     payload: ${params.payload}
   - primitive: receipt.write
     receipt:
       type: structured-output
       ticket_id: ${params.ticket_id}
       step: ${params.step}
-      persona: ${params.persona}
+      agent: ${params.agent}
       payload: ${params.payload}
     hash_bind_context: true
   - primitive: event.append

@@ -29,8 +29,6 @@ gate_policies:
     - name
     provider_version_fields:
     - protocol_version
-    - protocol
-    - version
   selection:
     mode: ranked_first
     ranks:
@@ -128,7 +126,15 @@ gate_policies:
         - gate
     inherited_gates:
       traverse:
-        from: $ancestors
+        # Research capability gates are synthesized at experiment boundaries. Runs, ablations,
+        # evidence, and reports inherit those experiment gates; a late review gate attached to a
+        # broader hypothesis/root must not become a circular prerequisite for empirical execution.
+        from:
+          intersection:
+          - $ancestors
+          - nodes:
+              node_types:
+              - experiment
         relation: applies_to
         direction: incoming
         min_depth: 1

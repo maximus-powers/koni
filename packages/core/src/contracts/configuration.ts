@@ -1,8 +1,7 @@
 import type { Sha256Digest } from "../shared/canonical.js";
-import type { PiResourceBindingCatalog } from "./pi-resources.js";
 import type { CompiledBehaviorIr } from "./behavior.js";
 
-export const PROFILE_CONFIGURATION_SCHEMA_VERSION = "2.0" as const;
+export const PROFILE_CONFIGURATION_SCHEMA_VERSION = "3.0" as const;
 export const COMPILED_CONFIGURATION_PROTOCOL = "koni.compiled-configuration.v1" as const;
 
 export const PROFILE_IMPORT_CATEGORIES = [
@@ -12,7 +11,6 @@ export const PROFILE_IMPORT_CATEGORIES = [
   "workflows",
   "actions",
   "checks",
-  "personas",
   "reports",
   "cockpit",
   "lifecycles",
@@ -104,8 +102,6 @@ export interface CompiledConfigurationMaterial {
   readonly run_type_order: readonly string[];
   readonly run_types: Readonly<Record<string, CompiledRunType>>;
   readonly agents: Readonly<Record<string, CompiledAgentResource>>;
-  /** Authenticated project-owned policy for optional resources from ordinary Pi packages. */
-  readonly pi_resource_bindings?: PiResourceBindingCatalog;
   readonly edge_types: readonly ConfigurationObject[];
   readonly registries: CompiledConfigurationRegistries;
   /** Exact, hash-bound execution meaning derived from the editable configuration. */

@@ -1,4 +1,4 @@
-schema_version: '2.0'
+schema_version: '3.0'
 id: small
 title: Small
 description: One bounded claim in a known domain, with proportional planning, focused proof, and one worker at a time.
@@ -48,7 +48,7 @@ pipeline:
       kind: planning
       title: Plan the focused slice
       config:
-        persona: run-planner
+        agent: run-planner
         prompt: >-
           Produce one concise, implementation-ready vertical-slice plan and the smallest sufficient root-connected graph seed. Record the observable outcome, non-goals, success signals, objective.work_kind, one affected repository-native system, one approval-sentence change, its risk tier and concrete factors, and one primary focused proof with an exact repository-native argv and honest red_green, characterization, or current_verification baseline. Bind each proof condition and claim through structured oracle_cases to its callable production seam, exact seam_paths, action, assertions, and material environment/recipe; every seam path must resolve to the same normalized project-relative identity present in read-only covered_paths. Add interfaces, data, flows, and contracts only when material. Before submission, close every configured required relation already known in the seed: in particular, a system with contract_required true must already have its semantically complete contract linked through canonical contract.applies_to, reusing the existing fact rather than leaving a fallback ticket or duplicate. If discovery truly makes the slice elevated or critical, introduce the material risk and give that risk—not the change—a distinct boundary proof plus explicit treatment; otherwise escalate the run rather than hiding scope. Never seed statuses, receipts, tickets, transient investigation notes, or compiler-owned fields.
     approval:
@@ -117,7 +117,7 @@ agents:
     reviewer:
       model: gpt-5.6-terra
       thinking_level: max
-  personas: {}
+  overrides: {}
 orchestration:
   auto_start: true
   max_parallel: 1

@@ -10,6 +10,92 @@ import registerProfile, {
 } from "../extensions/profile.js";
 
 describe("research profile registrar", () => {
+  it("exposes an exact provider-version contract for capability-backed assets", async () => {
+    const [nodeSource, edgeSource] = await Promise.all([
+      readFile(path.resolve(import.meta.dirname, "../koni/baseline/graph/nodes.yaml"), "utf8"),
+      readFile(path.resolve(import.meta.dirname, "../koni/baseline/graph/edges.yaml"), "utf8"),
+    ]);
+    const nodeDocument = YAML.parse(nodeSource) as {
+      node_types: Array<{
+        id: string;
+        fields?: Record<
+          string,
+          {
+            items?: {
+              additional_properties?: boolean;
+              properties?: Record<string, { required?: boolean; pattern?: string }>;
+            };
+          }
+        >;
+      }>;
+    };
+    const edgeDocument = YAML.parse(edgeSource) as {
+      gate_policies: Array<{
+        id: string;
+        capability: { provider_version_fields: string[] };
+      }>;
+    };
+    const capabilityItem = nodeDocument.node_types.find(({ id }) => id === "asset")?.fields
+      ?.capabilities?.items;
+    const providerVersionFields = edgeDocument.gate_policies.find(
+      ({ id }) => id === "research-capability-gates",
+    )?.capability.provider_version_fields;
+
+    expect(capabilityItem?.additional_properties).toBe(false);
+    expect(capabilityItem?.properties?.name?.required).toBe(true);
+    expect(capabilityItem?.properties?.protocol_version).toMatchObject({
+      required: true,
+      pattern: expect.stringContaining("[0-9]+\\.[0-9]+\\.[0-9]+"),
+    });
+    expect(capabilityItem?.properties).not.toHaveProperty("protocol_range");
+    expect(providerVersionFields).toEqual(["protocol_version"]);
+  });
+
+  it("ships one queued ticket waiting state across every lifecycle return path", async () => {
+    const source = await readFile(
+      path.resolve(import.meta.dirname, "../koni/baseline/rules/lifecycle.yaml"),
+      "utf8",
+    );
+    const document = YAML.parse(source) as {
+      state_machines: Array<{
+        id: string;
+        initial: string;
+        states: string[];
+        transitions: Array<{ id: string; from: string[]; to: string }>;
+      }>;
+    };
+    const ticket = document.state_machines.find(({ id }) => id === "ticket");
+
+    expect(ticket?.initial).toBe("queued");
+    expect(ticket?.states).not.toEqual(expect.arrayContaining(["todo", "ready", "failed"]));
+    expect(ticket?.transitions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "approve-change-request",
+          from: ["proposed"],
+          to: "queued",
+        }),
+        expect.objectContaining({ id: "start", from: ["queued"], to: "in_progress" }),
+        expect.objectContaining({
+          id: "release-blocker",
+          from: ["blocked"],
+          to: "queued",
+        }),
+        expect.objectContaining({
+          id: "interrupt-active",
+          from: ["in_progress"],
+          to: "queued",
+        }),
+        expect.objectContaining({
+          id: "reopen-stale-obligation",
+          from: ["closed"],
+          to: "queued",
+        }),
+        expect.objectContaining({ id: "retire-queued", from: ["queued"], to: "closed" }),
+      ]),
+    );
+  });
+
   it("announces the immutable descriptor on discovery and session start", () => {
     const extensionHandlers = new Map<string, (...arguments_: unknown[]) => unknown>();
     const eventHandlers = new Map<string, (...arguments_: unknown[]) => unknown>();
@@ -106,7 +192,7 @@ describe("research profile registrar", () => {
     const instructions = await readFile(
       path.resolve(
         import.meta.dirname,
-        "../koni/baseline/resources/skills/model-koni-work/references/empirical-research.md",
+        "../../core/skills/model-koni-work/references/empirical-research.md",
       ),
       "utf8",
     );
@@ -116,27 +202,10 @@ describe("research profile registrar", () => {
     expect(instructions).toContain("one canonical `gate.applies_to` fact with inverse `gates`");
   });
 
-  it("makes every optional Pi binding selectable in the guided editor before enablement", async () => {
-    const source = await readFile(
-      path.resolve(import.meta.dirname, "../koni/baseline/resources/pi-packages.yaml"),
-      "utf8",
-    );
-    const document = YAML.parse(source) as {
-      bindings: Array<{
-        enabled: boolean;
-        select?: { skills?: unknown; prompts?: unknown; tools?: unknown };
-      }>;
-    };
-    expect(document.bindings.length).toBeGreaterThan(0);
-    expect(
-      document.bindings.every(
-        (binding) =>
-          binding.enabled === false &&
-          Array.isArray(binding.select?.skills) &&
-          Array.isArray(binding.select?.prompts) &&
-          Array.isArray(binding.select?.tools),
-      ),
-    ).toBe(true);
+  it("does not ship a parallel Pi resource registry", async () => {
+    await expect(
+      readFile(path.resolve(import.meta.dirname, "../koni/baseline/resources/pi-packages.yaml")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("gives missing-gate asset planning deterministic access to the active asset portfolio", async () => {
@@ -227,6 +296,19 @@ describe("research profile registrar", () => {
     });
   });
 
+  it("does not reopen an unselected compatible asset only because it owns no gate contracts", async () => {
+    const source = await readFile(
+      path.resolve(import.meta.dirname, "../koni/baseline/rules/research.yaml"),
+      "utf8",
+    );
+    const document = YAML.parse(source) as {
+      rules: Array<{ id: string; when?: unknown }>;
+    };
+    const rule = document.rules.find(({ id }) => id === "ticket.implement-asset");
+
+    expect(JSON.stringify(rule?.when)).not.toContain('"field":"spec.gate_contracts"');
+  });
+
   it("limits synthesized gates to experiment boundaries with the reusable verifier inventory", async () => {
     const ruleSource = await readFile(
       path.resolve(import.meta.dirname, "../koni/baseline/rules/research.yaml"),
@@ -246,33 +328,29 @@ describe("research profile registrar", () => {
       }>;
     };
     const rule = ruleDocument.rules.find(({ id }) => id === "ticket.define-gate");
-    const gateRequiredNodes = ruleDocument.queries.find(
-      ({ id }) => id === "gate-required-nodes",
-    );
+    const gateRequiredNodes = ruleDocument.queries.find(({ id }) => id === "gate-required-nodes");
 
     expect(gateRequiredNodes?.node_types).toEqual(["experiment"]);
     expect(rule?.emit).toMatchObject({
       read_scope: {
         union: ["$target", "active-assets", "gate-evaluation-subjects"],
       },
-      write_scope: "$target",
+      write_scope: {
+        union: [
+          "$target",
+          {
+            traverse: {
+              from: "$target",
+              relation: "requires",
+              direction: "outgoing",
+              min_depth: 1,
+              max_depth: 1,
+              node_types: ["gate"],
+            },
+          },
+        ],
+      },
     });
-
-    const agentSource = await readFile(
-      path.resolve(import.meta.dirname, "../koni/baseline/agents/gate-designer.yaml"),
-      "utf8",
-    );
-    const agent = YAML.parse(agentSource) as {
-      instructions: {
-        text: string;
-      };
-    };
-    expect(agent.instructions.text).toContain(
-      "Capability names identify reusable verifier interfaces",
-    );
-    expect(agent.instructions.text).toContain(
-      "per-gate or per-target capability name",
-    );
   });
 
   it("keeps asset payload mutation under one implementation owner", async () => {
@@ -285,7 +363,7 @@ describe("research profile registrar", () => {
         id: string;
         steps: Array<{
           id: string;
-          persona: string;
+          agent: string;
           depends_on: string[];
         }>;
       }>;
@@ -295,83 +373,28 @@ describe("research profile registrar", () => {
     expect(workflow?.steps.map(({ id }) => id)).not.toContain("inspect-contracts");
     expect(workflow?.steps[0]).toMatchObject({
       id: "implement",
-      persona: "asset-builder",
+      agent: "asset-builder",
       depends_on: [],
     });
-    expect(workflow?.steps.find(({ id }) => id === "verify")?.persona).toBe("asset-builder");
+    expect(workflow?.steps.find(({ id }) => id === "verify")?.agent).toBe("asset-builder");
 
     const integratorSource = await readFile(
       path.resolve(import.meta.dirname, "../koni/baseline/agents/integrator.yaml"),
       "utf8",
     );
     const integrator = YAML.parse(integratorSource) as {
-      capabilities: {
-        workspace_access: string;
-        commands: string;
+      instructions: string;
+      koni: {
+        capabilities: {
+          workspace_access: string;
+          commands: string;
+        };
       };
     };
-    expect(integrator.capabilities).toMatchObject({
-      workspace_access: "read_only",
-      commands: "read_only",
+    expect(integrator.koni.capabilities).toMatchObject({
+      workspace_access: "workspace_write",
+      commands: "workspace_write",
     });
-  });
-
-  it("keeps semantic gate contracts distinct from the executable result envelope", async () => {
-    const reviewerSource = await readFile(
-      path.resolve(import.meta.dirname, "../koni/baseline/agents/reviewer.yaml"),
-      "utf8",
-    );
-    const reviewer = YAML.parse(reviewerSource) as { instructions: { text: string } };
-    expect(reviewer.instructions.text).toContain(
-      "passed|failed|inconclusive",
-    );
-    expect(reviewer.instructions.text).toContain(
-      "Do not require the executable adapter to emit",
-    );
-
-    const plannerSource = await readFile(
-      path.resolve(import.meta.dirname, "../koni/baseline/agents/run-planner.yaml"),
-      "utf8",
-    );
-    const planner = YAML.parse(plannerSource) as { instructions: { text: string } };
-    expect(planner.instructions.text).toContain(
-      "executable verdict vocabulary",
-    );
-    expect(planner.instructions.text).toContain("`passed|failed|inconclusive`");
-  });
-
-  it("requires Python gate contracts to bind the executable they actually verify", async () => {
-    const assetBuilderSource = await readFile(
-      path.resolve(import.meta.dirname, "../koni/baseline/agents/asset-builder.yaml"),
-      "utf8",
-    );
-    const assetBuilder = YAML.parse(assetBuilderSource) as { instructions: { text: string } };
-    expect(assetBuilder.instructions.text).toContain(
-      "A Python verifier with a `python3` shebang must declare `python3`",
-    );
-    expect(assetBuilder.instructions.text).toContain(
-      "Treat an unavailable executable as an implementation failure",
-    );
-
-    const reviewerSource = await readFile(
-      path.resolve(import.meta.dirname, "../koni/baseline/agents/reviewer.yaml"),
-      "utf8",
-    );
-    const reviewer = YAML.parse(reviewerSource) as { instructions: { text: string } };
-    expect(reviewer.instructions.text).toContain(
-      "Reject a gate contract whose declared executable was not resolved",
-    );
-
-    for (const agent of ["run-planner", "gate-designer"]) {
-      const source = await readFile(
-        path.resolve(import.meta.dirname, `../koni/baseline/agents/${agent}.yaml`),
-        "utf8",
-      );
-      const parsed = YAML.parse(source) as { instructions: { text: string } };
-      expect(parsed.instructions.text).toContain(
-        "Python command contracts must use `python3`",
-      );
-    }
   });
 
   it("gives every node-creating operation an explicit positive bound", async () => {

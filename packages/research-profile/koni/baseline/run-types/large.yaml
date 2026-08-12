@@ -1,4 +1,4 @@
-schema_version: '2.0'
+schema_version: '3.0'
 id: large
 title: Large
 description: A high-complexity project with separate architecture, risk, and verification plans plus independent review.
@@ -49,19 +49,19 @@ pipeline:
       kind: planning
       title: Plan research architecture
       config:
-        persona: run-planner
+        agent: run-planner
         prompt: Map scoped scientific claims, a small cohesive empirical experiment portfolio, assets, gates, bounded receipt-backed evidence, and reporting required by the goal.
     risk-plan:
       kind: planning
       title: Plan research risks
       config:
-        persona: run-planner
+        agent: run-planner
         prompt: Identify validity threats, provenance risks, operational hazards, mitigations, and escalation boundaries.
     verification-plan:
       kind: planning
       title: Plan verification
       config:
-        persona: run-planner
+        agent: run-planner
         prompt: Map evidence requirements onto configured receipt, gate, check, review, and report-manifest surfaces; retain the empirical_runtime evidence basis and bounded_empirical inference scope; define acceptance criteria without inventing receipt classes or extending empirical conclusions beyond observed scope.
     approval:
       kind: approval
@@ -79,7 +79,7 @@ pipeline:
       kind: agent_review
       title: Independently review the run
       config:
-        persona: reviewer
+        agent: reviewer
         prompt: Independently review the completed run against its goal, evidence, checks, and unresolved risks.
     verification:
       kind: checkpoint
@@ -138,7 +138,7 @@ agents:
     reviewer:
       model: gpt-5.6-sol
       thinking_level: max
-  personas: {}
+  overrides: {}
 orchestration:
   auto_start: true
   max_parallel: 5

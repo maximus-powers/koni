@@ -4,41 +4,29 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
-const codingSkills = path.join(
-  repositoryRoot,
-  "packages/coding-profile/koni/baseline/resources/skills",
-);
-const researchSkills = path.join(
-  repositoryRoot,
-  "packages/research-profile/koni/baseline/resources/skills",
-);
+const source = path.join(repositoryRoot, "packages/core/skills");
 const destination = path.join(repositoryRoot, "packages/core/dist/skills");
 
-const [codingInventory, researchInventory] = await Promise.all([
-  inventory(codingSkills),
-  inventory(researchSkills),
-]);
+const sourceInventory = await inventory(source);
 assert.deepEqual(
-  researchInventory,
-  codingInventory,
-  "shared Koni operator skills must stay byte-identical across profiles",
-);
-assert.equal(codingInventory.length, 18, "the shared Koni skill bundle must contain 18 files");
-assert.deepEqual(
-  codingInventory
+  sourceInventory
     .filter(({ relative }) => relative.endsWith("/SKILL.md"))
     .map(({ relative }) => relative),
   ["configure-koni/SKILL.md", "model-koni-work/SKILL.md", "operate-koni/SKILL.md"],
-  "Core must publish exactly the three general Koni skills",
+  "Core's Pi package must publish only Koni's three native skills",
 );
 
 await rm(destination, { recursive: true, force: true });
-await mkdir(path.dirname(destination), { recursive: true });
-await cp(codingSkills, destination, { recursive: true });
+await mkdir(destination, { recursive: true });
+for (const skillName of ["configure-koni", "model-koni-work", "operate-koni"]) {
+  await cp(path.join(source, skillName), path.join(destination, skillName), {
+    recursive: true,
+  });
+}
 assert.deepEqual(
   await inventory(destination),
-  codingInventory,
-  "the published Core skill bundle must be exact",
+  sourceInventory,
+  "Core must publish only the exact Koni operator skill bytes",
 );
 
 async function inventory(root, current = root) {

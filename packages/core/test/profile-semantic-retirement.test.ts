@@ -163,8 +163,8 @@ orchestration:
   initial: pending
   states: [pending, complete]
 - id: ticket
-  initial: todo
-  states: [todo, closed]
+  initial: queued
+  states: [queued, closed]
 `);
     const project = bytes(`# keep project lifecycle notes
 state_machines:
@@ -172,13 +172,13 @@ state_machines:
   initial: pending
   states: [pending, ready, complete]
 - id: ticket
-  initial: todo
-  states: [todo, closed] # keep custom ticket states
+  initial: queued
+  states: [queued, closed] # keep custom ticket states
 `);
     const target = bytes(`state_machines:
 - id: ticket
-  initial: todo
-  states: [todo, closed]
+  initial: queued
+  states: [queued, closed]
 `);
     const plan = planProfileRetirement({
       resourceBytes: resource([operation]),
@@ -204,8 +204,8 @@ state_machines:
     expect(YAML.parse(transformed).state_machines).toEqual([
       {
         id: "ticket",
-        initial: "todo",
-        states: ["todo", "closed"],
+        initial: "queued",
+        states: ["queued", "closed"],
       },
     ]);
   });

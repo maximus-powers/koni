@@ -4,8 +4,10 @@ import path from "node:path";
 import {
   DefaultResourceLoader,
   SettingsManager,
+  loadSkills,
   type InlineExtension,
   type ResourceLoader,
+  type Skill,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentLaunchSpec, LaunchResource } from "./launch-spec.js";
 import { createFileAtomicallyNoReplace } from "./atomic-file.js";
@@ -104,20 +106,26 @@ export async function createContainedResourceLoader(options: {
     (entry) => path.basename(entry) === "SKILL.md",
   );
   const promptPaths = pathsForKind(spec.resources.entries, materialized, "prompt");
-  // Pi only advertises skills when a literal built-in `read` tool is active. Contained Koni
-  // sessions intentionally never grant that ambient filesystem capability, so compiler-selected
-  // skill bodies must enter the model through the sealed system context instead of becoming dead
-  // loader metadata. Static `context` resources are materialized/hash-checked for audit, but are
-  // not injected here: the managed extension is their single authoritative, refreshable channel.
-  const embeddedSkills = spec.resources.entries
-    .filter(
-      (resource) =>
-        resource.kind === "skill" && path.posix.basename(resource.relativePath) === "SKILL.md",
-    )
-    .map((resource) => ({ path: materialized.get(resource.id)!, content: resource.content }));
-  const appendSystemPrompt = spec.resources.entries
-    .filter((resource) => resource.kind === "append_system_prompt")
-    .map((resource) => resource.content);
+  // Pi normally advertises skill metadata and lets the model read a matching skill on demand.
+  // Contained sessions cannot expose Pi's ambient filesystem `read` tool, so reproduce that
+  // progressive-disclosure contract with Koni's sealed resource reader. Never inject complete
+  // skill bodies into the initial system prompt: a normal package can contain enough skills to
+  // exhaust the model context before the first turn.
+  const isolatedAgentDir = path.join(resourceRoot, ".pi-agent");
+  await mkdir(isolatedAgentDir, { recursive: mode === "recover", mode: 0o700 });
+  const loadedSkills = loadSkills({
+    cwd: spec.workspace.cwd,
+    agentDir: isolatedAgentDir,
+    skillPaths,
+    includeDefaults: false,
+  });
+  const skillCatalog = formatContainedSkillsForPrompt(loadedSkills.skills, resourceRoot);
+  const appendSystemPrompt = [
+    ...spec.resources.entries
+      .filter((resource) => resource.kind === "append_system_prompt")
+      .map((resource) => resource.content),
+    ...(skillCatalog.length === 0 ? [] : [skillCatalog]),
+  ];
   const settingsManager = SettingsManager.inMemory(
     {
       packages: [],
@@ -129,8 +137,6 @@ export async function createContainedResourceLoader(options: {
     },
     { projectTrusted: false },
   );
-  const isolatedAgentDir = path.join(resourceRoot, ".pi-agent");
-  await mkdir(isolatedAgentDir, { recursive: mode === "recover", mode: 0o700 });
   const namedExtension: InlineExtension =
     typeof options.extension === "function"
       ? { name: INLINE_EXTENSION_NAME, factory: options.extension }
@@ -151,17 +157,50 @@ export async function createContainedResourceLoader(options: {
     additionalPromptTemplatePaths: promptPaths,
     systemPrompt: spec.persona.systemPrompt,
     appendSystemPrompt,
-    agentsFilesOverride: () => ({ agentsFiles: embeddedSkills }),
+    agentsFilesOverride: () => ({ agentsFiles: [] }),
     themesOverride: () => ({ themes: [], diagnostics: [] }),
   });
   await delegate.reload();
-  assertContained(delegate, spec, skillPaths.length, promptPaths.length, embeddedSkills.length);
+  assertContained(delegate, spec, skillPaths.length, promptPaths.length, 0);
 
   return {
     loader: new SealedResourceLoader(delegate),
     settingsManager,
     resourceRoot,
   };
+}
+
+function formatContainedSkillsForPrompt(skills: readonly Skill[], resourceRoot: string): string {
+  const visible = skills.filter((skill) => !skill.disableModelInvocation);
+  if (visible.length === 0) return "";
+  const lines = [
+    "The following compiler-selected skills provide specialized instructions for this attempt.",
+    "Before responding or acting, use `koni_read_resource` to load every skill whose description matches the task.",
+    "Pass the skill's relative `<location>` as the resource path. Resolve referenced relative paths against that skill directory and load them with `koni_read_resource` only when needed.",
+    "",
+    "<available_skills>",
+  ];
+  for (const skill of visible) {
+    const location = path.relative(resourceRoot, skill.filePath).split(path.sep).join("/");
+    lines.push(
+      "  <skill>",
+      `    <name>${escapeXml(skill.name)}</name>`,
+      `    <description>${escapeXml(skill.description)}</description>`,
+      `    <location>${escapeXml(location)}</location>`,
+      "  </skill>",
+    );
+  }
+  lines.push("</available_skills>");
+  return lines.join("\n");
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
 }
 
 class SealedResourceLoader implements ResourceLoader {

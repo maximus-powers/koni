@@ -23,7 +23,7 @@ afterEach(async () => {
 }, 30_000);
 
 describe("profile installation and guarded upgrades", () => {
-  it("materializes a verified profile without changing Pi settings", async () => {
+  it("materializes a verified profile and merges the required Pi package", async () => {
     const project = await temporary("project");
     await mkdir(path.join(project, ".pi"), { recursive: true });
     await mkdir(path.join(project, ".agents", "skills", "community"), { recursive: true });
@@ -36,9 +36,10 @@ describe("profile installation and guarded upgrades", () => {
     const result = await installProfile(project, codingProfile);
     expect(result.packageName).toBe("@koni/coding-profile");
     expect(result.added).toContain("project.yaml");
-    expect(await readFile(path.join(project, ".pi", "settings.json"), "utf8")).toBe(
-      '{"theme":"user-owned"}\n',
-    );
+    expect(JSON.parse(await readFile(path.join(project, ".pi", "settings.json"), "utf8"))).toEqual({
+      theme: "user-owned",
+      packages: ["git:github.com/obra/superpowers"],
+    });
     expect(await readFile(path.join(project, ".pi", "auth.json"), "utf8")).toBe(
       '{"credential":"user-owned"}\n',
     );
@@ -54,6 +55,36 @@ describe("profile installation and guarded upgrades", () => {
     expect(await readFile(path.join(storedRoot, "profile-manifest.json"), "utf8")).toContain(
       result.bundleSha256,
     );
+  }, 30_000);
+
+  it("preserves a pre-existing required Pi package without duplicating it", async () => {
+    const project = await temporary("project");
+    await mkdir(path.join(project, ".pi"), { recursive: true });
+    await writeFile(
+      path.join(project, ".pi", "settings.json"),
+      `${JSON.stringify({ packages: ["git:github.com/obra/superpowers"], theme: "user-owned" })}\n`,
+    );
+
+    await installProfile(project, codingProfile);
+
+    expect(JSON.parse(await readFile(path.join(project, ".pi", "settings.json"), "utf8"))).toEqual({
+      packages: ["git:github.com/obra/superpowers"],
+      theme: "user-owned",
+    });
+  }, 30_000);
+
+  it("fails closed when the Koni-owned Pi package entry was changed", async () => {
+    const project = await temporary("project");
+    await installProfile(project, codingProfile);
+    const settingsPath = path.join(project, ".pi", "settings.json");
+    const settings = JSON.parse(await readFile(settingsPath, "utf8")) as { packages: string[] };
+    settings.packages[0] = "git:github.com/obra/superpowers@user-ref";
+    await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+
+    await expect(installProfile(project, codingProfile)).rejects.toMatchObject({
+      code: "pi_settings_conflict",
+    } satisfies Partial<ProfileInstallError>);
+    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(settings);
   }, 30_000);
 
   it("previews without creating a lock, transaction, or .koni tree", async () => {
@@ -82,13 +113,13 @@ describe("profile installation and guarded upgrades", () => {
   it("three-way merges changed defaults while preserving edits, deletions, and additions", async () => {
     const project = await temporary("project");
     const v1 = await syntheticProfile("1.0.0", {
-      "profile.yaml": "schema_version: '2.0'\nvalue: one\n",
+      "profile.yaml": "schema_version: '3.0'\nvalue: one\n",
       "edited.yaml": "value: old\n",
       "deleted.yaml": "value: old\n",
       "removed.yaml": "value: remove-me\n",
     });
     const v2 = await syntheticProfile("1.1.0", {
-      "profile.yaml": "schema_version: '2.0'\nvalue: two\n",
+      "profile.yaml": "schema_version: '3.0'\nvalue: two\n",
       "edited.yaml": "value: upstream\n",
       "deleted.yaml": "value: upstream\n",
       "added.yaml": "value: new\n",
@@ -250,7 +281,7 @@ async function syntheticProfile(
     profile: { id: "synthetic", display_name: "Synthetic", version, lineage: "koni.synthetic" },
     compatibility: {
       core_api_range: ">=1.0.0 <2.0.0",
-      profile_schema_range: ">=2.0.0 <3.0.0",
+      profile_schema_range: ">=3.0.0 <4.0.0",
       pi_range: ">=0.80.10 <0.81.0",
     },
     baseline: { root: "./baseline", files },

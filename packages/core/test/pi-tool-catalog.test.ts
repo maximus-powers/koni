@@ -32,6 +32,67 @@ const reject = async (
 });
 
 describe("Koni authority-backed Pi tool catalog", () => {
+  it("describes the exact complete terminal shape without inventing status fields", () => {
+    const [tool] = createKoniAuthorityTools({
+      names: ["koni_submit_output"],
+      terminalOutputSchema: Type.Object(
+        {
+          title: Type.Optional(Type.String()),
+          full: Type.Object({ architecture: Type.String() }),
+          concise: Type.Object({ architecture: Type.Array(Type.String()) }),
+          graphSeed: Type.Object({
+            nodes: Type.Array(
+              Type.Union([
+                Type.Object({
+                  key: Type.String(),
+                  type: Type.Literal("experiment"),
+                  title: Type.String(),
+                  spec: Type.Object(
+                    {
+                      objective: Type.String(),
+                      empirical_mode: Type.Union([
+                        Type.Literal("intervention"),
+                        Type.Literal("observation"),
+                      ]),
+                    },
+                    { additionalProperties: false },
+                  ),
+                }),
+                Type.Object({
+                  key: Type.String(),
+                  type: Type.Literal("metric"),
+                  title: Type.String(),
+                  spec: Type.Object({}, { additionalProperties: false }),
+                }),
+              ]),
+            ),
+          }),
+        },
+        { additionalProperties: false },
+      ),
+      async invoke() {
+        return accepted("receipt-planning");
+      },
+      reject,
+    });
+
+    expect(tool!.definition.description).toContain(
+      "On every validation retry, resubmit the complete object",
+    );
+    expect(tool!.definition.description).toContain("title: string");
+    expect(tool!.definition.description).toContain("full: object");
+    expect(tool!.definition.description).toContain("concise: object");
+    expect(tool!.definition.description).toContain("graphSeed: object");
+    expect(tool!.definition.description).toContain(
+      'graphSeed.nodes[] uses these exact type/spec contracts: type "experiment" allows only spec { empirical_mode, objective }; type "metric" allows only spec {}',
+    );
+    expect(tool!.definition.description).toContain(
+      "Never add status, summary, or any other field unless it appears in that exact shape",
+    );
+    expect(tool!.definition.description).not.toContain('"status":"completed"');
+    expect(tool!.definition.promptSnippet).toBe(tool!.definition.description);
+  });
+
   it("derives an exact unique hash-bound inventory from one canonical schema catalog", () => {
     const tools = createKoniAuthorityTools({
       names: ["koni_read_file", "koni_edit_file", "koni_submit_output"],
@@ -155,6 +216,37 @@ describe("Koni authority-backed Pi tool catalog", () => {
       ...base,
       recommendedOptionId: "preserve",
       impact: "high_impact",
+    });
+  });
+
+  it("accepts every exact terminal-union branch through the flattened Pi transport schema", () => {
+    const schema = Type.Union([
+      Type.Object(
+        { status: Type.Literal("completed"), summary: Type.String() },
+        { additionalProperties: false },
+      ),
+      Type.Object(
+        {
+          status: Type.Literal("failed"),
+          summary: Type.Optional(Type.String()),
+          blocker: Type.String(),
+        },
+        { additionalProperties: false },
+      ),
+    ]);
+
+    expect(
+      validateKoniToolArguments(
+        "koni_submit_output",
+        {
+          status: "failed",
+          blocker: "The bounded assignment could not complete.",
+        },
+        schema,
+      ),
+    ).toEqual({
+      status: "failed",
+      blocker: "The bounded assignment could not complete.",
     });
   });
 

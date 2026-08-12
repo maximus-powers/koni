@@ -47,7 +47,10 @@ const INSTALL_PROTOCOL = "koni.profile-install.v1" as const;
 const LIFECYCLE_PROTOCOL = "koni.profile-lifecycle.v1" as const;
 const INSTALL_METADATA_PATH = ".managed/install.json";
 const LIFECYCLE_METADATA_PATH = ".managed/lifecycle.json";
+const PI_SETTINGS_OWNERSHIP_PATH = ".managed/pi-settings.json";
 const PROFILE_LOCK_PATH = ".managed/profile-lifecycle.lock";
+export const REQUIRED_SUPERPOWERS_PI_PACKAGE = "git:github.com/obra/superpowers" as const;
+const PI_SETTINGS_OWNERSHIP_PROTOCOL = "koni.pi-settings-ownership.v1" as const;
 const profileLifecycleContext = new AsyncLocalStorage<{
   configRoot: string;
   nonce: string;
@@ -191,6 +194,13 @@ interface MaterializationPlan {
   lifecycleMetadata: ProfileLifecycleMetadata;
 }
 
+interface PiSettingsMergePlan {
+  readonly settingsPath: string;
+  readonly expectedSettingsSha256: Sha256Digest | null;
+  readonly settingsBytes?: Uint8Array;
+  readonly ownershipWrite: TransactionWrite;
+}
+
 interface PreparedSemanticRetirement {
   readonly descriptor: ProfileMigration;
   readonly plan: ProfileRetirementPlan;
@@ -308,7 +318,8 @@ export async function previewProfileInstall(
 
 /**
  * Install or upgrade one verified profile as a crash-forward materialized overlay.
- * The only project namespace this function can mutate is `.koni`.
+ * The installer mutates the managed `.koni` tree and merges only Koni's
+ * required package entry into Pi's ordinary project settings.
  */
 export async function installProfile(
   projectRoot: string,
@@ -328,6 +339,7 @@ export async function installProfile(
     const store = await FileTransactionStore.open(configRoot);
     await store.recoverPrepared();
     const plan = await buildMaterializationPlan(configRoot, baseline, options, true);
+    const piSettings = await preparePiSettingsMerge(project, configRoot);
     if (plan.preview.mandatoryRetirements.length > 0) {
       if (options.expectedPreviewSha256 === undefined) {
         throw new ProfileInstallError(
@@ -343,11 +355,160 @@ export async function installProfile(
       }
     }
     const transactionId = `profile-${plan.preview.generation}-${randomUUID()}`;
-    await store.prepare(transactionId, plan.writes, plan.deletes);
+    await store.prepare(transactionId, [...plan.writes, piSettings.ownershipWrite], plan.deletes);
+    await applyPiSettingsMerge(piSettings);
     await store.commit(transactionId);
     await store.cleanupCommitted(transactionId);
     return { ...structuredClone(plan.preview), transactionId };
   });
+}
+
+async function preparePiSettingsMerge(
+  projectRoot: string,
+  configRoot: string,
+): Promise<PiSettingsMergePlan> {
+  const piRoot = path.join(projectRoot, ".pi");
+  await assertOptionalRealPiRoot(piRoot, projectRoot);
+  const settingsPath = path.join(piRoot, "settings.json");
+  const currentSettingsBytes = await readOptionalFile(settingsPath);
+  const settings =
+    currentSettingsBytes === undefined
+      ? {}
+      : parseJsonRecord(currentSettingsBytes, "pi_settings_invalid", "Pi settings");
+  const packagesValue = settings.packages;
+  if (packagesValue !== undefined && !Array.isArray(packagesValue)) {
+    throw new ProfileInstallError("pi_settings_invalid", "Pi settings packages must be an array");
+  }
+  const packages = packagesValue === undefined ? [] : [...packagesValue];
+  for (const entry of packages) assertValidPiPackageEntry(entry);
+
+  const ownershipAbsolute = path.join(configRoot, PI_SETTINGS_OWNERSHIP_PATH);
+  const currentOwnershipBytes = await readOptionalFile(ownershipAbsolute);
+  const ownership = parsePiSettingsOwnership(currentOwnershipBytes);
+  const matching = packages.filter(
+    (entry) =>
+      canonicalPiPackageIdentity(piPackageSource(entry)) ===
+      canonicalPiPackageIdentity(REQUIRED_SUPERPOWERS_PI_PACKAGE),
+  );
+  const exact = matching.filter(isExactRequiredPiPackage);
+
+  if (matching.length !== exact.length || exact.length > 1) {
+    throw new ProfileInstallError(
+      "pi_settings_conflict",
+      `Pi package ${REQUIRED_SUPERPOWERS_PI_PACKAGE} is pinned, filtered, or duplicated; preserve that user choice or restore the Koni-managed entry before updating`,
+    );
+  }
+  if (ownership !== undefined && exact.length !== 1) {
+    throw new ProfileInstallError(
+      "pi_settings_conflict",
+      `Koni's required Pi package entry was removed or changed: ${REQUIRED_SUPERPOWERS_PI_PACKAGE}`,
+    );
+  }
+
+  const managed = ownership?.managed ?? exact.length === 0;
+  let settingsBytes: Uint8Array | undefined;
+  if (exact.length === 0) {
+    packages.push(REQUIRED_SUPERPOWERS_PI_PACKAGE);
+    settings.packages = packages;
+    settingsBytes = jsonBytes(settings);
+  }
+  const ownershipBytes = jsonBytes({
+    protocol: PI_SETTINGS_OWNERSHIP_PROTOCOL,
+    source: REQUIRED_SUPERPOWERS_PI_PACKAGE,
+    managed,
+  });
+  return {
+    settingsPath,
+    expectedSettingsSha256:
+      currentSettingsBytes === undefined ? null : rawSha256(currentSettingsBytes),
+    ...(settingsBytes === undefined ? {} : { settingsBytes }),
+    ownershipWrite: {
+      path: PI_SETTINGS_OWNERSHIP_PATH,
+      bytes: ownershipBytes,
+      expectedSha256: currentOwnershipBytes === undefined ? null : rawSha256(currentOwnershipBytes),
+    },
+  };
+}
+
+async function applyPiSettingsMerge(plan: PiSettingsMergePlan): Promise<void> {
+  if (plan.settingsBytes === undefined) return;
+  const piRoot = path.dirname(plan.settingsPath);
+  await mkdir(piRoot, { recursive: true, mode: 0o700 });
+  const current = await readOptionalFile(plan.settingsPath);
+  const currentSha256 = current === undefined ? null : rawSha256(current);
+  if (currentSha256 !== plan.expectedSettingsSha256) {
+    throw new ProfileInstallError(
+      "pi_settings_changed",
+      "Pi settings changed while the profile update was being prepared",
+    );
+  }
+  const temporaryPath = path.join(piRoot, `.settings.json.koni-${randomUUID()}.tmp`);
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(temporaryPath, "wx", 0o600);
+    await handle.writeFile(plan.settingsBytes);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await rename(temporaryPath, plan.settingsPath);
+  } finally {
+    await handle?.close();
+    await rm(temporaryPath, { force: true });
+  }
+}
+
+function parsePiSettingsOwnership(bytes: Uint8Array | undefined): { managed: boolean } | undefined {
+  if (bytes === undefined) return undefined;
+  const value = parseJsonRecord(bytes, "pi_settings_ownership_invalid", "Pi settings ownership");
+  rejectUnknownFields(
+    value,
+    ["protocol", "source", "managed"],
+    "pi_settings_ownership_invalid",
+    "Pi settings ownership",
+  );
+  if (
+    value.protocol !== PI_SETTINGS_OWNERSHIP_PROTOCOL ||
+    value.source !== REQUIRED_SUPERPOWERS_PI_PACKAGE ||
+    typeof value.managed !== "boolean"
+  ) {
+    throw new ProfileInstallError(
+      "pi_settings_ownership_invalid",
+      "Pi settings ownership has an invalid shape",
+    );
+  }
+  return { managed: value.managed };
+}
+
+function assertValidPiPackageEntry(value: unknown): void {
+  if (typeof value === "string" && value.length > 0) return;
+  if (isRecord(value) && typeof value.source === "string" && value.source.length > 0) {
+    return;
+  }
+  throw new ProfileInstallError(
+    "pi_settings_invalid",
+    "Pi settings contains an invalid package entry",
+  );
+}
+
+function piPackageSource(value: unknown): string {
+  return typeof value === "string" ? value : String((value as Record<string, unknown>).source);
+}
+
+function isExactRequiredPiPackage(value: unknown): boolean {
+  if (typeof value === "string") return value === REQUIRED_SUPERPOWERS_PI_PACKAGE;
+  const record = value as Record<string, unknown>;
+  return record.source === REQUIRED_SUPERPOWERS_PI_PACKAGE && Object.keys(record).length === 1;
+}
+
+function canonicalPiPackageIdentity(source: string): string {
+  return source
+    .replace(/^git:/u, "")
+    .replace(/^(?:https?|ssh):\/\//u, "")
+    .replace(/^git@github\.com:/u, "github.com/")
+    .replace(/\.git(?=@|$)/u, "")
+    .replace(/@[^/]+$/u, "")
+    .replace(/\/+$/u, "")
+    .toLowerCase();
 }
 
 /** Return lifecycle metadata without trusting it as package authority. */
@@ -2038,6 +2199,21 @@ async function assertOptionalRealConfigRoot(configRoot: string): Promise<void> {
     }
     if ((await realpath(configRoot)) !== configRoot) {
       throw new ProfileInstallError("config_escape", ".koni escapes the canonical project root");
+    }
+  } catch (error) {
+    if (!isCode(error, "ENOENT")) throw error;
+  }
+}
+
+async function assertOptionalRealPiRoot(piRoot: string, projectRoot: string): Promise<void> {
+  try {
+    const metadata = await lstat(piRoot);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new ProfileInstallError("unsafe_pi_root", ".pi must be a real directory");
+    }
+    const canonical = await realpath(piRoot);
+    if (canonical !== piRoot || !isWithin(projectRoot, canonical)) {
+      throw new ProfileInstallError("pi_root_escape", ".pi escapes the canonical project root");
     }
   } catch (error) {
     if (!isCode(error, "ENOENT")) throw error;

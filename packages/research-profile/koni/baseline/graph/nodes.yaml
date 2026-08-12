@@ -83,6 +83,19 @@ node_types:
   - evidence
   - reports
   - compiler
+  fields:
+    summary:
+      type: string
+      required: false
+      description: Concise account of the source or prior result and why it matters to this research plan.
+    citation:
+      type: string
+      required: false
+      description: Human-readable bibliographic citation for the source or prior result.
+    source_locator:
+      type: string
+      required: false
+      description: Stable project-relative or external locator for the source or prior result.
 - id: claim
   description: A precise scientific statement whose support or refutation can be traced to experiments and evidence.
   stage: experiment_design
@@ -511,11 +524,42 @@ node_types:
       required: false
       items:
         type: object
-      description: Capability objects containing stable names, provided protocol versions/ranges, and entrypoints.
+        additional_properties: false
+        properties:
+          name:
+            type: string
+            required: true
+            pattern: .*\S.*
+            description: Stable reusable capability interface name.
+          protocol_version:
+            type: string
+            required: true
+            pattern: ^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$
+            description: Exact semantic version provided by this asset; gates declare the compatible protocol range separately.
+          entrypoints:
+            type: list
+            required: true
+            items:
+              type: path
+              pattern: ^program/assets(?:/.*)?$
+            description: Concrete asset entrypoints that provide this capability.
+      description: Typed capability providers with stable names, exact provided protocol versions, and concrete entrypoints.
     gate_contracts:
       type: object
       required: false
-      description: Per-gate deterministic verifier contracts keyed by exact gate id; each contract carries protocol autoresearch.gate-result.v1 and a nonempty command argv.
+      description: 'Per-gate deterministic verifier contracts keyed by exact gate id. Each value has exact shape { protocol: "autoresearch.gate-result.v1", argv: [nonempty executable argv items] }; use argv, never command.'
+    support_paths:
+      type: list
+      required: false
+      items:
+        type: path
+        pattern: .*\S.*
+      description: >-
+        Project-relative paths outside implementation_plan.root that this asset's entrypoints must
+        read to produce their payload, such as a canonical builder or fixture module. The compiler
+        grants these as additional read scope on the implement-asset ticket. Declare them whenever
+        an entrypoint imports or loads code or data it does not own, otherwise the entrypoint
+        cannot reach that dependency at execution time and can only emit a degraded payload.
     implementation_plan:
       type: object
       required: false
@@ -637,8 +681,8 @@ node_types:
         protocol_range:
           type: string
           required: true
-          pattern: ^(?:>=|<=|>|<|=|\^|~)[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:(?:,\s*|\s+)(?:>=|<=|>|<|=|\^|~)[0-9]+\.[0-9]+(?:\.[0-9]+)?)*$
-          description: Semantic-version comparator range such as >=1.0,<2.0 or >=1.0.0 <2.0.0; never the autoresearch.gate-result.v1 adapter result protocol.
+          pattern: ^(?:>=|<=|>|<|=|\^|~)[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:\s+(?:>=|<=|>|<|=|\^|~)[0-9]+\.[0-9]+(?:\.[0-9]+)?)*$
+          description: Space-separated semantic-version comparator range such as >=1.0.0 <2.0.0; comma-separated comparators are invalid, and this is never the autoresearch.gate-result.v1 adapter result protocol.
     command_result_contract:
       type: object
       required: true

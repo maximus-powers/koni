@@ -43,7 +43,7 @@ describe("guided control-center configuration projection", () => {
     const agents = catalog.sections.find((section) => section.title === "Agents")!;
     const planner = agents.resources.find((resource) => resource.title === "Run Planner")!;
     expect(planner.fields.map((field) => field.label)).toEqual(
-      expect.arrayContaining(["Prompt", "Model", "Reasoning"]),
+      expect.arrayContaining(["Id", "Description", "Instructions"]),
     );
     expect(
       planner.fields.every(

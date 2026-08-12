@@ -27,7 +27,7 @@ const releases = [
     oldVersion: "0.7.0",
     newVersion: "0.8.0",
     oldBundleSha256: "sha256:4e955f7fb5a6bbd58542f395471d2e3f1c87364840abd218f973b8f62a5c0c7e",
-    newBundleSha256: "sha256:df6e6f62434fa3856880438b2d735f0c45c5b5a62ffe3ef84144e2130e675693",
+    newBundleSha256: "sha256:08a38ac2657d371c955c098955ab7dc91cb76b97abeb7e5bc0790f938f02f289",
     parallelism: { source: 5, project: 7 },
   },
   {
@@ -35,9 +35,9 @@ const releases = [
     directory: "research-profile",
     fixtureDirectory: "research-1.0.11",
     oldVersion: "1.0.11",
-    newVersion: "1.1.0",
+    newVersion: "1.1.9",
     oldBundleSha256: "sha256:1bc8bdb64934ccd475f50acad5b22a7b1b6f7e168a748ecd91e234be76126c60",
-    newBundleSha256: "sha256:e75e482a20d39659782edb8b0a23f3b0fc9cce27a6d97695e935e9efdd121153",
+    newBundleSha256: "sha256:348e93f17bd295bc96b9a71894d8cc9c12054fbe78673f948c00f491780c82ef",
     parallelism: { source: 64, project: 17 },
   },
 ] as const;
@@ -104,7 +104,7 @@ describe("official profile release upgrades", () => {
       expect(upgraded.pendingUpstream).toContainEqual(
         expect.objectContaining({
           path: "resources/skills/configure-koni/references/configuration-layers.md",
-          reason: "modified",
+          reason: "orphaned",
         }),
       );
       const appliedProfile = await readFile(profilePath, "utf8");
@@ -286,6 +286,14 @@ async function buildPriorReleasePackage(release: (typeof releases)[number]): Pro
     release.fixtureDirectory,
   );
   await cp(fixture, root, { recursive: true });
+  // The fixture models an already-installed prior release. Widen only this temporary package's
+  // loader envelope so current Core can reconstruct that historical install before exercising the
+  // target release's exact bundle-bound migration. The frozen baseline bytes and bundle identity
+  // remain unchanged.
+  const manifestPath = path.join(root, "koni", "profile-manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as ProfilePackageManifest;
+  manifest.compatibility.profile_schema_range = ">=2.0.0 <4.0.0";
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   const loaded = await loadProfilePackage(root);
   expect(loaded.manifest.bundle_sha256).toBe(release.oldBundleSha256);
   return root;

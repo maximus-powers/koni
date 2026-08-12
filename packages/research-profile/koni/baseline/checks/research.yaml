@@ -47,10 +47,11 @@ checks:
     backoff_seconds: []
 - id: gate-verifier
   kind: command
-  # Not bound to implement-asset: that operation authors the per-gate contract this check
-  # resolves its command from, so binding it at dispatch deadlocks the very ticket that would
-  # satisfy it. Gates stay covered by run-gate (which executes them) and validate-asset
-  # (which checks an asset that already exists).
+  # Deliberately excludes implement-asset. That operation *authors* spec.gate_contracts, so on the
+  # first implementation of any gate-compatible asset the contract this check resolves its argv
+  # from does not exist yet, and dispatch-time resolution deadlocks the very ticket that would
+  # create it. Gates remain covered by run-gate (which executes them) and validate-asset (which
+  # checks an asset that already exists).
   applies_to:
   - run-gate
   - validate-asset

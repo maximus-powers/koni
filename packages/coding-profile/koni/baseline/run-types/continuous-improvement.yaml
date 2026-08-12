@@ -1,4 +1,4 @@
-schema_version: '2.0'
+schema_version: '3.0'
 id: continuous-improvement
 title: Continuous Improvement
 description: A Medium-derived preset that decomposes a domain into improvement targets, explores and proves alternative implementations for each, selects the best against explicit criteria, and implements every winner.

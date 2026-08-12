@@ -16,10 +16,10 @@ const EXPECTATIONS = Object.freeze([
     profileId: "software",
     profileVersion: "0.8.0",
     lineage: "koni.software",
-    fileCount: 47,
-    kinds: { config: 19, agent: 10, skill: 18, other: 0 },
+    fileCount: 27,
+    kinds: { config: 17, agent: 10, skill: 0, other: 0 },
     // Reviewed in-tree profile baseline.
-    digest: "sha256:df6e6f62434fa3856880438b2d735f0c45c5b5a62ffe3ef84144e2130e675693",
+    digest: "sha256:08a38ac2657d371c955c098955ab7dc91cb76b97abeb7e5bc0790f938f02f289",
     migration: {
       id: "retire-inert-semantics-v1",
       kind: "retire_yaml_fields",
@@ -38,10 +38,10 @@ const EXPECTATIONS = Object.freeze([
     profileId: "research",
     profileVersion: "1.1.9",
     lineage: "koni.research",
-    fileCount: 49,
-    kinds: { config: 17, agent: 13, skill: 18, other: 1 },
+    fileCount: 29,
+    kinds: { config: 15, agent: 13, skill: 0, other: 1 },
     // Reviewed in-tree profile baseline.
-    digest: "sha256:bb6c3aac0e3b3b0eedb01ce99d445fd6bce0aaeecda9a53fcc77c21f7bda551f",
+    digest: "sha256:348e93f17bd295bc96b9a71894d8cc9c12054fbe78673f948c00f491780c82ef",
     migration: {
       id: "retire-inert-semantics-v1",
       kind: "retire_yaml_fields",
@@ -159,7 +159,7 @@ for (const expected of EXPECTATIONS) {
     });
     assert.deepEqual(manifest.compatibility, {
       core_api_range: ">=1.0.0 <2.0.0",
-      profile_schema_range: ">=2.0.0 <3.0.0",
+      profile_schema_range: ">=3.0.0 <4.0.0",
       pi_range: ">=0.80.10 <0.81.0",
     });
     assert.equal(manifest.baseline.root, "./baseline");
@@ -204,13 +204,77 @@ for (const expected of EXPECTATIONS) {
   });
 }
 
-test("official profiles carry the same shared skill resource tree", async () => {
-  const coding = await independentInventory(
-    join(repositoryRoot, "packages", "coding-profile", "koni", "baseline", "resources", "skills"),
+test("Core carries one shared Koni skill resource tree", async () => {
+  const skills = await independentInventory(join(repositoryRoot, "packages", "core", "skills"));
+  assert.equal(skills.length, 18);
+  assert.deepEqual(
+    skills.filter(({ path }) => path.endsWith("/SKILL.md")).map(({ path }) => path),
+    ["configure-koni/SKILL.md", "model-koni-work/SKILL.md", "operate-koni/SKILL.md"],
   );
-  const research = await independentInventory(
-    join(repositoryRoot, "packages", "research-profile", "koni", "baseline", "resources", "skills"),
+});
+
+test("shared software guidance defines a disjoint planning-patch ledger", async () => {
+  const guidance = await readFile(
+    join(repositoryRoot, "packages/core/skills/model-koni-work/references/software-projects.md"),
+    "utf8",
   );
-  assert.equal(coding.length, 18);
-  assert.deepEqual(research, coding);
+  assert.match(guidance, /retain, update, remove, or add/);
+  assert.match(guidance, /must not appear in both\s+the add and remove sets/);
+  assert.match(guidance, /do not re-add retained edges/);
+});
+
+test("shared software guidance defines behavioral proof construction invariants", async () => {
+  const guidance = await readFile(
+    join(repositoryRoot, "packages/core/skills/model-koni-work/references/software-projects.md"),
+    "utf8",
+  );
+  assert.match(guidance, /assert the desired behavior, not the historical\s+implementation/);
+  assert.match(
+    guidance,
+    /Do not replace a production seam named by an oracle case with a test double/,
+  );
+  assert.match(guidance, /valid at the real consumer boundary/);
+  assert.match(guidance, /same harness failure recurs without changed\s+evidence/);
+  assert.match(guidance, /future-green viability/);
+  assert.match(guidance, /target consumer contract/);
+  assert.match(guidance, /claim-to-observation ledger/);
+  assert.match(guidance, /actual runtime owner/);
+  assert.match(guidance, /substituted target owner cannot prove/);
+  assert.match(
+    guidance,
+    /route marker proves selection, not the selected behavior's internal\s+claim/,
+  );
+});
+
+test("coding agents enforce future-green proof viability and claim coverage", async () => {
+  const agentRoot = join(
+    repositoryRoot,
+    "packages",
+    "coding-profile",
+    "koni",
+    "baseline",
+    "agents",
+  );
+  const [planner, implementer, reviewer] = await Promise.all([
+    readFile(join(agentRoot, "run-planner.yaml"), "utf8"),
+    readFile(join(agentRoot, "implementer.yaml"), "utf8"),
+    readFile(join(agentRoot, "reviewer.yaml"), "utf8"),
+  ]);
+
+  for (const instructions of [planner, implementer, reviewer]) {
+    assert.match(instructions, /future-green viability/);
+    assert.match(instructions, /material approval claim/);
+  }
+  assert.match(reviewer, /claim-to-owner ledger/);
+  assert.match(reviewer, /substituted target owner/);
+});
+
+test("coding proof gates require the real owner of every material claim", async () => {
+  const operations = await readFile(
+    join(repositoryRoot, "packages", "coding-profile", "koni", "baseline", "operations.yaml"),
+    "utf8",
+  );
+
+  assert.match(operations, /claim-to-owner ledger/);
+  assert.match(operations, /substituted target owner cannot prove/);
 });

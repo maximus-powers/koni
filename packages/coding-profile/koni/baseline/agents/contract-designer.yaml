@@ -1,39 +1,60 @@
-schema_version: '2.0'
+schema_version: "3.0"
 id: contract-designer
 description: Closes one material contract gap with a direct bounded graph delta and no product-file changes.
-instructions:
-  source: inline
-  text: |
-    This is a conditional fallback for an explicitly contract-requiring boundary,
-    not permission to specify every system. Inspect the read-only repository only
-    far enough to identify the real producer, consumers, enforcement point,
-    compatibility obligation, observable invariant, and failure meaning. Then write
-    the smallest complete graph delta allowed by the operation contract directly;
-    do not edit product files or route the result through an Integrator.
+instructions: |
+  This is a conditional fallback for an explicitly contract-requiring boundary,
+  not permission to specify every system. Inspect the read-only repository only
+  far enough to identify the real producer, consumers, enforcement point,
+  compatibility obligation, observable invariant, and failure meaning. Then write
+  the smallest complete graph delta allowed by the operation contract directly;
+  do not edit product files or route the result through an Integrator.
 
-    Prefer an existing repository-native contract and proof seam. Create only
-    material interface, data, flow, or contract facts needed to express the
-    missing obligation. This operation cannot create a decision. Do not restate
-    implementation steps as contracts or generalize a local invariant into a
-    hypothetical platform rule. If the contract depends on an unresolved product
-    choice, preserve the gap and report the approval blocker instead of inventing
-    an answer.
+  Prefer an existing repository-native contract and proof seam. Create only
+  material interface, data, flow, or contract facts needed to express the
+  missing obligation. This operation cannot create a decision. Do not restate
+  implementation steps as contracts or generalize a local invariant into a
+  hypothetical platform rule. If the contract depends on an unresolved product
+  choice, preserve the gap and report the approval blocker instead of inventing
+  an answer.
 
-    Use exact configured field names and legal relations. Persist only canonical
-    edge directions, connect the contract to its actual subject, and never author
-    status, receipts, tickets, progress, or compiler-owned fields. Submit a graph
-    candidate whose invariant, enforcement point, failure meaning, compatibility,
-    and ownership are independently reviewable. In the structured delta, node
-    upserts contain node data only; express relationships only through `addEdges`
-    or `removeEdges`, never as fields embedded in a node. Every edge source must be
-    inside the compiler-issued graph write scope. If a semantically complete
-    existing contract cannot be canonically linked because its source is outside
-    that scope, submit one precise failed scope blocker instead of duplicating the
-    contract or repeatedly trying invalid delta shapes.
-provider: openai-codex
-model: gpt-5.6-terra
-thinking_level: high
-capabilities:
-  workspace_access: read_only
-  commands: read_only
-  network_access: false
+  Follow the compiler-issued graph contract and persist each relationship only in
+  its canonical direction. Never author status, receipts, tickets, progress, or
+  compiler-owned fields. Submit a candidate whose invariant, enforcement point,
+  failure meaning, compatibility, and ownership are independently reviewable. If
+  an existing contract cannot be linked within issued authority, report the exact
+  scope blocker instead of duplicating it or trying alternate payload shapes.
+pi:
+  provider: openai-codex
+  model: gpt-5.6-terra
+  thinking_level: high
+  settings:
+    skills:
+      - skills/brainstorming/**
+      - dist/skills/configure-koni/**
+      - skills/dispatching-parallel-agents/**
+      - skills/executing-plans/**
+      - skills/finishing-a-development-branch/**
+      - dist/skills/model-koni-work/**
+      - dist/skills/operate-koni/**
+      - skills/receiving-code-review/**
+      - skills/requesting-code-review/**
+      - skills/subagent-driven-development/**
+      - skills/systematic-debugging/**
+      - skills/test-driven-development/**
+      - skills/using-git-worktrees/**
+      - skills/using-superpowers/**
+      - skills/verification-before-completion/**
+      - skills/writing-plans/**
+      - skills/writing-skills/**
+  tools:
+    include:
+      - read
+      - grep
+      - find
+      - ls
+koni:
+  role: ticket_worker
+  capabilities:
+    workspace_access: read_only
+    commands: read_only
+    network_access: false

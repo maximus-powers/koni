@@ -33,15 +33,15 @@ describe("profile package manifests", () => {
       "coding",
       "packages/coding-profile/koni/profile-manifest.json",
       "packages/coding-profile/koni/baseline",
-      "sha256:df6e6f62434fa3856880438b2d735f0c45c5b5a62ffe3ef84144e2130e675693",
-      47,
+      "sha256:08a38ac2657d371c955c098955ab7dc91cb76b97abeb7e5bc0790f938f02f289",
+      27,
     ],
     [
       "research",
       "packages/research-profile/koni/profile-manifest.json",
       "packages/research-profile/koni/baseline",
-      "sha256:1dc80e1c35b44e1df16ffad9ff5b09e634b0718a62dab501f9123f7c36448f81",
-      49,
+      "sha256:348e93f17bd295bc96b9a71894d8cc9c12054fbe78673f948c00f491780c82ef",
+      29,
     ],
   ])(
     "validates and byte-verifies the reviewed %s profile bundle",
@@ -301,7 +301,7 @@ function validSyntheticManifest(
     profile: { id: "test", display_name: "Test", version: "1.2.3", lineage: "example.test" },
     compatibility: {
       core_api_range: ">=1.0.0 <2.0.0",
-      profile_schema_range: ">=2.0.0 <3.0.0",
+      profile_schema_range: ">=3.0.0 <4.0.0",
       pi_range: ">=0.80.10 <0.81.0",
     },
     baseline: { root: "./baseline", files },

@@ -1,32 +1,59 @@
-schema_version: '2.0'
+schema_version: "3.0"
 id: architecture-mapper
-description: Grounds the smallest missing architecture boundary and writes its bounded semantic graph delta without changing product files.
-instructions:
-  source: inline
-  text: |
-    This is a conditional fallback, not a universal architecture phase. Inspect
-    only enough of the read-only repository to ground the objective in at least one
-    real ownership boundary. Write the bounded graph delta allowed by the operation
-    contract directly; do not edit product files, create implementation work, or
-    hand prose to an Integrator for transcription.
+description: Grounds the smallest missing architecture boundary and writes its bounded semantic
+  graph delta without changing product files.
+instructions: |
+  This is a conditional fallback, not a universal architecture phase. Inspect
+  only enough of the read-only repository to ground the objective in at least one
+  real ownership boundary. Write the bounded graph delta allowed by the operation
+  contract directly; do not edit product files, create implementation work, or
+  hand prose to an Integrator for transcription.
 
-    Model the smallest repository-native system and its exact project-root-relative
-    owned paths. Add an interface, data model, flow, or contract only when it
-    changes ownership, compatibility, behavior, proof, or a vertical-slice seam.
-    Mark contract-required boundaries and explain the material reason; do not make
-    every system own a contract or data model. Reuse established identifiers and
-    distinguish existing from proposed names. Never invent paths or speculative
-    future services.
+  Model the smallest repository-native system and its exact project-root-relative
+  owned paths. Add an interface, data model, flow, or contract only when it
+  changes ownership, compatibility, behavior, proof, or a vertical-slice seam.
+  Mark contract-required boundaries and explain the material reason; do not make
+  every system own a contract or data model. Reuse established identifiers and
+  distinguish existing from proposed names. Never invent paths or speculative
+  future services.
 
-    Use only fields and outgoing relations authorized by the compiler packet.
-    Persist each canonical edge once and let Koni expose inverse aliases. Do not
-    author status, receipts, tickets, progress, or any compiler-owned field. Before
-    submitting, verify that every new node is connected to the target objective and
-    that the candidate graph—not just findings—contains the complete bounded map.
-provider: openai-codex
-model: gpt-5.6-terra
-thinking_level: high
-capabilities:
-  workspace_access: read_only
-  commands: read_only
-  network_access: false
+  Use only fields and outgoing relations authorized by the compiler packet.
+  Persist each canonical edge once and let Koni expose inverse aliases. Do not
+  author status, receipts, tickets, progress, or any compiler-owned field. Before
+  submitting, verify that every new node is connected to the target objective and
+  that the candidate graph—not just findings—contains the complete bounded map.
+pi:
+  provider: openai-codex
+  model: gpt-5.6-terra
+  thinking_level: high
+  settings:
+    skills:
+      - skills/brainstorming/**
+      - dist/skills/configure-koni/**
+      - skills/dispatching-parallel-agents/**
+      - skills/executing-plans/**
+      - skills/finishing-a-development-branch/**
+      - dist/skills/model-koni-work/**
+      - dist/skills/operate-koni/**
+      - skills/receiving-code-review/**
+      - skills/requesting-code-review/**
+      - skills/subagent-driven-development/**
+      - skills/systematic-debugging/**
+      - skills/test-driven-development/**
+      - skills/using-git-worktrees/**
+      - skills/using-superpowers/**
+      - skills/verification-before-completion/**
+      - skills/writing-plans/**
+      - skills/writing-skills/**
+  tools:
+    include:
+      - read
+      - grep
+      - find
+      - ls
+koni:
+  role: ticket_worker
+  capabilities:
+    workspace_access: read_only
+    commands: read_only
+    network_access: false

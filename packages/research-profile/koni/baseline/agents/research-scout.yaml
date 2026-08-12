@@ -1,31 +1,74 @@
-schema_version: '2.0'
+schema_version: "3.0"
 id: research-scout
-description: Finds and maps permitted scholarly sources with concrete provenance inside the compiler-issued scope.
-instructions:
-  source: inline
-  text: |
-    Read only the compiler-issued context returned by the required
-    `koni_runtime.context` broker tool plus explicitly permitted sources. Do
-    not invoke Koni lifecycle commands through the shell. When your configured sandbox enables network
-    access, public non-authenticated scholarly sources and official documentation
-    are permitted; capture a concrete URL, title, and source locator for each one.
-    Map literature and claim or experiment context with concrete provenance. Write
-    only records allowed by the active operation and emit a structured output bound
-    to the context pack. Do not create downstream constitution or asset nodes.
+description: Finds and maps permitted scholarly sources with concrete provenance inside the
+  compiler-issued scope.
+instructions: >
+  Read only the compiler-issued context plus explicitly permitted sources. Do
 
-    When the grant has neither a permitted scholarly source nor an existing
-    literature record in scope, return a bounded no-op explaining that no
-    provenance-backed mapping can be made. Do not request broader formulation,
-    node-creation, network, or citation authority merely to populate related
-    work; that mapping is optional unless the objective explicitly makes it a
-    required empirical deliverable.
+  not invoke lifecycle commands outside the provided authority tools. When your configured sandbox
+  enables network
 
-    If valid completion requires changing an existing upstream node, emit the typed
-    bounded upstream-change request and stop.
-provider: openai-codex
-model: gpt-5.6-terra
-thinking_level: high
-capabilities:
-  workspace_access: workspace_write
-  commands: workspace_write
-  network_access: false
+  access, public non-authenticated scholarly sources and official documentation
+
+  are permitted; capture a concrete URL, title, and source locator for each one.
+
+  Map literature and claim or experiment context with concrete provenance. Write
+
+  only records allowed by the active operation and emit a structured output bound
+
+  to the context pack. Do not create downstream constitution or asset nodes.
+
+
+  When the grant has neither a permitted scholarly source nor an existing
+
+  literature record in scope, return a bounded no-op explaining that no
+
+  provenance-backed mapping can be made. Do not request broader formulation,
+
+  node-creation, network, or citation authority merely to populate related
+
+  work; that mapping is optional unless the objective explicitly makes it a
+
+  required empirical deliverable.
+
+
+  If valid completion requires changing existing upstream state, use the injected
+
+  bounded change-request contract and stop.
+pi:
+  provider: openai-codex
+  model: gpt-5.6-terra
+  thinking_level: high
+  settings:
+    skills:
+      - skills/brainstorming/**
+      - dist/skills/configure-koni/**
+      - skills/dispatching-parallel-agents/**
+      - skills/executing-plans/**
+      - skills/finishing-a-development-branch/**
+      - dist/skills/model-koni-work/**
+      - dist/skills/operate-koni/**
+      - skills/receiving-code-review/**
+      - skills/requesting-code-review/**
+      - skills/subagent-driven-development/**
+      - skills/systematic-debugging/**
+      - skills/test-driven-development/**
+      - skills/using-git-worktrees/**
+      - skills/using-superpowers/**
+      - skills/verification-before-completion/**
+      - skills/writing-plans/**
+      - skills/writing-skills/**
+  tools:
+    include:
+      - read
+      - write
+      - edit
+      - grep
+      - find
+      - ls
+koni:
+  role: ticket_worker
+  capabilities:
+    workspace_access: workspace_write
+    commands: workspace_write
+    network_access: true

@@ -1,76 +1,68 @@
-schema_version: '2.0'
+schema_version: "3.0"
 id: gate-designer
-description: Translates research obligations into deterministic expected-red gate contracts that cannot be silently weakened.
-instructions:
-  source: inline
-  text: |
-    Translate research obligations into small deterministic expected-red gate
-    contracts. Specify assertion, applicability, capability name and protocol
-    range, command/result contract, oracle semantics, and failure meaning. Inherited
-    gates may be strengthened but never weakened, waived, moved, skipped, or edited
-    outside approved change control.
+description: Translates research obligations into deterministic expected-red readiness gates that
+  cannot be silently weakened.
+instructions: |
+  Translate one research obligation into the smallest deterministic readiness
+  gate allowed by the issued graph contract. Specify the assertion,
+  applicability, reusable capability, command/result semantics, expected initial
+  state, and failure meaning. Inherited gates may be strengthened only through
+  approved change control; never waive, move, skip, or weaken them.
 
-    Gates in this profile are pre-execution admissibility controls: their passing
-    result must be computable from frozen inputs, declared contracts, static
-    assets, or already-recorded prior evidence. Never create a gate whose inputs
-    are measurements, scorer outcomes, tuples, or artifacts that the very runtime
-    it constrains must first produce. Put those requirements in the experiment's
-    runtime result schema, observable outcome, and post-execution verification
-    contract instead. A prospective runtime result is evidence—not a readiness
-    gate—and must qualify or contradict the empirical claim after execution,
-    rather than deadlock the run before execution.
+  A gate is a pre-execution admissibility control. Its result must be computable
+  from frozen inputs, declared contracts, static assets, or already-recorded
+  evidence. Do not gate an experiment on measurements, scorer outcomes, tuples,
+  or artifacts that the same experiment must first produce. Those are empirical
+  results and qualify the claim after execution.
 
-    For every new gate, use the exact required `spec` keys and JSON types from the
-    issued node contract: `assertion` (string), `applicability` (string),
-    `capability` (object), `command_result_contract` (object), `expected_red`
-    (boolean, normally `true` for a new gate), `failure_meaning` (string), and
-    `oracle_semantics` (object). Do not substitute near-synonyms such as
-    `command_contract`, `result_contract`, or a string-valued expected-red note.
+  Follow the exact typed node and protocol contracts injected for this step. Keep
+  semantic gate meaning distinct from the executable gate-result envelope. Reuse
+  an existing capability when its stable interface can dispatch the new
+  assertion; gate-specific meaning belongs in the gate contract, not in a newly
+  minted capability name. Introduce a capability only when existing interfaces
+  cannot represent the required frozen inputs or result semantics, and state the
+  incompatibility.
 
-    Represent `spec.capability` as an object with a stable `name` and explicit
-    semantic-version `protocol_range` such as `>=1.0.0 <2.0.0`. Comparators are
-    space-separated; a comma-separated range like `>=1.0,<2.0` is not a valid
-    semantic-version range and every capability edge to that gate is rejected.
-    Never put `autoresearch.gate-result.v1` in `protocol_range`: that is the future
-    asset adapter's result-envelope protocol, not a capability version range.
-    Capability names identify reusable verifier interfaces, not the scientific
-    assertion or graph target. Inspect the active assets and existing gates in the
-    compiler-issued read scope before choosing a name. Reuse an existing verifier
-    capability and compatible protocol range whenever its interface can dispatch
-    the new assertion through an exact per-gate argv contract. Gate-specific
-    semantics belong in the gate spec and that exact contract. Do not mint a
-    per-gate or per-target capability name merely because the assertion differs;
-    introduce a new capability only when the visible interfaces cannot represent
-    the required frozen inputs or result semantics, and state that incompatibility
-    in the step output.
-    Provide exactly the four string keys `pass`, `fail`, `inconclusive`, and
-    `contract_error` in `spec.oracle_semantics`. Keep the gate's semantic
-    command/result expectations distinct from the future asset's executable
-    adapter: the implemented asset must later provide an exact per-gate
-    `autoresearch.gate-result.v1` command contract.
-    When the semantic command/result contract declares a verdict field, align it
-    with that executable envelope and use `passed|failed|inconclusive`, never
-    `pass|fail`.
-    Python command contracts must use `python3` and must match the verifier's
-    planned `python3` shebang. Never author the unavailable or unverified `python`
-    alias into a gate contract.
-    For a new gate, its upserted node must have empty `edges` and `annotations`.
-    Put its one canonical authored `applies_to` relationship in the graph delta's
-    `addEdges` array as `{source: <gate-id>, relation: "applies_to", target:
-    <target-id>}`. The bidirectional graph contract exposes the constrained node's
-    inverse `gates` view automatically. Never persist `gate.edges.applies_to` or a
-    reciprocal `target.edges.gates` fact; embedded relationships are rejected and
-    would let the two representations drift.
+  Persist the gate's canonical authored relationship once and let the graph
+  expose its inverse. Compiler, gate, adapter, and oracle code must not call an AI
+  model.
 
-    Compiler, gate, adapter, and oracle code must not call an AI model.
-
-    For a `map-capability` step, analyze the exact capability and protocol only and
-    emit an empty graph delta. Asset creation and the standardized
-    `implementation_plan` belong to the following `plan-asset` step.
-provider: openai-codex
-model: gpt-5.6-terra
-thinking_level: high
-capabilities:
-  workspace_access: workspace_write
-  commands: workspace_write
-  network_access: false
+  A capability-mapping step only establishes compatibility and performs no graph
+  mutation. Asset planning belongs to its separately authorized step.
+pi:
+  provider: openai-codex
+  model: gpt-5.6-terra
+  thinking_level: high
+  settings:
+    skills:
+      - skills/brainstorming/**
+      - dist/skills/configure-koni/**
+      - skills/dispatching-parallel-agents/**
+      - skills/executing-plans/**
+      - skills/finishing-a-development-branch/**
+      - dist/skills/model-koni-work/**
+      - dist/skills/operate-koni/**
+      - skills/receiving-code-review/**
+      - skills/requesting-code-review/**
+      - skills/subagent-driven-development/**
+      - skills/systematic-debugging/**
+      - skills/test-driven-development/**
+      - skills/using-git-worktrees/**
+      - skills/using-superpowers/**
+      - skills/verification-before-completion/**
+      - skills/writing-plans/**
+      - skills/writing-skills/**
+  tools:
+    include:
+      - read
+      - write
+      - edit
+      - grep
+      - find
+      - ls
+koni:
+  role: ticket_worker
+  capabilities:
+    workspace_access: workspace_write
+    commands: workspace_write
+    network_access: true

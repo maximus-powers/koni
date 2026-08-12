@@ -1,4 +1,4 @@
-schema_version: '2.0'
+schema_version: '3.0'
 id: large
 title: Large
 description: A cross-domain or high-risk change with shared staged planning, explicit controls, composed verification, and independent run review.
@@ -55,19 +55,19 @@ pipeline:
       kind: planning
       title: Plan architecture
       config:
-        persona: run-planner
+        agent: run-planner
         prompt: Establish the shared repository baseline and produce the outcome, non-goal, architecture, and decision portion of the plan. Classify objective.work_kind; identify the smallest affected repository-native systems and only material interfaces, data, flows, contracts, migrations, and consequential approval choices. Define cohesive vertical-slice seams and real dependencies without turning every graph node or layer into a ticket. Do not expand into detailed risk or proof prose yet.
     risk-plan:
       kind: planning
       title: Plan risk controls
       config:
-        persona: run-planner
+        agent: run-planner
         prompt: 'Using the architecture and repository ledger already in this thread, produce the risk plan: classify every planned change as routine, elevated, or critical from concrete factors; model only plausible material failure scenarios; choose structural mitigation or approval-bound acceptance; and specify recovery, compatibility, rollout, observability, and escalation controls when warranted. Acceptance must come from an already explicit human-approved decision, never from agent convenience. Inspect only specific evidence gaps and do not manufacture risks to justify the Large label.'
     verification-plan:
       kind: planning
       title: Plan verification
       config:
-        persona: run-planner
+        agent: run-planner
         prompt: >-
           Using the existing architecture, decisions, risks, and repository ledger, produce the verification plan and final smallest sufficient root-connected graph seed. Give every change or migration a primary focused proof that verifies exactly that implementation subject; add another only when it closes a distinct remaining evidence gap. For elevated and critical work, introduce the material risk and give that risk a genuinely distinct boundary proof; do not make one proof directly certify both change and risk. Record exact project-native argv, strategy-appropriate pre-change baselines, conditions, expected signals, non-claims, and structured oracle_cases binding every condition/claim to its callable production seam, exact seam_paths, action, assertions, and material environment/recipe, plus regression coverage, observability, and completion criteria. Every seam path must resolve to the same normalized project-relative identity present in read-only covered_paths; do not inherit other system paths. Before submission, close every configured required relation already known in the seed: in particular, every system with contract_required true must already have its semantically complete contract linked through canonical contract.applies_to, reusing the existing fact rather than leaving a fallback ticket or duplicate. Use canonical edges and exact paths. Do not repeat discovery, fake proof independence, manufacture expected-red failures, or seed compiler-owned status, tickets, receipts, or progress.
     approval:
@@ -91,7 +91,7 @@ pipeline:
       kind: agent_review
       title: Independently review the run
       config:
-        persona: reviewer
+        agent: reviewer
         prompt: Independently review the exact composed run for behavioral correctness, acceptance alignment, regressions, security, data and compatibility hazards, proof currentness and independence, scope discipline, recovery controls, and unresolved risks. Return only evidence-backed actionable findings; block when critical domain expertise is unavailable, and do not demand taste-driven perfection.
     report:
       kind: action
@@ -145,7 +145,7 @@ agents:
     reviewer:
       model: gpt-5.6-sol
       thinking_level: max
-  personas: {}
+  overrides: {}
 orchestration:
   auto_start: true
   max_parallel: 5

@@ -66,7 +66,9 @@ export async function initialize(data) {
   const stagedPiRoot = stagedRuntimePath(stageRoot, data.piPackageRoot);
   const stagedPiEntry = path.join(stagedPiRoot, "dist", "index.js");
   if (!stagedFiles.has(stagedPiEntry)) {
-    throw new Error("authenticated runtime stage does not contain Pi 0.80.10's pinned entry");
+    throw new Error(
+      `authenticated runtime stage does not contain Pi 0.80.10's pinned entry for ${data.piPackageRoot}`,
+    );
   }
   piParentURL = pathToFileURL(stagedPiEntry).href;
 }

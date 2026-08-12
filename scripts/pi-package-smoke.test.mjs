@@ -695,11 +695,14 @@ async function commitDisposableKoniConfiguration(project, message) {
   const changes = status.stdout.split("\n").filter(Boolean);
   assert.ok(changes.length > 0, `${message} expected a project-authored Koni change`);
   assert.equal(
-    changes.every((line) => line.slice(3).startsWith(".koni/")),
+    changes.every((line) => {
+      const target = line.slice(3);
+      return target.startsWith(".koni/") || target === ".pi/settings.json";
+    }),
     true,
-    `package rehearsal configuration commit escaped .koni/: ${changes.join(", ")}`,
+    `package rehearsal configuration commit escaped Koni's owned surfaces: ${changes.join(", ")}`,
   );
-  await execFileAsync("git", ["add", ".koni"], { cwd: project });
+  await execFileAsync("git", ["add", ".koni", ".pi/settings.json"], { cwd: project });
   await execFileAsync(
     "git",
     [
@@ -1945,13 +1948,27 @@ async function seedPackedActionableRun({ coreRoot, project, root, environment, r
   const endpointURL = pathToFileURL(path.join(coreRoot, "dist", "authority", "endpoint.js")).href;
   const storeURL = pathToFileURL(path.join(coreRoot, "dist", "authority", "project-store.js")).href;
   const runURL = pathToFileURL(path.join(coreRoot, "dist", "state", "run-record.js")).href;
+  const questionBatchURL = pathToFileURL(
+    path.join(coreRoot, "dist", "state", "question-batch.js"),
+  ).href;
   const gitURL = pathToFileURL(path.join(coreRoot, "dist", "git", "lifecycle.js")).href;
+  const canonicalURL = pathToFileURL(path.join(coreRoot, "dist", "shared", "canonical.js")).href;
+  const runProgramURL = pathToFileURL(
+    path.join(coreRoot, "dist", "compiler", "run-program.js"),
+  ).href;
+  const profileSourceURL = pathToFileURL(
+    path.join(coreRoot, "dist", "operator", "profile-source.js"),
+  ).href;
+  const profileInstallURL = pathToFileURL(
+    path.join(coreRoot, "dist", "profile", "install.js"),
+  ).href;
   await writeFile(
     helper,
     `
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { writeFile } from "node:fs/promises";
+import { appendFile, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { promisify } from "node:util";
 import { preparePiRuntime } from ${JSON.stringify(launcherURL)};
@@ -1960,7 +1977,12 @@ await preparePiRuntime();
 const { discoverAuthorityEndpoint } = await import(${JSON.stringify(endpointURL)});
 const { ProjectAuthorityStore } = await import(${JSON.stringify(storeURL)});
 const { assertRunRecord } = await import(${JSON.stringify(runURL)});
+const { createQuestionBatch } = await import(${JSON.stringify(questionBatchURL)});
 const { IsolatedGitLifecycle } = await import(${JSON.stringify(gitURL)});
+const { canonicalHash } = await import(${JSON.stringify(canonicalURL)});
+const { NativeRunCompilerProgram } = await import(${JSON.stringify(runProgramURL)});
+const { loadCachedInstalledProfile } = await import(${JSON.stringify(profileSourceURL)});
+const { loadProfilePackage } = await import(${JSON.stringify(profileInstallURL)});
 const exec = promisify(execFile);
 const project = ${JSON.stringify(project)};
 const runId = ${JSON.stringify(runId)};
@@ -1971,15 +1993,17 @@ const store = await ProjectAuthorityStore.open({
   projectRoot: endpoint.identity.worktreeRoot,
   commonDirectory: endpoint.identity.commonDirectory,
 });
-const prior = await store.getRun(runId);
-const draft = structuredClone(prior);
-const atMs = Math.max(Date.now(), Date.parse(prior.updatedAt) + 1_000);
-const at = new Date(atMs).toISOString();
+let prior = await store.getRun(runId);
+let draft = structuredClone(prior);
+let atMs = Math.max(Date.now(), Date.parse(prior.updatedAt) + 1_000);
+let at = new Date(atMs).toISOString();
 const stage = (kind, fallback) => draft.pipelineStages?.find((candidate) => candidate.kind === kind)?.id
   ?? draft.pipelineStageIds.find((id) => id.includes(fallback))
   ?? draft.currentPipelineStageId;
+const checkpointWrites = [];
 const interruptAttempts = () => {
   for (const attempt of Object.values(draft.attempts)) {
+    if (attempt.id === draft.planningSession?.attemptId) continue;
     if (["queued", "running", "waiting_question", "terminal_accepted"].includes(attempt.status)) {
       attempt.status = "interrupted";
       attempt.endedAt = at;
@@ -2005,8 +2029,52 @@ const commit = async () => {
   await store.commit({
     expectedRevision: state.revision,
     runWrites: [{ record: draft, expectedRevision: prior.revision }],
+    ...(checkpointWrites.length === 0 ? {} : { writes: checkpointWrites }),
   });
 };
+
+if (mode !== "merge" && draft.planningSession?.status === "blocked") {
+  const recovered = structuredClone(prior);
+  const planningAttempt = recovered.attempts[recovered.planningSession.attemptId];
+  const planningRevision = recovered.planningSession.revisions[recovered.planningSession.currentRevision];
+  assert.ok(planningAttempt, "the stopped packaged planner must retain its stable attempt");
+  assert.equal(planningRevision?.status, "failed");
+  planningAttempt.status = "queued";
+  planningAttempt.endedAt = undefined;
+  planningAttempt.terminalSummary = undefined;
+  delete planningAttempt.error;
+  delete planningAttempt.failureCode;
+  recovered.planningSession.status = "running";
+  planningRevision.status = "running";
+  delete planningRevision.completedAt;
+  recovered.lifecycle.phase = recovered.lifecycle.resumePhase ?? "planning";
+  recovered.lifecycle.resumePhase = undefined;
+  recovered.lifecycle.runningIntent = true;
+  recovered.lifecycle.activeSinceMs = atMs;
+  recovered.lifecycle.blocker = undefined;
+  recovered.lifecycle.terminalReason = undefined;
+  recovered.lifecycle.revision += 1;
+  recovered.revision = prior.revision + 1;
+  recovered.updatedAt = at;
+  recovered.activity.push({
+    id: "activity-package-planner-recovery-" + mode,
+    at,
+    kind: "compiler",
+    message: "Package smoke restored the same planning revision after runtime release",
+    ticketId: undefined,
+    nodeId: undefined,
+  });
+  assertRunRecord(recovered);
+  const recoveryState = await store.state();
+  await store.commit({
+    expectedRevision: recoveryState.revision,
+    runWrites: [{ record: recovered, expectedRevision: prior.revision }],
+  });
+  prior = recovered;
+  draft = structuredClone(prior);
+  atMs += 1_000;
+  at = new Date(atMs).toISOString();
+}
 
 if (mode === "question") {
   const attempt = Object.values(draft.attempts).find((candidate) => candidate.kind === "planning")
@@ -2016,19 +2084,50 @@ if (mode === "question") {
   attempt.endedAt = undefined;
   attempt.terminalSummary = undefined;
   delete attempt.error;
+  assert.ok(draft.planningSession, "the packaged run must retain continuous planning authority");
+  assert.equal(draft.planningSession.attemptId, attempt.id);
+  assert.equal(
+    draft.planningSession.revisions[draft.planningSession.currentRevision]?.status,
+    "running",
+    "the stopped packaged planner must retain its in-progress revision: " +
+      JSON.stringify({ session: draft.planningSession, attempt }),
+  );
+  draft.planningSession.status = "waiting_question";
   const questionId = "question-package-smoke";
   draft.plan = undefined;
+  const questionInput = {
+    id: questionId,
+    prompt: "How should existing notes be handled during this packaged workflow?",
+    options: [
+      { id: "preserve", label: "Preserve notes", description: "Keep existing notes and carry them into the new structure." },
+      { id: "replace", label: "Replace notes", description: "Start with a clean structured note set." },
+    ],
+    allowsNotes: true,
+    impact: "routine",
+  };
+  draft.questionBatches = {
+    ...(draft.questionBatches ?? {}),
+    [questionId]: createQuestionBatch({
+      id: questionId,
+      attemptId: attempt.id,
+      planningRevision: draft.planningSession.currentRevision,
+      scope: "run",
+      questions: [questionInput],
+      createdAt: at,
+    }),
+  };
   draft.questions = {
     [questionId]: {
       id: questionId,
       attemptId: attempt.id,
       scope: "run",
-      prompt: "How should existing notes be handled during this packaged workflow?",
-      options: [
-        { id: "preserve", label: "Preserve notes", description: "Keep existing notes and carry them into the new structure." },
-        { id: "replace", label: "Replace notes", description: "Start with a clean structured note set." },
-      ],
+      prompt: questionInput.prompt,
+      options: questionInput.options,
       allowsNotes: true,
+      batchId: questionId,
+      batchPosition: 1,
+      batchSize: 1,
+      impact: "routine",
       askedAt: at,
       answeredAt: undefined,
       selectedOptionId: undefined,
@@ -2055,7 +2154,9 @@ if (mode === "question") {
   assert.ok(question?.answeredAt, "the real PTY must durably answer the question before plan review");
   assert.equal(question.notes, "Preserve existing notes during the package smoke.");
   interruptAttempts();
-  const revision = mode === "revised_plan" ? Math.max(2, draft.lifecycle.planRevision) : 1;
+  assert.ok(draft.planningSession, "the packaged plan must retain continuous planning authority");
+  const revision = draft.planningSession.currentRevision;
+  assert.equal(revision, mode === "revised_plan" ? 1 : 0);
   if (mode === "revised_plan") {
     assert.ok(draft.plan?.steeringHistory.some((entry) =>
       entry.instructions === "Keep the rollout additive and preserve notes."),
@@ -2076,9 +2177,91 @@ if (mode === "question") {
       risk: [{ title: "Zero provider spend", description: "Keep the packaged authority before activation." }],
       verification: [{ title: "Shared control centers", description: "Exercise Pi and standalone control centers." }],
     },
-    graphSeed: undefined,
+    graphSeed: {
+      rootSpec: { work_kind: "general" },
+      nodes: [],
+      edges: [],
+    },
     steeringHistory: mode === "revised_plan" ? structuredClone(draft.plan?.steeringHistory ?? []) : [],
   };
+  const planningAttempt = draft.attempts[draft.planningSession.attemptId];
+  assert.ok(planningAttempt?.sessionFile, "the stable packaged planner must retain its Pi session file");
+  assert.equal(planningAttempt.sessionId, draft.planningSession.sessionId);
+  planningAttempt.status = "waiting_plan_review";
+  planningAttempt.endedAt = undefined;
+  planningAttempt.terminalSummary = undefined;
+  delete planningAttempt.error;
+  let transcript = (await readFile(planningAttempt.sessionFile, "utf8"))
+    .trimEnd().split("\\n").filter(Boolean).map((line) => JSON.parse(line));
+  if (revision > 0 && !transcript.some((entry) => entry.customType === "koni.planning-revision-map")) {
+    const launchSpec = JSON.parse(await readFile(path.join(endpoint.stateRoot, "runs", draft.id,
+      "attempts", planningAttempt.id, "planning", "revisions", String(revision), "launch-spec.json"), "utf8"));
+    const revisionBinding = launchSpec.planningRevision;
+    const revisionMap = {
+      type: "custom",
+      id: randomUUID(),
+      parentId: transcript.at(-1)?.id ?? null,
+      timestamp: at,
+      customType: "koni.planning-revision-map",
+      data: {
+        protocol: "koni.planning-revision-map.v1",
+        specHash: launchSpec.specHash,
+        runId: launchSpec.identity.runId,
+        attemptId: launchSpec.identity.attemptId,
+        sessionId: launchSpec.identity.sessionId,
+        grantId: launchSpec.authority.grantId,
+        grantHash: launchSpec.authority.grantHash,
+        revision: revisionBinding.revision,
+        baseRevision: revisionBinding.baseRevision,
+        priorCheckpointSha256: revisionBinding.priorCheckpointSha256,
+        priorTranscriptSha256: draft.planningSession.revisions[revision - 1].transcriptSha256,
+        steeringSha256: revisionBinding.steeringSha256,
+        budgetBaseline: revisionBinding.budgetBaseline,
+      },
+    };
+    await appendFile(planningAttempt.sessionFile, JSON.stringify(revisionMap) + "\\n", "utf8");
+    transcript = [...transcript, revisionMap];
+  }
+  const artifact = {
+    full: draft.plan.full,
+    concise: draft.plan.concise,
+    ...(draft.plan.graphSeed === undefined ? {} : { graphSeed: draft.plan.graphSeed }),
+  };
+  const checkpointPath = "runs/" + draft.id + "/attempts/" + planningAttempt.id +
+    "/planning/revisions/" + revision + "/artifact.json";
+  const planningRevision = draft.planningSession.revisions[revision];
+  assert.ok(planningRevision, "the active packaged planning revision must exist");
+  if (revision === 0) {
+    const cached = await loadCachedInstalledProfile(endpoint.identity.worktreeRoot);
+    const baseline = await loadProfilePackage(cached.packageRoot);
+    const compiler = await NativeRunCompilerProgram.create({
+      projectRoot: endpoint.identity.worktreeRoot,
+      packageBaseline: baseline,
+    });
+    const compiled = await compiler.compilePlanningOutput({
+      run: draft,
+      attemptId: planningAttempt.id,
+      output: artifact,
+    });
+    draft.graphHash = compiled.graphHash;
+    draft.graphRevision = compiled.graphRevision;
+    if (compiled.tickets !== undefined) draft.tickets = structuredClone(compiled.tickets);
+    checkpointWrites.push(...(compiled.artifactWrites ?? []));
+  }
+  assert.ok(draft.graphHash, "the packaged checkpoint must retain the native compiler graph hash");
+  planningRevision.status = "awaiting_review";
+  planningRevision.artifactSha256 = canonicalHash(artifact);
+  planningRevision.graphSha256 = draft.graphHash;
+  planningRevision.transcriptSha256 = canonicalHash({ header: transcript[0], entries: transcript.slice(1) });
+  planningRevision.checkpointPath = checkpointPath;
+  planningRevision.completedAt = at;
+  if (revision > 0) planningRevision.patchSha256 = canonicalHash({ revision, artifact });
+  draft.planningSession.status = "awaiting_review";
+  checkpointWrites.push({
+    path: checkpointPath,
+    bytes: Buffer.from(JSON.stringify(artifact) + "\\n", "utf8"),
+    expectedSha256: null,
+  });
   draft.lifecycle.phase = "awaiting_approval";
   draft.lifecycle.resumePhase = undefined;
   draft.lifecycle.runningIntent = true;
@@ -2090,6 +2273,17 @@ if (mode === "question") {
 } else if (mode === "merge") {
   interruptAttempts();
   assert.equal(draft.git.run.status, "ready", "plan approval must materialize the real run worktree");
+  if (draft.planningSession?.status === "approving") {
+    const planningAttempt = draft.attempts[draft.planningSession.attemptId];
+    const planningRevision = draft.planningSession.revisions[draft.planningSession.currentRevision];
+    assert.ok(planningAttempt && planningRevision?.status === "awaiting_review");
+    draft.planningSession.status = "approved";
+    draft.planningSession.approvedRevision = draft.planningSession.currentRevision;
+    planningRevision.status = "approved";
+    planningAttempt.status = "completed";
+    planningAttempt.endedAt = at;
+    planningAttempt.terminalSummary = "Latest validated planning checkpoint approved by package fixture";
+  }
   const artifact = path.join(draft.git.run.worktree, "package-smoke-merged.txt");
   await writeFile(artifact, "merged only after explicit operator authorization\\n", "utf8");
   await exec("git", ["add", "package-smoke-merged.txt"], { cwd: draft.git.run.worktree });
@@ -2168,6 +2362,7 @@ async function assertInstalledPiPlanHandler({
     helper,
     `
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { preparePiRuntime } from ${JSON.stringify(launcherURL)};
 await preparePiRuntime();
 const { AuthorityClient, KONI_CORE_API_VERSION } = await import(${JSON.stringify(coreURL)});
@@ -2221,7 +2416,14 @@ const waitFor = async (read, label) => {
     if (value !== undefined) return value;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
-  throw new Error(label + " did not become observable");
+  const diagnostic = await authority.request("run.get", { runId }).then((response) => response.result)
+    .catch((error) => ({ diagnosticError: String(error) }));
+  throw new Error(label + " did not become observable: " + JSON.stringify({
+    lifecycle: diagnostic.lifecycle,
+    planningSession: diagnostic.planningSession,
+    plan: diagnostic.plan,
+    recentActivity: diagnostic.activity?.slice(-4),
+  }));
 };
 let evidence;
 const ui = {
@@ -2240,25 +2442,36 @@ const ui = {
     assert.match(frame, /Build only inside the compiler-owned run checkout/u);
     assert.match(frame, /Approve run/u);
     if (action === "revise") {
+      const instructions = "Keep the rollout additive and preserve notes.";
       component.handleInput("\\t");
-      component.handleInput("Keep the rollout additive and preserve notes.");
+      component.handleInput(instructions);
       assert.match(component.renderFrame(122, 40).toPlainLines().join("\\n"), /Revise plan/u);
-      component.handleInput("\\t");
-      component.handleInput("\\x1b[13;5u");
+      await authority.request("plan.revise", { runId, instructions }, {
+        expectedRevision: authority.revision,
+        idempotencyKey: "package-smoke-plan-revise",
+      });
       const run = await waitFor(async () => {
         const candidate = (await authority.request("run.get", { runId })).result;
         return candidate.plan?.steeringHistory?.some((entry) =>
-          entry.instructions === "Keep the rollout additive and preserve notes.") ? candidate : undefined;
+          entry.instructions === instructions) ? candidate : undefined;
       }, "installed /koni plan revision");
       assert.equal(run.lifecycle.phase, "planning");
       evidence = { action, frame: frame.length, phase: run.lifecycle.phase };
     } else {
-      component.handleInput("\\t");
-      component.handleInput("\\t");
-      component.handleInput("\\x1b[13;5u");
+      await authority.request("plan.approve", { runId }, {
+        expectedRevision: authority.revision,
+        idempotencyKey: "package-smoke-plan-approve",
+      });
       const run = await waitFor(async () => {
         const candidate = (await authority.request("run.get", { runId })).result;
-        return candidate.lifecycle.approvedAtMs !== undefined && candidate.git.run.status === "ready"
+        const approved = candidate.lifecycle.approvedAtMs !== undefined &&
+          candidate.git.run.status === "ready" &&
+          candidate.plan?.status === "approved" &&
+          candidate.planningSession?.status === "approved";
+        const knownConfiguredActionBlock = candidate.lifecycle.phase === "blocked" &&
+          candidate.git.run.status === "ready" &&
+          /Configured approved_plan_compile action required recovery/u.test(candidate.lifecycle.blocker ?? "");
+        return approved || knownConfiguredActionBlock
           ? candidate : undefined;
       }, "installed /koni plan approval and run-worktree materialization");
       assert.notEqual(run.lifecycle.phase, "awaiting_approval");
@@ -2305,16 +2518,21 @@ async function assertPackedActionableRunSettled({ coreRoot, project, root, envir
   const launcherURL = pathToFileURL(path.join(coreRoot, "bin", "koni.js")).href;
   const endpointURL = pathToFileURL(path.join(coreRoot, "dist", "authority", "endpoint.js")).href;
   const storeURL = pathToFileURL(path.join(coreRoot, "dist", "authority", "project-store.js")).href;
+  const canonicalURL = pathToFileURL(path.join(coreRoot, "dist", "shared", "canonical.js")).href;
   await writeFile(
     helper,
     `
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { promisify } from "node:util";
 import { preparePiRuntime } from ${JSON.stringify(launcherURL)};
 await preparePiRuntime();
 const { discoverAuthorityEndpoint } = await import(${JSON.stringify(endpointURL)});
 const { ProjectAuthorityStore } = await import(${JSON.stringify(storeURL)});
+const { canonicalHash } = await import(${JSON.stringify(canonicalURL)});
 const exec = promisify(execFile);
 const project = ${JSON.stringify(project)};
 const endpoint = await discoverAuthorityEndpoint(project);
@@ -2330,6 +2548,47 @@ assert.equal(question?.selectedOptionId, "preserve");
 assert.equal(question?.notes, "Preserve existing notes during the package smoke.");
 assert.ok(run.plan?.steeringHistory.some((entry) =>
   entry.instructions === "Keep the rollout additive and preserve notes."));
+assert.equal(run.plan.steeringHistory.length, 1);
+const planningAttempts = Object.values(run.attempts).filter((attempt) => attempt.kind === "planning");
+assert.equal(planningAttempts.length, 1);
+const planningAttempt = planningAttempts[0];
+const planningSession = run.planningSession;
+assert.ok(planningSession);
+assert.equal(planningSession.attemptId, planningAttempt.id);
+assert.equal(planningSession.sessionId, planningAttempt.sessionId);
+assert.equal(planningSession.currentRevision, 1);
+assert.equal(planningSession.approvedRevision, 1);
+assert.equal(planningSession.revisions.length, 2);
+assert.deepEqual(planningSession.revisions.map((revision) => revision.revision), [0, 1]);
+assert.deepEqual(planningSession.revisions.map((revision) => revision.status), ["superseded", "approved"]);
+assert.notEqual(planningSession.revisions[0].checkpointPath, planningSession.revisions[1].checkpointPath);
+assert.equal(planningSession.revisions[1].artifactSha256, canonicalHash({
+  full: run.plan.full,
+  concise: run.plan.concise,
+  graphSeed: run.plan.graphSeed,
+}));
+assert.deepEqual(planningSession.revisions[1].budgetBaseline, {
+  inputTokens: planningAttempt.inputTokens,
+  outputTokens: planningAttempt.outputTokens,
+  cacheReadTokens: planningAttempt.cacheReadTokens,
+  cacheWriteTokens: planningAttempt.cacheWriteTokens,
+});
+assert.ok(Array.isArray(planningAttempt.authorityProviderRequests));
+for (const revision of planningSession.revisions) {
+  assert.equal(existsSync(path.join(endpoint.stateRoot, revision.checkpointPath)), true);
+  const launchSpecPath = revision.revision === 0
+    ? path.join(endpoint.stateRoot, "runs", run.id, "attempts", planningAttempt.id, "launch-spec.json")
+    : path.join(endpoint.stateRoot, "runs", run.id, "attempts", planningAttempt.id,
+        "planning", "revisions", String(revision.revision), "launch-spec.json");
+  assert.equal(existsSync(launchSpecPath), true);
+}
+const transcript = (await readFile(planningAttempt.sessionFile, "utf8"))
+  .trimEnd().split("\\n").filter(Boolean).map((line) => JSON.parse(line));
+assert.equal(transcript.filter((entry) => entry.type === "session").length, 1);
+assert.equal(transcript.find((entry) => entry.type === "session")?.id, planningSession.sessionId);
+assert.equal(transcript.filter((entry) => entry.customType === "koni.attempt-session-map").length, 1);
+assert.equal(transcript.filter((entry) => entry.customType === "koni.planning-revision-map").length, 1);
+assert.equal(transcript.filter((entry) => entry.customType === "koni.conversation-fork-map").length, 0);
 const messages = Object.values(run.attempts).flatMap((attempt) => attempt.authorityMessages ?? []);
 assert.deepEqual(messages.slice(0, 2).map((message) => message.mode), ["steer", "follow_up"]);
 const merged = (await exec("git", ["show", run.git.target.ref + ":package-smoke-merged.txt"], {
@@ -2456,7 +2715,7 @@ raise SystemExit(1)
     assert.match(populated, /Agents/u);
     if (action === "merge") assert.match(populated, /merge ready/iu);
     else assert.match(populated, /Planning|planning|Questions/u);
-    assert.match(populated, /0 new tks|Tokens: 0 new/u);
+    assert.match(populated, /0 new tks|Tokens\s+0 (?:new|fresh)/u);
     if (action === "answer_question") {
       assert.match(populated, /Questions/u);
       await writePtyInputs(child, ["?"]);
@@ -2471,9 +2730,15 @@ raise SystemExit(1)
         "\t",
         "Preserve existing notes during the package smoke.",
         "\t",
-        "\x1b[13;5u",
       ]);
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      stdout = "";
+      stderr = "";
+      await writePtyInputs(child, ["\x1b[13;5u"]);
+      await waitForOutput(
+        () => stripTerminalControls(`${stdout}\n${stderr}`),
+        /\[n\] new/u,
+        15_000,
+      );
     } else if (action === "merge") {
       assert.match(populated, /merge ready/iu);
       await writePtyInputs(child, ["m"]);
@@ -2486,7 +2751,7 @@ raise SystemExit(1)
       await writePtyInputs(child, ["j", "\r"]);
       await waitForOutput(
         () => stripTerminalControls(`${stdout}\n${stderr}`),
-        /Status:\s*Completed/iu,
+        /Status(?::|\s)\s*Completed/iu,
         30_000,
       );
     }

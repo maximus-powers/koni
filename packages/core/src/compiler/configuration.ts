@@ -14,7 +14,6 @@ import {
   type ConfigurationRegistryKind,
   type ProfileImportCategory,
 } from "../contracts/configuration.js";
-import type { PiResourceBindingCatalog } from "../contracts/pi-resources.js";
 import type { ProfileBaselineFile } from "../contracts/profile-package.js";
 import {
   canonicalHash,
@@ -39,10 +38,6 @@ import {
   verifyProfileBaseline,
   type VerifiedProfileBaseline,
 } from "./profile-package.js";
-import {
-  parsePiResourceBindingValue,
-  PiResourceBindingError,
-} from "../profile/resource-bindings.js";
 import { projectGraphSchemaDefinition } from "./graph-schema.js";
 import { compileStateMachineCatalog } from "./rules.js";
 import {
@@ -59,7 +54,6 @@ const REQUIRED_IMPORT_CATEGORIES: readonly ProfileImportCategory[] = [
   "workflows",
   "actions",
   "checks",
-  "personas",
   "reports",
   "cockpit",
 ];
@@ -104,7 +98,6 @@ const MODULE_PAYLOADS: Readonly<Record<ProfileImportCategory, readonly string[]>
   workflows: ["workflows"],
   actions: ["actions"],
   checks: ["checks"],
-  personas: ["personas"],
   reports: ["reports"],
   cockpit: ["views"],
   lifecycles: ["state_machines"],
@@ -120,7 +113,6 @@ const PAYLOAD_REGISTRIES: Readonly<Partial<Record<string, ConfigurationRegistryK
   workflows: "workflows",
   actions: "actions",
   checks: "checks",
-  personas: "personas",
   reports: "reports",
   views: "views",
   state_machines: "state_machines",
@@ -248,21 +240,12 @@ export function compileProjectConfiguration(
   const modules = loadProfileModules(profile, loader, registryState, bag);
   const agents = loadAgentResources(projectSource, filesByPath, loader, registryState, bag);
   const runTypes = loadRunTypes(project, loader, bag);
-  let piResourceBindings: PiResourceBindingCatalog | undefined;
   if (filesByPath.has("resources/pi-packages.yaml")) {
-    const resourceFile = loader("resources/pi-packages.yaml", "config");
-    if (resourceFile !== undefined) {
-      try {
-        piResourceBindings = parsePiResourceBindingValue(resourceFile.document);
-      } catch (error) {
-        const message = error instanceof PiResourceBindingError ? error.message : String(error);
-        bag.error(
-          "configuration.pi_resource_bindings",
-          fileRoot("resources/pi-packages.yaml"),
-          message,
-        );
-      }
-    }
+    bag.error(
+      "configuration.retired_pi_resource_catalog",
+      fileRoot("resources/pi-packages.yaml"),
+      "Pi packages and resources are configured through Pi; remove the retired Koni resource catalog",
+    );
   }
 
   if (modules === undefined || agents === undefined || runTypes === undefined) {
@@ -341,7 +324,6 @@ export function compileProjectConfiguration(
     run_type_order: [...project.runTypeOrder],
     run_types: runTypeRecord,
     agents: agentRecord,
-    ...(piResourceBindings === undefined ? {} : { pi_resource_bindings: piResourceBindings }),
     edge_types: registryState.edgeTypes,
     registries: materializeRegistries(registryState.records),
     behavior: behavior.value,
@@ -1092,7 +1074,10 @@ function loadAgentResources(
   registryState: RegistryState,
   bag: DiagnosticBag,
 ): Map<string, CompiledAgentResource> | undefined {
-  const agents = new Map<string, CompiledAgentResource>();
+  const sources = new Map<
+    string,
+    { path: string; sourceSha256: Sha256Digest; document: MutableConfigurationObject }
+  >();
   const paths = [...filesByPath.values()]
     .filter((file) => file.kind === "agent")
     .map((file) => file.path)
@@ -1106,16 +1091,7 @@ function loadAgentResources(
     const root = exactRecord(
       file.document,
       rootPath,
-      [
-        "schema_version",
-        "id",
-        "description",
-        "instructions",
-        "provider",
-        "model",
-        "thinking_level",
-        "capabilities",
-      ],
+      ["schema_version", "id", "extends", "description", "instructions", "pi", "koni"],
       bag,
     );
     const schemaVersion = requiredString(root, "schema_version", rootPath, bag);
@@ -1128,79 +1104,197 @@ function loadAgentResources(
     }
     const id = requiredIdentifier(root, "id", rootPath, bag);
     requiredString(root, "description", rootPath, bag);
-    const instructions = requiredExactRecord(
-      root,
-      "instructions",
-      rootPath,
-      ["source", "text", "path"],
-      bag,
-    );
-    if (instructions !== undefined) {
-      const source = requiredString(instructions, "source", pointer(rootPath, "instructions"), bag);
-      if (source === "inline") {
-        requiredString(instructions, "text", pointer(rootPath, "instructions"), bag);
-        if (instructions.path !== undefined) {
-          bag.error(
-            "configuration.agent_instructions",
-            `${rootPath}/instructions/path`,
-            "inline agent instructions must not declare a path",
+    if (root.extends !== undefined) optionalString(root, "extends", rootPath, bag);
+    if (root.instructions !== undefined) optionalString(root, "instructions", rootPath, bag);
+    else if (root.extends === undefined) {
+      bag.error(
+        "configuration.required_field",
+        pointer(rootPath, "instructions"),
+        "a root agent must declare instructions",
+      );
+    }
+    const pi =
+      root.pi === undefined
+        ? undefined
+        : exactRecord(
+            root.pi,
+            pointer(rootPath, "pi"),
+            ["provider", "model", "thinking_level", "settings", "tools"],
+            bag,
           );
-        }
-      } else if (source === "file") {
-        const instructionPath = requiredString(
-          instructions,
-          "path",
-          pointer(rootPath, "instructions"),
+    if (pi !== undefined) {
+      if (pi.provider !== undefined) optionalString(pi, "provider", pointer(rootPath, "pi"), bag);
+      if (pi.model !== undefined) optionalString(pi, "model", pointer(rootPath, "pi"), bag);
+      if (pi.thinking_level !== undefined)
+        requiredThinkingLevel(pi, "thinking_level", pointer(rootPath, "pi"), bag);
+      if (pi.settings !== undefined) {
+        const settings = exactRecord(
+          pi.settings,
+          pointer(pointer(rootPath, "pi"), "settings"),
+          ["packages", "extensions", "skills", "prompts", "themes"],
           bag,
         );
-        if (instructionPath !== undefined && !isNormalizedSafeRelativePath(instructionPath)) {
-          bag.error(
-            "configuration.agent_instruction_path",
-            `${rootPath}/instructions/path`,
-            "agent instruction path is not safe and normalized",
-          );
+        for (const field of ["extensions", "skills", "prompts", "themes"] as const) {
+          if (settings[field] !== undefined)
+            stringArray(
+              settings[field],
+              pointer(pointer(pointer(rootPath, "pi"), "settings"), field),
+              bag,
+            );
         }
-        if (instructions.text !== undefined) {
-          bag.error(
-            "configuration.agent_instructions",
-            `${rootPath}/instructions/text`,
-            "file agent instructions must not contain inline text",
+        if (settings.packages !== undefined)
+          expectArray(
+            settings.packages,
+            pointer(pointer(pointer(rootPath, "pi"), "settings"), "packages"),
+            bag,
           );
-        }
-      } else if (source !== undefined) {
-        bag.error(
-          "configuration.agent_instructions",
-          `${rootPath}/instructions/source`,
-          "agent instruction source is not supported",
+      }
+      if (pi.tools !== undefined) {
+        const tools = exactRecord(
+          pi.tools,
+          pointer(pointer(rootPath, "pi"), "tools"),
+          ["include", "exclude"],
+          bag,
         );
+        if (tools.include !== undefined)
+          stringArray(
+            tools.include,
+            pointer(pointer(pointer(rootPath, "pi"), "tools"), "include"),
+            bag,
+          );
+        if (tools.exclude !== undefined)
+          stringArray(
+            tools.exclude,
+            pointer(pointer(pointer(rootPath, "pi"), "tools"), "exclude"),
+            bag,
+          );
       }
     }
-    requiredString(root, "provider", rootPath, bag);
-    requiredString(root, "model", rootPath, bag);
-    requiredThinkingLevel(root, "thinking_level", rootPath, bag);
-    requiredRecord(root, "capabilities", rootPath, bag);
+    const koni =
+      root.koni === undefined
+        ? undefined
+        : exactRecord(root.koni, pointer(rootPath, "koni"), ["role", "capabilities"], bag);
+    if (koni === undefined && root.extends === undefined) {
+      bag.error(
+        "configuration.required_field",
+        pointer(rootPath, "koni"),
+        "a root agent must declare Koni policy",
+      );
+    }
+    if (koni !== undefined) {
+      if (koni.role !== undefined) requiredIdentifier(koni, "role", pointer(rootPath, "koni"), bag);
+      else if (root.extends === undefined)
+        bag.error(
+          "configuration.required_field",
+          pointer(pointer(rootPath, "koni"), "role"),
+          "a root agent must declare its Koni role",
+        );
+      if (koni.capabilities !== undefined)
+        expectRecord(koni.capabilities, pointer(pointer(rootPath, "koni"), "capabilities"), bag);
+    }
     if (id === undefined) {
       continue;
     }
     if (path !== `agents/${id}.yaml`) {
       bag.error("configuration.agent_path", rootPath, "agent path must be agents/<id>.yaml");
     }
-    if (agents.has(id)) {
+    if (sources.has(id)) {
       bag.error("configuration.duplicate_agent", pointer(rootPath, "id"), "agent id is duplicated");
+      continue;
+    }
+    sources.set(id, { path, sourceSha256: file.sourceSha256, document: root });
+  }
+  const agents = new Map<string, CompiledAgentResource>();
+  for (const id of [...sources.keys()].sort(compareUtf8)) {
+    const source = sources.get(id)!;
+    const parentId =
+      typeof source.document.extends === "string" ? source.document.extends : undefined;
+    const parent = parentId === undefined ? undefined : sources.get(parentId);
+    if (parentId !== undefined && parent === undefined) {
+      bag.error(
+        "configuration.agent_parent",
+        pointer(fileRoot(source.path), "extends"),
+        `parent agent ${parentId} is not configured`,
+      );
+      continue;
+    }
+    if (parent !== undefined && parent.document.extends !== undefined) {
+      bag.error(
+        "configuration.agent_extends_depth",
+        pointer(fileRoot(source.path), "extends"),
+        "agent inheritance supports exactly one optional parent",
+      );
+      continue;
+    }
+    const document =
+      parent === undefined ? source.document : mergeAgentDocument(parent.document, source.document);
+    if (typeof document.instructions !== "string" || document.instructions.trim().length === 0) {
+      bag.error(
+        "configuration.agent_instructions",
+        pointer(fileRoot(source.path), "instructions"),
+        "resolved agent instructions must be nonempty",
+      );
+      continue;
+    }
+    const koni = isMutableRecord(document.koni) ? document.koni : undefined;
+    if (koni === undefined || typeof koni.role !== "string") {
+      bag.error(
+        "configuration.agent_role",
+        pointer(pointer(fileRoot(source.path), "koni"), "role"),
+        "resolved agent must declare one Koni role",
+      );
       continue;
     }
     const agent: CompiledAgentResource = {
       id,
-      path,
-      source_sha256: file.sourceSha256,
-      document: root,
+      path: source.path,
+      source_sha256: source.sourceSha256,
+      document,
     };
     agents.set(id, agent);
-    registryState.records.agents.set(id, root);
-    registryState.locations.set(root, rootPath);
+    registryState.records.agents.set(id, document);
+    registryState.locations.set(document, fileRoot(source.path));
+    const internalAgentBinding: MutableConfigurationObject = {
+      id,
+      agent: id,
+      model_role: koni.role,
+      capabilities: isMutableRecord(koni.capabilities)
+        ? koni.capabilities
+        : (Object.create(null) as MutableConfigurationObject),
+    };
+    registryState.records.personas.set(id, internalAgentBinding);
+    registryState.locations.set(internalAgentBinding, fileRoot(source.path));
   }
   void baseline;
   return bag.hasErrors() ? undefined : agents;
+}
+
+function mergeAgentDocument(
+  parent: MutableConfigurationObject,
+  child: MutableConfigurationObject,
+): MutableConfigurationObject {
+  const parentPi = isMutableRecord(parent.pi) ? parent.pi : undefined;
+  const childPi = isMutableRecord(child.pi) ? child.pi : undefined;
+  const parentKoni = isMutableRecord(parent.koni) ? parent.koni : undefined;
+  const childKoni = isMutableRecord(child.koni) ? child.koni : undefined;
+  const parentCapabilities = isMutableRecord(parentKoni?.capabilities)
+    ? parentKoni.capabilities
+    : undefined;
+  const childCapabilities = isMutableRecord(childKoni?.capabilities)
+    ? childKoni.capabilities
+    : undefined;
+  return {
+    ...parent,
+    ...child,
+    ...(childPi === undefined && parentPi === undefined
+      ? {}
+      : { pi: { ...(parentPi ?? {}), ...(childPi ?? {}) } }),
+    koni: {
+      ...(parentKoni ?? {}),
+      ...(childKoni ?? {}),
+      capabilities: { ...(parentCapabilities ?? {}), ...(childCapabilities ?? {}) },
+    },
+  };
 }
 
 function loadRunTypes(
@@ -1823,7 +1917,7 @@ function validateSimpleRunRecords(
     );
   }
   if (behavior.agents !== undefined) {
-    const agents = exactRecord(behavior.agents, `${rootPath}/agents`, ["roles", "personas"], bag);
+    const agents = exactRecord(behavior.agents, `${rootPath}/agents`, ["roles", "overrides"], bag);
     const roles = requiredRecord(agents, "roles", `${rootPath}/agents`, bag);
     if (roles !== undefined) {
       for (const [roleId, value] of Object.entries(roles)) {
@@ -1839,8 +1933,8 @@ function validateSimpleRunRecords(
         }
       }
     }
-    if (agents.personas !== undefined) {
-      expectRecord(agents.personas, `${rootPath}/agents/personas`, bag);
+    if (agents.overrides !== undefined) {
+      expectRecord(agents.overrides, `${rootPath}/agents/overrides`, bag);
     }
   }
 }
@@ -2162,7 +2256,7 @@ function validateWorkflowSteps(
       continue;
     }
     const id = requiredIdentifier(step, "id", stepPath, bag);
-    validateReferenceField(step, "persona", stepPath, state.records.personas, "persona", bag);
+    validateReferenceField(step, "agent", stepPath, state.records.agents, "agent", bag);
     if (step.validation_action !== undefined) {
       validateActionReference(
         step.validation_action,
@@ -2272,21 +2366,21 @@ function validateRunTypeCrossReferences(
       const kind = typeof stage.kind === "string" ? stage.kind : undefined;
       const config = recordValue(stage.config);
       if (kind === "planning" || kind === "agent_dialog" || kind === "ai") {
-        const persona = config?.persona;
+        const persona = config?.agent;
         validateReferenceValue(
           persona,
-          `${stagePath}/config/persona`,
-          state.records.personas,
-          "persona",
+          `${stagePath}/config/agent`,
+          state.records.agents,
+          "agent",
           bag,
         );
       } else if (kind === "agent_review") {
-        const persona = config?.persona ?? "reviewer";
+        const persona = config?.agent ?? "reviewer";
         validateReferenceValue(
           persona,
-          `${stagePath}/config/persona`,
-          state.records.personas,
-          "persona",
+          `${stagePath}/config/agent`,
+          state.records.agents,
+          "agent",
           bag,
         );
       }

@@ -1,5 +1,4 @@
 export * from "./configuration.js";
-export * from "./community-resources.js";
 export * from "./expressions.js";
 export * from "./graph-schema.js";
 export * from "./profile-package.js";

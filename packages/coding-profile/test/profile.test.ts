@@ -10,6 +10,43 @@ import registerProfile, {
 } from "../extensions/profile.js";
 
 describe("coding profile registrar", () => {
+  it("ships one queued ticket waiting state across every lifecycle return path", async () => {
+    const source = await readFile(
+      path.resolve(import.meta.dirname, "../koni/baseline/lifecycle.yaml"),
+      "utf8",
+    );
+    const document = YAML.parse(source) as {
+      state_machines: Array<{
+        id: string;
+        initial: string;
+        states: string[];
+        transitions: Array<{ id: string; from: string[]; to: string }>;
+      }>;
+    };
+    const ticket = document.state_machines.find(({ id }) => id === "ticket");
+
+    expect(ticket?.initial).toBe("queued");
+    expect(ticket?.states).not.toEqual(expect.arrayContaining(["todo", "ready", "failed"]));
+    expect(ticket?.transitions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "approve", from: ["proposed"], to: "queued" }),
+        expect.objectContaining({ id: "start", from: ["queued"], to: "in_progress" }),
+        expect.objectContaining({ id: "release", from: ["blocked"], to: "queued" }),
+        expect.objectContaining({
+          id: "interrupt-active",
+          from: ["in_progress"],
+          to: "queued",
+        }),
+        expect.objectContaining({
+          id: "reopen-stale-obligation",
+          from: ["closed"],
+          to: "queued",
+        }),
+        expect.objectContaining({ id: "retire", from: ["proposed", "queued", "blocked"] }),
+      ]),
+    );
+  });
+
   it("announces the immutable descriptor on discovery and session start", () => {
     const extensionHandlers = new Map<string, (...arguments_: unknown[]) => unknown>();
     const eventHandlers = new Map<string, (...arguments_: unknown[]) => unknown>();
@@ -45,27 +82,10 @@ describe("coding profile registrar", () => {
     expect(eventHandlers.size).toBe(0);
   });
 
-  it("makes every optional Pi binding selectable in the guided editor before enablement", async () => {
-    const source = await readFile(
-      path.resolve(import.meta.dirname, "../koni/baseline/resources/pi-packages.yaml"),
-      "utf8",
-    );
-    const document = YAML.parse(source) as {
-      bindings: Array<{
-        enabled: boolean;
-        select?: { skills?: unknown; prompts?: unknown; tools?: unknown };
-      }>;
-    };
-    expect(document.bindings.length).toBeGreaterThan(0);
-    expect(
-      document.bindings.every(
-        (binding) =>
-          binding.enabled === false &&
-          Array.isArray(binding.select?.skills) &&
-          Array.isArray(binding.select?.prompts) &&
-          Array.isArray(binding.select?.tools),
-      ),
-    ).toBe(true);
+  it("does not ship a parallel Pi resource registry", async () => {
+    await expect(
+      readFile(path.resolve(import.meta.dirname, "../koni/baseline/resources/pi-packages.yaml")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("keeps obligation reasons complete instead of parsing prose as null YAML keys", async () => {
@@ -101,7 +121,7 @@ describe("coding profile registrar", () => {
       readFile(
         path.resolve(
           import.meta.dirname,
-          "../koni/baseline/resources/skills/configure-koni/references/run-types.md",
+          "../../core/skills/configure-koni/references/run-types.md",
         ),
         "utf8",
       ),
@@ -141,41 +161,12 @@ describe("coding profile registrar", () => {
     }
   });
 
-  it("teaches the default implementer to turn search offsets into bounded product reads", async () => {
-    const source = await readFile(
-      path.resolve(import.meta.dirname, "../koni/baseline/agents/implementer.yaml"),
-      "utf8",
-    );
-    const persona = YAML.parse(source) as { instructions: { text: string } };
-    expect(persona.instructions.text).toContain("Never issue parallel");
-    expect(persona.instructions.text).toContain(
-      "whole-file reads across multiple nontrivial files",
-    );
-    expect(persona.instructions.text).toContain("returned `byteOffset`");
-    expect(persona.instructions.text).toContain("read at most 32768 bytes");
-  });
-
   it("separates proof support evidence from product coverage and writable proof source", async () => {
-    const [
-      graphSource,
-      rulesSource,
-      workflowsSource,
-      checksSource,
-      plannerSource,
-      implementerSource,
-    ] = await Promise.all([
+    const [graphSource, rulesSource, workflowsSource, checksSource] = await Promise.all([
       readFile(path.resolve(import.meta.dirname, "../koni/baseline/graph.yaml"), "utf8"),
       readFile(path.resolve(import.meta.dirname, "../koni/baseline/rules.yaml"), "utf8"),
       readFile(path.resolve(import.meta.dirname, "../koni/baseline/workflows.yaml"), "utf8"),
       readFile(path.resolve(import.meta.dirname, "../koni/baseline/checks.yaml"), "utf8"),
-      readFile(
-        path.resolve(import.meta.dirname, "../koni/baseline/agents/run-planner.yaml"),
-        "utf8",
-      ),
-      readFile(
-        path.resolve(import.meta.dirname, "../koni/baseline/agents/implementer.yaml"),
-        "utf8",
-      ),
     ]);
     const graph = YAML.parse(graphSource) as {
       node_types: Array<{
@@ -220,18 +211,6 @@ describe("coding profile registrar", () => {
         "spec.support_paths",
       );
     }
-    const planner = YAML.parse(plannerSource) as { instructions: { text: string } };
-    const implementer = YAML.parse(implementerSource) as { instructions: { text: string } };
-    expect(planner.instructions.text).toContain("exact existing read-only `support_paths`");
-    expect(planner.instructions.text).toContain("actual import/render");
-    expect(planner.instructions.text).toContain("General observably empty");
-    expect(planner.instructions.text).toContain("do not use `--silent`");
-    expect(implementer.instructions.text).toContain(
-      "Do not assume a familiar testing library is installed",
-    );
-    expect(implementer.instructions.text).toContain("not make all cases stop at the same import");
-    expect(implementer.instructions.text).toContain("function-source string inspection");
-    expect(implementer.instructions.text).toContain("only the exit-code envelope");
   });
 
   it("authorizes only the authenticated 0.7 release for inert-semantics retirement", async () => {

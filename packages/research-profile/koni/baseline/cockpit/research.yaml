@@ -29,7 +29,7 @@ views:
     invalid_state_visible: true
     attention_conditions:
     - blocked-tickets
-    - todo-without-active-worker
+    - queued-without-active-worker
     - detached-agents
 - id: research-tickets
   title: Tickets
@@ -55,7 +55,7 @@ views:
   options:
     tabs:
     - active
-    - todo
+    - queued
     - blocked
     - proposed
     - closed
