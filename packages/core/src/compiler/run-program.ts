@@ -236,6 +236,8 @@ const PINNED_CONFIGURATION_PROTOCOL = "koni.pinned-run-configuration.v1" as cons
 const GRAPH_ARTIFACT_PROTOCOL = "koni.run-graph.v1" as const;
 const TICKET_ARTIFACT_PROTOCOL = "koni.ticket-definitions.v1" as const;
 const PLAN_ARTIFACT_PROTOCOL = "koni.planning-compilation.v1" as const;
+const PLANNING_TERMINAL_INSTRUCTION =
+  "Submission is a tool protocol, not prose. Submit the required planning payload through koni_submit_output in the same turn after assembling it. Plain assistant text is not a planning submission and will be discarded.";
 const LEGACY_GRAPH_NOTE_PROTOCOL = "koni.graph-note.v1" as const;
 const PI_THINKING_LEVELS = new Set<ThinkingLevel>([
   "off",
@@ -7241,7 +7243,8 @@ function planningAttempt(
                   `Operator steering for this revision:\n${latestSteering}`,
                 ].join("\n\n"),
             "Complete every configured planning concern in one bounded shared session.",
-            "The final output must contain four complete Markdown plans (architecture, decisions, risk, verification), four separately written concise title/description item lists for human approval, and the exact typed graph seed. Do not derive mini-plan headings by truncating the full prose.",
+            PLANNING_TERMINAL_INSTRUCTION,
+            "The koni_submit_output arguments must contain four complete Markdown plans (architecture, decisions, risk, verification), four separately written concise title/description item lists for human approval, and the exact typed graph seed. Do not derive mini-plan headings by truncating the full prose.",
             'Required top-level shape (illustrative only; replace every ... with schema-valid content): {"title":"...","full":{"architecture":"...","decisions":"...","risk":"...","verification":"..."},"concise":{"architecture":[{"title":"...","description":"..."}],"decisions":[...],"risk":[...],"verification":[...]},"graphSeed":{"rootSpec":{...},"nodes":[...],"edges":[...]}}. All four full domains, all four concise domains, and graphSeed are required in the same first submission.',
             "After any validation error, correct every named field before retrying; never resubmit the same incomplete shape.",
             'Also emit a top-level "title": a concise 3-4 word name for this run, suitable as an operator dashboard row label. Do not restate the full objective.',
@@ -7249,6 +7252,7 @@ function planningAttempt(
           ].join("\n\n")
         : [
             "Continue this planning session. Apply the operator steering to the current compiler-valid plan.",
+            PLANNING_TERMINAL_INSTRUCTION,
             "Preserve unchanged domains and graph elements. Submit only the bounded patch against the named base revision and artifact hash.",
             `Base revision: ${laterRevision.binding.baseRevision}\nBase artifact hash: ${laterRevision.binding.priorCheckpointSha256}`,
             `Operator steering for revision ${laterRevision.binding.revision}:\n${laterRevision.steering}`,

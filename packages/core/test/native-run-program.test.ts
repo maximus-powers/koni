@@ -3965,7 +3965,17 @@ describe("native compiler-authoritative run program", () => {
       '"graphSeed":{"rootSpec":{...},"nodes":[...],"edges":[...]}',
     );
     expect(prepared.spec.persona.initialPrompt).toContain(
+      "The koni_submit_output arguments must contain four complete Markdown plans",
+    );
+    expect(prepared.spec.persona.initialPrompt).not.toContain("The final output must contain");
+    expect(prepared.spec.persona.initialPrompt).toContain(
       "After any validation error, correct every named field before retrying; never resubmit the same incomplete shape.",
+    );
+    expect(prepared.spec.persona.initialPrompt).toContain(
+      "Submit the required planning payload through koni_submit_output in the same turn",
+    );
+    expect(prepared.spec.persona.initialPrompt).toContain(
+      "Plain assistant text is not a planning submission",
     );
     expect(prepared.contextContent).toContain("allowedNodeTypes");
     expect(prepared.contextContent).toContain("canonicalEdges");
@@ -4797,6 +4807,12 @@ describe("native compiler-authoritative run program", () => {
       "Continue this planning session. Apply the operator steering to the current compiler-valid plan.",
     );
     expect(prepared.spec.persona.initialPrompt).toContain(
+      "Submit the required planning payload through koni_submit_output in the same turn",
+    );
+    expect(prepared.spec.persona.initialPrompt).toContain(
+      "Plain assistant text is not a planning submission",
+    );
+    expect(prepared.spec.persona.initialPrompt).toContain(
       "Preserve unchanged domains and graph elements. Submit only the bounded patch against the named base revision and artifact hash.",
     );
     expect(prepared.spec.persona.initialPrompt).toContain(
@@ -4806,6 +4822,7 @@ describe("native compiler-authoritative run program", () => {
     expect(prepared.spec.persona.initialPrompt).toContain(
       "Every newly upserted node key must either already exist or connect through addEdges",
     );
+    expect(prepared.spec.persona.initialPrompt).not.toContain("Submit the complete artifact");
     expect(prepared.spec.persona.initialPrompt).toContain(artifactSha256);
     expect(prepared.spec.persona.initialPrompt).toContain(steering);
     expect(prepared.spec.persona.initialPrompt).toContain(JSON.stringify(artifact));
