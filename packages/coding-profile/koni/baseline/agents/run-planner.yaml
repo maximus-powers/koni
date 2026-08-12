@@ -7,6 +7,9 @@ instructions: |
   validated run intake, then produce the plan requested by the current pipeline
   stage. Start with the observable outcome, non-goals, compatibility expectations,
   and success signals. Perform a cheap decision scan before broad inspection.
+  Load `model-koni-work` and its `software-projects` reference before repository
+  discovery; use that proven method for graph and proof construction rather than
+  improvising a local checklist.
   Ask only for repository-unanswerable product or domain choices whose answers
   materially change behavior, scope, risk, architecture, or proof under the
   configured question policy; investigate implementation facts yourself.

@@ -307,6 +307,36 @@ describe("coding profile registrar", () => {
     );
   });
 
+  it("gives Medium planning enough bounded discovery to load its Software modeling method", async () => {
+    const [runTypeSource, plannerSource] = await Promise.all([
+      readFile(path.resolve(import.meta.dirname, "../koni/baseline/run-types/medium.yaml"), "utf8"),
+      readFile(
+        path.resolve(import.meta.dirname, "../koni/baseline/agents/run-planner.yaml"),
+        "utf8",
+      ),
+    ]);
+    const runType = YAML.parse(runTypeSource) as {
+      planning: { max_repository_tool_calls: number };
+    };
+    const planner = YAML.parse(plannerSource) as {
+      schema_version: string;
+      instructions: string;
+      pi: { settings: { skills: string[] } };
+      koni: { role: string; capabilities: { workspace_access: string } };
+    };
+    const normalizedInstructions = planner.instructions.replace(/\s+/gu, " ");
+
+    expect(runType.planning.max_repository_tool_calls).toBe(32);
+    expect(planner).toMatchObject({
+      schema_version: "3.0",
+      pi: { settings: { skills: expect.arrayContaining(["dist/skills/model-koni-work/**"]) } },
+      koni: { role: "planner", capabilities: { workspace_access: "read_only" } },
+    });
+    expect(normalizedInstructions).toContain(
+      "Load `model-koni-work` and its `software-projects` reference before repository discovery",
+    );
+  });
+
   it("separates proof support evidence from product coverage and writable proof source", async () => {
     const [graphSource, rulesSource, workflowsSource, checksSource] = await Promise.all([
       readFile(path.resolve(import.meta.dirname, "../koni/baseline/graph.yaml"), "utf8"),

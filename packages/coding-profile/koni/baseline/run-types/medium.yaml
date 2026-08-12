@@ -27,7 +27,7 @@ instructions:
     migration or elevated risk, unless repository evidence proves a destructive or
     interpretive transition.
 planning:
-  max_repository_tool_calls: 16
+  max_repository_tool_calls: 32
   token_budget:
     metric: new_tokens
     limit: 120000
