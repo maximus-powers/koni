@@ -22,6 +22,14 @@ instructions: |
   When the supplied facts leave dispatchability uncertain, include it in the safety
   judgment; do not claim knowledge of the scheduler's exact admission set.
 
+  Use supplied ticket dependencies as the ordering authority for the current
+  executable frontier. Narrative words such as first, then, or later describe
+  closure milestones, not exclusive sequencing, unless the supplied dependencies
+  establish that an operation must wait. Do not block solely because one safe
+  independent preparation operation can run before or alongside another. Block an
+  ordering mismatch only when it makes a stated obligation unreachable or permits
+  materially unsupported, unsafe, or out-of-plan work.
+
   Proceed only when at least one potentially dispatchable current operation advances
   the approved plan's stated closure chain, every other operation that deterministic
   authority could dispatch now is also supported, safe, and within that plan, and no

@@ -178,6 +178,12 @@ describe("coding profile registrar", () => {
     expect(normalizedPlanner).toContain(
       "initial compiler-emittable work through each accepted effect and newly eligible downstream operation to the terminal objective",
     );
+    expect(normalizedPlanner).toContain(
+      "Express ordering only when the submitted graph models the corresponding dependency",
+    );
+    expect(normalizedPlanner).toContain(
+      "Treat independent safe preparation obligations as one concurrent frontier",
+    );
     expect(normalized).toContain(
       "Treat only the plan, ticket board, resolved questions, receipts, and lifecycle facts supplied to this attempt as authoritative",
     );
@@ -194,6 +200,12 @@ describe("coding profile registrar", () => {
     );
     expect(normalized).toContain(
       "every other operation that deterministic authority could dispatch now is also supported, safe, and within that plan",
+    );
+    expect(normalized).toContain(
+      "Use supplied ticket dependencies as the ordering authority for the current executable frontier",
+    );
+    expect(normalized).toContain(
+      "Do not block solely because one safe independent preparation operation can run before or alongside another",
     );
     expect(normalized).toContain(
       "An eventual ticket absent from the current board is downstream work, not a missing path",

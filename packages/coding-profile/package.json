@@ -1,6 +1,6 @@
 {
   "name": "@koni/coding-profile",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "Koni's evidence-guided coding profile for Pi",
   "type": "module",
   "license": "MIT",

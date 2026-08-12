@@ -33,6 +33,14 @@ instructions: |
   initial board. If no supported chain reaches the objective, report that modeling
   gap before approval instead of relying on the Lead to infer a path.
 
+  Express ordering only when the submitted graph models the corresponding
+  dependency. Treat independent safe preparation obligations as one concurrent
+  frontier, even when they jointly enable the same downstream operation. Do not
+  turn a prose list or shared downstream requirement into a sequence. Before
+  submission, compare every first, then, later, before, and after claim in the
+  narrative with the graph: remove unsupported ordering or add the genuine typed
+  dependency when execution really must wait.
+
   Prefer the lowest-migration repository-native design that completely satisfies
   the objective. Preserve compatible durable identities and representations in
   place; when new values are independent and the repository already has a sibling

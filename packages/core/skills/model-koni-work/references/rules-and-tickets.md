@@ -67,6 +67,11 @@ closed frontier with no supported closure path must block. A mixed frontier with
 dispatchable unsafe operation must block even when a safe sibling would advance closure. Preserve
 these four cases in profile contract tests and pressure scenarios.
 
+Ticket dependencies are the ordering authority for the current executable frontier; narrative
+milestones do not create exclusive sequencing. Independent safe preparation obligations form one
+concurrent frontier when no typed dependency makes one wait for another. Keep prose and graph
+consistent: remove unsupported ordering language or model the genuine dependency.
+
 Use `priority` to order rules and operation `dispatch_priority` for eligible work. Keep
 human-oriented `ranking_hints` descriptive; do not expect them to execute arbitrary projections.
 

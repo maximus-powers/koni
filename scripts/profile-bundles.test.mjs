@@ -12,14 +12,14 @@ const EXPECTATIONS = Object.freeze([
   Object.freeze({
     directory: "coding-profile",
     packageName: "@koni/coding-profile",
-    packageVersion: "0.8.1",
+    packageVersion: "0.8.2",
     profileId: "software",
-    profileVersion: "0.8.1",
+    profileVersion: "0.8.2",
     lineage: "koni.software",
     fileCount: 27,
     kinds: { config: 17, agent: 10, skill: 0, other: 0 },
     // Reviewed in-tree profile baseline.
-    digest: "sha256:8a8bde393dacb0e5ad02bceed1c90a114967e5eddcb798e48a42e36082ca3cfd",
+    digest: "sha256:b12def8be255dd59d80997199552791ba9517bd3eb2b828d92aeeadf62aabce7",
     migration: {
       id: "retire-inert-semantics-v1",
       kind: "retire_yaml_fields",
@@ -34,14 +34,14 @@ const EXPECTATIONS = Object.freeze([
   Object.freeze({
     directory: "research-profile",
     packageName: "@koni/research-profile",
-    packageVersion: "1.1.12",
+    packageVersion: "1.1.13",
     profileId: "research",
-    profileVersion: "1.1.12",
+    profileVersion: "1.1.13",
     lineage: "koni.research",
     fileCount: 29,
     kinds: { config: 15, agent: 13, skill: 0, other: 1 },
     // Reviewed in-tree profile baseline.
-    digest: "sha256:14971c09f3bfc0812d8612a7a664438f9aa3efb9cfa1f7d5fce3073799772f8c",
+    digest: "sha256:4fade2816beef1594628de136662a0da2fcbfc8a4a6e05ad624317f2f2085dd1",
     migration: {
       id: "retire-inert-semantics-v1",
       kind: "retire_yaml_fields",
@@ -241,6 +241,12 @@ test("shared profile guidance preserves safe progressive closure", async () => {
     policy,
     /mixed frontier with any potentially dispatchable unsafe operation must block/,
   );
+  assert.match(
+    policy,
+    /ticket dependencies are the ordering authority for the current executable frontier/i,
+  );
+  assert.match(policy, /narrative milestones do not create exclusive sequencing/i);
+  assert.match(policy, /independent safe preparation obligations form one concurrent frontier/i);
   assert.match(agentsAndSkills, /progressive-frontier policy in `run-types\.md`/);
 });
 

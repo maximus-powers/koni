@@ -196,10 +196,13 @@ describe("research profile registrar", () => {
       ),
       "utf8",
     );
-    expect(instructions).toContain(
+    const normalizedInstructions = instructions.replace(/\s+/gu, " ");
+    expect(normalizedInstructions).toContain(
       "Store one canonical `target_claims` fact with inverse `tested_by`",
     );
-    expect(instructions).toContain("one canonical `gate.applies_to` fact with inverse `gates`");
+    expect(normalizedInstructions).toContain(
+      "one canonical `gate.applies_to` fact with inverse `gates`",
+    );
   });
 
   it("does not ship a parallel Pi resource registry", async () => {
@@ -276,6 +279,15 @@ describe("research profile registrar", () => {
     expect(normalizedPlanner).toContain(
       "initial compiler-emittable work through each accepted effect and newly eligible downstream operation to the terminal objective",
     );
+    expect(normalizedPlanner).toContain(
+      "Express ordering only when the submitted graph models the corresponding dependency",
+    );
+    expect(normalizedPlanner).toContain(
+      "Treat independent safe preparation obligations as one concurrent frontier",
+    );
+    expect(normalizedPlanner).toContain(
+      "Do not turn a prose list or shared downstream requirement into a sequence",
+    );
     expect(normalized).toContain(
       "Treat only the plan, ticket board, resolved questions, receipts, and lifecycle facts supplied to this attempt as authoritative",
     );
@@ -292,6 +304,15 @@ describe("research profile registrar", () => {
     );
     expect(normalized).toContain(
       "every other operation that deterministic authority could dispatch now is also supported, safe, and within that plan",
+    );
+    expect(normalized).toContain(
+      "Use supplied ticket dependencies as the ordering authority for the current executable frontier",
+    );
+    expect(normalized).toContain(
+      "Narrative words such as first, then, or later describe closure milestones, not exclusive sequencing",
+    );
+    expect(normalized).toContain(
+      "Do not block solely because one safe independent preparation operation can run before or alongside another",
     );
     expect(normalized).toContain(
       "An eventual ticket absent from the current board is downstream work, not a missing path",
