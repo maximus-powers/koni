@@ -8072,6 +8072,11 @@ function ticketAttempt(
     durableTicket?.executionControl?.sourceProposalTicketId !== undefined
       ? run.tickets[durableTicket.executionControl.sourceProposalTicketId]
       : undefined;
+  const approvedApplicationCausal = durableTicket?.executionControl?.controlTicketAuthority?.causal;
+  const approvedApplicationMaterialization =
+    approvedApplicationCausal?.role === "approved_application"
+      ? approvedApplicationCausal.materialization
+      : undefined;
   const applicationAuditSteering =
     approvedApplicationProposal === undefined || durableTicket === undefined
       ? []
@@ -8213,17 +8218,33 @@ function ticketAttempt(
         ? []
         : [
             `The approved change request defines the required state for this application: ${approvedApplicationProposal.summary}\n\nApplication graph write-authority nodes: ${definition.target_node_ids.join(", ")}. Request context may name causal nodes outside this application authority; treat those nodes as context only and never as an instruction to mutate them.`,
+            ...(approvedApplicationMaterialization === undefined
+              ? []
+              : [
+                  `Exact approved application selection (${approvedApplicationMaterialization.authoritySha256}): ${approvedApplicationMaterialization.selectionSummary}`,
+                  "The exact approved application selection is already the authoritative resolution among the source request's alternatives. Do not ask the operator to choose those alternatives again. Compatible later audit steering clarifies this selection but does not replace it. If later steering materially conflicts with or would replace the exact selection, do not silently choose either authority: route one focused question or a new change-control decision for that conflict. Otherwise ask only if current compiler-authenticated state creates a materially different high-impact choice that the selection and compatible steering do not resolve.",
+                ]),
             ...applicationAuditSteering,
             ...(applicationAuditSteering.length === 0
               ? []
               : [
-                  "The source approval remains hash-bound, and its later audit-only steering is cumulative binding interpretation for this application. Obey those clarifications in every application and review step; do not revive an explicitly excluded node, contract key, path, or mechanism from the earlier request wording.",
+                  "The source approval remains hash-bound. Treat compatible later audit-only steering as cumulative binding interpretation in every application and review step; do not revive an explicitly excluded node, contract key, path, or mechanism. Steering that materially conflicts with or replaces the exact approved selection requires a focused question or new change-control decision instead of silent precedence.",
                 ]),
             ...(applicationGraphOnlyReviewInstruction === undefined
               ? []
               : [applicationGraphOnlyReviewInstruction]),
             "The approved request together with its cumulative operator steering is the complete obligation for this application. Historical durable obligations are additive constraints: they may preserve earlier accepted state, but they never narrow, replace, or excuse any target or outcome that remains required after those operator clarifications. Review and apply that clarified request in full.",
-            "Apply a non-empty scoped semantic graph delta that makes that request true unless the current scoped graph already satisfies it. A prior proposal-selection summary may describe its read-only proposal boundary; it is not an instruction to replay an empty delta. Do not treat an unsatisfied request as a no-op.",
+            ...(step.kind === "review"
+              ? [
+                  "Review the predecessor candidate against the exact approved selection and compatible cumulative steering. This review is read-only: return only the configured verdict, and do not apply or demand a new graph mutation from this step.",
+                ]
+              : step.graph_mutation === "forbidden"
+                ? [
+                    "Inspect and authenticate the exact approved selection, its causal approval, and compatible cumulative steering without mutating the graph. Record the bounded inspection outcome so the separately authorized application step can apply it.",
+                  ]
+                : [
+                    "Apply a non-empty scoped semantic graph delta that makes the exact approved application selection true unless the current scoped graph already satisfies it. The selection originated at a read-only proposal boundary; that does not make an unsatisfied application a no-op.",
+                  ]),
             ...(step.id !== "apply-approved-delta"
               ? []
               : [

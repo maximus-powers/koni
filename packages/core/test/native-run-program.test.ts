@@ -8151,6 +8151,21 @@ describe("native compiler-authoritative run program", () => {
     ]);
     if (applicationTicket === undefined) throw new Error("missing approved application ticket");
     run.tickets[applicationTicket.id] = applicationTicket;
+    const conflictingAuditMaterial = {
+      protocol: "koni.proposal-decision-authority.v2" as const,
+      runId: run.id,
+      proposalTicketId: proposal.id,
+      requestSha256: proposal.executionControl!.proposalRequest!.requestSha256,
+      eventId: "proposal-conflicting-audit",
+      decision: "rejection" as const,
+      actor: "operator" as const,
+      message: `Replace ${controlTarget} with ${externalTarget} instead of applying the selected correction.`,
+      recordedAt: new Date(FIXED_NOW.getTime() + 60_000).toISOString(),
+    };
+    proposal.executionControl!.proposalDecisionHistory.push({
+      ...conflictingAuditMaterial,
+      sha256: canonicalHash(conflictingAuditMaterial),
+    });
     const applicationCycle = attachFixtureTicketCycle(run, applicationTicket);
     materializeFixtureCheckout(run.git.run.worktree, applicationCycle.worktree);
     const endpoint = await discoverAuthorityEndpoint(project.projectRoot);
@@ -8187,30 +8202,122 @@ describe("native compiler-authoritative run program", () => {
     applicationGraph.semanticSha256 = applicationGraph.graphSha256;
     run.graphHash = applicationGraph.graphSha256;
     await writeFile(applicationGraphPath, `${JSON.stringify(applicationGraph, null, 2)}\n`);
+    const prepareApplicationStep = async (stepId: string, ordinal: number) => {
+      const applicationStep = applicationTicket.steps.find((step) => step.id === stepId)!;
+      return program.prepareAttempt({
+        kind: "ticket" as const,
+        run,
+        assignment: {
+          runId: run.id,
+          ticketId: applicationTicket.id,
+          stepId: applicationStep.id,
+          personaId: applicationStep.personaId,
+          priority: applicationTicket.priority,
+        },
+        attemptId: `attempt-approved-change-application-${stepId}`,
+        sessionId: `session-approved-change-application-${stepId}`,
+        nextAuthorityRevision: 15 + ordinal,
+        expectedAuthorityStateHash: digest(`authority-application-${stepId}`),
+        lineage: {
+          branchEpoch: 0,
+          reason: "initial" as const,
+        },
+      });
+    };
+    const inspectApplicationPrepared = await prepareApplicationStep("inspect-approved-change", 0);
+    const applicationPrepared = await prepareApplicationStep("apply-approved-delta", 1);
+    const inspectPredecessor = attemptRecord(
+      inspectApplicationPrepared.spec,
+      "ticket",
+      "completed",
+    );
+    inspectPredecessor.endedAt = FIXED_NOW.toISOString();
+    run.attempts[inspectPredecessor.id] = inspectPredecessor;
+    const inspectStep = applicationTicket.steps.find(
+      (step) => step.id === "inspect-approved-change",
+    )!;
+    inspectStep.status = "completed";
+    inspectStep.attemptIds.push(inspectPredecessor.id);
+    const applicationPredecessor = attemptRecord(applicationPrepared.spec, "ticket", "completed");
+    applicationPredecessor.endedAt = FIXED_NOW.toISOString();
+    run.attempts[applicationPredecessor.id] = applicationPredecessor;
     const applicationStep = applicationTicket.steps.find(
       (step) => step.id === "apply-approved-delta",
     )!;
-    const applicationPrepared = await program.prepareAttempt({
-      kind: "ticket",
+    applicationStep.status = "completed";
+    applicationStep.attemptIds.push(applicationPredecessor.id);
+    const reviewStep = applicationTicket.steps.find((step) => step.id === "verify")!;
+    const reviewApplicationPrepared = await program.prepareAttempt({
+      kind: "verification",
       run,
       assignment: {
         runId: run.id,
         ticketId: applicationTicket.id,
-        stepId: applicationStep.id,
-        personaId: applicationStep.personaId,
+        stepId: reviewStep.id,
+        personaId: reviewStep.personaId,
         priority: applicationTicket.priority,
       },
-      attemptId: "attempt-approved-change-application",
-      sessionId: "session-approved-change-application",
-      nextAuthorityRevision: 15,
-      expectedAuthorityStateHash: digest("authority-fifteen"),
+      attemptId: "attempt-approved-change-application-verify",
+      sessionId: "session-approved-change-application-verify",
+      nextAuthorityRevision: 17,
+      expectedAuthorityStateHash: digest("authority-application-verify"),
       lineage: {
-        branchEpoch: 0,
-        reason: "initial",
+        branchEpoch: 1,
+        reason: "review",
+        parentAttemptId: applicationPredecessor.id,
+        parentSessionId: applicationPredecessor.sessionId,
       },
     });
+    delete run.attempts[inspectPredecessor.id];
+    inspectStep.status = "pending";
+    inspectStep.attemptIds.pop();
+    delete run.attempts[applicationPredecessor.id];
+    applicationStep.status = "pending";
+    applicationStep.attemptIds.pop();
+    for (const prepared of [
+      inspectApplicationPrepared,
+      applicationPrepared,
+      reviewApplicationPrepared,
+    ]) {
+      expect(prepared.spec.persona.initialPrompt).toContain(
+        `Exact approved application selection (${applicationMaterialization.authoritySha256}): ${applicationMaterialization.selectionSummary}`,
+      );
+      expect(prepared.spec.persona.initialPrompt).toContain(
+        "Compatible later audit steering clarifies this selection but does not replace it",
+      );
+      expect(prepared.spec.persona.initialPrompt).toContain(
+        "materially conflicts with or would replace the exact selection",
+      );
+      expect(prepared.spec.persona.initialPrompt).toContain(
+        `Operator audit-only steering after approval (does not revoke approval): ${conflictingAuditMaterial.message}`,
+      );
+      expect(prepared.spec.persona.initialPrompt).toContain(
+        "requires a focused question or new change-control decision instead of silent precedence",
+      );
+    }
+    expect(inspectApplicationPrepared.spec.persona.initialPrompt).toContain(
+      "Inspect and authenticate the exact approved selection",
+    );
+    expect(inspectApplicationPrepared.spec.persona.initialPrompt).toContain(
+      "without mutating the graph",
+    );
+    expect(inspectApplicationPrepared.spec.persona.initialPrompt).not.toContain(
+      "Apply a non-empty scoped semantic graph delta",
+    );
+    expect(reviewApplicationPrepared.spec.persona.initialPrompt).toContain(
+      "Review the predecessor candidate against the exact approved selection",
+    );
+    expect(reviewApplicationPrepared.spec.persona.initialPrompt).not.toContain(
+      "Apply a non-empty scoped semantic graph delta",
+    );
+    expect(applicationPrepared.spec.persona.initialPrompt).toContain(
+      "Apply a non-empty scoped semantic graph delta",
+    );
     expect(applicationPrepared.spec.persona.initialPrompt).toContain(
       "The approved change request defines the required state for this application",
+    );
+    expect(applicationPrepared.spec.persona.initialPrompt).toContain(
+      "The exact approved application selection is already the authoritative resolution",
     );
     expect(applicationPrepared.spec.persona.initialPrompt).toContain(
       "The approved request together with its cumulative operator steering is the complete obligation for this application",
@@ -8237,7 +8344,7 @@ describe("native compiler-authoritative run program", () => {
       "Correct the bounded hypothesis contract",
     );
     expect(applicationPrepared.spec.persona.initialPrompt).toContain(
-      "it is not an instruction to replay an empty delta",
+      "that does not make an unsatisfied application a no-op",
     );
     expect(applicationPrepared.spec.persona.initialPrompt).toContain(
       "update the asset's authored implementation_plan.files",
