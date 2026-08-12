@@ -12827,7 +12827,10 @@ export class RunAuthorityEngine {
           call,
         );
       } catch (error) {
-        const rejection = correctableAuthorityToolError(error);
+        const rejection = correctableAgentToolError(error, {
+          planning: false,
+          terminal: false,
+        });
         if (rejection === undefined) throw error;
         draft = nextRun(run, recordedAt);
         receipt = {
@@ -12905,7 +12908,10 @@ export class RunAuthorityEngine {
     try {
       return await invoke();
     } catch (error) {
-      const rejection = correctableAuthorityToolError(error);
+      const rejection = correctableAgentToolError(error, {
+        planning: prepared.spec.identity.ticketId === "run-planning",
+        terminal: call.name === prepared.spec.terminal.toolName,
+      });
       if (rejection === undefined) throw error;
       return this.#recordCorrectableAgentToolRejection(
         prepared,
@@ -23511,8 +23517,21 @@ const CORRECTABLE_AUTHORITY_TOOL_ERROR_CODES = new Set([
   "write_size",
 ]);
 
-function correctableAuthorityToolError(
+const COMPILER_DIAGNOSTIC_TRUNCATION = "[compiler diagnostic truncated]";
+
+function boundedCompilerDiagnosticText(value: string, maximumBytes: number): string {
+  const sanitized = value.replaceAll("\u0000", "\uFFFD");
+  if (Buffer.byteLength(sanitized, "utf8") <= maximumBytes) return sanitized;
+  const suffix = `\n${COMPILER_DIAGNOSTIC_TRUNCATION}`;
+  const prefixBytes = maximumBytes - Buffer.byteLength(suffix, "utf8");
+  let prefix = Buffer.from(sanitized, "utf8").subarray(0, prefixBytes).toString("utf8");
+  while (Buffer.byteLength(prefix, "utf8") > prefixBytes) prefix = prefix.slice(0, -1);
+  return `${prefix}${suffix}`;
+}
+
+export function correctableAgentToolError(
   error: unknown,
+  context: Readonly<{ planning: boolean; terminal: boolean }>,
 ): Readonly<{ code: string; summary: string; value?: JsonValue }> | undefined {
   if (error instanceof PathAuthorityError && error.code !== "unsafe_root") {
     return { code: error.code, summary: error.message };
@@ -23525,6 +23544,31 @@ function correctableAuthorityToolError(
       code: error.code,
       summary: error.message,
       ...(error.details !== undefined ? { value: structuredClone(error.details) } : {}),
+    };
+  }
+  if (
+    context.planning &&
+    context.terminal &&
+    error instanceof Error &&
+    isRecord(error) &&
+    error.name === "NativeRunProgramError" &&
+    typeof error.code === "string" &&
+    Array.isArray(error.details) &&
+    error.details.every((detail) => typeof detail === "string")
+  ) {
+    const sourceDetails = [...error.details] as string[];
+    const details = sourceDetails
+      .slice(0, 20)
+      .map((detail) => boundedCompilerDiagnosticText(detail, 2 * 1024));
+    if (sourceDetails.length > details.length) {
+      details.push(
+        `${COMPILER_DIAGNOSTIC_TRUNCATION}: ${sourceDetails.length - details.length} additional diagnostics omitted`,
+      );
+    }
+    return {
+      code: error.code,
+      summary: boundedCompilerDiagnosticText(error.message, 60 * 1024),
+      ...(details.length === 0 ? {} : { value: { diagnostics: details } }),
     };
   }
   return undefined;

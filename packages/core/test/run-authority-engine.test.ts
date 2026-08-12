@@ -13,6 +13,7 @@ import {
   configuredCheckHasNoExternalEffects,
   configuredCheckResultRequiresDependencyReopen,
   configuredResultArtifactPaths,
+  correctableAgentToolError,
   inheritedRepositoryDiscoveryCalls,
   isRecoverableAssignmentValidationAction,
   isExactSettledLeadLaunchReplay,
@@ -3963,6 +3964,57 @@ describe("run authority engine", () => {
         verdict: "inconclusive",
       }),
     ).toEqual([]);
+  });
+
+  it("persists planning compiler diagnostics as correctable terminal-tool rejections", () => {
+    const compilerError = new NativeRunProgramError(
+      "graph_seed_invalid",
+      "planning graph seed violates its typed schema",
+      ["node proof-one has unknown spec field planned_outputs"],
+    );
+    const planning = correctableAgentToolError(compilerError, {
+      planning: true,
+      terminal: true,
+    });
+
+    expect(planning).toEqual({
+      code: "graph_seed_invalid",
+      summary:
+        "planning graph seed violates its typed schema\nnode proof-one has unknown spec field planned_outputs",
+      value: {
+        diagnostics: ["node proof-one has unknown spec field planned_outputs"],
+      },
+    });
+    expect(
+      correctableAgentToolError(compilerError, { planning: false, terminal: true }),
+    ).toBeUndefined();
+    expect(
+      correctableAgentToolError(compilerError, { planning: true, terminal: false }),
+    ).toBeUndefined();
+    expect(
+      correctableAgentToolError(new Error("compiler implementation fault"), {
+        planning: true,
+        terminal: true,
+      }),
+    ).toBeUndefined();
+
+    const oversized = correctableAgentToolError(
+      new NativeRunProgramError("graph_seed_invalid", "invalid planning graph", [
+        `first useful diagnostic ${"x".repeat(80 * 1024)}`,
+        ...Array.from({ length: 100 }, (_, index) => `diagnostic ${index} ${"y".repeat(1024)}`),
+      ]),
+      { planning: true, terminal: true },
+    )!;
+    expect(Buffer.byteLength(oversized.summary, "utf8")).toBeLessThanOrEqual(60 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(oversized.value), "utf8")).toBeLessThanOrEqual(
+      48 * 1024,
+    );
+    expect(oversized.summary).toContain("[compiler diagnostic truncated]");
+    expect(oversized.value).toMatchObject({
+      diagnostics: expect.arrayContaining([
+        expect.stringContaining("[compiler diagnostic truncated]"),
+      ]),
+    });
   });
 
   it("retries a blocked continuous planning run in its stable attempt and session", async () => {

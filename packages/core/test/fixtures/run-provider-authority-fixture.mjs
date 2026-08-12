@@ -174,6 +174,16 @@ function onFrame(frame) {
     return;
   }
   if (frame.requestId === "terminal") {
+    if (scenario === "planning_compiler_rejection") {
+      if (
+        !frame.ok ||
+        frame.value?.outcome !== "rejected" ||
+        frame.value?.code !== "graph_seed_invalid"
+      )
+        process.exit(104);
+      // Keep the process live so the test can inspect the authority-committed diagnostic receipt.
+      return;
+    }
     if (scenario === "invalid_terminal_arguments") {
       if (
         !frame.ok ||

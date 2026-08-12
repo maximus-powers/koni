@@ -30,6 +30,7 @@ import type {
   TicketRecord,
 } from "../src/state/run-record.js";
 import { fixtureLaunchSpec, TERMINAL_OUTPUT_SCHEMA } from "./pi-managed-fixtures.js";
+import { NativeRunProgramError } from "../src/compiler/run-program.js";
 import { runBehaviorSnapshotFixture } from "./fixtures/compiled-behavior.js";
 
 const fixtureEntry = path.join(
@@ -109,6 +110,45 @@ describe("run authority provider reservation lifecycle", () => {
       outcome: "rejected",
       code: "tool_arguments",
     });
+  }, 60_000);
+
+  it("records a planning compiler diagnostic as a durable no-effect rejection", async () => {
+    const harness = await authorityHarness("planning_compiler_rejection");
+    const runId = await createRun(harness.client);
+
+    await waitFor(async () =>
+      Object.values((await harness.engine.store.getRun(runId)).attempts).some((attempt) =>
+        attempt.authorityToolResults?.some(
+          (result) => result.toolName === "koni_submit_output" && result.outcome === "rejected",
+        ),
+      ),
+    );
+
+    const attempt = onlyAttempt(await harness.engine.store.getRun(runId));
+    const rejection = attempt.authorityToolResults?.find(
+      (result) => result.toolName === "koni_submit_output",
+    );
+    expect(rejection).toMatchObject({
+      callId: "terminal-call",
+      outcome: "rejected",
+      argumentsSha256: rawSha256(canonicalEncode({ result: "provider-plan" })),
+    });
+    const receipt = JSON.parse(
+      await readFile(path.join(harness.root, ".git", "koni", rejection!.artifactPath), "utf8"),
+    );
+    expect(receipt).toMatchObject({
+      protocol: "koni.tool-receipt.v1",
+      outcome: "rejected",
+      code: "graph_seed_invalid",
+    });
+    expect(Buffer.byteLength(receipt.summary, "utf8")).toBeLessThanOrEqual(60 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(receipt.value), "utf8")).toBeLessThanOrEqual(48 * 1024);
+    expect(receipt.summary).toContain("planning graph seed violates its typed schema");
+    expect(receipt.summary).toContain("[compiler diagnostic truncated]");
+    expect(receipt.value.diagnostics).toEqual([
+      expect.stringContaining("unknown proof field"),
+      expect.stringContaining("[compiler diagnostic truncated]"),
+    ]);
   }, 60_000);
 
   it("resets only revision token allowance while retaining cumulative usage and discovery", () => {
@@ -1645,6 +1685,13 @@ function providerProgram(
     async compilePlanningOutput({ run, output }) {
       onCompile();
       expect(output).toEqual({ result: "provider-plan" });
+      if (scenario === "planning_compiler_rejection") {
+        throw new NativeRunProgramError(
+          "graph_seed_invalid",
+          "planning graph seed violates its typed schema",
+          ["unknown proof field", `oversized field ${"x".repeat(96 * 1024)}`],
+        );
+      }
       return {
         plan: {
           revision: run.planningSession?.currentRevision ?? 1,
