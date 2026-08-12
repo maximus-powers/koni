@@ -93,6 +93,15 @@ describe("Koni's Pi-native skills", () => {
     expect(normalized).toContain("preserve every unrelated valid operation");
   });
 
+  it("makes the graph-modeling skill discoverable while authoring a planning artifact", async () => {
+    const source = await readFile(path.join(skillsRoot, "model-koni-work/SKILL.md"), "utf8");
+    const frontmatter = source.match(/^---\n([\s\S]*?)\n---/u)?.[1] ?? "";
+    const normalized = frontmatter.replace(/\s+/gu, " ");
+
+    expect(normalized).toContain("Koni planning artifact");
+    expect(normalized).toContain("graph seed");
+  });
+
   it("grounds named repository work before modeling it", async () => {
     const source = await readFile(path.join(skillsRoot, "model-koni-work/SKILL.md"), "utf8");
     const normalized = source.replace(/\s+/gu, " ");

@@ -1,9 +1,9 @@
 ---
 name: model-koni-work
 description:
-  Use when defining or revising Koni graph ontology, structured rules, ticket emission, operations,
-  workflows, checks, receipts, reports, or lifecycle policy for a software or empirical research
-  project.
+  Use when authoring or revising a Koni planning artifact or graph seed, or defining graph ontology,
+  structured rules, ticket emission, operations, workflows, checks, receipts, reports, or lifecycle
+  policy for a software or empirical research project.
 ---
 
 # Model Köni Work
