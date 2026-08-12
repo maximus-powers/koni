@@ -635,9 +635,24 @@ function coerceJsonObjectArguments(value: unknown): unknown {
  * description — while the schema hash and authority-side validation keep the exact compiled union.
  */
 function transportToolSchema(name: KoniToolName, schema: TSchema): TSchema {
+  return terminalTransportToolSchema(name, schema, true);
+}
+
+/** Reconstruct launch specs issued before nested discriminator validation moved to authority. */
+function legacyTransportToolSchema(name: KoniToolName, schema: TSchema): TSchema {
+  return terminalTransportToolSchema(name, schema, false);
+}
+
+function terminalTransportToolSchema(
+  name: KoniToolName,
+  schema: TSchema,
+  relaxNestedDiscriminators: boolean,
+): TSchema {
   if (name !== "koni_submit_output") return schema;
   const branches = (schema as { anyOf?: TSchema[] }).anyOf;
-  if (!Array.isArray(branches) || branches.length === 0) return schema;
+  if (!Array.isArray(branches) || branches.length === 0) {
+    return relaxNestedDiscriminators ? relaxNestedDiscriminatedArrays(schema) : schema;
+  }
   const byKey = new Map<
     string,
     { variants: TSchema[]; hashes: Set<string>; requiredOccurrences: number }
@@ -674,7 +689,7 @@ function transportToolSchema(name: KoniToolName, schema: TSchema): TSchema {
   // persona, because 23 configured operations permit both a graph mutation and an upstream
   // request. State the exclusion where the fields are declared; prose elsewhere loses to shape.
   const exclusions = mutuallyExclusiveFieldGroups(branches);
-  return Type.Object(merged, {
+  const flattened = Type.Object(merged, {
     additionalProperties: false,
     description:
       `Send exactly one of these shapes, omitting every other branch's fields: ${describeSchemaShape(schema)}` +
@@ -683,6 +698,99 @@ function transportToolSchema(name: KoniToolName, schema: TSchema): TSchema {
         : `. Optional fields above belong to different shapes and must never be combined: ${exclusions
             .map((group) => group.map((field) => `\`${field}\``).join(" + "))
             .join("; ")} — sending fields from two shapes is refused and discards the attempt`),
+  });
+  return relaxNestedDiscriminators ? relaxNestedDiscriminatedArrays(flattened) : flattened;
+}
+
+/**
+ * Pi validates its advertised tool schema before calling Koni. Its generic validator expands every
+ * branch of a nested discriminated union and echoes the complete submitted artifact, so one wrong
+ * discriminator can consume tens of thousands of tokens without ever reaching Koni's bounded,
+ * durable compiler rejection. Keep the outer transport shape strict, but make the discriminator
+ * and its branch-owned object presentation-only. The exact terminal schema remains separately
+ * hash-bound and is compiled by authority before any effect is accepted.
+ */
+function relaxNestedDiscriminatedArrays(schema: TSchema): TSchema {
+  const visit = (candidate: unknown): unknown => {
+    if (!isRecord(candidate)) return candidate;
+    const out: Record<string, unknown> = structuredClone(candidate);
+    if (isRecord(candidate.properties)) {
+      out.properties = Object.fromEntries(
+        Object.entries(candidate.properties).map(([key, property]) => [key, visit(property)]),
+      );
+    }
+    if (candidate.type === "array" && isRecord(candidate.items)) {
+      const presentation = discriminatedArrayItemPresentation(candidate.items);
+      out.items = presentation ?? visit(candidate.items);
+    } else if (isRecord(candidate.items)) {
+      out.items = visit(candidate.items);
+    }
+    if (Array.isArray(candidate.anyOf)) out.anyOf = candidate.anyOf.map(visit);
+    return out;
+  };
+  return visit(schema) as TSchema;
+}
+
+function discriminatedArrayItemPresentation(items: Record<string, unknown>): TSchema | undefined {
+  const branches = Array.isArray(items.anyOf) ? items.anyOf : undefined;
+  if (branches === undefined || branches.length < 2) return undefined;
+  const branchProperties = branches.map((branch) =>
+    isRecord(branch) && isRecord(branch.properties) ? branch.properties : undefined,
+  );
+  if (branchProperties.some((properties) => properties === undefined)) return undefined;
+  const properties = branchProperties as Record<string, unknown>[];
+  const allKeys = [...new Set(properties.flatMap((branch) => Object.keys(branch)))].sort(
+    compareUtf8,
+  );
+  const sharedKeys = allKeys.filter((key) =>
+    properties.every((branch) => Object.hasOwn(branch, key)),
+  );
+  const discriminator = sharedKeys.find((key) => {
+    const literals = properties.map((branch) => branch[key]);
+    return literals.every((value) => isRecord(value) && typeof value.const === "string");
+  });
+  if (discriminator === undefined) return undefined;
+  const discriminatorValues = properties.map(
+    (branch) => (branch[discriminator] as Record<string, unknown>).const as string,
+  );
+  if (new Set(discriminatorValues).size !== branches.length) return undefined;
+
+  const requiredByBranch = branches.map(
+    (branch) => new Set((branch as { required?: string[] }).required ?? []),
+  );
+  const merged: Record<string, TSchema> = {};
+  for (const key of allKeys) {
+    const variants = properties.flatMap((branch) =>
+      Object.hasOwn(branch, key) ? [branch[key] as TSchema] : [],
+    );
+    if (key === discriminator) {
+      merged[key] = Type.String({
+        minLength: 1,
+        description: `Exact allowed literals: ${discriminatorValues
+          .map((value) => JSON.stringify(value))
+          .join(", ")}`,
+      });
+      continue;
+    }
+    if (
+      key === "spec" &&
+      variants.every((variant) => isRecord(variant) && variant.type === "object")
+    ) {
+      merged[key] = Type.Object({}, { additionalProperties: true });
+      continue;
+    }
+    const unique = new Map(variants.map((variant) => [canonicalHash(variant), variant]));
+    const property =
+      unique.size === 1 ? structuredClone(variants[0]!) : Type.Union([...unique.values()]);
+    merged[key] = requiredByBranch.every((required) => required.has(key))
+      ? property
+      : Type.Optional(property);
+  }
+  return Type.Object(merged, {
+    additionalProperties: false,
+    description: `Presentation envelope only. ${discriminator} must be one of ${discriminatorValues
+      .map((value) => JSON.stringify(value))
+      .join(", ")}; authority validates the exact branch-owned spec.`,
   });
 }
 
@@ -854,6 +962,13 @@ function resolveToolSchema(
     return current;
   // Launch specs issued before the transport flatten bound the raw terminal union as the submit
   // tool's parameter schema; keep those in-flight attempts recoverable.
+  if (
+    name === "koni_submit_output" &&
+    terminalOutputSchema !== undefined &&
+    canonicalHash(legacyTransportToolSchema(name, terminalOutputSchema)) === expectedSchemaHash
+  ) {
+    return legacyTransportToolSchema(name, terminalOutputSchema);
+  }
   if (
     name === "koni_submit_output" &&
     terminalOutputSchema !== undefined &&

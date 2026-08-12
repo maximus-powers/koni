@@ -3569,6 +3569,12 @@ describe("native compiler-authoritative run program", () => {
     expect(prepared.contextContent).toContain('"trigger": "orchestration_entry"');
     expect(prepared.contextContent).toContain('"settledDependencyIds": [\n        "obsolete"');
     expect(prepared.contextContent).toContain('"waitingOnDependencyIds": []');
+    expect(prepared.spec.persona.initialPrompt).toContain(
+      "only waitingOnDependencyIds establishes a current dependency wait",
+    );
+    expect(prepared.spec.persona.initialPrompt).toContain(
+      "settledDependencyIds remains causal history and does not require a completed ticket status",
+    );
     expect(
       Value.Check(prepared.terminalOutputSchema!, {
         protocol: "koni.lead-judgment-output.v1",

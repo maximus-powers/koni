@@ -7138,6 +7138,7 @@ function leadJudgmentAttempt(
       trigger === "orchestration_entry"
         ? "Judge whether the approved run is ready to enter deterministic ticket orchestration."
         : "Judge the supplied compiler deadlock once; do not schedule, retry, poll, or mutate work.",
+      "For dependency readiness, use the compiler-projected ticketBoard fields: only waitingOnDependencyIds establishes a current dependency wait; settledDependencyIds remains causal history and does not require a completed ticket status.",
       `Finish with exactly one ${LEAD_JUDGMENT_OUTPUT_PROTOCOL} output: disposition proceed or blocked, plus a concise summary.`,
     ].join("\n\n"),
     context,

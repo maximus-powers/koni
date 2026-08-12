@@ -2241,7 +2241,20 @@ function validateTerminalOutput(
   terminalOutputSchema: TSchema,
   value: unknown,
 ): void {
-  validateKoniToolArguments(spec.terminal.toolName as KoniToolName, value, terminalOutputSchema);
+  try {
+    validateKoniToolArguments(
+      spec.terminal.toolName as KoniToolName,
+      value,
+      terminalOutputSchema,
+      spec.terminal.outputSchemaHash,
+    );
+  } catch (error) {
+    if (!(error instanceof KoniToolArgumentValidationError)) throw error;
+    throw new PiAttemptProcessError(
+      "terminal_output",
+      "terminal output does not match its exact immutable schema",
+    );
+  }
   let encoded: string;
   try {
     encoded = JSON.stringify(value);

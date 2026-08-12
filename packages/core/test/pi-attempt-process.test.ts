@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { Type, type TSchema } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BoundedJsonLineDecoder,
@@ -207,6 +208,48 @@ describe("supervised autonomous Pi attempt process", () => {
     });
     expect(events).toEqual(["usage"]);
   });
+
+  it.each(["invalid_nested_terminal_event", "invalid_nested_terminal_outcome"])(
+    "rejects a malformed nested terminal payload at the exact supervisor boundary: %s",
+    async (behavior) => {
+      const terminalOutputSchema = Type.Object(
+        {
+          graphSeed: Type.Object({
+            nodes: Type.Array(
+              Type.Union([
+                Type.Object(
+                  {
+                    type: Type.Literal("contract"),
+                    spec: Type.Object({ invariant: Type.String() }),
+                  },
+                  { additionalProperties: false },
+                ),
+                Type.Object(
+                  {
+                    type: Type.Literal("proof"),
+                    spec: Type.Object({ claim: Type.String() }),
+                  },
+                  { additionalProperties: false },
+                ),
+              ]),
+            ),
+          }),
+        },
+        { additionalProperties: false },
+      );
+      const { spec, options } = await fixture(behavior, {}, { terminalOutputSchema });
+      const child = new SupervisedPiAttemptProcess(spec, {
+        ...options,
+        timings: { ...options.timings, activatedOutcomeTimeoutMs: 100 },
+      });
+
+      await child.ready;
+      await expect(child.outcome).resolves.toMatchObject({
+        status: "failed",
+        error: "terminal output does not match its exact immutable schema",
+      });
+    },
+  );
 
   it("cannot begin a deferred attempt until authority explicitly activates it", async () => {
     const { spec, options } = await fixture("deferred");
@@ -1279,7 +1322,7 @@ describe("run-level attempt process pool", () => {
 async function fixture(
   behavior: string,
   overrides: Partial<PiAttemptProcessAuthority> = {},
-  identities: { attemptId?: string; sessionId?: string } = {},
+  identities: { attemptId?: string; sessionId?: string; terminalOutputSchema?: TSchema } = {},
 ): Promise<{
   spec: ReturnType<typeof fixtureLaunchSpec>;
   options: ConstructorParameters<typeof SupervisedPiAttemptProcess>[1];
@@ -1352,7 +1395,7 @@ async function fixture(
     spec,
     options: {
       mode: "fresh",
-      terminalOutputSchema: TERMINAL_OUTPUT_SCHEMA,
+      terminalOutputSchema: identities.terminalOutputSchema ?? TERMINAL_OUTPUT_SCHEMA,
       authority,
       timings: { launchTimeoutMs: 2_000, abortGraceMs: 50, termGraceMs: 50, killGraceMs: 2_000 },
       runtime: {

@@ -101,6 +101,48 @@ function onFrame(frame) {
       finish();
       return;
     }
+    if (behavior === "invalid_nested_terminal_event") {
+      send({
+        type: "event",
+        event: {
+          type: "terminal",
+          toolName: frame.spec.terminal.toolName,
+          output: {
+            graphSeed: {
+              nodes: [
+                {
+                  type: "change",
+                  spec: { target_state: "The guide is available." },
+                },
+              ],
+            },
+          },
+        },
+      });
+      setInterval(() => {}, 1_000);
+      return;
+    }
+    if (behavior === "invalid_nested_terminal_outcome") {
+      send({
+        type: "outcome",
+        outcome: {
+          status: "completed",
+          terminalOutput: {
+            graphSeed: {
+              nodes: [
+                {
+                  type: "change",
+                  spec: { target_state: "The guide is available." },
+                },
+              ],
+            },
+          },
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, newTokens: 0, allTokens: 0 },
+        },
+      });
+      finish();
+      return;
+    }
     if (behavior === "crash_descendant") {
       descendant = spawn(
         process.execPath,

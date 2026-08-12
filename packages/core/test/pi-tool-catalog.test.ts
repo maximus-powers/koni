@@ -1,4 +1,5 @@
 import { Type } from "typebox";
+import { Value } from "typebox/value";
 import { describe, expect, it, vi } from "vitest";
 import { canonicalHash } from "../src/shared/canonical.js";
 import {
@@ -91,6 +92,167 @@ describe("Koni authority-backed Pi tool catalog", () => {
     );
     expect(tool!.definition.description).not.toContain('"status":"completed"');
     expect(tool!.definition.promptSnippet).toBe(tool!.definition.description);
+  });
+
+  it("forwards nested discriminated planning drafts to the exact compiler boundary", () => {
+    const terminalOutputSchema = Type.Object(
+      {
+        graphSeed: Type.Object({
+          nodes: Type.Array(
+            Type.Union([
+              Type.Object(
+                {
+                  key: Type.String(),
+                  type: Type.Literal("contract"),
+                  title: Type.String(),
+                  spec: Type.Object(
+                    {
+                      invariant: Type.String(),
+                      enforcement_point: Type.String(),
+                    },
+                    { additionalProperties: false },
+                  ),
+                },
+                { additionalProperties: false },
+              ),
+              Type.Object(
+                {
+                  key: Type.String(),
+                  type: Type.Literal("proof"),
+                  title: Type.String(),
+                  spec: Type.Object(
+                    {
+                      claim: Type.String(),
+                      command: Type.Array(Type.String()),
+                    },
+                    { additionalProperties: false },
+                  ),
+                },
+                { additionalProperties: false },
+              ),
+            ]),
+          ),
+        }),
+      },
+      { additionalProperties: false },
+    );
+    const [tool] = createKoniAuthorityTools({
+      names: ["koni_submit_output"],
+      terminalOutputSchema,
+      async invoke() {
+        return accepted("receipt-planning-draft");
+      },
+      reject,
+    });
+    const invalidDraft = {
+      graphSeed: {
+        nodes: [
+          {
+            key: "analysis-guide-change",
+            type: "change",
+            title: "Add analysis guide",
+            spec: { target_state: "The guide is available." },
+          },
+        ],
+      },
+    };
+
+    expect(Value.Check(tool!.definition.parameters, invalidDraft)).toBe(true);
+    expect(Value.Check(tool!.terminalOutputSchema!, invalidDraft)).toBe(false);
+    expect(
+      validateKoniToolArguments(
+        "koni_submit_output",
+        invalidDraft,
+        terminalOutputSchema,
+        tool!.schemaHash,
+      ),
+    ).toEqual(invalidDraft);
+    expect(tool!.definition.description).toContain(
+      'type "contract" allows only spec { enforcement_point, invariant }',
+    );
+    expect(tool!.definition.description).toContain(
+      'type "proof" allows only spec { claim, command }',
+    );
+  });
+
+  it("reconstructs a pre-relaxation flattened terminal transport by its issued hash", () => {
+    const graphSeedSchema = Type.Object({
+      nodes: Type.Array(
+        Type.Union([
+          Type.Object(
+            {
+              type: Type.Literal("contract"),
+              spec: Type.Object({ invariant: Type.String() }),
+            },
+            { additionalProperties: false },
+          ),
+          Type.Object(
+            {
+              type: Type.Literal("proof"),
+              spec: Type.Object({ claim: Type.String() }),
+            },
+            { additionalProperties: false },
+          ),
+        ]),
+      ),
+    });
+    const terminalOutputSchema = Type.Union([
+      Type.Object(
+        { status: Type.Literal("completed"), graphSeed: graphSeedSchema },
+        { additionalProperties: false },
+      ),
+      Type.Object(
+        { status: Type.Literal("checkpointed"), graphSeed: graphSeedSchema },
+        { additionalProperties: false },
+      ),
+    ]);
+    const legacyParameters = Type.Object(
+      {
+        status: Type.Union([Type.Literal("completed"), Type.Literal("checkpointed")]),
+        graphSeed: graphSeedSchema,
+      },
+      {
+        additionalProperties: false,
+        description:
+          'Send exactly one of these shapes, omitting every other branch\'s fields: { status: "completed", graphSeed: object }  OR  { status: "checkpointed", graphSeed: object }',
+      },
+    );
+    const legacySchemaHash = canonicalHash(legacyParameters);
+    const current = createKoniAuthorityTools({
+      names: ["koni_submit_output"],
+      terminalOutputSchema,
+      async invoke() {
+        return accepted("receipt-current");
+      },
+      reject,
+    })[0]!;
+    const legacy = createKoniAuthorityTools({
+      names: ["koni_submit_output"],
+      terminalOutputSchema,
+      schemaHashes: { koni_submit_output: legacySchemaHash },
+      async invoke() {
+        return accepted("receipt-legacy");
+      },
+      reject,
+    })[0]!;
+    const historicalInvalidDraft = {
+      status: "completed",
+      graphSeed: { nodes: [{ type: "change", spec: { target_state: "available" } }] },
+    };
+
+    expect(current.schemaHash).not.toBe(legacySchemaHash);
+    expect(legacy.schemaHash).toBe(legacySchemaHash);
+    expect(canonicalHash(legacy.definition.parameters)).toBe(legacySchemaHash);
+    expect(Value.Check(current.definition.parameters, historicalInvalidDraft)).toBe(true);
+    expect(Value.Check(legacy.definition.parameters, historicalInvalidDraft)).toBe(false);
+    expect(() =>
+      validateKoniToolArguments(
+        "koni_submit_output",
+        historicalInvalidDraft,
+        terminalOutputSchema,
+        legacySchemaHash,
+      ),
+    ).toThrow(/compiler-issued schema/u);
   });
 
   it("derives an exact unique hash-bound inventory from one canonical schema catalog", () => {

@@ -1,4 +1,4 @@
-import { Type } from "typebox";
+import { Type, type TSchema } from "typebox";
 import { canonicalHash, rawSha256 } from "../src/shared/canonical.js";
 import {
   AGENT_LAUNCH_SPEC_PROTOCOL,
@@ -11,6 +11,7 @@ import {
 import type { AuthorityBackedTool } from "../src/pi/managed-session.js";
 import {
   KONI_TOOL_RECEIPT_PROTOCOL,
+  koniToolSchemaHash,
   koniToolMaxResultBytes,
   renderKoniToolReceipt,
   type KoniToolReceipt,
@@ -85,10 +86,12 @@ export function fixtureLaunchSpec(options: {
   resources?: readonly LaunchResource[];
   maxAllTokens?: number;
   lineage?: AgentAttemptLineage;
+  terminalOutputSchema?: TSchema;
 }): Readonly<AgentLaunchSpec> {
   const resources = options.resources ?? [];
   const systemPrompt = "You are a contained Koni worker. Use only issued tools and context.";
   const initialPrompt = "Complete the exact compiler-issued ticket step, then submit output.";
+  const terminalOutputSchema = options.terminalOutputSchema ?? TERMINAL_OUTPUT_SCHEMA;
   return createAgentLaunchSpec({
     protocol: AGENT_LAUNCH_SPEC_PROTOCOL,
     issuedAt: "2026-07-16T00:00:00.000Z",
@@ -131,7 +134,7 @@ export function fixtureLaunchSpec(options: {
     tools: [
       {
         name: TERMINAL_TOOL_NAME,
-        schemaHash: TOOL_SCHEMA_HASH,
+        schemaHash: koniToolSchemaHash("koni_submit_output", terminalOutputSchema),
         executionMode: "sequential",
         maxResultBytes: koniToolMaxResultBytes("koni_submit_output"),
       },
@@ -155,7 +158,7 @@ export function fixtureLaunchSpec(options: {
     },
     terminal: {
       toolName: TERMINAL_TOOL_NAME,
-      outputSchemaHash: OUTPUT_SCHEMA_HASH,
+      outputSchemaHash: canonicalHash(terminalOutputSchema),
       maxOutputBytes: 64 * 1024,
     },
   });
