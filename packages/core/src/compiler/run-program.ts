@@ -14055,6 +14055,95 @@ export function generatedAssetImplementationReadPaths(
   ]);
 }
 
+function isSettledRecurringAssetTicket(ticket: Readonly<TicketRecord>): boolean {
+  return (
+    ticket.status === "completed" ||
+    (ticket.status === "cancelled" &&
+      ticket.blocker === COMPILER_INAPPLICABLE_TICKET &&
+      ticket.gitCycleId === undefined &&
+      ticket.worktreePath === undefined &&
+      ticket.branch === undefined &&
+      ticket.steps.length > 0 &&
+      ticket.steps.every((step) => step.status === "skipped"))
+  );
+}
+
+/**
+ * A completed recurring asset's old scope is immutable history for its accepted attempts, but it
+ * is not authority for a later compiler-required execution epoch. Once the prior Git cycle has
+ * settled, refresh only the grant-bearing scope on the durable ticket before reopening it. Live
+ * attempts remain pinned and continue through the ordinary compensation path.
+ */
+export function refreshSettledRecurringAssetTicketGrant(
+  ticket: TicketRecord,
+  definition: DerivedTicketDefinition,
+  reissueRequired: boolean,
+): boolean {
+  if (
+    !reissueRequired ||
+    !isSettledRecurringAssetTicket(ticket) ||
+    ticket.operationId !== "asset-resolution.asset.implement-asset" ||
+    definition.operation_registry_id !== ticket.operationId ||
+    ticket.steps.length !== definition.workflow.length ||
+    ticket.steps.some((step, index) => {
+      const compiled = definition.workflow[index];
+      return (
+        compiled === undefined ||
+        step.id !== compiled.id ||
+        step.personaId !== compiled.persona_id ||
+        (step.kind !== undefined && step.kind !== compiled.kind) ||
+        (step.dependsOn !== undefined &&
+          canonicalHash(step.dependsOn) !== canonicalHash(compiled.depends_on))
+      );
+    })
+  ) {
+    return false;
+  }
+  const before = canonicalHash({
+    targetNodeIds: ticket.targetNodeIds,
+    readNodeIds: ticket.readNodeIds ?? null,
+    writeNodeIds: ticket.writeNodeIds ?? null,
+    readPaths: ticket.readPaths,
+    writePaths: ticket.writePaths,
+    steps: ticket.steps.map((step) => ({
+      readNodeIds: step.readNodeIds ?? null,
+      writeNodeIds: step.writeNodeIds ?? null,
+      readPaths: step.readPaths ?? null,
+      writePaths: step.writePaths ?? null,
+    })),
+  });
+  ticket.targetNodeIds = [...definition.target_node_ids];
+  ticket.readNodeIds = [...definition.scope.read_node_ids];
+  ticket.writeNodeIds = [...definition.scope.write_node_ids];
+  ticket.readPaths = [...definition.scope.read_paths];
+  ticket.writePaths = [...definition.scope.write_paths];
+  for (const [index, step] of ticket.steps.entries()) {
+    const compiled = definition.workflow[index]!;
+    if (compiled.read_node_ids === undefined) delete step.readNodeIds;
+    else step.readNodeIds = [...compiled.read_node_ids];
+    if (compiled.write_node_ids === undefined) delete step.writeNodeIds;
+    else step.writeNodeIds = [...compiled.write_node_ids];
+    if (compiled.read_paths === undefined) delete step.readPaths;
+    else step.readPaths = [...compiled.read_paths];
+    if (compiled.write_paths === undefined) delete step.writePaths;
+    else step.writePaths = [...compiled.write_paths];
+  }
+  const after = canonicalHash({
+    targetNodeIds: ticket.targetNodeIds,
+    readNodeIds: ticket.readNodeIds ?? null,
+    writeNodeIds: ticket.writeNodeIds ?? null,
+    readPaths: ticket.readPaths,
+    writePaths: ticket.writePaths,
+    steps: ticket.steps.map((step) => ({
+      readNodeIds: step.readNodeIds ?? null,
+      writeNodeIds: step.writeNodeIds ?? null,
+      readPaths: step.readPaths ?? null,
+      writePaths: step.writePaths ?? null,
+    })),
+  });
+  return before !== after;
+}
+
 /**
  * A deterministic implement-asset id names the asset, not one immutable file manifest. If a later
  * approved graph change or repair request makes that asset actionable again, an old completed or
@@ -14068,17 +14157,9 @@ export function reopenCompletedRecurringAssetTicket(
   currentEpoch: number,
   reissueRequired = true,
 ): boolean {
-  const compilerRetired =
-    ticket.status === "cancelled" &&
-    ticket.blocker === COMPILER_INAPPLICABLE_TICKET &&
-    ticket.gitCycleId === undefined &&
-    ticket.worktreePath === undefined &&
-    ticket.branch === undefined &&
-    ticket.steps.length > 0 &&
-    ticket.steps.every((step) => step.status === "skipped");
   if (
     !reissueRequired ||
-    (ticket.status !== "completed" && !compilerRetired) ||
+    !isSettledRecurringAssetTicket(ticket) ||
     ticket.operationId !== "asset-resolution.asset.implement-asset" ||
     definition.operation_registry_id !== ticket.operationId
   ) {
@@ -14299,16 +14380,8 @@ function reconcileTickets(
     const existing = tickets[definition.id];
     if (existing !== undefined) {
       reconcileNeverStartedTicketNodeScope(existing, definition);
-      assertTicketDefinitionStable(existing, definition);
       const recurringAssetReissueRequired = definition.target_node_ids.some(
         (nodeId) => recurringAssetReissues?.has(nodeId) ?? true,
-      );
-      restoreSettledRecurringAssetTicket(
-        existing,
-        definition,
-        run.attempts,
-        at,
-        recurringAssetReissueRequired,
       );
       if (existing.operationId === "asset-resolution.asset.implement-asset") {
         const cycle =
@@ -14319,6 +14392,21 @@ function reconcileTickets(
             `completed asset ticket ${existing.id} cannot reissue before its Git cycle retires`,
           );
         }
+        refreshSettledRecurringAssetTicketGrant(
+          existing,
+          definition,
+          recurringAssetReissueRequired,
+        );
+      }
+      assertTicketDefinitionStable(existing, definition);
+      restoreSettledRecurringAssetTicket(
+        existing,
+        definition,
+        run.attempts,
+        at,
+        recurringAssetReissueRequired,
+      );
+      if (existing.operationId === "asset-resolution.asset.implement-asset") {
         reopenCompletedRecurringAssetTicket(
           existing,
           definition,
@@ -14467,8 +14555,9 @@ export function assertTicketDefinitionStable(
   // a freshly derived grant, which recovers. Letting it pass instead defers the mismatch to grant
   // recovery, where the pinned `grantHash` cannot be reproduced — turning a self-healing
   // compensation into a hard `stored launch authority no longer matches pinned compiler scope`
-  // block. If this ever needs relaxing, the descriptor must first reproduce the issued scope
-  // rather than the current derivation.
+  // block. The one explicit exception is handled before this assertion: a settled recurring asset
+  // whose prior Git cycle has retired may receive the compiler's current grant before a required
+  // fresh epoch opens. Its accepted attempts retain their original immutable launch specs.
   const pinnedNodeScope = !ticketIsNeverStarted(ticket);
   const nodeScopeDrift =
     !pinnedNodeScope &&

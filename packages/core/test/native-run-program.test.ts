@@ -53,6 +53,7 @@ import {
   routablePlannedAssetRepairProposalIds,
   routePlannedAssetRepairProposals,
   routeSupersededGateRunProposals,
+  refreshSettledRecurringAssetTicketGrant,
   reopenCompletedRecurringAssetTicket,
   recurringAssetHasUnaddressedGateFailure,
   recurringAssetHasUnaddressedStandaloneRunFailure,
@@ -1114,6 +1115,132 @@ describe("native compiler-authoritative run program", () => {
       ],
     });
     expect(ticket.gitCycleId).toBeUndefined();
+  });
+
+  it("refreshes a settled recurring asset grant before reissuing a changed approved contract", () => {
+    const ticket = {
+      id: "TK-asset-scope-refresh",
+      operationId: "asset-resolution.asset.implement-asset",
+      status: "completed",
+      executionEpoch: 2,
+      readNodeIds: ["asset-one", "gate-old"],
+      writeNodeIds: ["asset-one"],
+      targetNodeIds: ["asset-one"],
+      readPaths: ["program/assets/one", "evidence/old.json"],
+      writePaths: ["program/assets/one"],
+      steps: [
+        {
+          id: "implement",
+          personaId: "asset-builder",
+          kind: "production",
+          dependsOn: [],
+          readNodeIds: ["asset-one", "gate-old"],
+          writeNodeIds: ["asset-one"],
+          readPaths: ["program/assets/one", "evidence/old.json"],
+          writePaths: ["program/assets/one"],
+          status: "completed",
+          attemptIds: ["attempt-old"],
+        },
+      ],
+    } as unknown as TicketRecord;
+    const definition = {
+      id: ticket.id,
+      operation_registry_id: ticket.operationId,
+      target_node_ids: ["asset-one"],
+      scope: {
+        read_node_ids: ["asset-one", "gate-current"],
+        write_node_ids: ["asset-one"],
+        read_paths: ["program/assets/one", "evidence/current.json"],
+        write_paths: ["program/assets/one"],
+      },
+      workflow: [
+        {
+          id: "implement",
+          persona_id: "asset-builder",
+          kind: "production",
+          depends_on: [],
+          read_node_ids: ["asset-one", "gate-current"],
+          write_node_ids: ["asset-one"],
+          read_paths: ["program/assets/one", "evidence/current.json"],
+          write_paths: ["program/assets/one"],
+        },
+      ],
+    } as unknown as DerivedTicketDefinition;
+
+    expect(() => assertTicketDefinitionStable(ticket, definition)).toThrow(
+      /changed under the same deterministic identity/u,
+    );
+    expect(refreshSettledRecurringAssetTicketGrant(ticket, definition, true)).toBe(true);
+    expect(() => assertTicketDefinitionStable(ticket, definition)).not.toThrow();
+    expect(
+      reopenCompletedRecurringAssetTicket(ticket, definition, FIXED_NOW.toISOString(), 2),
+    ).toBe(true);
+    expect(ticket).toMatchObject({
+      status: "queued",
+      executionEpoch: 3,
+      readNodeIds: ["asset-one", "gate-current"],
+      readPaths: ["program/assets/one", "evidence/current.json"],
+      steps: [
+        {
+          id: "implement",
+          status: "pending",
+          attemptIds: ["attempt-old"],
+          readNodeIds: ["asset-one", "gate-current"],
+          readPaths: ["program/assets/one", "evidence/current.json"],
+        },
+      ],
+    });
+  });
+
+  it("does not refresh grant authority while a recurring asset attempt is in flight", () => {
+    const ticket = {
+      id: "TK-asset-running",
+      operationId: "asset-resolution.asset.implement-asset",
+      status: "running",
+      executionEpoch: 2,
+      targetNodeIds: ["asset-one"],
+      readPaths: ["evidence/old.json"],
+      writePaths: ["program/assets/one"],
+      steps: [
+        {
+          id: "implement",
+          personaId: "asset-builder",
+          kind: "production",
+          dependsOn: [],
+          readPaths: ["evidence/old.json"],
+          writePaths: ["program/assets/one"],
+          status: "running",
+          attemptIds: ["attempt-live"],
+        },
+      ],
+    } as unknown as TicketRecord;
+    const definition = {
+      id: ticket.id,
+      operation_registry_id: ticket.operationId,
+      target_node_ids: ["asset-one"],
+      scope: {
+        read_node_ids: ["asset-one"],
+        write_node_ids: ["asset-one"],
+        read_paths: ["evidence/current.json"],
+        write_paths: ["program/assets/one"],
+      },
+      workflow: [
+        {
+          id: "implement",
+          persona_id: "asset-builder",
+          kind: "production",
+          depends_on: [],
+          read_paths: ["evidence/current.json"],
+          write_paths: ["program/assets/one"],
+        },
+      ],
+    } as unknown as DerivedTicketDefinition;
+
+    expect(refreshSettledRecurringAssetTicketGrant(ticket, definition, true)).toBe(false);
+    expect(ticket.readPaths).toEqual(["evidence/old.json"]);
+    expect(() => assertTicketDefinitionStable(ticket, definition)).toThrow(
+      /changed under the same deterministic identity/u,
+    );
   });
 
   it("reopens a retired recurring asset when a later approved repair becomes actionable", () => {
