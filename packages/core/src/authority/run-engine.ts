@@ -79,7 +79,7 @@ import {
   type Sha256Digest,
 } from "../shared/canonical.js";
 import type { AuthorityGrant } from "./grants.js";
-import { WorktreePathAuthority } from "./path-policy.js";
+import { PathAuthorityError, WorktreePathAuthority } from "./path-policy.js";
 import {
   runContainedProcess,
   snapshotContainedPaths,
@@ -12654,23 +12654,57 @@ export class RunAuthorityEngine {
     const prior = await this.#store.findReceipt(method, idempotencyKey, requestHash);
     if (prior !== undefined) return this.#readToolReceipt(prior.result);
     if (call.name === "koni_ask_question") {
-      return this.#invokeQuestionTool(prepared, grant, call, method, idempotencyKey, requestHash);
-    }
-    if (call.name === "koni_run_check") {
-      return this.#invokeAgentCheckTool(prepared, grant, call, method, idempotencyKey, requestHash);
-    }
-    if (call.name === "koni_write_file" || call.name === "koni_edit_file") {
-      return this.#invokeWorkspaceMutationTool(
+      return this.#invokeCorrectableAgentTool(
         prepared,
         grant,
-        call as KoniToolInvocation & { name: "koni_write_file" | "koni_edit_file" },
+        call,
         method,
         idempotencyKey,
         requestHash,
+        () => this.#invokeQuestionTool(prepared, grant, call, method, idempotencyKey, requestHash),
+      );
+    }
+    if (call.name === "koni_run_check") {
+      return this.#invokeCorrectableAgentTool(
+        prepared,
+        grant,
+        call,
+        method,
+        idempotencyKey,
+        requestHash,
+        () =>
+          this.#invokeAgentCheckTool(prepared, grant, call, method, idempotencyKey, requestHash),
+      );
+    }
+    if (call.name === "koni_write_file" || call.name === "koni_edit_file") {
+      return this.#invokeCorrectableAgentTool(
+        prepared,
+        grant,
+        call,
+        method,
+        idempotencyKey,
+        requestHash,
+        () =>
+          this.#invokeWorkspaceMutationTool(
+            prepared,
+            grant,
+            call as KoniToolInvocation & { name: "koni_write_file" | "koni_edit_file" },
+            method,
+            idempotencyKey,
+            requestHash,
+          ),
       );
     }
     if (call.name === "koni_submit_output") {
-      return this.#invokeTerminalTool(prepared, grant, call, method, idempotencyKey, requestHash);
+      return this.#invokeCorrectableAgentTool(
+        prepared,
+        grant,
+        call,
+        method,
+        idempotencyKey,
+        requestHash,
+        () => this.#invokeTerminalTool(prepared, grant, call, method, idempotencyKey, requestHash),
+      );
     }
 
     let receipt: KoniToolReceipt | undefined;
@@ -12684,25 +12718,50 @@ export class RunAuthorityEngine {
         revision,
         this.#projectRoot,
       );
-      enforceRepositoryCallBudget(run, prepared.spec, attempt, call);
-      const draft = nextRun(run, this.#timestamp());
-      const compiled = await this.#executeAgentToolEffect(draft, attempt, grant, prepared, call);
-      if (compiled.graphHash !== undefined) draft.graphHash = compiled.graphHash;
-      if (compiled.graphRevision !== undefined) draft.graphRevision = compiled.graphRevision;
-      if (compiled.tickets !== undefined) draft.tickets = structuredClone(compiled.tickets);
-      draft.activity.push(...structuredClone(compiled.activity ?? []));
-      receipt = {
-        protocol: KONI_TOOL_RECEIPT_PROTOCOL,
-        receiptId: canonicalHash({ method, idempotencyKey, requestHash }),
-        outcome: "accepted",
-        summary: boundedText(compiled.summary, "tool receipt summary", 64 * 1024),
-        ...(compiled.value === undefined ? {} : { value: structuredClone(compiled.value) }),
-      };
+      const recordedAt = this.#timestamp();
+      let draft = nextRun(run, recordedAt);
+      let compiled: AgentToolCompilation | undefined;
+      try {
+        enforceRepositoryCallBudget(run, prepared.spec, attempt, call);
+        compiled = await this.#executeAgentToolEffect(
+          draft,
+          draft.attempts[attempt.id]!,
+          grant,
+          prepared,
+          call,
+        );
+      } catch (error) {
+        const rejection = correctableAuthorityToolError(error);
+        if (rejection === undefined) throw error;
+        draft = nextRun(run, recordedAt);
+        receipt = {
+          protocol: KONI_TOOL_RECEIPT_PROTOCOL,
+          receiptId: canonicalHash({ method, idempotencyKey, requestHash }),
+          outcome: "rejected",
+          code: rejection.code,
+          summary: boundedText(rejection.summary, "tool rejection summary", 64 * 1024),
+          ...(rejection.value === undefined ? {} : { value: structuredClone(rejection.value) }),
+        };
+      }
+      if (compiled !== undefined) {
+        if (compiled.graphHash !== undefined) draft.graphHash = compiled.graphHash;
+        if (compiled.graphRevision !== undefined) draft.graphRevision = compiled.graphRevision;
+        if (compiled.tickets !== undefined) draft.tickets = structuredClone(compiled.tickets);
+        draft.activity.push(...structuredClone(compiled.activity ?? []));
+        receipt = {
+          protocol: KONI_TOOL_RECEIPT_PROTOCOL,
+          receiptId: canonicalHash({ method, idempotencyKey, requestHash }),
+          outcome: "accepted",
+          summary: boundedText(compiled.summary, "tool receipt summary", 64 * 1024),
+          ...(compiled.value === undefined ? {} : { value: structuredClone(compiled.value) }),
+        };
+      }
+      if (receipt === undefined) throw new Error("authority tool produced no receipt");
       const receiptPath = toolReceiptPath(run.id, attempt.id, call.callId);
       const receiptBytes = encodeJsonArtifact(receipt);
       authorizeToolResult(draft.attempts[attempt.id]!, call, receipt, receiptPath, draft.updatedAt);
       const writes: TransactionWrite[] = [
-        ...(compiled.artifactWrites ?? []),
+        ...(compiled?.artifactWrites ?? []),
         {
           path: receiptPath,
           bytes: receiptBytes,
@@ -12723,8 +12782,102 @@ export class RunAuthorityEngine {
         revision: committed.state.revision,
         events: [
           {
-            topic: "agent.tool.accepted",
-            payload: { runId: run.id, attemptId: attempt.id, tool: call.name, callId: call.callId },
+            topic: receipt.outcome === "accepted" ? "agent.tool.accepted" : "agent.tool.rejected",
+            payload: {
+              runId: run.id,
+              attemptId: attempt.id,
+              tool: call.name,
+              callId: call.callId,
+              ...(receipt.outcome === "rejected" ? { code: receipt.code } : {}),
+            },
+          },
+        ],
+      };
+    });
+    return receipt!;
+  }
+
+  async #invokeCorrectableAgentTool(
+    prepared: PreparedManagedAttempt,
+    grant: AuthorityGrant,
+    call: KoniToolInvocation,
+    method: string,
+    idempotencyKey: string,
+    requestHash: Sha256Digest,
+    invoke: () => Promise<KoniToolReceipt>,
+  ): Promise<KoniToolReceipt> {
+    try {
+      return await invoke();
+    } catch (error) {
+      const rejection = correctableAuthorityToolError(error);
+      if (rejection === undefined) throw error;
+      return this.#recordCorrectableAgentToolRejection(
+        prepared,
+        grant,
+        call,
+        method,
+        idempotencyKey,
+        requestHash,
+        rejection,
+      );
+    }
+  }
+
+  async #recordCorrectableAgentToolRejection(
+    prepared: PreparedManagedAttempt,
+    grant: AuthorityGrant,
+    call: KoniToolInvocation,
+    method: string,
+    idempotencyKey: string,
+    requestHash: Sha256Digest,
+    rejection: Readonly<{ code: string; summary: string; value?: JsonValue }>,
+  ): Promise<KoniRejectedToolReceipt> {
+    let receipt: KoniRejectedToolReceipt | undefined;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(grant.runId);
+      const attempt = validateAgentToolGrant(
+        run,
+        prepared.spec,
+        grant,
+        call,
+        revision,
+        this.#projectRoot,
+      );
+      const draft = nextRun(run, this.#timestamp());
+      receipt = {
+        protocol: KONI_TOOL_RECEIPT_PROTOCOL,
+        receiptId: canonicalHash({ method, idempotencyKey, requestHash }),
+        outcome: "rejected",
+        code: rejection.code,
+        summary: boundedText(rejection.summary, "tool rejection summary", 64 * 1024),
+        ...(rejection.value === undefined ? {} : { value: structuredClone(rejection.value) }),
+      };
+      const receiptPath = toolReceiptPath(run.id, attempt.id, call.callId);
+      const receiptBytes = encodeJsonArtifact(receipt);
+      authorizeToolResult(draft.attempts[attempt.id]!, call, receipt, receiptPath, draft.updatedAt);
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+        writes: [{ path: receiptPath, bytes: receiptBytes, expectedSha256: null }],
+        receipt: {
+          method,
+          idempotencyKey,
+          requestHash,
+          result: { artifact: receiptPath, sha256: rawSha256(receiptBytes) },
+        },
+      });
+      return {
+        revision: committed.state.revision,
+        events: [
+          {
+            topic: "agent.tool.rejected",
+            payload: {
+              runId: run.id,
+              attemptId: attempt.id,
+              tool: call.name,
+              callId: call.callId,
+              code: receipt.code,
+            },
           },
         ],
       };
@@ -23062,6 +23215,68 @@ function validateAgentToolGrant(
     throw new AuthorityRpcError("tool_revoked", "tool grant is revoked or expired");
   }
   return attempt;
+}
+
+/**
+ * Path-request denials (except an unsafe authority root) and explicitly classified RPC errors are
+ * model-correctable tool outcomes. Persisting them as canonical rejected receipts keeps the
+ * transcript and authority ledger exact across process recovery; integrity and implementation
+ * failures still escape immediately.
+ */
+const CORRECTABLE_AUTHORITY_TOOL_ERROR_CODES = new Set([
+  "check_scope",
+  "duplicate_repository_discovery",
+  "edit_encoding",
+  "edit_input",
+  "edit_match",
+  "limit",
+  "list_type",
+  "path_escape",
+  "path_type",
+  "planning_synthesis_required",
+  "question_answer",
+  "question_batch",
+  "question_impact",
+  "question_notes",
+  "question_option",
+  "question_options",
+  "question_recommendation",
+  "read_offset",
+  "read_page_size",
+  "read_scope",
+  "read_search_required",
+  "read_type",
+  "repository_call_budget",
+  "resource_scope",
+  "search_bytes",
+  "search_files",
+  "search_query",
+  "symlink",
+  "terminal_size",
+  "text_offset",
+  "tool_arguments",
+  "write_cas",
+  "write_scope",
+  "write_size",
+]);
+
+function correctableAuthorityToolError(
+  error: unknown,
+): Readonly<{ code: string; summary: string; value?: JsonValue }> | undefined {
+  if (error instanceof PathAuthorityError && error.code !== "unsafe_root") {
+    return { code: error.code, summary: error.message };
+  }
+  if (
+    error instanceof AuthorityRpcError &&
+    CORRECTABLE_AUTHORITY_TOOL_ERROR_CODES.has(error.code)
+  ) {
+    return {
+      code: error.code,
+      summary: error.message,
+      ...(error.details !== undefined ? { value: structuredClone(error.details) } : {}),
+    };
+  }
+  return undefined;
 }
 
 /**

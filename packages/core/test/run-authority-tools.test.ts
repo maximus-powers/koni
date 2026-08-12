@@ -6,6 +6,7 @@ import path from "node:path";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { AuthorityClient } from "../src/authority/client.js";
+import { AuthorityRpcError } from "../src/authority/server.js";
 import {
   authorityRevisionStateHash,
   RunAuthorityEngine,
@@ -126,7 +127,10 @@ describe("run authority model tools", () => {
       Object.values(planned.attempts)[0]!.authorityToolResults?.filter(
         (result) => result.toolName === "koni_read_file",
       ),
-    ).toEqual([expect.objectContaining({ callId: "read-one", outcome: "accepted" })]);
+    ).toEqual([
+      expect.objectContaining({ callId: "read-one", outcome: "accepted" }),
+      expect.objectContaining({ callId: "read-two", outcome: "rejected" }),
+    ]);
     client.close();
   });
 
@@ -170,9 +174,159 @@ describe("run authority model tools", () => {
     const results = Object.values(planned.attempts)[0]!.authorityToolResults ?? [];
     expect(results.map((result) => [result.callId, result.toolName, result.outcome])).toEqual([
       ["large-first-page", "koni_read_file", "accepted"],
+      ["large-duplicate-first-page", "koni_read_file", "rejected"],
+      ["large-oversized-page", "koni_read_file", "rejected"],
+      ["large-blind-page", "koni_read_file", "rejected"],
       ["large-search", "koni_search_files", "accepted"],
       ["large-targeted-page", "koni_read_file", "accepted"],
+      ["large-outside-search-window", "koni_read_file", "rejected"],
       ["large-submit", "koni_submit_output", "accepted"],
+    ]);
+    client.close();
+  });
+
+  it("records a correctable discovery denial as a durable model-visible rejection", async () => {
+    const root = await repository();
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program: questionProgram("correctable-rejection"),
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const created = await client.request(
+      "run.create",
+      {
+        objective: "Recover from one correctable discovery denial",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Recover from one correctable discovery denial" },
+      },
+      { expectedRevision: 0, idempotencyKey: "create-correctable-rejection-run" },
+    );
+    const runId = (created.result as { runId: string }).runId;
+
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      if (current.lifecycle.phase === "blocked") {
+        throw new Error(
+          `correctable rejection run blocked: ${current.lifecycle.blocker ?? "unknown blocker"}`,
+        );
+      }
+      return current.lifecycle.phase === "awaiting_approval";
+    });
+    const planned = await engine.store.getRun(runId);
+    expect(Object.values(planned.attempts)[0]!.authorityToolResults).toEqual([
+      expect.objectContaining({
+        callId: "out-of-scope-search",
+        toolName: "koni_search_files",
+        outcome: "rejected",
+      }),
+      expect.objectContaining({
+        callId: "rejection-submit",
+        toolName: "koni_submit_output",
+        outcome: "accepted",
+      }),
+    ]);
+    client.close();
+  });
+
+  it("rolls back rejected compiler mutations and leaves integrity errors fatal", async () => {
+    const root = await repository();
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program: questionProgram("rejection-boundary"),
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const objective = "Reject without leaking compiler state";
+    const created = await client.request(
+      "run.create",
+      {
+        objective,
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: objective },
+      },
+      { expectedRevision: 0, idempotencyKey: "create-rejection-boundary-run" },
+    );
+    const runId = (created.result as { runId: string }).runId;
+
+    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "blocked");
+    const blocked = await engine.store.getRun(runId);
+    expect(blocked.lifecycle.blocker).toContain("compiler-issued resource bytes changed");
+    expect(blocked.objective).toBe(objective);
+    expect(Object.values(blocked.attempts)[0]!.authorityToolResults).toEqual([
+      expect.objectContaining({
+        callId: "rollback-rejection",
+        toolName: "koni_record_note",
+        outcome: "rejected",
+      }),
+    ]);
+    client.close();
+  });
+
+  it("records a correctable workspace denial without applying the write", async () => {
+    const root = await repository();
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program: questionProgram("workspace-rejection"),
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const created = await client.request(
+      "run.create",
+      {
+        objective: "Continue after a denied workspace write",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Continue after a denied workspace write" },
+      },
+      { expectedRevision: 0, idempotencyKey: "create-workspace-rejection-run" },
+    );
+    const runId = (created.result as { runId: string }).runId;
+
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      if (current.lifecycle.phase === "blocked") {
+        throw new Error(
+          `workspace rejection run blocked: ${current.lifecycle.blocker ?? "unknown"}`,
+        );
+      }
+      return current.lifecycle.phase === "awaiting_approval";
+    });
+    const planned = await engine.store.getRun(runId);
+    expect(Object.values(planned.attempts)[0]!.authorityToolResults).toEqual([
+      expect.objectContaining({
+        callId: "out-of-scope-write",
+        toolName: "koni_write_file",
+        outcome: "rejected",
+      }),
+      expect.objectContaining({
+        callId: "workspace-rejection-submit",
+        toolName: "koni_submit_output",
+        outcome: "accepted",
+      }),
     ]);
     client.close();
   });
@@ -221,7 +375,13 @@ describe("run authority model tools", () => {
 });
 
 function questionProgram(
-  mode: "question" | "bounded-read" | "resource-read" = "question",
+  mode:
+    | "question"
+    | "bounded-read"
+    | "resource-read"
+    | "correctable-rejection"
+    | "rejection-boundary"
+    | "workspace-rejection" = "question",
 ): RunCompilerProgram {
   const terminalSchema = Type.Object({ result: Type.String() }, { additionalProperties: false });
   const names: KoniToolName[] =
@@ -229,7 +389,13 @@ function questionProgram(
       ? ["koni_read_file", "koni_search_files", "koni_submit_output"]
       : mode === "resource-read"
         ? ["koni_read_resource", "koni_submit_output"]
-        : ["koni_read_file", "koni_ask_question", "koni_submit_output"];
+        : mode === "correctable-rejection"
+          ? ["koni_search_files", "koni_submit_output"]
+          : mode === "rejection-boundary"
+            ? ["koni_record_note", "koni_submit_output"]
+            : mode === "workspace-rejection"
+              ? ["koni_write_file", "koni_submit_output"]
+              : ["koni_read_file", "koni_ask_question", "koni_submit_output"];
   return {
     async resolveRun(request) {
       return {
@@ -294,7 +460,7 @@ function questionProgram(
         generation: input.run.generation,
         allowedTools: names,
         readPaths: mode === "bounded-read" ? ["large.ts"] : ["README.md"],
-        writePaths: [],
+        writePaths: mode === "workspace-rejection" ? ["notes.txt"] : [],
         expectedRevision: input.nextAuthorityRevision,
         expectedStateHash: input.expectedAuthorityStateHash,
       };
@@ -413,7 +579,13 @@ function questionProgram(
             ? new BoundedReadAdapter(spec, options.tools)
             : mode === "resource-read"
               ? new ResourceReadAdapter(spec, options.tools)
-              : new QuestionAdapter(spec, options.tools)) satisfies ManagedPiSessionFactory,
+              : mode === "question"
+                ? new QuestionAdapter(spec, options.tools)
+                : new RejectionAdapter(
+                    spec,
+                    options.tools,
+                    mode,
+                  )) satisfies ManagedPiSessionFactory,
       };
     },
     async compilePlanningOutput() {
@@ -440,6 +612,14 @@ function questionProgram(
     },
     async initializeApprovedPlan() {
       throw new Error("not used");
+    },
+    async executeAgentTool({ run, call }) {
+      if (mode !== "rejection-boundary") throw new Error("not used");
+      if (call.callId === "rollback-rejection") {
+        run.objective = "LEAKED REJECTED MUTATION";
+        throw new AuthorityRpcError("read_page_size", "Correctable compiler denial");
+      }
+      throw new AuthorityRpcError("resource_hash", "compiler-issued resource bytes changed");
     },
     async compileAssignmentOutput() {
       throw new Error("not used");
@@ -483,19 +663,11 @@ class QuestionAdapter implements PiSessionAdapter {
     if (JSON.stringify(replayedRead) !== JSON.stringify(firstRead)) {
       throw new Error("idempotent repository replay changed its accepted result");
     }
-    try {
-      await readTool.execute("read-two", readArgs, this.#abort.signal);
-      throw new Error("repository-call ceiling accepted a second unique read");
-    } catch (error) {
-      if (
-        !(error instanceof Error) ||
-        !new Set(["repository_call_budget", "duplicate_repository_discovery"]).has(
-          (error as Error & { code?: string }).code ?? "",
-        )
-      ) {
-        throw error;
-      }
-    }
+    const deniedRead = await readTool.execute("read-two", readArgs, this.#abort.signal);
+    expect(deniedRead.details).toMatchObject({
+      outcome: "rejected",
+      code: "duplicate_repository_discovery",
+    });
     const questionArgs = {
       prompt: "Which behavior should be primary?",
       options: [
@@ -591,27 +763,27 @@ class BoundedReadAdapter implements PiSessionAdapter {
       this.#abort.signal,
     )) as { details?: { value?: { sizeBytes?: number; eof?: boolean } } };
     expect(first.details?.value).toMatchObject({ sizeBytes: expect.any(Number), eof: false });
-    await expect(
-      read.execute(
-        "large-duplicate-first-page",
-        { path: "large.ts", offset: 0, maxBytes: 32 * 1024 },
-        this.#abort.signal,
-      ),
-    ).rejects.toMatchObject({ code: "duplicate_repository_discovery" });
-    await expect(
-      read.execute(
-        "large-oversized-page",
-        { path: "large.ts", offset: 0, maxBytes: 32 * 1024 + 1 },
-        this.#abort.signal,
-      ),
-    ).rejects.toMatchObject({ code: "read_page_size" });
-    await expect(
-      read.execute(
-        "large-blind-page",
-        { path: "large.ts", offset: 32 * 1024, maxBytes: 32 * 1024 },
-        this.#abort.signal,
-      ),
-    ).rejects.toMatchObject({ code: "read_search_required" });
+    const duplicate = await read.execute(
+      "large-duplicate-first-page",
+      { path: "large.ts", offset: 0, maxBytes: 32 * 1024 },
+      this.#abort.signal,
+    );
+    expect(duplicate.details).toMatchObject({
+      outcome: "rejected",
+      code: "duplicate_repository_discovery",
+    });
+    const oversized = await read.execute(
+      "large-oversized-page",
+      { path: "large.ts", offset: 0, maxBytes: 32 * 1024 + 1 },
+      this.#abort.signal,
+    );
+    expect(oversized.details).toMatchObject({ outcome: "rejected", code: "read_page_size" });
+    const blind = await read.execute(
+      "large-blind-page",
+      { path: "large.ts", offset: 32 * 1024, maxBytes: 32 * 1024 },
+      this.#abort.signal,
+    );
+    expect(blind.details).toMatchObject({ outcome: "rejected", code: "read_search_required" });
 
     const search = (await this.tool("koni_search_files").execute(
       "large-search",
@@ -629,13 +801,15 @@ class BoundedReadAdapter implements PiSessionAdapter {
       this.#abort.signal,
     )) as { details?: { value?: { content?: string } } };
     expect(targeted.details?.value?.content).toContain("TARGETED_SEAM");
-    await expect(
-      read.execute(
-        "large-outside-search-window",
-        { path: "large.ts", offset: match!.byteOffset - 32 * 1024 - 1, maxBytes: 1 },
-        this.#abort.signal,
-      ),
-    ).rejects.toMatchObject({ code: "read_search_required" });
+    const outsideWindow = await read.execute(
+      "large-outside-search-window",
+      { path: "large.ts", offset: match!.byteOffset - 32 * 1024 - 1, maxBytes: 1 },
+      this.#abort.signal,
+    );
+    expect(outsideWindow.details).toMatchObject({
+      outcome: "rejected",
+      code: "read_search_required",
+    });
     await this.tool("koni_submit_output").execute(
       "large-submit",
       { result: "targeted seam inspected" },
@@ -692,6 +866,88 @@ class ResourceReadAdapter implements PiSessionAdapter {
     await this.tool("koni_submit_output").execute(
       "resource-submit",
       { result: "skill read" },
+      this.#abort.signal,
+    );
+  }
+  public async continue(): Promise<void> {
+    await this.prompt();
+  }
+  public async steer(): Promise<void> {}
+  public async followUp(): Promise<void> {}
+  public async abort(): Promise<void> {
+    this.#abort.abort();
+  }
+  public dispose(): void {}
+
+  private tool(name: KoniToolName): AuthorityBackedTool {
+    const tool = this.tools.find((candidate) => candidate.name === name);
+    if (tool === undefined) throw new Error(`missing authority tool ${name}`);
+    return tool;
+  }
+}
+
+class RejectionAdapter implements PiSessionAdapter {
+  public readonly sessionId: string;
+  public readonly sessionFile: string;
+  readonly #abort = new AbortController();
+
+  public constructor(
+    spec: Readonly<AgentLaunchSpec>,
+    private readonly tools: readonly AuthorityBackedTool[],
+    private readonly mode: "correctable-rejection" | "rejection-boundary" | "workspace-rejection",
+  ) {
+    this.sessionId = spec.identity.sessionId;
+    this.sessionFile = path.join(spec.workspace.sessionDirectory, `${this.sessionId}.jsonl`);
+  }
+
+  public getActiveToolNames(): readonly string[] {
+    return this.tools.map((tool) => tool.name);
+  }
+  public appendMapping(): void {}
+  public subscribe(): () => void {
+    return () => {};
+  }
+  public async prompt(): Promise<void> {
+    if (this.mode === "rejection-boundary") {
+      const rejected = await this.tool("koni_record_note").execute(
+        "rollback-rejection",
+        { nodeId: "claim-one", kind: "observation", body: "Correctable denial" },
+        this.#abort.signal,
+      );
+      expect(rejected.details).toMatchObject({ outcome: "rejected", code: "read_page_size" });
+      await this.tool("koni_record_note").execute(
+        "fatal-integrity",
+        { nodeId: "claim-two", kind: "observation", body: "Fatal integrity fault" },
+        this.#abort.signal,
+      );
+      return;
+    }
+    if (this.mode === "workspace-rejection") {
+      const denied = await this.tool("koni_write_file").execute(
+        "out-of-scope-write",
+        { path: "outside.txt", expectedSha256: null, content: "must not be written\n" },
+        this.#abort.signal,
+      );
+      expect(denied.details).toMatchObject({ outcome: "rejected", code: "write_scope" });
+      await this.tool("koni_submit_output").execute(
+        "workspace-rejection-submit",
+        { result: "continued after denied write" },
+        this.#abort.signal,
+      );
+      return;
+    }
+    const search = this.tool("koni_search_files");
+    const args = { query: "TARGETED_SEAM", roots: ["large.ts"] };
+    const denied = await search.execute("out-of-scope-search", args, this.#abort.signal);
+    expect(denied.details).toMatchObject({
+      outcome: "rejected",
+      code: "read_scope",
+    });
+    const replayed = await search.execute("out-of-scope-search", args, this.#abort.signal);
+    expect(replayed).toEqual(denied);
+    await this.tool("koni_submit_output").execute(
+      "rejection-submit",
+      { result: "continued after correctable denial" },
       this.#abort.signal,
     );
   }
