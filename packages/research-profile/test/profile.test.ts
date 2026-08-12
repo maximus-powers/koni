@@ -383,11 +383,23 @@ describe("research profile registrar", () => {
       "Before submission, reconcile every path-bearing graph field against that evidence ledger and new-output distinction",
     );
     expect(normalizedPlanner).toContain("A failed lookup never authenticates the attempted path");
+    expect(normalizedPlanner).toContain(
+      "Materialize every discovered dependency in the exact graph field from which the downstream operation derives its authority",
+    );
+    expect(normalizedPlanner).toContain(
+      "record every consumed pre-existing repository file in `spec.support_paths` and link each resolved prerequisite through canonical `satisfied_by` before approval",
+    );
     expect(normalizedReference).toContain(
       "Graph write authority does not make grant-affecting fields mutable within the current ticket",
     );
     expect(normalizedReference).toContain(
       "Every pre-existing repository input or mutation target must appear verbatim in accepted repository evidence",
+    );
+    expect(normalizedReference).toContain(
+      "Planning must materialize each discovered dependency in the exact graph field from which downstream authority is projected",
+    );
+    expect(normalizedReference).toContain(
+      "A prose promise to resolve an already-discovered input later is not an authority binding",
     );
   });
 

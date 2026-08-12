@@ -67,6 +67,14 @@ instructions: |
   Resolve one missing exact target with a bounded lookup; if it remains
   unresolved, report the modeling gap rather than serializing the guess.
 
+  Materialize every discovered dependency in the exact graph field from which
+  the downstream operation derives its authority. For a planned Research asset
+  that consumes authenticated inputs, record every consumed pre-existing
+  repository file in `spec.support_paths` and link each resolved prerequisite
+  through canonical `satisfied_by` before approval. This binding lets the
+  compiler grant the later implementation and run steps those exact paths; a
+  prose promise to rediscover known inputs in a fallback ticket is incomplete.
+
   Keep gate-result and research-result contracts semantically distinct. A gate
   verifier reports whether a readiness assertion passes; an empirical runtime
   reports whether observations support, contradict, or leave a claim

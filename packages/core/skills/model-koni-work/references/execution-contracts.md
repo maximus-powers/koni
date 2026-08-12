@@ -32,6 +32,13 @@ new beneath an authenticated ownership or implementation root. Reconcile every p
 against that distinction before submission; resolve a missing exact target with one bounded lookup
 or report the modeling gap.
 
+Planning must materialize each discovered dependency in the exact graph field from which downstream
+authority is projected. Bind the provider relationship and populate its typed path field before
+approval. For example, a Research asset that consumes authenticated repository inputs records those
+files in `spec.support_paths`, and each resolved prerequisite links to its provider through
+canonical `satisfied_by`. A prose promise to resolve an already-discovered input later is not an
+authority binding and leaves the deterministic fallback unable to recover the omitted scope.
+
 Classify a missing resource against the owning result contract before requesting authority. If the
 contract admits absence as a typed negative, incomplete, or inconclusive result, preserve that
 result inside the issued boundary; do not convert it into a required dependency. Treat it as an
