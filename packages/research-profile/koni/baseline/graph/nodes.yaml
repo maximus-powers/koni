@@ -236,6 +236,13 @@ node_types:
       - intervention
       - observation
       description: Whether execution deliberately intervenes on an input/condition or observes a subject at runtime; static or review-only work is not a valid mode.
+    ablation_requirement:
+      type: string
+      required: false
+      enum:
+      - required
+      - not_applicable
+      description: Whether this experiment needs a controlled ablation to support its declared inference, or whether the approved design records that an ablation would add no material discrimination.
     execution_protocol:
       type: string
       required: true

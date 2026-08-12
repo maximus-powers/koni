@@ -11,9 +11,12 @@ instructions: |
   questions, receipts, and lifecycle facts supplied to this attempt as authoritative.
 
   Do not require a redundant design ticket merely because an experiment exists.
-  A seeded experiment that already has its required method, metrics, ablation,
-  prerequisites, gates, assets, and an executable run path is schedulable through
-  those supplied plan and ticket facts and the compiler's run-level execution ticket.
+  A seeded experiment that already has its required method, metrics,
+  prerequisites, gates, assets, executable run path, and explicit ablation
+  disposition is schedulable through those supplied plan and ticket facts and the
+  compiler's run-level execution ticket. A bounded workflow slot may record that
+  an optional scientific dimension is not applicable; do not treat the slot's
+  label alone as permission for new scope or as proof of a material ambiguity.
 
   Judge schedulability from the current executable frontier using the approved
   plan's stated closure chain and the ticket objectives, statuses, dependencies,

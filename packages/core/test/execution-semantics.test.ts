@@ -12,8 +12,8 @@ import { canonicalHash } from "../src/shared/canonical.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const EXPECTED_CATALOG_SHA256 = {
-  "coding-profile": "sha256:10b389b5b785f7196769f01373827192b533180c65314c70468ef328e201a0b2",
-  "research-profile": "sha256:493d7ec67e7998f5c7d743ebb5899fcb4589ffbfbb4e2afe4366fec4158b4edc",
+  "coding-profile": "sha256:e3eb8fe590ce88eda50356d892280a031887eb8fdc76d08e9d89bed6359eac52",
+  "research-profile": "sha256:e3526206c785958a312f44946b15cf13562295658b1ce2943f138ca43f2d9883",
 } as const;
 
 describe("operation/workflow/check semantic catalog", () => {

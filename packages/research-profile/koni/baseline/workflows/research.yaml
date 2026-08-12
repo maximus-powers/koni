@@ -293,7 +293,7 @@ workflows:
     agent: experiment-designer
     depends_on:
     - define-metrics
-    expected_output: controlled ablation graph delta
+    expected_output: explicit ablation requirement plus a controlled ablation graph delta when required, or a bounded not-applicable disposition without new nodes
     validation_action: compile-ticket
     required_receipts:
     - context-pack

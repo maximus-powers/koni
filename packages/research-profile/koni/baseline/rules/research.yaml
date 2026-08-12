@@ -245,9 +245,21 @@ rules:
     - op: edge_count
       relation: metrics
       min: 1
-    - op: edge_count
-      relation: ablations
-      min: 1
+    - any:
+      - all:
+        - op: field_equals
+          field: spec.ablation_requirement
+          value: required
+        - op: edge_count
+          relation: ablations
+          min: 1
+      - all:
+        - op: field_equals
+          field: spec.ablation_requirement
+          value: not_applicable
+        - op: edge_count
+          relation: ablations
+          exact: 0
     - op: edge_count
       relation: requires
       min: 1
@@ -630,9 +642,23 @@ rules:
     - op: edge_count
       relation: metrics
       exact: 0
-    - op: edge_count
-      relation: ablations
-      exact: 0
+    - not:
+        op: field_present
+        field: spec.ablation_requirement
+    - all:
+      - op: field_equals
+        field: spec.ablation_requirement
+        value: required
+      - op: edge_count
+        relation: ablations
+        exact: 0
+    - all:
+      - op: field_equals
+        field: spec.ablation_requirement
+        value: not_applicable
+      - op: edge_count
+        relation: ablations
+        min: 1
     - op: edge_count
       relation: requires
       exact: 0
@@ -640,11 +666,11 @@ rules:
     operation: design-experiment
     registry_entry_id: preparation.experiment.design-experiment
     source_state: experiment-constitution-incomplete
-    target_state: experiment-has-methods-metrics-ablations-prerequisites
+    target_state: experiment-has-complete-constitution
     obligations:
     - experiment.methods
     - experiment.metrics
-    - experiment.ablations
+    - experiment.ablation-disposition
     - experiment.prerequisites
     target_nodes: $target
     read_scope: $target
@@ -1251,40 +1277,55 @@ rules:
                       op: current_receipt
                       subject: $experiment_run
                       receipt_type: runtime.receipt
-                - op: edge_count
-                  subject: $experiment
-                  relation: ablations
-                  min: 1
-                - for_all:
-                    select:
-                      traverse:
-                        from: $experiment
-                        relation: ablations
-                        direction: outgoing
-                        max_depth: 1
-                        node_types:
-                        - ablation
-                    bind: descendant_ablation
-                    satisfies:
-                      all:
-                      - op: edge_count
-                        subject: $descendant_ablation
-                        relation: runs
-                        min: 1
-                      - for_all:
-                          select:
-                            traverse:
-                              from: $descendant_ablation
-                              relation: runs
-                              direction: outgoing
-                              max_depth: 1
-                              node_types:
-                              - run
-                          bind: ablation_run
-                          satisfies:
-                            op: current_receipt
-                            subject: $ablation_run
-                            receipt_type: runtime.receipt
+                - any:
+                  - all:
+                    - op: field_equals
+                      subject: $experiment
+                      field: spec.ablation_requirement
+                      value: required
+                    - op: edge_count
+                      subject: $experiment
+                      relation: ablations
+                      min: 1
+                    - for_all:
+                        select:
+                          traverse:
+                            from: $experiment
+                            relation: ablations
+                            direction: outgoing
+                            max_depth: 1
+                            node_types:
+                            - ablation
+                        bind: descendant_ablation
+                        satisfies:
+                          all:
+                          - op: edge_count
+                            subject: $descendant_ablation
+                            relation: runs
+                            min: 1
+                          - for_all:
+                              select:
+                                traverse:
+                                  from: $descendant_ablation
+                                  relation: runs
+                                  direction: outgoing
+                                  max_depth: 1
+                                  node_types:
+                                  - run
+                              bind: ablation_run
+                              satisfies:
+                                op: current_receipt
+                                subject: $ablation_run
+                                receipt_type: runtime.receipt
+                  - all:
+                    - op: field_equals
+                      subject: $experiment
+                      field: spec.ablation_requirement
+                      value: not_applicable
+                    - op: edge_count
+                      subject: $experiment
+                      relation: ablations
+                      exact: 0
     - not:
         exists:
           intersection:

@@ -791,6 +791,99 @@ describe("provider-free domain flows", () => {
     ).toEqual([]);
   });
 
+  it("synthesizes evidence only after every disposition-required run has a current receipt", async () => {
+    const root = await temporaryRoot();
+    const configuration = compileProfile("research-profile");
+    const cases = [
+      {
+        name: "not applicable with experiment receipt",
+        disposition: "not_applicable",
+        hasAblation: false,
+        receiptBindings: [["experiment_run", "run-experiment", "receipt-experiment"]],
+        emits: true,
+      },
+      {
+        name: "not applicable without experiment receipt",
+        disposition: "not_applicable",
+        hasAblation: false,
+        receiptBindings: [],
+        emits: false,
+      },
+      {
+        name: "required with experiment and ablation receipts",
+        disposition: "required",
+        hasAblation: true,
+        receiptBindings: [
+          ["experiment_run", "run-experiment", "receipt-experiment"],
+          ["ablation_run", "run-ablation", "receipt-ablation"],
+        ],
+        emits: true,
+      },
+      {
+        name: "required without ablation receipt",
+        disposition: "required",
+        hasAblation: true,
+        receiptBindings: [["experiment_run", "run-experiment", "receipt-experiment"]],
+        emits: false,
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const claim = node("claim-synthesis", "claim", "Bounded claim", "active");
+      const experimentRun = node("run-experiment", "run", "Experiment run", "active");
+      const ablationRun = node("run-ablation", "run", "Ablation run", "active");
+      const ablation = node(
+        "ablation-synthesis",
+        "ablation",
+        "Controlled ablation",
+        "active",
+        {},
+        { runs: [ablationRun.id] },
+      );
+      const experiment = node(
+        "experiment-synthesis",
+        "experiment",
+        "Bounded experiment",
+        "active",
+        { ablation_requirement: testCase.disposition },
+        {
+          runs: [experimentRun.id],
+          ...(testCase.hasAblation ? { ablations: [ablation.id] } : {}),
+        },
+      );
+      const hypothesis = node(
+        "hypothesis-synthesis",
+        "hypothesis",
+        "Bounded hypothesis",
+        "active",
+        {},
+        { claims: [claim.id], experiments: [experiment.id] },
+      );
+      const graph = projection([
+        hypothesis,
+        claim,
+        experiment,
+        experimentRun,
+        ...(testCase.hasAblation ? [ablation, ablationRun] : []),
+      ]);
+      const evidence = boundRuntimeEvidence(configuration, graph, testCase.receiptBindings);
+      const adapter = await createProductionRuleDomainAdapter({
+        configuration,
+        graph,
+        projectRoot: root,
+        evidence,
+      });
+      const result = evaluateConfiguredRules(
+        { configuration, graph },
+        { ruleIds: ["ticket.synthesize-evidence"], adapter },
+      );
+
+      expect(result.ok, `${testCase.name}: ${diagnostics(result)}`).toBe(true);
+      if (!result.ok) continue;
+      expect(result.value.tickets, testCase.name).toHaveLength(testCase.emits ? 1 : 0);
+    }
+  });
+
   it("lets only an authenticated passing review promote the authored research evidence candidate", async () => {
     const root = await temporaryRoot();
     const configuration = compileProfile("research-profile");
@@ -1626,6 +1719,48 @@ function runtimeEvidence(
       receipt_type: "runtime.receipt",
     };
     const bindings = { covered_run: [runId] };
+    const key = rulePredicateEvidenceKey({
+      configurationSha256: configuration.configuration_sha256,
+      inputGraphSha256,
+      leaf,
+      subjectNodeId: runId,
+      bindings,
+    });
+    predicates[key] = {
+      key,
+      result: true,
+      recordedAt: NOW,
+      sourceReceiptIds: [receiptId],
+      leaf,
+      subjectNodeId: runId,
+      bindings,
+    };
+  }
+  return createRuleAuthorityEvidence({
+    protocol: RULE_AUTHORITY_EVIDENCE_PROTOCOL,
+    configurationSha256: configuration.configuration_sha256,
+    inputGraphSha256,
+    predicates,
+  });
+}
+
+function boundRuntimeEvidence(
+  configuration: CompiledConfiguration,
+  graph: CompilerGraphProjection,
+  receipts: readonly (readonly [binding: string, runId: string, receiptId: string])[],
+): RuleAuthorityEvidence {
+  const inputGraphSha256 = ruleInputGraphSha256(configuration, graph);
+  const predicates: Record<
+    Sha256Digest,
+    import("../src/compiler/domain-adapter.js").RulePredicateEvidence
+  > = {};
+  for (const [binding, runId, receiptId] of receipts) {
+    const leaf: ConfigurationObject = {
+      op: "current_receipt",
+      subject: `$${binding}`,
+      receipt_type: "runtime.receipt",
+    };
+    const bindings = { [binding]: [runId] };
     const key = rulePredicateEvidenceKey({
       configurationSha256: configuration.configuration_sha256,
       inputGraphSha256,

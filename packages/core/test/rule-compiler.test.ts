@@ -204,7 +204,7 @@ describe("deterministic graph expression and rule compiler", () => {
       "experiment",
       "Run A",
       "draft",
-      {},
+      { ablation_requirement: "required" },
       {
         methods: ["method-a"],
         metrics: ["metric-a"],
@@ -243,6 +243,127 @@ describe("deterministic graph expression and rule compiler", () => {
     expect(result.value.input_graph_sha256).not.toBe(result.value.derived_graph_sha256);
     expect(result.value.tickets).toHaveLength(1);
     expect(result.value.tickets[0]?.operation_registry_id).toBe("execution.node.compile-run-plan");
+  });
+
+  it("compiles an observation plan when its experiment records that ablation is not applicable", () => {
+    const configuration = compileProfile("research-profile");
+    const experiment = node(
+      "experiment-observation",
+      "experiment",
+      "Bounded observation",
+      "draft",
+      { ablation_requirement: "not_applicable" },
+      {
+        methods: ["method-observation"],
+        metrics: ["metric-observation"],
+        requires: ["prerequisite-observation"],
+      },
+    );
+    const graph = projection([
+      experiment,
+      node("method-observation", "method", "Method", "draft"),
+      node("metric-observation", "metric", "Metric", "draft"),
+      node("prerequisite-observation", "prerequisite", "Prerequisite", "draft"),
+    ]);
+    const adapter: RuleDomainAdapter = {
+      evaluatePredicate: () => false,
+      selectPolicy: () => [],
+    };
+    const result = evaluateConfiguredRules(
+      { configuration, graph },
+      {
+        ruleIds: [
+          "readiness.experiment-constitution",
+          "ticket.experiment-constitution",
+          "ticket.compile-run-plan",
+        ],
+        includeGatePolicyFacts: true,
+        adapter,
+      },
+    );
+
+    expect(result.ok, diagnostics(result)).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.tickets).toHaveLength(1);
+    expect(result.value.tickets[0]?.operation_registry_id).toBe("execution.node.compile-run-plan");
+  });
+
+  it("routes every ablation disposition state to constitution repair or run planning", () => {
+    const configuration = compileProfile("research-profile");
+    const adapter: RuleDomainAdapter = {
+      evaluatePredicate: () => false,
+      selectPolicy: () => [],
+    };
+    const cases = [
+      { name: "missing disposition", disposition: undefined, hasAblation: false, ready: false },
+      {
+        name: "required without ablation",
+        disposition: "required",
+        hasAblation: false,
+        ready: false,
+      },
+      {
+        name: "not applicable with dangling ablation",
+        disposition: "not_applicable",
+        hasAblation: true,
+        ready: false,
+      },
+      { name: "required with ablation", disposition: "required", hasAblation: true, ready: true },
+      {
+        name: "not applicable without ablation",
+        disposition: "not_applicable",
+        hasAblation: false,
+        ready: true,
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const suffix = testCase.name.replaceAll(" ", "-");
+      const methodId = `method-${suffix}`;
+      const metricId = `metric-${suffix}`;
+      const prerequisiteId = `prerequisite-${suffix}`;
+      const ablationId = `ablation-${suffix}`;
+      const graph = projection([
+        node(
+          `experiment-${suffix}`,
+          "experiment",
+          testCase.name,
+          "draft",
+          testCase.disposition === undefined ? {} : { ablation_requirement: testCase.disposition },
+          {
+            methods: [methodId],
+            metrics: [metricId],
+            requires: [prerequisiteId],
+            ...(testCase.hasAblation ? { ablations: [ablationId] } : {}),
+          },
+        ),
+        node(methodId, "method", "Method", "draft"),
+        node(metricId, "metric", "Metric", "draft"),
+        node(prerequisiteId, "prerequisite", "Prerequisite", "draft"),
+        ...(testCase.hasAblation ? [node(ablationId, "ablation", "Ablation", "draft")] : []),
+      ]);
+      const result = evaluateConfiguredRules(
+        { configuration, graph },
+        {
+          ruleIds: [
+            "readiness.experiment-constitution",
+            "ticket.experiment-constitution",
+            "ticket.compile-run-plan",
+          ],
+          includeGatePolicyFacts: true,
+          adapter,
+        },
+      );
+
+      expect(result.ok, `${testCase.name}: ${diagnostics(result)}`).toBe(true);
+      if (!result.ok) continue;
+      expect(result.value.tickets, testCase.name).toHaveLength(1);
+      expect(result.value.tickets[0]?.operation_registry_id, testCase.name).toBe(
+        testCase.ready
+          ? "execution.node.compile-run-plan"
+          : "preparation.experiment.design-experiment",
+      );
+    }
   });
 
   it("repairs pinned research rules that gate run planning on final readiness", () => {

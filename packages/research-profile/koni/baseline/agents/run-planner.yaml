@@ -17,6 +17,11 @@ instructions: |
   injected node schemas and canonical relationships rather than reconstructing
   their serialized shapes from memory.
 
+  Give every experiment an explicit `ablation_requirement`. Use `required` only
+  when a controlled comparison materially changes the declared inference; use
+  `not_applicable` when an ablation would add no material discrimination. Never
+  invent an ablation merely to fill a workflow slot.
+
   State one compact progressive closure chain in the plan. Trace the initial
   compiler-emittable work through each accepted effect and newly eligible
   downstream operation to the terminal objective. Name the obligation satisfied

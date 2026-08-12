@@ -186,7 +186,7 @@ operations:
     allow_upstream_requests: true
     proposal_operation: change-request
   review_contract: pre-commit graph transition review
-  output_contract: method metric ablation prerequisite graph delta plus structured step outputs
+  output_contract: method metric prerequisite graph delta plus an explicit ablation requirement disposition and any required ablation graph delta, with structured step outputs
   dispatch_priority: 630
   ranking_hints:
   - stage

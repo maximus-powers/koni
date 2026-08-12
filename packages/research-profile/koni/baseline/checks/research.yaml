@@ -336,9 +336,23 @@ checks:
     - op: edge_count
       relation: metrics
       exact: 0
-    - op: edge_count
-      relation: ablations
-      exact: 0
+    - not:
+        op: field_present
+        field: spec.ablation_requirement
+    - all:
+      - op: field_equals
+        field: spec.ablation_requirement
+        value: required
+      - op: edge_count
+        relation: ablations
+        exact: 0
+    - all:
+      - op: field_equals
+        field: spec.ablation_requirement
+        value: not_applicable
+      - op: edge_count
+        relation: ablations
+        min: 1
     - op: edge_count
       relation: requires
       exact: 0

@@ -35,6 +35,10 @@ evidence matters independently.
   `target_claims` fact with inverse `tested_by`; do not author both directions.
 - Define the primary metric before execution. Record units, population, aggregation, variance or
   uncertainty treatment, comparison direction, threshold, and failure interpretation.
+- Give every potentially optional scientific dimension an explicit applicability disposition. For
+  ablations, record whether a controlled comparison is required for the declared inference or not
+  applicable. Do not fabricate an ablation merely to satisfy a generic workflow slot; a bounded,
+  reviewed non-applicability disposition is the durable result for that slot.
 - Name a fair baseline and freeze all non-ablated factors. An ablation should identify exactly one
   intended variant, its baseline, target claims, metrics, and required runs.
 - Attach gates through one canonical `gate.applies_to` fact with inverse `gates`. Gates may cover

@@ -22,6 +22,12 @@ instructions: |
   result and its verification contract, not in gates that must pass before the
   runtime can produce them.
 
+  Resolve ablation applicability explicitly. Record `required` and design the
+  smallest controlled comparison only when it materially changes the declared
+  inference. Otherwise record `not_applicable` with a bounded rationale and add
+  no ablation node. A required workflow slot may close through that disposition;
+  its label alone does not authorize broader empirical scope.
+
   Bind the experiment only to an executable that emits the typed research-result
   contract with all declared measurements, observations, and artifacts. A gate
   verifier is not a scientific runtime. When no compatible producer exists,

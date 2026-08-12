@@ -626,6 +626,98 @@ describe("research profile registrar", () => {
     );
   });
 
+  it("records ablation applicability without forcing scientifically redundant work", async () => {
+    const [nodeSource, ruleSource, checkSource, workflowSource, operationSource] =
+      await Promise.all([
+        readFile(path.resolve(import.meta.dirname, "../koni/baseline/graph/nodes.yaml"), "utf8"),
+        readFile(path.resolve(import.meta.dirname, "../koni/baseline/rules/research.yaml"), "utf8"),
+        readFile(
+          path.resolve(import.meta.dirname, "../koni/baseline/checks/research.yaml"),
+          "utf8",
+        ),
+        readFile(
+          path.resolve(import.meta.dirname, "../koni/baseline/workflows/research.yaml"),
+          "utf8",
+        ),
+        readFile(
+          path.resolve(import.meta.dirname, "../koni/baseline/operations/research.yaml"),
+          "utf8",
+        ),
+      ]);
+    const nodeDocument = YAML.parse(nodeSource) as {
+      node_types: Array<{
+        id: string;
+        fields?: Record<string, { type: string; required?: boolean; enum?: string[] }>;
+      }>;
+    };
+    const ruleDocument = YAML.parse(ruleSource) as {
+      rules: Array<{
+        id: string;
+        when?: unknown;
+        emit?: { obligations?: string[] };
+      }>;
+    };
+    const checkDocument = YAML.parse(checkSource) as {
+      checks: Array<{ id: string; predicate?: unknown }>;
+    };
+    const workflowDocument = YAML.parse(workflowSource) as {
+      workflows: Array<{
+        id: string;
+        steps: Array<{ id: string; expected_output: string }>;
+      }>;
+    };
+    const operationDocument = YAML.parse(operationSource) as {
+      operations: Array<{ id: string; output_contract?: string }>;
+    };
+
+    expect(
+      nodeDocument.node_types.find(({ id }) => id === "experiment")?.fields?.ablation_requirement,
+    ).toMatchObject({
+      type: "string",
+      required: false,
+      enum: ["required", "not_applicable"],
+    });
+
+    const readiness = ruleDocument.rules.find(
+      ({ id }) => id === "readiness.experiment-constitution",
+    );
+    const ticket = ruleDocument.rules.find(({ id }) => id === "ticket.experiment-constitution");
+    const gapCheck = checkDocument.checks.find(({ id }) => id === "gap.experiment-constitution");
+    const serializedReadiness = JSON.stringify(readiness?.when);
+    const serializedGap = JSON.stringify(ticket?.when);
+
+    expect(serializedReadiness).toContain(
+      '"field":"spec.ablation_requirement","value":"not_applicable"',
+    );
+    expect(serializedReadiness).toContain('"field":"spec.ablation_requirement","value":"required"');
+    expect(serializedGap).toContain('"field":"spec.ablation_requirement"');
+    expect(gapCheck?.predicate).toEqual(ticket?.when);
+    expect(ticket?.emit?.obligations).toContain("experiment.ablation-disposition");
+    expect(ticket?.emit?.obligations).not.toContain("experiment.ablations");
+
+    const workflow = workflowDocument.workflows.find(
+      ({ id }) => id === "design-experiment-constitution",
+    );
+    expect(workflow?.steps.find(({ id }) => id === "plan-ablations")?.expected_output).toContain(
+      "not-applicable disposition",
+    );
+    expect(
+      operationDocument.operations.find(
+        ({ id }) => id === "preparation.experiment.design-experiment",
+      )?.output_contract,
+    ).toContain("ablation requirement disposition");
+
+    const sharedGuidance = await readFile(
+      path.resolve(
+        import.meta.dirname,
+        "../../core/skills/model-koni-work/references/empirical-research.md",
+      ),
+      "utf8",
+    );
+    expect(sharedGuidance).toContain("explicit applicability disposition");
+    expect(sharedGuidance).toContain("Do not fabricate an ablation");
+  });
+
   it("authorizes only the authenticated 1.0.11 release for inert-semantics retirement", async () => {
     const source = await readFile(
       path.resolve(import.meta.dirname, "../koni/profile-manifest.json"),

@@ -2,12 +2,12 @@
   "protocol": "koni.profile-package.v1",
   "package": {
     "name": "@koni/research-profile",
-    "version": "1.1.14"
+    "version": "1.1.15"
   },
   "profile": {
     "id": "research",
     "display_name": "Research",
-    "version": "1.1.14",
+    "version": "1.1.15",
     "lineage": "koni.research"
   },
   "compatibility": {
@@ -50,8 +50,8 @@
       },
       {
         "path": "agents/experiment-designer.yaml",
-        "sha256": "sha256:0f6796458a3261693840e89b6d4d71f871f8bb7d98be357d1a4c3778af65df91",
-        "size_bytes": 3248,
+        "sha256": "sha256:248150e669226de0b5ea2816d5a59318704b9f52c1c1143c138bd40d9402e582",
+        "size_bytes": 3628,
         "kind": "agent"
       },
       {
@@ -74,8 +74,8 @@
       },
       {
         "path": "agents/lead.yaml",
-        "sha256": "sha256:c7f3d25c09f53bf29dab3eced1161fab3492c631b697d83e6b2cdf15f68cd307",
-        "size_bytes": 4870,
+        "sha256": "sha256:537a38255da694b775ca941cfdda76a0e8394fc8b935dc759ae2e1db718fc310",
+        "size_bytes": 5087,
         "kind": "agent"
       },
       {
@@ -104,14 +104,14 @@
       },
       {
         "path": "agents/run-planner.yaml",
-        "sha256": "sha256:9c3e6a7c94b972dbcd1867ae90f5a1960a02482d1a8a023aacc9448a8616ea52",
-        "size_bytes": 5141,
+        "sha256": "sha256:20ad8f4650dd8a7ecd0278ef0e1c1392e8903422d3e51d78787fdfbdba884990",
+        "size_bytes": 5433,
         "kind": "agent"
       },
       {
         "path": "checks/research.yaml",
-        "sha256": "sha256:275f6da8af180fcd2c70ecbaf19c012261e0c76b96bc48d9514feca91b5ba97c",
-        "size_bytes": 11896,
+        "sha256": "sha256:1a4f7ee0033c6e510bf1a101036e0b38f740de55722c5e4e598045d0de7e4af7",
+        "size_bytes": 12254,
         "kind": "config"
       },
       {
@@ -128,19 +128,19 @@
       },
       {
         "path": "graph/nodes.yaml",
-        "sha256": "sha256:4e44feb227b0f8375fc27db01a40fc27e50891bec2c260309deeaf526773ebbd",
-        "size_bytes": 31736,
+        "sha256": "sha256:f1a8653790a02940bc79546fd61ab77426e698492c11cd2f37489e158a35413d",
+        "size_bytes": 32055,
         "kind": "config"
       },
       {
         "path": "operations/research.yaml",
-        "sha256": "sha256:7b2dc498cbf842b177a43361d14a5cd65523d40216dc4dfbedffd6a50f847e57",
-        "size_bytes": 30213,
+        "sha256": "sha256:6c85f57040433a9174a8eecee185126bc7e075410e58c8d03fd1b90a474e4863",
+        "size_bytes": 30293,
         "kind": "config"
       },
       {
         "path": "profile.yaml",
-        "sha256": "sha256:c89fdb2977ea05c0d8ede1d75d47512dd5a3b946df9aca1b650b105547edf500",
+        "sha256": "sha256:6c6c55224ccbbeec1aefd1c3f07cfeed6f135f30d446806901568f5a087dad19",
         "size_bytes": 1319,
         "kind": "config"
       },
@@ -164,8 +164,8 @@
       },
       {
         "path": "rules/research.yaml",
-        "sha256": "sha256:09fd059105d6cd90dea1a1ab2031484a50371a12fdd2800da7a55cbf459b0b8d",
-        "size_bytes": 40238,
+        "sha256": "sha256:42ac3c44897a7b5cdb1860fee67bcd84045a936f30ba0d80a0ab229d8ee84d1c",
+        "size_bytes": 41628,
         "kind": "config"
       },
       {
@@ -188,8 +188,8 @@
       },
       {
         "path": "workflows/research.yaml",
-        "sha256": "sha256:bd4b905fcae337fe5b237ef6e77a4f40dfd32b938c6804c8ba70483bf6ac910d",
-        "size_bytes": 35934,
+        "sha256": "sha256:9712742e29bd67e9c0fdf9fe213a8ba6959ff8f4feefdf2d1e13ae85aa8d4a38",
+        "size_bytes": 36044,
         "kind": "config"
       }
     ]
@@ -206,5 +206,5 @@
       "sha256": "sha256:c807436b04f7d44ea65cce5cfa6ed8cba3c4e5d8d571034f7fecc25c9fd117a5"
     }
   ],
-  "bundle_sha256": "sha256:a968ce46bdd57910990612b5aaa81229bf4029371989a13fb0be9b59f2e97fd2"
+  "bundle_sha256": "sha256:914a874dcf80e42a19c07cb37fed16850cd5758bdb79ff32efbab2e369778f84"
 }
