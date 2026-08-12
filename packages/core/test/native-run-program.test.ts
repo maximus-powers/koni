@@ -3063,6 +3063,7 @@ describe("native compiler-authoritative run program", () => {
     ];
     const stderr = [
       "FAIL src/pages/analysis/index.test.tsx > Customer Analysis guide",
+      "AssertionError: promise rejected \"Error: Cannot find module './components/A… { code: '…' }\" instead of resolving",
       "Error: Cannot find module './components/AnalysisGuideContent' imported from",
       "'/tmp/worktree/apps/books/src/pages/analysis/index.test.tsx'",
       "Caused by: Error: Failed to load url ./components/AnalysisGuideContent (resolved id: ./components/AnalysisGuideContent). Does the file exist?",

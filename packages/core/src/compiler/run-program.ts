@@ -16580,8 +16580,7 @@ function onlyDeclaredLocalModulesAreMissing(
   const missingModulePattern =
     /cannot find module\s+['"]([^'"]+)['"]\s+imported from\s+['"]([^'"]+)['"]/giu;
   const matches = [...output.matchAll(missingModulePattern)];
-  const markerCount = foldedOutput.match(/cannot find module/gu)?.length ?? 0;
-  if (matches.length === 0 || matches.length !== markerCount) return false;
+  if (matches.length === 0) return false;
   // Node/Vite attach ERR_MODULE_NOT_FOUND to both ambient dependency failures and an honest
   // not-yet-created relative production import. The exact specifier/importer proof below is the
   // authority boundary; the generic code marker alone must not override it.
@@ -16616,6 +16615,26 @@ function onlyDeclaredLocalModulesAreMissing(
     );
     if (!declared) return false;
     allowedSpecifiers.add(specifier.toLocaleLowerCase("en-US"));
+  }
+
+  // Test reporters can echo a shortened form of the same causal error before the complete
+  // specifier/importer diagnostic. Admit only an unmistakably truncated prefix of a module that
+  // the complete diagnostics above already bound to an exact declared input. Any other unmatched
+  // missing-module marker remains an infrastructure failure.
+  const unmatchedOutput = output.replace(missingModulePattern, "");
+  const unmatchedMarkerCount =
+    unmatchedOutput.toLocaleLowerCase("en-US").match(/cannot find module/gu)?.length ?? 0;
+  const truncatedEchoes = [
+    ...unmatchedOutput.matchAll(/cannot find module\s+['"]([^'"\n]*?)(?:…|\.\.\.)/giu),
+  ];
+  if (
+    truncatedEchoes.length !== unmatchedMarkerCount ||
+    truncatedEchoes.some((match) => {
+      const prefix = match[1]!.toLocaleLowerCase("en-US");
+      return ![...allowedSpecifiers].some((specifier) => specifier.startsWith(prefix));
+    })
+  ) {
+    return false;
   }
 
   const failedLoads = [...output.matchAll(/failed to load url\s+([^\s(]+)/giu)];
