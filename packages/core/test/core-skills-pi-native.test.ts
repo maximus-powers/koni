@@ -42,6 +42,40 @@ describe("Koni's Pi-native skills", () => {
       "Narrow a role's skill filter only when the reusable technique itself is outside that role",
     );
   });
+
+  it("teaches planners to revise validated artifacts as bounded graph diffs", async () => {
+    const source = await readFile(path.join(skillsRoot, "model-koni-work/SKILL.md"), "utf8");
+    const normalized = source.replace(/\s+/gu, " ");
+
+    expect(normalized).toContain("Treat a planning revision as a three-way diff");
+    expect(normalized).toContain("`upsertNodes` replaces one complete node");
+    expect(normalized).toContain("exact `{ source, relation, target }` triples");
+    expect(normalized).toContain("set difference between the retained and desired edge sets");
+    expect(normalized).toContain("Never add and remove the same edge");
+    expect(normalized).toContain(
+      "repeat a retained edge, use shorthand objects, or create self-edges",
+    );
+    expect(normalized).toContain("Keep every retained or new local key connected");
+    expect(normalized).toContain("an already-retained or replacement path");
+    expect(normalized).toContain("check types, node keys, edge triples, connectivity");
+    expect(normalized).toContain("injected operation limits against the complete result");
+    expect(normalized).toContain(
+      "smallest set of changes that corrects every named validation error",
+    );
+    expect(normalized).toContain("preserve every unrelated valid operation");
+  });
+
+  it("grounds named repository work before modeling it", async () => {
+    const source = await readFile(path.join(skillsRoot, "model-koni-work/SKILL.md"), "utf8");
+    const normalized = source.replace(/\s+/gu, " ");
+
+    expect(normalized).toContain(
+      "Resolve a named repository work item from its authoritative definition before modeling it",
+    );
+    expect(normalized).toContain(
+      "Do not infer its meaning from an identifier, title, or referenced predecessor",
+    );
+  });
 });
 
 async function markdownFiles(root: string): Promise<string[]> {

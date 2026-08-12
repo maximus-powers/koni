@@ -61,8 +61,30 @@ workflow effects.
   a workflow defines required outputs, and an action performs effects.
 - Require current evidence. Bind checks and receipts to exact inputs so changed graph or filesystem
   state invalidates stale proof.
+- Resolve a named repository work item from its authoritative definition before modeling it. Do not
+  infer its meaning from an identifier, title, or referenced predecessor; use those only to locate
+  the repository-owned definition and its evidence inputs.
 - Discover commands and paths from the repository. Never preserve a baseline command, package
   manager, or directory assumption that the project does not own.
+
+## Revise validated plans as diffs
+
+Treat a planning revision as a three-way diff: retained validated artifact, operator steering, and
+desired artifact. Preserve anything the steering does not change.
+
+- `upsertNodes` replaces one complete node; use it only when that node's type, title, or spec
+  changes, and only with an allowed injected type and its exact spec contract.
+- Express every edge with exact `{ source, relation, target }` triples. Compute `addEdges` and
+  `removeEdges` as the set difference between the retained and desired edge sets. Never add and
+  remove the same edge, repeat a retained edge, use shorthand objects, or create self-edges.
+- Keep every retained or new local key connected after all operations materialize. If removing an
+  edge would disconnect a retained node, preserve connectivity through an already-retained or
+  replacement path, or remove the now-obsolete node.
+- Before submission, materialize the patch mentally and check types, node keys, edge triples,
+  connectivity, and the injected operation limits against the complete result.
+- After a validation error, make the smallest set of changes that corrects every named validation
+  error and preserve every unrelated valid operation; do not redesign or resend unrelated graph
+  changes.
 
 ## Build one vertical slice first
 
