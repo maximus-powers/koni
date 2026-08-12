@@ -19,6 +19,7 @@ import {
   approvedChangeObligationInstructions,
   approvedChangeObligationsForTargets,
   approvedChangeObligationsForAttempt,
+  assetImplementationFallbackEligible,
   assertApprovedChangeRuntimeObligations,
   assertFailedReviewDoesNotContradictApprovedChangeRuntimeObligations,
   assertAssetImplementationObligationsPreserved,
@@ -1269,6 +1270,66 @@ describe("native compiler-authoritative run program", () => {
         definitions,
       ),
     ).toEqual(new Set());
+  });
+
+  it("reprojects a completed internal asset workflow for an authenticated planned repair", () => {
+    const proposal = {
+      id: "TK-change-internal-asset",
+      title: "Change request: correct the authenticated support-path contract",
+      status: "proposed",
+      targetNodeIds: ["asset-internal"],
+      steps: [{ id: "scope-change", status: "pending", attemptIds: [] }],
+      executionControl: {
+        proposalRequest: {
+          requestSha256: digest("internal-asset-repair-request"),
+          sourceTicketId: "TK-source-review",
+          sourceStepId: "review",
+          sourceOutputSha256: digest("internal-asset-review-output"),
+          fulfillment: "planned_asset_repair",
+        },
+      },
+    } as unknown as TicketRecord;
+    const source = {
+      id: "TK-source-review",
+      executionControl: {
+        sourceHold: {
+          proposalTicketId: proposal.id,
+          requestSha256: proposal.executionControl!.proposalRequest!.requestSha256,
+        },
+      },
+    } as unknown as TicketRecord;
+    const completedAsset = {
+      id: "TK-asset-completed",
+      operationId: "asset-resolution.asset.implement-asset",
+      status: "completed",
+      targetNodeIds: ["asset-internal"],
+    } as unknown as TicketRecord;
+    const run = {
+      tickets: {
+        [source.id]: source,
+        [proposal.id]: proposal,
+        [completedAsset.id]: completedAsset,
+      },
+    } as Pick<RunRecord, "tickets">;
+    const internalAsset = {
+      id: "asset-internal",
+      type: "asset",
+      spec: {
+        source_strategy: "internal",
+        implementation_plan: {
+          root: "program/assets/internal",
+          files: ["program/assets/internal/run.py"],
+        },
+      },
+    } as unknown as GraphNode;
+
+    expect(assetImplementationFallbackEligible(run, internalAsset)).toBe(true);
+    expect(
+      assetImplementationFallbackEligible(
+        { tickets: { [source.id]: source, [proposal.id]: proposal } },
+        internalAsset,
+      ),
+    ).toBe(false);
   });
 
   it("projects cumulative authenticated planned-asset repair findings to the affected asset", () => {

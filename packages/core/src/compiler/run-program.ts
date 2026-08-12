@@ -13862,6 +13862,25 @@ export function gateProviderRepairScopeFallback(
       ]);
 }
 
+/**
+ * A generated asset always participates in the compatibility implementation projection. An
+ * already-issued implementation workflow also remains the authenticated repair owner when a
+ * pristine planned-asset request arrives after the ordinary readiness predicate has settled.
+ * Requiring that durable historical ticket prevents a request from inventing implementation
+ * authority for an asset that never had it.
+ */
+export function assetImplementationFallbackEligible(
+  run: Pick<RunRecord, "tickets">,
+  node: Pick<GraphNode, "id" | "type" | "spec">,
+): boolean {
+  if (node.type !== "asset") return false;
+  if (node.spec.source_strategy === "generated") return true;
+  return (
+    plannedAssetRepairRequestForNode(run, node.id) !== undefined &&
+    hasExistingAssetImplementationTicket(run, "asset-resolution.asset.implement-asset", node.id)
+  );
+}
+
 async function generatedAssetImplementationFallback(
   run: RunRecord,
   configuration: CompiledConfiguration,
@@ -13874,7 +13893,7 @@ async function generatedAssetImplementationFallback(
 
   const additions: DerivedTicketDefinition[] = [];
   for (const node of graph.nodes()) {
-    if (node.type !== "asset" || node.spec.source_strategy !== "generated") continue;
+    if (!assetImplementationFallbackEligible(run, node)) continue;
     const plan = optionalRecord(node.spec.implementation_plan);
     const root = typeof plan?.root === "string" ? plan.root : undefined;
     const files = Array.isArray(plan?.files)
