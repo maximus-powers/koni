@@ -3056,6 +3056,24 @@ describe("native compiler-authoritative run program", () => {
     ).toContain("test harness failed before its focused assertions ran");
   });
 
+  it("does not let a package-manager child-exit wrapper mask an exact declared expected red", () => {
+    const declaredInputs = [
+      "apps/books/src/pages/analysis/index.test.tsx",
+      "apps/books/src/pages/analysis/components/AnalysisGuideContent.tsx",
+    ];
+    const stderr = [
+      "FAIL src/pages/analysis/index.test.tsx > Customer Analysis guide",
+      "Error: Cannot find module './components/AnalysisGuideContent' imported from",
+      "'/tmp/worktree/apps/books/src/pages/analysis/index.test.tsx'",
+      "Caused by: Error: Failed to load url ./components/AnalysisGuideContent (resolved id: ./components/AnalysisGuideContent). Does the file exist?",
+      "[ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL] Command failed with exit code 1: vitest --run src/pages/analysis/index.test.tsx",
+    ].join("\n");
+
+    expect(
+      commandInfrastructureFailure("Tests 1 failed | 426 passed", stderr, declaredInputs),
+    ).toBe(undefined);
+  });
+
   it("rebinds current check evidence across only non-interfering graph changes", async () => {
     const project = await installedProject("coding-profile");
     await mkdir(path.join(project.projectRoot, "src"), { recursive: true });

@@ -16505,13 +16505,13 @@ export function commandInfrastructureFailure(
   } else if (contains("error: eperm:") && contains("operation not permitted")) {
     cause = "the runtime was denied a required sandbox resource";
   } else if (
-    // A failed subprocess spawn or a package-manager-level exec error happens before the test
-    // runner loads, so it can never be a legitimate test result (observed live: a sandbox
-    // `spawn EPERM` surfaced as `ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL`, exit 1, which fell inside
-    // the configured exit-code range and was silently accepted as the intended red baseline).
+    // A failed subprocess spawn happens before the test runner loads, so it can never be a
+    // legitimate test result. Package managers also append generic child-exit wrappers such as
+    // ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL after a runner has produced an admissible expected red;
+    // the concrete spawn, command, dependency, and collection diagnostics below—not that wrapper
+    // alone—determine whether execution failed before reaching the subject.
     contains("spawn eperm") ||
     contains("spawn eacces") ||
-    contains("err_pnpm_") ||
     contains("node_modules missing") ||
     /(?:^|\n)(?:sh|bash|zsh): [^\n]+: command not found(?:\n|$)/u.test(output) ||
     (contains("corepack") && (contains("eperm") || contains("eacces") || contains("cannot create")))
