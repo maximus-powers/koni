@@ -3366,7 +3366,7 @@ function assertProviderSettlementsMatchTranscript(
           ? entries.length
           : entries.findIndex((entry) => entry.id === nextBaselineId);
       const assistants = entries
-        .slice(baselineIndex + 1, nextBaselineIndex)
+        .slice(baselineIndex + 1, nextBaselineIndex + 1)
         .filter(
           (entry) =>
             entry.type === "message" &&

@@ -3,7 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
-import { assertAutonomousPiSession, readPiSession } from "../src/pi/session-transcript.js";
+import {
+  assertAutonomousPiSession,
+  readPiSession,
+  type PiSessionEntry,
+} from "../src/pi/session-transcript.js";
 import { ManagedPiSession, recoverManagedPiSession } from "../src/pi/managed-session.js";
 import { createAgentLaunchSpec, type AgentLaunchSpec } from "../src/pi/launch-spec.js";
 import { sealPiModelDescriptor } from "../src/pi/model-catalog.js";
@@ -597,7 +601,7 @@ describe("Pi 0.80.10 production session construction", () => {
     );
   });
 
-  it("restores the same session after an authenticated provider request retirement", async () => {
+  it("restores the same session after consecutive authenticated provider request retirements", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "koni-production-retired-provider-"));
     temporary.push(root);
     const cwd = path.join(root, "worktree");
@@ -645,19 +649,38 @@ describe("Pi 0.80.10 production session construction", () => {
       timestamp: Date.now(),
     });
     const aborted = await readPiSession(file);
-    const assistant = aborted.entries.at(-1)!;
-    const retirementMaterial = {
-      protocol: "koni.provider-exposure-retirement.v1" as const,
-      disposition: "operator_acknowledged_canonical_abort" as const,
-      assistantEntryId: assistant.id,
-      assistantEntrySha256: canonicalHash(assistant),
-      responseId: assistant.id,
-      authorizationSha256: rawSha256("retired-provider-authorization"),
-      retiredAt: new Date().toISOString(),
-    };
-    const retirement = {
-      ...retirementMaterial,
-      sha256: canonicalHash(retirementMaterial),
+    const firstAssistant = aborted.entries.at(-1)!;
+    manager.appendMessage({
+      role: "assistant",
+      content: [],
+      api: spec.model.api as "openai-codex-responses",
+      provider: spec.model.provider,
+      model: spec.model.id,
+      usage: {
+        input: 7,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 7,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "aborted",
+      errorMessage: "This operation was aborted",
+      timestamp: Date.now(),
+    });
+    const twiceAborted = await readPiSession(file);
+    const secondAssistant = twiceAborted.entries.at(-1)!;
+    const retirementFor = (assistant: PiSessionEntry, suffix: string) => {
+      const material = {
+        protocol: "koni.provider-exposure-retirement.v1" as const,
+        disposition: "operator_acknowledged_canonical_abort" as const,
+        assistantEntryId: assistant.id,
+        assistantEntrySha256: canonicalHash(assistant),
+        responseId: assistant.id,
+        authorizationSha256: rawSha256(`retired-provider-authorization-${suffix}`),
+        retiredAt: new Date().toISOString(),
+      };
+      return { ...material, sha256: canonicalHash(material) };
     };
     const providerRequests = [
       {
@@ -670,7 +693,19 @@ describe("Pi 0.80.10 production session construction", () => {
         prospectiveInputTokens: 128 + 4 * 1024,
         reservedOutputTokens: spec.model.catalogMaxTokens,
         baselineEntryId,
-        retirement,
+        retirement: retirementFor(firstAssistant, "one"),
+      },
+      {
+        sequence: 2,
+        reservationId: "provider-retired-two",
+        api: spec.model.api,
+        modelId: spec.model.id,
+        payloadSha256: rawSha256("retired-provider-payload-two"),
+        payloadSizeBytes: 128,
+        prospectiveInputTokens: 128 + 4 * 1024,
+        reservedOutputTokens: spec.model.catalogMaxTokens,
+        baselineEntryId: firstAssistant.id,
+        retirement: retirementFor(secondAssistant, "two"),
       },
     ] satisfies NonNullable<KoniAttemptRecoveryState["providerRequests"]>;
     const recovered = await recoverManagedPiSession(spec, {
