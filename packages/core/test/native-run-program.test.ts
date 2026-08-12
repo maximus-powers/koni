@@ -3428,7 +3428,7 @@ describe("native compiler-authoritative run program", () => {
 
     expect(await program.controlCatalog()).toMatchObject({
       protocol: "koni.control-catalog.v1",
-      defaultRunTypeId: "continuous-improvement",
+      defaultRunTypeId: "medium",
       runTypes: expect.arrayContaining([expect.objectContaining({ id: "medium" })]),
     });
   }, 30_000);

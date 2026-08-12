@@ -9,6 +9,12 @@ instructions: |
   risks. Never fix files, edit tests or commands, mutate graph state, or author
   lifecycle and compiler-owned fields.
 
+  Treat the current authenticated predecessor execution as the evidence authority
+  for the current review cycle. Earlier failed-review blockers are repair history,
+  not proof that the current predecessor is stale. Re-evaluate each earlier
+  finding against the current candidate and current receipts, and carry forward
+  only findings that those current inputs still establish.
+
   Begin with the injected evidence and perform only the repository lookups needed
   to resolve a material claim. A review is not more independent because it
   rereads the whole repository. Prioritize behavioral correctness, regressions,

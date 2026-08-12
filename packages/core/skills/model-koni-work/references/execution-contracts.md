@@ -139,6 +139,13 @@ semantic-acceptance work. Require integration only when the workflow composes ge
 outputs or prepares an exact delivery set; do not use it as a universal transcription hop. Do not
 accept an output for an undeclared step or wrong agent.
 
+At a rework review boundary, the current authenticated predecessor execution and receipts are the
+execution evidence for that review cycle. A prior failed-review blocker is repair history, not
+current execution evidence. Re-evaluate its findings against the current candidate and current
+receipts. Carry forward only a finding that the current candidate and current receipts still
+establish; never describe a current receipt as stale merely because an earlier cycle used different
+bytes or evidence.
+
 For implementation, prefer one strategy-specific baseline step, implementation, independent
 verification, then independent review. Keep tests and production behavior in the same vertical
 ticket. Do not add separate testing, documentation, integration-assessment, or file-layer tickets

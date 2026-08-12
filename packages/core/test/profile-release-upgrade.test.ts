@@ -25,9 +25,9 @@ const releases = [
     directory: "coding-profile",
     fixtureDirectory: "coding-0.7.0",
     oldVersion: "0.7.0",
-    newVersion: "0.8.9",
+    newVersion: "0.8.10",
     oldBundleSha256: "sha256:4e955f7fb5a6bbd58542f395471d2e3f1c87364840abd218f973b8f62a5c0c7e",
-    newBundleSha256: "sha256:4576cf223dd428227e70fdc9cc7ed6618d4c4a056845ffe9848aa92443f41db5",
+    newBundleSha256: "sha256:20b9256e838243dba3909526c728d70e46085a6ae0d39f866d07b82bdfe57f3e",
     parallelism: { source: 5, project: 7 },
   },
   {
@@ -35,9 +35,9 @@ const releases = [
     directory: "research-profile",
     fixtureDirectory: "research-1.0.11",
     oldVersion: "1.0.11",
-    newVersion: "1.1.24",
+    newVersion: "1.1.25",
     oldBundleSha256: "sha256:1bc8bdb64934ccd475f50acad5b22a7b1b6f7e168a748ecd91e234be76126c60",
-    newBundleSha256: "sha256:c77caaf23423e6dac7eab092c0783ea475156f9f3caa42d86d7be568455ffdec",
+    newBundleSha256: "sha256:afca7b91b505e8af1263d2237c2a1a51c19a33c831dfdace6f8f362fb4f09192",
     parallelism: { source: 64, project: 17 },
   },
 ] as const;

@@ -269,6 +269,17 @@ runner and working directory, required setup and environment, direct dependencie
 harness conventions, and the real callable seams or consumers for every oracle case. If any material
 entry is missing, correct the model or request authority before asking a proof author to guess.
 
+Build that ledger from inspected repository content before serializing the proof. A filename in a
+listing or search result authenticates identity, not its command, environment, or convention
+semantics. Read the smallest authoritative manifests, runner configuration, setup, compilation or
+module configuration, and established proof examples needed to support the chosen command and
+harness. Place every repository input relied on by the selected proof in exactly the proof field
+matching its authority role: executable or proof-owned bytes in `source_paths`, claimed product
+seams in `covered_paths`, and read-only environment or convention evidence in `support_paths`.
+Discard inspected alternatives that the selected proof does not use. Do not serialize the proof
+while any command, environment, dependency, or harness claim remains supported only by a familiar
+name or remembered convention.
+
 Design the proof as executable behavior, not source inspection. Exercise each declared route through
 its production seam, keep the routes independently reachable, and isolate an expected absence so it
 cannot hide setup failure or prevent existing behavior from executing. Accept a historical signal

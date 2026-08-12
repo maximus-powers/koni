@@ -379,6 +379,31 @@ describe("research profile registrar", () => {
     );
   });
 
+  it("reviews each rework cycle against its current authenticated predecessor", async () => {
+    const [reviewerSource, executionReference] = await Promise.all([
+      readFile(path.resolve(import.meta.dirname, "../koni/baseline/agents/reviewer.yaml"), "utf8"),
+      readFile(
+        path.resolve(
+          import.meta.dirname,
+          "../../core/skills/model-koni-work/references/execution-contracts.md",
+        ),
+        "utf8",
+      ),
+    ]);
+    const normalizedReviewer = reviewerSource.replace(/\s+/gu, " ");
+    const normalizedExecutionReference = executionReference.replace(/\s+/gu, " ");
+
+    expect(normalizedReviewer).toContain(
+      "Treat the current authenticated predecessor execution as the evidence authority for the current review cycle",
+    );
+    expect(normalizedReviewer).toContain(
+      "Re-evaluate each earlier finding against the current candidate and current receipts",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "A prior failed-review blocker is repair history, not current execution evidence",
+    );
+  });
+
   it("authenticates planned paths and routes grant-changing repairs", async () => {
     const [plannerSource, executionReference] = await Promise.all([
       readFile(

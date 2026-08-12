@@ -58,7 +58,7 @@ describe("standalone Configure document authority", () => {
       documentId: projectDocument.id,
       catalogToken: catalog.catalogToken,
     });
-    expect(source.source).toContain("default_run_type: continuous-improvement");
+    expect(source.source).toContain("default_run_type: medium");
     expect(source.document.capabilities).toMatchObject({
       update: true,
       rename: false,

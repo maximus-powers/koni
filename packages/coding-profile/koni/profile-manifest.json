@@ -2,12 +2,12 @@
   "protocol": "koni.profile-package.v1",
   "package": {
     "name": "@koni/coding-profile",
-    "version": "0.8.9"
+    "version": "0.8.10"
   },
   "profile": {
     "id": "software",
     "display_name": "Coding",
-    "version": "0.8.9",
+    "version": "0.8.10",
     "lineage": "koni.software"
   },
   "compatibility": {
@@ -62,8 +62,8 @@
       },
       {
         "path": "agents/reviewer.yaml",
-        "sha256": "sha256:378b3f53c6e79f8c7c151f61442cedfb5934068477a4dbf3ee0fa01289998e09",
-        "size_bytes": 5522,
+        "sha256": "sha256:28c6433e70eee32da4e28e1b888eda23801134eb792b2a59cea1ed4d559c863d",
+        "size_bytes": 5903,
         "kind": "agent"
       },
       {
@@ -74,8 +74,8 @@
       },
       {
         "path": "agents/run-planner.yaml",
-        "sha256": "sha256:74dcbf3c0bb103f5655b251ee1c77943c73ef812c2f3b6241c6ee0a99205d736",
-        "size_bytes": 8729,
+        "sha256": "sha256:1d480a13a78394f83f6713f957fc596e16691422bf2028ff51719609a950936c",
+        "size_bytes": 9243,
         "kind": "agent"
       },
       {
@@ -116,14 +116,14 @@
       },
       {
         "path": "profile.yaml",
-        "sha256": "sha256:e62dd47256f0b7d6c185f18234c1aed0809d04cf58e1eece21e89daf5d56725e",
-        "size_bytes": 1043,
+        "sha256": "sha256:a04d57add301146fb34620ab4b16fc1c494bbe5113dfc51e463f6ac11dd85b75",
+        "size_bytes": 1044,
         "kind": "config"
       },
       {
         "path": "project.yaml",
-        "sha256": "sha256:a8f924604544e139b27ad226aae832e2c52b9fdb109c28b8ab80a67615867e36",
-        "size_bytes": 527,
+        "sha256": "sha256:9a6efabcc8d4512afdd1606a99f5ffe820f2896bd81db4869a76356af9e31e6b",
+        "size_bytes": 511,
         "kind": "config"
       },
       {
@@ -194,5 +194,5 @@
       "sha256": "sha256:76557e8ef44078c59656280cc2af17bdfab09797205e04eb35be906cd88b395d"
     }
   ],
-  "bundle_sha256": "sha256:4576cf223dd428227e70fdc9cc7ed6618d4c4a056845ffe9848aa92443f41db5"
+  "bundle_sha256": "sha256:20b9256e838243dba3909526c728d70e46085a6ae0d39f866d07b82bdfe57f3e"
 }

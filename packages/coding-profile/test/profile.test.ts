@@ -161,6 +161,20 @@ describe("coding profile registrar", () => {
     }
   });
 
+  it("uses Medium as the general-purpose default while keeping intent presets explicit", async () => {
+    const projectSource = await readFile(
+      path.resolve(import.meta.dirname, "../koni/baseline/project.yaml"),
+      "utf8",
+    );
+    const project = YAML.parse(projectSource) as {
+      default_run_type: string;
+      run_types: Array<{ id: string }>;
+    };
+
+    expect(project.default_run_type).toBe("medium");
+    expect(project.run_types.map((runType) => runType.id)).toContain("continuous-improvement");
+  });
+
   it("judges orchestration from the progressive executable frontier", async () => {
     const [leadSource, plannerSource, runTypesReference, rulesReference, agentsReference] =
       await Promise.all([
@@ -286,6 +300,57 @@ describe("coding profile registrar", () => {
     );
     expect(normalizedAgentsReference).toContain(
       "A qualitative gate must consume the compiler-projected dependency settlement",
+    );
+  });
+
+  it("grounds proof authority before planning and re-evaluates rework against current evidence", async () => {
+    const [plannerSource, reviewerSource, softwareReference, executionReference] =
+      await Promise.all([
+        readFile(
+          path.resolve(import.meta.dirname, "../koni/baseline/agents/run-planner.yaml"),
+          "utf8",
+        ),
+        readFile(
+          path.resolve(import.meta.dirname, "../koni/baseline/agents/reviewer.yaml"),
+          "utf8",
+        ),
+        readFile(
+          path.resolve(
+            import.meta.dirname,
+            "../../core/skills/model-koni-work/references/software-projects.md",
+          ),
+          "utf8",
+        ),
+        readFile(
+          path.resolve(
+            import.meta.dirname,
+            "../../core/skills/model-koni-work/references/execution-contracts.md",
+          ),
+          "utf8",
+        ),
+      ]);
+    const normalizedPlanner = plannerSource.replace(/\s+/gu, " ");
+    const normalizedReviewer = reviewerSource.replace(/\s+/gu, " ");
+    const normalizedSoftwareReference = softwareReference.replace(/\s+/gu, " ");
+    const normalizedExecutionReference = executionReference.replace(/\s+/gu, " ");
+
+    expect(normalizedPlanner).toContain(
+      "Complete the skill's proof-construction ledger before serializing any proof node",
+    );
+    expect(normalizedPlanner).toContain(
+      "A filename in a listing or search result authenticates identity, not the file's command, environment, or convention semantics",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "Place every repository input relied on by the selected proof in exactly the proof field matching its authority role",
+    );
+    expect(normalizedReviewer).toContain(
+      "Treat the current authenticated predecessor execution as the evidence authority for the current review cycle",
+    );
+    expect(normalizedReviewer).toContain(
+      "Re-evaluate each earlier finding against the current candidate and current receipts",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "A prior failed-review blocker is repair history, not current execution evidence",
     );
   });
 

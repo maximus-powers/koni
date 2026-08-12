@@ -122,6 +122,28 @@ describe("Koni's Pi-native skills", () => {
       "Do not infer its meaning from an identifier, title, or referenced predecessor",
     );
   });
+
+  it("binds proof planning and review rework to current authenticated evidence", async () => {
+    const [softwareReference, executionReference] = await Promise.all([
+      readFile(path.join(skillsRoot, "model-koni-work/references/software-projects.md"), "utf8"),
+      readFile(path.join(skillsRoot, "model-koni-work/references/execution-contracts.md"), "utf8"),
+    ]);
+    const normalizedSoftwareReference = softwareReference.replace(/\s+/gu, " ");
+    const normalizedExecutionReference = executionReference.replace(/\s+/gu, " ");
+
+    expect(normalizedSoftwareReference).toContain(
+      "Place every repository input relied on by the selected proof in exactly the proof field matching its authority role",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "A filename in a listing or search result authenticates identity, not its command, environment, or convention semantics",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "A prior failed-review blocker is repair history, not current execution evidence",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "Carry forward only a finding that the current candidate and current receipts still establish",
+    );
+  });
 });
 
 async function markdownFiles(root: string): Promise<string[]> {

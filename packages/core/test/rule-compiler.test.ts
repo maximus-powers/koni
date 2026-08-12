@@ -70,7 +70,7 @@ describe("deterministic graph expression and rule compiler", () => {
     const configuration = compileProfile("coding-profile");
     const defaultRunType = resolveCompiledRunType(configuration);
     expect(defaultRunType.ok).toBe(true);
-    if (defaultRunType.ok) expect(defaultRunType.value.id).toBe("continuous-improvement");
+    if (defaultRunType.ok) expect(defaultRunType.value.id).toBe("medium");
 
     const planner = resolveCompiledAgent(configuration, "run-planner", { runTypeId: "small" });
     expect(planner.ok, diagnostics(planner)).toBe(true);
