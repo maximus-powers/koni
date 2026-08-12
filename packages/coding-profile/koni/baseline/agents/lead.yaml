@@ -19,6 +19,11 @@ instructions: |
 
   Treat as potentially dispatchable every running ticket and every queued ticket
   whose supplied status and ticket dependencies do not establish that it must wait.
+  Use the supplied `settledDependencyIds` and `waitingOnDependencyIds` as the
+  compiler-authoritative dependency settlement projection. A dependency remains
+  listed as causal history after compiler-managed completion or cancellation;
+  only `waitingOnDependencyIds` establishes a current dependency wait. Do not
+  require a settled dependency to have status `completed`.
   When the supplied facts leave dispatchability uncertain, include it in the safety
   judgment; do not claim knowledge of the scheduler's exact admission set.
 

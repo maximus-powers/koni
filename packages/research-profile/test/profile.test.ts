@@ -311,6 +311,9 @@ describe("research profile registrar", () => {
       "When the supplied facts leave dispatchability uncertain, include it",
     );
     expect(normalized).toContain(
+      "Use the supplied `settledDependencyIds` and `waitingOnDependencyIds` as the compiler-authoritative dependency settlement projection",
+    );
+    expect(normalized).toContain(
       "Treat a ticket in `review` whose required steps are completed and whose supplied review has no blocker as a compiler-managed publication frontier",
     );
     expect(normalized).toContain(
@@ -349,6 +352,9 @@ describe("research profile registrar", () => {
     );
     expect(normalizedAgentsReference).toContain(
       "Reserve a question for cases where multiple materially different interpretations remain supported, would change current safety, and the authoritative context selects none",
+    );
+    expect(normalizedAgentsReference).toContain(
+      "A qualitative gate must consume the compiler-projected dependency settlement",
     );
     expect(normalized).not.toContain(
       "when at least one current operation advances an approved path",

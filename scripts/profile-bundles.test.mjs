@@ -12,14 +12,14 @@ const EXPECTATIONS = Object.freeze([
   Object.freeze({
     directory: "coding-profile",
     packageName: "@koni/coding-profile",
-    packageVersion: "0.8.7",
+    packageVersion: "0.8.8",
     profileId: "software",
-    profileVersion: "0.8.7",
+    profileVersion: "0.8.8",
     lineage: "koni.software",
     fileCount: 27,
     kinds: { config: 17, agent: 10, skill: 0, other: 0 },
     // Reviewed in-tree profile baseline.
-    digest: "sha256:5e83c0dfbfa434d505d14eee5a478c95ae41b4200835e1abc0fbda5e4a1a959a",
+    digest: "sha256:0c69fb079129fe895971243b4ed2340d5a606213508f0be1d910a719621873c5",
     migration: {
       id: "retire-inert-semantics-v1",
       kind: "retire_yaml_fields",
@@ -34,14 +34,14 @@ const EXPECTATIONS = Object.freeze([
   Object.freeze({
     directory: "research-profile",
     packageName: "@koni/research-profile",
-    packageVersion: "1.1.22",
+    packageVersion: "1.1.23",
     profileId: "research",
-    profileVersion: "1.1.22",
+    profileVersion: "1.1.23",
     lineage: "koni.research",
     fileCount: 29,
     kinds: { config: 15, agent: 13, skill: 0, other: 1 },
     // Reviewed in-tree profile baseline.
-    digest: "sha256:98b645fa5bb380d6ac899533ce52f89545d0bfa0ca75300d1218301f0abcfdba",
+    digest: "sha256:978964b10be1082fefa952b13c637a72c761c27f23b5b5c62ebd372fa12ce594",
     migration: {
       id: "retire-inert-semantics-v1",
       kind: "retire_yaml_fields",
@@ -248,6 +248,10 @@ test("shared profile guidance preserves safe progressive closure", async () => {
   assert.match(policy, /narrative milestones do not create exclusive sequencing/i);
   assert.match(policy, /independent safe preparation obligations form one concurrent frontier/i);
   assert.match(agentsAndSkills, /progressive-frontier policy in `run-types\.md`/);
+  assert.match(
+    agentsAndSkills,
+    /qualitative gate must consume the compiler-projected dependency settlement/i,
+  );
 });
 
 test("shared profile guidance distinguishes existing-node scope from new-node authority", async () => {

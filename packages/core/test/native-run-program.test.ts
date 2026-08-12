@@ -3508,6 +3508,41 @@ describe("native compiler-authoritative run program", () => {
     });
     await persistWrites(project.projectRoot, resolved.artifactWrites ?? []);
     const run = runRecord(project.projectRoot, "run-lead-judgment", objective, resolved);
+    run.tickets.obsolete = {
+      id: "obsolete",
+      operationId: "fixture.obsolete",
+      title: "Obsolete compiler work",
+      summary: "No longer applies",
+      status: "cancelled",
+      blocker: "Current compiler predicate no longer applies after prior execution",
+      priority: 0,
+      dependencyIds: [],
+      targetNodeIds: [],
+      readNodeIds: [],
+      writeNodeIds: [],
+      readPaths: [],
+      writePaths: [],
+      steps: [],
+      createdAt: FIXED_NOW.toISOString(),
+      updatedAt: FIXED_NOW.toISOString(),
+    } as unknown as TicketRecord;
+    run.tickets.consumer = {
+      id: "consumer",
+      operationId: "fixture.consumer",
+      title: "Current consumer",
+      summary: "Advance after obsolete work settles",
+      status: "queued",
+      priority: 1,
+      dependencyIds: ["obsolete"],
+      targetNodeIds: [],
+      readNodeIds: [],
+      writeNodeIds: [],
+      readPaths: [],
+      writePaths: [],
+      steps: [],
+      createdAt: FIXED_NOW.toISOString(),
+      updatedAt: FIXED_NOW.toISOString(),
+    } as unknown as TicketRecord;
     const prepared = await program.prepareAttempt({
       kind: "lead",
       leadTrigger: "orchestration_entry",
@@ -3532,6 +3567,8 @@ describe("native compiler-authoritative run program", () => {
     expect(prepared.toolNames).toEqual(["koni_submit_output"]);
     expect(prepared.contextContent).toContain('"kind": "lead_judgment"');
     expect(prepared.contextContent).toContain('"trigger": "orchestration_entry"');
+    expect(prepared.contextContent).toContain('"settledDependencyIds": [\n        "obsolete"');
+    expect(prepared.contextContent).toContain('"waitingOnDependencyIds": []');
     expect(
       Value.Check(prepared.terminalOutputSchema!, {
         protocol: "koni.lead-judgment-output.v1",

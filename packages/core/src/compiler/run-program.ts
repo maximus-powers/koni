@@ -7028,28 +7028,38 @@ function leadJudgmentAttempt(
   }
   const tickets = Object.values(run.tickets)
     .sort((left, right) => left.priority - right.priority || compareText(left.id, right.id))
-    .map((ticket) => ({
-      id: ticket.id,
-      operationId: ticket.operationId,
-      title: ticket.title,
-      status: ticket.status,
-      priority: ticket.priority,
-      dependencyIds: ticket.dependencyIds,
-      blocker: ticket.blocker,
-      scope: {
-        readNodeIds: ticket.readNodeIds ?? [],
-        writeNodeIds: ticket.writeNodeIds ?? [],
-        readPaths: ticket.readPaths,
-        writePaths: ticket.writePaths,
-      },
-      steps: ticket.steps.map((step) => ({
-        id: step.id,
-        kind: step.kind,
-        personaId: step.personaId,
-        status: step.status,
-        summary: step.summary,
-      })),
-    }));
+    .map((ticket) => {
+      const settledDependencyIds = ticket.dependencyIds.filter((dependencyId) =>
+        ticketDependencySettled(run.tickets[dependencyId]),
+      );
+      const settled = new Set(settledDependencyIds);
+      return {
+        id: ticket.id,
+        operationId: ticket.operationId,
+        title: ticket.title,
+        status: ticket.status,
+        priority: ticket.priority,
+        dependencyIds: ticket.dependencyIds,
+        settledDependencyIds,
+        waitingOnDependencyIds: ticket.dependencyIds.filter(
+          (dependencyId) => !settled.has(dependencyId),
+        ),
+        blocker: ticket.blocker,
+        scope: {
+          readNodeIds: ticket.readNodeIds ?? [],
+          writeNodeIds: ticket.writeNodeIds ?? [],
+          readPaths: ticket.readPaths,
+          writePaths: ticket.writePaths,
+        },
+        steps: ticket.steps.map((step) => ({
+          id: step.id,
+          kind: step.kind,
+          personaId: step.personaId,
+          status: step.status,
+          summary: step.summary,
+        })),
+      };
+    });
   const activeAttempts = Object.values(run.attempts)
     .filter((attempt) =>
       new Set<AttemptStatus>(["queued", "running", "waiting_question", "terminal_accepted"]).has(

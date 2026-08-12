@@ -41,6 +41,12 @@ When authoring or changing a Lead, follow the progressive-frontier policy in `ru
 the judgment grounded in facts the attempt receives, and make planning and ticket contracts expose
 the closure chain the Lead must assess.
 
+A qualitative gate must consume the compiler-projected dependency settlement rather than infer it
+from raw status labels. Keep settled and waiting dependency identities in the attempt context. A
+dependency may remain in causal history after compiler-managed completion or cancellation; only the
+projected waiting set establishes a current dependency wait. Configure the Lead to preserve that
+distinction instead of requiring every predecessor to end as completed.
+
 A qualitative gate must not turn conservative, reversible uncertainty into an operator confirmation.
 When authoritative plan and ticket facts already support a safe bounded interpretation for current
 work, and every unresolved downstream effect remains behind its existing gate, configure the persona
