@@ -20,6 +20,7 @@ import {
   type VerifiedProfileBaseline,
 } from "../src/compiler/profile-package.js";
 import { evaluateConfiguredRules } from "../src/compiler/rules.js";
+import { deriveCompilerTicketDependencies } from "../src/compiler/ticket-dependencies.js";
 import {
   applyReviewEffects,
   researchStandaloneSupportRunFallback,
@@ -47,6 +48,111 @@ afterEach(async () => {
 });
 
 describe("provider-free domain flows", () => {
+  it("defines an experiment gate before compiling a runtime that consumes its asset contract", async () => {
+    const root = await temporaryRoot();
+    const configuration = compileProfile("research-profile");
+    const experiment = node(
+      "experiment-a",
+      "experiment",
+      "Bounded observation",
+      "draft",
+      {
+        objective: "Observe whether committed inputs satisfy the bounded audit contract",
+        target_claim_summary: "The committed inputs either satisfy or contradict the audit",
+        empirical_mode: "observation",
+        ablation_requirement: "not_applicable",
+        execution_protocol: "Run the declared adapter against the committed inputs",
+        observable_outcome: "A typed audit result distinguishes support from contradiction",
+      },
+      {
+        assets: ["asset-a"],
+        methods: ["method-a"],
+        metrics: ["metric-a"],
+        requires: ["gate-a", "prerequisite-a"],
+      },
+    );
+    const gate = node("gate-a", "gate", "Input integrity gate", "draft", {
+      assertion: "The committed inputs are internally consistent",
+      applicability: "Before the bounded observation executes",
+      capability: { name: "input.integrity", protocol_range: ">=1.0.0 <2.0.0" },
+      command_result_contract: { result_protocol: "autoresearch.gate-result.v1" },
+      oracle_semantics: {
+        pass: "The committed inputs are internally consistent",
+        fail: "The committed inputs contradict their manifest",
+        inconclusive: "The committed inputs cannot be evaluated",
+        contract_error: "The verifier result is malformed",
+      },
+      failure_meaning: "The observation cannot execute",
+      expected_red: true,
+    });
+    const asset = node("asset-a", "asset", "Observation adapter", "draft", {
+      source_strategy: "internal",
+      capabilities: [
+        {
+          name: "observation.audit",
+          protocol_version: "1.0.0",
+          entrypoints: ["program/assets/observation-audit/audit.py"],
+        },
+      ],
+      implementation_plan: {
+        root: "program/assets/observation-audit",
+        files: ["program/assets/observation-audit/audit.py"],
+      },
+    });
+    const graph = projection([
+      experiment,
+      gate,
+      asset,
+      node("method-a", "method", "Audit method", "draft", {
+        summary: "Apply the declared adapter without mutating its committed inputs",
+      }),
+      node("metric-a", "metric", "Audit metric", "draft", {
+        name: "audit_disposition",
+        definition: "The typed support, contradiction, or inconclusive disposition",
+      }),
+      node("prerequisite-a", "prerequisite", "Committed inputs", "draft", {
+        required_asset_type: "Committed audit inputs",
+        validation_approach: "Verify their manifest before execution",
+      }),
+    ]);
+    typedGraph(configuration, graph.nodes());
+    const adapter = await createProductionRuleDomainAdapter({
+      configuration,
+      graph,
+      projectRoot: root,
+    });
+    const evaluated = evaluateConfiguredRules(
+      { configuration, graph },
+      {
+        ruleIds: [
+          "readiness.experiment-constitution",
+          "ticket.define-gate",
+          "ticket.compile-run-plan",
+        ],
+        adapter,
+      },
+    );
+
+    expect(evaluated.ok, diagnostics(evaluated)).toBe(true);
+    if (!evaluated.ok) return;
+    expect(evaluated.value.tickets.map(({ operation }) => operation).sort()).toEqual([
+      "compile-run-plan",
+      "define-gates",
+    ]);
+    const compileTicket = evaluated.value.tickets.find(
+      ({ operation }) => operation === "compile-run-plan",
+    )!;
+    const defineGateTicket = evaluated.value.tickets.find(
+      ({ operation }) => operation === "define-gates",
+    )!;
+    expect(
+      Object.fromEntries(deriveCompilerTicketDependencies(evaluated.value.tickets, root)),
+    ).toEqual({
+      [compileTicket.id]: [defineGateTicket.id],
+      [defineGateTicket.id]: [],
+    });
+  });
+
   it("lets gate-definition tickets repair required gates missing canonical applicability links", async () => {
     const root = await temporaryRoot();
     const configuration = compileProfile("research-profile");

@@ -1053,7 +1053,11 @@ rules:
       field: spec.implementation_plan.root
 - id: ticket.compile-run-plan
   phase: ticket_emission
-  priority: 180
+  # Gate definition owns the experiment node and exposes the complete verifier inventory needed
+  # to decide whether a linked executable asset is implementation-ready. Keep run-plan compilation
+  # below both that preparation step (130) and asset implementation (155), so a consumer cannot
+  # reach change control for a contract that ordinary closure work is already authorized to finish.
+  priority: 125
   for_each: run-plan-targets
   when:
     op: edge_count
