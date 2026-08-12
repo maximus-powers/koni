@@ -76,7 +76,19 @@ rules:
           - participates_in
           - constrained_by
           max_depth: 2
-    write_scope: $target
+    write_scope:
+      union:
+      - $target
+      - intersection:
+        - traverse:
+            from: $target
+            relations:
+            - exposes
+            - owns
+            - participates_in
+            - constrained_by
+            max_depth: 2
+        - active_contracts
     read_paths:
     - select: $target
       field: spec.owned_paths

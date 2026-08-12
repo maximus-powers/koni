@@ -500,6 +500,66 @@ describe("deterministic graph expression and rule compiler", () => {
     expect(bad.diagnostics.map((item) => item.code)).toContain("rule.path_scope");
   });
 
+  it("lets contract fallback link an adjacent reusable contract", () => {
+    const configuration = compileProfile("coding-profile");
+    const system = node("system-a", "system", "Customer Analysis", "active", {
+      kind: "app",
+      responsibility: "Own the customer analysis experience",
+      contract_required: true,
+      contract_reason: "URL navigation is user-visible",
+      owned_paths: ["apps/books/src/pages/analysis"],
+    });
+    const interfaceNode = node(
+      "interface-a",
+      "interface",
+      "Analysis tabs",
+      "active",
+      {
+        kind: "frontend URL navigation",
+        surface: "Customer Analysis tab query parameter",
+        consumers: ["Customer Analysis users"],
+        compatibility: "Existing tab values remain compatible",
+      },
+      { produced_by: [system.id] },
+    );
+    const flow = node(
+      "flow-a",
+      "flow",
+      "Choose an analysis workflow",
+      "active",
+      {
+        intent: "Choose an existing analysis workflow",
+        entrypoint: "Customer Analysis",
+        ordered_steps: ["Choose a tab"],
+        exit_condition: "The selected workflow is visible",
+      },
+      { participants: [system.id, interfaceNode.id] },
+    );
+    const contract = node(
+      "contract-a",
+      "contract",
+      "Preserve analysis context",
+      "active",
+      {
+        invariant: "Tab changes preserve unrelated query parameters",
+        enforcement_point: "Analysis tab link construction",
+        failure_meaning: "The user loses analysis context",
+        observability: "Focused navigation regression",
+      },
+      { applies_to: [interfaceNode.id, flow.id] },
+    );
+
+    const result = evaluateConfiguredRules(
+      { configuration, graph: projection([system, interfaceNode, flow, contract]) },
+      { ruleIds: ["system.specify-contracts"] },
+    );
+
+    expect(result.ok, diagnostics(result)).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.tickets).toHaveLength(1);
+    expect(result.value.tickets[0]?.scope.write_node_ids).toEqual([contract.id, system.id]);
+  });
+
   it("grants Python package initializers needed to import an exact read-scoped module", () => {
     expect(
       expandPythonPackageReadPaths([
