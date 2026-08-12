@@ -303,6 +303,13 @@ describe("research profile registrar", () => {
       "When the supplied facts leave dispatchability uncertain, include it",
     );
     expect(normalized).toContain(
+      "Treat a ticket in `review` whose required steps are completed and whose supplied review has no blocker as a compiler-managed publication frontier",
+    );
+    expect(normalized).toContain(
+      "Do not treat its dependents as dispatchable before publication, and do not block merely because the ticket is not yet `completed`",
+    );
+    expect(normalized).toContain("An incomplete or blocked review is not a publication frontier");
+    expect(normalized).toContain(
       "every other operation that deterministic authority could dispatch now is also supported, safe, and within that plan",
     );
     expect(normalized).toContain(

@@ -162,10 +162,24 @@ describe("coding profile registrar", () => {
   });
 
   it("judges orchestration from the progressive executable frontier", async () => {
-    const [leadSource, plannerSource] = await Promise.all([
+    const [leadSource, plannerSource, runTypesReference, rulesReference] = await Promise.all([
       readFile(path.resolve(import.meta.dirname, "../koni/baseline/agents/lead.yaml"), "utf8"),
       readFile(
         path.resolve(import.meta.dirname, "../koni/baseline/agents/run-planner.yaml"),
+        "utf8",
+      ),
+      readFile(
+        path.resolve(
+          import.meta.dirname,
+          "../../core/skills/configure-koni/references/run-types.md",
+        ),
+        "utf8",
+      ),
+      readFile(
+        path.resolve(
+          import.meta.dirname,
+          "../../core/skills/model-koni-work/references/rules-and-tickets.md",
+        ),
         "utf8",
       ),
     ]);
@@ -173,6 +187,8 @@ describe("coding profile registrar", () => {
     const planner = YAML.parse(plannerSource) as { instructions: string };
     const normalized = lead.instructions.replace(/\s+/gu, " ");
     const normalizedPlanner = planner.instructions.replace(/\s+/gu, " ");
+    const normalizedRunTypesReference = runTypesReference.replace(/\s+/gu, " ");
+    const normalizedRulesReference = rulesReference.replace(/\s+/gu, " ");
 
     expect(normalizedPlanner).toContain("State one compact progressive closure chain in the plan");
     expect(normalizedPlanner).toContain(
@@ -199,6 +215,13 @@ describe("coding profile registrar", () => {
       "When the supplied facts leave dispatchability uncertain, include it",
     );
     expect(normalized).toContain(
+      "Treat a ticket in `review` whose required steps are completed and whose supplied review has no blocker as a compiler-managed publication frontier",
+    );
+    expect(normalized).toContain(
+      "Do not treat its dependents as dispatchable before publication, and do not block merely because the ticket is not yet `completed`",
+    );
+    expect(normalized).toContain("An incomplete or blocked review is not a publication frontier");
+    expect(normalized).toContain(
       "every other operation that deterministic authority could dispatch now is also supported, safe, and within that plan",
     );
     expect(normalized).toContain(
@@ -215,6 +238,15 @@ describe("coding profile registrar", () => {
     );
     expect(normalized).not.toContain(
       "when at least one current operation advances an approved path",
+    );
+    expect(normalizedRunTypesReference).toContain(
+      "A reviewed ticket with all required steps complete and no supplied blocker is a compiler-managed publication frontier",
+    );
+    expect(normalizedRulesReference).toContain(
+      "A ticket in review with every required step complete and no supplied blocker can advance closure through publication",
+    );
+    expect(normalizedRulesReference).toContain(
+      "An incomplete or blocked review remains nonpassing",
     );
   });
 

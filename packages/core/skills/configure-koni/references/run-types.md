@@ -67,6 +67,11 @@ block a closed frontier and any mixed frontier containing potentially dispatchab
 materially ambiguous work. Do not require the current board to contain an eventual downstream ticket
 that supported current work can cause reconciliation to derive.
 
+A reviewed ticket with all required steps complete and no supplied blocker is a compiler-managed
+publication frontier. Require the Lead to count safe publication as closure-advancing even when no
+worker assignment is ready. Its dependents still wait until publication makes the ticket completed;
+the Lead must neither dispatch them early nor block merely because publication has not run yet.
+
 For the current executable frontier, ticket dependencies are the ordering authority. Narrative
 milestones do not create exclusive sequencing. Require planners to model a real wait as a typed
 dependency and to describe independent safe preparation obligations as one concurrent frontier.

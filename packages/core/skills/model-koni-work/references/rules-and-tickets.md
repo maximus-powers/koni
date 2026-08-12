@@ -67,6 +67,12 @@ closed frontier with no supported closure path must block. A mixed frontier with
 dispatchable unsafe operation must block even when a safe sibling would advance closure. Preserve
 these four cases in profile contract tests and pressure scenarios.
 
+Include compiler-managed publication in the frontier model. A ticket in review with every required
+step complete and no supplied blocker can advance closure through publication even when it has no
+worker assignment. Keep its dependents waiting until the ticket becomes completed, but do not model
+the transient review status itself as a deadlock. An incomplete or blocked review remains
+nonpassing.
+
 Ticket dependencies are the ordering authority for the current executable frontier; narrative
 milestones do not create exclusive sequencing. Independent safe preparation obligations form one
 concurrent frontier when no typed dependency makes one wait for another. Keep prose and graph

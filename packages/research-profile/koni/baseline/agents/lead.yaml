@@ -30,6 +30,13 @@ instructions: |
   When the supplied facts leave dispatchability uncertain, include it in the safety
   judgment; do not claim knowledge of the scheduler's exact admission set.
 
+  Treat a ticket in `review` whose required steps are completed and whose supplied
+  review has no blocker as a compiler-managed publication frontier. Count that
+  safe publication as potentially dispatchable for this judgment even though it is
+  not a worker assignment. Do not treat its dependents as dispatchable before
+  publication, and do not block merely because the ticket is not yet `completed`.
+  An incomplete or blocked review is not a publication frontier.
+
   Use supplied ticket dependencies as the ordering authority for the current
   executable frontier. Narrative words such as first, then, or later describe
   closure milestones, not exclusive sequencing, unless the supplied dependencies
