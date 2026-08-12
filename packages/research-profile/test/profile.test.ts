@@ -259,6 +259,51 @@ describe("research profile registrar", () => {
     }
   });
 
+  it("judges orchestration from the progressive executable frontier", async () => {
+    const [leadSource, plannerSource] = await Promise.all([
+      readFile(path.resolve(import.meta.dirname, "../koni/baseline/agents/lead.yaml"), "utf8"),
+      readFile(
+        path.resolve(import.meta.dirname, "../koni/baseline/agents/run-planner.yaml"),
+        "utf8",
+      ),
+    ]);
+    const lead = YAML.parse(leadSource) as { instructions: string };
+    const planner = YAML.parse(plannerSource) as { instructions: string };
+    const normalized = lead.instructions.replace(/\s+/gu, " ");
+    const normalizedPlanner = planner.instructions.replace(/\s+/gu, " ");
+
+    expect(normalizedPlanner).toContain("State one compact progressive closure chain in the plan");
+    expect(normalizedPlanner).toContain(
+      "initial compiler-emittable work through each accepted effect and newly eligible downstream operation to the terminal objective",
+    );
+    expect(normalized).toContain(
+      "Treat only the plan, ticket board, resolved questions, receipts, and lifecycle facts supplied to this attempt as authoritative",
+    );
+    expect(normalized).toContain("approved plan's stated closure chain");
+    expect(normalized).toContain("Never invent hidden graph, rule, scheduler, or operation facts");
+    expect(normalized).toContain(
+      "Proceed only when at least one potentially dispatchable current operation advances",
+    );
+    expect(normalized).toContain(
+      "Treat as potentially dispatchable every running ticket and every queued ticket whose supplied status and ticket dependencies do not establish that it must wait",
+    );
+    expect(normalized).toContain(
+      "When the supplied facts leave dispatchability uncertain, include it",
+    );
+    expect(normalized).toContain(
+      "every other operation that deterministic authority could dispatch now is also supported, safe, and within that plan",
+    );
+    expect(normalized).toContain(
+      "An eventual ticket absent from the current board is downstream work, not a missing path",
+    );
+    expect(normalized).toContain(
+      "Block when every stated closure chain is structurally unreachable, or when any potentially dispatchable current operation is materially ambiguous, unsafe, or outside the approved plan",
+    );
+    expect(normalized).not.toContain(
+      "when at least one current operation advances an approved path",
+    );
+  });
+
   it("waits for a complete gate inventory before implementing capability assets", async () => {
     const source = await readFile(
       path.resolve(import.meta.dirname, "../koni/baseline/rules/research.yaml"),

@@ -12,14 +12,14 @@ const EXPECTATIONS = Object.freeze([
   Object.freeze({
     directory: "coding-profile",
     packageName: "@koni/coding-profile",
-    packageVersion: "0.8.0",
+    packageVersion: "0.8.1",
     profileId: "software",
-    profileVersion: "0.8.0",
+    profileVersion: "0.8.1",
     lineage: "koni.software",
     fileCount: 27,
     kinds: { config: 17, agent: 10, skill: 0, other: 0 },
     // Reviewed in-tree profile baseline.
-    digest: "sha256:08a38ac2657d371c955c098955ab7dc91cb76b97abeb7e5bc0790f938f02f289",
+    digest: "sha256:8a8bde393dacb0e5ad02bceed1c90a114967e5eddcb798e48a42e36082ca3cfd",
     migration: {
       id: "retire-inert-semantics-v1",
       kind: "retire_yaml_fields",
@@ -34,14 +34,14 @@ const EXPECTATIONS = Object.freeze([
   Object.freeze({
     directory: "research-profile",
     packageName: "@koni/research-profile",
-    packageVersion: "1.1.11",
+    packageVersion: "1.1.12",
     profileId: "research",
-    profileVersion: "1.1.11",
+    profileVersion: "1.1.12",
     lineage: "koni.research",
     fileCount: 29,
     kinds: { config: 15, agent: 13, skill: 0, other: 1 },
     // Reviewed in-tree profile baseline.
-    digest: "sha256:2ef14c0c593a297368f2930c62bd95227cd12d1aedbdb58a59247ee848b653cc",
+    digest: "sha256:14971c09f3bfc0812d8612a7a664438f9aa3efb9cfa1f7d5fce3073799772f8c",
     migration: {
       id: "retire-inert-semantics-v1",
       kind: "retire_yaml_fields",
@@ -211,6 +211,37 @@ test("Core carries one shared Koni skill resource tree", async () => {
     skills.filter(({ path }) => path.endsWith("/SKILL.md")).map(({ path }) => path),
     ["configure-koni/SKILL.md", "model-koni-work/SKILL.md", "operate-koni/SKILL.md"],
   );
+});
+
+test("shared profile guidance preserves safe progressive closure", async () => {
+  const [runTypes, rulesAndTickets, agentsAndSkills] = await Promise.all([
+    readFile(
+      join(repositoryRoot, "packages/core/skills/configure-koni/references/run-types.md"),
+      "utf8",
+    ),
+    readFile(
+      join(repositoryRoot, "packages/core/skills/model-koni-work/references/rules-and-tickets.md"),
+      "utf8",
+    ),
+    readFile(
+      join(repositoryRoot, "packages/core/skills/configure-koni/references/agents-and-skills.md"),
+      "utf8",
+    ),
+  ]);
+  const policy = `${runTypes}\n${rulesAndTickets}`.replace(/\s+/gu, " ");
+
+  assert.match(policy, /state each progressive closure chain in the supplied plan and tickets/);
+  assert.match(policy, /partial frontier with a supported safe operation must proceed/);
+  assert.match(
+    policy,
+    /absent downstream ticket that supported current work can unlock must proceed/,
+  );
+  assert.match(policy, /closed frontier with no supported closure path must block/);
+  assert.match(
+    policy,
+    /mixed frontier with any potentially dispatchable unsafe operation must block/,
+  );
+  assert.match(agentsAndSkills, /progressive-frontier policy in `run-types\.md`/);
 });
 
 test("shared software guidance defines a disjoint planning-patch ledger", async () => {

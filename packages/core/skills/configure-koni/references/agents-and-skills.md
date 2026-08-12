@@ -37,6 +37,10 @@ koni:
 The `id` must match the file name. Provider, model, and thinking level are selected together. Keep
 instructions role-stable; put reusable procedures in skills.
 
+When authoring or changing a Lead, follow the progressive-frontier policy in `run-types.md`. Keep
+the judgment grounded in facts the attempt receives, and make planning and ticket contracts expose
+the closure chain the Lead must assess.
+
 An agent inherits the complete Pi repository environment when `pi.settings` is omitted. Filters only
 narrow resources Pi already resolved. Positive globs must match. A package filter must name an
 already configured Pi package.

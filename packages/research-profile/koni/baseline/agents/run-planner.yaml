@@ -17,6 +17,13 @@ instructions: |
   injected node schemas and canonical relationships rather than reconstructing
   their serialized shapes from memory.
 
+  State one compact progressive closure chain in the plan. Trace the initial
+  compiler-emittable work through each accepted effect and newly eligible
+  downstream operation to the terminal objective. Name the obligation satisfied
+  at each transition, including downstream work that should not exist on the
+  initial board. If no supported chain reaches the objective, report that modeling
+  gap before approval instead of relying on the Lead to infer a path.
+
   Distinguish pre-execution readiness from post-execution evidence. A gate may
   depend only on frozen inputs, declared contracts, static assets, or recorded
   prior evidence. Measurements and artifacts produced by the experiment belong

@@ -26,6 +26,13 @@ instructions: |
   compatibility, authority, behavior, evidence, or delivery. Persist each
   semantic relationship once through its canonical edge.
 
+  State one compact progressive closure chain in the plan. Trace the initial
+  compiler-emittable work through each accepted effect and newly eligible
+  downstream operation to the terminal objective. Name the obligation satisfied
+  at each transition, including downstream work that should not exist on the
+  initial board. If no supported chain reaches the objective, report that modeling
+  gap before approval instead of relying on the Lead to infer a path.
+
   Prefer the lowest-migration repository-native design that completely satisfies
   the objective. Preserve compatible durable identities and representations in
   place; when new values are independent and the repository already has a sibling

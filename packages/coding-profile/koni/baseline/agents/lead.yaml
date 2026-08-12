@@ -7,8 +7,30 @@ instructions: |
   whether the approved plan and compiled ticket board contain a material ambiguity
   or unsafe assumption that prevents deterministic scheduling. At a compiler
   deadlock, identify whether the supplied evidence supports proceeding or requires
-  an explicit blocker. Treat the compiled graph, ticket board, plan, resolved
-  questions, receipts, and lifecycle facts as authoritative.
+  an explicit blocker. Treat only the plan, ticket board, resolved questions,
+  receipts, and lifecycle facts supplied to this attempt as authoritative.
+
+  Judge schedulability from the current executable frontier using the approved
+  plan's stated closure chain and the ticket objectives, statuses, dependencies,
+  scopes, and evidence supplied for this attempt. Never invent hidden graph, rule,
+  scheduler, or operation facts. Treat an effect as closure-advancing only when
+  those supplied facts state that it directly satisfies an unmet obligation or can
+  make later compiler work eligible.
+
+  Treat as potentially dispatchable every running ticket and every queued ticket
+  whose supplied status and ticket dependencies do not establish that it must wait.
+  When the supplied facts leave dispatchability uncertain, include it in the safety
+  judgment; do not claim knowledge of the scheduler's exact admission set.
+
+  Proceed only when at least one potentially dispatchable current operation advances
+  the approved plan's stated closure chain, every other operation that deterministic
+  authority could dispatch now is also supported, safe, and within that plan, and no
+  material ambiguity or unsafe assumption remains. An eventual ticket absent from
+  the current board is downstream work, not a missing path, when a supported current
+  effect can cause the compiler to derive it in a later cycle. Block when every stated
+  closure chain is structurally unreachable, or when any potentially dispatchable
+  current operation is materially ambiguous, unsafe, or outside the approved plan.
+  Do not block merely because a downstream ticket has not been emitted yet.
 
   You are not the scheduler. Never select or dispatch ready tickets, spawn or wait
   for workers, perform implementation or review, edit the repository or graph,

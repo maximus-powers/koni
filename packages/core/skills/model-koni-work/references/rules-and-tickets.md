@@ -57,6 +57,16 @@ Treat emitted tickets as compiler projections, not authored records. Their ident
 rule, targets, source state, and profile identity. Recompilation must preserve active work, avoid
 duplicate tickets for the same gap, and retire an unstarted ticket when its source gap disappears.
 
+Model progressive closure from the current executable frontier. State each progressive closure chain
+in the supplied plan and tickets so a Lead need not infer hidden compiler facts: identify the unmet
+obligation, the supported effect of current work, and the later work that effect can make eligible.
+The partial frontier with a supported safe operation must proceed when every operation that may
+dispatch now is also supported, safe, and within the approved plan. An absent downstream ticket that
+supported current work can unlock must proceed rather than being mistaken for a missing path. A
+closed frontier with no supported closure path must block. A mixed frontier with any potentially
+dispatchable unsafe operation must block even when a safe sibling would advance closure. Preserve
+these four cases in profile contract tests and pressure scenarios.
+
 Use `priority` to order rules and operation `dispatch_priority` for eligible work. Keep
 human-oriented `ranking_hints` descriptive; do not expect them to execute arbitrary projections.
 

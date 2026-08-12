@@ -55,5 +55,17 @@ Use `agents.roles` for all agents sharing a Koni role and `agents.overrides` for
 exception. These are model selections, not skill or capability bindings. Skills and capabilities
 belong to the agent document.
 
+Lead instructions must judge a progressively compiled board from its current executable frontier.
+Require the planner to state each progressive closure chain in the supplied plan and tickets: which
+current effect satisfies an obligation directly or makes later compiler work eligible. Require the
+Lead to use only supplied plan, ticket, and evidence facts instead of inferring hidden graph, rule,
+scheduler, or operation state. Define potentially dispatchable conservatively from supplied ticket
+statuses and dependencies, including uncertain tickets in the safety judgment. The Lead may proceed
+only when at least one current operation advances a stated closure chain and every operation that
+deterministic authority could dispatch now is supported, safe, and within the approved plan. It must
+block a closed frontier and any mixed frontier containing potentially dispatchable unsafe or
+materially ambiguous work. Do not require the current board to contain an eventual downstream ticket
+that supported current work can cause reconciliation to derive.
+
 Keep approval before orchestration. Use literal sibling Git ref leaves. Validate every cataloged run
 type, not only the default.
