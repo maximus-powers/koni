@@ -2,12 +2,12 @@
   "protocol": "koni.profile-package.v1",
   "package": {
     "name": "@koni/research-profile",
-    "version": "1.1.23"
+    "version": "1.1.24"
   },
   "profile": {
     "id": "research",
     "display_name": "Research",
-    "version": "1.1.23",
+    "version": "1.1.24",
     "lineage": "koni.research"
   },
   "compatibility": {
@@ -74,8 +74,8 @@
       },
       {
         "path": "agents/lead.yaml",
-        "sha256": "sha256:60c722025642f844302be55400cf3af459231cde03a7e740f8ca9358863b7da1",
-        "size_bytes": 6492,
+        "sha256": "sha256:68e806de020bf79d9d9f7a9f9bf5c7870c71a8c06d165a147fa0e09301121794",
+        "size_bytes": 6825,
         "kind": "agent"
       },
       {
@@ -140,7 +140,7 @@
       },
       {
         "path": "profile.yaml",
-        "sha256": "sha256:2d450469678a71440443379d1e1cda3031b253174f9c5324d96ab556e1a17068",
+        "sha256": "sha256:00430fd9df71a2f4fb0f3dd69585af9485e96921c129aba8140fdb59df59d9bc",
         "size_bytes": 1319,
         "kind": "config"
       },
@@ -206,5 +206,5 @@
       "sha256": "sha256:c807436b04f7d44ea65cce5cfa6ed8cba3c4e5d8d571034f7fecc25c9fd117a5"
     }
   ],
-  "bundle_sha256": "sha256:978964b10be1082fefa952b13c637a72c761c27f23b5b5c62ebd372fa12ce594"
+  "bundle_sha256": "sha256:c77caaf23423e6dac7eab092c0783ea475156f9f3caa42d86d7be568455ffdec"
 }

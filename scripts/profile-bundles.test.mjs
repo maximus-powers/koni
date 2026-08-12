@@ -12,14 +12,14 @@ const EXPECTATIONS = Object.freeze([
   Object.freeze({
     directory: "coding-profile",
     packageName: "@koni/coding-profile",
-    packageVersion: "0.8.8",
+    packageVersion: "0.8.9",
     profileId: "software",
-    profileVersion: "0.8.8",
+    profileVersion: "0.8.9",
     lineage: "koni.software",
     fileCount: 27,
     kinds: { config: 17, agent: 10, skill: 0, other: 0 },
     // Reviewed in-tree profile baseline.
-    digest: "sha256:0c69fb079129fe895971243b4ed2340d5a606213508f0be1d910a719621873c5",
+    digest: "sha256:4576cf223dd428227e70fdc9cc7ed6618d4c4a056845ffe9848aa92443f41db5",
     migration: {
       id: "retire-inert-semantics-v1",
       kind: "retire_yaml_fields",
@@ -34,14 +34,14 @@ const EXPECTATIONS = Object.freeze([
   Object.freeze({
     directory: "research-profile",
     packageName: "@koni/research-profile",
-    packageVersion: "1.1.23",
+    packageVersion: "1.1.24",
     profileId: "research",
-    profileVersion: "1.1.23",
+    profileVersion: "1.1.24",
     lineage: "koni.research",
     fileCount: 29,
     kinds: { config: 15, agent: 13, skill: 0, other: 1 },
     // Reviewed in-tree profile baseline.
-    digest: "sha256:978964b10be1082fefa952b13c637a72c761c27f23b5b5c62ebd372fa12ce594",
+    digest: "sha256:c77caaf23423e6dac7eab092c0783ea475156f9f3caa42d86d7be568455ffdec",
     migration: {
       id: "retire-inert-semantics-v1",
       kind: "retire_yaml_fields",

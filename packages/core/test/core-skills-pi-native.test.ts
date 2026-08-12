@@ -47,6 +47,15 @@ describe("Koni's Pi-native skills", () => {
     expect(normalized).toContain(
       "Select the repository's proven skill before adding technique-specific prose to the agent",
     );
+    expect(normalized).toContain(
+      "Configure the Lead to treat each nonterminal ticket in the supplied current board as a compiler-derived current obligation",
+    );
+    expect(normalized).toContain(
+      "Historical overlap alone does not make that current ticket stale or redundant",
+    );
+    expect(normalized).toContain(
+      "Preserve every existing plan, dependency, evidence, interaction, reachability, and safety criterion",
+    );
   });
 
   it("teaches profile authors to prepare fresh worktrees through bounded native bootstrap", async () => {

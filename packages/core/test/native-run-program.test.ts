@@ -3575,6 +3575,12 @@ describe("native compiler-authoritative run program", () => {
     expect(prepared.spec.persona.initialPrompt).toContain(
       "settledDependencyIds remains causal history and does not require a completed ticket status",
     );
+    expect(prepared.spec.persona.initialPrompt).toContain(
+      "Treat each nonterminal ticket in the current ticketBoard as a compiler-derived current obligation",
+    );
+    expect(prepared.spec.persona.initialPrompt).toContain(
+      "Do not infer that it is stale or redundant merely because a completed or cancelled ticket overlaps its target or scope",
+    );
     expect(
       Value.Check(prepared.terminalOutputSchema!, {
         protocol: "koni.lead-judgment-output.v1",

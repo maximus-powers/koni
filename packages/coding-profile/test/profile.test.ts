@@ -227,6 +227,15 @@ describe("coding profile registrar", () => {
       "Use the supplied `settledDependencyIds` and `waitingOnDependencyIds` as the compiler-authoritative dependency settlement projection",
     );
     expect(normalized).toContain(
+      "Treat each nonterminal ticket in the supplied current board as a compiler-derived current obligation",
+    );
+    expect(normalized).toContain(
+      "Do not infer that it is stale or redundant merely because a completed or cancelled ticket overlaps its target or scope",
+    );
+    expect(normalized).toContain(
+      "All existing plan, dependency, evidence, interaction, reachability, and safety criteria still apply",
+    );
+    expect(normalized).toContain(
       "Treat a ticket in `review` whose required steps are completed and whose supplied review has no blocker as a compiler-managed publication frontier",
     );
     expect(normalized).toContain(

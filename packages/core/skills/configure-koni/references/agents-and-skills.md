@@ -47,6 +47,13 @@ dependency may remain in causal history after compiler-managed completion or can
 projected waiting set establishes a current dependency wait. Configure the Lead to preserve that
 distinction instead of requiring every predecessor to end as completed.
 
+Configure the Lead to treat each nonterminal ticket in the supplied current board as a
+compiler-derived current obligation. Historical overlap alone does not make that current ticket
+stale or redundant: a completed or cancelled ticket can remain as causal history while the compiler
+projects a later bounded repair, recheck, or recurring obligation. Preserve every existing plan,
+dependency, evidence, interaction, reachability, and safety criterion; only historical overlap is
+insufficient by itself to establish a blocker.
+
 A qualitative gate must not turn conservative, reversible uncertainty into an operator confirmation.
 When authoritative plan and ticket facts already support a safe bounded interpretation for current
 work, and every unresolved downstream effect remains behind its existing gate, configure the persona

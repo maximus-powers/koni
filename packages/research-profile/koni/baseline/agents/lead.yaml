@@ -32,6 +32,11 @@ instructions: |
   listed as causal history after compiler-managed completion or cancellation;
   only `waitingOnDependencyIds` establishes a current dependency wait. Do not
   require a settled dependency to have status `completed`.
+  Treat each nonterminal ticket in the supplied current board as a
+  compiler-derived current obligation. Do not infer that it is stale or
+  redundant merely because a completed or cancelled ticket overlaps its target
+  or scope. All existing plan, dependency, evidence, interaction, reachability,
+  and safety criteria still apply.
   When the supplied facts leave dispatchability uncertain, include it in the safety
   judgment; do not claim knowledge of the scheduler's exact admission set.
 
