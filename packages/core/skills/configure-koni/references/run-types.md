@@ -51,6 +51,24 @@ orchestration:
   report_action: report
 ```
 
+## Workspace readiness
+
+Fresh managed worktrees do not inherit ignored repository toolchains. When configured checks need
+repository-local tooling, configure `workspace.bootstrap` on the common run type with one
+repository-native, noninteractive, lock-bound setup command. The authority runs its direct `argv`
+once after materializing the run worktree and each new ticket worktree.
+
+Treat manifests, continuous-integration configuration, and existing worktree setup scripts as
+authoritative evidence. When they identify one safe canonical setup path, select it without asking
+the operator to restate the repository's own convention. Require the command to be idempotent,
+bounded by a timeout, and limited to local workspace readiness. It must not prompt, acquire secrets,
+publish, deploy, or perform unrelated external effects.
+
+Do not put ecosystem-specific setup advice in an agent's instructions, and do not widen worker
+filesystem, command, network, or graph authority to compensate for an unprepared worktree. If the
+repository has no safe native setup command, keep workspace preparation an explicit configuration
+boundary instead of teaching ticket agents to improvise one.
+
 Use `agents.roles` for all agents sharing a Koni role and `agents.overrides` for one named
 exception. These are model selections, not skill or capability bindings. Skills and capabilities
 belong to the agent document.

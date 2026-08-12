@@ -43,6 +43,28 @@ describe("Koni's Pi-native skills", () => {
     );
   });
 
+  it("teaches profile authors to prepare fresh worktrees through bounded native bootstrap", async () => {
+    const source = await readFile(
+      path.join(skillsRoot, "configure-koni/references/run-types.md"),
+      "utf8",
+    );
+    const normalized = source.replace(/\s+/gu, " ");
+
+    expect(normalized).toContain(
+      "Fresh managed worktrees do not inherit ignored repository toolchains",
+    );
+    expect(normalized).toContain("one repository-native, noninteractive, lock-bound setup command");
+    expect(normalized).toContain(
+      "Treat manifests, continuous-integration configuration, and existing worktree setup scripts as authoritative evidence",
+    );
+    expect(normalized).toContain(
+      "Do not put ecosystem-specific setup advice in an agent's instructions",
+    );
+    expect(normalized).toContain(
+      "do not widen worker filesystem, command, network, or graph authority",
+    );
+  });
+
   it("teaches planners to revise validated artifacts as bounded graph diffs", async () => {
     const source = await readFile(path.join(skillsRoot, "model-koni-work/SKILL.md"), "utf8");
     const normalized = source.replace(/\s+/gu, " ");
