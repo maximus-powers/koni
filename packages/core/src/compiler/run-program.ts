@@ -7763,6 +7763,17 @@ export function repairedProviderGateRecheckInstruction(
   ].join(" ");
 }
 
+export function upstreamChangeRequestInstructions(
+  changeControl: CompiledChangeControl | undefined,
+): string[] {
+  if (changeControl?.role !== "ordinary" || !changeControl.allowUpstreamRequests) return [];
+  return [
+    'This step has an explicit upstream-change route. If satisfying the contract requires changing a read-only asset or another node outside this step\'s write authority, do not fabricate an inline substitute, weaken the contract, or upsert that node. Submit status "completed" with summary and upstreamChangeRequest, and omit graphDelta. Exact shape: {"status":"completed","summary":"...","upstreamChangeRequest":{"targetNodeIds":["the-existing-causal-node-id"],"fulfillment":"planned_asset_repair","summary":"...","reason":"..."}}.',
+    'Use fulfillment "planned_asset_repair" only when the existing asset implementation workflow can satisfy the whole request by editing that asset\'s authored source files or contracts. Use "dynamic_scope_change" when fulfillment needs a new run or node, runtime execution/output, or authority beyond the existing asset source grant.',
+    'Graph write authority does not make fields that derive this ticket\'s repository grant mutable during the active attempt. If accepted repository evidence contradicts a scope-bearing field, stop probing the rejected path and submit the upstreamChangeRequest without graphDelta; use fulfillment "dynamic_scope_change" for the correction even when the replacement path is already inside the issued grant.',
+  ];
+}
+
 function ticketAttempt(
   run: RunRecord,
   definition: DerivedTicketDefinition,
@@ -8030,13 +8041,7 @@ function ticketAttempt(
                 ]),
             "This is a fresh attempt. Any koni_submit_output call or accepted terminal result in the inherited parent transcript belongs only to that parent and does not settle this attempt. Finish this attempt with a newly accepted koni_submit_output call, even when the correct graph delta is empty or repeats the parent's candidate.",
           ]),
-      ...(proposalOperation?.changeControl.role === "ordinary" &&
-      proposalOperation.changeControl.allowUpstreamRequests
-        ? [
-            'This step has an explicit upstream-change route. If satisfying the contract requires changing a read-only asset or another node outside this step\'s write authority, do not fabricate an inline substitute, weaken the contract, or upsert that node. Submit status "completed" with summary and upstreamChangeRequest, and omit graphDelta. Exact shape: {"status":"completed","summary":"...","upstreamChangeRequest":{"targetNodeIds":["the-existing-causal-node-id"],"fulfillment":"planned_asset_repair","summary":"...","reason":"..."}}.',
-            'Use fulfillment "planned_asset_repair" only when the existing asset implementation workflow can satisfy the whole request by editing that asset\'s authored source files or contracts. Use "dynamic_scope_change" when fulfillment needs a new run or node, runtime execution/output, or authority beyond the existing asset source grant.',
-          ]
-        : []),
+      ...upstreamChangeRequestInstructions(proposalOperation?.changeControl),
       ...rejectedSourceProposalPrompts,
       ...(proposalApproval === undefined
         ? []

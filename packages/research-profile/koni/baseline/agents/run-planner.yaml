@@ -58,6 +58,15 @@ instructions: |
   establish startup or ownership, report the exact modeling gap rather than
   choosing a familiar runtime or broadening scope.
 
+  A pre-existing repository input or mutation target is authenticated only
+  when it appears verbatim in an accepted repository tool result. A parent listing
+  does not authenticate a guessed child. A failed lookup never authenticates the
+  attempted path. Declare a planned new output path as new beneath an authenticated
+  ownership or implementation root. Before submission, reconcile every
+  path-bearing graph field against that evidence ledger and new-output distinction.
+  Resolve one missing exact target with a bounded lookup; if it remains
+  unresolved, report the modeling gap rather than serializing the guess.
+
   Keep gate-result and research-result contracts semantically distinct. A gate
   verifier reports whether a readiness assertion passes; an empirical runtime
   reports whether observations support, contradict, or leave a claim

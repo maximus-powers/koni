@@ -65,6 +65,7 @@ import {
   standaloneSupportRunAssetRepairInstruction,
   standaloneSupportRunAssetRepairScopeFallback,
   ticketBoardApplicableTicketDefinitions,
+  upstreamChangeRequestInstructions,
   verificationActionableTicketDefinitions,
   reconcileNeverStartedTicketNodeScope,
   remapPlanningSeedGateContractKeys,
@@ -103,7 +104,10 @@ import type {
   ProfilePackageManifest,
 } from "../src/contracts/profile-package.js";
 import type { CompiledConfiguration, ConfigurationObject } from "../src/contracts/configuration.js";
-import type { CompiledExecutionSemanticCatalog } from "../src/compiler/execution-semantics.js";
+import type {
+  CompiledChangeControl,
+  CompiledExecutionSemanticCatalog,
+} from "../src/compiler/execution-semantics.js";
 import { GraphSchema, TypedGraph, type GraphNode } from "../src/graph/model.js";
 import type { AgentLaunchSpec } from "../src/pi/launch-spec.js";
 import type { JsonValue } from "../src/authority/protocol.js";
@@ -6438,6 +6442,18 @@ describe("native compiler-authoritative run program", () => {
     expect(prepared.spec.persona.initialPrompt).toContain("upstreamChangeRequest");
     expect(prepared.spec.persona.initialPrompt).toContain('"planned_asset_repair"');
     expect(prepared.spec.persona.initialPrompt).toContain("omit graphDelta");
+    expect(prepared.spec.persona.initialPrompt).toContain(
+      "Graph write authority does not make fields that derive this ticket's repository grant mutable during the active attempt",
+    );
+    expect(prepared.spec.persona.initialPrompt).toContain(
+      'use fulfillment "dynamic_scope_change" for the correction',
+    );
+    expect(
+      upstreamChangeRequestInstructions({
+        role: "ordinary",
+        allowUpstreamRequests: false,
+      } satisfies CompiledChangeControl),
+    ).toEqual([]);
     expect(prepared.authorityGrant?.configuredChecks).toEqual({
       ids: ["exact-prerequisite-set", "scoped-probe-set"],
       networkAccess: false,

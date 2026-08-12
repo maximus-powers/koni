@@ -355,6 +355,42 @@ describe("research profile registrar", () => {
     );
   });
 
+  it("authenticates planned paths and routes grant-changing repairs", async () => {
+    const [plannerSource, executionReference] = await Promise.all([
+      readFile(
+        path.resolve(import.meta.dirname, "../koni/baseline/agents/run-planner.yaml"),
+        "utf8",
+      ),
+      readFile(
+        path.resolve(
+          import.meta.dirname,
+          "../../core/skills/model-koni-work/references/execution-contracts.md",
+        ),
+        "utf8",
+      ),
+    ]);
+    const planner = YAML.parse(plannerSource) as { instructions: string };
+    const normalizedPlanner = planner.instructions.replace(/\s+/gu, " ");
+    const normalizedReference = executionReference.replace(/\s+/gu, " ");
+
+    expect(normalizedPlanner).toContain(
+      "A pre-existing repository input or mutation target is authenticated only when it appears verbatim in an accepted repository tool result",
+    );
+    expect(normalizedPlanner).toContain(
+      "Declare a planned new output path as new beneath an authenticated ownership or implementation root",
+    );
+    expect(normalizedPlanner).toContain(
+      "Before submission, reconcile every path-bearing graph field against that evidence ledger and new-output distinction",
+    );
+    expect(normalizedPlanner).toContain("A failed lookup never authenticates the attempted path");
+    expect(normalizedReference).toContain(
+      "Graph write authority does not make grant-affecting fields mutable within the current ticket",
+    );
+    expect(normalizedReference).toContain(
+      "Every pre-existing repository input or mutation target must appear verbatim in accepted repository evidence",
+    );
+  });
+
   it("keeps run-plan compilation behind directly linked asset work", async () => {
     const source = await readFile(
       path.resolve(import.meta.dirname, "../koni/baseline/rules/research.yaml"),

@@ -23,6 +23,23 @@ for a stable project-owned definition. Allow only node types the operation genui
 deletion, gate-contract, edge-addition-only, receipt-coverage, or review-effect authority only for a
 concrete invariant.
 
+### Evidence-derived repository scope
+
+Every pre-existing repository input or mutation target must appear verbatim in accepted repository
+evidence. A successful parent-directory listing does not authenticate a guessed child, and a failed
+lookup never authenticates the attempted path. A planned new output path is different: declare it as
+new beneath an authenticated ownership or implementation root. Reconcile every path-bearing field
+against that distinction before submission; resolve a missing exact target with one bounded lookup
+or report the modeling gap.
+
+Graph write authority does not make grant-affecting fields mutable within the current ticket. Once
+an attempt is issued, fields that derive its read paths, write paths, working directory, command, or
+workflow grant are frozen even when their containing node is writable. If current evidence
+contradicts one, keep valid in-grant work and use the configured upstream-change route without a
+graph delta. Target the existing causal node and request dynamic scope for any correction to the
+grant-derived field; the replacement path's membership in the old grant does not make the field
+mutable.
+
 ## Workflow DAG
 
 The following is the shipped Software 0.3 composition pattern, retained as historical context:

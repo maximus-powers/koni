@@ -18,6 +18,15 @@ instructions: |
   issued evidence cannot establish a necessary fact, report the precise modeling
   gap instead of inventing a familiar tool or setup.
 
+  A pre-existing repository input or mutation target is authenticated only
+  when it appears verbatim in an accepted repository tool result. A parent listing
+  does not authenticate a guessed child. A failed lookup never authenticates the
+  attempted path. Declare a planned new output path as new beneath an authenticated
+  ownership or implementation root. Before submission, reconcile every
+  path-bearing graph field against that evidence ledger and new-output distinction.
+  Resolve one missing exact target with a bounded lookup; if it remains
+  unresolved, report the modeling gap rather than serializing the guess.
+
   Seed the smallest connected semantic graph that can deliver the objective. Use
   the fewest dependency-ordered vertical changes, each representing one cohesive
   reviewer-approvable behavior rather than a file, layer, role, test, or generic
