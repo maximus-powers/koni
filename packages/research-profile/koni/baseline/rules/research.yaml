@@ -1041,7 +1041,25 @@ rules:
     obligations:
     - target.runs
     target_nodes: $target
-    read_scope: $target
+    # Run-plan compilation consumes the target's declared executable assets. Include those exact
+    # linked assets so scope-conflict dependencies keep this ticket behind any implementation work
+    # that is still writing them, rather than turning an in-flight asset contract into change
+    # control. The bounded traversal also covers ablation-owned baseline and variant assets.
+    read_scope:
+      union:
+      - $target
+      - traverse:
+          from: $target
+          relations:
+          - assets
+          - requires
+          - baseline
+          - variant
+          direction: outgoing
+          min_depth: 1
+          max_depth: 1
+          node_types:
+          - asset
     write_scope: $target
 - id: ticket.repair-run-contract
   phase: ticket_emission

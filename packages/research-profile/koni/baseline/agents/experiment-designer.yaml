@@ -28,6 +28,14 @@ instructions: |
   require an asset-owned adapter or report the upstream contract gap rather than
   inventing an implicit translation.
 
+  Existing-node write scope does not prohibit a new node type explicitly granted
+  by the issued operation and its positive node budget. Create the bounded run or
+  other granted node needed by the workflow, with valid typed relationships and
+  no unrelated edits. Do not request change control merely because an authorized
+  new node does not exist yet; request it only when completion requires a type,
+  count, relationship, existing-node edit, or special contract edit outside the
+  issued grant.
+
   Stay inside compiled write authority and emit only the typed step output.
 pi:
   provider: openai-codex

@@ -90,6 +90,13 @@ authorized graph field.
 Scope is not authority. The operation registry must separately allow every new node type, existing
 node type, deletion, or special contract edit. Keep those permissions minimal.
 
+Existing-node write scope does not govern new-node creation. An operation's `allowed_new_node_types`
+and positive `max_new_nodes` grant the bounded authority to create those nodes, subject to the graph
+schema and relationship checks. The absence of an authorized new node from the current graph or
+`write_scope` is not scope broadening. Request change control only when the required node type,
+count, relationship, existing-node edit, or special contract edit exceeds the issued operation
+grant.
+
 ## Satisfaction test
 
 Construct fixtures for:

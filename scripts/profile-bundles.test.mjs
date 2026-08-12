@@ -34,14 +34,14 @@ const EXPECTATIONS = Object.freeze([
   Object.freeze({
     directory: "research-profile",
     packageName: "@koni/research-profile",
-    packageVersion: "1.1.13",
+    packageVersion: "1.1.14",
     profileId: "research",
-    profileVersion: "1.1.13",
+    profileVersion: "1.1.14",
     lineage: "koni.research",
     fileCount: 29,
     kinds: { config: 15, agent: 13, skill: 0, other: 1 },
     // Reviewed in-tree profile baseline.
-    digest: "sha256:4fade2816beef1594628de136662a0da2fcbfc8a4a6e05ad624317f2f2085dd1",
+    digest: "sha256:a968ce46bdd57910990612b5aaa81229bf4029371989a13fb0be9b59f2e97fd2",
     migration: {
       id: "retire-inert-semantics-v1",
       kind: "retire_yaml_fields",
@@ -248,6 +248,18 @@ test("shared profile guidance preserves safe progressive closure", async () => {
   assert.match(policy, /narrative milestones do not create exclusive sequencing/i);
   assert.match(policy, /independent safe preparation obligations form one concurrent frontier/i);
   assert.match(agentsAndSkills, /progressive-frontier policy in `run-types\.md`/);
+});
+
+test("shared profile guidance distinguishes existing-node scope from new-node authority", async () => {
+  const guidance = await readFile(
+    join(repositoryRoot, "packages/core/skills/model-koni-work/references/rules-and-tickets.md"),
+    "utf8",
+  );
+
+  assert.match(guidance, /Existing-node write scope does not govern new-node creation/i);
+  assert.match(guidance, /allowed_new_node_types.*max_new_nodes/is);
+  assert.match(guidance, /absence of an authorized new node.*not.*scope broadening/is);
+  assert.match(guidance, /Request change control only when/i);
 });
 
 test("shared software guidance defines a disjoint planning-patch ledger", async () => {

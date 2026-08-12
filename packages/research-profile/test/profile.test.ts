@@ -325,6 +325,55 @@ describe("research profile registrar", () => {
     );
   });
 
+  it("keeps run-plan compilation behind directly linked asset work", async () => {
+    const source = await readFile(
+      path.resolve(import.meta.dirname, "../koni/baseline/rules/research.yaml"),
+      "utf8",
+    );
+    const document = YAML.parse(source) as {
+      rules: Array<{
+        id: string;
+        emit?: { read_scope?: unknown; write_scope?: unknown };
+      }>;
+    };
+    const rule = document.rules.find(({ id }) => id === "ticket.compile-run-plan");
+
+    expect(rule?.emit).toMatchObject({
+      read_scope: {
+        union: [
+          "$target",
+          {
+            traverse: {
+              from: "$target",
+              relations: ["assets", "requires", "baseline", "variant"],
+              direction: "outgoing",
+              min_depth: 1,
+              max_depth: 1,
+              node_types: ["asset"],
+            },
+          },
+        ],
+      },
+      write_scope: "$target",
+    });
+  });
+
+  it("treats the operation new-node budget as current ticket authority", async () => {
+    const source = await readFile(
+      path.resolve(import.meta.dirname, "../koni/baseline/agents/experiment-designer.yaml"),
+      "utf8",
+    );
+    const document = YAML.parse(source) as { instructions: string };
+    const normalized = document.instructions.replace(/\s+/gu, " ");
+
+    expect(normalized).toContain(
+      "Existing-node write scope does not prohibit a new node type explicitly granted by the issued operation",
+    );
+    expect(normalized).toContain(
+      "Do not request change control merely because an authorized new node does not exist yet",
+    );
+  });
+
   it("waits for a complete gate inventory before implementing capability assets", async () => {
     const source = await readFile(
       path.resolve(import.meta.dirname, "../koni/baseline/rules/research.yaml"),
