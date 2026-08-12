@@ -716,6 +716,8 @@ export interface AgentAttemptRecord {
   cacheWriteTokens: number;
   /** Ticket execution generation this assignment belongs to; absent on legacy/assignment-free attempts. */
   ticketExecutionEpoch?: number;
+  /** Exact durable authorization for one bounded automatic token-budget recovery. */
+  tokenBudgetRecovery?: AgentTokenBudgetRecoveryRecord;
   /** Required on newly issued attempts; optional only for imported pre-lineage state. */
   lineage?: AgentAttemptLineage;
   /** Exact composed run/graph reviewed by a verification attempt; absent on other/legacy attempts. */
@@ -740,6 +742,17 @@ export interface AgentAttemptRecord {
   error?: string;
   /** Stable managed-runtime failure class used only for explicit operator-authorized retry. */
   failureCode?: string;
+}
+
+export interface AgentTokenBudgetRecoveryRecord {
+  protocol: "koni.agent-token-budget-recovery.v1";
+  failedAttemptId: string;
+  ticketId: string;
+  stepId: string;
+  ticketExecutionEpoch?: number;
+  reviewReworkOrdinal?: number;
+  recoveredAt: string;
+  sha256: Sha256Digest;
 }
 
 export type AgentTerminalPolicyRecord =
@@ -1778,6 +1791,15 @@ export function assertRunRecord(value: unknown): asserts value is RunRecord {
   assertRunExecutionControlGraph(value as unknown as RunRecord);
   for (const [id, attempt] of Object.entries(value.attempts)) {
     assertAttemptRecord(id, attempt);
+  }
+  for (const attempt of Object.values(value.attempts) as AgentAttemptRecord[]) {
+    if (
+      attempt.tokenBudgetRecovery !== undefined &&
+      attempt.tokenBudgetRecovery.ticketExecutionEpoch !==
+        normalizedAttemptTicketExecutionEpoch(value as unknown as RunRecord, attempt)
+    ) {
+      throw new Error(`invalid attempt token-budget recovery slice: ${attempt.id}`);
+    }
   }
   assertPlanningSessionRecord(value as unknown as RunRecord);
   assertAttemptLineageForest(value.attempts as Record<string, AgentAttemptRecord>);
@@ -5310,6 +5332,181 @@ export function validateRunActionArchiveMutation(
   return { writes };
 }
 
+function normalizedAttemptTicketExecutionEpoch(
+  run: Readonly<RunRecord>,
+  attempt: Readonly<AgentAttemptRecord>,
+): number | undefined {
+  if (attempt.ticketExecutionEpoch !== undefined) return attempt.ticketExecutionEpoch;
+  const ticket = run.tickets[attempt.ticketId];
+  if (ticket === undefined) return undefined;
+  if (ticket.executionEpoch !== undefined) return 0;
+  const cycle =
+    ticket.gitCycleId === undefined ? undefined : run.git.ticketCycles[ticket.gitCycleId];
+  return (cycle?.ordinal ?? 1) > 1 ? undefined : 0;
+}
+
+function normalizedAttemptReviewReworkOrdinal(
+  run: Readonly<RunRecord>,
+  attempt: Readonly<AgentAttemptRecord>,
+): number | undefined {
+  const ticket = run.tickets[attempt.ticketId];
+  const rework = ticket?.reviewReworks?.at(-1);
+  if (ticket === undefined || rework === undefined || attempt.startedAt === undefined) {
+    return undefined;
+  }
+  const byId = new Map(ticket.steps.map((step) => [step.id, step]));
+  const visited = new Set<string>();
+  const dependsOnReopenedStep = (stepId: string): boolean => {
+    if (stepId === rework.reopenFromStepId) return true;
+    if (visited.has(stepId)) return false;
+    visited.add(stepId);
+    return (byId.get(stepId)?.dependsOn ?? []).some(dependsOnReopenedStep);
+  };
+  const applies =
+    rework.scope === "review_only"
+      ? attempt.stepId === rework.reopenFromStepId
+      : dependsOnReopenedStep(attempt.stepId);
+  return applies && attempt.startedAt >= rework.openedAt ? rework.ordinal : undefined;
+}
+
+export const MAX_TOKEN_BUDGET_AUTO_RECOVERIES_PER_SLICE = 1;
+export const MAX_TOKEN_BUDGET_AUTO_RECOVERIES_PER_TICKET_STEP = 3;
+
+export function tokenBudgetRecoverySliceForAttempt(
+  run: Readonly<RunRecord>,
+  attempt: Readonly<AgentAttemptRecord>,
+): { ticketExecutionEpoch: number | undefined; reviewReworkOrdinal: number | undefined } {
+  return {
+    ticketExecutionEpoch: normalizedAttemptTicketExecutionEpoch(run, attempt),
+    reviewReworkOrdinal: normalizedAttemptReviewReworkOrdinal(run, attempt),
+  };
+}
+
+function isTokenBudgetFailureRecord(attempt: Readonly<AgentAttemptRecord> | undefined): boolean {
+  return (
+    attempt !== undefined &&
+    new Set(["failed", "aborted"]).has(attempt.status) &&
+    /^(?:input|output|cache-read|cache-write|new-token|cache-inclusive) token budget (?:exceeded|exhausted)$/u.test(
+      attempt.error ?? "",
+    )
+  );
+}
+
+export function tokenBudgetRecoveryAuthorityCounts(
+  run: Readonly<RunRecord>,
+  failed: Readonly<AgentAttemptRecord>,
+): { slice: number; total: number } {
+  const recovered = new Map<
+    string,
+    { ticketExecutionEpoch: number | undefined; reviewReworkOrdinal: number | undefined }
+  >();
+  for (const attempt of Object.values(run.attempts)) {
+    if (attempt.ticketId !== failed.ticketId || attempt.stepId !== failed.stepId) continue;
+    if (attempt.tokenBudgetRecovery !== undefined && isTokenBudgetFailureRecord(attempt)) {
+      recovered.set(attempt.id, {
+        ticketExecutionEpoch: attempt.tokenBudgetRecovery.ticketExecutionEpoch,
+        reviewReworkOrdinal: attempt.tokenBudgetRecovery.reviewReworkOrdinal,
+      });
+    }
+    // Explicit compatibility fallback for pre-marker records: immutable recovery lineage binds
+    // the exact failed parent without trusting display activity or wall-clock ordering.
+    const parentId = attempt.lineage?.parentAttemptId;
+    const parent = parentId === undefined ? undefined : run.attempts[parentId];
+    if (
+      attempt.lineage?.reason === "recovery" &&
+      parent !== undefined &&
+      parent.ticketId === failed.ticketId &&
+      parent.stepId === failed.stepId &&
+      isTokenBudgetFailureRecord(parent)
+    ) {
+      const parentSlice = tokenBudgetRecoverySliceForAttempt(run, parent);
+      const childSlice = tokenBudgetRecoverySliceForAttempt(run, attempt);
+      if (
+        childSlice.ticketExecutionEpoch === parentSlice.ticketExecutionEpoch &&
+        childSlice.reviewReworkOrdinal === parentSlice.reviewReworkOrdinal
+      ) {
+        recovered.set(parent.id, parentSlice);
+      }
+    }
+  }
+  const expected = tokenBudgetRecoverySliceForAttempt(run, failed);
+  return {
+    slice: [...recovered.values()].filter(
+      (slice) =>
+        slice.ticketExecutionEpoch === expected.ticketExecutionEpoch &&
+        slice.reviewReworkOrdinal === expected.reviewReworkOrdinal,
+    ).length,
+    total: recovered.size,
+  };
+}
+
+function assertTokenBudgetRecoveryMutation(
+  previous: Readonly<RunRecord>,
+  next: Readonly<RunRecord>,
+): void {
+  for (const [attemptId, priorAttempt] of Object.entries(previous.attempts)) {
+    const currentAttempt = next.attempts[attemptId];
+    const priorRecovery = priorAttempt.tokenBudgetRecovery;
+    const currentRecovery = currentAttempt?.tokenBudgetRecovery;
+    if (priorRecovery !== undefined) {
+      if (
+        currentRecovery === undefined ||
+        canonicalHash(currentRecovery) !== canonicalHash(priorRecovery)
+      ) {
+        throw new Error(`run rewrote token-budget recovery authority: ${attemptId}`);
+      }
+      continue;
+    }
+    if (currentAttempt === undefined || currentRecovery === undefined) continue;
+    assertAttemptRecord(attemptId, currentAttempt);
+    const priorTicket = previous.tickets[priorAttempt.ticketId];
+    const currentTicket = next.tickets[priorAttempt.ticketId];
+    const priorStep = priorTicket?.steps.find((step) => step.id === priorAttempt.stepId);
+    const currentStep = currentTicket?.steps.find((step) => step.id === priorAttempt.stepId);
+    const { tokenBudgetRecovery: _currentRecovery, ...currentAttemptWithoutRecovery } =
+      currentAttempt;
+    const recoveryCounts = tokenBudgetRecoveryAuthorityCounts(previous, priorAttempt);
+    if (
+      !new Set(["failed", "aborted"]).has(priorAttempt.status) ||
+      !/^(?:input|output|cache-read|cache-write|new-token|cache-inclusive) token budget (?:exceeded|exhausted)$/u.test(
+        priorAttempt.error ?? "",
+      ) ||
+      priorAttempt.terminalAcceptedAt !== undefined ||
+      priorAttempt.terminalOutputSha256 !== undefined ||
+      (priorAttempt.authorityProviderRequests ?? []).some(
+        (request) => request.settledAt === undefined && request.retirement === undefined,
+      ) ||
+      recoveryCounts.slice >= MAX_TOKEN_BUDGET_AUTO_RECOVERIES_PER_SLICE ||
+      recoveryCounts.total >= MAX_TOKEN_BUDGET_AUTO_RECOVERIES_PER_TICKET_STEP ||
+      currentRecovery.recoveredAt !== next.updatedAt ||
+      currentRecovery.ticketExecutionEpoch !==
+        normalizedAttemptTicketExecutionEpoch(previous, priorAttempt) ||
+      currentRecovery.reviewReworkOrdinal !==
+        normalizedAttemptReviewReworkOrdinal(previous, priorAttempt) ||
+      canonicalHash(currentAttemptWithoutRecovery) !== canonicalHash(priorAttempt) ||
+      priorTicket?.status !== "blocked" ||
+      priorStep?.status !== "failed" ||
+      priorStep.attemptIds.at(-1) !== attemptId ||
+      currentTicket?.status !== "queued" ||
+      currentStep?.status !== "pending" ||
+      currentStep.attemptIds.at(-1) !== attemptId ||
+      currentTicket.executionEpoch !== priorTicket.executionEpoch
+    ) {
+      throw new Error(
+        `run added token-budget recovery without exact failed assignment: ${attemptId}`,
+      );
+    }
+  }
+  for (const [attemptId, currentAttempt] of Object.entries(next.attempts)) {
+    if (
+      currentAttempt.tokenBudgetRecovery !== undefined &&
+      previous.attempts[attemptId] === undefined
+    ) {
+      throw new Error(`run added token-budget recovery to a new attempt: ${attemptId}`);
+    }
+  }
+}
+
 /** Enforce append-only control evidence and immutable cross-ticket identities across one CAS. */
 export function assertRunExecutionControlMutation(
   previous: Readonly<RunRecord>,
@@ -5317,6 +5514,7 @@ export function assertRunExecutionControlMutation(
   previousArchivedActions: ReadonlyMap<string, Readonly<RunActionExecutionRecord>> = new Map(),
 ): void {
   assertPlanningSessionMutation(previous.planningSession, next.planningSession);
+  assertTokenBudgetRecoveryMutation(previous, next);
   // This transition guard is an authority boundary in its own right. Validate the successor's
   // complete cross-ticket graph here so direct CAS callers cannot bypass raw-load validation by
   // introducing a structurally self-hashed but causally substituted control ticket.
@@ -6001,6 +6199,54 @@ function assertAttemptRecord(id: string, value: unknown): asserts value is Agent
     (value.failureCode !== undefined && !isBoundedRecordText(value.failureCode, 128))
   )
     throw new Error(`invalid attempt record: ${id}`);
+
+  if (value.tokenBudgetRecovery !== undefined) {
+    if (!isRecord(value.tokenBudgetRecovery)) {
+      throw new Error(`invalid attempt token-budget recovery: ${id}`);
+    }
+    const recovery = value.tokenBudgetRecovery;
+    const expectedKeys = [
+      "failedAttemptId",
+      "protocol",
+      "recoveredAt",
+      "sha256",
+      "stepId",
+      "ticketId",
+      ...(recovery.ticketExecutionEpoch === undefined ? [] : ["ticketExecutionEpoch"]),
+      ...(recovery.reviewReworkOrdinal === undefined ? [] : ["reviewReworkOrdinal"]),
+    ].sort();
+    const material = {
+      protocol: recovery.protocol,
+      failedAttemptId: recovery.failedAttemptId,
+      ticketId: recovery.ticketId,
+      stepId: recovery.stepId,
+      ...(recovery.ticketExecutionEpoch === undefined
+        ? {}
+        : { ticketExecutionEpoch: recovery.ticketExecutionEpoch }),
+      ...(recovery.reviewReworkOrdinal === undefined
+        ? {}
+        : { reviewReworkOrdinal: recovery.reviewReworkOrdinal }),
+      recoveredAt: recovery.recoveredAt,
+    };
+    if (
+      recovery.protocol !== "koni.agent-token-budget-recovery.v1" ||
+      recovery.failedAttemptId !== id ||
+      recovery.ticketId !== value.ticketId ||
+      recovery.stepId !== value.stepId ||
+      Object.keys(recovery).sort().join("\0") !== expectedKeys.join("\0") ||
+      (recovery.ticketExecutionEpoch !== undefined &&
+        !isNonnegativeSafeInteger(recovery.ticketExecutionEpoch)) ||
+      (recovery.reviewReworkOrdinal !== undefined &&
+        (!isNonnegativeSafeInteger(recovery.reviewReworkOrdinal) ||
+          recovery.reviewReworkOrdinal < 1)) ||
+      typeof recovery.recoveredAt !== "string" ||
+      recovery.recoveredAt.length === 0 ||
+      !isSha256Digest(recovery.sha256) ||
+      recovery.sha256 !== canonicalHash(material)
+    ) {
+      throw new Error(`invalid attempt token-budget recovery: ${id}`);
+    }
+  }
 
   if (
     (value.reviewedRunOid !== undefined &&

@@ -21,6 +21,7 @@ import {
   retainTicketAuthorityFields,
   reopenCompletedConfiguredCheckDependencies,
   resetRetryableConfiguredCheckInfrastructureAssignments,
+  resetRetryableInfrastructureAssignment,
   replacementTicketExecutionEpoch,
   shouldRefreshIntegrationCandidateCycle,
   shouldRearmCancelledTerminalResolver,
@@ -536,6 +537,225 @@ describe("run authority engine", () => {
         "Automatically retrying Implement feature step implement after bounded token-budget recovery",
       ),
     ).toBe(0);
+  });
+
+  it("does not charge a new ticket execution epoch for token recovery spent before an approved reissue", () => {
+    const historicalFailure = {
+      id: "attempt-historical-budget-failure",
+      ticketId: "ticket-one",
+      stepId: "implement",
+      ticketExecutionEpoch: 0,
+      status: "aborted",
+      error: "input token budget exceeded",
+      startedAt: "2026-08-12T10:10:00.000Z",
+    } as AgentAttemptRecord;
+    const historicalRecovery = {
+      id: "attempt-historical-recovery",
+      ticketId: "ticket-one",
+      stepId: "implement",
+      ticketExecutionEpoch: 0,
+      status: "completed",
+      startedAt: "2026-08-12T10:11:00.000Z",
+      lineage: {
+        branchEpoch: 1,
+        reason: "recovery",
+        parentAttemptId: historicalFailure.id,
+        parentSessionId: "session-historical",
+      },
+    } as AgentAttemptRecord;
+    const reissuedFailure = {
+      id: "attempt-reissued-budget-failure",
+      ticketId: "ticket-one",
+      stepId: "implement",
+      ticketExecutionEpoch: 1,
+      status: "aborted",
+      error: "new-token token budget exceeded",
+      startedAt: "2026-08-12T10:20:00.000Z",
+    } as AgentAttemptRecord;
+    const recoveryMessage =
+      "Automatically retrying Execute work step implement after bounded token-budget recovery";
+    const run = {
+      tickets: {
+        "ticket-one": {
+          id: "ticket-one",
+          title: "Execute work",
+          executionEpoch: 1,
+          steps: [{ id: "implement", kind: "production", dependsOn: [] }],
+        },
+      },
+      attempts: {
+        [historicalFailure.id]: historicalFailure,
+        [historicalRecovery.id]: historicalRecovery,
+        [reissuedFailure.id]: reissuedFailure,
+      },
+      activity: [
+        {
+          // A regressed/equal wall clock cannot make this old display marker authoritative for
+          // the new execution epoch.
+          at: reissuedFailure.startedAt,
+          ticketId: "ticket-one",
+          message: recoveryMessage,
+        },
+      ],
+    } as unknown as RunRecord;
+
+    expect(tokenBudgetRecoveryCount(run, reissuedFailure, recoveryMessage)).toBe(0);
+  });
+
+  it("does not let a stale token-recovery callback reset a newer failed execution epoch", () => {
+    const oldFailure = {
+      id: "attempt-old-budget-failure",
+      ticketId: "ticket-one",
+      stepId: "implement",
+      ticketExecutionEpoch: 0,
+      status: "aborted",
+      error: "input token budget exceeded",
+    } as AgentAttemptRecord;
+    const currentFailure = {
+      id: "attempt-current-budget-failure",
+      ticketId: "ticket-one",
+      stepId: "implement",
+      ticketExecutionEpoch: 1,
+      status: "aborted",
+      error: "new-token token budget exceeded",
+    } as AgentAttemptRecord;
+    const ticket = {
+      id: "ticket-one",
+      title: "Execute work",
+      status: "blocked",
+      blocker: currentFailure.error,
+      executionEpoch: 1,
+      steps: [
+        {
+          id: "implement",
+          kind: "production",
+          status: "failed",
+          attemptIds: [oldFailure.id, currentFailure.id],
+        },
+      ],
+    } as unknown as TicketRecord;
+    const run = {
+      tickets: { [ticket.id]: ticket },
+      attempts: { [oldFailure.id]: oldFailure, [currentFailure.id]: currentFailure },
+      git: { ticketCycles: {} },
+    } as unknown as RunRecord;
+    const before = structuredClone(run);
+
+    expect(
+      resetRetryableInfrastructureAssignment(run, ticket.id, "2026-08-12T10:30:00.000Z", {
+        failedAttemptId: oldFailure.id,
+        ticketExecutionEpoch: oldFailure.ticketExecutionEpoch,
+      }),
+    ).toBeUndefined();
+    expect(run).toEqual(before);
+  });
+
+  it("counts an exact recovery marker before a successor exists and blocks a second spend in the same epoch", () => {
+    const recoveryMaterial = {
+      protocol: "koni.agent-token-budget-recovery.v1" as const,
+      failedAttemptId: "attempt-first-budget-failure",
+      ticketId: "ticket-one",
+      stepId: "implement",
+      ticketExecutionEpoch: 1,
+      recoveredAt: "2026-08-12T10:20:01.000Z",
+    };
+    const firstFailure = {
+      id: recoveryMaterial.failedAttemptId,
+      ticketId: recoveryMaterial.ticketId,
+      stepId: recoveryMaterial.stepId,
+      ticketExecutionEpoch: recoveryMaterial.ticketExecutionEpoch,
+      status: "aborted",
+      error: "input token budget exceeded",
+      startedAt: "2026-08-12T10:20:00.000Z",
+      tokenBudgetRecovery: {
+        ...recoveryMaterial,
+        sha256: canonicalHash(recoveryMaterial),
+      },
+    } as AgentAttemptRecord;
+    const secondFailure = {
+      id: "attempt-second-budget-failure",
+      ticketId: firstFailure.ticketId,
+      stepId: firstFailure.stepId,
+      ticketExecutionEpoch: firstFailure.ticketExecutionEpoch,
+      status: "aborted",
+      error: "new-token token budget exceeded",
+      startedAt: "2026-08-12T10:21:00.000Z",
+    } as AgentAttemptRecord;
+    const run = {
+      tickets: {
+        "ticket-one": {
+          id: "ticket-one",
+          title: "Execute work",
+          executionEpoch: 1,
+          steps: [{ id: "implement", kind: "production", dependsOn: [] }],
+        },
+      },
+      attempts: {
+        [firstFailure.id]: firstFailure,
+        [secondFailure.id]: secondFailure,
+      },
+      activity: [],
+    } as unknown as RunRecord;
+
+    expect(tokenBudgetRecoveryCount(run, secondFailure, "display text is non-authoritative")).toBe(
+      1,
+    );
+  });
+
+  it("normalizes legacy epoch-less token recovery into execution epoch zero", () => {
+    const recoveryMaterial = {
+      protocol: "koni.agent-token-budget-recovery.v1" as const,
+      failedAttemptId: "attempt-legacy-budget-failure",
+      ticketId: "ticket-one",
+      stepId: "implement",
+      ticketExecutionEpoch: 0,
+      recoveredAt: "2026-08-12T10:20:01.000Z",
+    };
+    const legacyFailure = {
+      id: recoveryMaterial.failedAttemptId,
+      ticketId: recoveryMaterial.ticketId,
+      stepId: recoveryMaterial.stepId,
+      status: "aborted",
+      error: "input token budget exceeded",
+      startedAt: "2026-08-12T10:20:00.000Z",
+      tokenBudgetRecovery: {
+        ...recoveryMaterial,
+        sha256: canonicalHash(recoveryMaterial),
+      },
+    } as AgentAttemptRecord;
+    const retryFailure = {
+      id: "attempt-epoch-zero-retry-failure",
+      ticketId: legacyFailure.ticketId,
+      stepId: legacyFailure.stepId,
+      ticketExecutionEpoch: 0,
+      status: "aborted",
+      error: "new-token token budget exceeded",
+      startedAt: "2026-08-12T10:21:00.000Z",
+      lineage: {
+        branchEpoch: 1,
+        reason: "recovery",
+        parentAttemptId: legacyFailure.id,
+        parentSessionId: "session-legacy",
+      },
+    } as AgentAttemptRecord;
+    const run = {
+      tickets: {
+        "ticket-one": {
+          id: "ticket-one",
+          title: "Execute work",
+          executionEpoch: 0,
+          steps: [{ id: "implement", kind: "production", dependsOn: [] }],
+        },
+      },
+      attempts: {
+        [legacyFailure.id]: legacyFailure,
+        [retryFailure.id]: retryFailure,
+      },
+      activity: [],
+      git: { ticketCycles: {} },
+    } as unknown as RunRecord;
+
+    expect(tokenBudgetRecoveryCount(run, retryFailure, "legacy display marker")).toBe(1);
   });
 
   it("recognizes only an exact settled Lead launch replay as already consumed", () => {
@@ -4663,6 +4883,86 @@ describe("run authority engine", () => {
     expect(attempts[1]!.lineage?.conversationFork).toMatchObject({
       parentLaunchSpecHash: first.launchSpecHash,
     });
+    expect(attempts[0]!.tokenBudgetRecovery).toMatchObject({
+      protocol: "koni.agent-token-budget-recovery.v1",
+      failedAttemptId: attempts[0]!.id,
+      ticketId: attempts[0]!.ticketId,
+      stepId: attempts[0]!.stepId,
+      ticketExecutionEpoch: 0,
+    });
+    expect(() => assertRunRecord(structuredClone(ready))).not.toThrow();
+    const tamperedRecovery = structuredClone(ready);
+    tamperedRecovery.attempts[attempts[0]!.id]!.tokenBudgetRecovery!.recoveredAt =
+      "2026-08-12T00:00:00.000Z";
+    expect(() => assertRunRecord(tamperedRecovery)).toThrow(/token-budget recovery/u);
+    const unknownField = structuredClone(ready) as RunRecord & {
+      attempts: Record<
+        string,
+        AgentAttemptRecord & { tokenBudgetRecovery?: Record<string, unknown> }
+      >;
+    };
+    unknownField.attempts[attempts[0]!.id]!.tokenBudgetRecovery!.unexpected = true;
+    expect(() => assertRunRecord(unknownField)).toThrow(/token-budget recovery/u);
+
+    const deletedMarker = structuredClone(ready);
+    delete deletedMarker.attempts[attempts[0]!.id]!.tokenBudgetRecovery;
+    expect(() => assertRunExecutionControlMutation(ready, deletedMarker)).toThrow(
+      /rewrote token-budget recovery authority/u,
+    );
+    const rewrittenMarker = structuredClone(ready);
+    const rewritten = rewrittenMarker.attempts[attempts[0]!.id]!.tokenBudgetRecovery!;
+    rewritten.recoveredAt = "2026-08-12T00:00:00.000Z";
+    const { sha256: _priorSha256, ...rewrittenMaterial } = rewritten;
+    rewritten.sha256 = canonicalHash(rewrittenMaterial);
+    expect(() => assertRunExecutionControlMutation(ready, rewrittenMarker)).toThrow(
+      /rewrote token-budget recovery authority/u,
+    );
+    const previousWithoutMarker = structuredClone(ready);
+    delete previousWithoutMarker.attempts[attempts[0]!.id]!.tokenBudgetRecovery;
+    expect(() => assertRunExecutionControlMutation(previousWithoutMarker, ready)).toThrow(
+      /without exact failed assignment/u,
+    );
+
+    const commitRejectedMutation = async (
+      mutate: (draft: RunRecord) => void,
+      expected: RegExp,
+    ): Promise<void> => {
+      const state = await engine.store.state();
+      const current = await engine.store.getRun(runId);
+      const draft = structuredClone(current);
+      draft.revision += 1;
+      draft.updatedAt = "2026-08-12T00:00:00.000Z";
+      mutate(draft);
+      await expect(
+        engine.store.commit({
+          expectedRevision: state.revision,
+          runWrites: [{ record: draft, expectedRevision: current.revision }],
+        }),
+      ).rejects.toThrow(expected);
+    };
+    await commitRejectedMutation((draft) => {
+      delete draft.attempts[attempts[0]!.id]!.tokenBudgetRecovery;
+    }, /rewrote token-budget recovery authority/u);
+    await commitRejectedMutation((draft) => {
+      const recovery = draft.attempts[attempts[0]!.id]!.tokenBudgetRecovery!;
+      recovery.recoveredAt = draft.updatedAt;
+      const { sha256: _sha256, ...material } = recovery;
+      recovery.sha256 = canonicalHash(material);
+    }, /rewrote token-budget recovery authority/u);
+    await commitRejectedMutation((draft) => {
+      const completed = draft.attempts[attempts[1]!.id]!;
+      const material = {
+        protocol: "koni.agent-token-budget-recovery.v1" as const,
+        failedAttemptId: completed.id,
+        ticketId: completed.ticketId,
+        stepId: completed.stepId,
+        ...(completed.ticketExecutionEpoch === undefined
+          ? {}
+          : { ticketExecutionEpoch: completed.ticketExecutionEpoch }),
+        recoveredAt: draft.updatedAt,
+      };
+      completed.tokenBudgetRecovery = { ...material, sha256: canonicalHash(material) };
+    }, /without exact failed assignment/u);
     expect(
       ready.activity.some(
         (entry) =>
@@ -4672,6 +4972,124 @@ describe("run authority engine", () => {
     ).toBe(true);
     client.close();
   });
+
+  it("rejects direct recovery authority after the current execution slice already spent it", async () => {
+    const root = await repository();
+    const base = directApprovalProgram();
+    const prepareAttempt = base.prepareAttempt.bind(base);
+    let exhausted = 0;
+    const program: RunCompilerProgram = {
+      ...base,
+      async prepareAttempt(input) {
+        const prepared = await prepareAttempt(input);
+        if (input.kind !== "ticket" || exhausted >= 2) return prepared;
+        exhausted += 1;
+        return {
+          ...prepared,
+          factory: async () => new BudgetExhaustingAdapter(prepared.spec),
+        };
+      },
+    };
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(client, engine, "same-slice-recovery-cap");
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      return (
+        current.tickets["ticket-one"]?.status === "blocked" &&
+        Object.values(current.attempts).filter(
+          (attempt) => attempt.kind === "ticket" && attempt.stepId === "implement",
+        ).length === 2
+      );
+    });
+    const current = await engine.store.getRun(runId);
+    const state = await engine.store.state();
+    const attempts = Object.values(current.attempts)
+      .filter((attempt) => attempt.kind === "ticket" && attempt.stepId === "implement")
+      .sort((left, right) => (left.startedAt ?? "").localeCompare(right.startedAt ?? ""));
+    expect(attempts[0]!.tokenBudgetRecovery).toBeDefined();
+    expect(attempts[1]!.tokenBudgetRecovery).toBeUndefined();
+    const draft = structuredClone(current);
+    draft.revision += 1;
+    draft.updatedAt = "2026-08-12T12:00:00.000Z";
+    const failed = draft.attempts[attempts[1]!.id]!;
+    const material = {
+      protocol: "koni.agent-token-budget-recovery.v1" as const,
+      failedAttemptId: failed.id,
+      ticketId: failed.ticketId,
+      stepId: failed.stepId,
+      ticketExecutionEpoch: failed.ticketExecutionEpoch!,
+      recoveredAt: draft.updatedAt,
+    };
+    failed.tokenBudgetRecovery = { ...material, sha256: canonicalHash(material) };
+    const ticket = draft.tickets[failed.ticketId]!;
+    const step = ticket.steps.find((candidate) => candidate.id === failed.stepId)!;
+    ticket.status = "queued";
+    ticket.blocker = undefined;
+    ticket.updatedAt = draft.updatedAt;
+    step.status = "pending";
+    step.startedAt = undefined;
+    step.completedAt = undefined;
+    step.summary = undefined;
+    await expect(
+      engine.store.commit({
+        expectedRevision: state.revision,
+        runWrites: [{ record: draft, expectedRevision: current.revision }],
+      }),
+    ).rejects.toThrow(/without exact failed assignment/u);
+
+    const unsettled = structuredClone(current);
+    const unsettledFailure = unsettled.attempts[attempts[1]!.id]!;
+    const settledRequests = unsettledFailure.authorityProviderRequests ?? [];
+    if (settledRequests.length === 0) {
+      unsettledFailure.authorityProviderUsageBaseline = {
+        inputTokens: unsettledFailure.inputTokens,
+        outputTokens: unsettledFailure.outputTokens,
+        cacheReadTokens: unsettledFailure.cacheReadTokens,
+        cacheWriteTokens: unsettledFailure.cacheWriteTokens,
+        recordedAt: "2026-08-12T11:58:00.000Z",
+      };
+    }
+    unsettledFailure.authorityProviderRequests = [
+      ...settledRequests,
+      {
+        sequence: settledRequests.length + 1,
+        reservationId: "reservation-open",
+        api: "openai-codex-responses",
+        modelId: "gpt-5.6-luna",
+        payloadSha256: rawSha256("open provider payload"),
+        payloadSizeBytes: 64,
+        baselineEntryId: "provider-baseline",
+        prospectiveInputTokens: 128,
+        reservedOutputTokens: 64,
+        reservedAt: "2026-08-12T11:59:00.000Z",
+      },
+    ];
+    const unsettledNext = structuredClone(draft);
+    unsettledNext.attempts[attempts[1]!.id]!.authorityProviderRequests = structuredClone(
+      unsettledFailure.authorityProviderRequests,
+    );
+    if (unsettledFailure.authorityProviderUsageBaseline !== undefined) {
+      unsettledNext.attempts[attempts[1]!.id]!.authorityProviderUsageBaseline = structuredClone(
+        unsettledFailure.authorityProviderUsageBaseline,
+      );
+    }
+    expect(() => assertRunExecutionControlMutation(unsettled, unsettledNext)).toThrow(
+      /without exact failed assignment/u,
+    );
+    client.close();
+  }, 30_000);
 
   it("bounds automatic token-budget recovery per workflow step rather than per ticket", async () => {
     const root = await repository();
@@ -4755,6 +5173,185 @@ describe("run authority engine", () => {
     client.close();
   }, 30_000);
 
+  it("renews bounded token-budget recovery when the compiler reissues a ticket in a new execution epoch", async () => {
+    const root = await repository();
+    const base = directApprovalProgram();
+    const prepareAttempt = base.prepareAttempt.bind(base);
+    const exhaustedEpochs = new Set<number>();
+    let rediscoveries = 0;
+    const program: RunCompilerProgram = {
+      ...base,
+      async prepareAttempt(input) {
+        const prepared = await prepareAttempt(input);
+        const ticketId = input.assignment?.ticketId;
+        if (input.kind !== "ticket" || ticketId === undefined) return prepared;
+        const epoch = input.run.tickets[ticketId]?.executionEpoch ?? 0;
+        if (exhaustedEpochs.has(epoch)) return prepared;
+        exhaustedEpochs.add(epoch);
+        return {
+          ...prepared,
+          factory: async () => new BudgetExhaustingAdapter(prepared.spec),
+        };
+      },
+      async verifyRun(run) {
+        if (rediscoveries === 0 && run.tickets["ticket-one"]?.status === "completed") {
+          rediscoveries += 1;
+          return {
+            ok: false,
+            reason: "Verification found 1 still-applicable compiler ticket: Execute work",
+            tickets: structuredClone(run.tickets),
+            applicableTicketIds: ["ticket-one"],
+          };
+        }
+        return base.verifyRun(run);
+      },
+    };
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(
+      client,
+      engine,
+      "reissued-ticket-budget-abort-retry",
+    );
+
+    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "merge_ready");
+    const ready = await engine.store.getRun(runId);
+    const attempts = Object.values(ready.attempts).filter(
+      (attempt) => attempt.kind === "ticket" && attempt.stepId === "implement",
+    );
+    expect(rediscoveries).toBe(1);
+    expect(exhaustedEpochs).toEqual(new Set([0, 1]));
+    expect(attempts).toHaveLength(4);
+    for (const epoch of [0, 1]) {
+      const epochAttempts = attempts.filter((attempt) => attempt.ticketExecutionEpoch === epoch);
+      expect(epochAttempts).toHaveLength(2);
+      expect(epochAttempts.some((attempt) => attempt.status === "aborted")).toBe(true);
+      expect(epochAttempts.some((attempt) => attempt.status === "completed")).toBe(true);
+    }
+    client.close();
+  }, 30_000);
+
+  it("bounds token-budget recovery across repeated ticket execution epochs", async () => {
+    const root = await repository();
+    const base = directApprovalProgram();
+    const prepareAttempt = base.prepareAttempt.bind(base);
+    const exhaustedEpochs = new Set<number>();
+    let rediscoveries = 0;
+    const program: RunCompilerProgram = {
+      ...base,
+      async prepareAttempt(input) {
+        const prepared = await prepareAttempt(input);
+        const ticketId = input.assignment?.ticketId;
+        if (input.kind !== "ticket" || ticketId === undefined) return prepared;
+        const epoch = input.run.tickets[ticketId]?.executionEpoch ?? 0;
+        if (exhaustedEpochs.has(epoch)) return prepared;
+        exhaustedEpochs.add(epoch);
+        return {
+          ...prepared,
+          factory: async () => new BudgetExhaustingAdapter(prepared.spec),
+        };
+      },
+      async verifyRun(run) {
+        if (rediscoveries < 3 && run.tickets["ticket-one"]?.status === "completed") {
+          rediscoveries += 1;
+          return {
+            ok: false,
+            reason: "Verification found a still-applicable compiler ticket",
+            tickets: structuredClone(run.tickets),
+            applicableTicketIds: ["ticket-one"],
+          };
+        }
+        return base.verifyRun(run);
+      },
+    };
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(
+      client,
+      engine,
+      "bounded-reissued-ticket-budget-abort-retry",
+    );
+
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      return (
+        current.tickets["ticket-one"]?.status === "blocked" &&
+        Object.values(current.attempts).some(
+          (attempt) =>
+            attempt.ticketExecutionEpoch === 3 &&
+            attempt.status === "aborted" &&
+            attempt.error === "input token budget exceeded",
+        )
+      );
+    });
+    const blocked = await engine.store.getRun(runId);
+    const attempts = Object.values(blocked.attempts).filter(
+      (attempt) => attempt.kind === "ticket" && attempt.stepId === "implement",
+    );
+    expect(rediscoveries).toBe(3);
+    expect(exhaustedEpochs).toEqual(new Set([0, 1, 2, 3]));
+    expect(attempts).toHaveLength(7);
+    expect(attempts.filter((attempt) => attempt.tokenBudgetRecovery !== undefined)).toHaveLength(3);
+    expect(
+      attempts.find((attempt) => attempt.ticketExecutionEpoch === 3 && attempt.status === "aborted")
+        ?.tokenBudgetRecovery,
+    ).toBeUndefined();
+    const state = await engine.store.state();
+    const draft = structuredClone(blocked);
+    draft.revision += 1;
+    draft.updatedAt = "2026-08-12T13:00:00.000Z";
+    const failed = Object.values(draft.attempts).find(
+      (attempt) => attempt.ticketExecutionEpoch === 3 && attempt.status === "aborted",
+    )!;
+    const material = {
+      protocol: "koni.agent-token-budget-recovery.v1" as const,
+      failedAttemptId: failed.id,
+      ticketId: failed.ticketId,
+      stepId: failed.stepId,
+      ticketExecutionEpoch: 3,
+      recoveredAt: draft.updatedAt,
+    };
+    failed.tokenBudgetRecovery = { ...material, sha256: canonicalHash(material) };
+    const ticket = draft.tickets[failed.ticketId]!;
+    const step = ticket.steps.find((candidate) => candidate.id === failed.stepId)!;
+    ticket.status = "queued";
+    ticket.blocker = undefined;
+    ticket.updatedAt = draft.updatedAt;
+    step.status = "pending";
+    step.startedAt = undefined;
+    step.completedAt = undefined;
+    step.summary = undefined;
+    await expect(
+      engine.store.commit({
+        expectedRevision: state.revision,
+        runWrites: [{ record: draft, expectedRevision: blocked.revision }],
+      }),
+    ).rejects.toThrow(/without exact failed assignment/u);
+    client.close();
+  }, 30_000);
+
   it("renews bounded token-budget recovery for an explicitly reopened review-rework slice", async () => {
     const root = await repository();
     const base = reviewReworkProgram();
@@ -4818,6 +5415,31 @@ describe("run authority engine", () => {
       parentLaunchSpecHash: ready.attempts[implementation.attemptIds[2]!]!.launchSpecHash,
     });
     expect(ticket.reviewReworks?.map((record) => record.mode)).toEqual(["automatic"]);
+    expect(
+      ready.attempts[implementation.attemptIds[2]!]!.tokenBudgetRecovery?.reviewReworkOrdinal,
+    ).toBe(1);
+
+    const laterRework = structuredClone(ready);
+    const laterTicket = laterRework.tickets["ticket-one"]!;
+    laterTicket.reviewReworkLimit = 2;
+    laterTicket.reviewReworkCount = 2;
+    laterTicket.reviewReworks!.push({
+      ordinal: 2,
+      mode: "automatic",
+      scope: "producer_and_review",
+      failedReviewAttemptId: review.attemptIds.at(-1)!,
+      reopenFromStepId: laterTicket.reviewFailureReopenFrom!,
+      blocker: "A later review opened another bounded semantic slice",
+      openedAt: "2026-08-12T11:00:00.000Z",
+    });
+    expect(() => assertRunRecord(laterRework)).not.toThrow();
+
+    const freshEpoch = structuredClone(ready);
+    const freshTicket = freshEpoch.tickets["ticket-one"]!;
+    freshTicket.executionEpoch = (freshTicket.executionEpoch ?? 0) + 1;
+    freshTicket.reviewReworkCount = 0;
+    freshTicket.reviewReworks = [];
+    expect(() => assertRunRecord(freshEpoch)).not.toThrow();
     client.close();
   }, 30_000);
 

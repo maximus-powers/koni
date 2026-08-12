@@ -237,8 +237,12 @@ import {
   configuredCheckInfrastructureFailureForAttempt,
   deriveRunActionExecutionArchive,
   deriveRunActionExecutionArchiveSegment,
+  MAX_TOKEN_BUDGET_AUTO_RECOVERIES_PER_SLICE,
+  MAX_TOKEN_BUDGET_AUTO_RECOVERIES_PER_TICKET_STEP,
   terminalFailureBindingsForTicket,
   terminalFailureBindingFromProof,
+  tokenBudgetRecoveryAuthorityCounts,
+  tokenBudgetRecoverySliceForAttempt,
 } from "../state/run-record.js";
 import {
   authorizeBlockedReviewRetry,
@@ -252,7 +256,6 @@ import {
   finishAssignment,
   legacyCompletedReviewRejectionCandidate,
   recoverLegacyCompletedReviewRejection,
-  reviewReworkAppliesToStep,
   ticketDependencySettled,
   type ReadyAssignment,
   type SchedulerExecutionAuthority,
@@ -307,7 +310,6 @@ const MAX_PROVIDER_RATE_LIMIT_RECOVERY_DELAY_MS = 15 * 60_000;
 // from a fresh contained root, bounded just like provider-exposure recovery, so an oversized
 // inherited transcript never turns into an operator-only retry loop.
 const MAX_PROVIDER_ADMISSION_AUTO_RECOVERIES = 3;
-const MAX_TOKEN_BUDGET_AUTO_RECOVERIES_PER_STEP = 1;
 const RECOVERABLE_CONFIGURED_CHECK_PREFLIGHT_CODES = new Set([
   "check_argv",
   "check_input_binding",
@@ -16142,8 +16144,11 @@ export class RunAuthorityEngine {
         return this.#noOpInternal(revision);
       }
       const recoveryMessage = tokenBudgetRecoveryMessage(run, failed);
-      const recoveries = tokenBudgetRecoveryCount(run, failed, recoveryMessage);
-      if (recoveries >= MAX_TOKEN_BUDGET_AUTO_RECOVERIES_PER_STEP) {
+      const recoveries = tokenBudgetRecoveryAuthorityCounts(run, failed);
+      if (
+        recoveries.slice >= MAX_TOKEN_BUDGET_AUTO_RECOVERIES_PER_SLICE ||
+        recoveries.total >= MAX_TOKEN_BUDGET_AUTO_RECOVERIES_PER_TICKET_STEP
+      ) {
         return this.#noOpInternal(revision);
       }
       const draft = nextRun(run, this.#timestamp());
@@ -16155,10 +16160,20 @@ export class RunAuthorityEngine {
         });
       }
       if (draft.lifecycle.phase !== "executing") return this.#noOpInternal(revision);
+      draft.attempts[failedAttemptId]!.tokenBudgetRecovery = tokenBudgetRecoveryRecord(
+        run,
+        failed,
+        draft.updatedAt,
+      );
       const retried = resetRetryableInfrastructureAssignment(
         draft,
         failed.ticketId,
         draft.updatedAt,
+        {
+          failedAttemptId,
+          ticketExecutionEpoch: tokenBudgetRecoverySliceForAttempt(run, failed)
+            .ticketExecutionEpoch,
+        },
       );
       if (retried === undefined) return this.#noOpInternal(revision);
       draft.activity.push(
@@ -21802,10 +21817,14 @@ function resetRetryableInfrastructureAssignments(
   return retried;
 }
 
-function resetRetryableInfrastructureAssignment(
+export function resetRetryableInfrastructureAssignment(
   run: RunRecord,
   ticketId: string,
   at: string,
+  expected?: {
+    failedAttemptId: string;
+    ticketExecutionEpoch: number | undefined;
+  },
 ): { ticketId: string; ticketTitle: string } | undefined {
   const ticket = run.tickets[ticketId];
   if (ticket?.status !== "blocked") return undefined;
@@ -21815,6 +21834,11 @@ function resetRetryableInfrastructureAssignment(
   if (
     step === undefined ||
     attempt === undefined ||
+    (expected !== undefined &&
+      (attemptId !== expected.failedAttemptId ||
+        attemptTicketExecutionEpoch(run, ticket, attempt) !== expected.ticketExecutionEpoch ||
+        (expected.ticketExecutionEpoch !== undefined &&
+          currentTicketExecutionEpoch(run, ticket) !== expected.ticketExecutionEpoch))) ||
     !new Set<AttemptStatus>(["failed", "aborted"]).has(attempt.status) ||
     attempt.terminalAcceptedAt !== undefined ||
     attempt.terminalOutputSha256 !== undefined ||
@@ -21923,55 +21947,31 @@ function tokenBudgetRecoveryMessage(
 export function tokenBudgetRecoveryCount(
   run: Readonly<RunRecord>,
   failed: Readonly<AgentAttemptRecord>,
-  recoveryMessage: string,
+  _recoveryMessage: string,
 ): number {
-  const ticket = run.tickets[failed.ticketId];
-  const latestRework = ticket?.reviewReworks?.at(-1);
-  // Review rework is a newly compiler-authorized semantic slice. It gets the same single,
-  // bounded infrastructure recovery as the original step; otherwise one historical budget abort
-  // can make an explicit supervised retry immediately depend on another operator action. Bind the
-  // renewal to the durable rework timestamp and only when this failed attempt actually belongs to
-  // that slice, so startup scans cannot reinterpret an older abort under a newer rework epoch.
-  const recoveryEpochStartedAt =
-    ticket !== undefined &&
-    latestRework !== undefined &&
-    reviewReworkAppliesToStep(ticket, failed.stepId) &&
-    failed.startedAt !== undefined &&
-    failed.startedAt >= latestRework.openedAt
-      ? latestRework.openedAt
-      : undefined;
-  const inRecoveryEpoch = (at: string | undefined): boolean =>
-    recoveryEpochStartedAt === undefined || (at !== undefined && at >= recoveryEpochStartedAt);
-  const durableMarkers = run.activity.filter(
-    (entry) =>
-      entry.ticketId === failed.ticketId &&
-      entry.message === recoveryMessage &&
-      inRecoveryEpoch(entry.at),
-  ).length;
-  // Runs created before step-scoped markers used one ticket-wide activity message. Recover the
-  // actual scope from immutable attempt lineage so an upgrade cannot silently grant an already
-  // retried step another automatic spend.
-  const issuedRecoveries = Object.values(run.attempts).filter((attempt) => {
-    if (
-      attempt.ticketId !== failed.ticketId ||
-      attempt.stepId !== failed.stepId ||
-      attempt.lineage?.reason !== "recovery" ||
-      attempt.lineage.parentAttemptId === undefined
-    ) {
-      return false;
-    }
-    const parent = run.attempts[attempt.lineage.parentAttemptId];
-    return (
-      inRecoveryEpoch(attempt.startedAt) &&
-      // The first attempt of a newly authorized rework can retain a budget-failed parent from the
-      // preceding slice for audit lineage. It was authorized by the rework action, not by this
-      // epoch's automatic recovery allowance, so both sides of a counted recovery edge must live
-      // inside the same epoch.
-      inRecoveryEpoch(parent?.startedAt) &&
-      isTokenBudgetFailure(parent)
-    );
-  }).length;
-  return Math.max(durableMarkers, issuedRecoveries);
+  return tokenBudgetRecoveryAuthorityCounts(run, failed).slice;
+}
+
+function tokenBudgetRecoveryRecord(
+  run: Readonly<RunRecord>,
+  failed: Readonly<AgentAttemptRecord>,
+  recoveredAt: string,
+): NonNullable<AgentAttemptRecord["tokenBudgetRecovery"]> {
+  const slice = tokenBudgetRecoverySliceForAttempt(run, failed);
+  const material = {
+    protocol: "koni.agent-token-budget-recovery.v1" as const,
+    failedAttemptId: failed.id,
+    ticketId: failed.ticketId,
+    stepId: failed.stepId,
+    ...(slice.ticketExecutionEpoch === undefined
+      ? {}
+      : { ticketExecutionEpoch: slice.ticketExecutionEpoch }),
+    ...(slice.reviewReworkOrdinal === undefined
+      ? {}
+      : { reviewReworkOrdinal: slice.reviewReworkOrdinal }),
+    recoveredAt,
+  };
+  return { ...material, sha256: canonicalHash(material) };
 }
 
 /**
