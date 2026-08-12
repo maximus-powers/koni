@@ -16220,6 +16220,7 @@ export class RunAuthorityEngine {
       if (recoveries > MAX_TERMINAL_PROTOCOL_AUTO_RECOVERIES) {
         return this.#noOpInternal(revision);
       }
+      const recoveryMessage = terminalProtocolRecoveryMessage(run, failed);
       const draft = nextRun(run, this.#timestamp());
       if (draft.lifecycle.phase === "blocked") {
         applyLifecycle(draft, {
@@ -16228,7 +16229,29 @@ export class RunAuthorityEngine {
           phase: run.lifecycle.resumePhase ?? "executing",
         });
       }
-      if (draft.lifecycle.phase === "executing") {
+      if (draft.lifecycle.phase === "planning") {
+        const session = draft.planningSession;
+        const planningAttempt =
+          session === undefined ? undefined : draft.attempts[session.attemptId];
+        const planningRevision = session?.revisions[session.currentRevision];
+        if (
+          session === undefined ||
+          planningAttempt?.id !== failedAttemptId ||
+          planningAttempt.kind !== "planning" ||
+          planningAttempt.status !== "failed" ||
+          planningAttempt.failureCode !== "terminal_protocol" ||
+          planningRevision?.status !== "failed"
+        ) {
+          return this.#noOpInternal(revision);
+        }
+        planningAttempt.status = "queued";
+        clearPlanningRevisionTerminalState(planningAttempt);
+        delete planningAttempt.error;
+        delete planningAttempt.failureCode;
+        session.status = "running";
+        planningRevision.status = "running";
+        delete planningRevision.completedAt;
+      } else if (draft.lifecycle.phase === "executing") {
         for (const retried of resetRetryableInfrastructureAssignments(draft, draft.updatedAt)) {
           draft.activity.push(
             activity(
@@ -16247,7 +16270,7 @@ export class RunAuthorityEngine {
           this.#createId("activity"),
           draft.updatedAt,
           "compiler",
-          "Auto-retrying an effect-free terminal-contract failure with a fresh contained attempt",
+          recoveryMessage,
           undefined,
           "info",
         ),
@@ -16264,7 +16287,10 @@ export class RunAuthorityEngine {
         ],
       };
     });
-    if (redrivePhase === "executing" || redrivePhase === "verifying") {
+    if (redrivePhase === "planning") {
+      this.#supervisor.resumeRun(runId);
+      await this.#recoverContinuousPlanningRevision(runId);
+    } else if (redrivePhase === "executing" || redrivePhase === "verifying") {
       this.#supervisor.resumeRun(runId);
       await this.#recoverConfiguredActions(runId);
       await this.#tick(runId);
@@ -21887,6 +21913,13 @@ export function terminalProtocolRecoveryCount(
   run: Readonly<RunRecord>,
   failed: Readonly<AgentAttemptRecord>,
 ): number {
+  if (run.planningSession?.attemptId === failed.id && failed.kind === "planning") {
+    const recoveryMessage = terminalProtocolRecoveryMessage(run, failed);
+    return (
+      run.activity.filter((entry) => entry.message === recoveryMessage).length +
+      (failed.status === "failed" && failed.failureCode === "terminal_protocol" ? 1 : 0)
+    );
+  }
   const lane = Object.values(run.attempts)
     .filter((attempt) => {
       if (
@@ -21920,6 +21953,16 @@ export function terminalProtocolRecoveryCount(
     count += 1;
   }
   return count;
+}
+
+function terminalProtocolRecoveryMessage(
+  run: Readonly<RunRecord>,
+  failed: Readonly<AgentAttemptRecord>,
+): string {
+  if (run.planningSession?.attemptId === failed.id && failed.kind === "planning") {
+    return `Auto-retrying an effect-free terminal-contract failure in planning revision ${run.planningSession.currentRevision} with the same authenticated session`;
+  }
+  return "Auto-retrying an effect-free terminal-contract failure with a fresh contained attempt";
 }
 
 /** A failed unassigned judgment must not revoke tools from an independent active worker. */

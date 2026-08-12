@@ -3975,6 +3975,162 @@ describe("run authority engine", () => {
     client.close();
   });
 
+  it("automatically retries a planning terminal-contract failure in its stable session", async () => {
+    const root = await repository();
+    const base = fakeProgram();
+    const prepareAttempt = base.prepareAttempt.bind(base);
+    let failFirstPlanner = true;
+    let failedIdentity: Readonly<{ attemptId: string; sessionId: string }> | undefined;
+    const program: RunCompilerProgram = {
+      ...base,
+      async prepareAttempt(input) {
+        const prepared = await prepareAttempt(input);
+        if (input.kind !== "planning" || !failFirstPlanner) return prepared;
+        failFirstPlanner = false;
+        failedIdentity = {
+          attemptId: prepared.spec.identity.attemptId,
+          sessionId: prepared.spec.identity.sessionId,
+        };
+        return {
+          ...prepared,
+          factory: async () =>
+            new InfrastructureFailingAdapter(
+              prepared.spec,
+              "terminal_protocol",
+              "agent settled without calling terminal tool koni_submit_output",
+              { input: 13, output: 5, cacheRead: 8, cacheWrite: 2 },
+            ),
+        };
+      },
+    };
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+
+    const created = await client.request(
+      "run.create",
+      {
+        objective: "Recover an effect-free planning terminal failure",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Recover an effect-free planning terminal failure" },
+      },
+      { expectedRevision: 0, idempotencyKey: "create-terminal-recovery-planning-run" },
+    );
+    const runId = (created.result as { runId: string }).runId;
+    await waitFor(
+      async () => (await engine.store.getRun(runId)).lifecycle.phase === "awaiting_approval",
+    );
+
+    const planned = await engine.store.getRun(runId);
+    const planningAttempts = Object.values(planned.attempts).filter(
+      (attempt) => attempt.kind === "planning",
+    );
+    expect(planningAttempts).toHaveLength(1);
+    expect(planningAttempts[0]).toMatchObject({
+      id: failedIdentity?.attemptId,
+      sessionId: failedIdentity?.sessionId,
+      status: "waiting_plan_review",
+      inputTokens: 13,
+      outputTokens: 5,
+      cacheReadTokens: 8,
+      cacheWriteTokens: 2,
+    });
+    expect(planned.planningSession).toMatchObject({
+      attemptId: failedIdentity?.attemptId,
+      sessionId: failedIdentity?.sessionId,
+      currentRevision: 0,
+      status: "awaiting_review",
+    });
+    expect(
+      planned.activity.some((entry) =>
+        entry.message.includes("Auto-retrying an effect-free terminal-contract failure"),
+      ),
+    ).toBe(true);
+    client.close();
+  }, 30_000);
+
+  it("bounds automatic planning terminal-contract recovery per revision", async () => {
+    const root = await repository();
+    const base = fakeProgram();
+    const prepareAttempt = base.prepareAttempt.bind(base);
+    const recoverAttempt = base.recoverAttempt!.bind(base);
+    let plannerLaunches = 0;
+    const failingFactory = (spec: AgentLaunchSpec) => {
+      plannerLaunches += 1;
+      return new InfrastructureFailingAdapter(
+        spec,
+        "terminal_protocol",
+        "agent settled without calling terminal tool koni_submit_output",
+      );
+    };
+    const program: RunCompilerProgram = {
+      ...base,
+      async prepareAttempt(input) {
+        const prepared = await prepareAttempt(input);
+        if (input.kind !== "planning") return prepared;
+        return { ...prepared, factory: async () => failingFactory(prepared.spec) };
+      },
+      async recoverAttempt(input) {
+        const prepared = await recoverAttempt(input);
+        return { ...prepared, factory: async () => failingFactory(prepared.spec) };
+      },
+    };
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+
+    const created = await client.request(
+      "run.create",
+      {
+        objective: "Bound repeated planning terminal failures",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Bound repeated planning terminal failures" },
+      },
+      { expectedRevision: 0, idempotencyKey: "create-bounded-terminal-planning-run" },
+    );
+    const runId = (created.result as { runId: string }).runId;
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      return (
+        current.lifecycle.phase === "blocked" &&
+        current.activity.filter((entry) =>
+          entry.message.includes("Auto-retrying an effect-free terminal-contract failure"),
+        ).length === 3
+      );
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const blocked = await engine.store.getRun(runId);
+    expect(plannerLaunches).toBe(4);
+    expect(
+      Object.values(blocked.attempts).filter((attempt) => attempt.kind === "planning"),
+    ).toEqual([expect.objectContaining({ status: "failed", failureCode: "terminal_protocol" })]);
+    expect(blocked.planningSession).toMatchObject({ currentRevision: 0, status: "blocked" });
+    client.close();
+  }, 30_000);
+
   it("scopes terminal-contract recovery to the failed lane and preserves active siblings", () => {
     const failedLead = {
       id: "attempt-lead-current",
@@ -4020,6 +4176,28 @@ describe("run authority engine", () => {
     activeSibling.status = "completed";
     expect(hasProviderCapableSiblingAttempt(run, failedLead.id)).toBe(false);
     expect(shouldDeferBlockedLeadDisposition(run, failedLead.id, "blocked")).toBe(false);
+
+    const failedPlanner = {
+      id: "attempt-planning-stable",
+      kind: "planning",
+      ticketId: "run-planning",
+      stepId: "combined-plan",
+      status: "failed",
+      failureCode: "terminal_protocol",
+    } as AgentAttemptRecord;
+    const revisionZeroRecovery =
+      "Auto-retrying an effect-free terminal-contract failure in planning revision 0 with the same authenticated session";
+    const revisionOneRecovery =
+      "Auto-retrying an effect-free terminal-contract failure in planning revision 1 with the same authenticated session";
+    const continuousPlanningRun = {
+      attempts: { [failedPlanner.id]: failedPlanner },
+      planningSession: { attemptId: failedPlanner.id, currentRevision: 1 },
+      activity: [
+        ...Array.from({ length: 3 }, () => ({ message: revisionZeroRecovery })),
+        { message: revisionOneRecovery },
+      ],
+    } as unknown as RunRecord;
+    expect(terminalProtocolRecoveryCount(continuousPlanningRun, failedPlanner)).toBe(2);
   });
 
   it("keeps independent ticket work executable while a sibling terminal failure recovers", async () => {
@@ -9829,11 +10007,18 @@ class CompletingAdapter implements PiSessionAdapter {
 class InfrastructureFailingAdapter implements PiSessionAdapter {
   public readonly sessionId: string;
   public readonly sessionFile: string;
+  readonly #listeners = new Set<(event: AgentSessionEvent) => void>();
 
   public constructor(
     spec: AgentLaunchSpec,
     private readonly failureCode: string | undefined,
     private readonly failureMessage: string,
+    private readonly usage?: Readonly<{
+      input: number;
+      output: number;
+      cacheRead: number;
+      cacheWrite: number;
+    }>,
   ) {
     this.sessionId = spec.identity.sessionId;
     this.sessionFile = path.join(spec.workspace.sessionDirectory, `${this.sessionId}.jsonl`);
@@ -9843,10 +10028,35 @@ class InfrastructureFailingAdapter implements PiSessionAdapter {
     return [TERMINAL_TOOL_NAME];
   }
   public appendMapping(): void {}
-  public subscribe(): () => void {
-    return () => undefined;
+  public subscribe(listener: (event: AgentSessionEvent) => void): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
   }
   public async prompt(): Promise<void> {
+    if (this.usage !== undefined) {
+      const { input, output, cacheRead, cacheWrite } = this.usage;
+      const event = {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "planning" }],
+          api: "openai-responses",
+          provider: "openai-codex",
+          model: "test-model",
+          usage: {
+            input,
+            output,
+            cacheRead,
+            cacheWrite,
+            totalTokens: input + output + cacheRead + cacheWrite,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          },
+          stopReason: "stop",
+          timestamp: Date.now(),
+        },
+      } as unknown as AgentSessionEvent;
+      for (const listener of this.#listeners) listener(event);
+    }
     if (this.failureCode === undefined) throw new Error(this.failureMessage);
     throw new ManagedSessionError(this.failureCode, this.failureMessage);
   }
