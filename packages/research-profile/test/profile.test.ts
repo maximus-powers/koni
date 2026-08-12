@@ -232,6 +232,33 @@ describe("research profile registrar", () => {
     });
   });
 
+  it("keeps approved asset resolution inside the autonomous closure chain", async () => {
+    const source = await readFile(
+      path.resolve(import.meta.dirname, "../koni/baseline/operations/research.yaml"),
+      "utf8",
+    );
+    const document = YAML.parse(source) as {
+      operations: Array<{
+        id: string;
+        change_control?: {
+          role?: string;
+          allow_upstream_requests?: boolean;
+        };
+      }>;
+    };
+    const assetResolutionOperations = [
+      "asset-resolution.prerequisite.resolve-assets",
+      "asset-resolution.prerequisite.plan-build-asset",
+    ].map((id) => document.operations.find((operation) => operation.id === id));
+
+    for (const operation of assetResolutionOperations) {
+      expect(operation?.change_control).toEqual({
+        role: "ordinary",
+        allow_upstream_requests: false,
+      });
+    }
+  });
+
   it("waits for a complete gate inventory before implementing capability assets", async () => {
     const source = await readFile(
       path.resolve(import.meta.dirname, "../koni/baseline/rules/research.yaml"),

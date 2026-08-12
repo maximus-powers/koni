@@ -395,8 +395,7 @@ operations:
   change_control_barrier: false
   change_control:
     role: ordinary
-    allow_upstream_requests: true
-    proposal_operation: change-request
+    allow_upstream_requests: false
   review_contract: pre-commit asset readiness review
   output_contract: asset graph delta or asset-build recommendation plus structured step outputs
   dispatch_priority: 430
@@ -425,8 +424,7 @@ operations:
   change_control_barrier: false
   change_control:
     role: ordinary
-    allow_upstream_requests: true
-    proposal_operation: change-request
+    allow_upstream_requests: false
   review_contract: pre-commit asset build plan review
   output_contract: one capability-compatible asset with spec.implementation_plan.root and nonempty spec.implementation_plan.files; new nodes omit every compiler-owned field, while existing complete-node upserts preserve current compiler-owned values exactly
   dispatch_priority: 420
