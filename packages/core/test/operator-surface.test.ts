@@ -18,9 +18,11 @@ import {
   createProjectRun,
   ensureProjectAuthority,
   launchAuthorityDaemon,
+  proposalTicketForOperatorDecision,
   serveProjectAuthority,
   stopAuthorityWhenInstallationSuperseded,
 } from "../src/operator/authority-bootstrap.js";
+import type { RunRecord } from "../src/state/run-record.js";
 import { createRunFromPi, projectPiModels } from "../src/operator/control-center-host.js";
 import {
   installAndCacheProfile,
@@ -438,6 +440,71 @@ describe("Pi operator extension", () => {
 });
 
 describe("shell operator surface", () => {
+  it("allows explicit audit steering for an already-approved proposal", () => {
+    const approved = {
+      id: "TK-change-approved",
+      title: "Approved bounded repair",
+      status: "running",
+      executionControl: {
+        proposalRequest: { requestSha256: `sha256:${"a".repeat(64)}` },
+        proposalDecision: { decision: "approval" },
+        proposalApprovalSha256: `sha256:${"c".repeat(64)}`,
+      },
+    };
+    const pending = {
+      id: "TK-change-pending",
+      title: "Pending bounded repair",
+      status: "proposed",
+      executionControl: {
+        proposalRequest: { requestSha256: `sha256:${"b".repeat(64)}` },
+      },
+    };
+    const run = {
+      id: "run-1",
+      tickets: { [approved.id]: approved, [pending.id]: pending },
+    } as unknown as RunRecord;
+
+    expect(proposalTicketForOperatorDecision(run, approved.id)).toBe(approved);
+    expect(proposalTicketForOperatorDecision(run)).toBe(pending);
+  });
+
+  it("decides a held change proposal from the CLI and refuses an ambiguous decision", async () => {
+    const output: string[] = [];
+    const io: KoniCliIO = {
+      stdout: (text) => output.push(text),
+      stderr: () => undefined,
+      stdinIsTTY: false,
+      stdoutIsTTY: false,
+    };
+    const dependencies = fakeCliDependencies();
+    vi.mocked(dependencies.decideProposal).mockResolvedValue({
+      runId: "run-1",
+      ticketId: "TK-change-1",
+      decision: "approval",
+    });
+
+    expect(
+      await runKoniCli(
+        ["decide", "--run", "run-1", "--approve", "--root", "/project"],
+        io,
+        dependencies,
+      ),
+    ).toBe(0);
+    expect(dependencies.decideProposal).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: "run-1", decision: "approval" }),
+    );
+    expect(output.join("")).toContain("TK-change-1");
+
+    // A proposal decision is not a retry: an operator who supplies neither or both intents must be
+    // told rather than silently defaulted into approving an upstream change.
+    await expect(runKoniCli(["decide", "--run", "run-1"], io, dependencies)).rejects.toThrow(
+      /--approve or --reject/u,
+    );
+    await expect(
+      runKoniCli(["decide", "--run", "run-1", "--approve", "--reject"], io, dependencies),
+    ).rejects.toThrow(/not both/u);
+  });
+
   it("provides deterministic help/version/status without launching a TUI or daemon", async () => {
     const output: string[] = [];
     const io: KoniCliIO = {
@@ -464,6 +531,48 @@ describe("shell operator surface", () => {
     expect(JSON.parse(output.pop()!)).toMatchObject({ running: false, projectRoot: "/project" });
     expect(dependencies.ensure).not.toHaveBeenCalled();
     expect(dependencies.standalone).not.toHaveBeenCalled();
+  });
+
+  it("resolves one Pi-native agent through the config CLI", async () => {
+    const output: string[] = [];
+    const io: KoniCliIO = {
+      stdout: (text) => output.push(text),
+      stderr: () => undefined,
+      stdinIsTTY: false,
+      stdoutIsTTY: false,
+    };
+    const dependencies = fakeCliDependencies();
+    vi.mocked(dependencies.resolveAgent).mockResolvedValue({
+      projectRoot: "/project",
+      runTypeId: "small",
+      agent: {
+        agentId: "run-planner",
+        ancestry: ["base", "run-planner"],
+        description: "",
+        instructions: "Plan.",
+        settings: {},
+        resources: { skills: [], extensions: [], prompts: [], themes: [], context: [] },
+        extensions: [],
+        tools: [{ name: "read" }],
+        koni: { role: "planner", capabilities: {} },
+        configurationSha256: `sha256:${"a".repeat(64)}`,
+      },
+      effectiveModel: { provider: "openai-codex", id: "gpt-5.6-terra", thinkingLevel: "high" },
+    });
+
+    expect(
+      await runKoniCli(
+        ["config", "resolve-agent", "run-planner", "--run-type", "small", "--json"],
+        io,
+        dependencies,
+      ),
+    ).toBe(0);
+    expect(dependencies.resolveAgent).toHaveBeenCalledWith({
+      projectRoot: expect.any(String),
+      agentId: "run-planner",
+      runTypeId: "small",
+    });
+    expect(JSON.parse(output[0]!)).toMatchObject({ agent: { agentId: "run-planner" } });
   });
 
   it("opens the shared standalone control center only from an explicit interactive TUI command", async () => {
@@ -1192,6 +1301,7 @@ function fakeCliDependencies(): KoniCliDependencies {
     serve: vi.fn(),
     stop: vi.fn(),
     validate: vi.fn(),
+    resolveAgent: vi.fn(),
     install: vi.fn(),
     previewInstall: vi.fn(),
     resolveProfile: vi.fn(),
@@ -1199,6 +1309,7 @@ function fakeCliDependencies(): KoniCliDependencies {
     run: vi.fn(),
     resumeRun: vi.fn(),
     approveRun: vi.fn(),
+    decideProposal: vi.fn(),
     standalone: vi.fn(),
   } as unknown as KoniCliDependencies;
 }

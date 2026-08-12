@@ -6,6 +6,7 @@ import {
   fsyncSync,
   mkdirSync,
   openSync,
+  readFileSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -43,7 +44,10 @@ function onFrame(frame) {
       frame.spec.workspace.sessionDirectory,
       `${frame.spec.identity.sessionId}.jsonl`,
     );
-    createTranscript(frame.spec);
+    if (frame.mode === "fresh") createTranscript(frame.spec);
+    if (frame.mode === "planning_revision") {
+      appendPlanningRevisionTranscript(frame.spec, frame.priorTranscriptSha256);
+    }
     send({ type: "ready", sessionFile });
     return;
   }
@@ -61,7 +65,7 @@ function onFrame(frame) {
     });
     if (
       (scenario === "pause_canonical_abort" || scenario === "provider_liveness_timeout") &&
-      launch.spec.lineage.branchEpoch === 0
+      isInitialFailureHost()
     ) {
       appendCanonicalAbort();
     }
@@ -79,21 +83,29 @@ function onFrame(frame) {
   if (frame.type !== "authority_response") return;
   if (frame.requestId === "reserve") {
     if (!frame.ok || frame.value?.protocol !== "koni.provider-request-reservation.v1") {
-      if (scenario === "context_window_headroom") {
-        send({
-          type: "outcome",
-          outcome: {
-            status: "failed",
-            error: `first reservation rejected: ${frame.error ?? "invalid response"}`,
-            usage: emptyUsage(),
-          },
-        });
-        finish(23);
-        return;
-      }
-      process.exit(92);
+      send({
+        type: "outcome",
+        outcome: {
+          status: "failed",
+          error: `first reservation rejected: ${frame.error ?? "invalid response"}`,
+          usage: emptyUsage(),
+        },
+      });
+      finish(23);
+      return;
     }
     reservationId = frame.value.reservationId;
+    if (
+      scenario === "assignment_unreconciled_request" &&
+      launch.spec.identity.ticketId === "ticket-one" &&
+      launch.spec.lineage.branchEpoch === 0
+    ) {
+      // Model a contained provider process that exits after the authority reserves the next turn
+      // but before Pi can append any assistant entry for that reservation. Earlier turns may have
+      // completed normally; the final baseline is the only boundary relevant to retirement.
+      finish(23);
+      return;
+    }
     if (scenario === "partial_assistant") {
       appendFileSync(
         sessionFile,
@@ -103,12 +115,12 @@ function onFrame(frame) {
       finish(23);
       return;
     }
-    if (scenario === "canonical_abort_recovery" && launch.spec.lineage.branchEpoch === 0) {
+    if (scenario === "canonical_abort_recovery" && isInitialFailureHost()) {
       appendCanonicalAbort();
       finish(23);
       return;
     }
-    if (scenario === "canonical_abort_after_prior_assistant" && launch.spec.lineage.branchEpoch === 0) {
+    if (scenario === "canonical_abort_after_prior_assistant" && isInitialFailureHost()) {
       appendAssistant();
       appendCanonicalAbort(assistantEntry.id);
       finish(23);
@@ -116,15 +128,16 @@ function onFrame(frame) {
     }
     if (
       (scenario === "pause_canonical_abort" || scenario === "provider_liveness_timeout") &&
-      launch.spec.lineage.branchEpoch === 0
+      isInitialFailureHost()
     )
       return;
     appendAssistant();
     if (
       (scenario === "failed_provider" ||
         scenario === "failed_provider_tool_call" ||
+        scenario === "rate_limit_provider_error" ||
         scenario === "uncanonical_provider_error") &&
-      launch.spec.lineage.branchEpoch === 0
+      isInitialFailureHost()
     ) {
       finish(23);
       return;
@@ -166,7 +179,10 @@ function onFrame(frame) {
       send({
         type: "outcome",
         outcome: {
-          status: "completed",
+          status: launch.spec.planningRevision === undefined ? "completed" : "checkpointed",
+          ...(launch.spec.planningRevision === undefined
+            ? {}
+            : { revision: launch.spec.planningRevision.revision }),
           terminalOutput: { result: "provider-plan" },
           usage: usage(),
         },
@@ -183,13 +199,24 @@ function onFrame(frame) {
   }
   if (
     frame.requestId === "settle" &&
-    (scenario === "normal" ||
+    (launch.mode === "recover" ||
+      scenario === "normal" ||
       scenario === "torn_after_assistant" ||
       scenario.startsWith("assignment_") ||
       scenario.startsWith("lead_sol_fallback"))
   ) {
-    if (!frame.ok || frame.value?.protocol !== "koni.provider-request-settlement.v1")
-      process.exit(94);
+    if (!frame.ok || frame.value?.protocol !== "koni.provider-request-settlement.v1") {
+      send({
+        type: "outcome",
+        outcome: {
+          status: "failed",
+          error: `settlement rejected: ${frame.error ?? "invalid response"}`,
+          usage: usage(),
+        },
+      });
+      finish(23);
+      return;
+    }
     if (
       scenario.startsWith("assignment_terminal_") &&
       launch.spec.identity.ticketId === "ticket-one"
@@ -201,7 +228,10 @@ function onFrame(frame) {
     send({
       type: "outcome",
       outcome: {
-        status: "completed",
+        status: launch.spec.planningRevision === undefined ? "completed" : "checkpointed",
+        ...(launch.spec.planningRevision === undefined
+          ? {}
+          : { revision: launch.spec.planningRevision.revision }),
         terminalOutput: { result: "provider-plan" },
         usage: usage(),
       },
@@ -284,7 +314,10 @@ function onFrame(frame) {
     send({
       type: "outcome",
       outcome: {
-        status: "completed",
+        status: launch.spec.planningRevision === undefined ? "completed" : "checkpointed",
+        ...(launch.spec.planningRevision === undefined
+          ? {}
+          : { revision: launch.spec.planningRevision.revision }),
         terminalOutput: { result: "provider-plan" },
         usage: combinedUsage(),
       },
@@ -342,6 +375,49 @@ function createTranscript(spec) {
   syncFile();
 }
 
+function appendPlanningRevisionTranscript(spec, priorTranscriptSha256) {
+  const revision = spec.planningRevision;
+  const entries = readFileSync(sessionFile, "utf8")
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const parentId = entries.at(-1)?.id ?? null;
+  const mappingId = `revision-map-${revision.revision}`;
+  const mapping = {
+    type: "custom",
+    id: mappingId,
+    parentId,
+    customType: "koni.planning-revision-map",
+    data: {
+      protocol: "koni.planning-revision-map.v1",
+      specHash: spec.specHash,
+      runId: spec.identity.runId,
+      attemptId: spec.identity.attemptId,
+      sessionId: spec.identity.sessionId,
+      grantId: spec.authority.grantId,
+      grantHash: spec.authority.grantHash,
+      revision: revision.revision,
+      baseRevision: revision.baseRevision,
+      priorCheckpointSha256: revision.priorCheckpointSha256,
+      priorTranscriptSha256,
+      steeringSha256: revision.steeringSha256,
+      budgetBaseline: revision.budgetBaseline,
+    },
+  };
+  const initial = {
+    type: "message",
+    id: `revision-baseline-${revision.revision}`,
+    parentId: mappingId,
+    message: {
+      role: "user",
+      content: [{ type: "text", text: spec.persona.initialPrompt }],
+      timestamp: Date.now(),
+    },
+  };
+  appendFileSync(sessionFile, jsonl(mapping, initial));
+  syncFile();
+}
+
 function requestReservation() {
   const payload =
     scenario === "context_window_headroom"
@@ -355,7 +431,7 @@ function requestReservation() {
     request: {
       operation: "reserve_provider_request",
       request: {
-        sequence: 1,
+        sequence: launch.mode === "fresh" ? 1 : 2,
         api: launch.spec.model.api,
         modelId: launch.spec.model.id,
         payloadSha256: rawSha256(encoded),
@@ -369,13 +445,14 @@ function requestReservation() {
 
 function appendAssistant() {
   const failed =
-    (scenario === "failed_provider" ||
+    ((scenario === "failed_provider" ||
       scenario === "failed_provider_tool_call" ||
+      scenario === "rate_limit_provider_error" ||
       scenario === "assignment_provider_error" ||
       scenario === "uncanonical_provider_error") &&
-    launch.spec.lineage.branchEpoch === 0 &&
-    (scenario !== "assignment_provider_error" ||
-      launch.spec.identity.ticketId === "ticket-one") ||
+      isInitialFailureHost() &&
+      (scenario !== "assignment_provider_error" ||
+        launch.spec.identity.ticketId === "ticket-one")) ||
     (scenario.startsWith("lead_sol_fallback") &&
       launch.spec.identity.ticketId === "run-orchestration" &&
       (launch.spec.model.id === "gpt-5.6-sol" ||
@@ -418,15 +495,28 @@ function appendAssistant() {
             : [
                 {
                   type: "toolCall",
-                  id: "terminal-call",
+                  id: terminalCallId(),
                   name: launch.spec.terminal.toolName,
                   arguments: { result: "provider-plan" },
                 },
               ];
   assistantEntry = {
     type: "message",
-    id: "assistant",
-    parentId: "baseline",
+    id:
+      launch.mode === "planning_revision"
+        ? `assistant-revision-${launch.spec.planningRevision.revision}`
+        : launch.mode === "recover"
+          ? "assistant-recovered"
+          : "assistant",
+    parentId:
+      launch.mode === "planning_revision"
+        ? `revision-baseline-${launch.spec.planningRevision.revision}`
+        : launch.mode === "recover" &&
+            (scenario.includes("canonical_abort") || scenario === "provider_liveness_timeout")
+          ? "assistant-aborted"
+          : launch.mode === "recover"
+            ? "assistant"
+            : "baseline",
     message: {
       role: "assistant",
       content,
@@ -443,7 +533,10 @@ function appendAssistant() {
             scenario.startsWith("lead_sol_fallback")
               ? { responseId: "resp_fixture_provider_error" }
               : {}),
-            errorMessage: "Codex error: simulated terminal provider failure",
+            errorMessage:
+              scenario === "rate_limit_provider_error"
+                ? '429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account rate limit. Please try again later."}}'
+                : "Codex error: simulated terminal provider failure",
           }
         : {}),
       timestamp: Date.now(),
@@ -613,11 +706,17 @@ function requestTerminal() {
     activationToken,
     request: {
       operation: "invoke_tool",
-      callId: "terminal-call",
+      callId: terminalCallId(),
       name: launch.spec.terminal.toolName,
       arguments: { result: "provider-plan" },
     },
   });
+}
+
+function terminalCallId() {
+  return launch.mode === "planning_revision"
+    ? `terminal-call-revision-${launch.spec.planningRevision.revision}`
+    : "terminal-call";
 }
 
 function requestSettlement() {
@@ -628,7 +727,7 @@ function requestSettlement() {
     request: {
       operation: "reconcile_provider_request",
       settlement: {
-        sequence: 1,
+        sequence: launch.mode === "fresh" ? 1 : 2,
         reservationId,
         assistantEntryId: assistantEntry.id,
         assistantEntrySha256: canonicalHash(assistantEntry),
@@ -731,6 +830,12 @@ function send(body) {
       sequence: ++sequence,
     })}\n`,
   );
+}
+
+function isInitialFailureHost() {
+  return launch.spec.identity.ticketId === "run-planning"
+    ? launch.mode === "fresh"
+    : launch.spec.lineage.branchEpoch === 0;
 }
 
 function syncFile() {

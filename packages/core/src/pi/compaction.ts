@@ -168,10 +168,41 @@ export interface KoniProviderRequestSettlement {
   usage: KoniAttemptUsage;
 }
 
+export type KoniProviderRequestRetirement =
+  | {
+      protocol: "koni.provider-exposure-retirement.v1";
+      disposition: "operator_acknowledged_canonical_abort" | "operator_acknowledged_provider_error";
+      assistantEntryId: string;
+      assistantEntrySha256: Sha256Digest;
+      responseId: string;
+      errorMessageSha256?: Sha256Digest;
+      authorizationSha256: Sha256Digest;
+      retiredAt: string;
+      sha256: Sha256Digest;
+    }
+  | {
+      protocol: "koni.provider-exposure-retirement.v1";
+      disposition: "operator_acknowledged_authority_pause";
+      pauseReasonSha256: Sha256Digest;
+      authorizationSha256: Sha256Digest;
+      retiredAt: string;
+      sha256: Sha256Digest;
+    }
+  | {
+      protocol: "koni.provider-exposure-retirement.v1";
+      disposition: "operator_acknowledged_unreconciled_request";
+      failureReasonSha256: Sha256Digest;
+      authorizationSha256: Sha256Digest;
+      retiredAt: string;
+      sha256: Sha256Digest;
+    };
+
 export interface KoniProviderRequestRecoveryRecord extends KoniProviderRequestReservationInput {
   reservationId: string;
   baselineEntryId: string;
   settlement?: Omit<KoniProviderRequestSettlement, "protocol" | "sequence" | "reservationId">;
+  /** Authenticated non-billing terminal that conservatively retains the original exposure bound. */
+  retirement?: KoniProviderRequestRetirement;
 }
 
 export interface KoniAttemptRecoveryClaim {

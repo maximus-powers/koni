@@ -4,6 +4,7 @@ import {
   ManagedPiSession,
   type ManagedPiSessionFactory,
   type ManagedPiSessionFactoryOptions,
+  type ManagedPlanningRevisionOptions,
   type ManagedSessionEvent,
   type ManagedSessionOutcome,
 } from "./managed-session.js";
@@ -44,7 +45,7 @@ export class ManagedSessionSupervisor {
       runId: string;
       specHash: string;
       epoch: number;
-      mode: "fresh" | "recover";
+      mode: "fresh" | "recover" | "planning_revision";
       promise: Promise<ManagedSessionHandle>;
     }
   >();
@@ -75,10 +76,19 @@ export class ManagedSessionSupervisor {
     return this.#admit(spec, options, "recover");
   }
 
+  public continuePlanningRevision(
+    spec: AgentLaunchSpec,
+    options: ManagedPlanningRevisionOptions,
+  ): Promise<ManagedSessionHandle> {
+    return this.#admit(spec, options, "planning_revision");
+  }
+
   #admit(
     spec: AgentLaunchSpec,
-    options: ManagedPiSessionFactoryOptions & { factory?: ManagedPiSessionFactory },
-    mode: "fresh" | "recover",
+    options:
+      | (ManagedPiSessionFactoryOptions & { factory?: ManagedPiSessionFactory })
+      | ManagedPlanningRevisionOptions,
+    mode: "fresh" | "recover" | "planning_revision",
   ): Promise<ManagedSessionHandle> {
     const { runId, attemptId } = spec.identity;
     this.#assertRunMayLaunch(runId);
@@ -224,14 +234,21 @@ export class ManagedSessionSupervisor {
 
   async #createAndStart(
     spec: AgentLaunchSpec,
-    options: ManagedPiSessionFactoryOptions & { factory?: ManagedPiSessionFactory },
+    options:
+      | (ManagedPiSessionFactoryOptions & { factory?: ManagedPiSessionFactory })
+      | ManagedPlanningRevisionOptions,
     launchEpoch: number,
-    mode: "fresh" | "recover",
+    mode: "fresh" | "recover" | "planning_revision",
   ): Promise<ManagedSessionHandle> {
     const session =
       mode === "fresh"
         ? await ManagedPiSession.create(spec, options)
-        : await ManagedPiSession.recover(spec, options);
+        : mode === "recover"
+          ? await ManagedPiSession.recover(spec, options)
+          : await ManagedPiSession.continuePlanningRevision(
+              spec,
+              options as ManagedPlanningRevisionOptions,
+            );
     const { runId, attemptId } = spec.identity;
     if (
       this.#allSuspended ||

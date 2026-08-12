@@ -70,6 +70,8 @@ export interface QuestionBatchRecord {
   protocol: typeof QUESTION_BATCH_PROTOCOL;
   id: string;
   attemptId: string;
+  /** Active continuous-planning revision; absent for legacy and non-planning batches. */
+  planningRevision?: number;
   /** Absent only on batches created before compiler-authored question scoping. */
   scope?: "run" | "ticket";
   /** Present exactly when `scope` is `ticket`. */
@@ -96,6 +98,7 @@ export interface QuestionBatchQuestionInput {
 export interface CreateQuestionBatchInput {
   id: string;
   attemptId: string;
+  planningRevision?: number;
   scope?: "run" | "ticket";
   ticketId?: string;
   questions: QuestionBatchQuestionInput[];
@@ -140,6 +143,7 @@ export interface QuestionBatchQuestionCapabilities {
 export interface QuestionBatchCapabilities {
   protocol: typeof QUESTION_BATCH_CAPABILITIES_PROTOCOL;
   batchId: string;
+  planningRevision?: number;
   scope?: "run" | "ticket";
   ticketId?: string;
   batchVersion: number;
@@ -173,6 +177,7 @@ export interface QuestionBatchResolution {
   protocol: typeof QUESTION_BATCH_RESOLUTION_PROTOCOL;
   batchId: string;
   attemptId: string;
+  planningRevision?: number;
   scope?: "run" | "ticket";
   ticketId?: string;
   batchVersion: number;
@@ -240,6 +245,9 @@ export function createQuestionBatch(input: CreateQuestionBatchInput): QuestionBa
     protocol: QUESTION_BATCH_PROTOCOL,
     id: normalizeId(input.id, "$.id"),
     attemptId: normalizeId(input.attemptId, "$.attemptId"),
+    ...(input.planningRevision === undefined
+      ? {}
+      : { planningRevision: normalizePlanningRevision(input.planningRevision) }),
     ...scope,
     version: 0,
     status: "pending_answers",
@@ -391,6 +399,9 @@ export function projectQuestionBatchResolution(
     protocol: QUESTION_BATCH_RESOLUTION_PROTOCOL,
     batchId: current.id,
     attemptId: current.attemptId,
+    ...(current.planningRevision === undefined
+      ? {}
+      : { planningRevision: current.planningRevision }),
     ...(current.scope === undefined ? {} : { scope: current.scope }),
     ...(current.ticketId === undefined ? {} : { ticketId: current.ticketId }),
     batchVersion: current.version,
@@ -478,6 +489,9 @@ export function projectQuestionBatchCapabilities(
   return {
     protocol: QUESTION_BATCH_CAPABILITIES_PROTOCOL,
     batchId: current.id,
+    ...(current.planningRevision === undefined
+      ? {}
+      : { planningRevision: current.planningRevision }),
     ...(current.scope === undefined ? {} : { scope: current.scope }),
     ...(current.ticketId === undefined ? {} : { ticketId: current.ticketId }),
     batchVersion: current.version,
@@ -598,6 +612,7 @@ export function assertQuestionBatchRecord(value: unknown): asserts value is Ques
   }
   normalizeId(value.id, "$.id");
   normalizeId(value.attemptId, "$.attemptId");
+  if (value.planningRevision !== undefined) normalizePlanningRevision(value.planningRevision);
   normalizeScope(value.scope, value.ticketId, "$");
   if (!isNonnegativeInteger(value.version)) fail("$.version", "must be a nonnegative safe integer");
   if (
@@ -1033,6 +1048,13 @@ function normalizeId(value: unknown, path: string): string {
     Buffer.byteLength(value, "utf8") > QUESTION_BATCH_LIMITS.idBytes
   ) {
     fail(path, "must be a safe nonempty identifier of at most 128 bytes");
+  }
+  return value;
+}
+
+function normalizePlanningRevision(value: unknown): number {
+  if (!isNonnegativeInteger(value)) {
+    fail("$.planningRevision", "must be a nonnegative safe integer");
   }
   return value;
 }

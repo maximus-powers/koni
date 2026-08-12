@@ -23,6 +23,7 @@ import {
   compileStateMachineCatalog,
   evaluateConfiguredRules,
 } from "../src/compiler/rules.js";
+import { rebindRuleEvidenceAcrossNonInterferingGraphChange } from "../src/compiler/run-program.js";
 import type {
   CompiledConfiguration,
   CompiledConfigurationRegistries,
@@ -55,6 +56,78 @@ afterEach(async () => {
 });
 
 describe("graph and rules semantic closure", () => {
+  it("keeps passing gate evidence across unrelated graph motion but drops it on gate-context drift", () => {
+    const configuration = fixtureConfiguration({ withGatePolicy: true });
+    const schema = projectedSchema(configuration);
+    const claim = claimNode();
+    const gate = gateNode({ applies_to: [claim.id] });
+    const verifier = assetNode("1.0.0", { validates: [gate.id] });
+    const unrelated = experimentNode("active", "An unrelated bounded observation");
+    const before = new TypedGraph(schema, [claim, gate, verifier, unrelated]);
+    const leaf: ConfigurationObject = {
+      op: "gate_policy_satisfied",
+      gate_policy: "research-gates",
+      gate_subject: "$target",
+    };
+    const bindings = { target: [gate.id] };
+    const beforeSha256 = ruleInputGraphSha256(configuration, before);
+    const key = rulePredicateEvidenceKey({
+      configurationSha256: configuration.configuration_sha256,
+      inputGraphSha256: beforeSha256,
+      leaf,
+      subjectNodeId: gate.id,
+      bindings,
+    });
+    const evidence = createRuleAuthorityEvidence({
+      protocol: RULE_AUTHORITY_EVIDENCE_PROTOCOL,
+      configurationSha256: configuration.configuration_sha256,
+      inputGraphSha256: beforeSha256,
+      predicates: {
+        [key]: {
+          key,
+          result: true,
+          receiptStatus: "passed",
+          recordedAt: NOW,
+          sourceReceiptIds: ["receipt-gate-a"],
+          leaf,
+          subjectNodeId: gate.id,
+          bindings,
+        },
+      },
+    });
+    const unrelatedAfter = new TypedGraph(schema, [
+      claim,
+      gate,
+      verifier,
+      { ...unrelated, title: "Unrelated observation revised" },
+    ]);
+    expect(
+      Object.values(
+        rebindRuleEvidenceAcrossNonInterferingGraphChange({
+          configuration,
+          before,
+          after: unrelatedAfter,
+          evidence,
+        })?.predicates ?? {},
+      ),
+    ).toEqual([
+      expect.objectContaining({ result: true, receiptStatus: "passed", subjectNodeId: gate.id }),
+    ]);
+
+    const changedVerifier = {
+      ...verifier,
+      spec: { ...verifier.spec, root: "tools/verifier-v2" },
+    };
+    expect(
+      rebindRuleEvidenceAcrossNonInterferingGraphChange({
+        configuration,
+        before,
+        after: new TypedGraph(schema, [claim, gate, changedVerifier, unrelated]),
+        evidence,
+      }),
+    ).toBeUndefined();
+  });
+
   it("compiles the current Coding and Research baselines through every new semantic catalog", () => {
     const coding = compileCurrentProfile("coding-profile");
     const research = compileCurrentProfile("research-profile");
@@ -77,7 +150,7 @@ describe("graph and rules semantic closure", () => {
         authorizeStateTransition(codingCatalog.value, {
           machineId: "ticket",
           from: "in_progress",
-          to: "todo",
+          to: "queued",
           actor: "compiler",
         }),
       ).toMatchObject({ allowed: true, transition: { id: "interrupt-active" } });
@@ -93,7 +166,7 @@ describe("graph and rules semantic closure", () => {
         authorizeStateTransition(codingCatalog.value, {
           machineId: "ticket",
           from: "closed",
-          to: "todo",
+          to: "queued",
           actor: "compiler",
         }),
       ).toMatchObject({ allowed: true, transition: { id: "reopen-stale-obligation" } });
@@ -101,7 +174,7 @@ describe("graph and rules semantic closure", () => {
         authorizeStateTransition(researchCatalog.value, {
           machineId: "ticket",
           from: "closed",
-          to: "todo",
+          to: "queued",
           actor: "compiler",
         }),
       ).toMatchObject({ allowed: true, transition: { id: "reopen-stale-obligation" } });
@@ -352,7 +425,7 @@ describe("graph and rules semantic closure", () => {
     expect(
       authorizeStateTransition(result.value, {
         machineId: "ticket",
-        from: "todo",
+        from: "queued",
         to: "in_progress",
         actor: "compiler",
       }),
@@ -360,7 +433,7 @@ describe("graph and rules semantic closure", () => {
     expect(
       authorizeStateTransition(result.value, {
         machineId: "ticket",
-        from: "todo",
+        from: "queued",
         to: "in_progress",
         actor: "human",
       }),
@@ -535,11 +608,11 @@ function fixtureConfiguration(
     ? {
         ticket: {
           id: "ticket",
-          initial: "todo",
-          states: ["todo", "in_progress", "closed"],
+          initial: "queued",
+          states: ["queued", "in_progress", "closed"],
           terminal_states: ["closed"],
           transitions: [
-            { id: "start", from: ["todo"], to: "in_progress", actors: ["compiler", "lead"] },
+            { id: "start", from: ["queued"], to: "in_progress", actors: ["compiler", "lead"] },
             { id: "finish", from: ["in_progress"], to: "closed", actors: ["compiler"] },
           ],
         },
@@ -622,7 +695,7 @@ function fixtureConfiguration(
     : [];
   const material = {
     protocol: "koni.compiled-configuration.v1" as const,
-    schema_version: "2.0" as const,
+    schema_version: "3.0" as const,
     package: {
       name: "@koni/semantic-closure-fixture",
       version: "1.0.0",
@@ -641,7 +714,6 @@ function fixtureConfiguration(
       workflows: [],
       actions: [],
       checks: [],
-      personas: [],
       reports: [],
       cockpit: [],
       lifecycles: [],

@@ -13,7 +13,7 @@ import { canonicalHash } from "../src/shared/canonical.js";
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const EXPECTED_CATALOG_SHA256 = {
   "coding-profile": "sha256:10b389b5b785f7196769f01373827192b533180c65314c70468ef328e201a0b2",
-  "research-profile": "sha256:dd872bb81b06a849ce1f2724e9cbf1f69aded7a2f35bd28b6a5b5134f8e51eeb",
+  "research-profile": "sha256:493d7ec67e7998f5c7d743ebb5899fcb4589ffbfbb4e2afe4366fec4158b4edc",
 } as const;
 
 describe("operation/workflow/check semantic catalog", () => {
@@ -43,9 +43,7 @@ describe("operation/workflow/check semantic catalog", () => {
             ?.allowed_existing_node_types,
         ).toContain("asset");
         expect(
-          configuration.registries.operations[
-            "asset-resolution.prerequisite.plan-build-asset"
-          ],
+          configuration.registries.operations["asset-resolution.prerequisite.plan-build-asset"],
         ).toMatchObject({
           max_new_nodes: 1,
           allowed_new_node_types: ["asset"],

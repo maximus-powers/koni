@@ -652,14 +652,14 @@ function compilePipeline(
           automatic,
         };
     } else if ((kind === "planning" || kind === "agent_review") && config !== undefined) {
-      rejectUnknown(config, ["persona", "prompt"], pointer(stagePath, "config"), bag);
-      const persona = text(config.persona, `${stagePath}/config/persona`, bag);
+      rejectUnknown(config, ["agent", "prompt"], pointer(stagePath, "config"), bag);
+      const persona = text(config.agent, `${stagePath}/config/agent`, bag);
       const prompt = text(config.prompt, `${stagePath}/config/prompt`, bag);
       if (persona !== undefined && !personas.has(persona))
         bag.error(
           "configuration.dangling_reference",
-          `${stagePath}/config/persona`,
-          `persona ${persona} is not configured`,
+          `${stagePath}/config/agent`,
+          `agent ${persona} is not configured`,
         );
       if (persona !== undefined && prompt !== undefined)
         compiledConfig = { kind: "agent", persona, prompt };
@@ -994,14 +994,14 @@ function compileRoles(
 ): readonly CompiledAgentRoleBehavior[] {
   const config = record(value, path, bag);
   if (config === undefined) return [];
-  rejectUnknown(config, ["roles", "personas"], path, bag);
+  rejectUnknown(config, ["roles", "overrides"], path, bag);
   const roles = record(config.roles, pointer(path, "roles"), bag);
-  const overrides = record(config.personas, pointer(path, "personas"), bag);
+  const overrides = record(config.overrides, pointer(path, "overrides"), bag);
   if (overrides !== undefined && Object.keys(overrides).length > 0)
     bag.error(
       "configuration.persona_override",
-      pointer(path, "personas"),
-      "run-type persona overrides are not supported; configure shared persona resources or role defaults",
+      pointer(path, "overrides"),
+      "run-type agent overrides are not supported; configure shared agent resources or role defaults",
     );
   if (roles === undefined) return [];
   const output: CompiledAgentRoleBehavior[] = [];
@@ -1049,7 +1049,9 @@ function providerForRole(
   const providers = new Set<string>();
   for (const persona of personas.values()) {
     if (persona.model_role !== roleId || typeof persona.agent !== "string") continue;
-    const provider = agents.get(persona.agent)?.document.provider;
+    const agentDocument = agents.get(persona.agent)?.document;
+    const pi = isRecord(agentDocument?.pi) ? agentDocument.pi : undefined;
+    const provider = pi?.provider;
     if (typeof provider === "string" && provider.length > 0) providers.add(provider);
   }
   if (providers.size !== 1) {
@@ -1132,12 +1134,11 @@ function compileLeadJudgment(
     );
   }
   const spawn = spawns[0];
-  const personaId =
-    typeof spawn?.arguments.persona === "string" ? spawn.arguments.persona : undefined;
+  const personaId = typeof spawn?.arguments.agent === "string" ? spawn.arguments.agent : undefined;
   const prompt = typeof spawn?.arguments.prompt === "string" ? spawn.arguments.prompt : undefined;
   if (
     personaId === undefined ||
-    spawn?.arguments.persona_from !== undefined ||
+    spawn?.arguments.agent_from !== undefined ||
     spawn?.arguments.ticket !== undefined
   ) {
     reject(
@@ -1191,13 +1192,8 @@ function compileLeadJudgment(
   }
   const agentId = typeof persona?.agent === "string" ? persona.agent : undefined;
   const agent = agentId === undefined ? undefined : agents.get(agentId);
-  const instructionRecord = isRecord(agent?.document.instructions)
-    ? agent.document.instructions
-    : undefined;
   const instructionText =
-    instructionRecord?.source === "inline" && typeof instructionRecord.text === "string"
-      ? instructionRecord.text
-      : undefined;
+    typeof agent?.document.instructions === "string" ? agent.document.instructions : undefined;
   if (agent === undefined || instructionText === undefined) {
     reject(
       "configuration.lead_agent_contract",

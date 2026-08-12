@@ -74,7 +74,7 @@ export async function runPiAttemptProcessChild(): Promise<void> {
         return result as Extract<KoniToolReceipt, { outcome: "rejected" }>;
       },
     });
-    if (launch.mode === "recover") {
+    if (launch.mode === "recover" || launch.mode === "planning_revision") {
       // Recovery has an immutable pre-existing session path. Publish that deterministic path first
       // and wait for the parent to commit+activate it before acquiring recovery ownership or
       // replaying a pending authority tool receipt. This removes every effectful recovery RPC from
@@ -85,7 +85,14 @@ export async function runPiAttemptProcessChild(): Promise<void> {
       });
       await transport.waitForActivation();
       if (transport.abortRequested === undefined) {
-        session = await ManagedPiSession.recover(spec, { tools, contextProvider });
+        session =
+          launch.mode === "recover"
+            ? await ManagedPiSession.recover(spec, { tools, contextProvider })
+            : await ManagedPiSession.continuePlanningRevision(spec, {
+                tools,
+                contextProvider,
+                priorTranscriptSha256: launch.priorTranscriptSha256!,
+              });
       }
     } else {
       session = await ManagedPiSession.create(spec, { tools, contextProvider });
@@ -98,7 +105,10 @@ export async function runPiAttemptProcessChild(): Promise<void> {
       await transport.send({ type: "ready", sessionFile: session.sessionFile });
       await transport.waitForActivation();
     }
-    if (session !== undefined && launch.mode === "recover") {
+    if (
+      session !== undefined &&
+      (launch.mode === "recover" || launch.mode === "planning_revision")
+    ) {
       transport.attachSession(session);
       session.subscribe((event) => {
         void transport
@@ -360,7 +370,11 @@ class ChildTransport {
         if (this.#launch.value?.deferActivation !== true) {
           throw new Error("attempt launch did not request deferred activation");
         }
-        if (this.#session === undefined && this.#launch.value?.mode !== "recover") {
+        if (
+          this.#session === undefined &&
+          this.#launch.value?.mode !== "recover" &&
+          this.#launch.value?.mode !== "planning_revision"
+        ) {
           throw new Error("Pi session is not ready for activation");
         }
         if (
@@ -486,8 +500,15 @@ function exactKoniToolNames(spec: Readonly<AgentLaunchSpec>): KoniToolName[] {
 }
 
 function validateLaunchFrame(frame: LaunchAttemptFrame): LaunchAttemptFrame {
-  if (frame.mode !== "fresh" && frame.mode !== "recover")
+  if (frame.mode !== "fresh" && frame.mode !== "recover" && frame.mode !== "planning_revision")
     throw new Error("invalid attempt launch mode");
+  if (
+    frame.mode === "planning_revision" &&
+    (typeof frame.priorTranscriptSha256 !== "string" ||
+      !/^sha256:[0-9a-f]{64}$/u.test(frame.priorTranscriptSha256))
+  ) {
+    throw new Error("planning revision transcript hash is missing");
+  }
   if (typeof frame.deferActivation !== "boolean")
     throw new Error("invalid attempt activation policy");
   if (typeof frame.spec !== "object" || frame.spec === null)

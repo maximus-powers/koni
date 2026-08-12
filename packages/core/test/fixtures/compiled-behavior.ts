@@ -113,7 +113,7 @@ export function runBehaviorSnapshotFixture(
           {
             id: "judge",
             primitive: "agent.spawn",
-            persona: "lead",
+            agent: "lead",
             prompt:
               "Make one bounded readiness judgment and return proceed or blocked. Never poll or schedule tickets.",
             transport: "compiler_broker",

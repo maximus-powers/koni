@@ -87,6 +87,20 @@ function onFrame(frame) {
       finish();
       return;
     }
+    if (behavior === "planning_checkpoint") {
+      if (frame.deferActivation) return;
+      send({
+        type: "outcome",
+        outcome: {
+          status: "checkpointed",
+          revision: frame.spec.planningRevision?.revision,
+          terminalOutput: { result: "planning-checkpoint" },
+          usage: { input: 2, output: 3, cacheRead: 5, cacheWrite: 7, newTokens: 5, allTokens: 17 },
+        },
+      });
+      finish();
+      return;
+    }
     if (behavior === "crash_descendant") {
       descendant = spawn(
         process.execPath,
@@ -444,6 +458,19 @@ function onFrame(frame) {
       return;
     }
     send({ type: "control_result", controlId: frame.controlId, ok: true });
+    if (behavior === "planning_checkpoint" && frame.action === "activate") {
+      send({
+        type: "outcome",
+        outcome: {
+          status: "checkpointed",
+          revision: launch.spec.planningRevision?.revision,
+          terminalOutput: { result: "planning-checkpoint" },
+          usage: { input: 2, output: 3, cacheRead: 5, cacheWrite: 7, newTokens: 5, allTokens: 17 },
+        },
+      });
+      finish();
+      return;
+    }
     if (behavior === "authority_before_ready" && frame.action === "activate") {
       send({
         type: "outcome",

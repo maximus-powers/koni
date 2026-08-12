@@ -37,7 +37,7 @@ import {
   type KoniToolName,
   type KoniRuntimeToolRejection,
 } from "./tool-catalog.js";
-import { isSha256Digest, rawSha256 } from "../shared/canonical.js";
+import { isSha256Digest, rawSha256, type Sha256Digest } from "../shared/canonical.js";
 import {
   KONI_RUNTIME_CLOSURE_ENV,
   KONI_RUNTIME_PIN_PATH_ENV,
@@ -61,6 +61,15 @@ const DEFAULT_LAUNCH_TIMEOUT_MS = 120_000;
 // last provider-boundary activity rather than the whole attempt lifetime, otherwise a productive
 // multi-turn worker is killed mid-task and its work is needlessly reissued.
 const DEFAULT_ACTIVATED_OUTCOME_TIMEOUT_MS = 120_000;
+/**
+ * The outcome deadline exists to contain a child that has gone silent with nothing outstanding. A
+ * reserved-but-unsettled provider request is not silence: the turn is demonstrably in flight and
+ * owned upstream. Killing it anyway made every provider turn longer than the deadline fail, which
+ * across a long research run meant the planner — which legitimately reasons for minutes before its
+ * first tool call — could not finish at all, and each abort left the reservation held. Extend while
+ * a request is genuinely open, but keep a hard ceiling so a wedged provider still terminates.
+ */
+const MAX_PROVIDER_INFLIGHT_DEADLINE_EXTENSIONS = 5;
 const DEFAULT_ABORT_GRACE_MS = 5_000;
 const DEFAULT_KILL_GRACE_MS = 2_000;
 const MAX_AUTOMATIC_RETIREMENT_RECOVERY_ATTEMPTS = 3;
@@ -632,6 +641,8 @@ export interface PiAttemptProcessRuntime {
 
 export interface PiAttemptProcessOptions {
   mode: PiAttemptProcessMode;
+  /** Exact transcript snapshot hash of the prior validated planning checkpoint. */
+  priorTranscriptSha256?: Sha256Digest;
   /** Hold the real Pi session before its first provider turn until `activate()` is acknowledged. */
   deferActivation?: boolean;
   terminalOutputSchema: TSchema;
@@ -701,6 +712,8 @@ export class SupervisedPiAttemptProcess {
   #activationToken: string | undefined;
   #preActivationTimeout: NodeJS.Timeout | undefined;
   #activatedOutcomeTimeout: NodeJS.Timeout | undefined;
+  #openProviderRequests = 0;
+  #providerInflightExtensions = 0;
   #admissionPhase: AttemptAdmissionPhase = "constructing";
   #processGroupId: number | undefined;
   #processGroupRetirementProven = false;
@@ -727,6 +740,15 @@ export class SupervisedPiAttemptProcess {
     this.spec = spec;
     this.#options = options;
     validateTimings(options.timings);
+    if (
+      (options.mode === "planning_revision" && !isSha256Digest(options.priorTranscriptSha256)) ||
+      (options.mode !== "planning_revision" && options.priorTranscriptSha256 !== undefined)
+    ) {
+      throw new PiAttemptProcessError(
+        "planning_revision_transcript",
+        "planning revision process mode requires exactly one prior transcript hash",
+      );
+    }
     const entry =
       options.runtime?.childEntry ??
       fileURLToPath(new URL("./attempt-process-entry.js", import.meta.url));
@@ -814,6 +836,9 @@ export class SupervisedPiAttemptProcess {
           deferActivation: options.deferActivation === true,
           spec,
           terminalOutputSchema: structuredClone(options.terminalOutputSchema),
+          ...(options.priorTranscriptSha256 === undefined
+            ? {}
+            : { priorTranscriptSha256: options.priorTranscriptSha256 }),
         }),
       )
       .catch((error) => this.#failProtocol(asError(error)));
@@ -951,6 +976,14 @@ export class SupervisedPiAttemptProcess {
     if (this.#activatedOutcomeTimeout !== undefined) clearTimeout(this.#activatedOutcomeTimeout);
     this.#activatedOutcomeTimeout = setTimeout(() => {
       this.#activatedOutcomeTimeout = undefined;
+      if (
+        this.#openProviderRequests > 0 &&
+        this.#providerInflightExtensions < MAX_PROVIDER_INFLIGHT_DEADLINE_EXTENSIONS
+      ) {
+        this.#providerInflightExtensions += 1;
+        this.#refreshActivatedOutcomeDeadline();
+        return;
+      }
       void this.abort("activated attempt exceeded the bounded provider outcome deadline");
     }, this.#options.timings?.activatedOutcomeTimeoutMs ?? DEFAULT_ACTIVATED_OUTCOME_TIMEOUT_MS);
     this.#activatedOutcomeTimeout.unref();
@@ -963,7 +996,8 @@ export class SupervisedPiAttemptProcess {
   }
 
   #armPreActivationDeadline(): void {
-    if (this.#closed || this.#requestedAbort !== undefined || this.#admissionPhase !== "ready") return;
+    if (this.#closed || this.#requestedAbort !== undefined || this.#admissionPhase !== "ready")
+      return;
     this.#preActivationTimeout = setTimeout(() => {
       this.#preActivationTimeout = undefined;
       void this.abort("ready attempt exceeded the bounded activation deadline");
@@ -1345,7 +1379,7 @@ export class SupervisedPiAttemptProcess {
         validateCompactionAuthorizationRequest(request.record);
         return provider.authorizeCompaction(this.spec, structuredClone(request.record));
       case "acquire_recovery_claim": {
-        if (this.#options.mode !== "recover") {
+        if (this.#options.mode !== "recover" && this.#options.mode !== "planning_revision") {
           throw new PiAttemptProcessError(
             "recovery_claim",
             "fresh attempts cannot acquire recovery ownership",
@@ -1377,7 +1411,7 @@ export class SupervisedPiAttemptProcess {
         return { claimToken, claimId: claim.claimId, state: structuredClone(claim.state) };
       }
       case "release_recovery_claim": {
-        if (this.#options.mode !== "recover") {
+        if (this.#options.mode !== "recover" && this.#options.mode !== "planning_revision") {
           throw new PiAttemptProcessError(
             "recovery_claim",
             "fresh attempts cannot release recovery ownership",
@@ -1394,6 +1428,7 @@ export class SupervisedPiAttemptProcess {
         return { released: true };
       }
       case "reserve_provider_request": {
+        this.#providerInflightExtensions = 0;
         this.#refreshActivatedOutcomeDeadline();
         if (provider.reserveProviderRequest === undefined) {
           throw new PiAttemptProcessError(
@@ -1406,9 +1441,13 @@ export class SupervisedPiAttemptProcess {
           structuredClone(request.request),
         );
         validateProviderReservationResponse(request.request, reserved);
+        // Counted only once the reservation exists, so a rejected reservation cannot leave a
+        // phantom in-flight request holding the deadline open.
+        this.#openProviderRequests += 1;
         return structuredClone(reserved);
       }
       case "reconcile_provider_request": {
+        this.#providerInflightExtensions = 0;
         this.#refreshActivatedOutcomeDeadline();
         if (provider.reconcileProviderRequest === undefined) {
           throw new PiAttemptProcessError(
@@ -1421,6 +1460,9 @@ export class SupervisedPiAttemptProcess {
           structuredClone(request.settlement),
         );
         validateProviderSettlementResponse(request.settlement, settled);
+        // Cleared only on a durable settlement; a failed reconcile leaves the request open, which
+        // is exactly the state the extension is meant to keep alive.
+        this.#openProviderRequests = Math.max(0, this.#openProviderRequests - 1);
         return structuredClone(settled);
       }
     }
@@ -1956,10 +1998,7 @@ export class SupervisedPiAttemptProcess {
       return;
     }
     this.#retirementFailureObserved = true;
-    const failure = new PiAttemptProcessError(
-      "termination_unconfirmed",
-      errorText(error),
-    );
+    const failure = new PiAttemptProcessError("termination_unconfirmed", errorText(error));
     this.#protocolFailure ??= failure;
     this.#cleanupFailureDeferred.resolve(failure);
     this.#readyDeferred.reject(this.#protocolFailure);
@@ -2156,12 +2195,26 @@ function validateOutcome(
   terminalOutputSchema: TSchema,
   value: ManagedSessionOutcome,
 ): ManagedSessionOutcome {
-  if (value.status !== "completed" && value.status !== "failed" && value.status !== "aborted") {
+  if (
+    value.status !== "completed" &&
+    value.status !== "checkpointed" &&
+    value.status !== "failed" &&
+    value.status !== "aborted"
+  ) {
     throw new PiAttemptProcessError("outcome", "child reported an invalid outcome status");
   }
   validateUsage(value.usage);
-  if (value.status === "completed")
+  if (value.status === "completed" || value.status === "checkpointed")
     validateTerminalOutput(spec, terminalOutputSchema, value.terminalOutput);
+  if (
+    value.status === "checkpointed" &&
+    (spec.planningRevision === undefined || value.revision !== spec.planningRevision.revision)
+  ) {
+    throw new PiAttemptProcessError(
+      "outcome",
+      "child reported a planning checkpoint outside its immutable revision binding",
+    );
+  }
   if (value.status === "failed") {
     requireBoundedText(value.error, "outcome error", 1024 * 1024);
     if (value.code !== undefined) requireBoundedText(value.code, "outcome failure code", 128);

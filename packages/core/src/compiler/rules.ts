@@ -79,7 +79,7 @@ const WORKFLOW_FIELDS = [
 const STEP_FIELDS = [
   "id",
   "kind",
-  "persona",
+  "agent",
   "depends_on",
   "required",
   "read_scope",
@@ -285,11 +285,7 @@ export function compileStateMachineCatalog(
       string,
       CompiledStateMachine
     >;
-    const allowedActors = new Set([
-      "human",
-      "compiler",
-      ...Object.keys(configuration.registries.personas),
-    ]);
+    const allowedActors = new Set(["human", "compiler", ...Object.keys(configuration.agents)]);
     for (const [registryId, raw] of Object.entries(configuration.registries.state_machines).sort(
       ([left], [right]) => compareUtf8(left, right),
     )) {
@@ -741,6 +737,9 @@ function materializeGatePolicyAuthority(
       const unsatisfied = applicable.filter(
         (gateId) => !gatePolicySatisfied(policy, gateId, evaluator),
       );
+      const currentTerminal = unsatisfied.filter((gateId) =>
+        gatePolicyHasCurrentTerminal(policy, gateId, evaluator),
+      );
       let ordinal = 0;
       if (missingRequiredGate) {
         const key = renderGateTemplate(policy.missingGateObligationKeyTemplate, {
@@ -839,6 +838,7 @@ function materializeGatePolicyAuthority(
               policy_contract_sha256: policy.contractSha256,
               subject_id: subjectId,
               blocking_gate_ids: unsatisfied,
+              current_terminal_gate_ids: currentTerminal,
               missing_required_gate: missingRequiredGate,
             },
             configuration,
@@ -1001,6 +1001,29 @@ function gatePolicySatisfied(
   );
 }
 
+function gatePolicyHasCurrentTerminal(
+  policy: CompiledGatePolicyDefinition,
+  gateId: string,
+  evaluator: GraphExpressionEvaluator,
+): boolean {
+  return withBindings(
+    evaluator,
+    [
+      ["gate", [gateId]],
+      ["target", [gateId]],
+    ],
+    () =>
+      evaluator.evaluate(
+        {
+          op: "gate_policy_has_current_terminal",
+          gate_policy: policy.id,
+          gate_subject: "$gate",
+        },
+        `/registries/gate_policies/${escapePointer(policy.id)}/passing_receipt_statuses`,
+      ),
+  );
+}
+
 function resolveGateContextReadPaths(
   definitions: CompiledGatePolicyDefinition["context"] extends infer Context
     ? Context extends { readPaths: infer Paths }
@@ -1151,10 +1174,8 @@ function deriveTicket(
         "ticket_write_scope",
         writeNodeIds,
         () => {
-          const readPaths = resolvePathScopes(
-            emit.readPaths,
-            evaluator,
-            pointer(emitPath, "read_paths"),
+          const readPaths = expandPythonPackageReadPaths(
+            resolvePathScopes(emit.readPaths, evaluator, pointer(emitPath, "read_paths")),
           );
           const writePaths = resolvePathScopes(
             emit.writePaths,
@@ -1362,7 +1383,7 @@ function parseWorkflow(
     );
   }
   const steps = arrayValue(workflow.steps!, pointer(path, "steps")).map((step, index) =>
-    exactRecord(step, pointer(pointer(path, "steps"), index), STEP_FIELDS, ["id", "persona"]),
+    exactRecord(step, pointer(pointer(path, "steps"), index), STEP_FIELDS, ["id", "agent"]),
   );
   const reviewFailureReopenFrom = parseReviewFailureReopenFrom(workflow, path);
   if (
@@ -1502,10 +1523,12 @@ function compileWorkflowSteps(
     const readPaths =
       step.read_paths === undefined
         ? undefined
-        : resolvePathScopes(
-            arrayValue(step.read_paths, pointer(path, "read_paths")),
-            evaluator,
-            pointer(path, "read_paths"),
+        : expandPythonPackageReadPaths(
+            resolvePathScopes(
+              arrayValue(step.read_paths, pointer(path, "read_paths")),
+              evaluator,
+              pointer(path, "read_paths"),
+            ),
           );
     const writePaths =
       step.write_paths === undefined
@@ -1584,7 +1607,7 @@ function compileWorkflowSteps(
       deepFreeze({
         id,
         kind: kind as DerivedWorkflowStepKind,
-        persona_id: nonemptyString(step.persona, pointer(path, "persona")),
+        persona_id: nonemptyString(step.agent, pointer(path, "agent")),
         depends_on: Object.freeze(
           uniqueSortedStrings(
             optionalStringArray(step.depends_on, pointer(path, "depends_on")),
@@ -1749,6 +1772,23 @@ function resolvePathScopes(
     }
   }
   return [...output].sort(compareUtf8);
+}
+
+/**
+ * Importing an exact Python module also executes each package initializer above it. Keep those
+ * implicit dependencies read-only and explicit in the deterministic ticket grant.
+ */
+export function expandPythonPackageReadPaths(readPaths: readonly string[]): string[] {
+  const expanded = new Set(readPaths);
+  for (const readPath of readPaths) {
+    if (!readPath.endsWith(".py")) continue;
+    const segments = readPath.split("/");
+    segments.pop();
+    for (let depth = 1; depth <= segments.length; depth += 1) {
+      expanded.add(`${segments.slice(0, depth).join("/")}/__init__.py`);
+    }
+  }
+  return [...expanded].sort(compareUtf8);
 }
 
 function validateScopePath(value: string, path: string): string {

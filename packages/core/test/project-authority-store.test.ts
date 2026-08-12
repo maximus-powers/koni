@@ -952,7 +952,7 @@ describe("project authority transaction store", () => {
 
     const unownedApproval = structuredClone(run);
     unownedApproval.revision = 1;
-    unownedApproval.tickets.proposal!.status = "ready";
+    unownedApproval.tickets.proposal!.status = "queued";
     await expect(
       store.commit({
         expectedRevision: 1,
@@ -1044,13 +1044,13 @@ function runRecord(root: string, runId = "run-one"): RunRecord {
 function lifecycleCatalog(configurationSha256: `sha256:${string}`): CompiledStateMachineCatalog {
   const ticket = machine(
     "ticket",
-    "todo",
-    ["proposed", "todo", "in_progress", "closed"],
+    "queued",
+    ["proposed", "queued", "in_progress", "closed"],
     ["closed"],
     [
-      transition("propose", ["todo"], "proposed", ["compiler"]),
-      transition("approve", ["proposed"], "todo", ["lead"]),
-      transition("start", ["todo"], "in_progress", ["compiler"]),
+      transition("propose", ["queued"], "proposed", ["compiler"]),
+      transition("approve", ["proposed"], "queued", ["lead"]),
+      transition("start", ["queued"], "in_progress", ["compiler"]),
       transition("finish", ["in_progress"], "closed", ["compiler"]),
     ],
   );

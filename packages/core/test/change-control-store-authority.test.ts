@@ -3619,7 +3619,7 @@ async function controlApplicationTicket(
   const application = controlTicketFromDefinition(
     catalog,
     definition,
-    "ready",
+    "queued",
     selectionSummary,
     executionControl,
     [proposal.id],
@@ -3697,7 +3697,7 @@ async function controlResolverFixture(
   const resolver = controlTicketFromDefinition(
     catalog,
     definition,
-    "ready",
+    "queued",
     `Recover terminal ticket ${source.id} from 1 authenticated failure binding(s).`,
     executionControl,
   );

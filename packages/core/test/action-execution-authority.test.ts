@@ -115,12 +115,12 @@ describe("configured action authority", () => {
   });
 
   it("re-admits only a stale Lead action cursor", () => {
-    expect(isReadmittableLeadActionDrift(new RunActionAuthorityError("stale_revision", "stale"))).toBe(
-      true,
-    );
-    expect(isReadmittableLeadActionDrift(new RunActionAuthorityError("stale_generation", "stale"))).toBe(
-      false,
-    );
+    expect(
+      isReadmittableLeadActionDrift(new RunActionAuthorityError("stale_revision", "stale")),
+    ).toBe(true);
+    expect(
+      isReadmittableLeadActionDrift(new RunActionAuthorityError("stale_generation", "stale")),
+    ).toBe(false);
   });
 
   it("revalidates action ticket state through the pinned lifecycle projection", () => {
@@ -134,7 +134,7 @@ describe("configured action authority", () => {
       machines: {
         ticket: {
           id: "ticket",
-          states: ["todo", "in_progress", "integrating", "blocked", "closed"],
+          states: ["queued", "in_progress", "integrating", "blocked", "closed"],
         },
       },
     } as unknown as NonNullable<RunRecord["lifecycleCatalog"]>;

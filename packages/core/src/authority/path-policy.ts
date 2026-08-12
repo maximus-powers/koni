@@ -9,6 +9,77 @@ const MAX_LIST_ENTRIES = 10_000;
 const MAX_SEARCH_FILES = 10_000;
 const MAX_SEARCH_BYTES = 32 * 1024 * 1024;
 const MAX_SEARCH_RESULTS = 1_000;
+/**
+ * A literal UTF-8 search cannot match inside these, and reading them anyway spends the byte budget
+ * on content that can never produce a result — a handful of images in a research repository
+ * exhausted it before any source file was reached, and the agent saw only "narrow your roots".
+ * Content-sniffing already discards binaries after the read; this declines to pay for them first.
+ */
+const NON_TEXT_SEARCH_EXTENSIONS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".bmp",
+  ".ico",
+  ".webp",
+  ".tiff",
+  ".avif",
+  ".pdf",
+  ".zip",
+  ".gz",
+  ".tgz",
+  ".bz2",
+  ".xz",
+  ".zst",
+  ".7z",
+  ".rar",
+  ".jar",
+  ".mp3",
+  ".mp4",
+  ".wav",
+  ".ogg",
+  ".webm",
+  ".mov",
+  ".avi",
+  ".mkv",
+  ".flac",
+  ".woff",
+  ".woff2",
+  ".ttf",
+  ".otf",
+  ".eot",
+  ".so",
+  ".dylib",
+  ".dll",
+  ".exe",
+  ".bin",
+  ".o",
+  ".a",
+  ".class",
+  ".wasm",
+  ".pyc",
+  ".pyd",
+  ".npy",
+  ".npz",
+  ".pt",
+  ".pth",
+  ".ckpt",
+  ".safetensors",
+  ".parquet",
+  ".arrow",
+  ".feather",
+  ".h5",
+  ".hdf5",
+  ".pkl",
+  ".pickle",
+  ".db",
+  ".sqlite",
+]);
+
+function isNonTextSearchCandidate(relativePath: string): boolean {
+  return NON_TEXT_SEARCH_EXTENSIONS.has(path.extname(relativePath).toLowerCase());
+}
 
 export interface AuthorizedPathEntry {
   path: string;
@@ -222,7 +293,13 @@ export class WorktreePathAuthority {
         files.add(root);
       } else if (metadata.isDirectory()) {
         for (const entry of await this.list(root, { recursive: true, limit: MAX_SEARCH_FILES })) {
-          if (entry.kind === "file" && entry.sizeBytes <= MAX_READ_BYTES) files.add(entry.path);
+          if (
+            entry.kind === "file" &&
+            entry.sizeBytes <= MAX_READ_BYTES &&
+            !isNonTextSearchCandidate(entry.path)
+          ) {
+            files.add(entry.path);
+          }
         }
       }
       if (files.size > MAX_SEARCH_FILES) {

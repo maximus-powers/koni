@@ -126,6 +126,22 @@ describe("execution policy authority", () => {
         ]),
       "execution_policy.gate_contract_edit",
     );
+    // A review rework may correct a gate this same ticket authored before review. The compiler
+    // supplies the exact ownership-bound node id; unrelated typed gates remain immutable.
+    expect(() =>
+      assertOperationGraphMutationPolicy(
+        catalog,
+        ordinary,
+        gates,
+        [
+          {
+            before: gate,
+            after: { ...gate, spec: { assertion: "corrected after review" } },
+          },
+        ],
+        ["gate-1"],
+      ),
+    ).not.toThrow();
     expectPolicyError(
       () =>
         assertOperationGraphMutationPolicy(catalog, ordinary, gates, [

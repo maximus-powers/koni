@@ -8,9 +8,31 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthorityClient } from "../src/authority/client.js";
 import {
   authorityRevisionStateHash,
+  acceptedLeadJudgmentForRun,
+  completedConfiguredCheckDependencyIds,
+  configuredCheckHasNoExternalEffects,
+  configuredCheckResultRequiresDependencyReopen,
+  configuredResultArtifactPaths,
+  inheritedRepositoryDiscoveryCalls,
+  isRecoverableAssignmentValidationAction,
   isExactSettledLeadLaunchReplay,
   needsHistoricalPreservedDeletionWorktreeRetirement,
+  questionBatchPlanningRevisionIsCurrent,
+  retainTicketAuthorityFields,
+  reopenCompletedConfiguredCheckDependencies,
+  resetRetryableConfiguredCheckInfrastructureAssignments,
+  replacementTicketExecutionEpoch,
+  shouldRefreshIntegrationCandidateCycle,
+  shouldRearmCancelledTerminalResolver,
+  shouldRetireInapplicableTicket,
+  shouldDeferBlockedLeadDisposition,
+  shouldBypassEntryLeadForExactActiveProposal,
+  shouldRefreshUnusedTicketCycle,
   RunAuthorityEngine,
+  hasProviderCapableSiblingAttempt,
+  hasExactQueuedProposalApproval,
+  hasExactActiveProposalApproval,
+  terminalProtocolRecoveryCount,
   tokenBudgetRecoveryCount,
   type PreparedManagedAttempt,
   type RuntimeAssignmentTerminalPolicyProjection,
@@ -57,6 +79,7 @@ import { canonicalHash, rawSha256, type Sha256Digest } from "../src/shared/canon
 import { MAX_TRANSACTION_BYTES } from "../src/authority/durable-limits.js";
 import { newRunLifecycle, reduceRunLifecycle } from "../src/state/run-lifecycle.js";
 import { executeActionPlan } from "../src/compiler/action-recipes.js";
+import { NativeRunProgramError } from "../src/compiler/run-program.js";
 import {
   compileExecutionSemanticCatalog,
   type CompiledExecutionSemanticCatalog,
@@ -88,7 +111,10 @@ import type {
   TicketExecutionControlRecord,
   TicketRecord,
 } from "../src/state/run-record.js";
+import type { QuestionBatchRecord } from "../src/state/question-batch.js";
 import {
+  assertRunExecutionControlMutation,
+  assertRunRecord,
   createCompilerControlTicketAuthority,
   createRunActionSettlement,
   createTerminalSuccessSettlementProof,
@@ -109,6 +135,308 @@ afterEach(async () => {
 });
 
 describe("run authority engine", () => {
+  it("reopens an effect-free failed submission after a typed configured-check infrastructure failure", () => {
+    const at = "2026-08-10T00:00:00.000Z";
+    const run = configuredCheckInfrastructureRetryFixture(at, {
+      infrastructureFailure: "the check runner failed to launch",
+    });
+
+    expect(resetRetryableConfiguredCheckInfrastructureAssignments(run, at)).toEqual([
+      { ticketId: "ticket-one", ticketTitle: "Prepare proof" },
+    ]);
+    expect(run.tickets["ticket-one"]).toMatchObject({
+      status: "queued",
+      blocker: undefined,
+      steps: [
+        expect.objectContaining({
+          id: "author-historical-baseline",
+          status: "pending",
+          completedAt: undefined,
+        }),
+      ],
+    });
+  });
+
+  it("supports the exact compiler-authored legacy infrastructure diagnostic without reopening semantic failures", () => {
+    const at = "2026-08-10T00:00:00.000Z";
+    const legacy = configuredCheckInfrastructureRetryFixture(at, {
+      summary:
+        "baseline-proof-set failed its configured result contract: command 0: command infrastructure failed before producing an admissible expected result: the check runner failed to launch",
+    });
+    const semantic = configuredCheckInfrastructureRetryFixture(at, {
+      summary: "baseline-proof-set failed its configured result contract: assertion failed",
+    });
+
+    expect(resetRetryableConfiguredCheckInfrastructureAssignments(legacy, at)).toHaveLength(1);
+    expect(resetRetryableConfiguredCheckInfrastructureAssignments(semantic, at)).toEqual([]);
+    expect(semantic.tickets["ticket-one"]?.status).toBe("blocked");
+  });
+
+  it("rejects a delayed planning-question resolution from an earlier revision", () => {
+    const run = {
+      planningSession: { attemptId: "attempt-plan", currentRevision: 1 },
+    } as RunRecord;
+    const current = {
+      attemptId: "attempt-plan",
+      planningRevision: 1,
+    } as QuestionBatchRecord;
+    const stale = { ...current, planningRevision: 0 };
+
+    expect(questionBatchPlanningRevisionIsCurrent(run, current)).toBe(true);
+    expect(questionBatchPlanningRevisionIsCurrent(run, stale)).toBe(false);
+    expect(
+      questionBatchPlanningRevisionIsCurrent(run, {
+        attemptId: "attempt-plan",
+      } as QuestionBatchRecord),
+    ).toBe(true);
+  });
+
+  it("validates contiguous append-only revisions for one stable planning session", () => {
+    const run = largeAwaitingApprovalRun("/tmp/koni-continuous-plan", "run-continuous-plan", 16);
+    run.lifecycle.planRevision = 1;
+    run.attempts["attempt-plan"] = {
+      id: "attempt-plan",
+      sessionId: "session-plan",
+      ticketId: "run-planning",
+      stepId: "planning",
+      personaId: "planner",
+      modelProvider: "anthropic",
+      modelId: "claude-sonnet-5",
+      thinkingLevel: "high",
+      status: "waiting_plan_review",
+      launchSpecHash: rawSha256("initial-planning-launch"),
+      sessionFile: "runs/run-continuous-plan/sessions/attempt-plan/session-plan.jsonl",
+      startedAt: "2026-08-09T00:00:00.000Z",
+      endedAt: undefined,
+      terminalSummary: undefined,
+      inputTokens: 8_000,
+      outputTokens: 2_000,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      kind: "planning",
+    };
+    const tokenPolicy = {
+      metric: "new_tokens" as const,
+      limit: 120_000,
+      synthesisReserve: 20_000,
+      synthesisThreshold: 100_000,
+      onExhausted: "force_synthesis" as const,
+    };
+    run.planningSession = {
+      protocol: "koni.planning-session.v1",
+      attemptId: "attempt-plan",
+      sessionId: "session-plan",
+      status: "awaiting_review",
+      currentRevision: 1,
+      revisions: [
+        {
+          protocol: "koni.planning-revision.v1",
+          revision: 0,
+          status: "superseded",
+          launchSpecSha256: rawSha256("planning-launch-0"),
+          grantSha256: rawSha256("planning-grant-0"),
+          budgetBaseline: {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
+          budgetPolicy: tokenPolicy,
+          startedAt: "2026-08-09T00:00:00.000Z",
+          artifactSha256: rawSha256("planning-artifact-0"),
+          graphSha256: rawSha256("planning-graph-0"),
+          transcriptSha256: rawSha256("planning-transcript-0"),
+          checkpointPath:
+            "runs/run-continuous-plan/attempts/attempt-plan/planning/revisions/0/checkpoint.json",
+          completedAt: "2026-08-09T00:01:00.000Z",
+        },
+        {
+          protocol: "koni.planning-revision.v1",
+          revision: 1,
+          status: "awaiting_review",
+          launchSpecSha256: rawSha256("planning-launch-1"),
+          grantSha256: rawSha256("planning-grant-1"),
+          budgetBaseline: {
+            inputTokens: 6_000,
+            outputTokens: 1_000,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
+          budgetPolicy: tokenPolicy,
+          startedAt: "2026-08-09T00:02:00.000Z",
+          steering: {
+            sequence: 1,
+            instructionsSha256: rawSha256("planning-steering-1"),
+            instructionsSizeBytes: 42,
+            artifactPath:
+              "runs/run-continuous-plan/attempts/attempt-plan/planning/revisions/1/steering.txt",
+            recordedAt: "2026-08-09T00:02:00.000Z",
+          },
+          patchSha256: rawSha256("planning-patch-1"),
+          artifactSha256: rawSha256("planning-artifact-1"),
+          graphSha256: rawSha256("planning-graph-1"),
+          transcriptSha256: rawSha256("planning-transcript-1"),
+          checkpointPath:
+            "runs/run-continuous-plan/attempts/attempt-plan/planning/revisions/1/checkpoint.json",
+          completedAt: "2026-08-09T00:03:00.000Z",
+        },
+      ],
+    };
+
+    expect(() => assertRunRecord(run)).not.toThrow();
+
+    const runningNextRevision = structuredClone(run);
+    const runningSession = runningNextRevision.planningSession as unknown as {
+      status: string;
+      currentRevision: number;
+      revisions: Array<Record<string, unknown>>;
+    };
+    runningSession.status = "running";
+    runningSession.currentRevision = 2;
+    runningSession.revisions[1]!.status = "superseded";
+    runningSession.revisions.push({
+      protocol: "koni.planning-revision.v1",
+      revision: 2,
+      status: "running",
+      launchSpecSha256: rawSha256("planning-launch-2"),
+      grantSha256: rawSha256("planning-grant-2"),
+      budgetBaseline: {
+        inputTokens: 8_000,
+        outputTokens: 2_000,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      },
+      budgetPolicy: tokenPolicy,
+      startedAt: "2026-08-09T00:04:00.000Z",
+      steering: {
+        sequence: 2,
+        instructionsSha256: rawSha256("planning-steering-2"),
+        instructionsSizeBytes: 24,
+        artifactPath:
+          "runs/run-continuous-plan/attempts/attempt-plan/planning/revisions/2/steering.txt",
+        recordedAt: "2026-08-09T00:04:00.000Z",
+      },
+    });
+    runningNextRevision.attempts["attempt-plan"]!.status = "running";
+    expect(runningNextRevision.plan?.revision).toBe(1);
+    expect(() => assertRunRecord(runningNextRevision)).not.toThrow();
+
+    const noncontiguous = structuredClone(run);
+    (
+      noncontiguous.planningSession as { revisions: Array<{ revision: number }> }
+    ).revisions[1]!.revision = 2;
+    expect(() => assertRunRecord(noncontiguous)).toThrow(/planning revision/u);
+
+    const rewritten = structuredClone(run);
+    rewritten.revision += 1;
+    (
+      rewritten.planningSession as {
+        revisions: Array<{ artifactSha256: Sha256Digest }>;
+      }
+    ).revisions[0]!.artifactSha256 = rawSha256("rewritten-planning-artifact-0");
+    expect(() => assertRunExecutionControlMutation(run, rewritten)).toThrow(/planning revision/u);
+  });
+
+  it("validates historical multi-attempt planning without synthesizing a session marker", () => {
+    const run = largeAwaitingApprovalRun(
+      "/tmp/koni-legacy-planning-lineage",
+      "run-legacy-planning-lineage",
+      32,
+    );
+    run.lifecycle.planRevision = 2;
+    run.plan!.revision = 2;
+    for (const revision of [1, 2]) {
+      const id = `legacy-planner-${revision}`;
+      run.attempts[id] = {
+        id,
+        sessionId: `legacy-session-${revision}`,
+        kind: "planning",
+        ticketId: "run-planning",
+        stepId: "planning",
+        personaId: "planner",
+        modelProvider: "anthropic",
+        modelId: "claude-sonnet-5",
+        thinkingLevel: "high",
+        status: "completed",
+        launchSpecHash: rawSha256(`legacy launch ${revision}`),
+        sessionFile: `runs/run-legacy-planning-lineage/sessions/${id}.jsonl`,
+        startedAt: `2026-08-09T00:0${revision}:00.000Z`,
+        endedAt: `2026-08-09T00:0${revision}:30.000Z`,
+        terminalSummary: `Legacy plan revision ${revision}`,
+        inputTokens: revision * 1_000,
+        outputTokens: revision * 100,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        lineage: {
+          reason: revision === 1 ? "initial" : "rework",
+          branchEpoch: revision - 1,
+          ...(revision === 1
+            ? {}
+            : {
+                parentAttemptId: "legacy-planner-1",
+                parentSessionId: "legacy-session-1",
+                parentEntryId: "legacy-leaf-1",
+                conversationFork: {
+                  parentLaunchSpecHash: rawSha256("legacy planning launch"),
+                  parentTranscriptSha256: rawSha256("legacy planning transcript"),
+                },
+              }),
+        },
+      };
+    }
+    const before = structuredClone(run);
+
+    expect(() => assertRunRecord(run)).not.toThrow();
+    expect(run.planningSession).toBeUndefined();
+    expect(Object.values(run.attempts).map((attempt) => attempt.sessionId)).toEqual([
+      "legacy-session-1",
+      "legacy-session-2",
+    ]);
+    expect(run).toEqual(before);
+  });
+
+  it("retires a blocked or freshly reissued ordinary ticket when its compiler predicate disappears", () => {
+    const failed = ticket();
+    failed.status = "blocked";
+    failed.blocker = "The prior assignment failed.";
+    failed.steps[0]!.status = "failed";
+    failed.steps[0]!.attemptIds = ["attempt-old"];
+    failed.gitCycleId = "cycle-old";
+
+    const reissued = structuredClone(failed);
+    reissued.status = "queued";
+    reissued.executionEpoch = 1;
+    reissued.gitCycleId = "cycle-fresh";
+    reissued.steps[0]!.status = "pending";
+
+    expect(shouldRetireInapplicableTicket(failed, new Set())).toBe(true);
+    expect(shouldRetireInapplicableTicket(failed, new Set(), new Set([failed.id]))).toBe(false);
+    expect(shouldRetireInapplicableTicket(reissued, new Set())).toBe(true);
+    expect(shouldRetireInapplicableTicket(reissued, new Set([reissued.id]))).toBe(false);
+
+    const preparedOnly = ticket();
+    preparedOnly.status = "queued";
+    preparedOnly.gitCycleId = "cycle-prepared-only";
+    preparedOnly.worktreePath = "/tmp/koni-prepared-only";
+    preparedOnly.branch = "koni/tickets/prepared-only";
+    expect(preparedOnly.steps.every((step) => step.attemptIds.length === 0)).toBe(true);
+    expect(shouldRetireInapplicableTicket(preparedOnly, new Set())).toBe(true);
+    expect(shouldRetireInapplicableTicket(preparedOnly, new Set([preparedOnly.id]))).toBe(false);
+
+    const running = structuredClone(reissued);
+    running.status = "running";
+    running.steps[0]!.status = "running";
+    expect(shouldRetireInapplicableTicket(running, new Set())).toBe(false);
+
+    const control = structuredClone(failed);
+    control.executionControl = { controlTicketAuthority: {} } as TicketExecutionControlRecord;
+    expect(shouldRetireInapplicableTicket(control, new Set())).toBe(false);
+
+    const integration = structuredClone(reissued);
+    integration.integrationForTicketId = failed.id;
+    expect(shouldRetireInapplicableTicket(integration, new Set())).toBe(false);
+  });
+
   it("recognizes only historical branch-preservation records that still own worktrees", () => {
     const git = fixtureRunGit("/tmp/koni-historical-delete", "run-historical-delete");
     git.planning.status = "preserved";
@@ -505,6 +833,7 @@ describe("run authority engine", () => {
       type: "blocked",
       atMs: Date.parse("2026-07-18T00:00:01.000Z"),
       reason: "inert startup fixture",
+      remedy: "resume",
     }).state;
     const seed = await RunAuthorityEngine.open({
       projectRoot: root,
@@ -815,7 +1144,13 @@ describe("run authority engine", () => {
       git,
     });
     engines.push(engine);
-    const starting = engine.start();
+    // Observe the intentional startup cancellation immediately. Waiting to attach the rejection
+    // assertion until after the Git gate is released lets Node report the expected rejection as
+    // unhandled even though the test later consumes it.
+    const starting = engine.start().then(
+      () => ({ status: "fulfilled" as const }),
+      (error: unknown) => ({ status: "rejected" as const, error }),
+    );
     await entered;
     // Queue a second startup recovery behind the already-admitted Git lane. Seven bounded run
     // reads carry a draft from the scan through initializeRun; after that, #withGit has no await
@@ -833,7 +1168,10 @@ describe("run authority engine", () => {
       if (queuedReads === 7) reachedGitQueue();
       return value;
     });
-    const queuedRecovery = engine.recover();
+    const queuedRecovery = engine.recover().then(
+      () => ({ status: "fulfilled" as const }),
+      (error: unknown) => ({ status: "rejected" as const, error }),
+    );
     await atGitQueue;
     await new Promise<void>((resolve) => setImmediate(resolve));
     const stopping = engine.stop();
@@ -847,8 +1185,14 @@ describe("run authority engine", () => {
     await Promise.resolve();
     expect(stopSettled).toBe(false);
     releaseEffect();
-    await expect(starting).rejects.toMatchObject({ name: "RunAdvancementStoppedError" });
-    await expect(queuedRecovery).rejects.toMatchObject({ name: "RunAdvancementStoppedError" });
+    await expect(starting).resolves.toMatchObject({
+      status: "rejected",
+      error: { name: "RunAdvancementStoppedError" },
+    });
+    await expect(queuedRecovery).resolves.toMatchObject({
+      status: "rejected",
+      error: { name: "RunAdvancementStoppedError" },
+    });
     await stopping;
     expect(materialize).toHaveBeenCalledTimes(1);
     getRun.mockRestore();
@@ -1088,7 +1432,7 @@ describe("run authority engine", () => {
       },
       { expectedRevision: 0, idempotencyKey: "approve-proposal-one" },
     );
-    expect(approved.result).toMatchObject({ status: "ready", decision: { decision: "approval" } });
+    expect(approved.result).toMatchObject({ status: "queued", decision: { decision: "approval" } });
     const afterApproval = await engine.store.getRun(runId);
     const approval = afterApproval.tickets[proposal.id]!.executionControl!.proposalDecision!;
     expect(afterApproval.tickets[proposal.id]!.executionControl!.proposalDecisionHistory).toEqual([
@@ -1107,7 +1451,7 @@ describe("run authority engine", () => {
       },
       { expectedRevision: auditExpectedRevision, idempotencyKey: "audit-proposal-one" },
     );
-    expect(audit.result).toMatchObject({ status: "ready", decision: { decision: "approval" } });
+    expect(audit.result).toMatchObject({ status: "queued", decision: { decision: "approval" } });
     const afterAudit = await engine.store.getRun(runId);
     expect(afterAudit.tickets[proposal.id]!.executionControl!.proposalDecision).toEqual(approval);
     expect(afterAudit.tickets[proposal.id]!.executionControl!.proposalDecisionHistory).toHaveLength(
@@ -1145,6 +1489,119 @@ describe("run authority engine", () => {
         { expectedRevision: client.revision, idempotencyKey: "reject-deleted-proposal" },
       ),
     ).rejects.toMatchObject({ code: "proposal_run_deleted" });
+    client.close();
+  }, 30_000);
+
+  it("resumes a change-request-blocked execution and its suspended supervisor when its exact proposal is approved", async () => {
+    const root = await repository();
+    let engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program: directApprovalProgram(),
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    let client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const created = await client.request(
+      "run.create",
+      {
+        objective: "Resume after approving a change request",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Resume after approving a change request" },
+      },
+      { expectedRevision: 0, idempotencyKey: "create-blocked-proposal-decision" },
+    );
+    const runId = (created.result as { runId: string }).runId;
+    await waitFor(
+      async () => (await engine.store.getRun(runId)).lifecycle.phase === "awaiting_approval",
+    );
+
+    const current = await engine.store.getRun(runId);
+    const draft = structuredClone(current);
+    draft.revision += 1;
+    draft.updatedAt = "2026-07-18T00:00:00.000Z";
+    draft.lifecycle = reduceRunLifecycle(draft.lifecycle, {
+      type: "plan_approval_requested",
+      atMs: Date.parse("2026-07-18T00:00:00.000Z"),
+    }).state;
+    draft.lifecycle = reduceRunLifecycle(draft.lifecycle, {
+      type: "plan_approved",
+      atMs: Date.parse("2026-07-18T00:00:01.000Z"),
+    }).state;
+    draft.plan = draft.plan === undefined ? undefined : { ...draft.plan, status: "approved" };
+    draft.currentPipelineStageId = draft.behavior!.runType.pipeline.find(
+      (stage) => stage.kind === "orchestration",
+    )!.id;
+    const proposal = await addCanonicalProposalFixture(draft);
+    draft.lifecycle = reduceRunLifecycle(draft.lifecycle, {
+      type: "blocked",
+      atMs: Date.parse("2026-07-18T00:00:02.000Z"),
+      reason: "Awaiting an operator decision on the exact change request",
+      remedy: "change_request",
+    }).state;
+    const state = await engine.store.state();
+    await engine.store.commit({
+      expectedRevision: state.revision,
+      runWrites: [{ record: draft, expectedRevision: current.revision }],
+    });
+    client.close();
+    await engine.stop();
+    engines.splice(engines.indexOf(engine), 1);
+    const restartedSupervisor = new ManagedSessionSupervisor();
+    engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program: directApprovalProgram(),
+      supervisor: restartedSupervisor,
+    });
+    engines.push(engine);
+    await engine.start();
+    client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    await restartedSupervisor.abortByRun(runId, "deterministic Lead deadlock");
+
+    const requestSha256 = proposal.executionControl!.proposalRequest!.requestSha256;
+    await client.request(
+      "proposal.decide",
+      {
+        runId,
+        ticketId: proposal.id,
+        requestSha256,
+        decision: "approval",
+        message: "Proceed with the exact reviewed change.",
+      },
+      { expectedRevision: 0, idempotencyKey: "approve-blocked-proposal" },
+    );
+
+    const resumed = await engine.store.getRun(runId);
+    expect(resumed.lifecycle).toMatchObject({ phase: "executing", runningIntent: true });
+    expect(resumed.lifecycle.blocker).toBeUndefined();
+    expect(resumed.lifecycle.blockerRemedy).toBeUndefined();
+    expect(resumed.tickets[proposal.id]).toMatchObject({ status: "queued" });
+    const admissionSpec = fixtureLaunchSpec({
+      cwd: root,
+      sessionDirectory: path.join(root, ".sessions", "proposal-resume-admission"),
+      runId,
+      ticketId: "ticket-admission-probe",
+      stepId: "admission-probe",
+      attemptId: "attempt-proposal-resume-admission",
+      sessionId: "session-proposal-resume-admission",
+    }) as AgentLaunchSpec;
+    const admitted = await restartedSupervisor.launch(admissionSpec, {
+      tools: [fixtureTool()],
+      contextProvider: contextProvider(admissionSpec),
+      factory: async () => new HangingAdapter(admissionSpec),
+    });
+    expect(admitted.session.spec.identity.runId).toBe(runId);
     client.close();
   }, 30_000);
 
@@ -1711,10 +2168,21 @@ describe("run authority engine", () => {
       /draft|planning|awaiting_approval/u,
     );
 
-    await waitFor(
-      async () => (await engine.store.getRun(runId)).lifecycle.phase === "awaiting_approval",
-    );
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      if (current.lifecycle.phase === "blocked" || current.lifecycle.phase === "failed") {
+        throw new Error(
+          `run stopped before plan review: ${current.lifecycle.blocker ?? current.lifecycle.terminalReason}`,
+        );
+      }
+      return current.lifecycle.phase === "awaiting_approval";
+    });
     const planned = await engine.store.getRun(runId);
+    expect(planned.planningSession).toMatchObject({
+      attemptId: expect.any(String),
+      sessionId: expect.any(String),
+      currentRevision: 0,
+    });
     expect(planned.plan?.concise.architecture).toEqual([
       {
         title: "Use existing seam",
@@ -1800,7 +2268,7 @@ describe("run authority engine", () => {
       { mode: 0o600 },
     );
     await client.request("authority.ping");
-    await client.request(
+    const revisionRequest = await client.request(
       "plan.revise",
       {
         runId,
@@ -1811,33 +2279,43 @@ describe("run authority engine", () => {
         idempotencyKey: "revise-feature-plan",
       },
     );
+    expect(revisionRequest.result).toMatchObject({
+      runId,
+      status: "planning",
+      planRevision: 1,
+      planningSessionId: firstPlanner.sessionId,
+      planningAttemptId: firstPlanner.id,
+      revisionUsage: {
+        cumulative: expect.objectContaining({ total: expect.any(Number) }),
+        currentRevision: { new: 0, cache: 0, total: 0 },
+      },
+    });
     await waitFor(async () => {
       const current = await engine.store.getRun(runId);
       return (
         current.lifecycle.phase === "awaiting_approval" &&
         Object.values(current.attempts).filter((attempt) => attempt.kind === "planning").length ===
-          2
+          1 &&
+        current.planningSession?.currentRevision === 1
       );
     });
     const revised = await engine.store.getRun(runId);
-    const planners = Object.values(revised.attempts)
-      .filter((attempt) => attempt.kind === "planning")
-      .sort((left, right) => (left.lineage?.branchEpoch ?? 0) - (right.lineage?.branchEpoch ?? 0));
+    const planners = Object.values(revised.attempts).filter(
+      (attempt) => attempt.kind === "planning",
+    );
+    expect(planners).toHaveLength(1);
     expect(planners[0]!.id).toBe(firstPlanner.id);
-    expect(planners[0]!.status).toMatch(/completed|interrupted/u);
-    expect(planners[1]!.sessionId).not.toBe(firstPlanner.sessionId);
-    expect(planners[1]!.lineage).toMatchObject({
-      branchEpoch: 1,
-      reason: "rework",
-      parentAttemptId: firstPlanner.id,
-      parentSessionId: firstPlanner.sessionId,
-      parentEntryId: responseId,
-      conversationFork: {
-        parentLaunchSpecHash: firstPlanner.launchSpecHash,
-        parentTranscriptSha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+    expect(planners[0]!.sessionId).toBe(firstPlanner.sessionId);
+    expect(planners[0]!.lineage?.conversationFork).toBeUndefined();
+    expect(revised.planningSession?.revisions).toHaveLength(2);
+    expect(revised.planningSession?.revisions[0]).toMatchObject({ status: "superseded" });
+    expect(revised.planningSession?.revisions[1]).toMatchObject({
+      revision: 1,
+      status: "awaiting_review",
+      steering: {
+        instructionsSha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
       },
     });
-    expect(planners[1]!.authorityMessages).toEqual([]);
     expect(revised.plan?.steeringHistory.at(-1)?.instructions).toContain("verification proof");
     await client.request("authority.ping");
     await client.request(
@@ -1881,6 +2359,25 @@ describe("run authority engine", () => {
         runOid: ready.git.run.headOid,
       }),
     ]);
+    const longRunningResearchHistory = structuredClone(ready);
+    const firstLeadAttempt = leadJudgments[0]!;
+    const firstLeadJudgment = longRunningResearchHistory.leadJudgments![0]!;
+    for (let index = 1; index < 65; index += 1) {
+      const attemptId = `attempt-lead-history-${index}`;
+      const { launchActionInvocationId: _launchActionInvocationId, ...historicalAttempt } =
+        structuredClone(firstLeadAttempt);
+      longRunningResearchHistory.attempts[attemptId] = {
+        ...historicalAttempt,
+        id: attemptId,
+        sessionId: `session-lead-history-${index}`,
+      };
+      longRunningResearchHistory.leadJudgments!.push({
+        ...structuredClone(firstLeadJudgment),
+        attemptId,
+        graphHash: rawSha256(`lead-history-graph-${index}`),
+      });
+    }
+    expect(() => assertRunRecord(longRunningResearchHistory)).not.toThrow();
     expect(
       Object.values(ready.attempts).filter((attempt) => attempt.personaId === "supervisor"),
     ).toEqual([]);
@@ -1981,11 +2478,9 @@ describe("run authority engine", () => {
     const report = Object.values(ready.actionExecutions ?? {}).find(
       (action) => action.boundary.kind === "post_orchestration_report",
     );
-    expect(ready.behavior?.actions.actions.report?.recipe.map(({ primitive }) => primitive)).toEqual([
-      "lock.acquire",
-      "project.validate",
-      "report.render",
-    ]);
+    expect(
+      ready.behavior?.actions.actions.report?.recipe.map(({ primitive }) => primitive),
+    ).toEqual(["lock.acquire", "project.validate", "report.render"]);
     expect(report?.settlement?.disposition).toBe("completed");
     client.close();
   }, 30_000);
@@ -2094,6 +2589,116 @@ describe("run authority engine", () => {
       [],
     );
     expect(blocked.lifecycle.blocker).toContain("remains deadlocked after bounded Lead review");
+    client.close();
+  });
+
+  it("rearms an exact never-started terminal resolver after source dependencies settle", () => {
+    const source = ticket();
+    source.id = "source-terminal";
+    source.status = "blocked";
+    source.dependencyIds = ["repair-terminal"];
+    source.steps[0]!.status = "failed";
+
+    const repair = ticket();
+    repair.id = "repair-terminal";
+    repair.status = "completed";
+
+    const failureBindingSha256 = canonicalHash("source-terminal-failure");
+    const resolver = ticket();
+    resolver.id = "resolver-terminal";
+    resolver.status = "cancelled";
+    resolver.blocker = "Superseded before execution by newer compiler state";
+    resolver.executionControl = {
+      terminalRecovery: {
+        sourceTicketId: source.id,
+        failureBindingSha256s: [failureBindingSha256],
+      },
+    } as TicketExecutionControlRecord;
+    for (const step of resolver.steps) {
+      step.status = "skipped";
+      step.attemptIds = [];
+    }
+
+    const run = {
+      tickets: {
+        [source.id]: source,
+        [repair.id]: repair,
+        [resolver.id]: resolver,
+      },
+    } as unknown as RunRecord;
+
+    expect(shouldRearmCancelledTerminalResolver(run, source, resolver, failureBindingSha256)).toBe(
+      true,
+    );
+
+    source.dependencyIds = [];
+    expect(shouldRearmCancelledTerminalResolver(run, source, resolver, failureBindingSha256)).toBe(
+      true,
+    );
+    source.dependencyIds = [repair.id];
+
+    repair.status = "running";
+    expect(shouldRearmCancelledTerminalResolver(run, source, resolver, failureBindingSha256)).toBe(
+      false,
+    );
+    repair.status = "completed";
+
+    resolver.steps[0]!.attemptIds = ["attempt-started"];
+    expect(shouldRearmCancelledTerminalResolver(run, source, resolver, failureBindingSha256)).toBe(
+      false,
+    );
+    resolver.steps[0]!.attemptIds = [];
+
+    expect(
+      shouldRearmCancelledTerminalResolver(run, source, resolver, canonicalHash("other-failure")),
+    ).toBe(false);
+  });
+
+  it("advances to verification when the remaining ticket is terminally cancelled", async () => {
+    const root = await repository();
+    const base = directApprovalProgram();
+    const program: RunCompilerProgram = {
+      ...base,
+      async initializeApprovedPlan() {
+        const cancelled = ticket();
+        cancelled.status = "cancelled";
+        cancelled.blocker = "Superseded before execution by newer compiler state";
+        for (const step of cancelled.steps) {
+          step.status = "skipped";
+          step.completedAt = cancelled.updatedAt;
+        }
+        return {
+          graphHash: `sha256:${"e".repeat(64)}`,
+          graphRevision: 1,
+          tickets: { [cancelled.id]: cancelled },
+        };
+      },
+    };
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(client, engine, "terminal-cancelled-board");
+    await waitFor(async () => {
+      const phase = (await engine.store.getRun(runId)).lifecycle.phase;
+      return phase === "merge_ready" || phase === "blocked";
+    });
+
+    const resolved = await engine.store.getRun(runId);
+    expect(resolved.lifecycle.phase).toBe("merge_ready");
+    expect(resolved.tickets["ticket-one"]?.status).toBe("cancelled");
+    expect(
+      resolved.leadJudgments?.some((judgment) => judgment.trigger === "compiler_deadlock"),
+    ).toBe(false);
     client.close();
   });
 
@@ -2216,7 +2821,7 @@ describe("run authority engine", () => {
       ]),
     );
     client.close();
-  });
+  }, 30_000);
 
   it("moves a direct-approval run to review without creating a planner attempt", async () => {
     const root = await repository();
@@ -2371,13 +2976,542 @@ describe("run authority engine", () => {
     client.close();
   });
 
-  it("retries a blocked planning run as a fresh immutable attempt", async () => {
+  it("reopens a completed dependency when configured-check preflight rejects its contract", async () => {
+    const root = await repository();
+    const direct = directApprovalProgram();
+    let repaired = false;
+    const program: RunCompilerProgram = {
+      ...direct,
+      async initializeApprovedPlan() {
+        const producer = reviewTicket();
+        producer.id = "ticket-compile-run-plan";
+        producer.operationId = "execution.node.compile-run-plan";
+        producer.targetNodeIds = ["run-one"];
+        producer.writeNodeIds = ["run-one"];
+
+        const runner = ticket();
+        runner.id = "ticket-run-experiment";
+        runner.operationId = "execution.run.run-experiment";
+        runner.targetNodeIds = ["run-one"];
+        runner.readNodeIds = ["run-one"];
+        runner.writeNodeIds = ["run-one"];
+        runner.dependencyIds = [producer.id];
+
+        return {
+          graphHash: `sha256:${"c".repeat(64)}`,
+          graphRevision: 1,
+          tickets: { [producer.id]: producer, [runner.id]: runner },
+        };
+      },
+      async prepareAttempt(input) {
+        if (input.assignment?.ticketId === "ticket-run-experiment" && !repaired) {
+          throw new NativeRunProgramError(
+            "check_input_binding",
+            "check scientific-result-integrity argv input source is not a permitted nonempty list",
+          );
+        }
+        return direct.prepareAttempt(input);
+      },
+      async compileAssignmentOutput({ run, assignment }) {
+        if (
+          assignment.ticketId === "ticket-compile-run-plan" &&
+          run.tickets[assignment.ticketId]?.reviewReworks?.some((rework) =>
+            rework.blocker.includes("configured-check preflight"),
+          )
+        ) {
+          repaired = true;
+        }
+        return { outcome: { status: "completed", summary: "Completed bounded assignment" } };
+      },
+    };
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(
+      client,
+      engine,
+      "reopen-invalid-runtime-contract-producer",
+    );
+
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      return current.tickets["ticket-compile-run-plan"]?.executionEpoch === 1;
+    });
+    const reopened = await engine.store.getRun(runId);
+    expect(reopened.tickets["ticket-compile-run-plan"]?.reviewReworks).toEqual([
+      expect.objectContaining({
+        mode: "automatic",
+        scope: "producer_and_review",
+        blocker: expect.stringContaining("configured-check preflight"),
+      }),
+    ]);
+
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      if (current.lifecycle.phase === "blocked") return true;
+      return current.lifecycle.phase === "merge_ready";
+    });
+    const settled = await engine.store.getRun(runId);
+    expect(settled.lifecycle.phase).toBe("merge_ready");
+    expect(settled.tickets["ticket-compile-run-plan"]).toMatchObject({
+      status: "completed",
+      executionEpoch: 1,
+    });
+    expect(
+      settled.activity.some((entry) =>
+        entry.message.includes(
+          "Reopened completed dependency after configured-check preflight rejected its contract",
+        ),
+      ),
+    ).toBe(true);
+    client.close();
+  }, 30_000);
+
+  it("reopens the reviewed producer with contract diagnostics after a configured result rejection", async () => {
+    const root = await repository();
+    const run = await recoveryDraftRun(
+      root,
+      "run-rejected-configured-result",
+      "Repair a rejected configured result",
+      directApprovalProgram(),
+    );
+    const producer = reviewTicket();
+    producer.id = "ticket-compile-run-plan";
+    producer.operationId = "execution.node.compile-run-plan";
+    producer.status = "completed";
+    producer.targetNodeIds = ["run-one"];
+    producer.writeNodeIds = ["run-one"];
+    for (const step of producer.steps) {
+      step.status = "completed";
+      step.attemptIds = [`attempt-${step.id}`];
+    }
+    const consumer = ticket();
+    consumer.id = "ticket-run-experiment";
+    consumer.targetNodeIds = ["run-one"];
+    consumer.readNodeIds = ["run-one"];
+    consumer.writeNodeIds = ["run-one"];
+    consumer.dependencyIds = [producer.id];
+    run.tickets = { [producer.id]: producer, [consumer.id]: consumer };
+
+    consumer.dependencyIds = [];
+    const producerIds = completedConfiguredCheckDependencyIds(run, consumer.id);
+    const reopened = reopenCompletedConfiguredCheckDependencies(
+      run,
+      consumer.id,
+      "configured check scientific-runtime rejected its result: protocol mismatch",
+      "2026-08-03T00:00:00.000Z",
+      producerIds,
+    );
+
+    expect(reopened).toEqual([producer.id]);
+    expect(run.tickets[producer.id]).toMatchObject({
+      status: "queued",
+      executionEpoch: 1,
+      reviewReworkCount: 1,
+      reviewReworks: [
+        expect.objectContaining({
+          mode: "automatic",
+          scope: "producer_and_review",
+          blocker: expect.stringContaining("protocol mismatch"),
+        }),
+      ],
+    });
+  });
+
+  it("does not reopen completed scientific dependencies for an infrastructure-only check failure", () => {
+    expect(
+      configuredCheckResultRequiresDependencyReopen({
+        accepted: false,
+        infrastructureFailure:
+          "command infrastructure failed before producing an admissible expected result: the configured test graph could not load one of its modules",
+      }),
+    ).toBe(false);
+    expect(
+      configuredCheckResultRequiresDependencyReopen({
+        accepted: false,
+      }),
+    ).toBe(true);
+    expect(
+      configuredCheckResultRequiresDependencyReopen({
+        accepted: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("also reopens a completed asset producer omitted from satisfied dependency edges", () => {
+    const source = reviewTicket();
+    source.id = "ticket-compile-run-plan";
+    source.operationId = "execution.node.compile-run-plan";
+    source.status = "completed";
+    source.targetNodeIds = ["run-one"];
+    source.writeNodeIds = ["run-one"];
+
+    const asset = reviewTicket();
+    asset.id = "ticket-implement-asset";
+    asset.operationId = "asset-resolution.asset.implement-asset";
+    asset.status = "completed";
+    asset.targetNodeIds = ["asset-verifier"];
+    asset.writeNodeIds = ["asset-verifier"];
+    asset.writePaths = ["program/assets/verifier"];
+
+    const consumer = ticket();
+    consumer.id = "ticket-run-experiment";
+    consumer.targetNodeIds = ["run-one"];
+    consumer.readNodeIds = ["asset-verifier", "run-one"];
+    consumer.writeNodeIds = ["run-one"];
+    consumer.dependencyIds = [source.id];
+
+    const run = {
+      tickets: {
+        [source.id]: source,
+        [asset.id]: asset,
+        [consumer.id]: consumer,
+      },
+    } as unknown as Pick<RunRecord, "tickets">;
+
+    expect(completedConfiguredCheckDependencyIds(run, consumer.id)).toEqual([source.id, asset.id]);
+  });
+
+  it("does not restore a retired checkout onto a persisted queued recurring asset ticket", () => {
+    const prior = reviewTicket();
+    prior.id = "ticket-implement-asset";
+    prior.operationId = "asset-resolution.asset.implement-asset";
+    prior.status = "queued";
+    prior.executionEpoch = 2;
+    prior.gitCycleId = "cycle-retired";
+    prior.worktreePath = "/tmp/retired-worktree";
+    prior.branch = "refs/heads/retired-ticket-cycle";
+    for (const step of prior.steps) step.status = "pending";
+
+    const compiled = structuredClone(prior);
+    compiled.status = "queued";
+    compiled.executionEpoch = 3;
+    delete compiled.gitCycleId;
+    compiled.worktreePath = undefined;
+    compiled.branch = undefined;
+    for (const step of compiled.steps) step.status = "pending";
+
+    const run = {
+      tickets: { [prior.id]: prior },
+      git: fixtureRunGit("/tmp/koni-recurring-asset", "run-recurring-asset"),
+    } as unknown as Pick<RunRecord, "tickets" | "git">;
+    run.git.ticketCycles[prior.gitCycleId] = {
+      cycleId: prior.gitCycleId,
+      ticketId: prior.id,
+      ordinal: 3,
+      status: "retired",
+    } as RunRecord["git"]["ticketCycles"][string];
+    const retained = retainTicketAuthorityFields(run, { [compiled.id]: compiled });
+
+    expect(retained[compiled.id]).toMatchObject({
+      status: "queued",
+      executionEpoch: 3,
+      worktreePath: undefined,
+      branch: undefined,
+    });
+    expect(retained[compiled.id]!.gitCycleId).toBeUndefined();
+  });
+
+  it("advances the ticket epoch when checkout allocation replaces a retired cycle", () => {
+    const ticket = reviewTicket();
+    ticket.id = "ticket-recurring";
+    ticket.status = "queued";
+    ticket.executionEpoch = 4;
+    ticket.gitCycleId = "cycle-retired";
+    const run = {
+      tickets: { [ticket.id]: ticket },
+      git: fixtureRunGit("/tmp/koni-cycle-replacement", "run-cycle-replacement"),
+    } as unknown as Pick<RunRecord, "tickets" | "git">;
+    run.git.ticketCycles[ticket.gitCycleId] = {
+      cycleId: ticket.gitCycleId,
+      ticketId: ticket.id,
+      ordinal: 5,
+      status: "retired",
+    } as RunRecord["git"]["ticketCycles"][string];
+
+    expect(replacementTicketExecutionEpoch(run, ticket)).toBe(5);
+    run.git.ticketCycles[ticket.gitCycleId]!.status = "active";
+    expect(replacementTicketExecutionEpoch(run, ticket)).toBeUndefined();
+  });
+
+  it("refreshes an unused queued ticket cycle when the integration head advanced", () => {
+    const ticket = reviewTicket();
+    ticket.id = "ticket-consumer";
+    ticket.status = "queued";
+    ticket.executionEpoch = 0;
+    ticket.gitCycleId = "cycle-stale";
+    for (const step of ticket.steps) step.attemptIds = [];
+    const run = {
+      tickets: { [ticket.id]: ticket },
+      attempts: {},
+      git: fixtureRunGit("/tmp/koni-stale-consumer", "run-stale-consumer"),
+    } as unknown as RunRecord;
+    run.git.run.headOid = "b".repeat(40);
+    const cycle = {
+      cycleId: ticket.gitCycleId,
+      ticketId: ticket.id,
+      ordinal: 1,
+      status: "active",
+      baseRunOid: "a".repeat(40),
+    } as RunRecord["git"]["ticketCycles"][string];
+    run.git.ticketCycles[ticket.gitCycleId] = cycle;
+
+    expect(shouldRefreshUnusedTicketCycle(run, ticket, cycle)).toBe(true);
+    ticket.steps[0]!.attemptIds = ["attempt-existing"];
+    run.attempts["attempt-existing"] = {
+      id: "attempt-existing",
+      ticketId: ticket.id,
+      stepId: ticket.steps[0]!.id,
+      ticketExecutionEpoch: 0,
+    } as AgentAttemptRecord;
+    expect(shouldRefreshUnusedTicketCycle(run, ticket, cycle)).toBe(true);
+    ticket.steps[0]!.status = "completed";
+    expect(shouldRefreshUnusedTicketCycle(run, ticket, cycle)).toBe(false);
+  });
+
+  it("refreshes a clean active ticket cycle between steps when the integration head advanced", () => {
+    const ticket = reviewTicket();
+    ticket.id = "ticket-stale-between-steps";
+    ticket.status = "running";
+    ticket.gitCycleId = "cycle-stale-between-steps";
+    ticket.steps[0]!.status = "completed";
+    ticket.steps[1]!.status = "running";
+    const run = {
+      tickets: { [ticket.id]: ticket },
+      attempts: {},
+      git: fixtureRunGit("/tmp/koni-stale-between-steps", "run-stale-between-steps"),
+    } as unknown as RunRecord;
+    run.git.run.headOid = "b".repeat(40);
+    const cycle = {
+      cycleId: ticket.gitCycleId,
+      ticketId: ticket.id,
+      ordinal: 1,
+      status: "active",
+      baseRunOid: "a".repeat(40),
+      ticketHeadOid: "a".repeat(40),
+    } as RunRecord["git"]["ticketCycles"][string];
+    run.git.ticketCycles[ticket.gitCycleId] = cycle;
+
+    expect(shouldRefreshUnusedTicketCycle(run, ticket, cycle)).toBe(true);
+    cycle.ticketHeadOid = "c".repeat(40);
+    expect(shouldRefreshUnusedTicketCycle(run, ticket, cycle)).toBe(false);
+  });
+
+  it("refreshes a consumed historical integration cycle that omitted its conflict candidate", () => {
+    const ticket = reviewTicket();
+    ticket.id = "ticket-integration";
+    ticket.status = "queued";
+    ticket.integrationForTicketId = "ticket-source";
+    ticket.gitCycleId = "cycle-without-preview";
+    ticket.steps[0]!.status = "completed";
+    ticket.steps[0]!.attemptIds = ["attempt-invalid-inspection"];
+    const cycle = {
+      cycleId: ticket.gitCycleId,
+      ticketId: ticket.id,
+      ordinal: 1,
+      status: "active",
+      baseRunOid: "a".repeat(40),
+      ticketHeadOid: "a".repeat(40),
+    } as RunRecord["git"]["ticketCycles"][string];
+
+    expect(shouldRefreshIntegrationCandidateCycle(ticket, cycle, "b".repeat(40))).toBe(true);
+  });
+
+  it("uses the current graph's latest Lead judgment when reporting a deterministic deadlock", () => {
+    const run = {
+      graphHash: `sha256:${"b".repeat(64)}`,
+      git: { run: { headOid: "2".repeat(40) } },
+      leadJudgments: [
+        {
+          trigger: "compiler_deadlock",
+          graphHash: `sha256:${"a".repeat(64)}`,
+          runOid: "1".repeat(40),
+          disposition: "proceed",
+          summary: "stale deadlock diagnosis",
+        },
+        {
+          trigger: "compiler_deadlock",
+          graphHash: `sha256:${"b".repeat(64)}`,
+          runOid: "2".repeat(40),
+          disposition: "proceed",
+          summary: "current deadlock diagnosis",
+        },
+      ],
+    } as unknown as RunRecord;
+
+    expect(acceptedLeadJudgmentForRun(run, "compiler_deadlock")?.summary).toBe(
+      "current deadlock diagnosis",
+    );
+  });
+
+  it("invalidates a blocked entry Lead for an exactly approved queued proposal before it has a disposition", () => {
+    const approvalSha256 = `sha256:${"a".repeat(64)}` as const;
+    const run = {
+      tickets: {
+        "proposal-one": {
+          status: "queued",
+          executionControl: {
+            proposalDecision: {
+              decision: "approval",
+              sha256: approvalSha256,
+            },
+            proposalApprovalSha256: approvalSha256,
+          },
+        },
+      },
+    } as unknown as RunRecord;
+
+    expect(hasExactQueuedProposalApproval(run)).toBe(true);
+    expect(run.tickets["proposal-one"]!.executionControl?.proposalDisposition).toBeUndefined();
+    expect(shouldBypassEntryLeadForExactActiveProposal(run, "orchestration_entry", undefined)).toBe(
+      true,
+    );
+    expect(shouldBypassEntryLeadForExactActiveProposal(run, "compiler_deadlock", undefined)).toBe(
+      false,
+    );
+    run.tickets["proposal-one"]!.status = "running";
+    expect(hasExactQueuedProposalApproval(run)).toBe(false);
+    expect(hasExactActiveProposalApproval(run)).toBe(true);
+    expect(shouldBypassEntryLeadForExactActiveProposal(run, "orchestration_entry", undefined)).toBe(
+      true,
+    );
+    run.tickets["proposal-one"]!.status = "review";
+    expect(hasExactActiveProposalApproval(run)).toBe(true);
+    run.tickets["proposal-one"]!.executionControl!.proposalApprovalSha256 =
+      `sha256:${"b".repeat(64)}`;
+    expect(hasExactActiveProposalApproval(run)).toBe(false);
+  });
+
+  it("bypasses an entry Lead while an exact approved application is still settling", () => {
+    const applicationSha256 = `sha256:${"c".repeat(64)}` as const;
+    const run = {
+      tickets: {
+        "proposal-one": {
+          id: "proposal-one",
+          status: "completed",
+          executionControl: {
+            approvedApplicationSha256: applicationSha256,
+            proposalDisposition: {
+              kind: "application",
+              applicationTicketId: "application-one",
+              authoritySha256: applicationSha256,
+            },
+          },
+        },
+        "application-one": {
+          id: "application-one",
+          status: "queued",
+          executionControl: {
+            controlTicketAuthority: { role: "approved_application" },
+            sourceProposalTicketId: "proposal-one",
+            approvedApplicationSha256: applicationSha256,
+          },
+        },
+      },
+    } as unknown as RunRecord;
+
+    expect(shouldBypassEntryLeadForExactActiveProposal(run, "orchestration_entry", undefined)).toBe(
+      true,
+    );
+    expect(shouldBypassEntryLeadForExactActiveProposal(run, "compiler_deadlock", undefined)).toBe(
+      false,
+    );
+    run.tickets["application-one"]!.executionControl!.approvedApplicationSha256 =
+      `sha256:${"d".repeat(64)}`;
+    expect(shouldBypassEntryLeadForExactActiveProposal(run, "orchestration_entry", undefined)).toBe(
+      false,
+    );
+  });
+
+  it("does not recover an assignment-validation action after its accepted attempt was interrupted", () => {
+    const ticket = reviewTicket();
+    ticket.id = "ticket-current";
+    ticket.status = "queued";
+    ticket.executionEpoch = 2;
+    ticket.gitCycleId = "cycle-current";
+    ticket.steps[0]!.status = "pending";
+    const attempt = {
+      id: "attempt-stale",
+      kind: "ticket",
+      ticketId: ticket.id,
+      stepId: ticket.steps[0]!.id,
+      ticketExecutionEpoch: 1,
+      status: "interrupted",
+    } as AgentAttemptRecord;
+    const action = {
+      boundary: {
+        kind: "assignment_validation",
+        ticketId: ticket.id,
+        stepId: ticket.steps[0]!.id,
+        attemptId: attempt.id,
+        cycleId: "cycle-stale",
+      },
+    } as RunActionExecutionRecord;
+    const run = {
+      attempts: { [attempt.id]: attempt },
+      tickets: { [ticket.id]: ticket },
+    } as unknown as RunRecord;
+
+    expect(isRecoverableAssignmentValidationAction(run, action)).toBe(false);
+    attempt.status = "terminal_accepted";
+    attempt.ticketExecutionEpoch = 2;
+    action.boundary.cycleId = ticket.gitCycleId;
+    ticket.status = "running";
+    ticket.steps[0]!.status = "running";
+    ticket.steps[0]!.attemptIds.push(attempt.id);
+    expect(isRecoverableAssignmentValidationAction(run, action)).toBe(true);
+  });
+
+  it("treats malformed artifact envelopes as rejected results when the command has no effects", () => {
+    const check = {
+      commands: [
+        {
+          effect: "workspace_write",
+          networkAccess: false,
+          outputPaths: [],
+        },
+      ],
+    };
+    const command = {
+      checkId: "scientific-runtime",
+      outputArtifactSelector: {
+        field: "artifacts",
+        allowPathStrings: true,
+        pathField: "path",
+      },
+    };
+
+    expect(configuredCheckHasNoExternalEffects(check)).toBe(true);
+    expect(
+      configuredResultArtifactPaths(command, {
+        protocol: "autoresearch.gate-result.v1",
+        verdict: "inconclusive",
+      }),
+    ).toEqual([]);
+  });
+
+  it("retries a blocked continuous planning run in its stable attempt and session", async () => {
     const root = await repository();
     const base = fakeProgram();
     const prepareAttempt = base.prepareAttempt.bind(base);
+    const preparePlanningRevision = base.preparePlanningRevision!.bind(base);
     let failFirstPlanner = true;
+    let failFirstRevision = true;
     const program: RunCompilerProgram = {
       ...base,
+      async initializeApprovedPlan() {
+        throw new Error("blocked planning resume must not initialize an unapproved plan");
+      },
       async prepareAttempt(input) {
         const prepared = await prepareAttempt(input);
         if (input.kind !== "planning" || !failFirstPlanner) return prepared;
@@ -2386,6 +3520,17 @@ describe("run authority engine", () => {
           ...prepared,
           factory: async () => {
             throw new Error("simulated contained session cold-start timeout");
+          },
+        };
+      },
+      async preparePlanningRevision(input) {
+        const prepared = await preparePlanningRevision(input);
+        if (!failFirstRevision) return prepared;
+        failFirstRevision = false;
+        return {
+          ...prepared,
+          factory: async () => {
+            throw new Error("simulated planning revision host failure");
           },
         };
       },
@@ -2435,28 +3580,94 @@ describe("run authority engine", () => {
       },
     );
     expect(resumed.result).toMatchObject({ runId, status: "planning" });
-    await waitFor(async () => {
+    try {
+      await waitFor(async () => {
+        const current = await engine.store.getRun(runId);
+        return (
+          current.lifecycle.phase === "awaiting_approval" &&
+          Object.values(current.attempts).filter((attempt) => attempt.kind === "planning")
+            .length === 1
+        );
+      });
+    } catch (error) {
       const current = await engine.store.getRun(runId);
-      return (
-        current.lifecycle.phase === "awaiting_approval" &&
-        Object.values(current.attempts).filter((attempt) => attempt.kind === "planning").length ===
-          2
+      throw new Error(
+        `continuous planning retry did not settle: ${JSON.stringify({ lifecycle: current.lifecycle, attempts: current.attempts, planningSession: current.planningSession, activity: current.activity.slice(-6) })}`,
+        { cause: error },
       );
-    });
+    }
     const planned = await engine.store.getRun(runId);
     const attempts = Object.values(planned.attempts)
       .filter((attempt) => attempt.kind === "planning")
       .sort((left, right) => (left.lineage?.branchEpoch ?? 0) - (right.lineage?.branchEpoch ?? 0));
-    expect(attempts[1]).toMatchObject({
-      status: "completed",
-      lineage: {
-        branchEpoch: 1,
-        reason: "retry",
-        parentAttemptId: first.id,
-        parentSessionId: first.sessionId,
-      },
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).toMatchObject({
+      id: first.id,
+      sessionId: first.sessionId,
+      status: "waiting_plan_review",
+      lineage: { branchEpoch: 0, reason: "initial" },
+    });
+    expect(attempts[0]?.lineage?.conversationFork).toBeUndefined();
+    expect(planned.planningSession).toMatchObject({
+      attemptId: first.id,
+      sessionId: first.sessionId,
+      currentRevision: 0,
+      status: "awaiting_review",
     });
     expect(planned.activity.at(-1)?.message).toContain("Retrying blocked run from planning");
+
+    await client.request("authority.ping");
+    await client.request(
+      "plan.revise",
+      { runId, instructions: "Clarify the bounded verification proof." },
+      {
+        expectedRevision: client.revision,
+        idempotencyKey: "launch-failing-planning-revision",
+      },
+    );
+    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "blocked");
+    const blockedRevision = await engine.store.getRun(runId);
+    expect(blockedRevision).toMatchObject({
+      lifecycle: { phase: "blocked", resumePhase: "planning" },
+      planningSession: {
+        attemptId: first.id,
+        sessionId: first.sessionId,
+        currentRevision: 1,
+        status: "blocked",
+      },
+    });
+
+    await client.request("authority.ping");
+    await client.request(
+      "run.resume",
+      { runId },
+      {
+        expectedRevision: client.revision,
+        idempotencyKey: "retry-blocked-planning-revision",
+      },
+    );
+    try {
+      await waitFor(async () => {
+        const current = await engine.store.getRun(runId);
+        return (
+          current.lifecycle.phase === "awaiting_approval" &&
+          current.planningSession?.currentRevision === 1
+        );
+      });
+    } catch (error) {
+      const current = await engine.store.getRun(runId);
+      throw new Error(
+        `continuous planning revision retry did not settle: ${JSON.stringify({ lifecycle: current.lifecycle, attempts: current.attempts, planningSession: current.planningSession, activity: current.activity.slice(-6) })}`,
+        { cause: error },
+      );
+    }
+    const revised = await engine.store.getRun(runId);
+    expect(revised.planningSession).toMatchObject({
+      attemptId: first.id,
+      sessionId: first.sessionId,
+      currentRevision: 1,
+      status: "awaiting_review",
+    });
     client.close();
   });
 
@@ -2478,9 +3689,14 @@ describe("run authority engine", () => {
       failureMessage: "authority stopping",
     },
     {
-      label: "terminal protocol",
-      failureCode: "terminal_protocol",
-      failureMessage: "agent settled without calling terminal tool koni_submit_output",
+      label: "legacy suspended run admission",
+      failureCode: undefined,
+      failureMessage: "run run-one is paused",
+    },
+    {
+      label: "legacy unsafe-boundary recovery",
+      failureCode: undefined,
+      failureMessage: "Pi transcript does not end at a provably safe continuation boundary",
     },
   ])(
     "retries a $label runtime-failed ticket only after an explicit operator resume",
@@ -2701,7 +3917,7 @@ describe("run authority engine", () => {
       ),
     ).toHaveLength(3);
     client.close();
-  });
+  }, 30_000);
 
   it("automatically retries a terminal-contract failure without an operator resume", async () => {
     const root = await repository();
@@ -2759,7 +3975,54 @@ describe("run authority engine", () => {
     client.close();
   });
 
-  it("keeps independent ticket work executable after a sibling launch failure", async () => {
+  it("scopes terminal-contract recovery to the failed lane and preserves active siblings", () => {
+    const failedLead = {
+      id: "attempt-lead-current",
+      kind: "lead",
+      ticketId: "run-orchestration",
+      stepId: "lead-compiler-deadlock",
+      status: "failed",
+      failureCode: "terminal_protocol",
+    } as AgentAttemptRecord;
+    const activeSibling = {
+      id: "attempt-ticket-active",
+      kind: "ticket",
+      ticketId: "ticket-active",
+      stepId: "implement",
+      status: "running",
+    } as AgentAttemptRecord;
+    const historicalFailures = Object.fromEntries(
+      ["inspect", "implement", "review"].map((stepId, index) => {
+        const attempt = {
+          id: `attempt-historical-${index}`,
+          kind: "ticket",
+          ticketId: `ticket-historical-${index}`,
+          stepId,
+          status: "failed",
+          failureCode: "terminal_protocol",
+        } as AgentAttemptRecord;
+        return [attempt.id, attempt];
+      }),
+    );
+    const run = {
+      attempts: {
+        ...historicalFailures,
+        [failedLead.id]: failedLead,
+        [activeSibling.id]: activeSibling,
+      },
+      tickets: {},
+    } as unknown as RunRecord;
+
+    expect(terminalProtocolRecoveryCount(run, failedLead)).toBe(1);
+    expect(hasProviderCapableSiblingAttempt(run, failedLead.id)).toBe(true);
+    expect(shouldDeferBlockedLeadDisposition(run, failedLead.id, "blocked")).toBe(true);
+    expect(shouldDeferBlockedLeadDisposition(run, failedLead.id, "proceed")).toBe(false);
+    activeSibling.status = "completed";
+    expect(hasProviderCapableSiblingAttempt(run, failedLead.id)).toBe(false);
+    expect(shouldDeferBlockedLeadDisposition(run, failedLead.id, "blocked")).toBe(false);
+  });
+
+  it("keeps independent ticket work executable while a sibling terminal failure recovers", async () => {
     const root = await repository();
     const base = directApprovalProgram();
     const prepareAttempt = base.prepareAttempt.bind(base);
@@ -2824,13 +4087,20 @@ describe("run authority engine", () => {
 
     await waitFor(async () => {
       const current = await engine.store.getRun(runId);
-      return current.tickets["ticket-two"]?.status === "completed";
+      return current.lifecycle.phase === "merge_ready";
     });
     const current = await engine.store.getRun(runId);
-    expect(current.tickets["ticket-one"]).toMatchObject({ status: "blocked" });
+    expect(current.tickets["ticket-one"]).toMatchObject({ status: "completed" });
     expect(current.tickets["ticket-two"]).toMatchObject({ status: "completed" });
+    const firstTicketAttempts = Object.values(current.attempts).filter(
+      (attempt) => attempt.ticketId === "ticket-one",
+    );
+    expect(firstTicketAttempts).toHaveLength(2);
+    expect(firstTicketAttempts.some((attempt) => attempt.failureCode === "terminal_protocol")).toBe(
+      true,
+    );
     client.close();
-  });
+  }, 30_000);
 
   it("automatically retries a token-budget-aborted ticket once without an operator resume", async () => {
     const root = await repository();
@@ -3010,7 +4280,7 @@ describe("run authority engine", () => {
       });
     }
     client.close();
-  });
+  }, 30_000);
 
   it("renews bounded token-budget recovery for an explicitly reopened review-rework slice", async () => {
     const root = await repository();
@@ -3144,6 +4414,77 @@ describe("run authority engine", () => {
         entry.message.includes("operator-confirmed runtime recovery"),
       ),
     ).toBe(false);
+    client.close();
+  });
+
+  it("archives and cancels failed work when the current compiler predicate becomes false", async () => {
+    const root = await repository();
+    const base = directApprovalProgram();
+    let predicateApplies = true;
+    const program: RunCompilerProgram = {
+      ...base,
+      async reconcileTicketBoard(run) {
+        return {
+          tickets: structuredClone(run.tickets),
+          applicableTicketIds: predicateApplies ? ["ticket-one"] : [],
+        };
+      },
+      async compileAssignmentOutput() {
+        return {
+          outcome: { status: "failed", blocker: "The old predicate no longer describes work" },
+        };
+      },
+    };
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(client, engine, "retire-obsolete-failure");
+    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "blocked");
+    const blocked = await engine.store.getRun(runId);
+    const cycleId = blocked.tickets["ticket-one"]!.gitCycleId!;
+    const attemptIds = Object.values(blocked.attempts)
+      .filter((attempt) => attempt.ticketId === "ticket-one")
+      .map((attempt) => attempt.id);
+    expect(attemptIds).toHaveLength(1);
+
+    predicateApplies = false;
+    await client.request("authority.ping");
+    await client.request(
+      "run.resume",
+      { runId },
+      { expectedRevision: client.revision, idempotencyKey: "retire-obsolete-failure" },
+    );
+    await waitFor(async () => {
+      const run = await engine.store.getRun(runId);
+      return run.tickets["ticket-one"]?.status === "cancelled";
+    });
+
+    const retired = await engine.store.getRun(runId);
+    expect(retired.tickets["ticket-one"]).toMatchObject({
+      status: "cancelled",
+      blocker: "Current compiler predicate no longer applies after prior execution",
+    });
+    expect(retired.tickets["ticket-one"]!.gitCycleId).toBeUndefined();
+    expect(retired.git.ticketCycles[cycleId]).toMatchObject({
+      status: "retired",
+      archiveRef: expect.stringContaining("refs/koni/archive/"),
+    });
+    expect(
+      Object.values(retired.attempts)
+        .filter((attempt) => attempt.ticketId === "ticket-one")
+        .map((attempt) => attempt.id),
+    ).toEqual(attemptIds);
+    expect(() => assertRunRecord(structuredClone(retired))).not.toThrow();
     client.close();
   });
 
@@ -3949,10 +5290,18 @@ describe("run authority engine", () => {
 
     await engine.stop();
     engines.splice(engines.indexOf(engine), 1);
+    let resumeBoardRefreshes = 0;
+    const refreshedProgram: RunCompilerProgram = {
+      ...program,
+      async reconcileTicketBoard(run) {
+        resumeBoardRefreshes += 1;
+        return { tickets: structuredClone(run.tickets) };
+      },
+    };
     engine = await RunAuthorityEngine.open({
       projectRoot: root,
       version: "1.0.0",
-      program,
+      program: refreshedProgram,
       supervisor: new ManagedSessionSupervisor(),
     });
     engines.push(engine);
@@ -3967,6 +5316,7 @@ describe("run authority engine", () => {
         idempotencyKey: "resume-after-refresh",
       },
     );
+    expect(resumeBoardRefreshes).toBe(1);
     await waitFor(async () => {
       const current = await engine.store.getRun(runId);
       return (
@@ -4771,7 +6121,7 @@ describe("run authority engine", () => {
     await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "paused");
 
     const paused = await engine.store.getRun(runId);
-    expect(paused.tickets["ticket-one"]?.status).toBe("todo");
+    expect(paused.tickets["ticket-one"]?.status).toBe("queued");
     expect("worktreePath" in paused.tickets["ticket-one"]!).toBe(false);
     expect("branch" in paused.tickets["ticket-one"]!).toBe(false);
     expect(paused.git.ticketCycles).toEqual({});
@@ -4897,6 +6247,56 @@ describe("run authority engine", () => {
       terminalSummary: "The configured check could not establish an honest result",
       terminalPolicy: { mode: "failed_submission" },
     });
+    expect(run.tickets["ticket-one"]).toMatchObject({
+      status: "blocked",
+      blocker: "The configured check could not establish an honest result",
+      steps: [expect.objectContaining({ status: "failed" })],
+    });
+    client.close();
+  }, 30_000);
+
+  it("accepts an honest configured assignment blocker without replaying completion checks", async () => {
+    const root = await repository();
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program: semanticDirectReceiptProgram({
+        failedSubmission: true,
+        configuredValidation: true,
+      }),
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(
+      client,
+      engine,
+      "honest-configured-failed-terminal-submission",
+    );
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      return (
+        Object.values(current.attempts).some(
+          (attempt) => attempt.ticketId === "ticket-one" && attempt.status === "completed",
+        ) || current.lifecycle.phase === "blocked"
+      );
+    });
+
+    const run = await engine.store.getRun(runId);
+    const attempt = Object.values(run.attempts).find(
+      (candidate) => candidate.ticketId === "ticket-one" && candidate.stepId === "implement",
+    )!;
+    expect(attempt).toMatchObject({
+      status: "completed",
+      terminalSummary: "The configured check could not establish an honest result",
+      terminalPolicy: { mode: "failed_submission" },
+    });
+    expect(run.lifecycle.phase).toBe("executing");
     expect(run.tickets["ticket-one"]).toMatchObject({
       status: "blocked",
       blocker: "The configured check could not establish an honest result",
@@ -5076,6 +6476,7 @@ describe("run authority engine", () => {
       atMs: new Date(blockedDraft.updatedAt).getTime(),
       reason:
         "ticket validation action did not complete with its exact accepted assignment (failed)",
+      remedy: "resume",
     }).state;
     const authorityState = await engine.store.state();
     await engine.store.commit({
@@ -5150,6 +6551,147 @@ describe("run authority engine", () => {
         entry.message.includes("Retrying compiler validation from accepted output"),
       ),
     ).toBe(true);
+    client.close();
+  }, 30_000);
+
+  it("charges a forked continuation for the discovery its inherited transcript already paid for", () => {
+    // A recovery fork keeps the parent's results in its transcript, so it can reuse them. Counting
+    // the budget per attempt handed each fork a fresh allowance anyway, which under a recovery loop
+    // let one planning stage spend far past its configured ceiling.
+    const attempt = (
+      id: string,
+      accepted: number,
+      parent?: string,
+      fork = true,
+    ): AgentAttemptRecord =>
+      ({
+        id,
+        authorityToolResults: Array.from({ length: accepted }, (_unused, index) => ({
+          sequence: index,
+          toolName: "koni_read_file",
+          outcome: "accepted",
+        })),
+        ...(parent === undefined
+          ? { lineage: { branchEpoch: 0, reason: "initial" } }
+          : {
+              lineage: {
+                branchEpoch: 1,
+                reason: "recovery",
+                parentAttemptId: parent,
+                ...(fork
+                  ? {
+                      conversationFork: {
+                        parentLaunchSpecHash: "sha256:aa",
+                        parentTranscriptSha256: "sha256:bb",
+                      },
+                    }
+                  : {}),
+              },
+            }),
+      }) as unknown as AgentAttemptRecord;
+
+    const root = attempt("a", 10);
+    const forked = attempt("b", 4, "a");
+    const grandchild = attempt("c", 3, "b");
+    const freshRoot = attempt("d", 2, "a", false);
+    const run = {
+      attempts: { a: root, b: forked, c: grandchild, d: freshRoot },
+    } as unknown as RunRecord;
+
+    expect(inheritedRepositoryDiscoveryCalls(run, root)).toBe(10);
+    expect(inheritedRepositoryDiscoveryCalls(run, forked)).toBe(14);
+    expect(inheritedRepositoryDiscoveryCalls(run, grandchild)).toBe(17);
+    // No conversation fork means an empty session with nothing to reuse, so it legitimately restarts.
+    expect(inheritedRepositoryDiscoveryCalls(run, freshRoot)).toBe(2);
+  });
+
+  it("reconciles a stalled attempt that no live process backs and re-drives the run", async () => {
+    const root = await repository();
+    const base = configuredValidationDirectProgram();
+    const compileAssignmentOutput = base.compileAssignmentOutput.bind(base);
+    let compilationCount = 0;
+    const program: RunCompilerProgram = {
+      ...base,
+      async compileAssignmentOutput(input) {
+        compilationCount += 1;
+        if (compilationCount === 1) {
+          throw new Error("simulated compiler review-effect compatibility failure");
+        }
+        return compileAssignmentOutput(input);
+      },
+    };
+    let engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    let client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(client, engine, "reconcile-stalled-attempt");
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      return Object.values(current.actionExecutions ?? {}).some(
+        (action) =>
+          action.boundary.kind === "assignment_validation" && action.journal.status === "failed",
+      );
+    });
+
+    // The wedge observed in the field: the record still asserts an accepted attempt, the run is not
+    // blocked, and nothing will dispatch again. Capture it before reconciliation can act on it.
+    const wedged = await engine.store.getRun(runId);
+    const accepted = Object.values(wedged.attempts).find(
+      (attempt) => attempt.ticketId === "ticket-one",
+    )!;
+    expect(wedged.lifecycle.phase).not.toBe("blocked");
+    expect(accepted.status).toBe("terminal_accepted");
+    expect(accepted.terminalPolicy).toBeUndefined();
+
+    client.close();
+    await engine.server.stop();
+
+    // A fresh supervisor owns no handle for that attempt, which is exactly the divergence between
+    // record and reality that reconciliation exists to repair.
+    engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.1",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+      reconcileIntervalMs: 25,
+      attemptStallMs: 50,
+    });
+    engines.push(engine);
+    await engine.start();
+    client = await AuthorityClient.connect({ projectRoot: root, client: "tui", version: "1.0.1" });
+
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      return current.attempts[accepted.id]?.status === "interrupted";
+    });
+
+    const reconciled = await engine.store.getRun(runId);
+    expect(reconciled.attempts[accepted.id]).toMatchObject({
+      status: "interrupted",
+      error: expect.stringContaining("no live process"),
+    });
+    expect(
+      reconciled.activity.some((entry) => entry.message.includes("Reconciliation retired")),
+    ).toBe(true);
+    // An interrupted acceptance is only legal when its bound validation action is abandoned in the
+    // same CAS, and the repair must leave the run dispatchable rather than merely tidy.
+    expect(
+      Object.values(reconciled.actionExecutions ?? {}).find(
+        (action) => action.boundary.kind === "assignment_validation",
+      )?.settlement?.disposition,
+    ).toBe("abandoned");
+    expect(reconciled.tickets["ticket-one"]?.steps.at(-1)?.status).toBe("pending");
+    expect(reconciled.lifecycle.phase).toBe("executing");
+    expect(reconciled.lifecycle.blocker).toBeUndefined();
     client.close();
   }, 30_000);
 
@@ -5230,17 +6772,50 @@ describe("run authority engine", () => {
   it("records a durable blocker when compensated validation reissues are exhausted", async () => {
     const root = await repository();
     const base = configuredValidationDirectProgram("compile-with-compensation");
+    const prepareAttempt = base.prepareAttempt.bind(base);
     const program: RunCompilerProgram = {
       ...base,
+      async resolveRun(request) {
+        const resolved = await base.resolveRun(request);
+        return {
+          ...resolved,
+          executionConfig: { ...resolved.executionConfig, maxParallel: 2 },
+        };
+      },
+      async initializeApprovedPlan() {
+        const first = ticket();
+        first.steps[0]!.validationAction = "compile-with-compensation";
+        first.readPaths = ["README.md"];
+        const sibling = structuredClone(first);
+        sibling.id = "ticket-two";
+        sibling.title = "Keep independent work in flight";
+        sibling.targetNodeIds = ["change-two"];
+        sibling.readPaths = ["CHANGELOG.md"];
+        sibling.writePaths = ["CHANGELOG.md"];
+        return {
+          graphHash: `sha256:${"c".repeat(64)}`,
+          graphRevision: 1,
+          tickets: { [first.id]: first, [sibling.id]: sibling },
+        };
+      },
+      async prepareAttempt(input) {
+        const prepared = await prepareAttempt(input);
+        if (input.assignment?.ticketId !== "ticket-two") return prepared;
+        return {
+          ...prepared,
+          factory: async () => new HangingAdapter(prepared.spec),
+        };
+      },
       async compileAssignmentOutput() {
         throw new Error("agent graph delta targets a stale graph hash");
       },
     };
+    const supervisor = new ManagedSessionSupervisor();
     const engine = await RunAuthorityEngine.open({
       projectRoot: root,
       version: "1.0.0",
       program,
-      supervisor: new ManagedSessionSupervisor(),
+      supervisor,
     });
     engines.push(engine);
     await engine.start();
@@ -5262,6 +6837,22 @@ describe("run authority engine", () => {
     expect(attempts).toHaveLength(4);
     expect(attempts.filter((attempt) => attempt.status === "interrupted")).toHaveLength(3);
     expect(attempts.at(-1)).toMatchObject({ status: "terminal_accepted" });
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      return (
+        supervisor.list(runId).length === 0 &&
+        Object.values(current.attempts).find((attempt) => attempt.ticketId === "ticket-two")
+          ?.status === "aborted"
+      );
+    });
+    const settled = await engine.store.getRun(runId);
+    expect(
+      Object.values(settled.attempts).find((attempt) => attempt.ticketId === "ticket-two"),
+    ).toMatchObject({ status: "aborted" });
+    expect(settled.tickets["ticket-two"]).toMatchObject({
+      status: "queued",
+      steps: [expect.objectContaining({ status: "pending" })],
+    });
     client.close();
   }, 30_000);
 
@@ -5322,7 +6913,7 @@ describe("run authority engine", () => {
         (proof) => proof.attemptId === attempt.id,
       ),
     ).toBe(false);
-    expect(paused.tickets["ticket-one"]).toMatchObject({ status: "ready" });
+    expect(paused.tickets["ticket-one"]).toMatchObject({ status: "queued" });
     expect(paused.tickets["ticket-one"]?.steps[0]).toMatchObject({ status: "pending" });
     expect(Object.values(paused.tickets).filter((ticket) => ticket.status === "proposed")).toEqual(
       [],
@@ -6430,6 +8021,91 @@ describe("run authority engine", () => {
     ).toBe(true);
     client.close();
   }, 30_000);
+
+  it("revalidates a merge-ready run when an explicit resume discovers compiler work", async () => {
+    const root = await repository();
+    const direct = directApprovalProgram();
+    let exposeFollowup = false;
+    const program: RunCompilerProgram = {
+      ...direct,
+      async reconcileTicketBoard(run) {
+        const tickets = structuredClone(run.tickets);
+        if (exposeFollowup && tickets["ticket-merge-ready-followup"] === undefined) {
+          const followup = ticket();
+          followup.id = "ticket-merge-ready-followup";
+          followup.title = "Execute merge-ready compiler follow-up";
+          followup.summary = "Explicit revalidation discovered newly applicable bounded work";
+          tickets[followup.id] = followup;
+        }
+        return { tickets };
+      },
+    };
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(client, engine, "merge-ready-revalidation");
+    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "merge_ready");
+    const before = await engine.store.getRun(runId);
+    const priorReportId = before.postOrchestration?.report?.reportId;
+    expect(priorReportId).toBeDefined();
+
+    await client.request("authority.ping");
+    await client.request(
+      "run.pause",
+      { runId },
+      {
+        expectedRevision: client.revision,
+        idempotencyKey: "pause-before-merge-ready-revalidation",
+      },
+    );
+    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "paused");
+    expect((await engine.store.getRun(runId)).lifecycle.resumePhase).toBe("merge_ready");
+
+    exposeFollowup = true;
+    await client.request("authority.ping");
+    const resumed = await client.request(
+      "run.resume",
+      { runId },
+      {
+        expectedRevision: client.revision,
+        idempotencyKey: "revalidate-merge-ready-run",
+      },
+    );
+    expect(resumed.result).toMatchObject({ runId, status: "executing" });
+
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      if (current.lifecycle.phase === "blocked" || current.lifecycle.phase === "failed") {
+        throw new Error(
+          current.lifecycle.blocker ?? current.lifecycle.terminalReason ?? "run stopped",
+        );
+      }
+      return (
+        current.lifecycle.phase === "merge_ready" &&
+        current.tickets["ticket-merge-ready-followup"]?.status === "completed"
+      );
+    });
+
+    const ready = await engine.store.getRun(runId);
+    expect(ready.postOrchestration?.report?.reportId).not.toBe(priorReportId);
+    expect(ready.reports).toHaveLength((before.reports?.length ?? 0) + 1);
+    expect(
+      ready.activity.some((entry) =>
+        entry.message.includes("Reopened merge-ready run after compiler revalidation"),
+      ),
+    ).toBe(true);
+    client.close();
+  }, 30_000);
 });
 
 async function createAndApproveDirectRun(
@@ -6997,7 +8673,7 @@ function configuredValidationDirectProgram(validationAction = "compile"): RunCom
 }
 
 function semanticDirectReceiptProgram(
-  options: { failedSubmission?: boolean } = {},
+  options: { failedSubmission?: boolean; configuredValidation?: boolean } = {},
 ): RunCompilerProgram {
   const direct = directApprovalProgram();
   const catalog = semanticDirectCatalog();
@@ -7190,6 +8866,9 @@ function semanticDirectReceiptProgram(
       configured.operationId = operationId;
       configured.executionPolicyBinding = operationBinding;
       configured.steps[0]!.executionPolicyBinding = stepBinding;
+      if (options.configuredValidation === true) {
+        configured.steps[0]!.validationAction = "compile";
+      }
       return {
         graphHash: `sha256:${"c".repeat(64)}`,
         graphRevision: 1,
@@ -7234,6 +8913,9 @@ function semanticDirectReceiptProgram(
       return projection();
     },
     async compileAssignmentTerminalReplay(input) {
+      if (options.failedSubmission === true && options.configuredValidation === true) {
+        throw new Error("failed configured submissions must not replay completion checks");
+      }
       const material = {
         protocol: "koni.assignment-terminal-replay.v1" as const,
         projectionSha256: input.projectionSha256,
@@ -7489,8 +9171,13 @@ function exhaustedReviewReworkProgram(
 
 function lifecycleProgram(harness: LifecycleHarness): RunCompilerProgram {
   const direct = directApprovalProgram();
+  const { recoverAttempt: _recoverAttempt, ...lifecycleBaseProgram } = direct;
   return {
-    ...direct,
+    ...lifecycleBaseProgram,
+    // This harness exercises the legacy runtime-without-session-recovery branch: shutdown keeps
+    // the active cursor durable, then startup interrupts it and issues one fresh successor. The
+    // shared fake program now supports authenticated planning recovery, so keep that unrelated
+    // capability from silently changing this fixture's contract.
     async prepareAttempt(input) {
       if (input.kind === "lead") return direct.prepareAttempt(input);
       const ticketId = input.assignment?.ticketId ?? "run-planning";
@@ -7506,7 +9193,7 @@ function lifecycleProgram(harness: LifecycleHarness): RunCompilerProgram {
         }
         workspace = input.run.git.ticketCycles[input.run.tickets[ticketId]!.gitCycleId!]!.worktree;
       }
-      const spec = fixtureLaunchSpec({
+      const baseSpec = fixtureLaunchSpec({
         cwd: workspace,
         sessionDirectory: path.join(input.run.projectRoot, ".sessions", input.attemptId),
         runId: input.run.id,
@@ -7516,6 +9203,24 @@ function lifecycleProgram(harness: LifecycleHarness): RunCompilerProgram {
         sessionId: input.sessionId,
         lineage: input.lineage,
       }) as AgentLaunchSpec;
+      const revision = input.run.planningSession?.revisions[0];
+      const spec =
+        input.kind !== "planning" || revision === undefined
+          ? baseSpec
+          : (() => {
+              const { specHash: _hash, ...draft } = structuredClone(baseSpec);
+              return createAgentLaunchSpec({
+                ...draft,
+                identity: { ...draft.identity, ticketId: "run-planning", stepId },
+                planningRevision: {
+                  revision: 0,
+                  baseRevision: null,
+                  priorCheckpointSha256: null,
+                  steeringSha256: null,
+                  budgetBaseline: structuredClone(revision.budgetBaseline),
+                },
+              });
+            })();
       return {
         spec,
         tools: [fixtureTool()],
@@ -7752,7 +9457,7 @@ function fakeProgram(overrides: Readonly<{ legacyReportLock?: boolean }> = {}): 
             : input.kind === "verification"
               ? input.run.git.run.worktree
               : input.run.git.ticketCycles[input.run.tickets[ticketId]!.gitCycleId!]!.worktree;
-      const spec = fixtureLaunchSpec({
+      const baseSpec = fixtureLaunchSpec({
         cwd: workspace,
         sessionDirectory: path.join(input.run.projectRoot, ".sessions", input.attemptId),
         runId: input.run.id,
@@ -7763,6 +9468,23 @@ function fakeProgram(overrides: Readonly<{ legacyReportLock?: boolean }> = {}): 
         ...(input.kind === "lead" ? { personaId: "lead" } : {}),
         lineage: input.lineage,
       }) as AgentLaunchSpec;
+      const initialRevision = input.run.planningSession?.revisions[0];
+      const spec =
+        input.kind !== "planning" || initialRevision === undefined
+          ? baseSpec
+          : (() => {
+              const { specHash: _hash, ...draft } = structuredClone(baseSpec);
+              return createAgentLaunchSpec({
+                ...draft,
+                planningRevision: {
+                  revision: 0,
+                  baseRevision: null,
+                  priorCheckpointSha256: null,
+                  steeringSha256: null,
+                  budgetBaseline: structuredClone(initialRevision.budgetBaseline),
+                },
+              });
+            })();
       const adapter = new CompletingAdapter(spec, input.kind);
       return {
         spec,
@@ -7771,10 +9493,62 @@ function fakeProgram(overrides: Readonly<{ legacyReportLock?: boolean }> = {}): 
         factory: (async () => adapter) satisfies ManagedPiSessionFactory,
       };
     },
-    async compilePlanningOutput() {
+    async preparePlanningRevision(input) {
+      const session = input.run.planningSession!;
+      const revision = session.revisions[session.currentRevision]!;
+      const prior = session.revisions[session.currentRevision - 1]!;
+      const baseSpec = fixtureLaunchSpec({
+        cwd: input.run.git.planning.worktree,
+        sessionDirectory: path.join(input.run.projectRoot, ".sessions", input.attemptId),
+        runId: input.run.id,
+        ticketId: "run-planning",
+        stepId: "combined-plan",
+        attemptId: input.attemptId,
+        sessionId: input.sessionId,
+        lineage: { branchEpoch: 0, reason: "initial" },
+      }) as AgentLaunchSpec;
+      const { specHash: _hash, ...draft } = structuredClone(baseSpec);
+      const spec = createAgentLaunchSpec({
+        ...draft,
+        authority: {
+          ...draft.authority,
+          grantId: `grant-${input.attemptId}-planning-revision-${revision.revision}`,
+          grantHash: revision.grantSha256,
+          expectedRevision: input.nextAuthorityRevision,
+          expectedStateHash: input.expectedAuthorityStateHash,
+        },
+        planningRevision: {
+          revision: revision.revision,
+          baseRevision: prior.revision,
+          priorCheckpointSha256: prior.artifactSha256!,
+          steeringSha256: revision.steering!.instructionsSha256,
+          budgetBaseline: structuredClone(revision.budgetBaseline),
+        },
+      });
+      return {
+        spec,
+        tools: [fixtureTool()],
+        contextProvider: contextProvider(spec),
+        factory: (async () =>
+          new CompletingAdapter(spec, "planning")) satisfies ManagedPiSessionFactory,
+      };
+    },
+    async recoverAttempt({ attempt, spec }) {
+      return {
+        spec,
+        tools: [fixtureTool()],
+        contextProvider: contextProvider(spec),
+        factory: (async () =>
+          new CompletingAdapter(
+            spec,
+            attempt.kind ?? "planning",
+          )) satisfies ManagedPiSessionFactory,
+      };
+    },
+    async compilePlanningOutput({ run }) {
       return {
         plan: {
-          revision: 1,
+          revision: run.planningSession?.currentRevision ?? 1,
           status: "planning",
           full: {
             architecture: "## Architecture\nUse the existing seam.",
@@ -7799,6 +9573,18 @@ function fakeProgram(overrides: Readonly<{ legacyReportLock?: boolean }> = {}): 
           },
           graphSeed: { objective: "feature" },
           steeringHistory: [],
+        },
+      };
+    },
+    async compilePlanningRevision({ run, revision }) {
+      return {
+        plan: {
+          revision,
+          status: "planning",
+          full: structuredClone(run.plan!.full),
+          concise: structuredClone(run.plan!.concise),
+          graphSeed: structuredClone(run.plan!.graphSeed),
+          steeringHistory: structuredClone(run.plan!.steeringHistory),
         },
       };
     },
@@ -8487,7 +10273,7 @@ function ticket(): TicketRecord {
     operationId: "implement-change",
     title: "Implement feature",
     summary: "Implement the approved feature",
-    status: "todo",
+    status: "queued",
     priority: 0,
     dependencyIds: [],
     targetNodeIds: ["change-one"],
@@ -8514,20 +10300,98 @@ function ticket(): TicketRecord {
   };
 }
 
+function configuredCheckInfrastructureRetryFixture(
+  at: string,
+  check: { infrastructureFailure?: string; summary?: string },
+): RunRecord {
+  const value = ticket();
+  value.title = "Prepare proof";
+  value.status = "blocked";
+  value.blocker = "baseline-proof-set failed validation";
+  value.steps[0] = {
+    ...value.steps[0]!,
+    id: "author-historical-baseline",
+    status: "failed",
+    attemptIds: ["attempt-proof"],
+    startedAt: at,
+    completedAt: at,
+  };
+  const terminalPolicyMaterial = {
+    protocol: "koni.agent-terminal-policy.v1" as const,
+    mode: "failed_submission" as const,
+    acceptedAt: at,
+  };
+  return {
+    tickets: { [value.id]: value },
+    attempts: {
+      "attempt-proof": {
+        id: "attempt-proof",
+        sessionId: "session-proof",
+        sessionFile: undefined,
+        ticketId: value.id,
+        stepId: value.steps[0].id,
+        personaId: value.steps[0].personaId,
+        modelProvider: "anthropic",
+        modelId: "claude-haiku-4-5",
+        thinkingLevel: "medium",
+        status: "completed",
+        launchSpecHash: rawSha256("proof launch"),
+        startedAt: at,
+        endedAt: at,
+        terminalOutputSha256: rawSha256("failed proof submission"),
+        terminalOutputSizeBytes: 64,
+        terminalAcceptedAt: at,
+        terminalPolicy: {
+          ...terminalPolicyMaterial,
+          sha256: canonicalHash(terminalPolicyMaterial),
+        },
+        inputTokens: 1,
+        outputTokens: 1,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        kind: "ticket",
+      },
+    },
+    checks: [
+      {
+        id: "check-proof",
+        attemptId: "attempt-proof",
+        callId: "call-proof",
+        requestedCheckId: "baseline-proof-set",
+        definitionHash: rawSha256("proof check"),
+        kind: "command",
+        accepted: false,
+        passed: false,
+        summary: check.summary ?? "baseline-proof-set failed its configured result contract",
+        commands: [],
+        evidenceSha256: rawSha256("proof evidence"),
+        evidenceSizeBytes: 1,
+        evidenceArtifactPath: "runs/run-one/checks/proof.json",
+        recordedAt: at,
+        ...(check.infrastructureFailure === undefined
+          ? {}
+          : { infrastructureFailure: check.infrastructureFailure }),
+      },
+    ],
+  } as unknown as RunRecord;
+}
+
 function reissuableLifecycleCatalog(): CompiledStateMachineCatalog {
   const ticket = lifecycleMachine(
     "ticket",
-    "todo",
-    ["todo", "in_progress", "integrating", "blocked", "closed"],
+    "queued",
+    ["queued", "in_progress", "integrating", "blocked", "closed"],
     ["closed"],
     [
-      lifecycleTransition("start", ["todo"], "in_progress", ["compiler"]),
+      lifecycleTransition("start", ["queued"], "in_progress", ["compiler"]),
       lifecycleTransition("request-review", ["in_progress"], "integrating", ["compiler"]),
       lifecycleTransition("rework", ["integrating"], "in_progress", ["compiler"]),
-      lifecycleTransition("block", ["todo", "in_progress", "integrating"], "blocked", ["compiler"]),
-      lifecycleTransition("release", ["blocked"], "todo", ["compiler"]),
+      lifecycleTransition("block", ["queued", "in_progress", "integrating"], "blocked", [
+        "compiler",
+      ]),
+      lifecycleTransition("release", ["blocked"], "queued", ["compiler"]),
       lifecycleTransition("finish", ["in_progress", "integrating"], "closed", ["compiler"]),
-      lifecycleTransition("reopen-stale-obligation", ["closed"], "todo", ["compiler"]),
+      lifecycleTransition("reopen-stale-obligation", ["closed"], "queued", ["compiler"]),
     ],
   );
   const run = lifecycleMachine(

@@ -26,6 +26,7 @@ import type {
   RunCompilerProgram,
   RunCreationRequest,
   RunPipelineStageDefinition,
+  TicketBoardCompilation,
   VerificationCompilation,
 } from "../authority/run-engine.js";
 import type { JsonValue } from "../authority/protocol.js";
@@ -53,6 +54,7 @@ import {
   type LeadJudgmentOutput,
 } from "../contracts/behavior.js";
 import type {
+  CompilerGraphNode,
   CompiledGatePolicyContext,
   CompiledRuleEvaluation,
   CompiledStateMachineCatalog,
@@ -72,6 +74,7 @@ import { validateConfiguredGraphConstraints } from "./graph-constraints.js";
 import {
   TicketDependencyProjectionError,
   deriveCompilerTicketDependencies,
+  type RetainedTicketDependencyProjection,
 } from "./ticket-dependencies.js";
 import {
   GRAPH_CHANGE_NOTE_PROTOCOL,
@@ -110,8 +113,16 @@ import {
   validateAgentLaunchSpec,
   type AgentLaunchSpec,
   type LaunchResource,
+  type PlanningRevisionLaunchBinding,
 } from "../pi/launch-spec.js";
 import { loadSealedPiModelBinding, type SealedPiModelBinding } from "../pi/model-catalog.js";
+import {
+  loadPiResolvedInventory,
+  piAgentCatalogFromCompiledConfiguration,
+  resolvePiAgentConfiguration,
+  type PiResolvedInventory,
+  type ResolvedPiAgentConfiguration,
+} from "../pi/agent-configuration.js";
 import {
   KONI_TOOL_NAMES,
   isSupportedKoniToolSchemaHash,
@@ -135,6 +146,7 @@ import {
   type AttemptStatus,
   type RunActivityRecord,
   type RunPlanRecord,
+  type RunCheckRecord,
   type RunRecord,
   type TicketRecord,
   type TicketExecutionControlRecord,
@@ -143,11 +155,20 @@ import {
   type ControlTicketCausalAuthority,
   type ControlTicketRole,
   createCompilerControlTicketAuthority,
+  configuredCheckInfrastructureFailureForAttempt,
   ticketImmutableProjection,
   terminalFailureBindingFromProof,
 } from "../state/run-record.js";
 import { semanticQuestionPolicy } from "../state/question-policy.js";
-import type { ReadyAssignment } from "../state/scheduler.js";
+import {
+  COMPILER_INAPPLICABLE_TICKET,
+  COMPILER_ROUTED_TO_MANIFEST_GATE_RECHECK,
+  COMPILER_ROUTED_TO_PLANNED_ASSET_REPAIR,
+  COMPILER_SUPERSEDED_BEFORE_EXECUTION,
+  reviewReworkAppliesToStep,
+  ticketDependencySettled,
+  type ReadyAssignment,
+} from "../state/scheduler.js";
 import {
   deriveChangeControlPublication,
   type ApprovedChangeMaterialization,
@@ -155,17 +176,21 @@ import {
   type TerminalResolverReconciliation,
 } from "../state/change-control.js";
 import type { VerifiedProfileBaseline } from "./profile-package.js";
-import {
-  pinCommunityResourceBundle,
-  selectCommunityAttemptResources,
-  validatePinnedCommunityResourceBundle,
-  type CommunityToolAdapterDefinition,
-  type PinnedCommunityResourceBundle,
-  type SelectedCommunityAttemptResources,
-} from "./community-resources.js";
 import { projectGatePolicyDefinitions, projectGraphSchemaDefinition } from "./graph-schema.js";
-import { GraphExpressionEvaluator } from "./expressions.js";
+import { GraphExpressionEvaluator, type RuleDomainAdapter } from "./expressions.js";
 import { compileProjectDirectory } from "./project-directory.js";
+import {
+  PLAN_DOMAINS,
+  PlanningArtifactValidationError,
+  applyPlanningArtifactPatch,
+  parsePlanningArtifact,
+  parsePlanningArtifactPatch,
+  parsePlanningFullPlans,
+  parsePlanningGraphSeed,
+  type PlanDomain,
+  type PlanningArtifact,
+  type PlanningGraphSeed,
+} from "./planning-artifact.js";
 import {
   effectiveOrchestrationPolicy,
   normalizeRunIntake,
@@ -176,16 +201,22 @@ import {
   assertHistoricalBehaviorMatchesRun,
   projectHistoricalCompiledBehavior,
 } from "./historical-behavior.js";
-import { resolveCompiledPersona, resolveCompiledRunType } from "./resolution.js";
-import { compileStateMachineCatalog, evaluateConfiguredRules } from "./rules.js";
+import { resolveCompiledAgent, resolveCompiledRunType } from "./resolution.js";
+import {
+  compileStateMachineCatalog,
+  evaluateConfiguredRules,
+  expandPythonPackageReadPaths,
+} from "./rules.js";
 import {
   compileExecutionSemanticCatalog,
+  type CompiledChangeControl,
   type CompiledExecutionSemanticCatalog,
   type CompiledWorkflowStepSemantics,
 } from "./execution-semantics.js";
 import { compileConfiguredReports, type PreparedReportArtifact } from "./reports.js";
 import {
   RULE_AUTHORITY_EVIDENCE_PROTOCOL,
+  createPolicySelectionRuleDomainAdapter,
   createProductionRuleDomainAdapter,
   createRuleAuthorityEvidence,
   prepareFilesystemManifestAcceptance,
@@ -195,17 +226,12 @@ import {
   type RuleAuthorityEvidence,
   type RulePredicateEvidence,
 } from "./domain-adapter.js";
-import {
-  discoverInstalledPiPackageReferences,
-  type InstalledPiPackageReference,
-} from "../profile/resource-bindings.js";
 
 const PINNED_CONFIGURATION_PROTOCOL = "koni.pinned-run-configuration.v1" as const;
 const GRAPH_ARTIFACT_PROTOCOL = "koni.run-graph.v1" as const;
 const TICKET_ARTIFACT_PROTOCOL = "koni.ticket-definitions.v1" as const;
 const PLAN_ARTIFACT_PROTOCOL = "koni.planning-compilation.v1" as const;
 const LEGACY_GRAPH_NOTE_PROTOCOL = "koni.graph-note.v1" as const;
-const SAFE_LOCAL_KEY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const PI_THINKING_LEVELS = new Set<ThinkingLevel>([
   "off",
   "minimal",
@@ -215,7 +241,6 @@ const PI_THINKING_LEVELS = new Set<ThinkingLevel>([
   "xhigh",
   "max",
 ]);
-const PLAN_DOMAINS = ["architecture", "decisions", "risk", "verification"] as const;
 const MAX_PLAN_CHARS = 24_000;
 const MAX_CONTEXT_BYTES = 4 * 1024 * 1024;
 const MAX_LAUNCH_SPEC_BYTES = 16 * 1024 * 1024;
@@ -231,8 +256,6 @@ const MAX_GRAPH_NOTES = 4_096;
 const MAX_WORKING_SPEC_BYTES = 1024 * 1024;
 const MAX_BASELINE_SPEC_BYTES = 8 * 1024 * 1024;
 const MAX_RUN_GRAPH_BYTES = 64 * 1024 * 1024;
-
-type PlanDomain = (typeof PLAN_DOMAINS)[number];
 
 interface PinnedSkillFile {
   relativePath: string;
@@ -251,8 +274,15 @@ interface PinnedConfigurationMaterial {
   runId: string;
   configuration: CompiledConfiguration;
   skills: Record<string, PinnedSkill>;
-  /** Optional for compatibility with already-issued pre-community run artifacts. */
-  community?: PinnedCommunityResourceBundle;
+  /** Pi-native resources selected for each schema-3 Koni agent at run creation. */
+  piAgents?: Record<
+    string,
+    Readonly<{
+      skillIds: readonly string[];
+      context: readonly string[];
+      configurationSha256: Sha256Digest;
+    }>
+  >;
 }
 
 interface PinnedConfigurationArtifact extends PinnedConfigurationMaterial {
@@ -348,19 +378,7 @@ interface GraphNoteArtifact {
   recordedAt: string;
 }
 
-interface PlanningOutput {
-  /** Planner-authored 3-4 word operator label; optional for frozen personas that omit it. */
-  title?: string;
-  full: Record<PlanDomain, string>;
-  concise: Record<PlanDomain, { title: string; description: string }[]>;
-  graphSeed: PlanningGraphSeed;
-}
-
-interface PlanningGraphSeed {
-  rootSpec: Record<string, JsonValue>;
-  nodes: Array<{ key: string; type: string; title: string; spec: Record<string, JsonValue> }>;
-  edges: Array<{ source: string; relation: string; target: string }>;
-}
+type PlanningOutput = PlanningArtifact;
 
 interface AssignmentOutput {
   status: "completed" | "failed";
@@ -374,6 +392,7 @@ interface AssignmentOutput {
 
 interface AssignmentUpstreamChangeRequest {
   targetNodeIds: string[];
+  fulfillment: "planned_asset_repair" | "dynamic_scope_change";
   summary: string;
   reason: string;
 }
@@ -418,6 +437,21 @@ interface AttemptDescriptorInput {
   run: RunRecord;
   assignment?: ReadyAssignment;
   leadTrigger?: LeadJudgmentTrigger;
+  planningRevision?: PlanningRevisionPreparationContext;
+}
+
+interface PlanningRevisionPreparationContext {
+  binding: PlanningRevisionLaunchBinding;
+  currentArtifact?: PlanningArtifact;
+  steering?: string;
+}
+
+interface PrepareAttemptInput extends AttemptDescriptorInput {
+  attemptId: string;
+  sessionId: string;
+  nextAuthorityRevision: number;
+  expectedAuthorityStateHash: Sha256Digest;
+  lineage: AgentLaunchSpec["lineage"];
 }
 
 export interface AssignmentTerminalPolicyRetainedReceipt {
@@ -505,10 +539,8 @@ export interface NativeRunCompilerProgramOptions {
   packageBaseline: VerifiedProfileBaseline;
   /** Re-resolve the verified installed-package cache for future runs without touching pinned runs. */
   packageBaselineLoader?: () => Promise<VerifiedProfileBaseline>;
-  /** Read-only Pi package inventory. Missing packages must never be installed by this callback. */
-  installedPiPackagesLoader?: () => Promise<readonly InstalledPiPackageReference[]>;
-  /** Koni-owned adapters only; community extension exports are never accepted here. */
-  communityToolAdapters?: readonly CommunityToolAdapterDefinition[];
+  /** Resolve Pi's ordinary repository inventory without installing or importing resources. */
+  piInventoryLoader?: () => Promise<PiResolvedInventory>;
   /** Provider-free tests may inject a deterministic seal; production reads Pi's offline catalog. */
   sealedModelBindingLoader?: (provider: string, modelId: string) => Promise<SealedPiModelBinding>;
   now?: () => Date;
@@ -551,8 +583,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
   readonly #projectRoot: string;
   #packageBaseline: VerifiedProfileBaseline;
   readonly #packageBaselineLoader: (() => Promise<VerifiedProfileBaseline>) | undefined;
-  readonly #installedPiPackagesLoader: () => Promise<readonly InstalledPiPackageReference[]>;
-  readonly #communityToolAdapters: readonly CommunityToolAdapterDefinition[];
+  readonly #piInventoryLoader: () => Promise<PiResolvedInventory>;
   readonly #sealedModelBindingLoader: (
     provider: string,
     modelId: string,
@@ -568,10 +599,14 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     this.#projectRoot = path.resolve(options.projectRoot);
     this.#packageBaseline = options.packageBaseline;
     this.#packageBaselineLoader = options.packageBaselineLoader;
-    this.#installedPiPackagesLoader =
-      options.installedPiPackagesLoader ??
-      (() => discoverInstalledPiPackageReferences({ projectRoot: this.#projectRoot }));
-    this.#communityToolAdapters = structuredClone(options.communityToolAdapters ?? []);
+    this.#piInventoryLoader =
+      options.piInventoryLoader ??
+      (() =>
+        loadPiResolvedInventory({
+          projectRoot: this.#projectRoot,
+          installMissingPackages: process.env.NODE_ENV !== "test",
+          skipMissingPackages: process.env.NODE_ENV === "test",
+        }));
     this.#sealedModelBindingLoader =
       options.sealedModelBindingLoader ??
       ((provider, modelId) => loadSealedPiModelBinding(provider, modelId));
@@ -870,6 +905,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const unusedReceiptKeys = new Set(selectedReceipts.keys());
     const checkResults: Array<{
       checkId: string;
+      kind: string;
       accepted: boolean;
       passed: boolean;
       replayedLeafCheckIds: string[];
@@ -922,6 +958,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       }
       checkResults.push({
         checkId: policy.checkId,
+        kind: policy.resolvedCheck.kind,
         accepted: compiled.every((result) => result.accepted),
         passed,
         replayedLeafCheckIds: policy.resolvedCheck.commands.map((command) => command.checkId),
@@ -937,6 +974,17 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     }
     const accepted = checkResults.every((result) => result.accepted);
     const passed = accepted && checkResults.every((result) => result.passed);
+    // Whether this replay may settle its assignment. For a command check, `accepted` is already the
+    // acceptance notion that honours the check's own `allow_nonpassing_receipt`: it equals `passed`
+    // unless the check declares that a nonpassing verdict is still a valid receipt — which is
+    // exactly what an `expected_red` research gate declares. A graph check has no commands, so its
+    // `accepted` is vacuously true and only `passed`, computed by `evaluateRequestedGraphCheck`,
+    // carries meaning; it must stay strict. Demanding `passed` for both made a correctly-red gate
+    // unable to settle its ticket at all, which is the same inert-flag defect already fixed in
+    // `assertCurrentAssignmentChecks` and reachable independently through this replay path.
+    const terminalSatisfied = checkResults.every((result) =>
+      result.kind === "graph" ? result.passed : result.accepted,
+    );
     const evidence = {
       protocol: "koni.assignment-terminal-replay-evidence.v1",
       runId: input.run.id,
@@ -946,6 +994,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       projectionSha256: projection.sha256,
       accepted,
       passed,
+      terminalSatisfied,
       checks: checkResults,
       retainedReceipts: input.retainedReceipts,
       recordedAt: this.#now().toISOString(),
@@ -955,10 +1004,12 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       projectionSha256: projection.sha256,
       accepted,
       passed,
+      terminalSatisfied,
       checks: Object.freeze(
         checkResults.map((result) =>
           deepFreeze({
             checkId: result.checkId,
+            kind: result.kind,
             accepted: result.accepted,
             passed: result.passed,
             replayedLeafCheckIds: Object.freeze([...result.replayedLeafCheckIds]),
@@ -1018,17 +1069,15 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const agents: ResolvedRunDefinition["executionConfig"]["agents"] = Object.create(
       null,
     ) as ResolvedRunDefinition["executionConfig"]["agents"];
-    for (const personaId of Object.keys(compiled.registries.personas).sort(compareText)) {
-      const personaDefinition = requiredRecord(
-        compiled.registries.personas[personaId],
-        `persona ${personaId}`,
-      );
-      const roleId = optionalString(personaDefinition.model_role);
+    for (const agentId of Object.keys(compiled.agents).sort(compareText)) {
+      const agentDocument = compiled.agents[agentId]!.document;
+      const koniPolicy = requiredRecord(agentDocument.koni, `agent ${agentId} Koni policy`);
+      const roleId = optionalString(koniPolicy.role);
       const roleSelection = roleId === undefined ? undefined : overrides.roles[roleId];
-      const personaSelection = overrides.agents[personaId];
+      const personaSelection = overrides.agents[agentId];
       const selected = mergeAgentSelection(roleSelection, personaSelection);
       const persona = requireValidation(
-        resolveCompiledPersona(compiled, personaId, {
+        resolveCompiledAgent(compiled, agentId, {
           runTypeId: runType.id,
           ...(selected?.model === undefined ? {} : { model: selected.model }),
           ...(selected?.thinkingLevel === undefined
@@ -1036,44 +1085,25 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
             : { thinkingLevel: selected.thinkingLevel }),
         }),
         "persona_invalid",
-        `persona ${personaId} is not executable`,
+        `agent ${agentId} is not executable`,
       );
-      const provider = requiredPersonaProvider(selected?.provider ?? persona.provider, personaId);
-      const model = requiredNonempty(persona.model, `persona ${personaId} model`);
-      const thinkingLevel = requireThinkingLevel(persona.thinking_level, `persona ${personaId}`);
-      agents[personaId] = { provider, model, thinkingLevel };
+      const provider = requiredPersonaProvider(selected?.provider ?? persona.provider, agentId);
+      const model = requiredNonempty(persona.model, `agent ${agentId} model`);
+      const thinkingLevel = requireThinkingLevel(persona.thinking_level, `agent ${agentId}`);
+      agents[agentId] = { provider, model, thinkingLevel };
     }
-    const skills = await pinConfiguredSkills(compiled, this.#projectRoot);
-    const needsCommunityInventory =
-      compiled.pi_resource_bindings?.bindings.some(
-        ({ enabled, integration }) =>
-          enabled && integration !== "interactive_only" && integration !== "not_recommended",
-      ) === true;
-    let installedPiPackages: readonly InstalledPiPackageReference[] = [];
-    if (needsCommunityInventory) {
-      try {
-        installedPiPackages = await this.#installedPiPackagesLoader();
-      } catch (error) {
-        fail(
-          "community_inventory",
-          `Pi's installed-package inventory could not be read without mutation: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
-    let community: PinnedCommunityResourceBundle;
+    let piInventory: PiResolvedInventory;
     try {
-      community = await pinCommunityResourceBundle({
-        catalog: compiled.pi_resource_bindings,
-        installed: installedPiPackages,
-        adapters: this.#communityToolAdapters,
-      });
+      piInventory = await this.#piInventoryLoader();
     } catch (error) {
       fail(
-        "community_resource_unavailable",
-        error instanceof Error ? error.message : String(error),
+        "pi_inventory",
+        `Pi's resolved repository inventory could not be read without mutation: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    const pinned = createPinnedArtifact(request.runId, compiled, skills, community);
+    const piAgents = resolveRunPiAgents(compiled, piInventory);
+    const skills = await pinPiResolvedSkills(piAgents);
+    const pinned = createPinnedArtifact(request.runId, compiled, skills, piAgents);
     const lifecycleCatalog = requireValidation(
       compileStateMachineCatalog(compiled),
       "state_machine_invalid",
@@ -1189,17 +1219,177 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     };
   }
 
-  public async prepareAttempt(input: {
-    kind: "planning" | "lead" | "ticket" | "verification" | "integration";
+  public async prepareAttempt(input: PrepareAttemptInput): Promise<PreparedManagedAttempt> {
+    if (input.planningRevision !== undefined) {
+      fail(
+        "planning_revision_authority",
+        "planning revision context may only be issued by preparePlanningRevision",
+      );
+    }
+    if (input.kind !== "planning" || input.run.planningSession === undefined) {
+      return this.#prepareAttempt(input);
+    }
+    const session = input.run.planningSession;
+    const revision = session.revisions[0];
+    if (
+      session.currentRevision !== 0 ||
+      session.attemptId !== input.attemptId ||
+      session.sessionId !== input.sessionId ||
+      revision === undefined ||
+      revision.revision !== 0 ||
+      revision.status !== "running" ||
+      Object.values(revision.budgetBaseline).some((value) => value !== 0)
+    ) {
+      fail(
+        "planning_revision_identity",
+        "initial continuous planning launch must bind revision zero to its stable attempt and session",
+      );
+    }
+    return this.#prepareAttempt({
+      ...input,
+      planningRevision: {
+        binding: {
+          revision: 0,
+          baseRevision: null,
+          priorCheckpointSha256: null,
+          steeringSha256: null,
+          budgetBaseline: structuredClone(revision.budgetBaseline),
+        },
+      },
+    });
+  }
+
+  public async preparePlanningRevision(input: {
     run: RunRecord;
-    assignment?: ReadyAssignment;
-    leadTrigger?: LeadJudgmentTrigger;
     attemptId: string;
     sessionId: string;
     nextAuthorityRevision: number;
     expectedAuthorityStateHash: Sha256Digest;
-    lineage: AgentLaunchSpec["lineage"];
+    steering?: string;
   }): Promise<PreparedManagedAttempt> {
+    const session = input.run.planningSession;
+    if (
+      session === undefined ||
+      session.attemptId !== input.attemptId ||
+      session.sessionId !== input.sessionId ||
+      session.currentRevision < 1
+    ) {
+      fail(
+        "planning_revision_identity",
+        "planning revision must retain the authenticated planning attempt and Pi session",
+      );
+    }
+    const attempt = input.run.attempts[input.attemptId];
+    if (
+      attempt === undefined ||
+      attempt.kind !== "planning" ||
+      attempt.sessionId !== input.sessionId
+    ) {
+      fail(
+        "planning_revision_identity",
+        "planning revision attempt metadata does not match the stable planning session",
+      );
+    }
+    const revision = session.revisions[session.currentRevision];
+    const base = session.revisions[session.currentRevision - 1];
+    if (
+      revision === undefined ||
+      revision.revision !== session.currentRevision ||
+      revision.status !== "running" ||
+      revision.steering === undefined ||
+      base === undefined ||
+      base.revision !== revision.revision - 1 ||
+      base.artifactSha256 === undefined ||
+      base.checkpointPath === undefined
+    ) {
+      fail(
+        "planning_revision_state",
+        "planning revision does not name one contiguous validated base checkpoint and steering event",
+      );
+    }
+    for (const field of [
+      "inputTokens",
+      "outputTokens",
+      "cacheReadTokens",
+      "cacheWriteTokens",
+    ] as const) {
+      if (revision.budgetBaseline[field] > attempt[field]) {
+        fail(
+          "planning_revision_budget",
+          `planning revision token baseline ${field} exceeds cumulative settled provider usage`,
+        );
+      }
+    }
+    const runRoot = path.resolve(this.#stateRoot, "runs", input.run.id);
+    const artifactPath = path.resolve(this.#stateRoot, base.checkpointPath);
+    const steeringPath = path.resolve(this.#stateRoot, revision.steering.artifactPath);
+    for (const [label, candidate] of [
+      ["checkpoint", artifactPath],
+      ["steering", steeringPath],
+    ] as const) {
+      if (candidate !== runRoot && !candidate.startsWith(`${runRoot}${path.sep}`)) {
+        fail("planning_revision_path", `planning revision ${label} path escapes its run root`);
+      }
+    }
+    const artifactBytes = await readFile(artifactPath).catch(() => undefined);
+    if (artifactBytes === undefined || artifactBytes.byteLength > MAX_CONTEXT_BYTES) {
+      fail(
+        "planning_revision_checkpoint",
+        "planning revision base artifact is missing or oversized",
+      );
+    }
+    let artifactValue: unknown;
+    try {
+      artifactValue = JSON.parse(artifactBytes.toString("utf8"));
+    } catch {
+      fail("planning_revision_checkpoint", "planning revision base artifact is malformed");
+    }
+    const currentArtifact = planningArtifactBoundary(() => parsePlanningArtifact(artifactValue));
+    if (canonicalHash(currentArtifact) !== base.artifactSha256) {
+      fail(
+        "planning_revision_checkpoint",
+        "planning revision base artifact does not match its validated checkpoint hash",
+      );
+    }
+    const steeringBytes =
+      input.steering === undefined
+        ? await readFile(steeringPath).catch(() => undefined)
+        : Buffer.from(input.steering, "utf8");
+    if (
+      steeringBytes === undefined ||
+      steeringBytes.byteLength !== revision.steering.instructionsSizeBytes ||
+      steeringBytes.byteLength > MAX_CONTEXT_BYTES ||
+      rawSha256(steeringBytes) !== revision.steering.instructionsSha256
+    ) {
+      fail(
+        "planning_revision_steering",
+        "planning revision steering does not match its durable authenticated binding",
+      );
+    }
+    const steering = steeringBytes.toString("utf8");
+    if (steering.trim().length === 0 || steering.includes("\0")) {
+      fail("planning_revision_steering", "planning revision steering is empty or unsafe");
+    }
+    const binding: PlanningRevisionLaunchBinding = {
+      revision: revision.revision,
+      baseRevision: base.revision,
+      priorCheckpointSha256: base.artifactSha256,
+      steeringSha256: revision.steering.instructionsSha256,
+      budgetBaseline: structuredClone(revision.budgetBaseline),
+    };
+    return this.#prepareAttempt({
+      kind: "planning",
+      run: input.run,
+      attemptId: input.attemptId,
+      sessionId: input.sessionId,
+      nextAuthorityRevision: input.nextAuthorityRevision,
+      expectedAuthorityStateHash: input.expectedAuthorityStateHash,
+      lineage: { branchEpoch: 0, reason: "initial" },
+      planningRevision: { binding, currentArtifact, steering },
+    });
+  }
+
+  async #prepareAttempt(input: PrepareAttemptInput): Promise<PreparedManagedAttempt> {
     const pinned = await this.#loadPinned(input.run);
     const runType = requireValidation(
       resolveCompiledRunType(pinned.configuration, input.run.runTypeId),
@@ -1213,13 +1403,18 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         ? undefined
         : input.run.attempts[input.lineage.parentAttemptId];
     const parentFailure = parentAttempt?.error?.slice(0, 400) ?? parentAttempt?.failureCode;
+    const compensatedValidationFailures = activeCompensatedValidationFailures(
+      input.run,
+      input.assignment,
+    );
     const initialPrompt = sameScopeContinuationPrompt(
       descriptor.initialPrompt,
       input.lineage,
       parentFailure,
+      compensatedValidationFailures,
     );
     const persona = requireValidation(
-      resolveCompiledPersona(pinned.configuration, descriptor.personaId, {
+      resolveCompiledAgent(pinned.configuration, descriptor.personaId, {
         runTypeId: input.run.runTypeId,
       }),
       "persona_invalid",
@@ -1254,37 +1449,20 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       descriptor,
       persona.capabilities,
     );
-    let communitySelection: SelectedCommunityAttemptResources;
-    try {
-      communitySelection =
-        input.kind === "lead"
-          ? { resources: [], toolNames: [], bindingIds: [] }
-          : selectCommunityAttemptResources({
-              bundle: pinned.community,
-              personaId: descriptor.personaId,
-              stageIds: communityAttemptStageIds(
-                input.kind,
-                descriptor,
-                pinned.configuration,
-                runType.document,
-              ),
-              networkAccess: configuredChecks?.networkAccess === true,
-            });
-    } catch (error) {
-      fail("community_attempt_unavailable", error instanceof Error ? error.message : String(error));
-    }
     const resources = launchResources(
       pinned,
-      persona.skills,
+      pinned.piAgents?.[descriptor.personaId]?.skillIds ?? [],
       input.run.executionConfig?.instructions ?? "",
-      communitySelection.resources,
     );
-    const toolNames = toolInventory(input.run, descriptor, resources, communitySelection.toolNames);
+    const toolNames = toolInventory(input.run, descriptor, resources);
     const contextContent = boundedContext(descriptor.context);
     const contextHash = rawSha256(contextContent);
     const authorityGrant: AuthorityGrant = {
       protocol: "koni.authority-grant.v1",
-      grantId: `grant-${input.attemptId}`,
+      grantId:
+        input.planningRevision === undefined
+          ? `grant-${input.attemptId}`
+          : `grant-${input.attemptId}-planning-revision-${input.planningRevision.binding.revision}`,
       runId: input.run.id,
       ticketId: descriptor.ticketId,
       stepId: descriptor.stepId,
@@ -1302,6 +1480,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const grantHash = canonicalHash(authorityGrant);
     const repositoryCallBudget = attemptRepositoryCallBudget(runBehavior, input.kind);
     const systemPrompt = [
+      ...(pinned.piAgents?.[descriptor.personaId]?.context ?? []),
       persona.instructions.trim(),
       "You are executing one immutable compiler-issued Koni attempt. Use only the Koni tools present in this session. Never use ambient filesystem, shell, Git, network, extension, subagent, or lifecycle authority. The authority reissues your exact bound context before every provider request; observe and reuse it instead of refetching it through a tool. Stay inside the exact semantic and path grant, and finish with exactly one koni_submit_output call matching its schema.",
       renderPathGrant(descriptor.readPaths, descriptor.writePaths),
@@ -1309,12 +1488,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       "Reason briefly, then act: once you have decided the next tool call, emit it in the same turn instead of continuing to deliberate. A turn that spends its whole output budget on reasoning is cut off before any tool call and the entire turn is lost. Never re-derive a conclusion you already reached in an earlier turn.",
       "Read the koni_submit_output schema from its tool definition before calling it, and submit your real result on the first call. Never send placeholder, probing, or schema-discovery payloads: an accepted failed submission is terminal, cannot be retried, and permanently fails this assignment even if your actual work succeeded.",
       'Do the concrete work this step requires before you submit — author the proof, make the edit and run the check, or assemble and verify the candidate as the step demands; do not submit failed with little or no tool use. A failed submission is a genuine-impossibility last resort, and its blocker must be a specific self-contained diagnosis: the exact obstacle, what you tried, and why nothing within your grant can resolve it. An accepted failed submission is terminal and strands the whole run for operator recovery, so a terse or placeholder blocker (for example "test", "probe", "blocked") is never acceptable — never submit one.',
-      ...(descriptor.writePaths.length === 0
-        ? []
-        : [
-            "This is an implementation attempt with a write grant. Reading alone does not satisfy it. Make the change with koni_write_file/koni_edit_file inside your write grant, then run the configured proof with koni_run_check before you submit. Reserve a failed submission for a blocker that survives an actual implementation attempt (missing capability, contradictory contract, grant that cannot express the change), never for difficulty, uncertainty, or investigation you have not yet turned into edits and a check run.",
-            "If the configured proof fails, that is normal iteration, not a blocker: read the failure, fix the edit, and run it again. Keep iterating until it passes or you have proven the objective is impossible within the grant. Do not stop after a single failing check.",
-          ]),
+      ...implementationWriteGrantInstructions(
+        descriptor.writePaths.length > 0,
+        descriptor.step?.validation_checks.length ?? 0,
+      ),
       ...(repositoryCallBudget === undefined
         ? []
         : [
@@ -1342,6 +1519,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         sessionId: input.sessionId,
       },
       lineage: structuredClone(input.lineage),
+      ...(input.planningRevision === undefined
+        ? {}
+        : { planningRevision: structuredClone(input.planningRevision.binding) }),
       authority: {
         grantId: authorityGrant.grantId,
         grantHash,
@@ -1427,7 +1607,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       compactionSnapshot: snapshot,
       artifactWrites: [
         {
-          path: `runs/${input.run.id}/attempts/${input.attemptId}/compiler-input.json`,
+          path:
+            input.planningRevision === undefined
+              ? `runs/${input.run.id}/attempts/${input.attemptId}/compiler-input.json`
+              : `runs/${input.run.id}/attempts/${input.attemptId}/planning/revisions/${input.planningRevision.binding.revision}/compiler-input.json`,
           bytes: encodeArtifact(attemptArtifact),
           expectedSha256: null,
         },
@@ -1464,12 +1647,18 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       kind === "planning" || kind === "lead" || isRunWideVerificationAttempt(attempt)
         ? undefined
         : assignmentFromAttempt(run, attempt);
+    const compilerInput = await this.#readPreparedAttemptArtifact(run, attempt, spec);
+    const planningRevision =
+      kind === "planning" && spec.planningRevision !== undefined
+        ? recoveredPlanningRevisionContext(spec, compilerInput)
+        : undefined;
     const descriptor = await this.#attemptDescriptor(
       {
         kind,
         run,
         ...(assignment === undefined ? {} : { assignment }),
         ...(kind === "lead" ? { leadTrigger: leadTriggerForAttempt(attempt) } : {}),
+        ...(planningRevision === undefined ? {} : { planningRevision }),
       },
       pinned.configuration,
       runType.document,
@@ -1486,7 +1675,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     }
 
     const persona = requireValidation(
-      resolveCompiledPersona(pinned.configuration, descriptor.personaId, {
+      resolveCompiledAgent(pinned.configuration, descriptor.personaId, {
         runTypeId: run.runTypeId,
       }),
       "persona_invalid",
@@ -1498,30 +1687,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       descriptor,
       persona.capabilities,
     );
-    let communitySelection: SelectedCommunityAttemptResources;
-    try {
-      communitySelection =
-        kind === "lead"
-          ? { resources: [], toolNames: [], bindingIds: [] }
-          : selectCommunityAttemptResources({
-              bundle: pinned.community,
-              personaId: descriptor.personaId,
-              stageIds: communityAttemptStageIds(
-                kind,
-                descriptor,
-                pinned.configuration,
-                runType.document,
-              ),
-              networkAccess: configuredChecks?.networkAccess === true,
-            });
-    } catch (error) {
-      fail("recovery_community_resource", error instanceof Error ? error.message : String(error));
-    }
     const expectedResources = launchResources(
       pinned,
-      persona.skills,
+      pinned.piAgents?.[descriptor.personaId]?.skillIds ?? [],
       run.executionConfig?.instructions ?? "",
-      communitySelection.resources,
     );
     if (
       computeLaunchResourceSetHash(expectedResources) !== spec.resources.setHash ||
@@ -1532,12 +1701,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         "stored launch resources no longer match pinned compiler state",
       );
     }
-    const compiledTools = toolInventory(
-      run,
-      descriptor,
-      expectedResources,
-      communitySelection.toolNames,
-    );
+    const compiledTools = toolInventory(run, descriptor, expectedResources);
     const storedTools = spec.tools.map((tool) => tool.name);
     // Contextual tools added after a launch was issued never rewrite a legacy launch inventory.
     const expectedTools =
@@ -1571,7 +1735,6 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         );
     }
 
-    const compilerInput = await this.#readPreparedAttemptArtifact(run, attempt, spec);
     if (rawSha256(compilerInput.contextContent) !== spec.authority.authoritativeContextHash)
       fail("recovery_context", "stored launch spec has no valid authoritative assignment context");
     const authorityGrant: AuthorityGrant = {
@@ -1702,6 +1865,11 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       graphRead.graph.nodes().map((node) => [node.id, graphRead.graph.repositoryPaths(node.id)]),
     );
     const ticket = run.tickets[attempt.ticketId];
+    const approvedChangeReferencePaths = approvedChangeContextReferencePaths(
+      run,
+      ticket,
+      graphRead.graph,
+    );
     const cacheKey = canonicalHash({
       runId: run.id,
       generation: run.generation,
@@ -1736,9 +1904,13 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       stepTargetIds: [...new Set([...descriptor.writeNodeIds, ...descriptor.readNodeIds])].sort(
         compareText,
       ),
-      scopedPaths: [...new Set([...descriptor.readPaths, ...descriptor.writePaths])].sort(
-        compareText,
-      ),
+      scopedPaths: [
+        ...new Set([
+          ...descriptor.readPaths,
+          ...descriptor.writePaths,
+          ...approvedChangeReferencePaths,
+        ]),
+      ].sort(compareText),
       touchedPaths: touchedFiles,
       graphActivity: run.activity.map((activity) => ({
         at: activity.at,
@@ -1829,7 +2001,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       parsed.full,
       this.#projectRoot,
     );
-    const revision = (input.run.plan?.revision ?? 0) + 1;
+    const revision =
+      input.run.planningSession === undefined
+        ? (input.run.plan?.revision ?? 0) + 1
+        : input.run.planningSession.currentRevision;
     const plan: RunPlanRecord = {
       revision,
       status: "planning",
@@ -1873,6 +2048,138 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         {
           path: `runs/${input.run.id}/attempts/${input.attemptId}/planning-graph.json`,
           bytes: encodeRunGraphArtifact(pendingGraphArtifact),
+          expectedSha256: null,
+        },
+      ],
+    };
+  }
+
+  public async compilePlanningRevision(input: {
+    run: RunRecord;
+    attemptId: string;
+    revision: number;
+    patch: unknown;
+  }): Promise<PlanningCompilation> {
+    const session = input.run.planningSession;
+    if (
+      session === undefined ||
+      session.attemptId !== input.attemptId ||
+      session.currentRevision !== input.revision ||
+      input.revision < 1 ||
+      session.revisions[input.revision]?.status !== "running"
+    ) {
+      fail(
+        "planning_revision_identity",
+        "planning revision output is not bound to the current stable planning session",
+      );
+    }
+    const baseRevision = input.revision - 1;
+    const baseRecord = session.revisions[baseRevision];
+    if (
+      baseRecord === undefined ||
+      baseRecord.artifactSha256 === undefined ||
+      baseRecord.checkpointPath === undefined ||
+      !["awaiting_review", "superseded", "approved"].includes(baseRecord.status)
+    ) {
+      fail("planning_revision_base", "planning revision has no exact validated base checkpoint");
+    }
+
+    const runRoot = path.resolve(this.#stateRoot, "runs", input.run.id);
+    const basePath = path.resolve(this.#stateRoot, baseRecord.checkpointPath);
+    if (!basePath.startsWith(`${runRoot}${path.sep}`)) {
+      fail("planning_revision_base", "planning revision checkpoint escapes the run artifact root");
+    }
+    let baseBytes: Buffer;
+    try {
+      baseBytes = await readStableDurableFile(basePath, {
+        minimum: 1,
+        maximum: MAX_CONTEXT_BYTES,
+        label: `planning revision ${baseRevision} artifact`,
+      });
+    } catch (error) {
+      fail(
+        "planning_revision_base",
+        `planning revision base checkpoint is not durably readable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    let baseValue: unknown;
+    try {
+      baseValue = JSON.parse(baseBytes.toString("utf8"));
+    } catch {
+      fail("planning_revision_base", "planning revision base checkpoint is not valid JSON");
+    }
+    if (canonicalHash(baseValue) !== baseRecord.artifactSha256) {
+      fail(
+        "planning_revision_base",
+        "planning revision base checkpoint differs from its immutable artifact hash",
+      );
+    }
+
+    const pinned = await this.#loadPinned(input.run);
+    const parsedPatch = planningArtifactBoundary(() => parsePlanningArtifactPatch(input.patch));
+    const artifact = planningArtifactBoundary(() =>
+      applyPlanningArtifactPatch(baseValue, parsedPatch, {
+        baseRevision,
+        protectedRootSpecFields: planningProtectedRootSpecFields(pinned.configuration),
+      }),
+    );
+    const graph = compilePlanningSeed(
+      pinned.configuration,
+      input.run,
+      artifact.graphSeed,
+      artifact.full,
+      this.#projectRoot,
+    );
+    const plan: RunPlanRecord = {
+      revision: input.revision,
+      status: "planning",
+      ...(artifact.title === undefined ? {} : { title: artifact.title }),
+      full: artifact.full,
+      concise: artifact.concise,
+      graphSeed: structuredClone(artifact.graphSeed) as unknown as JsonValue,
+      steeringHistory: structuredClone(input.run.plan?.steeringHistory ?? []),
+    };
+    const graphValue = graphArtifact(input.run, pinned.configuration, graph, 0);
+    const prefix = `runs/${input.run.id}/attempts/${input.attemptId}/planning/revisions/${input.revision}`;
+    const patchSha256 = canonicalHash(parsedPatch);
+    const artifactSha256 = canonicalHash(artifact);
+    const checkpoint = {
+      protocol: "koni.planning-checkpoint.v1" as const,
+      runId: input.run.id,
+      attemptId: input.attemptId,
+      revision: input.revision,
+      baseRevision,
+      baseArtifactSha256: baseRecord.artifactSha256,
+      patchSha256,
+      artifactSha256,
+      graphSha256: graph.hash,
+      patchPath: `${prefix}/patch.json`,
+      artifactPath: `${prefix}/artifact.json`,
+      graphPath: `${prefix}/graph.json`,
+    };
+    return {
+      plan,
+      graphHash: graph.hash,
+      graphRevision: 0,
+      activity: [
+        compilerActivity(
+          input.run,
+          `Planning revision ${input.revision} graph validated (${graph.nodes().length} nodes)`,
+          "plan",
+          "success",
+        ),
+      ],
+      artifactWrites: [
+        { path: checkpoint.patchPath, bytes: encodeArtifact(parsedPatch), expectedSha256: null },
+        { path: checkpoint.artifactPath, bytes: encodeArtifact(artifact), expectedSha256: null },
+        {
+          path: checkpoint.graphPath,
+          bytes: encodeRunGraphArtifact(graphValue),
+          expectedSha256: null,
+        },
+        {
+          path: `${prefix}/checkpoint.json`,
+          bytes: encodeArtifact(checkpoint),
           expectedSha256: null,
         },
       ],
@@ -1940,7 +2247,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
             pinned.configuration,
             run,
             parsePlanningSeed(run.plan.graphSeed),
-            parsePlanTextRecord(run.plan.full, "approved full plan"),
+            planningArtifactBoundary(() =>
+              parsePlanningFullPlans(run.plan!.full, "approved full plan"),
+            ),
             this.#projectRoot,
           );
     if (run.graphHash !== undefined && run.graphHash !== graph.hash) {
@@ -1960,6 +2269,14 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       requireExecutionSemanticCatalog(pinned.configuration),
       this.#now().toISOString(),
       this.#projectRoot,
+      await recurringAssetReissueNodeIds(
+        run,
+        pinned.configuration,
+        graph,
+        evaluation,
+        run.git.run.worktree,
+      ),
+      integrationOperation(pinned.configuration, run.runTypeId),
     );
     const graphRevision = 1;
     let priorGraph:
@@ -2034,6 +2351,48 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     };
   }
 
+  public async reconcileTicketBoard(run: RunRecord): Promise<TicketBoardCompilation> {
+    const pinned = await this.#loadPinned(run);
+    const graphRead = await this.#readGraph(run, pinned.configuration);
+    const definitionsRead = await this.#readTicketDefinitions(run, pinned.configuration);
+    const evaluation = requireValidation(
+      await this.#evaluateRules(run, pinned.configuration, graphRead.graph),
+      "rule_compilation_failed",
+      "current graph did not compile into a valid ticket board",
+    );
+    const recurringAssetReissues = await recurringAssetReissueNodeIds(
+      run,
+      pinned.configuration,
+      graphRead.graph,
+      evaluation,
+      run.git.run.worktree,
+    );
+    const tickets = reconcileTickets(
+      run,
+      evaluation.tickets,
+      requireExecutionSemanticCatalog(pinned.configuration),
+      this.#now().toISOString(),
+      this.#projectRoot,
+      recurringAssetReissues,
+      integrationOperation(pinned.configuration, run.runTypeId),
+    );
+    const definitions = ticketArtifact(run, run.graphRevision, evaluation, definitionsRead.value);
+    return {
+      tickets,
+      applicableTicketIds: ticketBoardApplicableTicketDefinitions(
+        evaluation.tickets,
+        recurringAssetReissues,
+      ).map((definition) => definition.id),
+      artifactWrites: [
+        {
+          path: ticketDefinitionsPath(run.id),
+          bytes: encodeArtifact(definitions),
+          expectedSha256: definitionsRead.bytesSha256,
+        },
+      ],
+    };
+  }
+
   public async compileAssignmentOutput(input: {
     run: RunRecord;
     assignment: ReadyAssignment;
@@ -2060,7 +2419,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const synthetic =
       pinnedDefinition ??
       (ticket?.operationId === integrationOperation(pinned.configuration, input.run.runTypeId)
-        ? integrationDefinition(input.run, input.assignment, pinned.configuration)
+        ? integrationDefinition(input.run, input.assignment, pinned.configuration, graphRead.graph)
         : await this.#recoverDefinitionFromRecordedAttempt(
             input.run,
             attempt,
@@ -2084,7 +2443,31 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       step.kind,
     );
     if (result.status === "failed") {
-      return { outcome: { status: "failed", blocker: result.blocker! } };
+      assertFailedAssignmentDoesNotReuseInheritedChecks(
+        input.run,
+        input.assignment,
+        input.attemptId,
+        step,
+      );
+      if (step.kind === "review") {
+        assertFailedReviewDoesNotContradictApprovedChangeRuntimeObligations(
+          input.run,
+          graphRead.graph,
+          step.write_node_ids ?? synthetic.scope.write_node_ids,
+          result.blocker!,
+        );
+      }
+      return {
+        outcome: {
+          status: "failed",
+          ...(result.summary === undefined ? {} : { summary: result.summary }),
+          blocker: result.blocker!,
+          ...(configuredCheckInfrastructureFailureForAttempt(input.run, input.attemptId) ===
+          undefined
+            ? {}
+            : { failureKind: "infrastructure" as const }),
+        },
+      };
     }
     assertCurrentAssignmentChecks(input.run, input.assignment, input.attemptId, step);
     let graph = graphRead.graph;
@@ -2116,8 +2499,23 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       title: string;
     }> = [];
     if (result.graphDelta !== undefined && result.graphDelta !== null) {
-      const normalizedDelta = normalizeAgentGraphRelationships(graph, result.graphDelta);
-      validateAgentGraphDelta(pinned.configuration, graph, synthetic, step, normalizedDelta);
+      const ticketOwnedWritableNodeIds =
+        ticket === undefined || step.graph_mutation === "forbidden"
+          ? []
+          : ticketCreatedNodeIds(input.run, ticket, graph);
+      const normalizedDelta = normalizeAgentGraphRelationships(
+        graph,
+        result.graphDelta,
+        ticketOwnedWritableNodeIds,
+      );
+      validateAgentGraphDelta(
+        pinned.configuration,
+        graph,
+        synthetic,
+        step,
+        normalizedDelta,
+        ticketOwnedWritableNodeIds,
+      );
       const effectiveDelta = materializeCompilerFieldSources(
         pinned.configuration,
         input.run,
@@ -2129,9 +2527,22 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         executionBinding,
         typedGateIdentityCatalog(pinned.configuration, graph),
         materializedNodeChanges(graph, applied.graph, effectiveDelta),
+        ticketOwnedWritableNodeIds,
       );
       graph = applied.graph;
+      assertAssetGateContractsBoundToGraph(
+        graph,
+        typedGateIdentityCatalog(pinned.configuration, graph).gateNodeTypes,
+        effectiveDelta.upsertNodes.map((mutation) => mutation.node.id),
+      );
       changes.push(...applied.changes);
+    }
+    if (shouldAssertApprovedChangeRuntimeObligations(step)) {
+      assertApprovedChangeRuntimeObligations(
+        input.run,
+        graph,
+        step.write_node_ids ?? synthetic.scope.write_node_ids,
+      );
     }
     const reviewCandidates =
       step.kind === "review"
@@ -2157,6 +2568,12 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     });
     graph = effected.graph;
     changes.push(...effected.changes);
+    if (synthetic.operation === "compile-run-plan") {
+      for (const nodeId of synthetic.target_node_ids) {
+        const node = graph.node(nodeId);
+        if (node?.type === "run") assertRunPlanUsesRepositoryOwnedArgv(node);
+      }
+    }
     const successorEvidence = rebindRuleEvidenceAcrossNonInterferingGraphChange({
       configuration: pinned.configuration,
       before: reviewInputGraph,
@@ -2175,7 +2592,53 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       );
     }
     if (changes.length === 0) {
-      return { outcome: { status: "completed", summary: result.summary! } };
+      const evaluationRun =
+        successorEvidence === undefined
+          ? input.run
+          : {
+              ...structuredClone(input.run),
+              ruleAuthorityEvidence: successorEvidence as unknown as JsonValue,
+            };
+      const evaluation = requireValidation(
+        await this.#evaluateRules(evaluationRun, pinned.configuration, graph),
+        "rule_compilation_failed",
+        "unchanged agent output did not compile into a valid ticket board",
+      );
+      const tickets = reconcileTickets(
+        input.run,
+        evaluation.tickets,
+        executionCatalog,
+        this.#now().toISOString(),
+        this.#projectRoot,
+        await recurringAssetReissueNodeIds(
+          input.run,
+          pinned.configuration,
+          graph,
+          evaluation,
+          input.run.git.run.worktree,
+        ),
+        integrationOperation(pinned.configuration, input.run.runTypeId),
+      );
+      const definitions = ticketArtifact(
+        input.run,
+        input.run.graphRevision,
+        evaluation,
+        definitionsRead.value,
+      );
+      return {
+        outcome: { status: "completed", summary: result.summary! },
+        tickets,
+        ...(successorEvidence === undefined
+          ? {}
+          : { ruleAuthorityEvidence: successorEvidence as unknown as JsonValue }),
+        artifactWrites: [
+          {
+            path: ticketDefinitionsPath(input.run.id),
+            bytes: encodeArtifact(definitions),
+            expectedSha256: definitionsRead.bytesSha256,
+          },
+        ],
+      };
     }
     const selfPreparationReview =
       step.kind === "review" &&
@@ -2202,6 +2665,14 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       requireExecutionSemanticCatalog(pinned.configuration),
       this.#now().toISOString(),
       this.#projectRoot,
+      await recurringAssetReissueNodeIds(
+        input.run,
+        pinned.configuration,
+        graph,
+        evaluation,
+        input.run.git.run.worktree,
+      ),
+      integrationOperation(pinned.configuration, input.run.runTypeId),
     );
     const graphBytes = encodeRunGraphArtifact(
       graphArtifact(
@@ -2292,7 +2763,13 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     }
     const result = parseAssignmentOutput(input.output, "forbidden");
     return result.status === "failed"
-      ? { outcome: { status: "failed", blocker: result.blocker! } }
+      ? {
+          outcome: {
+            status: "failed",
+            ...(result.summary === undefined ? {} : { summary: result.summary }),
+            blocker: result.blocker!,
+          },
+        }
       : { outcome: { status: "completed", summary: result.summary! } };
   }
 
@@ -2307,7 +2784,19 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       "rule_compilation_failed",
       "verification could not compile the current graph",
     );
-    if (evaluation.tickets.length > 0) {
+    const recurringAssetReissues = await recurringAssetReissueNodeIds(
+      run,
+      pinned.configuration,
+      graphRead.graph,
+      evaluation,
+      run.git.run.worktree,
+    );
+    const actionableTickets = verificationActionableTicketDefinitions(
+      evaluation.tickets,
+      recurringAssetReissues,
+      Object.values(run.tickets),
+    );
+    if (actionableTickets.length > 0) {
       const definitionsRead = await this.#readTicketDefinitions(run, pinned.configuration);
       const tickets = reconcileTickets(
         run,
@@ -2315,13 +2804,15 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         requireExecutionSemanticCatalog(pinned.configuration),
         this.#now().toISOString(),
         this.#projectRoot,
+        recurringAssetReissues,
+        integrationOperation(pinned.configuration, run.runTypeId),
       );
-      const reason = `Verification found ${evaluation.tickets.length} still-applicable compiler tickets: ${evaluation.tickets.map((item) => item.title).join("; ")}`;
+      const reason = `Verification found ${actionableTickets.length} still-applicable compiler tickets: ${actionableTickets.map((item) => item.title).join("; ")}`;
       return {
         ok: false,
         reason,
         tickets,
-        applicableTicketIds: evaluation.tickets.map((ticket) => ticket.id).sort(compareText),
+        applicableTicketIds: actionableTickets.map((ticket) => ticket.id).sort(compareText),
         activity: [compilerActivity(run, reason, "verify", "error")],
         artifactWrites: [
           {
@@ -2334,7 +2825,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         ],
       };
     }
-    if (Object.values(run.tickets).some((ticket) => ticket.status !== "completed")) {
+    if (Object.values(run.tickets).some((ticket) => !ticketDependencySettled(ticket))) {
       return { ok: false, reason: "Verification found a ticket that is not complete." };
     }
     const compiledAt = this.#now().toISOString();
@@ -2404,7 +2895,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     run: RunRecord;
     changeControl: Extract<RuntimeAssignmentChangeControlCompilation, { kind: "upstream_request" }>;
     sourceTerminalProof: TerminalSuccessSettlementProof;
-  }): Promise<TicketRecord> {
+  }): Promise<TicketRecord | undefined> {
     assertHashBoundRecord(input.changeControl, "compiled upstream change request");
     const pinned = await this.#loadPinned(input.run);
     const catalog = requireExecutionSemanticCatalog(pinned.configuration);
@@ -2463,6 +2954,15 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         "proposal publication lacks its exact successful source action",
       );
     }
+    if (
+      input.changeControl.fulfillment === "dynamic_scope_change" &&
+      existingStandaloneSupportRunForUpstreamRequest(graph, input.changeControl.targetNodeIds, [
+        ...source.targetNodeIds,
+        ...(source.readNodeIds ?? []),
+      ]) !== undefined
+    ) {
+      return undefined;
+    }
     const expectedPublication = deriveChangeControlPublication(catalog, {
       runId: input.run.id,
       sourceTicketId: input.changeControl.sourceTicketId,
@@ -2520,6 +3020,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
           sourceTicketId: input.changeControl.sourceTicketId,
           sourceStepId: input.changeControl.sourceStepId,
           sourceOutputSha256: input.changeControl.sourceOutputSha256,
+          fulfillment: input.changeControl.fulfillment,
         },
       },
       causal: {
@@ -2711,7 +3212,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       definition,
       catalog,
       at: this.#now().toISOString(),
-      status: "ready",
+      status: "queued",
       summary: input.selection.summary,
       dependencyIds: [input.selection.proposalTicketId],
       executionControl: {
@@ -2870,7 +3371,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       definition,
       catalog,
       at: this.#now().toISOString(),
-      status: "ready",
+      status: "queued",
       summary: `Recover terminal ticket ${source.id} from ${failureHashes.length} authenticated failure binding(s).`,
       dependencyIds: [],
       executionControl: {
@@ -2958,6 +3459,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     preserveControlTicketCreationAuthority(existing, template, "terminal_resolver");
     assertControlTicketTemplate(existing, template, "terminal resolver", {
       allowFailureHashExtension: true,
+      allowPristineCompilerCancellation: true,
     });
     return structuredClone(existing);
   }
@@ -2974,48 +3476,69 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       "run type disappeared",
     );
     const promotion = optionalRecord(runType.document.promotion);
-    const operationId =
-      optionalString(promotion?.conflict_operation) ?? "resolve-target-integration";
     const executionCatalog = requireExecutionSemanticCatalog(pinned.configuration);
-    const ticketBinding = resolveExecutionPolicyBinding(executionCatalog, {
-      configurationSha256: pinned.configuration.configuration_sha256,
-      operationId,
-    });
-    const stepBinding = resolveExecutionPolicyBinding(executionCatalog, {
-      configurationSha256: pinned.configuration.configuration_sha256,
-      operationId,
-      stepId: "resolve-conflicts",
-    });
+    const operationId = resolveConfiguredOperationReference(
+      executionCatalog,
+      optionalString(promotion?.conflict_operation) ?? "resolve-target-integration",
+    );
     const id = `TK-integration-${digestBody(canonicalHash([input.run.id, input.targetOid, input.conflictReport])).slice(0, 16)}`;
     const at = this.#now().toISOString();
+    const graph = (await this.#readGraph(input.run, pinned.configuration)).graph;
+    const definition = configuredIntegrationTicketDefinition({
+      configuration: pinned.configuration,
+      catalog: executionCatalog,
+      graph,
+      id,
+      operationId,
+      title: `Integrate target ${shortOid(input.targetOid)}`,
+    });
+    const semantic = resolveDefinitionExecutionBindings(executionCatalog, definition);
     const ticket: SemanticTicketRecord = {
       id,
       operationId,
-      executionPolicyBinding: ticketBinding,
-      title: `Integrate target ${shortOid(input.targetOid)}`,
+      executionPolicyBinding: semantic.ticket,
+      title: definition.title,
       summary: boundedText(input.conflictReport, "conflict report", 64 * 1024),
-      status: "ready",
+      status: "queued",
       priority: -1_000_000,
       dependencyIds: [],
-      targetNodeIds: [],
-      readPaths: ["."],
-      writePaths: ["."],
-      steps: [
-        {
-          id: "resolve-conflicts",
-          title: "Resolve target conflicts",
-          personaId: "integrator",
-          executionPolicyBinding: stepBinding,
-          status: "pending",
-          attemptIds: [],
-          summary: undefined,
-          startedAt: undefined,
-          completedAt: undefined,
-        },
-      ],
+      targetNodeIds: [...definition.target_node_ids],
+      readNodeIds: [...definition.scope.read_node_ids],
+      writeNodeIds: [...definition.scope.write_node_ids],
+      readPaths: [...definition.scope.read_paths],
+      writePaths: [...definition.scope.write_paths],
+      steps: definition.workflow.map((step) => ({
+        id: step.id,
+        title: humanize(step.id),
+        personaId: step.persona_id,
+        executionPolicyBinding: semantic.steps.get(step.id)!,
+        kind: step.kind,
+        dependsOn: [...step.depends_on],
+        ...(step.read_node_ids === undefined ? {} : { readNodeIds: [...step.read_node_ids] }),
+        ...(step.write_node_ids === undefined ? {} : { writeNodeIds: [...step.write_node_ids] }),
+        ...(step.read_paths === undefined ? {} : { readPaths: [...step.read_paths] }),
+        ...(step.write_paths === undefined ? {} : { writePaths: [...step.write_paths] }),
+        ...(step.validation_action === undefined
+          ? {}
+          : { validationAction: step.validation_action }),
+        status: "pending",
+        attemptIds: [],
+        summary: undefined,
+        startedAt: undefined,
+        completedAt: undefined,
+      })),
+      ...(definition.review_failure_reopen_from === undefined
+        ? {}
+        : {
+            reviewFailureReopenFrom: definition.review_failure_reopen_from,
+            reviewReworkLimit: 1,
+            reviewReworkCount: 0,
+            reviewReworks: [],
+          }),
       worktreePath: undefined,
       branch: undefined,
       blocker: undefined,
+      integrationCandidateOid: input.targetOid,
       createdAt: at,
       updatedAt: at,
     };
@@ -3200,6 +3723,74 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         artifactPath,
         artifactSha256: rawSha256(bytes),
         planRevision: run.plan.revision,
+      };
+    }
+    if (run.planningSession !== undefined) {
+      const session = run.planningSession;
+      const revision = session.revisions[session.currentRevision];
+      const attempt = run.attempts[session.attemptId];
+      if (
+        !["approving", "approved"].includes(session.status) ||
+        revision === undefined ||
+        revision.revision !== session.currentRevision ||
+        !["awaiting_review", "approved"].includes(revision.status) ||
+        revision.artifactSha256 === undefined ||
+        revision.graphSha256 === undefined ||
+        revision.transcriptSha256 === undefined ||
+        revision.checkpointPath === undefined ||
+        run.plan.revision !== session.currentRevision ||
+        revision.graphSha256 !== run.graphHash ||
+        attempt === undefined ||
+        attempt.kind !== "planning" ||
+        attempt.id !== session.attemptId ||
+        attempt.sessionId !== session.sessionId
+      ) {
+        fail("working_spec_source", "current continuous planning checkpoint is not approval-bound");
+      }
+      const artifactPath = revision.checkpointPath;
+      const runRoot = path.resolve(this.#stateRoot, "runs", run.id);
+      const resolvedArtifactPath = path.resolve(this.#stateRoot, artifactPath);
+      if (!resolvedArtifactPath.startsWith(`${runRoot}${path.sep}`)) {
+        fail("working_spec_source", "continuous planning checkpoint escapes its run root");
+      }
+      let bytes: Buffer;
+      try {
+        bytes = await readStableDurableFile(resolvedArtifactPath, {
+          minimum: 1,
+          maximum: MAX_CONTEXT_BYTES,
+          label: `planning revision ${revision.revision} checkpoint`,
+        });
+      } catch (error) {
+        fail(
+          "working_spec_source",
+          `continuous planning checkpoint is not durably readable: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      let value: unknown;
+      try {
+        value = JSON.parse(bytes.toString("utf8"));
+      } catch {
+        fail("working_spec_source", "continuous planning checkpoint is not valid JSON");
+      }
+      const artifact = planningArtifactBoundary(() => parsePlanningArtifact(value));
+      if (
+        canonicalHash(artifact) !== revision.artifactSha256 ||
+        canonicalHash(artifact.full) !== canonicalHash(run.plan.full) ||
+        canonicalHash(artifact.concise) !== canonicalHash(run.plan.concise) ||
+        canonicalHash(artifact.graphSeed) !== canonicalHash(run.plan.graphSeed ?? null) ||
+        (artifact.title ?? null) !== (run.plan.title ?? null)
+      ) {
+        fail(
+          "working_spec_source",
+          "continuous planning checkpoint failed its immutable compiler binding",
+        );
+      }
+      return {
+        kind: "approved_plan",
+        artifactPath,
+        artifactSha256: revision.artifactSha256,
+        planRevision: revision.revision,
+        attemptId: attempt.id,
       };
     }
     const candidates = Object.values(run.attempts)
@@ -3720,6 +4311,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     );
     const accepted = compiled.every((result) => result.accepted);
     let passed = compiled.every((result) => result.passed);
+    const infrastructureFailure = compiled.find(
+      (result) => result.infrastructureFailure !== undefined,
+    )?.infrastructureFailure;
     if (resolved.kind === "graph") {
       passed = await evaluateRequestedGraphCheck(
         pinned.configuration,
@@ -3785,6 +4379,14 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       requireExecutionSemanticCatalog(pinned.configuration),
       this.#now().toISOString(),
       this.#projectRoot,
+      await recurringAssetReissueNodeIds(
+        input.run,
+        pinned.configuration,
+        descriptor.graph,
+        evaluation,
+        input.run.git.run.worktree,
+      ),
+      integrationOperation(pinned.configuration, input.run.runTypeId),
     );
     const definitions = ticketArtifact(
       input.run,
@@ -3816,13 +4418,26 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const repeatNote = deterministicRepeat
       ? " — byte-identical to a previous run of this check in this attempt; the failure is deterministic, so re-running without changing its inputs cannot change the result"
       : "";
+    const rejectionDiagnostics = compiled
+      .flatMap((result, commandIndex) => {
+        const value = isRecord(result.value) ? result.value : undefined;
+        const errors = Array.isArray(value?.errors) ? value.errors : [];
+        return errors
+          .filter((error): error is string => typeof error === "string" && error.length > 0)
+          .map((error) => `command ${commandIndex}: ${error.slice(0, 512)}`);
+      })
+      .slice(0, 8);
+    const rejectionDetail =
+      !accepted && rejectionDiagnostics.length > 0 ? `: ${rejectionDiagnostics.join("; ")}` : "";
     return {
       accepted,
       passed,
+      ...(infrastructureFailure === undefined ? {} : { infrastructureFailure }),
       summary:
         (accepted
           ? `${resolved.requestedCheckId} ${passed ? "passed" : "recorded a nonpassing result"}`
-          : `${resolved.requestedCheckId} failed its configured result contract`) + repeatNote,
+          : `${resolved.requestedCheckId} failed its configured result contract${rejectionDetail}`) +
+        repeatNote,
       value: {
         requestedCheckId: resolved.requestedCheckId,
         accepted,
@@ -3929,13 +4544,39 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     });
     const evaluated = evaluateConfiguredRules({ configuration, graph }, { adapter });
     if (!evaluated.ok) return evaluated;
-    const repaired = generatedAssetImplementationFallback(configuration, graph, evaluated.value);
-    return repaired === undefined
+    const scientificDefinitions = scientificRunTicketDefinitions(graph, evaluated.value.tickets);
+    const compatibleEvaluation =
+      scientificDefinitions.length === evaluated.value.tickets.length
+        ? evaluated.value
+        : rehashRuleEvaluation(evaluated.value, scientificDefinitions);
+    const withStandaloneSupportRuns = researchStandaloneSupportRunFallback(
+      configuration,
+      graph,
+      compatibleEvaluation,
+      adapter,
+      Object.values(run.tickets),
+    );
+    const withRunContractScope = researchRunContractScopeFallback(graph, withStandaloneSupportRuns);
+    const withBlockedGateRechecks = repairedProviderBlockedDirectGateFallback(
+      configuration,
+      graph,
+      withRunContractScope,
+    );
+    const repaired = await generatedAssetImplementationFallback(
+      run,
+      configuration,
+      graph,
+      withBlockedGateRechecks,
+    );
+    const withAssetCompatibility = repaired ?? withBlockedGateRechecks;
+    const withRunPlanCompatibility = researchConstitutionRunPlanFallback(
+      configuration,
+      graph,
+      withAssetCompatibility,
+    );
+    return withRunPlanCompatibility === evaluated.value
       ? evaluated
-      : {
-          ...evaluated,
-          value: repaired,
-        };
+      : { ...evaluated, value: withRunPlanCompatibility };
   }
 
   /**
@@ -4568,10 +5209,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
           "recovered compiler definition differs from the durable attempt assignment",
         );
       }
-      const predecessorExecution =
-        step.kind === "review"
-          ? await this.#reviewPredecessorExecution(run, definition, step)
-          : undefined;
+      const predecessorExecution = shouldAttachPredecessorExecution(step)
+        ? await this.#reviewPredecessorExecution(run, definition, step)
+        : undefined;
       const reviewCandidateNodeIds =
         step.kind === "review"
           ? await this.#reviewCandidateNodeIds(
@@ -4584,6 +5224,15 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         step.kind === "review"
           ? await this.#reviewHistoricalPreparation(run, definition, step, graph, configuration)
           : undefined;
+      const gateRepairEvidence = shouldAttachCurrentGateRepairEvidence(run, definition, step)
+        ? await this.#currentNonpassingGateRepairEvidence(
+            run,
+            configuration,
+            graph,
+            definitions.value.evaluation,
+            gateRepairEvidenceTargetNodeIds(run, graph, definition.target_node_ids),
+          )
+        : [];
       descriptor = ticketAttempt(
         run,
         definition,
@@ -4595,6 +5244,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         predecessorExecution,
         reviewCandidateNodeIds,
         historicalPreparation,
+        gateRepairEvidence,
       );
     }
     if (
@@ -4743,7 +5393,8 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     configuration: CompiledConfiguration,
     runType: ConfigurationObject,
   ): Promise<AttemptDescriptor> {
-    if (input.kind === "planning") return planningAttempt(input.run, runType, configuration);
+    if (input.kind === "planning")
+      return planningAttempt(input.run, runType, configuration, input.planningRevision);
     if (input.kind === "lead") {
       if (input.assignment !== undefined)
         fail("lead_assignment", "run-level Lead judgment cannot carry a ticket assignment");
@@ -4779,15 +5430,14 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         input.assignment,
         configuration,
       )) ??
-      integrationDefinition(input.run, input.assignment, configuration);
+      integrationDefinition(input.run, input.assignment, configuration, graph);
     const step = definition.workflow.find((item) => item.id === input.assignment!.stepId);
     if (step === undefined || step.persona_id !== input.assignment.personaId) {
       fail("assignment_drift", "scheduler assignment does not match the compiler definition");
     }
-    const predecessorExecution =
-      step.kind === "review"
-        ? await this.#reviewPredecessorExecution(input.run, definition, step)
-        : undefined;
+    const predecessorExecution = shouldAttachPredecessorExecution(step)
+      ? await this.#reviewPredecessorExecution(input.run, definition, step)
+      : undefined;
     const reviewCandidateNodeIds =
       step.kind === "review"
         ? await this.#reviewCandidateNodeIds(input.run, definition, executionCatalog)
@@ -4796,6 +5446,15 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       step.kind === "review"
         ? await this.#reviewHistoricalPreparation(input.run, definition, step, graph, configuration)
         : undefined;
+    const gateRepairEvidence = shouldAttachCurrentGateRepairEvidence(input.run, definition, step)
+      ? await this.#currentNonpassingGateRepairEvidence(
+          input.run,
+          configuration,
+          graph,
+          definitions.value.evaluation,
+          gateRepairEvidenceTargetNodeIds(input.run, graph, definition.target_node_ids),
+        )
+      : [];
     return ticketAttempt(
       input.run,
       definition,
@@ -4807,6 +5466,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       predecessorExecution,
       reviewCandidateNodeIds,
       historicalPreparation,
+      gateRepairEvidence,
     );
   }
 
@@ -4857,15 +5517,15 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
   async #reviewPredecessorExecution(
     run: RunRecord,
     definition: DerivedTicketDefinition,
-    reviewStep: DerivedWorkflowStep,
+    dependentStep: DerivedWorkflowStep,
   ): Promise<Record<string, unknown> | undefined> {
     const ticket = run.tickets[definition.id];
-    if (ticket === undefined || reviewStep.depends_on.length === 0) return undefined;
+    if (ticket === undefined || dependentStep.depends_on.length === 0) return undefined;
     let remainingBytes = MAX_REVIEW_EXECUTION_EVIDENCE_BYTES;
     const predecessors: Record<string, unknown>[] = [];
     for (const predecessorStepId of orderedReviewPredecessorStepIds(
       definition.workflow,
-      reviewStep,
+      dependentStep,
     )) {
       const durableStep = ticket.steps.find((candidate) => candidate.id === predecessorStepId);
       if (durableStep === undefined) {
@@ -4882,6 +5542,11 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
             candidate?.status === "completed" && candidate.stepId === predecessorStepId,
         );
       if (attempt === undefined) {
+        // Non-review dependent steps can follow compiler/operator control stages whose durable
+        // completion has no agent attempt. Preserve strict complete provenance for review, while
+        // still carrying every available authenticated predecessor execution into ordinary causal
+        // steps such as a gate's analyze stage.
+        if (dependentStep.kind !== "review") continue;
         fail(
           "review_evidence_attempt",
           `review predecessor ${predecessorStepId} has no completed durable attempt`,
@@ -4959,10 +5624,11 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         checks,
       });
     }
+    if (predecessors.length === 0) return undefined;
     const material = {
       protocol: "koni.review-predecessor-execution.v1",
       ticketId: ticket.id,
-      reviewStepId: reviewStep.id,
+      reviewStepId: dependentStep.id,
       predecessors,
     };
     return { ...material, sha256: canonicalHash(material) };
@@ -5147,6 +5813,119 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     };
   }
 
+  async #currentNonpassingGateRepairEvidence(
+    run: RunRecord,
+    configuration: CompiledConfiguration,
+    graph: TypedGraph,
+    evaluation: Pick<CompiledRuleEvaluation, "facts" | "gate_policy_contexts">,
+    targetNodeIds: readonly string[],
+  ): Promise<CurrentNonpassingGateRepairEvidence[]> {
+    const evidence = runRuleEvidence(
+      run,
+      configuration.configuration_sha256,
+      ruleInputGraphSha256(configuration, graph),
+    );
+    const stateRoot = path.resolve(this.#stateRoot);
+    const runRoot = path.resolve(stateRoot, "runs", run.id);
+    let remainingBytes = MAX_HISTORICAL_PREPARATION_EVIDENCE_BYTES;
+    const requests = await currentNonpassingGateRepairEvidenceRequests({
+      graph,
+      evaluation,
+      evidence,
+      checks: run.checks,
+      targetNodeIds,
+      readEvidence: async (check) => {
+        if (check.evidenceSizeBytes > remainingBytes) {
+          fail(
+            "gate_repair_evidence_size",
+            `current gate repair evidence candidate ${check.id} exceeds the bounded context budget`,
+          );
+        }
+        const absolute = path.resolve(stateRoot, check.evidenceArtifactPath);
+        if (!absolute.startsWith(`${runRoot}${path.sep}`)) {
+          fail(
+            "gate_repair_evidence_path",
+            `current gate repair evidence candidate ${check.id} escapes the authority-owned run root`,
+          );
+        }
+        const bytes = await readStableDurableFile(absolute, {
+          minimum: 1,
+          maximum: check.evidenceSizeBytes,
+          label: `current gate repair evidence candidate ${check.id}`,
+        });
+        if (
+          bytes.byteLength !== check.evidenceSizeBytes ||
+          rawSha256(bytes) !== check.evidenceSha256
+        ) {
+          fail(
+            "gate_repair_evidence_integrity",
+            `current gate repair evidence candidate ${check.id} differs from its durable record`,
+          );
+        }
+        remainingBytes -= bytes.byteLength;
+        try {
+          return JSON.parse(bytes.toString("utf8")) as unknown;
+        } catch {
+          fail(
+            "gate_repair_evidence_shape",
+            `current gate repair evidence candidate ${check.id} is not valid JSON`,
+          );
+        }
+      },
+    });
+    const contexts: CurrentNonpassingGateRepairEvidence[] = [];
+    for (const request of requests) {
+      const check = request.check;
+      const value = request.artifact;
+      if (
+        !isRecord(value) ||
+        value.protocol !== "koni.agent-check-execution-evidence.v1" ||
+        typeof value.id !== "string" ||
+        !request.receiptIds.includes(value.id) ||
+        value.accepted !== true ||
+        value.passed !== false ||
+        !Array.isArray(value.commands) ||
+        value.commands.length !== check.commands.length
+      ) {
+        fail(
+          "gate_repair_evidence_shape",
+          `current gate repair evidence for ${request.gateNodeId} does not match its current accepted nonpassing receipt`,
+        );
+      }
+      const commands = value.commands.map((rawCommand, index) => {
+        const command = requiredRecord(rawCommand, `current gate repair evidence command ${index}`);
+        const resultSource = requiredRecord(
+          command.resultSource,
+          `current gate repair evidence command ${index} result source`,
+        );
+        if (resultSource.value === undefined) {
+          fail(
+            "gate_repair_evidence_shape",
+            `current gate repair evidence command ${index} has no decoded result`,
+          );
+        }
+        const durableCommand = check.commands[index]!;
+        return {
+          argv: [...durableCommand.argv],
+          exitCode: durableCommand.exitCode,
+          result: structuredClone(resultSource.value) as JsonValue,
+        };
+      });
+      contexts.push({
+        protocol: "koni.current-gate-repair-evidence.v1",
+        gateNodeId: request.gateNodeId,
+        providerNodeId: request.providerNodeId,
+        evidenceId: value.id,
+        evidenceSha256: check.evidenceSha256,
+        checkId: check.requestedCheckId,
+        recordedAt: check.recordedAt,
+        summary: check.summary,
+        commands,
+      });
+    }
+    return contexts;
+  }
+
   async #loadPinned(run: RunRecord): Promise<PinnedConfigurationArtifact> {
     const cached = this.#pinned.get(run.id);
     if (cached !== undefined) {
@@ -5199,7 +5978,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         configuration,
         run,
         parsePlanningSeed(run.plan.graphSeed),
-        parsePlanTextRecord(run.plan.full, "reviewed full plan"),
+        planningArtifactBoundary(() =>
+          parsePlanningFullPlans(run.plan!.full, "reviewed full plan"),
+        ),
         this.#projectRoot,
       );
       if (run.graphHash === undefined || run.graphHash !== graph.hash) {
@@ -5321,9 +6102,11 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     attempt: AgentAttemptRecord,
     spec: Readonly<AgentLaunchSpec>,
   ): Promise<PreparedAttemptArtifact> {
-    const bytes = await readFile(
-      path.join(this.#stateRoot, `runs/${run.id}/attempts/${attempt.id}/compiler-input.json`),
-    );
+    const compilerInputPath =
+      spec.planningRevision === undefined
+        ? `runs/${run.id}/attempts/${attempt.id}/compiler-input.json`
+        : `runs/${run.id}/attempts/${attempt.id}/planning/revisions/${spec.planningRevision.revision}/compiler-input.json`;
+    const bytes = await readFile(path.join(this.#stateRoot, compilerInputPath));
     if (bytes.byteLength > MAX_CONTEXT_BYTES + 1024 * 1024 || bytes.includes(0)) {
       fail("recovery_compiler_input", "stored compiler input is oversized or unsafe");
     }
@@ -5364,7 +6147,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const stepBindings = resolveDefinitionExecutionBindings(executionCatalog, ticket).steps;
     const priorAttempts = Object.values(run.attempts)
       .filter(
-        (attempt) => attempt.ticketId === ticket.id && attempt.terminalOutputSha256 !== undefined,
+        (attempt) =>
+          attempt.ticketId === ticket.id &&
+          attempt.status === "completed" &&
+          attempt.terminalOutputSha256 !== undefined,
       )
       .sort((left, right) => compareText(left.id, right.id));
     for (const attempt of priorAttempts) {
@@ -5408,8 +6194,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         output.graphDelta === null
       )
         continue;
-      for (const mutation of output.graphDelta.upsertNodes) candidates.add(mutation.node.id);
-      for (const edge of output.graphDelta.addEdges) candidates.add(edge.source);
+      for (const nodeId of graphDeltaReviewCandidateNodeIds(output.graphDelta)) {
+        candidates.add(nodeId);
+      }
     }
     if (candidates.size === 0) {
       for (const id of ticket.target_node_ids) candidates.add(id);
@@ -5496,15 +6283,31 @@ function sameScopeContinuationPrompt(
   initialPrompt: string,
   lineage: Readonly<AgentLaunchSpec["lineage"]>,
   parentFailure?: string,
+  compensatedValidationFailures: readonly string[] = [],
 ): string {
-  if (
-    lineage.conversationFork === undefined ||
-    (lineage.reason !== "retry" && lineage.reason !== "recovery")
-  )
-    return initialPrompt;
+  const continuesSameScope = lineage.reason === "retry" || lineage.reason === "recovery";
+  const authenticatedFork = lineage.conversationFork !== undefined && continuesSameScope;
+  const boundedCompilerRecovery = compensatedValidationFailures.length > 0;
+  if (!authenticatedFork && !boundedCompilerRecovery) return initialPrompt;
+  const rejectionLedger = [...new Set(compensatedValidationFailures)].map(
+    (failure, index) => `${index + 1}. ${failure}`,
+  );
+  if (!authenticatedFork) {
+    return [
+      initialPrompt,
+      "This is a fresh same-scope compiler-recovery root because no safe authenticated conversation fork was available. No parent transcript is inherited; use only the current compiler-authenticated repository and graph context.",
+      `Compiler-rejected outputs in this active bounded recovery chain (oldest to newest):\n${rejectionLedger.join("\n")}`,
+      "Correct every listed contract failure in one complete submission. Do not regress an earlier correction while fixing the latest rejection.",
+    ].join("\n\n");
+  }
   return [
     initialPrompt,
-    "This is an authenticated same-scope continuation. The inherited Pi conversation is the repository and execution ledger: reuse its successful reads, searches, checks, and decisions instead of repeating them.",
+    // "checks" deliberately absent from this list: assignment completion requires every configured
+    // check receipt to be bound to the *current* attempt, so an agent that reuses inherited check
+    // results produces zero valid receipts and fails completion. Reusing reads and decisions is
+    // sound economy; reusing checks is a contract violation the compiler will reject.
+    "This is an authenticated same-scope continuation. The inherited Pi conversation is the repository and execution ledger: reuse its successful reads, searches, and decisions instead of repeating them.",
+    "Configured checks are the exception to that reuse: a check receipt in inherited history belongs to the parent attempt and cannot satisfy this one. Re-run every configured check your step requires in this attempt, even when the inherited run passed.",
     "Discard any speculative reasoning from that failed turn; retain only authenticated repository results, compiler constraints, and the unfinished objective.",
     "The parent terminal or provider-error turn was not accepted output. A terminal-tool receipt visible in inherited history belongs to the parent attempt and is invalid for this attempt: do not answer that it was already submitted. Resolve the remaining action directly from the already-retained evidence and current objective, then invoke the required terminal tool exactly once in this attempt. Perform another repository call only when one specific missing fact makes correct completion impossible.",
     // The authority-classified cause of the parent's death is metadata the inherited transcript
@@ -5520,21 +6323,67 @@ function sameScopeContinuationPrompt(
               ]
             : []),
         ]),
+    ...(rejectionLedger.length === 0
+      ? []
+      : [
+          `Compiler-rejected outputs in this active bounded recovery chain (oldest to newest):\n${rejectionLedger.join("\n")}`,
+          "Correct every listed contract failure in one complete submission. Do not regress an earlier correction while fixing the latest rejection.",
+        ]),
   ].join("\n\n");
+}
+
+const COMPENSATED_VALIDATION_FAILURE_PREFIX =
+  "Retired accepted output after a compensated validation";
+
+function activeCompensatedValidationFailures(
+  run: Readonly<RunRecord>,
+  assignment: Readonly<ReadyAssignment> | undefined,
+): string[] {
+  if (assignment === undefined) return [];
+  const step = run.tickets[assignment.ticketId]?.steps.find(
+    (candidate) => candidate.id === assignment.stepId,
+  );
+  if (step === undefined) return [];
+  const failures: string[] = [];
+  for (const attemptId of [...step.attemptIds].reverse()) {
+    const attempt = run.attempts[attemptId];
+    const failure = attempt?.error ?? attempt?.terminalSummary;
+    if (
+      attempt?.status !== "interrupted" ||
+      failure === undefined ||
+      !failure.startsWith(COMPENSATED_VALIDATION_FAILURE_PREFIX)
+    ) {
+      break;
+    }
+    failures.push(failure.slice(0, 400));
+  }
+  return failures.reverse();
 }
 
 function createPinnedArtifact(
   runId: string,
   configuration: CompiledConfiguration,
   skills: Record<string, PinnedSkill>,
-  community: PinnedCommunityResourceBundle,
+  resolvedPiAgents: Readonly<Record<string, ResolvedPiAgentConfiguration>>,
 ): PinnedConfigurationArtifact {
+  const piAgents = Object.fromEntries(
+    Object.entries(resolvedPiAgents)
+      .sort(([left], [right]) => compareText(left, right))
+      .map(([id, agent]) => [
+        id,
+        {
+          skillIds: agent.resources.skills.map((skill) => skill.id).sort(compareText),
+          context: agent.resources.context.map((resource) => resource.content),
+          configurationSha256: agent.configurationSha256,
+        },
+      ]),
+  );
   const material: PinnedConfigurationMaterial = {
     protocol: PINNED_CONFIGURATION_PROTOCOL,
     runId,
     configuration,
     skills,
-    community,
+    piAgents,
   };
   return deepFreeze({ ...structuredClone(material), artifactSha256: canonicalHash(material) });
 }
@@ -5586,8 +6435,22 @@ function validatePinnedArtifact(value: unknown): PinnedConfigurationArtifact {
       }
     }
   }
-  if (artifact.community !== undefined) {
-    validatePinnedCommunityResourceBundle(artifact.community);
+  if (artifact.piAgents !== undefined) {
+    for (const [id, agent] of Object.entries(artifact.piAgents)) {
+      if (
+        !isRecord(agent) ||
+        !Array.isArray(agent.skillIds) ||
+        agent.skillIds.some(
+          (skillId) => typeof skillId !== "string" || artifact.skills[skillId] === undefined,
+        ) ||
+        !Array.isArray(agent.context) ||
+        agent.context.some((entry) => typeof entry !== "string") ||
+        typeof agent.configurationSha256 !== "string" ||
+        !isSha256Digest(agent.configurationSha256)
+      ) {
+        fail("pi_agent_resources", `pinned Pi resources for agent ${id} are invalid`);
+      }
+    }
   }
   return deepFreeze(structuredClone(artifact));
 }
@@ -5631,34 +6494,54 @@ function assertPinnedMatchesRun(artifact: PinnedConfigurationArtifact, run: RunR
   }
 }
 
-async function pinConfiguredSkills(
+function resolveRunPiAgents(
   configuration: CompiledConfiguration,
-  projectRoot: string,
+  inventory: PiResolvedInventory,
+): Readonly<Record<string, ResolvedPiAgentConfiguration>> {
+  const catalog = piAgentCatalogFromCompiledConfiguration(configuration);
+  const output: Record<string, ResolvedPiAgentConfiguration> = Object.create(null) as Record<
+    string,
+    ResolvedPiAgentConfiguration
+  >;
+  for (const agentId of Object.keys(catalog).sort(compareText)) {
+    output[agentId] = requireValidation(
+      resolvePiAgentConfiguration({
+        agentId,
+        agents: catalog,
+        inventory,
+        extensionAdapters: {},
+      }),
+      "pi_agent_invalid",
+      `Pi resources for agent ${agentId} are not executable`,
+    );
+  }
+  return output;
+}
+
+async function pinPiResolvedSkills(
+  agents: Readonly<Record<string, ResolvedPiAgentConfiguration>>,
 ): Promise<Record<string, PinnedSkill>> {
-  const requested = new Set<string>();
-  for (const persona of Object.values(configuration.registries.personas)) {
-    const skills = persona.skills;
-    if (skills === undefined) continue;
-    if (
-      !Array.isArray(skills) ||
-      skills.some((item) => typeof item !== "string" || !SAFE_LOCAL_KEY.test(item))
-    ) {
-      fail("skill_configuration", "persona skills must be safe string identifiers");
+  const selected = new Map<string, ResolvedPiAgentConfiguration["resources"]["skills"][number]>();
+  for (const agent of Object.values(agents)) {
+    for (const skill of agent.resources.skills) {
+      const existing = selected.get(skill.id);
+      if (existing !== undefined && existing.sha256 !== skill.sha256) {
+        fail("skill_identity_collision", `Pi resolved different skills with id ${skill.id}`);
+      }
+      selected.set(skill.id, skill);
     }
-    for (const item of skills) requested.add(item as string);
   }
   const output: Record<string, PinnedSkill> = Object.create(null) as Record<string, PinnedSkill>;
-  const configRoot = await realpath(path.join(projectRoot, ".koni"));
   let totalFiles = 0;
   let totalBytes = 0;
-  for (const id of [...requested].sort(compareText)) {
-    const skillRoot = path.join(configRoot, "resources", "skills", id);
+  for (const [id, resource] of [...selected.entries()].sort(([left], [right]) =>
+    compareText(left, right),
+  )) {
+    const skillRoot = path.dirname(resource.absolutePath);
     const metadata = await lstat(skillRoot);
     if (!metadata.isDirectory() || metadata.isSymbolicLink())
       fail("skill_directory", `skill ${id} is not a regular directory`);
     const canonical = await realpath(skillRoot);
-    if (!isWithinDirectory(configRoot, canonical))
-      fail("skill_escape", `skill ${id} escapes .koni`);
     const files = await readSkillPackage(canonical, id);
     if (!Object.hasOwn(files, "SKILL.md")) fail("skill_file", `skill ${id} has no root SKILL.md`);
     totalFiles += Object.keys(files).length;
@@ -6114,6 +6997,7 @@ function planningAttempt(
   run: RunRecord,
   runType: ConfigurationObject,
   configuration: CompiledConfiguration,
+  revisionContext?: PlanningRevisionPreparationContext,
 ): AttemptDescriptor {
   const pipeline = pipelineDefinition(runType);
   const planning = pipeline.order.flatMap((id) => {
@@ -6124,7 +7008,7 @@ function planningAttempt(
       {
         id,
         title: optionalString(stage.title) ?? id,
-        persona: optionalString(config.persona) ?? "run-planner",
+        persona: optionalString(config.agent) ?? "run-planner",
         prompt:
           optionalString(config.prompt) ?? "Produce the implementation-ready plan for this stage.",
       },
@@ -6142,20 +7026,59 @@ function planningAttempt(
   const stageId = planning.at(-1)!.id;
   const graphSeedContract = planningGraphSeedContract(configuration);
   const latestSteering = run.plan?.steeringHistory.at(-1)?.instructions;
+  const laterRevision =
+    revisionContext?.binding.revision === undefined
+      ? undefined
+      : revisionContext.binding.revision > 0
+        ? revisionContext
+        : undefined;
+  if (
+    laterRevision !== undefined &&
+    (laterRevision.currentArtifact === undefined || laterRevision.steering === undefined)
+  ) {
+    fail(
+      "planning_revision_context",
+      "later planning revision is missing its validated artifact or exact steering",
+    );
+  }
+  const resolvedQuestions = answeredQuestionContext(run);
   const context = {
     protocol: "koni.attempt-context.v1",
     kind: "planning",
     run: { id: run.id, objective: run.objective, intake: run.intake, runTypeId: run.runTypeId },
     questionPolicy: run.executionConfig?.questionPolicy ?? "some",
-    resolvedQuestions: answeredQuestionContext(run),
+    resolvedQuestions,
     stages: planning,
     instructions: run.executionConfig?.instructions ?? "",
-    requiredOutput: {
-      title: "One 3-4 word operator-facing run name (3-60 characters).",
-      full: PLAN_DOMAINS,
-      concise: "Each domain is an independently authored list of {title, description} items.",
-      graphSeed: graphSeedContract.context,
-    },
+    requiredOutput:
+      laterRevision === undefined
+        ? {
+            title: "One 3-4 word operator-facing run name (3-60 characters).",
+            full: PLAN_DOMAINS,
+            concise: "Each domain is an independently authored list of {title, description} items.",
+            graphSeed: graphSeedContract.context,
+          }
+        : {
+            kind: "bounded_patch",
+            baseRevision: laterRevision.binding.baseRevision,
+            baseArtifactSha256: laterRevision.binding.priorCheckpointSha256,
+            editableDomains: PLAN_DOMAINS,
+            graphSeedOperations: [
+              "setRootSpec",
+              "removeRootSpecFields",
+              "upsertNodes",
+              "removeNodeKeys",
+              "addEdges",
+              "removeEdges",
+            ],
+          },
+    ...(laterRevision === undefined
+      ? {}
+      : {
+          currentValidatedArtifact: laterRevision.currentArtifact,
+          planningRevision: laterRevision.binding,
+          steering: laterRevision.steering,
+        }),
   };
   return {
     ticketId: "run-planning",
@@ -6166,21 +7089,38 @@ function planningAttempt(
     readNodeIds: [],
     writeNodeIds: [],
     graphMutation: "forbidden",
-    initialPrompt: [
-      latestSteering === undefined
-        ? `Plan this ${run.runTypeId} run: ${run.objective}`
+    initialPrompt:
+      laterRevision === undefined
+        ? [
+            latestSteering === undefined
+              ? `Plan this ${run.runTypeId} run: ${run.objective}`
+              : [
+                  `Revise the prior ${run.runTypeId} plan for this unchanged objective: ${run.objective}`,
+                  "The prior accepted planning transcript is your starting point. Apply the operator steering exactly, preserve every unaffected sound decision, and do not repeat repository discovery unless one specific steering consequence cannot be resolved from retained evidence.",
+                  `Operator steering for this revision:\n${latestSteering}`,
+                ].join("\n\n"),
+            "Complete every configured planning concern in one bounded shared session.",
+            "The final output must contain four complete Markdown plans (architecture, decisions, risk, verification), four separately written concise title/description item lists for human approval, and the exact typed graph seed. Do not derive mini-plan headings by truncating the full prose.",
+            'Required top-level shape (illustrative only; replace every ... with schema-valid content): {"title":"...","full":{"architecture":"...","decisions":"...","risk":"...","verification":"..."},"concise":{"architecture":[{"title":"...","description":"..."}],"decisions":[...],"risk":[...],"verification":[...]},"graphSeed":{"rootSpec":{...},"nodes":[...],"edges":[...]}}. All four full domains, all four concise domains, and graphSeed are required in the same first submission.',
+            "After any validation error, correct every named field before retrying; never resubmit the same incomplete shape.",
+            'Also emit a top-level "title": a concise 3-4 word name for this run, suitable as an operator dashboard row label. Do not restate the full objective.',
+            "For graphSeed, reference the already-existing run objective only with the literal $root. rootSpec enriches that objective and never declares a node key. Every other edge endpoint must exactly equal a key declared in nodes; connect every declared node to $root and never invent a root alias from the objective title.",
+          ].join("\n\n")
         : [
-            `Revise the prior ${run.runTypeId} plan for this unchanged objective: ${run.objective}`,
-            "The prior accepted planning transcript is your starting point. Apply the operator steering exactly, preserve every unaffected sound decision, and do not repeat repository discovery unless one specific steering consequence cannot be resolved from retained evidence.",
-            `Operator steering for this revision:\n${latestSteering}`,
+            "Continue this planning session. Apply the operator steering to the current compiler-valid plan.",
+            "Preserve unchanged domains and graph elements. Submit only the bounded patch against the named base revision and artifact hash.",
+            `Base revision: ${laterRevision.binding.baseRevision}\nBase artifact hash: ${laterRevision.binding.priorCheckpointSha256}`,
+            `Operator steering for revision ${laterRevision.binding.revision}:\n${laterRevision.steering}`,
+            `Resolved planning questions:\n${JSON.stringify(resolvedQuestions)}`,
+            `Current compiler-valid planning artifact:\n${JSON.stringify(laterRevision.currentArtifact)}`,
+            "Use the planning patch schema. Include only changed title, plan domains, concise review domains, or semantic graph operations. The compiler will preserve every omitted field and revalidate the complete materialized artifact.",
+            "Within a patch, graphSeed may contain only setRootSpec, removeRootSpecFields, upsertNodes, removeNodeKeys, addEdges, and removeEdges. Never send the initial nodes/edges seed shape. Never add an unchanged edge again; use addEdges and removeEdges only for relations that actually change. Every newly upserted node key must either already exist or connect through addEdges to the retained graph in the same patch.",
           ].join("\n\n"),
-      "Complete every configured planning concern in one bounded shared session.",
-      "The final output must contain four complete Markdown plans (architecture, decisions, risk, verification), four separately written concise title/description item lists for human approval, and the exact typed graph seed. Do not derive mini-plan headings by truncating the full prose.",
-      'Also emit a top-level "title": a concise 3-4 word name for this run, suitable as an operator dashboard row label. Do not restate the full objective.',
-      "For graphSeed, reference the already-existing run objective only with the literal $root. rootSpec enriches that objective and never declares a node key. Every other edge endpoint must exactly equal a key declared in nodes; connect every declared node to $root and never invent a root alias from the objective title.",
-    ].join("\n\n"),
     context,
-    terminalSchema: planningTerminalSchema(graphSeedContract.schema),
+    terminalSchema:
+      laterRevision === undefined
+        ? planningTerminalSchema(graphSeedContract.schema)
+        : planningPatchTerminalSchema(),
   };
 }
 
@@ -6190,6 +7130,8 @@ export function resolvePinnedGateAutoEvaluationContexts(input: {
   /** Ticket operation of the compiling descriptor; gate checks that do not apply to it are skipped. */
   operation?: string;
   subjectNodeIds: readonly string[];
+  /** Gate nodes this descriptor is accountable for (target/write scope), when it has any. */
+  ownedNodeIds?: readonly string[];
   contexts: readonly CompiledGatePolicyContext[];
 }): ResolvedGateAutoEvaluationContextBinding[] {
   const projected = requireValidation(
@@ -6200,6 +7142,8 @@ export function resolvePinnedGateAutoEvaluationContexts(input: {
   const definitions = new Map(projected.map((policy) => [policy.id, policy] as const));
   const subjectIds = new Set(input.subjectNodeIds);
   const output: ResolvedGateAutoEvaluationContextBinding[] = [];
+  const ownedIds = new Set(input.ownedNodeIds ?? []);
+  const ownedGateBindings = new Set<ResolvedGateAutoEvaluationContextBinding>();
   for (const context of input.contexts) {
     if (canonicalHash(withoutField(context, "context_sha256")) !== context.context_sha256) {
       fail(
@@ -6274,9 +7218,19 @@ export function resolvePinnedGateAutoEvaluationContexts(input: {
       contextSha256: context.context_sha256,
       readPaths: Object.freeze([...new Set(context.read_paths)].sort(compareText)),
     } as const;
-    output.push(deepFreeze({ ...material, sha256: canonicalHash(material) }));
+    const binding = deepFreeze({ ...material, sha256: canonicalHash(material) });
+    output.push(binding);
+    if (ownedIds.has(context.gate_node_id)) ownedGateBindings.add(binding);
   }
-  return output.sort((left, right) =>
+  // Sibling gates share an evaluation target, so a gate node reachable only through that shared
+  // target rides along with the gate the ticket actually owns. Two contexts then declare the same
+  // auto-evaluate check id, and the step's bare `validation_checks` entry can no longer name one
+  // of them, which fails the entire check plan. When the ticket names gates outright those are its
+  // obligation; a context matched only via a shared evaluation target belongs to its own gate's
+  // ticket and is dropped here.
+  const selected =
+    ownedGateBindings.size > 0 ? output.filter((b) => ownedGateBindings.has(b)) : output;
+  return selected.sort((left, right) =>
     compareText(`${left.policyId}\0${left.gateNodeId}`, `${right.policyId}\0${right.gateNodeId}`),
   );
 }
@@ -6317,6 +7271,498 @@ export function orderedReviewPredecessorStepIds(
   return workflow.filter((step) => closure.has(step.id)).map((step) => step.id);
 }
 
+/** Every dependent step needs the exact accepted outputs that causally precede it. */
+export function shouldAttachPredecessorExecution(
+  step: Pick<DerivedWorkflowStep, "kind" | "depends_on">,
+): boolean {
+  return step.kind === "review" || step.depends_on.length > 0;
+}
+
+export interface ApprovedChangeObligationContext {
+  readonly ticketId: string;
+  readonly approvedApplicationSha256: Sha256Digest;
+  readonly targetNodeIds: readonly string[];
+  readonly summary: string;
+  /** The application delta is accepted but its control workflow has not settled yet. */
+  readonly inFlight?: true;
+  readonly operatorSteering?: readonly string[];
+}
+
+/** Preserve an approved semantic obligation after its control ticket has settled. */
+export function approvedChangeObligationsForTargets(
+  run: Pick<RunRecord, "tickets">,
+  targetNodeIds: readonly string[],
+): ApprovedChangeObligationContext[] {
+  const targets = new Set(targetNodeIds);
+  return Object.values(run.tickets)
+    .filter(
+      (ticket) =>
+        ticket.status === "completed" &&
+        ticket.executionControl?.controlTicketAuthority?.role === "approved_application" &&
+        ticket.executionControl.approvedApplicationSha256 !== undefined &&
+        ticket.summary.trim().length > 0 &&
+        ticket.targetNodeIds.some((nodeId) => targets.has(nodeId)),
+    )
+    .sort((left, right) => compareText(left.id, right.id))
+    .map((ticket) => ({
+      ticketId: ticket.id,
+      approvedApplicationSha256: ticket.executionControl!.approvedApplicationSha256!,
+      targetNodeIds: [...ticket.targetNodeIds],
+      summary: ticket.summary,
+    }));
+}
+
+/** Control proposals authorize later work; they do not themselves inherit settled application work. */
+export function approvedChangeObligationsForAttempt(
+  run: Pick<RunRecord, "tickets">,
+  targetNodeIds: readonly string[],
+  operationRole: CompiledChangeControl["role"],
+): ApprovedChangeObligationContext[] {
+  if (operationRole === "proposal") return [];
+  const settled = approvedChangeObligationsForTargets(run, targetNodeIds);
+  if (operationRole !== "ordinary") return settled;
+  const targets = new Set(targetNodeIds);
+  const inFlight = Object.values(run.tickets)
+    .filter(
+      (ticket) =>
+        ticket.status !== "completed" &&
+        ticket.executionControl?.controlTicketAuthority?.role === "approved_application" &&
+        ticket.executionControl.approvedApplicationSha256 !== undefined &&
+        ticket.targetNodeIds.some((nodeId) => targets.has(nodeId)),
+    )
+    .sort((left, right) => compareText(left.id, right.id))
+    .flatMap((ticket) => {
+      const sourceProposalId = ticket.executionControl?.sourceProposalTicketId;
+      const sourceProposal =
+        sourceProposalId === undefined ? undefined : run.tickets[sourceProposalId];
+      const summary = sourceProposal?.summary.trim() || ticket.summary.trim();
+      if (summary.length === 0) return [];
+      const sourceControl = sourceProposal?.executionControl;
+      const approvalSha256 = sourceControl?.proposalApprovalSha256;
+      return [
+        {
+          ticketId: ticket.id,
+          approvedApplicationSha256: ticket.executionControl!.approvedApplicationSha256!,
+          targetNodeIds: [...ticket.targetNodeIds],
+          summary,
+          inFlight: true as const,
+          ...(approvalSha256 === undefined
+            ? {}
+            : {
+                operatorSteering: approvedProposalAuditSteering(
+                  sourceControl?.proposalDecisionHistory ?? [],
+                  approvalSha256,
+                ),
+              }),
+        },
+      ];
+    });
+  return [...settled, ...inFlight];
+}
+
+export function approvedChangeObligationInstructions(
+  obligation: ApprovedChangeObligationContext,
+  stepKind: DerivedWorkflowStep["kind"] = "production",
+): string[] {
+  const reviewBoundary =
+    stepKind === "review"
+      ? "Treat the complete approved request and operator steering as binding review criteria. If the current candidate does not satisfy them, reject it with a precise repair blocker so the compiler can reopen the source-owning implementation step. Do not edit files or graph nodes during independent review."
+      : undefined;
+  if (obligation.inFlight === true) {
+    return [
+      `In-flight approved-change obligation ${obligation.approvedApplicationSha256} from ${obligation.ticketId}: ${obligation.summary}`,
+      ...(obligation.operatorSteering ?? []),
+      ...(reviewBoundary === undefined
+        ? [
+            "The compiler is currently applying this exact approved request through the source-owning workflow. Treat its complete request and operator steering as binding input for the files and authored contract in this attempt; do not substitute repository neighbors, invent gate identities, or wait for the application control ticket to settle.",
+          ]
+        : [reviewBoundary]),
+    ];
+  }
+  return [
+    `Durable approved-change obligation ${obligation.approvedApplicationSha256} from ${obligation.ticketId}: ${obligation.summary}`,
+    "This authenticated obligation survives the completed control ticket. Before claiming it is satisfied, read every named target file available in this ticket's scope and compare the current argv element-by-element with the approved argv; omitted, reordered, or substituted secondary script arguments are material defects. Verify named implementation mechanisms literally (for example runpy versus subprocess) from file content, never from a filename or prior summary. Preserve its exact algorithms, argv shape, and bounded target semantics.",
+    ...(reviewBoundary === undefined
+      ? [
+          "If the current graph or files do not satisfy it, repair them within this ticket's grant or raise the smallest upstream change request; do not silently substitute a different implementation.",
+        ]
+      : [reviewBoundary]),
+  ];
+}
+
+/** Independent review observes a sealed candidate and can only return a typed verdict. */
+export function effectiveAssignmentWriteScope(input: {
+  readonly stepKind: DerivedWorkflowStep["kind"];
+  readonly graphMutation: DerivedWorkflowStep["graph_mutation"];
+  readonly writePaths: readonly string[];
+  readonly writeNodeIds: readonly string[];
+}): {
+  graphMutation: DerivedWorkflowStep["graph_mutation"];
+  writePaths: string[];
+  writeNodeIds: string[];
+} {
+  if (input.stepKind === "review") {
+    return { graphMutation: "forbidden", writePaths: [], writeNodeIds: [] };
+  }
+  return {
+    graphMutation: input.graphMutation,
+    writePaths: [...input.writePaths],
+    writeNodeIds: [...input.writeNodeIds],
+  };
+}
+
+/** Keep approved proposal selection and its independent review on their distinct stages. */
+export function approvedProposalAttemptInstructions(input: {
+  readonly approved: boolean;
+  readonly proposalStepId: string | undefined;
+  readonly stepId: string;
+  readonly stepKind: DerivedWorkflowStep["kind"];
+  readonly applicationOperations: readonly string[];
+}): string[] {
+  if (!input.approved || input.proposalStepId === undefined) return [];
+  if (input.stepId === input.proposalStepId) {
+    return [
+      "This proposal-selection step is intentionally read-only. Empty graph and repository write scopes, graph_mutation forbidden, and maxNewNodes 0 do not block selecting an authorized changeApplication: this step records the bounded selection, and the separately materialized application ticket performs any approved mutation with its own compiler-derived authority.",
+      "For this approved proposal, submit the exact authorized changeApplication when the request remains unsatisfied. Do not select no-op while the approved request remains unsatisfied; no-op is allowed only when the requested state is already satisfied in the current scoped graph.",
+      ...(input.applicationOperations.length === 0
+        ? []
+        : [
+            `Use changeApplication.operation ${input.applicationOperations.map((operation) => `\"${operation}\"`).join(" or ")}; do not use the proposal operation name as an application operation.`,
+          ]),
+    ];
+  }
+  if (input.stepKind !== "review") return [];
+  return [
+    "This is a pre-application review of the predecessor changeApplication selection. Validate that the selection is exactly bound to the approved request, stays within its control scope, and chooses an authorized application operation. Do not reject the selection merely because the requested state is still unsatisfied: no application ticket can be materialized until this review approves. Do not demand that this read-only proposal ticket produce the requested files or post-application gate verdicts. Approve a correctly bounded selection so the compiler can materialize the separate application ticket; reject only a defect in the selection or its approval binding.",
+  ];
+}
+
+/** Surface append-only post-approval messages without misrepresenting them as revocation. */
+export function approvedProposalAuditSteering(
+  history: NonNullable<TicketExecutionControlRecord["proposalDecisionHistory"]>,
+  approvalSha256: Sha256Digest,
+): string[] {
+  const approvalIndex = history.findIndex((event) => event.sha256 === approvalSha256);
+  if (approvalIndex < 0) return [];
+  return history.slice(approvalIndex + 1).flatMap((event) => {
+    const message = event.message?.trim();
+    return message === undefined || message.length === 0
+      ? []
+      : [`Operator audit-only steering after approval (does not revoke approval): ${message}`];
+  });
+}
+
+/** Preserve the operator's exact correction when a rejected proposal reissues its source. */
+export function rejectedSourceProposalInstructions(
+  run: Pick<RunRecord, "tickets">,
+  sourceTicketId: string,
+): string[] {
+  const rejections = Object.values(run.tickets)
+    .filter((ticket) => {
+      const control = ticket.executionControl;
+      return (
+        control?.proposalRequest?.sourceTicketId === sourceTicketId &&
+        control.proposalDecision?.decision === "rejection" &&
+        control.proposalDisposition?.kind === "rejected"
+      );
+    })
+    .sort((left, right) => {
+      const leftDecision = left.executionControl!.proposalDecision!;
+      const rightDecision = right.executionControl!.proposalDecision!;
+      return (
+        leftDecision.recordedAt.localeCompare(rightDecision.recordedAt) ||
+        compareText(left.id, right.id)
+      );
+    });
+  if (rejections.length === 0) return [];
+  return [
+    ...rejections.map((ticket) => {
+      const control = ticket.executionControl!;
+      const request = control.proposalRequest!;
+      const decision = control.proposalDecision!;
+      return `Operator rejection ${decision.sha256} for prior upstream request ${ticket.id} (${request.requestSha256}): ${decision.message}`;
+    }),
+    "Treat that rejection as binding corrective evidence. Do not repeat the rejected upstream request from older diagnostics unless new compiler-authenticated evidence recorded after the rejection contradicts it; continue the source workflow under the operator's correction.",
+  ];
+}
+
+/** The materialized application inherits every append-only clarification on its source approval. */
+export function approvedApplicationAuditSteering(
+  run: Pick<RunRecord, "tickets">,
+  application: Pick<TicketRecord, "executionControl">,
+): string[] {
+  const sourceProposalTicketId = application.executionControl?.sourceProposalTicketId;
+  if (sourceProposalTicketId === undefined) return [];
+  const sourceControl = run.tickets[sourceProposalTicketId]?.executionControl;
+  const approvalSha256 = sourceControl?.proposalApprovalSha256;
+  if (approvalSha256 === undefined) return [];
+  return approvedProposalAuditSteering(
+    sourceControl?.proposalDecisionHistory ?? [],
+    approvalSha256,
+  );
+}
+
+/** Keep a graph-only application review from duplicating the source workflow's file review. */
+export function approvedApplicationGraphOnlyReviewInstruction(input: {
+  readonly operationRole: CompiledChangeControl["role"];
+  readonly stepKind: DerivedWorkflowStep["kind"];
+  readonly readPaths: readonly string[];
+}): string | undefined {
+  if (
+    input.operationRole !== "application" ||
+    input.stepKind !== "review" ||
+    input.readPaths.length !== 0
+  ) {
+    return undefined;
+  }
+  return [
+    "This is a graph-only application review: judge the exact scoped semantic delta and the ordered cumulative operator steering.",
+    "The source-owning filesystem workflow independently reviews candidate bytes and publishes the compiler-owned asset manifest.",
+    "Past diagnostic prose reports the state observed when it was recorded; it is not proof that inaccessible file bytes remain unchanged after a later source workflow or follow-up audit.",
+    "Do not reject this graph application solely for alleged file contents you have no read grant to inspect, and do not demand duplicate filesystem proof from this control ticket.",
+    "Do reject a graph defect, a missing route to the source-owning workflow, or a current scoped graph state that contradicts the latest cumulative steering.",
+  ].join(" ");
+}
+
+/** A later run-plan ticket may not silently contradict an exact approved argv. */
+export function assertApprovedChangeRuntimeObligations(
+  run: Pick<RunRecord, "tickets">,
+  graph: Pick<TypedGraph, "node">,
+  writableNodeIds: readonly string[],
+): void {
+  const writable = new Set(writableNodeIds);
+  for (const obligation of approvedChangeObligationsForTargets(run, writableNodeIds)) {
+    const gateVerifierPaths = new Set<string>();
+    const entrypoints = obligation.targetNodeIds.flatMap((nodeId) => {
+      const node = graph.node(nodeId);
+      if (node?.type !== "asset") return [];
+      const implementation = optionalRecord(node.spec.implementation);
+      const assetEntrypoints = stringArray(
+        implementation?.entrypoints,
+        `asset ${nodeId} implementation entrypoints`,
+      );
+      const gateContracts = optionalRecord(node.spec.gate_contracts);
+      for (const contractValue of Object.values(gateContracts ?? {})) {
+        const contract = optionalRecord(contractValue);
+        if (!Array.isArray(contract?.argv)) continue;
+        for (const argument of contract.argv) {
+          if (typeof argument === "string" && assetEntrypoints.includes(argument)) {
+            gateVerifierPaths.add(argument);
+          }
+        }
+      }
+      return assetEntrypoints;
+    });
+    const commandPattern = /([A-Za-z0-9][A-Za-z0-9._:-]*)\s*\(command=\[([^\]]*)\]\)/gu;
+    for (const match of obligation.summary.matchAll(commandPattern)) {
+      const nodeId = match[1]!;
+      if (!writable.has(nodeId)) continue;
+      const node = graph.node(nodeId);
+      if (node?.type !== "run") continue;
+      const rawArgv = [...match[2]!.matchAll(/'([^']*)'|"([^"]*)"/gu)].map(
+        (token) => token[1] ?? token[2]!,
+      );
+      if (rawArgv.length === 0) {
+        fail(
+          "approved_change_obligation",
+          `approved change ${obligation.ticketId} carries an unreadable command for ${nodeId}`,
+        );
+      }
+      const expectedArgv = rawArgv.map((argument) => {
+        if (!argument.startsWith(".../")) return argument;
+        const suffix = argument.slice(3);
+        const candidates = [
+          ...new Set(entrypoints.filter((entrypoint) => entrypoint.endsWith(suffix))),
+        ];
+        if (candidates.length !== 1) {
+          fail(
+            "approved_change_obligation",
+            `approved change ${obligation.ticketId} cannot resolve ${argument} to one target asset entrypoint`,
+          );
+        }
+        return candidates[0]!;
+      });
+      const contract = optionalRecord(node.spec.runtime_contract);
+      const command = contract?.command;
+      if (
+        !Array.isArray(command) ||
+        command.some((argument) => typeof argument !== "string" || argument.trim().length === 0)
+      ) {
+        fail(
+          "approved_change_obligation",
+          `run ${nodeId} must carry one nonempty argv for approved change ${obligation.ticketId}`,
+        );
+      }
+      const actualArgv = command as string[];
+      if (
+        actualArgv.length !== expectedArgv.length ||
+        actualArgv.some((argument, index) => argument !== expectedArgv[index])
+      ) {
+        fail(
+          "approved_change_obligation",
+          `run ${nodeId} must retain approved command ${JSON.stringify(expectedArgv)} from ${obligation.ticketId}; received ${JSON.stringify(actualArgv)}`,
+        );
+      }
+      const scientificInputs = Array.isArray(contract?.scientific_inputs)
+        ? contract.scientific_inputs.flatMap((value) => {
+            const input = optionalRecord(value);
+            return typeof input?.path === "string" ? [input] : [];
+          })
+        : [];
+      const scientificInputPaths = new Set(scientificInputs.map((input) => input.path as string));
+      for (const argument of expectedArgv.slice(1)) {
+        if (!argument.includes("/") || argument.startsWith("-")) continue;
+        if (scientificInputPaths.has(argument)) continue;
+        fail(
+          "approved_change_obligation",
+          `run ${nodeId} approved command path ${argument} must remain a scientific input under ${obligation.ticketId}`,
+        );
+      }
+      if (/no change to [^.]*scientific_inputs roles/iu.test(obligation.summary)) {
+        const protocolAdapterRequired = /protocol adapter/iu.test(obligation.summary);
+        for (const argument of expectedArgv.slice(1)) {
+          if (!argument.includes("/") || argument.startsWith("-")) continue;
+          const requiredRole = gateVerifierPaths.has(argument)
+            ? "verifier_contract"
+            : protocolAdapterRequired
+              ? "protocol_adapter"
+              : undefined;
+          if (requiredRole === undefined) continue;
+          const input = scientificInputs.find((candidate) => candidate.path === argument);
+          if (input?.role === requiredRole) continue;
+          fail(
+            "approved_change_obligation",
+            `run ${nodeId} scientific input role for ${argument} must remain ${requiredRole} under ${obligation.ticketId}`,
+          );
+        }
+      }
+    }
+  }
+}
+
+export function shouldAssertApprovedChangeRuntimeObligations(
+  step: Pick<DerivedWorkflowStep, "id" | "graph_mutation">,
+): boolean {
+  return step.id !== "diagnose" && step.graph_mutation !== "forbidden";
+}
+
+export function assertFailedReviewDoesNotContradictApprovedChangeRuntimeObligations(
+  run: Pick<RunRecord, "tickets">,
+  graph: Pick<TypedGraph, "node">,
+  writableNodeIds: readonly string[],
+  blocker: string,
+): void {
+  const obligations = approvedChangeObligationsForTargets(run, writableNodeIds);
+  if (obligations.length === 0) return;
+  try {
+    assertApprovedChangeRuntimeObligations(run, graph, writableNodeIds);
+  } catch {
+    return;
+  }
+  const contradicted = obligations.find(
+    (obligation) =>
+      blocker.includes(obligation.ticketId) ||
+      blocker.includes(obligation.approvedApplicationSha256),
+  );
+  if (contradicted === undefined) return;
+  fail(
+    "approved_change_review_contradiction",
+    `failed review blocker contradicts satisfied approved change ${contradicted.ticketId}; review the current graph and durable obligation`,
+  );
+}
+
+/**
+ * Explain the compiler-owned filesystem acceptance boundary to asset reviewers.
+ *
+ * The manifest in the review graph describes the last accepted predecessor bytes. A later
+ * workflow step may have changed the candidate files legitimately. The review verdict is the
+ * authority that permits `applyReviewEffects` to derive and publish the new manifest, so requiring
+ * that predecessor manifest to match before approval makes the atomic transition impossible.
+ */
+export function implementAssetReviewManifestInstruction(
+  operation: string | undefined,
+  stepKind: string,
+): string | undefined {
+  if (operation !== "implement-asset" || stepKind !== "review") return undefined;
+  return [
+    "Review the current scoped filesystem bytes as the candidate.",
+    "A stale compiler-owned filesystem manifest is expected when an earlier workflow step changed those bytes; do not reject solely because its accepted hash describes predecessor bytes.",
+    "If the current asset satisfies the review contract, approve it: after approval the compiler atomically derives and publishes the current manifest from the reviewed bytes.",
+    "Reject only a defect in the current bytes or authored contract, and never author compiler-owned manifest fields yourself.",
+  ].join(" ");
+}
+
+/** Keep implementation instructions honest about the exact compiled tool inventory. */
+export function implementationWriteGrantInstructions(
+  hasWriteGrant: boolean,
+  validationCheckCount: number,
+): readonly string[] {
+  if (!hasWriteGrant) return [];
+  const implementationBoundary =
+    "This is an implementation attempt with a write grant. Reading alone does not satisfy it. Make the change with koni_write_file/koni_edit_file inside your write grant. Reserve a failed submission for a blocker that survives an actual implementation attempt (missing capability, contradictory contract, grant that cannot express the change), never for difficulty, uncertainty, or investigation you have not yet turned into an edit.";
+  if (validationCheckCount === 0) {
+    return [
+      implementationBoundary,
+      "No configured command proof is available in this attempt, so koni_run_check is intentionally absent. Inspect the exact authored bytes and authenticated causal evidence before submitting; do not treat the absence of an unconfigured check tool as a blocker when the requested file can be authored from that evidence.",
+    ];
+  }
+  return [
+    `${implementationBoundary} Run the configured proof with koni_run_check before you submit.`,
+    "If the configured proof fails, that is normal iteration, not a blocker: read the failure, fix the edit, and run it again. Keep iterating until it passes or you have proven the objective is impossible within the grant. Do not stop after a single failing check.",
+  ];
+}
+
+/** Keep recurring gate-provider repair attempts causal instead of merely descriptive. */
+export function gateRepairInstruction(evidenceCount: number): string | undefined {
+  if (evidenceCount === 0) return undefined;
+  return [
+    "Compiler-authenticated gateRepairEvidence is attached because current accepted gate receipts are nonpassing and this causal repair attempt was opened or reopened.",
+    "expected_red describes an allowed initial check state; it does not make a current nonpassing receipt sufficient for downstream execution.",
+    "Treat every attached diagnostic as an active repair obligation.",
+    "Do not submit a no-op merely because files and manifests are current.",
+    "Changing diagnostic wording, labels, or cause categories does not repair an unchanged nonpassing condition.",
+    "Materially repair the cause within this grant; when the cause is outside this grant, raise the smallest upstream change request in this attempt instead of editing only its description.",
+    "The application write scope is exactly its targetNodeIds. For a missing causal asset artifact, target the existing source-owning asset node or nodes visible in this attempt's causal scope, not merely the gate nodes that report the symptom.",
+    "The attached commands[].result measurements are authenticated causal outputs. When they contain the exact regenerated hashes, paths, or other values required by the missing source artifact, use those exact values instead of demanding another execution of work the receipt already proves.",
+    'An upstream change request is a successful handoff: submit it with status "completed", never status "failed".',
+  ].join(" ");
+}
+
+/** Keep compatibility-scoped source repair causal when historical obligations describe pre-failure state. */
+export function standaloneSupportRunAssetRepairInstruction(ruleId: string): string | undefined {
+  if (ruleId !== "compiler.compatibility.standalone-support-run-asset-repair-scope") {
+    return undefined;
+  }
+  return [
+    "This compatibility ticket exists because a later compiler-authenticated standalone runtime failure supersedes older statements that the asset was already current, that only execution was missing, or that no source edit was requested.",
+    "Do not use those pre-failure descriptions or an unchanged manifest as evidence that this repair can be a no-op.",
+    "Preserve the authored thresholds, behavior scope, and output contract, but improve the source implementation that produces the failed measurements—for example its training procedure, optimizer, initialization, or other bounded implementation detail inside this write grant.",
+    "The downstream standalone runtime rerun supplies validation after integration; the intentional absence of koni_run_check in this source-only attempt does not make a material source repair forbidden or unverifiable.",
+  ].join(" ");
+}
+
+/** Keep a failed post-repair gate recheck moving toward the first writable cause. */
+export function repairedProviderGateRecheckInstruction(
+  operationRegistryId: string | undefined,
+  sourceStateKey: string | undefined,
+  stepId: string,
+): string | undefined {
+  if (
+    operationRegistryId !== "gates.gate.run-gate" ||
+    sourceStateKey !== "direct-scientific-gate-blocked-after-provider-repair" ||
+    stepId !== "analyze"
+  ) {
+    return undefined;
+  }
+  return [
+    "This is a compiler-created recheck after the selected gate provider completed repair.",
+    "If the current accepted receipt passes, interpret it normally.",
+    "If it remains nonpassing, diagnose the first unmet causal precondition; expected_red does not settle the current readiness obligation.",
+    "Do not stop at receipt interpretation or another observation.",
+    "Repair the cause within this grant, or when the cause is outside this grant, raise the smallest upstream change request in this attempt.",
+  ].join(" ");
+}
+
 function ticketAttempt(
   run: RunRecord,
   definition: DerivedTicketDefinition,
@@ -6328,6 +7774,7 @@ function ticketAttempt(
   predecessorExecution?: Record<string, unknown>,
   reviewCandidateNodeIds: readonly string[] = [],
   historicalPreparation?: Record<string, unknown>,
+  gateRepairEvidence: readonly CurrentNonpassingGateRepairEvidence[] = [],
 ): AttemptDescriptor {
   const semantic = resolveDefinitionExecutionBindings(executionCatalog, definition);
   const executionPolicyBinding = semantic.steps.get(step.id);
@@ -6336,6 +7783,21 @@ function ticketAttempt(
   }
   const durableTicket = run.tickets[definition.id] as SemanticTicketRecord | undefined;
   const durableStep = durableTicket?.steps.find((candidate) => candidate.id === step.id);
+  const activeReviewRework =
+    durableTicket !== undefined && reviewReworkCoversStep(durableTicket, step.id)
+      ? durableTicket.reviewReworks?.at(-1)
+      : undefined;
+  const ticketOwnedNodeIds =
+    durableTicket === undefined ? [] : ticketCreatedNodeIds(run, durableTicket, graph);
+  const terminalRecovery = durableTicket?.executionControl?.terminalRecovery;
+  const terminalRecoveryContext =
+    terminalRecovery === undefined
+      ? undefined
+      : {
+          sourceTicketId: terminalRecovery.sourceTicketId,
+          failureBindingSha256s: [...terminalRecovery.failureBindingSha256s],
+          sourceFailureProof: structuredClone(terminalRecovery.sourceFailureProof),
+        };
   const compatibility: string[] = [];
   if (durableTicket?.executionPolicyBinding === undefined)
     compatibility.push("ticket_binding_rederived_from_pinned_configuration");
@@ -6364,6 +7826,15 @@ function ticketAttempt(
         ...(step.write_node_ids ?? definition.scope.write_node_ids),
       ]),
     ],
+    // The gates this ticket is actually accountable for. Read scope routinely also contains
+    // sibling gates on the same asset, and binding those makes two contexts declare the same
+    // auto-evaluate check id, which the step's unqualified `validation_checks` entry cannot name.
+    ownedNodeIds: [
+      ...new Set([
+        ...definition.target_node_ids,
+        ...(step.write_node_ids ?? definition.scope.write_node_ids),
+      ]),
+    ],
     contexts: gatePolicyContexts,
   });
   const legacyDeliveryReview =
@@ -6375,14 +7846,27 @@ function ticketAttempt(
       ...boundGateContexts.flatMap((binding) => binding.readPaths),
     ]),
   ].sort(compareText);
-  const writePaths = [...(step.write_paths ?? definition.scope.write_paths)];
+  const configuredWritePaths = [...(step.write_paths ?? definition.scope.write_paths)];
   const readNodeIds = [
     ...new Set([
       ...(step.read_node_ids ?? definition.scope.read_node_ids),
+      ...ticketOwnedNodeIds,
       ...(step.kind === "review" ? reviewCandidateNodeIds : []),
     ]),
   ].sort(compareText);
-  const writeNodeIds = [...(step.write_node_ids ?? definition.scope.write_node_ids)];
+  const configuredWriteNodeIds = [
+    ...new Set([
+      ...(step.write_node_ids ?? definition.scope.write_node_ids),
+      ...(step.graph_mutation === "forbidden" ? [] : ticketOwnedNodeIds),
+    ]),
+  ].sort(compareText);
+  const effectiveWriteScope = effectiveAssignmentWriteScope({
+    stepKind: step.kind,
+    graphMutation: step.graph_mutation,
+    writePaths: configuredWritePaths,
+    writeNodeIds: configuredWriteNodeIds,
+  });
+  const { graphMutation, writePaths, writeNodeIds } = effectiveWriteScope;
   const contextNodes = graph
     .nodes()
     .filter((node) => new Set([...readNodeIds, ...writeNodeIds]).has(node.id))
@@ -6390,20 +7874,6 @@ function ticketAttempt(
   const mutationContract = assignmentMutationContract(configuration, definition);
   const compilerOwnedFields = assignmentCompilerOwnedFields(configuration, definition);
   const predecessorHasCommandEvidence = reviewPredecessorHasCommandEvidence(predecessorExecution);
-  const reviewRework = durableTicket?.reviewReworks?.at(-1);
-  const reopenIndex =
-    definition.review_failure_reopen_from === undefined
-      ? -1
-      : definition.workflow.findIndex(
-          (candidate) => candidate.id === definition.review_failure_reopen_from,
-        );
-  const stepIndex = definition.workflow.findIndex((candidate) => candidate.id === step.id);
-  const activeReviewRework =
-    reviewRework?.scope === "review_only" && step.kind === "review"
-      ? reviewRework
-      : reviewRework !== undefined && reopenIndex >= 0 && stepIndex >= reopenIndex
-        ? reviewRework
-        : undefined;
   const proposalControl = durableTicket?.executionControl;
   const proposalApproval =
     proposalControl?.proposalDecision?.decision === "approval" &&
@@ -6420,11 +7890,56 @@ function ticketAttempt(
     proposalOperation?.changeControl.role === "proposal"
       ? proposalOperation.changeControl.applicationOperations
       : [];
+  const proposalAttemptInstructions = approvedProposalAttemptInstructions({
+    approved: proposalApproval !== undefined,
+    proposalStepId:
+      proposalOperation?.changeControl.role === "proposal"
+        ? proposalOperation.changeControl.proposalStep
+        : undefined,
+    stepId: step.id,
+    stepKind: step.kind,
+    applicationOperations: proposalApplicationOperations,
+  });
+  const proposalAuditSteering =
+    proposalApproval === undefined
+      ? []
+      : approvedProposalAuditSteering(
+          proposalControl?.proposalDecisionHistory ?? [],
+          proposalApproval.approvalSha256,
+        );
   const approvedApplicationProposal =
     proposalOperation?.changeControl.role === "application" &&
     durableTicket?.executionControl?.sourceProposalTicketId !== undefined
       ? run.tickets[durableTicket.executionControl.sourceProposalTicketId]
       : undefined;
+  const applicationAuditSteering =
+    approvedApplicationProposal === undefined || durableTicket === undefined
+      ? []
+      : approvedApplicationAuditSteering(run, durableTicket);
+  const applicationGraphOnlyReviewInstruction = approvedApplicationGraphOnlyReviewInstruction({
+    operationRole: proposalOperation?.changeControl.role ?? "ordinary",
+    stepKind: step.kind,
+    readPaths,
+  });
+  const approvedChangeObligations = approvedChangeObligationsForAttempt(
+    run,
+    definition.target_node_ids,
+    proposalOperation?.changeControl.role ?? "ordinary",
+  );
+  const assetManifestReviewInstruction = implementAssetReviewManifestInstruction(
+    definition.operation,
+    step.kind,
+  );
+  const gateRepairPrompt = gateRepairInstruction(gateRepairEvidence.length);
+  const standaloneSupportRunAssetRepairPrompt = standaloneSupportRunAssetRepairInstruction(
+    definition.rule_id,
+  );
+  const repairedProviderGateRecheckPrompt = repairedProviderGateRecheckInstruction(
+    definition.operation_registry_id,
+    definition.source_state_key,
+    step.id,
+  );
+  const rejectedSourceProposalPrompts = rejectedSourceProposalInstructions(run, definition.id);
   if (
     executionCatalog.operations[definition.operation_registry_id]?.changeControl.role ===
       "proposal" &&
@@ -6444,14 +7959,17 @@ function ticketAttempt(
     writePaths,
     readNodeIds,
     writeNodeIds,
-    graphMutation: step.graph_mutation,
+    graphMutation,
     initialPrompt: [
       `Execute ${definition.title}.`,
       `Current step: ${step.id}.`,
+      `Graph write-authority nodes for this exact step: ${writeNodeIds.length === 0 ? "none" : writeNodeIds.join(", ")}. Every other graph node in context is read-only: never upsert or delete it. A referenced asset that needs a contract or source change requires the configured upstream-change route; visibility is not mutation authority.`,
+      `Repository write-authority paths for this exact step: ${writePaths.length === 0 ? "none" : writePaths.join(", ")}. Never create, edit, or promise a file outside these paths.`,
       ...(step.validation_checks.length === 0
         ? []
         : [
             `Current-step validation checks (the only check IDs authorized in this attempt): ${step.validation_checks.join(", ")}. Do not call checks listed on earlier or later workflow steps.`,
+            'A required configured check whose result is rejected cannot satisfy this assignment. Do not submit status "completed" after any required check returns accepted: false. Submit status "failed" with the exact check blocker unless you materially repair the cause and rerun that check successfully in this attempt.',
           ]),
       ...(executionPolicyBinding.context.outputContract.text.length === 0
         ? []
@@ -6459,6 +7977,7 @@ function ticketAttempt(
       ...(step.kind !== "review" || executionPolicyBinding.context.reviewContract.text.length === 0
         ? []
         : [`Independent review contract: ${executionPolicyBinding.context.reviewContract.text}`]),
+      ...(assetManifestReviewInstruction === undefined ? [] : [assetManifestReviewInstruction]),
       ...(step.kind !== "review" || predecessorExecution === undefined
         ? []
         : predecessorHasCommandEvidence
@@ -6468,6 +7987,11 @@ function ticketAttempt(
           : [
               "The compiler-authenticated predecessorExecution for this review contains no direct command evidence because the preceding step is graph-only. Judge exactly the configured review contract and compiler-authenticated graph/evidence closure; do not demand raw stdout/stderr or unrelated checks that this operation does not require.",
             ]),
+      ...(step.kind === "review" || predecessorExecution === undefined
+        ? []
+        : [
+            "The compiler-authenticated predecessorExecution is the exact accepted evidence from this step's causal predecessors. Use its structured outputs and command results directly. Do not infer that a receipt is absent from graph reachability: predecessor graph effects may not be integrated until this workflow's later integration boundary. Never raise a repair request that contradicts a passing predecessor receipt.",
+          ]),
       ...(step.kind !== "review" || historicalPreparation === undefined
         ? []
         : [
@@ -6485,6 +8009,12 @@ function ticketAttempt(
       ...(step.expected_outputs.length === 0
         ? []
         : [`Expected result: ${step.expected_outputs.join("; ")}`]),
+      ...(terminalRecoveryContext === undefined
+        ? []
+        : [
+            `The compiler-authenticated terminal recovery proof is the exact source failure this resolver must address. Source ticket ${terminalRecoveryContext.sourceTicketId} failed with: ${terminalRecoveryContext.sourceFailureProof.semanticResult.blocker}`,
+            "Treat that immutable semantic result as current causal evidence. A clean worktree or absent output proves only that the failed attempt left no side effects; it does not make the recorded failure transient. Do not reissue the unchanged source contract unless the proof establishes retryability or the cause has since been materially repaired. Resolve the proved cause within this grant when possible; otherwise return a precise blocker instead of approving a deterministic no-op retry.",
+          ]),
       ...(activeReviewRework === undefined
         ? []
         : [
@@ -6500,29 +8030,59 @@ function ticketAttempt(
                 ]),
             "This is a fresh attempt. Any koni_submit_output call or accepted terminal result in the inherited parent transcript belongs only to that parent and does not settle this attempt. Finish this attempt with a newly accepted koni_submit_output call, even when the correct graph delta is empty or repeats the parent's candidate.",
           ]),
+      ...(proposalOperation?.changeControl.role === "ordinary" &&
+      proposalOperation.changeControl.allowUpstreamRequests
+        ? [
+            'This step has an explicit upstream-change route. If satisfying the contract requires changing a read-only asset or another node outside this step\'s write authority, do not fabricate an inline substitute, weaken the contract, or upsert that node. Submit status "completed" with summary and upstreamChangeRequest, and omit graphDelta. Exact shape: {"status":"completed","summary":"...","upstreamChangeRequest":{"targetNodeIds":["the-existing-causal-node-id"],"fulfillment":"planned_asset_repair","summary":"...","reason":"..."}}.',
+            'Use fulfillment "planned_asset_repair" only when the existing asset implementation workflow can satisfy the whole request by editing that asset\'s authored source files or contracts. Use "dynamic_scope_change" when fulfillment needs a new run or node, runtime execution/output, or authority beyond the existing asset source grant.',
+          ]
+        : []),
+      ...rejectedSourceProposalPrompts,
       ...(proposalApproval === undefined
         ? []
         : [
             `Operator approval (${proposalApproval.approvalSha256}): ${proposalApproval.event.message ?? "Approved."}`,
-            "For this approved proposal, submit the exact authorized changeApplication when the request remains unsatisfied. Do not select no-op while the approved request remains unsatisfied; no-op is allowed only when the requested state is already satisfied in the current scoped graph.",
-            ...(proposalApplicationOperations.length === 0
-              ? []
-              : [
-                  `Use changeApplication.operation ${proposalApplicationOperations.map((operation) => `\"${operation}\"`).join(" or ")}; do not use the proposal operation name as an application operation.`,
-                ]),
+            ...proposalAuditSteering,
+            ...proposalAttemptInstructions,
           ]),
       ...(approvedApplicationProposal === undefined
         ? []
         : [
-            `The approved change request defines the required state for this application: ${approvedApplicationProposal.summary}\n\nAuthorized target nodes: ${approvedApplicationProposal.targetNodeIds.join(", ")}.`,
+            `The approved change request defines the required state for this application: ${approvedApplicationProposal.summary}\n\nApplication graph write-authority nodes: ${definition.target_node_ids.join(", ")}. Request context may name causal nodes outside this application authority; treat those nodes as context only and never as an instruction to mutate them.`,
+            ...applicationAuditSteering,
+            ...(applicationAuditSteering.length === 0
+              ? []
+              : [
+                  "The source approval remains hash-bound, and its later audit-only steering is cumulative binding interpretation for this application. Obey those clarifications in every application and review step; do not revive an explicitly excluded node, contract key, path, or mechanism from the earlier request wording.",
+                ]),
+            ...(applicationGraphOnlyReviewInstruction === undefined
+              ? []
+              : [applicationGraphOnlyReviewInstruction]),
+            "The approved request together with its cumulative operator steering is the complete obligation for this application. Historical durable obligations are additive constraints: they may preserve earlier accepted state, but they never narrow, replace, or excuse any target or outcome that remains required after those operator clarifications. Review and apply that clarified request in full.",
             "Apply a non-empty scoped semantic graph delta that makes that request true unless the current scoped graph already satisfies it. A prior proposal-selection summary may describe its read-only proposal boundary; it is not an instruction to replay an empty delta. Do not treat an unsatisfied request as a no-op.",
+            ...(step.id !== "apply-approved-delta"
+              ? []
+              : [
+                  "This application step is graph-only and does not write repository files directly. When the approved request adds a required file under an existing asset implementation root, update the asset's authored implementation_plan.files within the exact graph write grant, while preserving its other authored fields and omitting compiler-owned asset_manifest, readiness, and status. That contract change lets the compiler reissue the source-owning implement-asset workflow with its bounded filesystem grant.",
+                  "An approved request can explicitly authorize a bounded new node even though that node has no preexisting id to list in the application graph write-authority nodes. When the request requires one, create it only within this operation's allowed new-node types and count; unapproved-new-node-creation forbids only a new node that the approved request does not require.",
+                ]),
           ]),
+      ...approvedChangeObligations.flatMap((obligation) =>
+        approvedChangeObligationInstructions(obligation, step.kind),
+      ),
+      ...(gateRepairPrompt === undefined ? [] : [gateRepairPrompt]),
+      ...(standaloneSupportRunAssetRepairPrompt === undefined
+        ? []
+        : [standaloneSupportRunAssetRepairPrompt]),
+      ...(repairedProviderGateRecheckPrompt === undefined
+        ? []
+        : [repairedProviderGateRecheckPrompt]),
       ...(compilerOwnedFields.length === 0
         ? []
         : [
             `Compiler-owned graph fields are materialized automatically. Omit these fields entirely from every node you author; never guess or copy them from context: ${compilerOwnedFields.join(", ")}.`,
           ]),
-      ...(step.graph_mutation === "allowed"
+      ...(graphMutation === "allowed"
         ? [
             "For each existing node upsert, use that node's exact nodeHash from the injected context as expectedNodeHash. Never guess or derive a node hash; if it is absent, use koni_graph_context before submitting.",
           ]
@@ -6558,6 +8118,11 @@ function ticketAttempt(
       ...(compatibility.length === 0 ? {} : { executionPolicyCompatibility: compatibility }),
       ...(activeReviewRework === undefined ? {} : { reviewRework: activeReviewRework }),
       ...(proposalApproval === undefined ? {} : { proposalApproval }),
+      ...(terminalRecoveryContext === undefined
+        ? {}
+        : { terminalRecovery: terminalRecoveryContext }),
+      ...(approvedChangeObligations.length === 0 ? {} : { approvedChangeObligations }),
+      ...(gateRepairEvidence.length === 0 ? {} : { gateRepairEvidence }),
       ...(predecessorExecution === undefined ? {} : { predecessorExecution }),
       ...(historicalPreparation === undefined ? {} : { historicalPreparation }),
       mutationContract,
@@ -6566,7 +8131,7 @@ function ticketAttempt(
       scope: { readPaths, writePaths, readNodeIds, writeNodeIds },
     },
     terminalSchema: assignmentTerminalSchema(
-      step.graph_mutation,
+      graphMutation,
       assignmentChangeControlContract(executionCatalog, executionPolicyBinding, step.id),
       step.kind,
     ),
@@ -6642,7 +8207,7 @@ interface ControlTicketRecordInput {
   definition: DerivedTicketDefinition;
   catalog: CompiledExecutionSemanticCatalog;
   at: string;
-  status: "proposed" | "ready";
+  status: "proposed" | "queued";
   summary: string;
   dependencyIds: readonly string[];
   executionControl: TicketExecutionControlRecord;
@@ -6851,7 +8416,7 @@ function configuredControlTicketDefinition(
           return deepFreeze({
             id,
             kind: kind as DerivedWorkflowStep["kind"],
-            persona_id: requiredNonempty(step.persona, `workflow ${workflowId} step ${id} persona`),
+            persona_id: requiredNonempty(step.agent, `workflow ${workflowId} step ${id} agent`),
             depends_on: Object.freeze(dependsOn),
             required: true,
             ...(differsReadNodes ? { read_node_ids: Object.freeze(stepReadNodeIds) } : {}),
@@ -7420,8 +8985,24 @@ function assertControlTicketTemplate(
   existing: TicketRecord,
   expected: TicketRecord,
   label: string,
-  options: { allowFailureHashExtension?: boolean } = {},
+  options: {
+    allowFailureHashExtension?: boolean;
+    allowPristineCompilerCancellation?: boolean;
+  } = {},
 ): void {
+  const existingTicket = structuredClone(existing);
+  if (
+    options.allowPristineCompilerCancellation === true &&
+    existingTicket.status === "cancelled" &&
+    existingTicket.blocker === COMPILER_SUPERSEDED_BEFORE_EXECUTION &&
+    existingTicket.gitCycleId === undefined &&
+    existingTicket.worktreePath === undefined &&
+    existingTicket.branch === undefined &&
+    existingTicket.steps.length > 0 &&
+    existingTicket.steps.every((step) => step.status === "skipped" && step.attemptIds.length === 0)
+  ) {
+    existingTicket.status = expected.status;
+  }
   const existingControl = structuredClone(existing.executionControl);
   const expectedControl = structuredClone(expected.executionControl);
   if (options.allowFailureHashExtension) {
@@ -7472,7 +9053,7 @@ function assertControlTicketTemplate(
     reviewReworkLimit: ticket.reviewReworkLimit ?? null,
   });
   if (
-    canonicalHash(immutable(existing, existingControl)) !==
+    canonicalHash(immutable(existingTicket, existingControl)) !==
     canonicalHash(immutable(expected, expectedControl))
   ) {
     fail(
@@ -7541,56 +9122,25 @@ function integrationDefinition(
   run: RunRecord,
   assignment: ReadyAssignment,
   configuration: CompiledConfiguration,
+  graph: TypedGraph,
 ): DerivedTicketDefinition {
   const ticket = run.tickets[assignment.ticketId];
-  if (
-    ticket === undefined ||
-    ticket.operationId !== integrationOperation(configuration, run.runTypeId)
-  ) {
+  const catalog = requireExecutionSemanticCatalog(configuration);
+  const operationId = integrationOperation(configuration, run.runTypeId);
+  if (ticket === undefined || ticket.operationId !== operationId) {
     fail(
       "ticket_definition_missing",
       `ticket ${assignment.ticketId} has no pinned compiler definition`,
     );
   }
-  const material = {
-    protocol: "koni.derived-ticket.v1" as const,
+  return configuredIntegrationTicketDefinition({
+    configuration,
+    catalog,
+    graph,
     id: ticket.id,
-    rule_id: "compiler.target-integration",
-    rule_phase: "promotion",
-    rule_priority: 1_000,
-    anchor_node_id: "target-ref",
-    operation: ticket.operationId,
-    operation_registry_id: ticket.operationId,
-    operation_dispatch_priority: 1_000,
-    ranking_hints: ["target-conflict"],
+    operationId,
     title: ticket.title,
-    target_node_ids: [],
-    scope: { read_node_ids: [], write_node_ids: [], read_paths: ["."], write_paths: ["."] },
-    source_state_key: "target-conflicted",
-    target_state_key: "target-integrated",
-    obligation_keys: ["target.integration"],
-    workflow_id: "target-integration",
-    workflow: [
-      {
-        id: assignment.stepId,
-        kind: "integration" as const,
-        persona_id: assignment.personaId,
-        depends_on: [],
-        required: true,
-        read_paths: ["."],
-        write_paths: ["."],
-        expected_outputs: ["Conflict-free preservation of both target and run behavior"],
-        graph_mutation: "forbidden" as const,
-        required_receipts: [],
-        escalation_triggers: [],
-        stop_conditions: [],
-        validation_checks: [],
-        context_sha256: canonicalHash([ticket.id, assignment.stepId, run.compiledConfigHash]),
-      },
-    ],
-    configuration_sha256: configuration.configuration_sha256,
-  };
-  return deepFreeze({ ...material, definition_sha256: canonicalHash(material) });
+  });
 }
 
 function integrationOperation(configuration: CompiledConfiguration, runTypeId: string): string {
@@ -7599,10 +9149,56 @@ function integrationOperation(configuration: CompiledConfiguration, runTypeId: s
     "run_type_invalid",
     "run type disappeared",
   );
-  return (
+  return resolveConfiguredOperationReference(
+    requireExecutionSemanticCatalog(configuration),
     optionalString(optionalRecord(runType.document.promotion)?.conflict_operation) ??
-    "resolve-target-integration"
+      "resolve-target-integration",
   );
+}
+
+export function resolveConfiguredOperationReference(
+  catalog: CompiledExecutionSemanticCatalog,
+  reference: string,
+): string {
+  if (catalog.operations[reference] !== undefined) return reference;
+  const matches = Object.values(catalog.operations).filter(
+    (candidate) => candidate.publicOperation === reference,
+  );
+  if (matches.length !== 1) {
+    fail(
+      "operation_reference",
+      `configured operation reference ${reference} does not uniquely resolve to one pinned registry operation`,
+    );
+  }
+  return matches[0]!.id;
+}
+
+function configuredIntegrationTicketDefinition(input: {
+  configuration: CompiledConfiguration;
+  catalog: CompiledExecutionSemanticCatalog;
+  graph: TypedGraph;
+  id: string;
+  operationId: string;
+  title: string;
+}): DerivedTicketDefinition {
+  return configuredControlTicketDefinition({
+    configuration: input.configuration,
+    catalog: input.catalog,
+    graph: input.graph,
+    id: input.id,
+    operationId: input.operationId,
+    title: input.title,
+    targetNodeIds: [],
+    readNodeIds: [],
+    writeNodeIds: [],
+    readPaths: ["."],
+    writePaths: ["."],
+    sourceStateKey: "target-conflicted",
+    targetStateKey: "target-integrated",
+    obligationKeys: ["target.integration"],
+    forceGraphMutationForbidden: true,
+    ruleId: "compiler.target-integration",
+  });
 }
 
 function planningTerminalSchema(graphSeed: TSchema): TSchema {
@@ -7633,9 +9229,116 @@ function planningTerminalSchema(graphSeed: TSchema): TSchema {
   );
 }
 
+function planningPatchTerminalSchema(): TSchema {
+  const miniItem = Type.Object(
+    {
+      title: Type.String({ minLength: 1, maxLength: 160 }),
+      description: Type.String({ minLength: 1, maxLength: 1_200 }),
+    },
+    { additionalProperties: false },
+  );
+  const full = Type.Object(
+    Object.fromEntries(
+      PLAN_DOMAINS.map((domain) => [
+        domain,
+        Type.Optional(Type.String({ minLength: 1, maxLength: MAX_PLAN_CHARS })),
+      ]),
+    ),
+    { additionalProperties: false, minProperties: 1 },
+  );
+  const concise = Type.Object(
+    Object.fromEntries(
+      PLAN_DOMAINS.map((domain) => [
+        domain,
+        Type.Optional(Type.Array(miniItem, { minItems: 1, maxItems: 7 })),
+      ]),
+    ),
+    { additionalProperties: false, minProperties: 1 },
+  );
+  const edge = Type.Object(
+    {
+      source: Type.String({ minLength: 1, maxLength: 128 }),
+      relation: Type.String({ minLength: 1, maxLength: 128 }),
+      target: Type.String({ minLength: 1, maxLength: 128 }),
+    },
+    { additionalProperties: false },
+  );
+  const node = Type.Object(
+    {
+      key: Type.String({ minLength: 1, maxLength: 128 }),
+      type: Type.String({ minLength: 1, maxLength: 128 }),
+      title: Type.String({ minLength: 1, maxLength: 240 }),
+      spec: Type.Record(Type.String({ minLength: 1, maxLength: 256 }), Type.Unknown()),
+    },
+    { additionalProperties: false },
+  );
+  const graphSeed = Type.Object(
+    {
+      setRootSpec: Type.Optional(
+        Type.Record(Type.String({ minLength: 1, maxLength: 256 }), Type.Unknown()),
+      ),
+      removeRootSpecFields: Type.Optional(
+        Type.Array(Type.String({ minLength: 1, maxLength: 256 }), {
+          maxItems: 1_024,
+          uniqueItems: true,
+        }),
+      ),
+      upsertNodes: Type.Optional(Type.Array(node, { maxItems: 1_024 })),
+      removeNodeKeys: Type.Optional(
+        Type.Array(Type.String({ minLength: 1, maxLength: 128 }), {
+          maxItems: 1_024,
+          uniqueItems: true,
+        }),
+      ),
+      addEdges: Type.Optional(Type.Array(edge, { maxItems: 4_096 })),
+      removeEdges: Type.Optional(Type.Array(edge, { maxItems: 4_096 })),
+    },
+    { additionalProperties: false, minProperties: 1 },
+  );
+  return Type.Object(
+    {
+      baseRevision: Type.Integer({ minimum: 0 }),
+      baseArtifactSha256: Type.String({ pattern: "^sha256:[0-9a-f]{64}$" }),
+      title: Type.Optional(Type.String({ minLength: 3, maxLength: 60 })),
+      full: Type.Optional(full),
+      concise: Type.Optional(concise),
+      graphSeed: Type.Optional(graphSeed),
+    },
+    { additionalProperties: false, minProperties: 3 },
+  );
+}
+
 interface PlanningGraphSeedContract {
   schema: TSchema;
   context: JsonValue;
+}
+
+function planningProtectedRootSpecFields(configuration: CompiledConfiguration): string[] {
+  const initialization = configuration.behavior.profile.initialization;
+  const rootType = requiredNonempty(
+    initialization.rootNodeType,
+    "compiled initialization root node type",
+  );
+  const definition = requireValidation(
+    projectGraphSchemaDefinition(configuration),
+    "graph_schema_invalid",
+    "compiled profile graph schema is invalid",
+  );
+  const rootDefinition = definition.nodeTypes.find((nodeType) => nodeType.id === rootType);
+  if (rootDefinition === undefined) {
+    fail("graph_seed_root_type", `unknown root node type ${rootType}`);
+  }
+  return [
+    requiredNonempty(initialization.goalField, "compiled initialization goal field").replace(
+      /^spec\./u,
+      "",
+    ),
+    requiredNonempty(
+      initialization.planningContextField,
+      "compiled initialization planning context field",
+    ).replace(/^spec\./u, ""),
+    ...compilerOwnedSpecFields(rootDefinition),
+  ];
 }
 
 function leadJudgmentTerminalSchema(): TSchema {
@@ -8200,6 +9903,13 @@ function assignmentTerminalSchema(
                 maxItems: 1_024,
                 uniqueItems: true,
               }),
+              fulfillment: Type.Union(
+                [Type.Literal("planned_asset_repair"), Type.Literal("dynamic_scope_change")],
+                {
+                  description:
+                    'Use "planned_asset_repair" only when the existing asset implementation workflow can satisfy the entire request by editing its authored source files/contracts. Use "dynamic_scope_change" when fulfillment requires execution, a runtime artifact/output root, a new run or other node, or authority beyond that asset\'s source write grant.',
+                },
+              ),
               summary: Type.String({ minLength: 1, maxLength: 1_024 }),
               reason: Type.String({ minLength: 1, maxLength: 4_096 }),
             },
@@ -8247,6 +9957,14 @@ function assignmentTerminalSchema(
             }),
           }
         : {}),
+      summary: Type.Optional(
+        Type.String({
+          minLength: 1,
+          maxLength: 1_024,
+          description:
+            "Optional concise outcome summary. The blocker remains the complete repair diagnosis.",
+        }),
+      ),
       blocker: Type.String({
         minLength: 1,
         maxLength: 64 * 1024,
@@ -8271,121 +9989,20 @@ function edgeSchema(): TSchema {
 }
 
 function parsePlanningOutput(value: unknown): PlanningOutput {
-  const root = requiredRecord(value, "planning output");
-  assertAllowedFields(root, ["full", "concise", "graphSeed", "title"], "planning output");
-  for (const key of ["full", "concise", "graphSeed"] as const) {
-    if (!Object.hasOwn(root, key)) fail("missing_field", `planning output is missing ${key}`);
-  }
-  const title =
-    root.title === undefined
-      ? undefined
-      : boundedText(root.title, "plan title", 60).replace(/\s+/gu, " ").trim();
-  if (title !== undefined && title.length < 3)
-    fail("plan_title", "plan title must be at least 3 characters");
-  const full = parsePlanTextRecord(requiredRecord(root.full, "full plans"), "full plans");
-  const conciseSource = requiredRecord(root.concise, "concise plans");
-  assertExactFields(conciseSource, PLAN_DOMAINS, "concise plans");
-  const concise = Object.create(null) as Record<
-    PlanDomain,
-    { title: string; description: string }[]
-  >;
-  for (const domain of PLAN_DOMAINS) {
-    const raw = conciseSource[domain];
-    if (!Array.isArray(raw) || raw.length < 1 || raw.length > 7)
-      fail("plan_concise_items", `${domain} requires one to seven concise items`);
-    const titles = new Set<string>();
-    concise[domain] = raw.map((item, index) => {
-      const record = requiredRecord(item, `${domain} concise item ${index}`);
-      assertExactFields(record, ["title", "description"], `${domain} concise item ${index}`);
-      const title = boundedText(record.title, `${domain} concise title`, 160).trim();
-      const description = boundedText(
-        record.description,
-        `${domain} concise description`,
-        1_200,
-      ).trim();
-      const key = title.toLocaleLowerCase("en-US");
-      if (titles.has(key))
-        fail("plan_concise_duplicate", `${domain} contains duplicate concise title ${title}`);
-      titles.add(key);
-      return { title, description };
-    });
-  }
-  return {
-    ...(title === undefined ? {} : { title }),
-    full,
-    concise,
-    graphSeed: parsePlanningSeed(root.graphSeed),
-  };
-}
-
-function parsePlanTextRecord(value: unknown, label: string): Record<PlanDomain, string> {
-  const root = requiredRecord(value, label);
-  assertExactFields(root, PLAN_DOMAINS, label);
-  const output = Object.create(null) as Record<PlanDomain, string>;
-  let total = 0;
-  for (const domain of PLAN_DOMAINS) {
-    const text = boundedText(root[domain], `${label}.${domain}`, MAX_PLAN_CHARS).trim();
-    total += text.length;
-    output[domain] = text;
-  }
-  if (total > 4 * MAX_PLAN_CHARS)
-    fail("plan_size", "combined full plans exceed their bounded allowance");
-  return output;
+  return planningArtifactBoundary(() => parsePlanningArtifact(value));
 }
 
 function parsePlanningSeed(value: unknown): PlanningGraphSeed {
-  const root = requiredRecord(value, "graph seed");
-  assertExactFields(root, ["rootSpec", "nodes", "edges"], "graph seed");
-  const rootSpec = jsonRecord(root.rootSpec, "graph seed rootSpec");
-  if (!Array.isArray(root.nodes) || root.nodes.length > 1_024)
-    fail("graph_seed_nodes", "graph seed nodes are invalid or oversized");
-  if (!Array.isArray(root.edges) || root.edges.length > 4_096)
-    fail("graph_seed_edges", "graph seed edges are invalid or oversized");
-  const keys = new Set<string>();
-  const nodes = root.nodes.map((item, index) => {
-    const node = requiredRecord(item, `graph seed node ${index}`);
-    assertExactFields(node, ["key", "type", "title", "spec"], `graph seed node ${index}`);
-    const key = requiredNonempty(node.key, "graph seed node key");
-    if (!SAFE_LOCAL_KEY.test(key) || key === "$root" || keys.has(key))
-      fail("graph_seed_key", `invalid or duplicate graph seed key ${key}`);
-    keys.add(key);
-    return {
-      key,
-      type: requiredNonempty(node.type, `graph seed node ${key} type`),
-      title: boundedText(node.title, `graph seed node ${key} title`, 16_384),
-      spec: jsonRecord(node.spec, `graph seed node ${key} spec`),
-    };
-  });
-  const edgeKeys = new Set<string>();
-  const edges = root.edges.map((item, index) => {
-    const edge = requiredRecord(item, `graph seed edge ${index}`);
-    assertExactFields(edge, ["source", "relation", "target"], `graph seed edge ${index}`);
-    const parsed = {
-      source: requiredNonempty(edge.source, "graph seed edge source"),
-      relation: requiredNonempty(edge.relation, "graph seed edge relation"),
-      target: requiredNonempty(edge.target, "graph seed edge target"),
-    };
-    const unknownKeys = [
-      ...new Set([parsed.source, parsed.target].filter((key) => key !== "$root" && !keys.has(key))),
-    ];
-    if (unknownKeys.length > 0) {
-      fail(
-        "graph_seed_edge_key",
-        `graph seed edge ${index} references unknown local ${unknownKeys.length === 1 ? "key" : "keys"}: ${unknownKeys.join(", ")}; use $root for the existing run objective`,
-      );
-    }
-    if (parsed.source === parsed.target)
-      fail("graph_seed_self_edge", "graph seed edge may not self-reference");
-    const identity = `${parsed.source}\u0000${parsed.relation}\u0000${parsed.target}`;
-    if (edgeKeys.has(identity))
-      fail("graph_seed_edge_duplicate", "graph seed contains a duplicate relationship");
-    edgeKeys.add(identity);
-    return parsed;
-  });
-  if (Object.keys(rootSpec).length === 0 && nodes.length === 0)
-    fail("graph_seed_empty", "graph seed must enrich the root or add at least one typed node");
-  ensureSeedConnected(keys, edges);
-  return { rootSpec, nodes, edges };
+  return planningArtifactBoundary(() => parsePlanningGraphSeed(value));
+}
+
+function planningArtifactBoundary<Value>(operation: () => Value): Value {
+  try {
+    return operation();
+  } catch (error) {
+    if (error instanceof PlanningArtifactValidationError) fail(error.code, error.message);
+    throw error;
+  }
 }
 
 export function remapPlanningSeedGateContractKeys(
@@ -8404,7 +10021,17 @@ export function remapPlanningSeedGateContractKeys(
           `graph seed node ${node.key} defines duplicate gate contract ${resolved}`,
         );
       }
-      remapped[resolved] = structuredClone(contract);
+      const materializedContract = structuredClone(contract);
+      if (
+        resolved !== key &&
+        isRecord(materializedContract) &&
+        Array.isArray(materializedContract.argv)
+      ) {
+        materializedContract.argv = materializedContract.argv.map((argument) =>
+          argument === key ? resolved : argument,
+        );
+      }
+      remapped[resolved] = materializedContract;
     }
     return {
       ...structuredClone(node),
@@ -8645,8 +10272,13 @@ function compileDirectInitialGraph(
  * deletion policy, predicates, and graph validation still run through their existing compiler
  * path. Annotations are deliberately not normalized because they have separate authority.
  */
-function normalizeAgentGraphRelationships(graph: TypedGraph, delta: GraphDelta): GraphDelta {
+function normalizeAgentGraphRelationships(
+  graph: TypedGraph,
+  delta: GraphDelta,
+  reviewReworkWritableNodeIds: readonly string[] = [],
+): GraphDelta {
   const normalized = structuredClone(delta);
+  const reviewReworkWritable = new Set(reviewReworkWritableNodeIds);
   const explicitAdds = new Set(normalized.addEdges.map(graphEdgeKey));
   const explicitRemovals = new Set(normalized.removeEdges.map(graphEdgeKey));
   const addKeys = new Set(explicitAdds);
@@ -8681,6 +10313,16 @@ function normalizeAgentGraphRelationships(graph: TypedGraph, delta: GraphDelta):
 
   for (const mutation of normalized.upsertNodes) {
     const existing = graph.node(mutation.node.id);
+    // Review recovery can replay the original create-shaped delta after the compiler has preserved
+    // that ticket's accepted pre-review node. Durable graph_added activity is the ownership
+    // receipt, so bind the replay to the exact current node instead of failing its original CAS.
+    if (
+      existing !== undefined &&
+      mutation.expectedNodeHash === null &&
+      reviewReworkWritable.has(existing.id)
+    ) {
+      mutation.expectedNodeHash = canonicalHash(existing);
+    }
     const priorEdges = existing?.edges ?? {};
     const requestedEdges = mutation.node.edges;
     const relations = new Set([...Object.keys(priorEdges), ...Object.keys(requestedEdges)]);
@@ -8691,8 +10333,12 @@ function normalizeAgentGraphRelationships(graph: TypedGraph, delta: GraphDelta):
         if (!priorTargets.has(target)) addEdge({ source: mutation.node.id, relation, target });
       }
       for (const target of [...priorTargets].sort(compareText)) {
-        if (!requestedTargets.has(target))
-          removeEdge({ source: mutation.node.id, relation, target });
+        if (!requestedTargets.has(target)) {
+          const edge = { source: mutation.node.id, relation, target };
+          // A create-shaped recovery output keeps relationships in the dedicated edge lane. If
+          // that exact add was already preserved, the empty embedded snapshot does not delete it.
+          if (!explicitAdds.has(graphEdgeKey(edge))) removeEdge(edge);
+        }
       }
     }
     mutation.node.edges = structuredClone(priorEdges);
@@ -8704,12 +10350,65 @@ function graphEdgeKey(edge: GraphEdge): string {
   return `${edge.source}\0${edge.relation}\0${edge.target}`;
 }
 
+/** Every graph node whose current state can materially affect review of a candidate delta. */
+export function graphDeltaReviewCandidateNodeIds(delta: GraphDelta): string[] {
+  const candidates = new Set<string>();
+  for (const mutation of delta.upsertNodes) {
+    candidates.add(mutation.node.id);
+    for (const targets of Object.values(mutation.node.edges)) {
+      for (const target of targets) candidates.add(target);
+    }
+  }
+  for (const deletion of delta.deleteNodes) candidates.add(deletion.id);
+  for (const edge of [...delta.addEdges, ...delta.removeEdges]) {
+    candidates.add(edge.source);
+    candidates.add(edge.target);
+  }
+  return [...candidates].sort(compareText);
+}
+
+/**
+ * Later workflow steps retain authority over nodes this ticket created in earlier steps. The
+ * original compiled definition cannot name those nodes because their IDs did not exist when the
+ * ticket was derived. Compiler-authored graph activity is the durable ownership receipt; callers
+ * still suppress write authority for graph-mutation-forbidden steps.
+ */
+export function ticketCreatedNodeIds(
+  run: RunRecord,
+  ticket: TicketRecord,
+  graph: TypedGraph,
+): string[] {
+  return [
+    ...new Set(
+      run.activity
+        .filter(
+          (activity) =>
+            activity.kind === "graph_added" &&
+            activity.ticketId === ticket.id &&
+            activity.nodeId !== undefined &&
+            graph.node(activity.nodeId) !== undefined,
+        )
+        .map((activity) => activity.nodeId!),
+    ),
+  ].sort(compareText);
+}
+
+function reviewReworkCoversStep(ticket: TicketRecord, stepId: string): boolean {
+  const rework = ticket.reviewReworks?.at(-1);
+  if (rework === undefined) return false;
+  if (rework.scope === "review_only") {
+    return ticket.steps.find((step) => step.id === stepId)?.kind === "review";
+  }
+  return reviewReworkAppliesToStep(ticket, stepId);
+}
+
 function validateAgentGraphDelta(
   configuration: CompiledConfiguration,
   graph: TypedGraph,
   ticket: DerivedTicketDefinition,
   step: DerivedWorkflowStep,
   delta: GraphDelta,
+  additionalWritableNodeIds: readonly string[] = [],
 ): void {
   // The whole-graph hash may have moved while the worker was in flight (a disjoint sibling ticket
   // committed its own compile). That is not a conflict: every check below validates each mutation
@@ -8723,7 +10422,11 @@ function validateAgentGraphDelta(
   const operation = configuration.registries.operations[ticket.operation_registry_id];
   if (operation === undefined && !ticket.rule_id.startsWith("compiler."))
     fail("operation_missing", "ticket operation disappeared from pinned config");
-  const writable = new Set(step.write_node_ids ?? ticket.scope.write_node_ids);
+  const writable = new Set([
+    ...(step.write_node_ids ?? ticket.scope.write_node_ids),
+    ...additionalWritableNodeIds,
+  ]);
+  const reviewReworkOwned = new Set(additionalWritableNodeIds);
   const allowedNew = new Set(
     stringArray(operation?.allowed_new_node_types, "allowed new node types"),
   );
@@ -8731,6 +10434,9 @@ function validateAgentGraphDelta(
     stringArray(operation?.allowed_existing_node_types, "allowed existing node types"),
   );
   const schema = requireGraphSchema(configuration);
+  const typedGateIds = new Set(
+    typedGateIdentityCatalog(configuration, graph).gateNodes.map((node) => node.id),
+  );
   let added = 0;
   for (const mutation of delta.upsertNodes) {
     const existing = graph.node(mutation.node.id);
@@ -8762,7 +10468,11 @@ function validateAgentGraphDelta(
     } else {
       if (!writable.has(existing.id))
         fail("graph_delta_write_scope", `node ${existing.id} is outside the step write scope`);
-      if (allowedExisting.size > 0 && !allowedExisting.has(existing.type))
+      if (
+        allowedExisting.size > 0 &&
+        !allowedExisting.has(existing.type) &&
+        !reviewReworkOwned.has(existing.id)
+      )
         fail("graph_delta_existing_type", `operation cannot update ${existing.type}`);
       if (mutation.node.type !== existing.type || mutation.node.status !== existing.status) {
         fail("graph_delta_compiler_state", "agent graph deltas may not change node type or status");
@@ -8781,6 +10491,18 @@ function validateAgentGraphDelta(
         existing,
         mutation.node,
       );
+      if (operation?.operation === "implement-asset" && existing.type === "asset") {
+        const existingContracts = optionalRecord(existing.spec.gate_contracts);
+        assertAssetImplementationObligationsPreserved(existing, mutation.node, {
+          removableGateContractIds: Object.keys(existingContracts ?? {}).filter(
+            (gateId) => !typedGateIds.has(gateId),
+          ),
+        });
+      }
+      if (existing.type === "run") {
+        assertRunPlanObligationsPreserved(existing, mutation.node);
+        assertRunPlanUsesRepositoryOwnedArgv(mutation.node);
+      }
     }
   }
   const maximum = optionalSafeInteger(operation?.max_new_nodes) ?? 0;
@@ -8811,6 +10533,122 @@ function validateAgentGraphDelta(
         `relationship source ${canonicalSourceId} is outside the write scope`,
       );
     }
+  }
+}
+
+/** Asset implementation must satisfy an admitted plan, not make missing work disappear. */
+export function assertAssetImplementationObligationsPreserved(
+  existing: GraphNode,
+  updated: GraphNode,
+  options: { readonly removableGateContractIds?: readonly string[] } = {},
+): void {
+  if (
+    canonicalHash(existing.spec.capabilities ?? null) !==
+    canonicalHash(updated.spec.capabilities ?? null)
+  ) {
+    fail(
+      "asset_implementation_obligation",
+      `asset ${existing.id} implementation cannot change its planned capability declarations`,
+    );
+  }
+  const existingPlan = optionalRecord(existing.spec.implementation_plan);
+  const updatedPlan = optionalRecord(updated.spec.implementation_plan);
+  const existingImplementation = optionalRecord(existing.spec.implementation);
+  const updatedImplementation = optionalRecord(updated.spec.implementation);
+  assertDeclaredStringsPreserved(
+    existing.id,
+    "implementation file",
+    existingPlan?.files,
+    updatedPlan?.files,
+  );
+  assertDeclaredStringsPreserved(
+    existing.id,
+    "implementation entrypoint",
+    existingImplementation?.entrypoints,
+    updatedImplementation?.entrypoints,
+  );
+  const existingContracts = optionalRecord(existing.spec.gate_contracts);
+  const updatedContracts = optionalRecord(updated.spec.gate_contracts);
+  const removableContracts = new Set(options.removableGateContractIds ?? []);
+  for (const gateId of Object.keys(existingContracts ?? {}).sort(compareText)) {
+    if (updatedContracts?.[gateId] !== undefined || removableContracts.has(gateId)) continue;
+    fail(
+      "asset_implementation_obligation",
+      `asset ${existing.id} implementation cannot remove declared gate contract ${gateId}`,
+    );
+  }
+}
+
+/** Recovery may correct a runtime contract, but it may not erase accepted execution obligations. */
+export function assertRunPlanObligationsPreserved(existing: GraphNode, updated: GraphNode): void {
+  const existingContract = optionalRecord(existing.spec.runtime_contract);
+  if (existingContract === undefined) return;
+  const updatedContract = optionalRecord(updated.spec.runtime_contract);
+  for (const field of [
+    "command",
+    "composed_verification_command",
+    "result_protocol",
+    "required_measurements",
+    "asset_entrypoints",
+    "scientific_inputs",
+  ] as const) {
+    if (existingContract[field] === undefined || updatedContract?.[field] !== undefined) continue;
+    fail(
+      "runtime_contract_obligation",
+      `run ${existing.id} update cannot remove established runtime obligation ${field}`,
+    );
+  }
+}
+
+/** Runtime plans must execute repository-owned programs, never source text smuggled through argv. */
+export function assertRunPlanUsesRepositoryOwnedArgv(node: Readonly<GraphNode>): void {
+  const contract = optionalRecord(node.spec.runtime_contract);
+  if (contract === undefined) return;
+  const interpreters =
+    /^(?:bash|bun|deno|fish|node|perl|php|python(?:\d+(?:\.\d+)*)?|ruby|sh|zsh)$/u;
+  const inlineFlags = new Set(["-c", "-e", "--eval", "--execute"]);
+  for (const field of ["command", "composed_verification_command"] as const) {
+    const raw = contract[field];
+    if (!Array.isArray(raw) || raw.length === 0 || raw.some((item) => typeof item !== "string"))
+      continue;
+    const argv = raw as string[];
+    const executable = path.basename(argv[0]!).toLowerCase();
+    const embedsInlineSource =
+      (interpreters.test(executable) &&
+        argv.slice(1).some((argument) => inlineFlags.has(argument))) ||
+      argv.some(
+        (argument) =>
+          argument.includes("\n") || argument.includes("\r") || /(?:^|\s)<<-?\s*/u.test(argument),
+      );
+    if (embedsInlineSource) {
+      fail(
+        "runtime_contract_inline_argv",
+        `run ${node.id} ${field} cannot embed an inline interpreter payload; put the logic in a repository file and pass that project-relative path as a plain argv element`,
+      );
+    }
+  }
+}
+
+function assertDeclaredStringsPreserved(
+  assetId: string,
+  label: string,
+  existing: unknown,
+  updated: unknown,
+): void {
+  const required = Array.isArray(existing)
+    ? existing.filter((value): value is string => typeof value === "string")
+    : [];
+  const retained = new Set(
+    Array.isArray(updated)
+      ? updated.filter((value): value is string => typeof value === "string")
+      : [],
+  );
+  for (const value of required.sort(compareText)) {
+    if (retained.has(value)) continue;
+    fail(
+      "asset_implementation_obligation",
+      `asset ${assetId} implementation cannot remove declared ${label} ${value}`,
+    );
   }
 }
 
@@ -9327,9 +11165,11 @@ function parseAssignmentOutput(
 ): AssignmentOutput {
   const root = requiredRecord(value, "assignment output");
   if (root.status === "failed") {
-    assertExactFields(
+    assertAllowedFields(
       root,
-      stepKind === "review" ? ["status", "reviewVerdict", "blocker"] : ["status", "blocker"],
+      stepKind === "review"
+        ? ["status", "reviewVerdict", "summary", "blocker"]
+        : ["status", "summary", "blocker"],
       "failed assignment output",
     );
     if (stepKind === "review" && root.reviewVerdict !== "rejected") {
@@ -9338,6 +11178,9 @@ function parseAssignmentOutput(
     return {
       status: "failed",
       ...(stepKind === "review" ? { reviewVerdict: "rejected" as const } : {}),
+      ...(root.summary === undefined
+        ? {}
+        : { summary: boundedText(root.summary, "assignment summary", 1_024) }),
       blocker: boundedText(root.blocker, "assignment blocker", 64 * 1024),
     };
   }
@@ -9369,7 +11212,8 @@ function parseAssignmentOutput(
       "configured proposal step requires changeApplication",
     );
   }
-  if ((hasUpstreamRequest || hasChangeApplication) && root.graphDelta !== undefined) {
+  const hasConcreteGraphDelta = root.graphDelta !== undefined && root.graphDelta !== null;
+  if ((hasUpstreamRequest || hasChangeApplication) && hasConcreteGraphDelta) {
     fail(
       "change_control_graph_collision",
       "typed change-control output cannot also contain graphDelta",
@@ -9386,6 +11230,9 @@ function parseAssignmentOutput(
         "status",
         "summary",
         "upstreamChangeRequest",
+        // Provider transports flatten the terminal union and can preserve the normal branch's
+        // optional null sentinel. Null carries no graph mutation authority.
+        "graphDelta",
         ...(stepKind === "review" ? ["reviewVerdict"] : []),
       ]
     : hasChangeApplication
@@ -9393,6 +11240,7 @@ function parseAssignmentOutput(
           "status",
           "summary",
           "changeApplication",
+          "graphDelta",
           ...(stepKind === "review" ? ["reviewVerdict"] : []),
         ]
       : policy === "forbidden"
@@ -9407,9 +11255,11 @@ function parseAssignmentOutput(
     ? parseChangeApplication(root.changeApplication)
     : undefined;
   const graphDelta =
-    root.graphDelta === undefined || root.graphDelta === null
-      ? root.graphDelta
-      : parseGraphDelta(root.graphDelta);
+    hasUpstreamRequest || hasChangeApplication || root.graphDelta === undefined
+      ? undefined
+      : root.graphDelta === null
+        ? null
+        : parseGraphDelta(root.graphDelta);
   if (
     policy === "required" &&
     !hasUpstreamRequest &&
@@ -9436,9 +11286,26 @@ function parseAssignmentOutput(
 
 function parseUpstreamChangeRequest(value: unknown): AssignmentUpstreamChangeRequest {
   const request = requiredRecord(value, "upstreamChangeRequest");
-  assertExactFields(request, ["targetNodeIds", "summary", "reason"], "upstreamChangeRequest");
+  assertAllowedFields(
+    request,
+    ["targetNodeIds", "fulfillment", "summary", "reason"],
+    "upstreamChangeRequest",
+  );
+  const fulfillment =
+    request.fulfillment === undefined
+      ? // Compatibility for attempts launched before the structured routing discriminator existed:
+        // preserve the explicit change-control path instead of silently narrowing their request.
+        "dynamic_scope_change"
+      : request.fulfillment;
+  if (fulfillment !== "planned_asset_repair" && fulfillment !== "dynamic_scope_change") {
+    fail(
+      "change_control_fulfillment",
+      "upstream change fulfillment must be planned_asset_repair or dynamic_scope_change",
+    );
+  }
   return {
     targetNodeIds: boundedUniqueIds(request.targetNodeIds, "upstream change target nodes"),
+    fulfillment,
     summary: boundedText(request.summary, "upstream change summary", 1_024).trim(),
     reason: boundedText(request.reason, "upstream change reason", 4_096).trim(),
   };
@@ -9554,6 +11421,7 @@ function compileAssignmentChangeControl(input: {
       sourceBindingSha256: input.binding.sha256,
       sourceOutputSha256,
       targetNodeIds: Object.freeze([...request.targetNodeIds]),
+      fulfillment: request.fulfillment,
       summary: request.summary,
       reason: request.reason,
       publication,
@@ -9689,20 +11557,80 @@ function assertCurrentAssignmentChecks(
       "configured checks are not bound to the current assignment attempt",
     );
   }
+  // `accepted` is the acceptance notion that already honours the check's own contract:
+  //   passed   = contractValid && exitAccepted && semanticPassing
+  //   accepted = contractValid && exitAccepted && (semanticPassing || allowNonpassingReceipt)
+  // For a check that does not set `allow_nonpassing_receipt` the two are identical, so requiring
+  // acceptance here is exactly as strict as before. For one that does set it, the flag finally
+  // means something. It previously did not: `gate-verifier` declares `allow_nonpassing_receipt:
+  // true` precisely because a research gate may be `expected_red`, and every gate in an observed
+  // run was, yet demanding `passed` here made a correctly-red gate unable to complete its
+  // `run-gate` ticket at all — the ticket reissued indefinitely with no route to any other outcome.
+  // Recording a red gate is the research result; treating it as satisfied is a separate question,
+  // and the stricter `passed` requirements guarding receipt retention and replay are left intact.
   const missing = step.validation_checks.filter(
     (checkId) =>
       !(run.checks ?? []).some(
         (check) =>
           check.attemptId === attemptId &&
           check.requestedCheckId === checkId &&
-          check.accepted &&
-          check.passed === true,
+          check.accepted === true,
       ),
   );
   if (missing.length > 0) {
     fail(
       "assignment_checks_incomplete",
-      `assignment cannot complete without current passing configured checks: ${missing.join(", ")}`,
+      `assignment cannot complete without current accepted configured checks: ${missing.join(", ")}`,
+    );
+  }
+}
+
+function assertFailedAssignmentDoesNotReuseInheritedChecks(
+  run: RunRecord,
+  assignment: ReadyAssignment,
+  attemptId: string,
+  step: DerivedWorkflowStep,
+): void {
+  if (step.validation_checks.length === 0) return;
+  const attempt = run.attempts[attemptId];
+  if (
+    attempt === undefined ||
+    attempt.ticketId !== assignment.ticketId ||
+    attempt.stepId !== assignment.stepId ||
+    attempt.personaId !== assignment.personaId
+  ) {
+    fail(
+      "assignment_check_provenance",
+      "configured checks are not bound to the current assignment attempt",
+    );
+  }
+  let parentAttemptId =
+    attempt.lineage?.conversationFork === undefined ? undefined : attempt.lineage.parentAttemptId;
+  const inheritedAttemptIds = new Set<string>();
+  while (parentAttemptId !== undefined && !inheritedAttemptIds.has(parentAttemptId)) {
+    inheritedAttemptIds.add(parentAttemptId);
+    parentAttemptId = run.attempts[parentAttemptId]?.lineage?.parentAttemptId;
+  }
+  if (inheritedAttemptIds.size === 0) return;
+  const required = new Set(step.validation_checks);
+  const inherited = new Set(
+    (run.checks ?? [])
+      .filter(
+        (check) => inheritedAttemptIds.has(check.attemptId) && required.has(check.requestedCheckId),
+      )
+      .map((check) => check.requestedCheckId),
+  );
+  if (inherited.size === 0) return;
+  const current = new Set(
+    (run.checks ?? [])
+      .filter((check) => check.attemptId === attemptId && required.has(check.requestedCheckId))
+      .map((check) => check.requestedCheckId),
+  );
+  const stale = [...inherited].filter((checkId) => !current.has(checkId)).sort(compareText);
+  if (stale.length > 0) {
+    fail(
+      "assignment_check_provenance",
+      `failed assignment cannot reuse configured checks from its parent attempt; rerun in the current attempt: ${stale.join(", ")}`,
     );
   }
 }
@@ -9823,7 +11751,6 @@ type SemanticTicketRecord = Omit<TicketRecord, "steps"> & {
   steps: SemanticTicketStepRecord[];
 };
 
-const COMPILER_SUPERSEDED_BEFORE_EXECUTION = "Superseded before execution by newer compiler state";
 const LEGACY_DELIVERY_NODE_SHA256 =
   "sha256:cbe87347eaa602ec31828745a8dd25417e1cad9cc3a86afc0ae9bf0d8003277d" as Sha256Digest;
 const LEGACY_BROAD_DELIVERY_REVIEW_WORKFLOW_SHA256 =
@@ -9875,11 +11802,1848 @@ function assertOrBackfillExecutionPolicyBinding(
  * normal ticket derivation: it preserves the pinned graph and uses only the pinned
  * implement-asset operation and workflow. Newer profiles derive this ticket normally.
  */
-function generatedAssetImplementationFallback(
+export function hasExistingAssetImplementationTicket(
+  run: Pick<RunRecord, "tickets">,
+  operationId: string,
+  assetId: string,
+): boolean {
+  return Object.values(run.tickets).some(
+    (ticket) =>
+      ticket.status !== "cancelled" &&
+      ticket.operationId === operationId &&
+      ticket.targetNodeIds.includes(assetId),
+  );
+}
+
+export async function assetImplementationFilesMaterialized(
+  projectRoot: string,
+  files: readonly string[],
+): Promise<boolean> {
+  const root = path.resolve(projectRoot);
+  for (const file of files) {
+    const absolute = path.resolve(root, file);
+    const relative = path.relative(root, absolute);
+    if (
+      relative.length === 0 ||
+      relative === ".." ||
+      relative.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relative)
+    ) {
+      return false;
+    }
+    try {
+      const metadata = await lstat(absolute);
+      if (!metadata.isFile() || metadata.size === 0) return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+  }
+  return true;
+}
+
+async function recurringAssetReissueNodeIds(
+  run: Pick<RunRecord, "tickets" | "checks" | "attempts" | "git">,
   configuration: CompiledConfiguration,
   graph: TypedGraph,
   evaluation: CompiledRuleEvaluation,
-): CompiledRuleEvaluation | undefined {
+  projectRoot: string,
+): Promise<ReadonlySet<string>> {
+  const plannedRepairTargets = new Set<string>();
+  const routableProposalIds = routablePlannedAssetRepairProposalIds(run, evaluation.tickets);
+  for (const proposalId of routableProposalIds) {
+    for (const nodeId of run.tickets[proposalId]?.targetNodeIds ?? []) {
+      plannedRepairTargets.add(nodeId);
+    }
+  }
+  const blockedGateProviders = experimentBoundaryBlockedGateProviderNodeIds(graph, evaluation);
+  const delegatedGateNodeIds = standaloneSupportRunGateNodeIds(graph, evaluation);
+  const standaloneRunNodeIdsByAsset = standaloneSupportRunAssetNodeIds(graph, evaluation);
+  const selectedGateIdsByProvider = new Map<string, Set<string>>();
+  for (const context of evaluation.gate_policy_contexts) {
+    if (context.winner_node_id === undefined) continue;
+    const gateIds = selectedGateIdsByProvider.get(context.winner_node_id) ?? new Set<string>();
+    gateIds.add(context.gate_node_id);
+    selectedGateIdsByProvider.set(context.winner_node_id, gateIds);
+  }
+  const reissue = new Set<string>();
+  for (const definition of evaluation.tickets) {
+    if (definition.operation_registry_id !== "asset-resolution.asset.implement-asset") continue;
+    for (const nodeId of definition.target_node_ids) {
+      if (plannedRepairTargets.has(nodeId)) {
+        reissue.add(nodeId);
+        continue;
+      }
+      const node = graph.node(nodeId);
+      const manifestDefinition =
+        node === undefined
+          ? undefined
+          : optionalRecord(configuration.registries.node_types[node.type]?.filesystem_manifest);
+      if (node === undefined || manifestDefinition === undefined) {
+        reissue.add(nodeId);
+        continue;
+      }
+      const outputField = optionalString(manifestDefinition.output_field);
+      if (outputField === undefined) {
+        reissue.add(nodeId);
+        continue;
+      }
+      const extendedNode = node as unknown as ConfigurationObject & {
+        fields?: ConfigurationObject;
+      };
+      const currentManifest = optionalRecord(
+        extendedNode.fields?.[outputField] ?? extendedNode[outputField],
+      );
+      const acceptance = await prepareFilesystemManifestAcceptance(
+        configuration,
+        node,
+        projectRoot,
+      );
+      const currentAcceptedContentHash = optionalString(currentManifest?.accepted_content_hash);
+      const currentContentHash = optionalString(acceptance?.manifest.content_hash);
+      const implementationCurrent =
+        acceptance !== undefined &&
+        acceptance.blockingErrors.length === 0 &&
+        currentAcceptedContentHash !== undefined &&
+        currentAcceptedContentHash === currentContentHash &&
+        optionalString(currentManifest?.implementation_status) === "ready" &&
+        optionalString(currentManifest?.vendor_status) === "vendored";
+      const selectedGateIds = selectedGateIdsByProvider.get(nodeId) ?? new Set<string>();
+      const standaloneRunNodeIds = standaloneRunNodeIdsByAsset.get(nodeId);
+      const gateContracts = optionalRecord(node.spec.gate_contracts);
+      const validates = new Set(node.edges.validates ?? []);
+      const selectedGateContractsCurrent = [...selectedGateIds].every((gateId) => {
+        const contract = optionalRecord(gateContracts?.[gateId]);
+        return (
+          optionalString(contract?.protocol) === "autoresearch.gate-result.v1" &&
+          Array.isArray(contract?.argv) &&
+          contract.argv.length > 0 &&
+          contract.argv.every((value) => typeof value === "string" && value.length > 0) &&
+          validates.has(gateId)
+        );
+      });
+      if (
+        recurringAssetRequiresReissue({
+          implementationCurrent,
+          selectedGateContractsCurrent,
+          selectedGateBlocked:
+            blockedGateProviders.has(nodeId) &&
+            recurringAssetHasUnaddressedGateFailure({
+              tickets: run.tickets,
+              attempts: run.attempts,
+              checks: run.checks,
+              providerNodeId: nodeId,
+              gateNodeIds: selectedGateIds,
+              delegatedGateNodeIds,
+            }),
+          standaloneSupportRunFailed:
+            standaloneRunNodeIds !== undefined &&
+            recurringAssetHasUnaddressedStandaloneRunFailure({
+              tickets: run.tickets,
+              attempts: run.attempts,
+              checks: run.checks,
+              ticketCycles: run.git.ticketCycles,
+              assetNodeId: nodeId,
+              runNodeIds: standaloneRunNodeIds,
+            }),
+          reviewReworkPending: recurringAssetReviewReworkPending(run.tickets, nodeId),
+        })
+      ) {
+        reissue.add(nodeId);
+      }
+    }
+  }
+  return reissue;
+}
+
+/**
+ * Treat a completed provider repair as the causal response to every nonpassing gate receipt that
+ * predates it. Reopening again for those same receipts creates an asset-review loop and starves
+ * the gate ticket that must recheck or analyze the repaired provider. A newer nonpassing receipt
+ * is fresh evidence and may reopen the provider once more.
+ */
+export function recurringAssetHasUnaddressedGateFailure(input: {
+  readonly tickets: Readonly<Record<string, TicketRecord>>;
+  readonly attempts?: Readonly<Record<string, AgentAttemptRecord>>;
+  readonly checks: readonly RunCheckRecord[] | undefined;
+  readonly providerNodeId: string;
+  readonly gateNodeIds: ReadonlySet<string>;
+  readonly delegatedGateNodeIds?: ReadonlySet<string>;
+}): boolean {
+  const providerRepairGateNodeIds = new Set(
+    [...input.gateNodeIds].filter(
+      (gateNodeId) => input.delegatedGateNodeIds?.has(gateNodeId) !== true,
+    ),
+  );
+  if (providerRepairGateNodeIds.size === 0) return false;
+  const latestFailureAt = input.checks
+    ?.filter(
+      (check) =>
+        check.accepted &&
+        check.passed === false &&
+        check.executionPolicy?.gatePolicyContexts.some((context) =>
+          providerRepairGateNodeIds.has(context.gateNodeId),
+        ),
+    )
+    .map((check) => check.recordedAt)
+    .sort(compareText)
+    .at(-1);
+  if (latestFailureAt === undefined) return true;
+  const providerTickets = Object.values(input.tickets).filter(
+    (ticket) =>
+      ticket.operationId === "asset-resolution.asset.implement-asset" &&
+      ticket.status !== "cancelled" &&
+      ticket.targetNodeIds.includes(input.providerNodeId),
+  );
+  const latestCompletedRepairAt = providerTickets
+    .filter(
+      (ticket) =>
+        ticket.steps.length > 0 && ticket.steps.every((step) => step.status === "completed"),
+    )
+    .flatMap((ticket) => [
+      ticket.updatedAt,
+      ...ticket.steps.flatMap((step) => (step.completedAt === undefined ? [] : [step.completedAt])),
+    ])
+    .concat(
+      providerTickets.flatMap((ticket) =>
+        completedRecurringAssetEpochTimes(ticket, input.attempts ?? {}),
+      ),
+    )
+    .sort(compareText)
+    .at(-1);
+  return (
+    latestCompletedRepairAt === undefined ||
+    compareText(latestFailureAt, latestCompletedRepairAt) > 0
+  );
+}
+
+/**
+ * A rejected standalone support-run command is evidence that one of its exact executable assets
+ * still needs repair. Compare only the newest runtime check with a fully completed asset workflow
+ * epoch so an older rejection cannot reopen an asset after either a successful rerun or repair.
+ */
+export function recurringAssetHasUnaddressedStandaloneRunFailure(input: {
+  readonly tickets: Readonly<Record<string, TicketRecord>>;
+  readonly attempts: Readonly<Record<string, AgentAttemptRecord>>;
+  readonly checks: readonly RunCheckRecord[] | undefined;
+  readonly ticketCycles: RunRecord["git"]["ticketCycles"];
+  readonly assetNodeId: string;
+  readonly runNodeIds: ReadonlySet<string>;
+}): boolean {
+  const runTicketIds = new Set(
+    Object.values(input.tickets)
+      .filter(
+        (ticket) =>
+          ticket.operationId === "execution.run.run-experiment" &&
+          ticket.targetNodeIds.some((nodeId) => input.runNodeIds.has(nodeId)),
+      )
+      .map((ticket) => ticket.id),
+  );
+  const latestRuntimeCheck = input.checks
+    ?.filter((check) => {
+      const attempt = input.attempts[check.attemptId];
+      return (
+        check.requestedCheckId === "scientific-runtime" &&
+        attempt !== undefined &&
+        runTicketIds.has(attempt.ticketId)
+      );
+    })
+    .sort((left, right) => compareText(left.recordedAt, right.recordedAt))
+    .at(-1);
+  if (latestRuntimeCheck?.accepted !== false) return false;
+
+  const latestRepairAt = Object.values(input.tickets)
+    .filter(
+      (ticket) =>
+        ticket.operationId === "asset-resolution.asset.implement-asset" &&
+        ticket.targetNodeIds.includes(input.assetNodeId),
+    )
+    .flatMap((ticket) =>
+      completedMaterialRecurringAssetEpochTimes(ticket, input.attempts, input.ticketCycles),
+    )
+    .sort(compareText)
+    .at(-1);
+  return (
+    latestRepairAt === undefined || compareText(latestRuntimeCheck.recordedAt, latestRepairAt) > 0
+  );
+}
+
+interface CompletedRecurringAssetEpoch {
+  readonly executionEpoch: number;
+  readonly completedAt: string;
+}
+
+function completedRecurringAssetEpochTimes(
+  ticket: TicketRecord,
+  attempts: Readonly<Record<string, AgentAttemptRecord>>,
+): readonly string[] {
+  return completedRecurringAssetEpochs(ticket, attempts).map((epoch) => epoch.completedAt);
+}
+
+function completedMaterialRecurringAssetEpochTimes(
+  ticket: TicketRecord,
+  attempts: Readonly<Record<string, AgentAttemptRecord>>,
+  ticketCycles: RunRecord["git"]["ticketCycles"],
+): readonly string[] {
+  const materialCycleOrdinals = new Set(
+    Object.values(ticketCycles)
+      .filter(
+        (cycle) =>
+          cycle.ticketId === ticket.id &&
+          (cycle.status === "integrated" || cycle.status === "retired") &&
+          cycle.ticketHeadOid !== cycle.baseRunOid,
+      )
+      .map((cycle) => cycle.ordinal),
+  );
+  return completedRecurringAssetEpochs(ticket, attempts)
+    .filter((epoch) => materialCycleOrdinals.has(epoch.executionEpoch + 1))
+    .map((epoch) => epoch.completedAt);
+}
+
+function completedRecurringAssetEpochs(
+  ticket: TicketRecord,
+  attempts: Readonly<Record<string, AgentAttemptRecord>>,
+): readonly CompletedRecurringAssetEpoch[] {
+  if (ticket.steps.length === 0) return [];
+  const completedByStep = ticket.steps.map((step) =>
+    (step.attemptIds ?? [])
+      .map((attemptId) => attempts[attemptId])
+      .filter(
+        (attempt): attempt is AgentAttemptRecord & { ticketExecutionEpoch: number } =>
+          attempt !== undefined &&
+          attempt.ticketId === ticket.id &&
+          attempt.stepId === step.id &&
+          attempt.status === "completed" &&
+          typeof attempt.ticketExecutionEpoch === "number" &&
+          attempt.terminalSummary !== undefined &&
+          attempt.terminalSummary.trim().length > 0 &&
+          (attempt.endedAt !== undefined || attempt.terminalAcceptedAt !== undefined),
+      ),
+  );
+  if (completedByStep.some((candidates) => candidates.length === 0)) return [];
+  const commonEpochs = completedByStep
+    .slice(1)
+    .reduce(
+      (common, candidates) =>
+        new Set(
+          [...common].filter((epoch) =>
+            candidates.some((candidate) => candidate.ticketExecutionEpoch === epoch),
+          ),
+        ),
+      new Set(completedByStep[0]!.map((attempt) => attempt.ticketExecutionEpoch)),
+    );
+  return [...commonEpochs].flatMap((executionEpoch) => {
+    const completedAt = completedByStep
+      .flatMap((candidates) =>
+        candidates
+          .filter((attempt) => attempt.ticketExecutionEpoch === executionEpoch)
+          .flatMap((attempt) => [attempt.endedAt ?? attempt.terminalAcceptedAt!]),
+      )
+      .sort(compareText)
+      .at(-1);
+    return completedAt === undefined ? [] : [{ executionEpoch, completedAt }];
+  });
+}
+
+/**
+ * A standalone support-run ticket is the compiler's explicit remediation path for the gates that
+ * run evaluates. While that work is applicable, a nonpassing receipt for the same gate is not
+ * evidence that the selected verifier provider needs another implementation cycle.
+ */
+export function standaloneSupportRunGateNodeIds(
+  graph: Pick<ResearchRunContractScopeGraph, "node" | "edges">,
+  evaluation: Pick<CompiledRuleEvaluation, "tickets">,
+): ReadonlySet<string> {
+  const gateNodeIds = new Set<string>();
+  const edges = graph.edges();
+  for (const definition of evaluation.tickets) {
+    if (definition.rule_id !== "compiler.compatibility.research-standalone-support-run") continue;
+    for (const nodeId of definition.target_node_ids) {
+      const node = graph.node(nodeId);
+      if (node?.type !== "run") continue;
+      for (const edge of edges) {
+        if (edge.source === nodeId && edge.relation === "evaluates") gateNodeIds.add(edge.target);
+      }
+    }
+  }
+  return gateNodeIds;
+}
+
+/**
+ * Bind standalone support runs to only the generated assets whose entrypoints the runtime contract
+ * executes. A generic `uses` edge is intentionally insufficient: it can also name read-only data,
+ * verifier, and auxiliary assets that did not cause the command failure.
+ */
+export function standaloneSupportRunAssetNodeIds(
+  graph: Pick<ResearchRunContractScopeGraph, "node">,
+  evaluation: Pick<CompiledRuleEvaluation, "tickets">,
+): ReadonlyMap<string, ReadonlySet<string>> {
+  const runNodeIdsByAsset = new Map<string, Set<string>>();
+  for (const definition of evaluation.tickets) {
+    if (definition.rule_id !== "compiler.compatibility.research-standalone-support-run") continue;
+    for (const runNodeId of definition.target_node_ids) {
+      const runNode = graph.node(runNodeId);
+      if (runNode?.type !== "run") continue;
+      const runtimeContract = optionalRecord(runNode.spec.runtime_contract);
+      const entrypoints = Array.isArray(runtimeContract?.asset_entrypoints)
+        ? runtimeContract.asset_entrypoints
+        : [];
+      for (const rawEntrypoint of entrypoints) {
+        const assetNodeId = optionalString(optionalRecord(rawEntrypoint)?.asset_id);
+        const assetNode = assetNodeId === undefined ? undefined : graph.node(assetNodeId);
+        if (
+          assetNodeId === undefined ||
+          assetNode?.type !== "asset" ||
+          assetNode.spec.source_strategy !== "generated"
+        ) {
+          continue;
+        }
+        const runNodeIds = runNodeIdsByAsset.get(assetNodeId) ?? new Set<string>();
+        runNodeIds.add(runNodeId);
+        runNodeIdsByAsset.set(assetNodeId, runNodeIds);
+      }
+    }
+  }
+  return new Map(
+    [...runNodeIdsByAsset.entries()]
+      .sort(([left], [right]) => compareText(left, right))
+      .map(([assetNodeId, runNodeIds]) => [
+        assetNodeId,
+        new Set([...runNodeIds].sort(compareText)),
+      ]),
+  );
+}
+
+/**
+ * Give an existing generated-asset implementation workflow read-only context for the standalone
+ * run that executed it. A new deterministic ticket identity prevents an already-issued narrower
+ * grant from drifting while the asset's original write authority remains byte-for-byte unchanged.
+ */
+export function standaloneSupportRunAssetRepairScopeFallback(
+  graph: ResearchRunContractScopeGraph,
+  evaluation: CompiledRuleEvaluation,
+): CompiledRuleEvaluation {
+  const runNodeIdsByAsset = standaloneSupportRunAssetNodeIds(graph, evaluation);
+  if (runNodeIdsByAsset.size === 0) return evaluation;
+
+  const edges = graph.edges();
+  const existingIds = new Set(evaluation.tickets.map((definition) => definition.id));
+  const supersededIds = new Set<string>();
+  const additions: DerivedTicketDefinition[] = [];
+  for (const definition of evaluation.tickets) {
+    if (definition.operation_registry_id !== "asset-resolution.asset.implement-asset") continue;
+    const runNodeIds = [
+      ...new Set(
+        definition.target_node_ids.flatMap((assetNodeId) => [
+          ...(runNodeIdsByAsset.get(assetNodeId) ?? []),
+        ]),
+      ),
+    ].sort(compareText);
+    if (runNodeIds.length === 0) continue;
+
+    const readNodeIds = new Set(definition.scope.read_node_ids);
+    const readPaths = new Set(definition.scope.read_paths);
+    for (const runNodeId of runNodeIds) {
+      readNodeIds.add(runNodeId);
+      for (const edge of edges) {
+        if (edge.source === runNodeId && edge.relation === "evaluates") {
+          readNodeIds.add(edge.target);
+        }
+      }
+      const runtimeContract = optionalRecord(graph.node(runNodeId)?.spec.runtime_contract);
+      const outputRoot = optionalString(runtimeContract?.output_root);
+      if (outputRoot !== undefined) readPaths.add(outputRoot);
+    }
+    const sortedReadNodeIds = [...readNodeIds].sort(compareText);
+    const sortedReadPaths = [...readPaths].sort(compareText);
+    if (
+      canonicalHash(sortedReadNodeIds) === canonicalHash(definition.scope.read_node_ids) &&
+      canonicalHash(sortedReadPaths) === canonicalHash(definition.scope.read_paths)
+    ) {
+      continue;
+    }
+
+    const { definition_sha256: _definitionSha256, ...existing } = definition;
+    const id = `TK-compat-standalone-run-asset-repair-scope-${digestBody(
+      canonicalHash({
+        configuration_sha256: evaluation.configuration_sha256,
+        source_definition_id: definition.id,
+        target_node_ids: definition.target_node_ids,
+        support_run_node_ids: runNodeIds,
+        read_node_ids: sortedReadNodeIds,
+        read_paths: sortedReadPaths,
+      }),
+    ).slice(0, 24)}`;
+    supersededIds.add(definition.id);
+    if (existingIds.has(id)) continue;
+    const material = {
+      ...existing,
+      id,
+      rule_id: "compiler.compatibility.standalone-support-run-asset-repair-scope",
+      scope: {
+        ...definition.scope,
+        read_node_ids: sortedReadNodeIds,
+        read_paths: sortedReadPaths,
+      },
+    };
+    additions.push(deepFreeze({ ...material, definition_sha256: canonicalHash(material) }));
+    existingIds.add(id);
+  }
+  return supersededIds.size === 0
+    ? evaluation
+    : rehashRuleEvaluation(evaluation, [
+        ...evaluation.tickets.filter((definition) => !supersededIds.has(definition.id)),
+        ...additions,
+      ]);
+}
+
+/**
+ * An upstream request that targets only assets already owned by configured implement-asset
+ * tickets is repair work inside the approved plan, not a new dynamic scope decision. Route only
+ * pristine, unapproved proposals whose exact source is still held; any operator decision or
+ * started proposal remains on the explicit change-control path.
+ */
+export function routablePlannedAssetRepairProposalIds(
+  run: Pick<RunRecord, "tickets">,
+  definitions: readonly Pick<
+    DerivedTicketDefinition,
+    "operation_registry_id" | "target_node_ids"
+  >[],
+): ReadonlySet<string> {
+  const implementedAssetIds = new Set(
+    definitions
+      .filter(
+        (definition) =>
+          definition.operation_registry_id === "asset-resolution.asset.implement-asset",
+      )
+      .flatMap((definition) => definition.target_node_ids),
+  );
+  const proposalIds = new Set<string>();
+  for (const proposal of Object.values(run.tickets)) {
+    if (!pristineHeldProposal(run, proposal)) continue;
+    if (proposal.executionControl?.proposalRequest?.fulfillment !== "planned_asset_repair")
+      continue;
+    const sourceOwnedAssetIds = sourceOwnedPlannedAssetRepairNodeIds(run, proposal);
+    const repairAssetIds = new Set([
+      ...proposal.targetNodeIds.filter((nodeId) => implementedAssetIds.has(nodeId)),
+      ...sourceOwnedAssetIds,
+    ]);
+    if (
+      repairAssetIds.size === 0 ||
+      [...repairAssetIds].some((nodeId) => !implementedAssetIds.has(nodeId))
+    )
+      continue;
+    proposalIds.add(proposal.id);
+  }
+  return proposalIds;
+}
+
+export function plannedAssetRepairProposalTargetNodeIds(
+  run: Pick<RunRecord, "tickets">,
+): ReadonlySet<string> {
+  const targetNodeIds = new Set<string>();
+  for (const proposal of Object.values(run.tickets)) {
+    if (!pristineHeldProposal(run, proposal)) continue;
+    if (proposal.executionControl?.proposalRequest?.fulfillment !== "planned_asset_repair")
+      continue;
+    for (const nodeId of proposal.targetNodeIds) targetNodeIds.add(nodeId);
+  }
+  return targetNodeIds;
+}
+
+export function plannedAssetRepairRequestForNode(
+  run: Pick<RunRecord, "tickets">,
+  nodeId: string,
+):
+  | Readonly<{
+      proposalTicketId: string;
+      requestSha256: Sha256Digest;
+      title: string;
+    }>
+  | undefined {
+  const candidates = Object.values(run.tickets)
+    .filter((proposal) => {
+      const control = proposal.executionControl;
+      const request = control?.proposalRequest;
+      if (
+        control === undefined ||
+        request === undefined ||
+        request.fulfillment !== "planned_asset_repair" ||
+        (!proposal.targetNodeIds.includes(nodeId) &&
+          !sourceOwnedPlannedAssetRepairNodeIds(run, proposal).includes(nodeId)) ||
+        control.proposalApprovalSha256 !== undefined ||
+        control.proposalDecision !== undefined ||
+        (control.proposalDecisionHistory?.length ?? 0) > 0
+      ) {
+        return false;
+      }
+      if (pristineHeldProposal(run, proposal)) return true;
+      return (
+        proposal.status === "cancelled" &&
+        proposal.blocker === COMPILER_ROUTED_TO_PLANNED_ASSET_REPAIR &&
+        proposal.steps.every((step) => step.status === "skipped" && step.attemptIds.length === 0)
+      );
+    })
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const proposal = candidates[0];
+  const request = proposal?.executionControl?.proposalRequest;
+  return proposal === undefined || request === undefined
+    ? undefined
+    : {
+        proposalTicketId: proposal.id,
+        requestSha256: request.requestSha256,
+        title: proposal.title,
+      };
+}
+
+/**
+ * A repair request can name the gates that exposed the defect while its exact held source already
+ * owns the selected verifier asset. Preserve that bounded source authority instead of requiring
+ * the agent to redundantly repeat the asset id in its proposal. Every requested node must still be
+ * inside the immutable source ticket's node grant; otherwise this remains a real scope proposal.
+ */
+function sourceOwnedPlannedAssetRepairNodeIds(
+  run: Pick<RunRecord, "tickets">,
+  proposal: Readonly<TicketRecord>,
+): string[] {
+  const request = proposal.executionControl?.proposalRequest;
+  const source = request === undefined ? undefined : run.tickets[request.sourceTicketId];
+  if (
+    source?.operationId !== "asset-resolution.asset.implement-asset" ||
+    source.executionControl?.sourceHold?.proposalTicketId !== proposal.id ||
+    source.executionControl.sourceHold.requestSha256 !== request?.requestSha256
+  )
+    return [];
+  const sourceAuthorityNodeIds = new Set([
+    ...source.targetNodeIds,
+    ...(source.readNodeIds ?? []),
+    ...(source.writeNodeIds ?? []),
+  ]);
+  if (proposal.targetNodeIds.some((nodeId) => !sourceAuthorityNodeIds.has(nodeId))) return [];
+  return [...new Set(source.targetNodeIds)].sort(compareText);
+}
+
+function pristineHeldProposal(
+  run: Pick<RunRecord, "tickets">,
+  proposal: Readonly<TicketRecord>,
+): boolean {
+  const control = proposal.executionControl;
+  const request = control?.proposalRequest;
+  const source = request === undefined ? undefined : run.tickets[request.sourceTicketId];
+  const hold = source?.executionControl?.sourceHold;
+  return (
+    proposal.status === "proposed" &&
+    control !== undefined &&
+    request !== undefined &&
+    control.proposalApprovalSha256 === undefined &&
+    control.proposalDecision === undefined &&
+    (control.proposalDecisionHistory?.length ?? 0) === 0 &&
+    proposal.targetNodeIds.length > 0 &&
+    proposal.steps.every((step) => step.status === "pending" && step.attemptIds.length === 0) &&
+    hold?.proposalTicketId === proposal.id &&
+    hold.requestSha256 === request.requestSha256
+  );
+}
+
+export function routePlannedAssetRepairProposals(
+  tickets: Record<string, TicketRecord>,
+  proposalIds: ReadonlySet<string>,
+  at: string,
+): void {
+  for (const proposalId of proposalIds) {
+    const ticket = tickets[proposalId];
+    if (ticket === undefined) continue;
+    ticket.status = "cancelled";
+    ticket.blocker = COMPILER_ROUTED_TO_PLANNED_ASSET_REPAIR;
+    ticket.updatedAt = at;
+    for (const step of ticket.steps) step.status = "skipped";
+  }
+}
+
+/**
+ * A pristine proposal that asks only to rerun a gate is obsolete once the compiler has projected
+ * the exact current-manifest recheck. Cancel only that untouched proposal and leave its source
+ * hold intact: the authority can then archive the exact held Git cycle, release the source, and
+ * retire the now-inapplicable historical ticket without erasing any accepted attempts.
+ */
+export function routeSupersededGateRunProposals(
+  tickets: Record<string, TicketRecord>,
+  definitions: readonly DerivedTicketDefinition[],
+  at: string,
+): string[] {
+  const applicableIds = new Set(definitions.map((definition) => definition.id));
+  const recheckedGateIds = new Set(
+    definitions
+      .filter(
+        (definition) =>
+          definition.rule_id === "compiler.compatibility.repaired-provider-gate-recheck" &&
+          definition.operation_registry_id === "gates.gate.run-gate",
+      )
+      .flatMap((definition) => definition.target_node_ids),
+  );
+  const routed: string[] = [];
+  for (const source of Object.values(tickets).sort((left, right) =>
+    compareText(left.id, right.id),
+  )) {
+    const hold = source.executionControl?.sourceHold;
+    if (
+      hold === undefined ||
+      source.operationId !== "gates.gate.run-gate" ||
+      source.status !== "blocked" ||
+      applicableIds.has(source.id) ||
+      !source.targetNodeIds.some((nodeId) => recheckedGateIds.has(nodeId))
+    )
+      continue;
+    const proposal = tickets[hold.proposalTicketId];
+    const request = proposal?.executionControl?.proposalRequest;
+    if (
+      proposal === undefined ||
+      request?.fulfillment !== "dynamic_scope_change" ||
+      request.sourceTicketId !== source.id ||
+      request.requestSha256 !== hold.requestSha256 ||
+      !pristineHeldProposal({ tickets }, proposal)
+    )
+      continue;
+    proposal.status = "cancelled";
+    proposal.blocker = COMPILER_ROUTED_TO_MANIFEST_GATE_RECHECK;
+    proposal.updatedAt = at;
+    for (const step of proposal.steps) step.status = "skipped";
+    routed.push(proposal.id);
+  }
+  return routed;
+}
+
+/**
+ * A blocked gate without a current terminal receipt needs a fresh check, while a current accepted
+ * nonpassing receipt is concrete repair evidence for the selected provider. Reopen the asset only
+ * in the latter state so its higher priority cannot starve the first gate execution.
+ */
+export function recurringAssetRequiresReissue(input: {
+  readonly implementationCurrent: boolean;
+  readonly selectedGateContractsCurrent: boolean;
+  readonly selectedGateBlocked: boolean;
+  readonly standaloneSupportRunFailed?: boolean;
+  readonly reviewReworkPending?: boolean;
+}): boolean {
+  return (
+    !input.implementationCurrent ||
+    !input.selectedGateContractsCurrent ||
+    input.selectedGateBlocked ||
+    input.standaloneSupportRunFailed === true ||
+    input.reviewReworkPending === true
+  );
+}
+
+export function recurringAssetReviewReworkPending(
+  tickets: Readonly<Record<string, TicketRecord>>,
+  nodeId: string,
+): boolean {
+  return Object.values(tickets).some(
+    (ticket) =>
+      ticket.operationId === "asset-resolution.asset.implement-asset" &&
+      ticket.targetNodeIds.includes(nodeId) &&
+      ticket.status !== "completed" &&
+      ticket.status !== "cancelled" &&
+      (ticket.reviewReworks?.length ?? 0) > 0 &&
+      ticket.steps.some((step) => step.status === "pending" || step.status === "running"),
+  );
+}
+
+/**
+ * A current file manifest proves byte integrity, not that the implementation satisfies the gate it
+ * was selected to verify. When a direct experiment/prerequisite gate has a current accepted
+ * nonpassing receipt, its selected provider remains actionable even if every declared file is
+ * present and hash-current. Broader hypothesis/root gates are deliberately excluded: treating a
+ * terminal report-review gate as an implementation prerequisite creates a circular dependency.
+ */
+export function experimentBoundaryBlockedGateProviderNodeIds(
+  graph: { node(id: string): { readonly type: string } | undefined },
+  evaluation: Pick<CompiledRuleEvaluation, "facts" | "gate_policy_contexts">,
+): ReadonlySet<string> {
+  const selfBlockedGateIds = new Set<string>();
+  const currentTerminalGateIds = new Set<string>();
+  for (const fact of evaluation.facts) {
+    if (fact.kind !== "readiness" || fact.value !== "blocked") continue;
+    const blocking = fact.args.blocking_gate_ids;
+    if (Array.isArray(blocking) && blocking.some((gateId) => gateId === fact.anchor_node_id)) {
+      selfBlockedGateIds.add(fact.anchor_node_id);
+    }
+    const terminal = fact.args.current_terminal_gate_ids;
+    if (Array.isArray(terminal) && terminal.some((gateId) => gateId === fact.anchor_node_id)) {
+      currentTerminalGateIds.add(fact.anchor_node_id);
+    }
+  }
+  const providers = new Set<string>();
+  for (const context of evaluation.gate_policy_contexts) {
+    if (
+      context.winner_node_id !== undefined &&
+      selfBlockedGateIds.has(context.gate_node_id) &&
+      currentTerminalGateIds.has(context.gate_node_id) &&
+      context.evaluation_target_node_ids.some((nodeId) => {
+        const type = graph.node(nodeId)?.type;
+        return type === "experiment" || type === "prerequisite";
+      })
+    ) {
+      providers.add(context.winner_node_id);
+    }
+  }
+  return providers;
+}
+
+export interface CurrentNonpassingGateRepairEvidenceRequest {
+  readonly gateNodeId: string;
+  readonly providerNodeId: string;
+  readonly receiptIds: readonly string[];
+  readonly check: RunCheckRecord;
+  readonly artifact: ConfigurationObject;
+}
+
+interface CurrentNonpassingGateRepairEvidence {
+  readonly protocol: "koni.current-gate-repair-evidence.v1";
+  readonly gateNodeId: string;
+  readonly providerNodeId: string;
+  readonly evidenceId: string;
+  readonly evidenceSha256: Sha256Digest;
+  readonly checkId: string;
+  readonly recordedAt: string;
+  readonly summary: string;
+  readonly commands: readonly {
+    readonly argv: readonly string[];
+    readonly exitCode: number | null;
+    readonly result: JsonValue;
+  }[];
+}
+
+/**
+ * A nonpassing receipt is an active obligation until this execution epoch has produced its repair.
+ * After a successful production step, later verification/integration/review stages evaluate the
+ * candidate that step created. Relabeling the predecessor receipt as still active makes a bounded
+ * verifier request an upstream scope change for a defect that its own candidate may already fix.
+ * Read-only terminal resolvers have no production step, so their full diagnose/resolve chain keeps
+ * the causal evidence it needs to route the repair.
+ */
+export function shouldAttachCurrentGateRepairEvidence(
+  run: Pick<RunRecord, "tickets" | "attempts">,
+  definition: Pick<DerivedTicketDefinition, "id" | "operation_registry_id" | "workflow">,
+  step: DerivedTicketDefinition["workflow"][number],
+): boolean {
+  // A run-gate ticket is itself the current deterministic recheck. Giving its first step the
+  // predecessor's nonpassing receipt lets the operator route another repair without executing the
+  // now-current command, creating a repair/recheck loop even when the integrated verifier passes.
+  if (definition.operation_registry_id === "gates.gate.run-gate") return false;
+  const stepIndex = definition.workflow.findIndex((candidate) => candidate.id === step.id);
+  if (stepIndex <= 0) return true;
+  const ticket = run.tickets[definition.id];
+  if (ticket === undefined) return true;
+  const executionEpoch = ticket.executionEpoch ?? 0;
+  const priorProductionStepIds = new Set(
+    definition.workflow
+      .slice(0, stepIndex)
+      .filter((candidate) => candidate.kind === "production")
+      .map((candidate) => candidate.id),
+  );
+  if (priorProductionStepIds.size === 0) return true;
+  return !ticket.steps.some(
+    (candidate) =>
+      priorProductionStepIds.has(candidate.id) &&
+      candidate.status === "completed" &&
+      candidate.attemptIds.some((attemptId) => {
+        const attempt = run.attempts[attemptId];
+        return (
+          attempt?.status === "completed" && (attempt.ticketExecutionEpoch ?? 0) === executionEpoch
+        );
+      }),
+  );
+}
+
+/**
+ * Carry a gate's authenticated failing receipt through an approved source-owned repair.
+ *
+ * The verifier is the gate policy winner, but an approved application can deliberately route the
+ * repair to a different asset that owns the missing causal artifact. The application ticket is the
+ * compiler-authenticated bridge: when it targets the current ticket's source asset, the source
+ * proposal's gate targets remain causal read evidence even though they are not writable here.
+ */
+export function gateRepairEvidenceTargetNodeIds(
+  run: Pick<RunRecord, "tickets">,
+  graph: { node(id: string): { readonly type: string } | undefined },
+  targetNodeIds: readonly string[],
+): readonly string[] {
+  const targets = new Set(targetNodeIds);
+  for (const ticket of Object.values(run.tickets)) {
+    const control = ticket.executionControl;
+    if (
+      control?.sourceProposalTicketId === undefined ||
+      control.approvedApplicationSha256 === undefined ||
+      !ticket.targetNodeIds.some((nodeId) => targets.has(nodeId))
+    ) {
+      continue;
+    }
+    const proposal = run.tickets[control.sourceProposalTicketId];
+    if (proposal === undefined) continue;
+    for (const nodeId of proposal.targetNodeIds) {
+      if (graph.node(nodeId)?.type === "gate") targets.add(nodeId);
+    }
+  }
+  return [...targets].sort(compareText);
+}
+
+/**
+ * Bind a recurring verifier asset to the exact current nonpassing gate receipt that reopened it.
+ * The durable rule-evidence envelope supplies freshness authority; a historical check with the
+ * same gate id is never enough. The evidence artifact itself is authenticated and decoded later
+ * at the compiler I/O boundary before any diagnostic is exposed to an attempt.
+ */
+export async function currentNonpassingGateRepairEvidenceRequests(input: {
+  readonly graph: { node(id: string): { readonly type: string } | undefined };
+  readonly evaluation: Pick<CompiledRuleEvaluation, "facts" | "gate_policy_contexts">;
+  readonly evidence: RuleAuthorityEvidence | undefined;
+  readonly checks: readonly RunCheckRecord[] | undefined;
+  readonly targetNodeIds: readonly string[];
+  readonly readEvidence: (check: RunCheckRecord) => Promise<unknown>;
+}): Promise<CurrentNonpassingGateRepairEvidenceRequest[]> {
+  if (input.evidence === undefined || input.checks === undefined) return [];
+  const targets = new Set(input.targetNodeIds);
+  const selfBlockedGateIds = new Set<string>();
+  const currentTerminalGateIds = new Set<string>();
+  for (const fact of input.evaluation.facts) {
+    if (fact.kind !== "readiness" || fact.value !== "blocked") continue;
+    const blocking = fact.args.blocking_gate_ids;
+    if (Array.isArray(blocking) && blocking.some((gateId) => gateId === fact.anchor_node_id)) {
+      selfBlockedGateIds.add(fact.anchor_node_id);
+    }
+    const terminal = fact.args.current_terminal_gate_ids;
+    if (Array.isArray(terminal) && terminal.some((gateId) => gateId === fact.anchor_node_id)) {
+      currentTerminalGateIds.add(fact.anchor_node_id);
+    }
+  }
+  const requests: CurrentNonpassingGateRepairEvidenceRequest[] = [];
+  for (const context of input.evaluation.gate_policy_contexts) {
+    if (
+      context.winner_node_id === undefined ||
+      (!targets.has(context.winner_node_id) && !targets.has(context.gate_node_id)) ||
+      !selfBlockedGateIds.has(context.gate_node_id) ||
+      !currentTerminalGateIds.has(context.gate_node_id) ||
+      !context.evaluation_target_node_ids.some((nodeId) => {
+        const type = input.graph.node(nodeId)?.type;
+        return type === "experiment" || type === "prerequisite";
+      })
+    ) {
+      continue;
+    }
+    const currentPredicates = Object.values(input.evidence.predicates).filter(
+      (predicate) =>
+        predicate.result === true &&
+        predicate.subjectNodeId === context.gate_node_id &&
+        predicate.leaf?.op === "current_receipt" &&
+        predicate.leaf.receipt_type === "gate.receipt",
+    );
+    const receiptIds = [
+      ...new Set(currentPredicates.flatMap((predicate) => predicate.sourceReceiptIds)),
+    ].sort(compareText);
+    if (receiptIds.length === 0) continue;
+    const candidates = [...input.checks]
+      .reverse()
+      .filter(
+        (candidate) =>
+          candidate.accepted &&
+          candidate.passed === false &&
+          candidate.executionPolicy?.gatePolicyContexts.some(
+            (binding) => binding.gateNodeId === context.gate_node_id,
+          ),
+      );
+    let selected: { check: RunCheckRecord; artifact: ConfigurationObject } | undefined;
+    for (const check of candidates) {
+      const artifact = await input.readEvidence(check);
+      if (!isRecord(artifact) || typeof artifact.id !== "string") continue;
+      if (!receiptIds.includes(artifact.id)) continue;
+      selected = { check, artifact: artifact as ConfigurationObject };
+      break;
+    }
+    if (selected === undefined) continue;
+    requests.push({
+      gateNodeId: context.gate_node_id,
+      providerNodeId: context.winner_node_id,
+      receiptIds,
+      ...selected,
+    });
+  }
+  return requests.sort((left, right) => compareText(left.gateNodeId, right.gateNodeId));
+}
+
+/** Direct scientific gates need a fresh check after their selected verifier manifest changes. */
+export function repairedProviderBlockedDirectGateNodeIds(
+  graph: {
+    node(id: string):
+      | {
+          readonly type: string;
+          readonly asset_manifest?: Readonly<Record<string, unknown>>;
+        }
+      | undefined;
+  },
+  evaluation: Pick<CompiledRuleEvaluation, "facts" | "gate_policy_contexts">,
+): ReadonlySet<string> {
+  const selfBlockedGateIds = new Set<string>();
+  for (const fact of evaluation.facts) {
+    if (fact.kind !== "readiness" || fact.value !== "blocked") continue;
+    const blocking = fact.args.blocking_gate_ids;
+    if (Array.isArray(blocking) && blocking.some((gateId) => gateId === fact.anchor_node_id)) {
+      selfBlockedGateIds.add(fact.anchor_node_id);
+    }
+  }
+  const gates = new Set<string>();
+  for (const context of evaluation.gate_policy_contexts) {
+    const winner =
+      context.winner_node_id === undefined ? undefined : graph.node(context.winner_node_id);
+    const manifestHash = optionalString(winner?.asset_manifest?.hash);
+    if (
+      manifestHash !== undefined &&
+      selfBlockedGateIds.has(context.gate_node_id) &&
+      context.evaluation_target_node_ids.some((nodeId) => {
+        const type = graph.node(nodeId)?.type;
+        return type === "experiment" || type === "prerequisite";
+      })
+    ) {
+      gates.add(context.gate_node_id);
+    }
+  }
+  return gates;
+}
+
+/**
+ * A direct gate recheck reads the gate, its selected verifier, and the scientific subject being
+ * evaluated. The broader policy context is useful evidence for rule selection, but granting every
+ * context node here creates false read/write dependencies on unrelated run-contract repairs and
+ * can deadlock the very gate that would unblock execution.
+ */
+export function repairedProviderDirectGateReadNodeIds(
+  graph: { node(id: string): { readonly type: string } | undefined },
+  context: {
+    readonly gate_node_id: string;
+    readonly winner_node_id?: string;
+    readonly evaluation_target_node_ids: readonly string[];
+    readonly context_node_ids?: readonly string[];
+  },
+): readonly string[] {
+  return [
+    context.gate_node_id,
+    ...(context.winner_node_id === undefined ? [] : [context.winner_node_id]),
+    ...context.evaluation_target_node_ids,
+  ]
+    .filter((nodeId) => graph.node(nodeId) !== undefined)
+    .sort(compareText)
+    .filter((nodeId, index, all) => index === 0 || nodeId !== all[index - 1]);
+}
+
+/** A gate recheck is current only when its manifest-derived definition identity is current. */
+export function hasManifestScopedDirectGateRecheck(
+  definitions: readonly Pick<DerivedTicketDefinition, "id" | "operation_registry_id">[],
+  expectedDefinitionId: string,
+): boolean {
+  return definitions.some(
+    (definition) =>
+      definition.operation_registry_id === "gates.gate.run-gate" &&
+      definition.id === expectedDefinitionId,
+  );
+}
+
+/** Return current manifest-bound gate rechecks even when they already exist in the evaluation. */
+export function manifestScopedDirectGateRechecks(
+  definitions: readonly DerivedTicketDefinition[],
+  expectedDefinitionIds: ReadonlySet<string>,
+): DerivedTicketDefinition[] {
+  return definitions.filter(
+    (definition) =>
+      definition.operation_registry_id === "gates.gate.run-gate" &&
+      expectedDefinitionIds.has(definition.id),
+  );
+}
+
+/**
+ * A manifest-bound recheck is the current execution authority for its gate. Keeping an older
+ * run-gate definition for the same node makes the new ticket depend on a stale failed workflow
+ * (and possibly its operator proposal), even though the selected provider bytes have changed.
+ */
+export function replaceGateRunDefinitionsWithManifestRechecks(
+  definitions: readonly DerivedTicketDefinition[],
+  rechecks: readonly DerivedTicketDefinition[],
+): DerivedTicketDefinition[] {
+  const recheckedGateIds = new Set(rechecks.flatMap((definition) => definition.target_node_ids));
+  return [
+    ...definitions.filter(
+      (definition) =>
+        definition.operation_registry_id !== "gates.gate.run-gate" ||
+        !definition.target_node_ids.some((nodeId) => recheckedGateIds.has(nodeId)),
+    ),
+    ...rechecks,
+  ];
+}
+
+function repairedProviderBlockedDirectGateFallback(
+  configuration: CompiledConfiguration,
+  graph: TypedGraph,
+  evaluation: CompiledRuleEvaluation,
+): CompiledRuleEvaluation {
+  const operationId = "gates.gate.run-gate";
+  if (configuration.registries.operations[operationId]?.operation !== "run-gate") {
+    return evaluation;
+  }
+  const targetGateIds = repairedProviderBlockedDirectGateNodeIds(graph, evaluation);
+  const additions: DerivedTicketDefinition[] = [];
+  const expectedDefinitionIds = new Set<string>();
+  const catalog = requireExecutionSemanticCatalog(configuration);
+  for (const gateId of [...targetGateIds].sort(compareText)) {
+    const gate = graph.node(gateId);
+    const context = evaluation.gate_policy_contexts.find(
+      (candidate) => candidate.gate_node_id === gateId && candidate.winner_node_id !== undefined,
+    );
+    const winnerId = context?.winner_node_id;
+    const winner = winnerId === undefined ? undefined : graph.node(winnerId);
+    const extendedWinner = winner as unknown as ConfigurationObject | undefined;
+    const manifestHash = optionalString(optionalRecord(extendedWinner?.asset_manifest)?.hash);
+    if (gate?.type !== "gate" || winnerId === undefined || manifestHash === undefined) continue;
+    const readNodeIds = repairedProviderDirectGateReadNodeIds(graph, {
+      gate_node_id: gateId,
+      winner_node_id: winnerId,
+      evaluation_target_node_ids: context?.evaluation_target_node_ids ?? [],
+    });
+    const id = `TK-compat-run-gate-${digestBody(
+      canonicalHash({
+        configuration_sha256: configuration.configuration_sha256,
+        gate_node_id: gateId,
+        winner_node_id: winnerId,
+        winner_manifest_hash: manifestHash,
+      }),
+    ).slice(0, 24)}`;
+    expectedDefinitionIds.add(id);
+    if (hasManifestScopedDirectGateRecheck(evaluation.tickets, id)) continue;
+    additions.push(
+      configuredControlTicketDefinition({
+        configuration,
+        catalog,
+        graph,
+        id,
+        operationId,
+        title: `run-gate: ${gate.title}`,
+        targetNodeIds: [gateId],
+        readNodeIds,
+        writeNodeIds: [gateId],
+        readPaths: [...(context?.read_paths ?? [])].sort(compareText),
+        writePaths: [],
+        sourceStateKey: "direct-scientific-gate-blocked-after-provider-repair",
+        targetStateKey: "direct-scientific-gate-has-current-passing-receipt",
+        obligationKeys: ["gate.verdict"],
+        forceGraphMutationForbidden: false,
+        ruleId: "compiler.compatibility.repaired-provider-gate-recheck",
+      }),
+    );
+  }
+  const currentRechecks = manifestScopedDirectGateRechecks(
+    evaluation.tickets,
+    expectedDefinitionIds,
+  );
+  const rechecks = [...currentRechecks, ...additions];
+  if (rechecks.length === 0) return evaluation;
+  const reconciled = replaceGateRunDefinitionsWithManifestRechecks(evaluation.tickets, rechecks);
+  const unchanged =
+    reconciled.length === evaluation.tickets.length &&
+    reconciled.every((definition, index) => definition === evaluation.tickets[index]);
+  return unchanged ? evaluation : rehashRuleEvaluation(evaluation, reconciled);
+}
+
+/**
+ * Rule evaluation intentionally continues to project deterministic implement-asset definitions
+ * after a recurring asset has settled. The filesystem acceptance pass is the authority for whether
+ * that recurring obligation is current. Verification must therefore omit current recurring assets
+ * from its actionable fixpoint while retaining stale assets and every non-asset predicate.
+ */
+export function verificationActionableTicketDefinitions(
+  definitions: readonly DerivedTicketDefinition[],
+  recurringAssetReissues: ReadonlySet<string>,
+  durableTickets: readonly Pick<TicketRecord, "id" | "status">[] = [],
+): readonly DerivedTicketDefinition[] {
+  const completedTicketIds = new Set(
+    durableTickets.filter((ticket) => ticket.status === "completed").map((ticket) => ticket.id),
+  );
+  return ticketBoardApplicableTicketDefinitions(definitions, recurringAssetReissues).filter(
+    (definition) =>
+      definition.rule_id !== "compiler.compatibility.repaired-provider-gate-recheck" ||
+      !completedTicketIds.has(definition.id),
+  );
+}
+
+/**
+ * A current recurring asset definition remains in the compiler artifact for stable identity and
+ * restoration, but it is not an applicable scheduling predicate until materialization becomes
+ * stale again. Keeping these ids out of the board's applicable set also lets the authority retire
+ * an already-created empty reissue cycle before it can launch another provider attempt.
+ */
+export function ticketBoardApplicableTicketDefinitions(
+  definitions: readonly DerivedTicketDefinition[],
+  recurringAssetReissues: ReadonlySet<string>,
+): readonly DerivedTicketDefinition[] {
+  return definitions.filter(
+    (definition) =>
+      definition.operation_registry_id !== "asset-resolution.asset.implement-asset" ||
+      definition.target_node_ids.some((nodeId) => recurringAssetReissues.has(nodeId)),
+  );
+}
+
+/**
+ * Older pinned research profiles select scientific runs only through an incoming experiment or
+ * ablation `runs` edge. An approved change can instead author a bounded standalone support run to
+ * materialize a runtime artifact required by a gate. Preserve that approved execution path by
+ * projecting the same configured contract-repair or runtime operation that the current profile
+ * emits for a scientific-result run, while continuing to exclude gate-result provenance records.
+ */
+export function researchStandaloneSupportRunFallback(
+  configuration: CompiledConfiguration,
+  graph: TypedGraph,
+  evaluation: CompiledRuleEvaluation,
+  adapter: RuleDomainAdapter,
+  durableTickets: readonly Pick<
+    TicketRecord,
+    "id" | "operationId" | "targetNodeIds" | "status"
+  >[] = [],
+): CompiledRuleEvaluation {
+  const edges = graph.edges();
+  const ownedRunIds = new Set(
+    edges
+      .filter((edge) => {
+        const source = graph.node(edge.source);
+        return (
+          edge.relation === "runs" && (source?.type === "experiment" || source?.type === "ablation")
+        );
+      })
+      .map((edge) => edge.target),
+  );
+  const evaluatedTargetKeys = new Set<string>();
+  for (const definition of evaluation.tickets) {
+    for (const nodeId of definition.target_node_ids) {
+      evaluatedTargetKeys.add(operationTargetKey(definition.operation_registry_id, nodeId));
+    }
+  }
+  const durableTicketIdsByTarget = new Map<string, Set<string>>();
+  for (const ticket of durableTickets) {
+    if (ticket.status === "completed" || ticket.status === "cancelled") continue;
+    for (const nodeId of ticket.targetNodeIds) {
+      const key = operationTargetKey(ticket.operationId, nodeId);
+      const ticketIds = durableTicketIdsByTarget.get(key) ?? new Set<string>();
+      ticketIds.add(ticket.id);
+      durableTicketIdsByTarget.set(key, ticketIds);
+    }
+  }
+  const requiredContractFields = [
+    "spec.runtime_contract.command",
+    "spec.runtime_contract.composed_verification_command",
+    "spec.runtime_contract.result_protocol",
+    "spec.runtime_contract.required_measurements",
+    "spec.runtime_contract.asset_entrypoints",
+  ] as const;
+  const terminalStatuses = new Set(["satisfied", "archived", "superseded"]);
+  const catalog = requireExecutionSemanticCatalog(configuration);
+  const additions: DerivedTicketDefinition[] = [];
+
+  for (const node of graph.nodes()) {
+    const runtimeContract = optionalRecord(node.spec.runtime_contract);
+    if (
+      node.type !== "run" ||
+      terminalStatuses.has(node.status) ||
+      ownedRunIds.has(node.id) ||
+      runtimeContract?.result_protocol !== "autoresearch.research-result.v1"
+    ) {
+      continue;
+    }
+
+    const evaluator = new GraphExpressionEvaluator(configuration, graph, adapter);
+    evaluator.bind("target", [node.id]);
+    const contractComplete =
+      requiredContractFields.every((field) => evaluator.evaluate({ op: "field_present", field })) &&
+      Array.isArray(runtimeContract.scientific_inputs);
+    const operationId = contractComplete
+      ? "execution.run.run-experiment"
+      : "execution.node.compile-run-plan";
+    if (
+      contractComplete &&
+      evaluator.evaluate({ op: "current_receipt", receipt_type: "runtime.receipt" })
+    ) {
+      continue;
+    }
+
+    const relatedNodeIds = new Set([node.id]);
+    for (const edge of edges) {
+      if (edge.source === node.id && (edge.relation === "uses" || edge.relation === "evaluates")) {
+        relatedNodeIds.add(edge.target);
+      }
+    }
+    const readNodeIds = [...relatedNodeIds].sort(compareText);
+    const readPaths = new Set<string>();
+    for (const nodeId of readNodeIds) {
+      const related = graph.node(nodeId);
+      if (related?.type !== "asset") continue;
+      const root = optionalString(optionalRecord(related.spec.implementation_plan)?.root);
+      if (root !== undefined) readPaths.add(root);
+    }
+    const outputRoot = optionalString(runtimeContract.output_root);
+    if (contractComplete && outputRoot !== undefined) readPaths.add(outputRoot);
+    const sourceStateKey = contractComplete
+      ? "run-missing-current-valid-runtime-receipt"
+      : "run-missing-executable-contract";
+    const targetStateKey = contractComplete
+      ? "run-has-current-valid-runtime-receipt"
+      : "run-has-executable-scientific-contract";
+    const id = `TK-compat-standalone-run-${digestBody(
+      canonicalHash({
+        configuration_sha256: configuration.configuration_sha256,
+        operation_id: operationId,
+        target_node_id: node.id,
+        source_state: sourceStateKey,
+      }),
+    ).slice(0, 24)}`;
+    const targetKey = operationTargetKey(operationId, node.id);
+    if (evaluatedTargetKeys.has(targetKey)) continue;
+    const durableTicketIds = durableTicketIdsByTarget.get(targetKey);
+    if (
+      durableTicketIds !== undefined &&
+      [...durableTicketIds].some((ticketId) => ticketId !== id)
+    ) {
+      continue;
+    }
+    additions.push(
+      configuredControlTicketDefinition({
+        configuration,
+        catalog,
+        graph,
+        id,
+        operationId,
+        title: `${contractComplete ? "run-experiment" : "compile-run-plan"}: ${node.title}`,
+        targetNodeIds: [node.id],
+        readNodeIds,
+        writeNodeIds: [node.id],
+        readPaths: [...readPaths].sort(compareText),
+        writePaths: contractComplete && outputRoot !== undefined ? [outputRoot] : [],
+        sourceStateKey,
+        targetStateKey,
+        obligationKeys: [contractComplete ? "run.receipt" : "run.runtime-contract"],
+        forceGraphMutationForbidden: false,
+        ruleId: "compiler.compatibility.research-standalone-support-run",
+      }),
+    );
+  }
+
+  return additions.length === 0
+    ? evaluation
+    : rehashRuleEvaluation(evaluation, [...evaluation.tickets, ...additions]);
+}
+
+function operationTargetKey(operationId: string, targetNodeId: string): string {
+  return `${operationId}\u0000${targetNodeId}`;
+}
+
+/**
+ * Resolve an already-authorized standalone scientific run that covers an upstream request's exact
+ * asset/gate seam. A request may name only the executable asset while its source ticket carries the
+ * causal gate in read scope; that still requires an explicit gate overlap rather than treating any
+ * run that happens to use the asset as fulfillment. The run must declare a durable output root and
+ * scientific result protocol; a gate-result provenance record or an experiment-owned run is not a
+ * substitute.
+ */
+export function existingStandaloneSupportRunForUpstreamRequest(
+  graph: {
+    node(id: string):
+      | {
+          readonly type: string;
+          readonly spec?: Readonly<Record<string, unknown>>;
+        }
+      | undefined;
+    edges(): readonly {
+      readonly source: string;
+      readonly relation: string;
+      readonly target: string;
+    }[];
+  },
+  targetNodeIds: readonly string[],
+  causalContextNodeIds: readonly string[] = [],
+): string | undefined {
+  const requestedAssets: string[] = [];
+  const requestedGates: string[] = [];
+  for (const nodeId of targetNodeIds) {
+    const type = graph.node(nodeId)?.type;
+    if (type === "asset") requestedAssets.push(nodeId);
+    else if (type === "gate") requestedGates.push(nodeId);
+    else return undefined;
+  }
+  if (requestedAssets.length === 0) return undefined;
+  const contextualGates = new Set(
+    causalContextNodeIds.filter((nodeId) => graph.node(nodeId)?.type === "gate"),
+  );
+  if (requestedGates.length === 0 && contextualGates.size === 0) return undefined;
+
+  const edges = graph.edges();
+  const ownedRunIds = new Set(
+    edges
+      .filter((edge) => {
+        const source = graph.node(edge.source);
+        return (
+          edge.relation === "runs" && (source?.type === "experiment" || source?.type === "ablation")
+        );
+      })
+      .map((edge) => edge.target),
+  );
+  const candidateRunIds = [...new Set(edges.map((edge) => edge.source))]
+    .filter((nodeId) => graph.node(nodeId)?.type === "run" && !ownedRunIds.has(nodeId))
+    .sort(compareText);
+  for (const runId of candidateRunIds) {
+    const runtimeContract = optionalRecord(graph.node(runId)?.spec?.runtime_contract);
+    if (
+      runtimeContract?.result_protocol !== "autoresearch.research-result.v1" ||
+      optionalString(runtimeContract.output_root) === undefined
+    ) {
+      continue;
+    }
+    const uses = new Set(
+      edges
+        .filter((edge) => edge.source === runId && edge.relation === "uses")
+        .map((edge) => edge.target),
+    );
+    const evaluates = new Set(
+      edges
+        .filter((edge) => edge.source === runId && edge.relation === "evaluates")
+        .map((edge) => edge.target),
+    );
+    if (
+      requestedAssets.every((nodeId) => uses.has(nodeId)) &&
+      (requestedGates.length > 0
+        ? requestedGates.every((nodeId) => evaluates.has(nodeId))
+        : [...contextualGates].some((nodeId) => evaluates.has(nodeId)))
+    ) {
+      return runId;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Scientific execution workflows apply to runs owned by an experiment or ablation through its
+ * `runs` edge and to bounded standalone support runs that explicitly declare the scientific result
+ * protocol. Approved change applications can author the latter to materialize an upstream runtime
+ * artifact before an experiment owns it. Gate workflows may also create run-shaped provenance
+ * records, but those emit gate-result receipts and cannot truthfully satisfy a research-result
+ * runtime contract. Keep this invariant in Core as compatibility for already-pinned profile
+ * bundles.
+ */
+export function scientificRunTicketDefinitions(
+  graph: {
+    node(id: string):
+      | {
+          readonly type: string;
+          readonly spec?: Readonly<Record<string, unknown>>;
+        }
+      | undefined;
+    edges(): readonly {
+      readonly source: string;
+      readonly relation: string;
+      readonly target: string;
+    }[];
+  },
+  definitions: readonly DerivedTicketDefinition[],
+): readonly DerivedTicketDefinition[] {
+  const scientificRunIds = new Set(
+    graph
+      .edges()
+      .filter((edge) => {
+        const source = graph.node(edge.source);
+        const target = graph.node(edge.target);
+        return (
+          edge.relation === "runs" &&
+          (source?.type === "experiment" || source?.type === "ablation") &&
+          target?.type === "run"
+        );
+      })
+      .map((edge) => edge.target),
+  );
+  const scientificOperations = new Set([
+    "execution.node.compile-run-plan",
+    "execution.run.run-experiment",
+  ]);
+  return definitions.filter(
+    (definition) =>
+      !scientificOperations.has(definition.operation_registry_id) ||
+      definition.target_node_ids.every((nodeId) => {
+        const node = graph.node(nodeId);
+        const runtimeContract = isRecord(node?.spec?.runtime_contract)
+          ? node.spec.runtime_contract
+          : undefined;
+        const standaloneScientificRun =
+          runtimeContract?.result_protocol === "autoresearch.research-result.v1";
+        return node?.type !== "run" || scientificRunIds.has(nodeId) || standaloneScientificRun;
+      }),
+  );
+}
+
+function rehashRuleEvaluation(
+  evaluation: CompiledRuleEvaluation,
+  tickets: readonly DerivedTicketDefinition[],
+): CompiledRuleEvaluation {
+  const material = { ...evaluation, tickets: [...tickets] };
+  return deepFreeze({
+    ...material,
+    evaluation_sha256: canonicalHash(withoutField(material, "evaluation_sha256")),
+  });
+}
+
+/**
+ * Research profiles historically selected run-plan targets through the final `readiness.state`.
+ * Gate-policy authority is materialized after constitution readiness and deliberately overwrites
+ * that field while an expected-red gate is unresolved, so the old selector made the operation
+ * that designs an executable run unreachable. Planning a run is not scientific execution: gates
+ * must constrain the later runtime receipt, not whether the runtime contract can be authored.
+ *
+ * Keep already-pinned runs live by projecting the same compile-run-plan operation from the
+ * constitution encoded in their typed graph. Current profiles express this with the private
+ * `compiler.constitution_state` projection; this fallback is inert once the configured rule emits
+ * the ticket itself or the target already owns a run.
+ */
+export function researchConstitutionRunPlanFallback(
+  configuration: CompiledConfiguration,
+  graph: TypedGraph,
+  evaluation: CompiledRuleEvaluation,
+): CompiledRuleEvaluation {
+  const operationId = "execution.node.compile-run-plan";
+  const operation = configuration.registries.operations[operationId];
+  if (operation?.operation !== "compile-run-plan") return evaluation;
+
+  const existingTargets = new Set(
+    evaluation.tickets
+      .filter((definition) => definition.operation_registry_id === operationId)
+      .flatMap((definition) => definition.target_node_ids),
+  );
+  const additions: DerivedTicketDefinition[] = [];
+  const catalog = requireExecutionSemanticCatalog(configuration);
+  for (const node of graph.nodes()) {
+    if (
+      (node.type !== "experiment" && node.type !== "ablation") ||
+      new Set(["satisfied", "archived", "superseded"]).has(node.status) ||
+      existingTargets.has(node.id) ||
+      (node.edges.runs?.length ?? 0) > 0
+    ) {
+      continue;
+    }
+    const constitutionComplete =
+      node.type === "experiment"
+        ? (node.edges.methods?.length ?? 0) > 0 &&
+          (node.edges.metrics?.length ?? 0) > 0 &&
+          (node.edges.ablations?.length ?? 0) > 0 &&
+          (node.edges.requires?.length ?? 0) > 0
+        : (node.edges.metrics?.length ?? 0) > 0 &&
+          ((node.edges.method?.length ?? 0) > 0 ||
+            ((node.edges.baseline?.length ?? 0) > 0 && (node.edges.variant?.length ?? 0) > 0));
+    if (!constitutionComplete) continue;
+
+    const id = `TK-compat-run-plan-${digestBody(
+      canonicalHash({
+        configuration_sha256: configuration.configuration_sha256,
+        target_node_id: node.id,
+        source_state: "constitution-complete-without-run-plan",
+      }),
+    ).slice(0, 24)}`;
+    additions.push(
+      configuredControlTicketDefinition({
+        configuration,
+        catalog,
+        graph,
+        id,
+        operationId,
+        title: `compile-run-plan: ${node.title}`,
+        targetNodeIds: [node.id],
+        readNodeIds: [node.id],
+        writeNodeIds: [node.id],
+        readPaths: [],
+        writePaths: [],
+        sourceStateKey: "constitution-complete-without-run-plan",
+        targetStateKey: "target-has-linked-run",
+        obligationKeys: ["target.runs"],
+        forceGraphMutationForbidden: false,
+        ruleId: "compiler.compatibility.research-constitution-run-plan",
+      }),
+    );
+  }
+  return additions.length === 0
+    ? evaluation
+    : rehashRuleEvaluation(evaluation, [...evaluation.tickets, ...additions]);
+}
+
+interface ResearchRunContractScopeGraph {
+  node(id: string):
+    | {
+        readonly id: string;
+        readonly type: string;
+        readonly spec: Readonly<Record<string, unknown>>;
+      }
+    | undefined;
+  edges(): readonly {
+    readonly source: string;
+    readonly relation: string;
+    readonly target: string;
+  }[];
+}
+
+/**
+ * A run-contract repair step must be able to inspect the concrete assets that its scientific
+ * owner already selected. Older research rules only traversed `run -> evaluates` and `run ->
+ * uses`; before the bind step creates `uses` edges, that scope excludes the very harness and
+ * prerequisite assets needed to author truthful argv and integrity commands.
+ *
+ * Expand only scientific compile-run-plan repairs, and only through the owner's typed research
+ * relations. This keeps unrelated assets out of scope while repairing already-pinned profiles.
+ */
+export function researchRunContractScopeFallback(
+  graph: ResearchRunContractScopeGraph,
+  evaluation: CompiledRuleEvaluation,
+): CompiledRuleEvaluation {
+  const edges = graph.edges();
+  const expansionRelations = new Set([
+    "assets",
+    "methods",
+    "requires",
+    "baseline",
+    "variant",
+    "method",
+    "implements",
+    "satisfied_by",
+    "metrics",
+  ]);
+  const existingIds = new Set(evaluation.tickets.map((definition) => definition.id));
+  const supersededIds = new Set<string>();
+  const additions: DerivedTicketDefinition[] = [];
+  for (const definition of evaluation.tickets) {
+    if (
+      definition.operation_registry_id !== "execution.node.compile-run-plan" ||
+      definition.source_state_key !== "run-missing-executable-contract"
+    ) {
+      continue;
+    }
+    const targetRunIds = definition.target_node_ids.filter(
+      (nodeId) => graph.node(nodeId)?.type === "run",
+    );
+    if (targetRunIds.length === 0) continue;
+
+    const visible = new Set(definition.scope.read_node_ids);
+    const frontier: string[] = [...visible];
+    const add = (nodeId: string): void => {
+      if (graph.node(nodeId) === undefined || visible.has(nodeId)) return;
+      visible.add(nodeId);
+      frontier.push(nodeId);
+    };
+    for (const runId of targetRunIds) {
+      add(runId);
+      for (const edge of edges) {
+        if (edge.source === runId && edge.relation === "evaluates") add(edge.target);
+        if (edge.target === runId && edge.relation === "runs") {
+          const owner = graph.node(edge.source);
+          if (owner?.type === "experiment" || owner?.type === "ablation") add(edge.source);
+        }
+      }
+    }
+    for (const nodeId of [...visible]) {
+      if (graph.node(nodeId)?.type !== "ablation") continue;
+      for (const edge of edges) {
+        if (edge.relation === "ablations" && edge.target === nodeId) add(edge.source);
+      }
+    }
+    for (let index = 0; index < frontier.length; index += 1) {
+      const source = frontier[index]!;
+      for (const edge of edges) {
+        if (edge.source === source && expansionRelations.has(edge.relation)) add(edge.target);
+      }
+    }
+
+    const readPaths = new Set(definition.scope.read_paths);
+    for (const nodeId of visible) {
+      const node = graph.node(nodeId);
+      if (node?.type !== "asset") continue;
+      const plan = optionalRecord(node.spec.implementation_plan);
+      const root = optionalString(plan?.root);
+      if (root !== undefined) readPaths.add(root);
+    }
+    const readNodeIds = [...visible].sort(compareText);
+    const sortedReadPaths = [...readPaths].sort(compareText);
+    if (
+      canonicalHash(readNodeIds) === canonicalHash(definition.scope.read_node_ids) &&
+      canonicalHash(sortedReadPaths) === canonicalHash(definition.scope.read_paths)
+    ) {
+      continue;
+    }
+    const { definition_sha256: _definitionSha256, ...existing } = definition;
+    const id = `TK-compat-run-contract-scope-${digestBody(
+      canonicalHash({
+        configuration_sha256: evaluation.configuration_sha256,
+        target_node_ids: targetRunIds,
+        read_node_ids: readNodeIds,
+        read_paths: sortedReadPaths,
+      }),
+    ).slice(0, 24)}`;
+    supersededIds.add(definition.id);
+    if (existingIds.has(id)) continue;
+    const material = {
+      ...existing,
+      id,
+      rule_id: "compiler.compatibility.research-run-contract-scope",
+      scope: {
+        ...definition.scope,
+        read_node_ids: readNodeIds,
+        read_paths: sortedReadPaths,
+      },
+    };
+    additions.push(deepFreeze({ ...material, definition_sha256: canonicalHash(material) }));
+    existingIds.add(id);
+  }
+  const withRunContractScope =
+    supersededIds.size === 0
+      ? evaluation
+      : rehashRuleEvaluation(evaluation, [
+          ...evaluation.tickets.filter((definition) => !supersededIds.has(definition.id)),
+          ...additions,
+        ]);
+  return standaloneSupportRunAssetRepairScopeFallback(
+    graph,
+    gateProviderRepairScopeFallback(graph, withRunContractScope),
+  );
+}
+
+/**
+ * A selected gate provider can diagnose that the nonpassing condition belongs to the scientific
+ * prerequisite's generated asset rather than to the verifier itself. Give that recurring repair
+ * ticket read-only visibility through the direct gate -> prerequisite -> asset chain so it can
+ * name an exact, already-planned upstream target. Write authority remains confined to the
+ * provider asset.
+ */
+export function gateProviderRepairScopeFallback(
+  graph: ResearchRunContractScopeGraph,
+  evaluation: CompiledRuleEvaluation,
+): CompiledRuleEvaluation {
+  const delegatedGateNodeIds = standaloneSupportRunGateNodeIds(graph, evaluation);
+  const selfBlockedGateIds = new Set<string>();
+  const currentTerminalGateIds = new Set<string>();
+  for (const fact of evaluation.facts) {
+    if (fact.kind !== "readiness" || fact.value !== "blocked") continue;
+    const blocking = fact.args.blocking_gate_ids;
+    if (Array.isArray(blocking) && blocking.some((gateId) => gateId === fact.anchor_node_id)) {
+      selfBlockedGateIds.add(fact.anchor_node_id);
+    }
+    const terminal = fact.args.current_terminal_gate_ids;
+    if (Array.isArray(terminal) && terminal.some((gateId) => gateId === fact.anchor_node_id)) {
+      currentTerminalGateIds.add(fact.anchor_node_id);
+    }
+  }
+
+  const edges = graph.edges();
+  const causalRelations = new Set(["applies_to", "requires", "satisfied_by"]);
+  const causalScopeByProvider = new Map<string, Set<string>>();
+  for (const context of evaluation.gate_policy_contexts) {
+    const providerId = context.winner_node_id;
+    if (
+      providerId === undefined ||
+      delegatedGateNodeIds.has(context.gate_node_id) ||
+      !selfBlockedGateIds.has(context.gate_node_id) ||
+      !currentTerminalGateIds.has(context.gate_node_id) ||
+      !context.evaluation_target_node_ids.some((nodeId) => {
+        const type = graph.node(nodeId)?.type;
+        return type === "experiment" || type === "prerequisite";
+      })
+    ) {
+      continue;
+    }
+    const causal = causalScopeByProvider.get(providerId) ?? new Set<string>();
+    const frontier = [context.gate_node_id, ...context.evaluation_target_node_ids];
+    for (let index = 0; index < frontier.length; index += 1) {
+      const source = frontier[index]!;
+      if (graph.node(source) === undefined || causal.has(source)) continue;
+      causal.add(source);
+      for (const edge of edges) {
+        if (
+          edge.source === source &&
+          causalRelations.has(edge.relation) &&
+          !causal.has(edge.target)
+        ) {
+          frontier.push(edge.target);
+        }
+      }
+    }
+    causal.add(providerId);
+    causalScopeByProvider.set(providerId, causal);
+  }
+  if (causalScopeByProvider.size === 0) return evaluation;
+
+  const existingIds = new Set(evaluation.tickets.map((definition) => definition.id));
+  const supersededIds = new Set<string>();
+  const additions: DerivedTicketDefinition[] = [];
+  for (const definition of evaluation.tickets) {
+    if (definition.operation_registry_id !== "asset-resolution.asset.implement-asset") continue;
+    const causalNodeIds = new Set(
+      definition.target_node_ids.flatMap((nodeId) => [
+        ...(causalScopeByProvider.get(nodeId) ?? []),
+      ]),
+    );
+    if (causalNodeIds.size === 0) continue;
+
+    const readNodeIds = [...new Set([...definition.scope.read_node_ids, ...causalNodeIds])].sort(
+      compareText,
+    );
+    const readPaths = new Set(definition.scope.read_paths);
+    for (const nodeId of readNodeIds) {
+      const node = graph.node(nodeId);
+      if (node?.type !== "asset") continue;
+      const root = optionalString(optionalRecord(node.spec.implementation_plan)?.root);
+      if (root !== undefined) readPaths.add(root);
+    }
+    const sortedReadPaths = [...readPaths].sort(compareText);
+    if (
+      canonicalHash(readNodeIds) === canonicalHash(definition.scope.read_node_ids) &&
+      canonicalHash(sortedReadPaths) === canonicalHash(definition.scope.read_paths)
+    ) {
+      continue;
+    }
+
+    const { definition_sha256: _definitionSha256, ...existing } = definition;
+    const id = `TK-compat-gate-provider-repair-scope-${digestBody(
+      canonicalHash({
+        configuration_sha256: evaluation.configuration_sha256,
+        source_definition_id: definition.id,
+        target_node_ids: definition.target_node_ids,
+        read_node_ids: readNodeIds,
+        read_paths: sortedReadPaths,
+      }),
+    ).slice(0, 24)}`;
+    supersededIds.add(definition.id);
+    if (existingIds.has(id)) continue;
+    const material = {
+      ...existing,
+      id,
+      rule_id: "compiler.compatibility.gate-provider-repair-scope",
+      scope: {
+        ...definition.scope,
+        read_node_ids: readNodeIds,
+        read_paths: sortedReadPaths,
+      },
+    };
+    additions.push(deepFreeze({ ...material, definition_sha256: canonicalHash(material) }));
+    existingIds.add(id);
+  }
+  return supersededIds.size === 0
+    ? evaluation
+    : rehashRuleEvaluation(evaluation, [
+        ...evaluation.tickets.filter((definition) => !supersededIds.has(definition.id)),
+        ...additions,
+      ]);
+}
+
+async function generatedAssetImplementationFallback(
+  run: RunRecord,
+  configuration: CompiledConfiguration,
+  graph: TypedGraph,
+  evaluation: CompiledRuleEvaluation,
+): Promise<CompiledRuleEvaluation | undefined> {
   const operationId = "asset-resolution.asset.implement-asset";
   const operation = configuration.registries.operations[operationId];
   if (operation?.operation !== "implement-asset") return undefined;
@@ -9893,15 +13657,32 @@ function generatedAssetImplementationFallback(
       ? plan.files.filter((file): file is string => typeof file === "string" && file.length > 0)
       : [];
     const contracts = optionalRecord(node.spec.gate_contracts);
-    if (
-      root === undefined ||
-      files.length === 0 ||
-      contracts === undefined ||
-      Object.keys(contracts).length === 0 ||
-      (node.edges.validates?.length ?? 0) === 0
-    ) {
-      continue;
-    }
+    if (root === undefined || files.length === 0) continue;
+    const repairRequest = plannedAssetRepairRequestForNode(run, node.id);
+    const readPaths = generatedAssetImplementationReadPaths(node, root);
+    const id = `TK-compat-${digestBody(
+      canonicalHash({
+        configuration_sha256: configuration.configuration_sha256,
+        asset_id: node.id,
+        root,
+        files: [...files].sort(compareText),
+        read_paths: readPaths,
+        ...(repairRequest === undefined
+          ? {}
+          : { repair_request_sha256: repairRequest.requestSha256 }),
+      }),
+    ).slice(0, 24)}`;
+    const compatibilityTicket = run.tickets[id];
+    const compatibilityRepairInFlight =
+      compatibilityTicket !== undefined &&
+      compatibilityTicket.status !== "completed" &&
+      compatibilityTicket.status !== "cancelled";
+    const requestedRepair = repairRequest !== undefined && run.tickets[id]?.status !== "completed";
+    const hasGateImplementationPlan =
+      contracts !== undefined &&
+      Object.keys(contracts).length > 0 &&
+      (node.edges.validates?.length ?? 0) > 0;
+    if (!hasGateImplementationPlan && !requestedRepair && !compatibilityRepairInFlight) continue;
     const alreadyMaterialized = evaluation.tickets.some(
       (ticket) =>
         ticket.operation_registry_id === operationId &&
@@ -9910,14 +13691,23 @@ function generatedAssetImplementationFallback(
     );
     if (alreadyMaterialized) continue;
 
-    const id = `TK-compat-${digestBody(
-      canonicalHash({
-        configuration_sha256: configuration.configuration_sha256,
-        asset_id: node.id,
-        root,
-        files: [...files].sort(compareText),
-      }),
-    ).slice(0, 24)}`;
+    const existingTickets = Object.values(run.tickets).filter(
+      (ticket) =>
+        ticket.status !== "cancelled" &&
+        ticket.operationId === operationId &&
+        ticket.targetNodeIds.includes(node.id),
+    );
+    if (existingTickets.some((ticket) => ticket.id !== id && ticket.status !== "completed")) {
+      continue;
+    }
+    if (
+      !requestedRepair &&
+      !compatibilityRepairInFlight &&
+      existingTickets.some((ticket) => ticket.status === "completed") &&
+      (await assetImplementationFilesMaterialized(run.git.run.worktree, files))
+    ) {
+      continue;
+    }
     additions.push(
       configuredControlTicketDefinition({
         configuration,
@@ -9925,15 +13715,22 @@ function generatedAssetImplementationFallback(
         graph,
         id,
         operationId,
-        title: `implement-asset: ${node.title}`,
+        title:
+          repairRequest === undefined
+            ? `implement-asset: ${node.title}`
+            : `implement-asset repair: ${repairRequest.title}`,
         targetNodeIds: [node.id],
         readNodeIds: [node.id],
         writeNodeIds: [node.id],
-        readPaths: [root],
+        readPaths,
         writePaths: [root],
         sourceStateKey: "generated-asset-unmaterialized",
         targetStateKey: "generated-asset-materialized",
-        obligationKeys: ["asset.implementation", "asset.gates"],
+        obligationKeys: [
+          "asset.implementation",
+          ...(hasGateImplementationPlan ? ["asset.gates"] : []),
+          ...(repairRequest === undefined ? [] : [repairRequest.requestSha256]),
+        ],
         forceGraphMutationForbidden: false,
         ruleId: "compiler.compatibility.generated-asset-implementation",
       }),
@@ -9950,22 +13747,195 @@ function generatedAssetImplementationFallback(
   });
 }
 
+/**
+ * Generated assets may explicitly depend on repository files outside their writable root.
+ * Those declared support paths are immutable inputs to implementation and repair attempts, so
+ * expose them read-only while retaining the asset root as the sole write scope.
+ */
+export function generatedAssetImplementationReadPaths(
+  node: Pick<GraphNode, "id" | "spec">,
+  root: string,
+): string[] {
+  const supportPaths = stringArray(node.spec.support_paths, `${node.id}.spec.support_paths`).map(
+    (value, index) => controlScopePath(value, `${node.id} generated asset read path ${index + 1}`),
+  );
+  return expandPythonPackageReadPaths([
+    controlScopePath(root, `${node.id} generated asset read path 0`),
+    ...supportPaths,
+  ]);
+}
+
+/**
+ * A deterministic implement-asset id names the asset, not one immutable file manifest. If a later
+ * approved graph change or repair request makes that asset actionable again, an old completed or
+ * compiler-retired record is audit history rather than proof that the new obligation is met.
+ * Reissue the same ticket in a fresh execution epoch while preserving its prior attempt ids.
+ */
+export function reopenCompletedRecurringAssetTicket(
+  ticket: TicketRecord,
+  definition: Pick<DerivedTicketDefinition, "operation_registry_id">,
+  at: string,
+  currentEpoch: number,
+  reissueRequired = true,
+): boolean {
+  const compilerRetired =
+    ticket.status === "cancelled" &&
+    ticket.blocker === COMPILER_INAPPLICABLE_TICKET &&
+    ticket.gitCycleId === undefined &&
+    ticket.worktreePath === undefined &&
+    ticket.branch === undefined &&
+    ticket.steps.length > 0 &&
+    ticket.steps.every((step) => step.status === "skipped");
+  if (
+    !reissueRequired ||
+    (ticket.status !== "completed" && !compilerRetired) ||
+    ticket.operationId !== "asset-resolution.asset.implement-asset" ||
+    definition.operation_registry_id !== ticket.operationId
+  ) {
+    return false;
+  }
+  ticket.executionEpoch = currentEpoch + 1;
+  delete ticket.gitCycleId;
+  ticket.worktreePath = undefined;
+  ticket.branch = undefined;
+  ticket.status = "queued";
+  ticket.blocker = undefined;
+  ticket.updatedAt = at;
+  for (const step of ticket.steps) {
+    step.status = "pending";
+    step.summary = undefined;
+    step.startedAt = undefined;
+    step.completedAt = undefined;
+  }
+  if (ticket.reviewReworkCount !== undefined) ticket.reviewReworkCount = 0;
+  if (ticket.reviewReworks !== undefined) ticket.reviewReworks = [];
+  return true;
+}
+
+/**
+ * A compiler bug can reissue a completed recurring asset even though its accepted manifest is
+ * still current. Before any work starts in that empty epoch, restore the exact prior completed
+ * epoch from its authenticated attempts instead of paying for the whole workflow again.
+ */
+export function restoreSettledRecurringAssetTicket(
+  ticket: TicketRecord,
+  definition: Pick<DerivedTicketDefinition, "operation_registry_id">,
+  attempts: Readonly<Record<string, AgentAttemptRecord>>,
+  at: string,
+  reissueRequired: boolean,
+): boolean {
+  if (
+    reissueRequired ||
+    ticket.status !== "queued" ||
+    ticket.operationId !== "asset-resolution.asset.implement-asset" ||
+    definition.operation_registry_id !== ticket.operationId ||
+    ticket.gitCycleId !== undefined ||
+    ticket.worktreePath !== undefined ||
+    ticket.branch !== undefined ||
+    ticket.steps.length === 0 ||
+    ticket.steps.some((step) => step.status !== "pending")
+  ) {
+    return false;
+  }
+  const completedByStep = ticket.steps.map((step) =>
+    step.attemptIds
+      .map((attemptId) => attempts[attemptId])
+      .filter(
+        (attempt): attempt is AgentAttemptRecord & { ticketExecutionEpoch: number } =>
+          attempt !== undefined &&
+          attempt.ticketId === ticket.id &&
+          attempt.stepId === step.id &&
+          attempt.status === "completed" &&
+          typeof attempt.ticketExecutionEpoch === "number" &&
+          attempt.ticketExecutionEpoch < (ticket.executionEpoch ?? 0) &&
+          attempt.terminalSummary !== undefined &&
+          attempt.terminalSummary.trim().length > 0 &&
+          (attempt.endedAt !== undefined || attempt.terminalAcceptedAt !== undefined),
+      ),
+  );
+  if (completedByStep.some((candidates) => candidates.length === 0)) return false;
+  const commonEpochs = completedByStep
+    .slice(1)
+    .reduce(
+      (common, candidates) =>
+        new Set(
+          [...common].filter((epoch) =>
+            candidates.some((candidate) => candidate.ticketExecutionEpoch === epoch),
+          ),
+        ),
+      new Set(completedByStep[0]!.map((attempt) => attempt.ticketExecutionEpoch)),
+    );
+  const restoredEpoch = [...commonEpochs].sort((left, right) => right - left)[0];
+  if (restoredEpoch === undefined) return false;
+  ticket.executionEpoch = restoredEpoch;
+  ticket.status = "completed";
+  ticket.blocker = undefined;
+  ticket.updatedAt = at;
+  for (const [index, step] of ticket.steps.entries()) {
+    const accepted = completedByStep[index]!.filter(
+      (attempt) => attempt.ticketExecutionEpoch === restoredEpoch,
+    ).at(-1)!;
+    step.status = "completed";
+    step.summary = accepted.terminalSummary;
+    step.startedAt = accepted.startedAt;
+    step.completedAt = accepted.endedAt ?? accepted.terminalAcceptedAt;
+  }
+  return true;
+}
+
+function compilerTicketExecutionEpoch(run: RunRecord, ticket: TicketRecord): number {
+  if (ticket.executionEpoch !== undefined) return ticket.executionEpoch;
+  const cycle =
+    ticket.gitCycleId === undefined ? undefined : run.git.ticketCycles[ticket.gitCycleId];
+  return Math.max(0, (cycle?.ordinal ?? 1) - 1);
+}
+
 function reconcileTickets(
   run: RunRecord,
   definitions: readonly DerivedTicketDefinition[],
   executionCatalog: CompiledExecutionSemanticCatalog,
   at: string,
   projectRoot: string,
+  recurringAssetReissues?: ReadonlySet<string>,
+  syntheticIntegrationOperationId?: string,
 ): Record<string, TicketRecord> {
   const tickets = structuredClone(run.tickets);
   const applicableIds = new Set(definitions.map((definition) => definition.id));
+  routeSupersededGateRunProposals(tickets, definitions, at);
+  const routedAssetRepairProposalIds = routablePlannedAssetRepairProposalIds(run, definitions);
+  routePlannedAssetRepairProposals(tickets, routedAssetRepairProposalIds, at);
   for (const ticket of Object.values(tickets)) {
+    // Target-conflict integration tickets are compiler-synthetic control work, not graph-rule
+    // products. Preserve them across ordinary board reconciliation and repair the historical
+    // cancellation produced by older compilers at an explicit resume boundary.
+    if (ticket.operationId === syntheticIntegrationOperationId) {
+      if (
+        ticket.status === "cancelled" &&
+        (ticket.blocker === COMPILER_SUPERSEDED_BEFORE_EXECUTION ||
+          ticket.blocker === COMPILER_INAPPLICABLE_TICKET) &&
+        ticket.steps.every((step) => step.status === "skipped")
+      ) {
+        ticket.status = "queued";
+        ticket.blocker = undefined;
+        ticket.updatedAt = at;
+        for (const step of ticket.steps) {
+          step.status = "pending";
+          step.summary = undefined;
+          step.startedAt = undefined;
+          step.completedAt = undefined;
+        }
+      }
+      continue;
+    }
     // Change proposals are durable control-plane records projected from an accepted
     // source settlement, not ordinary rule-derived tickets. They can legitimately
     // be absent from the next compiler definition set while awaiting the operator's
     // decision or their approved application workflow. Cancelling one here loses
     // its only materialization path and strands the source hold.
     if (ticket.executionControl?.proposalRequest !== undefined) {
+      if (routedAssetRepairProposalIds.has(ticket.id)) {
+        continue;
+      }
       // Repair records produced by an older compiler that cancelled a never-started
       // proposal during reconciliation. The source remains durably held by this
       // exact request, so re-arm only that same immutable proposal; do not invent
@@ -9979,7 +13949,7 @@ function reconcileTickets(
         ticket.steps.every((step) => step.status === "skipped" && step.attemptIds.length === 0)
       ) {
         ticket.status =
-          ticket.executionControl.proposalApprovalSha256 === undefined ? "proposed" : "ready";
+          ticket.executionControl.proposalApprovalSha256 === undefined ? "proposed" : "queued";
         ticket.blocker = undefined;
         ticket.updatedAt = at;
         for (const step of ticket.steps) step.status = "pending";
@@ -10000,7 +13970,34 @@ function reconcileTickets(
   }
   let dependencies: ReadonlyMap<string, readonly string[]>;
   try {
-    dependencies = deriveCompilerTicketDependencies(definitions, projectRoot);
+    // Compiler control tickets carry a hash-bound immutable projection. Their dependency list is
+    // fixed when the compiler creates that control record; ordinary rule recompilation must not
+    // rewrite it merely because the control ticket is already running. Doing so invalidates the
+    // exact control-ticket authority before the resolver can settle its own graph repair.
+    const retainedDependencies: RetainedTicketDependencyProjection[] = Object.values(tickets)
+      .filter(
+        (ticket) =>
+          ticket.executionControl?.controlTicketAuthority === undefined &&
+          !applicableIds.has(ticket.id) &&
+          ticket.status !== "completed" &&
+          ticket.status !== "cancelled" &&
+          !ticketIsNeverStarted(ticket),
+      )
+      .map((ticket) => ({
+        id: ticket.id,
+        priority: ticket.priority,
+        operationRegistryId: ticket.operationId,
+        scope: {
+          read_node_ids: [...(ticket.readNodeIds ?? [])],
+          write_node_ids: [...(ticket.writeNodeIds ?? [])],
+          read_paths: [...(ticket.readPaths ?? [])],
+          write_paths: [...(ticket.writePaths ?? [])],
+        },
+      }));
+    dependencies = deriveCompilerTicketDependencies(definitions, projectRoot, retainedDependencies);
+    for (const retained of retainedDependencies) {
+      tickets[retained.id]!.dependencyIds = [...(dependencies.get(retained.id) ?? [])];
+    }
   } catch (error) {
     if (error instanceof TicketDependencyProjectionError) {
       fail("ticket_dependency_scope", error.message);
@@ -10013,6 +14010,33 @@ function reconcileTickets(
     if (existing !== undefined) {
       reconcileNeverStartedTicketNodeScope(existing, definition);
       assertTicketDefinitionStable(existing, definition);
+      const recurringAssetReissueRequired = definition.target_node_ids.some(
+        (nodeId) => recurringAssetReissues?.has(nodeId) ?? true,
+      );
+      restoreSettledRecurringAssetTicket(
+        existing,
+        definition,
+        run.attempts,
+        at,
+        recurringAssetReissueRequired,
+      );
+      if (existing.operationId === "asset-resolution.asset.implement-asset") {
+        const cycle =
+          existing.gitCycleId === undefined ? undefined : run.git.ticketCycles[existing.gitCycleId];
+        if (existing.status === "completed" && cycle !== undefined && cycle.status !== "retired") {
+          fail(
+            "asset_reissue_git",
+            `completed asset ticket ${existing.id} cannot reissue before its Git cycle retires`,
+          );
+        }
+        reopenCompletedRecurringAssetTicket(
+          existing,
+          definition,
+          at,
+          compilerTicketExecutionEpoch(run, run.tickets[existing.id] ?? existing),
+          recurringAssetReissueRequired,
+        );
+      }
       if (
         existing.status === "cancelled" &&
         existing.blocker === COMPILER_SUPERSEDED_BEFORE_EXECUTION &&
@@ -10025,7 +14049,7 @@ function reconcileTickets(
             `derived ticket ${definition.id} references unknown operation ${definition.operation_registry_id}`,
           );
         }
-        existing.status = operation.changeControl.role === "proposal" ? "proposed" : "ready";
+        existing.status = operation.changeControl.role === "proposal" ? "proposed" : "queued";
         existing.blocker = undefined;
         existing.updatedAt = at;
         for (const step of existing.steps) step.status = "pending";
@@ -10085,7 +14109,7 @@ function reconcileTickets(
       executionPolicyBinding: semantic.ticket,
       title: definition.title,
       summary: `${definition.operation}: ${definition.title}`,
-      status: operation.changeControl.role === "proposal" ? "proposed" : "ready",
+      status: operation.changeControl.role === "proposal" ? "proposed" : "queued",
       priority: -(definition.rule_priority * 1_000 + definition.operation_dispatch_priority),
       dependencyIds: [...(dependencies.get(definition.id) ?? [])],
       targetNodeIds: [...definition.target_node_ids],
@@ -10134,7 +14158,7 @@ function reconcileTickets(
   );
 }
 
-function assertTicketDefinitionStable(
+export function assertTicketDefinitionStable(
   ticket: TicketRecord,
   definition: DerivedTicketDefinition,
 ): void {
@@ -10142,8 +14166,19 @@ function assertTicketDefinitionStable(
   // accepted graph effects legitimately change what the rules re-derive for the same deterministic
   // id (observed live: a delivery-node graphDelta added the new node to its submitting ticket's
   // derived node scope, and this guard rejected the whole delta as drift — making the assembly
-  // step unsatisfiable). Tolerate node-scope drift for started tickets; operation, title,
-  // workflow, and path drift remain fatal for every ticket.
+  // step unsatisfiable). Tolerate node-scope drift for started tickets. A derived title is display
+  // text copied from the target node and carries no grant authority, so title-only drift is also
+  // harmless; operation, workflow, and path drift remain fatal for every ticket.
+  //
+  // Path drift is deliberately NOT tolerated here, and an attempt to relax it made things worse.
+  // A derived read path can change while an attempt is in flight (`ticket.implement-asset` grants
+  // `spec.support_paths`, and gate-context paths join the descriptor once the asset becomes a
+  // gate's selected provider). Failing here compensates the assignment and reissues the step with
+  // a freshly derived grant, which recovers. Letting it pass instead defers the mismatch to grant
+  // recovery, where the pinned `grantHash` cannot be reproduced — turning a self-healing
+  // compensation into a hard `stored launch authority no longer matches pinned compiler scope`
+  // block. If this ever needs relaxing, the descriptor must first reproduce the issued scope
+  // rather than the current derivation.
   const pinnedNodeScope = !ticketIsNeverStarted(ticket);
   const nodeScopeDrift =
     !pinnedNodeScope &&
@@ -10168,7 +14203,6 @@ function assertTicketDefinitionStable(
   if (
     nodeScopeDrift ||
     ticket.operationId !== definition.operation_registry_id ||
-    ticket.title !== definition.title ||
     canonicalHash(ticket.readPaths) !== canonicalHash(definition.scope.read_paths) ||
     canonicalHash(ticket.writePaths) !== canonicalHash(definition.scope.write_paths) ||
     canonicalHash(ticket.steps.map((step) => [step.id, step.personaId])) !==
@@ -10474,7 +14508,7 @@ function ticketArtifact(
 
 function ticketIsNeverStarted(ticket: Readonly<TicketRecord>): boolean {
   return (
-    new Set<TicketRecord["status"]>(["proposed", "todo", "ready"]).has(ticket.status) &&
+    new Set<TicketRecord["status"]>(["proposed", "queued"]).has(ticket.status) &&
     ticket.worktreePath === undefined &&
     ticket.branch === undefined &&
     ticket.gitCycleId === undefined &&
@@ -10539,6 +14573,47 @@ function assertConfiguredGraphConstraints(
   }
 }
 
+/**
+ * An executable gate contract is semantic authority for one exact typed gate. A mnemonic or
+ * script-local key is not a harmless metadata label: gate selection and verifier execution both
+ * address this map by graph node id. Require the corresponding canonical relationship as the
+ * independently inspectable graph binding.
+ */
+export function assertAssetGateContractsBoundToGraph(
+  graph: Pick<TypedGraph, "nodes">,
+  gateNodeTypes: readonly string[],
+  candidateNodeIds?: readonly string[],
+): void {
+  const typedGateTypes = new Set(gateNodeTypes);
+  const typedGateIds = new Set(
+    graph
+      .nodes()
+      .filter((node) => typedGateTypes.has(node.type))
+      .map((node) => node.id),
+  );
+  const candidates = candidateNodeIds === undefined ? undefined : new Set(candidateNodeIds);
+  for (const node of graph.nodes()) {
+    if (candidates !== undefined && !candidates.has(node.id)) continue;
+    const contracts = optionalRecord(node.spec.gate_contracts);
+    if (contracts === undefined) continue;
+    const validates = new Set(node.edges.validates ?? []);
+    for (const gateId of Object.keys(contracts).sort(compareText)) {
+      if (!typedGateIds.has(gateId)) {
+        fail(
+          "asset_gate_contract_target",
+          `asset ${node.id} gate contract ${gateId} must bind an exact typed gate node`,
+        );
+      }
+      if (!validates.has(gateId)) {
+        fail(
+          "asset_gate_contract_relationship",
+          `asset ${node.id} gate contract ${gateId} requires a canonical validates relationship`,
+        );
+      }
+    }
+  }
+}
+
 function typedGateIdentityCatalog(
   configuration: CompiledConfiguration,
   graph: TypedGraph,
@@ -10590,10 +14665,10 @@ function launchResources(
   pinned: PinnedConfigurationArtifact,
   skillIds: readonly string[],
   runInstructions: string,
-  communityResources: readonly LaunchResource[] = [],
 ): LaunchResource[] {
   const resources: LaunchResource[] = [];
-  for (const id of [...new Set(skillIds)].sort(compareText)) {
+  const selectedSkillIds = [...new Set(skillIds)].sort(compareText);
+  for (const id of selectedSkillIds) {
     const skill = pinned.skills[id];
     if (skill === undefined) fail("skill_unpinned", `persona requested unpinned skill ${id}`);
     for (const [relativePath, file] of Object.entries(skill.files).sort(([left], [right]) =>
@@ -10616,7 +14691,6 @@ function launchResources(
       ),
     );
   }
-  resources.push(...structuredClone(communityResources));
   return resources.sort((left, right) =>
     compareText(`${left.id}\0${left.relativePath}`, `${right.id}\0${right.relativePath}`),
   );
@@ -10642,7 +14716,6 @@ function toolInventory(
   run: RunRecord,
   descriptor: AttemptDescriptor,
   resources: readonly LaunchResource[],
-  communityTools: readonly KoniToolName[] = [],
 ): KoniToolName[] {
   if (descriptor.toolProfile === "lead_judgment") {
     const exact = new Set<KoniToolName>(["koni_submit_output"]);
@@ -10655,13 +14728,7 @@ function toolInventory(
   // budget without adding authority or information. The catalog entry remains available to the
   // interactive package, but autonomous launch inventories intentionally omit it.
   const names = new Set<KoniToolName>();
-  if (
-    resources.some(
-      (entry) =>
-        entry.kind === "prompt" ||
-        (entry.kind === "skill" && path.posix.basename(entry.relativePath) !== "SKILL.md"),
-    )
-  ) {
+  if (resources.some((entry) => entry.kind === "prompt" || entry.kind === "skill")) {
     names.add("koni_read_resource");
   }
   if (descriptor.graph !== undefined) names.add("koni_graph_context");
@@ -10680,42 +14747,8 @@ function toolInventory(
   names.add("koni_record_note");
   if (run.workingSpecOwnerId === descriptor.personaId) names.add("koni_update_working_spec");
   if ((run.executionConfig?.questionPolicy ?? "some") !== "none") names.add("koni_ask_question");
-  for (const name of communityTools) {
-    if (name === "koni_submit_output")
-      fail("community_terminal_tool", "community adapters cannot select the terminal tool");
-    names.add(name);
-  }
   names.add("koni_submit_output");
   return KONI_TOOL_NAMES.filter((name) => names.has(name));
-}
-
-function communityAttemptStageIds(
-  kind: "planning" | "ticket" | "verification" | "integration",
-  descriptor: AttemptDescriptor,
-  configuration: CompiledConfiguration,
-  runType: ConfigurationObject,
-): string[] {
-  const stages = new Set<string>([kind, descriptor.stepId]);
-  if (kind === "planning") {
-    const pipeline = pipelineDefinition(runType);
-    for (const stageId of pipeline.order) {
-      const stage = requiredRecord(pipeline.stages[stageId], `pipeline stage ${stageId}`);
-      if (stage.kind === "planning") stages.add(stageId);
-    }
-  } else if (kind === "ticket") {
-    stages.add("orchestrate");
-    const operationId = descriptor.definition?.operation_registry_id;
-    const operation =
-      operationId === undefined ? undefined : configuration.registries.operations[operationId];
-    const configuredStage = operation === undefined ? undefined : optionalString(operation.stage);
-    if (configuredStage !== undefined) stages.add(configuredStage.replaceAll("_", "-"));
-  } else if (kind === "verification") {
-    stages.add("verification");
-  } else {
-    stages.add("orchestrate");
-    stages.add("integration");
-  }
-  return [...stages].sort(compareText);
 }
 
 function requireKoniToolName(value: string): KoniToolName {
@@ -10730,8 +14763,13 @@ function assertRecoveryIdentity(
   attempt: AgentAttemptRecord,
   spec: Readonly<AgentLaunchSpec>,
 ): void {
+  const planningSession = run.planningSession;
+  const launchSpecHash =
+    planningSession?.attemptId === attempt.id
+      ? planningSession.revisions[planningSession.currentRevision]?.launchSpecSha256
+      : attempt.launchSpecHash;
   if (
-    attempt.launchSpecHash !== spec.specHash ||
+    launchSpecHash !== spec.specHash ||
     spec.identity.runId !== run.id ||
     spec.identity.attemptId !== attempt.id ||
     spec.identity.sessionId !== attempt.sessionId ||
@@ -10741,6 +14779,50 @@ function assertRecoveryIdentity(
     spec.authority.generation !== run.generation
   )
     fail("recovery_identity", "stored launch spec does not match its durable attempt record");
+}
+
+function recoveredPlanningRevisionContext(
+  spec: Readonly<AgentLaunchSpec>,
+  compilerInput: Readonly<PreparedAttemptArtifact>,
+): PlanningRevisionPreparationContext {
+  const binding = spec.planningRevision;
+  if (binding === undefined) {
+    fail("recovery_planning_revision", "continuous planning recovery lost its revision binding");
+  }
+  if (binding.revision === 0) {
+    return { binding: structuredClone(binding) };
+  }
+  let contextValue: unknown;
+  try {
+    contextValue = JSON.parse(compilerInput.contextContent);
+  } catch {
+    fail("recovery_planning_revision", "planning revision context is not valid JSON");
+  }
+  if (
+    !isRecord(contextValue) ||
+    canonicalHash(contextValue.planningRevision) !== canonicalHash(binding) ||
+    typeof contextValue.steering !== "string" ||
+    rawSha256(contextValue.steering) !== binding.steeringSha256
+  ) {
+    fail(
+      "recovery_planning_revision",
+      "planning revision context differs from its immutable launch binding",
+    );
+  }
+  const currentArtifact = planningArtifactBoundary(() =>
+    parsePlanningArtifact(contextValue.currentValidatedArtifact),
+  );
+  if (canonicalHash(currentArtifact) !== binding.priorCheckpointSha256) {
+    fail(
+      "recovery_planning_revision",
+      "planning revision artifact differs from its immutable base checkpoint",
+    );
+  }
+  return {
+    binding: structuredClone(binding),
+    currentArtifact,
+    steering: contextValue.steering,
+  };
 }
 
 function recoveredAttemptKind(
@@ -10974,35 +15056,6 @@ function requireThinkingLevel(value: unknown, label: string): ThinkingLevel {
   if (!PI_THINKING_LEVELS.has(value as ThinkingLevel))
     fail("thinking_level", `${label} has unsupported Pi thinking level ${String(value)}`);
   return value as ThinkingLevel;
-}
-
-function ensureSeedConnected(keys: Set<string>, edges: PlanningGraphSeed["edges"]): void {
-  if (keys.size === 0) return;
-  const neighbors = new Map<string, Set<string>>();
-  for (const edge of edges) {
-    const left = neighbors.get(edge.source) ?? new Set<string>();
-    left.add(edge.target);
-    neighbors.set(edge.source, left);
-    const right = neighbors.get(edge.target) ?? new Set<string>();
-    right.add(edge.source);
-    neighbors.set(edge.target, right);
-  }
-  const seen = new Set<string>(["$root"]);
-  const queue = ["$root"];
-  while (queue.length > 0) {
-    for (const next of neighbors.get(queue.shift()!) ?? []) {
-      if (!seen.has(next)) {
-        seen.add(next);
-        queue.push(next);
-      }
-    }
-  }
-  const missing = [...keys].filter((key) => !seen.has(key));
-  if (missing.length > 0)
-    fail(
-      "graph_seed_disconnected",
-      `graph seed nodes are not connected to $root: ${missing.join(", ")}`,
-    );
 }
 
 function rejectCompilerOwnedSpec(
@@ -11812,6 +15865,17 @@ async function resolveCommandCheck(
         binding.argv,
         checkId,
         input.projectRoot,
+        standaloneSupportRunAllowsEmptyScientificInputs(
+          input.descriptor.definition,
+          optionalString(optionalRecord(definition.argv_input_bindings)?.from) ?? "",
+          binding.root === undefined
+            ? undefined
+            : dynamicValuePath(
+                binding.root,
+                optionalString(optionalRecord(definition.argv_input_bindings)?.from) ?? "",
+                {},
+              ),
+        ),
       );
       const inputPaths = [...new Set([...(member?.inputPaths ?? []), ...boundInputPaths])]
         .map((value) => normalizeCheckPath(value, `${checkId} input path`))
@@ -11970,11 +16034,29 @@ function exactArgv(value: unknown, checkId: string, source?: string): string[] {
     // absent entry for one gate rather than a malformed array. Naming the node, the resolved path,
     // and what was actually found is the difference between a fixable report and a hunt.
     const found = value === undefined ? "no value" : String(JSON.stringify(value)).slice(0, 120);
+    // When the value *is* a nonempty array, "must be one exact nonempty argv array" describes it
+    // accurately and explains nothing: the violation is inside one element. Observed live on a
+    // `python3 -c` inline script whose source carried newlines, where the message sent the author
+    // looking for a missing or malformed array that was neither.
+    const offending = Array.isArray(value)
+      ? value.findIndex(
+          (item) =>
+            typeof item !== "string" ||
+            item.trim().length === 0 ||
+            item.includes("\u0000") ||
+            item.includes("\n") ||
+            item.includes("\r"),
+        )
+      : -1;
     fail(
       "check_argv",
-      `check ${checkId} command must be one exact nonempty argv array${
-        source === undefined ? "" : `; resolved ${source} to ${found}`
-      }`,
+      offending >= 0
+        ? `check ${checkId} argv element ${offending} is not a usable argument: it must be a nonempty single-line string with no NUL, newline, or carriage return. An inline script passed with -c cannot be an argv element; put it in a repository file and pass that path instead${
+            source === undefined ? "" : ` (resolved ${source})`
+          }`
+        : `check ${checkId} command must be one exact nonempty argv array${
+            source === undefined ? "" : `; resolved ${source} to ${found}`
+          }`,
     );
   }
   const argv = value as string[];
@@ -12006,6 +16088,7 @@ async function resolveCheckInputBindings(
   argv: readonly string[],
   checkId: string,
   projectRoot: string,
+  allowExplicitEmpty = false,
 ): Promise<string[]> {
   const configured = optionalRecord(definition.argv_input_bindings);
   if (configured === undefined) return [];
@@ -12013,7 +16096,10 @@ async function resolveCheckInputBindings(
     fail("check_input_binding", `check ${checkId} has no dynamic root for argv input bindings`);
   const from = requiredNonempty(configured.from, `${checkId} argv input source`);
   const rows = dynamicValuePath(root, from, {});
-  if (!Array.isArray(rows) || (configured.require_nonempty === true && rows.length === 0)) {
+  if (
+    !Array.isArray(rows) ||
+    (configured.require_nonempty === true && rows.length === 0 && !allowExplicitEmpty)
+  ) {
     fail(
       "check_input_binding",
       `check ${checkId} argv input source is not a permitted nonempty list`,
@@ -12039,9 +16125,18 @@ async function resolveCheckInputBindings(
       !argv.includes(normalized) &&
       !argv.includes(value)
     ) {
+      // Distinguish "the argv does not contain this path" from "there is no argv". Both reach here,
+      // but only the first is a quoting or `--flag=value` problem; the second is an incomplete
+      // runtime contract, and reporting it as an argv-element mismatch sends the author looking for
+      // a formatting error in an array that does not exist. Observed live on a `run` node whose
+      // contract declared scientific_inputs with `argv: null`.
       fail(
         "check_input_binding",
-        `check ${checkId} input path ${normalized} is not an exact argv element`,
+        argv.length === 0
+          ? `check ${checkId} declares input path ${normalized} but its runtime contract has no argv; author the exact argv that consumes this input`
+          : `check ${checkId} input path ${normalized} is not an exact argv element (argv: ${argv
+              .map((element) => JSON.stringify(element))
+              .join(" ")}); pass the path as its own element rather than inside --flag=value`,
       );
     }
     if (configured.require_project_file === true) {
@@ -12050,6 +16145,26 @@ async function resolveCheckInputBindings(
     paths.push(normalized);
   }
   return paths;
+}
+
+/**
+ * Historical research profiles require at least one scientific input for ordinary experiment
+ * runs. A compiler-authored standalone support run may instead be a deterministic zero-input
+ * generator whose sole purpose is to materialize a prerequisite artifact. Preserve the profile's
+ * fail-closed rule everywhere else and relax it only for an explicit empty scientific-input list
+ * on that exact compatibility ticket.
+ */
+export function standaloneSupportRunAllowsEmptyScientificInputs(
+  definition: Pick<DerivedTicketDefinition, "rule_id"> | undefined,
+  source: string,
+  value: unknown,
+): boolean {
+  return (
+    definition?.rule_id === "compiler.compatibility.research-standalone-support-run" &&
+    source === "runtime_contract.scientific_inputs" &&
+    Array.isArray(value) &&
+    value.length === 0
+  );
 }
 
 async function assertExistingProjectFile(
@@ -12139,6 +16254,7 @@ function assertPathInScopes(value: string, scopes: readonly string[], label: str
 interface CompiledCheckCommandExecution {
   accepted: boolean;
   passed: boolean;
+  infrastructureFailure?: string;
   value: JsonValue;
   evidence: ConfigurationObject;
 }
@@ -12171,6 +16287,8 @@ export function commandInfrastructureFailure(
     contains("spawn eperm") ||
     contains("spawn eacces") ||
     contains("err_pnpm_") ||
+    contains("node_modules missing") ||
+    /(?:^|\n)(?:sh|bash|zsh): [^\n]+: command not found(?:\n|$)/u.test(output) ||
     (contains("corepack") && (contains("eperm") || contains("eacces") || contains("cannot create")))
   ) {
     cause = "the check runner failed to launch (package-manager or subprocess spawn error)";
@@ -12198,6 +16316,7 @@ export function commandInfrastructureFailure(
     contains("err_module_not_found") ||
     contains("cannot find module") ||
     contains("cannot find package") ||
+    contains("modulenotfounderror: no module named") ||
     contains("failed to resolve import") ||
     contains("failed to load url")
   ) {
@@ -12282,6 +16401,40 @@ function stripModuleExtension(value: string): string {
   return value.replace(/\.(?:[cm]?[jt]sx?|json)$/u, "");
 }
 
+function formatResultSchemaLiteral(value: unknown): string {
+  const encoded = JSON.stringify(value);
+  if (encoded === undefined) return String(value);
+  return encoded.length <= 120 ? encoded : `${encoded.slice(0, 117)}...`;
+}
+
+function resultSchemaMismatchDiagnostics(schema: TSchema, result: unknown): string[] {
+  const mismatches = new Map<string, { allowed: string[]; messages: string[] }>();
+  for (const error of Value.Errors(schema, result)) {
+    const instancePath = error.instancePath.length === 0 ? "/" : error.instancePath;
+    const mismatch = mismatches.get(instancePath) ?? { allowed: [], messages: [] };
+    if (error.keyword === "const") {
+      mismatch.allowed.push(formatResultSchemaLiteral(error.params.allowedValue));
+    } else if (error.keyword === "enum") {
+      mismatch.allowed.push(
+        ...error.params.allowedValues.map((value) => formatResultSchemaLiteral(value)),
+      );
+    } else if (error.keyword !== "anyOf") {
+      mismatch.messages.push(error.message);
+    }
+    mismatches.set(instancePath, mismatch);
+  }
+
+  return [...mismatches.entries()].slice(0, 5).map(([instancePath, mismatch]) => {
+    const allowed = [...new Set(mismatch.allowed)].slice(0, 10);
+    if (allowed.length === 1)
+      return `result schema mismatch at ${instancePath}: expected ${allowed[0]}`;
+    if (allowed.length > 1)
+      return `result schema mismatch at ${instancePath}: expected one of ${allowed.join(", ")}`;
+    const message = [...new Set(mismatch.messages)][0] ?? "value is invalid";
+    return `result schema mismatch at ${instancePath}: ${message}`;
+  });
+}
+
 function compileCheckCommandExecution(
   command: ResolvedAgentCheckCommand,
   execution: AgentCheckExecution,
@@ -12361,14 +16514,11 @@ function compileCheckCommandExecution(
     errors.push(
       `exit ${execution.exitCode ?? execution.signal ?? "unknown"} is outside the configured contract`,
     );
-  if (exitAccepted && execution.exitCode !== 0) {
-    const infrastructureFailure = commandInfrastructureFailure(
-      execution.stdout,
-      execution.stderr,
-      command.inputPaths,
-    );
-    if (infrastructureFailure !== undefined) errors.push(infrastructureFailure);
-  }
+  const infrastructureFailure =
+    execution.exitCode !== null && execution.exitCode !== 0
+      ? commandInfrastructureFailure(execution.stdout, execution.stderr, command.inputPaths)
+      : undefined;
+  if (infrastructureFailure !== undefined) errors.push(infrastructureFailure);
   if (
     command.effect === "read_only" &&
     execution.preManifestSha256 !== execution.postManifestSha256
@@ -12424,8 +16574,17 @@ function compileCheckCommandExecution(
   }
   if (command.resultSchema !== undefined) {
     try {
-      if (!Value.Check(command.resultSchema as TSchema, result))
-        errors.push("result does not match the configured schema");
+      if (!Value.Check(command.resultSchema as TSchema, result)) {
+        const diagnostics = resultSchemaMismatchDiagnostics(
+          command.resultSchema as TSchema,
+          result,
+        );
+        errors.push(
+          ...(diagnostics.length > 0
+            ? diagnostics
+            : ["result does not match the configured schema"]),
+        );
+      }
     } catch {
       fail(
         "check_result_schema",
@@ -12490,6 +16649,7 @@ function compileCheckCommandExecution(
   return {
     accepted,
     passed,
+    ...(infrastructureFailure === undefined ? {} : { infrastructureFailure }),
     value,
     evidence: {
       checkId: command.checkId,
@@ -12967,6 +17127,16 @@ function collectEvidenceLeaves(
       leaf: structuredClone(value) as ConfigurationObject,
       result: op === "gate_policy_satisfied" ? passed : accepted,
     });
+  } else if (
+    op === "gate_policy_receipt_refused" &&
+    typeof value.gate_policy === "string" &&
+    gatePolicies.has(value.gate_policy)
+  ) {
+    // A refused receipt (contract failure) is durably distinct from "never ran": evidence exists
+    // with a false acceptance. Without this leaf that distinction is invisible to rules, and a
+    // gate whose verifier cannot produce a valid receipt re-emits its run-gate ticket forever
+    // while no operation with write access is ever told to repair the verifier.
+    output.push({ leaf: structuredClone(value) as ConfigurationObject, result: !accepted });
   }
   for (const child of Object.values(value))
     collectEvidenceLeaves(child, resolved, receiptTypes, gatePolicies, accepted, passed, output);
@@ -13079,6 +17249,30 @@ function ruleEvidencePredicateGraphScopeSha256(
   const leaf = evidence.leaf;
   if (leaf === undefined) return undefined;
   const op = optionalString(leaf.op);
+  if (
+    op === "gate_policy_satisfied" ||
+    op === "gate_policy_has_current_terminal" ||
+    op === "gate_policy_receipt_refused"
+  ) {
+    const policyId = optionalString(leaf.gate_policy) ?? optionalString(leaf.policy);
+    const gateId = evidence.subjectNodeId;
+    const gateSubject = optionalString(leaf.gate_subject) ?? "$gate";
+    const bindingName = /^\$([A-Za-z_][A-Za-z0-9_-]*)$/u.exec(gateSubject)?.[1];
+    if (
+      policyId === undefined ||
+      gateId === undefined ||
+      bindingName === undefined ||
+      canonicalHash(evidence.bindings?.[bindingName] ?? []) !== canonicalHash([gateId])
+    ) {
+      return undefined;
+    }
+    try {
+      const material = gatePolicyEvidenceGraphScopeMaterial(configuration, graph, policyId, gateId);
+      return material === undefined ? undefined : canonicalHash({ op, material });
+    } catch {
+      return undefined;
+    }
+  }
   if (op === "check_passed" || op === "check_has_current_terminal") {
     const checkId = optionalString(leaf.check);
     if (checkId === undefined || evidence.subjectNodeId === undefined) return undefined;
@@ -13130,9 +17324,21 @@ function checkEvidenceGraphScopeMaterial(
   const subjects = [...new Set(subjectIds)].sort(compareText);
   if (kind === "command") {
     const commandSource = optionalRecord(definition.command_source);
-    // Policy selection can depend on the complete candidate graph. Until that selection exposes a
-    // dedicated deterministic footprint, preserve its receipt only on the exact whole-graph hash.
-    if (optionalString(commandSource?.gate_policy) !== undefined) return undefined;
+    const gatePolicyId = optionalString(commandSource?.gate_policy);
+    if (gatePolicyId !== undefined) {
+      const scopes: ConfigurationValue[] = [];
+      for (const gateId of subjects) {
+        const scope = gatePolicyEvidenceGraphScopeMaterial(
+          configuration,
+          graph,
+          gatePolicyId,
+          gateId,
+        );
+        if (scope === undefined) return undefined;
+        scopes.push(scope);
+      }
+      return { check: checkId, kind, gate_policy: gatePolicyId, scopes };
+    }
     return {
       check: checkId,
       kind,
@@ -13185,7 +17391,109 @@ function checkEvidenceGraphScopeMaterial(
   return { check: checkId, kind, members: projectedMembers };
 }
 
-function graphNodeEvidenceMaterial(node: GraphNode): ConfigurationObject {
+/**
+ * Exact graph footprint that can change one gate-policy command or the meaning of its verdict.
+ *
+ * The full graph is intentionally not included: unrelated research nodes may advance after a gate
+ * passes. Candidate-pool membership, policy selection, applicability context, and every node the
+ * compiled context exposes are included, so any relevant semantic change still invalidates the
+ * receipt fail-closed.
+ */
+function gatePolicyEvidenceGraphScopeMaterial(
+  configuration: CompiledConfiguration,
+  graph: TypedGraph,
+  policyId: string,
+  gateId: string,
+): ConfigurationValue | undefined {
+  const configured = configuration.registries.gate_policies[policyId];
+  const gate = graph.node(gateId);
+  if (configured === undefined || gate === undefined) return undefined;
+  const evaluator = new GraphExpressionEvaluator(
+    configuration,
+    graph,
+    createPolicySelectionRuleDomainAdapter(),
+  );
+  evaluator.bind("gate", [gateId]);
+  const candidatePool = configured.candidate_pool;
+  const evaluationTargets = optionalRecord(configured.evaluation_targets);
+  if (candidatePool === undefined || evaluationTargets?.select === undefined) return undefined;
+  const candidateIds = [...evaluator.select(candidatePool)];
+  const winnerIds = [
+    ...evaluator.select({
+      policy_selection: { policy: policyId, gate: { ids: [gateId] }, result: "winner" },
+    }),
+  ];
+  if (winnerIds.length > 1) return undefined;
+  const targetIds = [...evaluator.select(evaluationTargets.select)];
+  const selectApplicability = (
+    result: "ancestors" | "direct_gates" | "inherited_gates" | "applicable_gates",
+  ): string[] => [
+    ...evaluator.select({
+      policy_applicability: {
+        policy: policyId,
+        subject: { ids: targetIds },
+        result,
+      },
+    }),
+  ];
+  const ancestors = selectApplicability("ancestors");
+  const direct = selectApplicability("direct_gates");
+  const inherited = selectApplicability("inherited_gates");
+  const applicable = [...new Set([...direct, ...inherited])].sort(compareText);
+  evaluator.bind("winner", winnerIds);
+  evaluator.bind("candidate", winnerIds);
+  evaluator.bind("target", targetIds);
+  evaluator.bind("evaluation_targets", targetIds);
+  evaluator.bind("ancestors", ancestors);
+  evaluator.bind("direct_gates", direct);
+  evaluator.bind("inherited_gates", inherited);
+  evaluator.bind("applicable_gates", applicable);
+  const context = optionalRecord(configured.context);
+  const contextIds = context?.select === undefined ? [] : [...evaluator.select(context.select)];
+  evaluator.bind("context", contextIds);
+  const readPaths = new Set<string>();
+  const configuredReadPaths = context?.read_paths;
+  if (configuredReadPaths !== undefined && !Array.isArray(configuredReadPaths)) return undefined;
+  for (const definition of (configuredReadPaths ?? []) as readonly ConfigurationValue[]) {
+    if (typeof definition === "string") {
+      readPaths.add(definition);
+      continue;
+    }
+    const projected = optionalRecord(definition);
+    const field = optionalString(projected?.field);
+    if (projected?.select === undefined || field === undefined) return undefined;
+    for (const nodeId of evaluator.select(projected.select)) {
+      const value = evaluator.field(nodeId, field);
+      if (typeof value === "string") readPaths.add(value);
+      else if (Array.isArray(value) && value.every((item) => typeof item === "string")) {
+        for (const item of value) readPaths.add(item);
+      } else if (value !== undefined) return undefined;
+    }
+  }
+  const nodes = (ids: readonly string[]): ConfigurationValue[] =>
+    [...new Set(ids)].sort(compareText).map((id) => {
+      const node = graph.node(id);
+      if (node === undefined) throw new Error(`gate policy scope references missing node ${id}`);
+      return graphNodeEvidenceMaterial(node);
+    });
+  return {
+    protocol: "koni.gate-policy-evidence-graph-scope.v1",
+    policy_id: policyId,
+    policy: structuredClone(configured),
+    gate: graphNodeEvidenceMaterial(gate),
+    candidates: nodes(candidateIds),
+    winners: nodes(winnerIds),
+    evaluation_targets: nodes(targetIds),
+    ancestors: nodes(ancestors),
+    direct_gates: nodes(direct),
+    inherited_gates: nodes(inherited),
+    applicable_gates: nodes(applicable),
+    context_nodes: nodes(contextIds),
+    read_paths: [...readPaths].sort(compareText),
+  };
+}
+
+function graphNodeEvidenceMaterial(node: CompilerGraphNode): ConfigurationObject {
   const { status: _status, ...material } = structuredClone(node);
   return material;
 }
@@ -13685,6 +17993,69 @@ function attemptWorkspace(
     fail("ticket_workspace", `ticket ${ticketId} Git cycle is missing, stale, or not executable`);
   }
   return path.resolve(cycle.worktree);
+}
+
+/**
+ * Approved applications sometimes need to add a typed reference to an existing node that is not
+ * yet connected to the write target. Preserve the exact write grant, but make nodes whose
+ * repository paths are named verbatim in the reviewed, hash-bound application summary eligible
+ * for dynamic read context. Terminal resolvers inherit the same provenance from their source
+ * application so a failed application can be repaired without ambient graph visibility.
+ */
+function approvedChangeContextReferencePaths(
+  run: RunRecord,
+  ticket: TicketRecord | undefined,
+  graph: TypedGraph,
+): readonly string[] {
+  const summaries: string[] = [];
+  const visited = new Set<string>();
+  let current = ticket;
+  while (current !== undefined && !visited.has(current.id)) {
+    visited.add(current.id);
+    const control = current.executionControl;
+    const causal = control?.controlTicketAuthority?.causal;
+    const materializations = [
+      control?.approvedMaterialization,
+      ...(causal?.role === "approved_application" ? [causal.materialization] : []),
+    ];
+    for (const materialization of materializations) {
+      if (materialization?.kind === "application") summaries.push(materialization.selectionSummary);
+    }
+    const sourceTicketId =
+      control?.terminalRecovery?.sourceTicketId ?? control?.sourceProposalTicketId;
+    current = sourceTicketId === undefined ? undefined : run.tickets[sourceTicketId];
+  }
+  if (summaries.length === 0) return [];
+
+  const referenced = new Set<string>();
+  for (const node of graph.nodes()) {
+    for (const repositoryPath of graph.repositoryPaths(node.id)) {
+      if (summaries.some((summary) => textMentionsExactRepositoryPath(summary, repositoryPath))) {
+        referenced.add(repositoryPath);
+      }
+    }
+  }
+  return [...referenced].sort(compareText);
+}
+
+function textMentionsExactRepositoryPath(text: string, repositoryPath: string): boolean {
+  if (repositoryPath.length === 0) return false;
+  const pathCharacter = /[A-Za-z0-9._/@+-]/u;
+  for (let offset = 0; offset <= text.length - repositoryPath.length;) {
+    const index = text.indexOf(repositoryPath, offset);
+    if (index < 0) return false;
+    const before = index === 0 ? undefined : text[index - 1];
+    const afterIndex = index + repositoryPath.length;
+    const after = afterIndex >= text.length ? undefined : text[afterIndex];
+    if (
+      (before === undefined || !pathCharacter.test(before)) &&
+      (after === undefined || !pathCharacter.test(after))
+    ) {
+      return true;
+    }
+    offset = index + repositoryPath.length;
+  }
+  return false;
 }
 
 function deepFreeze<Value>(value: Value): Value {

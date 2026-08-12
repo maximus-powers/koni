@@ -94,6 +94,8 @@ export interface AgentLaunchSpec {
     sessionId: string;
   };
   lineage: AgentAttemptLineage;
+  /** Immutable revision epoch inside one stable continuous planning attempt and Pi session. */
+  planningRevision?: PlanningRevisionLaunchBinding;
   authority: {
     grantId: string;
     grantHash: Sha256Digest;
@@ -163,6 +165,19 @@ export interface AgentLaunchSpec {
     toolName: string;
     outputSchemaHash: Sha256Digest;
     maxOutputBytes: number;
+  };
+}
+
+export interface PlanningRevisionLaunchBinding {
+  revision: number;
+  baseRevision: number | null;
+  priorCheckpointSha256: Sha256Digest | null;
+  steeringSha256: Sha256Digest | null;
+  budgetBaseline: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
   };
 }
 
@@ -411,6 +426,7 @@ function validateDraft(draft: AgentLaunchSpecDraft): void {
   validateId(draft.identity.attemptId, "/identity/attemptId");
   validateSessionId(draft.identity.sessionId, "/identity/sessionId");
   validateLineage(draft);
+  validatePlanningRevision(draft);
   validateId(draft.authority.grantId, "/authority/grantId");
   validateDigest(draft.authority.grantHash, "/authority/grantHash");
   validatePositiveInt(draft.authority.generation, "/authority/generation", true);
@@ -546,6 +562,83 @@ function validateDraft(draft: AgentLaunchSpecDraft): void {
   validatePositiveInt(draft.terminal.maxOutputBytes, "/terminal/maxOutputBytes", false);
   if (draft.terminal.maxOutputBytes > MAX_RESOURCE_BYTES) {
     fail("terminal_size", "/terminal/maxOutputBytes", "terminal output bound exceeds 4 MiB");
+  }
+}
+
+function validatePlanningRevision(draft: AgentLaunchSpecDraft): void {
+  const revision = draft.planningRevision;
+  if (revision === undefined) return;
+  const pointer = "/planningRevision";
+  if (
+    revision === null ||
+    typeof revision !== "object" ||
+    Array.isArray(revision) ||
+    draft.identity.ticketId !== "run-planning" ||
+    draft.lineage.branchEpoch !== 0 ||
+    draft.lineage.reason !== "initial" ||
+    draft.lineage.parentAttemptId !== undefined ||
+    draft.lineage.parentSessionId !== undefined ||
+    draft.lineage.parentEntryId !== undefined ||
+    draft.lineage.conversationFork !== undefined
+  ) {
+    fail(
+      "planning_revision",
+      pointer,
+      "planning revisions require one root planning attempt and cannot use conversation lineage",
+    );
+  }
+  if (!Number.isSafeInteger(revision.revision) || revision.revision < 0) {
+    fail("planning_revision", `${pointer}/revision`, "planning revision must be non-negative");
+  }
+  const initial = revision.revision === 0;
+  if (
+    (initial && revision.baseRevision !== null) ||
+    (!initial && revision.baseRevision !== revision.revision - 1)
+  ) {
+    fail(
+      "planning_revision",
+      `${pointer}/baseRevision`,
+      "planning revision must name its exact contiguous base revision",
+    );
+  }
+  if (
+    (initial && revision.priorCheckpointSha256 !== null) ||
+    (!initial && !isSha256Digest(revision.priorCheckpointSha256))
+  ) {
+    fail(
+      "planning_revision",
+      `${pointer}/priorCheckpointSha256`,
+      "later planning revisions require the prior checkpoint digest",
+    );
+  }
+  if (
+    (initial && revision.steeringSha256 !== null) ||
+    (!initial && !isSha256Digest(revision.steeringSha256))
+  ) {
+    fail(
+      "planning_revision",
+      `${pointer}/steeringSha256`,
+      "later planning revisions require the operator steering digest",
+    );
+  }
+  const baseline = revision.budgetBaseline;
+  if (baseline === null || typeof baseline !== "object" || Array.isArray(baseline)) {
+    fail("planning_revision", `${pointer}/budgetBaseline`, "planning token baseline is invalid");
+  }
+  for (const field of [
+    "inputTokens",
+    "outputTokens",
+    "cacheReadTokens",
+    "cacheWriteTokens",
+  ] as const) {
+    validatePositiveInt(baseline[field], `${pointer}/budgetBaseline/${field}`, true);
+    if (initial && baseline[field] !== 0) {
+      fail(
+        "planning_revision",
+        `${pointer}/budgetBaseline/${field}`,
+        "initial planning revision must begin from a zero provider baseline",
+      );
+    }
   }
 }
 

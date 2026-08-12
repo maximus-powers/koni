@@ -1,6 +1,7 @@
 import type { TSchema } from "typebox";
 import type { KoniAuthorizedMessage } from "./compaction.js";
 import type { AgentLaunchSpec } from "./launch-spec.js";
+import type { Sha256Digest } from "../shared/canonical.js";
 import type {
   ManagedSessionEvent,
   ManagedSessionOutcome,
@@ -17,6 +18,7 @@ import {
 export interface PiAttemptProcessLaunchOptions {
   terminalOutputSchema: TSchema;
   authority: PiAttemptProcessAuthority;
+  priorTranscriptSha256?: Sha256Digest;
   timings?: PiAttemptProcessTimings;
   runtime?: PiAttemptProcessRuntime;
 }
@@ -62,12 +64,13 @@ interface PoolEntry {
   handle: PiAttemptProcessHandle;
   view: MutableSessionView;
   unsubscribe: () => void;
+  mode: "fresh" | "recover" | "planning_revision";
 }
 
 interface PendingEntry {
   runId: string;
   specHash: string;
-  mode: "fresh" | "recover";
+  mode: "fresh" | "recover" | "planning_revision";
   epoch: number;
   process: SupervisedPiAttemptProcess;
   promise: Promise<PiAttemptProcessHandle>;
@@ -75,8 +78,13 @@ interface PendingEntry {
 
 interface AttemptTombstone {
   runId: string;
+  sessionId: string;
+  ticketId: string;
+  stepId: string;
   specHash: string;
-  mode: "fresh" | "recover";
+  mode: "fresh" | "recover" | "planning_revision";
+  planningRevision: number | undefined;
+  terminalStatus: ManagedSessionOutcome["status"] | undefined;
 }
 
 /** Run-level owner for all one-attempt process groups admitted by one authority instance. */
@@ -117,6 +125,14 @@ export class PiAttemptProcessSupervisor {
     return this.#admit(spec, options, "recover");
   }
 
+  public continuePlanningRevision(
+    spec: Readonly<AgentLaunchSpec>,
+    options: PiAttemptProcessLaunchOptions & { priorTranscriptSha256: Sha256Digest },
+  ): Promise<PiAttemptProcessHandle> {
+    this.#assertMayLaunch(spec.identity.runId);
+    return this.#admit(spec, options, "planning_revision");
+  }
+
   public get(attemptId: string): PiAttemptProcessHandle | undefined {
     return this.#sessions.get(attemptId)?.handle;
   }
@@ -145,6 +161,8 @@ export class PiAttemptProcessSupervisor {
     for (const process of processes) {
       try {
         await process.abort(reason);
+        const outcome = await process.outcome;
+        this.#retireSettledProcess(process, outcome.status);
       } catch (error) {
         failure ??= error;
       }
@@ -212,7 +230,7 @@ export class PiAttemptProcessSupervisor {
   async #admit(
     spec: Readonly<AgentLaunchSpec>,
     options: PiAttemptProcessLaunchOptions,
-    mode: "fresh" | "recover",
+    mode: "fresh" | "recover" | "planning_revision",
   ): Promise<PiAttemptProcessHandle> {
     const { runId, attemptId } = spec.identity;
     this.#assertMayLaunch(runId);
@@ -244,13 +262,17 @@ export class PiAttemptProcessSupervisor {
       })
       .catch(() => undefined);
     void promise.catch(() => {
+      let terminalStatus: ManagedSessionOutcome["status"] | undefined;
       void process.outcome
+        .then((outcome) => {
+          terminalStatus = outcome.status;
+        })
         .finally(() => {
           // Terminal publication already proves transport close and process-group absence. Only at
           // that boundary may a never-admitted process release its cleanup handle and become a
           // durable anti-reuse tombstone. Successful admission has its own session finalizer below.
           if (this.#pending.get(attemptId) === pending) this.#pending.delete(attemptId);
-          this.#attemptTombstones.set(attemptId, { runId, specHash: spec.specHash, mode });
+          this.#attemptTombstones.set(attemptId, attemptTombstone(spec, mode, terminalStatus));
         })
         .catch(() => undefined);
     });
@@ -259,7 +281,7 @@ export class PiAttemptProcessSupervisor {
 
   #existingAdmission(
     spec: Readonly<AgentLaunchSpec>,
-    mode: "fresh" | "recover",
+    mode: "fresh" | "recover" | "planning_revision",
   ): Promise<PiAttemptProcessHandle> | undefined {
     const { runId, attemptId } = spec.identity;
     const existing = this.#sessions.get(attemptId);
@@ -281,6 +303,27 @@ export class PiAttemptProcessSupervisor {
     }
     const tombstone = this.#attemptTombstones.get(attemptId);
     if (tombstone !== undefined) {
+      if (isPlanningRevisionSuccessor(tombstone, spec, mode)) {
+        // A checkpoint ends one provider-host lifetime, not the stable planning attempt. The
+        // authority has already authenticated the new grant/checkpoint/transcript binding; the
+        // process pool admits only the exact next revision on the same run/session/assignment.
+        this.#attemptTombstones.delete(attemptId);
+        return undefined;
+      }
+      if (
+        (mode === "recover" ||
+          (mode === "planning_revision" &&
+            tombstone.terminalStatus !== "checkpointed" &&
+            tombstone.terminalStatus !== "completed")) &&
+        tombstone.runId === runId &&
+        tombstone.specHash === spec.specHash
+      ) {
+        // A continuous planning attempt may release a failed provider host and reopen the exact
+        // same authenticated session/revision. Authority state gates this recovery; the pool only
+        // removes its process-lifetime tombstone after exact run/spec authentication succeeds.
+        this.#attemptTombstones.delete(attemptId);
+        return undefined;
+      }
       if (
         tombstone.runId !== runId ||
         tombstone.specHash !== spec.specHash ||
@@ -302,7 +345,7 @@ export class PiAttemptProcessSupervisor {
   async #finishAdmission(
     process: SupervisedPiAttemptProcess,
     epoch: number,
-    mode: "fresh" | "recover",
+    mode: "fresh" | "recover" | "planning_revision",
   ): Promise<PiAttemptProcessHandle> {
     const { runId, attemptId } = process.spec.identity;
     const earlyEvents: ManagedSessionEvent[] = [];
@@ -346,15 +389,17 @@ export class PiAttemptProcessSupervisor {
       outcome: process.outcome,
       cleanupFailure: process.cleanupFailure,
     };
-    entry = { process, handle, view, unsubscribe };
+    entry = { process, handle, view, unsubscribe, mode };
     const admittedEntry = entry;
     this.#sessions.set(attemptId, admittedEntry);
     for (const event of earlyEvents) {
       if (event.type === "status") view.statusValue = event.status;
       this.#emit(process.spec, event);
     }
+    let terminalStatus: ManagedSessionOutcome["status"] | undefined;
     void process.outcome
       .then((outcome) => {
+        terminalStatus = outcome.status;
         view.statusValue =
           outcome.status === "completed"
             ? "completed"
@@ -366,14 +411,40 @@ export class PiAttemptProcessSupervisor {
       .finally(() => {
         // Durable run state and Pi JSONL preserve history. The live pool must not retain a process
         // object—and therefore an obsolete numeric PID/PGID capability—after terminal publication.
-        if (this.#sessions.get(attemptId) === admittedEntry) {
-          admittedEntry.unsubscribe();
-          this.#sessions.delete(attemptId);
-        }
-        this.#attemptTombstones.set(attemptId, { runId, specHash: process.spec.specHash, mode });
+        this.#retireSettledProcess(process, terminalStatus);
       })
       .catch(() => undefined);
     return handle;
+  }
+
+  /**
+   * Publish process retirement synchronously once `outcome` has resolved. Promise finalizers are
+   * otherwise allowed to run in a later microtask, where an immediate resume could still observe
+   * and reattach the obsolete handle for the stable continuous-planning attempt.
+   */
+  #retireSettledProcess(
+    process: SupervisedPiAttemptProcess,
+    terminalStatus: ManagedSessionOutcome["status"] | undefined,
+  ): void {
+    const { attemptId } = process.spec.identity;
+    const admitted = this.#sessions.get(attemptId);
+    if (admitted?.process === process) {
+      admitted.unsubscribe();
+      this.#sessions.delete(attemptId);
+      this.#attemptTombstones.set(
+        attemptId,
+        attemptTombstone(process.spec, admitted.mode, terminalStatus),
+      );
+      return;
+    }
+    const pending = this.#pending.get(attemptId);
+    if (pending?.process === process) {
+      this.#pending.delete(attemptId);
+      this.#attemptTombstones.set(
+        attemptId,
+        attemptTombstone(process.spec, pending.mode, terminalStatus),
+      );
+    }
   }
 
   async #deleteRunOnce(runId: string): Promise<void> {
@@ -455,6 +526,45 @@ export class PiAttemptProcessSupervisor {
       }
     }
   }
+}
+
+function attemptTombstone(
+  spec: Readonly<AgentLaunchSpec>,
+  mode: AttemptTombstone["mode"],
+  terminalStatus: AttemptTombstone["terminalStatus"],
+): AttemptTombstone {
+  return {
+    runId: spec.identity.runId,
+    sessionId: spec.identity.sessionId,
+    ticketId: spec.identity.ticketId,
+    stepId: spec.identity.stepId,
+    specHash: spec.specHash,
+    mode,
+    planningRevision: spec.planningRevision?.revision,
+    terminalStatus,
+  };
+}
+
+function isPlanningRevisionSuccessor(
+  tombstone: AttemptTombstone,
+  spec: Readonly<AgentLaunchSpec>,
+  mode: AttemptTombstone["mode"],
+): boolean {
+  const next = spec.planningRevision;
+  return (
+    mode === "planning_revision" &&
+    tombstone.terminalStatus === "checkpointed" &&
+    tombstone.runId === spec.identity.runId &&
+    tombstone.sessionId === spec.identity.sessionId &&
+    tombstone.ticketId === spec.identity.ticketId &&
+    tombstone.stepId === spec.identity.stepId &&
+    tombstone.planningRevision !== undefined &&
+    next !== undefined &&
+    next.revision === tombstone.planningRevision + 1 &&
+    next.baseRevision === tombstone.planningRevision &&
+    next.priorCheckpointSha256 !== null &&
+    next.steeringSha256 !== null
+  );
 }
 
 class MutableSessionView implements PiAttemptProcessSessionView {

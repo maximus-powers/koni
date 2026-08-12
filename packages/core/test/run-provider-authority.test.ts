@@ -8,15 +8,26 @@ import { discoverAuthorityEndpoint } from "../src/authority/endpoint.js";
 import type { AuthorityGrant } from "../src/authority/grants.js";
 import {
   authorityRevisionStateHash,
+  executionActionBoundaryLifecycleIsCurrent,
+  inheritedRepositoryDiscoveryCalls,
+  isProviderRateLimitErrorMessage,
+  planningRevisionTokenUsage,
+  providerRateLimitRecoveryDelayMs,
+  recoverablePlanningTerminalAuthority,
   RunAuthorityEngine,
   type RunCompilerProgram,
 } from "../src/authority/run-engine.js";
 import { PiAttemptProcessSupervisor } from "../src/pi/attempt-process-pool.js";
 import { createAgentLaunchSpec, type AgentLaunchSpec } from "../src/pi/launch-spec.js";
 import { koniToolMaxResultBytes, koniToolSchemaHash } from "../src/pi/tool-catalog.js";
-import { canonicalHash, rawSha256 } from "../src/shared/canonical.js";
+import { canonicalEncode, canonicalHash, rawSha256 } from "../src/shared/canonical.js";
 import { reduceRunLifecycle } from "../src/state/run-lifecycle.js";
-import type { RunRecord, TicketRecord } from "../src/state/run-record.js";
+import type {
+  AgentAttemptRecord,
+  PlanningRevisionRecord,
+  RunRecord,
+  TicketRecord,
+} from "../src/state/run-record.js";
 import { fixtureLaunchSpec, TERMINAL_OUTPUT_SCHEMA } from "./pi-managed-fixtures.js";
 import { runBehaviorSnapshotFixture } from "./fixtures/compiled-behavior.js";
 
@@ -34,12 +45,121 @@ afterEach(async () => {
 });
 
 describe("run authority provider reservation lifecycle", () => {
+  it("recovers only an exact authority-accepted planning terminal artifact", () => {
+    const output = {
+      baseRevision: 0,
+      operations: [{ op: "replace", path: "/title", value: "Revised" }],
+    };
+    const encoded = canonicalEncode(output);
+    const attempt = {
+      authorityToolResults: [
+        {
+          sequence: 1,
+          callId: "planning-terminal",
+          toolName: "koni_submit_output",
+          outcome: "accepted",
+          argumentsSha256: rawSha256(encoded),
+          argumentsSizeBytes: Buffer.byteLength(encoded, "utf8"),
+          recordedAt: "2026-08-09T00:00:00.000Z",
+        },
+      ],
+    } as AgentAttemptRecord;
+
+    expect(
+      recoverablePlanningTerminalAuthority(attempt, "koni_submit_output", output),
+    ).toMatchObject({
+      callId: "planning-terminal",
+      recordedAt: "2026-08-09T00:00:00.000Z",
+    });
+    expect(
+      recoverablePlanningTerminalAuthority(attempt, "koni_submit_output", {
+        ...output,
+        baseRevision: 1,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("resets only revision token allowance while retaining cumulative usage and discovery", () => {
+    const attempt = {
+      id: "attempt-plan",
+      inputTokens: 80_000,
+      outputTokens: 20_000,
+      cacheReadTokens: 5_000,
+      cacheWriteTokens: 1_000,
+      authorityToolResults: [
+        {
+          sequence: 1,
+          toolName: "koni_read_file",
+          outcome: "accepted",
+        },
+      ],
+      lineage: { branchEpoch: 0, reason: "initial" },
+    } as AgentAttemptRecord;
+    const revision = {
+      budgetBaseline: {
+        inputTokens: 72_000,
+        outputTokens: 18_000,
+        cacheReadTokens: 4_000,
+        cacheWriteTokens: 500,
+      },
+    } as PlanningRevisionRecord;
+    const run = { attempts: { [attempt.id]: attempt } } as RunRecord;
+
+    expect(planningRevisionTokenUsage(attempt, revision)).toEqual({
+      inputTokens: 8_000,
+      outputTokens: 2_000,
+      cacheReadTokens: 1_000,
+      cacheWriteTokens: 500,
+    });
+    expect(attempt.inputTokens + attempt.outputTokens).toBe(100_000);
+    expect(inheritedRepositoryDiscoveryCalls(run, attempt)).toBe(1);
+  });
+
+  it("classifies canonical 429s and assigns bounded token-bucket backoff", () => {
+    expect(
+      isProviderRateLimitErrorMessage(
+        '429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."}}',
+      ),
+    ).toBe(true);
+    expect(isProviderRateLimitErrorMessage("500 Internal server error")).toBe(false);
+    expect(isProviderRateLimitErrorMessage("429 unrelated gateway response")).toBe(false);
+
+    expect([0, 1, 2, 3, 4, 12].map(providerRateLimitRecoveryDelayMs)).toEqual([
+      60_000, 120_000, 240_000, 480_000, 900_000, 900_000,
+    ]);
+  });
+
+  it("keeps admitted execution actions current only through a provider-exposure hold", () => {
+    expect(
+      executionActionBoundaryLifecycleIsCurrent({ phase: "executing", blocker: undefined }),
+    ).toBe(true);
+    expect(
+      executionActionBoundaryLifecycleIsCurrent({
+        phase: "blocked",
+        blocker:
+          "Provider request remains reserved without a canonical assistant settlement; worst-case exposure is held",
+      }),
+    ).toBe(true);
+    expect(
+      executionActionBoundaryLifecycleIsCurrent({
+        phase: "blocked",
+        blocker: "configured validation needs operator input",
+      }),
+    ).toBe(false);
+    expect(executionActionBoundaryLifecycleIsCurrent({ phase: "paused", blocker: undefined })).toBe(
+      false,
+    );
+  });
+
   it("auto-clears a stale provider hold after its terminal settlement arrives", async () => {
     const harness = await authorityHarness("normal");
     const runId = await createRun(harness.client);
     await waitFor(async () => {
       const run = await harness.engine.store.getRun(runId);
-      return run.lifecycle.phase === "awaiting_approval" && onlyAttempt(run).status === "completed";
+      return (
+        run.lifecycle.phase === "awaiting_approval" &&
+        onlyAttempt(run).status === "waiting_plan_review"
+      );
     });
 
     await harness.engine.server.mutateInternal(async ({ revision }) => {
@@ -52,6 +172,7 @@ describe("run authority provider reservation lifecycle", () => {
         atMs: Date.parse(draft.updatedAt),
         reason:
           "A prior provider request remains unsettled; its worst-case exposure blocks a successor attempt",
+        remedy: "resume",
       }).state;
       const committed = await harness.engine.store.commit({
         expectedRevision: revision,
@@ -81,7 +202,15 @@ describe("run authority provider reservation lifecycle", () => {
       }),
     });
     engines.push(restarted);
-    await restarted.start();
+    try {
+      await restarted.start();
+    } catch (error) {
+      const stopped = await restarted.store.getRun(runId);
+      throw new Error(
+        `restart failed from ${JSON.stringify({ phase: stopped.lifecycle.phase, blocker: stopped.lifecycle.blocker, attempt: onlyAttempt(stopped), session: stopped.planningSession })}`,
+        { cause: error },
+      );
+    }
 
     await waitFor(async () => {
       const recovered = await restarted.store.getRun(runId);
@@ -102,11 +231,14 @@ describe("run authority provider reservation lifecycle", () => {
           `synthesis run stopped: ${run.lifecycle.blocker ?? run.lifecycle.terminalReason}`,
         );
       }
-      return run.lifecycle.phase === "awaiting_approval" && onlyAttempt(run).status === "completed";
+      return (
+        run.lifecycle.phase === "awaiting_approval" &&
+        onlyAttempt(run).status === "waiting_plan_review"
+      );
     });
     const run = await harness.engine.store.getRun(runId);
     const attempt = onlyAttempt(run);
-    expect(attempt.planningSynthesis).toMatchObject({
+    expect(run.planningSession?.revisions[0]?.planningSynthesis).toMatchObject({
       protocol: "koni.planning-synthesis.v1",
       thresholdNewTokens: 14,
       limitNewTokens: 5_000,
@@ -129,7 +261,7 @@ describe("run authority provider reservation lifecycle", () => {
 
     const run = await harness.engine.store.getRun(runId);
     const attempt = onlyAttempt(run);
-    expect(attempt.planningSynthesis).toMatchObject({
+    expect(run.planningSession?.revisions[0]?.planningSynthesis).toMatchObject({
       protocol: "koni.planning-synthesis.v1",
       triggerReason: "provider_input_pressure",
       triggeredNewTokens: 0,
@@ -154,13 +286,13 @@ describe("run authority provider reservation lifecycle", () => {
       const run = await harness.engine.store.getRun(runId);
       return (
         run.lifecycle.phase === "awaiting_approval" &&
-        Object.values(run.attempts)[0]?.status === "completed"
+        Object.values(run.attempts)[0]?.status === "waiting_plan_review"
       );
     });
     const run = await harness.engine.store.getRun(runId);
     const attempt = onlyAttempt(run);
 
-    expect(attempt.status).toBe("completed");
+    expect(attempt.status).toBe("waiting_plan_review");
     expect(attempt.authorityProviderRequests).toHaveLength(1);
     expect(attempt.authorityProviderRequests?.[0]).toMatchObject({
       sequence: 1,
@@ -176,21 +308,138 @@ describe("run authority provider reservation lifecycle", () => {
     expect(harness.compileCount()).toBe(1);
   }, 60_000);
 
+  it("admits a provider turn through the current revision map while preserving the initial attempt mapping", async () => {
+    const harness = await authorityHarness("normal");
+    const runId = await createRun(harness.client);
+    await waitFor(async () => {
+      const run = await harness.engine.store.getRun(runId);
+      return (
+        run.lifecycle.phase === "awaiting_approval" &&
+        onlyAttempt(run).status === "waiting_plan_review"
+      );
+    });
+    const before = await harness.engine.store.getRun(runId);
+    const attemptId = before.planningSession!.attemptId;
+    const sessionId = before.planningSession!.sessionId;
+    const initialLaunchHash = before.attempts[attemptId]!.launchSpecHash;
+
+    await harness.client.request(
+      "plan.revise",
+      { runId, instructions: "Keep the artifact and revise only its provider-bound checkpoint." },
+      { expectedRevision: harness.client.revision, idempotencyKey: "provider-planning-revision" },
+    );
+    await waitFor(async () => {
+      const run = await harness.engine.store.getRun(runId);
+      if (run.lifecycle.phase === "blocked" || run.lifecycle.phase === "failed") {
+        throw new Error(
+          `revision provider turn stopped: ${run.lifecycle.blocker ?? run.lifecycle.terminalReason}`,
+        );
+      }
+      return (
+        run.lifecycle.phase === "awaiting_approval" &&
+        run.planningSession?.currentRevision === 1 &&
+        onlyAttempt(run).status === "waiting_plan_review"
+      );
+    });
+
+    const revised = await harness.engine.store.getRun(runId);
+    const attempt = onlyAttempt(revised);
+    expect(revised.planningSession).toMatchObject({ attemptId, sessionId, currentRevision: 1 });
+    expect(attempt.launchSpecHash).toBe(initialLaunchHash);
+    expect(attempt.authorityProviderRequests).toHaveLength(2);
+    const transcript = (await readFile(attempt.sessionFile!, "utf8"))
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(
+      transcript.filter((entry) => entry.customType === "koni.attempt-session-map"),
+    ).toHaveLength(1);
+    expect(
+      transcript.filter((entry) => entry.customType === "koni.planning-revision-map"),
+    ).toHaveLength(1);
+  }, 60_000);
+
+  it("scopes identical planning-synthesis instructions to their immutable revisions", async () => {
+    const harness = await authorityHarness("synthesis_threshold");
+    const runId = await createRun(harness.client);
+    await waitFor(async () => {
+      const run = await harness.engine.store.getRun(runId);
+      if (run.lifecycle.phase === "blocked" || run.lifecycle.phase === "failed") {
+        throw new Error(
+          `initial synthesis stopped: ${run.lifecycle.blocker ?? run.lifecycle.terminalReason}`,
+        );
+      }
+      return run.lifecycle.phase === "awaiting_approval";
+    });
+    const initial = await harness.engine.store.getRun(runId);
+    const attemptId = initial.planningSession!.attemptId;
+    const sessionId = initial.planningSession!.sessionId;
+    const firstSynthesis = initial.planningSession!.revisions[0]!.planningSynthesis!;
+
+    await harness.client.request(
+      "plan.revise",
+      { runId, instructions: "Preserve the plan and reissue the same bounded synthesis policy." },
+      {
+        expectedRevision: harness.client.revision,
+        idempotencyKey: "revision-scoped-planning-synthesis",
+      },
+    );
+    await waitFor(async () => {
+      const run = await harness.engine.store.getRun(runId);
+      if (run.lifecycle.phase === "blocked" || run.lifecycle.phase === "failed") {
+        throw new Error(
+          `revision synthesis stopped: ${run.lifecycle.blocker ?? run.lifecycle.terminalReason}`,
+        );
+      }
+      return (
+        run.lifecycle.phase === "awaiting_approval" && run.planningSession?.currentRevision === 1
+      );
+    });
+
+    const revised = await harness.engine.store.getRun(runId);
+    const secondSynthesis = revised.planningSession!.revisions[1]!.planningSynthesis!;
+    expect(revised.planningSession).toMatchObject({ attemptId, sessionId, currentRevision: 1 });
+    expect(secondSynthesis.instructionSha256).toBe(firstSynthesis.instructionSha256);
+    expect(secondSynthesis.instructionArtifactPath).not.toBe(
+      firstSynthesis.instructionArtifactPath,
+    );
+    expect(firstSynthesis.instructionArtifactPath).toContain("planning/revisions/0/");
+    expect(secondSynthesis.instructionArtifactPath).toContain("planning/revisions/1/");
+    await expect(
+      harness.engine.store.readArtifact(
+        firstSynthesis.instructionArtifactPath,
+        firstSynthesis.instructionSizeBytes + 1,
+      ),
+    ).resolves.toHaveLength(firstSynthesis.instructionSizeBytes);
+    await expect(
+      harness.engine.store.readArtifact(
+        secondSynthesis.instructionArtifactPath,
+        secondSynthesis.instructionSizeBytes + 1,
+      ),
+    ).resolves.toHaveLength(secondSynthesis.instructionSizeBytes);
+  }, 60_000);
+
   it("uses authority-accepted terminal bytes after a lost settlement ACK and still compiles the plan", async () => {
     const harness = await authorityHarness("lost_settlement_ack");
     const runId = await createRun(harness.client);
 
     await waitFor(async () => {
       const run = await harness.engine.store.getRun(runId);
+      if (run.lifecycle.phase === "blocked" || run.lifecycle.phase === "failed") {
+        const attempt = onlyAttempt(run);
+        throw new Error(
+          `lost-ack run stopped: ${run.lifecycle.blocker ?? run.lifecycle.terminalReason}; ${JSON.stringify({ status: attempt.status, error: attempt.error, requests: attempt.authorityProviderRequests, session: run.planningSession })}`,
+        );
+      }
       return (
         run.lifecycle.phase === "awaiting_approval" &&
-        Object.values(run.attempts)[0]?.status === "completed"
+        Object.values(run.attempts)[0]?.status === "waiting_plan_review"
       );
     });
     const run = await harness.engine.store.getRun(runId);
     const attempt = onlyAttempt(run);
 
-    expect(attempt.status).toBe("completed");
+    expect(attempt.status).toBe("waiting_plan_review");
     expect(attempt.authorityProviderRequests?.[0]?.settledAt).toEqual(expect.any(String));
     expect(providerTotals(attempt)).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 1 });
     expect(run.plan?.full.architecture).toContain("Authority-backed plan");
@@ -249,7 +498,7 @@ describe("run authority provider reservation lifecycle", () => {
         );
       });
       const beforeStop = await harness.engine.store.getRun(runId);
-      const compiledPlanHash = canonicalHash(beforeStop.plan);
+      const acceptedTerminalHash = onlyAttempt(beforeStop).terminalOutputSha256;
 
       await harness.client.request("authority.ping");
       const lifecycleParams =
@@ -264,11 +513,11 @@ describe("run authority provider reservation lifecycle", () => {
       });
 
       const stopped = await harness.engine.store.getRun(runId);
-      expect(canonicalHash(stopped.plan)).toBe(compiledPlanHash);
+      expect(stopped.plan).toEqual(beforeStop.plan);
       expect(harness.compileCount()).toBe(1);
       expect(onlyAttempt(stopped)).toMatchObject({
-        status: expect.stringMatching(/completed|terminal_accepted/u),
-        terminalOutputSha256: expect.any(String),
+        status: expect.stringMatching(/terminal_accepted|interrupted/u),
+        terminalOutputSha256: acceptedTerminalHash,
       });
     },
     60_000,
@@ -285,7 +534,7 @@ describe("run authority provider reservation lifecycle", () => {
         return (
           run.lifecycle.phase === "awaiting_approval" &&
           Object.values(run.attempts).some(
-            (attempt) => attempt.kind === "planning" && attempt.status === "completed",
+            (attempt) => attempt.kind === "planning" && attempt.status === "waiting_plan_review",
           )
         );
       });
@@ -375,15 +624,21 @@ describe("run authority provider reservation lifecycle", () => {
     // A transient provider error (e.g. "servers overloaded, try again later") holds a reservation
     // koni cannot settle. koni does zero automatic provider retries, so without auto-recovery the
     // run would wedge needing an operator resume. It must instead retire the held reservation and
-    // re-drive planning on its own, reaching approval with a second attempt — no operator action.
+    // re-drive the same authenticated planning session on its own — no operator action.
     await waitFor(async () => {
       const recovered = await harness.engine.store.getRun(runId);
-      if (recovered.lifecycle.phase === "blocked" && Object.keys(recovered.attempts).length >= 2) {
-        throw new Error(`provider-error auto-recovery blocked: ${recovered.lifecycle.blocker}`);
+      if (
+        recovered.lifecycle.phase === "blocked" &&
+        !String(recovered.lifecycle.blocker).includes("worst-case exposure")
+      ) {
+        throw new Error(
+          `provider-error recovery stopped: ${recovered.lifecycle.blocker}; ${JSON.stringify({ attempt: onlyAttempt(recovered), session: recovered.planningSession, activity: recovered.activity.slice(-5) })}`,
+        );
       }
       return (
         recovered.lifecycle.phase === "awaiting_approval" &&
-        Object.keys(recovered.attempts).length === 2
+        Object.keys(recovered.attempts).length === 1 &&
+        onlyAttempt(recovered).status === "waiting_plan_review"
       );
     });
 
@@ -396,7 +651,9 @@ describe("run authority provider reservation lifecycle", () => {
     await expect(
       readFile(path.join(recovered.projectRoot, "never-written.txt")),
     ).rejects.toMatchObject({ code: "ENOENT" });
-    expect(attempts[0]?.authorityToolResults ?? []).toHaveLength(0);
+    expect((attempts[0]?.authorityToolResults ?? []).map((result) => result.toolName)).toEqual([
+      "koni_submit_output",
+    ]);
     expect(attempts[0]?.authorityProviderRequests?.[0]?.retirement).toMatchObject({
       protocol: "koni.provider-exposure-retirement.v1",
       disposition: "operator_acknowledged_provider_error",
@@ -408,20 +665,20 @@ describe("run authority provider reservation lifecycle", () => {
     });
     // Retirement is not a settlement: exposure is retained, not billed.
     expect(providerTotals(attempts[0]!)).toEqual({
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
+      input: 10,
+      output: 5,
+      cacheRead: 2,
+      cacheWrite: 1,
     });
-    expect(attempts[1]?.lineage).toMatchObject({
-      branchEpoch: 1,
-      reason: "retry",
-      parentAttemptId: attempts[0]?.id,
-      conversationFork: {
-        parentLaunchSpecHash: attempts[0]?.launchSpecHash,
-        parentTranscriptSha256: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
-      },
-    });
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).not.toHaveProperty("terminalOutputSha256");
+    expect(attempts[0]).not.toHaveProperty("terminalOutputSizeBytes");
+    expect(attempts[0]).not.toHaveProperty("terminalAcceptedAt");
+    expect(attempts[0]).not.toHaveProperty("terminalPolicy");
+    expect(attempts[0]?.terminalSummary).toBeUndefined();
+    expect(attempts[0]?.endedAt).toBeUndefined();
+    expect(attempts[0]?.lineage).toMatchObject({ branchEpoch: 0, reason: "initial" });
+    expect(attempts[0]?.lineage?.conversationFork).toBeUndefined();
     expect(
       recovered.activity.some(
         (entry) =>
@@ -429,6 +686,23 @@ describe("run authority provider reservation lifecycle", () => {
           entry.message.includes("without an operator retry"),
       ),
     ).toBe(true);
+  }, 60_000);
+
+  it("keeps a canonical 429 blocked during its token-bucket backoff", async () => {
+    const harness = await authorityHarness("rate_limit_provider_error");
+    const runId = await createRun(harness.client);
+
+    await waitFor(
+      async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+
+    const waiting = await harness.engine.store.getRun(runId);
+    expect(waiting.lifecycle.phase).toBe("blocked");
+    expect(Object.keys(waiting.attempts)).toHaveLength(1);
+    expect(
+      waiting.attempts[Object.keys(waiting.attempts)[0]!]!.authorityProviderRequests?.[0],
+    ).not.toHaveProperty("retirement");
   }, 60_000);
 
   it("auto-recovers a ticket provider error by resetting the failed assignment", async () => {
@@ -465,10 +739,12 @@ describe("run authority provider reservation lifecycle", () => {
     const attempts = Object.values(recovered.attempts)
       .filter((attempt) => attempt.kind === "ticket" && attempt.ticketId === "ticket-one")
       .sort((left, right) => String(left.startedAt).localeCompare(String(right.startedAt)));
+    // The accounting consequence stays the prefix that retry classification matches, and the
+    // provider's own reported cause — previously discarded entirely — now follows it.
     expect(attempts[0]).toMatchObject({
       status: "failed",
       error:
-        "Provider request remains reserved without a canonical assistant settlement; worst-case exposure is held",
+        "Provider request remains reserved without a canonical assistant settlement; worst-case exposure is held; provider reported: worker exited with code 23",
     });
     expect(attempts[0]?.authorityProviderRequests?.[0]?.retirement).toMatchObject({
       disposition: "operator_acknowledged_provider_error",
@@ -481,6 +757,46 @@ describe("run authority provider reservation lifecycle", () => {
         parentAttemptId: attempts[0]?.id,
       },
     });
+  }, 60_000);
+
+  it("auto-recovers an unreconciled ticket request when the failure retains its provider cause", async () => {
+    const harness = await authorityHarness("assignment_unreconciled_request");
+    const runId = await createRun(harness.client);
+    await waitFor(
+      async () =>
+        (await harness.engine.store.getRun(runId)).lifecycle.phase === "awaiting_approval",
+    );
+    await harness.client.request("authority.ping");
+    await harness.client.request(
+      "plan.approve",
+      { runId },
+      {
+        expectedRevision: harness.client.revision,
+        idempotencyKey: "approve-ticket-unreconciled-request",
+      },
+    );
+
+    await waitFor(async () => {
+      const run = await harness.engine.store.getRun(runId);
+      const attempts = Object.values(run.attempts).filter(
+        (attempt) => attempt.kind === "ticket" && attempt.ticketId === "ticket-one",
+      );
+      return attempts.length === 2 && attempts.some((attempt) => attempt.status === "completed");
+    });
+
+    const recovered = await harness.engine.store.getRun(runId);
+    const attempts = Object.values(recovered.attempts)
+      .filter((attempt) => attempt.kind === "ticket" && attempt.ticketId === "ticket-one")
+      .sort((left, right) => String(left.startedAt).localeCompare(String(right.startedAt)));
+    expect(attempts[0]).toMatchObject({
+      status: "failed",
+      error:
+        "Provider request remains reserved without a canonical assistant settlement; worst-case exposure is held; provider reported: worker exited with code 23",
+    });
+    expect(attempts[0]?.authorityProviderRequests?.[0]?.retirement).toMatchObject({
+      disposition: "operator_acknowledged_unreconciled_request",
+    });
+    expect(recovered.tickets["ticket-one"]?.steps[0]).toMatchObject({ status: "completed" });
   }, 60_000);
 
   it("fails over an exhausted Sol lead recovery to Terra without an operator retry", async () => {
@@ -637,7 +953,11 @@ describe("run authority provider reservation lifecycle", () => {
     const runId = await createRun(harness.client);
     await waitFor(async () => {
       const run = await harness.engine.store.getRun(runId);
-      return run.lifecycle.phase === "awaiting_approval" && Object.keys(run.attempts).length === 2;
+      return (
+        run.lifecycle.phase === "awaiting_approval" &&
+        Object.keys(run.attempts).length === 1 &&
+        onlyAttempt(run).status === "waiting_plan_review"
+      );
     });
 
     const recovered = await harness.engine.store.getRun(runId);
@@ -682,13 +1002,22 @@ describe("run authority provider reservation lifecycle", () => {
       }),
     });
     engines.push(restarted);
-    await restarted.start();
+    try {
+      await restarted.start();
+    } catch (error) {
+      const stopped = await restarted.store.getRun(runId);
+      throw new Error(
+        `provider restart failed from ${JSON.stringify({ phase: stopped.lifecycle.phase, blocker: stopped.lifecycle.blocker, attempt: onlyAttempt(stopped), session: stopped.planningSession })}`,
+        { cause: error },
+      );
+    }
 
     await waitFor(async () => {
       const run = await restarted.store.getRun(runId);
       return (
         run.lifecycle.phase === "awaiting_approval" &&
-        Object.keys(run.attempts).length > attemptsAtShutdown
+        Object.keys(run.attempts).length === attemptsAtShutdown &&
+        onlyAttempt(run).status === "waiting_plan_review"
       );
     });
     expect((await restarted.store.getRun(runId)).lifecycle.blocker).toBeUndefined();
@@ -699,10 +1028,14 @@ describe("run authority provider reservation lifecycle", () => {
     const runId = await createRun(harness.client);
     // No operator resume: a canonical Pi abort holds a reservation koni can never settle, so the
     // authority auto-retires it and re-drives planning on its own. The run must reach approval with
-    // a second (retry) attempt entirely autonomously.
+    // the same stable attempt entirely autonomously.
     await waitFor(async () => {
       const run = await harness.engine.store.getRun(runId);
-      return run.lifecycle.phase === "awaiting_approval" && Object.keys(run.attempts).length === 2;
+      return (
+        run.lifecycle.phase === "awaiting_approval" &&
+        Object.keys(run.attempts).length === 1 &&
+        onlyAttempt(run).status === "waiting_plan_review"
+      );
     });
 
     const recovered = await harness.engine.store.getRun(runId);
@@ -720,12 +1053,13 @@ describe("run authority provider reservation lifecycle", () => {
     });
     // Retirement is not a settlement: the conservative worst-case exposure is retained, not billed.
     expect(providerTotals(attempts[0]!)).toEqual({
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
+      input: 10,
+      output: 5,
+      cacheRead: 2,
+      cacheWrite: 1,
     });
-    expect(attempts[1]?.lineage).toMatchObject({ branchEpoch: 1 });
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]?.lineage).toMatchObject({ branchEpoch: 0, reason: "initial" });
     expect(
       recovered.activity.some(
         (entry) =>
@@ -743,7 +1077,11 @@ describe("run authority provider reservation lifecycle", () => {
     const runId = await createRun(harness.client);
     await waitFor(async () => {
       const run = await harness.engine.store.getRun(runId);
-      return run.lifecycle.phase === "awaiting_approval" && Object.keys(run.attempts).length === 2;
+      return (
+        run.lifecycle.phase === "awaiting_approval" &&
+        Object.keys(run.attempts).length === 1 &&
+        onlyAttempt(run).status === "waiting_plan_review"
+      );
     });
 
     const recovered = await harness.engine.store.getRun(runId);
@@ -760,20 +1098,33 @@ describe("run authority provider reservation lifecycle", () => {
 
   it("aborts and re-drives a provider request that exceeds the liveness boundary", async () => {
     const harness = await authorityHarness("provider_liveness_timeout", {
-      providerRequestLivenessTimeoutMs: 25,
+      providerRequestLivenessTimeoutMs: 250,
     });
     const runId = await createRun(harness.client);
 
     await waitFor(async () => {
       const run = await harness.engine.store.getRun(runId);
-      return run.lifecycle.phase === "awaiting_approval" && Object.keys(run.attempts).length === 2;
+      if (
+        run.lifecycle.phase === "blocked" &&
+        run.activity.some((entry) => entry.message.includes("Auto-recovered"))
+      ) {
+        throw new Error(
+          `liveness recovery stopped: ${JSON.stringify({ blocker: run.lifecycle.blocker, attempt: onlyAttempt(run), session: run.planningSession, activity: run.activity.slice(-8) })}`,
+        );
+      }
+      return (
+        run.lifecycle.phase === "awaiting_approval" &&
+        Object.keys(run.attempts).length === 1 &&
+        onlyAttempt(run).status === "waiting_plan_review"
+      );
     });
 
     const recovered = await harness.engine.store.getRun(runId);
     const attempts = Object.values(recovered.attempts).sort((left, right) =>
       String(left.startedAt).localeCompare(String(right.startedAt)),
     );
-    expect(attempts[0]?.status).toBe("aborted");
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]?.status).toBe("waiting_plan_review");
     expect(attempts[0]?.authorityProviderRequests?.[0]?.retirement).toMatchObject({
       disposition: "operator_acknowledged_canonical_abort",
     });
@@ -818,7 +1169,16 @@ describe("run authority provider reservation lifecycle", () => {
     );
     await waitFor(async () => {
       const run = await harness.engine.store.getRun(runId);
-      return run.lifecycle.phase === "awaiting_approval" && Object.keys(run.attempts).length === 2;
+      if (run.lifecycle.phase === "blocked") {
+        throw new Error(
+          `paused recovery stopped: ${JSON.stringify({ blocker: run.lifecycle.blocker, attempt: onlyAttempt(run), session: run.planningSession, activity: run.activity.slice(-8) })}`,
+        );
+      }
+      return (
+        run.lifecycle.phase === "awaiting_approval" &&
+        Object.keys(run.attempts).length === 1 &&
+        onlyAttempt(run).status === "waiting_plan_review"
+      );
     });
 
     const recovered = await harness.engine.store.getRun(runId);
@@ -832,7 +1192,8 @@ describe("run authority provider reservation lifecycle", () => {
       responseId: "resp_fixture_canonical_abort",
     });
     expect(recovered.lifecycle.blocker).toBeUndefined();
-    expect(attempts[1]?.lineage).toMatchObject({ branchEpoch: 1 });
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]?.lineage).toMatchObject({ branchEpoch: 0, reason: "initial" });
   }, 60_000);
 
   it("settles a committed assistant before an unterminated following JSONL tail", async () => {
@@ -842,7 +1203,7 @@ describe("run authority provider reservation lifecycle", () => {
       const run = await harness.engine.store.getRun(runId);
       return (
         run.lifecycle.phase === "awaiting_approval" &&
-        Object.values(run.attempts)[0]?.status === "completed"
+        Object.values(run.attempts)[0]?.status === "waiting_plan_review"
       );
     });
     const attempt = onlyAttempt(await harness.engine.store.getRun(runId));
@@ -893,7 +1254,10 @@ describe("run authority provider reservation lifecycle", () => {
           )}`,
         );
       }
-      return run.lifecycle.phase === "awaiting_approval" && onlyAttempt(run).status === "completed";
+      return (
+        run.lifecycle.phase === "awaiting_approval" &&
+        onlyAttempt(run).status === "waiting_plan_review"
+      );
     });
 
     const run = await harness.engine.store.getRun(runId);
@@ -917,9 +1281,14 @@ describe("run authority provider reservation lifecycle", () => {
     const runId = await createRun(harness.client);
     await waitFor(async () => {
       const run = await harness.engine.store.getRun(runId);
+      if (run.lifecycle.phase === "blocked" || run.lifecycle.phase === "failed") {
+        throw new Error(
+          `run stopped before provider checkpoint: ${run.lifecycle.blocker ?? run.lifecycle.terminalReason}`,
+        );
+      }
       return (
         run.lifecycle.phase === "awaiting_approval" &&
-        Object.values(run.attempts)[0]?.status === "completed"
+        Object.values(run.attempts)[0]?.status === "waiting_plan_review"
       );
     });
 
@@ -929,7 +1298,6 @@ describe("run authority provider reservation lifecycle", () => {
       draft.revision += 1;
       draft.updatedAt = new Date(Date.parse(run.updatedAt) + 1).toISOString();
       const attempt = onlyAttempt(draft);
-      attempt.status = "terminal_accepted";
       attempt.authorityProviderRequests!.push({
         sequence: 2,
         reservationId: "provider-unsettled-successor-hold",
@@ -1023,7 +1391,7 @@ function providerProgram(
   onCompile: () => void,
   scenario: string,
 ): RunCompilerProgram {
-  return {
+  const program: RunCompilerProgram = {
     async resolveRun(request) {
       return {
         profile: {
@@ -1190,6 +1558,16 @@ function providerProgram(
         authoritativeContextHash: rawSha256(context),
       };
       draft.persona.id = input.assignment?.personaId ?? "lead";
+      const initialPlanningRevision = input.run.planningSession?.revisions[0];
+      if (input.kind === "planning" && initialPlanningRevision !== undefined) {
+        draft.planningRevision = {
+          revision: 0,
+          baseRevision: null,
+          priorCheckpointSha256: null,
+          steeringSha256: null,
+          budgetBaseline: structuredClone(initialPlanningRevision.budgetBaseline),
+        };
+      }
       if (scenario.startsWith("lead_sol_fallback")) {
         draft.model.id = input.run.executionConfig!.agents.lead!.model;
       }
@@ -1220,12 +1598,12 @@ function providerProgram(
         },
       };
     },
-    async compilePlanningOutput({ output }) {
+    async compilePlanningOutput({ run, output }) {
       onCompile();
       expect(output).toEqual({ result: "provider-plan" });
       return {
         plan: {
-          revision: 1,
+          revision: run.planningSession?.currentRevision ?? 1,
           status: "planning",
           full: {
             architecture: "## Authority-backed plan\nUse the accepted terminal artifact.",
@@ -1279,6 +1657,61 @@ function providerProgram(
       throw new Error("integration is not used");
     },
   };
+  program.compilePlanningRevision = async ({ run, attemptId, patch }) => {
+    const compiled = await program.compilePlanningOutput({ run, attemptId, output: patch });
+    const revision = run.planningSession!.currentRevision;
+    return {
+      ...compiled,
+      artifactWrites: [
+        {
+          path: `runs/${run.id}/attempts/${attemptId}/planning/revisions/${revision}/artifact.json`,
+          bytes: Buffer.from(`${JSON.stringify({ revision, fixture: true })}\n`, "utf8"),
+          expectedSha256: null,
+        },
+      ],
+    };
+  };
+  program.preparePlanningRevision = async (input) => {
+    const attempt = input.run.attempts[input.attemptId]!;
+    const prepared = await program.prepareAttempt({
+      kind: "planning",
+      run: input.run,
+      attemptId: input.attemptId,
+      sessionId: input.sessionId,
+      nextAuthorityRevision: input.nextAuthorityRevision,
+      expectedAuthorityStateHash: input.expectedAuthorityStateHash,
+      lineage: structuredClone(attempt.lineage!),
+    });
+    const current =
+      input.run.planningSession!.revisions[input.run.planningSession!.currentRevision]!;
+    const prior =
+      input.run.planningSession!.revisions[input.run.planningSession!.currentRevision - 1]!;
+    const { specHash: _preparedHash, ...draft } = structuredClone(prepared.spec);
+    draft.persona.initialPrompt = input.steering ?? draft.persona.initialPrompt;
+    draft.persona.initialPromptHash = rawSha256(draft.persona.initialPrompt);
+    draft.planningRevision = {
+      revision: current.revision,
+      baseRevision: current.revision - 1,
+      priorCheckpointSha256: prior.artifactSha256!,
+      steeringSha256: current.steering!.instructionsSha256,
+      budgetBaseline: structuredClone(current.budgetBaseline),
+    };
+    return { ...prepared, spec: createAgentLaunchSpec(draft) };
+  };
+  program.recoverAttempt = async ({ run, attempt, spec }) => {
+    if (attempt.kind !== "planning") throw new Error("fixture only recovers planning attempts");
+    const recovered = await program.prepareAttempt({
+      kind: "planning",
+      run,
+      attemptId: attempt.id,
+      sessionId: attempt.sessionId,
+      nextAuthorityRevision: spec.authority.expectedRevision,
+      expectedAuthorityStateHash: spec.authority.expectedStateHash,
+      lineage: structuredClone(spec.lineage),
+    });
+    return { ...recovered, spec };
+  };
+  return program;
 }
 
 function providerTicket(): TicketRecord {
@@ -1288,7 +1721,7 @@ function providerTicket(): TicketRecord {
     operationId: "provider-authority-assignment",
     title: "Exercise assignment authority",
     summary: "Prove terminal assignment effects are compiled once",
-    status: "todo",
+    status: "queued",
     priority: 0,
     dependencyIds: [],
     targetNodeIds: ["provider-authority"],

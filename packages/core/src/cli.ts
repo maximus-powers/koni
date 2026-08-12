@@ -11,15 +11,20 @@ import { runStandaloneControlCenter } from "./control-center/standalone.js";
 import { parseControlCatalog } from "./control-center/protocol.js";
 import { connectRunningKoniAuthority } from "./pi/interactive-tools.js";
 import { parseMonitorSnapshot, type MonitorRunSummary } from "./monitor/protocol.js";
+import { blockerRemedyGuidance } from "./state/run-lifecycle.js";
 import {
   createProjectRun,
   ensureProjectAuthority,
   inspectProjectAuthority,
+  acknowledgeProviderExposure,
+  decideProjectProposal,
   approveProjectRun,
+  mergeProjectRun,
   resumeProjectRun,
   serveProjectAuthority,
   stopProjectAuthority,
   validateProjectConfiguration,
+  resolveProjectAgentConfiguration,
 } from "./operator/authority-bootstrap.js";
 import {
   installAndCacheProfile,
@@ -42,6 +47,7 @@ export interface KoniCliDependencies {
   serve: typeof serveProjectAuthority;
   stop: typeof stopProjectAuthority;
   validate: typeof validateProjectConfiguration;
+  resolveAgent: typeof resolveProjectAgentConfiguration;
   install: typeof installAndCacheProfile;
   previewInstall: typeof previewProfileUpdate;
   resolveProfile: typeof resolveProfilePackageRoot;
@@ -49,6 +55,9 @@ export interface KoniCliDependencies {
   run: typeof createProjectRun;
   resumeRun: typeof resumeProjectRun;
   approveRun: typeof approveProjectRun;
+  mergeRun: typeof mergeProjectRun;
+  acknowledgeRun: typeof acknowledgeProviderExposure;
+  decideProposal: typeof decideProjectProposal;
   standalone: typeof runStandaloneControlCenter;
   connectReadOnly: typeof connectRunningKoniAuthority;
 }
@@ -66,6 +75,7 @@ const DEFAULT_DEPENDENCIES: KoniCliDependencies = {
   serve: serveProjectAuthority,
   stop: stopProjectAuthority,
   validate: validateProjectConfiguration,
+  resolveAgent: resolveProjectAgentConfiguration,
   install: installAndCacheProfile,
   previewInstall: previewProfileUpdate,
   resolveProfile: resolveProfilePackageRoot,
@@ -73,6 +83,9 @@ const DEFAULT_DEPENDENCIES: KoniCliDependencies = {
   run: createProjectRun,
   resumeRun: resumeProjectRun,
   approveRun: approveProjectRun,
+  mergeRun: mergeProjectRun,
+  acknowledgeRun: acknowledgeProviderExposure,
+  decideProposal: decideProjectProposal,
   standalone: runStandaloneControlCenter,
   connectReadOnly: connectRunningKoniAuthority,
 };
@@ -319,6 +332,11 @@ export async function runKoniCli(
         ...runs.flatMap((run) => [
           `  ${run.id} · ${run.runType} · ${runStatusLine(run)}`,
           ...(run.blocker === undefined ? [] : [`    blocked: ${run.blocker}`]),
+          // The prose says what broke; without the remedy an operator has to work out which of
+          // several identical-looking blocked states this is before they can act on it.
+          ...(run.blockerRemedy === undefined
+            ? []
+            : [`    remedy: ${run.blockerRemedy} — ${blockerRemedyGuidance(run.blockerRemedy)}`]),
           ...(run.failure === undefined ? [] : [`    failed: ${run.failure}`]),
         ]),
       ]);
@@ -326,6 +344,34 @@ export async function runKoniCli(
     }
     case "config": {
       const action = parsed.positionals[0] ?? "validate";
+      if (action === "resolve-agent") {
+        const agentId = parsed.positionals[1];
+        if (agentId === undefined) {
+          throw new CliUsageError("config resolve-agent requires an agent id");
+        }
+        const resolved = await dependencies.resolveAgent({
+          projectRoot,
+          agentId,
+          ...(parsed.runType === undefined ? {} : { runTypeId: parsed.runType }),
+        });
+        print(io, parsed.json, resolved, [
+          `Agent: ${resolved.agent.agentId}`,
+          `Ancestry: ${resolved.agent.ancestry.join(" → ")}`,
+          `Skills: ${resolved.agent.resources.skills.map(({ id }) => id).join(", ") || "none"}`,
+          `Extensions: ${
+            resolved.agent.extensions.map(({ id, status }) => `${id} (${status})`).join(", ") ||
+            "none"
+          }`,
+          `Tools: ${resolved.agent.tools.map(({ name }) => name).join(", ")}`,
+          ...(resolved.effectiveModel === undefined
+            ? []
+            : [
+                `Model: ${resolved.effectiveModel.provider}/${resolved.effectiveModel.id} (${resolved.effectiveModel.thinkingLevel})`,
+              ]),
+          `Configuration: ${resolved.agent.configurationSha256}`,
+        ]);
+        return 0;
+      }
       if (action !== "validate" && action !== "status") {
         throw new CliUsageError(`unknown config action: ${action}`);
       }
@@ -445,6 +491,54 @@ export async function runKoniCli(
       print(io, parsed.json, result, [`Approved run ${result.runId} into ${result.status}.`]);
       return 0;
     }
+    case "acknowledge": {
+      const runId = parsed.runId ?? parsed.positionals[0];
+      if (runId === undefined) throw new CliUsageError("acknowledge requires --run <run-id>");
+      const result = await dependencies.acknowledgeRun({
+        projectRoot,
+        version: KONI_CORE_API_VERSION,
+        runId,
+      });
+      print(io, parsed.json, result, [
+        `Acknowledged held provider exposure for run ${result.runId} (${result.status}).`,
+      ]);
+      return 0;
+    }
+    case "decide": {
+      const runId = parsed.runId ?? parsed.positionals[0];
+      if (runId === undefined) throw new CliUsageError("decide requires --run <run-id>");
+      if (parsed.approveProposal === true && parsed.rejectProposal === true) {
+        throw new CliUsageError("decide takes either --approve or --reject, not both");
+      }
+      if (parsed.approveProposal !== true && parsed.rejectProposal !== true) {
+        throw new CliUsageError("decide requires --approve or --reject");
+      }
+      const result = await dependencies.decideProposal({
+        projectRoot,
+        version: KONI_CORE_API_VERSION,
+        runId,
+        ...(parsed.proposal === undefined ? {} : { ticketId: parsed.proposal }),
+        decision: parsed.approveProposal === true ? "approval" : "rejection",
+        ...(parsed.message === undefined ? {} : { message: parsed.message }),
+      });
+      print(io, parsed.json, result, [
+        `Recorded ${result.decision} for change proposal ${result.ticketId} on run ${result.runId}.`,
+      ]);
+      return 0;
+    }
+    case "merge": {
+      const runId = parsed.runId ?? parsed.positionals[0];
+      if (runId === undefined) throw new CliUsageError("merge requires --run <run-id>");
+      const result = await dependencies.mergeRun({
+        projectRoot,
+        version: KONI_CORE_API_VERSION,
+        runId,
+      });
+      print(io, parsed.json, result, [
+        `Authorized merge for run ${result.runId} (${result.status}).`,
+      ]);
+      return 0;
+    }
     case "authority": {
       if (parsed.positionals[0] !== "serve") {
         throw new CliUsageError("authority is an internal command; expected `authority serve`");
@@ -482,6 +576,9 @@ interface ParsedCli {
     | "run"
     | "resume"
     | "approve"
+    | "merge"
+    | "acknowledge"
+    | "decide"
     | "authority";
   positionals: string[];
   root?: string;
@@ -494,6 +591,11 @@ interface ParsedCli {
   /** Additional intake answers for run types that require more than the objective field. */
   fields?: Record<string, string>;
   runId?: string;
+  /** Change-proposal ticket id; optional when the run has exactly one undecided proposal. */
+  proposal?: string;
+  approveProposal: boolean;
+  rejectProposal: boolean;
+  message?: string;
   previewSha256?: string;
   conflictResolution?: "keep_project" | "accept_upstream";
   apply: boolean;
@@ -506,6 +608,8 @@ function parseCli(argv: readonly string[]): ParsedCli {
   const result: ParsedCli = {
     positionals: [],
     newTarget: false,
+    approveProposal: false,
+    rejectProposal: false,
     apply: false,
     json: false,
     help: false,
@@ -536,6 +640,11 @@ function parseCli(argv: readonly string[]): ParsedCli {
         [entry.slice(0, separator)]: entry.slice(separator + 1),
       };
     } else if (argument === "--run") result.runId = requireOptionValue(argv, ++index, argument);
+    else if (argument === "--proposal")
+      result.proposal = requireOptionValue(argv, ++index, argument);
+    else if (argument === "--approve") result.approveProposal = true;
+    else if (argument === "--reject") result.rejectProposal = true;
+    else if (argument === "--message") result.message = requireOptionValue(argv, ++index, argument);
     else if (argument === "--preview")
       result.previewSha256 = requireOptionValue(argv, ++index, argument);
     else if (argument === "--keep-project")
@@ -573,6 +682,9 @@ function isCommand(value: string): value is NonNullable<ParsedCli["command"]> {
     "run",
     "resume",
     "approve",
+    "merge",
+    "acknowledge",
+    "decide",
     "authority",
   ]).has(value);
 }
@@ -670,12 +782,17 @@ function helpText(): string {
     "  koni restart [--root PATH]\n" +
     "  koni status [--root PATH] [--json]\n" +
     "  koni config validate [--root PATH] [--json]\n" +
+    "  koni config resolve-agent AGENT [--run-type TYPE] [--root PATH] [--json]\n" +
     "  koni run --goal TEXT [--field ID=VALUE]... [--type <run-type>] [--target BRANCH] [--new-target [--from REF]]\n" +
     "    Available run types come from the project's compiled profile and configuration.\n" +
     "    --field answers additional required intake (repeatable), e.g. --field hypothesis='...'.\n" +
     "    --new-target branches a not-yet-existing --target from --from (default: current branch).\n" +
-    "  koni resume --run RUN_ID [--root PATH]  Resume a paused run or retry a blocked run\n" +
+    "  koni resume --run RUN_ID [--root PATH]  Resume/retry a run or revalidate merge-ready work\n" +
     "  koni approve --run RUN_ID [--root PATH] Approve a run waiting at its approval gate\n" +
+    "  koni merge --run RUN_ID [--root PATH]   Authorize the merge of a run at its promotion boundary\n" +
+    "  koni acknowledge --run RUN_ID [--root PATH] Acknowledge a held provider error, then resume\n" +
+    "  koni decide --run RUN_ID (--approve|--reject) [--proposal TICKET_ID] [--message TEXT]\n" +
+    "    Decide a change proposal that is holding its source ticket.\n" +
     "  koni tui [--root PATH]\n\n" +
     "The TUI opens only in the terminal where `koni tui` is invoked; Koni never creates panes.\n"
   );

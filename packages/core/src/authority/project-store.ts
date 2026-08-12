@@ -2012,7 +2012,7 @@ function assertConfiguredTicketLifecycleMutation(
     }
   }
   for (const [ticketId, ticket] of Object.entries(next.tickets)) {
-    const priorStatus = previous.tickets[ticketId]?.status ?? "todo";
+    const priorStatus = previous.tickets[ticketId]?.status ?? "queued";
     if (
       configuredTicketState(machine, priorStatus) === configuredTicketState(machine, ticket.status)
     ) {

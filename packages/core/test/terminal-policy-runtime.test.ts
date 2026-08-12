@@ -389,7 +389,7 @@ function fixtureTicket(binding?: ExecutionPolicyBinding): TicketRecord {
     operationId: "operation-main",
     title: "Ticket",
     summary: "Ticket",
-    status: "todo",
+    status: "queued",
     ...(binding === undefined ? {} : { executionPolicyBinding: binding }),
     priority: 0,
     dependencyIds: [],

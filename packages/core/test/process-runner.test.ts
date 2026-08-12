@@ -49,6 +49,23 @@ describe("configured process containment", () => {
     });
   });
 
+  it("keeps an explicitly empty configured path set empty", async () => {
+    const root = await temporaryRoot();
+    await writeFile(path.join(root, "unrelated-large-artifact.bin"), "not part of this check\n");
+
+    const manifest = await snapshotContainedPaths(root, []);
+
+    expect(manifest.roots).toEqual([]);
+    expect(manifest.entries).toEqual([]);
+    expect(manifest.manifestSha256).toBe(
+      canonicalHash({
+        protocol: "koni.contained-path-manifest.v1",
+        roots: [],
+        entries: [],
+      }),
+    );
+  });
+
   it.runIf(process.platform === "darwin")(
     "reads repository source in Seatbelt while hiding project secrets",
     async () => {
@@ -361,6 +378,54 @@ describe("configured process containment", () => {
 
       expect(result.exitCode, result.stderr.toString("utf8")).toBe(0);
       expect(result.stdout.toString("utf8")).toBe("shim runtime\n");
+    },
+  );
+
+  it.runIf(process.platform === "darwin")(
+    "admits a configured Python user site without exposing the rest of HOME",
+    async () => {
+      const root = await temporaryRoot();
+      const stateRoot = await temporaryRoot();
+      const runtime = await temporaryRoot();
+      const home = await temporaryRoot();
+      const userSite = path.join(
+        home,
+        "Library",
+        "Python",
+        "3.14",
+        "lib",
+        "python",
+        "site-packages",
+      );
+      await mkdir(path.join(runtime, "bin"), { recursive: true });
+      await mkdir(userSite, { recursive: true });
+      await writeFile(path.join(userSite, "fixture.txt"), "user dependency\n");
+      await writeFile(path.join(home, "secret.txt"), "not for checks\n");
+      const python = path.join(runtime, "bin", "python3.14");
+      await writeFile(
+        python,
+        [
+          "#!/bin/sh",
+          'cat "$HOME/Library/Python/3.14/lib/python/site-packages/fixture.txt"',
+          'cat "$HOME/secret.txt" 2>/dev/null || true',
+          "",
+        ].join("\n"),
+      );
+      await chmod(python, 0o700);
+
+      const result = await runContainedProcess({
+        projectRoot: root,
+        stateRoot,
+        check: {
+          ...command([python]),
+          environment: { inherit: [], set: { HOME: home } },
+        },
+        readPaths: [],
+        writePaths: [],
+      });
+
+      expect(result.exitCode, result.stderr.toString("utf8")).toBe(0);
+      expect(result.stdout.toString("utf8")).toBe("user dependency\n");
     },
   );
 

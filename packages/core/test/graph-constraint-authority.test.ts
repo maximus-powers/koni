@@ -371,7 +371,7 @@ function configurationFixture(
   };
   const material = {
     protocol: "koni.compiled-configuration.v1" as const,
-    schema_version: "2.0" as const,
+    schema_version: "3.0" as const,
     package: {
       name: "@koni/test-profile",
       version: "1.0.0",
@@ -390,7 +390,6 @@ function configurationFixture(
       workflows: [],
       actions: [],
       checks: [],
-      personas: [],
       reports: [],
       cockpit: [],
       lifecycles: [],

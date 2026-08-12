@@ -20,7 +20,11 @@ import {
   type VerifiedProfileBaseline,
 } from "../src/compiler/profile-package.js";
 import { evaluateConfiguredRules } from "../src/compiler/rules.js";
-import { applyReviewEffects } from "../src/compiler/run-program.js";
+import {
+  applyReviewEffects,
+  researchStandaloneSupportRunFallback,
+  standaloneSupportRunAllowsEmptyScientificInputs,
+} from "../src/compiler/run-program.js";
 import type { CompiledConfiguration, ConfigurationObject } from "../src/contracts/configuration.js";
 import {
   DERIVED_TICKET_PROTOCOL,
@@ -43,6 +47,490 @@ afterEach(async () => {
 });
 
 describe("provider-free domain flows", () => {
+  it("lets gate-definition tickets repair required gates missing canonical applicability links", async () => {
+    const root = await temporaryRoot();
+    const configuration = compileProfile("research-profile");
+    const experiment = node(
+      "experiment-a",
+      "experiment",
+      "Bounded classification experiment",
+      "draft",
+      {},
+      { requires: ["gate-a"] },
+    );
+    const gate = node("gate-a", "gate", "Development boundary gate", "draft", {
+      assertion: "The experiment uses development data only",
+      applicability: "Before the experiment executes",
+      capability: { name: "development.boundary", protocol_range: ">=1.0.0 <2.0.0" },
+      command_result_contract: { result_protocol: "autoresearch.gate-result.v1" },
+      oracle_semantics: {
+        pass: "Only development data was used",
+        fail: "Sealed data was used",
+        inconclusive: "The data boundary could not be established",
+        contract_error: "The verifier result was malformed",
+      },
+      failure_meaning: "The experiment cannot execute",
+      expected_red: true,
+    });
+    const graph = projection([experiment, gate]);
+    const adapter = await createProductionRuleDomainAdapter({
+      configuration,
+      graph,
+      projectRoot: root,
+    });
+    const result = evaluateConfiguredRules(
+      { configuration, graph },
+      { ruleIds: ["ticket.define-gate"], adapter },
+    );
+
+    expect(result.ok, diagnostics(result)).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.tickets).toHaveLength(1);
+    expect(result.value.tickets[0]?.target_node_ids).toEqual(["experiment-a"]);
+    expect(result.value.tickets[0]?.scope.write_node_ids).toEqual(["experiment-a", "gate-a"]);
+  });
+
+  it("does not compile a scientific runtime contract for a gate-check record", async () => {
+    const root = await temporaryRoot();
+    const configuration = compileProfile("research-profile");
+    const gate = node("gate-a", "gate", "Scoped compile gate", "draft");
+    const verifier = node("asset-verifier", "asset", "Gate verifier", "active");
+    const gateCheck = node(
+      "run-gate-check",
+      "run",
+      "Scoped compile gate check execution",
+      "draft",
+      {
+        intent: "Invoke the configured gate verifier and record its compiler-owned receipt",
+        result_summary: "The verifier ran and recorded a nonpassing gate result",
+      },
+      { evaluates: [gate.id], uses: [verifier.id] },
+    );
+    const graph = projection([gate, verifier, gateCheck]);
+    const adapter = await createProductionRuleDomainAdapter({
+      configuration,
+      graph,
+      projectRoot: root,
+    });
+    const result = evaluateConfiguredRules(
+      { configuration, graph },
+      {
+        ruleIds: ["readiness.run-contract", "ticket.repair-run-contract", "ticket.run-experiment"],
+        adapter,
+      },
+    );
+
+    expect(result.ok, diagnostics(result)).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.facts).not.toContainEqual(
+      expect.objectContaining({ anchor_node_id: gateCheck.id, kind: "readiness" }),
+    );
+    expect(result.value.tickets).toEqual([]);
+  });
+
+  it("routes an approved standalone scientific support run into contract repair", async () => {
+    const root = await temporaryRoot();
+    const configuration = compileProfile("research-profile");
+    const generator = node("asset-generator", "asset", "Development pool generator", "active", {
+      source_strategy: "generated",
+      capabilities: [{ name: "dev-pool.generator", protocol_version: "1.0.0" }],
+      implementation_plan: {
+        root: "program/assets/dev-pool",
+        files: ["program/assets/dev-pool/generate.py"],
+      },
+    });
+    const gate = gateNode("gate-a", "dev-pool.boundary", generator.id);
+    const supportRun = node(
+      "run-support",
+      "run",
+      "Generate the development pool",
+      "draft",
+      {
+        intent: "Materialize the development-only pool required by the boundary gate",
+        runtime_contract: {
+          command: [
+            "python3",
+            "program/assets/dev-pool/generate.py",
+            "--output-dir",
+            "runs/dev-pool",
+          ],
+          result_protocol: "autoresearch.research-result.v1",
+          required_measurements: ["behavior_counts", "manifest_sha256"],
+          asset_entrypoints: [
+            { asset_id: generator.id, path: "program/assets/dev-pool/generate.py" },
+          ],
+          scientific_inputs: [],
+          output_root: "runs/dev-pool",
+        },
+      },
+      { evaluates: [gate.id], uses: [generator.id] },
+    );
+    const graph = projection([gate, generator, supportRun]);
+    const adapter = await createProductionRuleDomainAdapter({
+      configuration,
+      graph,
+      projectRoot: root,
+    });
+    const result = evaluateConfiguredRules(
+      { configuration, graph },
+      {
+        ruleIds: ["readiness.run-contract", "ticket.repair-run-contract", "ticket.run-experiment"],
+        adapter,
+      },
+    );
+
+    expect(result.ok, diagnostics(result)).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.tickets).toEqual([
+      expect.objectContaining({
+        operation: "compile-run-plan",
+        target_node_ids: [supportRun.id],
+      }),
+    ]);
+  });
+
+  it("keeps approved zero-input standalone support runs live for pinned research profiles", async () => {
+    const root = await temporaryRoot();
+    const current = compileProfile("research-profile");
+    const configuration: CompiledConfiguration = {
+      ...current,
+      registries: {
+        ...current.registries,
+        queries: {
+          ...current.registries.queries,
+          "active-runs": {
+            ...current.registries.queries["active-runs"],
+            where: { op: "incoming_count", relation: "runs", min: 1 },
+          },
+        },
+      },
+    };
+    const generator = node("asset-generator", "asset", "Development pool generator", "active", {
+      source_strategy: "generated",
+      capabilities: [{ name: "dev-pool.generator", protocol_version: "1.0.0" }],
+      implementation_plan: {
+        root: "program/assets/dev-pool",
+        files: ["program/assets/dev-pool/generate.py"],
+      },
+    });
+    const gate = gateNode("gate-a", "dev-pool.boundary", generator.id);
+    const supportRun = node(
+      "run-support",
+      "run",
+      "Generate the development pool",
+      "draft",
+      {
+        intent: "Materialize the development-only pool required by the boundary gate",
+        runtime_contract: {
+          command: [
+            "python3",
+            "program/assets/dev-pool/generate.py",
+            "--output-dir",
+            "runs/dev-pool",
+          ],
+          result_protocol: "autoresearch.research-result.v1",
+          required_measurements: ["behavior_counts", "manifest_sha256"],
+          asset_entrypoints: [
+            { asset_id: generator.id, path: "program/assets/dev-pool/generate.py" },
+          ],
+          scientific_inputs: [],
+          output_root: "runs/dev-pool",
+        },
+      },
+      { evaluates: [gate.id], uses: [generator.id] },
+    );
+    const nodes = [gate, generator, supportRun];
+    const graph = projection(nodes);
+    const adapter = await createProductionRuleDomainAdapter({
+      configuration,
+      graph,
+      projectRoot: root,
+    });
+    const evaluated = evaluateConfiguredRules(
+      { configuration, graph },
+      {
+        ruleIds: ["readiness.run-contract", "ticket.repair-run-contract", "ticket.run-experiment"],
+        adapter,
+      },
+    );
+
+    expect(evaluated.ok, diagnostics(evaluated)).toBe(true);
+    if (!evaluated.ok) return;
+    expect(evaluated.value.tickets).toEqual([]);
+    const repaired = researchStandaloneSupportRunFallback(
+      configuration,
+      typedGraph(configuration, nodes),
+      evaluated.value,
+      adapter,
+    );
+    expect(repaired.tickets).toEqual([
+      expect.objectContaining({
+        operation: "compile-run-plan",
+        target_node_ids: [supportRun.id],
+      }),
+    ]);
+
+    const executableRun: CompilerGraphNode = {
+      ...supportRun,
+      spec: {
+        ...supportRun.spec,
+        runtime_contract: {
+          ...(supportRun.spec.runtime_contract as ConfigurationObject),
+          composed_verification_command: [
+            "python3",
+            "program/assets/dev-pool/verify.py",
+            "runs/dev-pool/dev_pool_manifest.json",
+          ],
+          scientific_inputs: [],
+        },
+      },
+    };
+    const executableNodes = [gate, generator, executableRun];
+    const executableGraph = projection(executableNodes);
+    const executableAdapter = await createProductionRuleDomainAdapter({
+      configuration,
+      graph: executableGraph,
+      projectRoot: root,
+    });
+    const legacyExecutable = evaluateConfiguredRules(
+      { configuration, graph: executableGraph },
+      {
+        ruleIds: ["readiness.run-contract", "ticket.repair-run-contract", "ticket.run-experiment"],
+        adapter: executableAdapter,
+      },
+    );
+    expect(legacyExecutable.ok, diagnostics(legacyExecutable)).toBe(true);
+    if (!legacyExecutable.ok) return;
+    const runnable = researchStandaloneSupportRunFallback(
+      configuration,
+      typedGraph(configuration, executableNodes),
+      legacyExecutable.value,
+      executableAdapter,
+    );
+    expect(runnable.tickets).toEqual([
+      expect.objectContaining({
+        operation: "run-experiment",
+        target_node_ids: [supportRun.id],
+        scope: expect.objectContaining({ write_paths: ["runs/dev-pool"] }),
+      }),
+    ]);
+    expect(
+      standaloneSupportRunAllowsEmptyScientificInputs(
+        runnable.tickets[0],
+        "runtime_contract.scientific_inputs",
+        [],
+      ),
+    ).toBe(true);
+    expect(
+      standaloneSupportRunAllowsEmptyScientificInputs(
+        { ...runnable.tickets[0]!, rule_id: "ticket.run-experiment" },
+        "runtime_contract.scientific_inputs",
+        [],
+      ),
+    ).toBe(false);
+  });
+
+  it("does not duplicate a retained active standalone run-contract ticket", async () => {
+    const root = await temporaryRoot();
+    const current = compileProfile("research-profile");
+    const configuration: CompiledConfiguration = {
+      ...current,
+      registries: {
+        ...current.registries,
+        queries: {
+          ...current.registries.queries,
+          "active-runs": {
+            ...current.registries.queries["active-runs"],
+            where: { op: "incoming_count", relation: "runs", min: 1 },
+          },
+        },
+      },
+    };
+    const generator = node("asset-generator", "asset", "Development pool generator", "active", {
+      source_strategy: "generated",
+      capabilities: [{ name: "dev-pool.generator", protocol_version: "1.0.0" }],
+      implementation_plan: {
+        root: "program/assets/dev-pool",
+        files: ["program/assets/dev-pool/generate.py"],
+      },
+    });
+    const gate = gateNode("gate-a", "dev-pool.boundary", generator.id);
+    const supportRun = node(
+      "run-support",
+      "run",
+      "Generate the development pool",
+      "draft",
+      {
+        intent: "Materialize the development-only pool required by the boundary gate",
+        runtime_contract: {
+          command: [
+            "python3",
+            "program/assets/dev-pool/generate.py",
+            "--output-dir",
+            "runs/dev-pool",
+          ],
+          result_protocol: "autoresearch.research-result.v1",
+          required_measurements: ["behavior_counts", "manifest_sha256"],
+          asset_entrypoints: [
+            { asset_id: generator.id, path: "program/assets/dev-pool/generate.py" },
+          ],
+          scientific_inputs: [],
+          output_root: "runs/dev-pool",
+        },
+      },
+      { evaluates: [gate.id], uses: [generator.id] },
+    );
+    const nodes = [gate, generator, supportRun];
+    const graph = projection(nodes);
+    const adapter = await createProductionRuleDomainAdapter({
+      configuration,
+      graph,
+      projectRoot: root,
+    });
+    const evaluated = evaluateConfiguredRules(
+      { configuration, graph },
+      {
+        ruleIds: ["readiness.run-contract", "ticket.repair-run-contract", "ticket.run-experiment"],
+        adapter,
+      },
+    );
+
+    expect(evaluated.ok, diagnostics(evaluated)).toBe(true);
+    if (!evaluated.ok) return;
+    const repaired = researchStandaloneSupportRunFallback(
+      configuration,
+      typedGraph(configuration, nodes),
+      evaluated.value,
+      adapter,
+      [
+        {
+          id: "TK-retained-run-contract",
+          operationId: "execution.node.compile-run-plan",
+          targetNodeIds: [supportRun.id],
+          status: "queued",
+        },
+      ],
+    );
+
+    expect(repaired.tickets).toEqual([]);
+
+    const initialFallback = researchStandaloneSupportRunFallback(
+      configuration,
+      typedGraph(configuration, nodes),
+      evaluated.value,
+      adapter,
+    );
+    const fallbackTicket = initialFallback.tickets[0]!;
+    const durableFallbackTicket = {
+      id: fallbackTicket.id,
+      operationId: "execution.node.compile-run-plan",
+      targetNodeIds: [supportRun.id],
+      status: "queued" as const,
+    };
+    const retainedFallback = researchStandaloneSupportRunFallback(
+      configuration,
+      typedGraph(configuration, nodes),
+      evaluated.value,
+      adapter,
+      [durableFallbackTicket],
+    );
+
+    expect(retainedFallback.tickets.map(({ id }) => id)).toEqual([fallbackTicket.id]);
+  });
+
+  it("emits run-contract repair instead of execution until scientific inputs are bound", async () => {
+    const root = await temporaryRoot();
+    const configuration = compileProfile("research-profile");
+    const runtimeContract = {
+      command: ["python3", "program/assets/fixture/run.py", "program/assets/fixture/input.json"],
+      composed_verification_command: [
+        "python3",
+        "program/assets/fixture/verify.py",
+        "program/assets/fixture/input.json",
+      ],
+      result_protocol: "autoresearch.research-result.v1",
+      required_measurements: ["score"],
+      asset_entrypoints: [{ asset_id: "asset-fixture", path: "program/assets/fixture/run.py" }],
+      scientific_inputs: [],
+    };
+    const incompleteRun = node("run-incomplete", "run", "Incomplete run", "active", {
+      intent: "Exercise one bounded fixture",
+      runtime_contract: runtimeContract,
+    });
+    const incompleteExperiment = node(
+      "experiment-incomplete",
+      "experiment",
+      "Incomplete experiment",
+      "active",
+      {},
+      { runs: [incompleteRun.id] },
+    );
+    const incompleteGraph = projection([incompleteExperiment, incompleteRun]);
+    const incompleteAdapter = await createProductionRuleDomainAdapter({
+      configuration,
+      graph: incompleteGraph,
+      projectRoot: root,
+    });
+    const incomplete = evaluateConfiguredRules(
+      { configuration, graph: incompleteGraph },
+      {
+        ruleIds: ["readiness.run-contract", "ticket.repair-run-contract", "ticket.run-experiment"],
+        adapter: incompleteAdapter,
+      },
+    );
+
+    expect(incomplete.ok, diagnostics(incomplete)).toBe(true);
+    if (!incomplete.ok) return;
+    expect(incomplete.value.tickets.map(({ operation }) => operation)).toEqual([
+      "compile-run-plan",
+    ]);
+    expect(incomplete.value.facts).not.toContainEqual(
+      expect.objectContaining({ kind: "readiness", value: "ready" }),
+    );
+
+    const completeRun = node("run-complete", "run", "Complete run", "active", {
+      intent: "Exercise one bounded fixture",
+      runtime_contract: {
+        ...runtimeContract,
+        scientific_inputs: [
+          {
+            asset_id: "asset-fixture",
+            role: "fixture",
+            path: "program/assets/fixture/input.json",
+          },
+        ],
+      },
+    });
+    const completeExperiment = node(
+      "experiment-complete",
+      "experiment",
+      "Complete experiment",
+      "active",
+      {},
+      { runs: [completeRun.id] },
+    );
+    const completeGraph = projection([completeExperiment, completeRun]);
+    const completeAdapter = await createProductionRuleDomainAdapter({
+      configuration,
+      graph: completeGraph,
+      projectRoot: root,
+    });
+    const complete = evaluateConfiguredRules(
+      { configuration, graph: completeGraph },
+      {
+        ruleIds: ["readiness.run-contract", "ticket.repair-run-contract", "ticket.run-experiment"],
+        adapter: completeAdapter,
+      },
+    );
+
+    expect(complete.ok, diagnostics(complete)).toBe(true);
+    if (!complete.ok) return;
+    expect(complete.value.tickets.map(({ operation }) => operation)).toEqual(["run-experiment"]);
+    expect(complete.value.facts).toContainEqual(
+      expect.objectContaining({ kind: "readiness", value: "ready" }),
+    );
+  });
+
   it("keeps expected-red research gates blocked until a typed passing verifier receipt exists", async () => {
     const root = await temporaryRoot();
     const configuration = compileProfile("research-profile");
@@ -110,6 +598,117 @@ describe("provider-free domain flows", () => {
     );
     expect(compiled.ok, diagnostics(compiled)).toBe(true);
     if (compiled.ok) expect(compiled.value.facts).toEqual([]);
+  });
+
+  it("inherits research execution gates from experiment boundaries, not the run root", async () => {
+    const root = await temporaryRoot();
+    const configuration = compileProfile("research-profile");
+    const hypothesis = node(
+      "hypothesis-root",
+      "hypothesis",
+      "Bounded hypothesis",
+      "active",
+      {},
+      { experiments: ["experiment-a"] },
+    );
+    const experiment = node(
+      "experiment-a",
+      "experiment",
+      "Bounded experiment",
+      "draft",
+      {},
+      { runs: ["run-a"] },
+    );
+    const run = node("run-a", "run", "Bounded run", "draft", {
+      intent: "Measure one bounded outcome",
+      runtime_contract: {
+        command: ["python3", "program/assets/fixture/run.py"],
+        composed_verification_command: ["python3", "program/assets/fixture/verify.py"],
+        result_protocol: "autoresearch.research-result.v1",
+        required_measurements: ["score"],
+        asset_entrypoints: [
+          { asset_id: "asset-experiment-gate", path: "program/assets/fixture/run.py" },
+        ],
+        scientific_inputs: [
+          {
+            asset_id: "asset-experiment-gate",
+            role: "fixture",
+            path: "program/assets/fixture/input.json",
+          },
+        ],
+      },
+    });
+    const rootGate = gateNode("gate-root", "root.review", hypothesis.id);
+    const experimentGate = gateNode("gate-experiment", "experiment.runtime", experiment.id);
+    const rootVerifier = verifierNode("asset-root-gate", "root.review", rootGate.id);
+    const experimentVerifier = verifierNode(
+      "asset-experiment-gate",
+      "experiment.runtime",
+      experimentGate.id,
+    );
+    const graph = projection([
+      hypothesis,
+      experiment,
+      run,
+      rootGate,
+      experimentGate,
+      rootVerifier,
+      experimentVerifier,
+    ]);
+    const inputGraphSha256 = ruleInputGraphSha256(configuration, graph);
+    const receiptLeaf: ConfigurationObject = {
+      op: "current_receipt",
+      receipt_type: "gate.receipt",
+    };
+    const receiptKey = rulePredicateEvidenceKey({
+      configurationSha256: configuration.configuration_sha256,
+      inputGraphSha256,
+      leaf: receiptLeaf,
+      subjectNodeId: experimentGate.id,
+      bindings: {},
+    });
+    const evidence = createRuleAuthorityEvidence({
+      protocol: RULE_AUTHORITY_EVIDENCE_PROTOCOL,
+      configurationSha256: configuration.configuration_sha256,
+      inputGraphSha256,
+      predicates: {
+        [receiptKey]: {
+          key: receiptKey,
+          result: true,
+          recordedAt: NOW,
+          sourceReceiptIds: ["receipt-experiment-gate"],
+          leaf: receiptLeaf,
+          subjectNodeId: experimentGate.id,
+          bindings: {},
+        },
+      },
+    });
+    const adapter = await createProductionRuleDomainAdapter({
+      configuration,
+      graph,
+      projectRoot: root,
+      evidence,
+    });
+    const evaluated = evaluateConfiguredRules(
+      { configuration, graph },
+      {
+        ruleIds: ["readiness.run-contract"],
+        includeGatePolicyFacts: true,
+        adapter,
+      },
+    );
+
+    expect(evaluated.ok, diagnostics(evaluated)).toBe(true);
+    if (!evaluated.ok) return;
+    const runReadiness = evaluated.value.facts.find(
+      (fact) =>
+        fact.rule_id === "gate-policy.research-capability-gates" &&
+        fact.anchor_node_id === run.id &&
+        fact.kind === "readiness",
+    );
+    expect(runReadiness?.value).toBe("blocked");
+    expect(runReadiness?.args.blocking_gate_ids).toEqual([experimentGate.id]);
+    expect(runReadiness?.args.current_terminal_gate_ids).toEqual([experimentGate.id]);
   });
 
   it("promotes only receipt-complete research evidence and invalidates stale or incomplete coverage", async () => {
@@ -797,6 +1396,54 @@ function node(
   edges: Readonly<Record<string, readonly string[]>> = {},
 ): CompilerGraphNode {
   return { id, type, title, status, spec, edges };
+}
+
+function gateNode(id: string, capability: string, targetId: string): CompilerGraphNode {
+  return node(
+    id,
+    "gate",
+    `Gate ${id}`,
+    "draft",
+    {
+      assertion: "The bounded verifier passes",
+      applicability: "Before the bounded target executes",
+      capability: { name: capability, protocol_range: ">=1.0.0 <2.0.0" },
+      command_result_contract: { result_protocol: "autoresearch.gate-result.v1" },
+      oracle_semantics: {
+        pass: "The verifier passed",
+        fail: "The verifier failed",
+        inconclusive: "The verifier could not discriminate",
+        contract_error: "The result violated its typed contract",
+      },
+      failure_meaning: "The bounded target remains blocked",
+      expected_red: true,
+    },
+    { applies_to: [targetId] },
+  );
+}
+
+function verifierNode(id: string, capability: string, gateId: string): CompilerGraphNode {
+  return node(
+    id,
+    "asset",
+    `Verifier ${id}`,
+    "draft",
+    {
+      source_strategy: "generated",
+      capabilities: [{ name: capability, protocol_version: "1.0.0" }],
+      gate_contracts: {
+        [gateId]: {
+          protocol: "autoresearch.gate-result.v1",
+          argv: ["python3", `program/assets/${id}/verify.py`, "--gate-id", gateId],
+        },
+      },
+      implementation_plan: {
+        root: `program/assets/${id}`,
+        files: [`program/assets/${id}/verify.py`],
+      },
+    },
+    { validates: [gateId] },
+  );
 }
 
 function typedGraph(

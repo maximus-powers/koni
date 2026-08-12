@@ -116,11 +116,11 @@ describe("run authority model tools", () => {
       const current = await engine.store.getRun(runId);
       return (
         current.lifecycle.phase === "awaiting_approval" &&
-        Object.values(current.attempts)[0]?.status === "completed"
+        Object.values(current.attempts)[0]?.status === "waiting_plan_review"
       );
     });
     const planned = await engine.store.getRun(runId);
-    expect(Object.values(planned.attempts)[0]!.status).toBe("completed");
+    expect(Object.values(planned.attempts)[0]!.status).toBe("waiting_plan_review");
     expect(planned.plan?.concise.decisions?.[0]?.title).toBe("Use recommendation");
     expect(
       Object.values(planned.attempts)[0]!.authorityToolResults?.filter(
@@ -176,14 +176,60 @@ describe("run authority model tools", () => {
     ]);
     client.close();
   });
+
+  it("reads an immutable skill by its Pi-relative path", async () => {
+    const root = await repository();
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program: questionProgram("resource-read"),
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const created = await client.request(
+      "run.create",
+      {
+        objective: "Read one skill",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Read one skill" },
+      },
+      { expectedRevision: 0, idempotencyKey: "create-resource-read-run" },
+    );
+    const runId = (created.result as { runId: string }).runId;
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      if (current.lifecycle.phase === "blocked") {
+        throw new Error(`resource read run blocked: ${current.lifecycle.blocker ?? "unknown"}`);
+      }
+      return current.lifecycle.phase === "awaiting_approval";
+    });
+    const run = await engine.store.getRun(runId);
+    expect(Object.values(run.attempts)[0]!.authorityToolResults).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ callId: "skill-by-path", outcome: "accepted" }),
+      ]),
+    );
+    client.close();
+  });
 });
 
-function questionProgram(mode: "question" | "bounded-read" = "question"): RunCompilerProgram {
+function questionProgram(
+  mode: "question" | "bounded-read" | "resource-read" = "question",
+): RunCompilerProgram {
   const terminalSchema = Type.Object({ result: Type.String() }, { additionalProperties: false });
   const names: KoniToolName[] =
     mode === "bounded-read"
       ? ["koni_read_file", "koni_search_files", "koni_submit_output"]
-      : ["koni_read_file", "koni_ask_question", "koni_submit_output"];
+      : mode === "resource-read"
+        ? ["koni_read_resource", "koni_submit_output"]
+        : ["koni_read_file", "koni_ask_question", "koni_submit_output"];
   return {
     async resolveRun(request) {
       return {
@@ -222,6 +268,19 @@ function questionProgram(mode: "question" | "bounded-read" = "question"): RunCom
       throw new Error("not used");
     },
     async prepareAttempt(input) {
+      const resources =
+        mode === "resource-read"
+          ? [
+              {
+                kind: "skill" as const,
+                id: "skill-using-superpowers",
+                relativePath: "skills/using-superpowers/SKILL.md",
+                content: "Use relevant skills before acting.",
+                sha256: rawSha256("Use relevant skills before acting."),
+                sizeBytes: Buffer.byteLength("Use relevant skills before acting.", "utf8"),
+              },
+            ]
+          : [];
       const context = "Compiler-bound planning context";
       const grant: AuthorityGrant = {
         protocol: "koni.authority-grant.v1",
@@ -255,6 +314,19 @@ function questionProgram(mode: "question" | "bounded-read" = "question"): RunCom
           sessionId: input.sessionId,
         },
         lineage: input.lineage,
+        ...(input.kind !== "planning" || input.run.planningSession === undefined
+          ? {}
+          : {
+              planningRevision: {
+                revision: 0,
+                baseRevision: null,
+                priorCheckpointSha256: null,
+                steeringSha256: null,
+                budgetBaseline: structuredClone(
+                  input.run.planningSession.revisions[0]!.budgetBaseline,
+                ),
+              },
+            }),
         authority: {
           grantId: grant.grantId,
           grantHash: canonicalHash(grant),
@@ -287,12 +359,14 @@ function questionProgram(mode: "question" | "bounded-read" = "question"): RunCom
           name,
           schemaHash: koniToolSchemaHash(name, terminalSchema),
           executionMode:
-            name === "koni_read_file" || name === "koni_search_files"
+            name === "koni_read_file" ||
+            name === "koni_read_resource" ||
+            name === "koni_search_files"
               ? ("parallel" as const)
               : ("sequential" as const),
           maxResultBytes: koniToolMaxResultBytes(name),
         })),
-        resources: { setHash: computeLaunchResourceSetHash([]), entries: [] },
+        resources: { setHash: computeLaunchResourceSetHash(resources), entries: resources },
         budgets: {
           tokens: {
             maxInput: 10_000,
@@ -337,13 +411,15 @@ function questionProgram(mode: "question" | "bounded-read" = "question"): RunCom
         factory: (async (_spec, options) =>
           mode === "bounded-read"
             ? new BoundedReadAdapter(spec, options.tools)
-            : new QuestionAdapter(spec, options.tools)) satisfies ManagedPiSessionFactory,
+            : mode === "resource-read"
+              ? new ResourceReadAdapter(spec, options.tools)
+              : new QuestionAdapter(spec, options.tools)) satisfies ManagedPiSessionFactory,
       };
     },
     async compilePlanningOutput() {
       return {
         plan: {
-          revision: 1,
+          revision: 0,
           status: "planning",
           full: {
             architecture: "## Architecture\nUse the existing seam.",
@@ -413,7 +489,9 @@ class QuestionAdapter implements PiSessionAdapter {
     } catch (error) {
       if (
         !(error instanceof Error) ||
-        (error as Error & { code?: string }).code !== "repository_call_budget"
+        !new Set(["repository_call_budget", "duplicate_repository_discovery"]).has(
+          (error as Error & { code?: string }).code ?? "",
+        )
       ) {
         throw error;
       }
@@ -561,6 +639,59 @@ class BoundedReadAdapter implements PiSessionAdapter {
     await this.tool("koni_submit_output").execute(
       "large-submit",
       { result: "targeted seam inspected" },
+      this.#abort.signal,
+    );
+  }
+  public async continue(): Promise<void> {
+    await this.prompt();
+  }
+  public async steer(): Promise<void> {}
+  public async followUp(): Promise<void> {}
+  public async abort(): Promise<void> {
+    this.#abort.abort();
+  }
+  public dispose(): void {}
+
+  private tool(name: KoniToolName): AuthorityBackedTool {
+    const tool = this.tools.find((candidate) => candidate.name === name);
+    if (tool === undefined) throw new Error(`missing authority tool ${name}`);
+    return tool;
+  }
+}
+
+class ResourceReadAdapter implements PiSessionAdapter {
+  public readonly sessionId: string;
+  public readonly sessionFile: string;
+  readonly #abort = new AbortController();
+
+  public constructor(
+    spec: Readonly<AgentLaunchSpec>,
+    private readonly tools: readonly AuthorityBackedTool[],
+  ) {
+    this.sessionId = spec.identity.sessionId;
+    this.sessionFile = path.join(spec.workspace.sessionDirectory, `${this.sessionId}.jsonl`);
+  }
+
+  public getActiveToolNames(): readonly string[] {
+    return this.tools.map((tool) => tool.name);
+  }
+  public appendMapping(): void {}
+  public subscribe(): () => void {
+    return () => {};
+  }
+  public async prompt(): Promise<void> {
+    const read = (await this.tool("koni_read_resource").execute(
+      "skill-by-path",
+      { resourceId: "skills/using-superpowers/SKILL.md" },
+      this.#abort.signal,
+    )) as { details?: { value?: { content?: string; resourceId?: string } } };
+    expect(read.details?.value).toMatchObject({
+      content: "Use relevant skills before acting.",
+      resourceId: "skill-using-superpowers",
+    });
+    await this.tool("koni_submit_output").execute(
+      "resource-submit",
+      { result: "skill read" },
       this.#abort.signal,
     );
   }

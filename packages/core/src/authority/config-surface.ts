@@ -148,7 +148,6 @@ type ConceptSectionId =
   | "project"
   | "run-types"
   | "agents"
-  | "skills"
   | "workflows-tickets"
   | "graph-rules"
   | "actions-checks"
@@ -159,7 +158,6 @@ const CONCEPT_ORDER: readonly ConceptSectionId[] = [
   "project",
   "run-types",
   "agents",
-  "skills",
   "workflows-tickets",
   "graph-rules",
   "actions-checks",
@@ -178,9 +176,8 @@ const CONCEPT_COPY: Record<ConceptSectionId, { title: string; description: strin
   },
   agents: {
     title: "Agents",
-    description: "Planner, Lead, worker, and reviewer personas, models, prompts, and policy.",
+    description: "Pi-native planner, Lead, worker, and reviewer overlays and Koni policy.",
   },
-  skills: { title: "Skills", description: "Reusable project skills bound to Koni attempts." },
   "workflows-tickets": {
     title: "Workflows & Tickets",
     description: "Ticket types, per-ticket workflows, and run lifecycle.",
@@ -209,7 +206,7 @@ const DOMAIN_CONCEPT: Record<ProjectConfigSemanticDomain, ConceptSectionId> = {
   "run-type": "run-types",
   agent: "agents",
   personas: "agents",
-  resource: "skills",
+  resource: "advanced",
   workflows: "workflows-tickets",
   operations: "workflows-tickets",
   lifecycle: "workflows-tickets",

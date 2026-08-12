@@ -52,6 +52,7 @@ const DOMAIN_PREDICATE_OPERATORS = new Set([
   "gate_policy_command_available",
   "gate_policy_execution_ready",
   "gate_policy_has_current_terminal",
+  "gate_policy_receipt_refused",
   "gate_policy_evaluation_targets_ready",
 ]);
 

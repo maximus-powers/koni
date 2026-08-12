@@ -843,7 +843,7 @@ function ticketRecord(id: string, worktreePath: string, branch: string): TicketR
     operationId: "implement-change",
     title: "Legacy ticket",
     summary: "Legacy ticket",
-    status: "ready",
+    status: "queued",
     priority: 1,
     dependencyIds: [],
     targetNodeIds: [],

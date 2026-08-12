@@ -597,6 +597,130 @@ describe("Pi 0.80.10 production session construction", () => {
     );
   });
 
+  it("restores the same session after an authenticated provider request retirement", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "koni-production-retired-provider-"));
+    temporary.push(root);
+    const cwd = path.join(root, "worktree");
+    await mkdir(cwd);
+    const spec = fixtureLaunchSpec({
+      cwd,
+      sessionDirectory: path.join(root, "sessions", "attempt-retired-provider"),
+      attemptId: "attempt-retired-provider",
+      sessionId: "session-retired-provider",
+    });
+    const modelRuntime = await isolatedModelRuntime(root);
+    const tools = [fixtureTool()];
+    const fresh = await ManagedPiSession.create(spec, {
+      tools,
+      modelRuntime,
+      contextProvider: recoveryProvider(spec),
+    });
+    const file = fresh.sessionFile;
+    await fresh.dispose();
+
+    const manager = SessionManager.open(file, spec.workspace.sessionDirectory, cwd);
+    manager.appendMessage({
+      role: "user",
+      content: spec.persona.initialPrompt,
+      timestamp: Date.now(),
+    });
+    const beforeAbort = await readPiSession(file);
+    const baselineEntryId = beforeAbort.entries.at(-1)!.id;
+    manager.appendMessage({
+      role: "assistant",
+      content: [],
+      api: spec.model.api as "openai-codex-responses",
+      provider: spec.model.provider,
+      model: spec.model.id,
+      usage: {
+        input: 7,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 7,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "aborted",
+      errorMessage: "This operation was aborted",
+      timestamp: Date.now(),
+    });
+    const aborted = await readPiSession(file);
+    const assistant = aborted.entries.at(-1)!;
+    const retirementMaterial = {
+      protocol: "koni.provider-exposure-retirement.v1" as const,
+      disposition: "operator_acknowledged_canonical_abort" as const,
+      assistantEntryId: assistant.id,
+      assistantEntrySha256: canonicalHash(assistant),
+      responseId: assistant.id,
+      authorizationSha256: rawSha256("retired-provider-authorization"),
+      retiredAt: new Date().toISOString(),
+    };
+    const retirement = {
+      ...retirementMaterial,
+      sha256: canonicalHash(retirementMaterial),
+    };
+    const providerRequests = [
+      {
+        sequence: 1,
+        reservationId: "provider-retired-one",
+        api: spec.model.api,
+        modelId: spec.model.id,
+        payloadSha256: rawSha256("retired-provider-payload"),
+        payloadSizeBytes: 128,
+        prospectiveInputTokens: 128 + 4 * 1024,
+        reservedOutputTokens: spec.model.catalogMaxTokens,
+        baselineEntryId,
+        retirement,
+      },
+    ] satisfies NonNullable<KoniAttemptRecoveryState["providerRequests"]>;
+    const recovered = await recoverManagedPiSession(spec, {
+      tools,
+      modelRuntime,
+      contextProvider: recoveryProvider(spec, {
+        providerRequests,
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          newTokens: 0,
+          allTokens: 0,
+        },
+      }),
+    });
+
+    expect(recovered.recovery?.disposition).toEqual({ kind: "continue" });
+    expect(recovered.recovery?.usage).toEqual({
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      newTokens: 0,
+      allTokens: 0,
+    });
+    await recovered.dispose();
+
+    const tamperedRequests = structuredClone(providerRequests);
+    tamperedRequests[0]!.retirement.sha256 = rawSha256("tampered-retirement");
+    await expect(
+      recoverManagedPiSession(spec, {
+        tools,
+        modelRuntime,
+        contextProvider: recoveryProvider(spec, {
+          providerRequests: tamperedRequests,
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            newTokens: 0,
+            allTokens: 0,
+          },
+        }),
+      }),
+    ).rejects.toEqual(expect.objectContaining({ code: "recovery_authority" }));
+  });
+
   it("rejects a post-settlement assistant rewrite before interpreting its tool calls", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "koni-production-provider-ledger-drift-"));
     temporary.push(root);
@@ -639,14 +763,7 @@ describe("Pi 0.80.10 production session construction", () => {
     const baselineEntryId = afterUser.entries.at(-1)!.id;
     manager.appendMessage({
       role: "assistant",
-      content: [
-        {
-          type: "toolCall",
-          id: "settled-note",
-          name: "koni_record_note",
-          arguments: { nodeId: "claim-one", kind: "observation", body: "Original bytes" },
-        },
-      ],
+      content: [{ type: "text", text: "Original settled provider bytes." }],
       api: spec.model.api as "openai-codex-responses",
       provider: spec.model.provider,
       model: spec.model.id,
@@ -658,13 +775,13 @@ describe("Pi 0.80.10 production session construction", () => {
         totalTokens: 2,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
       },
-      stopReason: "toolUse",
+      stopReason: "stop",
       timestamp: Date.now(),
     });
     const settled = await readPiSession(file);
     const assistant = settled.entries.at(-1)!;
     const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, newTokens: 2, allTokens: 2 };
-    const providerRequests: NonNullable<KoniAttemptRecoveryState["providerRequests"]> = [
+    const providerRequests = [
       {
         sequence: 1,
         reservationId: "provider-settled-one",
@@ -681,7 +798,78 @@ describe("Pi 0.80.10 production session construction", () => {
           usage,
         },
       },
-    ];
+    ] satisfies NonNullable<KoniAttemptRecoveryState["providerRequests"]>;
+
+    manager.appendMessage({
+      role: "assistant",
+      content: [],
+      api: spec.model.api as "openai-codex-responses",
+      provider: spec.model.provider,
+      model: spec.model.id,
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "error",
+      errorMessage: "local admission failed before another provider reservation",
+      timestamp: Date.now(),
+    });
+    const withLocalError = await readPiSession(file);
+    const localError = withLocalError.entries.at(-1)!;
+    const recoveredWithLocalSuffix = await recoverManagedPiSession(spec, {
+      tools,
+      modelRuntime,
+      contextProvider: recoveryProvider(spec, { usage, providerRequests }),
+    });
+    expect(recoveredWithLocalSuffix.recovery?.disposition).toEqual({ kind: "continue" });
+    await recoveredWithLocalSuffix.dispose();
+
+    manager.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "A later provider response remains independently bound." }],
+      api: spec.model.api as "openai-codex-responses",
+      provider: spec.model.provider,
+      model: spec.model.id,
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    });
+    const withSuccessor = await readPiSession(file);
+    const successor = withSuccessor.entries.at(-1)!;
+    providerRequests.push({
+      sequence: 2,
+      reservationId: "provider-settled-two",
+      api: spec.model.api,
+      modelId: spec.model.id,
+      payloadSha256: rawSha256("settled-provider-payload-two"),
+      payloadSizeBytes: 128,
+      prospectiveInputTokens: 128 + 4 * 1024,
+      reservedOutputTokens: spec.model.catalogMaxTokens,
+      baselineEntryId: localError.id,
+      settlement: {
+        assistantEntryId: successor.id,
+        assistantEntrySha256: canonicalHash(successor),
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, newTokens: 0, allTokens: 0 },
+      },
+    });
+    const recoveredWithSuccessor = await recoverManagedPiSession(spec, {
+      tools,
+      modelRuntime,
+      contextProvider: recoveryProvider(spec, { usage, providerRequests }),
+    });
+    expect(recoveredWithSuccessor.recovery?.disposition.kind).toBe("blocked");
+    await recoveredWithSuccessor.dispose();
 
     const lines = (await readFile(file, "utf8"))
       .trimEnd()
@@ -735,6 +923,153 @@ describe("Pi 0.80.10 production session construction", () => {
     });
 
     const recovered = await recoverManagedPiSession(spec, options);
+    expect(recovered.recovery?.disposition).toEqual({ kind: "continue" });
+    await recovered.dispose();
+  });
+
+  it("recovers an authority-closed zero-usage assistant turn at a safe continuation boundary", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "koni-production-authority-closed-"));
+    temporary.push(root);
+    const cwd = path.join(root, "worktree");
+    await mkdir(cwd);
+    const spec = fixtureLaunchSpec({
+      cwd,
+      sessionDirectory: path.join(root, "sessions", "attempt-authority-closed"),
+      attemptId: "attempt-authority-closed",
+      sessionId: "session-authority-closed",
+    });
+    const modelRuntime = await isolatedModelRuntime(root);
+    const options = {
+      tools: [fixtureTool()],
+      modelRuntime,
+      contextProvider: recoveryProvider(spec),
+    };
+    const fresh = await ManagedPiSession.create(spec, options);
+    const file = fresh.sessionFile;
+    await fresh.dispose();
+    const manager = SessionManager.open(file, spec.workspace.sessionDirectory, cwd);
+    manager.appendMessage({
+      role: "user",
+      content: spec.persona.initialPrompt,
+      timestamp: Date.now(),
+    });
+    manager.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "" }],
+      api: spec.model.api as "openai-codex-responses",
+      provider: spec.model.provider,
+      model: spec.model.id,
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "aborted",
+      errorMessage: "authority effects are closed for this attempt",
+      timestamp: Date.now(),
+    });
+
+    const recovered = await recoverManagedPiSession(spec, options);
+    expect(recovered.recovery?.disposition).toEqual({ kind: "continue" });
+    await recovered.dispose();
+  });
+
+  it("recovers the current planning revision from its stable mapping and revision map", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "koni-production-planning-recovery-"));
+    temporary.push(root);
+    const cwd = path.join(root, "worktree");
+    await mkdir(cwd);
+    const base = fixtureLaunchSpec({
+      cwd,
+      sessionDirectory: path.join(root, "sessions", "attempt-planning-recovery"),
+      ticketId: "run-planning",
+      stepId: "combined-plan",
+      attemptId: "attempt-planning-recovery",
+      sessionId: "session-planning-recovery",
+    });
+    const { specHash: _baseHash, ...baseDraft } = structuredClone(base);
+    const initial = createAgentLaunchSpec({
+      ...baseDraft,
+      planningRevision: {
+        revision: 0,
+        baseRevision: null,
+        priorCheckpointSha256: null,
+        steeringSha256: null,
+        budgetBaseline: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+      },
+    });
+    const modelRuntime = await isolatedModelRuntime(root);
+    const fresh = await ManagedPiSession.create(initial, {
+      tools: [fixtureTool()],
+      modelRuntime,
+      contextProvider: recoveryProvider(initial),
+    });
+    const file = fresh.sessionFile;
+    await fresh.dispose();
+    const manager = SessionManager.open(file, initial.workspace.sessionDirectory, cwd);
+    manager.appendMessage({
+      role: "user",
+      content: initial.persona.initialPrompt,
+      timestamp: Date.now(),
+    });
+
+    const { specHash: _initialHash, ...revisionDraft } = structuredClone(initial);
+    const revision = createAgentLaunchSpec({
+      ...revisionDraft,
+      authority: {
+        ...revisionDraft.authority,
+        grantId: "grant-attempt-planning-recovery-revision-1",
+        grantHash: rawSha256("planning recovery revision one grant"),
+      },
+      planningRevision: {
+        revision: 1,
+        baseRevision: 0,
+        priorCheckpointSha256: rawSha256("planning recovery checkpoint zero"),
+        steeringSha256: rawSha256("planning recovery steering one"),
+        budgetBaseline: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+      },
+    });
+    manager.appendCustomEntry("koni.planning-revision-map", {
+      protocol: "koni.planning-revision-map.v1",
+      specHash: revision.specHash,
+      runId: revision.identity.runId,
+      attemptId: revision.identity.attemptId,
+      sessionId: revision.identity.sessionId,
+      grantId: revision.authority.grantId,
+      grantHash: revision.authority.grantHash,
+      revision: 1,
+      baseRevision: 0,
+      priorCheckpointSha256: revision.planningRevision!.priorCheckpointSha256,
+      priorTranscriptSha256: rawSha256("planning recovery transcript zero"),
+      steeringSha256: revision.planningRevision!.steeringSha256,
+      budgetBaseline: revision.planningRevision!.budgetBaseline,
+    });
+    manager.appendModelChange(revision.model.provider, revision.model.id);
+    manager.appendThinkingLevelChange(revision.model.thinkingLevel);
+    manager.appendMessage({
+      role: "user",
+      content: revision.persona.initialPrompt,
+      timestamp: Date.now(),
+    });
+
+    const recovered = await recoverManagedPiSession(revision, {
+      tools: [fixtureTool()],
+      modelRuntime,
+      contextProvider: recoveryProvider(revision),
+    });
     expect(recovered.recovery?.disposition).toEqual({ kind: "continue" });
     await recovered.dispose();
   });

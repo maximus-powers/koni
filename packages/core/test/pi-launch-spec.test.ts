@@ -184,6 +184,144 @@ describe("immutable AgentLaunchSpec", () => {
     );
   });
 
+  it("authenticates a later planning revision without a conversation fork", () => {
+    const original = fixtureLaunchSpec({
+      cwd: "/tmp/koni-workspace",
+      sessionDirectory: "/tmp/koni-sessions/attempt-plan",
+      ticketId: "run-planning",
+      stepId: "planning",
+      attemptId: "attempt-plan",
+      sessionId: "session-plan",
+      lineage: { branchEpoch: 0, reason: "initial" },
+    });
+    const { specHash: _hash, ...draft } = structuredClone(original);
+    const spec = createAgentLaunchSpec({
+      ...draft,
+      planningRevision: {
+        revision: 1,
+        baseRevision: 0,
+        priorCheckpointSha256: rawSha256("planning-checkpoint-0"),
+        steeringSha256: rawSha256("planning-steering-1"),
+        budgetBaseline: {
+          inputTokens: 80_000,
+          outputTokens: 10_000,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+      },
+    });
+
+    expect(validateAgentLaunchSpec(structuredClone(spec)).identity.attemptId).toBe("attempt-plan");
+    expect(spec.identity.sessionId).toBe("session-plan");
+    expect(spec.lineage.conversationFork).toBeUndefined();
+    expect(spec.planningRevision).toMatchObject({ revision: 1, baseRevision: 0 });
+  });
+
+  it.each([
+    [
+      "missing prior checkpoint",
+      {
+        revision: 1,
+        baseRevision: 0,
+        priorCheckpointSha256: null,
+        steeringSha256: rawSha256("planning-steering-1"),
+      },
+    ],
+    [
+      "noncontiguous base revision",
+      {
+        revision: 2,
+        baseRevision: 0,
+        priorCheckpointSha256: rawSha256("planning-checkpoint-0"),
+        steeringSha256: rawSha256("planning-steering-2"),
+      },
+    ],
+    [
+      "missing steering hash",
+      {
+        revision: 1,
+        baseRevision: 0,
+        priorCheckpointSha256: rawSha256("planning-checkpoint-0"),
+        steeringSha256: null,
+      },
+    ],
+  ])("rejects a planning revision with %s", (_label, revision) => {
+    const original = fixtureLaunchSpec({
+      cwd: "/tmp/koni-workspace",
+      sessionDirectory: "/tmp/koni-sessions/attempt-plan",
+      ticketId: "run-planning",
+      stepId: "planning",
+      attemptId: "attempt-plan",
+      sessionId: "session-plan",
+      lineage: { branchEpoch: 0, reason: "initial" },
+    });
+    const { specHash: _hash, ...draft } = structuredClone(original);
+    expect(() =>
+      createAgentLaunchSpec({
+        ...draft,
+        planningRevision: {
+          ...revision,
+          budgetBaseline: {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
+        },
+      }),
+    ).toThrowError(
+      expect.objectContaining<Partial<AgentLaunchSpecError>>({ code: "planning_revision" }),
+    );
+  });
+
+  it("rejects a planning revision binding on a forked or non-planning launch", () => {
+    const forked = fixtureLaunchSpec({
+      cwd: "/tmp/koni-workspace",
+      sessionDirectory: "/tmp/koni-sessions/attempt-plan",
+      ticketId: "run-planning",
+      stepId: "planning",
+      attemptId: "attempt-plan",
+      sessionId: "session-plan",
+      lineage: {
+        branchEpoch: 1,
+        reason: "rework",
+        parentAttemptId: "attempt-parent",
+        parentSessionId: "session-parent",
+        parentEntryId: "entry-parent",
+        conversationFork: {
+          parentLaunchSpecHash: rawSha256("parent launch"),
+          parentTranscriptSha256: rawSha256("parent transcript"),
+        },
+      },
+    });
+    const { specHash: _hash, ...forkedDraft } = structuredClone(forked);
+    const planningRevision = {
+      revision: 1,
+      baseRevision: 0,
+      priorCheckpointSha256: rawSha256("planning-checkpoint-0"),
+      steeringSha256: rawSha256("planning-steering-1"),
+      budgetBaseline: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      },
+    };
+    expect(() => createAgentLaunchSpec({ ...forkedDraft, planningRevision })).toThrowError(
+      expect.objectContaining<Partial<AgentLaunchSpecError>>({ code: "planning_revision" }),
+    );
+
+    const ordinary = fixtureLaunchSpec({
+      cwd: "/tmp/koni-workspace",
+      sessionDirectory: "/tmp/koni-sessions/attempt-ticket",
+      ticketId: "ticket-one",
+    });
+    const { specHash: _ordinaryHash, ...ordinaryDraft } = structuredClone(ordinary);
+    expect(() => createAgentLaunchSpec({ ...ordinaryDraft, planningRevision })).toThrowError(
+      expect.objectContaining<Partial<AgentLaunchSpecError>>({ code: "planning_revision" }),
+    );
+  });
+
   it("validates fresh review roots and an authenticated same-scope conversation fork", () => {
     const parentLaunchSpecHash = rawSha256("worker launch");
     const parentTranscriptSha256 = rawSha256("worker transcript");

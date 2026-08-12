@@ -10,6 +10,7 @@ import { RunAuthorityEngine } from "../authority/run-engine.js";
 import { NativeRunCompilerProgram } from "../compiler/run-program.js";
 import { compileProjectDirectory } from "../compiler/project-directory.js";
 import { parseControlCatalog } from "../control-center/protocol.js";
+import type { RunRecord, TicketRecord } from "../state/run-record.js";
 import {
   assertSealedModelAdmission,
   describeRoleModelSubstitutions,
@@ -26,6 +27,13 @@ import {
 } from "./profile-source.js";
 import { loadProfilePackage } from "../profile/install.js";
 import { PiAttemptProcessSupervisor } from "../pi/attempt-process-pool.js";
+import {
+  loadPiResolvedInventory,
+  piAgentCatalogFromCompiledConfiguration,
+  resolvePiAgentConfiguration,
+  type ResolvedPiAgentConfiguration,
+} from "../pi/agent-configuration.js";
+import { resolveCompiledAgent } from "../compiler/resolution.js";
 import {
   assertRuntimeClosureCurrent,
   assertRuntimeClosureFromEnvironment,
@@ -142,6 +150,17 @@ export interface ProjectConfigurationStatus {
     runTypes: readonly string[];
     agents: readonly string[];
   };
+}
+
+export interface ProjectAgentResolution {
+  readonly projectRoot: string;
+  readonly runTypeId?: string;
+  readonly agent: ResolvedPiAgentConfiguration;
+  readonly effectiveModel?: Readonly<{
+    provider: string;
+    id: string;
+    thinkingLevel: string;
+  }>;
 }
 
 export class AuthorityBootstrapError extends Error {
@@ -357,6 +376,67 @@ export async function validateProjectConfiguration(
       runTypes: [...result.value.run_type_order],
       agents: Object.keys(result.value.agents).sort(),
     },
+  };
+}
+
+/** Resolve one agent against the same Pi repository inventory used for future runs. */
+export async function resolveProjectAgentConfiguration(options: {
+  projectRoot: string;
+  agentId: string;
+  runTypeId?: string;
+}): Promise<ProjectAgentResolution> {
+  const endpoint = await discoverAuthorityEndpoint(options.projectRoot);
+  const cached = await loadCachedInstalledProfile(endpoint.identity.worktreeRoot);
+  const baseline = await loadProfilePackage(cached.packageRoot);
+  const compiled = await compileProjectDirectory(endpoint.identity.worktreeRoot, baseline);
+  if (!compiled.ok) {
+    throw new AuthorityBootstrapError(
+      "configuration_invalid",
+      compiled.diagnostics
+        .map(({ code, path: diagnosticPath, message }) => `${code} ${diagnosticPath}: ${message}`)
+        .join("\n"),
+    );
+  }
+  const inventory = await loadPiResolvedInventory({
+    projectRoot: endpoint.identity.worktreeRoot,
+    installMissingPackages: process.env.NODE_ENV !== "test",
+    skipMissingPackages: process.env.NODE_ENV === "test",
+  });
+  const resolved = resolvePiAgentConfiguration({
+    agentId: options.agentId,
+    agents: piAgentCatalogFromCompiledConfiguration(compiled.value),
+    inventory,
+    extensionAdapters: {},
+  });
+  if (!resolved.ok) {
+    throw new AuthorityBootstrapError(
+      "agent_invalid",
+      resolved.diagnostics
+        .map(({ code, path: diagnosticPath, message }) => `${code} ${diagnosticPath}: ${message}`)
+        .join("\n"),
+    );
+  }
+  const effective = resolveCompiledAgent(compiled.value, options.agentId, {
+    ...(options.runTypeId === undefined ? {} : { runTypeId: options.runTypeId }),
+  });
+  if (!effective.ok) {
+    throw new AuthorityBootstrapError(
+      "agent_invalid",
+      effective.diagnostics
+        .map(({ code, path: diagnosticPath, message }) => `${code} ${diagnosticPath}: ${message}`)
+        .join("\n"),
+    );
+  }
+  const provider = effective.value.provider;
+  const model = effective.value.model;
+  const thinkingLevel = effective.value.thinking_level;
+  return {
+    projectRoot: endpoint.identity.worktreeRoot,
+    ...(options.runTypeId === undefined ? {} : { runTypeId: options.runTypeId }),
+    agent: resolved.value,
+    ...(provider === undefined || model === undefined || thinkingLevel === undefined
+      ? {}
+      : { effectiveModel: { provider, id: model, thinkingLevel } }),
   };
 }
 
@@ -646,7 +726,7 @@ export async function createProjectRun(
   }
 }
 
-/** Explicitly resume a paused run or retry a blocked run from its durable prior phase. */
+/** Resume paused/blocked work or explicitly revalidate a merge-ready compiler board. */
 export async function resumeProjectRun(options: {
   projectRoot: string;
   version: string;
@@ -701,6 +781,216 @@ export async function approveProjectRun(options: {
   } finally {
     client.close();
   }
+}
+
+/**
+ * Authorize the merge of a run that has reached its promotion boundary.
+ *
+ * The capability is confirmation-gated and carries a run-revision binding, so the exact control has
+ * to be read back from `run.controls` rather than synthesized. Without this the operator seat stops
+ * one step short of a finished run and a human has to open the TUI purely to press a button.
+ */
+/**
+ * Acknowledge a held provider-exposure reservation so the run can be retried.
+ *
+ * Held exposure is an acknowledge-then-retry condition, not a plain resume: the authority gates the
+ * retry behind `requiresProviderExposureRetirement`, so resuming without acknowledging simply
+ * re-blocks. The TUI has always offered this control; without a CLI equivalent an unattended
+ * operator can only resume, which is why one run burned twelve consecutive resumes against a
+ * blocker that needed one acknowledgement.
+ */
+export async function acknowledgeProviderExposure(options: {
+  projectRoot: string;
+  version: string;
+  runId: string;
+}): Promise<{ runId: string; status: string }> {
+  const client = await ensureProjectAuthority({
+    projectRoot: options.projectRoot,
+    version: options.version,
+    client: "cli",
+  });
+  try {
+    const controls = (await client.request("run.controls", { runId: options.runId }))
+      .result as unknown as {
+      binding: { runRevision: number; generation: number };
+      runActions: ReadonlyArray<{
+        id: string;
+        intent: string;
+        availability: { state: string; reason?: string };
+      }>;
+    };
+    const action = controls.runActions.find(
+      (candidate) => candidate.intent === "retire_provider_exposure",
+    );
+    if (action === undefined || action.availability.state !== "available") {
+      throw new Error(
+        `run ${options.runId} has no available provider-exposure acknowledgement: ${
+          action?.availability.reason ?? "control absent"
+        }`,
+      );
+    }
+    const response = await client.request(
+      "run.action.execute",
+      {
+        protocol: "koni.stage-action-invocation.v1",
+        runId: options.runId,
+        runRevision: controls.binding.runRevision,
+        generation: controls.binding.generation,
+        capabilityId: action.id,
+        confirmed: true,
+        values: {},
+      },
+      {
+        expectedRevision: client.revision,
+        idempotencyKey: `operator-acknowledge-exposure:${options.runId}:${randomUUID()}`,
+      },
+    );
+    return parseRunCreation(response);
+  } finally {
+    client.close();
+  }
+}
+
+export async function mergeProjectRun(options: {
+  projectRoot: string;
+  version: string;
+  runId: string;
+}): Promise<{ runId: string; status: string }> {
+  const client = await ensureProjectAuthority({
+    projectRoot: options.projectRoot,
+    version: options.version,
+    client: "cli",
+  });
+  try {
+    const controls = (await client.request("run.controls", { runId: options.runId }))
+      .result as unknown as {
+      binding: { runRevision: number; generation: number };
+      runActions: ReadonlyArray<{
+        id: string;
+        intent: string;
+        availability: { state: string; reason?: string };
+      }>;
+    };
+    const action = controls.runActions.find((candidate) => candidate.intent === "authorize_merge");
+    if (action === undefined) {
+      throw new Error(`run ${options.runId} exposes no merge authorization control`);
+    }
+    if (action.availability.state !== "available") {
+      throw new Error(
+        `run ${options.runId} cannot authorize its merge yet: ${action.availability.reason ?? action.availability.state}`,
+      );
+    }
+    const response = await client.request(
+      "run.action.execute",
+      {
+        protocol: "koni.stage-action-invocation.v1",
+        runId: options.runId,
+        runRevision: controls.binding.runRevision,
+        generation: controls.binding.generation,
+        capabilityId: action.id,
+        confirmed: true,
+        values: {},
+      },
+      {
+        expectedRevision: client.revision,
+        idempotencyKey: `operator-merge:${options.runId}:${randomUUID()}`,
+      },
+    );
+    return parseRunCreation(response);
+  } finally {
+    client.close();
+  }
+}
+
+/**
+ * Decide one durable change proposal from the CLI. A proposal that no operator answers holds its
+ * source ticket forever: the scheduler keeps a `proposal` role ticket in `proposed` until it carries
+ * exact approval authority, so the run deadlocks with every remaining ticket waiting on a decision
+ * nobody was asked for. The TUI and the Pi companion could already answer one; an operator driving
+ * Koni headlessly could not, which made the change-request escape hatch unreachable exactly when a
+ * run depended on it.
+ */
+export async function decideProjectProposal(options: {
+  projectRoot: string;
+  version: string;
+  runId: string;
+  ticketId?: string;
+  decision: "approval" | "rejection";
+  message?: string;
+}): Promise<{ runId: string; ticketId: string; decision: string }> {
+  const client = await ensureProjectAuthority({
+    projectRoot: options.projectRoot,
+    version: options.version,
+    client: "cli",
+  });
+  try {
+    const run = (await client.request("run.get", { runId: options.runId }))
+      .result as unknown as RunRecord;
+    const pending = undecidedProposalTickets(run);
+    const ticketId = options.ticketId;
+    const target = proposalTicketForOperatorDecision(run, ticketId);
+    if (target === undefined) {
+      const listed = pending.map((ticket) => `${ticket.id} (${ticket.title})`).join("; ");
+      throw new Error(
+        pending.length === 0
+          ? `run ${options.runId} has no change proposal awaiting a decision`
+          : ticketId === undefined
+            ? `run ${options.runId} has ${pending.length} proposals awaiting a decision; pass --proposal: ${listed}`
+            : `run ${options.runId} has no undecided proposal ${ticketId}; awaiting: ${listed}`,
+      );
+    }
+    const inspection = (
+      await client.request("proposal.inspect", { runId: options.runId, ticketId: target.id })
+    ).result as unknown as { requestSha256: string };
+    await client.request(
+      "proposal.decide",
+      {
+        runId: options.runId,
+        ticketId: target.id,
+        requestSha256: inspection.requestSha256,
+        decision: options.decision,
+        ...(options.message === undefined ? {} : { message: options.message }),
+      },
+      {
+        expectedRevision: client.revision,
+        idempotencyKey: `operator-proposal:${options.runId}:${target.id}:${randomUUID()}`,
+      },
+    );
+    return { runId: options.runId, ticketId: target.id, decision: options.decision };
+  } finally {
+    client.close();
+  }
+}
+
+function undecidedProposalTickets(run: Readonly<RunRecord>): TicketRecord[] {
+  return Object.values(run.tickets).filter(
+    (ticket) =>
+      ticket.status === "proposed" &&
+      ticket.executionControl?.proposalRequest !== undefined &&
+      ticket.executionControl.proposalDecision === undefined,
+  );
+}
+
+/**
+ * Resolve an operator proposal target without making audit-only steering ambiguous.
+ *
+ * An omitted id retains the safe CLI shorthand and considers only undecided proposals. An exact
+ * id may also select a proposal whose approval already owns execution authority: the authority RPC
+ * records that later decision as audit history without revoking the approval. This is how an
+ * operator corrects a running proposal worker while preserving the original hash-bound grant.
+ */
+export function proposalTicketForOperatorDecision(
+  run: Readonly<RunRecord>,
+  ticketId?: string,
+): TicketRecord | undefined {
+  const pending = undecidedProposalTickets(run);
+  if (ticketId === undefined) return pending.length === 1 ? pending[0] : undefined;
+  return Object.values(run.tickets).find(
+    (ticket) =>
+      ticket.id === ticketId &&
+      ticket.executionControl?.proposalRequest !== undefined &&
+      (pending.includes(ticket) || ticket.executionControl.proposalApprovalSha256 !== undefined),
+  );
 }
 
 type AuthorityProbe =

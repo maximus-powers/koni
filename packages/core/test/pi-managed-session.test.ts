@@ -35,6 +35,50 @@ describe("managed Pi session", () => {
     expect(providerOutputLimit(spec, undefined)).toBe(68_000);
   });
 
+  it("applies a planning revision budget to usage after its cumulative baseline", () => {
+    const fixture = specFor("attempt-revision-budget", "session-revision-budget");
+    const { specHash: _specHash, ...draft } = fixture;
+    const spec = createAgentLaunchSpec({
+      ...draft,
+      identity: { ...draft.identity, ticketId: "run-planning", stepId: "combined-plan" },
+      budgets: {
+        ...draft.budgets,
+        tokens: {
+          maxInput: 120_000,
+          maxOutput: 120_000,
+          maxCacheRead: 120_000,
+          maxCacheWrite: 120_000,
+          maxNew: 120_000,
+          maxAll: 120_000,
+          providerOutputHeadroom: 128_000,
+        },
+      },
+      planningRevision: {
+        revision: 1,
+        baseRevision: 0,
+        priorCheckpointSha256: rawSha256("revision-zero-artifact"),
+        steeringSha256: rawSha256("revision-one-steering"),
+        budgetBaseline: {
+          inputTokens: 72_000,
+          outputTokens: 18_000,
+          cacheReadTokens: 4_000,
+          cacheWriteTokens: 500,
+        },
+      },
+    });
+
+    expect(
+      providerOutputLimit(spec, {
+        input: 80_000,
+        output: 20_000,
+        cacheRead: 5_000,
+        cacheWrite: 1_000,
+        newTokens: 100_000,
+        allTokens: 106_000,
+      }),
+    ).toBe(108_500);
+  });
+
   it("fails closed when the private continuation seam is not the exact pinned Pi runtime", () => {
     expect(() => assertSupportedPiRuntimeVersion("0.80.11")).toThrowError(
       expect.objectContaining({ code: "pi_runtime_version" }),
@@ -83,6 +127,56 @@ describe("managed Pi session", () => {
     expect(events).toContain("usage");
     expect(events).toContain("terminal");
     expect(adapter.disposeCalls).toBe(1);
+  });
+
+  it("continues a planning revision as a checkpoint on the same attempt and Pi session", async () => {
+    const initial = fixtureLaunchSpec({
+      cwd: "/tmp/koni-workspace",
+      sessionDirectory: "/tmp/koni-sessions/attempt-plan",
+      ticketId: "run-planning",
+      stepId: "planning",
+      attemptId: "attempt-plan",
+      sessionId: "session-plan",
+    });
+    const { specHash: _initialHash, ...draft } = structuredClone(initial);
+    const revision = createAgentLaunchSpec({
+      ...draft,
+      authority: {
+        ...draft.authority,
+        grantId: "grant-attempt-plan-planning-revision-1",
+        grantHash: rawSha256("planning revision grant 1"),
+      },
+      planningRevision: {
+        revision: 1,
+        baseRevision: 0,
+        priorCheckpointSha256: rawSha256("planning checkpoint 0"),
+        steeringSha256: rawSha256("planning steering 1"),
+        budgetBaseline: {
+          inputTokens: 500,
+          outputTokens: 100,
+          cacheReadTokens: 20,
+          cacheWriteTokens: 10,
+        },
+      },
+    });
+    const adapter = new FakeSessionAdapter(revision);
+    adapter.promptBehavior = async () => emitTerminal(adapter, { result: "checkpoint-one" });
+
+    const session = await ManagedPiSession.continuePlanningRevision(revision, {
+      ...runtimeOptions(adapter),
+      priorTranscriptSha256: rawSha256("planning transcript 0"),
+    });
+    const outcome = await session.start();
+
+    expect(session.sessionFile).toBe("/tmp/koni-sessions/attempt-plan/session-plan.jsonl");
+    expect(revision.lineage.conversationFork).toBeUndefined();
+    expect(outcome).toMatchObject({
+      status: "checkpointed",
+      revision: 1,
+      terminalOutput: { result: "checkpoint-one" },
+    });
+    expect(adapter.promptCalls).toBe(1);
+    expect(adapter.continueCalls).toBe(0);
   });
 
   it("isolates throwing observers from token accounting and terminal persistence", async () => {

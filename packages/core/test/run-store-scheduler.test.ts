@@ -256,7 +256,7 @@ describe("durable run store and deterministic scheduler", () => {
         "2026-07-16T00:00:05.000Z",
       ),
     ).toBe(true);
-    expect(ticket.status).toBe("ready");
+    expect(ticket.status).toBe("queued");
     expect(ticket.reviewReworkCount).toBe(1);
     expect(ticket.blocker).toBe("unsafe execution path.");
     expect(ticket.steps.map((step) => [step.id, step.status, step.attemptIds])).toEqual([
@@ -401,7 +401,7 @@ describe("durable run store and deterministic scheduler", () => {
       "2026-07-16T00:00:04.000Z",
       "Keep the real parent render, but stub unrelated icon and return-product leaves.",
     );
-    expect(ticket.status).toBe("ready");
+    expect(ticket.status).toBe("queued");
     expect(ticket.blocker).toBe("Second review found a material route gap.");
     expect(ticket.reviewReworkCount).toBe(1);
     expect(ticket.reviewReworks).toEqual([
@@ -458,7 +458,7 @@ describe("durable run store and deterministic scheduler", () => {
     });
 
     authorizeBlockedReviewRetry(run, candidate, "2026-07-16T00:00:04.000Z");
-    expect(ticket.status).toBe("ready");
+    expect(ticket.status).toBe("queued");
     expect(ticket.blocker).toBe("Reviewer requires proof through the real parent consumer.");
     expect(ticket.reviewReworkCount).toBe(1);
     expect(ticket.reviewReworks).toEqual([
@@ -692,7 +692,7 @@ function ticket(id: string, priority: number, dependencyIds: string[]): TicketRe
     operationId: "implement-change",
     title: id,
     summary: id,
-    status: "todo",
+    status: "queued",
     priority,
     dependencyIds,
     targetNodeIds: [],

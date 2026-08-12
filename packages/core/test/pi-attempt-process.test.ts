@@ -17,6 +17,7 @@ import {
 } from "../src/pi/attempt-process-supervisor.js";
 import { PiAttemptProcessSupervisor } from "../src/pi/attempt-process-pool.js";
 import { TERMINAL_OUTPUT_SCHEMA, fixtureLaunchSpec } from "./pi-managed-fixtures.js";
+import { createAgentLaunchSpec } from "../src/pi/launch-spec.js";
 import { rawSha256 } from "../src/shared/canonical.js";
 import { KONI_TOOL_RECEIPT_PROTOCOL } from "../src/pi/tool-catalog.js";
 
@@ -234,6 +235,40 @@ describe("supervised autonomous Pi attempt process", () => {
       code: "provider_admission",
       error: "input budget cannot reserve the prospective provider input",
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, newTokens: 0, allTokens: 0 },
+    });
+  });
+
+  it("reports a planning checkpoint revision without completing the stable attempt", async () => {
+    const { spec: initial, options } = await fixture("planning_checkpoint");
+    const { specHash: _initialHash, ...draft } = structuredClone(initial);
+    const spec = createAgentLaunchSpec({
+      ...draft,
+      identity: {
+        ...draft.identity,
+        ticketId: "run-planning",
+        stepId: "planning",
+      },
+      planningRevision: {
+        revision: 1,
+        baseRevision: 0,
+        priorCheckpointSha256: rawSha256("checkpoint-zero"),
+        steeringSha256: rawSha256("steering-one"),
+        budgetBaseline: {
+          inputTokens: 20,
+          outputTokens: 10,
+          cacheReadTokens: 5,
+          cacheWriteTokens: 2,
+        },
+      },
+    });
+    const child = new SupervisedPiAttemptProcess(spec, options);
+
+    await child.ready;
+    await expect(child.outcome).resolves.toEqual({
+      status: "checkpointed",
+      revision: 1,
+      terminalOutput: { result: "planning-checkpoint" },
+      usage: { input: 2, output: 3, cacheRead: 5, cacheWrite: 7, newTokens: 5, allTokens: 17 },
     });
   });
 
@@ -718,28 +753,34 @@ describe("supervised autonomous Pi attempt process", () => {
     );
   });
 
-  it("keeps recovery construction read-only and acquires its exact claim only after activation", async () => {
-    const invokeTool = vi.fn(async () => ({
-      protocol: KONI_TOOL_RECEIPT_PROTOCOL,
-      receiptId: "arbitrary-recovery-effect",
-      outcome: "accepted" as const,
-      summary: "must not execute",
-    }));
-    const { spec, options } = await fixture("recovery_admission", { invokeTool });
-    const child = new SupervisedPiAttemptProcess(spec, {
-      ...options,
-      mode: "recover",
-      deferActivation: true,
-    });
-    await child.ready;
-    expect(invokeTool).not.toHaveBeenCalled();
-    await child.activate();
-    await expect(child.outcome).resolves.toMatchObject({
-      status: "completed",
-      terminalOutput: { result: "recovery-gated" },
-    });
-    expect(invokeTool).not.toHaveBeenCalled();
-  });
+  it.each(["recover", "planning_revision"] as const)(
+    "keeps %s construction read-only and acquires its exact claim only after activation",
+    async (mode) => {
+      const invokeTool = vi.fn(async () => ({
+        protocol: KONI_TOOL_RECEIPT_PROTOCOL,
+        receiptId: "arbitrary-recovery-effect",
+        outcome: "accepted" as const,
+        summary: "must not execute",
+      }));
+      const { spec, options } = await fixture("recovery_admission", { invokeTool });
+      const child = new SupervisedPiAttemptProcess(spec, {
+        ...options,
+        mode,
+        deferActivation: true,
+        ...(mode === "planning_revision"
+          ? { priorTranscriptSha256: rawSha256("prior planning transcript") }
+          : {}),
+      });
+      await child.ready;
+      expect(invokeTool).not.toHaveBeenCalled();
+      await child.activate();
+      await expect(child.outcome).resolves.toMatchObject({
+        status: "completed",
+        terminalOutput: { result: "recovery-gated" },
+      });
+      expect(invokeTool).not.toHaveBeenCalled();
+    },
+  );
 
   it("deletion escalates past a stuck child and resolves only after exit", async () => {
     const { spec, options } = await fixture("stuck");
@@ -822,6 +863,66 @@ describe("run-level attempt process pool", () => {
     expect(pool.list(spec.identity.runId)).toEqual([]);
     await expect(pool.launch(spec, launchOptions)).rejects.toMatchObject({
       code: "attempt_terminal",
+    });
+    await pool.dispose();
+  });
+
+  it("reopens the next continuous planning revision after the prior host checkpoints", async () => {
+    const { spec: base, options } = await fixture("planning_checkpoint");
+    const { mode: _mode, ...launchOptions } = options;
+    const { specHash: _baseHash, ...baseDraft } = structuredClone(base);
+    const initial = createAgentLaunchSpec({
+      ...baseDraft,
+      identity: {
+        ...baseDraft.identity,
+        ticketId: "run-planning",
+        stepId: "combined-plan",
+      },
+      planningRevision: {
+        revision: 0,
+        baseRevision: null,
+        priorCheckpointSha256: null,
+        steeringSha256: null,
+        budgetBaseline: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+      },
+    });
+    const pool = new PiAttemptProcessSupervisor({ deferActivationUntilAuthorityCommit: true });
+
+    const first = await pool.launch(initial, launchOptions);
+    await first.session.activate();
+    await expect(first.outcome).resolves.toMatchObject({ status: "checkpointed", revision: 0 });
+    await waitUntil(() => pool.get(initial.identity.attemptId) === undefined);
+
+    const { specHash: _initialHash, ...revisionDraft } = structuredClone(initial);
+    const revision = createAgentLaunchSpec({
+      ...revisionDraft,
+      planningRevision: {
+        revision: 1,
+        baseRevision: 0,
+        priorCheckpointSha256: rawSha256("planning checkpoint zero"),
+        steeringSha256: rawSha256("planning steering one"),
+        budgetBaseline: {
+          inputTokens: 2,
+          outputTokens: 3,
+          cacheReadTokens: 5,
+          cacheWriteTokens: 7,
+        },
+      },
+    });
+
+    const continued = await pool.continuePlanningRevision(revision, {
+      ...launchOptions,
+      priorTranscriptSha256: rawSha256("planning transcript zero"),
+    });
+    await continued.session.activate();
+    await expect(continued.outcome).resolves.toMatchObject({
+      status: "checkpointed",
+      revision: 1,
     });
     await pool.dispose();
   });

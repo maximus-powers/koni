@@ -13,11 +13,16 @@ import {
   parseProfilePackageManifest,
   type VerifiedProfileBaseline,
 } from "../src/compiler/profile-package.js";
-import { deterministicTicketId, evaluateConfiguredRules } from "../src/compiler/rules.js";
-import { resolveCompiledPersona, resolveCompiledRunType } from "../src/compiler/resolution.js";
+import {
+  deterministicTicketId,
+  evaluateConfiguredRules,
+  expandPythonPackageReadPaths,
+} from "../src/compiler/rules.js";
+import { researchConstitutionRunPlanFallback } from "../src/compiler/run-program.js";
+import { resolveCompiledAgent, resolveCompiledRunType } from "../src/compiler/resolution.js";
 import type { CompiledConfiguration, ConfigurationObject } from "../src/contracts/configuration.js";
 import type { CompilerGraphNode, CompilerGraphProjection } from "../src/contracts/rules.js";
-import { GraphSchema } from "../src/graph/model.js";
+import { GraphSchema, TypedGraph, type GraphNode } from "../src/graph/model.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
@@ -67,10 +72,10 @@ describe("deterministic graph expression and rule compiler", () => {
     expect(defaultRunType.ok).toBe(true);
     if (defaultRunType.ok) expect(defaultRunType.value.id).toBe("continuous-improvement");
 
-    const planner = resolveCompiledPersona(configuration, "run-planner", { runTypeId: "small" });
+    const planner = resolveCompiledAgent(configuration, "run-planner", { runTypeId: "small" });
     expect(planner.ok, diagnostics(planner)).toBe(true);
     if (!planner.ok) return;
-    expect(planner.value.agent_id).toBe("run-planner");
+    expect(planner.value.id).toBe("run-planner");
     expect(planner.value.provider).toBe("openai-codex");
     expect(planner.value.model).toBe("gpt-5.6-terra");
     expect(planner.value.thinking_level).toBe("xhigh");
@@ -78,7 +83,7 @@ describe("deterministic graph expression and rule compiler", () => {
     expect(planner.value.capabilities.workspace_access).toBe("read_only");
     expect(Object.isFrozen(planner.value)).toBe(true);
 
-    const stageOverride = resolveCompiledPersona(configuration, "run-planner", {
+    const stageOverride = resolveCompiledAgent(configuration, "run-planner", {
       runTypeId: "small",
       model: "stage-model",
       thinkingLevel: "max",
@@ -192,19 +197,8 @@ describe("deterministic graph expression and rule compiler", () => {
     if (result.ok) expect(result.value.tickets).toEqual([]);
   });
 
-  it("uses sequential derivation projections when later ticket queries read readiness", () => {
-    const configuration = withQueries(compileProfile("research-profile"), {
-      "run-plan-targets": {
-        id: "run-plan-targets",
-        node_types: ["experiment", "ablation"],
-        status_excluding: ["satisfied", "archived", "superseded"],
-        where: {
-          op: "field_equals",
-          field: "readiness.state",
-          value: "ready",
-        },
-      },
-    });
+  it("compiles a run plan from a complete constitution before research gates pass", () => {
+    const configuration = compileProfile("research-profile");
     const experiment = node(
       "experiment-a",
       "experiment",
@@ -225,18 +219,108 @@ describe("deterministic graph expression and rule compiler", () => {
       node("ablation-a", "ablation", "Ablation", "draft"),
       node("prerequisite-a", "prerequisite", "Prerequisite", "draft"),
     ]);
+    const adapter: RuleDomainAdapter = {
+      evaluatePredicate: () => false,
+      selectPolicy: () => [],
+    };
     const result = evaluateConfiguredRules(
       { configuration, graph },
-      { ruleIds: ["readiness.experiment-constitution", "ticket.compile-run-plan"] },
+      {
+        ruleIds: ["readiness.experiment-constitution", "ticket.compile-run-plan"],
+        includeGatePolicyFacts: true,
+        adapter,
+      },
     );
     expect(result.ok, diagnostics(result)).toBe(true);
     if (!result.ok) return;
-    expect(result.value.facts.map((fact) => [fact.kind, fact.anchor_node_id, fact.value])).toEqual([
-      ["readiness", "experiment-a", "ready"],
-    ]);
+    expect(result.value.facts).toContainEqual(
+      expect.objectContaining({
+        kind: "readiness",
+        anchor_node_id: "experiment-a",
+        value: "blocked",
+      }),
+    );
     expect(result.value.input_graph_sha256).not.toBe(result.value.derived_graph_sha256);
     expect(result.value.tickets).toHaveLength(1);
     expect(result.value.tickets[0]?.operation_registry_id).toBe("execution.node.compile-run-plan");
+  });
+
+  it("repairs pinned research rules that gate run planning on final readiness", () => {
+    const configuration = withQueries(compileProfile("research-profile"), {
+      "run-plan-targets": {
+        id: "run-plan-targets",
+        node_types: ["experiment", "ablation"],
+        status_excluding: ["satisfied", "archived", "superseded"],
+        where: {
+          op: "field_equals",
+          field: "readiness.state",
+          value: "ready",
+        },
+      },
+    });
+    const experiment = node(
+      "experiment-legacy",
+      "experiment",
+      "Legacy complete experiment",
+      "draft",
+      {
+        objective: "Measure one bounded outcome",
+        target_claim_summary: "Discriminate the bounded claim",
+        empirical_mode: "observation",
+        execution_protocol: "Run the bounded fixture",
+        observable_outcome: "One measured score",
+      },
+      {
+        methods: ["method-a"],
+        metrics: ["metric-a"],
+        ablations: ["ablation-a"],
+        requires: ["prerequisite-a"],
+      },
+    );
+    const graph = projection([
+      experiment,
+      node("method-a", "method", "Method", "draft", { approach: "Bounded method" }),
+      node("metric-a", "metric", "Metric", "draft", {
+        name: "score",
+        definition: "The bounded score",
+      }),
+      node("ablation-a", "ablation", "Ablation", "draft", {
+        controlled_difference: "One controlled difference",
+        decision_key: "fixture_difference",
+        summary: "A bounded ablation",
+      }),
+      node("prerequisite-a", "prerequisite", "Prerequisite", "draft", {
+        required_asset_type: "fixture",
+        validation_approach: "Check the fixture",
+      }),
+    ]);
+    const adapter: RuleDomainAdapter = {
+      evaluatePredicate: () => false,
+      selectPolicy: () => [],
+    };
+    const evaluated = evaluateConfiguredRules(
+      { configuration, graph },
+      {
+        ruleIds: ["readiness.experiment-constitution", "ticket.compile-run-plan"],
+        includeGatePolicyFacts: true,
+        adapter,
+      },
+    );
+    expect(evaluated.ok, diagnostics(evaluated)).toBe(true);
+    if (!evaluated.ok) return;
+    expect(evaluated.value.tickets).toEqual([]);
+
+    const repaired = researchConstitutionRunPlanFallback(
+      configuration,
+      typedGraph(configuration, graph.nodes()),
+      evaluated.value,
+    );
+
+    expect(repaired.tickets).toHaveLength(1);
+    expect(repaired.tickets[0]).toMatchObject({
+      operation_registry_id: "execution.node.compile-run-plan",
+      target_node_ids: ["experiment-legacy"],
+    });
   });
 
   it("compiles the research formulation ticket once and independently of graph input order", () => {
@@ -293,6 +377,20 @@ describe("deterministic graph expression and rule compiler", () => {
     );
     expect(bad.ok).toBe(false);
     expect(bad.diagnostics.map((item) => item.code)).toContain("rule.path_scope");
+  });
+
+  it("grants Python package initializers needed to import an exact read-scoped module", () => {
+    expect(
+      expandPythonPackageReadPaths([
+        "model_zoo/hypernet/paired_contrast.py",
+        "program/assets/signature_analysis",
+      ]),
+    ).toEqual([
+      "model_zoo/__init__.py",
+      "model_zoo/hypernet/__init__.py",
+      "model_zoo/hypernet/paired_contrast.py",
+      "program/assets/signature_analysis",
+    ]);
   });
 
   it("normalizes inverse edges, set algebra, vacuous quantifiers, and recursive query errors", () => {
@@ -430,6 +528,29 @@ function projection(nodes: readonly CompilerGraphNode[]): CompilerGraphProjectio
     nodes: () => nodes,
     node: (id) => nodes.find((node) => node.id === id),
   };
+}
+
+function typedGraph(
+  configuration: CompiledConfiguration,
+  nodes: readonly CompilerGraphNode[],
+): TypedGraph {
+  const projected = projectGraphSchemaDefinition(configuration);
+  if (!projected.ok) throw new Error(diagnostics(projected));
+  return new TypedGraph(
+    new GraphSchema(projected.value),
+    nodes.map((value): GraphNode => ({
+      schema_version: "1.0",
+      id: value.id,
+      type: value.type,
+      title: value.title,
+      status: value.status,
+      spec: structuredClone(value.spec) as GraphNode["spec"],
+      edges: Object.fromEntries(
+        Object.entries(value.edges).map(([relation, targets]) => [relation, [...targets]]),
+      ),
+      annotations: structuredClone(value.annotations ?? {}) as GraphNode["annotations"],
+    })),
+  );
 }
 
 function node(

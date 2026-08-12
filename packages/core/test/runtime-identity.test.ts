@@ -208,6 +208,25 @@ describe("runtime executable identity", () => {
     });
   });
 
+  it("captures the explicitly active Pi instead of a different workspace peer", async () => {
+    const fixture = await runtimeFixture();
+    const workspacePiRoot = await installFakePi(fixture);
+    const activePiRoot = await installExternalFakePi(fixture);
+
+    const closure = await captureRuntimeClosure(fixture.anchorUrl, activePiRoot);
+
+    expect(closure.resolutions).toContainEqual({
+      parentPackageRoot: await realpath(fixture.packageRoot),
+      dependency: "@earendil-works/pi-coding-agent",
+      packageRoot: activePiRoot,
+    });
+    expect(closure.resolutions).not.toContainEqual({
+      parentPackageRoot: await realpath(fixture.packageRoot),
+      dependency: "@earendil-works/pi-coding-agent",
+      packageRoot: workspacePiRoot,
+    });
+  });
+
   it("binds child preloads to Pi 0.80.10 and its exact TypeBox", async () => {
     const fixture = await runtimeFixture();
     const canonicalPiRoot = await installFakePi(fixture);

@@ -131,6 +131,21 @@ export function createRuleAuthorityEvidence(
   });
 }
 
+/** Synchronous policy selectors shared by compiler evaluation and evidence-scope projection. */
+export function createPolicySelectionRuleDomainAdapter(): RuleDomainAdapter {
+  return {
+    selectPolicy(selector, context) {
+      if (isRecord(selector.policy_applicability)) {
+        return selectPolicyApplicability(selector.policy_applicability, context);
+      }
+      if (isRecord(selector.policy_selection)) {
+        return selectPolicySelection(selector.policy_selection, context);
+      }
+      return undefined;
+    },
+  };
+}
+
 /** Build the deterministic/local half of the rule domain before one compiler pass begins. */
 export async function createProductionRuleDomainAdapter(
   options: ProductionRuleDomainAdapterOptions,
@@ -149,16 +164,11 @@ export async function createProductionRuleDomainAdapter(
     projectRoot,
   );
   const checkStack = new Set<string>();
+  const policyAdapter = createPolicySelectionRuleDomainAdapter();
 
   const adapter: RuleDomainAdapter = {
     selectPolicy(selector, context) {
-      if (isRecord(selector.policy_applicability)) {
-        return selectPolicyApplicability(selector.policy_applicability, context);
-      }
-      if (isRecord(selector.policy_selection)) {
-        return selectPolicySelection(selector.policy_selection, context);
-      }
-      return undefined;
+      return policyAdapter.selectPolicy?.(selector, context);
     },
     evaluatePredicate(leaf, context) {
       const op = stringValue(leaf.op);
@@ -260,10 +270,41 @@ export async function createProductionRuleDomainAdapter(
             inputGraphSha256,
           );
         case "gate_policy_has_current_terminal":
+          return (
+            evidenceResult(evidence, leaf, context, inputGraphSha256) ||
+            gatePolicyCurrentReceipt(
+              evidence,
+              policy(context, leaf),
+              leaf,
+              context,
+              inputGraphSha256,
+            )
+          );
         case "current_receipt":
         case "proof_preparation_current":
         case "check_has_current_terminal":
           return evidenceResult(evidence, leaf, context, inputGraphSha256);
+        case "gate_policy_receipt_refused": {
+          // True only when the gate's policy check has actually executed under the current
+          // configuration+graph and its latest receipt failed the configured result contract.
+          // Recording keys this evidence by the gate (subject = gate, every referenced binding →
+          // the gate id), so evaluation must rebuild that exact key rather than use the ambient
+          // context: rules that reach a gate through a bound name from a non-gate subject (the
+          // asset-reopen block in `ticket.implement-asset`) would otherwise never observe it, and
+          // a gate-scoped fact should not change meaning with the caller's loop structure.
+          const gate = boundNode(context, optionalString(leaf.gate_subject) ?? "$gate");
+          if (gate === undefined || evidence === undefined) return false;
+          const key = rulePredicateEvidenceKey({
+            configurationSha256: context.configuration.configuration_sha256,
+            inputGraphSha256,
+            leaf,
+            subjectNodeId: gate.id,
+            bindings: Object.fromEntries(
+              [...rulePredicateBindingNames(leaf)].map((name) => [name, [gate.id]]),
+            ),
+          });
+          return evidence.predicates[key]?.result === true;
+        }
         case "receipt_coverage_current":
           return receiptCoverageCurrent(evidence, leaf, context);
         case "review_effect_coverage_current":
@@ -314,6 +355,42 @@ function gatePolicyReceiptSatisfied(
   // Compatibility for existing durable evidence: its true result historically meant "passed".
   const status = current.receiptStatus ?? "passed";
   return stringArray(configured.passing_receipt_statuses).includes(status);
+}
+
+/**
+ * A gate command records both the policy-shaped terminal predicate and the configured check's
+ * canonical receipt predicate. Graph work performed after the command can legitimately preserve
+ * the latter while dropping the former when only the receipt's exact node scope was proven
+ * unchanged. Treat that still-current configured receipt as terminal evidence; passing remains
+ * stricter and continues to require the policy-shaped evidence with its authenticated status.
+ */
+function gatePolicyCurrentReceipt(
+  evidence: RuleAuthorityEvidence | undefined,
+  configured: ConfigurationObject,
+  leaf: ConfigurationObject,
+  context: RuleDomainContext,
+  inputGraphSha256: Sha256Digest,
+): boolean {
+  if (evidence === undefined) return false;
+  const gate = boundNode(context, optionalString(leaf.gate_subject) ?? "$gate");
+  const auto = recordValue(configured.auto_evaluate);
+  const checkId = optionalString(auto?.check);
+  const check =
+    checkId === undefined ? undefined : context.configuration.registries.checks[checkId];
+  const receiptType = optionalString(check?.receipt_type);
+  if (gate === undefined || receiptType === undefined) return false;
+  const receiptLeaf: ConfigurationObject = {
+    op: "current_receipt",
+    receipt_type: receiptType,
+  };
+  const key = rulePredicateEvidenceKey({
+    configurationSha256: context.configuration.configuration_sha256,
+    inputGraphSha256,
+    leaf: receiptLeaf,
+    subjectNodeId: gate.id,
+    bindings: {},
+  });
+  return evidence.predicates[key]?.result === true;
 }
 
 function receiptCoverageCurrent(

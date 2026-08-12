@@ -1,5 +1,6 @@
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -270,6 +271,47 @@ describe("composed change-control authority", () => {
       published.run.compiledConfigHash,
     );
     expect(fixture.harness.promptCalls).toBeGreaterThanOrEqual(2);
+    client.close();
+  }, 60_000);
+
+  it("settles a Research source request when the compiler consumes an existing authorized graph path", async () => {
+    const fixture = await researchAuthority(new ScriptHarness(["request"]), {
+      consumeExistingUpstreamRequest: true,
+    });
+    const client = await AuthorityClient.connect({
+      projectRoot: fixture.root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createApprovedRun(client, fixture.engine, "existing support path");
+
+    const settled = await waitForValue(async () => {
+      const run = await fixture.engine.store.getRun(runId);
+      const consumed = run.activity.some((entry) =>
+        entry.message.startsWith(
+          "Consumed upstream change request through an existing authorized graph path:",
+        ),
+      );
+      if (!consumed) return undefined;
+      const source = Object.values(run.tickets).find(
+        (ticket) => ticket.operationId === "formulation.hypothesis.drill-hypothesis",
+      );
+      return source === undefined ? undefined : { run, source };
+    });
+
+    expect(settled.source).toMatchObject({
+      status: "queued",
+    });
+    expect(settled.source.steps).toContainEqual(
+      expect.objectContaining({ id: "drill-claims", status: "completed" }),
+    );
+    expect(settled.source.executionControl?.sourceHold).toBeUndefined();
+    expect(
+      Object.values(settled.run.tickets).filter(
+        (ticket) => ticket.operationId === "lifecycle.change-request",
+      ),
+    ).toEqual([]);
+    expect(() => assertRunRecord(structuredClone(settled.run))).not.toThrow();
     client.close();
   }, 60_000);
 
@@ -621,6 +663,226 @@ describe("composed change-control authority", () => {
     client.close();
   }, 180_000);
 
+  it("does not let a completed terminal resolver supersede a source held for a later proposal", async () => {
+    const harness = new ScriptHarness(["fail", "request"], ["apply-change-request"]);
+    const fixture = await researchAuthority(harness);
+    const client = await AuthorityClient.connect({
+      projectRoot: fixture.root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createApprovedRun(
+      client,
+      fixture.engine,
+      "terminal-resolver-does-not-cross-source-hold",
+    );
+
+    let published: { run: RunRecord; proposal: RunRecord["tickets"][string] };
+    try {
+      published = await waitForDurableProgressValue(async () => {
+        const run = await fixture.engine.store.getRun(runId);
+        const proposal = Object.values(run.tickets).find(
+          (ticket) =>
+            ticket.status === "proposed" && ticket.executionControl?.proposalRequest !== undefined,
+        );
+        const value = proposal === undefined ? undefined : { run, proposal };
+        return value === undefined ? { progress: run.revision } : { progress: run.revision, value };
+      });
+    } catch (error) {
+      const run = await fixture.engine.store.getRun(runId);
+      throw new Error(
+        `source never reached its later proposal: ${JSON.stringify({
+          error: error instanceof Error ? error.message : String(error),
+          phase: run.lifecycle.phase,
+          blocker: run.lifecycle.blocker,
+          revision: run.revision,
+          tickets: Object.values(run.tickets).map((ticket) => ({
+            id: ticket.id,
+            operationId: ticket.operationId,
+            status: ticket.status,
+            blocker: ticket.blocker,
+            gitCycleId: ticket.gitCycleId,
+            sourceHold: ticket.executionControl?.sourceHold,
+            terminalRecovery: ticket.executionControl?.terminalRecovery?.sourceTicketId,
+            steps: ticket.steps.map((step) => ({ id: step.id, status: step.status })),
+          })),
+          activity: run.activity.slice(-16).map((entry) => entry.message),
+          trace: harness.trace,
+        })}`,
+      );
+    }
+    const sourceId = published.proposal.executionControl!.proposalRequest!.sourceTicketId;
+    const heldCycleId = published.run.tickets[sourceId]!.gitCycleId!;
+    expect(
+      Object.values(published.run.tickets).some(
+        (ticket) =>
+          ticket.status === "completed" &&
+          ticket.executionControl?.terminalRecovery?.sourceTicketId === sourceId,
+      ),
+    ).toBe(true);
+
+    // Drain the event-driven continuation that previously let the stale resolver archive this
+    // newer source cycle before the proposal had even reached an operator decision.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const held = await fixture.engine.store.getRun(runId);
+    expect(held.tickets[sourceId]).toMatchObject({
+      status: "blocked",
+      gitCycleId: heldCycleId,
+      executionControl: {
+        sourceHold: { proposalTicketId: published.proposal.id },
+      },
+    });
+    expect(held.git.ticketCycles[heldCycleId]?.status).not.toBe("retired");
+
+    // Simulate a run written by the affected engine: the old resolver archived the exact current
+    // source cycle under its own authenticated supersession before the approved application could
+    // release the newer hold. Recovery must reuse that immutable archive instead of requiring an
+    // impossible second retirement of the same cycle.
+    const legacySupersessionSha256 = canonicalHash({
+      protocol: "koni.test.prior-terminal-resolver-supersession.v1",
+      runId,
+      sourceId,
+      heldCycleId,
+    });
+    await fixture.engine.server.mutateInternal(async ({ revision }) => {
+      const current = await fixture.engine.store.getRun(runId);
+      const draft = nextFixtureRun(current);
+      const cycle = draft.git.ticketCycles[heldCycleId]!;
+      cycle.status = "retired";
+      cycle.retiredAt = draft.updatedAt;
+      cycle.supersededAt = draft.updatedAt;
+      cycle.supersessionSha256 = legacySupersessionSha256;
+      cycle.archiveRef = `refs/koni/archive/${runId}/tickets/${sourceId}/cycles/${heldCycleId}/${legacySupersessionSha256.slice("sha256:".length)}`;
+      const committed = await fixture.engine.store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: current.revision }],
+      });
+      return { revision: committed.state.revision };
+    });
+
+    await decideProposal(
+      client,
+      runId,
+      published.proposal.id,
+      "approval",
+      "Approve the bounded application after terminal recovery",
+    );
+    const released = await waitForDurableProgressValue(async () => {
+      const run = await fixture.engine.store.getRun(runId);
+      if (run.lifecycle.phase === "blocked" || run.lifecycle.phase === "failed") {
+        throw new Error(
+          run.lifecycle.blocker ?? run.lifecycle.terminalReason ?? run.lifecycle.phase,
+        );
+      }
+      const source = run.tickets[sourceId];
+      const disposition = run.tickets[published.proposal.id]?.executionControl?.proposalDisposition;
+      const application =
+        disposition?.kind === "application" && disposition.applicationTicketId !== undefined
+          ? run.tickets[disposition.applicationTicketId]
+          : undefined;
+      const value =
+        application?.status === "completed" &&
+        source !== undefined &&
+        source.executionControl?.sourceHold === undefined &&
+        source.gitCycleId !== undefined &&
+        source.gitCycleId !== heldCycleId
+          ? { run, source }
+          : undefined;
+      return value === undefined ? { progress: run.revision } : { progress: run.revision, value };
+    });
+    expect(released.run.git.ticketCycles[heldCycleId]).toMatchObject({
+      status: "retired",
+      archiveRef: expect.stringContaining("refs/koni/archive/"),
+      supersessionSha256: legacySupersessionSha256,
+    });
+    expect(released.source.executionControl?.sourceHold).toBeUndefined();
+    expect(() => assertRunRecord(structuredClone(released.run))).not.toThrow();
+    await pauseAtFreshRevision(
+      client,
+      fixture.engine,
+      runId,
+      "pause-after-terminal-resolver-source-hold",
+    );
+    client.close();
+  }, 180_000);
+
+  it("preserves terminal-resolver control authority when a resolver graph delta recompiles the board", async () => {
+    let root = "";
+    const harness = new ScriptHarness(["fail"], [], 0, (input, ticket) => {
+      const graphPath = path.join(
+        root,
+        ".git",
+        "koni",
+        "runs",
+        input.run.id,
+        "program",
+        "graph.json",
+      );
+      const artifact = JSON.parse(readFileSync(graphPath, "utf8")) as {
+        nodes: Record<string, Record<string, unknown>>;
+      };
+      const nodeId = ticket.targetNodeIds[0]!;
+      const original = artifact.nodes[nodeId]!;
+      const node = structuredClone(original);
+      const spec = node.spec as Record<string, unknown>;
+      const textField = Object.keys(spec).find((field) => typeof spec[field] === "string");
+      if (textField === undefined) throw new Error(`fixture node ${nodeId} has no text spec field`);
+      spec[textField] = `${String(spec[textField])} Resolver diagnosis recorded.`;
+      return {
+        protocol: "koni.graph-delta.v1",
+        expectedGraphHash: input.run.graphHash,
+        upsertNodes: [{ expectedNodeHash: canonicalHash(original), node }],
+        deleteNodes: [],
+        addEdges: [],
+        removeEdges: [],
+      };
+    });
+    const fixture = await researchAuthority(harness);
+    root = fixture.root;
+    const client = await AuthorityClient.connect({
+      projectRoot: fixture.root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createApprovedRun(
+      client,
+      fixture.engine,
+      "terminal-resolver-graph-delta-authority",
+    );
+
+    const recovered = await waitForValue(async () => {
+      const run = await fixture.engine.store.getRun(runId);
+      const resolver = Object.values(run.tickets).find(
+        (ticket) => ticket.executionControl?.terminalRecovery !== undefined,
+      );
+      if (run.lifecycle.phase === "blocked" || run.lifecycle.phase === "failed") {
+        throw new Error(
+          run.lifecycle.blocker ?? run.lifecycle.terminalReason ?? run.lifecycle.phase,
+        );
+      }
+      return resolver?.steps[0]?.status === "completed" ? { run, resolver } : undefined;
+    });
+    expect(recovered.resolver.executionControl?.controlTicketAuthority?.projection).toEqual(
+      ticketImmutableProjection(recovered.resolver),
+    );
+    expect(() => assertRunRecord(structuredClone(recovered.run))).not.toThrow();
+    expect(
+      harness.compilationTrace.some(
+        (entry) =>
+          entry.assignment !== undefined &&
+          (entry.assignment as { ticketId?: string }).ticketId === recovered.resolver.id &&
+          entry.outcome !== undefined,
+      ),
+    ).toBe(true);
+    await pauseAtFreshRevision(
+      client,
+      fixture.engine,
+      runId,
+      "pause-after-terminal-resolver-graph-delta",
+    );
+    client.close();
+  }, 180_000);
+
   it("recovers a faulted resolver supersession, retries the exact failure, and never chains resolvers", async () => {
     const harness = new ScriptHarness(["fail"], [], 1);
     let supersessionFaulted = false;
@@ -843,8 +1105,7 @@ describe("composed change-control authority", () => {
         const source = run.tickets[sourceId];
         return resolver?.status === "completed" &&
           source !== undefined &&
-          source.status !== "blocked" &&
-          source.status !== "failed"
+          source.status !== "blocked"
           ? { run, resolver, source }
           : undefined;
       });
@@ -1328,6 +1589,10 @@ class ScriptHarness {
     private readonly sourcePlan: readonly ("request" | "fail" | "complete")[] = ["request"],
     private readonly proposalPlan: readonly ("no-op" | "apply-change-request")[] = [],
     private readonly resolverFailures = 0,
+    private readonly resolverGraphDelta?: (
+      input: AttemptInput,
+      ticket: RunRecord["tickets"][string],
+    ) => unknown,
   ) {}
 
   public factory(input: AttemptInput, prepared: PreparedManagedAttempt): ManagedPiSessionFactory {
@@ -1406,6 +1671,7 @@ class ScriptHarness {
           summary: `The hypothesis requires bounded upstream semantic correction ${ordinal}`,
           upstreamChangeRequest: {
             targetNodeIds: [ticket.targetNodeIds[0]],
+            fulfillment: "dynamic_scope_change",
             summary: `Correct bounded hypothesis contract ${ordinal}`,
             reason: `Verified constraint ${ordinal} is not represented by the current formulation`,
           },
@@ -1437,6 +1703,20 @@ class ScriptHarness {
       if (stepId === "diagnose" && ordinal <= this.resolverFailures) {
         return { status: "failed", blocker: `Resolver failure ${ordinal} requires operator retry` };
       }
+      if (stepId === "diagnose" && this.resolverGraphDelta !== undefined) {
+        return {
+          status: "completed",
+          summary: "Diagnosed the bounded terminal failure with one in-scope graph repair.",
+          graphDelta: this.resolverGraphDelta(input, ticket),
+        };
+      }
+      if (stepId === "review") {
+        return {
+          status: "completed",
+          summary: "Approved the bounded terminal recovery.",
+          reviewVerdict: "approved",
+        };
+      }
     }
     return this.validCompletedOutput(
       input,
@@ -1452,6 +1732,7 @@ class ScriptHarness {
   ): unknown | undefined {
     const candidates: unknown[] = [
       { status: "completed", summary },
+      { status: "completed", summary, reviewVerdict: "approved" },
       {
         status: "completed",
         summary,
@@ -1553,6 +1834,7 @@ async function researchAuthority(
   options: {
     git?: (root: string) => IsolatedGitLifecycle;
     actionFault?: RunAuthorityEngineOptions["actionFault"];
+    consumeExistingUpstreamRequest?: boolean;
   } = {},
 ): Promise<{
   root: string;
@@ -1568,6 +1850,9 @@ async function researchAuthority(
   return openResearchEngine(root, baseline, harness, {
     ...(options.git === undefined ? {} : { git: options.git(root) }),
     ...(options.actionFault === undefined ? {} : { actionFault: options.actionFault }),
+    ...(options.consumeExistingUpstreamRequest === undefined
+      ? {}
+      : { consumeExistingUpstreamRequest: options.consumeExistingUpstreamRequest }),
   });
 }
 
@@ -1578,6 +1863,7 @@ async function openResearchEngine(
   options: {
     git?: IsolatedGitLifecycle;
     actionFault?: RunAuthorityEngineOptions["actionFault"];
+    consumeExistingUpstreamRequest?: boolean;
   } = {},
 ): Promise<{
   root: string;
@@ -1590,7 +1876,6 @@ async function openResearchEngine(
   const native = await NativeRunCompilerProgram.create({
     projectRoot: root,
     packageBaseline: baseline,
-    installedPiPackagesLoader: async () => [],
     sealedModelBindingLoader: async (provider, modelId) => ({
       provider,
       id: modelId,
@@ -1600,7 +1885,9 @@ async function openResearchEngine(
       catalogSha256: canonicalHash({ provider, modelId, fixture: "provider-free" }),
     }),
   });
-  const program = scriptNativeProgram(native, harness);
+  const program = scriptNativeProgram(native, harness, {
+    consumeExistingUpstreamRequest: options.consumeExistingUpstreamRequest ?? false,
+  });
   const engine = await RunAuthorityEngine.open({
     projectRoot: root,
     version: "1.0.0",
@@ -1811,6 +2098,7 @@ async function authorizeDelete(
 function scriptNativeProgram(
   native: NativeRunCompilerProgram,
   harness: ScriptHarness,
+  options: { consumeExistingUpstreamRequest?: boolean } = {},
 ): RunCompilerProgram {
   return new Proxy(native, {
     get(target, property) {
@@ -1839,7 +2127,9 @@ function scriptNativeProgram(
         return async (
           input: Parameters<NativeRunCompilerProgram["projectChangeControlProposalTicket"]>[0],
         ) => {
+          if (options.consumeExistingUpstreamRequest === true) return undefined;
           const proposal = await target.projectChangeControlProposalTicket(input);
+          if (proposal === undefined) return undefined;
           const source = input.run.tickets[input.changeControl.sourceTicketId];
           const sourceStep = source?.steps.find(
             (step) => step.id === input.changeControl.sourceStepId,

@@ -32,19 +32,46 @@ import type {
 import {
   deriveReadyAssignments,
   SchedulerAuthorityError,
+  ticketDependencySettled,
   type SchedulerExecutionAuthority,
   type SchedulerTicketExecutionAuthority,
 } from "../src/state/scheduler.js";
 import { fixtureRunGit } from "./run-record-fixtures.js";
 
 describe("semantic scheduler admission", () => {
+  it("treats compiler-routed cancellations as settled dependencies", () => {
+    const run = runRecord(2);
+    run.executionConfig!.disjointScopeParallelism = false;
+    run.tickets.obsolete = ticket("obsolete", "ordinary-work", "cancelled", 0, ["claim-a"]);
+    run.tickets.obsolete.blocker =
+      "Current compiler predicate no longer applies after prior execution";
+    run.tickets.consumer = ticket("consumer", "ordinary-work", "queued", 1, ["claim-b"]);
+    run.tickets.consumer.dependencyIds = ["obsolete"];
+
+    expect(deriveReadyAssignments(run, 2).ready.map((row) => row.ticketId)).toEqual(["consumer"]);
+    expect(ticketDependencySettled(run.tickets.obsolete)).toBe(true);
+
+    for (const blocker of [
+      "Superseded before execution by newer compiler state",
+      "Superseded by the existing planned asset implementation workflow",
+      "Superseded by a current manifest-bound gate recheck",
+    ]) {
+      run.tickets.obsolete.blocker = blocker;
+      expect(ticketDependencySettled(run.tickets.obsolete)).toBe(true);
+    }
+
+    run.tickets.obsolete.blocker = "Cancelled by operator";
+    expect(deriveReadyAssignments(run, 2).ready).toEqual([]);
+    expect(ticketDependencySettled(run.tickets.obsolete)).toBe(false);
+  });
+
   it("never schedules proposed work and blocks only overlapping barrier operations", () => {
     const catalog = buildCatalog();
     const run = runRecord(3);
     run.executionConfig!.disjointScopeParallelism = false;
     run.tickets.proposal = ticket("proposal", "propose-change", "proposed", 0, ["claim-a"]);
-    run.tickets.overlap = ticket("overlap", "ordinary-work", "ready", 1, ["claim-a"]);
-    run.tickets.unrelated = ticket("unrelated", "ordinary-work", "ready", 2, ["claim-b"]);
+    run.tickets.overlap = ticket("overlap", "ordinary-work", "queued", 1, ["claim-a"]);
+    run.tickets.unrelated = ticket("unrelated", "ordinary-work", "queued", 2, ["claim-b"]);
     const authority = executionAuthority(catalog, {
       proposal: {
         binding: bind(catalog, "proposal"),
@@ -72,7 +99,7 @@ describe("semantic scheduler admission", () => {
     const run = runRecord(2);
     run.executionConfig!.disjointScopeParallelism = false;
     run.tickets.pending = ticket("pending", "propose-change", "proposed", 0, ["claim-a"]);
-    run.tickets.approved = ticket("approved", "propose-change", "ready", 1, ["claim-b"]);
+    run.tickets.approved = ticket("approved", "propose-change", "queued", 1, ["claim-b"]);
     const authority = executionAuthority(catalog, {
       pending: {
         binding: bind(catalog, "proposal"),
@@ -94,8 +121,8 @@ describe("semantic scheduler admission", () => {
     const catalog = buildCatalog();
     const run = runRecord(2);
     run.executionConfig!.disjointScopeParallelism = false;
-    run.tickets.first = ticket("first", "ordinary-work", "ready", 0, ["claim-a"]);
-    run.tickets.second = ticket("second", "ordinary-work", "ready", 1, ["claim-b"]);
+    run.tickets.first = ticket("first", "ordinary-work", "queued", 0, ["claim-a"]);
+    run.tickets.second = ticket("second", "ordinary-work", "queued", 1, ["claim-b"]);
     const authority = executionAuthority(catalog, {
       first: { binding: bind(catalog, "ordinary") },
       second: { binding: bind(catalog, "ordinary") },
@@ -109,7 +136,7 @@ describe("semantic scheduler admission", () => {
       reason: "single_flight",
     });
 
-    run.tickets.first.status = "ready";
+    run.tickets.first.status = "queued";
     run.tickets.first.worktreePath = "/tmp/compiler-owned-first";
     run.tickets.first.gitCycleId = "cycle-first";
     const restarted = deriveReadyAssignments(run, 2, authority);
@@ -124,7 +151,7 @@ describe("semantic scheduler admission", () => {
   it("fails closed on missing proposal/application/resolver authority", () => {
     const catalog = buildCatalog();
     const proposed = runRecord(1);
-    proposed.tickets.proposal = ticket("proposal", "propose-change", "ready", 0, ["claim-a"]);
+    proposed.tickets.proposal = ticket("proposal", "propose-change", "queued", 0, ["claim-a"]);
     expectSchedulerError(
       () =>
         deriveReadyAssignments(
@@ -141,7 +168,7 @@ describe("semantic scheduler admission", () => {
     );
 
     const application = runRecord(1);
-    application.tickets.application = ticket("application", "apply-change", "ready", 0, [
+    application.tickets.application = ticket("application", "apply-change", "queued", 0, [
       "claim-a",
     ]);
     expectSchedulerError(
@@ -160,7 +187,7 @@ describe("semantic scheduler admission", () => {
     );
 
     const resolver = runRecord(1);
-    resolver.tickets.resolver = ticket("resolver", "resolve-failure", "ready", -1000, ["claim-a"]);
+    resolver.tickets.resolver = ticket("resolver", "resolve-failure", "queued", -1000, ["claim-a"]);
     expectSchedulerError(
       () =>
         deriveReadyAssignments(
@@ -179,7 +206,7 @@ describe("semantic scheduler admission", () => {
     const run = runRecord(1);
     run.executionConfig!.disjointScopeParallelism = false;
     run.tickets.proposal = ticket("proposal", "propose-change", "completed", 0, ["claim-a"]);
-    run.tickets.application = ticket("application", "apply-change", "ready", 1, ["claim-a"]);
+    run.tickets.application = ticket("application", "apply-change", "queued", 1, ["claim-a"]);
     const approved = digest("approved-application");
     const authority = executionAuthority(catalog, {
       proposal: {
@@ -219,15 +246,15 @@ describe("semantic scheduler admission", () => {
     const catalog = buildCatalog();
     const run = runRecord(3);
     run.executionConfig!.disjointScopeParallelism = false;
-    run.tickets["resolver-a"] = ticket("resolver-a", "resolve-failure", "ready", -2_000, [
+    run.tickets["resolver-a"] = ticket("resolver-a", "resolve-failure", "queued", -2_000, [
       "claim-a",
     ]);
-    run.tickets["resolver-b"] = ticket("resolver-b", "resolve-failure", "ready", -1_999, [
+    run.tickets["resolver-b"] = ticket("resolver-b", "resolve-failure", "queued", -1_999, [
       "claim-b",
     ]);
     run.tickets["source-a"] = ticket("source-a", "ordinary-work", "blocked", -100, ["claim-a"]);
     run.tickets["source-b"] = ticket("source-b", "ordinary-work", "blocked", -99, ["claim-b"]);
-    run.tickets.ordinary = ticket("ordinary", "ordinary-work", "ready", 0, ["claim-c"]);
+    run.tickets.ordinary = ticket("ordinary", "ordinary-work", "queued", 0, ["claim-c"]);
     const authority = executionAuthority(catalog, {
       "resolver-a": {
         binding: bind(catalog, "resolver"),
@@ -316,7 +343,7 @@ describe("deterministic change-control reconciliation", () => {
     expect(accepted).toMatchObject({
       disposition: "approve",
       approvalSha256: first.sha256,
-      transition: { from: "proposed", to: "ready" },
+      transition: { from: "proposed", to: "queued" },
     });
     expectChangeControlError(
       () =>

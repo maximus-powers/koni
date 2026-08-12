@@ -330,9 +330,13 @@ export function assertOperationGraphMutationPolicy(
   binding: ExecutionPolicyBinding,
   gateCatalog: TypedGateIdentityCatalog,
   changes: readonly MaterializedNodeChange[],
+  reviewReworkOwnedNodeIds: readonly string[] = [],
 ): void {
   const operation = resolveBoundOperation(catalog, binding);
   const gateTypes = new Set(assertUniqueStrings(gateCatalog.gateNodeTypes, "gate node types"));
+  const reviewReworkOwned = new Set(
+    assertUniqueStrings(reviewReworkOwnedNodeIds, "review-rework-owned node ids"),
+  );
   const gateIds = new Map<string, string>();
   for (const identity of gateCatalog.gateNodes) {
     if (!gateTypes.has(identity.type)) {
@@ -384,7 +388,7 @@ export function assertOperationGraphMutationPolicy(
     assertTypedGateIdentity(change.before, gateIds, gateTypes);
     assertTypedGateIdentity(change.after, gateIds, gateTypes);
     assertExistingNodeEdgeAdditions(operation, change);
-    assertGateContractEdit(operation, change, gateIds, gateTypes);
+    assertGateContractEdit(operation, change, gateIds, gateTypes, reviewReworkOwned);
   }
 }
 
@@ -455,6 +459,7 @@ function assertGateContractEdit(
   change: MaterializedNodeChange,
   gateIds: ReadonlyMap<string, string>,
   gateTypes: ReadonlySet<string>,
+  reviewReworkOwnedNodeIds: ReadonlySet<string>,
 ): void {
   if (operation.allowGateContractEdits || change.before === null) return;
   const typedGate = gateIds.has(change.before.id) || gateTypes.has(change.before.type);
@@ -465,6 +470,10 @@ function assertGateContractEdit(
       `operation ${operation.id} cannot delete existing typed gate ${change.before.id}`,
     );
   }
+  // A review correction retains semantic authority over a gate this same ticket created before
+  // review. The caller derives these exact ids from compiler-authored graph-added receipts; this
+  // does not authorize deletion or edits to any pre-existing or sibling gate.
+  if (reviewReworkOwnedNodeIds.has(change.before.id)) return;
   if (
     canonicalHash(gateSemanticContract(change.before)) !==
     canonicalHash(gateSemanticContract(change.after))

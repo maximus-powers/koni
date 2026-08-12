@@ -41,6 +41,123 @@ describe("compiler ticket dependency projection", () => {
     ).toEqual(Object.fromEntries(dependencies));
   });
 
+  it("orders run-plan compilation before execution for the same run node", async () => {
+    const root = await projectRoot();
+    const definitions = [
+      definition("ticket-run", 200, scope({ writeNodes: ["run-a"] }), {
+        operation: "run-experiment",
+        operationRegistryId: "execution.run.run-experiment",
+      }),
+    ];
+    const retained = [
+      {
+        id: "ticket-compile",
+        priority: -190_230,
+        operationRegistryId: "execution.node.compile-run-plan",
+        scope: scope({ writeNodes: ["run-a"] }),
+      },
+    ];
+
+    expect(
+      Object.fromEntries(deriveCompilerTicketDependencies(definitions, root, retained)),
+    ).toEqual({
+      "ticket-compile": [],
+      "ticket-run": ["ticket-compile"],
+    });
+  });
+
+  it("orders an asset implementation before runtime execution that reads the asset", async () => {
+    const root = await projectRoot();
+    const definitions = [
+      definition("ticket-run", 200, scope({ readNodes: ["asset-a"], writeNodes: ["run-a"] }), {
+        operation: "run-experiment",
+        operationRegistryId: "execution.run.run-experiment",
+      }),
+      definition("ticket-asset", 155, scope({ writeNodes: ["asset-a"] }), {
+        operation: "implement-asset",
+        operationRegistryId: "asset-resolution.asset.implement-asset",
+      }),
+    ];
+
+    expect(Object.fromEntries(deriveCompilerTicketDependencies(definitions, root))).toEqual({
+      "ticket-asset": [],
+      "ticket-run": ["ticket-asset"],
+    });
+  });
+
+  it("orders an asset implementation before run-plan compilation even before execution is projected", async () => {
+    const root = await projectRoot();
+    const definitions = [
+      definition("ticket-compile", 190, scope({ readNodes: ["asset-a"], writeNodes: ["run-a"] }), {
+        operation: "compile-run-plan",
+        operationRegistryId: "execution.node.compile-run-plan",
+      }),
+      definition("ticket-asset", 155, scope({ writeNodes: ["asset-a"] }), {
+        operation: "implement-asset",
+        operationRegistryId: "asset-resolution.asset.implement-asset",
+      }),
+    ];
+
+    expect(Object.fromEntries(deriveCompilerTicketDependencies(definitions, root))).toEqual({
+      "ticket-asset": [],
+      "ticket-compile": ["ticket-asset"],
+    });
+  });
+
+  it("orders runtime assets before both run-plan compilation and execution", async () => {
+    const root = await projectRoot();
+    const definitions = [
+      definition("ticket-run", 200, scope({ readNodes: ["asset-a"], writeNodes: ["run-a"] }), {
+        operation: "run-experiment",
+        operationRegistryId: "execution.run.run-experiment",
+      }),
+      definition("ticket-asset", 155, scope({ writeNodes: ["asset-a"] }), {
+        operation: "implement-asset",
+        operationRegistryId: "asset-resolution.asset.implement-asset",
+      }),
+    ];
+    const retained = [
+      {
+        id: "ticket-compile",
+        priority: -190_230,
+        operationRegistryId: "execution.node.compile-run-plan",
+        scope: scope({ writeNodes: ["run-a"] }),
+      },
+    ];
+
+    expect(
+      Object.fromEntries(deriveCompilerTicketDependencies(definitions, root, retained)),
+    ).toEqual({
+      "ticket-asset": [],
+      "ticket-compile": ["ticket-asset"],
+      "ticket-run": ["ticket-asset", "ticket-compile"],
+    });
+  });
+
+  it("orders a gate recheck before run-plan work that reads the gate", async () => {
+    const root = await projectRoot();
+    const definitions = [
+      definition("ticket-compile", 190, scope({ readNodes: ["gate-a"], writeNodes: ["run-a"] }), {
+        operation: "compile-run-plan",
+        operationRegistryId: "execution.node.compile-run-plan",
+      }),
+      definition("ticket-gate", 0, scope({ readNodes: ["asset-a"], writeNodes: ["gate-a"] }), {
+        operation: "run-gate",
+        operationRegistryId: "gates.gate.run-gate",
+      }),
+      definition("ticket-asset", 155, scope({ writeNodes: ["asset-a"] }), {
+        operation: "implement-asset",
+        operationRegistryId: "asset-resolution.asset.implement-asset",
+      }),
+    ];
+
+    expect(Object.fromEntries(deriveCompilerTicketDependencies(definitions, root))).toEqual({
+      "ticket-asset": [],
+      "ticket-compile": ["ticket-gate"],
+      "ticket-gate": ["ticket-asset"],
+    });
+  });
+
   it("settles narrower equal-priority path authority before an overlapping broad scope", async () => {
     const root = await projectRoot();
     const definitions = [
@@ -96,6 +213,23 @@ describe("compiler ticket dependency projection", () => {
 });
 
 describe("dependency- and scope-safe scheduler admission", () => {
+  it("admits retained run-plan compilation before conflicting runtime execution", async () => {
+    const root = await projectRoot();
+    const run = runRecord(root, 1);
+    run.tickets["ticket-compile"] = ticket("ticket-compile", -190_230, {
+      operationId: "execution.node.compile-run-plan",
+      writeNodes: ["run-a"],
+    });
+    run.tickets["ticket-run"] = ticket("ticket-run", -200_220, {
+      operationId: "execution.run.run-experiment",
+      writeNodes: ["run-a"],
+    });
+
+    expect(deriveReadyAssignments(run, 1).ready.map((assignment) => assignment.ticketId)).toEqual([
+      "ticket-compile",
+    ]);
+  });
+
   it("selects the deterministic maximal disjoint set under maxParallel", async () => {
     const root = await projectRoot();
     const run = runRecord(root, 3);
@@ -284,6 +418,7 @@ function ticket(
   id: string,
   priority: number,
   options: {
+    operationId?: string;
     dependencyIds?: string[];
     readNodes?: string[];
     writeNodes?: string[];
@@ -293,10 +428,10 @@ function ticket(
 ): TicketRecord {
   return {
     id,
-    operationId: "implement",
+    operationId: options.operationId ?? "implement",
     title: id,
     summary: id,
-    status: "ready",
+    status: "queued",
     priority,
     dependencyIds: options.dependencyIds ?? [],
     targetNodeIds: [],
@@ -346,6 +481,7 @@ function definition(
   id: string,
   rulePriority: number,
   ticketScope: DerivedTicketScope,
+  options: { operation?: string; operationRegistryId?: string } = {},
 ): DerivedTicketDefinition {
   const material = {
     protocol: "koni.derived-ticket.v1" as const,
@@ -354,8 +490,8 @@ function definition(
     rule_phase: "work",
     rule_priority: rulePriority,
     anchor_node_id: "anchor",
-    operation: "implement",
-    operation_registry_id: "implement",
+    operation: options.operation ?? "implement",
+    operation_registry_id: options.operationRegistryId ?? "implement",
     operation_dispatch_priority: 0,
     ranking_hints: [],
     title: id,

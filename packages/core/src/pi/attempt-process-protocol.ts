@@ -14,13 +14,14 @@ import type { SelectedDynamicGraphContext } from "../graph/context-selector.js";
 import type { AgentLaunchSpec } from "./launch-spec.js";
 import type { ManagedSessionEvent, ManagedSessionOutcome } from "./managed-session.js";
 import type { KoniRuntimeToolRejection, KoniToolName, KoniToolReceipt } from "./tool-catalog.js";
+import type { Sha256Digest } from "../shared/canonical.js";
 
 export const PI_ATTEMPT_PROCESS_PROTOCOL = "koni.pi-attempt-process.v1" as const;
 // The largest catalog argument is a 16 MiB string. JSON may expand each byte to a six-byte escape,
 // so 128 MiB preserves the complete compiler-authorized tool surface while remaining hard-bounded.
 export const PI_ATTEMPT_PROCESS_MAX_FRAME_BYTES = 128 * 1024 * 1024;
 
-export type PiAttemptProcessMode = "fresh" | "recover";
+export type PiAttemptProcessMode = "fresh" | "recover" | "planning_revision";
 
 interface FrameBase {
   protocol: typeof PI_ATTEMPT_PROCESS_PROTOCOL;
@@ -40,6 +41,7 @@ export interface LaunchAttemptFrame extends FrameBase {
   deferActivation: boolean;
   spec: AgentLaunchSpec;
   terminalOutputSchema: TSchema;
+  priorTranscriptSha256?: Sha256Digest;
 }
 
 export interface ActivateControlAttemptFrame extends FrameBase {
@@ -260,10 +262,15 @@ export function parseParentFrame(value: unknown): PiAttemptParentFrame {
   switch (frame.type) {
     case "launch":
       if (
-        (frame.mode !== "fresh" && frame.mode !== "recover") ||
+        (frame.mode !== "fresh" &&
+          frame.mode !== "recover" &&
+          frame.mode !== "planning_revision") ||
         typeof frame.deferActivation !== "boolean" ||
         !isRecord(frame.spec) ||
-        !isRecord(frame.terminalOutputSchema)
+        !isRecord(frame.terminalOutputSchema) ||
+        (frame.mode === "planning_revision"
+          ? !isDigest(frame.priorTranscriptSha256)
+          : frame.priorTranscriptSha256 !== undefined)
       )
         failShape("launch frame is malformed");
       break;

@@ -29,6 +29,39 @@ const T4 = "2026-07-17T00:00:04.000Z";
 const T5 = "2026-07-17T00:00:05.000Z";
 
 describe("durable question batch state machine", () => {
+  it("binds a planning question batch and its resolution to one planning revision", () => {
+    const created = createQuestionBatch({
+      id: "batch-planning-revision-one",
+      attemptId: "attempt-plan",
+      planningRevision: 1,
+      questions: [question("question-planning")],
+      createdAt: T0,
+    });
+    const answered = saveQuestionBatchAnswer(created, {
+      expectedVersion: created.version,
+      questionId: "question-planning",
+      selectedOptionId: "question-planning.yes",
+      savedAt: T1,
+    });
+    const queued = queueQuestionBatchResume(answered, {
+      expectedVersion: answered.version,
+      at: T2,
+    });
+
+    expect(created.planningRevision).toBe(1);
+    expect(projectQuestionBatchCapabilities(created).planningRevision).toBe(1);
+    expect(projectQuestionBatchResolution(queued).planningRevision).toBe(1);
+    expect(() =>
+      createQuestionBatch({
+        id: "batch-invalid-planning-revision",
+        attemptId: "attempt-plan",
+        planningRevision: -1,
+        questions: [question("question-invalid")],
+        createdAt: T0,
+      }),
+    ).toThrow(/planningRevision/u);
+  });
+
   it("binds ticket-scoped questions through capabilities and the sealed resolution", () => {
     const created = createQuestionBatch({
       id: "batch-scoped",

@@ -39,7 +39,7 @@ import {
   type TicketStatus,
 } from "../src/state/run-record.js";
 import { runBehaviorSnapshotFixture } from "./fixtures/compiled-behavior.js";
-import { fixtureRunGit } from "./run-record-fixtures.js";
+import { attachFixtureTicketCycle, fixtureRunGit } from "./run-record-fixtures.js";
 
 const AT = "2026-07-18T05:00:00.000Z";
 const ROLES: readonly ControlTicketRole[] = [
@@ -55,6 +55,110 @@ type AuthorityAttack = Readonly<{
 }>;
 
 describe("canonical compiler control-ticket authority", () => {
+  it("allows an actively held proposal source to receive later compiler dependencies", async () => {
+    const fixture = await controlFixture("proposal");
+    const proposal = fixture.run.tickets[fixture.controlTicketId]!;
+    const proposalAuthority = proposal.executionControl!.controlTicketAuthority!;
+    if (proposalAuthority.causal.role !== "proposal") {
+      throw new Error("fixture proposal cause mismatch");
+    }
+    const source = fixture.run.tickets[proposalAuthority.causal.publication.sourceTicketId]!;
+    expect(source.executionControl?.sourceHold?.proposalTicketId).toBe(proposal.id);
+    expect(() => assertRunRecord(fixture.run)).not.toThrow();
+
+    const next = structuredClone(fixture.run);
+    next.revision += 1;
+    next.updatedAt = "2026-07-18T05:01:00.000Z";
+    next.tickets[source.id]!.dependencyIds = [proposal.id];
+
+    expect(() => assertRunRecord(next)).not.toThrow();
+    expect(() => assertRunExecutionControlMutation(fixture.run, next)).not.toThrow();
+  });
+
+  it("allows a released proposal source to receive later compiler dependencies", async () => {
+    const fixture = await controlFixture("approved_application");
+    const application = fixture.run.tickets[fixture.controlTicketId]!;
+    const applicationAuthority = application.executionControl!.controlTicketAuthority!;
+    if (applicationAuthority.causal.role !== "approved_application") {
+      throw new Error("fixture application cause mismatch");
+    }
+    const proposal =
+      fixture.run.tickets[applicationAuthority.causal.materialization.proposalTicketId]!;
+    const proposalAuthority = proposal.executionControl!.controlTicketAuthority!;
+    if (proposalAuthority.causal.role !== "proposal") {
+      throw new Error("fixture proposal cause mismatch");
+    }
+    const source = fixture.run.tickets[proposalAuthority.causal.publication.sourceTicketId]!;
+    delete source.executionControl;
+    application.status = "completed";
+    for (const step of application.steps) step.status = "completed";
+    const cycle = attachFixtureTicketCycle(fixture.run, application);
+    cycle.status = "retired";
+    cycle.integratedRunOid = fixture.run.git.run.headOid;
+    cycle.squashCommitOid = fixture.run.git.run.headOid;
+    cycle.integratedAt = "2026-07-18T05:00:00.000Z";
+    cycle.retiredAt = "2026-07-18T05:00:01.000Z";
+    expect(() => assertRunRecord(fixture.run)).not.toThrow();
+
+    const next = structuredClone(fixture.run);
+    next.revision += 1;
+    next.updatedAt = "2026-07-18T05:01:00.000Z";
+    next.tickets[source.id]!.dependencyIds = [application.id];
+
+    expect(() => assertRunRecord(next)).not.toThrow();
+    expect(() => assertRunExecutionControlMutation(fixture.run, next)).not.toThrow();
+  });
+
+  it("allows a recovered terminal source to receive later compiler dependencies", async () => {
+    const fixture = await controlFixture("terminal_resolver");
+    const resolver = fixture.run.tickets[fixture.controlTicketId]!;
+    const resolverAuthority = resolver.executionControl!.controlTicketAuthority!;
+    if (resolverAuthority.causal.role !== "terminal_resolver") {
+      throw new Error("fixture resolver cause mismatch");
+    }
+    const source = fixture.run.tickets[resolverAuthority.causal.reconciliation.sourceTicketId]!;
+    const terminalProof = await addSuccessAttempt(
+      fixture.run,
+      resolver,
+      resolver.steps.length - 1,
+      "attempt-resolver-terminal",
+      {},
+    );
+    resolver.executionControl!.terminalResolverTerminalProof = terminalProof;
+    resolver.status = "completed";
+    for (const step of resolver.steps) step.status = "completed";
+    expect(() => assertRunRecord(fixture.run)).not.toThrow();
+
+    const next = structuredClone(fixture.run);
+    next.revision += 1;
+    next.updatedAt = "2026-07-18T05:01:00.000Z";
+    next.tickets[source.id]!.dependencyIds = [resolver.id];
+
+    expect(() => assertRunRecord(next)).not.toThrow();
+    expect(() => assertRunExecutionControlMutation(fixture.run, next)).not.toThrow();
+  });
+
+  it("allows an active terminal source to receive a compiler repair dependency", async () => {
+    const fixture = await controlFixture("terminal_resolver");
+    const resolver = fixture.run.tickets[fixture.controlTicketId]!;
+    const resolverAuthority = resolver.executionControl!.controlTicketAuthority!;
+    if (resolverAuthority.causal.role !== "terminal_resolver") {
+      throw new Error("fixture resolver cause mismatch");
+    }
+    const source = fixture.run.tickets[resolverAuthority.causal.reconciliation.sourceTicketId]!;
+    expect(resolver.status).toBe("queued");
+    expect(resolver.executionControl?.terminalResolverTerminalProof).toBeUndefined();
+    expect(() => assertRunRecord(fixture.run)).not.toThrow();
+
+    const next = structuredClone(fixture.run);
+    next.revision += 1;
+    next.updatedAt = "2026-07-18T05:01:00.000Z";
+    next.tickets[source.id]!.dependencyIds = ["TK-compiler-repair"];
+
+    expect(() => assertRunRecord(next)).not.toThrow();
+    expect(() => assertRunExecutionControlMutation(fixture.run, next)).not.toThrow();
+  });
+
   it.each(ROLES)(
     "accepts an exact %s authority through JSON restart and lifecycle-only mutation",
     async (role) => {
@@ -67,7 +171,7 @@ describe("canonical compiler control-ticket authority", () => {
       next.revision += 1;
       next.updatedAt = "2026-07-18T05:01:00.000Z";
       const ticket = next.tickets[fixture.controlTicketId]!;
-      ticket.status = ticket.status === "proposed" ? "ready" : "running";
+      ticket.status = ticket.status === "proposed" ? "queued" : "running";
       ticket.blocker = undefined;
       ticket.updatedAt = next.updatedAt;
       expect(() => assertRunRecord(next)).not.toThrow();
@@ -548,7 +652,7 @@ async function applicationFixture(
     sourceProposalTicketId: proposal.id,
     approvedApplicationSha256: materialization.authoritySha256,
   };
-  const ticket = ticketFromDefinition(catalog, definition, "ready", selectionSummary, control, [
+  const ticket = ticketFromDefinition(catalog, definition, "queued", selectionSummary, control, [
     proposal.id,
   ]);
   attachAuthority(run, catalog, ticket, definition, "approved_application", {
@@ -624,7 +728,7 @@ async function resolverFixture(
   const ticket = ticketFromDefinition(
     catalog,
     definition,
-    "ready",
+    "queued",
     `Recover terminal ticket ${source.id} from 1 authenticated failure binding(s).`,
     control,
   );

@@ -83,6 +83,35 @@ describe("worktree path authority", () => {
     });
   });
 
+  it("does not spend the search byte budget on files a text search cannot match", async () => {
+    const root = await temporary();
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "src", "one.ts"), "export const needle = 1;\n");
+    // A research repository's images and checkpoints are inside the read grant and under the
+    // per-file read cap, so they were enumerated, read in full, and charged against the shared
+    // search budget before being discarded as binary — exhausting it before any source was reached.
+    await writeFile(path.join(root, "src", "diagram.png"), Buffer.alloc(6 * 1024 * 1024));
+    await writeFile(path.join(root, "src", "weights.safetensors"), Buffer.alloc(6 * 1024 * 1024));
+    const policy = await WorktreePathAuthority.create(root, {
+      readPaths: ["src"],
+      writePaths: [],
+    });
+
+    expect(await policy.search("needle", { roots: ["src"] })).toEqual([
+      {
+        path: "src/one.ts",
+        line: 1,
+        column: 14,
+        byteOffset: 13,
+        preview: "export const needle = 1;",
+      },
+    ]);
+    // Enumeration still reports them; only the text scan declines to pay for them.
+    expect((await policy.list("src", { recursive: true })).map((entry) => entry.path)).toContain(
+      "src/diagram.png",
+    );
+  });
+
   it("returns UTF-8 byte offsets that can page directly into a multibyte CRLF file", async () => {
     const root = await temporary();
     await mkdir(path.join(root, "src"), { recursive: true });

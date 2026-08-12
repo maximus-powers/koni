@@ -868,11 +868,11 @@ function newDocumentDescriptor(
   if (domain === "agents" && kind === "native_agent" && format === "yaml") {
     return { path: `agents/${name.slug}.yaml`, fileKind: "agent", format };
   }
-  if (domain === "skills" && kind === "skill" && format === "markdown") {
-    return { path: `resources/skills/${name.slug}/SKILL.md`, fileKind: "skill", format };
-  }
-  if (domain === "skills" && kind === "markdown_prompt" && format === "markdown") {
-    return { path: `resources/prompts/${name.slug}.md`, fileKind: "prompt", format };
+  if (domain === "skills") {
+    throw new ConfigDocumentAuthorityError(
+      "pi_resource_native",
+      "skills and prompts are Pi-native repository resources; manage them with Pi instead of creating them beneath .koni",
+    );
   }
   if (domain === "advanced" && kind === "raw_source") {
     const extension = format === "yaml" ? "yaml" : format === "markdown" ? "md" : "toml";

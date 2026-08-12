@@ -31,7 +31,9 @@ import {
   type KoniAttemptRecoveryState,
   type KoniAttemptUsage,
   type KoniContextProvider,
+  type KoniProviderRequestRecoveryRecord,
   type KoniProviderRequestReservation,
+  type KoniProviderRequestRetirement,
 } from "./compaction.js";
 import { type AgentLaunchSpec, validateAgentLaunchSpec } from "./launch-spec.js";
 import { createContainedResourceLoader } from "./resource-loader.js";
@@ -116,6 +118,12 @@ export type ManagedSessionEvent =
 
 export type ManagedSessionOutcome =
   | { status: "completed"; terminalOutput: unknown; usage: ManagedTokenUsage }
+  | {
+      status: "checkpointed";
+      revision: number;
+      terminalOutput: unknown;
+      usage: ManagedTokenUsage;
+    }
   | { status: "failed"; error: string; code?: string; usage: ManagedTokenUsage }
   | { status: "aborted"; reason: string; usage: ManagedTokenUsage };
 
@@ -191,6 +199,11 @@ export interface ManagedPiSessionFactoryOptions {
   modelRuntime?: ModelRuntime;
 }
 
+export interface ManagedPlanningRevisionOptions extends ManagedPiSessionFactoryOptions {
+  priorTranscriptSha256: Sha256Digest;
+  factory?: ManagedPiSessionFactory;
+}
+
 export class ManagedSessionError extends Error {
   public readonly code: string;
 
@@ -232,6 +245,7 @@ export class ManagedPiSession {
     adapter: PiSessionAdapter,
     appendMapping: boolean,
     terminalTool: AuthorityBackedTool,
+    initialUsage?: ManagedTokenUsage,
   ) {
     this.spec = spec;
     this.#adapter = adapter;
@@ -256,6 +270,9 @@ export class ManagedPiSession {
     if (this.#recovery !== undefined) {
       validateManagedUsage(this.#recovery.usage);
       Object.assign(this.#usage, this.#recovery.usage);
+    } else if (initialUsage !== undefined) {
+      validateManagedUsage(initialUsage);
+      Object.assign(this.#usage, initialUsage);
     }
     assertExactToolInventory(spec, adapter.getActiveToolNames());
     if (adapter.sessionId !== spec.identity.sessionId) {
@@ -327,6 +344,47 @@ export class ManagedPiSession {
     try {
       const terminalTool = validateToolBindings(spec, options.tools);
       return new ManagedPiSession(spec, adapter, false, terminalTool);
+    } catch (error) {
+      await disposeRejectedAdapter(adapter);
+      throw error;
+    }
+  }
+
+  public static async continuePlanningRevision(
+    specValue: AgentLaunchSpec,
+    options: ManagedPlanningRevisionOptions,
+  ): Promise<ManagedPiSession> {
+    const spec = validateAgentLaunchSpec(specValue);
+    if (spec.planningRevision === undefined || spec.planningRevision.revision < 1) {
+      throw new ManagedSessionError(
+        "planning_revision",
+        "continued planning requires a later immutable planning revision binding",
+      );
+    }
+    if (!isSha256Digest(options.priorTranscriptSha256)) {
+      throw new ManagedSessionError(
+        "planning_revision_transcript",
+        "continued planning requires the prior checkpoint transcript hash",
+      );
+    }
+    validateToolBindings(spec, options.tools);
+    const adapter = await (options.factory ?? continueManagedPlanningSession)(spec, options);
+    try {
+      const terminalTool = validateToolBindings(spec, options.tools);
+      const baseline = spec.planningRevision.budgetBaseline;
+      return new ManagedPiSession(spec, adapter, false, terminalTool, {
+        input: baseline.inputTokens,
+        output: baseline.outputTokens,
+        cacheRead: baseline.cacheReadTokens,
+        cacheWrite: baseline.cacheWriteTokens,
+        newTokens: safeUsageSum(baseline.inputTokens, baseline.outputTokens),
+        allTokens: safeUsageSum(
+          baseline.inputTokens,
+          baseline.outputTokens,
+          baseline.cacheReadTokens,
+          baseline.cacheWriteTokens,
+        ),
+      });
     } catch (error) {
       await disposeRejectedAdapter(adapter);
       throw error;
@@ -455,7 +513,7 @@ export class ManagedPiSession {
       return outcome;
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      if (outcome.status === "completed") {
+      if (outcome.status === "completed" || outcome.status === "checkpointed") {
         // The terminal tool's resolved receipt means the authority effect is durably accepted.
         // Pi cleanup cannot roll that transaction back or turn it into replayable failed work.
         this.#setStatus("completed", `Pi cleanup warning after terminal acceptance: ${detail}`);
@@ -480,7 +538,7 @@ export class ManagedPiSession {
         output: this.#terminalOutput,
       });
       this.#setStatus("completed", "recovered accepted terminal receipt");
-      return { status: "completed", terminalOutput: this.#terminalOutput, usage: this.usage };
+      return this.#acceptedOutcome(this.#terminalOutput);
     }
     if (this.#recovery?.disposition.kind === "blocked") {
       this.#setStatus("failed", this.#recovery.disposition.reason);
@@ -536,7 +594,14 @@ export class ManagedPiSession {
       return { status: "failed", error, code: "terminal_protocol", usage: this.usage };
     }
     this.#setStatus("completed");
-    return { status: "completed", terminalOutput: this.#terminalOutput, usage: this.usage };
+    return this.#acceptedOutcome(this.#terminalOutput);
+  }
+
+  #acceptedOutcome(terminalOutput: unknown): ManagedSessionOutcome {
+    const revision = this.spec.planningRevision?.revision;
+    return revision === undefined
+      ? { status: "completed", terminalOutput, usage: this.usage }
+      : { status: "checkpointed", revision, terminalOutput, usage: this.usage };
   }
 
   #onPiEvent(event: AgentSessionEvent): void {
@@ -725,10 +790,18 @@ export async function recoverManagedPiSession(
   return createProductionPiSession(spec, options, "recover");
 }
 
+/** Reopen the stable planning transcript and append one authenticated revision epoch. */
+export async function continueManagedPlanningSession(
+  spec: Readonly<AgentLaunchSpec>,
+  options: ManagedPlanningRevisionOptions,
+): Promise<PiSessionAdapter> {
+  return createProductionPiSession(spec, options, "planning_revision");
+}
+
 async function createProductionPiSession(
   spec: Readonly<AgentLaunchSpec>,
-  options: ManagedPiSessionFactoryOptions,
-  mode: "fresh" | "recover",
+  options: ManagedPiSessionFactoryOptions | ManagedPlanningRevisionOptions,
+  mode: "fresh" | "recover" | "planning_revision",
 ): Promise<PiSessionAdapter> {
   assertSupportedPiRuntimeVersion();
   const boundTools = snapshotToolBindings(options.tools);
@@ -743,7 +816,9 @@ async function createProductionPiSession(
           terminalTool.terminalOutputSchema!,
           boundTools,
         )
-      : undefined;
+      : mode === "planning_revision"
+        ? await inspectPlanningRevisionAuthority(spec, options.contextProvider)
+        : undefined;
   const recovery = authenticatedRecovery?.projection;
   let adapterOwnsRecoveryClaim = false;
   try {
@@ -763,14 +838,19 @@ async function createProductionPiSession(
     const sessionSetup: FreshSessionSetup =
       mode === "fresh"
         ? await createFreshSessionManager(spec)
-        : {
-            sessionManager: SessionManager.open(
-              expectedSessionFile(spec),
-              spec.workspace.sessionDirectory,
-              spec.workspace.cwd,
-            ),
-            initialPromptPreloaded: false,
-          };
+        : mode === "planning_revision"
+          ? await openPlanningRevisionSessionManager(
+              spec,
+              (options as ManagedPlanningRevisionOptions).priorTranscriptSha256,
+            )
+          : {
+              sessionManager: SessionManager.open(
+                expectedSessionFile(spec),
+                spec.workspace.sessionDirectory,
+                spec.workspace.cwd,
+              ),
+              initialPromptPreloaded: false,
+            };
     const { sessionManager } = sessionSetup;
     let initialPromptPreloaded = sessionSetup.initialPromptPreloaded;
     let pendingForkCompaction = sessionSetup.pendingForkCompaction;
@@ -916,7 +996,11 @@ async function createProductionPiSession(
       },
       onTurnStart: () => resultBudget.reset(),
     });
-    const contained = await createContainedResourceLoader({ spec, extension, mode });
+    const contained = await createContainedResourceLoader({
+      spec,
+      extension,
+      mode: mode === "fresh" ? "fresh" : "recover",
+    });
     const modelRuntime = options.modelRuntime ?? (await ModelRuntime.create());
     const unboundedModel = modelRuntime.getModel(spec.model.provider, spec.model.id);
     if (unboundedModel === undefined) {
@@ -1504,6 +1588,236 @@ async function createFreshSessionManager(
   };
 }
 
+async function openPlanningRevisionSessionManager(
+  spec: Readonly<AgentLaunchSpec>,
+  priorTranscriptSha256: Sha256Digest,
+): Promise<FreshSessionSetup> {
+  const revision = spec.planningRevision;
+  if (revision === undefined || revision.revision < 1) {
+    throw new ManagedSessionError(
+      "planning_revision",
+      "planning continuation has no later revision binding",
+    );
+  }
+  const sessionFile = expectedSessionFile(spec);
+  let parsed: ParsedPiSession;
+  try {
+    parsed = await readPiSessionDurably(sessionFile, {
+      maxBytes: spec.budgets.transcript.maxBytes + MAX_RECOVERY_SINGLE_ENTRY_OVERSHOOT_BYTES,
+    });
+  } catch (error) {
+    throw new ManagedSessionError(
+      "planning_revision_transcript",
+      `planning transcript cannot be authenticated: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  try {
+    assertAutonomousPiSession(parsed, {
+      sessionId: spec.identity.sessionId,
+      cwd: spec.workspace.cwd,
+    });
+  } catch {
+    throw new ManagedSessionError(
+      "planning_revision_identity",
+      "planning continuation changed the stable session header, workspace, or linear history",
+    );
+  }
+  if (
+    parsed.entries.some(
+      (entry) => entry.type === "custom" && entry.customType === "koni.conversation-fork-map",
+    )
+  ) {
+    throw new ManagedSessionError(
+      "planning_revision_fork",
+      "planning continuation cannot contain a conversation fork",
+    );
+  }
+  assertStablePlanningAttemptMapping(spec, sessionFile, parsed.entries);
+  if (transcriptSnapshotHash(parsed) !== priorTranscriptSha256) {
+    throw new ManagedSessionError(
+      "planning_revision_transcript",
+      "planning transcript does not match the prior validated checkpoint leaf",
+    );
+  }
+  assertPlanningRevisionMapSequence(spec, parsed.entries);
+  const sessionManager = SessionManager.open(
+    sessionFile,
+    spec.workspace.sessionDirectory,
+    spec.workspace.cwd,
+  );
+  sessionManager.appendCustomEntry(
+    "koni.planning-revision-map",
+    planningRevisionMapping(spec, priorTranscriptSha256),
+  );
+  sessionManager.appendModelChange(spec.model.provider, spec.model.id);
+  sessionManager.appendThinkingLevelChange(spec.model.thinkingLevel);
+  sessionManager.appendMessage({
+    role: "user",
+    content: spec.persona.initialPrompt,
+    timestamp: Date.now(),
+  });
+  await syncSessionFile(sessionFile);
+  return { sessionManager, initialPromptPreloaded: true };
+}
+
+function planningRevisionMapping(
+  spec: Readonly<AgentLaunchSpec>,
+  priorTranscriptSha256: Sha256Digest,
+): Readonly<Record<string, unknown>> {
+  const revision = spec.planningRevision!;
+  return {
+    protocol: "koni.planning-revision-map.v1",
+    specHash: spec.specHash,
+    runId: spec.identity.runId,
+    attemptId: spec.identity.attemptId,
+    sessionId: spec.identity.sessionId,
+    grantId: spec.authority.grantId,
+    grantHash: spec.authority.grantHash,
+    revision: revision.revision,
+    baseRevision: revision.baseRevision,
+    priorCheckpointSha256: revision.priorCheckpointSha256,
+    priorTranscriptSha256,
+    steeringSha256: revision.steeringSha256,
+    budgetBaseline: revision.budgetBaseline,
+  };
+}
+
+function assertStablePlanningAttemptMapping(
+  spec: Readonly<AgentLaunchSpec>,
+  sessionFile: string,
+  entries: readonly PiSessionEntry[],
+): void {
+  const mappings = entries.filter(
+    (entry) => entry.type === "custom" && entry.customType === "koni.attempt-session-map",
+  );
+  const data = mappings[0]?.data;
+  if (
+    mappings.length !== 1 ||
+    !isRecord(data) ||
+    data.runId !== spec.identity.runId ||
+    data.ticketId !== spec.identity.ticketId ||
+    data.stepId !== spec.identity.stepId ||
+    data.attemptId !== spec.identity.attemptId ||
+    data.sessionId !== spec.identity.sessionId ||
+    data.sessionFile !== sessionFile
+  ) {
+    throw new ManagedSessionError(
+      "planning_revision_identity",
+      "planning transcript does not retain its original authenticated attempt mapping",
+    );
+  }
+}
+
+function planningRevisionRecoveryPartition(
+  spec: Readonly<AgentLaunchSpec>,
+  sessionFile: string,
+  entries: readonly PiSessionEntry[],
+): { entries: readonly PiSessionEntry[]; priorEntries: readonly PiSessionEntry[] } {
+  assertStablePlanningAttemptMapping(spec, sessionFile, entries);
+  const expectedRevision = spec.planningRevision!.revision;
+  const maps: Array<{ data: Record<string, unknown>; index: number }> = [];
+  entries.forEach((entry, index) => {
+    if (
+      entry.type === "custom" &&
+      entry.customType === "koni.planning-revision-map" &&
+      isRecord(entry.data)
+    ) {
+      maps.push({ data: entry.data, index });
+    }
+  });
+  if (
+    maps.length !== expectedRevision ||
+    maps.some(({ data }, index) => data.revision !== index + 1)
+  ) {
+    throw new ManagedSessionError(
+      "planning_revision_sequence",
+      "recovered planning transcript has replayed, missing, or noncontiguous revision maps",
+    );
+  }
+  const current = maps.at(-1)!;
+  const priorTranscriptSha256 = current.data.priorTranscriptSha256;
+  if (
+    !isSha256Digest(priorTranscriptSha256) ||
+    !jsonEqual(current.data, planningRevisionMapping(spec, priorTranscriptSha256))
+  ) {
+    throw new ManagedSessionError(
+      "planning_revision_identity",
+      "current planning revision map does not match its immutable launch binding",
+    );
+  }
+  return {
+    priorEntries: entries.slice(0, current.index + 1),
+    entries: entries.slice(current.index + 1),
+  };
+}
+
+function planningRevisionRecoveryAuthority(
+  authority: KoniAttemptRecoveryState,
+  priorEntries: readonly PiSessionEntry[],
+): KoniAttemptRecoveryState {
+  const priorToolCalls = new Set<string>();
+  const priorMessageSequences = new Set<number>();
+  for (const entry of priorEntries) {
+    if (
+      entry.type === "custom" &&
+      entry.customType === "koni.authorized-message-map" &&
+      isRecord(entry.data) &&
+      typeof entry.data.sequence === "number"
+    ) {
+      priorMessageSequences.add(entry.data.sequence);
+      continue;
+    }
+    if (entry.type !== "message" || !isRecord(entry.message)) continue;
+    if (entry.message.role === "toolResult" && typeof entry.message.toolCallId === "string") {
+      priorToolCalls.add(entry.message.toolCallId);
+      continue;
+    }
+    if (entry.message.role !== "assistant" || !Array.isArray(entry.message.content)) continue;
+    for (const block of entry.message.content) {
+      if (isRecord(block) && block.type === "toolCall" && typeof block.id === "string") {
+        priorToolCalls.add(block.id);
+      }
+    }
+  }
+  return {
+    ...authority,
+    authorizedMessages: authority.authorizedMessages.filter(
+      (message) => !priorMessageSequences.has(message.sequence),
+    ),
+    authorizedToolResults: authority.authorizedToolResults.filter(
+      (result) => !priorToolCalls.has(result.callId),
+    ),
+  };
+}
+
+function assertPlanningRevisionMapSequence(
+  spec: Readonly<AgentLaunchSpec>,
+  entries: readonly PiSessionEntry[],
+): void {
+  const expectedPrior = spec.planningRevision!.revision - 1;
+  const revisions = entries.flatMap((entry) => {
+    if (
+      entry.type !== "custom" ||
+      entry.customType !== "koni.planning-revision-map" ||
+      !isRecord(entry.data) ||
+      !Number.isSafeInteger(entry.data.revision)
+    ) {
+      return [];
+    }
+    return [Number(entry.data.revision)];
+  });
+  const expected = Array.from({ length: expectedPrior }, (_unused, index) => index + 1);
+  if (
+    revisions.length !== expected.length ||
+    revisions.some((revision, index) => revision !== expected[index])
+  ) {
+    throw new ManagedSessionError(
+      "planning_revision_sequence",
+      "planning transcript revision maps are replayed, missing, or noncontiguous",
+    );
+  }
+}
+
 function shouldPrecompactConversationFork(
   spec: Readonly<AgentLaunchSpec>,
   sessionManager: SessionManager,
@@ -1836,6 +2150,46 @@ function attemptSessionMapping(
   };
 }
 
+async function inspectPlanningRevisionAuthority(
+  spec: Readonly<AgentLaunchSpec>,
+  contextProvider: KoniContextProvider,
+): Promise<AuthenticatedRecovery> {
+  const claim = await contextProvider.acquireRecoveryClaim(spec);
+  const release =
+    typeof claim.release === "function"
+      ? onceAsync(claim.release.bind(claim))
+      : async () => undefined;
+  try {
+    validateRecoveryClaim(spec, claim);
+    validateRecoveryAuthority(spec, claim.state);
+    if (claim.state.providerRequests?.some(isOpenRecoveryProviderRequest)) {
+      throw new ManagedSessionError(
+        "planning_revision_provider",
+        "planning revision cannot continue while a provider request remains unsettled",
+      );
+    }
+    if (claim.state.status !== "continue") {
+      throw new ManagedSessionError(
+        "planning_revision_state",
+        "planning revision authority is not ready for same-session continuation",
+      );
+    }
+    return {
+      projection: {
+        usage: authorityRecoveryUsage(claim.state),
+        ...(claim.state.providerRequests === undefined
+          ? {}
+          : { providerRequestCount: claim.state.providerRequests.length }),
+        disposition: { kind: "prompt" },
+      },
+      release,
+    };
+  } catch (error) {
+    await release().catch(() => undefined);
+    throw error;
+  }
+}
+
 async function inspectRecoveredSession(
   spec: Readonly<AgentLaunchSpec>,
   contextProvider: KoniContextProvider,
@@ -1854,7 +2208,7 @@ async function inspectRecoveredSession(
     validateRecoveryAuthority(spec, recoveryState);
     const providerRequestCount = recoveryState.providerRequests?.length;
     const providerProjection = providerRequestCount === undefined ? {} : { providerRequestCount };
-    if (recoveryState.providerRequests?.some((request) => request.settlement === undefined)) {
+    if (recoveryState.providerRequests?.some(isOpenRecoveryProviderRequest)) {
       return {
         projection: {
           usage: authorityRecoveryUsage(recoveryState),
@@ -1936,9 +2290,28 @@ async function inspectRecoveredSession(
     }
     const transcriptPartition = await currentAttemptEntries(spec, parsed);
     const currentEntries = transcriptPartition.entries;
-    assertExactAttemptMapping(spec, sessionFile, currentEntries);
+    const planningPartition =
+      spec.planningRevision !== undefined && spec.planningRevision.revision > 0
+        ? planningRevisionRecoveryPartition(spec, sessionFile, currentEntries)
+        : undefined;
+    if (planningPartition === undefined)
+      assertExactAttemptMapping(spec, sessionFile, currentEntries);
+    const inspectionEntries = planningPartition?.entries ?? currentEntries;
+    const inspectionAuthority =
+      planningPartition === undefined
+        ? recoveryState
+        : planningRevisionRecoveryAuthority(recoveryState, planningPartition.priorEntries);
     const authorityUsage = authorityRecoveryUsage(recoveryState);
-    const transcriptUsage = recoveryUsage(currentEntries);
+    const retiredAssistantIds = new Set(
+      (recoveryState.providerRequests ?? []).flatMap((request) =>
+        request.retirement !== undefined && "assistantEntryId" in request.retirement
+          ? [request.retirement.assistantEntryId]
+          : [],
+      ),
+    );
+    const transcriptUsage = recoveryUsage(
+      currentEntries.filter((entry) => !retiredAssistantIds.has(entry.id)),
+    );
     const usage =
       recoveryState.providerRequests === undefined
         ? mergeRecoveryUsage(authorityUsage, transcriptUsage)
@@ -1993,12 +2366,15 @@ async function inspectRecoveredSession(
     }
     const transcript = inspectTranscript(
       spec,
-      currentEntries,
-      recoveryState,
+      inspectionEntries,
+      inspectionAuthority,
       tools,
-      transcriptPartition.inheritedEntryIds,
+      new Set([
+        ...transcriptPartition.inheritedEntryIds,
+        ...(planningPartition?.priorEntries.map((entry) => entry.id) ?? []),
+      ]),
     );
-    assertExactPersistedRuntime(spec, currentEntries, transcript.hasInitialPrompt);
+    assertExactPersistedRuntime(spec, inspectionEntries, transcript.hasInitialPrompt);
     const replayableTerminal =
       transcript.terminalResults === 0 &&
       transcript.pendingToolActions.some(
@@ -2230,6 +2606,7 @@ function inspectTranscript(
   let terminalCalls = 0;
   let terminalResults = 0;
   let toolCallOrder = 0;
+  let lastAssistantIsRetryableLocalInterruption = false;
   const authorizedMessages = new Map(
     authority.authorizedMessages.map((message) => [message.sequence, message] as const),
   );
@@ -2251,6 +2628,7 @@ function inspectTranscript(
   );
   const seenAuthorizedCompactions = new Set<string>();
   for (const entry of entries) {
+    lastAssistantIsRetryableLocalInterruption = false;
     if (entry.type === "custom") {
       if (entry.customType === "koni.authorized-message-map") {
         if (!hasInitialPrompt || !isRecord(entry.data)) {
@@ -2372,6 +2750,15 @@ function inspectTranscript(
           "Pi assistant message content is malformed",
         );
       }
+      // A retirement authenticates this exact provider terminal while deliberately retaining its
+      // reservation as uncertain exposure. It is history, not a tool batch to replay. Treat it as
+      // the recoverable continuation boundary after its identity was checked against the ledger.
+      if (isRetiredProviderAssistant(authority, entry.id)) {
+        lastAssistantIsRetryableLocalInterruption = true;
+        lastBoundary = "assistant";
+        seenEntryIds.add(entry.id);
+        continue;
+      }
       const batchCalls: Array<{ id: string; name: string }> = [];
       for (const block of message.content) {
         if (!isRecord(block) || !["text", "thinking", "toolCall"].includes(String(block.type))) {
@@ -2456,6 +2843,11 @@ function inspectTranscript(
         );
       }
       terminalCalls += batchCalls.filter((call) => call.name === spec.terminal.toolName).length;
+      lastAssistantIsRetryableLocalInterruption = isRetryableUnreservedAssistantInterruption(
+        spec,
+        message,
+        authority,
+      );
       lastBoundary = "assistant";
       seenEntryIds.add(entry.id);
       continue;
@@ -2568,7 +2960,8 @@ function inspectTranscript(
         lastBoundary === "toolResult" ||
         lastBoundary === "compaction" ||
         (lastBoundary === "messageMap" && outstandingMessageMappings.length > 0) ||
-        (lastBoundary === "assistant" && pendingToolActions.length > 0)),
+        (lastBoundary === "assistant" &&
+          (pendingToolActions.length > 0 || lastAssistantIsRetryableLocalInterruption))),
     terminalCalls,
     terminalResults,
     pendingMessages: authority.authorizedMessages
@@ -2579,6 +2972,39 @@ function inspectTranscript(
       })),
     pendingToolActions,
   };
+}
+
+function isRetryableUnreservedAssistantInterruption(
+  spec: Readonly<AgentLaunchSpec>,
+  message: Record<string, unknown>,
+  authority: KoniAttemptRecoveryState,
+): boolean {
+  const usage = message.usage;
+  const content = message.content;
+  const isLocalError =
+    message.stopReason === "error" && Array.isArray(content) && content.length === 0;
+  const isLocallyAborted =
+    message.stopReason === "aborted" &&
+    Array.isArray(content) &&
+    content.every((block) => isRecord(block) && block.type === "text" && block.text === "");
+  return (
+    (isLocalError || isLocallyAborted) &&
+    typeof message.errorMessage === "string" &&
+    message.errorMessage.length > 0 &&
+    Buffer.byteLength(message.errorMessage, "utf8") <= 1024 * 1024 &&
+    message.api === spec.model.api &&
+    message.provider === spec.model.provider &&
+    message.model === spec.model.id &&
+    isRecord(usage) &&
+    usage.input === 0 &&
+    usage.output === 0 &&
+    usage.cacheRead === 0 &&
+    usage.cacheWrite === 0 &&
+    usage.totalTokens === 0 &&
+    (authority.providerRequests ?? []).every(
+      (request) => request.settlement !== undefined || request.retirement !== undefined,
+    )
+  );
 }
 
 function validatePersistedCompaction(
@@ -2842,6 +3268,17 @@ function validateProviderRecoveryRecords(
       );
     }
     const settlement = request.settlement;
+    const retirement = request.retirement;
+    if (settlement !== undefined && retirement !== undefined) {
+      throw new ManagedSessionError(
+        "recovery_authority",
+        "provider request cannot be both settled and retired",
+      );
+    }
+    if (retirement !== undefined) {
+      validateProviderRequestRetirement(retirement);
+      continue;
+    }
     if (settlement === undefined) {
       if (unresolved || index !== requests.length - 1) {
         throw new ManagedSessionError(
@@ -2896,38 +3333,117 @@ function validateProviderRecoveryRecords(
   }
 }
 
+function isOpenRecoveryProviderRequest(request: KoniProviderRequestRecoveryRecord): boolean {
+  return request.settlement === undefined && request.retirement === undefined;
+}
+
+function isRetiredProviderAssistant(authority: KoniAttemptRecoveryState, entryId: string): boolean {
+  return (authority.providerRequests ?? []).some(
+    (request) =>
+      request.retirement !== undefined &&
+      "assistantEntryId" in request.retirement &&
+      request.retirement.assistantEntryId === entryId,
+  );
+}
+
+function validateProviderRequestRetirement(retirement: KoniProviderRequestRetirement): void {
+  if (
+    retirement.protocol !== "koni.provider-exposure-retirement.v1" ||
+    !isSha256Digest(retirement.authorizationSha256) ||
+    !safeTranscriptIdentity(retirement.retiredAt, 128) ||
+    !isSha256Digest(retirement.sha256)
+  ) {
+    throw new ManagedSessionError(
+      "recovery_authority",
+      "provider request retirement identity is malformed",
+    );
+  }
+  if (
+    retirement.disposition === "operator_acknowledged_authority_pause"
+      ? !isSha256Digest(retirement.pauseReasonSha256)
+      : retirement.disposition === "operator_acknowledged_unreconciled_request"
+        ? !isSha256Digest(retirement.failureReasonSha256)
+        : !safeTranscriptIdentity(retirement.assistantEntryId, 128) ||
+          !isSha256Digest(retirement.assistantEntrySha256) ||
+          !safeTranscriptIdentity(retirement.responseId, 512) ||
+          (retirement.disposition === "operator_acknowledged_provider_error"
+            ? !isSha256Digest(retirement.errorMessageSha256)
+            : retirement.errorMessageSha256 !== undefined)
+  ) {
+    throw new ManagedSessionError(
+      "recovery_authority",
+      "provider request retirement fields are malformed",
+    );
+  }
+  const { sha256, ...material } = retirement;
+  if (canonicalHash(material) !== sha256) {
+    throw new ManagedSessionError(
+      "recovery_authority",
+      "provider request retirement hash does not match its material",
+    );
+  }
+}
+
 function assertProviderSettlementsMatchTranscript(
   entries: readonly PiSessionEntry[],
   state: KoniAttemptRecoveryState,
 ): void {
   const requests = state.providerRequests;
   if (requests === undefined) return;
-  let derivedSettlements: ReturnType<typeof deriveProviderSettlements>;
-  try {
-    derivedSettlements = deriveProviderSettlements(
-      entries,
-      requests.map((request, index) => ({
-        baselineEntryId: request.baselineEntryId,
-        ...(requests[index + 1] === undefined
-          ? {}
-          : { nextBaselineEntryId: requests[index + 1]!.baselineEntryId }),
-      })),
-    );
-  } catch (error) {
-    throw new ManagedSessionError(
-      "recovery_provider_settlement",
-      `provider settlements cannot be re-derived from Pi JSONL: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
   for (const [index, request] of requests.entries()) {
     const settlement = request.settlement;
+    const retirement = request.retirement;
+    if (retirement !== undefined) {
+      const baselineIndex = entries.findIndex((entry) => entry.id === request.baselineEntryId);
+      const nextBaselineId = requests[index + 1]?.baselineEntryId;
+      const nextBaselineIndex =
+        nextBaselineId === undefined
+          ? entries.length
+          : entries.findIndex((entry) => entry.id === nextBaselineId);
+      const assistants = entries
+        .slice(baselineIndex + 1, nextBaselineIndex)
+        .filter(
+          (entry) =>
+            entry.type === "message" &&
+            isRecord(entry.message) &&
+            entry.message.role === "assistant",
+        );
+      const retiredAssistant = assistants.at(-1);
+      if (
+        baselineIndex < 0 ||
+        nextBaselineIndex <= baselineIndex ||
+        ("assistantEntryId" in retirement
+          ? retiredAssistant?.id !== retirement.assistantEntryId ||
+            canonicalHash(retiredAssistant) !== retirement.assistantEntrySha256
+          : assistants.length !== 0)
+      ) {
+        throw new ManagedSessionError(
+          "recovery_provider_settlement",
+          "provider retirement no longer matches its exact canonical Pi response boundary",
+        );
+      }
+      continue;
+    }
     if (settlement === undefined) {
       throw new ManagedSessionError(
         "recovery_provider_settlement",
         "provider reservation remains unsettled during transcript authentication",
       );
     }
-    const derived = derivedSettlements[index];
+    let derived: ReturnType<typeof deriveProviderSettlements>[number];
+    try {
+      [derived] = deriveProviderSettlements(entries, [
+        {
+          baselineEntryId: request.baselineEntryId,
+          nextBaselineEntryId: settlement.assistantEntryId,
+        },
+      ]);
+    } catch (error) {
+      throw new ManagedSessionError(
+        "recovery_provider_settlement",
+        `provider settlement cannot be re-derived from Pi JSONL: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     if (
       derived === undefined ||
       derived.assistantEntryId !== settlement.assistantEntryId ||
@@ -3593,8 +4109,9 @@ function safeUsageSum(...values: number[]): number {
 
 function tokenBudgetViolation(
   spec: Readonly<AgentLaunchSpec>,
-  usage: ManagedTokenUsage,
+  cumulativeUsage: ManagedTokenUsage,
 ): string | undefined {
+  const usage = planningRevisionBudgetUsage(spec, cumulativeUsage);
   const maximum = spec.budgets.tokens;
   const checks: Array<[number, number, string]> = [
     [usage.input, maximum.maxInput, "input"],
@@ -3609,8 +4126,9 @@ function tokenBudgetViolation(
 
 function tokenBudgetExhaustion(
   spec: Readonly<AgentLaunchSpec>,
-  usage: ManagedTokenUsage,
+  cumulativeUsage: ManagedTokenUsage,
 ): string | undefined {
+  const usage = planningRevisionBudgetUsage(spec, cumulativeUsage);
   const maximum = spec.budgets.tokens;
   const checks: Array<[number, number, string]> = [
     [usage.input, maximum.maxInput, "input"],
@@ -3638,7 +4156,7 @@ export function providerOutputLimit(
   spec: Readonly<AgentLaunchSpec>,
   recoveredUsage: ManagedTokenUsage | undefined,
 ): number {
-  const usage = recoveredUsage ?? emptyUsage();
+  const usage = planningRevisionBudgetUsage(spec, recoveredUsage ?? emptyUsage());
   const maximum = spec.budgets.tokens;
   const contextOutputCap =
     spec.model.catalogContextWindow === undefined
@@ -3653,6 +4171,32 @@ export function providerOutputLimit(
       contextOutputCap,
     ),
   );
+}
+
+function planningRevisionBudgetUsage(
+  spec: Readonly<AgentLaunchSpec>,
+  cumulative: Readonly<ManagedTokenUsage>,
+): ManagedTokenUsage {
+  const baseline = spec.planningRevision?.budgetBaseline;
+  if (baseline === undefined) return { ...cumulative };
+  const input = cumulative.input - baseline.inputTokens;
+  const output = cumulative.output - baseline.outputTokens;
+  const cacheRead = cumulative.cacheRead - baseline.cacheReadTokens;
+  const cacheWrite = cumulative.cacheWrite - baseline.cacheWriteTokens;
+  if ([input, output, cacheRead, cacheWrite].some((value) => value < 0)) {
+    throw new ManagedSessionError(
+      "planning_revision_budget",
+      "cumulative provider usage moved behind the authenticated planning revision baseline",
+    );
+  }
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    newTokens: safeUsageSum(input, output),
+    allTokens: safeUsageSum(input, output, cacheRead, cacheWrite),
+  };
 }
 
 function containedCompactionKeepRecentTokens(spec: Readonly<AgentLaunchSpec>): number {

@@ -117,7 +117,7 @@ describe("deterministic configured reports", () => {
 function fixtureConfiguration(): CompiledConfiguration {
   return {
     protocol: "koni.compiled-configuration.v1",
-    schema_version: "2.0",
+    schema_version: "3.0",
     package: {
       name: "@koni/research-profile",
       version: "1.0.0",
@@ -137,7 +137,6 @@ function fixtureConfiguration(): CompiledConfiguration {
       workflows: [],
       actions: [],
       checks: [],
-      personas: [],
       reports: [],
       cockpit: [],
       lifecycles: [],

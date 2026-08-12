@@ -155,7 +155,13 @@ describe("configured durable lifecycle authority", () => {
       ),
     ).toThrow(/initialize durable runs as active/u);
 
-    const wrongTicket = machine("ticket", "legacy-waiting", ["legacy-waiting", "closed"], ["closed"], []);
+    const wrongTicket = machine(
+      "ticket",
+      "legacy-waiting",
+      ["legacy-waiting", "closed"],
+      ["closed"],
+      [],
+    );
     expect(() =>
       assertRuntimeLifecycleCatalog(
         catalogWith({

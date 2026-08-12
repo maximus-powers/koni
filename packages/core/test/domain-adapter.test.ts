@@ -120,6 +120,144 @@ describe("production compiler rule-domain adapter", () => {
     ).rejects.toThrow(/does not match this compiler graph\/configuration snapshot/);
   });
 
+  it("recognizes a current gate terminal from its authenticated configured receipt", async () => {
+    const root = await temporaryRoot();
+    const configuration = compileProfile("research-profile");
+    const gate = node(
+      "gate-a",
+      "gate",
+      "Expected-red gate",
+      "active",
+      {
+        assertion: "Verifier executes",
+        applicability: "Claim A",
+        capability: { name: "verifier", protocol_range: ">=1.0.0 <2.0.0" },
+      },
+      { applies_to: ["claim-a"] },
+    );
+    const asset = node("asset-a", "asset", "Verifier", "active", {
+      capabilities: [{ name: "verifier", protocol_version: "1.0.0" }],
+      gate_contracts: { "gate-a": { argv: ["node", "verify.mjs"] } },
+    });
+    const graph = projection([gate, asset, node("claim-a", "claim", "Claim A", "active")]);
+    const inputGraphSha256 = ruleInputGraphSha256(configuration, graph);
+    const receiptLeaf: ConfigurationObject = {
+      op: "current_receipt",
+      receipt_type: "gate.receipt",
+    };
+    const receiptKey = rulePredicateEvidenceKey({
+      configurationSha256: configuration.configuration_sha256,
+      inputGraphSha256,
+      leaf: receiptLeaf,
+      subjectNodeId: gate.id,
+      bindings: {},
+    });
+    const evidence = createRuleAuthorityEvidence({
+      protocol: RULE_AUTHORITY_EVIDENCE_PROTOCOL,
+      configurationSha256: configuration.configuration_sha256,
+      inputGraphSha256,
+      predicates: {
+        [receiptKey]: {
+          key: receiptKey,
+          result: true,
+          recordedAt: NOW,
+          sourceReceiptIds: ["receipt-gate-a"],
+          leaf: receiptLeaf,
+          subjectNodeId: gate.id,
+          bindings: {},
+        },
+      },
+    });
+    const adapter = await createProductionRuleDomainAdapter({
+      configuration,
+      graph,
+      projectRoot: root,
+      evidence,
+    });
+    const evaluator = new GraphExpressionEvaluator(configuration, graph, adapter);
+    evaluator.bind("target", [gate.id]);
+
+    expect(
+      evaluator.evaluate({
+        op: "gate_policy_has_current_terminal",
+        gate_policy: "research-capability-gates",
+        gate_subject: "$target",
+      }),
+    ).toBe(true);
+  });
+
+  it("reads refused gate receipts from recorder-canonical keys regardless of caller context", async () => {
+    const root = await temporaryRoot();
+    const configuration = compileProfile("research-profile");
+    const gate = node("gate-a", "gate", "Expected-red gate", "active");
+    const asset = node("asset-a", "asset", "Verifier-owning asset", "active");
+    const graph = projection([gate, asset]);
+    const inputGraphSha256 = ruleInputGraphSha256(configuration, graph);
+    // Two leaf shapes reference the same gate: run-gate reaches it as $target, the asset-reopen
+    // block in ticket.implement-asset reaches it as $candidate_gate. The recorder stores one entry
+    // per configured leaf, keyed by the gate with every referenced binding mapped to the gate id.
+    const gateLeaf: ConfigurationObject = {
+      op: "gate_policy_receipt_refused",
+      gate_policy: "research-capability-gates",
+      gate_subject: "$target",
+    };
+    const assetContextLeaf: ConfigurationObject = {
+      op: "gate_policy_receipt_refused",
+      gate_policy: "research-capability-gates",
+      gate_subject: "$candidate_gate",
+    };
+    const predicates = Object.fromEntries(
+      [gateLeaf, assetContextLeaf].map((leaf) => {
+        const binding = String(leaf.gate_subject).slice(1);
+        const key = rulePredicateEvidenceKey({
+          configurationSha256: configuration.configuration_sha256,
+          inputGraphSha256,
+          leaf,
+          subjectNodeId: gate.id,
+          bindings: { [binding]: [gate.id] },
+        });
+        return [key, { key, result: true, recordedAt: NOW, sourceReceiptIds: ["receipt-gate-a"] }];
+      }),
+    );
+    const evidence = createRuleAuthorityEvidence({
+      protocol: RULE_AUTHORITY_EVIDENCE_PROTOCOL,
+      configurationSha256: configuration.configuration_sha256,
+      inputGraphSha256,
+      predicates,
+    });
+    const adapter = await createProductionRuleDomainAdapter({
+      configuration,
+      graph,
+      projectRoot: root,
+      evidence,
+    });
+    const evaluator = new GraphExpressionEvaluator(configuration, graph, adapter);
+
+    // From the gate's own context (ticket.run-gate).
+    evaluator.bind("target", [gate.id]);
+    expect(evaluator.evaluate(gateLeaf)).toBe(true);
+
+    // From a foreign subject (ticket.implement-asset iterating gates from an asset target): the
+    // ambient subject is the asset, and only the bound name reaches the gate. Ambient-context
+    // keying would miss here, which is exactly how the accepted-but-nonpassing reopen logic went
+    // dead in the field; the refused predicate must not repeat that.
+    const foreign = new GraphExpressionEvaluator(configuration, graph, adapter);
+    foreign.bind("target", [asset.id]);
+    foreign.bind("candidate_gate", [gate.id]);
+    expect(foreign.evaluate(assetContextLeaf)).toBe(true);
+
+    // No evidence for the current snapshot means "never ran", which must stay false so the gate
+    // still dispatches for its first execution.
+    const emptyAdapter = await createProductionRuleDomainAdapter({
+      configuration,
+      graph,
+      projectRoot: root,
+    });
+    const fresh = new GraphExpressionEvaluator(configuration, graph, emptyAdapter);
+    fresh.bind("target", [gate.id]);
+    expect(fresh.evaluate(gateLeaf)).toBe(false);
+  });
+
   it("snapshots configured paths inside the canonical project root and rejects escapes or symlinks", async () => {
     const root = await temporaryRoot();
     await mkdir(join(root, "src"));

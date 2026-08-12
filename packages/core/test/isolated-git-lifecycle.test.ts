@@ -675,6 +675,55 @@ describe("pure TypeScript isolated Git lifecycle", () => {
     expect(await gitOutput(root, "status", "--porcelain")).toBe("");
   });
 
+  it("materializes both sides of a conflicted candidate in a clean integration checkout", async () => {
+    const root = await repository();
+    const authority = lifecycle(root);
+    const journal = new MemoryJournal();
+    let state = await approvedRun(authority, journal, "run-ticket-conflict-preview");
+
+    await writeFile(path.join(root, "src", "base.ts"), "candidate\n");
+    await writeFile(path.join(root, "src", "candidate-only.ts"), "candidate only\n");
+    await git(root, "add", "src/base.ts", "src/candidate-only.ts");
+    await git(root, "commit", "-m", "candidate side");
+    const candidateOid = await gitOutput(root, "rev-parse", "HEAD");
+
+    state = await authority.openTicketCycle(state, ticket("TK-run", "run-1"), journal);
+    await writeFile(path.join(state.ticketCycles["run-1"]!.worktree, "src", "base.ts"), "run\n");
+    state = await authority.commitTicketCandidate(
+      state,
+      { cycleId: "run-1", scope: sourceScope, subject: "run side" },
+      journal,
+    );
+    const published = await authority.publishTicketCandidate(
+      state,
+      { cycleId: "run-1", scope: sourceScope, subject: "publish run side" },
+      journal,
+    );
+    if (published.status !== "integrated") throw new Error("expected run-side integration");
+    state = published.lifecycle;
+
+    state = await authority.openTicketCycle(
+      state,
+      {
+        ...ticket("TK-integrate", "integrate-1"),
+        integrationCandidateOid: candidateOid,
+      },
+      journal,
+    );
+    const cycle = state.ticketCycles["integrate-1"]!;
+    const conflicted = await readFile(path.join(cycle.worktree, "src", "base.ts"), "utf8");
+    expect(conflicted).toContain("<<<<<<<");
+    expect(conflicted).toContain("run");
+    expect(conflicted).toContain("candidate");
+    expect(conflicted).toContain(">>>>>>>");
+    expect(await readFile(path.join(cycle.worktree, "src", "candidate-only.ts"), "utf8")).toBe(
+      "candidate only\n",
+    );
+    expect(await gitOutput(cycle.worktree, "status", "--porcelain")).toBe("");
+    expect(cycle.baseRunOid).toBe(state.run.headOid);
+    expect(cycle.ticketHeadOid).not.toBe(cycle.baseRunOid);
+  });
+
   it("recovers target_sync by exact CAS and replays the synchronized state across restart", async () => {
     const root = await repository();
     const journal = new MemoryJournal();

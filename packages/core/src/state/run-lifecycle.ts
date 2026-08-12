@@ -18,6 +18,74 @@ export type RunPhase =
 
 export type ResumableRunPhase = Exclude<RunPhase, "pausing" | "paused" | "deleting" | "deleted">;
 
+/**
+ * A blocker's prose says what went wrong; this says what clears it. Without the distinction every
+ * blocked run renders identically, so an operator has to reverse-engineer the remedy from journals
+ * and hashes — and surfaces end up offering retries that cannot possibly succeed.
+ */
+export type RunBlockerRemedy =
+  /** Self-clearing: a tick or reconciliation pass resolves it with no operator action. */
+  | "auto"
+  /** `run.resume` retries productively, because the failure was transient. */
+  | "resume"
+  /** Only `koni stop` clears it; resume would replay an unreplayable terminal state forever. */
+  | "stop"
+  /** Needs a fresh conversational root, because inherited history is the thing that is wrong. */
+  | "fresh_epoch"
+  /** Unsalvageable under this run's pinned configuration; a new run is the only path. */
+  | "new_run"
+  /** Needs a human decision or a graph/spec change; no retry of any kind will help. */
+  | "change_request";
+
+/**
+ * Whether a retry is an honest thing to offer. Records written before typed remedies carry no
+ * remedy at all, and those keep today's behaviour rather than losing an affordance retroactively.
+ */
+export function retryClearsBlocker(remedy: RunBlockerRemedy | undefined): boolean {
+  return remedy === undefined || remedy === "auto" || remedy === "resume";
+}
+
+/**
+ * Derive a blocker's remedy from the failure it records, so a run never advertises `resume` for a
+ * condition resume cannot clear. Call sites that know better still pass an explicit remedy; this is
+ * the default for the ones that do not, and for paths where a throw escapes past every `catch` that
+ * would have classified it. Deriving it centrally rather than at each handler is deliberate: an
+ * exhausted reissue budget reached the operator as an untyped blocker precisely because one of the
+ * three callers of the assignment-validation settle has no handler of its own, and the unattended
+ * operator loop then spent its whole retry budget resuming a run that could not be resumed.
+ */
+export function classifyBlockerRemedy(reason: string): RunBlockerRemedy {
+  // Three fresh attempts already lost to the same rejection, so nothing inside this run's pinned
+  // configuration changes the outcome.
+  if (/automatic reissue is exhausted/u.test(reason)) return "new_run";
+  // Accepted terminal bytes are immutable, so replaying them fails identically every time.
+  if (
+    /terminal validation replay did not pass|terminal_replay_failed|terminal replay .* has no authenticated retained receipt/u.test(
+      reason,
+    )
+  )
+    return "stop";
+  return "resume";
+}
+
+/** One line naming the action that actually clears a blocker, for operator-facing surfaces. */
+export function blockerRemedyGuidance(remedy: RunBlockerRemedy): string {
+  switch (remedy) {
+    case "auto":
+      return "clears itself; authority reconciliation re-drives this run without operator action";
+    case "resume":
+      return "resume the run to retry from its durable blocked phase";
+    case "stop":
+      return "stop the run; resume would replay an unreplayable terminal state indefinitely";
+    case "fresh_epoch":
+      return "needs a fresh conversational root, because inherited history is what is wrong";
+    case "new_run":
+      return "unsalvageable under this run's pinned configuration; start a new run";
+    case "change_request":
+      return "needs an operator decision on a change request (`koni decide --run <id> --approve|--reject`) or a graph/spec change; no retry of any kind will clear it";
+  }
+}
+
 export interface PendingQuestion {
   id: string;
   attemptId: string;
@@ -41,6 +109,8 @@ export interface RunLifecycleState {
   accumulatedActiveMs: number;
   pendingQuestions: PendingQuestion[];
   blocker: string | undefined;
+  /** Present exactly when `blocker` is; absent on records written before typed remedies. */
+  blockerRemedy?: RunBlockerRemedy | undefined;
   terminalReason: string | undefined;
 }
 
@@ -53,6 +123,7 @@ export type RunLifecycleEvent =
     }
   | { type: "question_answered"; atMs: number; questionId: string; answer: string; notes?: string }
   | { type: "plan_submitted"; atMs: number }
+  | { type: "plan_checkpoint_validated"; atMs: number; revision: number }
   | { type: "plan_revision_requested"; atMs: number }
   | { type: "plan_approval_requested"; atMs: number }
   | { type: "plan_approved"; atMs: number }
@@ -67,7 +138,7 @@ export type RunLifecycleEvent =
   | { type: "pause_settled"; atMs: number }
   | { type: "resume_requested"; atMs: number }
   | { type: "questions_resume_requested"; atMs: number }
-  | { type: "blocked"; atMs: number; reason: string }
+  | { type: "blocked"; atMs: number; reason: string; remedy: RunBlockerRemedy }
   | { type: "retry_requested"; atMs: number; phase: ResumableRunPhase }
   | { type: "failed"; atMs: number; reason: string }
   | { type: "delete_requested"; atMs: number }
@@ -138,6 +209,7 @@ export function reduceRunLifecycle(
       state.phase = "planning";
       state.runningIntent = true;
       state.blocker = undefined;
+      state.blockerRemedy = undefined;
       state.activeSinceMs = event.atMs;
       state.planRevision += 1;
       effects.push({ type: "launch_planner", planRevision: state.planRevision });
@@ -189,6 +261,15 @@ export function reduceRunLifecycle(
       state.phase = "awaiting_approval";
       closeActiveInterval(state, event.atMs);
       break;
+    case "plan_checkpoint_validated":
+      requirePhase(current, event, ["planning"]);
+      if (!Number.isSafeInteger(event.revision) || event.revision < 0) {
+        throw new Error("planning checkpoint revision must be a non-negative safe integer");
+      }
+      state.phase = "awaiting_approval";
+      state.planRevision = event.revision;
+      closeActiveInterval(state, event.atMs);
+      break;
     case "plan_revision_requested": {
       // A blocked approved plan can be structurally unsound even when compilation succeeded
       // (for example, a runtime-produced receipt modeled as its own prerequisite). Retrying
@@ -198,6 +279,7 @@ export function reduceRunLifecycle(
       state.phase = "planning";
       state.planRevision += 1;
       state.blocker = undefined;
+      state.blockerRemedy = undefined;
       state.resumePhase = undefined;
       state.activeSinceMs = event.atMs;
       effects.push({ type: "request_plan_revision", planRevision: state.planRevision });
@@ -208,6 +290,7 @@ export function reduceRunLifecycle(
       state.phase = "approving";
       state.runningIntent = true;
       state.blocker = undefined;
+      state.blockerRemedy = undefined;
       state.approvedAtMs ??= event.atMs;
       state.accumulatedActiveMs = 0;
       state.activeSinceMs = event.atMs;
@@ -229,10 +312,11 @@ export function reduceRunLifecycle(
       effects.push({ type: "start_verification" });
       break;
     case "execution_required":
-      requirePhase(current, event, ["verifying"]);
+      requirePhase(current, event, ["verifying", "merge_ready"]);
       state.phase = "executing";
       state.runningIntent = true;
       state.blocker = undefined;
+      state.blockerRemedy = undefined;
       if (state.activeSinceMs === undefined) state.activeSinceMs = event.atMs;
       effects.push({ type: "admit_ready_work" });
       break;
@@ -245,6 +329,7 @@ export function reduceRunLifecycle(
       requirePhase(current, event, ["verifying", "merge_ready", "merging"]);
       state.phase = "executing";
       state.blocker = event.reason;
+      state.blockerRemedy = "auto";
       state.runningIntent = true;
       if (state.activeSinceMs === undefined) state.activeSinceMs = event.atMs;
       effects.push({ type: "admit_ready_work" });
@@ -292,6 +377,7 @@ export function reduceRunLifecycle(
       state.phase = state.resumePhase ?? "executing";
       state.resumePhase = undefined;
       state.blocker = undefined;
+      state.blockerRemedy = undefined;
       state.runningIntent = true;
       if (new Set<RunPhase>(["planning", "executing", "verifying"]).has(state.phase)) {
         state.activeSinceMs = event.atMs;
@@ -325,6 +411,7 @@ export function reduceRunLifecycle(
       state.resumePhase = current.phase as ResumableRunPhase;
       state.phase = "blocked";
       state.blocker = event.reason;
+      state.blockerRemedy = event.remedy;
       state.runningIntent = false;
       closeActiveInterval(state, event.atMs);
       effects.push({ type: "stop_admission" });
@@ -334,6 +421,7 @@ export function reduceRunLifecycle(
       state.phase = event.phase;
       state.resumePhase = undefined;
       state.blocker = undefined;
+      state.blockerRemedy = undefined;
       state.runningIntent = true;
       state.activeSinceMs = event.atMs;
       effects.push(

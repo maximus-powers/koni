@@ -102,6 +102,26 @@ export interface BlockedReviewRetryCandidate {
 
 export type BlockedReviewRetryScope = "producer_and_review" | "review_only";
 
+export const COMPILER_INAPPLICABLE_TICKET =
+  "Current compiler predicate no longer applies after prior execution";
+export const COMPILER_SUPERSEDED_BEFORE_EXECUTION =
+  "Superseded before execution by newer compiler state";
+export const COMPILER_ROUTED_TO_PLANNED_ASSET_REPAIR =
+  "Superseded by the existing planned asset implementation workflow";
+export const COMPILER_ROUTED_TO_MANIFEST_GATE_RECHECK =
+  "Superseded by a current manifest-bound gate recheck";
+
+export function ticketDependencySettled(ticket: Readonly<TicketRecord> | undefined): boolean {
+  return (
+    ticket?.status === "completed" ||
+    (ticket?.status === "cancelled" &&
+      (ticket.blocker === COMPILER_INAPPLICABLE_TICKET ||
+        ticket.blocker === COMPILER_SUPERSEDED_BEFORE_EXECUTION ||
+        ticket.blocker === COMPILER_ROUTED_TO_PLANNED_ASSET_REPAIR ||
+        ticket.blocker === COMPILER_ROUTED_TO_MANIFEST_GATE_RECHECK))
+  );
+}
+
 export function deriveReadyAssignments(
   run: RunRecord,
   maxParallel: number,
@@ -133,11 +153,11 @@ export function deriveReadyAssignments(
   }
 
   for (const ticket of tickets) {
-    if (!new Set(["todo", "ready", "running", "review"]).has(ticket.status)) {
+    if (!new Set(["queued", "running", "review"]).has(ticket.status)) {
       continue;
     }
     const waitingOn = ticket.dependencyIds.filter(
-      (dependencyId) => run.tickets[dependencyId]?.status !== "completed",
+      (dependencyId) => !ticketDependencySettled(run.tickets[dependencyId]),
     );
     if (waitingOn.length > 0) {
       blocked.push({ ticketId: ticket.id, waitingOn: waitingOn.sort() });
@@ -172,6 +192,7 @@ export function deriveReadyAssignments(
 
   candidates.sort(
     (left, right) =>
+      runtimeExecutionAdmissionRank(left.ticket) - runtimeExecutionAdmissionRank(right.ticket) ||
       left.ticket.priority - right.ticket.priority ||
       compareUtf8(left.ticket.id, right.ticket.id) ||
       compareUtf8(left.step.id, right.step.id),
@@ -285,6 +306,18 @@ export function deriveReadyAssignments(
     activeCount,
     availableSlots,
   };
+}
+
+/**
+ * A retained compiler ticket can be absent from the latest rule evaluation while its multi-step
+ * workflow is still authoring the same run node. Durable priorities alone would admit the newer
+ * run-experiment ticket first and compile its checks against a partial runtime contract. Keep
+ * empirical execution behind all simultaneously admissible preparation/control work; downstream
+ * synthesis does not become admissible until the runtime receipt exists, so it cannot be inverted
+ * by this rank.
+ */
+function runtimeExecutionAdmissionRank(ticket: TicketRecord): number {
+  return ticket.operationId === "execution.run.run-experiment" ? 1 : 0;
 }
 
 export function beginAssignment(
@@ -405,11 +438,11 @@ function assertCrossTicketControlAuthority(
         source === undefined ||
         sourceMetadata === undefined ||
         source.id === ticket.id ||
-        (source.status !== "blocked" && source.status !== "failed")
+        source.status !== "blocked"
       ) {
         schedulerFail(
           "scheduler.terminal_resolver_source",
-          `terminal resolver ${ticket.id} lacks one blocked/failed durable source ticket`,
+          `terminal resolver ${ticket.id} lacks one blocked durable source ticket`,
         );
       }
       const sourceAdmission = ticketAdmission(source, sourceMetadata);
@@ -597,9 +630,7 @@ function ticketOwnsExecutionReservation(ticket: TicketRecord): boolean {
 }
 
 function ticketIsTerminal(ticket: TicketRecord): boolean {
-  return (
-    ticket.status === "completed" || ticket.status === "failed" || ticket.status === "cancelled"
-  );
+  return ticket.status === "completed" || ticket.status === "cancelled";
 }
 
 function nonempty(value: string | undefined): value is string {
@@ -649,7 +680,7 @@ export function finishAssignment(
     (candidate) => candidate.status === "completed" || candidate.status === "skipped",
   )
     ? "completed"
-    : "ready";
+    : "queued";
   return {
     disposition: ticket.status === "completed" ? "ticket_completed" : "advanced",
   };
@@ -776,7 +807,7 @@ export function recoverLegacyCompletedReviewRejection(
     blocker,
     openedAt: at,
   });
-  ticket.status = "ready";
+  ticket.status = "queued";
   ticket.blocker = blocker;
   ticket.updatedAt = at;
   return true;
@@ -954,7 +985,7 @@ export function authorizeBlockedReviewRetry(
     ...(operatorSteering === undefined ? {} : { operatorSteering }),
     openedAt: at,
   });
-  ticket.status = "ready";
+  ticket.status = "queued";
   // Restore the exact reviewed blocker. The next compiler-issued author context uses it as the
   // operator-authorized rework contract; leaving a later author infrastructure/budget blocker here
   // would discard the reviewer findings that define the rework.
@@ -1057,7 +1088,7 @@ function reopenAfterReviewFailure(
     blocker,
     openedAt: at,
   });
-  ticket.status = "ready";
+  ticket.status = "queued";
   ticket.blocker = blocker;
   return true;
 }

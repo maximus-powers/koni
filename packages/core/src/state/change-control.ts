@@ -271,7 +271,7 @@ export function deriveProposalDecision(
         );
       }
       disposition = "approve";
-      if (input.status === "proposed") transition = { from: "proposed", to: "ready" };
+      if (input.status === "proposed") transition = { from: "proposed", to: "queued" };
       invalidatePriorReview = input.currentApprovalSha256 !== undefined;
     }
   } else if (input.status === "proposed") {

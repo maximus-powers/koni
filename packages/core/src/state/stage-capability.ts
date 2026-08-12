@@ -448,7 +448,7 @@ const BUILT_IN_ACTION_DEFAULTS: Readonly<Record<StageActionIntent, BuiltInAction
   ),
   revise_run_plan: defaults(
     "Revise plan",
-    "Send steering and request a new durable plan revision.",
+    "Send steering and continue the same durable planning session in a new revision.",
     "run",
     "plan_review",
   ),

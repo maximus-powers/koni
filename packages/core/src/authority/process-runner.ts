@@ -89,7 +89,7 @@ export async function snapshotContainedPaths(
   rootsInput: readonly string[],
 ): Promise<ContainedPathManifest> {
   const projectRoot = await canonicalDirectory(projectRootInput, "project root");
-  const roots = [...new Set(rootsInput.length === 0 ? ["."] : rootsInput)].sort();
+  const roots = [...new Set(rootsInput)].sort();
   const entries: ContainedPathManifest["entries"] = [];
   let totalBytes = 0;
   const add = (entry: ContainedPathManifest["entries"][number]) => {
@@ -381,6 +381,10 @@ async function resolveRuntimeReadRoots(input: {
     }
   }
 
+  for (const userSite of pythonUserSiteRoots(input.executable, input.environment)) {
+    await add(userSite);
+  }
+
   for (const dependencyRoot of await ensureSharedNodeDependencyLinks(input))
     await add(dependencyRoot);
 
@@ -401,6 +405,26 @@ async function resolveRuntimeReadRoots(input: {
   const pnpmHome = input.environment.PNPM_HOME;
   if (pnpmHome !== undefined && path.isAbsolute(pnpmHome)) await addWritable(pnpmHome);
   return { read: [...roots].sort(), write: [...writeRoots].sort() };
+}
+
+function pythonUserSiteRoots(
+  executable: string,
+  environment: Readonly<Record<string, string>>,
+): string[] {
+  const home = environment.HOME;
+  if (home === undefined || !path.isAbsolute(home) || environment.PYTHONNOUSERSITE !== undefined) {
+    return [];
+  }
+  const version = /^python(\d+)\.(\d+)$/u.exec(path.basename(executable));
+  if (version === null) return [];
+  const majorMinor = `${version[1]}.${version[2]}`;
+  if (process.platform === "darwin") {
+    return [path.join(home, "Library", "Python", majorMinor, "lib", "python", "site-packages")];
+  }
+  if (process.platform === "linux") {
+    return [path.join(home, ".local", "lib", `python${majorMinor}`, "site-packages")];
+  }
+  return [];
 }
 
 async function ensureSharedNodeDependencyLinks(input: {

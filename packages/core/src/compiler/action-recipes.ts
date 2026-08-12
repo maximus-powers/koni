@@ -87,8 +87,8 @@ export const ACTION_PRIMITIVE_SCHEMAS: Readonly<Record<string, PrimitiveSpec>> =
   "agent.spawn": {
     arguments: {
       duplicate_policy: stringArg(false, ["reject"]),
-      persona: stringArg(),
-      persona_from: stringArg(),
+      agent_from: stringArg(),
+      agent: stringArg(),
       prompt: stringArg(true),
       request_fields: listArg(),
       ticket: stringArg(),
@@ -137,7 +137,7 @@ export const ACTION_PRIMITIVE_SCHEMAS: Readonly<Record<string, PrimitiveSpec>> =
   "output.record": {
     arguments: {
       payload: jsonArg(true),
-      persona: stringArg(true),
+      agent: stringArg(true),
       step: stringArg(true),
       ticket: stringArg(true),
     },

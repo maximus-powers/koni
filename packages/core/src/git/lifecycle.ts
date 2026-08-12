@@ -220,6 +220,9 @@ export type GitLifecycleIntent =
       baseRunOid: string;
       ticketRef: string;
       ticketWorktree: string;
+      /** Preview commit that materializes a conflict candidate; absent on legacy intents. */
+      ticketHeadOid?: string;
+      integrationCandidateOid?: string;
       templateContext?: GitTicketTemplateContext;
     })
   | (GitIntentBase & {
@@ -804,6 +807,14 @@ export function assertGitLifecycleIntent(value: unknown): asserts value is GitLi
       throw new Error("forward compensation checkout must be absolute");
     }
     if (value.cycleId !== undefined) assertNamespaceId(String(value.cycleId), "ticket cycle ID");
+  }
+  if (kind === "ticket_materialize") {
+    if (value.ticketHeadOid !== undefined) {
+      assertOidValue(value.ticketHeadOid, "ticket materialization head OID");
+    }
+    if (value.integrationCandidateOid !== undefined) {
+      assertOidValue(value.integrationCandidateOid, "ticket integration candidate OID");
+    }
   }
   if (kind === "ticket_supersede") {
     if (!isSha256Value(value.supersessionSha256)) {
@@ -1409,6 +1420,8 @@ export class IsolatedGitLifecycle {
     input: {
       ticketId: string;
       cycleId: string;
+      /** Exact conflicted Git candidate to expose as a clean conflict-marker preview. */
+      integrationCandidateOid?: string;
       /** Required for policy-backed runs and persisted for commit/ref rendering. */
       templateContext?: GitTicketTemplateContext;
     },
@@ -1474,6 +1487,31 @@ export class IsolatedGitLifecycle {
     const worktree = policyBacked
       ? policyTicketWorktree(lifecycle.namespace.ticketRoot, branchRef)
       : path.join(lifecycle.namespace.ticketRoot, input.ticketId, "cycles", input.cycleId);
+    let ticketHeadOid = runHead;
+    if (input.integrationCandidateOid !== undefined) {
+      assertOidValue(input.integrationCandidateOid, "ticket integration candidate OID");
+      const preview = await repository.mergeTreeDetailed(runHead, input.integrationCandidateOid);
+      if (preview.treeOid === undefined) {
+        throw invalidState("Git could not materialize the configured integration candidate");
+      }
+      if (preview.treeOid !== (await repository.treeOfCommit(runHead))) {
+        const timestamp = this.#timestamp();
+        ticketHeadOid = await repository.commitTree(
+          preview.treeOid,
+          [runHead],
+          commitMessage(
+            `Koni conflict preview: ${input.ticketId}`,
+            `Candidate ${input.integrationCandidateOid}\nConflicts ${preview.conflictPaths.join(", ") || "none"}`,
+            {
+              "Koni-Run": lifecycle.runId,
+              "Koni-Ticket": input.ticketId,
+              "Koni-Conflict-Candidate": input.integrationCandidateOid,
+            },
+          ),
+          { ...this.#identity, timestamp },
+        );
+      }
+    }
     await assertNewRefNamespace(repository, branchRef, lifecycle.target.ref);
     await assertNewWorktreePath(
       { worktreeRoot: lifecycle.projectRoot, commonDirectory: lifecycle.commonDirectory },
@@ -1488,12 +1526,16 @@ export class IsolatedGitLifecycle {
       baseRunOid: runHead,
       ticketRef: branchRef,
       ticketWorktree: worktree,
+      ticketHeadOid,
+      ...(input.integrationCandidateOid === undefined
+        ? {}
+        : { integrationCandidateOid: input.integrationCandidateOid }),
       ...(input.templateContext === undefined
         ? {}
         : { templateContext: structuredClone(input.templateContext) }),
     };
     await journal.prepare(intent);
-    await repository.createRef(branchRef, runHead);
+    await repository.createRef(branchRef, ticketHeadOid);
     this.#fault("after_ticket_ref", intent);
     await ensureOwnedDirectory(path.dirname(worktree), lifecycle.commonDirectory);
     if (await pathExists(worktree)) {
@@ -1515,7 +1557,7 @@ export class IsolatedGitLifecycle {
       baseRunOid: runHead,
       branchRef,
       worktree,
-      ticketHeadOid: runHead,
+      ticketHeadOid,
       integratedRunOid: undefined,
       squashCommitOid: undefined,
       createdAt,
@@ -2610,9 +2652,10 @@ export class IsolatedGitLifecycle {
         }
         case "ticket_materialize": {
           const repository = new GitClient(lifecycle.projectRoot);
+          const ticketHeadOid = intent.ticketHeadOid ?? intent.baseRunOid;
           const ref = await repository.tryResolveRef(intent.ticketRef);
-          if (ref === undefined) await repository.createRef(intent.ticketRef, intent.baseRunOid);
-          else if (ref !== intent.baseRunOid) {
+          if (ref === undefined) await repository.createRef(intent.ticketRef, ticketHeadOid);
+          else if (ref !== ticketHeadOid) {
             return this.#preserveRecovery(
               lifecycle,
               intent,
@@ -2653,7 +2696,7 @@ export class IsolatedGitLifecycle {
               baseRunOid: intent.baseRunOid,
               branchRef: intent.ticketRef,
               worktree: intent.ticketWorktree,
-              ticketHeadOid: intent.baseRunOid,
+              ticketHeadOid,
               integratedRunOid: undefined,
               squashCommitOid: undefined,
               createdAt: intent.preparedAt,

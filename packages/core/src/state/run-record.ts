@@ -15,6 +15,7 @@ import type {
   CompiledActionCatalog,
   CompiledBehaviorIr,
   CompiledRunTypeBehavior,
+  CompiledTokenPolicy,
 } from "../contracts/behavior.js";
 import type {
   CompiledOperationSemantics,
@@ -60,13 +61,7 @@ export interface RunPipelineStageRecord {
 }
 
 export type TicketStatus =
-  | "proposed"
-  | "queued"
-  | "running"
-  | "review"
-  | "blocked"
-  | "completed"
-  | "cancelled";
+  "proposed" | "queued" | "running" | "review" | "blocked" | "completed" | "cancelled";
 
 export type TicketStepStatus = "pending" | "running" | "completed" | "failed" | "skipped";
 
@@ -218,6 +213,8 @@ export interface TicketExecutionControlRecord {
     sourceTicketId: string;
     sourceStepId: string;
     sourceOutputSha256: Sha256Digest;
+    /** Explicit compiler routing intent; absent only on legacy durable proposals. */
+    fulfillment?: "planned_asset_repair" | "dynamic_scope_change";
   };
   /** Source-ticket hold that prevents publication while its exact proposal is unresolved. */
   sourceHold?: {
@@ -351,6 +348,8 @@ export interface TicketRecord {
   executionEpoch?: number;
   /** When present, successful publication also resolves this conflicted predecessor ticket. */
   integrationForTicketId?: string;
+  /** Exact Git candidate whose tree must be materialized for configured conflict resolution. */
+  integrationCandidateOid?: string;
   blocker: string | undefined;
   createdAt: string;
   updatedAt: string;
@@ -360,6 +359,7 @@ export type AttemptStatus =
   | "queued"
   | "running"
   | "waiting_question"
+  | "waiting_plan_review"
   | "terminal_accepted"
   | "completed"
   | "failed"
@@ -441,7 +441,8 @@ export interface AgentProviderRequestRecord {
   retirement?:
     | {
         protocol: "koni.provider-exposure-retirement.v1";
-        disposition: "operator_acknowledged_canonical_abort" | "operator_acknowledged_provider_error";
+        disposition:
+          "operator_acknowledged_canonical_abort" | "operator_acknowledged_provider_error";
         assistantEntryId: string;
         assistantEntrySha256: Sha256Digest;
         responseId: string;
@@ -475,6 +476,65 @@ export interface AgentProviderUsageBaseline {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   recordedAt: string;
+}
+
+export interface AgentProviderTokenTotals {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+}
+
+export interface PlanningSteeringBinding {
+  sequence: number;
+  instructionsSha256: Sha256Digest;
+  instructionsSizeBytes: number;
+  artifactPath: string;
+  recordedAt: string;
+}
+
+export interface PlanningSynthesisRecord {
+  protocol: "koni.planning-synthesis.v1";
+  thresholdNewTokens: number;
+  limitNewTokens: number;
+  reserveNewTokens: number;
+  /** Additive metadata; absent only on transitions written before input-pressure recovery. */
+  triggerReason?: "token_threshold" | "provider_input_pressure";
+  triggeredNewTokens?: number;
+  instructionSha256: Sha256Digest;
+  instructionSizeBytes: number;
+  instructionArtifactPath: string;
+  triggeredAt: string;
+}
+
+export interface PlanningRevisionRecord {
+  protocol: "koni.planning-revision.v1";
+  revision: number;
+  status: "running" | "awaiting_review" | "superseded" | "approved" | "failed";
+  launchSpecSha256: Sha256Digest;
+  grantSha256: Sha256Digest;
+  budgetBaseline: AgentProviderTokenTotals;
+  budgetPolicy: CompiledTokenPolicy;
+  startedAt: string;
+  steering?: PlanningSteeringBinding;
+  /** Revision-local transition; explicit steering resets only this synthesis authority. */
+  planningSynthesis?: PlanningSynthesisRecord;
+  patchSha256?: Sha256Digest;
+  artifactSha256?: Sha256Digest;
+  graphSha256?: Sha256Digest;
+  transcriptSha256?: Sha256Digest;
+  checkpointPath?: string;
+  completedAt?: string;
+}
+
+export interface PlanningSessionRecord {
+  protocol: "koni.planning-session.v1";
+  attemptId: string;
+  sessionId: string;
+  status: "running" | "waiting_question" | "awaiting_review" | "approving" | "approved" | "blocked";
+  currentRevision: number;
+  approvedRevision?: number;
+  revisions: PlanningRevisionRecord[];
 }
 
 /** Crash-forward intent for one authority-owned workspace write/edit effect. */
@@ -615,6 +675,8 @@ export interface RunCheckRecord {
   /** Exact operation/check/gate policy that authorized this receipt. */
   executionPolicy?: CheckExecutionPolicyBinding;
   accepted: boolean;
+  /** Typed compiler diagnosis proving the command failed before reaching its semantic subject. */
+  infrastructureFailure?: string;
   /** Required on new records; absent legacy records cannot satisfy current-step closure. */
   passed?: boolean;
   summary: string;
@@ -665,19 +727,7 @@ export interface AgentAttemptRecord {
   /** Ordered, authority-authenticated operator messages delivered after the initial prompt. */
   authorityMessages?: AgentAuthorityMessageRecord[];
   /** One compiler-authored transition from exploration to bounded planning synthesis. */
-  planningSynthesis?: {
-    protocol: "koni.planning-synthesis.v1";
-    thresholdNewTokens: number;
-    limitNewTokens: number;
-    reserveNewTokens: number;
-    /** Additive metadata; absent only on transitions written before input-pressure recovery. */
-    triggerReason?: "token_threshold" | "provider_input_pressure";
-    triggeredNewTokens?: number;
-    instructionSha256: Sha256Digest;
-    instructionSizeBytes: number;
-    instructionArtifactPath: string;
-    triggeredAt: string;
-  };
+  planningSynthesis?: PlanningSynthesisRecord;
   /** Ordered authority receipts for every Pi-persisted tool result. */
   authorityToolResults?: AgentAuthorityToolResultRecord[];
   /** Ordered authority-issued compaction digests. */
@@ -1294,6 +1344,8 @@ export interface RunRecord {
   pipelineStages?: RunPipelineStageRecord[];
   currentPipelineStageId: string | undefined;
   plan: RunPlanRecord | undefined;
+  /** Stable pre-approval planner identity and immutable revision checkpoints for new runs. */
+  planningSession?: PlanningSessionRecord;
   /** Operator pause requested in a non-pausable phase; executed at the next pausable boundary. */
   pendingPause?: { requestedAt: string };
   /** Present after a guarded delete request; absent on legacy deleting records. */
@@ -1727,6 +1779,7 @@ export function assertRunRecord(value: unknown): asserts value is RunRecord {
   for (const [id, attempt] of Object.entries(value.attempts)) {
     assertAttemptRecord(id, attempt);
   }
+  assertPlanningSessionRecord(value as unknown as RunRecord);
   assertAttemptLineageForest(value.attempts as Record<string, AgentAttemptRecord>);
   assertLeadJudgments(
     value.leadJudgments,
@@ -1743,6 +1796,7 @@ export function assertRunRecord(value: unknown): asserts value is RunRecord {
   }
   if (value.questionBatches !== undefined) {
     if (!isRecord(value.questionBatches)) throw new Error("run question batches are invalid");
+    const planningSession = value.planningSession as PlanningSessionRecord | undefined;
     for (const [id, batch] of Object.entries(value.questionBatches)) {
       assertQuestionBatchRecord(batch);
       const typedBatch = batch;
@@ -1752,7 +1806,12 @@ export function assertRunRecord(value: unknown): asserts value is RunRecord {
       if (
         typedBatch.id !== id ||
         batchAttempt === undefined ||
-        (typedBatch.scope === "ticket" && typedBatch.ticketId !== batchAttempt.ticketId)
+        (typedBatch.scope === "ticket" && typedBatch.ticketId !== batchAttempt.ticketId) ||
+        (typedBatch.planningRevision !== undefined &&
+          (batchAttempt.kind !== "planning" ||
+            planningSession === undefined ||
+            planningSession.attemptId !== batchAttempt.id ||
+            typedBatch.planningRevision > planningSession.currentRevision))
       ) {
         throw new Error(`invalid run question batch identity: ${id}`);
       }
@@ -1779,6 +1838,249 @@ export function assertRunRecord(value: unknown): asserts value is RunRecord {
   }
 }
 
+function assertPlanningSessionRecord(run: Readonly<RunRecord>): void {
+  const session = run.planningSession;
+  if (session === undefined) return;
+  if (
+    !isRecord(session) ||
+    session.protocol !== "koni.planning-session.v1" ||
+    !isId(session.attemptId) ||
+    !isId(session.sessionId) ||
+    ![
+      "running",
+      "waiting_question",
+      "awaiting_review",
+      "approving",
+      "approved",
+      "blocked",
+    ].includes(String(session.status)) ||
+    !isNonnegativeSafeInteger(session.currentRevision) ||
+    !Array.isArray(session.revisions) ||
+    session.revisions.length === 0 ||
+    session.revisions.length > 10_000 ||
+    session.currentRevision !== session.revisions.length - 1
+  ) {
+    throw new Error("run planning session is invalid");
+  }
+
+  const planningAttempt = run.attempts[session.attemptId];
+  if (
+    planningAttempt?.kind !== "planning" ||
+    planningAttempt.sessionId !== session.sessionId ||
+    !planningAttemptStatusMatchesSession(planningAttempt.status, session.status)
+  ) {
+    throw new Error("run planning session has an invalid stable attempt identity or status");
+  }
+
+  for (const [index, revision] of session.revisions.entries()) {
+    assertPlanningRevisionRecord(revision, index, session.currentRevision);
+  }
+  const current = session.revisions[session.currentRevision]!;
+  const expectedCurrentStatus =
+    session.status === "running" || session.status === "waiting_question"
+      ? "running"
+      : session.status === "awaiting_review" || session.status === "approving"
+        ? "awaiting_review"
+        : session.status === "approved"
+          ? "approved"
+          : "failed";
+  if (current.status !== expectedCurrentStatus) {
+    throw new Error("run planning session current revision status is invalid");
+  }
+
+  if (
+    (session.status === "approved") !== (session.approvedRevision !== undefined) ||
+    (session.approvedRevision !== undefined && session.approvedRevision !== session.currentRevision)
+  ) {
+    throw new Error("run planning session approval revision is invalid");
+  }
+
+  const projectedRevision = [...session.revisions]
+    .reverse()
+    .find(
+      (revision) =>
+        revision.status === "awaiting_review" ||
+        revision.status === "superseded" ||
+        revision.status === "approved",
+    );
+  if (
+    (projectedRevision === undefined && run.plan !== undefined) ||
+    (projectedRevision !== undefined && run.plan?.revision !== projectedRevision.revision)
+  ) {
+    throw new Error("run plan is not bound to the latest validated planning revision");
+  }
+  if (run.plan === undefined) return;
+  const expectedPlanStatuses: Readonly<Record<PlanningSessionRecord["status"], readonly string[]>> =
+    {
+      running: ["planning", "revising", "awaiting_approval"],
+      waiting_question: ["planning", "revising", "awaiting_approval"],
+      awaiting_review: ["awaiting_approval"],
+      approving: ["approving"],
+      approved: ["approved"],
+      blocked: ["planning", "revising", "awaiting_approval"],
+    };
+  if (!expectedPlanStatuses[session.status].includes(run.plan.status)) {
+    throw new Error("run plan status does not agree with its planning session");
+  }
+}
+
+function assertPlanningRevisionRecord(
+  revision: unknown,
+  expectedRevision: number,
+  currentRevision: number,
+): asserts revision is PlanningRevisionRecord {
+  if (
+    !isRecord(revision) ||
+    revision.protocol !== "koni.planning-revision.v1" ||
+    revision.revision !== expectedRevision ||
+    !["running", "awaiting_review", "superseded", "approved", "failed"].includes(
+      String(revision.status),
+    ) ||
+    !isSha256Digest(revision.launchSpecSha256) ||
+    !isSha256Digest(revision.grantSha256) ||
+    !isAgentProviderTokenTotals(revision.budgetBaseline) ||
+    !isCompiledTokenPolicy(revision.budgetPolicy) ||
+    !isBoundedRecordText(revision.startedAt, 128) ||
+    (revision.completedAt !== undefined && !isBoundedRecordText(revision.completedAt, 128))
+  ) {
+    throw new Error(`run planning revision ${expectedRevision} is invalid`);
+  }
+  if (
+    revision.planningSynthesis !== undefined &&
+    !isPlanningSynthesisRecord(revision.planningSynthesis)
+  ) {
+    throw new Error(`run planning revision ${expectedRevision} has invalid synthesis authority`);
+  }
+
+  if (
+    (expectedRevision === 0 && revision.steering !== undefined) ||
+    (expectedRevision > 0 && !isPlanningSteeringBinding(revision.steering, expectedRevision))
+  ) {
+    throw new Error(`run planning revision ${expectedRevision} has invalid steering authority`);
+  }
+
+  for (const field of [
+    "patchSha256",
+    "artifactSha256",
+    "graphSha256",
+    "transcriptSha256",
+  ] as const) {
+    if (revision[field] !== undefined && !isSha256Digest(revision[field])) {
+      throw new Error(`run planning revision ${expectedRevision} has an invalid ${field}`);
+    }
+  }
+  if (
+    revision.checkpointPath !== undefined &&
+    (typeof revision.checkpointPath !== "string" || !isProjectRelativePath(revision.checkpointPath))
+  ) {
+    throw new Error(`run planning revision ${expectedRevision} has an invalid checkpoint path`);
+  }
+
+  const checkpointed =
+    revision.status === "awaiting_review" ||
+    revision.status === "superseded" ||
+    revision.status === "approved";
+  const checkpointFieldsPresent =
+    revision.artifactSha256 !== undefined &&
+    revision.graphSha256 !== undefined &&
+    revision.transcriptSha256 !== undefined &&
+    revision.checkpointPath !== undefined &&
+    revision.completedAt !== undefined;
+  if (
+    checkpointed !== checkpointFieldsPresent ||
+    (checkpointed && expectedRevision > 0 && revision.patchSha256 === undefined) ||
+    (expectedRevision === 0 && revision.patchSha256 !== undefined) ||
+    (expectedRevision < currentRevision && revision.status !== "superseded")
+  ) {
+    throw new Error(`run planning revision ${expectedRevision} checkpoint state is invalid`);
+  }
+}
+
+function planningAttemptStatusMatchesSession(
+  attemptStatus: AttemptStatus,
+  sessionStatus: PlanningSessionRecord["status"],
+): boolean {
+  switch (sessionStatus) {
+    case "running":
+      return ["queued", "running", "terminal_accepted"].includes(attemptStatus);
+    case "waiting_question":
+      return attemptStatus === "waiting_question";
+    case "awaiting_review":
+    case "approving":
+      return attemptStatus === "waiting_plan_review";
+    case "approved":
+      return attemptStatus === "completed";
+    case "blocked":
+      return ["failed", "aborted", "interrupted"].includes(attemptStatus);
+  }
+}
+
+function isAgentProviderTokenTotals(value: unknown): value is AgentProviderTokenTotals {
+  return (
+    isRecord(value) &&
+    isNonnegativeSafeInteger(value.inputTokens) &&
+    isNonnegativeSafeInteger(value.outputTokens) &&
+    isNonnegativeSafeInteger(value.cacheReadTokens) &&
+    isNonnegativeSafeInteger(value.cacheWriteTokens)
+  );
+}
+
+function isCompiledTokenPolicy(value: unknown): value is CompiledTokenPolicy {
+  return (
+    isRecord(value) &&
+    value.metric === "new_tokens" &&
+    isNonnegativeSafeInteger(value.limit) &&
+    value.limit > 0 &&
+    isNonnegativeSafeInteger(value.synthesisReserve) &&
+    value.synthesisReserve > 0 &&
+    isNonnegativeSafeInteger(value.synthesisThreshold) &&
+    value.synthesisThreshold === value.limit - value.synthesisReserve &&
+    value.onExhausted === "force_synthesis"
+  );
+}
+
+function isPlanningSynthesisRecord(value: unknown): value is PlanningSynthesisRecord {
+  return (
+    isRecord(value) &&
+    value.protocol === "koni.planning-synthesis.v1" &&
+    isNonnegativeSafeInteger(value.thresholdNewTokens) &&
+    value.thresholdNewTokens > 0 &&
+    isNonnegativeSafeInteger(value.limitNewTokens) &&
+    value.limitNewTokens > value.thresholdNewTokens &&
+    isNonnegativeSafeInteger(value.reserveNewTokens) &&
+    value.reserveNewTokens === value.limitNewTokens - value.thresholdNewTokens &&
+    (value.triggerReason === undefined) === (value.triggeredNewTokens === undefined) &&
+    (value.triggerReason === undefined ||
+      value.triggerReason === "token_threshold" ||
+      value.triggerReason === "provider_input_pressure") &&
+    (value.triggeredNewTokens === undefined ||
+      isNonnegativeSafeInteger(value.triggeredNewTokens)) &&
+    isSha256Digest(value.instructionSha256) &&
+    isNonnegativeSafeInteger(value.instructionSizeBytes) &&
+    value.instructionSizeBytes > 0 &&
+    typeof value.instructionArtifactPath === "string" &&
+    value.instructionArtifactPath.length > 0 &&
+    typeof value.triggeredAt === "string" &&
+    value.triggeredAt.length > 0
+  );
+}
+
+function isPlanningSteeringBinding(
+  value: unknown,
+  expectedSequence: number,
+): value is PlanningSteeringBinding {
+  return (
+    isRecord(value) &&
+    value.sequence === expectedSequence &&
+    isSha256Digest(value.instructionsSha256) &&
+    isNonnegativeSafeInteger(value.instructionsSizeBytes) &&
+    value.instructionsSizeBytes > 0 &&
+    typeof value.artifactPath === "string" &&
+    isProjectRelativePath(value.artifactPath) &&
+    isBoundedRecordText(value.recordedAt, 128)
+  );
+}
+
 function assertLeadJudgments(
   value: unknown,
   behavior: RunBehaviorSnapshot | undefined,
@@ -1787,8 +2089,9 @@ function assertLeadJudgments(
   if (value === undefined) return;
   // Two triggers may be issued for each immutable graph/run binding. Keep prior bindings as audit
   // history across a plan revision, rather than making a valid replacement Lead judgment corrupt
-  // the whole run record. The cap still bounds a pathological revision loop.
-  if (!Array.isArray(value) || value.length > 64 || behavior === undefined) {
+  // the whole run record. Medium research runs can legitimately cross dozens of graph bindings;
+  // retain a generous finite cap so the audit remains bounded without rejecting ordinary recovery.
+  if (!Array.isArray(value) || value.length > 1_024 || behavior === undefined) {
     throw new Error("run Lead judgment history is invalid");
   }
   const bindingTriggers = new Set<string>();
@@ -2911,6 +3214,8 @@ function assertRunCheck(value: unknown): asserts value is RunCheckRecord {
     !isSha256Digest(value.definitionHash) ||
     !["command", "graph", "composite"].includes(String(value.kind)) ||
     typeof value.accepted !== "boolean" ||
+    (value.infrastructureFailure !== undefined &&
+      (!isBoundedRecordText(value.infrastructureFailure, 64 * 1024) || value.accepted)) ||
     (value.passed !== undefined && typeof value.passed !== "boolean") ||
     typeof value.summary !== "string" ||
     !Array.isArray(value.commands) ||
@@ -3026,6 +3331,30 @@ function assertRunCheck(value: unknown): asserts value is RunCheckRecord {
       throw new Error("behavior-backed run check command lacks its exact durable execution audit");
     }
   }
+}
+
+const LEGACY_CONFIGURED_CHECK_INFRASTRUCTURE_MARKER =
+  "command infrastructure failed before producing an admissible expected result:";
+
+/**
+ * Return only compiler-authored configured-check infrastructure evidence for one immutable
+ * attempt. New records carry the typed field. The exact legacy marker was emitted by the compiler
+ * from the same typed command classification before that field became durable.
+ */
+export function configuredCheckInfrastructureFailureForAttempt(
+  run: Readonly<Pick<RunRecord, "checks">>,
+  attemptId: string,
+): string | undefined {
+  return [...(run.checks ?? [])]
+    .reverse()
+    .filter((check) => check.attemptId === attemptId && !check.accepted)
+    .map((check) => {
+      if (check.infrastructureFailure !== undefined) return check.infrastructureFailure;
+      return check.summary.includes(LEGACY_CONFIGURED_CHECK_INFRASTRUCTURE_MARKER)
+        ? check.summary
+        : undefined;
+    })
+    .find((failure): failure is string => failure !== undefined);
 }
 
 function assertRunCheckAttempt(value: unknown): asserts value is RunCheckAttemptRecord {
@@ -3292,15 +3621,16 @@ function assertTicketRecord(id: string, value: unknown): asserts value is Ticket
     throw new Error(`invalid ticket record: ${id}`);
   }
   if (
-    ![
-      "proposed",
-      "queued",
-      "running",
-      "review",
-      "blocked",
-      "completed",
-      "cancelled",
-    ].includes(value.status)
+    value.integrationCandidateOid !== undefined &&
+    (typeof value.integrationCandidateOid !== "string" ||
+      !/^[0-9a-f]{40,64}$/u.test(value.integrationCandidateOid))
+  ) {
+    throw new Error(`invalid ticket integration candidate OID: ${id}`);
+  }
+  if (
+    !["proposed", "queued", "running", "review", "blocked", "completed", "cancelled"].includes(
+      value.status,
+    )
   )
     throw new Error(`invalid ticket status: ${id}`);
   if (value.executionPolicyBinding !== undefined) {
@@ -3478,14 +3808,21 @@ function assertTicketExecutionControl(
       !isRecord(request) ||
       Object.keys(request).some(
         (field) =>
-          !["requestSha256", "sourceTicketId", "sourceStepId", "sourceOutputSha256"].includes(
-            field,
-          ),
+          ![
+            "requestSha256",
+            "sourceTicketId",
+            "sourceStepId",
+            "sourceOutputSha256",
+            "fulfillment",
+          ].includes(field),
       ) ||
       !isSha256Digest(request.requestSha256) ||
       !isId(request.sourceTicketId) ||
       !isId(request.sourceStepId) ||
-      !isSha256Digest(request.sourceOutputSha256)
+      !isSha256Digest(request.sourceOutputSha256) ||
+      (request.fulfillment !== undefined &&
+        request.fulfillment !== "planned_asset_repair" &&
+        request.fulfillment !== "dynamic_scope_change")
     ) {
       throw new Error(`invalid ticket proposal request: ${ticketId}`);
     }
@@ -4513,6 +4850,15 @@ function assertCompilerControlTicketForRun(
     }
     const source = run.tickets[causal.publication.sourceTicketId];
     const sourceProjection = source === undefined ? undefined : ticketImmutableProjection(source);
+    const sourceHold = source?.executionControl?.sourceHold;
+    const activelyHeldSource =
+      sourceHold?.proposalTicketId === ticket.id &&
+      sourceHold.requestSha256 === causal.publication.requestSha256 &&
+      canonicalHash(sourceHold) === canonicalHash(causal.sourceHold);
+    const authorizedSourceDependencyDrift =
+      sourceProjection !== undefined &&
+      (activelyHeldSource || proposalHasReleasedSourceAuthority(run, ticket)) &&
+      ticketProjectionsDifferOnlyByDependencies(sourceProjection, causal.sourceTicketProjection);
     const sourceStep = sourceProjection?.steps.find(
       (step) => step.id === causal.publication.sourceStepId,
     );
@@ -4538,6 +4884,9 @@ function assertCompilerControlTicketForRun(
       sourceBindingSha256: causal.publication.sourceBinding.sha256,
       sourceOutputSha256: causal.publication.sourceOutputSha256,
       targetNodeIds: causal.publication.targetNodeIds,
+      ...(projection.control.proposalRequest.fulfillment === undefined
+        ? {}
+        : { fulfillment: projection.control.proposalRequest.fulfillment }),
       summary: causal.publication.summary,
       reason: causal.publication.reason,
       publication: causal.publication,
@@ -4546,7 +4895,8 @@ function assertCompilerControlTicketForRun(
     if (
       source === undefined ||
       source.id === ticket.id ||
-      canonicalHash(sourceProjection) !== canonicalHash(causal.sourceTicketProjection) ||
+      (canonicalHash(sourceProjection) !== canonicalHash(causal.sourceTicketProjection) &&
+        !authorizedSourceDependencyDrift) ||
       sourceStep?.executionPolicyBinding?.sha256 !== causal.publication.sourceBinding.sha256 ||
       causal.publication.runId !== run.id ||
       causal.publication.proposalTicketId !== ticket.id ||
@@ -4632,12 +4982,16 @@ function assertCompilerControlTicketForRun(
   }
   const source = run.tickets[causal.reconciliation.sourceTicketId];
   const sourceProjection = source === undefined ? undefined : ticketImmutableProjection(source);
+  const authorizedSourceDependencyDrift =
+    sourceProjection !== undefined &&
+    ticketProjectionsDifferOnlyByDependencies(sourceProjection, causal.sourceTicketProjection);
   if (
     source === undefined ||
     sourceProjection === undefined ||
     source.id === ticket.id ||
     source.executionControl?.terminalRecovery !== undefined ||
-    canonicalHash(sourceProjection) !== canonicalHash(causal.sourceTicketProjection) ||
+    (canonicalHash(sourceProjection) !== canonicalHash(causal.sourceTicketProjection) &&
+      !authorizedSourceDependencyDrift) ||
     causal.reconciliation.resolverTicketId !== ticket.id ||
     causal.reconciliation.resolverOperationId !== authority.operation.id ||
     causal.reconciliation.resolverBinding.sha256 !== ticket.executionPolicyBinding?.sha256 ||
@@ -4666,6 +5020,24 @@ function assertCompilerControlTicketForRun(
   ) {
     throw new Error(`terminal resolver differs from its causal compiler authority: ${ticket.id}`);
   }
+}
+
+/**
+ * A control ticket authenticates the historical source projection forever, but that history must
+ * not freeze later compiler scheduling. Dependency edges are scheduling authority, not mutation
+ * scope; permit only that exact field to change while the control ticket remains causally valid.
+ */
+function ticketProjectionsDifferOnlyByDependencies(
+  current: Readonly<TicketImmutableProjection>,
+  historical: Readonly<TicketImmutableProjection>,
+): boolean {
+  return (
+    canonicalHash({
+      ...current,
+      dependencyIds: historical.dependencyIds,
+      sha256: historical.sha256,
+    }) === canonicalHash(historical)
+  );
 }
 
 function assertControlDefinitionProjection(
@@ -4944,6 +5316,7 @@ export function assertRunExecutionControlMutation(
   next: Readonly<RunRecord>,
   previousArchivedActions: ReadonlyMap<string, Readonly<RunActionExecutionRecord>> = new Map(),
 ): void {
+  assertPlanningSessionMutation(previous.planningSession, next.planningSession);
   // This transition guard is an authority boundary in its own right. Validate the successor's
   // complete cross-ticket graph here so direct CAS callers cannot bypass raw-load validation by
   // introducing a structurally self-hashed but causally substituted control ticket.
@@ -5237,6 +5610,119 @@ export function assertRunExecutionControlMutation(
   }
 }
 
+function assertPlanningSessionMutation(
+  previous: Readonly<PlanningSessionRecord> | undefined,
+  next: Readonly<PlanningSessionRecord> | undefined,
+): void {
+  if (previous === undefined) return;
+  if (next === undefined) throw new Error("run discarded its planning session authority");
+  if (
+    previous.protocol !== next.protocol ||
+    previous.attemptId !== next.attemptId ||
+    previous.sessionId !== next.sessionId ||
+    next.currentRevision < previous.currentRevision ||
+    next.currentRevision > previous.currentRevision + 1
+  ) {
+    throw new Error("run changed its stable planning session identity or revision sequence");
+  }
+
+  for (let index = 0; index < previous.currentRevision; index += 1) {
+    if (canonicalHash(previous.revisions[index]) !== canonicalHash(next.revisions[index])) {
+      throw new Error(`run changed immutable planning revision ${index}`);
+    }
+  }
+
+  const priorCurrent = previous.revisions[previous.currentRevision]!;
+  const nextPriorCurrent = next.revisions[previous.currentRevision];
+  if (nextPriorCurrent === undefined) {
+    throw new Error("run discarded its current planning revision");
+  }
+  assertPlanningRevisionMonotonicMutation(priorCurrent, nextPriorCurrent);
+
+  if (next.currentRevision === previous.currentRevision) {
+    if (next.revisions.length !== previous.revisions.length) {
+      throw new Error("run changed planning revision history without advancing its revision");
+    }
+    return;
+  }
+
+  if (
+    next.revisions.length !== previous.revisions.length + 1 ||
+    nextPriorCurrent.status !== "superseded" ||
+    next.revisions[next.currentRevision]?.status !== "running"
+  ) {
+    throw new Error("run appended an invalid planning revision transition");
+  }
+}
+
+function assertPlanningRevisionMonotonicMutation(
+  previous: Readonly<PlanningRevisionRecord>,
+  next: Readonly<PlanningRevisionRecord>,
+): void {
+  const {
+    status: _previousStatus,
+    planningSynthesis: _previousSynthesis,
+    patchSha256: _previousPatch,
+    artifactSha256: _previousArtifact,
+    graphSha256: _previousGraph,
+    transcriptSha256: _previousTranscript,
+    checkpointPath: _previousCheckpoint,
+    completedAt: _previousCompleted,
+    ...immutablePrevious
+  } = previous;
+  const {
+    status: _nextStatus,
+    planningSynthesis: _nextSynthesis,
+    patchSha256: _nextPatch,
+    artifactSha256: _nextArtifact,
+    graphSha256: _nextGraph,
+    transcriptSha256: _nextTranscript,
+    checkpointPath: _nextCheckpoint,
+    completedAt: _nextCompleted,
+    ...immutableNext
+  } = next;
+  if (canonicalHash(immutablePrevious) !== canonicalHash(immutableNext)) {
+    throw new Error(`run changed immutable planning revision ${previous.revision}`);
+  }
+  if (
+    previous.planningSynthesis !== undefined &&
+    canonicalHash(previous.planningSynthesis) !== canonicalHash(next.planningSynthesis)
+  ) {
+    throw new Error(`run changed immutable planning revision ${previous.revision} synthesis`);
+  }
+  for (const field of [
+    "patchSha256",
+    "artifactSha256",
+    "graphSha256",
+    "transcriptSha256",
+    "checkpointPath",
+    "completedAt",
+  ] as const) {
+    const clearsFailedRevisionCompletion =
+      field === "completedAt" &&
+      previous.status === "failed" &&
+      next.status === "running" &&
+      next.completedAt === undefined;
+    if (
+      previous[field] !== undefined &&
+      next[field] !== previous[field] &&
+      !clearsFailedRevisionCompletion
+    ) {
+      throw new Error(`run changed immutable planning revision ${previous.revision} ${field}`);
+    }
+  }
+  const legalTransitions: Readonly<Record<PlanningRevisionRecord["status"], readonly string[]>> = {
+    running: ["running", "awaiting_review", "failed"],
+    awaiting_review: ["awaiting_review", "superseded", "approved"],
+    superseded: ["superseded"],
+    approved: ["approved"],
+    failed: ["failed", "running"],
+  };
+  if (!legalTransitions[previous.status].includes(next.status)) {
+    throw new Error(`run changed planning revision ${previous.revision} through an invalid status`);
+  }
+}
+
 function assertNewProposalDecisionAuthorities(
   previous: Readonly<RunRecord>,
   next: Readonly<RunRecord>,
@@ -5489,6 +5975,17 @@ function assertAttemptRecord(id: string, value: unknown): asserts value is Agent
     !isId(value.stepId) ||
     !isId(value.personaId) ||
     typeof value.status !== "string" ||
+    ![
+      "queued",
+      "running",
+      "waiting_question",
+      "waiting_plan_review",
+      "terminal_accepted",
+      "completed",
+      "failed",
+      "aborted",
+      "interrupted",
+    ].includes(value.status) ||
     !isSha256Digest(value.launchSpecHash) ||
     (value.launchActionInvocationId !== undefined && !isId(value.launchActionInvocationId)) ||
     !isNonnegativeSafeInteger(value.inputTokens) ||
@@ -5564,30 +6061,7 @@ function assertAttemptRecord(id: string, value: unknown): asserts value is Agent
   );
   if (value.planningSynthesis !== undefined) {
     const synthesis = value.planningSynthesis;
-    if (
-      value.kind !== "planning" ||
-      !isRecord(synthesis) ||
-      synthesis.protocol !== "koni.planning-synthesis.v1" ||
-      !isNonnegativeSafeInteger(synthesis.thresholdNewTokens) ||
-      synthesis.thresholdNewTokens < 1 ||
-      !isNonnegativeSafeInteger(synthesis.limitNewTokens) ||
-      synthesis.limitNewTokens <= synthesis.thresholdNewTokens ||
-      !isNonnegativeSafeInteger(synthesis.reserveNewTokens) ||
-      synthesis.reserveNewTokens !== synthesis.limitNewTokens - synthesis.thresholdNewTokens ||
-      (synthesis.triggerReason === undefined) !== (synthesis.triggeredNewTokens === undefined) ||
-      (synthesis.triggerReason !== undefined &&
-        synthesis.triggerReason !== "token_threshold" &&
-        synthesis.triggerReason !== "provider_input_pressure") ||
-      (synthesis.triggeredNewTokens !== undefined &&
-        !isNonnegativeSafeInteger(synthesis.triggeredNewTokens)) ||
-      !isSha256Digest(synthesis.instructionSha256) ||
-      !isNonnegativeSafeInteger(synthesis.instructionSizeBytes) ||
-      synthesis.instructionSizeBytes < 1 ||
-      typeof synthesis.instructionArtifactPath !== "string" ||
-      synthesis.instructionArtifactPath.length === 0 ||
-      typeof synthesis.triggeredAt !== "string" ||
-      synthesis.triggeredAt.length === 0
-    )
+    if (value.kind !== "planning" || !isPlanningSynthesisRecord(synthesis))
       throw new Error(`invalid planning synthesis transition: ${id}`);
   }
   assertOrderedAuthorityRecords(
@@ -6069,16 +6543,16 @@ function assertProviderRequestRecords(id: string, attempt: AgentAttemptRecord): 
           ? !isSha256Digest(retirement.pauseReasonSha256)
           : retirement.disposition === "operator_acknowledged_unreconciled_request"
             ? !isSha256Digest(retirement.failureReasonSha256)
-          : !isBoundedRecordText(retirement.assistantEntryId, 128) ||
-            !isSha256Digest(retirement.assistantEntrySha256) ||
-            !isBoundedRecordText(retirement.responseId, 512) ||
-            (retirement.disposition === "operator_acknowledged_provider_error"
-              ? !isSha256Digest(retirement.errorMessageSha256)
-              : retirement.errorMessageSha256 !== undefined)
+            : !isBoundedRecordText(retirement.assistantEntryId, 128) ||
+              !isSha256Digest(retirement.assistantEntrySha256) ||
+              !isBoundedRecordText(retirement.responseId, 512) ||
+              (retirement.disposition === "operator_acknowledged_provider_error"
+                ? !isSha256Digest(retirement.errorMessageSha256)
+                : retirement.errorMessageSha256 !== undefined)
       )
         throw new Error(`invalid attempt provider exposure retirement fields: ${id}`);
       const { sha256, ...material } = retirement;
-      if (canonicalHash(material) !== sha256 || index !== records.length - 1) {
+      if (canonicalHash(material) !== sha256) {
         throw new Error(`invalid attempt provider exposure retirement identity: ${id}`);
       }
       continue;

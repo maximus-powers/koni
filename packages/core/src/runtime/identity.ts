@@ -852,6 +852,12 @@ async function resolveDependencyPackageRoot(
   dependency: string,
   explicitPiPackageRoot?: string,
 ): Promise<string | undefined> {
+  if (dependency === "@earendil-works/pi-coding-agent" && explicitPiPackageRoot !== undefined) {
+    const explicitPiRoot = await realpath(explicitPiPackageRoot).catch(() => undefined);
+    if (explicitPiRoot === undefined) return undefined;
+    const manifest = await readPackageManifest(explicitPiRoot);
+    return manifest.name === dependency ? explicitPiRoot : undefined;
+  }
   const local = await resolveDependencyFromAncestors(parentPackageRoot, dependency);
   if (local !== undefined) return local;
   const piRootValue = explicitPiPackageRoot ?? process.env[KONI_PI_PACKAGE_ROOT_ENV];
