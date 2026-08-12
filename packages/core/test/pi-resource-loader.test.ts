@@ -30,6 +30,8 @@ describe("contained Pi resource loader", () => {
     );
     const skill =
       "---\nname: issued-skill\ndescription: Compiler-issued procedure\n---\nFollow the ticket exactly.";
+    const lifecycleSkill =
+      "---\nname: lifecycle-skill\ndescription: Replans and obtains approval before implementation\n---\nRestart planning.";
     const skillReference = "# Reference\n\nUse the compiler-issued invariant.";
     const prompt = "---\ndescription: Compiler-issued operator prompt\n---\nDo the issued step.";
     const spec = fixtureLaunchSpec({
@@ -37,6 +39,12 @@ describe("contained Pi resource loader", () => {
       sessionDirectory: path.join(root, "sessions", "attempt-one"),
       resources: [
         fixtureResource("skill", "issued-skill", "skills/issued-skill/SKILL.md", skill),
+        fixtureResource(
+          "skill",
+          "lifecycle-skill",
+          "skills/lifecycle-skill/SKILL.md",
+          lifecycleSkill,
+        ),
         fixtureResource(
           "skill",
           "issued-skill-reference",
@@ -66,7 +74,10 @@ describe("contained Pi resource loader", () => {
     expect(result.loader.getExtensions().extensions.map((entry) => entry.path)).toEqual([
       "<inline:koni-managed-session>",
     ]);
-    expect(result.loader.getSkills().skills.map((entry) => entry.name)).toEqual(["issued-skill"]);
+    expect(result.loader.getSkills().skills.map((entry) => entry.name)).toEqual([
+      "issued-skill",
+      "lifecycle-skill",
+    ]);
     expect(result.loader.getPrompts().prompts.map((entry) => entry.name)).toEqual([
       "issued-prompt",
     ]);
@@ -84,7 +95,20 @@ describe("contained Pi resource loader", () => {
     expect(result.loader.getAppendSystemPrompt()[1]).toContain(
       "<location>skills/issued-skill/SKILL.md</location>",
     );
+    expect(result.loader.getAppendSystemPrompt()[1]).toContain("<name>lifecycle-skill</name>");
     expect(result.loader.getAppendSystemPrompt()[1]).toContain("koni_read_resource");
+    expect(result.loader.getAppendSystemPrompt()[1]).toContain(
+      "Koni already owns scope, approval, orchestration, worktrees, and promotion",
+    );
+    expect(result.loader.getAppendSystemPrompt()[1]).toContain(
+      "Use skills for techniques inside the issued step",
+    );
+    expect(result.loader.getAppendSystemPrompt()[1]).toContain(
+      "Treat this contained attempt as a dispatched subagent task",
+    );
+    expect(result.loader.getAppendSystemPrompt()[1]).not.toContain(
+      "load every skill whose description matches the task",
+    );
     expect(result.loader.getAppendSystemPrompt()[1]).not.toContain("Follow the ticket exactly.");
     expect(result.loader.getSystemPrompt()).toBe(spec.persona.systemPrompt);
     expect(

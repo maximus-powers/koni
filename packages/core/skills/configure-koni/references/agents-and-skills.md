@@ -45,6 +45,24 @@ An agent inherits the complete Pi repository environment when `pi.settings` is o
 narrow resources Pi already resolved. Positive globs must match. A package filter must name an
 already configured Pi package.
 
+## Skill selection inside contained attempts
+
+Keep Pi as the resource source of truth. Use an agent filter only when the role consistently needs a
+smaller resource surface, not to compensate for an ordinary skill whose interactive lifecycle would
+conflict with one compiler-issued phase. Koni's contained skill adapter treats an attempt as a
+dispatched task: Koni already owns scope, approval, orchestration, worktrees, and promotion, while
+skills contribute applicable techniques inside the issued step.
+
+Do not copy lifecycle policy into every agent, remove general skills from every profile, or add
+language- and task-specific warnings to stop a repeated agent mistake. Diagnose the owning layer:
+
+- If the skill is useful but part of its workflow would restart planning, approval, or another
+  lifecycle, preserve the Pi resource and fix the general contained-applicability contract.
+- If agents repeatedly lack a reusable software or research technique, select, create, or improve a
+  proven Pi skill at the repository or package layer.
+- If one role genuinely must never receive a resource class, narrow that agent through
+  `pi.settings`; do not create a second resource registry under `.koni`.
+
 One optional `extends` parent is allowed. Parent chains are rejected. A child's settings and tools
 replace those parent filters; capability fields merge with child values taking precedence.
 
