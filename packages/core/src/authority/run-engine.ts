@@ -226,6 +226,7 @@ import type {
   RunLeadJudgmentRecord,
   PlanningRevisionRecord,
   PlanningSynthesisRecord,
+  RecurringAssetGrantRefreshAuthority,
   TicketRecord,
   WorkspaceEffectIntentRecord,
 } from "../state/run-record.js";
@@ -243,6 +244,7 @@ import {
   terminalFailureBindingFromProof,
   tokenBudgetRecoveryAuthorityCounts,
   tokenBudgetRecoverySliceForAttempt,
+  ticketImmutableProjection,
 } from "../state/run-record.js";
 import {
   authorizeBlockedReviewRetry,
@@ -5158,6 +5160,12 @@ export class RunAuthorityEngine {
           valid: true,
           graphHash: draft.graphHash ?? null,
           graphRevision: draft.graphRevision,
+          ...(semantic?.kind !== "assignment" ||
+          semantic.recurringAssetGrantRefreshSha256s === undefined
+            ? {}
+            : {
+                recurringAssetGrantRefreshSha256s: semantic.recurringAssetGrantRefreshSha256s,
+              }),
         });
       }
       case "ticket.validate":
@@ -5187,6 +5195,12 @@ export class RunAuthorityEngine {
           writeNodes: ticket.writeNodeIds?.length ?? 0,
           readPaths: ticket.readPaths.length,
           writePaths: ticket.writePaths.length,
+          ...(semantic?.kind !== "assignment" ||
+          semantic.recurringAssetGrantRefreshSha256s === undefined
+            ? {}
+            : {
+                recurringAssetGrantRefreshSha256s: semantic.recurringAssetGrantRefreshSha256s,
+              }),
         });
       }
       case "output.validate":
@@ -5204,7 +5218,16 @@ export class RunAuthorityEngine {
             `${primitive} did not compile a terminal assignment result`,
           );
         }
-        return attachWrites({ valid: true, ticket: ticket.id, status: semantic.status });
+        return attachWrites({
+          valid: true,
+          ticket: ticket.id,
+          status: semantic.status,
+          ...(semantic.recurringAssetGrantRefreshSha256s === undefined
+            ? {}
+            : {
+                recurringAssetGrantRefreshSha256s: semantic.recurringAssetGrantRefreshSha256s,
+              }),
+        });
       }
       case "check.run": {
         if (semantic?.kind !== "assignment" || ticket === undefined) {
@@ -5218,6 +5241,11 @@ export class RunAuthorityEngine {
           ticket: ticket.id,
           check: typeof args.check === "string" ? args.check : "current-step-checks",
           status: semantic.status,
+          ...(semantic.recurringAssetGrantRefreshSha256s === undefined
+            ? {}
+            : {
+                recurringAssetGrantRefreshSha256s: semantic.recurringAssetGrantRefreshSha256s,
+              }),
         });
       }
       case "rules.evaluate":
@@ -5234,6 +5262,12 @@ export class RunAuthorityEngine {
           graphHash: draft.graphHash ?? null,
           graphRevision: draft.graphRevision,
           ticketCount: Object.keys(draft.tickets).length,
+          ...(semantic.kind !== "assignment" ||
+          semantic.recurringAssetGrantRefreshSha256s === undefined
+            ? {}
+            : {
+                recurringAssetGrantRefreshSha256s: semantic.recurringAssetGrantRefreshSha256s,
+              }),
         });
       }
       case "review.record": {
@@ -5497,8 +5531,20 @@ export class RunAuthorityEngine {
         attemptId,
         output: terminalOutput,
       });
+      let recurringAssetGrantRefreshSha256s: Sha256Digest[] = [];
       if (compiled.tickets !== undefined) {
-        draft.tickets = retainTicketAuthorityFields(run, structuredClone(compiled.tickets));
+        const compiledTickets = retainTicketAuthorityFields(run, structuredClone(compiled.tickets));
+        if (compiled.graphHash !== undefined && compiled.graphRevision !== undefined) {
+          recurringAssetGrantRefreshSha256s = appendRecurringAssetGrantRefreshAuthorities(
+            run,
+            compiledTickets,
+            record,
+            compiled.graphHash,
+            compiled.graphRevision,
+            draft.updatedAt,
+          );
+        }
+        draft.tickets = compiledTickets;
       }
       if (compiled.graphHash !== undefined) draft.graphHash = compiled.graphHash;
       if (compiled.graphRevision !== undefined) draft.graphRevision = compiled.graphRevision;
@@ -5515,6 +5561,9 @@ export class RunAuthorityEngine {
                 : {
                     changeControlSha256: compiled.changeControl.sha256,
                   }),
+              ...(recurringAssetGrantRefreshSha256s.length === 0
+                ? {}
+                : { recurringAssetGrantRefreshSha256s }),
             }
           : { kind: "assignment", status: "failed", blocker: compiled.outcome.blocker };
       return compiled.artifactWrites === undefined ? {} : { writes: compiled.artifactWrites };
@@ -21551,6 +21600,13 @@ export function retainTicketAuthorityFields(
     const recurringAssetReissue =
       recurringAsset &&
       (prior.status === "completed" ||
+        (prior.status === "cancelled" &&
+          prior.blocker === COMPILER_INAPPLICABLE_TICKET &&
+          prior.gitCycleId === undefined &&
+          prior.worktreePath === undefined &&
+          prior.branch === undefined &&
+          prior.steps.length > 0 &&
+          prior.steps.every((step) => step.status === "skipped")) ||
         (prior.status === "queued" && priorCycle?.status === "retired"));
     if (recurringAssetReissue) {
       resetTicketForFreshCycle(
@@ -21572,6 +21628,71 @@ export function retainTicketAuthorityFields(
     else ticket.integrationCandidateOid = prior.integrationCandidateOid;
   }
   return compiled;
+}
+
+export function appendRecurringAssetGrantRefreshAuthorities(
+  previous: Readonly<RunRecord>,
+  compiled: Record<string, TicketRecord>,
+  action: Readonly<RunActionExecutionRecord>,
+  nextGraphHash: Sha256Digest,
+  nextGraphRevision: number,
+  recordedAt: string,
+): Sha256Digest[] {
+  if (
+    previous.graphHash === undefined ||
+    nextGraphRevision !== previous.graphRevision + 1 ||
+    action.boundary.kind !== "assignment_validation" ||
+    previous.actionExecutions?.[action.invocationId]?.boundary.sha256 !== action.boundary.sha256
+  ) {
+    throw new AuthorityRpcError(
+      "recurring_asset_grant_refresh",
+      "recurring-asset grant refresh lacks an exact graph-changing compiler action",
+    );
+  }
+  const refreshSha256s: Sha256Digest[] = [];
+  for (const [ticketId, ticket] of Object.entries(compiled)) {
+    const prior = previous.tickets[ticketId];
+    if (
+      prior === undefined ||
+      prior.operationId !== "asset-resolution.asset.implement-asset" ||
+      ticket.operationId !== prior.operationId ||
+      ticket.status !== "queued" ||
+      ticket.executionEpoch !== (prior.executionEpoch ?? 0) + 1
+    ) {
+      continue;
+    }
+    const priorProjection = ticketImmutableProjection(prior);
+    const refreshedProjection = ticketImmutableProjection(ticket);
+    if (priorProjection.sha256 === refreshedProjection.sha256) continue;
+    const material = {
+      protocol: "koni.recurring-asset-grant-refresh.v1" as const,
+      runId: previous.id,
+      ticketId,
+      configurationSha256: previous.compiledConfigHash,
+      actionInvocationId: action.invocationId,
+      actionBoundarySha256: action.boundary.sha256,
+      priorGraphHash: previous.graphHash,
+      priorGraphRevision: previous.graphRevision,
+      nextGraphHash,
+      nextGraphRevision,
+      priorProjection,
+      priorProjectionSha256: priorProjection.sha256,
+      refreshedProjection,
+      nextProjectionSha256: refreshedProjection.sha256,
+      priorExecutionEpoch: prior.executionEpoch ?? 0,
+      nextExecutionEpoch: ticket.executionEpoch,
+      recordedAt,
+    };
+    const refresh: RecurringAssetGrantRefreshAuthority = {
+      ...material,
+      sha256: canonicalHash(material),
+    };
+    ticket.executionControl ??= {};
+    ticket.executionControl.recurringAssetGrantRefreshes ??= [];
+    ticket.executionControl.recurringAssetGrantRefreshes.push(refresh);
+    refreshSha256s.push(refresh.sha256);
+  }
+  return refreshSha256s.sort(compareUtf8);
 }
 
 function integrationCandidateOidFromPredecessor(

@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { prepareRunActionExecution } from "../src/authority/action-execution.js";
+import {
+  createRunActionEffectReceipt,
+  prepareRunActionExecution,
+} from "../src/authority/action-execution.js";
+import {
+  appendRecurringAssetGrantRefreshAuthorities,
+  retainTicketAuthorityFields,
+} from "../src/authority/run-engine.js";
 import {
   resolveExecutionPolicyBinding,
   type ExecutionPolicyBinding,
@@ -55,6 +62,216 @@ type AuthorityAttack = Readonly<{
 }>;
 
 describe("canonical compiler control-ticket authority", () => {
+  it("preserves a released proposal across an exact recurring-asset grant refresh", async () => {
+    const catalog = buildCatalog();
+    const run = baseRun(catalog);
+    const proposal = await proposalFixture(run, catalog, true, "-historical");
+    const application = await applicationFixture(run, catalog, proposal, "-historical");
+    const proposalAuthority = proposal.executionControl!.controlTicketAuthority!;
+    if (proposalAuthority.causal.role !== "proposal") {
+      throw new Error("fixture proposal cause mismatch");
+    }
+    const source = run.tickets[proposalAuthority.causal.publication.sourceTicketId]!;
+    source.executionControl = {};
+    source.status = "completed";
+    source.executionEpoch = 0;
+    for (const step of source.steps) step.status = "completed";
+    const sourceCycle = attachFixtureTicketCycle(run, source);
+    sourceCycle.status = "retired";
+    sourceCycle.integratedRunOid = run.git.run.headOid;
+    sourceCycle.squashCommitOid = run.git.run.headOid;
+    sourceCycle.integratedAt = AT;
+    sourceCycle.retiredAt = AT;
+    application.status = "completed";
+    for (const step of application.steps) step.status = "completed";
+    const applicationCycle = attachFixtureTicketCycle(run, application);
+    applicationCycle.status = "retired";
+    applicationCycle.integratedRunOid = run.git.run.headOid;
+    applicationCycle.squashCommitOid = run.git.run.headOid;
+    applicationCycle.integratedAt = AT;
+    applicationCycle.retiredAt = AT;
+
+    const currentProposal = await proposalFixture(run, catalog, false, "-refresh");
+    const refresher = await applicationFixture(run, catalog, currentProposal, "-refresh", "report");
+    refresher.status = "running";
+    const refreshAttemptId = "attempt-source-refresh-trigger";
+    const refreshStep = refresher.steps[0]!;
+    run.attempts[refreshAttemptId] = attemptRecord(
+      refresher,
+      refreshStep.id,
+      refreshAttemptId,
+      terminalPolicyFor(refreshAttemptId),
+      digest("source-refresh-trigger-output"),
+    );
+    run.attempts[refreshAttemptId].status = "terminal_accepted";
+    run.attempts[refreshAttemptId].endedAt = undefined;
+    refreshStep.status = "running";
+    refreshStep.attemptIds = [refreshAttemptId];
+    const prepared = prepareRunActionExecution(run, {
+      kind: "assignment_validation",
+      stageId: run.currentPipelineStageId!,
+      selector: refreshStep.validationAction!,
+      checkout: "main",
+      ticketId: refresher.id,
+      ticketState: refresher.status,
+      stepId: refreshStep.id,
+      attemptId: refreshAttemptId,
+      at: AT,
+    });
+    run.actionExecutions ??= {};
+    run.actionExecutions[prepared.invocationId] = structuredClone(prepared);
+    run.graphHash = digest("graph-before-refresh");
+    expect(() => assertRunRecord(run)).not.toThrow();
+
+    const next = structuredClone(run);
+    next.revision += 1;
+    next.updatedAt = "2026-07-18T05:01:00.000Z";
+    next.graphRevision += 1;
+    next.graphHash = digest("graph-after-refresh");
+    const refreshed = next.tickets[source.id]!;
+    const priorProjectionSha256 = ticketImmutableProjection(source).sha256;
+    refreshed.readPaths = ["evidence/current.json"];
+    refreshed.steps[0]!.readPaths = ["evidence/current.json"];
+    refreshed.status = "queued";
+    refreshed.executionEpoch = 1;
+    delete refreshed.gitCycleId;
+    refreshed.worktreePath = undefined;
+    refreshed.branch = undefined;
+    for (const step of refreshed.steps) {
+      step.status = "pending";
+      step.summary = undefined;
+      step.startedAt = undefined;
+      step.completedAt = undefined;
+    }
+    authorizeRecurringAssetGrantRefresh(run, next, prepared.invocationId);
+    expect(refreshed.executionControl?.recurringAssetGrantRefreshes).toHaveLength(1);
+    expect(
+      refreshed.executionControl?.recurringAssetGrantRefreshes?.[0]?.priorProjectionSha256,
+    ).toBe(priorProjectionSha256);
+
+    expect(() => assertRunRecord(next)).not.toThrow();
+    expect(() => assertRunExecutionControlMutation(run, next)).not.toThrow();
+
+    const laterProposalCheckpoint = structuredClone(next);
+    const laterProposal = laterProposalCheckpoint.tickets[proposal.id]!;
+    const laterProposalAuthority = laterProposal.executionControl!.controlTicketAuthority!;
+    if (laterProposalAuthority.causal.role !== "proposal") {
+      throw new Error("fixture later proposal cause mismatch");
+    }
+    (laterProposalAuthority.causal as unknown as Record<string, unknown>).sourceTicketProjection =
+      ticketImmutableProjection(laterProposalCheckpoint.tickets[source.id]!);
+    rehashAuthority(laterProposalAuthority);
+    const laterApplication = laterProposalCheckpoint.tickets[application.id]!;
+    const laterApplicationAuthority = laterApplication.executionControl!.controlTicketAuthority!;
+    if (laterApplicationAuthority.causal.role !== "approved_application") {
+      throw new Error("fixture later application cause mismatch");
+    }
+    (
+      laterApplicationAuthority.causal as unknown as Record<string, unknown>
+    ).proposalTicketAuthoritySha256 = laterProposalAuthority.sha256;
+    rehashAuthority(laterApplicationAuthority);
+    expect(() => assertRunRecord(laterProposalCheckpoint)).not.toThrow();
+
+    const twiceRefreshed = structuredClone(laterProposalCheckpoint);
+    const twiceSource = twiceRefreshed.tickets[source.id]!;
+    const beforeSecondRefresh = ticketImmutableProjection(twiceSource);
+    twiceSource.readPaths = ["evidence/current.json", "evidence/later.json"];
+    twiceSource.steps[0]!.readPaths = ["evidence/current.json", "evidence/later.json"];
+    twiceSource.executionEpoch = 2;
+    twiceRefreshed.graphRevision += 1;
+    twiceRefreshed.graphHash = digest("graph-after-second-refresh");
+    twiceRefreshed.updatedAt = "2026-07-18T05:02:00.000Z";
+    const afterSecondRefresh = ticketImmutableProjection(twiceSource);
+    const priorRefresh = twiceSource.executionControl!.recurringAssetGrantRefreshes![0]!;
+    const secondRefreshMaterial = {
+      ...priorRefresh,
+      priorGraphHash: next.graphHash,
+      priorGraphRevision: next.graphRevision,
+      nextGraphHash: twiceRefreshed.graphHash,
+      nextGraphRevision: twiceRefreshed.graphRevision,
+      priorProjection: beforeSecondRefresh,
+      priorProjectionSha256: beforeSecondRefresh.sha256,
+      refreshedProjection: afterSecondRefresh,
+      nextProjectionSha256: afterSecondRefresh.sha256,
+      priorExecutionEpoch: 1,
+      nextExecutionEpoch: 2,
+      recordedAt: twiceRefreshed.updatedAt,
+    };
+    const { sha256: _priorRefreshSha256, ...secondRefreshWithoutSha } = secondRefreshMaterial;
+    twiceSource.executionControl!.recurringAssetGrantRefreshes!.push({
+      ...secondRefreshWithoutSha,
+      sha256: canonicalHash(secondRefreshWithoutSha),
+    });
+    expect(() => assertRunRecord(twiceRefreshed)).not.toThrow();
+
+    const widened = structuredClone(next);
+    widened.tickets[source.id]!.writePaths = ["unrelated/widened-root"];
+    expect(() => assertRunExecutionControlMutation(run, widened)).toThrow();
+
+    const retargeted = unauthorizeRecurringAssetGrantRefresh(
+      next,
+      source.id,
+      prepared.invocationId,
+    );
+    retargeted.tickets[source.id]!.targetNodeIds = ["unrelated-node"];
+    authorizeRecurringAssetGrantRefresh(run, retargeted, prepared.invocationId);
+    expect(() => assertRunRecord(retargeted)).not.toThrow();
+    expect(() => assertRunExecutionControlMutation(run, retargeted)).toThrow();
+
+    const staleEpoch = structuredClone(next);
+    staleEpoch.tickets[source.id]!.executionEpoch = 0;
+    expect(() => assertRunExecutionControlMutation(run, staleEpoch)).toThrow();
+
+    const operatorCancelled = structuredClone(run);
+    const cancelledSource = operatorCancelled.tickets[source.id]!;
+    cancelledSource.status = "cancelled";
+    cancelledSource.blocker = "Operator cancelled this ticket";
+    delete cancelledSource.gitCycleId;
+    cancelledSource.worktreePath = undefined;
+    cancelledSource.branch = undefined;
+    for (const step of cancelledSource.steps) step.status = "skipped";
+    const operatorCancelledRefresh = unauthorizeRecurringAssetGrantRefresh(
+      next,
+      source.id,
+      prepared.invocationId,
+    );
+    authorizeRecurringAssetGrantRefresh(
+      operatorCancelled,
+      operatorCancelledRefresh,
+      prepared.invocationId,
+    );
+    expect(() => assertRunRecord(operatorCancelledRefresh)).not.toThrow();
+    expect(() =>
+      assertRunExecutionControlMutation(operatorCancelled, operatorCancelledRefresh),
+    ).toThrow();
+
+    const wrongSemanticPrimitive = unauthorizeRecurringAssetGrantRefresh(
+      next,
+      source.id,
+      prepared.invocationId,
+    );
+    authorizeRecurringAssetGrantRefresh(
+      run,
+      wrongSemanticPrimitive,
+      prepared.invocationId,
+      "nonpreferred",
+    );
+    expect(() => assertRunRecord(wrongSemanticPrimitive)).not.toThrow();
+    expect(() => assertRunExecutionControlMutation(run, wrongSemanticPrimitive)).toThrow();
+
+    const compilerRetired = structuredClone(run);
+    const retiredSource = compilerRetired.tickets[source.id]!;
+    retiredSource.status = "cancelled";
+    retiredSource.blocker = "Current compiler predicate no longer applies after prior execution";
+    delete retiredSource.gitCycleId;
+    retiredSource.worktreePath = undefined;
+    retiredSource.branch = undefined;
+    for (const step of retiredSource.steps) step.status = "skipped";
+    const compiledRetired = structuredClone(next.tickets);
+    retainTicketAuthorityFields(compilerRetired, compiledRetired);
+    expect(compiledRetired[source.id]).toMatchObject({ status: "queued", executionEpoch: 1 });
+  });
+
   it("allows an actively held proposal source to receive later compiler dependencies", async () => {
     const fixture = await controlFixture("proposal");
     const proposal = fixture.run.tickets[fixture.controlTicketId]!;
@@ -478,15 +695,29 @@ async function controlFixture(role: ControlTicketRole): Promise<ControlFixture> 
 async function proposalFixture(
   run: RunRecord,
   catalog: CompiledExecutionSemanticCatalog,
+  recurringAsset = false,
+  suffix = "",
 ): Promise<TicketRecord> {
-  const source = ordinaryTicket(catalog, "source-proposal", "blocked", ["claim-a"], [], []);
+  const source = ordinaryTicket(
+    catalog,
+    `source-proposal${suffix}`,
+    "blocked",
+    ["claim-a"],
+    [],
+    [],
+  );
+  if (recurringAsset) {
+    source.operationId = "asset-resolution.asset.implement-asset";
+    source.executionPolicyBinding = bind(catalog, source.operationId);
+    source.steps[0]!.executionPolicyBinding = bind(catalog, source.operationId, "work");
+  }
   run.tickets[source.id] = source;
   const sourceBinding = source.steps[0]!.executionPolicyBinding!;
   const publication = deriveChangeControlPublication(catalog, {
     runId: run.id,
     sourceTicketId: source.id,
     sourceStepId: source.steps[0]!.id,
-    sourceOutputSha256: digest("source-proposal-output"),
+    sourceOutputSha256: digest(`source-proposal-output${suffix}`),
     sourceBinding,
     targetNodeIds: ["claim-a"],
     summary: "Adjust exact claim contract",
@@ -504,7 +735,7 @@ async function proposalFixture(
     reason: publication.reason,
     publication,
   };
-  const sourceProof = await addSuccessAttempt(run, source, 0, "attempt-source-proposal", {
+  const sourceProof = await addSuccessAttempt(run, source, 0, `attempt-source-proposal${suffix}`, {
     changeControlSha256: canonicalHash(sourceCompilation),
   });
   const sourceHold = {
@@ -555,6 +786,8 @@ async function applicationFixture(
   run: RunRecord,
   catalog: CompiledExecutionSemanticCatalog,
   proposal: TicketRecord,
+  suffix = "",
+  validationAction = "compile",
 ): Promise<TicketRecord> {
   proposal.status = "completed";
   const request = proposal.executionControl!.proposalRequest!;
@@ -571,8 +804,8 @@ async function applicationFixture(
   };
   const approval = { ...approvalMaterial, sha256: canonicalHash(approvalMaterial) };
   const applicationBinding = bind(catalog, "application");
-  const proposalOutputSha256 = digest("proposal-selection-output");
-  const selectionSummary = "Apply the bounded claim change";
+  const proposalOutputSha256 = digest(`proposal-selection-output${suffix}`);
+  const selectionSummary = `Apply the bounded claim change${suffix}`;
   const selectionMaterial = {
     protocol: "koni.assignment-change-control.v1" as const,
     kind: "proposal_application" as const,
@@ -590,10 +823,22 @@ async function applicationFixture(
     scope: { readNodeIds: ["claim-a"], writeNodeIds: ["claim-a"], readPaths: [], writePaths: [] },
   };
   const selectionSha256 = canonicalHash(selectionMaterial);
-  const proposalProof = await addSuccessAttempt(run, proposal, 0, "attempt-proposal-selection", {
-    changeControlSha256: selectionSha256,
-  });
-  const reviewProof = await addSuccessAttempt(run, proposal, 1, "attempt-proposal-review", {});
+  const proposalProof = await addSuccessAttempt(
+    run,
+    proposal,
+    0,
+    `attempt-proposal-selection${suffix}`,
+    {
+      changeControlSha256: selectionSha256,
+    },
+  );
+  const reviewProof = await addSuccessAttempt(
+    run,
+    proposal,
+    1,
+    `attempt-proposal-review${suffix}`,
+    {},
+  );
   const reviewAttempt = run.attempts[reviewProof.attemptId]!;
   const reviewSha256 = canonicalHash({
     protocol: "koni.proposal-review-authority.v1",
@@ -646,6 +891,7 @@ async function applicationFixture(
     readPaths: [],
     writePaths: [],
     ruleId: "compiler.change-control.application",
+    validationAction,
   });
   const control: TicketExecutionControlRecord = {
     changeControlScopeNodeIds: ["claim-a"],
@@ -920,6 +1166,7 @@ function controlDefinition(
     readPaths: string[];
     writePaths: string[];
     ruleId: string;
+    validationAction?: string;
   }>,
 ): DerivedTicketDefinition {
   const operation = catalog.operations[input.operationId]!;
@@ -936,7 +1183,7 @@ function controlDefinition(
     write_paths: [...input.writePaths],
     expected_outputs: [index === workflow.steps.length - 1 ? "Reviewed result" : "Prepared result"],
     graph_mutation: input.writeNodeIds.length === 0 ? "forbidden" : "allowed",
-    validation_action: "compile",
+    validation_action: input.validationAction ?? "compile",
     required_receipts: [...semantic.requiredReceipts],
     escalation_triggers: [...semantic.escalationTriggers],
     stop_conditions: [...semantic.stopConditions],
@@ -1193,6 +1440,17 @@ function buildCatalog(): CompiledExecutionSemanticCatalog {
           proposal_operation: "propose-change",
         },
       },
+      "asset-resolution.asset.implement-asset": {
+        id: "asset-resolution.asset.implement-asset",
+        operation: "implement-recurring-asset",
+        stage: "execution",
+        workflow: "recurring-asset-flow",
+        change_control: {
+          role: "ordinary",
+          allow_upstream_requests: true,
+          proposal_operation: "propose-change",
+        },
+      },
       proposal: {
         id: "proposal",
         operation: "propose-change",
@@ -1224,6 +1482,9 @@ function buildCatalog(): CompiledExecutionSemanticCatalog {
     },
     workflows: {
       "ordinary-flow": workflow("ordinary-flow", "ordinary-work", ["work"]),
+      "recurring-asset-flow": workflow("recurring-asset-flow", "implement-recurring-asset", [
+        "work",
+      ]),
       "proposal-flow": workflow("proposal-flow", "propose-change", ["prepare", "review"]),
       "application-flow": workflow("application-flow", "apply-change", ["prepare", "review"]),
       "resolver-flow": workflow("resolver-flow", "resolve-failure", ["prepare", "review"]),
@@ -1276,6 +1537,75 @@ function bind(
     workflowId: operation.workflowId!,
     ...(stepId === undefined ? {} : { stepId }),
   });
+}
+
+function unauthorizeRecurringAssetGrantRefresh(
+  run: Readonly<RunRecord>,
+  sourceTicketId: string,
+  actionInvocationId: string,
+): RunRecord {
+  const next = structuredClone(run);
+  const source = next.tickets[sourceTicketId];
+  const action = next.actionExecutions?.[actionInvocationId];
+  if (source === undefined || action === undefined) {
+    throw new Error("fixture recurring-asset refresh authority is incomplete");
+  }
+  delete source.executionControl?.recurringAssetGrantRefreshes;
+  delete action.semanticResult;
+  action.effects = {};
+  return next;
+}
+
+function authorizeRecurringAssetGrantRefresh(
+  previous: Readonly<RunRecord>,
+  next: RunRecord,
+  actionInvocationId: string,
+  effect: "preferred" | "nonpreferred" = "preferred",
+): void {
+  const action = next.actionExecutions?.[actionInvocationId];
+  const priorAction = previous.actionExecutions?.[actionInvocationId];
+  if (action === undefined || priorAction === undefined || next.graphHash === undefined) {
+    throw new Error("fixture recurring-asset refresh action is incomplete");
+  }
+  action.updatedAt = next.updatedAt;
+  const refreshSha256s = appendRecurringAssetGrantRefreshAuthorities(
+    previous,
+    next.tickets,
+    priorAction,
+    next.graphHash,
+    next.graphRevision,
+    next.updatedAt,
+  );
+  action.semanticResult = {
+    kind: "assignment",
+    status: "completed",
+    summary: "Applied the graph change that refreshed the recurring asset grant",
+    recurringAssetGrantRefreshSha256s: refreshSha256s,
+  };
+  const preferredStep = ["check.run", "review.validate", "rules.evaluate", "project.validate"]
+    .map((primitive) => action.plan.recipe.find((step) => step.primitive === primitive))
+    .find((step) => step !== undefined);
+  if (preferredStep === undefined) throw new Error("fixture action has no semantic step");
+  const receiptStep =
+    effect === "preferred"
+      ? preferredStep
+      : action.plan.recipe.find((step) => step.id !== preferredStep.id);
+  if (receiptStep === undefined) throw new Error("fixture action has no nonpreferred step");
+  const effectKey = `${action.invocationId}:recipe:${receiptStep.id}:${action.plan.sha256}`;
+  action.effects[effectKey] = createRunActionEffectReceipt(
+    {
+      invocationId: action.invocationId,
+      planSha256: action.plan.sha256,
+      effectKey,
+      actionId: action.plan.actionId,
+      actor: action.plan.actor,
+      phase: "recipe",
+      step: receiptStep,
+      context: action.plan.context,
+    },
+    { recurringAssetGrantRefreshSha256s: refreshSha256s },
+    next.updatedAt,
+  );
 }
 
 function reprojectAttackerAuthority(ticket: TicketRecord): void {

@@ -199,6 +199,27 @@ export interface CompilerControlTicketAuthority {
   readonly sha256: Sha256Digest;
 }
 
+export interface RecurringAssetGrantRefreshAuthority {
+  readonly protocol: "koni.recurring-asset-grant-refresh.v1";
+  readonly runId: string;
+  readonly ticketId: string;
+  readonly configurationSha256: Sha256Digest;
+  readonly actionInvocationId: string;
+  readonly actionBoundarySha256: Sha256Digest;
+  readonly priorGraphHash: Sha256Digest;
+  readonly priorGraphRevision: number;
+  readonly nextGraphHash: Sha256Digest;
+  readonly nextGraphRevision: number;
+  readonly priorProjection: TicketImmutableProjection;
+  readonly priorProjectionSha256: Sha256Digest;
+  readonly refreshedProjection: TicketImmutableProjection;
+  readonly nextProjectionSha256: Sha256Digest;
+  readonly priorExecutionEpoch: number;
+  readonly nextExecutionEpoch: number;
+  readonly recordedAt: string;
+  readonly sha256: Sha256Digest;
+}
+
 /**
  * Compiler-authored control/recovery transaction state carried with one ticket. It deliberately
  * contains identities and hashes only; scheduling policy is projected elsewhere from this record.
@@ -206,6 +227,8 @@ export interface CompilerControlTicketAuthority {
 export interface TicketExecutionControlRecord {
   /** Complete compiler definition, immutable ticket projection, and role-specific causal proof. */
   controlTicketAuthority?: CompilerControlTicketAuthority;
+  /** Append-only compiler proof for a recurring asset's fresh-epoch grant replacement. */
+  recurringAssetGrantRefreshes?: RecurringAssetGrantRefreshAuthority[];
   changeControlScopeNodeIds?: string[];
   /** Immutable compiler request that caused this proposal ticket to exist. */
   proposalRequest?: {
@@ -847,6 +870,8 @@ export type RunActionSemanticResult =
       blocker?: string;
       /** Exact compiler-emitted change-control object retained in the accepted terminal artifact. */
       changeControlSha256?: Sha256Digest;
+      /** Compiler-emitted recurring-asset grant replacements applied by this exact action. */
+      recurringAssetGrantRefreshSha256s?: Sha256Digest[];
     }
   | { kind: "report"; reportId: string; bundleHash: Sha256Digest };
 
@@ -2944,6 +2969,11 @@ function assertRunActionSemanticResult(value: unknown): void {
       (value.summary !== undefined && typeof value.summary !== "string") ||
       (value.blocker !== undefined && typeof value.blocker !== "string") ||
       (value.changeControlSha256 !== undefined && !isSha256Digest(value.changeControlSha256)) ||
+      (value.recurringAssetGrantRefreshSha256s !== undefined &&
+        (!Array.isArray(value.recurringAssetGrantRefreshSha256s) ||
+          value.recurringAssetGrantRefreshSha256s.length === 0 ||
+          value.recurringAssetGrantRefreshSha256s.length > 64 ||
+          value.recurringAssetGrantRefreshSha256s.some((digest) => !isSha256Digest(digest)))) ||
       (value.status === "completed" &&
         (typeof value.summary !== "string" || value.summary.length === 0)) ||
       (value.status === "failed" &&
@@ -3785,6 +3815,79 @@ function assertTicketRecord(id: string, value: unknown): asserts value is Ticket
   }
 }
 
+function assertRecurringAssetGrantRefreshAuthority(
+  ticketId: string,
+  value: unknown,
+): asserts value is RecurringAssetGrantRefreshAuthority {
+  if (!isRecord(value)) {
+    throw new Error(`invalid recurring-asset grant refresh: ${ticketId}`);
+  }
+  const allowed = new Set([
+    "protocol",
+    "runId",
+    "ticketId",
+    "configurationSha256",
+    "actionInvocationId",
+    "actionBoundarySha256",
+    "priorGraphHash",
+    "priorGraphRevision",
+    "nextGraphHash",
+    "nextGraphRevision",
+    "priorProjection",
+    "priorProjectionSha256",
+    "refreshedProjection",
+    "nextProjectionSha256",
+    "priorExecutionEpoch",
+    "nextExecutionEpoch",
+    "recordedAt",
+    "sha256",
+  ]);
+  if (
+    Object.keys(value).some((field) => !allowed.has(field)) ||
+    value.protocol !== "koni.recurring-asset-grant-refresh.v1" ||
+    !isId(value.runId) ||
+    value.ticketId !== ticketId ||
+    !isSha256Digest(value.configurationSha256) ||
+    !isId(value.actionInvocationId) ||
+    !isSha256Digest(value.actionBoundarySha256) ||
+    !isSha256Digest(value.priorGraphHash) ||
+    !isNonnegativeSafeInteger(value.priorGraphRevision) ||
+    !isSha256Digest(value.nextGraphHash) ||
+    !isNonnegativeSafeInteger(value.nextGraphRevision) ||
+    !isRecord(value.priorProjection) ||
+    !isSha256Digest(value.priorProjectionSha256) ||
+    !isRecord(value.refreshedProjection) ||
+    !isSha256Digest(value.nextProjectionSha256) ||
+    !isNonnegativeSafeInteger(value.priorExecutionEpoch) ||
+    !isNonnegativeSafeInteger(value.nextExecutionEpoch) ||
+    typeof value.recordedAt !== "string" ||
+    value.recordedAt.length === 0 ||
+    !isSha256Digest(value.sha256)
+  ) {
+    throw new Error(`invalid recurring-asset grant refresh: ${ticketId}`);
+  }
+  assertTicketImmutableProjection(
+    value.priorProjection,
+    `recurring-asset prior projection: ${ticketId}`,
+  );
+  assertTicketImmutableProjection(
+    value.refreshedProjection,
+    `recurring-asset refreshed projection: ${ticketId}`,
+  );
+  const { sha256, ...material } = value;
+  if (
+    value.priorProjection.id !== ticketId ||
+    value.refreshedProjection.id !== ticketId ||
+    value.priorProjectionSha256 !== value.priorProjection.sha256 ||
+    value.nextProjectionSha256 !== value.refreshedProjection.sha256 ||
+    value.nextGraphRevision !== value.priorGraphRevision + 1 ||
+    value.nextExecutionEpoch !== value.priorExecutionEpoch + 1 ||
+    canonicalHash(material) !== sha256
+  ) {
+    throw new Error(`invalid recurring-asset grant refresh authority: ${ticketId}`);
+  }
+}
+
 function assertTicketExecutionControl(
   ticketId: string,
   value: unknown,
@@ -3794,6 +3897,7 @@ function assertTicketExecutionControl(
   let validatedProposalDisposition: TicketExecutionControlRecord["proposalDisposition"];
   const allowed = new Set([
     "controlTicketAuthority",
+    "recurringAssetGrantRefreshes",
     "changeControlScopeNodeIds",
     "proposalRequest",
     "sourceHold",
@@ -3814,6 +3918,17 @@ function assertTicketExecutionControl(
   }
   if (value.controlTicketAuthority !== undefined) {
     assertCompilerControlTicketAuthority(ticketId, value.controlTicketAuthority);
+  }
+  if (value.recurringAssetGrantRefreshes !== undefined) {
+    if (
+      !Array.isArray(value.recurringAssetGrantRefreshes) ||
+      value.recurringAssetGrantRefreshes.length > 64
+    ) {
+      throw new Error(`invalid recurring-asset grant refresh history: ${ticketId}`);
+    }
+    for (const refresh of value.recurringAssetGrantRefreshes) {
+      assertRecurringAssetGrantRefreshAuthority(ticketId, refresh);
+    }
   }
   if (value.changeControlScopeNodeIds !== undefined) {
     if (!isStringArray(value.changeControlScopeNodeIds)) {
@@ -4520,6 +4635,7 @@ function assertRunExecutionControlGraph(run: Readonly<RunRecord>): void {
   const proposalForSource = new Map<string, string>();
   const resolverFailures = new Set<string>();
   for (const ticket of Object.values(run.tickets)) {
+    assertRecurringAssetGrantRefreshHistory(run, ticket);
     assertCompilerControlTicketForRun(run, ticket);
     const control = ticket.executionControl;
     if (control === undefined) continue;
@@ -4877,10 +4993,17 @@ function assertCompilerControlTicketForRun(
       sourceHold?.proposalTicketId === ticket.id &&
       sourceHold.requestSha256 === causal.publication.requestSha256 &&
       canonicalHash(sourceHold) === canonicalHash(causal.sourceHold);
-    const authorizedSourceDependencyDrift =
+    const authorizedSourceEvolution =
+      source !== undefined &&
       sourceProjection !== undefined &&
-      (activelyHeldSource || proposalHasReleasedSourceAuthority(run, ticket)) &&
-      ticketProjectionsDifferOnlyByDependencies(sourceProjection, causal.sourceTicketProjection);
+      (activelyHeldSource
+        ? ticketProjectionsDifferOnlyByDependencies(sourceProjection, causal.sourceTicketProjection)
+        : proposalHasReleasedSourceAuthority(run, ticket) &&
+          recurringAssetGrantRefreshChainAuthorizes(
+            source,
+            sourceProjection,
+            causal.sourceTicketProjection,
+          ));
     const sourceStep = sourceProjection?.steps.find(
       (step) => step.id === causal.publication.sourceStepId,
     );
@@ -4918,7 +5041,7 @@ function assertCompilerControlTicketForRun(
       source === undefined ||
       source.id === ticket.id ||
       (canonicalHash(sourceProjection) !== canonicalHash(causal.sourceTicketProjection) &&
-        !authorizedSourceDependencyDrift) ||
+        !authorizedSourceEvolution) ||
       sourceStep?.executionPolicyBinding?.sha256 !== causal.publication.sourceBinding.sha256 ||
       causal.publication.runId !== run.id ||
       causal.publication.proposalTicketId !== ticket.id ||
@@ -5060,6 +5183,62 @@ function ticketProjectionsDifferOnlyByDependencies(
       sha256: historical.sha256,
     }) === canonicalHash(historical)
   );
+}
+
+function recurringAssetGrantRefreshChainAuthorizes(
+  source: Readonly<TicketRecord>,
+  current: Readonly<TicketImmutableProjection>,
+  historical: Readonly<TicketImmutableProjection>,
+): boolean {
+  const history = source.executionControl?.recurringAssetGrantRefreshes ?? [];
+  let accepted = historical;
+  let cursor = history.findIndex((refresh) =>
+    ticketProjectionsDifferOnlyByDependencies(refresh.priorProjection, historical),
+  );
+  if (cursor < 0) {
+    const checkpoint = history.findLastIndex((refresh) =>
+      ticketProjectionsDifferOnlyByDependencies(refresh.refreshedProjection, historical),
+    );
+    cursor = checkpoint + 1;
+  }
+  for (const refresh of history.slice(cursor)) {
+    if (!ticketProjectionsDifferOnlyByDependencies(refresh.priorProjection, accepted)) return false;
+    accepted = refresh.refreshedProjection;
+  }
+  return ticketProjectionsDifferOnlyByDependencies(current, accepted);
+}
+
+function assertRecurringAssetGrantRefreshHistory(
+  run: Readonly<RunRecord>,
+  ticket: Readonly<TicketRecord>,
+): void {
+  const history = ticket.executionControl?.recurringAssetGrantRefreshes;
+  if (history === undefined || history.length === 0) return;
+  if (ticket.operationId !== "asset-resolution.asset.implement-asset") {
+    throw new Error(`non-recurring ticket retains grant refresh authority: ${ticket.id}`);
+  }
+  for (const [index, refresh] of history.entries()) {
+    if (
+      refresh.runId !== run.id ||
+      refresh.ticketId !== ticket.id ||
+      refresh.configurationSha256 !== run.compiledConfigHash ||
+      (index > 0 &&
+        !ticketProjectionsDifferOnlyByDependencies(
+          refresh.priorProjection,
+          history[index - 1]!.refreshedProjection,
+        ))
+    ) {
+      throw new Error(`recurring-asset grant refresh chain is invalid: ${ticket.id}`);
+    }
+  }
+  if (
+    !ticketProjectionsDifferOnlyByDependencies(
+      ticketImmutableProjection(ticket),
+      history.at(-1)!.refreshedProjection,
+    )
+  ) {
+    throw new Error(`recurring-asset ticket differs from its latest grant refresh: ${ticket.id}`);
+  }
 }
 
 function assertControlDefinitionProjection(
@@ -5507,6 +5686,153 @@ function assertTokenBudgetRecoveryMutation(
   }
 }
 
+function recurringAssetProjectionDefinitionMaterial(
+  projection: Readonly<TicketImmutableProjection>,
+): unknown {
+  return {
+    ...projection,
+    dependencyIds: [],
+    readNodeIds: [],
+    writeNodeIds: [],
+    readPaths: [],
+    writePaths: [],
+    steps: projection.steps.map((step) => ({
+      ...step,
+      readNodeIds: [],
+      writeNodeIds: [],
+      readPaths: [],
+      writePaths: [],
+    })),
+    sha256: "",
+  };
+}
+
+function assignmentSemanticCompilerStep(
+  action: Readonly<RunActionExecutionRecord>,
+): Readonly<RunActionExecutionRecord["plan"]["recipe"][number]> | undefined {
+  for (const primitive of ["check.run", "review.validate", "rules.evaluate", "project.validate"]) {
+    const step = action.plan.recipe.find((candidate) => candidate.primitive === primitive);
+    if (step !== undefined) return step;
+  }
+  return undefined;
+}
+
+function assertRecurringAssetGrantRefreshMutation(
+  previous: Readonly<RunRecord>,
+  next: Readonly<RunRecord>,
+): void {
+  for (const [ticketId, currentTicket] of Object.entries(next.tickets)) {
+    const priorTicket = previous.tickets[ticketId];
+    const priorHistory = priorTicket?.executionControl?.recurringAssetGrantRefreshes ?? [];
+    const currentHistory = currentTicket.executionControl?.recurringAssetGrantRefreshes ?? [];
+    if (
+      currentHistory.length < priorHistory.length ||
+      canonicalHash(currentHistory.slice(0, priorHistory.length)) !== canonicalHash(priorHistory)
+    ) {
+      throw new Error(`ticket rewrote recurring-asset grant refresh authority: ${ticketId}`);
+    }
+    const added = currentHistory.slice(priorHistory.length);
+    if (added.length === 0) continue;
+    if (added.length !== 1 || priorTicket === undefined) {
+      throw new Error(
+        `ticket added ambiguous recurring-asset grant refresh authority: ${ticketId}`,
+      );
+    }
+    const refresh = added[0]!;
+    const priorProjection = ticketImmutableProjection(priorTicket);
+    const currentProjection = ticketImmutableProjection(currentTicket);
+    const priorCycle =
+      priorTicket.gitCycleId === undefined
+        ? undefined
+        : previous.git.ticketCycles[priorTicket.gitCycleId];
+    const priorSettled =
+      (priorTicket.status === "completed" && priorCycle?.status === "retired") ||
+      (priorTicket.status === "cancelled" &&
+        priorTicket.blocker ===
+          "Current compiler predicate no longer applies after prior execution" &&
+        priorTicket.gitCycleId === undefined &&
+        priorTicket.worktreePath === undefined &&
+        priorTicket.branch === undefined &&
+        priorTicket.steps.length > 0 &&
+        priorTicket.steps.every((step) => step.status === "skipped"));
+    const priorAction = previous.actionExecutions?.[refresh.actionInvocationId];
+    const currentAction = next.actionExecutions?.[refresh.actionInvocationId];
+    const applicationTicket =
+      currentAction?.boundary.ticketId === undefined
+        ? undefined
+        : next.tickets[currentAction.boundary.ticketId];
+    const applicationAuthority = applicationTicket?.executionControl?.controlTicketAuthority;
+    const applicationCausal =
+      applicationAuthority?.causal.role === "approved_application"
+        ? applicationAuthority.causal
+        : undefined;
+    const applicationStep = applicationAuthority?.definition.workflow.find(
+      (step) => step.id === currentAction?.boundary.stepId,
+    );
+    const semanticCompilerStep =
+      currentAction === undefined ? undefined : assignmentSemanticCompilerStep(currentAction);
+    const refreshEffect =
+      currentAction === undefined || semanticCompilerStep === undefined
+        ? undefined
+        : currentAction.effects[
+            `${currentAction.invocationId}:recipe:${semanticCompilerStep.id}:${currentAction.plan.sha256}`
+          ];
+    if (
+      priorTicket.operationId !== "asset-resolution.asset.implement-asset" ||
+      currentTicket.operationId !== priorTicket.operationId ||
+      !priorSettled ||
+      currentTicket.status !== "queued" ||
+      currentTicket.executionEpoch !== (priorTicket.executionEpoch ?? 0) + 1 ||
+      currentTicket.gitCycleId !== undefined ||
+      currentTicket.worktreePath !== undefined ||
+      currentTicket.branch !== undefined ||
+      currentTicket.steps.length === 0 ||
+      currentTicket.steps.some((step) => step.status !== "pending") ||
+      refresh.runId !== next.id ||
+      refresh.ticketId !== ticketId ||
+      refresh.configurationSha256 !== next.compiledConfigHash ||
+      refresh.priorGraphHash !== previous.graphHash ||
+      refresh.priorGraphRevision !== previous.graphRevision ||
+      refresh.nextGraphHash !== next.graphHash ||
+      refresh.nextGraphRevision !== next.graphRevision ||
+      refresh.priorProjectionSha256 !== priorProjection.sha256 ||
+      canonicalHash(refresh.priorProjection) !== canonicalHash(priorProjection) ||
+      refresh.nextProjectionSha256 !== currentProjection.sha256 ||
+      canonicalHash(refresh.refreshedProjection) !== canonicalHash(currentProjection) ||
+      refresh.priorExecutionEpoch !== (priorTicket.executionEpoch ?? 0) ||
+      refresh.nextExecutionEpoch !== currentTicket.executionEpoch ||
+      refresh.recordedAt !== next.updatedAt ||
+      canonicalHash(recurringAssetProjectionDefinitionMaterial(priorProjection)) !==
+        canonicalHash(recurringAssetProjectionDefinitionMaterial(currentProjection)) ||
+      priorAction === undefined ||
+      currentAction === undefined ||
+      priorAction.boundary.kind !== "assignment_validation" ||
+      priorAction.boundary.sha256 !== refresh.actionBoundarySha256 ||
+      currentAction.boundary.sha256 !== refresh.actionBoundarySha256 ||
+      currentAction.boundary.ticketId !== applicationTicket?.id ||
+      applicationAuthority?.role !== "approved_application" ||
+      applicationCausal === undefined ||
+      applicationStep?.graph_mutation === "forbidden" ||
+      semanticCompilerStep === undefined ||
+      !applicationCausal.materialization.targetNodeIds.some((nodeId) =>
+        priorProjection.targetNodeIds.includes(nodeId),
+      ) ||
+      previous.graphHash === next.graphHash ||
+      priorAction.semanticResult !== undefined ||
+      currentAction.semanticResult?.kind !== "assignment" ||
+      currentAction.semanticResult.status !== "completed" ||
+      !currentAction.semanticResult.recurringAssetGrantRefreshSha256s?.includes(refresh.sha256) ||
+      refreshEffect === undefined ||
+      priorAction.effects[refreshEffect.effectKey] !== undefined ||
+      !isRecord(refreshEffect.output) ||
+      !Array.isArray(refreshEffect.output.recurringAssetGrantRefreshSha256s) ||
+      !refreshEffect.output.recurringAssetGrantRefreshSha256s.includes(refresh.sha256)
+    ) {
+      throw new Error(`ticket added unauthenticated recurring-asset grant refresh: ${ticketId}`);
+    }
+  }
+}
+
 /** Enforce append-only control evidence and immutable cross-ticket identities across one CAS. */
 export function assertRunExecutionControlMutation(
   previous: Readonly<RunRecord>,
@@ -5515,6 +5841,7 @@ export function assertRunExecutionControlMutation(
 ): void {
   assertPlanningSessionMutation(previous.planningSession, next.planningSession);
   assertTokenBudgetRecoveryMutation(previous, next);
+  assertRecurringAssetGrantRefreshMutation(previous, next);
   // This transition guard is an authority boundary in its own right. Validate the successor's
   // complete cross-ticket graph here so direct CAS callers cannot bypass raw-load validation by
   // introducing a structurally self-hashed but causally substituted control ticket.
