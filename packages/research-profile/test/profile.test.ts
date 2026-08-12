@@ -391,6 +391,49 @@ describe("research profile registrar", () => {
     );
   });
 
+  it("separates filesystem materialization from semantic graph publication", async () => {
+    const [workflowSource, executionReference] = await Promise.all([
+      readFile(
+        path.resolve(import.meta.dirname, "../koni/baseline/workflows/research.yaml"),
+        "utf8",
+      ),
+      readFile(
+        path.resolve(
+          import.meta.dirname,
+          "../../core/skills/model-koni-work/references/execution-contracts.md",
+        ),
+        "utf8",
+      ),
+    ]);
+    const document = YAML.parse(workflowSource) as {
+      workflows: Array<{
+        id: string;
+        steps: Array<{ id: string; graph_mutation?: string; expected_output?: string }>;
+      }>;
+    };
+    const workflow = document.workflows.find(({ id }) => id === "implement-asset");
+    const mutationByStep = Object.fromEntries(
+      (workflow?.steps ?? []).map(({ id, graph_mutation }) => [id, graph_mutation]),
+    );
+    const normalizedReference = executionReference.replace(/\s+/gu, " ");
+
+    expect(mutationByStep).toEqual({
+      implement: "forbidden",
+      verify: "forbidden",
+      integrate: "required",
+      review: "forbidden",
+    });
+    expect(normalizedReference).toContain(
+      "A filesystem-only step must declare graph mutation forbidden and omit the graph delta",
+    );
+    expect(normalizedReference).toContain(
+      "Do not reconstruct or echo an existing node merely to report unchanged authored fields",
+    );
+    expect(normalizedReference).toContain(
+      "A later semantic integration step owns the required graph mutation",
+    );
+  });
+
   it("keeps run-plan compilation behind directly linked asset work", async () => {
     const source = await readFile(
       path.resolve(import.meta.dirname, "../koni/baseline/rules/research.yaml"),

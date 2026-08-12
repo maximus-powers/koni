@@ -40,6 +40,13 @@ graph delta. Target the existing causal node and request dynamic scope for any c
 grant-derived field; the replacement path's membership in the old grant does not make the field
 mutable.
 
+Separate repository effects from graph effects at the workflow boundary. A filesystem-only step must
+declare graph mutation forbidden and omit the graph delta. Do not reconstruct or echo an existing
+node merely to report unchanged authored fields: a complete-node upsert can silently alter an
+unrelated field and therefore changes semantic authority. A later semantic integration step owns the
+required graph mutation, reads the current node, and publishes only the intended authored contract
+after the repository effect is verified.
+
 ## Workflow DAG
 
 The following is the shipped Software 0.3 composition pattern, retained as historical context:

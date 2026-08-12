@@ -518,7 +518,8 @@ workflows:
   - id: implement
     agent: asset-builder
     depends_on: []
-    expected_output: concrete nonempty payload plus spec.implementation.kind and unique project-relative entrypoints under the authorized root, including deterministic autoresearch.gate-result.v1 verifier commands for every target gate; preserve existing compiler-owned values exactly and never author them on new nodes
+    graph_mutation: forbidden
+    expected_output: concrete nonempty payload under the authorized root with no model-authored graph delta; the later integrate step owns semantic graph publication after verification
     validation_action: compile-ticket
     required_receipts:
     - context-pack
@@ -535,6 +536,7 @@ workflows:
     agent: asset-builder
     depends_on:
     - implement
+    graph_mutation: forbidden
     expected_output: typed validation receipts
     validation_action: compile-ticket
     required_receipts:
@@ -550,6 +552,7 @@ workflows:
     agent: integrator
     depends_on:
     - verify
+    graph_mutation: required
     expected_output: canonical existing-asset upsert preserving current compiler-owned fields exactly while adding authored implementation kind, entrypoints, exact gate_contracts, and validates links; new nodes omit compiler-owned fields
     validation_action: compile-ticket
     required_receipts:
@@ -569,6 +572,7 @@ workflows:
     agent: reviewer
     depends_on:
     - integrate
+    graph_mutation: forbidden
     expected_output: typed review receipt
     validation_action: review
     required_receipts:
