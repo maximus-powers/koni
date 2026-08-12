@@ -143,6 +143,24 @@ describe("Koni's Pi-native skills", () => {
     expect(normalizedExecutionReference).toContain(
       "Carry forward only a finding that the current candidate and current receipts still establish",
     );
+    expect(normalizedSoftwareReference).toContain(
+      "Perform a historical-executability audit before selecting the proof strategy",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "Only the intended target assertion may be absent or red before implementation",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "Fixture setup and every unchanged or preservation route must remain executable without the missing target",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "The target invocation itself may be the isolated red at its real application-owned seam",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "assert the exact structured transition or command that the application owns",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "A claimed runtime effect still requires separate evidence that executes its actual owner",
+    );
   });
 });
 

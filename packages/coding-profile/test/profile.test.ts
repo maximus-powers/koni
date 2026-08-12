@@ -417,6 +417,41 @@ describe("coding profile registrar", () => {
     );
   });
 
+  it("requires historically executable proof contracts at the application-owned seam", async () => {
+    const [plannerSource, referenceSource] = await Promise.all([
+      readFile(
+        path.resolve(import.meta.dirname, "../koni/baseline/agents/run-planner.yaml"),
+        "utf8",
+      ),
+      readFile(
+        path.resolve(
+          import.meta.dirname,
+          "../../core/skills/model-koni-work/references/software-projects.md",
+        ),
+        "utf8",
+      ),
+    ]);
+    const planner = YAML.parse(plannerSource) as { instructions: string };
+    const normalizedPlanner = planner.instructions.replace(/\s+/gu, " ");
+    const normalizedReference = referenceSource.replace(/\s+/gu, " ");
+
+    expect(normalizedPlanner).toContain(
+      "Perform the shared historical-executability audit before selecting a proof strategy",
+    );
+    expect(normalizedPlanner).toContain(
+      "Bind each case to the transition or observation the application actually owns",
+    );
+    expect(normalizedPlanner).toContain(
+      "keep fixture setup and every unchanged or preservation route executable without the missing target",
+    );
+    expect(normalizedPlanner).toContain(
+      "allow that target invocation itself to be the isolated red at its real application seam",
+    );
+    expect(normalizedReference).toContain(
+      "Only the intended target assertion may be absent or red before implementation",
+    );
+  });
+
   it("separates proof support evidence from product coverage and writable proof source", async () => {
     const [graphSource, rulesSource, workflowsSource, checksSource] = await Promise.all([
       readFile(path.resolve(import.meta.dirname, "../koni/baseline/graph.yaml"), "utf8"),

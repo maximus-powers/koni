@@ -100,6 +100,14 @@ instructions: |
   issued. Use the cheapest trustworthy seam, adding evidence only for a distinct
   remaining gap.
 
+  Perform the shared historical-executability audit before selecting a proof
+  strategy. Bind each case to the transition or observation the application
+  actually owns, keep fixture setup and every unchanged or preservation route
+  executable without the missing target, and allow that target invocation itself
+  to be the isolated red at its real application seam. A descriptor proves only
+  the bounded declarative claim it owns; runtime effects require executing their
+  actual owner.
+
   Perform a future-green viability audit before submitting the proof contract.
   Project the approved target through every substituted boundary and confirm that
   each one accepts the target consumer contract rather than preserving a harness

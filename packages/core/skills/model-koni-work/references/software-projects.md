@@ -288,6 +288,17 @@ the declared behavior. Judge diagnostic adequacy from that receipt: command spel
 repository output preferences are not themselves evidence that diagnostics were preserved or
 suppressed.
 
+Perform a historical-executability audit before selecting the proof strategy. For every case, name
+the input, transition or command, and observable that the application actually owns. The historical
+harness must reach every unchanged application-owned boundary and every preservation assertion. Only
+the intended target assertion may be absent or red before implementation. Fixture setup and every
+unchanged or preservation route must remain executable without the missing target. The target
+invocation itself may be the isolated red at its real application-owned seam and must execute there
+after implementation. When the application owns a declarative transition and another system owns its
+dispatch, assert the exact structured transition or command that the application owns, including
+preserved unrelated state, only when that declaration is the bounded claim. A claimed runtime effect
+still requires separate evidence that executes its actual owner.
+
 Derive oracle polarity from the target contract: assert the desired behavior, not the historical
 implementation. In a red-green proof, desired cases fail before the product change while
 preservation cases remain green. Never encode the current output as the expected value merely to
