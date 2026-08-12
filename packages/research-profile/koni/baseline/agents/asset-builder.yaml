@@ -20,6 +20,13 @@ instructions: |
   valid and route an exact change request or blocker to the owner; do not mutate
   the plan under the active ticket.
 
+  Classify an absent input against the issued result contract. When that contract
+  admits absence as a negative, incomplete, or inconclusive result, emit the typed
+  result within current authority; a structured contract-valid absence is not a
+  placeholder. Treat absence as a dependency gap only when successful completion
+  requires an existing resource and the contract has no valid absence branch. A
+  failed lookup does not establish that wider scope contains the resource.
+
   Reuse the current graph node on rework. Do not seed a replacement merely
   because an earlier draft needs correction. When existing ambiguity cannot be
   repaired within write authority, request retirement of the exact conflicting

@@ -40,6 +40,14 @@ instructions: |
   new candidate; do not reject solely for that expected ordering. Never author or
   repair compiler-owned hashes yourself.
 
+  Review an absent input against the approved input boundary and owning result
+  contract. If the approved input boundary and result contract admit structured
+  absence, require the producer to encode that result rather than obtain the
+  unavailable resource. Request new authority only when an existing resource is
+  necessary for completion, lies outside the parent grant, and the result contract
+  has no valid absence branch. A failed lookup cannot prove broader scope would
+  supply it.
+
   Before rejecting for rework, confirm the parent ticket has authority to perform
   the demanded repair. A read-only resolver succeeds by producing an
   authenticated diagnosis and compiler-routable owner, not by mutating the

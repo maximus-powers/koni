@@ -48,6 +48,13 @@ to make that bounded judgment and report the assumption. Reserve a question for 
 materially different interpretations remain supported, would change current safety, and the
 authoritative context selects none.
 
+Preserve the distinction between a required dependency and contract-defined absence. When an
+operation's result contract accepts missing or unavailable input as a typed result, configure its
+producer to emit that result and its reviewer to preserve it inside current authority. Route change
+control only when an existing resource is necessary for completion, is outside the issued grant, and
+no valid absence branch exists. A failed lookup does not establish that broader authority would
+resolve the gap.
+
 An agent inherits the complete Pi repository environment when `pi.settings` is omitted. Filters only
 narrow resources Pi already resolved. Positive globs must match. A package filter must name an
 already configured Pi package.

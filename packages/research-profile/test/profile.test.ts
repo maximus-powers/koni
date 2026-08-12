@@ -391,6 +391,65 @@ describe("research profile registrar", () => {
     );
   });
 
+  it("keeps contract-defined absence distinct from missing authority", async () => {
+    const [assetBuilderSource, reviewerSource, executionReference, agentsReference] =
+      await Promise.all([
+        readFile(
+          path.resolve(import.meta.dirname, "../koni/baseline/agents/asset-builder.yaml"),
+          "utf8",
+        ),
+        readFile(
+          path.resolve(import.meta.dirname, "../koni/baseline/agents/reviewer.yaml"),
+          "utf8",
+        ),
+        readFile(
+          path.resolve(
+            import.meta.dirname,
+            "../../core/skills/model-koni-work/references/execution-contracts.md",
+          ),
+          "utf8",
+        ),
+        readFile(
+          path.resolve(
+            import.meta.dirname,
+            "../../core/skills/configure-koni/references/agents-and-skills.md",
+          ),
+          "utf8",
+        ),
+      ]);
+    const assetBuilder = YAML.parse(assetBuilderSource) as { instructions: string };
+    const reviewer = YAML.parse(reviewerSource) as { instructions: string };
+    const normalizedAssetBuilder = assetBuilder.instructions.replace(/\s+/gu, " ");
+    const normalizedReviewer = reviewer.instructions.replace(/\s+/gu, " ");
+    const normalizedExecutionReference = executionReference.replace(/\s+/gu, " ");
+    const normalizedAgentsReference = agentsReference.replace(/\s+/gu, " ");
+
+    expect(normalizedAssetBuilder).toContain(
+      "Classify an absent input against the issued result contract",
+    );
+    expect(normalizedAssetBuilder).toContain(
+      "When that contract admits absence as a negative, incomplete, or inconclusive result, emit the typed result within current authority",
+    );
+    expect(normalizedReviewer).toContain(
+      "If the approved input boundary and result contract admit structured absence, require the producer to encode that result rather than obtain the unavailable resource",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "Classify a missing resource against the owning result contract before requesting authority",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "A lookup that establishes nonexistence supports absence only at its authenticated boundary",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "A permission, scope, or transient failure establishes neither absence nor that wider authority contains the resource",
+    );
+    expect(normalizedAgentsReference).toContain(
+      "Preserve the distinction between a required dependency and contract-defined absence",
+    );
+    expect(normalizedAgentsReference).toContain(
+      "configure its producer to emit that result and its reviewer to preserve it",
+    );
+  });
+
   it("separates filesystem materialization from semantic graph publication", async () => {
     const [workflowSource, executionReference] = await Promise.all([
       readFile(

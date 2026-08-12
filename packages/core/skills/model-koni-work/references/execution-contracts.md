@@ -32,6 +32,14 @@ new beneath an authenticated ownership or implementation root. Reconcile every p
 against that distinction before submission; resolve a missing exact target with one bounded lookup
 or report the modeling gap.
 
+Classify a missing resource against the owning result contract before requesting authority. If the
+contract admits absence as a typed negative, incomplete, or inconclusive result, preserve that
+result inside the issued boundary; do not convert it into a required dependency. Treat it as an
+authority gap only when successful completion requires an existing resource outside the grant and
+the contract has no valid absence branch. A lookup that establishes nonexistence supports absence
+only at its authenticated boundary. A permission, scope, or transient failure establishes neither
+absence nor that wider authority contains the resource.
+
 Graph write authority does not make grant-affecting fields mutable within the current ticket. Once
 an attempt is issued, fields that derive its read paths, write paths, working directory, command, or
 workflow grant are frozen even when their containing node is writable. If current evidence
