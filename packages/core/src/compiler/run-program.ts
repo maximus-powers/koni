@@ -139,6 +139,10 @@ import {
   rawSha256,
   type Sha256Digest,
 } from "../shared/canonical.js";
+import {
+  createProjectPathAuthority,
+  normalizeProjectRelativePath,
+} from "../shared/project-path-authority.js";
 import type { CompilerDiagnostic, ValidationResult } from "../shared/diagnostics.js";
 import {
   createRunBehaviorSnapshot,
@@ -357,6 +361,8 @@ interface AuthenticatedProofPreparationCurrent {
 interface RuleEvaluationOptions {
   /** The one terminal-accepted review whose compiler-owned effect is being evaluated pre-persist. */
   selfPreparationReviewAttemptId?: string;
+  /** Override the approved run checkout when evaluating a pre-approval planning graph. */
+  projectRoot?: string;
 }
 
 interface GraphNoteArtifact {
@@ -1996,13 +2002,22 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
   }): Promise<PlanningCompilation> {
     const pinned = await this.#loadPinned(input.run);
     const parsed = parsePlanningOutput(input.output);
+    const planningWorkspace = attemptWorkspace(input.run, "planning", "run-planning");
     const graph = compilePlanningSeed(
       pinned.configuration,
       input.run,
       parsed.graphSeed,
       parsed.full,
-      this.#projectRoot,
+      planningWorkspace,
     );
+    const evaluation = requireValidation(
+      await this.#evaluateRules(input.run, pinned.configuration, graph, {
+        projectRoot: planningWorkspace,
+      }),
+      "rule_compilation_failed",
+      "planning graph did not compile into a valid ticket board",
+    );
+    await assertPlanningRepositoryPaths(planningWorkspace, evaluation.tickets);
     const revision =
       input.run.planningSession === undefined
         ? (input.run.plan?.revision ?? 0) + 1
@@ -2125,13 +2140,22 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         protectedRootSpecFields: planningProtectedRootSpecFields(pinned.configuration),
       }),
     );
+    const planningWorkspace = attemptWorkspace(input.run, "planning", "run-planning");
     const graph = compilePlanningSeed(
       pinned.configuration,
       input.run,
       artifact.graphSeed,
       artifact.full,
-      this.#projectRoot,
+      planningWorkspace,
     );
+    const evaluation = requireValidation(
+      await this.#evaluateRules(input.run, pinned.configuration, graph, {
+        projectRoot: planningWorkspace,
+      }),
+      "rule_compilation_failed",
+      "planning revision graph did not compile into a valid ticket board",
+    );
+    await assertPlanningRepositoryPaths(planningWorkspace, evaluation.tickets);
     const plan: RunPlanRecord = {
       revision: input.revision,
       status: "planning",
@@ -4541,7 +4565,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const adapter = await createProductionRuleDomainAdapter({
       configuration,
       graph,
-      projectRoot: path.resolve(run.git.run.worktree),
+      projectRoot: path.resolve(options.projectRoot ?? run.git.run.worktree),
       ...(evidence === undefined ? {} : { evidence }),
     });
     const evaluated = evaluateConfiguredRules({ configuration, graph }, { adapter });
@@ -4569,6 +4593,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       configuration,
       graph,
       withBlockedGateRechecks,
+      options.projectRoot ?? run.git.run.worktree,
     );
     const withAssetCompatibility = repaired ?? withBlockedGateRechecks;
     const withRunPlanCompatibility = researchConstitutionRunPlanFallback(
@@ -13886,6 +13911,7 @@ async function generatedAssetImplementationFallback(
   configuration: CompiledConfiguration,
   graph: TypedGraph,
   evaluation: CompiledRuleEvaluation,
+  projectRoot: string,
 ): Promise<CompiledRuleEvaluation | undefined> {
   const operationId = "asset-resolution.asset.implement-asset";
   const operation = configuration.registries.operations[operationId];
@@ -13947,7 +13973,7 @@ async function generatedAssetImplementationFallback(
       !requestedRepair &&
       !compatibilityRepairInFlight &&
       existingTickets.some((ticket) => ticket.status === "completed") &&
-      (await assetImplementationFilesMaterialized(run.git.run.worktree, files))
+      (await assetImplementationFilesMaterialized(projectRoot, files))
     ) {
       continue;
     }
@@ -14814,6 +14840,190 @@ function assertConfiguredGraphConstraints(
     }
     throw error;
   }
+}
+
+/**
+ * A planning checkpoint may name repository inputs only when the compiler can bind them to the
+ * exact planning checkout or to authority that the same checkpoint grants to create them. This
+ * catches copied or invented paths before approval while preserving ordinary planned outputs.
+ */
+export async function assertPlanningRepositoryPaths(
+  projectRoot: string,
+  definitions: readonly DerivedTicketDefinition[],
+): Promise<void> {
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = await realpath(projectRoot);
+  } catch {
+    fail("planning_workspace", "planning repository checkout is not durably readable");
+  }
+  const authority = createProjectPathAuthority(canonicalRoot!);
+  let dependencies: ReadonlyMap<string, readonly string[]>;
+  try {
+    dependencies = deriveCompilerTicketDependencies(definitions, canonicalRoot!);
+  } catch (error) {
+    fail("planning_repository_path", "planning graph repository paths cannot be ordered safely", [
+      error instanceof Error ? error.message : String(error),
+    ]);
+  }
+  const orderedDefinitions = [...definitions].sort((left, right) => compareText(left.id, right.id));
+  const definitionsById = new Map(
+    orderedDefinitions.map((definition) => [definition.id, definition]),
+  );
+  const workflowScopesByDefinitionId = new Map(
+    orderedDefinitions.map((definition) => [definition.id, planningWorkflowPathScopes(definition)]),
+  );
+  const missing = new Set<string>();
+  for (const definition of orderedDefinitions) {
+    const steps = workflowScopesByDefinitionId.get(definition.id)!;
+    const predecessorSteps = workflowPredecessors(definition.workflow);
+    for (const reader of steps) {
+      for (const readPath of reader.readPaths) {
+        if (await planningRepositoryPathExists(canonicalRoot!, readPath)) continue;
+        let planned = false;
+        try {
+          planned = reader.writePaths.some((writePath) =>
+            authority.pathsOverlap(readPath, writePath),
+          );
+          if (!planned) {
+            planned = steps.some(
+              (writer) =>
+                predecessorSteps.get(reader.id)?.has(writer.id) === true &&
+                writer.writePaths.some((writePath) => authority.pathsOverlap(readPath, writePath)),
+            );
+          }
+          if (!planned) {
+            planned = (dependencies!.get(definition.id) ?? []).some((writerId) => {
+              const writer = definitionsById.get(writerId);
+              return (
+                writer !== undefined &&
+                workflowScopesByDefinitionId
+                  .get(writer.id)!
+                  .some((writerStep) =>
+                    writerStep.writePaths.some((writePath) =>
+                      authority.pathsOverlap(readPath, writePath),
+                    ),
+                  )
+              );
+            });
+          }
+        } catch (error) {
+          fail(
+            "planning_repository_path",
+            "planning graph repository paths cannot be resolved safely",
+            [error instanceof Error ? error.message : String(error)],
+          );
+        }
+        if (!planned) missing.add(readPath);
+      }
+    }
+  }
+  if (missing.size === 0) return;
+  const sortedMissing = [...missing].sort(compareText);
+  const bounded = sortedMissing
+    .slice(0, 64)
+    .map(
+      (value) =>
+        `${value} does not exist in the planning checkout and no derived write scope can create it`,
+    );
+  if (sortedMissing.length > bounded.length) {
+    bounded.push(
+      `${sortedMissing.length - bounded.length} additional unresolved read path(s) omitted`,
+    );
+  }
+  fail(
+    "planning_repository_path",
+    "planning graph derives repository reads that are neither authenticated inputs nor planned outputs",
+    bounded,
+  );
+}
+
+interface PlanningWorkflowPathScope {
+  readonly id: string;
+  readonly readPaths: readonly string[];
+  readonly writePaths: readonly string[];
+}
+
+function planningWorkflowPathScopes(
+  definition: DerivedTicketDefinition,
+): readonly PlanningWorkflowPathScope[] {
+  if (definition.workflow.length === 0) {
+    return [
+      {
+        id: definition.id,
+        readPaths: normalizePlanningPaths(definition.scope.read_paths, "read"),
+        writePaths: normalizePlanningPaths(definition.scope.write_paths, "write"),
+      },
+    ];
+  }
+  return definition.workflow.map((step) => {
+    const writePaths = normalizePlanningPaths(
+      step.write_paths ?? definition.scope.write_paths,
+      "write",
+    );
+    return {
+      id: step.id,
+      readPaths: normalizePlanningPaths(step.read_paths ?? definition.scope.read_paths, "read"),
+      writePaths: step.kind === "review" ? [] : writePaths,
+    };
+  });
+}
+
+function workflowPredecessors(
+  workflow: readonly DerivedWorkflowStep[],
+): ReadonlyMap<string, ReadonlySet<string>> {
+  const direct = new Map(workflow.map((step) => [step.id, new Set(step.depends_on)]));
+  const predecessors = new Map<string, ReadonlySet<string>>();
+  const visit = (stepId: string, visiting = new Set<string>()): ReadonlySet<string> => {
+    const cached = predecessors.get(stepId);
+    if (cached !== undefined) return cached;
+    if (visiting.has(stepId)) return new Set();
+    const nextVisiting = new Set(visiting).add(stepId);
+    const result = new Set<string>();
+    for (const dependencyId of direct.get(stepId) ?? []) {
+      result.add(dependencyId);
+      for (const ancestorId of visit(dependencyId, nextVisiting)) result.add(ancestorId);
+    }
+    predecessors.set(stepId, result);
+    return result;
+  };
+  for (const step of workflow) visit(step.id);
+  return predecessors;
+}
+
+function normalizePlanningPaths(values: readonly string[], kind: "read" | "write"): string[] {
+  const normalized = new Set<string>();
+  for (const value of values) {
+    try {
+      normalized.add(normalizeProjectRelativePath(value));
+    } catch (error) {
+      fail(
+        "planning_repository_path",
+        `planning graph derives an invalid repository ${kind} path`,
+        [error instanceof Error ? error.message : String(error)],
+      );
+    }
+  }
+  return [...normalized].sort(compareText);
+}
+
+async function planningRepositoryPathExists(root: string, relativePath: string): Promise<boolean> {
+  if (relativePath === ".") return true;
+  let current = root;
+  for (const component of relativePath.split("/")) {
+    current = path.join(current, component);
+    let metadata;
+    try {
+      metadata = await lstat(current);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return false;
+      throw error;
+    }
+    if (metadata.isSymbolicLink()) return false;
+  }
+  const canonical = await realpath(current).catch(() => undefined);
+  return canonical !== undefined && isWithinDirectory(root, canonical);
 }
 
 /**

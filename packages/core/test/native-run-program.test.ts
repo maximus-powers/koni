@@ -6821,6 +6821,236 @@ describe("native compiler-authoritative run program", () => {
         planningOutputWithCapabilityRange(">=1.0.0,<2.0.0"),
       ),
     ).toBe(false);
+    const planningOutputWithSupportPath = (supportPath: string) =>
+      planningOutput(
+        {
+          hypothesis:
+            "Retrieval improves bounded factual recall under the fixed evaluation protocol.",
+          fixture_command: ["node", "scripts/verify-research.mjs", "fixtures/research-input.json"],
+          scientific_inputs: [
+            { asset_id: "fixture-input", role: "dataset", path: "fixtures/research-input.json" },
+          ],
+        },
+        [
+          {
+            key: "fixture-experiment",
+            type: "experiment",
+            title: "Fixture experiment",
+            spec: {
+              objective: "Execute one bounded fixture observation.",
+              target_claim_summary: "Distinguish the bounded fixture outcomes.",
+              empirical_mode: "observation",
+              ablation_requirement: "not_applicable",
+              execution_protocol: "Run the planned fixture asset once.",
+              observable_outcome: "A typed fixture observation is recorded.",
+            },
+          },
+          {
+            key: "fixture-asset",
+            type: "asset",
+            title: "Fixture observer",
+            spec: {
+              capabilities: [
+                {
+                  name: "fixture.observer",
+                  protocol_version: "1.0.0",
+                  entrypoints: ["program/assets/fixture-observer/run.mjs"],
+                },
+              ],
+              implementation_plan: {
+                root: "program/assets/fixture-observer",
+                files: ["program/assets/fixture-observer/run.mjs"],
+              },
+              source_strategy: "internal",
+              support_paths: [supportPath],
+            },
+          },
+          {
+            key: "fixture-gate",
+            type: "gate",
+            title: "Fixture readiness gate",
+            spec: {
+              applicability: "Before the fixture experiment runs.",
+              assertion: "The fixture observer is executable.",
+              capability: { name: "fixture.observer", protocol_range: ">=1.0.0 <2.0.0" },
+              command_result_contract: { verdict: "passed|failed|inconclusive" },
+              oracle_semantics: {
+                pass: "The fixture observer is executable.",
+                fail: "The fixture observer is not executable.",
+                inconclusive: "Fixture readiness is unknown.",
+                contract_error: "The fixture result is malformed.",
+              },
+              failure_meaning: "The fixture experiment must not start.",
+              expected_red: true,
+            },
+          },
+        ],
+        [
+          { source: "$root", target: "fixture-experiment", relation: "experiments" },
+          { source: "fixture-experiment", target: "fixture-asset", relation: "assets" },
+          { source: "fixture-gate", target: "fixture-experiment", relation: "applies_to" },
+        ],
+      );
+    await expect(
+      program.compilePlanningOutput({
+        run,
+        attemptId: "attempt-research-missing-support-path",
+        output: planningOutputWithSupportPath("fixtures/copied-path-that-does-not-exist.json"),
+      }),
+    ).rejects.toMatchObject({
+      code: "planning_repository_path",
+      details: [expect.stringContaining("fixtures/copied-path-that-does-not-exist.json")],
+    });
+    await writeFile(path.join(project.projectRoot, "fixtures", "main-checkout-only.json"), "{}\n");
+    await expect(
+      program.compilePlanningOutput({
+        run,
+        attemptId: "attempt-research-main-checkout-only",
+        output: planningOutputWithSupportPath("fixtures/main-checkout-only.json"),
+      }),
+    ).rejects.toMatchObject({
+      code: "planning_repository_path",
+      details: [expect.stringContaining("fixtures/main-checkout-only.json")],
+    });
+    await writeFile(
+      path.join(run.git.planning.worktree, "fixtures", "planning-checkout-only.json"),
+      "{}\n",
+    );
+    await expect(
+      program.compilePlanningOutput({
+        run,
+        attemptId: "attempt-research-planning-checkout-only",
+        output: planningOutputWithSupportPath("fixtures/planning-checkout-only.json"),
+      }),
+    ).resolves.toMatchObject({ graphHash: expect.stringMatching(/^sha256:/u) });
+    const groundedPlanning = await program.compilePlanningOutput({
+      run,
+      attemptId: "attempt-research-grounded-support-path",
+      output: planningOutputWithSupportPath("fixtures/research-input.json"),
+    });
+    expect(groundedPlanning.graphHash).toMatch(/^sha256:/u);
+
+    const revisionRun = structuredClone(run);
+    const baseArtifact = {
+      full: groundedPlanning.plan.full,
+      concise: groundedPlanning.plan.concise,
+      graphSeed: groundedPlanning.plan.graphSeed,
+    };
+    const baseArtifactSha256 = canonicalHash(baseArtifact);
+    const checkpointPath = `runs/${runId}/attempts/attempt-research-revision/planning/revisions/0/artifact.json`;
+    await persistWrites(project.projectRoot, [
+      {
+        path: checkpointPath,
+        bytes: Buffer.from(`${JSON.stringify(baseArtifact)}\n`, "utf8"),
+        expectedSha256: null,
+      },
+    ]);
+    revisionRun.plan = { ...groundedPlanning.plan, status: "awaiting_approval" };
+    revisionRun.attempts["attempt-research-revision"] = {
+      id: "attempt-research-revision",
+      sessionId: "session-research-revision",
+      ticketId: "run-planning",
+      stepId: "planning",
+      personaId: "run-planner",
+      modelProvider: "openai-codex",
+      modelId: "gpt-5.3-codex",
+      thinkingLevel: "high",
+      status: "running",
+      launchSpecHash: digest("research-revision-launch"),
+      sessionFile: `runs/${runId}/sessions/attempt-research-revision/session-research-revision.jsonl`,
+      startedAt: FIXED_NOW.toISOString(),
+      endedAt: undefined,
+      terminalSummary: undefined,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      kind: "planning",
+    };
+    revisionRun.planningSession = {
+      protocol: "koni.planning-session.v1",
+      attemptId: "attempt-research-revision",
+      sessionId: "session-research-revision",
+      status: "running",
+      currentRevision: 1,
+      revisions: [
+        {
+          protocol: "koni.planning-revision.v1",
+          revision: 0,
+          status: "superseded",
+          launchSpecSha256: digest("research-revision-launch-zero"),
+          grantSha256: digest("research-revision-grant-zero"),
+          budgetBaseline: {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
+          budgetPolicy: {
+            metric: "new_tokens",
+            limit: 120_000,
+            synthesisReserve: 20_000,
+            synthesisThreshold: 100_000,
+            onExhausted: "force_synthesis",
+          },
+          startedAt: FIXED_NOW.toISOString(),
+          completedAt: FIXED_NOW.toISOString(),
+          artifactSha256: baseArtifactSha256,
+          graphSha256: groundedPlanning.graphHash!,
+          transcriptSha256: digest("research-revision-transcript-zero"),
+          checkpointPath,
+        },
+        {
+          protocol: "koni.planning-revision.v1",
+          revision: 1,
+          status: "running",
+          launchSpecSha256: digest("research-revision-launch-one"),
+          grantSha256: digest("research-revision-grant-one"),
+          budgetBaseline: {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
+          budgetPolicy: {
+            metric: "new_tokens",
+            limit: 120_000,
+            synthesisReserve: 20_000,
+            synthesisThreshold: 100_000,
+            onExhausted: "force_synthesis",
+          },
+          startedAt: FIXED_NOW.toISOString(),
+        },
+      ],
+    };
+    const revisedAsset = (
+      baseArtifact.graphSeed as { nodes: Array<Record<string, unknown>> }
+    ).nodes.find((node) => node.key === "fixture-asset")!;
+    await expect(
+      program.compilePlanningRevision({
+        run: revisionRun,
+        attemptId: "attempt-research-revision",
+        revision: 1,
+        patch: {
+          baseRevision: 0,
+          baseArtifactSha256,
+          graphSeed: {
+            upsertNodes: [
+              {
+                ...structuredClone(revisedAsset),
+                spec: {
+                  ...(structuredClone(revisedAsset.spec) as Record<string, unknown>),
+                  support_paths: ["fixtures/copied-path-that-does-not-exist.json"],
+                },
+              },
+            ],
+          },
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: "planning_repository_path",
+      details: [expect.stringContaining("fixtures/copied-path-that-does-not-exist.json")],
+    });
     const planning = await program.compilePlanningOutput({
       run,
       attemptId: "attempt-research-plan",
@@ -9093,7 +9323,7 @@ function runRecord(
     type: "planning_started",
     atMs: FIXED_NOW.getTime(),
   }).state;
-  return {
+  const run: RunRecord = {
     protocol: "koni.run-record.v1",
     id,
     revision: 1,
@@ -9124,6 +9354,8 @@ function runRecord(
     activity: [],
     git: fixtureRunGit(projectRoot, id),
   };
+  materializeFixtureCheckout(projectRoot, run.git.planning.worktree);
+  return run;
 }
 
 function answeredQuestion(): RunQuestionRecord {
