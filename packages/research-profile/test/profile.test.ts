@@ -263,10 +263,17 @@ describe("research profile registrar", () => {
   });
 
   it("judges orchestration from the progressive executable frontier", async () => {
-    const [leadSource, plannerSource] = await Promise.all([
+    const [leadSource, plannerSource, agentsReference] = await Promise.all([
       readFile(path.resolve(import.meta.dirname, "../koni/baseline/agents/lead.yaml"), "utf8"),
       readFile(
         path.resolve(import.meta.dirname, "../koni/baseline/agents/run-planner.yaml"),
+        "utf8",
+      ),
+      readFile(
+        path.resolve(
+          import.meta.dirname,
+          "../../core/skills/configure-koni/references/agents-and-skills.md",
+        ),
         "utf8",
       ),
     ]);
@@ -274,6 +281,7 @@ describe("research profile registrar", () => {
     const planner = YAML.parse(plannerSource) as { instructions: string };
     const normalized = lead.instructions.replace(/\s+/gu, " ");
     const normalizedPlanner = planner.instructions.replace(/\s+/gu, " ");
+    const normalizedAgentsReference = agentsReference.replace(/\s+/gu, " ");
 
     expect(normalizedPlanner).toContain("State one compact progressive closure chain in the plan");
     expect(normalizedPlanner).toContain(
@@ -326,6 +334,21 @@ describe("research profile registrar", () => {
     );
     expect(normalized).toContain(
       "Block when every stated closure chain is structurally unreachable, or when any potentially dispatchable current operation is materially ambiguous, unsafe, or outside the approved plan",
+    );
+    expect(normalized).toContain(
+      "Do not ask the operator to restate a choice already entailed by the supplied authoritative facts",
+    );
+    expect(normalized).toContain(
+      "preserves every unresolved downstream effect behind its existing gate",
+    );
+    expect(normalized).toContain(
+      "Ask only when at least two materially different interpretations remain supported, would change current dispatch safety, and the authoritative context selects none",
+    );
+    expect(normalizedAgentsReference).toContain(
+      "A qualitative gate must not turn conservative, reversible uncertainty into an operator confirmation",
+    );
+    expect(normalizedAgentsReference).toContain(
+      "Reserve a question for cases where multiple materially different interpretations remain supported, would change current safety, and the authoritative context selects none",
     );
     expect(normalized).not.toContain(
       "when at least one current operation advances an approved path",

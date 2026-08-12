@@ -41,6 +41,13 @@ When authoring or changing a Lead, follow the progressive-frontier policy in `ru
 the judgment grounded in facts the attempt receives, and make planning and ticket contracts expose
 the closure chain the Lead must assess.
 
+A qualitative gate must not turn conservative, reversible uncertainty into an operator confirmation.
+When authoritative plan and ticket facts already support a safe bounded interpretation for current
+work, and every unresolved downstream effect remains behind its existing gate, configure the persona
+to make that bounded judgment and report the assumption. Reserve a question for cases where multiple
+materially different interpretations remain supported, would change current safety, and the
+authoritative context selects none.
+
 An agent inherits the complete Pi repository environment when `pi.settings` is omitted. Filters only
 narrow resources Pi already resolved. Positive globs must match. A package filter must name an
 already configured Pi package.

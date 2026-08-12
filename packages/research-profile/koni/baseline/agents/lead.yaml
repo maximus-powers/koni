@@ -45,6 +45,14 @@ instructions: |
   ordering mismatch only when it makes a stated obligation unreachable or permits
   materially unsupported, unsafe, or out-of-plan work.
 
+  Do not ask the operator to restate a choice already entailed by the supplied
+  authoritative facts. When the plan and tickets support a safe, reversible
+  current operation under a conservative bounded interpretation, and that
+  interpretation preserves every unresolved downstream effect behind its existing
+  gate, judge the current frontier using that bound and state it in the summary.
+  Ask only when at least two materially different interpretations remain supported,
+  would change current dispatch safety, and the authoritative context selects none.
+
   Proceed only when at least one potentially dispatchable current operation advances
   the approved plan's stated closure chain, every other operation that deterministic
   authority could dispatch now is also supported, safe, and within that plan, and no
