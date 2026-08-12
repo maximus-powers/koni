@@ -139,13 +139,21 @@ export class WorktreePathAuthority {
   public async read(relative: string): Promise<{ bytes: Buffer; sha256: Sha256Digest }> {
     const normalized = normalizeRelative(relative);
     this.#requireScope(normalized, this.#readRoots, "read_scope");
-    const absolute = await this.#safeAbsolute(normalized, false);
-    const metadata = await lstat(absolute);
-    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > MAX_READ_BYTES) {
-      throw new PathAuthorityError("read_type", "read target is not a bounded regular file");
+    try {
+      const absolute = await this.#safeAbsolute(normalized, false);
+      const metadata = await lstat(absolute);
+      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > MAX_READ_BYTES) {
+        throw new PathAuthorityError("read_type", "read target is not a bounded regular file");
+      }
+      const bytes = await readFile(absolute);
+      return { bytes, sha256: rawSha256(bytes) };
+    } catch (error) {
+      if (error instanceof PathAuthorityError) throw error;
+      if (isCode(error, "ENOENT")) {
+        throw new PathAuthorityError("read_missing", `read target does not exist: ${normalized}`);
+      }
+      throw error;
     }
-    const bytes = await readFile(absolute);
-    return { bytes, sha256: rawSha256(bytes) };
   }
 
   public async write(

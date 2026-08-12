@@ -27,6 +27,20 @@ describe("worktree path authority", () => {
     await expect(policy.read("secret.txt")).rejects.toMatchObject({ code: "read_scope" });
   });
 
+  it("classifies an absent in-scope read as a correctable path rejection", async () => {
+    const root = await temporary();
+    const policy = await WorktreePathAuthority.create(root, {
+      readPaths: ["optional/AGENTS.md"],
+      writePaths: [],
+    });
+
+    await expect(policy.read("optional/AGENTS.md")).rejects.toMatchObject({
+      name: "PathAuthorityError",
+      code: "read_missing",
+      message: "read target does not exist: optional/AGENTS.md",
+    } satisfies Partial<PathAuthorityError>);
+  });
+
   it("rejects stale writes, symlinks, escapes, and compiler-owned paths", async () => {
     const root = await temporary();
     const outside = await temporary();
