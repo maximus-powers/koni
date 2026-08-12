@@ -21,6 +21,9 @@ const snapshot: KoniCompactionSnapshot = {
   },
   graphRefs: ["claim:authority", "gate:verification"],
   touchedFiles: ["src/example.ts"],
+  loadedResources: [
+    "skills/using-superpowers/SKILL.md (sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)",
+  ],
   receiptIds: ["receipt-one"],
   checkIds: ["check-unit"],
   unresolvedQuestions: ["Which compatibility fixture remains?"],
@@ -113,6 +116,8 @@ describe("Koni Pi compaction extension", () => {
     );
     expect(compacted.compaction.summary).toContain("# Koni attempt checkpoint");
     expect(compacted.compaction.summary).toContain("## Files read or modified");
+    expect(compacted.compaction.summary).toContain("## Skills already loaded");
+    expect(compacted.compaction.summary).toContain("skills/using-superpowers/SKILL.md");
     expect(compacted.compaction.details).toMatchObject({
       protocol: "koni.compaction.v1",
       authorizationId: "authorization-one",
@@ -273,6 +278,7 @@ describe("Koni Pi compaction extension", () => {
     expect(rendered).toContain("### Risk");
     expect(rendered).toContain("### Verification");
     expect(rendered).toContain("## Receipts");
+    expect(rendered).toContain("## Skills already loaded");
     expect(rendered).toContain("## Checks");
     expect(rendered).toContain("## Unresolved questions");
   });

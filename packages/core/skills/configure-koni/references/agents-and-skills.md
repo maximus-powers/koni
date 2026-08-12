@@ -60,6 +60,12 @@ conflict with one compiler-issued phase. Koni's contained skill adapter treats a
 dispatched task: Koni already owns scope, approval, orchestration, worktrees, and promotion, while
 skills contribute applicable techniques inside the issued step.
 
+A complete authenticated skill read remains satisfied across same-scope recovery and compaction.
+Koni records its immutable relative path and hash in the checkpoint. Agents reuse that loaded
+procedure; they do not reload it merely because Pi compacted the conversation or the compiler
+restored an authenticated continuation. Do not raise token budgets or remove useful skills to
+compensate for repeated immutable resource reads. Treat that pattern as a containment-ledger defect.
+
 Do not copy lifecycle policy into every agent, remove general skills from every profile, or add
 language- and task-specific warnings to stop a repeated agent mistake. Diagnose the owning layer:
 
@@ -67,8 +73,9 @@ language- and task-specific warnings to stop a repeated agent mistake. Diagnose 
   lifecycle, preserve the Pi resource and fix the general contained-applicability contract.
 - If agents repeatedly lack a reusable software or research technique, select, create, or improve a
   proven Pi skill at the repository or package layer.
-- If one role genuinely must never receive a resource class, narrow that agent through
-  `pi.settings`; do not create a second resource registry under `.koni`.
+- Narrow a role's skill filter only when the reusable technique itself is outside that role. If one
+  role genuinely must never receive a resource class, narrow that agent through `pi.settings`; do
+  not create a second resource registry under `.koni`.
 
 One optional `extends` parent is allowed. Parent chains are rejected. A child's settings and tools
 replace those parent filters; capability fields merge with child values taking precedence.

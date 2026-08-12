@@ -128,6 +128,7 @@ import {
   isSupportedKoniToolSchemaHash,
   koniToolMaxResultBytes,
   koniToolSchemaHash,
+  validateKoniToolReceipt,
   type KoniToolInvocation,
   type KoniToolName,
 } from "../pi/tool-catalog.js";
@@ -1860,7 +1861,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       }
     }
     const lineage = compatibleAttemptLineage(run, attempt);
-    const { touchedFiles } = await this.#readAttemptReceiptContext(run, attempt);
+    const { touchedFiles } = await this.#readAttemptReceiptContext(run, attempt, spec);
     const nodePaths = Object.fromEntries(
       graphRead.graph.nodes().map((node) => [node.id, graphRead.graph.repositoryPaths(node.id)]),
     );
@@ -1960,10 +1961,11 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       runType.document,
     );
     const snapshot = compactionSnapshot(run, descriptor);
-    const durable = await this.#readAttemptReceiptContext(run, attempt);
+    const durable = await this.#readAttemptReceiptContext(run, attempt, spec);
     const dynamic = await this.selectDynamicGraphContext({ run, attempt, spec });
     snapshot.receiptIds = durable.receiptIds;
     snapshot.touchedFiles = durable.touchedFiles;
+    snapshot.loadedResources = durable.loadedResources;
     snapshot.graphRefs = dynamic.envelope.selection.selected.map(
       (entry) => `${entry.id} (${entry.reason})`,
     );
@@ -6207,51 +6209,22 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
   async #readAttemptReceiptContext(
     run: RunRecord,
     attempt: AgentAttemptRecord,
-  ): Promise<{ receiptIds: string[]; touchedFiles: string[] }> {
+    spec: Readonly<AgentLaunchSpec>,
+  ): Promise<{ receiptIds: string[]; touchedFiles: string[]; loadedResources: string[] }> {
     const receiptIds = new Set<string>();
     const touchedFiles = new Set<string>();
-    const expectedPrefix = `runs/${run.id}/attempts/${attempt.id}/tool-receipts/`;
+    const loadedResources = new Set<string>();
     for (const record of [...(attempt.authorityToolResults ?? [])].sort(
       (left, right) => left.sequence - right.sequence,
     )) {
-      if (
-        !record.artifactPath.startsWith(expectedPrefix) ||
-        path.posix.normalize(record.artifactPath) !== record.artifactPath
-      )
-        fail(
-          "compaction_receipt_path",
-          "authority tool result points outside its attempt receipt directory",
-        );
-      const bytes = await readFile(path.join(this.#stateRoot, record.artifactPath));
-      if (bytes.byteLength > 16 * 1024 * 1024 || bytes.includes(0))
-        fail(
-          "compaction_receipt_hash",
-          "authority tool receipt bytes do not match their durable record",
-        );
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(bytes.toString("utf8"));
-      } catch {
-        fail("compaction_receipt_json", "authority tool receipt is not valid JSON");
-      }
-      // The authority ledger binds the canonical parsed KoniToolReceipt. Its JSON artifact uses
-      // the repository's newline-terminated artifact encoding, so raw artifact bytes are expected
-      // to be one byte larger than the canonical receipt. Recovery uses this same canonical-object
-      // contract; keep compaction/context refresh aligned with it.
-      const canonical = canonicalEncode(parsed);
-      if (
-        Buffer.byteLength(canonical, "utf8") !== record.receiptSizeBytes ||
-        rawSha256(canonical) !== record.receiptSha256
-      )
-        fail(
-          "compaction_receipt_hash",
-          "authority tool receipt bytes do not match their durable record",
-        );
+      const parsed = await this.#readAuthorityToolReceipt(run, attempt, record);
       if (!isRecord(parsed) || typeof parsed.receiptId !== "string") {
         fail("compaction_receipt_shape", "authority tool receipt has an invalid shape");
       }
       receiptIds.add(parsed.receiptId);
       const value = optionalRecord(parsed.value);
+      const loaded = loadedSkillResourceFromReceipt(record, parsed, spec);
+      if (loaded !== undefined) loadedResources.add(loaded);
       if (
         record.toolName === "koni_read_file" ||
         record.toolName === "koni_write_file" ||
@@ -6272,11 +6245,153 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         }
       }
     }
+    let descendant = attempt;
+    const visited = new Set([attempt.id]);
+    while (
+      (descendant.lineage?.reason === "retry" || descendant.lineage?.reason === "recovery") &&
+      descendant.lineage.conversationFork !== undefined &&
+      descendant.lineage.parentAttemptId !== undefined
+    ) {
+      const parent = run.attempts[descendant.lineage.parentAttemptId];
+      if (
+        parent === undefined ||
+        visited.has(parent.id) ||
+        parent.sessionId !== descendant.lineage.parentSessionId ||
+        parent.launchSpecHash !== descendant.lineage.conversationFork.parentLaunchSpecHash
+      ) {
+        fail("compaction_resource_lineage", "same-scope resource ancestry is unauthenticated");
+      }
+      visited.add(parent.id);
+      const parentSpec = await this.#readRecordedLaunchSpec(run, parent);
+      for (const record of parent.authorityToolResults ?? []) {
+        if (record.toolName !== "koni_read_resource" || record.outcome !== "accepted") continue;
+        const parsed = await this.#readAuthorityToolReceipt(run, parent, record);
+        const loaded = loadedSkillResourceFromReceipt(record, parsed, parentSpec);
+        if (loaded !== undefined) loadedResources.add(loaded);
+      }
+      descendant = parent;
+    }
     return {
       receiptIds: [...receiptIds].sort(compareText),
       touchedFiles: [...touchedFiles].sort(compareText),
+      loadedResources: [...loadedResources].sort(compareText),
     };
   }
+
+  async #readAuthorityToolReceipt(
+    run: Readonly<RunRecord>,
+    attempt: Readonly<AgentAttemptRecord>,
+    record: NonNullable<AgentAttemptRecord["authorityToolResults"]>[number],
+  ): Promise<unknown> {
+    const expectedPrefix = `runs/${run.id}/attempts/${attempt.id}/tool-receipts/`;
+    if (
+      !record.artifactPath.startsWith(expectedPrefix) ||
+      path.posix.normalize(record.artifactPath) !== record.artifactPath
+    ) {
+      fail(
+        "compaction_receipt_path",
+        "authority tool result points outside its attempt receipt directory",
+      );
+    }
+    const bytes = await readFile(path.join(this.#stateRoot, record.artifactPath));
+    if (bytes.byteLength > 16 * 1024 * 1024 || bytes.includes(0)) {
+      fail(
+        "compaction_receipt_hash",
+        "authority tool receipt bytes do not match their durable record",
+      );
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(bytes.toString("utf8"));
+    } catch {
+      fail("compaction_receipt_json", "authority tool receipt is not valid JSON");
+    }
+    const canonical = canonicalEncode(parsed);
+    if (
+      Buffer.byteLength(canonical, "utf8") !== record.receiptSizeBytes ||
+      rawSha256(canonical) !== record.receiptSha256
+    ) {
+      fail(
+        "compaction_receipt_hash",
+        "authority tool receipt bytes do not match their durable record",
+      );
+    }
+    return parsed;
+  }
+
+  async #readRecordedLaunchSpec(
+    run: Readonly<RunRecord>,
+    attempt: Readonly<AgentAttemptRecord>,
+  ): Promise<Readonly<AgentLaunchSpec>> {
+    const cached = this.#issuedSpecs.get(attempt.id);
+    let parsed: unknown = cached;
+    if (parsed === undefined) {
+      const bytes = await readStableDurableFile(
+        path.join(this.#stateRoot, `runs/${run.id}/attempts/${attempt.id}/launch-spec.json`),
+        {
+          minimum: 1,
+          maximum: MAX_LAUNCH_SPEC_BYTES,
+          label: `launch specification for ${attempt.id}`,
+        },
+      );
+      try {
+        parsed = JSON.parse(bytes.toString("utf8"));
+      } catch {
+        fail("compaction_resource_spec", "ancestor launch specification is not valid JSON");
+      }
+    }
+    let spec: Readonly<AgentLaunchSpec>;
+    try {
+      spec = validateAgentLaunchSpec(parsed as AgentLaunchSpec);
+    } catch {
+      fail("compaction_resource_spec", "ancestor launch specification is invalid");
+    }
+    if (
+      spec.specHash !== attempt.launchSpecHash ||
+      spec.identity.runId !== run.id ||
+      spec.identity.attemptId !== attempt.id ||
+      spec.identity.ticketId !== attempt.ticketId ||
+      spec.identity.stepId !== attempt.stepId ||
+      spec.identity.sessionId !== attempt.sessionId
+    ) {
+      fail("compaction_resource_spec", "ancestor launch specification identity drifted");
+    }
+    return spec;
+  }
+}
+
+export function loadedSkillResourceFromReceipt(
+  record: Readonly<{ toolName: string; outcome: string }>,
+  receipt: unknown,
+  spec: Readonly<AgentLaunchSpec>,
+): string | undefined {
+  if (record.toolName !== "koni_read_resource" || record.outcome !== "accepted") return undefined;
+  try {
+    validateKoniToolReceipt(receipt);
+  } catch {
+    return undefined;
+  }
+  if (receipt.outcome !== "accepted") return undefined;
+  const value = optionalRecord(receipt.value);
+  const resource = spec.resources.entries.find(
+    (entry) =>
+      entry.kind === "skill" &&
+      entry.id === value?.resourceId &&
+      entry.relativePath === value.relativePath &&
+      entry.sha256 === value.sha256,
+  );
+  if (
+    resource === undefined ||
+    value?.offsetChars !== 0 ||
+    value.eof !== true ||
+    value.nextOffsetChars !== value.totalChars ||
+    typeof value.content !== "string" ||
+    Array.from(value.content).length !== value.totalChars ||
+    rawSha256(value.content) !== resource.sha256
+  ) {
+    return undefined;
+  }
+  return `${resource.relativePath} (${resource.sha256})`;
 }
 
 function sameScopeContinuationPrompt(
@@ -6307,6 +6422,7 @@ function sameScopeContinuationPrompt(
     // results produces zero valid receipts and fails completion. Reusing reads and decisions is
     // sound economy; reusing checks is a contract violation the compiler will reject.
     "This is an authenticated same-scope continuation. The inherited Pi conversation is the repository and execution ledger: reuse its successful reads, searches, and decisions instead of repeating them.",
+    "An accepted inherited koni_read_resource receipt already satisfies skill loading for those immutable bytes. Reuse it and do not reload the same immutable resource after recovery or compaction.",
     "Configured checks are the exception to that reuse: a check receipt in inherited history belongs to the parent attempt and cannot satisfy this one. Re-run every configured check your step requires in this attempt, even when the inherited run passed.",
     "Discard any speculative reasoning from that failed turn; retain only authenticated repository results, compiler constraints, and the unfinished objective.",
     "The parent terminal or provider-error turn was not accepted output. A terminal-tool receipt visible in inherited history belongs to the parent attempt and is invalid for this attempt: do not answer that it was already submitted. Resolve the remaining action directly from the already-retained evidence and current objective, then invoke the required terminal tool exactly once in this attempt. Perform another repository call only when one specific missing fact makes correct completion impossible.",
@@ -14902,6 +15018,7 @@ function compactionSnapshot(run: RunRecord, descriptor: AttemptDescriptor): Koni
     },
     graphRefs: descriptor.graph?.nodes().map((node) => `${node.type}: ${node.title}`) ?? [],
     touchedFiles: [],
+    loadedResources: [],
     receiptIds: [],
     checkIds: descriptor.step?.validation_checks ?? [],
     unresolvedQuestions: Object.values(run.questions)

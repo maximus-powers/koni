@@ -42,6 +42,7 @@ import {
   manifestScopedDirectGateRechecks,
   implementAssetReviewManifestInstruction,
   implementationWriteGrantInstructions,
+  loadedSkillResourceFromReceipt,
   NativeRunCompilerProgram,
   NativeRunProgramError,
   orderedReviewPredecessorStepIds,
@@ -110,6 +111,7 @@ import type {
 } from "../src/compiler/execution-semantics.js";
 import { GraphSchema, TypedGraph, type GraphNode } from "../src/graph/model.js";
 import type { AgentLaunchSpec } from "../src/pi/launch-spec.js";
+import { fixtureLaunchSpec, fixtureResource } from "./pi-managed-fixtures.js";
 import type { JsonValue } from "../src/authority/protocol.js";
 import {
   canonicalEncode,
@@ -148,6 +150,89 @@ afterEach(async () => {
 });
 
 describe("native compiler-authoritative run program", () => {
+  it("retains only complete accepted skill reads in the compaction ledger", () => {
+    const content = "---\nname: durable-skill\ndescription: Durable procedure\n---\nApply it.";
+    const skill = fixtureResource(
+      "skill",
+      "skill-durable",
+      "skills/durable-skill/SKILL.md",
+      content,
+    );
+    const prompt = fixtureResource("prompt", "prompt-durable", "prompts/durable.md", content);
+    const spec = fixtureLaunchSpec({
+      cwd: "/tmp/koni-loaded-skill",
+      sessionDirectory: "/tmp/koni-loaded-skill/sessions",
+      resources: [skill, prompt],
+    });
+    const accepted = {
+      protocol: "koni.tool-receipt.v1" as const,
+      receiptId: "receipt-durable-skill",
+      outcome: "accepted" as const,
+      summary: "Read resource skill-durable",
+      value: {
+        resourceId: skill.id,
+        relativePath: skill.relativePath,
+        sha256: skill.sha256,
+        offsetChars: 0,
+        nextOffsetChars: Array.from(content).length,
+        totalChars: Array.from(content).length,
+        eof: true,
+        content,
+      },
+    };
+    const record = { toolName: "koni_read_resource", outcome: "accepted" };
+
+    expect(loadedSkillResourceFromReceipt(record, accepted, spec)).toBe(
+      `${skill.relativePath} (${skill.sha256})`,
+    );
+    const rejectedReceipt = {
+      protocol: "koni.tool-receipt.v1" as const,
+      receiptId: "receipt-rejected-skill",
+      outcome: "rejected" as const,
+      code: "resource_scope",
+      summary: "Rejected resource read",
+    };
+    const excluded: Array<[string, { toolName: string; outcome: string }, unknown]> = [
+      ["rejected authority result", { ...record, outcome: "rejected" }, accepted],
+      ["rejected receipt", record, rejectedReceipt],
+      [
+        "partial skill read",
+        record,
+        {
+          ...accepted,
+          value: {
+            ...accepted.value,
+            eof: false,
+            nextOffsetChars: 10,
+            content: content.slice(0, 10),
+          },
+        },
+      ],
+      [
+        "prompt resource",
+        record,
+        {
+          ...accepted,
+          value: {
+            ...accepted.value,
+            resourceId: prompt.id,
+            relativePath: prompt.relativePath,
+            sha256: prompt.sha256,
+          },
+        },
+      ],
+      [
+        "mismatched identity",
+        record,
+        { ...accepted, value: { ...accepted.value, relativePath: "skills/other/SKILL.md" } },
+      ],
+      ["different tool", { toolName: "koni_read_file", outcome: "accepted" }, accepted],
+    ];
+    for (const [label, candidateRecord, receipt] of excluded) {
+      expect(loadedSkillResourceFromReceipt(candidateRecord, receipt, spec), label).toBeUndefined();
+    }
+  });
+
   it("carries source-proposal audit steering into its approved application", () => {
     const approvalSha256 = digest("approved-proposal");
     const requestSha256 = digest("proposal-request");
@@ -3638,6 +3723,12 @@ describe("native compiler-authoritative run program", () => {
     expect(retried.spec.persona.initialPrompt).toContain(
       "Do not reissue an exact repository discovery call that already succeeded or was rejected as a duplicate",
     );
+    expect(retried.spec.persona.initialPrompt).toContain(
+      "An accepted inherited koni_read_resource receipt already satisfies skill loading",
+    );
+    expect(retried.spec.persona.initialPrompt).toContain(
+      "do not reload the same immutable resource",
+    );
     expect(retried.spec.lineage.conversationFork).toEqual({
       parentLaunchSpecHash: prepared.spec.specHash,
       parentTranscriptSha256: digest("planning-parent-transcript"),
@@ -3744,8 +3835,108 @@ describe("native compiler-authoritative run program", () => {
       await restarted.refreshCompactionSnapshot({ run, attempt, spec: prepared.spec }),
     ).toMatchObject({
       touchedFiles: ["src/notes.ts"],
+      loadedResources: [],
       receiptIds: ["receipt-write-notes"],
     });
+
+    const resourceReceiptPath = `runs/${run.id}/attempts/${attempt.id}/tool-receipts/resource.json`;
+    const issuedSkill = prepared.spec.resources.entries.find(
+      (entry) => entry.relativePath === "skills/using-superpowers/SKILL.md",
+    );
+    if (issuedSkill === undefined) throw new Error("fixture has no using-superpowers skill");
+    const resourceReceipt = {
+      protocol: "koni.tool-receipt.v1" as const,
+      receiptId: "receipt-read-skill",
+      outcome: "accepted" as const,
+      summary: "Read resource skill-using-superpowers",
+      value: {
+        resourceId: issuedSkill.id,
+        relativePath: issuedSkill.relativePath,
+        sha256: issuedSkill.sha256,
+        offsetChars: 0,
+        nextOffsetChars: Array.from(issuedSkill.content).length,
+        totalChars: Array.from(issuedSkill.content).length,
+        eof: true,
+        content: issuedSkill.content,
+      },
+    };
+    const canonicalResourceReceipt = canonicalEncode(resourceReceipt);
+    await persistWrites(project.projectRoot, [
+      {
+        path: resourceReceiptPath,
+        bytes: Buffer.from(`${JSON.stringify(resourceReceipt)}\n`, "utf8"),
+        expectedSha256: null,
+      },
+    ]);
+    attempt.authorityToolResults.push({
+      sequence: 2,
+      callId: "call-read-skill",
+      toolName: "koni_read_resource",
+      outcome: "accepted",
+      argumentsSha256: rawSha256("{}"),
+      argumentsSizeBytes: 2,
+      receiptSha256: rawSha256(canonicalResourceReceipt),
+      receiptSizeBytes: Buffer.byteLength(canonicalResourceReceipt, "utf8"),
+      artifactPath: resourceReceiptPath,
+      recordedAt: FIXED_NOW.toISOString(),
+    });
+    expect(
+      await restarted.refreshCompactionSnapshot({ run, attempt, spec: prepared.spec }),
+    ).toMatchObject({
+      loadedResources: [`skills/using-superpowers/SKILL.md (${issuedSkill.sha256})`],
+      receiptIds: ["receipt-read-skill", "receipt-write-notes"],
+    });
+
+    await persistWrites(project.projectRoot, [
+      ...(retried.artifactWrites ?? []),
+      {
+        path: `runs/${run.id}/attempts/${attempt.id}/launch-spec.json`,
+        bytes: Buffer.from(JSON.stringify(prepared.spec), "utf8"),
+        expectedSha256: null,
+      },
+      {
+        path: `runs/${run.id}/attempts/${retried.spec.identity.attemptId}/launch-spec.json`,
+        bytes: Buffer.from(JSON.stringify(retried.spec), "utf8"),
+        expectedSha256: null,
+      },
+    ]);
+    const recoveryAttempt = attemptRecord(retried.spec, "planning", "running");
+    run.attempts[recoveryAttempt.id] = recoveryAttempt;
+    const coldRestart = await compilerProgram(project);
+    expect(
+      await coldRestart.refreshCompactionSnapshot({
+        run,
+        attempt: recoveryAttempt,
+        spec: retried.spec,
+      }),
+    ).toMatchObject({
+      loadedResources: [`skills/using-superpowers/SKILL.md (${issuedSkill.sha256})`],
+    });
+
+    const nonFork = await program.prepareAttempt({
+      kind: "planning",
+      run,
+      attemptId: "attempt-planning-rework-no-fork",
+      sessionId: "session-planning-rework-no-fork",
+      nextAuthorityRevision: 6,
+      expectedAuthorityStateHash: digest("authority-six-no-fork"),
+      lineage: {
+        branchEpoch: 1,
+        reason: "rework",
+        parentAttemptId: attempt.id,
+        parentSessionId: attempt.sessionId,
+        parentEntryId: "entry-planning-one",
+      },
+    });
+    const nonForkAttempt = attemptRecord(nonFork.spec, "planning", "running");
+    run.attempts[nonForkAttempt.id] = nonForkAttempt;
+    expect(
+      await program.refreshCompactionSnapshot({
+        run,
+        attempt: nonForkAttempt,
+        spec: nonFork.spec,
+      }),
+    ).toMatchObject({ loadedResources: [] });
 
     const listReceiptPath = `runs/${run.id}/attempts/${attempt.id}/tool-receipts/list.json`;
     const listReceipt = {
@@ -3768,7 +3959,7 @@ describe("native compiler-authoritative run program", () => {
       },
     ]);
     attempt.authorityToolResults.push({
-      sequence: 2,
+      sequence: 3,
       callId: "call-list-tree",
       toolName: "koni_list_files",
       outcome: "accepted",
@@ -3783,7 +3974,7 @@ describe("native compiler-authoritative run program", () => {
       await restarted.refreshCompactionSnapshot({ run, attempt, spec: prepared.spec }),
     ).toMatchObject({
       touchedFiles: ["src/notes.ts"],
-      receiptIds: ["receipt-list-tree", "receipt-write-notes"],
+      receiptIds: ["receipt-list-tree", "receipt-read-skill", "receipt-write-notes"],
     });
 
     await expect(
@@ -5268,7 +5459,7 @@ describe("native compiler-authoritative run program", () => {
       }),
     ).toEqual([root.id, "system-notes-app"].sort());
     expect(continuationPrepared.spec.persona.initialPrompt).toContain(
-      "Graph write-authority nodes for this exact step: root-d7d843ce58bec8100965.",
+      "Graph write-authority nodes for this exact step: none.",
     );
     expect(continuationPrepared.spec.persona.initialPrompt).not.toContain(
       "Graph write-authority nodes for this exact step: root-d7d843ce58bec8100965, system-notes-app",

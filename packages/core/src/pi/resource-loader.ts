@@ -180,6 +180,7 @@ function formatContainedSkillsForPrompt(skills: readonly Skill[], resourceRoot: 
     "Treat this contained attempt as a dispatched subagent task when a skill distinguishes interactive parent work from subagent execution.",
     "Never let a skill restart planning, seek another approval, create a parallel lifecycle, or require authority absent from this attempt. If part of an otherwise useful skill conflicts with the issued phase or grant, ignore that part and continue the issued step.",
     "Before responding or acting, use `koni_read_resource` to load the applicable skills selected under this rule.",
+    "A path listed under `Skills already loaded` in an authenticated Koni checkpoint has already satisfied this requirement. Reuse that immutable skill content and do not reload the same immutable resource after recovery or compaction.",
     "Pass the skill's relative `<location>` as the resource path. Resolve referenced relative paths against that skill directory and load them with `koni_read_resource` only when needed.",
     "",
     "<available_skills>",

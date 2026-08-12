@@ -56,6 +56,8 @@ export interface KoniCompactionSnapshot {
   };
   graphRefs: readonly string[];
   touchedFiles: readonly string[];
+  /** Fully read immutable skill resources retained across compaction. */
+  loadedResources?: readonly string[];
   receiptIds: readonly string[];
   checkIds: readonly string[];
   unresolvedQuestions: readonly string[];
@@ -710,6 +712,7 @@ export function renderCompactionSummary(
     "",
     renderList("Graph nodes and edges touched", snapshot.graphRefs),
     renderList("Files read or modified", snapshot.touchedFiles),
+    renderList("Skills already loaded", snapshot.loadedResources ?? []),
     renderList("Receipts", snapshot.receiptIds),
     renderList("Checks", snapshot.checkIds),
     renderList("Unresolved questions", snapshot.unresolvedQuestions),
@@ -774,6 +777,7 @@ function validateSnapshot(snapshot: KoniCompactionSnapshot): void {
   for (const [name, values] of Object.entries({
     graphRefs: snapshot.graphRefs,
     touchedFiles: snapshot.touchedFiles,
+    loadedResources: snapshot.loadedResources ?? [],
     receiptIds: snapshot.receiptIds,
     checkIds: snapshot.checkIds,
     unresolvedQuestions: snapshot.unresolvedQuestions,

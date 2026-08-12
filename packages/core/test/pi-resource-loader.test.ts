@@ -106,6 +106,10 @@ describe("contained Pi resource loader", () => {
     expect(result.loader.getAppendSystemPrompt()[1]).toContain(
       "Treat this contained attempt as a dispatched subagent task",
     );
+    expect(result.loader.getAppendSystemPrompt()[1]).toContain("Skills already loaded");
+    expect(result.loader.getAppendSystemPrompt()[1]).toContain(
+      "do not reload the same immutable resource",
+    );
     expect(result.loader.getAppendSystemPrompt()[1]).not.toContain(
       "load every skill whose description matches the task",
     );
