@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { Type } from "typebox";
 import { AuthorityClient } from "../src/authority/client.js";
 import { discoverAuthorityEndpoint } from "../src/authority/endpoint.js";
 import type { AuthorityGrant } from "../src/authority/grants.js";
@@ -78,6 +79,37 @@ describe("run authority provider reservation lifecycle", () => {
       }),
     ).toBeUndefined();
   });
+
+  it("records an exact terminal-schema mismatch as a durable no-effect rejection", async () => {
+    const harness = await authorityHarness("invalid_terminal_arguments");
+    const runId = await createRun(harness.client);
+
+    await waitFor(async () =>
+      Object.values((await harness.engine.store.getRun(runId)).attempts).some((attempt) =>
+        attempt.authorityToolResults?.some(
+          (result) => result.toolName === "koni_submit_output" && result.outcome === "rejected",
+        ),
+      ),
+    );
+
+    const attempt = onlyAttempt(await harness.engine.store.getRun(runId));
+    const rejection = attempt.authorityToolResults?.find(
+      (result) => result.toolName === "koni_submit_output",
+    );
+    expect(rejection).toMatchObject({
+      callId: "terminal-call",
+      outcome: "rejected",
+      argumentsSha256: rawSha256(canonicalEncode({ result: "provider-plan" })),
+    });
+    const receipt = JSON.parse(
+      await readFile(path.join(harness.root, ".git", "koni", rejection!.artifactPath), "utf8"),
+    );
+    expect(receipt).toMatchObject({
+      protocol: "koni.tool-receipt.v1",
+      outcome: "rejected",
+      code: "tool_arguments",
+    });
+  }, 60_000);
 
   it("resets only revision token allowance while retaining cumulative usage and discovery", () => {
     const attempt = {
@@ -1391,6 +1423,13 @@ function providerProgram(
   onCompile: () => void,
   scenario: string,
 ): RunCompilerProgram {
+  const terminalOutputSchema =
+    scenario === "invalid_terminal_arguments"
+      ? Type.Object(
+          { result: Type.Literal("compiler-approved-plan") },
+          { additionalProperties: false },
+        )
+      : TERMINAL_OUTPUT_SCHEMA;
   const program: RunCompilerProgram = {
     async resolveRun(request) {
       return {
@@ -1506,6 +1545,11 @@ function providerProgram(
         maxAllTokens: 300_000,
       });
       const { specHash: _baseHash, ...draft } = structuredClone(base);
+      if (scenario === "invalid_terminal_arguments") {
+        const terminalTool = draft.tools.find((tool) => tool.name === "koni_submit_output")!;
+        terminalTool.schemaHash = koniToolSchemaHash("koni_submit_output", terminalOutputSchema);
+        draft.terminal.outputSchemaHash = canonicalHash(terminalOutputSchema);
+      }
       if (scenario === "response_overshoot") draft.budgets.transcript.maxBytes = 1024 * 1024;
       if (scenario === "synthesis_threshold") {
         draft.budgets.tokens = {
@@ -1579,7 +1623,7 @@ function providerProgram(
           scenario === "synthesis_threshold"
             ? ["koni_read_file", "koni_submit_output"]
             : ["koni_submit_output"],
-        terminalOutputSchema: TERMINAL_OUTPUT_SCHEMA,
+        terminalOutputSchema,
         contextContent: context,
         compactionSnapshot: {
           objective: input.run.objective,

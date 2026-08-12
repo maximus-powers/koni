@@ -134,7 +134,7 @@ function onFrame(frame) {
       }, 10);
       return;
     }
-    if (behavior === "authority") {
+    if (behavior === "authority" || behavior === "authority_invalid_arguments") {
       send({
         type: "authority_request",
         requestId: "request-one",
@@ -142,7 +142,7 @@ function onFrame(frame) {
           operation: "invoke_tool",
           callId: "call-one",
           name: frame.spec.terminal.toolName,
-          arguments: { result: "fixture" },
+          arguments: { result: behavior === "authority" ? "fixture" : 42 },
         },
       });
       return;
@@ -321,13 +321,23 @@ function onFrame(frame) {
     }
   }
 
-  if (frame.type === "authority_response" && behavior === "authority") {
-    if (!frame.ok || frame.requestId !== "request-one") process.exit(92);
+  if (
+    frame.type === "authority_response" &&
+    (behavior === "authority" || behavior === "authority_invalid_arguments")
+  ) {
+    if (
+      !frame.ok ||
+      frame.requestId !== "request-one" ||
+      (behavior === "authority_invalid_arguments" && frame.value?.outcome !== "rejected")
+    )
+      process.exit(92);
     send({
       type: "outcome",
       outcome: {
         status: "completed",
-        terminalOutput: { result: "authority-ok" },
+        terminalOutput: {
+          result: behavior === "authority" ? "authority-ok" : "invalid-arguments-recorded",
+        },
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, newTokens: 0, allTokens: 0 },
       },
     });

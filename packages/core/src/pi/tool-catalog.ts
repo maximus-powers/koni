@@ -62,6 +62,14 @@ export interface KoniRuntimeToolRejection {
   summary: string;
 }
 
+/** A model-correctable mismatch against the compiler-issued exact tool contract. */
+export class KoniToolArgumentValidationError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = "KoniToolArgumentValidationError";
+  }
+}
+
 /** The closure must cross the TypeScript authority boundary; Pi never performs effects itself. */
 export type KoniToolInvoker = (call: KoniToolInvocation) => Promise<KoniToolReceipt>;
 export type KoniToolRejector = (
@@ -602,7 +610,7 @@ export function validateKoniToolArguments(
   // status value, whole token budgets drained). Return a self-describing error that names the
   // allowed values, the actual-vs-max lengths, and the full expected shape, so the next call is
   // correct. This is provider-agnostic — it derives everything from the compiled schema.
-  throw new Error(describeSchemaMismatch(name, schema, parsed));
+  throw new KoniToolArgumentValidationError(describeSchemaMismatch(name, schema, parsed));
 }
 
 /** Accept a JSON-string form of the arguments (a transport artifact) as if it were the object. */

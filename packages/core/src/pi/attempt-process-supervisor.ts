@@ -31,6 +31,7 @@ import {
   type PiAuthorityResponseValue,
 } from "./attempt-process-protocol.js";
 import {
+  KoniToolArgumentValidationError,
   validateKoniToolArguments,
   validateKoniToolReceipt,
   type KoniToolInvocation,
@@ -1318,17 +1319,27 @@ export class SupervisedPiAttemptProcess {
       case "invoke_tool": {
         assertToolAuthorized(this.spec, request.name);
         this.#claimToolCall(request.callId);
-        const invocation: KoniToolInvocation = {
-          callId: request.callId,
-          name: request.name,
-          arguments: validateKoniToolArguments(
+        let forwardedArguments: Record<string, unknown>;
+        try {
+          forwardedArguments = validateKoniToolArguments(
             request.name,
             request.arguments,
             request.name === this.spec.terminal.toolName
               ? this.#options.terminalOutputSchema
               : undefined,
             this.spec.tools.find((tool) => tool.name === request.name)?.schemaHash,
-          ),
+          );
+        } catch (error) {
+          if (!(error instanceof KoniToolArgumentValidationError)) throw error;
+          // The authority records exact-contract mismatches as durable no-effect rejections. Keep
+          // the provider's presentation-valid bytes intact so transcript recovery can bind the
+          // rejection to the original call instead of surfacing an unauthenticated local error.
+          forwardedArguments = structuredClone(request.arguments);
+        }
+        const invocation: KoniToolInvocation = {
+          callId: request.callId,
+          name: request.name,
+          arguments: forwardedArguments,
           signal,
         };
         const receipt = await this.#options.authority.invokeTool(invocation);

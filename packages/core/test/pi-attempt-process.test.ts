@@ -310,6 +310,33 @@ describe("supervised autonomous Pi attempt process", () => {
     });
   });
 
+  it("forwards presentation-valid exact-schema mismatches for durable authority rejection", async () => {
+    let invocation: unknown;
+    const { spec, options } = await fixture("authority_invalid_arguments", {
+      invokeTool: async (call) => {
+        invocation = call;
+        return {
+          protocol: KONI_TOOL_RECEIPT_PROTOCOL,
+          receiptId: "receipt-invalid-arguments",
+          outcome: "rejected",
+          code: "tool_arguments",
+          summary: "The terminal arguments do not match the exact compiler contract.",
+        };
+      },
+    });
+    const child = new SupervisedPiAttemptProcess(spec, options);
+    await child.ready;
+    await expect(child.outcome).resolves.toMatchObject({
+      status: "completed",
+      terminalOutput: { result: "invalid-arguments-recorded" },
+    });
+    expect(invocation).toMatchObject({
+      callId: "call-one",
+      name: "koni_submit_output",
+      arguments: { result: 42 },
+    });
+  });
+
   it("round-trips durable provider reservation and settlement through parent authority", async () => {
     const { spec, options } = await fixture("provider_authority");
     const provider = options.authority.contextProvider;

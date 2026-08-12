@@ -174,6 +174,16 @@ function onFrame(frame) {
     return;
   }
   if (frame.requestId === "terminal") {
+    if (scenario === "invalid_terminal_arguments") {
+      if (
+        !frame.ok ||
+        frame.value?.outcome !== "rejected" ||
+        frame.value?.code !== "tool_arguments"
+      )
+        process.exit(93);
+      // Keep the process live so the test can inspect the authority-committed no-effect receipt.
+      return;
+    }
     if (!frame.ok || frame.value?.outcome !== "accepted") process.exit(93);
     if (scenario === "synthesis_threshold") {
       send({
@@ -277,11 +287,21 @@ function onFrame(frame) {
   }
   if (frame.requestId === "synthesis-read" && scenario === "synthesis_threshold") {
     if (
-      frame.ok ||
-      typeof frame.error !== "string" ||
-      !frame.error.includes("planning exploration is closed")
+      !frame.ok ||
+      frame.value?.outcome !== "rejected" ||
+      frame.value?.code !== "planning_synthesis_required" ||
+      !frame.value?.summary?.includes("planning exploration is closed")
     ) {
-      process.exit(99);
+      send({
+        type: "outcome",
+        outcome: {
+          status: "failed",
+          error: `unexpected synthesis-read response: ${JSON.stringify(frame)}`,
+          usage: usage(),
+        },
+      });
+      finish(23);
+      return;
     }
     requestTerminal();
   }
@@ -692,7 +712,10 @@ function requestForbiddenRead() {
     activationToken,
     request: {
       operation: "invoke_tool",
-      callId: "synthesis-read-call",
+      callId:
+        launch.mode === "planning_revision"
+          ? `synthesis-read-call-revision-${launch.spec.planningRevision.revision}`
+          : "synthesis-read-call",
       name: "koni_read_file",
       arguments: { path: "README.md" },
     },

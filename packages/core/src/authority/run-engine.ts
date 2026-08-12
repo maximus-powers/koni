@@ -112,6 +112,7 @@ import type {
 } from "../pi/managed-session.js";
 import {
   createKoniAuthorityTools,
+  KoniToolArgumentValidationError,
   KONI_TOOL_RECEIPT_PROTOCOL,
   validateKoniToolReceipt,
   validateKoniToolArguments,
@@ -12700,17 +12701,23 @@ export class RunAuthorityEngine {
         "attempt did not carry a production authority plan",
       );
     }
-    const call: KoniToolInvocation = {
-      ...rawCall,
-      arguments: validateKoniToolArguments(
+    if (rawCall.signal?.aborted === true)
+      throw new AuthorityRpcError("tool_aborted", "tool call was aborted");
+    let argumentRejection: KoniToolArgumentValidationError | undefined;
+    let exactArguments: Record<string, unknown>;
+    try {
+      exactArguments = validateKoniToolArguments(
         rawCall.name,
         rawCall.arguments,
         terminalSchema,
         prepared.spec.tools.find((tool) => tool.name === rawCall.name)?.schemaHash,
-      ),
-    };
-    if (call.signal?.aborted === true)
-      throw new AuthorityRpcError("tool_aborted", "tool call was aborted");
+      );
+    } catch (error) {
+      if (!(error instanceof KoniToolArgumentValidationError)) throw error;
+      argumentRejection = error;
+      exactArguments = structuredClone(rawCall.arguments);
+    }
+    const call: KoniToolInvocation = { ...rawCall, arguments: exactArguments };
     const method = `agent.${call.name}`;
     const idempotencyKey = canonicalHash({
       grantId: grant.grantId,
@@ -12725,6 +12732,17 @@ export class RunAuthorityEngine {
     });
     const prior = await this.#store.findReceipt(method, idempotencyKey, requestHash);
     if (prior !== undefined) return this.#readToolReceipt(prior.result);
+    if (argumentRejection !== undefined) {
+      return this.#recordCorrectableAgentToolRejection(
+        prepared,
+        grant,
+        call,
+        method,
+        idempotencyKey,
+        requestHash,
+        { code: "tool_arguments", summary: argumentRejection.message },
+      );
+    }
     if (call.name === "koni_ask_question") {
       return this.#invokeCorrectableAgentTool(
         prepared,
