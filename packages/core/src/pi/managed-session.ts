@@ -33,7 +33,7 @@ import {
   type KoniContextProvider,
   type KoniProviderRequestRecoveryRecord,
   type KoniProviderRequestReservation,
-  type KoniProviderRequestRetirement,
+  providerRequestRetirementValidationError,
 } from "./compaction.js";
 import { type AgentLaunchSpec, validateAgentLaunchSpec } from "./launch-spec.js";
 import { createContainedResourceLoader } from "./resource-loader.js";
@@ -3276,7 +3276,10 @@ function validateProviderRecoveryRecords(
       );
     }
     if (retirement !== undefined) {
-      validateProviderRequestRetirement(retirement);
+      const retirementError = providerRequestRetirementValidationError(retirement);
+      if (retirementError !== undefined) {
+        throw new ManagedSessionError("recovery_authority", retirementError);
+      }
       continue;
     }
     if (settlement === undefined) {
@@ -3344,44 +3347,6 @@ function isRetiredProviderAssistant(authority: KoniAttemptRecoveryState, entryId
       "assistantEntryId" in request.retirement &&
       request.retirement.assistantEntryId === entryId,
   );
-}
-
-function validateProviderRequestRetirement(retirement: KoniProviderRequestRetirement): void {
-  if (
-    retirement.protocol !== "koni.provider-exposure-retirement.v1" ||
-    !isSha256Digest(retirement.authorizationSha256) ||
-    !safeTranscriptIdentity(retirement.retiredAt, 128) ||
-    !isSha256Digest(retirement.sha256)
-  ) {
-    throw new ManagedSessionError(
-      "recovery_authority",
-      "provider request retirement identity is malformed",
-    );
-  }
-  if (
-    retirement.disposition === "operator_acknowledged_authority_pause"
-      ? !isSha256Digest(retirement.pauseReasonSha256)
-      : retirement.disposition === "operator_acknowledged_unreconciled_request"
-        ? !isSha256Digest(retirement.failureReasonSha256)
-        : !safeTranscriptIdentity(retirement.assistantEntryId, 128) ||
-          !isSha256Digest(retirement.assistantEntrySha256) ||
-          !safeTranscriptIdentity(retirement.responseId, 512) ||
-          (retirement.disposition === "operator_acknowledged_provider_error"
-            ? !isSha256Digest(retirement.errorMessageSha256)
-            : retirement.errorMessageSha256 !== undefined)
-  ) {
-    throw new ManagedSessionError(
-      "recovery_authority",
-      "provider request retirement fields are malformed",
-    );
-  }
-  const { sha256, ...material } = retirement;
-  if (canonicalHash(material) !== sha256) {
-    throw new ManagedSessionError(
-      "recovery_authority",
-      "provider request retirement hash does not match its material",
-    );
-  }
 }
 
 function assertProviderSettlementsMatchTranscript(

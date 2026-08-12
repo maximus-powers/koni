@@ -10,6 +10,7 @@ import type {
   KoniProviderRequestReservation,
   KoniProviderRequestSettlement,
 } from "./compaction.js";
+import { providerRequestRetirementValidationError } from "./compaction.js";
 import type { AgentLaunchSpec } from "./launch-spec.js";
 import type {
   ManagedSessionEvent,
@@ -2420,6 +2421,19 @@ function validateProviderRecoveryLedger(
         "recovery_claim",
         "provider request ledger is not launch-bound",
       );
+    }
+    if (request.settlement !== undefined && request.retirement !== undefined) {
+      throw new PiAttemptProcessError(
+        "recovery_claim",
+        "provider request cannot be both settled and retired",
+      );
+    }
+    if (request.retirement !== undefined) {
+      const retirementError = providerRequestRetirementValidationError(request.retirement);
+      if (retirementError !== undefined) {
+        throw new PiAttemptProcessError("recovery_claim", retirementError);
+      }
+      continue;
     }
     if (request.settlement === undefined) {
       if (unresolved || index !== requests.length - 1) {

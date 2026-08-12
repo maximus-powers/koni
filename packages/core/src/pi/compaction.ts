@@ -2,6 +2,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import {
   canonicalEncode,
+  canonicalHash,
   isSha256Digest,
   rawSha256,
   type Sha256Digest,
@@ -196,6 +197,70 @@ export type KoniProviderRequestRetirement =
       retiredAt: string;
       sha256: Sha256Digest;
     };
+
+export function providerRequestRetirementValidationError(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return "provider request retirement is not an object";
+  }
+  const retirement = value as Record<string, unknown>;
+  if (
+    retirement.protocol !== "koni.provider-exposure-retirement.v1" ||
+    !isSha256Digest(retirement.authorizationSha256) ||
+    !safeRetirementIdentity(retirement.retiredAt, 128) ||
+    !isSha256Digest(retirement.sha256)
+  ) {
+    return "provider request retirement identity is malformed";
+  }
+  const common = ["protocol", "disposition", "authorizationSha256", "retiredAt", "sha256"];
+  let variant: string[];
+  switch (retirement.disposition) {
+    case "operator_acknowledged_canonical_abort":
+      variant = ["assistantEntryId", "assistantEntrySha256", "responseId"];
+      break;
+    case "operator_acknowledged_provider_error":
+      variant = ["assistantEntryId", "assistantEntrySha256", "responseId", "errorMessageSha256"];
+      break;
+    case "operator_acknowledged_authority_pause":
+      variant = ["pauseReasonSha256"];
+      break;
+    case "operator_acknowledged_unreconciled_request":
+      variant = ["failureReasonSha256"];
+      break;
+    default:
+      return "provider request retirement disposition is unsupported";
+  }
+  const expectedKeys = [...common, ...variant].sort();
+  if (JSON.stringify(Object.keys(retirement).sort()) !== JSON.stringify(expectedKeys)) {
+    return "provider request retirement fields do not match its disposition";
+  }
+  if (
+    retirement.disposition === "operator_acknowledged_authority_pause"
+      ? !isSha256Digest(retirement.pauseReasonSha256)
+      : retirement.disposition === "operator_acknowledged_unreconciled_request"
+        ? !isSha256Digest(retirement.failureReasonSha256)
+        : !safeRetirementIdentity(retirement.assistantEntryId, 128) ||
+          !isSha256Digest(retirement.assistantEntrySha256) ||
+          !safeRetirementIdentity(retirement.responseId, 512) ||
+          (retirement.disposition === "operator_acknowledged_provider_error" &&
+            !isSha256Digest(retirement.errorMessageSha256))
+  ) {
+    return "provider request retirement fields are malformed";
+  }
+  const { sha256, ...material } = retirement;
+  if (canonicalHash(material) !== sha256) {
+    return "provider request retirement hash does not match its material";
+  }
+  return undefined;
+}
+
+function safeRetirementIdentity(value: unknown, maximumLength: number): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maximumLength &&
+    !/[\u0000-\u001f\u007f]/u.test(value)
+  );
+}
 
 export interface KoniProviderRequestRecoveryRecord extends KoniProviderRequestReservationInput {
   reservationId: string;

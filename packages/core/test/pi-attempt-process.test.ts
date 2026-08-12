@@ -18,6 +18,7 @@ import {
 import { PiAttemptProcessSupervisor } from "../src/pi/attempt-process-pool.js";
 import { TERMINAL_OUTPUT_SCHEMA, fixtureLaunchSpec } from "./pi-managed-fixtures.js";
 import { createAgentLaunchSpec } from "../src/pi/launch-spec.js";
+import { providerRequestRetirementValidationError } from "../src/pi/compaction.js";
 import { canonicalEncode, canonicalHash, rawSha256 } from "../src/shared/canonical.js";
 import { KONI_TOOL_RECEIPT_PROTOCOL } from "../src/pi/tool-catalog.js";
 
@@ -836,6 +837,163 @@ describe("supervised autonomous Pi attempt process", () => {
       });
     },
   );
+
+  it("admits recovery after multiple authenticated provider request retirements", async () => {
+    const { spec, options } = await fixture("recovery_admission");
+    const contextProvider = options.authority.contextProvider;
+    const acquireRecoveryClaim = contextProvider.acquireRecoveryClaim.bind(contextProvider);
+    contextProvider.acquireRecoveryClaim = async (requested) => {
+      const claim = await acquireRecoveryClaim(requested);
+      const providerRequests = [1, 2].map((sequence) => {
+        const retirementMaterial = {
+          protocol: "koni.provider-exposure-retirement.v1" as const,
+          disposition: "operator_acknowledged_provider_error" as const,
+          assistantEntryId: `assistant-retired-${sequence}`,
+          assistantEntrySha256: rawSha256(`assistant-retired-${sequence}`),
+          responseId: `response-retired-${sequence}`,
+          errorMessageSha256: rawSha256("noncanonical provider terminal"),
+          authorizationSha256: rawSha256(`retirement-authorization-${sequence}`),
+          retiredAt: `2026-08-12T09:17:2${sequence}.000Z`,
+        };
+        return {
+          sequence,
+          reservationId: `provider-retired-${sequence}`,
+          api: spec.model.api,
+          modelId: spec.model.id,
+          payloadSha256: rawSha256("same-retried-payload"),
+          payloadSizeBytes: 128,
+          prospectiveInputTokens: 128 + 4 * 1024,
+          reservedOutputTokens: spec.model.catalogMaxTokens,
+          baselineEntryId: `baseline-retired-${sequence}`,
+          retirement: {
+            ...retirementMaterial,
+            sha256: canonicalHash(retirementMaterial),
+          },
+        };
+      });
+      return {
+        ...claim,
+        state: {
+          ...claim.state,
+          providerRequests,
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            newTokens: 0,
+            allTokens: 0,
+          },
+        },
+      };
+    };
+    const child = new SupervisedPiAttemptProcess(spec, {
+      ...options,
+      mode: "recover",
+      deferActivation: true,
+    });
+
+    await child.ready;
+    await child.activate();
+    await expect(child.outcome).resolves.toMatchObject({
+      status: "completed",
+      terminalOutput: { result: "recovery-gated" },
+    });
+  });
+
+  it("rejects malformed provider retirements and settled-retired collisions", async () => {
+    const retirementMaterial = {
+      protocol: "koni.provider-exposure-retirement.v1" as const,
+      disposition: "operator_acknowledged_provider_error" as const,
+      assistantEntryId: "assistant-retired",
+      assistantEntrySha256: rawSha256("assistant-retired"),
+      responseId: "response-retired",
+      errorMessageSha256: rawSha256("noncanonical provider terminal"),
+      authorizationSha256: rawSha256("retirement-authorization"),
+      retiredAt: "2026-08-12T09:17:21.000Z",
+    };
+    const validRetirement = {
+      ...retirementMaterial,
+      sha256: canonicalHash(retirementMaterial),
+    };
+    const unknownMaterial = {
+      ...retirementMaterial,
+      disposition: "operator_acknowledged_something_else",
+    };
+    const crossVariantMaterial = {
+      ...retirementMaterial,
+      pauseReasonSha256: rawSha256("foreign-pause-field"),
+    };
+
+    expect(
+      providerRequestRetirementValidationError({
+        ...unknownMaterial,
+        sha256: canonicalHash(unknownMaterial),
+      }),
+    ).toContain("disposition is unsupported");
+    expect(
+      providerRequestRetirementValidationError({
+        ...crossVariantMaterial,
+        sha256: canonicalHash(crossVariantMaterial),
+      }),
+    ).toContain("fields do not match");
+    expect(
+      providerRequestRetirementValidationError({
+        ...validRetirement,
+        sha256: rawSha256("tampered-retirement"),
+      }),
+    ).toContain("hash does not match");
+
+    const { spec, options } = await fixture("recovery_admission");
+    const contextProvider = options.authority.contextProvider;
+    const acquireRecoveryClaim = contextProvider.acquireRecoveryClaim.bind(contextProvider);
+    contextProvider.acquireRecoveryClaim = async (requested) => {
+      const claim = await acquireRecoveryClaim(requested);
+      return {
+        ...claim,
+        state: {
+          ...claim.state,
+          providerRequests: [
+            {
+              sequence: 1,
+              reservationId: "provider-collision",
+              api: spec.model.api,
+              modelId: spec.model.id,
+              payloadSha256: rawSha256("collision-payload"),
+              payloadSizeBytes: 128,
+              prospectiveInputTokens: 128 + 4 * 1024,
+              reservedOutputTokens: spec.model.catalogMaxTokens,
+              baselineEntryId: "baseline-collision",
+              retirement: validRetirement,
+              settlement: {
+                assistantEntryId: "assistant-settled",
+                assistantEntrySha256: rawSha256("assistant-settled"),
+                usage: {
+                  input: 0,
+                  output: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  newTokens: 0,
+                  allTokens: 0,
+                },
+              },
+            },
+          ],
+        },
+      };
+    };
+    const child = new SupervisedPiAttemptProcess(spec, {
+      ...options,
+      mode: "recover",
+      deferActivation: true,
+    });
+
+    await child.ready;
+    await child.activate();
+    await expect(child.outcome).resolves.toMatchObject({
+      status: "failed",
+    });
+  });
 
   it("deletion escalates past a stuck child and resolves only after exit", async () => {
     const { spec, options } = await fixture("stuck");
