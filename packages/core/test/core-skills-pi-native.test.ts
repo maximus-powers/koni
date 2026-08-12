@@ -41,6 +41,12 @@ describe("Koni's Pi-native skills", () => {
     expect(normalized).toContain(
       "Narrow a role's skill filter only when the reusable technique itself is outside that role",
     );
+    expect(normalized).toContain(
+      "A narrowing filter must retain every repository skill that applicable governing instructions require for that role",
+    );
+    expect(normalized).toContain(
+      "Select the repository's proven skill before adding technique-specific prose to the agent",
+    );
   });
 
   it("teaches profile authors to prepare fresh worktrees through bounded native bootstrap", async () => {

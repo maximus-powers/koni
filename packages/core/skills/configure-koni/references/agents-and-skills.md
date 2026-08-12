@@ -59,6 +59,13 @@ An agent inherits the complete Pi repository environment when `pi.settings` is o
 narrow resources Pi already resolved. Positive globs must match. A package filter must name an
 already configured Pi package.
 
+A narrowing filter must retain every repository skill that applicable governing instructions require
+for that role. Resolve the agent against Pi's current inventory, trace each required skill to its
+exact project-owned path, and include that path in `pi.settings.skills`; a system prompt that names
+an excluded skill is an unsatisfiable agent contract. Select the repository's proven skill before
+adding technique-specific prose to the agent. Keep instructions about role and authority, then let
+the selected skill supply the reusable coding, testing, research, or review method.
+
 ## Skill selection inside contained attempts
 
 Keep Pi as the resource source of truth. Use an agent filter only when the role consistently needs a
