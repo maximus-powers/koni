@@ -4280,6 +4280,301 @@ describe("run authority engine", () => {
     client.close();
   }, 30_000);
 
+  it("live recovery closes a settled terminal cursor when its original finalizer is lost", async () => {
+    const root = await repository();
+    const base = configuredValidationDirectProgram();
+    const prepareAttempt = base.prepareAttempt.bind(base);
+    const finalizationReached = deferred<void>();
+    const releaseOriginalFinalizer = deferred<void>();
+    let failSiblingOnce = true;
+    const program: RunCompilerProgram = {
+      ...base,
+      async resolveRun(request) {
+        const resolved = await base.resolveRun(request);
+        return {
+          ...resolved,
+          executionConfig: { ...resolved.executionConfig, maxParallel: 2 },
+        };
+      },
+      async initializeApprovedPlan() {
+        const first = ticket();
+        first.steps[0]!.validationAction = "compile";
+        first.readPaths = ["README.md"];
+        const sibling = structuredClone(first);
+        sibling.id = "ticket-two";
+        sibling.title = "Recover independent feature";
+        sibling.targetNodeIds = ["change-two"];
+        sibling.readPaths = ["CHANGELOG.md"];
+        sibling.writePaths = ["CHANGELOG.md"];
+        return {
+          graphHash: `sha256:${"c".repeat(64)}`,
+          graphRevision: 1,
+          tickets: { [first.id]: first, [sibling.id]: sibling },
+        };
+      },
+      async prepareAttempt(input) {
+        const prepared = await prepareAttempt(input);
+        if (input.kind === "ticket" && input.assignment?.ticketId === "ticket-one") {
+          return {
+            ...prepared,
+            factory: async () =>
+              new UsageCompletingAdapter(prepared.spec, input.kind, {
+                input: 17,
+                output: 5,
+                cacheRead: 11,
+                cacheWrite: 3,
+              }),
+          };
+        }
+        if (
+          input.kind !== "ticket" ||
+          input.assignment?.ticketId !== "ticket-two" ||
+          !failSiblingOnce
+        ) {
+          return prepared;
+        }
+        failSiblingOnce = false;
+        return {
+          ...prepared,
+          factory: async () =>
+            new GatedInfrastructureFailingAdapter(
+              prepared.spec,
+              finalizationReached.promise,
+              "terminal_protocol",
+              "agent settled without calling terminal tool koni_submit_output",
+            ),
+        };
+      },
+    };
+    const supervisor = new ManagedSessionSupervisor();
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor,
+      actionFault: async (point, input) => {
+        if (point !== "before_attempt_finalize" || input.ticketId !== "ticket-one") return;
+        finalizationReached.resolve();
+        await releaseOriginalFinalizer.promise;
+      },
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    try {
+      const runId = await createAndApproveDirectRun(
+        client,
+        engine,
+        "live-settled-terminal-recovery",
+      );
+      await finalizationReached.promise;
+      try {
+        await waitFor(async () => {
+          const current = await engine.store.getRun(runId);
+          const first = Object.values(current.attempts).find(
+            (attempt) => attempt.ticketId === "ticket-one",
+          );
+          const siblingAttempts = Object.values(current.attempts).filter(
+            (attempt) => attempt.ticketId === "ticket-two",
+          );
+          return (
+            first?.status === "completed" &&
+            siblingAttempts.length === 2 &&
+            siblingAttempts.some((attempt) => attempt.status === "completed")
+          );
+        });
+      } catch (error) {
+        const current = await engine.store.getRun(runId);
+        throw new Error(
+          `${error instanceof Error ? error.message : String(error)}; ${JSON.stringify({
+            phase: current.lifecycle.phase,
+            blocker: current.lifecycle.blocker,
+            attempts: Object.values(current.attempts).map((attempt) => ({
+              id: attempt.id,
+              ticketId: attempt.ticketId,
+              status: attempt.status,
+              failureCode: attempt.failureCode,
+              terminalPolicy: attempt.terminalPolicy?.mode,
+            })),
+            actions: Object.values(current.actionExecutions ?? {}).map((action) => ({
+              kind: action.boundary.kind,
+              attemptId: action.boundary.attemptId,
+              journal: action.journal.status,
+              settlement: action.settlement?.disposition,
+              settledAt: action.settledAt,
+            })),
+            supervisor: supervisor
+              .list(runId)
+              .map((handle) => handle.session.spec.identity.attemptId),
+            activity: current.activity.slice(-8).map((entry) => entry.message),
+          })}`,
+        );
+      }
+
+      const recovered = await engine.store.getRun(runId);
+      const recoveredFirst = Object.values(recovered.attempts).find(
+        (attempt) => attempt.ticketId === "ticket-one",
+      );
+      expect(recoveredFirst).toMatchObject({
+        inputTokens: 17,
+        outputTokens: 5,
+        cacheReadTokens: 11,
+        cacheWriteTokens: 3,
+      });
+      expect(
+        recovered.activity.some((entry) =>
+          entry.message.includes("Auto-retrying an effect-free terminal-contract failure"),
+        ),
+      ).toBe(true);
+      expect(recovered.tickets["ticket-one"]?.steps[0]).toMatchObject({ status: "completed" });
+      expect(recovered.tickets["ticket-two"]?.steps[0]).toMatchObject({ status: "completed" });
+    } finally {
+      releaseOriginalFinalizer.resolve();
+      client.close();
+    }
+  }, 30_000);
+
+  it("live terminal recovery preserves the exhausted-review change-request boundary", async () => {
+    const root = await repository();
+    const base = configuredValidationDirectProgram();
+    const prepareAttempt = base.prepareAttempt.bind(base);
+    const finalizationReached = deferred<void>();
+    const releaseOriginalFinalizer = deferred<void>();
+    let exhaustedReviewAttemptId: string | undefined;
+    let ticketOneFinalizations = 0;
+    let failSiblingOnce = true;
+    const program: RunCompilerProgram = {
+      ...base,
+      async resolveRun(request) {
+        const resolved = await base.resolveRun(request);
+        return {
+          ...resolved,
+          executionConfig: { ...resolved.executionConfig, maxParallel: 2 },
+        };
+      },
+      async initializeApprovedPlan() {
+        const reviewed = reviewTicket();
+        reviewed.steps.forEach((step) => {
+          step.validationAction = "compile";
+        });
+        reviewed.readPaths = ["README.md"];
+        const sibling = ticket();
+        sibling.id = "ticket-two";
+        sibling.title = "Recover independent feature";
+        sibling.targetNodeIds = ["change-two"];
+        sibling.readPaths = ["CHANGELOG.md"];
+        sibling.writePaths = ["CHANGELOG.md"];
+        const dependent = ticket();
+        dependent.id = "ticket-dependent";
+        dependent.title = "Publish reviewed result";
+        dependent.dependencyIds = [reviewed.id];
+        dependent.targetNodeIds = ["change-dependent"];
+        dependent.readPaths = ["README.md"];
+        dependent.writePaths = ["REPORT.md"];
+        return {
+          graphHash: `sha256:${"c".repeat(64)}`,
+          graphRevision: 1,
+          tickets: {
+            [reviewed.id]: reviewed,
+            [sibling.id]: sibling,
+            [dependent.id]: dependent,
+          },
+        };
+      },
+      async prepareAttempt(input) {
+        const prepared = await prepareAttempt(input);
+        if (
+          input.kind !== "ticket" ||
+          input.assignment?.ticketId !== "ticket-two" ||
+          !failSiblingOnce
+        ) {
+          return prepared;
+        }
+        failSiblingOnce = false;
+        return {
+          ...prepared,
+          factory: async () =>
+            new GatedInfrastructureFailingAdapter(
+              prepared.spec,
+              finalizationReached.promise,
+              "terminal_protocol",
+              "agent settled without calling terminal tool koni_submit_output",
+            ),
+        };
+      },
+      async compileAssignmentOutput({ run, assignment }) {
+        if (assignment.stepId === "review") {
+          return {
+            outcome: {
+              status: "failed" as const,
+              blocker:
+                run.tickets[assignment.ticketId]?.reviewReworkCount === 0
+                  ? "First independent review found a correctable route gap"
+                  : "Second independent review still found a material route gap",
+            },
+          };
+        }
+        return { outcome: { status: "completed" as const, summary: "Implemented feature" } };
+      },
+    };
+    const supervisor = new ManagedSessionSupervisor();
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor,
+      actionFault: async (point, input) => {
+        if (point !== "before_attempt_finalize" || input.ticketId !== "ticket-one") return;
+        ticketOneFinalizations += 1;
+        if (ticketOneFinalizations !== 4) return;
+        exhaustedReviewAttemptId = input.attemptId;
+        finalizationReached.resolve();
+        await releaseOriginalFinalizer.promise;
+      },
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    try {
+      const runId = await createAndApproveDirectRun(
+        client,
+        engine,
+        "lost-exhausted-review-finalizer",
+      );
+      await finalizationReached.promise;
+      await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "blocked");
+
+      const blocked = await engine.store.getRun(runId);
+      expect(blocked.lifecycle).toMatchObject({
+        phase: "blocked",
+        blocker: "Second independent review still found a material route gap",
+        blockerRemedy: "change_request",
+      });
+      expect(blocked.attempts[exhaustedReviewAttemptId!]).toMatchObject({ status: "completed" });
+      expect(
+        blocked.activity.some((entry) =>
+          entry.message.includes("Independent review exhausted automatic rework"),
+        ),
+      ).toBe(true);
+      expect(
+        Object.values(blocked.attempts).filter(
+          (attempt) => attempt.ticketId === "ticket-dependent",
+        ),
+      ).toEqual([]);
+    } finally {
+      releaseOriginalFinalizer.resolve();
+      client.close();
+    }
+  }, 30_000);
+
   it("automatically retries a token-budget-aborted ticket once without an operator resume", async () => {
     const root = await repository();
     const base = directApprovalProgram();
@@ -9999,8 +10294,48 @@ class CompletingAdapter implements PiSessionAdapter {
   public async followUp(): Promise<void> {}
   public async abort(): Promise<void> {}
   public dispose(): void {}
-  private emit(event: AgentSessionEvent): void {
+  protected emit(event: AgentSessionEvent): void {
     for (const listener of this.#listeners) listener(event);
+  }
+}
+
+class UsageCompletingAdapter extends CompletingAdapter {
+  public constructor(
+    spec: AgentLaunchSpec,
+    kind: string,
+    private readonly reportedUsage: Readonly<{
+      input: number;
+      output: number;
+      cacheRead: number;
+      cacheWrite: number;
+    }>,
+  ) {
+    super(spec, kind);
+  }
+
+  public override async prompt(): Promise<void> {
+    const { input, output, cacheRead, cacheWrite } = this.reportedUsage;
+    this.emit({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "completed bounded work" }],
+        api: "openai-responses",
+        provider: "openai-codex",
+        model: "test-model",
+        usage: {
+          input,
+          output,
+          cacheRead,
+          cacheWrite,
+          totalTokens: input + output + cacheRead + cacheWrite,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "stop",
+        timestamp: Date.now(),
+      },
+    } as unknown as AgentSessionEvent);
+    await super.prompt();
   }
 }
 
@@ -10067,6 +10402,22 @@ class InfrastructureFailingAdapter implements PiSessionAdapter {
   public async followUp(): Promise<void> {}
   public async abort(): Promise<void> {}
   public dispose(): void {}
+}
+
+class GatedInfrastructureFailingAdapter extends InfrastructureFailingAdapter {
+  public constructor(
+    spec: AgentLaunchSpec,
+    private readonly gate: Promise<void>,
+    failureCode: string | undefined,
+    failureMessage: string,
+  ) {
+    super(spec, failureCode, failureMessage);
+  }
+
+  public override async prompt(): Promise<void> {
+    await this.gate;
+    await super.prompt();
+  }
 }
 
 class BudgetExhaustingAdapter implements PiSessionAdapter {

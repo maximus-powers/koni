@@ -1930,6 +1930,78 @@ export class RunAuthorityEngine {
     }
   }
 
+  /**
+   * Close provider cursors whose exact assignment semantics are already durable but whose live
+   * outcome continuation disappeared. The terminal policy proves semantic settlement, the absent
+   * supervisor handle proves no provider process remains, and settled accounting proves there is
+   * no exposure left for an outcome callback to authenticate. This is the live equivalent of the
+   * crash-forward terminal closure in #recoverInFlight.
+   */
+  async #recoverSettledTerminalAttempts(runId: string): Promise<void> {
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const run = await this.#store.getRun(runId);
+      if (!new Set<RunPhase>(["executing", "verifying"]).has(run.lifecycle.phase)) {
+        return this.#noOpInternal(revision);
+      }
+      const recoverable = Object.values(run.attempts).filter(
+        (attempt) =>
+          attempt.status === "terminal_accepted" &&
+          assignmentForAttempt(run, attempt) !== undefined &&
+          attempt.terminalPolicy !== undefined &&
+          providerOutcomeAccountingIssue(attempt, undefined, false) === undefined &&
+          this.#supervisor.get(attempt.id) === undefined,
+      );
+      if (recoverable.length === 0) return this.#noOpInternal(revision);
+      const draft = nextRun(run, this.#timestamp());
+      for (const recovered of recoverable) {
+        const mutable = draft.attempts[recovered.id]!;
+        mutable.status = "completed";
+        mutable.endedAt = draft.updatedAt;
+        mutable.terminalSummary ??= "Recovered durable terminal semantic settlement";
+        this.#applyExhaustedReviewFinalization(draft, recovered.id);
+      }
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+      });
+      return {
+        revision: committed.state.revision,
+        events: recoverable.map((attempt) => ({
+          topic: "agent.completed",
+          payload: { runId, attemptId: attempt.id },
+        })),
+      };
+    });
+  }
+
+  /** Preserve the exact bounded-review escalation owned by every accepted-attempt finalizer. */
+  #applyExhaustedReviewFinalization(run: RunRecord, attemptId: string): void {
+    if (!new Set<RunPhase>(["executing", "verifying"]).has(run.lifecycle.phase)) return;
+    const attempt = run.attempts[attemptId];
+    const assignment = attempt === undefined ? undefined : assignmentForAttempt(run, attempt);
+    const exhaustedReview =
+      assignment === undefined
+        ? undefined
+        : blockedReviewRetryCandidate(run.tickets[assignment.ticketId]!);
+    if (exhaustedReview?.failedReviewAttemptId !== attemptId) return;
+    applyLifecycle(run, {
+      type: "blocked",
+      atMs: this.#now().getTime(),
+      reason: exhaustedReview.blocker,
+      remedy: "change_request",
+    });
+    run.activity.push(
+      activity(
+        this.#createId("activity"),
+        run.updatedAt,
+        "compiler",
+        `Independent review exhausted automatic rework: ${exhaustedReview.ticketTitle}`,
+        exhaustedReview.ticketId,
+        "error",
+      ),
+    );
+  }
+
   /** Close an orphaned validation journal whose accepted assignment has already been superseded. */
   async #retireStaleAssignmentValidationAction(runId: string, invocationId: string): Promise<void> {
     await this.#server.mutateInternal(async ({ revision }) => {
@@ -15822,31 +15894,7 @@ export class RunAuthorityEngine {
       mutable.status = "completed";
       mutable.endedAt = draft.updatedAt;
       if (mutable.authorityProviderRequests === undefined) applyUsage(mutable, outcome.usage);
-      const exhaustedReview =
-        assignment === undefined
-          ? undefined
-          : blockedReviewRetryCandidate(draft.tickets[assignment.ticketId]!);
-      if (
-        exhaustedReview?.failedReviewAttemptId === attemptId &&
-        new Set<RunPhase>(["executing", "verifying"]).has(draft.lifecycle.phase)
-      ) {
-        applyLifecycle(draft, {
-          type: "blocked",
-          atMs: this.#now().getTime(),
-          reason: exhaustedReview.blocker,
-          remedy: "change_request",
-        });
-        draft.activity.push(
-          activity(
-            this.#createId("activity"),
-            draft.updatedAt,
-            "compiler",
-            `Independent review exhausted automatic rework: ${exhaustedReview.ticketTitle}`,
-            exhaustedReview.ticketId,
-            "error",
-          ),
-        );
-      }
+      this.#applyExhaustedReviewFinalization(draft, attemptId);
       shouldTick = draft.lifecycle.phase === "executing" || draft.lifecycle.phase === "verifying";
       const committed = await this.#store.commit({
         expectedRevision: revision,
@@ -16610,10 +16658,18 @@ export class RunAuthorityEngine {
     if (run.lifecycle.phase !== "executing" && run.lifecycle.phase !== "verifying") {
       return;
     }
+    await this.#recoverSettledTerminalAttempts(runId);
+    run = await this.#store.getRun(runId);
+    if (
+      (expected !== undefined && !this.#matchesAdvancement(run, expected)) ||
+      (run.lifecycle.phase !== "executing" && run.lifecycle.phase !== "verifying")
+    ) {
+      return;
+    }
     // Compiler action primitives may durably stage semantic ticket/graph state before the Pi
     // provider ACK closes the exact attempt. That state is recoverable, but it is not yet legal
-    // scheduler, change-control, or publication input. The attempt finalizer owns the one tick
-    // that makes the settled result consumable.
+    // scheduler, change-control, or publication input. Only the normal attempt finalizer or the
+    // exact lost-continuation repair above may make the settled result consumable.
     if (hasUnfinalizedAcceptedAssignment(run)) {
       return;
     }
