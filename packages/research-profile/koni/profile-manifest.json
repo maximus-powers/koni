@@ -2,12 +2,12 @@
   "protocol": "koni.profile-package.v1",
   "package": {
     "name": "@koni/research-profile",
-    "version": "1.1.9"
+    "version": "1.1.10"
   },
   "profile": {
     "id": "research",
     "display_name": "Research",
-    "version": "1.1.9",
+    "version": "1.1.10",
     "lineage": "koni.research"
   },
   "compatibility": {
@@ -56,8 +56,8 @@
       },
       {
         "path": "agents/gate-designer.yaml",
-        "sha256": "sha256:48c0dd612314e636bac7edfa9e773416b10215d96563963e52f62cb80524246a",
-        "size_bytes": 2748,
+        "sha256": "sha256:fa4ea8aa15345721b363304111cc4b0bf353f66e87a04e396250d4668836abfb",
+        "size_bytes": 3286,
         "kind": "agent"
       },
       {
@@ -140,8 +140,8 @@
       },
       {
         "path": "profile.yaml",
-        "sha256": "sha256:ca3ec061b466731ac0b437273074f93181699e6d336a5c418f79aa685371f543",
-        "size_bytes": 1318,
+        "sha256": "sha256:95d9db963a3f9f580b6920d5c8b0d16aef570606fef6129c0916a09e9b9d0f3a",
+        "size_bytes": 1319,
         "kind": "config"
       },
       {
@@ -206,5 +206,5 @@
       "sha256": "sha256:c807436b04f7d44ea65cce5cfa6ed8cba3c4e5d8d571034f7fecc25c9fd117a5"
     }
   ],
-  "bundle_sha256": "sha256:348e93f17bd295bc96b9a71894d8cc9c12054fbe78673f948c00f491780c82ef"
+  "bundle_sha256": "sha256:95295bb22dd6a87e89a37d8392305484d1bb8d811175c3053a5a4770de1b589d"
 }

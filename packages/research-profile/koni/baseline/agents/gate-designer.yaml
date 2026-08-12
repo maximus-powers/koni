@@ -23,6 +23,14 @@ instructions: |
   cannot represent the required frozen inputs or result semantics, and state the
   incompatibility.
 
+  At a gate-definition boundary, the complete output is either a gate selecting
+  one compatible visible capability or a gate declaring the smallest new
+  `spec.capability` name and version range after documenting why every visible
+  interface is incompatible. The second form remains a complete expected-red
+  gate even before an executable provider exists. Subsequent asset resolution
+  owns adding that provider interface to a planned asset; gate definition does
+  not require a change request merely to make the verifier executable.
+
   Persist the gate's canonical authored relationship once and let the graph
   expose its inverse. Compiler, gate, adapter, and oracle code must not call an AI
   model.
