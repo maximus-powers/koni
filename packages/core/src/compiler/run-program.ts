@@ -15686,20 +15686,17 @@ function attemptTokenBudget(
   const semanticEnvelope = configured ?? 240_000;
   // Ticket work and independent verification both need a complete authenticated repository
   // round-trip. Workers read, reason, edit, and check. Reviewers additionally receive the
-  // candidate and its cumulative evidence, then may need one contained compaction before they can
-  // submit a verdict. A review allowance no larger than the worker envelope can therefore expire
-  // after a valid inspection but before the terminal turn, causing repeated partial reviews to
-  // spend more than one complete review. Give verification two semantic envelopes while keeping
-  // ticket work at one; Lead and integration remain lightweight, bounded judgments.
-  const verificationEnvelope = Math.min(Number.MAX_SAFE_INTEGER, semanticEnvelope * 2);
+  // candidate and its cumulative evidence. Either may need one contained compaction before the
+  // terminal turn. A one-envelope attempt can therefore expire after valid inspection and force a
+  // fresh recovery to repeat the same authenticated work. Give both repository-working attempt
+  // kinds two semantic envelopes; Lead and integration remain lightweight, bounded judgments.
+  const repositoryWorkEnvelope = Math.min(Number.MAX_SAFE_INTEGER, semanticEnvelope * 2);
   const maxNew =
     kind === "planning"
       ? configured!
-      : kind === "verification"
-        ? Math.max(32_000, verificationEnvelope)
-        : kind === "ticket"
-          ? Math.max(32_000, semanticEnvelope)
-          : Math.max(32_000, Math.floor(semanticEnvelope / 2));
+      : kind === "verification" || kind === "ticket"
+        ? Math.max(32_000, repositoryWorkEnvelope)
+        : Math.max(32_000, Math.floor(semanticEnvelope / 2));
   // The cache-inclusive ceiling is a worst-case exposure hold, not a spend target. Anthropic
   // usage reports re-read the entire cached prefix on every turn (observed live: a healthy
   // 14-turn implementer accumulated 905K cacheRead against 6.6K new tokens before crossing the
