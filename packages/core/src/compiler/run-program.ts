@@ -15555,17 +15555,17 @@ function attemptTokenBudget(
   // Direct-approval run types use the fixed compatibility envelope until they define a distinct
   // execution budget field in a future schema.
   const semanticEnvelope = configured ?? 240_000;
-  // The ticket worker performs the heaviest turn sequence of the run — read, reason, edit, then
-  // iterate against the configured proof — and at the model catalog's forced-minimum thinking
-  // tier extended reasoning dominates the new-token count. Halving the planning envelope for it
-  // (the previous `semanticEnvelope / 2`) exhausted the budget during discovery, aborting
-  // productive implementers before they could write a single edit. Give the worker the full
-  // planning envelope; the lighter non-planning roles (review, verification, integration) keep the
-  // halved envelope, which is ample for their bounded turn counts in practice.
+  // Ticket work and independent verification both need a complete authenticated repository
+  // round-trip. Workers read, reason, edit, and check; reviewers read the current candidate and
+  // receipts before submitting a verdict. Halving either envelope can make an ordinary two-turn
+  // review exceed its allowance solely because the immutable starting context is substantial,
+  // causing identical automatic retries to spend more than one correctly sized attempt. Keep the
+  // full semantic envelope for those evidence-producing boundaries. Lead and integration remain
+  // lightweight, bounded judgments and retain the halved envelope.
   const maxNew =
     kind === "planning"
       ? configured!
-      : kind === "ticket"
+      : kind === "ticket" || kind === "verification"
         ? Math.max(32_000, semanticEnvelope)
         : Math.max(32_000, Math.floor(semanticEnvelope / 2));
   // The cache-inclusive ceiling is a worst-case exposure hold, not a spend target. Anthropic

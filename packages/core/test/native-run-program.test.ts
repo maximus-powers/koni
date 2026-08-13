@@ -5325,6 +5325,7 @@ describe("native compiler-authoritative run program", () => {
         parentSessionId: "session-plan",
       },
     });
+    expect(prepared.spec.budgets.tokens.maxNew).toBe(120_000);
     expect(prepared.spec.lineage).toEqual({
       branchEpoch: 1,
       reason: "rework",
@@ -5536,6 +5537,7 @@ describe("native compiler-authoritative run program", () => {
         parentSessionId: "session-architecture",
       },
     });
+    expect(graphOnlyReviewPrepared.spec.budgets.tokens.maxNew).toBe(120_000);
     expect(graphOnlyReviewPrepared.spec.persona.initialPrompt).toContain(
       "preceding step is graph-only",
     );
