@@ -950,7 +950,8 @@ function describeSchemaMismatch(
       ? "Koni decoded JSON-string fields before validation; correct the exact decoded-field errors below rather than changing their transport representation. "
       : "") +
     `You sent: { ${observed} }. Expected exactly one of: ${describeSchemaShape(schema)}. ` +
-    "Send status as the exact literal shown, include every listed field, and keep each string within its char limit.";
+    "Send status as the exact literal shown, include every listed field, and keep each string within its char limit. " +
+    "On retry of this tool, use the immediately preceding arguments as the working draft, correct every current mismatch together, and do not undo a prior correction unless a later diagnostic explicitly requires it.";
   const diagnostics = argumentSchemaMismatchDiagnostics(schema, value);
   const boundedOverview = boundUtf8Text(overview, 8 * 1024, " … schema overview truncated");
   return boundUtf8Text(
@@ -970,10 +971,10 @@ function argumentSchemaMismatchDiagnostics(schema: TSchema, value: unknown): str
     let reason: string;
     if (error.keyword === "additionalProperties") {
       const fields = [...error.params.additionalProperties].sort(compareUtf8);
-      reason = `unexpected ${fields.length === 1 ? "field" : "fields"} ${fields.join(", ")}`;
+      reason = `unexpected ${fields.length === 1 ? "field" : "fields"} ${fields.map(diagnosticFieldName).join(", ")}`;
     } else if (error.keyword === "required") {
       const fields = [...error.params.requiredProperties].sort(compareUtf8);
-      reason = `required ${fields.length === 1 ? "field" : "fields"} missing: ${fields.join(", ")}`;
+      reason = `required ${fields.length === 1 ? "field" : "fields"} missing: ${fields.map(diagnosticFieldName).join(", ")}`;
     } else if (error.keyword === "const") {
       reason = `expected ${JSON.stringify(error.params.allowedValue)}`;
     } else if (error.keyword === "enum") {
@@ -985,6 +986,10 @@ function argumentSchemaMismatchDiagnostics(schema: TSchema, value: unknown): str
     if (rendered.size === 8) break;
   }
   return [...rendered];
+}
+
+function diagnosticFieldName(field: string): string {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/u.test(field) ? field : JSON.stringify(field);
 }
 
 function boundedSchemaValidationErrors(schema: TSchema, value: unknown): SchemaValidationError[] {

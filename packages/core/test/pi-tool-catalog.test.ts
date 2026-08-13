@@ -806,6 +806,9 @@ describe("Koni authority-backed Pi tool catalog", () => {
     expect(message).toContain('/node/mode: expected "strict"');
     expect(message).not.toContain('expected "proof"');
     expect(message).not.toContain('expected "focused"');
+    expect(message).toContain(
+      "On retry of this tool, use the immediately preceding arguments as the working draft, correct every current mismatch together, and do not undo a prior correction unless a later diagnostic explicitly requires it.",
+    );
   });
 
   it("selects a late discriminated branch before bounded diagnostic traversal", () => {
@@ -896,6 +899,28 @@ describe("Koni authority-backed Pi tool catalog", () => {
     expect(message).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f]/u);
     expect(message).toContain("hostile????- /status: expected completed");
     expect(message.match(/\n- /gu)).toHaveLength(1);
+  });
+
+  it("renders an empty unexpected field name explicitly", () => {
+    let message = "";
+    try {
+      validateKoniToolArguments(
+        "koni_submit_output",
+        { full: { architecture: "Use the existing page owner.", "": "draft residue" } },
+        Type.Object({
+          full: Type.Object({ architecture: Type.String() }, { additionalProperties: false }),
+        }),
+      );
+    } catch (error) {
+      expect(error).toBeInstanceOf(KoniToolArgumentValidationError);
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain('/full: unexpected field ""');
+    expect(message).not.toContain("unexpected field \n");
+    expect(message).toContain(
+      "On retry of this tool, use the immediately preceding arguments as the working draft, correct every current mismatch together, and do not undo a prior correction unless a later diagnostic explicitly requires it.",
+    );
   });
 
   it("bounds diagnostic inspection for a large repeated-invalid payload", () => {
