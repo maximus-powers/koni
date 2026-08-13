@@ -509,7 +509,7 @@ workflows:
     - assemble-candidate
     read_paths: []
     write_paths: []
-    expected_output: Independent exact-closure, current-proof, terminal-prerequisite, risk-disposition, scope, and candidate-readiness review
+    expected_output: Independent exact-closure, current-proof, terminal-prerequisite, risk-disposition, scope, and candidate-readiness review; rely on each included proof's completed independent semantic review unless current downstream evidence proves drift, contradiction, or an interaction defect
     validation_action: review
 - id: target-integration-conflict
   version: 1.0.0

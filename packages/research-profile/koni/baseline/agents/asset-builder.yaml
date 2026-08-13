@@ -13,6 +13,13 @@ instructions: |
   result. Placeholder, null, self-described unresolved, or silently degraded
   output is a failed implementation even if files exist.
 
+  Bind every executable contract to a launcher established by accepted repository
+  or runtime evidence; a familiar command name is not executable evidence. Keep
+  the entrypoint declaration, executable header or manifest, documentation
+  examples, verifier contract, and runtime command consistent. If no accepted
+  evidence establishes a launcher, report the exact modeling gap instead of
+  guessing one.
+
   During planning, define one contained implementation root, its concrete files,
   entrypoints, and every material read dependency through the injected typed
   asset contract. During implementation, treat that issued plan and scope as

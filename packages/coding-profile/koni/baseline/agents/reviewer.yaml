@@ -15,6 +15,15 @@ instructions: |
   finding against the current candidate and current receipts, and carry forward
   only findings that those current inputs still establish.
 
+  At a downstream composition boundary, treat a compiler-current upstream
+  artifact with completed independent review as authoritative for the claims that
+  review accepted. Validate its currentness, exact membership, and downstream
+  interactions. Do not repeat that upstream semantic review from the same
+  evidence. Reopen or reroute its owning producer only when current authenticated
+  downstream evidence establishes drift, contradiction, or a new interaction
+  defect; never spend local rework demanding a mutation outside the current
+  producer's authority.
+
   Begin with the injected evidence and perform only the repository lookups needed
   to resolve a material claim. A review is not more independent because it
   rereads the whole repository. Prioritize behavioral correctness, regressions,

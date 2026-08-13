@@ -376,6 +376,39 @@ describe("coding profile registrar", () => {
     );
   });
 
+  it("keeps downstream composition review within its own authority boundary", async () => {
+    const [reviewerSource, workflowSource, executionReference] = await Promise.all([
+      readFile(
+        path.resolve(import.meta.dirname, "../koni/baseline/agents/reviewer.yaml"),
+        "utf8",
+      ),
+      readFile(path.resolve(import.meta.dirname, "../koni/baseline/workflows.yaml"), "utf8"),
+      readFile(
+        path.resolve(
+          import.meta.dirname,
+          "../../core/skills/model-koni-work/references/execution-contracts.md",
+        ),
+        "utf8",
+      ),
+    ]);
+    const normalizedReviewer = reviewerSource.replace(/\s+/gu, " ");
+    const normalizedWorkflow = workflowSource.replace(/\s+/gu, " ");
+    const normalizedExecutionReference = executionReference.replace(/\s+/gu, " ");
+
+    expect(normalizedReviewer).toContain(
+      "At a downstream composition boundary, treat a compiler-current upstream artifact with completed independent review as authoritative for the claims that review accepted",
+    );
+    expect(normalizedReviewer).toContain(
+      "Do not repeat that upstream semantic review from the same evidence",
+    );
+    expect(normalizedWorkflow).toContain(
+      "rely on each included proof's completed independent semantic review unless current downstream evidence proves drift, contradiction, or an interaction defect",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "Validate currentness, exact membership, and downstream interactions; do not repeat that upstream semantic review from the same evidence",
+    );
+  });
+
   it("plans repository paths only from accepted evidence", async () => {
     const [plannerSource, executionReference] = await Promise.all([
       readFile(

@@ -421,6 +421,15 @@ describe("research profile registrar", () => {
     expect(normalizedExecutionReference).toContain(
       "A prior failed-review blocker is repair history, not current execution evidence",
     );
+    expect(normalizedReviewer).toContain(
+      "At a downstream composition boundary, treat a compiler-current upstream artifact with completed independent review as authoritative for the claims that review accepted",
+    );
+    expect(normalizedReviewer).toContain(
+      "Do not repeat that upstream semantic review from the same evidence",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "Validate currentness, exact membership, and downstream interactions; do not repeat that upstream semantic review from the same evidence",
+    );
   });
 
   it("authenticates planned paths and routes grant-changing repairs", async () => {
@@ -527,6 +536,42 @@ describe("research profile registrar", () => {
     );
     expect(normalizedAgentsReference).toContain(
       "configure its producer to emit that result and its reviewer to preserve it",
+    );
+  });
+
+  it("binds executable contracts to an authenticated launcher", async () => {
+    const [assetBuilderSource, integratorSource, executionReference] = await Promise.all([
+      readFile(
+        path.resolve(import.meta.dirname, "../koni/baseline/agents/asset-builder.yaml"),
+        "utf8",
+      ),
+      readFile(
+        path.resolve(import.meta.dirname, "../koni/baseline/agents/integrator.yaml"),
+        "utf8",
+      ),
+      readFile(
+        path.resolve(
+          import.meta.dirname,
+          "../../core/skills/model-koni-work/references/execution-contracts.md",
+        ),
+        "utf8",
+      ),
+    ]);
+    const normalizedAssetBuilder = assetBuilderSource.replace(/\s+/gu, " ");
+    const normalizedIntegrator = integratorSource.replace(/\s+/gu, " ");
+    const normalizedExecutionReference = executionReference.replace(/\s+/gu, " ");
+
+    expect(normalizedAssetBuilder).toContain(
+      "Bind every executable contract to a launcher established by accepted repository or runtime evidence",
+    );
+    expect(normalizedAssetBuilder).toContain(
+      "Keep the entrypoint declaration, executable header or manifest, documentation examples, verifier contract, and runtime command consistent",
+    );
+    expect(normalizedIntegrator).toContain(
+      "Reject a composed executable contract whose launcher differs from the authenticated predecessor entrypoint contract",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "A familiar command name is not evidence that an executable exists",
     );
   });
 

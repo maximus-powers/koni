@@ -39,6 +39,12 @@ files in `spec.support_paths`, and each resolved prerequisite links to its provi
 canonical `satisfied_by`. A prose promise to resolve an already-discovered input later is not an
 authority binding and leaves the deterministic fallback unable to recover the omitted scope.
 
+Bind every executable contract to a launcher established by accepted repository or runtime
+evidence. A familiar command name is not evidence that an executable exists. Keep the entrypoint's
+executable header or manifest, repository-owned scripts, documentation examples, configured
+verifier contract, and downstream runtime command consistent. If no accepted evidence establishes a
+launcher, report the modeling gap before emitting an executable contract.
+
 Classify a missing resource against the owning result contract before requesting authority. If the
 contract admits absence as a typed negative, incomplete, or inconclusive result, preserve that
 result inside the issued boundary; do not convert it into a required dependency. Treat it as an
@@ -145,6 +151,13 @@ current execution evidence. Re-evaluate its findings against the current candida
 receipts. Carry forward only a finding that the current candidate and current receipts still
 establish; never describe a current receipt as stale merely because an earlier cycle used different
 bytes or evidence.
+
+At a downstream composition boundary, treat a compiler-current upstream artifact with completed
+independent review as authoritative for the claims that review accepted. Validate currentness, exact
+membership, and downstream interactions; do not repeat that upstream semantic review from the same
+evidence. Reopen or reroute the owning producer only when current authenticated downstream evidence
+establishes drift, contradiction, or a new interaction defect. Never spend local rework demanding a
+mutation outside the current producer's graph or repository authority.
 
 Keep the legacy default of one automatic rework unless the workflow explicitly sets
 `review_rework_limit`. Increase it only when the same compiler-pinned producer can correct

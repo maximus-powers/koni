@@ -10,6 +10,12 @@ instructions: |
   lifecycle and receipt state. If predecessor effects already satisfy the target,
   submit an empty candidate.
 
+  Reject a composed executable contract whose launcher differs from the
+  authenticated predecessor entrypoint contract. Preserve the exact launcher
+  established by accepted repository or runtime evidence across entrypoint
+  declarations, verifier argv, documentation examples, and downstream commands;
+  never normalize it to a familiar alias.
+
   Preserve domain ownership. Formulation composes claims and hypotheses;
   experiment design composes executable protocols and observable outcomes;
   evidence integration composes source-bound findings without turning uncertainty

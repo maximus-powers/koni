@@ -2,12 +2,12 @@
   "protocol": "koni.profile-package.v1",
   "package": {
     "name": "@koni/research-profile",
-    "version": "1.1.26"
+    "version": "1.1.27"
   },
   "profile": {
     "id": "research",
     "display_name": "Research",
-    "version": "1.1.26",
+    "version": "1.1.27",
     "lineage": "koni.research"
   },
   "compatibility": {
@@ -32,8 +32,8 @@
       },
       {
         "path": "agents/asset-builder.yaml",
-        "sha256": "sha256:a4f3104cf472ed4fe7caa890df4a188d82d31ea6cd9e3091065169d99819a81c",
-        "size_bytes": 4481,
+        "sha256": "sha256:fd5877b62ef7309533a0194752743fa6d24b30674b262c832ecea7593ba3ef78",
+        "size_bytes": 4889,
         "kind": "agent"
       },
       {
@@ -68,8 +68,8 @@
       },
       {
         "path": "agents/integrator.yaml",
-        "sha256": "sha256:aacc4bb933942fb24db8cecdcde60f56a1ee620bfd439d6c4792e37eaa158427",
-        "size_bytes": 2901,
+        "sha256": "sha256:933bfc95cd88cf276e47be64b747db88d7fe3c8c6a85ade83e0c7097454f5394",
+        "size_bytes": 3248,
         "kind": "agent"
       },
       {
@@ -92,8 +92,8 @@
       },
       {
         "path": "agents/reviewer.yaml",
-        "sha256": "sha256:5854adf130054678b22a97926ccfaf1a52bca74dd066b4c3dead5c887cd4c9dc",
-        "size_bytes": 5131,
+        "sha256": "sha256:54fdc93a74842a38f337d1757a107ee803f0c651caea014ed03104867be7e249",
+        "size_bytes": 5699,
         "kind": "agent"
       },
       {
@@ -140,7 +140,7 @@
       },
       {
         "path": "profile.yaml",
-        "sha256": "sha256:7ad59a4a45157e3d8305d093a8a2d97a34702986c975806f6b7ccea050730310",
+        "sha256": "sha256:f4bfdc4479db7002a6b5f0aa97bcace1f5d7272c6a68b24be6cd1c07e0873820",
         "size_bytes": 1319,
         "kind": "config"
       },
@@ -206,5 +206,5 @@
       "sha256": "sha256:c807436b04f7d44ea65cce5cfa6ed8cba3c4e5d8d571034f7fecc25c9fd117a5"
     }
   ],
-  "bundle_sha256": "sha256:75eebba5d966b079336e3eb9f80513e429bc6d481fca796924fd512ba8e17edd"
+  "bundle_sha256": "sha256:b9168bf7a25ed1efb62955c286ace3ab327317e1d853209df3f5069fd3afdd72"
 }

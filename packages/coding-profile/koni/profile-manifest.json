@@ -2,12 +2,12 @@
   "protocol": "koni.profile-package.v1",
   "package": {
     "name": "@koni/coding-profile",
-    "version": "0.8.12"
+    "version": "0.8.13"
   },
   "profile": {
     "id": "software",
     "display_name": "Coding",
-    "version": "0.8.12",
+    "version": "0.8.13",
     "lineage": "koni.software"
   },
   "compatibility": {
@@ -62,8 +62,8 @@
       },
       {
         "path": "agents/reviewer.yaml",
-        "sha256": "sha256:28c6433e70eee32da4e28e1b888eda23801134eb792b2a59cea1ed4d559c863d",
-        "size_bytes": 5903,
+        "sha256": "sha256:b1cbc4b5dd528487f350cd12c3165f8b897c088348d1f034bb3a19b0b474e64a",
+        "size_bytes": 6471,
         "kind": "agent"
       },
       {
@@ -116,7 +116,7 @@
       },
       {
         "path": "profile.yaml",
-        "sha256": "sha256:73298bff6ca482ed9cd2b94f3a60b7eaa8d0a23deb56a48e3911482486d98344",
+        "sha256": "sha256:5a02a8a6136448ff3c69a3ff6758ef15b2245fbb1656752d22536038748198e5",
         "size_bytes": 1044,
         "kind": "config"
       },
@@ -176,8 +176,8 @@
       },
       {
         "path": "workflows.yaml",
-        "sha256": "sha256:b56f2904f6283671325f74905ce07c5ff63715134199998f8a6e7f453c1603e7",
-        "size_bytes": 20218,
+        "sha256": "sha256:81d41f1a38d82bd90b9a00a95f971cefcd23354560b325104c5a7b233b73c99a",
+        "size_bytes": 20376,
         "kind": "config"
       }
     ]
@@ -194,5 +194,5 @@
       "sha256": "sha256:76557e8ef44078c59656280cc2af17bdfab09797205e04eb35be906cd88b395d"
     }
   ],
-  "bundle_sha256": "sha256:16d0ddb34aae6b0c2bc0764a9d300483976938013fd8978a47756b687640b761"
+  "bundle_sha256": "sha256:afda83c102c113a252e27d896ed16121fca83143837a27d3100123a8bbae3067"
 }

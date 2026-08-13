@@ -144,6 +144,12 @@ describe("Koni's Pi-native skills", () => {
       "Carry forward only a finding that the current candidate and current receipts still establish",
     );
     expect(normalizedExecutionReference).toContain(
+      "Validate currentness, exact membership, and downstream interactions; do not repeat that upstream semantic review from the same evidence",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "A familiar command name is not evidence that an executable exists",
+    );
+    expect(normalizedExecutionReference).toContain(
       "Keep the legacy default of one automatic rework unless the workflow explicitly sets `review_rework_limit`",
     );
     expect(normalizedExecutionReference).toContain(
