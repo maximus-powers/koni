@@ -20310,7 +20310,7 @@ function proposalLifecycleActor(
  * no settled provider response remains in the same epoch, so a persistent abort-every-time loop
  * is still bounded.
  */
-function providerRecoveryEpochAttempts(run: RunRecord): readonly AgentAttemptRecord[] {
+export function providerRecoveryEpochAttempts(run: RunRecord): readonly AgentAttemptRecord[] {
   const attempts = Object.values(run.attempts);
   let boundary = -1;
   for (const [index, attempt] of attempts.entries()) {
@@ -20319,7 +20319,11 @@ function providerRecoveryEpochAttempts(run: RunRecord): readonly AgentAttemptRec
     // so treating any settlement as progress made the cap unreachable: one run auto-recovered
     // twelve consecutive times over roughly fifty minutes, re-paying for identical discovery each
     // time, because each failure cleared its own counter. Genuine progress still resets it.
-    if (attempt.status === "aborted" && isProviderExposureHoldBlocker(attempt.error)) continue;
+    if (
+      (attempt.status === "failed" || attempt.status === "aborted") &&
+      isProviderExposureHoldBlocker(attempt.error)
+    )
+      continue;
     if (
       attempt.authorityProviderRequests?.some((request) => request.settledAt !== undefined) ||
       (attempt.kind === "lead" && attempt.status === "completed")

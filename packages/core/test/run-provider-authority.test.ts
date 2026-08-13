@@ -13,6 +13,7 @@ import {
   inheritedRepositoryDiscoveryCalls,
   isProviderRateLimitErrorMessage,
   planningRevisionTokenUsage,
+  providerRecoveryEpochAttempts,
   providerRateLimitRecoveryDelayMs,
   recoverablePlanningTerminalAuthority,
   RunAuthorityEngine,
@@ -198,6 +199,42 @@ describe("run authority provider reservation lifecycle", () => {
 
     expect([0, 1, 2, 3, 4, 12].map(providerRateLimitRecoveryDelayMs)).toEqual([
       60_000, 120_000, 240_000, 480_000, 900_000, 900_000,
+    ]);
+  });
+
+  it("does not let a failed provider hold reset its own bounded recovery epoch", () => {
+    const settledAt = "2026-08-13T00:00:01.000Z";
+    const providerHold = (id: string, status: "failed" | "aborted") =>
+      ({
+        id,
+        status,
+        error:
+          "Provider request remains reserved without a canonical assistant settlement; worst-case exposure is held; provider reported: transient failure",
+        authorityProviderRequests: [
+          {
+            settledAt,
+            retirement: { disposition: "operator_acknowledged_provider_error" },
+          },
+        ],
+      }) as unknown as AgentAttemptRecord;
+    const completed = {
+      id: "completed-boundary",
+      status: "completed",
+      authorityProviderRequests: [{ settledAt }],
+    } as unknown as AgentAttemptRecord;
+    const run = {
+      attempts: {
+        completed,
+        failed: providerHold("failed-hold", "failed"),
+        aborted: providerHold("aborted-hold", "aborted"),
+        current: { id: "current", status: "running" } as AgentAttemptRecord,
+      },
+    } as unknown as RunRecord;
+
+    expect(providerRecoveryEpochAttempts(run).map((attempt) => attempt.id)).toEqual([
+      "failed-hold",
+      "aborted-hold",
+      "current",
     ]);
   });
 
