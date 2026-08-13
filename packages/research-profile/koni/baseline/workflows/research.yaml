@@ -560,8 +560,8 @@ workflows:
     agent: integrator
     depends_on:
     - verify
-    graph_mutation: required
-    expected_output: canonical existing-asset upsert preserving current compiler-owned fields exactly while adding authored implementation kind, entrypoints, exact gate_contracts, and validates links; new nodes omit compiler-owned fields
+    graph_mutation: allowed
+    expected_output: canonical existing-asset upsert preserving current compiler-owned fields exactly when authored implementation kind, entrypoints, exact gate_contracts, or validates links must change; new nodes omit compiler-owned fields; submit an empty candidate when verified repository-only repair leaves that contract exact
     validation_action: compile-ticket
     required_receipts:
     - context-pack

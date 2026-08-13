@@ -485,7 +485,7 @@ operations:
     allow_upstream_requests: true
     proposal_operation: change-request
   review_contract: pre-commit asset implementation review
-  output_contract: materialize and verify concrete nonempty files under spec.implementation_plan.root without echoing the graph node, then publish authored spec.implementation.kind and project-relative spec.implementation.entrypoints in the graph-owning integration step; only when the target asset is capability-compatible with one or more research gates, add exact per-gate spec.gate_contracts and canonical validates links. Runner-only assets must not own verifier contracts or validates links. New nodes omit compiler-owned fields and existing upserts preserve them byte-for-byte without claiming readiness
+  output_contract: materialize and verify concrete nonempty files under spec.implementation_plan.root without echoing the graph node, then use the graph-owning integration step to publish authored spec.implementation.kind and project-relative spec.implementation.entrypoints when they must change; submit an empty candidate when verified repository-only repair leaves that semantic contract exact; only when the target asset is capability-compatible with one or more research gates, add exact per-gate spec.gate_contracts and canonical validates links. Runner-only assets must not own verifier contracts or validates links. New nodes omit compiler-owned fields and existing upserts preserve them byte-for-byte without claiming readiness
   dispatch_priority: 410
   ranking_hints:
   - stage

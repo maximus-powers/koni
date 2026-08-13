@@ -697,6 +697,7 @@ describe("research profile registrar", () => {
       }>;
     };
     const workflow = document.workflows.find(({ id }) => id === "implement-asset");
+    const integrationStep = workflow?.steps.find(({ id }) => id === "integrate");
     const mutationByStep = Object.fromEntries(
       (workflow?.steps ?? []).map(({ id, graph_mutation }) => [id, graph_mutation]),
     );
@@ -705,7 +706,7 @@ describe("research profile registrar", () => {
     expect(mutationByStep).toEqual({
       implement: "forbidden",
       verify: "forbidden",
-      integrate: "required",
+      integrate: "allowed",
       review: "forbidden",
     });
     expect(normalizedReference).toContain(
@@ -715,7 +716,13 @@ describe("research profile registrar", () => {
       "Do not reconstruct or echo an existing node merely to report unchanged authored fields",
     );
     expect(normalizedReference).toContain(
-      "A later semantic integration step owns the required graph mutation",
+      "A later semantic integration step owns any required graph mutation",
+    );
+    expect(normalizedReference).toContain(
+      "When verified repository work does not change the authored semantic contract, that integration step may submit an empty candidate",
+    );
+    expect(integrationStep?.expected_output).toContain(
+      "empty candidate when verified repository-only repair leaves that contract exact",
     );
   });
 

@@ -39,11 +39,11 @@ files in `spec.support_paths`, and each resolved prerequisite links to its provi
 canonical `satisfied_by`. A prose promise to resolve an already-discovered input later is not an
 authority binding and leaves the deterministic fallback unable to recover the omitted scope.
 
-Bind every executable contract to a launcher established by accepted repository or runtime
-evidence. A familiar command name is not evidence that an executable exists. Keep the entrypoint's
-executable header or manifest, repository-owned scripts, documentation examples, configured
-verifier contract, and downstream runtime command consistent. If no accepted evidence establishes a
-launcher, report the modeling gap before emitting an executable contract.
+Bind every executable contract to a launcher established by accepted repository or runtime evidence.
+A familiar command name is not evidence that an executable exists. Keep the entrypoint's executable
+header or manifest, repository-owned scripts, documentation examples, configured verifier contract,
+and downstream runtime command consistent. If no accepted evidence establishes a launcher, report
+the modeling gap before emitting an executable contract.
 
 Classify a missing resource against the owning result contract before requesting authority. If the
 contract admits absence as a typed negative, incomplete, or inconclusive result, preserve that
@@ -64,9 +64,12 @@ mutable.
 Separate repository effects from graph effects at the workflow boundary. A filesystem-only step must
 declare graph mutation forbidden and omit the graph delta. Do not reconstruct or echo an existing
 node merely to report unchanged authored fields: a complete-node upsert can silently alter an
-unrelated field and therefore changes semantic authority. A later semantic integration step owns the
+unrelated field and therefore changes semantic authority. A later semantic integration step owns any
 required graph mutation, reads the current node, and publishes only the intended authored contract
-after the repository effect is verified.
+after the repository effect is verified. When verified repository work does not change the authored
+semantic contract, that integration step may submit an empty candidate. Configure mutation as
+allowed at such a mixed initial-publication and repository-repair boundary; reserve required for a
+boundary whose successful outcome always changes semantic graph state.
 
 ## Workflow DAG
 
