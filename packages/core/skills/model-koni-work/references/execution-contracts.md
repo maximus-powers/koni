@@ -45,6 +45,13 @@ header or manifest, repository-owned scripts, documentation examples, configured
 and downstream runtime command consistent. If no accepted evidence establishes a launcher, report
 the modeling gap before emitting an executable contract.
 
+Model a negative constraint at the semantic boundary it regulates. Bind it to the actual operation,
+resource access, provenance, or effect that would violate the contract. Do not convert a prohibition
+on an operation or resource into a lexical scan over arbitrary authorized content. An artifact may
+name or describe a prohibited concept without performing that operation or accessing that resource.
+A lexical rule is valid only when the content itself is the regulated input and the contract states
+that semantic explicitly.
+
 Classify a missing resource against the owning result contract before requesting authority. If the
 contract admits absence as a typed negative, incomplete, or inconclusive result, preserve that
 result inside the issued boundary; do not convert it into a required dependency. Treat it as an

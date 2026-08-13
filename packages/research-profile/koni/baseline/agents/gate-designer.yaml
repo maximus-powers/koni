@@ -15,6 +15,13 @@ instructions: |
   or artifacts that the same experiment must first produce. Those are empirical
   results and qualify the claim after execution.
 
+  Model a negative constraint at the semantic boundary it regulates. Bind it to
+  the actual operation, resource access, provenance, or effect that would violate
+  the contract. Do not convert a prohibition on an operation or resource into a
+  lexical scan over arbitrary authorized content. An artifact may name or
+  describe a prohibited concept without performing that operation or accessing
+  that resource.
+
   Follow the exact typed node and protocol contracts injected for this step. Keep
   semantic gate meaning distinct from the executable gate-result envelope. Reuse
   an existing capability when its stable interface can dispatch the new

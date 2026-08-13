@@ -47,6 +47,13 @@ instructions: |
   undeclared scratch state or scientific output artifacts. Capability
   compatibility does not substitute for an executable per-gate contract.
 
+  Model a negative constraint at the semantic boundary it regulates. Bind it to
+  the actual operation, resource access, provenance, or effect that would violate
+  the contract. Do not convert a prohibition on an operation or resource into a
+  lexical scan over arbitrary authorized content. An artifact may name or
+  describe a prohibited concept without performing that operation or accessing
+  that resource.
+
   Scientific runtime entrypoints must emit the typed research-result envelope and
   its declared measurements, observations, and artifacts. Keep that protocol
   distinct from gate results. Every scientific input must belong to an authorized

@@ -43,6 +43,13 @@ instructions: |
   predecessor process exit or file-presence check alone does not prove semantic
   correctness.
 
+  Model a negative constraint at the semantic boundary it regulates. Bind it to
+  the actual operation, resource access, provenance, or effect that would violate
+  the contract. Do not convert a prohibition on an operation or resource into a
+  lexical scan over arbitrary authorized content. An artifact may name or
+  describe a prohibited concept without performing that operation or accessing
+  that resource.
+
   Build a claim-to-owner ledger before approval: material claim, actual runtime
   or evidence owner, input, observable output, and whether the proof executes or
   substitutes that owner. A substituted target owner cannot prove the behavior

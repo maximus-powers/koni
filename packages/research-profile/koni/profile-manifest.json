@@ -2,12 +2,12 @@
   "protocol": "koni.profile-package.v1",
   "package": {
     "name": "@koni/research-profile",
-    "version": "1.1.33"
+    "version": "1.1.34"
   },
   "profile": {
     "id": "research",
     "display_name": "Research",
-    "version": "1.1.33",
+    "version": "1.1.34",
     "lineage": "koni.research"
   },
   "compatibility": {
@@ -32,8 +32,8 @@
       },
       {
         "path": "agents/asset-builder.yaml",
-        "sha256": "sha256:50cd04731068fa7e44d320f12743dabff6e20f6a21a4fef2ae12c6b7fdc33811",
-        "size_bytes": 5354,
+        "sha256": "sha256:74400e9d7aedb2816c49f51ad21a030350181a5fcbb81c48d15c327852b9665a",
+        "size_bytes": 5767,
         "kind": "agent"
       },
       {
@@ -56,8 +56,8 @@
       },
       {
         "path": "agents/gate-designer.yaml",
-        "sha256": "sha256:0174fdd790377315fe82ed77032215147b861ad12e37b43d729d05552e5a513b",
-        "size_bytes": 3530,
+        "sha256": "sha256:76c18c02281e9ae515d55d04d1a137e8ae0875bd529865d690b8a4c2eca9da62",
+        "size_bytes": 3943,
         "kind": "agent"
       },
       {
@@ -92,8 +92,8 @@
       },
       {
         "path": "agents/reviewer.yaml",
-        "sha256": "sha256:54fdc93a74842a38f337d1757a107ee803f0c651caea014ed03104867be7e249",
-        "size_bytes": 5699,
+        "sha256": "sha256:4c42bdbfb48ae259be32e0616361ee05a20a736e7f94e136d96b83157aeb4243",
+        "size_bytes": 6112,
         "kind": "agent"
       },
       {
@@ -104,8 +104,8 @@
       },
       {
         "path": "agents/run-planner.yaml",
-        "sha256": "sha256:da5977ebe1823b086dd6364e092f542943235f4f4606d73f9a8a0bdb861e573d",
-        "size_bytes": 8259,
+        "sha256": "sha256:b4c19d5a21774b8797d90127841142a26d1c5c1f50f4bafe5ff029ca5890c2f7",
+        "size_bytes": 8672,
         "kind": "agent"
       },
       {
@@ -140,7 +140,7 @@
       },
       {
         "path": "profile.yaml",
-        "sha256": "sha256:7424d1901801095bc45795238146531c5698b8313cf0ba86d345af7e7970ed78",
+        "sha256": "sha256:503106131f1f7b7dc2c2563448e5fdc92f8c0a2f21690222e420536c0767d1f5",
         "size_bytes": 1319,
         "kind": "config"
       },
@@ -206,5 +206,5 @@
       "sha256": "sha256:c807436b04f7d44ea65cce5cfa6ed8cba3c4e5d8d571034f7fecc25c9fd117a5"
     }
   ],
-  "bundle_sha256": "sha256:ebcf924803e52dc319ab7f5052cf96d70c486f8d934d8fa578831a7030de123f"
+  "bundle_sha256": "sha256:9f24d05a226e82d161a585037600f290bf14ab4119fe20a43e1cc631cdff6b05"
 }

@@ -10,6 +10,37 @@ import registerProfile, {
 } from "../extensions/profile.js";
 
 describe("research profile registrar", () => {
+  it("keeps negative constraints on the operation, resource, or effect they regulate", async () => {
+    const sources = await Promise.all(
+      ["run-planner", "gate-designer", "asset-builder", "reviewer"].map((agent) =>
+        readFile(
+          path.resolve(import.meta.dirname, `../koni/baseline/agents/${agent}.yaml`),
+          "utf8",
+        ),
+      ),
+    );
+    const sharedGuidance = await readFile(
+      path.resolve(
+        import.meta.dirname,
+        "../../core/skills/model-koni-work/references/execution-contracts.md",
+      ),
+      "utf8",
+    );
+    const normalized = [...sources, sharedGuidance].map((source) => source.replace(/\s+/gu, " "));
+
+    for (const source of normalized) {
+      expect(source).toContain(
+        "Do not convert a prohibition on an operation or resource into a lexical scan over arbitrary authorized content",
+      );
+      expect(source).toContain(
+        "An artifact may name or describe a prohibited concept without performing that operation or accessing that resource",
+      );
+    }
+    expect(normalized.at(-1)).toContain(
+      "A lexical rule is valid only when the content itself is the regulated input and the contract states that semantic explicitly",
+    );
+  });
+
   it("keeps post-execution evidence out of prerequisite authority", async () => {
     const [plannerSource, sharedGuidance] = await Promise.all([
       readFile(

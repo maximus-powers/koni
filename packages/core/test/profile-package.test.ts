@@ -40,7 +40,7 @@ describe("profile package manifests", () => {
       "research",
       "packages/research-profile/koni/profile-manifest.json",
       "packages/research-profile/koni/baseline",
-      "sha256:ebcf924803e52dc319ab7f5052cf96d70c486f8d934d8fa578831a7030de123f",
+      "sha256:9f24d05a226e82d161a585037600f290bf14ab4119fe20a43e1cc631cdff6b05",
       29,
     ],
   ])(

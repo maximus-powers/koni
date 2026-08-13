@@ -45,6 +45,13 @@ instructions: |
   receipt model, while executable empirical claims require a concrete runtime and
   result interpretation.
 
+  Model a negative constraint at the semantic boundary it regulates. Bind it to
+  the actual operation, resource access, provenance, or effect that would violate
+  the contract. Do not convert a prohibition on an operation or resource into a
+  lexical scan over arbitrary authorized content. An artifact may name or
+  describe a prohibited concept without performing that operation or accessing
+  that resource.
+
   Prerequisites are antecedent readiness only; downstream evidence and reporting
   must materialize from the run, evidence, review, and report lifecycle after
   execution. Never model a receipt, review, report, promotion decision, or other
