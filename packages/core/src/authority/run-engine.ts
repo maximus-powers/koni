@@ -1012,9 +1012,13 @@ export interface RunAuthorityEngineOptions {
       | "after_verification",
     input: Readonly<{ runId: string; ticketId?: string }>,
   ) => Promise<void> | void;
-  /** Provider-free crash injection after a primitive receipt but before its journal transition. */
+  /** Provider-free fault injection at bounded action and attempt transition seams. */
   actionFault?: (
-    point: "before_journal" | "before_assignment_settle" | "before_attempt_finalize",
+    point:
+      | "before_journal"
+      | "before_assignment_settle"
+      | "before_attempt_finalize"
+      | "before_lead_attempt_admission",
     input: Readonly<{
       runId: string;
       invocationId: string;
@@ -1875,14 +1879,17 @@ export class RunAuthorityEngine {
         continue;
       }
       try {
+        if (
+          current.expectedRunRevision !== run.revision &&
+          (current.boundary.kind === "lead_launch" || !isTerminalActionJournal(current.journal))
+        ) {
+          this.#assertStartupMayContinue();
+          await this.#adoptRunActionRevision(runId, current.invocationId);
+          run = await this.#store.getRun(runId);
+          current = run.actionExecutions?.[candidate.invocationId];
+          if (current === undefined || current.settledAt !== undefined) continue;
+        }
         if (!isTerminalActionJournal(current.journal)) {
-          if (current.expectedRunRevision !== run.revision) {
-            this.#assertStartupMayContinue();
-            await this.#adoptRunActionRevision(runId, current.invocationId);
-            run = await this.#store.getRun(runId);
-            current = run.actionExecutions?.[candidate.invocationId];
-            if (current === undefined || current.settledAt !== undefined) continue;
-          }
           this.#assertStartupMayContinue();
           await this.#executeRunAction(runId, current.invocationId);
         }
@@ -10981,6 +10988,13 @@ export class RunAuthorityEngine {
     let prepared: PreparedManagedAttempt | undefined;
     let providerHoldDetected = false;
     let readmitLeadAction = false;
+    if (kind === "lead") {
+      await this.#actionFault?.("before_lead_attempt_admission", {
+        runId: run.id,
+        invocationId: leadActionAdmission!.invocationId,
+        attemptId,
+      });
+    }
     await this.#server.mutateInternal(async ({ revision }) => {
       const current = await this.#store.getRun(run.id);
       if (!this.#matchesAdvancement(current, admission)) return this.#noOpInternal(revision);
@@ -11251,7 +11265,10 @@ export class RunAuthorityEngine {
       return;
     }
     if (readmitLeadAction) {
-      this.#background(() => this.#tick(run.id), run.id);
+      this.#background(async () => {
+        await this.#recoverConfiguredActions(run.id);
+        await this.#tick(run.id);
+      }, run.id);
       return;
     }
     if (prepared === undefined) return;

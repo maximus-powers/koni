@@ -3218,6 +3218,117 @@ describe("run authority engine", () => {
     client.close();
   });
 
+  it("retires and reissues a Lead launch when its ticket frontier changes before attempt admission", async () => {
+    const root = await repository();
+    const base = directApprovalProgram();
+    const program: RunCompilerProgram = {
+      ...base,
+      async initializeApprovedPlan() {
+        const work = ticket();
+        return {
+          graphHash: `sha256:${"d".repeat(64)}`,
+          graphRevision: 1,
+          tickets: { [work.id]: work },
+        };
+      },
+      async compileLeadJudgmentOutput() {
+        return {
+          protocol: "koni.lead-judgment-output.v1",
+          disposition: "proceed",
+          summary: "The current ticket frontier is safe to execute",
+        };
+      },
+    };
+    let engine: RunAuthorityEngine;
+    let changedFrontier = false;
+    engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+      actionFault: async (point, input) => {
+        if (point !== "before_lead_attempt_admission" || changedFrontier) {
+          return;
+        }
+        await engine.server.mutateInternal(async ({ revision }) => {
+          const current = await engine.store.getRun(input.runId);
+          const action = current.actionExecutions?.[input.invocationId];
+          if (action?.boundary.kind !== "lead_launch") return { revision };
+          const changed = structuredClone(current);
+          changed.revision += 1;
+          changed.updatedAt = "2026-08-13T06:00:00.000Z";
+          changed.graphRevision += 1;
+          changed.graphHash = rawSha256("concurrent compiler graph product");
+          const completed = ticket();
+          completed.id = "ticket-concurrently-completed";
+          completed.title = "Concurrent compiler completion";
+          completed.status = "completed";
+          for (const step of completed.steps) {
+            step.status = "completed";
+            step.completedAt = changed.updatedAt;
+          }
+          changed.tickets[completed.id] = completed;
+          const committed = await engine.store.commit({
+            expectedRevision: revision,
+            runWrites: [{ record: changed, expectedRevision: current.revision }],
+          });
+          return { revision: committed.state.revision };
+        });
+        changedFrontier = true;
+      },
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(client, engine, "live-lead-frontier-drift");
+
+    try {
+      await waitFor(async () => {
+        const current = await engine.store.getRun(runId);
+        return current.lifecycle.phase === "merge_ready" || current.lifecycle.phase === "blocked";
+      });
+    } catch (error) {
+      const current = await engine.store.getRun(runId);
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}: ${JSON.stringify({
+          lifecycle: current.lifecycle,
+          changedFrontier,
+          tickets: Object.values(current.tickets).map(({ id, status }) => ({ id, status })),
+          actions: Object.values(current.actionExecutions ?? {}).map((action) => ({
+            kind: action.boundary.kind,
+            stepId: action.boundary.stepId,
+            productSha256: action.boundary.productSha256,
+            expectedRunRevision: action.expectedRunRevision,
+            admittedRunRevision: action.boundary.admittedRunRevision,
+            status: action.journal.status,
+            settlement: action.settlement?.disposition,
+          })),
+        })}`,
+      );
+    }
+
+    const settled = await engine.store.getRun(runId);
+    expect(changedFrontier).toBe(true);
+    expect(settled.lifecycle.phase).toBe("merge_ready");
+    expect(settled.lifecycle.blocker).toBeUndefined();
+    expect(
+      Object.values(settled.actionExecutions ?? {}).some(
+        (action) =>
+          action.boundary.kind === "lead_launch" &&
+          action.settlement?.disposition === "abandoned" &&
+          action.settlement.reason.includes("graph/run-product evolution"),
+      ),
+    ).toBe(true);
+    expect(
+      Object.values(settled.attempts).filter((attempt) => attempt.kind === "lead"),
+    ).toHaveLength(1);
+    client.close();
+  });
+
   it("rearms an exact never-started terminal resolver after source dependencies settle", () => {
     const source = ticket();
     source.id = "source-terminal";
