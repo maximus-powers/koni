@@ -646,15 +646,27 @@ rules:
     read_scope:
       union:
       - $target
+      - risk_treatment_context_frontier
       - traverse:
-          from: $target
-          relations:
-          - introduced_by
-          - threatens
-          - mitigated_by
-          - accepted_by
-          - verified_by
-          max_depth: 2
+          from: risk_treatment_context_frontier
+          relation: introduced_by
+          max_depth: 1
+      - traverse:
+          from: risk_treatment_context_frontier
+          relation: threatens
+          max_depth: 1
+      - traverse:
+          from: risk_treatment_context_frontier
+          relation: mitigated_by
+          max_depth: 1
+      - traverse:
+          from: risk_treatment_context_frontier
+          relation: accepted_by
+          max_depth: 1
+      - traverse:
+          from: risk_treatment_context_frontier
+          relation: verified_by
+          max_depth: 1
     write_scope: $target
     read_paths:
     - select:

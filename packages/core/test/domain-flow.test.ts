@@ -1541,6 +1541,118 @@ describe("provider-free domain flows", () => {
     expect(reopened.ok, diagnostics(reopened)).toBe(true);
     if (reopened.ok) expect(reopened.value.tickets).toHaveLength(1);
   });
+
+  it("deduplicates a risk control that both introduces and mitigates the same risk", async () => {
+    const root = await temporaryRoot();
+    await Promise.all([
+      mkdir(join(root, "src"), { recursive: true }),
+      mkdir(join(root, "tests"), { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(join(root, "src/behavior.ts"), "export const behavior = true;\n"),
+      writeFile(join(root, "tests/proof-change-a.mjs"), "void true;\n"),
+    ]);
+    const configuration = compileProfile("coding-profile");
+    const objective = node("objective-a", "objective", "Ship bounded behavior", "active", {
+      outcome: "The bounded behavior is available",
+      work_kind: "general",
+    });
+    const system = node("system-a", "system", "Bounded owner", "active", {
+      kind: "app",
+      responsibility: "Own the bounded behavior",
+      contract_required: false,
+      contract_reason: "Ordinary repository behavior is sufficient",
+      owned_paths: ["src"],
+    });
+    const change = node(
+      "change-a",
+      "change",
+      "Implement bounded behavior",
+      "planned",
+      {
+        approval_claim: "Expose the bounded behavior",
+        current_state: "The behavior is unavailable",
+        target_state: "The behavior is available",
+        owned_paths: ["src/behavior.ts"],
+        blast_radius: "One bounded owner",
+        commit_type: "feat",
+        risk_tier: "elevated",
+        risk_factors: ["The new behavior can regress its existing owner"],
+        proof_strategy: "red_green",
+      },
+      {
+        realizes: [objective.id],
+        affects: [system.id],
+        introduces: ["risk-a"],
+      },
+    );
+    const risk = node(
+      "risk-a",
+      "risk",
+      "Existing owner regression",
+      "active",
+      {
+        scenario: "The new behavior regresses its existing owner",
+        impact: "The owner becomes unusable",
+        likelihood: "possible",
+        detection: "A boundary proof observes the owner",
+        treatment: "mitigate",
+        treatment_rationale: "The implementing change owns the bounded control",
+        residual_risk: "A separately reviewed boundary proof remains required",
+      },
+      { threatens: [system.id], mitigated_by: [change.id] },
+    );
+    const focusedProof = node(
+      "proof-change-a",
+      "proof",
+      "Focused change proof",
+      "planned",
+      {
+        purpose: "focused",
+        baseline_check_id: "proof-expected-red",
+        claim: "The bounded behavior is available",
+        method: "Exercise the repository-native behavior seam",
+        command: ["node", "tests/proof-change-a.mjs"],
+        source_paths: ["tests/proof-change-a.mjs"],
+        covered_paths: ["src/behavior.ts"],
+        oracle_cases: [
+          {
+            id: "bounded_behavior",
+            condition: "The bounded owner is available",
+            claim: "The behavior is exposed",
+            production_seam: "bounded behavior entrypoint",
+            seam_paths: ["src/behavior.ts"],
+            action: "Invoke the bounded behavior",
+            assertions: ["The expected behavior is observable"],
+          },
+        ],
+        working_directory: ".",
+        layer: "unit",
+        conditions: ["The bounded owner is available"],
+        expected_signal: "The focused assertion passes",
+        why: "This is the smallest repository-native proof seam",
+        not_proven: ["Unrelated owners"],
+      },
+      { verifies: [change.id] },
+    );
+    const graph = projection([objective, system, change, risk, focusedProof]);
+    typedGraph(configuration, graph.nodes(), root);
+
+    const evaluated = evaluateConfiguredRules(
+      { configuration, graph },
+      { ruleIds: ["risk.plan-treatment"] },
+    );
+
+    expect(evaluated.ok, diagnostics(evaluated)).toBe(true);
+    if (!evaluated.ok) return;
+    expect(evaluated.value.tickets).toHaveLength(1);
+    expect(evaluated.value.tickets[0]?.scope.read_node_ids).toEqual([
+      change.id,
+      focusedProof.id,
+      risk.id,
+      system.id,
+    ]);
+  });
 });
 
 async function temporaryRoot(): Promise<string> {
@@ -1648,6 +1760,7 @@ function verifierNode(id: string, capability: string, gateId: string): CompilerG
 function typedGraph(
   configuration: CompiledConfiguration,
   nodes: readonly CompilerGraphNode[],
+  projectRoot?: string,
 ): TypedGraph {
   const projected = projectGraphSchemaDefinition(configuration);
   if (!projected.ok) throw new Error(diagnostics(projected));
@@ -1666,6 +1779,7 @@ function typedGraph(
       ),
       annotations: structuredClone(value.annotations ?? {}) as GraphNode["annotations"],
     })),
+    projectRoot === undefined ? {} : { projectRoot },
   );
 }
 

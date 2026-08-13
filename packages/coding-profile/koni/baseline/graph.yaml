@@ -1515,6 +1515,29 @@ queries:
         - migration
         statuses:
         - complete
+- id: risk_treatment_context_frontier
+  select:
+    union:
+    - traverse:
+        from: $target
+        relation: introduced_by
+        max_depth: 1
+    - traverse:
+        from: $target
+        relation: threatens
+        max_depth: 1
+    - traverse:
+        from: $target
+        relation: mitigated_by
+        max_depth: 1
+    - traverse:
+        from: $target
+        relation: accepted_by
+        max_depth: 1
+    - traverse:
+        from: $target
+        relation: verified_by
+        max_depth: 1
 - id: structurally_valid_risks
   select: active_risks
   where:
