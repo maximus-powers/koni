@@ -5753,6 +5753,7 @@ export class RunAuthorityEngine {
             attempt === undefined ? undefined : assignmentForAttempt(draft, attempt);
           if (
             attempt?.status !== "terminal_accepted" ||
+            attempt.terminalAcceptedAt === undefined ||
             assignment === undefined ||
             assignment.ticketId !== parent.boundary.ticketId ||
             assignment.stepId !== parent.boundary.stepId
@@ -5762,6 +5763,7 @@ export class RunAuthorityEngine {
               "recovered validation lost its exact terminal-accepted assignment",
             );
           }
+          attempt.terminalPolicy = failedSubmissionTerminalPolicy(attempt.terminalAcceptedAt);
           recoveryBlocker =
             currentRecovery.journal.status === "completed"
               ? "Configured terminal validation required recovery; reissue from authenticated failure"
