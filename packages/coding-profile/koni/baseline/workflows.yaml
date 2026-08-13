@@ -8,6 +8,7 @@ workflows:
   applies_to:
   - map-architecture
   review_failure_reopen_from: map-affected-boundary
+  review_rework_limit: 2
   steps:
   - id: map-affected-boundary
     agent: architecture-mapper
@@ -28,6 +29,7 @@ workflows:
   applies_to:
   - specify-contracts
   review_failure_reopen_from: specify-material-contract
+  review_rework_limit: 2
   steps:
   - id: specify-material-contract
     agent: contract-designer
@@ -48,6 +50,7 @@ workflows:
   applies_to:
   - plan-change
   review_failure_reopen_from: plan-vertical-change
+  review_rework_limit: 2
   steps:
   - id: plan-vertical-change
     agent: change-designer
@@ -68,6 +71,7 @@ workflows:
   applies_to:
   - ground-defect
   review_failure_reopen_from: ground-diagnostic-seam
+  review_rework_limit: 2
   steps:
   - id: ground-diagnostic-seam
     agent: change-designer
@@ -88,6 +92,7 @@ workflows:
   applies_to:
   - prepare-proof
   review_failure_reopen_from: author-historical-baseline
+  review_rework_limit: 2
   steps:
   - id: author-historical-baseline
     agent: implementer
@@ -133,6 +138,7 @@ workflows:
   applies_to:
   - diagnose-defect
   review_failure_reopen_from: diagnose-cause
+  review_rework_limit: 2
   steps:
   - id: diagnose-cause
     agent: change-designer
@@ -164,6 +170,7 @@ workflows:
   applies_to:
   - plan-risk-treatment
   review_failure_reopen_from: repair-treatment
+  review_rework_limit: 2
   steps:
   - id: repair-treatment
     agent: risk-analyst
@@ -184,6 +191,7 @@ workflows:
   applies_to:
   - resolve-decision
   review_failure_reopen_from: validate-approved-choice
+  review_rework_limit: 2
   steps:
   - id: validate-approved-choice
     agent: change-designer
@@ -204,6 +212,7 @@ workflows:
   applies_to:
   - implement-change
   - implement-migration
+  review_rework_limit: 2
   review_failure_routes:
     ticket_rework:
       disposition: reopen
@@ -292,6 +301,7 @@ workflows:
   applies_to:
   - implement-change
   - implement-migration
+  review_rework_limit: 2
   review_failure_routes:
     ticket_rework:
       disposition: reopen
@@ -381,6 +391,7 @@ workflows:
   - implement-change
   - implement-migration
   review_failure_reopen_from: implement
+  review_rework_limit: 2
   steps:
   - id: establish-baseline
     agent: verifier
@@ -482,6 +493,7 @@ workflows:
   applies_to:
   - prepare-delivery
   review_failure_reopen_from: assemble-candidate
+  review_rework_limit: 2
   steps:
   - id: assemble-candidate
     kind: integration
@@ -527,6 +539,7 @@ workflows:
   applies_to:
   - decompose-domain
   review_failure_reopen_from: decompose
+  review_rework_limit: 2
   steps:
   - id: decompose
     agent: change-designer
@@ -547,6 +560,7 @@ workflows:
   applies_to:
   - resolve-target
   review_failure_reopen_from: explore-and-select
+  review_rework_limit: 2
   steps:
   - id: explore-and-select
     agent: implementer

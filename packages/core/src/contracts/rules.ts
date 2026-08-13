@@ -160,8 +160,10 @@ export interface DerivedTicketDefinition {
   readonly target_state_key: string;
   readonly obligation_keys: readonly string[];
   readonly workflow_id?: string;
-  /** Compiler-validated owner step reopened after one failed independent review. */
+  /** Compiler-validated owner step reopened after failed independent review. */
   readonly review_failure_reopen_from?: string;
+  /** Explicit bounded automatic rework allowance; legacy definitions omit it and retain one. */
+  readonly review_rework_limit?: number;
   readonly workflow: readonly DerivedWorkflowStep[];
   readonly configuration_sha256: Sha256Digest;
   readonly definition_sha256: Sha256Digest;

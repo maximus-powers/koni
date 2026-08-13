@@ -249,6 +249,8 @@ import {
 import {
   authorizeBlockedReviewRetry,
   beginAssignment,
+  bindAutomaticReviewReworkFailureProof,
+  bindAutomaticReviewReworkTerminalOutput,
   beginsBoundedReviewRework,
   blockedIndependentReviewRetryCandidate,
   blockedReviewRetryCandidate,
@@ -5778,6 +5780,10 @@ export class RunAuthorityEngine {
           }
           draft.terminalFailureProofs ??= {};
           draft.terminalFailureProofs[failureProof.sha256] = failureProof;
+          const failedTicket = draft.tickets[assignment.ticketId];
+          if (failedTicket?.reviewReworks?.at(-1)?.failedReviewAttemptId === attempt.id) {
+            bindAutomaticReviewReworkFailureProof(failedTicket, attempt.id, failureProof.sha256);
+          }
           assignmentFailed = true;
           draft.activity.push(
             activity(
@@ -6194,6 +6200,10 @@ export class RunAuthorityEngine {
           );
         }
         draft.terminalFailureProofs[proof.sha256] = proof;
+        const failedTicket = draft.tickets[assignment.ticketId];
+        if (failedTicket?.reviewReworks?.at(-1)?.failedReviewAttemptId === attempt.id) {
+          bindAutomaticReviewReworkFailureProof(failedTicket, attempt.id, proof.sha256);
+        }
       }
       const committed = await this.#store.commit({
         expectedRevision: revision,
@@ -8443,6 +8453,17 @@ export class RunAuthorityEngine {
     }
     const retriedAt = this.#timestamp();
     const draft = nextRun(run, retriedAt);
+    const retryReceipt = receiptFor(request, null);
+    const operatorAuthorizationMaterial = {
+      protocol: "koni.review-rework-operator-authorization.v1" as const,
+      method: retryReceipt.method,
+      idempotencyKey: retryReceipt.idempotencyKey,
+      requestHash: retryReceipt.requestHash,
+    };
+    const operatorAuthorization = {
+      ...operatorAuthorizationMaterial,
+      sha256: canonicalHash(operatorAuthorizationMaterial),
+    };
     let recovery;
     try {
       recovery = authorizeBlockedReviewRetry(
@@ -8455,6 +8476,7 @@ export class RunAuthorityEngine {
         retriedAt,
         steering,
         retryScope,
+        operatorAuthorization,
       );
     } catch (error) {
       throw new AuthorityRpcError(errorCode(error) ?? "review_retry_invalid", errorMessage(error));
@@ -8825,6 +8847,17 @@ export class RunAuthorityEngine {
           )
         : [];
     const draft = nextRun(run, resumedAt);
+    const resumeReceipt = receiptFor(request, null);
+    const resumeAuthorizationMaterial = {
+      protocol: "koni.review-rework-operator-authorization.v1" as const,
+      method: resumeReceipt.method,
+      idempotencyKey: resumeReceipt.idempotencyKey,
+      requestHash: resumeReceipt.requestHash,
+    };
+    const resumeAuthorization = {
+      ...resumeAuthorizationMaterial,
+      sha256: canonicalHash(resumeAuthorizationMaterial),
+    };
     // An explicit operator resume or blocked retry supersedes any stale scheduled pause.
     delete draft.pendingPause;
     let resumeActionArchiveWrites: TransactionWrite[] = [
@@ -8859,6 +8892,7 @@ export class RunAuthorityEngine {
           candidate.reviewAttemptId,
           candidate.blocker,
           resumedAt,
+          resumeAuthorization,
         )
       ) {
         throw new AuthorityRpcError(
@@ -10930,6 +10964,12 @@ export class RunAuthorityEngine {
       await this.#recordRunBlocker(run.id, providerExposureIssue, admission);
       return;
     }
+    const compilerCheckPreflightId =
+      assignment !== undefined && assignmentUsesConfiguredValidation(run, assignment)
+        ? await this.#ensureCompilerCheckPreflightIntent(run.id, assignment, admission)
+        : undefined;
+    run = await this.#store.getRun(run.id);
+    if (!this.#matchesAdvancement(run, admission)) return;
     const attemptId = leadActionAdmission?.attemptId ?? this.#createId("attempt");
     const sessionId = this.#createId("session");
     let prepared: PreparedManagedAttempt | undefined;
@@ -11087,6 +11127,9 @@ export class RunAuthorityEngine {
         const executionAuthority = await this.#schedulerExecutionAuthority(draft);
         beginAssignment(draft, assignment, attemptId, draft.updatedAt, executionAuthority);
         draft.tickets[assignment.ticketId]!.executionEpoch = assignmentExecutionEpoch!;
+      }
+      if (compilerCheckPreflightId !== undefined) {
+        delete (draft.pendingCompilerCheckPreflights ?? {})[compilerCheckPreflightId];
       }
       const attempt: AgentAttemptRecord = {
         id: attemptId,
@@ -13587,6 +13630,10 @@ export class RunAuthorityEngine {
           blocker,
           draft.updatedAt,
           rejectedResultProducerIds,
+          {
+            kind: "configured_check_result",
+            sourceSha256: canonicalHash(checkRecord),
+          },
         );
         for (const ticketId of reopened) {
           draft.activity.push(
@@ -14545,6 +14592,18 @@ export class RunAuthorityEngine {
       mutable.terminalOutputSizeBytes = outputBytes.byteLength;
       mutable.terminalAcceptedAt = draft.updatedAt;
       if (terminalPolicyRecord !== undefined) mutable.terminalPolicy = terminalPolicyRecord;
+      const directFailedTicket =
+        attempt.ticketId === undefined ? undefined : draft.tickets[attempt.ticketId];
+      if (
+        directFailedTicket?.reviewReworks?.at(-1)?.failedReviewAttemptId === attempt.id &&
+        mutable.terminalPolicy !== undefined
+      ) {
+        bindAutomaticReviewReworkTerminalOutput(
+          directFailedTicket,
+          attempt.id,
+          mutable.terminalOutputSha256,
+        );
+      }
 
       const pointer: JsonValue = {
         artifact: receiptPath,
@@ -15832,6 +15891,17 @@ export class RunAuthorityEngine {
         compiled.outcome,
         draft.updatedAt,
       ).disposition;
+      const directFailedTicket = draft.tickets[assignment.ticketId];
+      if (
+        directFailedTicket?.reviewReworks?.at(-1)?.failedReviewAttemptId === attemptId &&
+        mutableAttempt.terminalPolicy !== undefined
+      ) {
+        bindAutomaticReviewReworkTerminalOutput(
+          directFailedTicket,
+          attemptId,
+          mutableAttempt.terminalOutputSha256,
+        );
+      }
       const changeControlSettlement =
         compiled.outcome.status === "completed"
           ? await this.#applyAssignmentChangeControl(
@@ -16974,6 +17044,67 @@ export class RunAuthorityEngine {
   }
 
   /**
+   * Admit the exact configured-check preparation boundary before compiling an attempt launch.
+   * A later preflight rejection may consume only this prior durable intent; a successful launch
+   * removes it in the same CAS that publishes the matching attempt.
+   */
+  async #ensureCompilerCheckPreflightIntent(
+    runId: string,
+    assignment: ReadyAssignment,
+    advancement: RunAdvancementToken,
+  ): Promise<string | undefined> {
+    let intentId: string | undefined;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const current = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(current, advancement)) return this.#noOpInternal(revision);
+      const producerIds = completedConfiguredCheckDependencyIds(current, assignment.ticketId);
+      if (producerIds.length === 0) return this.#noOpInternal(revision);
+      const existing = Object.values(current.pendingCompilerCheckPreflights ?? {}).find(
+        (intent) =>
+          intent.consumerTicketId === assignment.ticketId &&
+          intent.consumerStepId === assignment.stepId,
+      );
+      if (existing !== undefined) {
+        intentId = existing.id;
+        return this.#noOpInternal(revision);
+      }
+      const draft = nextRun(current, this.#timestamp());
+      const id = `preflight-${canonicalHash({
+        runId,
+        ticketId: assignment.ticketId,
+        stepId: assignment.stepId,
+        runRevision: current.revision,
+      }).slice(7, 39)}`;
+      const material = {
+        protocol: "koni.pending-compiler-check-preflight.v1" as const,
+        id,
+        runId,
+        runRevision: current.revision,
+        configurationSha256: current.compiledConfigHash,
+        consumerTicketId: assignment.ticketId,
+        consumerStepId: assignment.stepId,
+        producerTicketIds: producerIds,
+        producerProjectionSha256s: producerIds.map(
+          (ticketId) => ticketImmutableProjection(current.tickets[ticketId]!).sha256,
+        ),
+        preparedAt: draft.updatedAt,
+      };
+      draft.pendingCompilerCheckPreflights ??= {};
+      draft.pendingCompilerCheckPreflights[id] = {
+        ...material,
+        sha256: canonicalHash(material),
+      };
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: current.revision }],
+      });
+      intentId = id;
+      return { revision: committed.state.revision };
+    });
+    return intentId;
+  }
+
+  /**
    * A configured-check plan is compiled before an assignment attempt exists. If that preflight
    * rejects agent-authored paths or argv, the completed dependency that wrote the assignment's
    * target is stale work, not an infrastructure blocker. Reissue that exact dependency generation
@@ -16993,13 +17124,62 @@ export class RunAuthorityEngine {
       if (!this.#matchesAdvancement(current, advancement)) return this.#noOpInternal(revision);
       const draft = nextRun(current, this.#timestamp());
       const blocker = `configured-check preflight rejected the completed contract: ${errorMessage(error)}`;
+      const retainedProducerIds = completedConfiguredCheckDependencyIds(
+        current,
+        assignment.ticketId,
+      );
+      if (retainedProducerIds.length === 0) return this.#noOpInternal(revision);
+      const pendingIntent = Object.values(current.pendingCompilerCheckPreflights ?? {}).find(
+        (intent) =>
+          intent.consumerTicketId === assignment.ticketId &&
+          intent.consumerStepId === assignment.stepId,
+      );
+      if (pendingIntent === undefined) return this.#noOpInternal(revision);
+      const preflightMaterial = {
+        protocol: "koni.compiler-check-preflight-rejection.v1" as const,
+        runId: current.id,
+        runRevision: current.revision,
+        configurationSha256: current.compiledConfigHash,
+        consumerTicketId: assignment.ticketId,
+        consumerStepId: assignment.stepId,
+        producerTicketIds: retainedProducerIds,
+        producerProjectionSha256s: retainedProducerIds.map(
+          (ticketId) => ticketImmutableProjection(current.tickets[ticketId]!).sha256,
+        ),
+        intentSha256: pendingIntent.sha256,
+        code: errorCode(error) as
+          | "check_argv"
+          | "check_input_binding"
+          | "check_path"
+          | "check_path_scope"
+          | "check_result_path",
+        message: errorMessage(error),
+        recordedAt: draft.updatedAt,
+      };
+      const preflightProof = {
+        ...preflightMaterial,
+        sha256: canonicalHash(preflightMaterial),
+      };
+      draft.compilerCheckPreflightRejections ??= [];
+      draft.compilerCheckPreflightRejections.push(preflightProof);
+      delete (draft.pendingCompilerCheckPreflights ?? {})[pendingIntent.id];
       const producerIds = reopenCompletedConfiguredCheckDependencies(
         draft,
         assignment.ticketId,
         blocker,
         draft.updatedAt,
+        retainedProducerIds,
+        {
+          kind: "configured_check_preflight",
+          sourceSha256: preflightProof.sha256,
+        },
       );
-      if (producerIds.length === 0) return this.#noOpInternal(revision);
+      if (producerIds.length === 0) {
+        throw new AuthorityRpcError(
+          "configured_check_reissue",
+          "compiler preflight proof lost its exact completed producer set",
+        );
+      }
       for (const producerId of producerIds) {
         draft.activity.push(
           activity(
@@ -21218,6 +21398,10 @@ export function reopenCompletedConfiguredCheckDependencies(
   blocker: string,
   at: string,
   retainedProducerIds?: readonly string[],
+  diagnosis?: Readonly<{
+    kind: "configured_check_preflight" | "configured_check_result";
+    sourceSha256: Sha256Digest;
+  }>,
 ): string[] {
   const consumer = run.tickets[consumerTicketId];
   if (consumer === undefined) return [];
@@ -21228,32 +21412,20 @@ export function reopenCompletedConfiguredCheckDependencies(
     .filter((ticket): ticket is TicketRecord => ticket !== undefined)
     .filter((ticket) => ticket.status === "completed");
   for (const producer of producers) {
-    const failedReviewAttemptId = [...producer.steps]
-      .reverse()
-      .find((step) => step.kind === "review" && step.status === "completed")
-      ?.attemptIds.at(-1);
-    const reworkContext =
-      failedReviewAttemptId !== undefined &&
-      producer.reviewFailureReopenFrom !== undefined &&
-      producer.reviewReworkLimit !== undefined
-        ? {
-            failedReviewAttemptId,
-            reopenFromStepId: producer.reviewFailureReopenFrom,
-          }
-        : undefined;
     resetTicketForFreshCycle(producer, at, currentTicketExecutionEpoch(run, producer));
-    if (reworkContext !== undefined) {
-      producer.reviewReworkCount = 1;
-      producer.reviewReworks = [
-        {
-          ordinal: 1,
-          mode: "automatic",
-          scope: "producer_and_review",
-          ...reworkContext,
-          blocker,
-          openedAt: at,
-        },
-      ];
+    producer.blocker = blocker;
+    if (diagnosis !== undefined) {
+      const material = {
+        protocol: "koni.ticket-compiler-reissue-diagnosis.v1" as const,
+        kind: diagnosis.kind,
+        sourceTicketId: consumerTicketId,
+        executionEpoch: producer.executionEpoch!,
+        blocker,
+        sourceSha256: diagnosis.sourceSha256,
+        openedAt: at,
+      };
+      producer.compilerReissueDiagnoses ??= [];
+      producer.compilerReissueDiagnoses.push({ ...material, sha256: canonicalHash(material) });
     }
   }
   return producers.map(({ id }) => id);
@@ -21330,8 +21502,6 @@ function resetTicketForFreshCycle(ticket: TicketRecord, at: string, currentEpoch
     step.startedAt = undefined;
     step.completedAt = undefined;
   }
-  if (ticket.reviewReworkCount !== undefined) ticket.reviewReworkCount = 0;
-  if (ticket.reviewReworks !== undefined) ticket.reviewReworks = [];
 }
 
 /**
@@ -21591,6 +21761,11 @@ export function retainTicketAuthorityFields(
   for (const [ticketId, ticket] of Object.entries(compiled)) {
     const prior = previous.tickets[ticketId];
     if (prior === undefined) continue;
+    if (prior.reviewReworkCount !== undefined) ticket.reviewReworkCount = prior.reviewReworkCount;
+    if (prior.reviewReworks !== undefined)
+      ticket.reviewReworks = structuredClone(prior.reviewReworks);
+    if (prior.compilerReissueDiagnoses !== undefined)
+      ticket.compilerReissueDiagnoses = structuredClone(prior.compilerReissueDiagnoses);
     const recurringAsset =
       ticket.status === "queued" &&
       ticket.operationId === "asset-resolution.asset.implement-asset" &&

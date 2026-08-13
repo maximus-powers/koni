@@ -143,6 +143,16 @@ describe("Koni's Pi-native skills", () => {
     expect(normalizedExecutionReference).toContain(
       "Carry forward only a finding that the current candidate and current receipts still establish",
     );
+    expect(normalizedExecutionReference).toContain(
+      "Keep the legacy default of one automatic rework unless the workflow explicitly sets `review_rework_limit`",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "Increase it only when the same compiler-pinned producer can correct successive current findings inside the unchanged grant",
+    );
+    expect(normalizedExecutionReference).toContain("The compiler caps the allowance at three");
+    expect(normalizedExecutionReference).toContain(
+      "The allowance is cumulative for the ticket across fresh execution epochs",
+    );
     expect(normalizedSoftwareReference).toContain(
       "Perform a historical-executability audit before selecting the proof strategy",
     );

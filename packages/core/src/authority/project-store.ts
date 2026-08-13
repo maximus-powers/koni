@@ -635,7 +635,12 @@ export class ProjectAuthorityStore {
             previous,
             requiredArchivedActionIdsForMutation(previous, record),
           );
-          assertRunExecutionControlMutation(previous, record, requiredArchivedActions);
+          assertRunExecutionControlMutation(
+            previous,
+            record,
+            requiredArchivedActions,
+            mutation.receipt,
+          );
           const archiveMutation = validateRunActionArchiveMutation(previous, record);
           assertExactArchiveMutationWrites(
             record.id,

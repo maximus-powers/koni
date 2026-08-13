@@ -10,6 +10,25 @@ import registerProfile, {
 } from "../extensions/profile.js";
 
 describe("research profile registrar", () => {
+  it("keeps every automatic review-rework workflow bounded to two corrections", async () => {
+    const source = await readFile(
+      path.resolve(import.meta.dirname, "../koni/baseline/workflows/research.yaml"),
+      "utf8",
+    );
+    const document = YAML.parse(source) as {
+      workflows: Array<{
+        review_failure_reopen_from?: string;
+        review_rework_limit?: number;
+      }>;
+    };
+    const reworking = document.workflows.filter(
+      (workflow) => workflow.review_failure_reopen_from !== undefined,
+    );
+
+    expect(reworking.length).toBeGreaterThan(0);
+    expect(reworking.every((workflow) => workflow.review_rework_limit === 2)).toBe(true);
+  });
+
   it("exposes an exact provider-version contract for capability-backed assets", async () => {
     const [nodeSource, edgeSource] = await Promise.all([
       readFile(path.resolve(import.meta.dirname, "../koni/baseline/graph/nodes.yaml"), "utf8"),

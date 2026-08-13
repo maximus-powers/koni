@@ -1,4 +1,9 @@
-import type { RunRecord, TicketRecord, TicketStepRecord } from "./run-record.js";
+import type {
+  RunRecord,
+  TicketRecord,
+  TicketReviewReworkRecord,
+  TicketStepRecord,
+} from "./run-record.js";
 import {
   deriveExecutionAdmissionConflicts,
   type ExecutionAdmissionConflict,
@@ -14,6 +19,14 @@ import {
   createProjectPathAuthority,
   type ProjectPathAuthority,
 } from "../shared/project-path-authority.js";
+export {
+  COMPILER_INAPPLICABLE_TICKET,
+  COMPILER_ROUTED_TO_MANIFEST_GATE_RECHECK,
+  COMPILER_ROUTED_TO_PLANNED_ASSET_REPAIR,
+  COMPILER_SUPERSEDED_BEFORE_EXECUTION,
+  ticketDependencySettled,
+} from "./ticket-dependency.js";
+import { ticketDependencySettled } from "./ticket-dependency.js";
 
 export interface ReadyAssignment {
   runId: string;
@@ -101,26 +114,6 @@ export interface BlockedReviewRetryCandidate {
 }
 
 export type BlockedReviewRetryScope = "producer_and_review" | "review_only";
-
-export const COMPILER_INAPPLICABLE_TICKET =
-  "Current compiler predicate no longer applies after prior execution";
-export const COMPILER_SUPERSEDED_BEFORE_EXECUTION =
-  "Superseded before execution by newer compiler state";
-export const COMPILER_ROUTED_TO_PLANNED_ASSET_REPAIR =
-  "Superseded by the existing planned asset implementation workflow";
-export const COMPILER_ROUTED_TO_MANIFEST_GATE_RECHECK =
-  "Superseded by a current manifest-bound gate recheck";
-
-export function ticketDependencySettled(ticket: Readonly<TicketRecord> | undefined): boolean {
-  return (
-    ticket?.status === "completed" ||
-    (ticket?.status === "cancelled" &&
-      (ticket.blocker === COMPILER_INAPPLICABLE_TICKET ||
-        ticket.blocker === COMPILER_SUPERSEDED_BEFORE_EXECUTION ||
-        ticket.blocker === COMPILER_ROUTED_TO_PLANNED_ASSET_REPAIR ||
-        ticket.blocker === COMPILER_ROUTED_TO_MANIFEST_GATE_RECHECK))
-  );
-}
 
 export function deriveReadyAssignments(
   run: RunRecord,
@@ -767,6 +760,7 @@ export function recoverLegacyCompletedReviewRejection(
   reviewAttemptId: string,
   blocker: string,
   at: string,
+  operatorAuthorization?: TicketReviewReworkRecord["operatorAuthorization"],
 ): boolean {
   const reopenFrom = ticket.reviewFailureReopenFrom;
   const limit = ticket.reviewReworkLimit;
@@ -805,6 +799,7 @@ export function recoverLegacyCompletedReviewRejection(
     failedReviewAttemptId: reviewAttemptId,
     reopenFromStepId: reopenFrom,
     blocker,
+    ...(operatorAuthorization === undefined ? {} : { operatorAuthorization }),
     openedAt: at,
   });
   ticket.status = "queued";
@@ -915,6 +910,7 @@ export function authorizeBlockedReviewRetry(
   at: string,
   operatorSteering?: string,
   retryScope: BlockedReviewRetryScope = "producer_and_review",
+  operatorAuthorization?: TicketReviewReworkRecord["operatorAuthorization"],
 ): BlockedReviewRetryCandidate {
   const ticket = run.tickets[expected.ticketId];
   const candidate =
@@ -983,6 +979,7 @@ export function authorizeBlockedReviewRetry(
     reopenFromStepId: candidate.reopenFromStepId,
     blocker: candidate.blocker,
     ...(operatorSteering === undefined ? {} : { operatorSteering }),
+    ...(operatorAuthorization === undefined ? {} : { operatorAuthorization }),
     openedAt: at,
   });
   ticket.status = "queued";
@@ -992,6 +989,48 @@ export function authorizeBlockedReviewRetry(
   ticket.blocker = candidate.blocker;
   ticket.updatedAt = at;
   return candidate;
+}
+
+/** Bind the automatic review retry opened by `finishAssignment` to its exact failed settlement. */
+export function bindAutomaticReviewReworkFailureProof(
+  ticket: TicketRecord,
+  failedReviewAttemptId: string,
+  failureProofSha256: Sha256Digest,
+): void {
+  const record = ticket.reviewReworks?.at(-1);
+  if (
+    record === undefined ||
+    record.mode === "supervised" ||
+    record.failedReviewAttemptId !== failedReviewAttemptId ||
+    record.failureProofSha256 !== undefined
+  ) {
+    schedulerFail(
+      "review_rework_failure_proof",
+      `automatic review rework no longer matches ${failedReviewAttemptId}`,
+    );
+  }
+  record.failureProofSha256 = failureProofSha256;
+}
+
+/** Bind a direct-terminal review retry to the exact compiler-consumed terminal artifact. */
+export function bindAutomaticReviewReworkTerminalOutput(
+  ticket: TicketRecord,
+  failedReviewAttemptId: string,
+  terminalOutputSha256: Sha256Digest,
+): void {
+  const record = ticket.reviewReworks?.at(-1);
+  if (
+    record === undefined ||
+    record.mode === "supervised" ||
+    record.failedReviewAttemptId !== failedReviewAttemptId ||
+    record.failureTerminalOutputSha256 !== undefined
+  ) {
+    schedulerFail(
+      "review_rework_terminal_output",
+      `automatic review rework no longer matches ${failedReviewAttemptId}`,
+    );
+  }
+  record.failureTerminalOutputSha256 = terminalOutputSha256;
 }
 
 /**

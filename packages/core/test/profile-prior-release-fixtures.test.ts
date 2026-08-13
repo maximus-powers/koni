@@ -9,13 +9,13 @@ const fixtures = [
     directory: "coding-0.7.0",
     bundleSha256: "sha256:4e955f7fb5a6bbd58542f395471d2e3f1c87364840abd218f973b8f62a5c0c7e",
     targetDirectory: "coding-profile",
-    targetBundleSha256: "sha256:d79e2cf553b6326e95d30ed5fa38f805fbb79ce2a78d23ced318a7b202bb6d48",
+    targetBundleSha256: "sha256:16d0ddb34aae6b0c2bc0764a9d300483976938013fd8978a47756b687640b761",
   },
   {
     directory: "research-1.0.11",
     bundleSha256: "sha256:1bc8bdb64934ccd475f50acad5b22a7b1b6f7e168a748ecd91e234be76126c60",
     targetDirectory: "research-profile",
-    targetBundleSha256: "sha256:138b83fe05230ead65d20695c0eb19fda38ea251ea9d43b07f20a6b680b7f498",
+    targetBundleSha256: "sha256:75eebba5d966b079336e3eb9f80513e429bc6d481fca796924fd512ba8e17edd",
   },
 ] as const;
 

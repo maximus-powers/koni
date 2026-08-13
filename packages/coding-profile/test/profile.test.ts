@@ -10,6 +10,28 @@ import registerProfile, {
 } from "../extensions/profile.js";
 
 describe("coding profile registrar", () => {
+  it("keeps every automatic review-rework workflow bounded to two corrections", async () => {
+    const source = await readFile(
+      path.resolve(import.meta.dirname, "../koni/baseline/workflows.yaml"),
+      "utf8",
+    );
+    const document = YAML.parse(source) as {
+      workflows: Array<{
+        review_failure_reopen_from?: string;
+        review_failure_routes?: Record<string, unknown>;
+        review_rework_limit?: number;
+      }>;
+    };
+    const reworking = document.workflows.filter(
+      (workflow) =>
+        workflow.review_failure_reopen_from !== undefined ||
+        workflow.review_failure_routes !== undefined,
+    );
+
+    expect(reworking.length).toBeGreaterThan(0);
+    expect(reworking.every((workflow) => workflow.review_rework_limit === 2)).toBe(true);
+  });
+
   it("ships one queued ticket waiting state across every lifecycle return path", async () => {
     const source = await readFile(
       path.resolve(import.meta.dirname, "../koni/baseline/lifecycle.yaml"),

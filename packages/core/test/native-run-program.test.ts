@@ -1101,8 +1101,8 @@ describe("native compiler-authoritative run program", () => {
       worktreePath: undefined,
       branch: undefined,
       updatedAt: FIXED_NOW.toISOString(),
-      reviewReworkCount: 0,
-      reviewReworks: [],
+      reviewReworkCount: 1,
+      reviewReworks: [{ ordinal: 1 }],
       steps: [
         {
           id: "implement",
@@ -5275,8 +5275,29 @@ describe("native compiler-authoritative run program", () => {
     run.graphRevision = approved.graphRevision;
     run.tickets = approved.tickets;
     architectureTicket.reviewReworks ??= [];
+    architectureTicket.reviewReworkCount = 1;
     architectureTicket.reviewReworks.push({
       ordinal: 1,
+      mode: "automatic",
+      failedReviewAttemptId: "attempt-first-review",
+      reopenFromStepId: architectureTicket.reviewFailureReopenFrom!,
+      blocker: "The first review found that the existing route lost query state.",
+      openedAt: FIXED_NOW.toISOString(),
+    });
+    const compilerReissueMaterial = {
+      protocol: "koni.ticket-compiler-reissue-diagnosis.v1" as const,
+      kind: "configured_check_preflight" as const,
+      sourceTicketId: architectureTicket.id,
+      executionEpoch: 0,
+      blocker: "Configured check rejected the prior repository contract.",
+      sourceSha256: digest("configured-check-preflight-diagnosis"),
+      openedAt: FIXED_NOW.toISOString(),
+    };
+    architectureTicket.compilerReissueDiagnoses = [
+      { ...compilerReissueMaterial, sha256: canonicalHash(compilerReissueMaterial) },
+    ];
+    architectureTicket.reviewReworks.push({
+      ordinal: 2,
       mode: "supervised",
       failedReviewAttemptId: "attempt-prior-review",
       reopenFromStepId: architectureTicket.reviewFailureReopenFrom!,
@@ -5328,7 +5349,24 @@ describe("native compiler-authoritative run program", () => {
       "Every other graph node in context is read-only",
     );
     expect(prepared.spec.persona.initialPrompt).toContain(
-      "The operator explicitly authorized reviewed-blocker recovery 1",
+      "The operator explicitly authorized reviewed-blocker recovery 2",
+    );
+    expect(prepared.spec.persona.initialPrompt).toContain(
+      "review-rework history is cumulative for this ticket",
+    );
+    expect(prepared.spec.persona.initialPrompt).toContain(
+      "Configured check rejected the prior repository contract.",
+    );
+    expect(prepared.contextContent).toContain('"compilerReissueDiagnosis"');
+    expect(prepared.spec.persona.initialPrompt).toContain(
+      "The first review found that the existing route lost query state.",
+    );
+    expect(prepared.contextContent).toContain('"reviewReworkHistory"');
+    expect(prepared.contextContent).toContain(
+      "The first review found that the existing route lost query state.",
+    );
+    expect(prepared.contextContent).toContain(
+      "The prior review found a material parent-consumer route gap.",
     );
     expect(prepared.spec.persona.initialPrompt).toContain(
       "Operator steering for this exact recovery: Keep the real parent boundary",
@@ -5510,6 +5548,13 @@ describe("native compiler-authoritative run program", () => {
     expect(graphOnlyReviewPrepared.spec.persona.initialPrompt).toContain(
       "historical context, not a required conclusion",
     );
+    expect(graphOnlyReviewPrepared.spec.persona.initialPrompt).toContain(
+      "The first review found that the existing route lost query state.",
+    );
+    expect(graphOnlyReviewPrepared.spec.persona.initialPrompt).toContain(
+      "The prior review found a material parent-consumer route gap.",
+    );
+    expect(graphOnlyReviewPrepared.contextContent).toContain('"reviewReworkHistory"');
     expect(graphOnlyReviewPrepared.spec.persona.initialPrompt).not.toContain(
       "Materially address every finding",
     );

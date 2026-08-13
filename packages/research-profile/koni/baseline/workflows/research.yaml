@@ -7,6 +7,7 @@ workflows:
   - map-prereqs
   - evaluate-gate
   review_failure_reopen_from: work
+  review_rework_limit: 2
   steps:
   - id: work
     agent: experiment-designer
@@ -117,6 +118,7 @@ workflows:
   applies_to:
   - design-experiment
   review_failure_reopen_from: design-experiment-portfolio
+  review_rework_limit: 2
   steps:
   - id: map-claim-portfolio
     agent: research-scout
@@ -182,6 +184,7 @@ workflows:
   applies_to:
   - design-experiment
   review_failure_reopen_from: design-experiment
+  review_rework_limit: 2
   steps:
   - id: map-claim-context
     agent: research-scout
@@ -247,6 +250,7 @@ workflows:
   applies_to:
   - design-experiment
   review_failure_reopen_from: design-methods
+  review_rework_limit: 2
   steps:
   - id: design-methods
     agent: experiment-designer
@@ -336,6 +340,7 @@ workflows:
   applies_to:
   - define-gates
   review_failure_reopen_from: write-gate-contracts
+  review_rework_limit: 2
   steps:
   - id: compile-gate-stack
     agent: gate-designer
@@ -402,6 +407,7 @@ workflows:
   - compile-gates
   - compile-tests
   review_failure_reopen_from: work
+  review_rework_limit: 2
   steps:
   - id: work
     agent: experiment-designer
@@ -449,6 +455,7 @@ workflows:
   - resolve-assets
   - plan-build-asset
   review_failure_reopen_from: plan-asset
+  review_rework_limit: 2
   steps:
   - id: map-capability
     agent: gate-designer
@@ -514,6 +521,7 @@ workflows:
   - validate-asset
   - implement-asset
   review_failure_reopen_from: implement
+  review_rework_limit: 2
   steps:
   - id: implement
     agent: asset-builder
@@ -585,6 +593,7 @@ workflows:
   applies_to:
   - compile-run-plan
   review_failure_reopen_from: design-runtime-contract
+  review_rework_limit: 2
   steps:
   - id: design-runtime-contract
     agent: experiment-designer
@@ -768,6 +777,7 @@ workflows:
   applies_to:
   - synthesize-evidence
   review_failure_reopen_from: work
+  review_rework_limit: 2
   steps:
   - id: work
     agent: experiment-designer
@@ -815,6 +825,7 @@ workflows:
   applies_to:
   - compile-report
   review_failure_reopen_from: analyze-evidence
+  review_rework_limit: 2
   steps:
   - id: analyze-evidence
     agent: evidence-analyst
@@ -875,6 +886,7 @@ workflows:
   applies_to:
   - conclude-hypothesis
   review_failure_reopen_from: synthesize-claims
+  review_rework_limit: 2
   steps:
   - id: synthesize-claims
     agent: evidence-analyst
@@ -949,6 +961,7 @@ workflows:
   applies_to:
   - draft-paper-input
   review_failure_reopen_from: draft-paper-input
+  review_rework_limit: 2
   steps:
   - id: map-paper-role
     agent: report-writer
@@ -1010,6 +1023,7 @@ workflows:
   - change-request
   - no-op
   review_failure_reopen_from: scope-change
+  review_rework_limit: 2
   steps:
   - id: scope-change
     kind: integration
@@ -1059,6 +1073,7 @@ workflows:
   applies_to:
   - apply-change-request
   review_failure_reopen_from: inspect-approved-change
+  review_rework_limit: 2
   steps:
   - id: inspect-approved-change
     kind: integration
@@ -1107,6 +1122,7 @@ workflows:
   applies_to:
   - resolve-conflict
   review_failure_reopen_from: diagnose
+  review_rework_limit: 2
   steps:
   - id: diagnose
     kind: integration
@@ -1156,6 +1172,7 @@ workflows:
   applies_to:
   - resolve-target-integration
   review_failure_reopen_from: resolve-conflicts
+  review_rework_limit: 2
   steps:
   - id: inspect-conflict
     kind: integration

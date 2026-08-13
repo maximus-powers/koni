@@ -40,6 +40,7 @@ import {
 import type { QuestionPolicy } from "./question-policy.js";
 import { assertQuestionBatchRecord, type QuestionBatchRecord } from "./question-batch.js";
 import type { RunLifecycleState } from "./run-lifecycle.js";
+import { ticketDependencySettled } from "./ticket-dependency.js";
 import type {
   ApprovedChangeMaterialization,
   ChangeControlPublication,
@@ -102,7 +103,63 @@ export interface TicketReviewReworkRecord {
   blocker: string;
   /** Optional operator-authored correction for this exact supervised rework cycle. */
   operatorSteering?: string;
+  /** Exact failed semantic settlement that authorized an automatic retry. */
+  failureProofSha256?: Sha256Digest;
+  /** Exact direct-terminal output that the compiler rejected when no action recipe was used. */
+  failureTerminalOutputSha256?: Sha256Digest;
+  /** Same-transaction RPC authority that authorized a supervised or legacy retry. */
+  operatorAuthorization?: ReviewReworkOperatorAuthorization;
   openedAt: string;
+}
+
+export interface ReviewReworkOperatorAuthorization {
+  protocol: "koni.review-rework-operator-authorization.v1";
+  method: string;
+  idempotencyKey: string;
+  requestHash: Sha256Digest;
+  sha256: Sha256Digest;
+}
+
+export interface TicketCompilerReissueDiagnosis {
+  protocol: "koni.ticket-compiler-reissue-diagnosis.v1";
+  kind: "configured_check_preflight" | "configured_check_result";
+  sourceTicketId: string;
+  executionEpoch: number;
+  blocker: string;
+  sourceSha256: Sha256Digest;
+  openedAt: string;
+  sha256: Sha256Digest;
+}
+
+export interface CompilerCheckPreflightRejectionRecord {
+  protocol: "koni.compiler-check-preflight-rejection.v1";
+  runId: string;
+  runRevision: number;
+  configurationSha256: Sha256Digest;
+  consumerTicketId: string;
+  consumerStepId: string;
+  producerTicketIds: string[];
+  producerProjectionSha256s: Sha256Digest[];
+  intentSha256: Sha256Digest;
+  code:
+    "check_argv" | "check_input_binding" | "check_path" | "check_path_scope" | "check_result_path";
+  message: string;
+  recordedAt: string;
+  sha256: Sha256Digest;
+}
+
+export interface PendingCompilerCheckPreflightIntentRecord {
+  protocol: "koni.pending-compiler-check-preflight.v1";
+  id: string;
+  runId: string;
+  runRevision: number;
+  configurationSha256: Sha256Digest;
+  consumerTicketId: string;
+  consumerStepId: string;
+  producerTicketIds: string[];
+  producerProjectionSha256s: Sha256Digest[];
+  preparedAt: string;
+  sha256: Sha256Digest;
 }
 
 export const CONTROL_TICKET_AUTHORITY_PROTOCOL =
@@ -359,6 +416,8 @@ export interface TicketRecord {
   reviewReworkLimit?: number;
   reviewReworkCount?: number;
   reviewReworks?: TicketReviewReworkRecord[];
+  /** Immutable compiler diagnosis for a non-review fresh-cycle reissue. */
+  compilerReissueDiagnoses?: TicketCompilerReissueDiagnosis[];
   worktreePath: string | undefined;
   branch: string | undefined;
   /** Authority-generated Git cycle backing this ticket's current execution/reissue. */
@@ -1404,6 +1463,10 @@ export interface RunRecord {
   terminalSuccessProofs?: Record<string, TerminalSuccessSettlementProof>;
   /** Complete audit log for compiler-configured validation execution. */
   checks?: RunCheckRecord[];
+  /** Compiler-classified failures emitted before a configured check attempt can launch. */
+  compilerCheckPreflightRejections?: CompilerCheckPreflightRejectionRecord[];
+  /** Durable admission preceding configured-check launch preparation; removed on launch/rejection. */
+  pendingCompilerCheckPreflights?: Record<string, PendingCompilerCheckPreflightIntentRecord>;
   /** Exact compiler-owned dynamic predicate evidence envelope for the next graph pass. */
   ruleAuthorityEvidence?: JsonValue;
   /** Incomplete external effects only; completed effects are represented by receipts. */
@@ -1870,6 +1933,25 @@ export function assertRunRecord(value: unknown): asserts value is RunRecord {
     }
     for (const check of value.checks) assertRunCheck(check);
   }
+  if (value.compilerCheckPreflightRejections !== undefined) {
+    if (
+      !Array.isArray(value.compilerCheckPreflightRejections) ||
+      value.compilerCheckPreflightRejections.length > 100_000
+    ) {
+      throw new Error("run compiler check preflight rejections are invalid");
+    }
+    for (const rejection of value.compilerCheckPreflightRejections) {
+      assertCompilerCheckPreflightRejection(rejection, value as unknown as RunRecord);
+    }
+  }
+  if (value.pendingCompilerCheckPreflights !== undefined) {
+    if (!isRecord(value.pendingCompilerCheckPreflights)) {
+      throw new Error("run pending compiler check preflights are invalid");
+    }
+    for (const [id, intent] of Object.entries(value.pendingCompilerCheckPreflights)) {
+      assertPendingCompilerCheckPreflight(id, intent, value as unknown as RunRecord);
+    }
+  }
   if (value.pendingEffects !== undefined) {
     if (!isRecord(value.pendingEffects)) throw new Error("run pending effects are invalid");
     for (const [id, effect] of Object.entries(value.pendingEffects))
@@ -1882,6 +1964,130 @@ export function assertRunRecord(value: unknown): asserts value is RunRecord {
   if (value.postOrchestration !== undefined) {
     // All required run fields and every referenced attempt/report are structurally proven above.
     assertRunPostOrchestration(value.postOrchestration, value as unknown as RunRecord);
+  }
+}
+
+function assertPendingCompilerCheckPreflight(
+  id: string,
+  value: unknown,
+  run: Readonly<RunRecord>,
+): asserts value is PendingCompilerCheckPreflightIntentRecord {
+  if (!isRecord(value)) throw new Error("invalid pending compiler check preflight");
+  const allowed = new Set([
+    "protocol",
+    "id",
+    "runId",
+    "runRevision",
+    "configurationSha256",
+    "consumerTicketId",
+    "consumerStepId",
+    "producerTicketIds",
+    "producerProjectionSha256s",
+    "preparedAt",
+    "sha256",
+  ]);
+  const material = {
+    protocol: "koni.pending-compiler-check-preflight.v1" as const,
+    id: value.id,
+    runId: value.runId,
+    runRevision: value.runRevision,
+    configurationSha256: value.configurationSha256,
+    consumerTicketId: value.consumerTicketId,
+    consumerStepId: value.consumerStepId,
+    producerTicketIds: value.producerTicketIds,
+    producerProjectionSha256s: value.producerProjectionSha256s,
+    preparedAt: value.preparedAt,
+  };
+  if (
+    Object.keys(value).some((key) => !allowed.has(key)) ||
+    value.protocol !== material.protocol ||
+    value.id !== id ||
+    !isId(value.id) ||
+    value.runId !== run.id ||
+    !isNonnegativeSafeInteger(value.runRevision) ||
+    !isSha256Digest(value.configurationSha256) ||
+    !isId(value.consumerTicketId) ||
+    !isId(value.consumerStepId) ||
+    !isStringArray(value.producerTicketIds) ||
+    value.producerTicketIds.length === 0 ||
+    new Set(value.producerTicketIds).size !== value.producerTicketIds.length ||
+    !Array.isArray(value.producerProjectionSha256s) ||
+    value.producerProjectionSha256s.length !== value.producerTicketIds.length ||
+    value.producerProjectionSha256s.some((sha256) => !isSha256Digest(sha256)) ||
+    typeof value.preparedAt !== "string" ||
+    value.preparedAt.length === 0 ||
+    !isSha256Digest(value.sha256) ||
+    value.sha256 !== canonicalHash(material)
+  ) {
+    throw new Error("invalid pending compiler check preflight");
+  }
+}
+
+function assertCompilerCheckPreflightRejection(
+  value: unknown,
+  run: Readonly<RunRecord>,
+): asserts value is CompilerCheckPreflightRejectionRecord {
+  if (!isRecord(value)) throw new Error("invalid compiler check preflight rejection");
+  const allowed = new Set([
+    "protocol",
+    "runId",
+    "runRevision",
+    "configurationSha256",
+    "consumerTicketId",
+    "consumerStepId",
+    "producerTicketIds",
+    "producerProjectionSha256s",
+    "intentSha256",
+    "code",
+    "message",
+    "recordedAt",
+    "sha256",
+  ]);
+  const material = {
+    protocol: "koni.compiler-check-preflight-rejection.v1" as const,
+    runId: value.runId,
+    runRevision: value.runRevision,
+    configurationSha256: value.configurationSha256,
+    consumerTicketId: value.consumerTicketId,
+    consumerStepId: value.consumerStepId,
+    producerTicketIds: value.producerTicketIds,
+    producerProjectionSha256s: value.producerProjectionSha256s,
+    intentSha256: value.intentSha256,
+    code: value.code,
+    message: value.message,
+    recordedAt: value.recordedAt,
+  };
+  if (
+    Object.keys(value).some((key) => !allowed.has(key)) ||
+    value.protocol !== material.protocol ||
+    value.runId !== run.id ||
+    !isNonnegativeSafeInteger(value.runRevision) ||
+    !isSha256Digest(value.configurationSha256) ||
+    !isId(value.consumerTicketId) ||
+    !isId(value.consumerStepId) ||
+    !isStringArray(value.producerTicketIds) ||
+    value.producerTicketIds.length === 0 ||
+    new Set(value.producerTicketIds).size !== value.producerTicketIds.length ||
+    !Array.isArray(value.producerProjectionSha256s) ||
+    value.producerProjectionSha256s.length !== value.producerTicketIds.length ||
+    value.producerProjectionSha256s.some((sha256) => !isSha256Digest(sha256)) ||
+    !isSha256Digest(value.intentSha256) ||
+    !new Set([
+      "check_argv",
+      "check_input_binding",
+      "check_path",
+      "check_path_scope",
+      "check_result_path",
+    ]).has(String(value.code)) ||
+    typeof value.message !== "string" ||
+    value.message.length === 0 ||
+    Buffer.byteLength(value.message, "utf8") > 64 * 1024 ||
+    typeof value.recordedAt !== "string" ||
+    value.recordedAt.length === 0 ||
+    !isSha256Digest(value.sha256) ||
+    value.sha256 !== canonicalHash(material)
+  ) {
+    throw new Error("invalid compiler check preflight rejection");
   }
 }
 
@@ -3727,6 +3933,53 @@ function assertTicketRecord(id: string, value: unknown): asserts value is Ticket
   assertUniquePaths(value.readPaths, `ticket read paths: ${id}`);
   assertUniquePaths(value.writePaths, `ticket write paths: ${id}`);
   assertTicketStepGraph(id, value.steps);
+  if (value.compilerReissueDiagnoses !== undefined) {
+    if (
+      !Array.isArray(value.compilerReissueDiagnoses) ||
+      value.compilerReissueDiagnoses.length > 100 ||
+      value.compilerReissueDiagnoses.some((diagnosis) => {
+        if (!isRecord(diagnosis)) return true;
+        const allowed = new Set([
+          "protocol",
+          "kind",
+          "sourceTicketId",
+          "executionEpoch",
+          "blocker",
+          "sourceSha256",
+          "openedAt",
+          "sha256",
+        ]);
+        const material = {
+          protocol: "koni.ticket-compiler-reissue-diagnosis.v1" as const,
+          kind: diagnosis.kind,
+          sourceTicketId: diagnosis.sourceTicketId,
+          executionEpoch: diagnosis.executionEpoch,
+          blocker: diagnosis.blocker,
+          sourceSha256: diagnosis.sourceSha256,
+          openedAt: diagnosis.openedAt,
+        };
+        return (
+          Object.keys(diagnosis).some((key) => !allowed.has(key)) ||
+          diagnosis.protocol !== material.protocol ||
+          !new Set(["configured_check_preflight", "configured_check_result"]).has(
+            String(diagnosis.kind),
+          ) ||
+          !isId(diagnosis.sourceTicketId) ||
+          !isNonnegativeSafeInteger(diagnosis.executionEpoch) ||
+          typeof diagnosis.blocker !== "string" ||
+          diagnosis.blocker.length === 0 ||
+          Buffer.byteLength(diagnosis.blocker, "utf8") > 64 * 1024 ||
+          !isSha256Digest(diagnosis.sourceSha256) ||
+          typeof diagnosis.openedAt !== "string" ||
+          diagnosis.openedAt.length === 0 ||
+          !isSha256Digest(diagnosis.sha256) ||
+          diagnosis.sha256 !== canonicalHash(material)
+        );
+      })
+    ) {
+      throw new Error(`invalid ticket compiler-reissue diagnosis: ${id}`);
+    }
+  }
   if (
     value.status === "completed" &&
     (value.steps as unknown as TicketStepRecord[]).some(
@@ -3766,6 +4019,11 @@ function assertTicketRecord(id: string, value: unknown): asserts value is Ticket
             (typeof rework.operatorSteering !== "string" ||
               rework.operatorSteering.trim().length === 0 ||
               Buffer.byteLength(rework.operatorSteering, "utf8") > 64 * 1024)) ||
+          (rework.failureProofSha256 !== undefined && !isSha256Digest(rework.failureProofSha256)) ||
+          (rework.failureTerminalOutputSha256 !== undefined &&
+            !isSha256Digest(rework.failureTerminalOutputSha256)) ||
+          (rework.operatorAuthorization !== undefined &&
+            !isReviewReworkOperatorAuthorization(rework.operatorAuthorization)) ||
           typeof rework.openedAt !== "string" ||
           rework.openedAt.length === 0,
       )
@@ -3781,6 +4039,7 @@ function assertTicketRecord(id: string, value: unknown): asserts value is Ticket
       !isId(value.reviewFailureReopenFrom) ||
       !Number.isSafeInteger(value.reviewReworkLimit) ||
       Number(value.reviewReworkLimit) < 1 ||
+      Number(value.reviewReworkLimit) > 3 ||
       !isNonnegativeSafeInteger(value.reviewReworkCount) ||
       Number(value.reviewReworkCount) > Number(value.reviewReworkLimit) ||
       !Array.isArray(value.reviewReworks) ||
@@ -3803,6 +4062,11 @@ function assertTicketRecord(id: string, value: unknown): asserts value is Ticket
             (typeof rework.operatorSteering !== "string" ||
               rework.operatorSteering.trim().length === 0 ||
               Buffer.byteLength(rework.operatorSteering, "utf8") > 64 * 1024)) ||
+          (rework.failureProofSha256 !== undefined && !isSha256Digest(rework.failureProofSha256)) ||
+          (rework.failureTerminalOutputSha256 !== undefined &&
+            !isSha256Digest(rework.failureTerminalOutputSha256)) ||
+          (rework.operatorAuthorization !== undefined &&
+            !isReviewReworkOperatorAuthorization(rework.operatorAuthorization)) ||
           typeof rework.openedAt !== "string" ||
           rework.openedAt.length === 0,
       ) ||
@@ -3813,6 +4077,30 @@ function assertTicketRecord(id: string, value: unknown): asserts value is Ticket
     )
       throw new Error(`invalid ticket review-rework state: ${id}`);
   }
+}
+
+function isReviewReworkOperatorAuthorization(
+  value: unknown,
+): value is ReviewReworkOperatorAuthorization {
+  if (!isRecord(value)) return false;
+  const allowed = new Set(["protocol", "method", "idempotencyKey", "requestHash", "sha256"]);
+  if (Object.keys(value).some((key) => !allowed.has(key))) return false;
+  const material = {
+    protocol: "koni.review-rework-operator-authorization.v1" as const,
+    method: value.method,
+    idempotencyKey: value.idempotencyKey,
+    requestHash: value.requestHash,
+  };
+  return (
+    value.protocol === material.protocol &&
+    typeof value.method === "string" &&
+    value.method.length > 0 &&
+    typeof value.idempotencyKey === "string" &&
+    value.idempotencyKey.length > 0 &&
+    isSha256Digest(value.requestHash) &&
+    isSha256Digest(value.sha256) &&
+    value.sha256 === canonicalHash(material)
+  );
 }
 
 function assertRecurringAssetGrantRefreshAuthority(
@@ -5262,8 +5550,9 @@ function assertControlDefinitionProjection(
     canonicalHash(definition.scope.read_paths) !== canonicalHash(projection.readPaths) ||
     canonicalHash(definition.scope.write_paths) !== canonicalHash(projection.writePaths) ||
     (definition.review_failure_reopen_from ?? null) !== projection.reviewFailureReopenFrom ||
-    (definition.review_failure_reopen_from === undefined ? null : 1) !==
-      projection.reviewReworkLimit ||
+    (definition.review_failure_reopen_from === undefined
+      ? null
+      : (definition.review_rework_limit ?? 1)) !== projection.reviewReworkLimit ||
     definition.workflow.length !== projection.steps.length
   ) {
     throw new Error(`control-ticket definition differs from immutable projection: ${ticket.id}`);
@@ -5833,15 +6122,567 @@ function assertRecurringAssetGrantRefreshMutation(
   }
 }
 
+function assertReviewReworkMutation(
+  previous: Readonly<RunRecord>,
+  next: Readonly<RunRecord>,
+  receipt?: Readonly<{
+    method: string;
+    idempotencyKey: string;
+    requestHash: Sha256Digest;
+  }>,
+): void {
+  for (const [ticketId, prior] of Object.entries(previous.tickets)) {
+    const current = next.tickets[ticketId];
+    if (current === undefined) continue;
+    const priorLimit = prior.reviewReworkLimit;
+    const currentLimit = current.reviewReworkLimit;
+    const priorCount = prior.reviewReworkCount;
+    const currentCount = current.reviewReworkCount;
+    const priorHistory = prior.reviewReworks ?? [];
+    const currentHistory = current.reviewReworks ?? [];
+    const priorConfigured =
+      prior.reviewFailureReopenFrom !== undefined ||
+      priorLimit !== undefined ||
+      priorCount !== undefined ||
+      prior.reviewReworks !== undefined;
+    const currentConfigured =
+      current.reviewFailureReopenFrom !== undefined ||
+      currentLimit !== undefined ||
+      currentCount !== undefined ||
+      current.reviewReworks !== undefined;
+    if (!priorConfigured && !currentConfigured) continue;
+    const priorStandaloneReviewOnly =
+      prior.reviewFailureReopenFrom === undefined &&
+      priorLimit === undefined &&
+      priorCount === undefined &&
+      prior.reviewReworks !== undefined;
+    if (priorStandaloneReviewOnly) {
+      if (
+        current.reviewFailureReopenFrom !== undefined ||
+        currentLimit !== undefined ||
+        currentCount !== undefined ||
+        current.reviewReworks === undefined ||
+        currentHistory.length < priorHistory.length ||
+        currentHistory.length > priorHistory.length + 1 ||
+        canonicalHash(currentHistory.slice(0, priorHistory.length)) !== canonicalHash(priorHistory)
+      ) {
+        throw new Error(`ticket rewrote standalone review-only authority: ${ticketId}`);
+      }
+      const added = currentHistory.at(priorHistory.length);
+      if (added === undefined) continue;
+      const review = current.steps.find(
+        (step) => step.kind === "review" && step.attemptIds.includes(added.failedReviewAttemptId),
+      );
+      const authorization = added.operatorAuthorization;
+      const exactRequestHash = canonicalHash({
+        method: "run.action.execute",
+        params: {
+          protocol: "koni.stage-action-invocation.v1",
+          runId: previous.id,
+          runRevision: previous.revision,
+          generation: previous.generation,
+          capabilityId: `ticket:${ticketId}:retry-review-only:${added.failedReviewAttemptId}`,
+          confirmed: true,
+          values: {
+            ticketId,
+            reviewStepId: review?.id,
+            retryScope: "review_only",
+            failedReviewAttemptId: added.failedReviewAttemptId,
+            ...(added.operatorSteering === undefined ? {} : { steering: added.operatorSteering }),
+          },
+        },
+      });
+      if (
+        added.mode !== "supervised" ||
+        added.scope !== "review_only" ||
+        added.reopenFromStepId !== review?.id ||
+        added.openedAt !== next.updatedAt ||
+        prior.status !== "blocked" ||
+        current.status !== "queued" ||
+        authorization === undefined ||
+        receipt === undefined ||
+        authorization.method !== receipt.method ||
+        authorization.idempotencyKey !== receipt.idempotencyKey ||
+        authorization.requestHash !== receipt.requestHash ||
+        authorization.requestHash !== exactRequestHash
+      ) {
+        throw new Error(`ticket added unauthenticated standalone review-only history: ${ticketId}`);
+      }
+      continue;
+    }
+    if (!priorConfigured) {
+      const standalone = currentHistory[0];
+      const standaloneReview = current.steps.find(
+        (step) =>
+          step.kind === "review" &&
+          standalone !== undefined &&
+          step.attemptIds.includes(standalone.failedReviewAttemptId),
+      );
+      const standaloneAuthorization = standalone?.operatorAuthorization;
+      const standaloneRequestHash =
+        standalone === undefined || standaloneReview === undefined
+          ? undefined
+          : canonicalHash({
+              method: "run.action.execute",
+              params: {
+                protocol: "koni.stage-action-invocation.v1",
+                runId: previous.id,
+                runRevision: previous.revision,
+                generation: previous.generation,
+                capabilityId: `ticket:${ticketId}:retry-review-only:${standalone.failedReviewAttemptId}`,
+                confirmed: true,
+                values: {
+                  ticketId,
+                  reviewStepId: standaloneReview.id,
+                  retryScope: "review_only",
+                  failedReviewAttemptId: standalone.failedReviewAttemptId,
+                  ...(standalone.operatorSteering === undefined
+                    ? {}
+                    : { steering: standalone.operatorSteering }),
+                },
+              },
+            });
+      const exactStandaloneReviewOnly =
+        currentCount === undefined &&
+        current.reviewFailureReopenFrom === undefined &&
+        currentLimit === undefined &&
+        currentHistory.length === 1 &&
+        standalone?.mode === "supervised" &&
+        standalone.scope === "review_only" &&
+        standalone.reopenFromStepId === standaloneReview?.id &&
+        standalone.openedAt === next.updatedAt &&
+        prior.status === "blocked" &&
+        current.status === "queued" &&
+        standaloneAuthorization !== undefined &&
+        receipt !== undefined &&
+        standaloneAuthorization.method === receipt.method &&
+        standaloneAuthorization.idempotencyKey === receipt.idempotencyKey &&
+        standaloneAuthorization.requestHash === receipt.requestHash &&
+        standaloneAuthorization.requestHash === standaloneRequestHash;
+      if (exactStandaloneReviewOnly) continue;
+      if (
+        currentCount !== 0 ||
+        currentHistory.length !== 0 ||
+        prior.steps.some((step) => step.attemptIds.length > 0)
+      ) {
+        throw new Error(`ticket added review-rework authority after execution: ${ticketId}`);
+      }
+      continue;
+    }
+    if (
+      !currentConfigured ||
+      current.reviewFailureReopenFrom !== prior.reviewFailureReopenFrom ||
+      currentLimit !== priorLimit
+    ) {
+      throw new Error(`ticket rewrote review-rework authority: ${ticketId}`);
+    }
+    if (
+      currentHistory.length < priorHistory.length ||
+      canonicalHash(currentHistory.slice(0, priorHistory.length)) !== canonicalHash(priorHistory) ||
+      currentHistory.length > priorHistory.length + 1 ||
+      currentCount === undefined ||
+      priorCount === undefined
+    ) {
+      throw new Error(`ticket rewrote review-rework history: ${ticketId}`);
+    }
+    const added = currentHistory.at(priorHistory.length);
+    if (added === undefined) {
+      if (currentCount !== priorCount) {
+        throw new Error(`ticket rewrote review-rework count: ${ticketId}`);
+      }
+      continue;
+    }
+    const review = current.steps.find(
+      (step) => step.kind === "review" && step.attemptIds.includes(added.failedReviewAttemptId),
+    );
+    const attempt = next.attempts[added.failedReviewAttemptId];
+    const automatic = added.mode !== "supervised";
+    const failureAlreadyConsumed = priorHistory.some(
+      (record) => record.failedReviewAttemptId === added.failedReviewAttemptId,
+    );
+    const failureProof =
+      added.failureProofSha256 === undefined
+        ? undefined
+        : next.terminalFailureProofs?.[added.failureProofSha256];
+    const authorization = added.operatorAuthorization;
+    const sameReceipt =
+      authorization !== undefined &&
+      receipt !== undefined &&
+      authorization.method === receipt.method &&
+      authorization.idempotencyKey === receipt.idempotencyKey &&
+      authorization.requestHash === receipt.requestHash;
+    const exactFailure =
+      failureProof !== undefined &&
+      failureProof.ticketId === ticketId &&
+      failureProof.stepId === review?.id &&
+      failureProof.attemptId === added.failedReviewAttemptId &&
+      failureProof.semanticResult.status === "failed" &&
+      failureProof.semanticResult.blocker === added.blocker;
+    const exactDirectFailure =
+      added.failureTerminalOutputSha256 !== undefined &&
+      attempt?.terminalOutputSha256 === added.failureTerminalOutputSha256 &&
+      attempt.terminalPolicy?.mode === "failed_submission" &&
+      attempt.terminalSummary === added.blocker &&
+      new Set<AttemptStatus>(["terminal_accepted", "completed"]).has(attempt.status);
+    const exactSupervisedRequestHash = canonicalHash({
+      method: "run.action.execute",
+      params: {
+        protocol: "koni.stage-action-invocation.v1",
+        runId: previous.id,
+        runRevision: previous.revision,
+        generation: previous.generation,
+        capabilityId: `ticket:${ticketId}:retry-review${added.scope === "review_only" ? "-only" : ""}:${added.failedReviewAttemptId}`,
+        confirmed: true,
+        values: {
+          ticketId,
+          reviewStepId: review?.id,
+          retryScope: added.scope ?? "producer_and_review",
+          failedReviewAttemptId: added.failedReviewAttemptId,
+          ...(added.operatorSteering === undefined ? {} : { steering: added.operatorSteering }),
+        },
+      },
+    });
+    const exactLegacyResumeHashes = new Set([
+      canonicalHash({ method: "run.resume", params: { runId: previous.id } }),
+      canonicalHash({
+        method: "run.action.execute",
+        params: {
+          protocol: "koni.stage-action-invocation.v1",
+          runId: previous.id,
+          runRevision: previous.revision,
+          generation: previous.generation,
+          capabilityId: `stage:${previous.currentPipelineStageId}:retry`,
+          confirmed: true,
+          values: {},
+        },
+      }),
+    ]);
+    const legacyOperatorRecovery =
+      automatic &&
+      sameReceipt &&
+      new Set(["run.action.execute", "run.resume"]).has(authorization.method) &&
+      exactLegacyResumeHashes.has(authorization.requestHash) &&
+      previous.attempts[added.failedReviewAttemptId]?.status === "completed";
+    if (
+      review === undefined ||
+      attempt === undefined ||
+      attempt.ticketId !== ticketId ||
+      attempt.stepId !== review.id ||
+      added.openedAt !== next.updatedAt ||
+      (automatic
+        ? currentCount !== priorCount + 1 ||
+          priorLimit === undefined ||
+          priorCount >= priorLimit ||
+          failureAlreadyConsumed ||
+          (!exactFailure && !exactDirectFailure && !legacyOperatorRecovery)
+        : currentCount !== priorCount ||
+          prior.status !== "blocked" ||
+          current.status !== "queued" ||
+          !sameReceipt ||
+          authorization.method !== "run.action.execute" ||
+          authorization.requestHash !== exactSupervisedRequestHash)
+    ) {
+      throw new Error(`ticket added unauthenticated review-rework history: ${ticketId}`);
+    }
+  }
+}
+
+function assertCompilerReissueDiagnosisMutation(
+  previous: Readonly<RunRecord>,
+  next: Readonly<RunRecord>,
+  receipt?: Readonly<{
+    method: string;
+    idempotencyKey: string;
+    requestHash: Sha256Digest;
+  }>,
+): void {
+  const priorPending = previous.pendingCompilerCheckPreflights ?? {};
+  const currentPending = next.pendingCompilerCheckPreflights ?? {};
+  const addedPendingIds = Object.keys(currentPending).filter(
+    (id) => priorPending[id] === undefined,
+  );
+  const removedPendingIds = Object.keys(priorPending).filter(
+    (id) => currentPending[id] === undefined,
+  );
+  if (
+    addedPendingIds.length > 1 ||
+    removedPendingIds.length > 1 ||
+    Object.entries(priorPending).some(
+      ([id, intent]) =>
+        currentPending[id] !== undefined &&
+        canonicalHash(currentPending[id]) !== canonicalHash(intent),
+    )
+  ) {
+    throw new Error("run rewrote pending compiler check preflight authority");
+  }
+  const addedPending =
+    addedPendingIds.length === 0 ? undefined : currentPending[addedPendingIds[0]!]!;
+  if (addedPending !== undefined) {
+    const consumer = previous.tickets[addedPending.consumerTicketId];
+    const step = consumer?.steps.find((candidate) => candidate.id === addedPending.consumerStepId);
+    const exactProducerIds = compilerCheckProducerIds(previous, addedPending.consumerTicketId);
+    if (
+      addedPending.runRevision !== previous.revision ||
+      addedPending.configurationSha256 !== previous.compiledConfigHash ||
+      addedPending.preparedAt !== next.updatedAt ||
+      previous.behavior === undefined ||
+      consumer?.status !== "queued" ||
+      step?.status !== "pending" ||
+      step.validationAction === undefined ||
+      consumer.dependencyIds.some(
+        (dependencyId) => !ticketDependencySettled(previous.tickets[dependencyId]),
+      ) ||
+      (step.dependsOn ?? []).some(
+        (stepId) =>
+          !new Set(["completed", "skipped"]).has(
+            consumer.steps.find((candidate) => candidate.id === stepId)?.status ?? "missing",
+          ),
+      ) ||
+      canonicalHash([...addedPending.producerTicketIds].sort()) !==
+        canonicalHash(exactProducerIds) ||
+      addedPending.producerTicketIds.some(
+        (producerId, index) =>
+          addedPending.producerProjectionSha256s[index] !==
+          ticketImmutableProjection(previous.tickets[producerId]!).sha256,
+      )
+    ) {
+      throw new Error("run added unauthenticated pending compiler check preflight");
+    }
+  }
+  const priorPreflight = previous.compilerCheckPreflightRejections ?? [];
+  const currentPreflight = next.compilerCheckPreflightRejections ?? [];
+  if (
+    currentPreflight.length < priorPreflight.length ||
+    currentPreflight.length > priorPreflight.length + 1 ||
+    canonicalHash(currentPreflight.slice(0, priorPreflight.length)) !==
+      canonicalHash(priorPreflight)
+  ) {
+    throw new Error("run rewrote compiler check preflight rejection authority");
+  }
+  const addedPreflight = currentPreflight.at(priorPreflight.length);
+  if (addedPreflight !== undefined) {
+    const removedIntent =
+      removedPendingIds.length === 0 ? undefined : priorPending[removedPendingIds[0]!]!;
+    const consumer = previous.tickets[addedPreflight.consumerTicketId];
+    const exactProducerIds = compilerCheckProducerIds(previous, addedPreflight.consumerTicketId);
+    if (
+      addedPreflight.runRevision !== previous.revision ||
+      addedPreflight.configurationSha256 !== previous.compiledConfigHash ||
+      addedPreflight.recordedAt !== next.updatedAt ||
+      removedIntent?.sha256 !== addedPreflight.intentSha256 ||
+      removedIntent?.consumerTicketId !== addedPreflight.consumerTicketId ||
+      removedIntent?.consumerStepId !== addedPreflight.consumerStepId ||
+      canonicalHash(removedIntent?.producerTicketIds) !==
+        canonicalHash(addedPreflight.producerTicketIds) ||
+      canonicalHash(removedIntent?.producerProjectionSha256s) !==
+        canonicalHash(addedPreflight.producerProjectionSha256s) ||
+      consumer === undefined ||
+      !consumer.steps.some((step) => step.id === addedPreflight.consumerStepId) ||
+      consumer.status !== "queued" ||
+      canonicalHash([...addedPreflight.producerTicketIds].sort()) !==
+        canonicalHash(exactProducerIds) ||
+      addedPreflight.producerTicketIds.some((producerId, index) => {
+        const producer = previous.tickets[producerId];
+        return (
+          producer === undefined ||
+          producer.status !== "completed" ||
+          addedPreflight.producerProjectionSha256s[index] !==
+            ticketImmutableProjection(producer).sha256
+        );
+      })
+    ) {
+      throw new Error("run added unauthenticated compiler check preflight rejection");
+    }
+  }
+  if (removedPendingIds.length > 0 && addedPreflight === undefined) {
+    const removed = priorPending[removedPendingIds[0]!]!;
+    const launched = Object.values(next.attempts).some(
+      (attempt) =>
+        previous.attempts[attempt.id] === undefined &&
+        attempt.ticketId === removed.consumerTicketId &&
+        attempt.stepId === removed.consumerStepId &&
+        attempt.startedAt === next.updatedAt &&
+        attempt.status === "running",
+    );
+    if (!launched) throw new Error("run discarded pending compiler check preflight authority");
+  }
+  for (const [ticketId, current] of Object.entries(next.tickets)) {
+    const prior = previous.tickets[ticketId];
+    if (prior === undefined) continue;
+    const priorHistory = prior.compilerReissueDiagnoses ?? [];
+    const currentHistory = current.compilerReissueDiagnoses ?? [];
+    if (
+      currentHistory.length < priorHistory.length ||
+      currentHistory.length > priorHistory.length + 1 ||
+      canonicalHash(currentHistory.slice(0, priorHistory.length)) !== canonicalHash(priorHistory)
+    ) {
+      throw new Error(`ticket rewrote compiler-reissue diagnosis: ${ticketId}`);
+    }
+    const added = currentHistory.at(priorHistory.length);
+    if (added === undefined) continue;
+    if (
+      Object.values(previous.tickets).some((ticket) =>
+        ticket.compilerReissueDiagnoses?.some(
+          (diagnosis) => diagnosis.sourceSha256 === added.sourceSha256,
+        ),
+      )
+    ) {
+      throw new Error(`ticket reused compiler-reissue diagnosis authority: ${ticketId}`);
+    }
+    const resultCheck =
+      added.kind === "configured_check_result"
+        ? next.checks?.find((check) => canonicalHash(check) === added.sourceSha256)
+        : undefined;
+    const resultAttempt =
+      resultCheck === undefined ? undefined : next.attempts[resultCheck.attemptId];
+    const previousResultAttempt =
+      resultCheck === undefined ? undefined : previous.attempts[resultCheck.attemptId];
+    const resultIntent =
+      resultCheck === undefined
+        ? undefined
+        : Object.values(previous.pendingChecks ?? {}).find(
+            (intent) =>
+              intent.attemptId === resultCheck.attemptId && intent.callId === resultCheck.callId,
+          );
+    const resolvedResultCheck =
+      resultIntent !== undefined && isRecord(resultIntent.resolvedCheck)
+        ? resultIntent.resolvedCheck
+        : undefined;
+    const priorToolResults = previousResultAttempt?.authorityToolResults ?? [];
+    const currentToolResults = resultAttempt?.authorityToolResults ?? [];
+    const addedToolResult = currentToolResults.at(priorToolResults.length);
+    const exactResultProducerIds = compilerCheckProducerIds(previous, added.sourceTicketId);
+    const resultDiagnosedTicketIds = Object.entries(next.tickets)
+      .filter(([, ticket]) =>
+        ticket.compilerReissueDiagnoses?.some(
+          (diagnosis) => diagnosis.sourceSha256 === added.sourceSha256,
+        ),
+      )
+      .map(([id]) => id)
+      .sort();
+    const exactResultSource =
+      resultCheck !== undefined &&
+      !(previous.checks ?? []).some((check) => canonicalHash(check) === added.sourceSha256) &&
+      resultAttempt?.ticketId === added.sourceTicketId &&
+      resultCheck.accepted === false &&
+      resultCheck.infrastructureFailure === undefined &&
+      resultIntent !== undefined &&
+      resolvedResultCheck !== undefined &&
+      canonicalHash(resolvedResultCheck) === resultIntent.resolvedCheckSha256 &&
+      resultCheck.requestedCheckId === resultIntent.requestedCheckId &&
+      resultCheck.definitionHash === resolvedResultCheck.definitionHash &&
+      resultCheck.kind === resolvedResultCheck.kind &&
+      next.pendingChecks?.[resultIntent.id] === undefined &&
+      receipt?.method === resultIntent.method &&
+      receipt.idempotencyKey === resultIntent.idempotencyKey &&
+      receipt.requestHash === resultIntent.requestHash &&
+      currentToolResults.length === priorToolResults.length + 1 &&
+      canonicalHash(currentToolResults.slice(0, priorToolResults.length)) ===
+        canonicalHash(priorToolResults) &&
+      addedToolResult?.callId === resultCheck.callId &&
+      addedToolResult.toolName === "koni_run_check" &&
+      addedToolResult.outcome === "accepted" &&
+      addedToolResult.argumentsSha256 === resultIntent.argumentsSha256 &&
+      addedToolResult.recordedAt === resultCheck.recordedAt &&
+      resultCheck.recordedAt === next.updatedAt &&
+      canonicalHash(resultDiagnosedTicketIds) === canonicalHash(exactResultProducerIds);
+    const exactPreflightSource =
+      added.kind === "configured_check_preflight" &&
+      addedPreflight?.sha256 === added.sourceSha256 &&
+      addedPreflight.consumerTicketId === added.sourceTicketId &&
+      addedPreflight.producerTicketIds.includes(ticketId);
+    if (
+      current.executionEpoch !== (prior.executionEpoch ?? 0) + 1 ||
+      current.status !== "queued" ||
+      current.blocker !== added.blocker ||
+      added.executionEpoch !== current.executionEpoch ||
+      added.openedAt !== next.updatedAt ||
+      next.tickets[added.sourceTicketId] === undefined ||
+      (!exactResultSource && !exactPreflightSource)
+    ) {
+      throw new Error(`ticket added unauthenticated compiler-reissue diagnosis: ${ticketId}`);
+    }
+  }
+  if (addedPreflight !== undefined) {
+    const diagnosedIds = Object.entries(next.tickets)
+      .filter(([, ticket]) =>
+        ticket.compilerReissueDiagnoses?.some(
+          (diagnosis) => diagnosis.sourceSha256 === addedPreflight.sha256,
+        ),
+      )
+      .map(([id]) => id)
+      .sort();
+    if (
+      canonicalHash(diagnosedIds) !== canonicalHash([...addedPreflight.producerTicketIds].sort())
+    ) {
+      throw new Error("compiler check preflight diagnosis set is incomplete");
+    }
+  }
+}
+
+function compilerCheckProducerIds(run: Readonly<RunRecord>, consumerTicketId: string): string[] {
+  const consumer = run.tickets[consumerTicketId];
+  if (consumer === undefined) return [];
+  const consumerNodeIds = new Set([
+    ...consumer.targetNodeIds,
+    ...(consumer.readNodeIds ?? []),
+    ...(consumer.writeNodeIds ?? []),
+  ]);
+  const directOrPlanProducerIds =
+    consumer.dependencyIds.length > 0
+      ? consumer.dependencyIds
+      : Object.values(run.tickets)
+          .filter(
+            (ticket) =>
+              ticket.id !== consumer.id && ticket.operationId === "execution.node.compile-run-plan",
+          )
+          .map(({ id }) => id);
+  const assetProducerIds = Object.values(run.tickets)
+    .filter(
+      (ticket) =>
+        ticket.status === "completed" &&
+        ticket.operationId === "asset-resolution.asset.implement-asset",
+    )
+    .filter((ticket) =>
+      [
+        ...(ticket.writeNodeIds ?? []),
+        ...(ticket.writeNodeIds === undefined || ticket.writeNodeIds.length === 0
+          ? ticket.targetNodeIds
+          : []),
+      ].some((nodeId) => consumerNodeIds.has(nodeId)),
+    )
+    .map(({ id }) => id);
+  return [...new Set([...directOrPlanProducerIds, ...assetProducerIds])]
+    .map((id) => run.tickets[id])
+    .filter((ticket): ticket is TicketRecord => ticket?.status === "completed")
+    .filter((ticket) =>
+      [
+        ...(ticket.writeNodeIds ?? []),
+        ...(ticket.writeNodeIds === undefined || ticket.writeNodeIds.length === 0
+          ? ticket.targetNodeIds
+          : []),
+      ].some((nodeId) => consumerNodeIds.has(nodeId)),
+    )
+    .map(({ id }) => id)
+    .sort();
+}
+
 /** Enforce append-only control evidence and immutable cross-ticket identities across one CAS. */
 export function assertRunExecutionControlMutation(
   previous: Readonly<RunRecord>,
   next: Readonly<RunRecord>,
   previousArchivedActions: ReadonlyMap<string, Readonly<RunActionExecutionRecord>> = new Map(),
+  receipt?: Readonly<{
+    method: string;
+    idempotencyKey: string;
+    requestHash: Sha256Digest;
+  }>,
 ): void {
   assertPlanningSessionMutation(previous.planningSession, next.planningSession);
   assertTokenBudgetRecoveryMutation(previous, next);
   assertRecurringAssetGrantRefreshMutation(previous, next);
+  assertReviewReworkMutation(previous, next, receipt);
+  assertCompilerReissueDiagnosisMutation(previous, next, receipt);
   // This transition guard is an authority boundary in its own right. Validate the successor's
   // complete cross-ticket graph here so direct CAS callers cannot bypass raw-load validation by
   // introducing a structurally self-hashed but causally substituted control ticket.

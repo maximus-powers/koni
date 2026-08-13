@@ -119,6 +119,7 @@ describe("deterministic graph expression and rule compiler", () => {
     expect(ticket.operation_registry_id).toBe("architecture.objective.map");
     expect(ticket.workflow_id).toBe("architecture-map");
     expect(ticket.review_failure_reopen_from).toBe("map-affected-boundary");
+    expect(ticket.review_rework_limit).toBe(2);
     expect(ticket.scope.read_paths).toEqual(["."]);
     expect(ticket.workflow.map((step) => [step.id, step.persona_id, step.kind])).toEqual([
       ["map-affected-boundary", "architecture-mapper", "production"],
@@ -134,6 +135,70 @@ describe("deterministic graph expression and rule compiler", () => {
     );
     expect(reordered.ok).toBe(true);
     if (reordered.ok) expect(reordered.value.evaluation_sha256).toBe(first.value.evaluation_sha256);
+  });
+
+  it("compiles an explicit bounded automatic review-rework allowance", () => {
+    const configuration = compileProfile("coding-profile");
+    const workflow = {
+      ...structuredClone(configuration.registries.workflows["architecture-map"]!),
+      review_rework_limit: 2,
+    } satisfies ConfigurationObject;
+    const configured: CompiledConfiguration = {
+      ...configuration,
+      registries: {
+        ...configuration.registries,
+        workflows: {
+          ...configuration.registries.workflows,
+          "architecture-map": workflow,
+        },
+      },
+    };
+    const result = evaluateConfiguredRules(
+      {
+        configuration: configured,
+        graph: projection([
+          node("objective-a", "objective", "Build notes", "active", {
+            outcome: "Users can keep notes",
+          }),
+        ]),
+      },
+      { ruleIds: ["objective.map-architecture"] },
+    );
+
+    expect(result.ok, diagnostics(result)).toBe(true);
+    if (result.ok) expect(result.value.tickets[0]?.review_rework_limit).toBe(2);
+  });
+
+  it.each([0, 4])("rejects automatic review-rework allowance %i", (reviewReworkLimit) => {
+    const configuration = compileProfile("coding-profile");
+    const workflow = {
+      ...structuredClone(configuration.registries.workflows["architecture-map"]!),
+      review_rework_limit: reviewReworkLimit,
+    } satisfies ConfigurationObject;
+    const configured: CompiledConfiguration = {
+      ...configuration,
+      registries: {
+        ...configuration.registries,
+        workflows: {
+          ...configuration.registries.workflows,
+          "architecture-map": workflow,
+        },
+      },
+    };
+    const result = evaluateConfiguredRules(
+      {
+        configuration: configured,
+        graph: projection([
+          node("objective-a", "objective", "Build notes", "active", {
+            outcome: "Users can keep notes",
+          }),
+        ]),
+      },
+      { ruleIds: ["objective.map-architecture"] },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.diagnostics.map((item) => item.code)).toContain("rule.review_rework_limit");
   });
 
   it("rejects review rework routes whose owner cannot durably repair the finding", () => {

@@ -74,6 +74,7 @@ const WORKFLOW_FIELDS = [
   "applies_to",
   "review_failure_reopen_from",
   "review_failure_routes",
+  "review_rework_limit",
   "steps",
 ] as const;
 const STEP_FIELDS = [
@@ -178,6 +179,7 @@ interface ParsedWorkflow {
   appliesTo: string[];
   definitionSha256: Sha256Digest;
   reviewFailureReopenFrom?: string;
+  reviewReworkLimit?: number;
   steps: readonly ConfigurationObject[];
 }
 
@@ -1246,6 +1248,9 @@ function deriveTicket(
             ...(workflow?.reviewFailureReopenFrom === undefined
               ? {}
               : { review_failure_reopen_from: workflow.reviewFailureReopenFrom }),
+            ...(workflow?.reviewReworkLimit === undefined
+              ? {}
+              : { review_rework_limit: workflow.reviewReworkLimit }),
             workflow: Object.freeze(steps),
             configuration_sha256: configuration.configuration_sha256,
           };
@@ -1386,6 +1391,10 @@ function parseWorkflow(
     exactRecord(step, pointer(pointer(path, "steps"), index), STEP_FIELDS, ["id", "agent"]),
   );
   const reviewFailureReopenFrom = parseReviewFailureReopenFrom(workflow, path);
+  const reviewReworkLimit = optionalSignedInteger(
+    workflow.review_rework_limit,
+    pointer(path, "review_rework_limit"),
+  );
   if (
     reviewFailureReopenFrom !== undefined &&
     !steps.some(
@@ -1398,11 +1407,22 @@ function parseWorkflow(
       `workflow ${id} reopens unknown step ${reviewFailureReopenFrom}`,
     );
   }
+  if (
+    reviewReworkLimit !== undefined &&
+    (reviewFailureReopenFrom === undefined || reviewReworkLimit < 1 || reviewReworkLimit > 3)
+  ) {
+    fail(
+      "rule.review_rework_limit",
+      pointer(path, "review_rework_limit"),
+      "review_rework_limit requires a review rework route and must be between one and three",
+    );
+  }
   return {
     id,
     appliesTo,
     definitionSha256: canonicalHash(source),
     ...(reviewFailureReopenFrom === undefined ? {} : { reviewFailureReopenFrom }),
+    ...(reviewReworkLimit === undefined ? {} : { reviewReworkLimit }),
     steps,
   };
 }

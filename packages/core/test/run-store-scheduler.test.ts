@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { newRunLifecycle, reduceRunLifecycle } from "../src/state/run-lifecycle.js";
-import type { RunRecord, TicketRecord } from "../src/state/run-record.js";
+import {
+  assertRunExecutionControlMutation,
+  type RunRecord,
+  type TicketRecord,
+} from "../src/state/run-record.js";
 import { DurableRunStore, RunRevisionConflictError } from "../src/state/run-store.js";
 import {
   authorizeBlockedReviewRetry,
@@ -12,11 +16,16 @@ import {
   blockedIndependentReviewRetryCandidate,
   blockedReviewRetryCandidate,
   canRetryBlockedReviewOnly,
+  COMPILER_INAPPLICABLE_TICKET,
+  COMPILER_ROUTED_TO_MANIFEST_GATE_RECHECK,
+  COMPILER_ROUTED_TO_PLANNED_ASSET_REPAIR,
+  COMPILER_SUPERSEDED_BEFORE_EXECUTION,
   deriveReadyAssignments,
   finishAssignment,
   legacyCompletedReviewRejectionCandidate,
   recoverLegacyCompletedReviewRejection,
   reviewReworkAppliesToStep,
+  ticketDependencySettled,
 } from "../src/state/scheduler.js";
 import { fixtureRunGit } from "./run-record-fixtures.js";
 
@@ -27,6 +36,24 @@ afterEach(async () => {
 });
 
 describe("durable run store and deterministic scheduler", () => {
+  it("shares the exact four compiler-cancellation dependency settlements", () => {
+    for (const blocker of [
+      COMPILER_INAPPLICABLE_TICKET,
+      COMPILER_SUPERSEDED_BEFORE_EXECUTION,
+      COMPILER_ROUTED_TO_PLANNED_ASSET_REPAIR,
+      COMPILER_ROUTED_TO_MANIFEST_GATE_RECHECK,
+    ]) {
+      const dependency = ticket("ticket-cancelled", 0, []);
+      dependency.status = "cancelled";
+      dependency.blocker = blocker;
+      expect(ticketDependencySettled(dependency)).toBe(true);
+    }
+    const obsolete = ticket("ticket-obsolete", 0, []);
+    obsolete.status = "cancelled";
+    obsolete.blocker = "Superseded before execution by the current graph";
+    expect(ticketDependencySettled(obsolete)).toBe(false);
+  });
+
   it("accepts queued tickets and rejects legacy ticket states", async () => {
     for (const legacyStatus of ["todo", "ready", "failed"] as const) {
       const store = await DurableRunStore.open(await temporaryRoot());
@@ -62,6 +89,56 @@ describe("durable run store and deterministic scheduler", () => {
         },
       },
     });
+  });
+
+  it("rejects durable review-rework authority above the compiler cap", async () => {
+    const store = await DurableRunStore.open(await temporaryRoot());
+    const run = runRecord();
+    const overbroad = reviewTicket("ticket-overbroad-review-rework");
+    overbroad.reviewReworkLimit = 4;
+    run.tickets[overbroad.id] = overbroad;
+
+    await expect(store.create(run)).rejects.toThrow(/invalid ticket review-rework state/u);
+  });
+
+  it("keeps review-rework authority and history immutable inside one execution epoch", () => {
+    const previous = runRecord();
+    const reviewed = reviewTicket("ticket-review-authority");
+    reviewed.reviewReworkLimit = 2;
+    reviewed.reviewReworkCount = 1;
+    reviewed.reviewReworks = [
+      {
+        ordinal: 1,
+        mode: "automatic",
+        failedReviewAttemptId: "attempt-review-one",
+        reopenFromStepId: "implement",
+        blocker: "First finding.",
+        openedAt: "2026-07-16T00:00:01.000Z",
+      },
+    ];
+    previous.tickets[reviewed.id] = reviewed;
+
+    const raised = structuredClone(previous);
+    raised.tickets[reviewed.id]!.reviewReworkLimit = 3;
+    expect(() => assertRunExecutionControlMutation(previous, raised)).toThrow(
+      /rewrote review-rework authority/u,
+    );
+
+    const reset = structuredClone(previous);
+    reset.tickets[reviewed.id]!.reviewReworkCount = 0;
+    reset.tickets[reviewed.id]!.reviewReworks = [];
+    expect(() => assertRunExecutionControlMutation(previous, reset)).toThrow(
+      /rewrote review-rework history/u,
+    );
+
+    const fresh = structuredClone(previous);
+    const freshTicket = fresh.tickets[reviewed.id]!;
+    freshTicket.executionEpoch = 1;
+    freshTicket.reviewReworkCount = 0;
+    freshTicket.reviewReworks = [];
+    expect(() => assertRunExecutionControlMutation(previous, fresh)).toThrow(
+      /rewrote review-rework history/u,
+    );
   });
 
   it("persists CAS mutations and rejects stale writers", async () => {
@@ -346,6 +423,66 @@ describe("durable run store and deterministic scheduler", () => {
     expect(ticket.status).toBe("blocked");
     expect(ticket.reviewReworkCount).toBe(1);
     expect(ticket.reviewReworks).toHaveLength(1);
+  });
+
+  it("honors an explicit second automatic rework and blocks the next failed review", () => {
+    const run = runRecord();
+    const ticket = reviewTicket("ticket-review-limit-two");
+    ticket.reviewReworkLimit = 2;
+    ticket.reviewReworkCount = 1;
+    ticket.reviewReworks = [
+      {
+        ordinal: 1,
+        mode: "automatic",
+        failedReviewAttemptId: "attempt-review-one",
+        reopenFromStepId: "implement",
+        blocker: "First review failed.",
+        openedAt: "2026-07-16T00:00:01.000Z",
+      },
+    ];
+    ticket.steps[0]!.status = "completed";
+    ticket.steps[1]!.status = "pending";
+    run.tickets[ticket.id] = ticket;
+
+    const secondReview = deriveReadyAssignments(run, 1).ready[0]!;
+    beginAssignment(run, secondReview, "attempt-review-two", "2026-07-16T00:00:02.000Z");
+    expect(
+      finishAssignment(
+        run,
+        secondReview,
+        { status: "failed", blocker: "Second current defect." },
+        "2026-07-16T00:00:03.000Z",
+      ),
+    ).toEqual({ disposition: "review_rework" });
+    expect(ticket.reviewReworkCount).toBe(2);
+    expect(ticket.status).toBe("queued");
+
+    const secondImplementation = deriveReadyAssignments(run, 1).ready[0]!;
+    beginAssignment(
+      run,
+      secondImplementation,
+      "attempt-implementation-three",
+      "2026-07-16T00:00:04.000Z",
+    );
+    finishAssignment(
+      run,
+      secondImplementation,
+      { status: "completed", summary: "Second repair." },
+      "2026-07-16T00:00:05.000Z",
+    );
+    const thirdReview = deriveReadyAssignments(run, 1).ready[0]!;
+    beginAssignment(run, thirdReview, "attempt-review-three", "2026-07-16T00:00:06.000Z");
+    expect(
+      finishAssignment(
+        run,
+        thirdReview,
+        { status: "failed", blocker: "Third current defect." },
+        "2026-07-16T00:00:07.000Z",
+      ),
+    ).toEqual({ disposition: "review_exhausted" });
+    expect(ticket.reviewReworkCount).toBe(2);
+    expect(ticket.reviewReworks).toHaveLength(2);
+    expect(ticket.status).toBe("blocked");
   });
 
   it("reopens an exhausted review only through one exact operator-authorized boundary", () => {

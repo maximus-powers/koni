@@ -64,6 +64,10 @@ import type {
   PiSessionAdapter,
 } from "../src/pi/managed-session.js";
 import { ManagedSessionError } from "../src/pi/managed-session.js";
+import {
+  authorizeBlockedReviewRetry,
+  blockedReviewRetryCandidate,
+} from "../src/state/scheduler.js";
 import { readAutonomousPiTranscriptPage } from "../src/pi/transcript-page.js";
 import {
   AGENT_LAUNCH_SPEC_PROTOCOL,
@@ -3462,6 +3466,7 @@ describe("run authority engine", () => {
         runner.readNodeIds = ["run-one"];
         runner.writeNodeIds = ["run-one"];
         runner.dependencyIds = [producer.id];
+        runner.steps[0]!.validationAction = "compile";
 
         return {
           graphHash: `sha256:${"c".repeat(64)}`,
@@ -3481,8 +3486,8 @@ describe("run authority engine", () => {
       async compileAssignmentOutput({ run, assignment }) {
         if (
           assignment.ticketId === "ticket-compile-run-plan" &&
-          run.tickets[assignment.ticketId]?.reviewReworks?.some((rework) =>
-            rework.blocker.includes("configured-check preflight"),
+          run.tickets[assignment.ticketId]?.compilerReissueDiagnoses?.some((diagnosis) =>
+            diagnosis.blocker.includes("configured-check preflight"),
           )
         ) {
           repaired = true;
@@ -3514,13 +3519,25 @@ describe("run authority engine", () => {
       return current.tickets["ticket-compile-run-plan"]?.executionEpoch === 1;
     });
     const reopened = await engine.store.getRun(runId);
-    expect(reopened.tickets["ticket-compile-run-plan"]?.reviewReworks).toEqual([
+    expect(reopened.tickets["ticket-compile-run-plan"]?.reviewReworks).toEqual([]);
+    expect(reopened.tickets["ticket-compile-run-plan"]?.compilerReissueDiagnoses).toEqual([
       expect.objectContaining({
-        mode: "automatic",
-        scope: "producer_and_review",
+        protocol: "koni.ticket-compiler-reissue-diagnosis.v1",
+        kind: "configured_check_preflight",
         blocker: expect.stringContaining("configured-check preflight"),
       }),
     ]);
+    const preflightProof = reopened.compilerCheckPreflightRejections?.at(-1);
+    expect(preflightProof).toMatchObject({
+      protocol: "koni.compiler-check-preflight-rejection.v1",
+      runId,
+      consumerTicketId: "ticket-run-experiment",
+      producerTicketIds: ["ticket-compile-run-plan"],
+      code: "check_input_binding",
+    });
+    expect(
+      reopened.tickets["ticket-compile-run-plan"]?.compilerReissueDiagnoses?.at(-1)?.sourceSha256,
+    ).toBe(preflightProof?.sha256);
 
     await waitFor(async () => {
       const current = await engine.store.getRun(runId);
@@ -3570,6 +3587,7 @@ describe("run authority engine", () => {
     run.tickets = { [producer.id]: producer, [consumer.id]: consumer };
 
     consumer.dependencyIds = [];
+    const prior = structuredClone(run);
     const producerIds = completedConfiguredCheckDependencyIds(run, consumer.id);
     const reopened = reopenCompletedConfiguredCheckDependencies(
       run,
@@ -3577,21 +3595,212 @@ describe("run authority engine", () => {
       "configured check scientific-runtime rejected its result: protocol mismatch",
       "2026-08-03T00:00:00.000Z",
       producerIds,
+      {
+        kind: "configured_check_result",
+        sourceSha256: `sha256:${"e".repeat(64)}`,
+      },
     );
 
     expect(reopened).toEqual([producer.id]);
     expect(run.tickets[producer.id]).toMatchObject({
       status: "queued",
       executionEpoch: 1,
-      reviewReworkCount: 1,
-      reviewReworks: [
+      blocker: expect.stringContaining("protocol mismatch"),
+      reviewReworkCount: 0,
+      reviewReworks: [],
+      compilerReissueDiagnoses: [
         expect.objectContaining({
-          mode: "automatic",
-          scope: "producer_and_review",
+          protocol: "koni.ticket-compiler-reissue-diagnosis.v1",
+          kind: "configured_check_result",
           blocker: expect.stringContaining("protocol mismatch"),
         }),
       ],
     });
+    expect(() => assertRunExecutionControlMutation(prior, run)).toThrow(
+      /unauthenticated compiler-reissue diagnosis/u,
+    );
+
+    const stalePrior = structuredClone(prior);
+    const staleEvidence = configuredCheckInfrastructureRetryFixture("2026-08-02T23:59:00.000Z", {
+      summary: "historical configured result rejection",
+    });
+    const staleCheck = staleEvidence.checks![0]!;
+    const staleAttempt = staleEvidence.attempts[staleCheck.attemptId]!;
+    staleAttempt.ticketId = consumer.id;
+    staleAttempt.stepId = consumer.steps[0]!.id;
+    stalePrior.checks = [staleCheck];
+    stalePrior.attempts[staleAttempt.id] = staleAttempt;
+    const staleReplay = structuredClone(stalePrior);
+    staleReplay.updatedAt = "2026-08-03T00:00:30.000Z";
+    reopenCompletedConfiguredCheckDependencies(
+      staleReplay,
+      consumer.id,
+      "configured check replayed a historical rejected result",
+      staleReplay.updatedAt,
+      [producer.id],
+      { kind: "configured_check_result", sourceSha256: canonicalHash(staleCheck) },
+    );
+    expect(() => assertRunExecutionControlMutation(stalePrior, staleReplay)).toThrow(
+      /unauthenticated compiler-reissue diagnosis/u,
+    );
+  });
+
+  it("rejects a compiler-reissue diagnosis without its durable preflight proof", async () => {
+    const root = await repository();
+    const run = await recoveryDraftRun(
+      root,
+      "run-invented-preflight-diagnosis",
+      "Reject invented compiler preflight authority",
+      directApprovalProgram(),
+    );
+    const producer = reviewTicket();
+    producer.id = "ticket-producer";
+    producer.status = "completed";
+    producer.targetNodeIds = ["change-one"];
+    for (const step of producer.steps) step.status = "completed";
+    const consumer = ticket();
+    consumer.id = "ticket-consumer";
+    consumer.dependencyIds = [];
+    consumer.targetNodeIds = ["change-one"];
+    run.tickets = { [producer.id]: producer, [consumer.id]: consumer };
+    const prior = structuredClone(run);
+
+    expect(
+      reopenCompletedConfiguredCheckDependencies(
+        run,
+        consumer.id,
+        "configured-check preflight rejected an invented contract",
+        "2026-08-03T00:00:00.000Z",
+        [producer.id],
+        {
+          kind: "configured_check_preflight",
+          sourceSha256: `sha256:${"f".repeat(64)}`,
+        },
+      ),
+    ).toEqual([producer.id]);
+    expect(() => assertRunExecutionControlMutation(prior, run)).toThrow(
+      /unauthenticated compiler-reissue diagnosis/u,
+    );
+
+    const unrelated = reviewTicket();
+    unrelated.id = "ticket-unrelated";
+    unrelated.status = "completed";
+    unrelated.targetNodeIds = ["unrelated-node"];
+    unrelated.writeNodeIds = ["unrelated-node"];
+    for (const step of unrelated.steps) step.status = "completed";
+    const forgedPrior = structuredClone(prior);
+    forgedPrior.tickets[unrelated.id] = unrelated;
+    const forged = structuredClone(forgedPrior);
+    forged.updatedAt = "2026-08-03T00:01:00.000Z";
+    const preflightMaterial = {
+      protocol: "koni.compiler-check-preflight-rejection.v1" as const,
+      runId: forged.id,
+      runRevision: forgedPrior.revision,
+      configurationSha256: forgedPrior.compiledConfigHash,
+      consumerTicketId: consumer.id,
+      consumerStepId: consumer.steps[0]!.id,
+      producerTicketIds: [unrelated.id],
+      producerProjectionSha256s: [ticketImmutableProjection(unrelated).sha256],
+      intentSha256: `sha256:${"a".repeat(64)}` as const,
+      code: "check_input_binding" as const,
+      message: "hash-valid but causally unrelated preflight rejection",
+      recordedAt: forged.updatedAt,
+    };
+    const preflightProof = {
+      ...preflightMaterial,
+      sha256: canonicalHash(preflightMaterial),
+    };
+    forged.compilerCheckPreflightRejections = [preflightProof];
+    reopenCompletedConfiguredCheckDependencies(
+      forged,
+      consumer.id,
+      "configured-check preflight selected an unrelated producer",
+      forged.updatedAt,
+      [unrelated.id],
+      { kind: "configured_check_preflight", sourceSha256: preflightProof.sha256 },
+    );
+    expect(() => assertRunExecutionControlMutation(forgedPrior, forged)).toThrow(
+      /unauthenticated compiler check preflight rejection/u,
+    );
+
+    const intentPrior = structuredClone(prior);
+    const intentNext = structuredClone(intentPrior);
+    intentNext.updatedAt = "2026-08-03T00:01:10.000Z";
+    const intentMaterial = {
+      protocol: "koni.pending-compiler-check-preflight.v1" as const,
+      id: "preflight-forged-ordinary-step",
+      runId: intentPrior.id,
+      runRevision: intentPrior.revision,
+      configurationSha256: intentPrior.compiledConfigHash,
+      consumerTicketId: consumer.id,
+      consumerStepId: consumer.steps[0]!.id,
+      producerTicketIds: [producer.id],
+      producerProjectionSha256s: [ticketImmutableProjection(producer).sha256],
+      preparedAt: intentNext.updatedAt,
+    };
+    intentNext.pendingCompilerCheckPreflights = {
+      [intentMaterial.id]: { ...intentMaterial, sha256: canonicalHash(intentMaterial) },
+    };
+    expect(() => assertRunExecutionControlMutation(intentPrior, intentNext)).toThrow(
+      /unauthenticated pending compiler check preflight/u,
+    );
+
+    const waitingPrior = structuredClone(intentPrior);
+    waitingPrior.tickets[consumer.id]!.steps[0]!.validationAction = "compile";
+    const waiting = ticket();
+    waiting.id = "ticket-waiting";
+    waiting.targetNodeIds = ["waiting-node"];
+    waitingPrior.tickets[waiting.id] = waiting;
+    waitingPrior.tickets[consumer.id]!.dependencyIds = [producer.id, waiting.id];
+    const waitingNext = structuredClone(waitingPrior);
+    waitingNext.updatedAt = "2026-08-03T00:01:20.000Z";
+    const waitingIntentMaterial = {
+      ...intentMaterial,
+      id: "preflight-forged-nonready-step",
+      preparedAt: waitingNext.updatedAt,
+    };
+    waitingNext.pendingCompilerCheckPreflights = {
+      [waitingIntentMaterial.id]: {
+        ...waitingIntentMaterial,
+        sha256: canonicalHash(waitingIntentMaterial),
+      },
+    };
+    expect(() => assertRunExecutionControlMutation(waitingPrior, waitingNext)).toThrow(
+      /unauthenticated pending compiler check preflight/u,
+    );
+
+    const stepWaitingPrior = structuredClone(intentPrior);
+    const stepWaitingConsumer = stepWaitingPrior.tickets[consumer.id]!;
+    stepWaitingConsumer.steps.push({
+      id: "validate",
+      title: "Validate",
+      personaId: "reviewer",
+      kind: "review",
+      validationAction: "compile",
+      dependsOn: [stepWaitingConsumer.steps[0]!.id],
+      status: "pending",
+      attemptIds: [],
+      summary: undefined,
+      startedAt: undefined,
+      completedAt: undefined,
+    });
+    const stepWaitingNext = structuredClone(stepWaitingPrior);
+    stepWaitingNext.updatedAt = "2026-08-03T00:01:30.000Z";
+    const stepWaitingIntentMaterial = {
+      ...intentMaterial,
+      id: "preflight-forged-step-predecessor",
+      consumerStepId: "validate",
+      preparedAt: stepWaitingNext.updatedAt,
+    };
+    stepWaitingNext.pendingCompilerCheckPreflights = {
+      [stepWaitingIntentMaterial.id]: {
+        ...stepWaitingIntentMaterial,
+        sha256: canonicalHash(stepWaitingIntentMaterial),
+      },
+    };
+    expect(() => assertRunExecutionControlMutation(stepWaitingPrior, stepWaitingNext)).toThrow(
+      /unauthenticated pending compiler check preflight/u,
+    );
   });
 
   it("does not reopen completed scientific dependencies for an infrastructure-only check failure", () => {
@@ -5743,8 +5952,8 @@ describe("run authority engine", () => {
     const freshEpoch = structuredClone(ready);
     const freshTicket = freshEpoch.tickets["ticket-one"]!;
     freshTicket.executionEpoch = (freshTicket.executionEpoch ?? 0) + 1;
-    freshTicket.reviewReworkCount = 0;
-    freshTicket.reviewReworks = [];
+    expect(freshTicket.reviewReworkCount).toBe(1);
+    expect(freshTicket.reviewReworks).toHaveLength(1);
     expect(() => assertRunRecord(freshEpoch)).not.toThrow();
     client.close();
   }, 30_000);
@@ -6092,8 +6301,58 @@ describe("run authority engine", () => {
     expect(review.attemptIds).toHaveLength(2);
     expect(new Set([...implementation.attemptIds, ...review.attemptIds]).size).toBe(4);
     expect(settled.reviewReworks?.[0]?.failedReviewAttemptId).toBe(review.attemptIds[0]);
+    expect(settled.reviewReworks?.[0]?.failureTerminalOutputSha256).toBe(
+      ready.attempts[review.attemptIds[0]!]!.terminalOutputSha256,
+    );
     expect(review.summary).toBe("Fresh review passed");
     expect(settled.status).toBe("completed");
+    const forgedSuccessfulReview = structuredClone(ready);
+    const forgedPriorTicket = forgedSuccessfulReview.tickets["ticket-one"]!;
+    forgedPriorTicket.reviewReworkLimit = 2;
+    const forgedSuccessor = structuredClone(forgedSuccessfulReview);
+    forgedSuccessor.updatedAt = "2026-08-12T12:30:00.000Z";
+    const forgedTicket = forgedSuccessor.tickets["ticket-one"]!;
+    forgedTicket.status = "queued";
+    forgedTicket.reviewReworkCount = 2;
+    for (const step of forgedTicket.steps) {
+      step.status = "pending";
+      step.summary = undefined;
+      step.startedAt = undefined;
+      step.completedAt = undefined;
+    }
+    const successfulReviewAttemptId = review.attemptIds[1]!;
+    forgedTicket.reviewReworks!.push({
+      ordinal: 2,
+      mode: "automatic",
+      failedReviewAttemptId: successfulReviewAttemptId,
+      reopenFromStepId: "implement",
+      blocker: "Fresh review passed",
+      failureTerminalOutputSha256:
+        forgedSuccessor.attempts[successfulReviewAttemptId]!.terminalOutputSha256!,
+      openedAt: forgedSuccessor.updatedAt,
+    });
+    expect(() =>
+      assertRunExecutionControlMutation(forgedSuccessfulReview, forgedSuccessor),
+    ).toThrow(/unauthenticated review-rework history/u);
+    const replayedFailure = structuredClone(forgedSuccessfulReview);
+    replayedFailure.updatedAt = "2026-08-12T12:31:00.000Z";
+    const replayedTicket = replayedFailure.tickets["ticket-one"]!;
+    replayedTicket.status = "queued";
+    replayedTicket.reviewReworkCount = 2;
+    for (const step of replayedTicket.steps) {
+      step.status = "pending";
+      step.summary = undefined;
+      step.startedAt = undefined;
+      step.completedAt = undefined;
+    }
+    replayedTicket.reviewReworks!.push({
+      ...structuredClone(replayedTicket.reviewReworks![0]!),
+      ordinal: 2,
+      openedAt: replayedFailure.updatedAt,
+    });
+    expect(() =>
+      assertRunExecutionControlMutation(forgedSuccessfulReview, replayedFailure),
+    ).toThrow(/unauthenticated review-rework history/u);
     expect(ready.git.ticketCycles[settled.gitCycleId!]?.status).toBe("retired");
     expect(ready.attempts[implementation.attemptIds[1]!]!.lineage).toMatchObject({
       reason: "rework",
@@ -6177,6 +6436,33 @@ describe("run authority engine", () => {
     expect(ticket.reviewReworkCount).toBe(1);
     expect(ticket.reviewReworks?.map((record) => record.mode)).toEqual(["automatic"]);
 
+    const forged = structuredClone(blocked);
+    forged.updatedAt = "2026-08-12T12:00:00.000Z";
+    authorizeBlockedReviewRetry(
+      forged,
+      blockedReviewRetryCandidate(forged.tickets["ticket-one"]!)!,
+      forged.updatedAt,
+      "Forged operator steering without a durable RPC receipt.",
+    );
+    const forgedRequestHash = `sha256:${"f".repeat(64)}` as const;
+    const forgedAuthorizationMaterial = {
+      protocol: "koni.review-rework-operator-authorization.v1" as const,
+      method: "run.action.execute",
+      idempotencyKey: "forged-review-retry",
+      requestHash: forgedRequestHash,
+    };
+    forged.tickets["ticket-one"]!.reviewReworks!.at(-1)!.operatorAuthorization = {
+      ...forgedAuthorizationMaterial,
+      sha256: canonicalHash(forgedAuthorizationMaterial),
+    };
+    expect(() =>
+      assertRunExecutionControlMutation(blocked, forged, new Map(), {
+        method: "run.action.execute",
+        idempotencyKey: "forged-review-retry",
+        requestHash: forgedRequestHash,
+      }),
+    ).toThrow(/unauthenticated review-rework history/u);
+
     const controls = (await client.request("run.controls", { runId })).result as {
       binding: { runId: string; runRevision: number; generation: number };
       runActions: Array<{
@@ -6232,6 +6518,11 @@ describe("run authority engine", () => {
       "supervised",
     ]);
     expect(recoveredTicket.reviewReworks?.at(-1)?.operatorSteering).toBe(values.steering);
+    expect(recoveredTicket.reviewReworks?.at(-1)?.operatorAuthorization).toMatchObject({
+      protocol: "koni.review-rework-operator-authorization.v1",
+      method: "run.action.execute",
+      idempotencyKey: "retry-exhausted-reviewed-blocker",
+    });
     expect(recoveredTicket.steps.find((step) => step.id === "implement")?.attemptIds).toHaveLength(
       3,
     );
@@ -6404,7 +6695,13 @@ describe("run authority engine", () => {
       },
     );
 
-    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "merge_ready");
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      if (current.lifecycle.phase === "blocked") {
+        throw new Error(`review-only recovery blocked: ${current.lifecycle.blocker}`);
+      }
+      return current.lifecycle.phase === "merge_ready";
+    });
     const recoveredRun = await engine.store.getRun(runId);
     const recovered = recoveredRun.tickets["ticket-one"]!;
     expect(recovered.reviewReworks).toEqual([
@@ -6415,6 +6712,10 @@ describe("run authority engine", () => {
         operatorSteering: values.steering,
       }),
     ]);
+    expect(recovered.reviewReworks?.[0]?.operatorAuthorization).toMatchObject({
+      method: "run.action.execute",
+      idempotencyKey: "review-only-no-producer-route",
+    });
     expect(recovered.steps.find((step) => step.id === "implement")?.attemptIds).toHaveLength(1);
     const reviewAttempts = recovered.steps.find((step) => step.id === "review")?.attemptIds ?? [];
     expect(reviewAttempts).toHaveLength(2);

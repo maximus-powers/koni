@@ -146,6 +146,14 @@ receipts. Carry forward only a finding that the current candidate and current re
 establish; never describe a current receipt as stale merely because an earlier cycle used different
 bytes or evidence.
 
+Keep the legacy default of one automatic rework unless the workflow explicitly sets
+`review_rework_limit`. Increase it only when the same compiler-pinned producer can correct
+successive current findings inside the unchanged grant, and keep independent review after every
+cycle. The compiler caps the allowance at three. Extra cycles must never widen scope, reset history,
+repair an upstream proof or model, repeat unsafe external effects, or substitute for missing repair
+authority. The allowance is cumulative for the ticket across fresh execution epochs; exhaustion
+remains an explicit supervised boundary.
+
 For implementation, prefer one strategy-specific baseline step, implementation, independent
 verification, then independent review. Keep tests and production behavior in the same vertical
 ticket. Do not add separate testing, documentation, integration-assessment, or file-layer tickets

@@ -3560,7 +3560,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         ? {}
         : {
             reviewFailureReopenFrom: definition.review_failure_reopen_from,
-            reviewReworkLimit: 1,
+            reviewReworkLimit: definition.review_rework_limit ?? 1,
             reviewReworkCount: 0,
             reviewReworks: [],
           }),
@@ -7956,6 +7956,11 @@ function ticketAttempt(
     durableTicket !== undefined && reviewReworkCoversStep(durableTicket, step.id)
       ? durableTicket.reviewReworks?.at(-1)
       : undefined;
+  const activeReviewReworkHistory =
+    activeReviewRework === undefined ? [] : [...(durableTicket?.reviewReworks ?? [])];
+  const activeCompilerReissueDiagnosis = durableTicket?.compilerReissueDiagnoses
+    ?.filter((diagnosis) => diagnosis.executionEpoch === (durableTicket.executionEpoch ?? 0))
+    .at(-1);
   const ticketOwnedNodeIds =
     durableTicket === undefined ? [] : ticketCreatedNodeIds(run, durableTicket, graph);
   const terminalRecovery = durableTicket?.executionControl?.terminalRecovery;
@@ -8200,6 +8205,7 @@ function ticketAttempt(
       ...(activeReviewRework === undefined
         ? []
         : [
+            `The compiler-authenticated review-rework history is cumulative for this ticket. Preserve every established repair and address every current finding that remains supported: ${JSON.stringify(activeReviewReworkHistory)}`,
             activeReviewRework.scope === "review_only"
               ? `The operator authorized an independent rereview of the unchanged compiler-accepted predecessor. Re-evaluate it from scratch under the current configured review contract. This earlier blocker is historical context, not a required conclusion; retain only findings supported by the current authenticated evidence: ${activeReviewRework.blocker}`
               : activeReviewRework.mode === "supervised"
@@ -8211,6 +8217,11 @@ function ticketAttempt(
                   `Operator steering for this exact recovery: ${activeReviewRework.operatorSteering}`,
                 ]),
             "This is a fresh attempt. Any koni_submit_output call or accepted terminal result in the inherited parent transcript belongs only to that parent and does not settle this attempt. Finish this attempt with a newly accepted koni_submit_output call, even when the correct graph delta is empty or repeats the parent's candidate.",
+          ]),
+      ...(activeCompilerReissueDiagnosis === undefined
+        ? []
+        : [
+            `The compiler reopened this fresh execution epoch because a configured check rejected the prior contract. Treat this hash-bound diagnosis as the current repair contract, correct its cause within the existing grant, and do not repeat the unchanged work: ${activeCompilerReissueDiagnosis.blocker}`,
           ]),
       ...(plannedAssetRepairHistory.length === 0
         ? []
@@ -8319,6 +8330,12 @@ function ticketAttempt(
       gatePolicyContexts: boundGateContexts,
       ...(compatibility.length === 0 ? {} : { executionPolicyCompatibility: compatibility }),
       ...(activeReviewRework === undefined ? {} : { reviewRework: activeReviewRework }),
+      ...(activeReviewReworkHistory.length === 0
+        ? {}
+        : { reviewReworkHistory: activeReviewReworkHistory }),
+      ...(activeCompilerReissueDiagnosis === undefined
+        ? {}
+        : { compilerReissueDiagnosis: activeCompilerReissueDiagnosis }),
       ...(plannedAssetRepairHistory.length === 0 ? {} : { plannedAssetRepairHistory }),
       ...(proposalApproval === undefined ? {} : { proposalApproval }),
       ...(terminalRecoveryContext === undefined
@@ -8659,6 +8676,11 @@ function configuredControlTicketDefinition(
     ),
   );
   const reviewFailureReopenFrom = configuredReviewFailureReopen(rawWorkflow, workflowId);
+  const reviewReworkLimit = configuredReviewReworkLimit(
+    rawWorkflow,
+    workflowId,
+    reviewFailureReopenFrom,
+  );
   if (
     reviewFailureReopenFrom !== undefined &&
     !workflow.some((step) => step.id === reviewFailureReopenFrom)
@@ -8706,6 +8728,7 @@ function configuredControlTicketDefinition(
     ...(reviewFailureReopenFrom === undefined
       ? {}
       : { review_failure_reopen_from: reviewFailureReopenFrom }),
+    ...(reviewReworkLimit === undefined ? {} : { review_rework_limit: reviewReworkLimit }),
     workflow: Object.freeze(workflow),
     configuration_sha256: input.configuration.configuration_sha256,
   };
@@ -8758,7 +8781,7 @@ function controlTicketRecordFromDefinition(input: ControlTicketRecordInput): Tic
       ? {}
       : {
           reviewFailureReopenFrom: input.definition.review_failure_reopen_from,
-          reviewReworkLimit: 1,
+          reviewReworkLimit: input.definition.review_rework_limit ?? 1,
           reviewReworkCount: 0,
           reviewReworks: [],
         }),
@@ -8968,6 +8991,25 @@ function configuredReviewFailureReopen(
     );
   }
   return direct ?? routed[0];
+}
+
+function configuredReviewReworkLimit(
+  workflow: ConfigurationObject,
+  workflowId: string,
+  reopenFrom: string | undefined,
+): number | undefined {
+  if (workflow.review_rework_limit === undefined) return undefined;
+  const limit = requireSignedInteger(
+    workflow.review_rework_limit,
+    `workflow ${workflowId} review_rework_limit`,
+  );
+  if (reopenFrom === undefined || limit < 1 || limit > 3) {
+    fail(
+      "control_ticket_review_rework",
+      `workflow ${workflowId} review_rework_limit requires a review rework route and must be between one and three`,
+    );
+  }
+  return limit;
 }
 
 function assertControlWorkflowDag(
@@ -14195,8 +14237,6 @@ export function reopenCompletedRecurringAssetTicket(
     step.startedAt = undefined;
     step.completedAt = undefined;
   }
-  if (ticket.reviewReworkCount !== undefined) ticket.reviewReworkCount = 0;
-  if (ticket.reviewReworks !== undefined) ticket.reviewReworks = [];
   return true;
 }
 
@@ -14483,7 +14523,7 @@ function reconcileTickets(
       existing.writeNodeIds ??= [...definition.scope.write_node_ids];
       if (definition.review_failure_reopen_from !== undefined) {
         existing.reviewFailureReopenFrom ??= definition.review_failure_reopen_from;
-        existing.reviewReworkLimit ??= 1;
+        existing.reviewReworkLimit ??= definition.review_rework_limit ?? 1;
         existing.reviewReworkCount ??= 0;
         existing.reviewReworks ??= [];
       }
@@ -14536,7 +14576,7 @@ function reconcileTickets(
         ? {}
         : {
             reviewFailureReopenFrom: definition.review_failure_reopen_from,
-            reviewReworkLimit: 1,
+            reviewReworkLimit: definition.review_rework_limit ?? 1,
             reviewReworkCount: 0,
             reviewReworks: [],
           }),
@@ -14621,7 +14661,12 @@ export function assertTicketDefinitionStable(
           step.validationAction !== definition.workflow[index]!.validation_action),
     ) ||
     (ticket.reviewFailureReopenFrom !== undefined &&
-      ticket.reviewFailureReopenFrom !== definition.review_failure_reopen_from)
+      ticket.reviewFailureReopenFrom !== definition.review_failure_reopen_from) ||
+    (ticket.reviewReworkLimit !== undefined &&
+      ticket.reviewReworkLimit !==
+        (definition.review_failure_reopen_from === undefined
+          ? undefined
+          : (definition.review_rework_limit ?? 1)))
   )
     fail(
       "ticket_definition_drift",
