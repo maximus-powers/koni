@@ -4505,7 +4505,7 @@ describe("run authority engine", () => {
     expect(planning).toEqual({
       code: "graph_seed_invalid",
       summary:
-        "planning graph seed violates its typed schema\nnode proof-one has unknown spec field planned_outputs",
+        "planning graph seed violates its typed schema\nnode proof-one has unknown spec field planned_outputs\n\nOn retry of this tool, use the immediately preceding arguments as the working draft, correct every current mismatch together, and do not undo a prior correction unless a later diagnostic explicitly requires it.",
       value: {
         diagnostics: ["node proof-one has unknown spec field planned_outputs"],
       },

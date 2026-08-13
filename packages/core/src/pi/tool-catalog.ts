@@ -37,6 +37,9 @@ export interface KoniToolInvocation {
 
 export const KONI_TOOL_RECEIPT_PROTOCOL = "koni.tool-receipt.v1" as const;
 
+export const CUMULATIVE_TOOL_RETRY_INSTRUCTION =
+  "On retry of this tool, use the immediately preceding arguments as the working draft, correct every current mismatch together, and do not undo a prior correction unless a later diagnostic explicitly requires it.";
+
 interface KoniToolReceiptBase {
   protocol: typeof KONI_TOOL_RECEIPT_PROTOCOL;
   receiptId: string;
@@ -951,7 +954,7 @@ function describeSchemaMismatch(
       : "") +
     `You sent: { ${observed} }. Expected exactly one of: ${describeSchemaShape(schema)}. ` +
     "Send status as the exact literal shown, include every listed field, and keep each string within its char limit. " +
-    "On retry of this tool, use the immediately preceding arguments as the working draft, correct every current mismatch together, and do not undo a prior correction unless a later diagnostic explicitly requires it.";
+    CUMULATIVE_TOOL_RETRY_INSTRUCTION;
   const diagnostics = argumentSchemaMismatchDiagnostics(schema, value);
   const boundedOverview = boundUtf8Text(overview, 8 * 1024, " … schema overview truncated");
   return boundUtf8Text(

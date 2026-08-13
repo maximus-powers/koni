@@ -111,6 +111,7 @@ import type {
   ManagedSessionOutcome,
 } from "../pi/managed-session.js";
 import {
+  CUMULATIVE_TOOL_RETRY_INSTRUCTION,
   createKoniAuthorityTools,
   KoniToolArgumentValidationError,
   KONI_TOOL_RECEIPT_PROTOCOL,
@@ -24011,6 +24012,12 @@ function boundedCompilerDiagnosticText(value: string, maximumBytes: number): str
   return `${prefix}${suffix}`;
 }
 
+function cumulativePlanningCompilerSummary(value: string): string {
+  const suffix = `\n\n${CUMULATIVE_TOOL_RETRY_INSTRUCTION}`;
+  const maximumBodyBytes = 60 * 1024 - Buffer.byteLength(suffix, "utf8");
+  return `${boundedCompilerDiagnosticText(value, maximumBodyBytes)}${suffix}`;
+}
+
 export function correctableAgentToolError(
   error: unknown,
   context: Readonly<{ planning: boolean; terminal: boolean }>,
@@ -24049,7 +24056,7 @@ export function correctableAgentToolError(
     }
     return {
       code: error.code,
-      summary: boundedCompilerDiagnosticText(error.message, 60 * 1024),
+      summary: cumulativePlanningCompilerSummary(error.message),
       ...(details.length === 0 ? {} : { value: { diagnostics: details } }),
     };
   }
