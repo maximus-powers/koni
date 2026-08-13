@@ -335,6 +335,7 @@ export function createKoniManagedExtension(options: {
   spec: Readonly<AgentLaunchSpec>;
   contextProvider: KoniContextProvider;
   beforeProviderRequest?: () => void | Promise<void>;
+  selectCompactionFirstKeptEntryId?: (preparedFirstKeptEntryId: string) => string;
   onTurnStart?: () => void;
   onNotice?: (notice: CompactionLifecycleNotice) => void;
 }): InlineExtension {
@@ -452,10 +453,13 @@ export function createKoniManagedExtension(options: {
           const summary = renderCompactionSummary(options.spec, snapshot);
           const summaryHash = rawSha256(summary);
           const summaryBytes = Buffer.byteLength(summary, "utf8");
+          const firstKeptEntryId =
+            options.selectCompactionFirstKeptEntryId?.(event.preparation.firstKeptEntryId) ??
+            event.preparation.firstKeptEntryId;
           const authorized = await options.contextProvider.authorizeCompaction(options.spec, {
             summaryHash,
             summaryBytes,
-            firstKeptEntryId: event.preparation.firstKeptEntryId,
+            firstKeptEntryId,
             tokensBefore: event.preparation.tokensBefore,
           });
           validateAuthorizationId(authorized.authorizationId);
@@ -463,7 +467,7 @@ export function createKoniManagedExtension(options: {
           return {
             compaction: {
               summary,
-              firstKeptEntryId: event.preparation.firstKeptEntryId,
+              firstKeptEntryId,
               tokensBefore: event.preparation.tokensBefore,
               details: {
                 protocol: "koni.compaction.v1",

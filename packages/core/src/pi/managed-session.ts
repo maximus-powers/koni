@@ -70,6 +70,8 @@ const PINNED_PI_CODING_AGENT_VERSION = "0.80.10";
 const TRANSCRIPT_TOOL_RESULT_OVERHEAD_BYTES = 4 * 1024;
 const RUNTIME_REJECTION_RESULT_BYTES = 64 * 1024;
 const OPENAI_CODEX_RESPONSES_API = "openai-codex-responses";
+const PROVIDER_INPUT_PRESSURE_MARKER =
+  "Koni provider admission rejected: request exceeds the context window. ";
 
 export interface AuthorityBackedTool {
   name: string;
@@ -980,6 +982,13 @@ async function createProductionPiSession(
       spec,
       contextProvider: options.contextProvider,
       beforeProviderRequest: () => beforeProviderRequest(),
+      selectCompactionFirstKeptEntryId: (preparedFirstKeptEntryId) =>
+        providerPressureCompactionFirstKeptEntryId(
+          spec,
+          sessionManager,
+          providerRequestFailure,
+          preparedFirstKeptEntryId,
+        ),
       onNotice: (notice) => {
         try {
           options.onCompactionNotice?.(notice);
@@ -4172,6 +4181,48 @@ function containedCompactionKeepRecentTokens(spec: Readonly<AgentLaunchSpec>): n
   return Math.max(2_000, Math.min(8_000, Math.floor(spec.budgets.tokens.maxInput / 32)));
 }
 
+function providerPressureCompactionFirstKeptEntryId(
+  spec: Readonly<AgentLaunchSpec>,
+  sessionManager: Pick<SessionManager, "getLeafEntry">,
+  failure: ManagedSessionError | undefined,
+  preparedFirstKeptEntryId: string,
+): string {
+  if (failure?.code !== "provider_input_exposure" && failure?.code !== "provider_token_exposure") {
+    return preparedFirstKeptEntryId;
+  }
+  const leaf = sessionManager.getLeafEntry();
+  const assistant =
+    leaf?.type === "message" && leaf.message.role === "assistant" ? leaf.message : undefined;
+  const leafId = leaf?.id;
+  const usage = assistant?.usage;
+  const cost = usage?.cost;
+  if (
+    assistant === undefined ||
+    leafId === undefined ||
+    !Array.isArray(assistant.content) ||
+    assistant.content.length !== 0 ||
+    assistant.api !== spec.model.api ||
+    assistant.provider !== spec.model.provider ||
+    assistant.model !== spec.model.id ||
+    assistant.stopReason !== "error" ||
+    !failure.message.startsWith(PROVIDER_INPUT_PRESSURE_MARKER) ||
+    assistant.errorMessage !== failure.message ||
+    usage?.input !== 0 ||
+    usage?.output !== 0 ||
+    usage?.cacheRead !== 0 ||
+    usage?.cacheWrite !== 0 ||
+    usage?.totalTokens !== 0 ||
+    cost?.input !== 0 ||
+    cost?.output !== 0 ||
+    cost?.cacheRead !== 0 ||
+    cost?.cacheWrite !== 0 ||
+    cost?.total !== 0
+  ) {
+    return preparedFirstKeptEntryId;
+  }
+  return leafId;
+}
+
 function exactProviderPayload(
   api: string,
   payload: unknown,
@@ -4318,9 +4369,8 @@ function providerAdmissionFailure(error: unknown): ManagedSessionError {
   // Pi owns the provider-free compact-and-retry lifecycle, but identifies overflow from the
   // persisted assistant error text. Preserve Koni's typed code while projecting a stable marker
   // that Pi recognizes instead of coupling recovery to authority wording.
-  const marker = "Koni provider admission rejected: request exceeds the context window. ";
   return new ManagedSessionError(
     failure.code,
-    `${marker}${sanitizeProviderError(failure.message)}`.slice(0, 4_096),
+    `${PROVIDER_INPUT_PRESSURE_MARKER}${sanitizeProviderError(failure.message)}`.slice(0, 4_096),
   );
 }

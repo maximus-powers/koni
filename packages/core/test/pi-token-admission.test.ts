@@ -13,10 +13,17 @@ import { stream as streamOpenAICodex } from "@earendil-works/pi-ai/api/openai-co
 import { clampMaxTokensToContext } from "@earendil-works/pi-ai/api/simple-options";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createAgentLaunchSpec } from "../src/pi/launch-spec.js";
-import { ManagedPiSession, ManagedSessionError } from "../src/pi/managed-session.js";
+import {
+  ManagedPiSession,
+  ManagedSessionError,
+  recoverManagedPiSession,
+} from "../src/pi/managed-session.js";
 import { sealPiModelDescriptor } from "../src/pi/model-catalog.js";
 import { readPiSession } from "../src/pi/session-transcript.js";
+import { canonicalEncode, canonicalHash } from "../src/shared/canonical.js";
 import type {
+  KoniAuthorizedCompaction,
+  KoniAuthorizedToolResult,
   KoniContextProvider,
   KoniProviderRequestReservationInput,
   KoniProviderRequestSettlementInput,
@@ -172,6 +179,142 @@ describe("durable Pi provider request admission", () => {
       expect(harness.reservations.map((request) => request.sequence)).toEqual([1, 2, 2]);
     },
   );
+
+  it("drops an oversized assistant tool batch on repeated provider-input compaction", async () => {
+    const harness = await twoRoundHarness({
+      compactOnInputPressure: true,
+      repeatedInputPressure: true,
+    });
+    const session = await ManagedPiSession.create(harness.spec, {
+      tools: harness.tools,
+      modelRuntime: harness.modelRuntime,
+      contextProvider: harness.contextProvider,
+    });
+
+    const outcome = await session.start();
+
+    expect(outcome).toEqual({
+      status: "completed",
+      terminalOutput: { result: "done" },
+      usage: {
+        input: 40,
+        output: 17,
+        cacheRead: 7,
+        cacheWrite: 4,
+        newTokens: 57,
+        allTokens: 68,
+      },
+    });
+    expect(harness.order).toEqual([
+      "reserve:1",
+      "transport:1",
+      "settle:1",
+      "reserve:2",
+      "compact:1",
+      "reserve:2",
+      "transport:3",
+      "settle:2",
+      "reserve:3",
+      "compact:2",
+      "reserve:3",
+      "transport:5",
+      "settle:3",
+    ]);
+    expect(harness.compactionAuthorizations).toHaveLength(2);
+    const transcript = await readPiSession(
+      path.join(
+        harness.spec.workspace.sessionDirectory,
+        `${harness.spec.identity.sessionId}.jsonl`,
+      ),
+    );
+    const secondAuthorization = harness.compactionAuthorizations[1]!;
+    const secondCompaction = transcript.entries.filter((entry) => entry.type === "compaction")[1]!;
+    expect(secondCompaction).toMatchObject({
+      firstKeptEntryId: secondAuthorization.firstKeptEntryId,
+      tokensBefore: secondAuthorization.tokensBefore,
+      details: {
+        summaryHash: secondAuthorization.summaryHash,
+        summaryBytes: secondAuthorization.summaryBytes,
+        authorizationId: "compaction-2",
+      },
+    });
+    const secondBoundary = transcript.byId.get(secondAuthorization.firstKeptEntryId)!;
+    expect(secondBoundary).toEqual({
+      type: "message",
+      id: secondAuthorization.firstKeptEntryId,
+      parentId: expect.any(String),
+      timestamp: expect.any(String),
+      message: {
+        role: "assistant",
+        content: [],
+        api: "openai-codex-responses",
+        provider: "koni-provider-reservation-test",
+        model: "contained-codex",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "error",
+        errorMessage:
+          "Koni provider admission rejected: request exceeds the context window. prospective provider input plus reserved output exceeds the authenticated model context window",
+        timestamp: expect.any(Number),
+      },
+    });
+  });
+
+  it("keeps Pi's prepared boundary when the durable pressure error differs from the current failure", async () => {
+    const harness = await twoRoundHarness({
+      compactOnInputPressure: true,
+      mismatchedPersistedPressureError: true,
+    });
+    const session = await ManagedPiSession.create(harness.spec, {
+      tools: harness.tools,
+      modelRuntime: harness.modelRuntime,
+      contextProvider: harness.contextProvider,
+    });
+
+    await expect(session.start()).resolves.toMatchObject({ status: "completed" });
+
+    const transcript = await readPiSession(
+      path.join(
+        harness.spec.workspace.sessionDirectory,
+        `${harness.spec.identity.sessionId}.jsonl`,
+      ),
+    );
+    const authorization = harness.compactionAuthorizations[0]!;
+    expect(transcript.byId.get(authorization.firstKeptEntryId)).toMatchObject({
+      type: "message",
+      message: { role: "assistant", stopReason: "toolUse" },
+    });
+  });
+
+  it("cold-recovers a pressure compaction bound to the exact durable assistant error", async () => {
+    const harness = await twoRoundHarness({
+      compactOnInputPressure: true,
+      stopAfterFirstPressureCompaction: true,
+    });
+    const session = await ManagedPiSession.create(harness.spec, {
+      tools: harness.tools,
+      modelRuntime: harness.modelRuntime,
+      contextProvider: harness.contextProvider,
+    });
+    await expect(session.start()).resolves.toMatchObject({ status: "failed" });
+    await session.dispose();
+    expect(harness.compactionAuthorizations).toHaveLength(1);
+
+    const recovered = await recoverManagedPiSession(harness.spec, {
+      tools: harness.tools,
+      modelRuntime: harness.modelRuntime,
+      contextProvider: harness.contextProvider,
+    });
+
+    expect(recovered.recovery?.disposition).toEqual({ kind: "continue" });
+    await recovered.dispose();
+  });
 
   it("never enters transport when the final durable reservation rejects", async () => {
     const harness = await twoRoundHarness({ rejectReservation: true });
@@ -380,6 +523,9 @@ async function twoRoundHarness(
     rejectReservation?: boolean;
     providerError?: boolean;
     compactOnInputPressure?: boolean;
+    repeatedInputPressure?: boolean;
+    mismatchedPersistedPressureError?: boolean;
+    stopAfterFirstPressureCompaction?: boolean;
     exposureCode?: "provider_input_exposure" | "provider_token_exposure";
     exposureMessage?: string;
   } = {},
@@ -422,50 +568,55 @@ async function twoRoundHarness(
             stream.end();
             return;
           }
-          const message =
-            round === 1
-              ? assistant(_model, {
-                  content: [
-                    {
-                      type: "toolCall",
-                      id: "record-note-one",
-                      name: "koni_record_note",
-                      arguments: {
-                        nodeId: "node-one",
-                        kind: "observation",
-                        body:
-                          options.compactOnInputPressure === true
-                            ? "x".repeat(100_000)
-                            : "round one",
-                      },
+          const producesNote =
+            round === 1 || (options.repeatedInputPressure === true && round === 3);
+          const message = producesNote
+            ? assistant(_model, {
+                content: [
+                  {
+                    type: "toolCall",
+                    id: `record-note-${round}`,
+                    name: "koni_record_note",
+                    arguments: {
+                      nodeId: `node-${round}`,
+                      kind: "observation",
+                      body:
+                        options.compactOnInputPressure === true ? "x".repeat(100_000) : "round one",
                     },
-                  ],
-                  input: 10,
-                  output: 5,
-                  cacheRead: 2,
-                  cacheWrite: 1,
-                })
-              : assistant(_model, {
-                  content: [
-                    {
-                      type: "toolCall",
-                      id: "submit-output-two",
-                      name: "koni_submit_output",
-                      arguments: { result: "done" },
-                    },
-                  ],
-                  input: 20,
-                  output: 7,
-                  cacheRead: 3,
-                  cacheWrite: 2,
-                });
+                  },
+                ],
+                input: 10,
+                output: 5,
+                cacheRead: 2,
+                cacheWrite: 1,
+              })
+            : assistant(_model, {
+                content: [
+                  {
+                    type: "toolCall",
+                    id: "submit-output-two",
+                    name: "koni_submit_output",
+                    arguments: { result: "done" },
+                  },
+                ],
+                input: 20,
+                output: 7,
+                cacheRead: 3,
+                cacheWrite: 2,
+              });
           stream.push({ type: "start", partial: structuredClone(message) });
           stream.push({ type: "done", reason: "toolUse", message });
           stream.end();
         } catch (error) {
+          const failureMessage = error instanceof Error ? error.message : String(error);
           const failed = failedAssistant(
             _model,
-            error instanceof Error ? error.message : String(error),
+            options.mismatchedPersistedPressureError === true &&
+              failureMessage.startsWith(
+                "Koni provider admission rejected: request exceeds the context window. ",
+              )
+              ? `${failureMessage} [persisted mismatch]`
+              : failureMessage,
           );
           stream.push({ type: "error", reason: "error", error: failed });
           stream.end();
@@ -512,21 +663,31 @@ async function twoRoundHarness(
       maxResultBytes: koniToolMaxResultBytes("koni_submit_output"),
     },
   ];
-  draft.terminal.outputSchemaHash = koniToolSchemaHash(
-    "koni_submit_output",
-    TERMINAL_OUTPUT_SCHEMA,
-  );
+  draft.terminal.outputSchemaHash = canonicalHash(TERMINAL_OUTPUT_SCHEMA);
   const spec = createAgentLaunchSpec(draft);
+  const authorizedToolResults: KoniAuthorizedToolResult[] = [];
   const tools = createKoniAuthorityTools({
     names: ["koni_record_note", "koni_submit_output"],
     terminalOutputSchema: TERMINAL_OUTPUT_SCHEMA,
     async invoke(callInput) {
-      return {
+      const receipt = {
         protocol: KONI_TOOL_RECEIPT_PROTOCOL,
         receiptId: `receipt-${callInput.callId}`,
-        outcome: "accepted",
+        outcome: "accepted" as const,
         summary: callInput.name === "koni_submit_output" ? "submitted" : "noted",
       };
+      authorizedToolResults.push({
+        sequence: authorizedToolResults.length + 1,
+        callId: callInput.callId,
+        toolName: callInput.name,
+        outcome: receipt.outcome,
+        argumentsSha256: canonicalHash(callInput.arguments),
+        argumentsSizeBytes: Buffer.byteLength(canonicalEncode(callInput.arguments), "utf8"),
+        receiptSha256: canonicalHash(receipt),
+        receiptSizeBytes: Buffer.byteLength(canonicalEncode(receipt), "utf8"),
+        receipt,
+      });
+      return receipt;
     },
     async reject(_callInput, rejection) {
       return {
@@ -539,8 +700,11 @@ async function twoRoundHarness(
     },
   });
   const reservations: KoniProviderRequestReservationInput[] = [];
-  let pressureRejected = false;
+  const pressureRejectedSequences = new Set<number>();
   let compactionSequence = 0;
+  const compactionAuthorizations: Array<
+    Omit<KoniAuthorizedCompaction, "sequence" | "authorizationId">
+  > = [];
   const contextProvider: KoniContextProvider = {
     async loadBoundContext() {
       return {
@@ -573,16 +737,46 @@ async function twoRoundHarness(
         nextAction: "Retry the same provider turn after provider-free compaction.",
       };
     },
-    async authorizeCompaction() {
+    async authorizeCompaction(_spec, record) {
       if (options.compactOnInputPressure !== true) {
         throw new Error("compaction is not expected in provider reservation tests");
       }
       compactionSequence += 1;
+      compactionAuthorizations.push(structuredClone(record));
       order.push(`compact:${compactionSequence}`);
       return { authorizationId: `compaction-${compactionSequence}` };
     },
     async acquireRecoveryClaim() {
-      throw new Error("recovery is not expected in fresh provider reservation tests");
+      return {
+        protocol: "koni.attempt-recovery-claim.v1",
+        claimId: `claim-${spec.identity.attemptId}`,
+        state: {
+          protocol: "koni.attempt-recovery.v1",
+          specHash: spec.specHash,
+          ...spec.identity,
+          grantHash: spec.authority.grantHash,
+          generation: spec.authority.generation,
+          epoch: spec.authority.epoch,
+          stateHash: spec.authority.expectedStateHash,
+          status: "continue",
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            newTokens: 0,
+            allTokens: 0,
+          },
+          authorizedMessages: [],
+          authorizedToolResults,
+          authorizedCompactions: compactionAuthorizations.map((record, index) => ({
+            sequence: index + 1,
+            authorizationId: `compaction-${index + 1}`,
+            ...record,
+          })),
+        },
+        async release() {},
+      };
     },
     async reserveProviderRequest(_spec, request) {
       order.push(`reserve:${request.sequence}`);
@@ -590,13 +784,27 @@ async function twoRoundHarness(
       if (options.rejectReservation === true) {
         throw new Error("reservation rejected by test authority");
       }
-      if (options.compactOnInputPressure === true && request.sequence === 2 && !pressureRejected) {
-        pressureRejected = true;
+      const pressureSequence =
+        request.sequence === 2 ||
+        (options.repeatedInputPressure === true && request.sequence === 3);
+      if (
+        options.compactOnInputPressure === true &&
+        pressureSequence &&
+        !pressureRejectedSequences.has(request.sequence)
+      ) {
+        pressureRejectedSequences.add(request.sequence);
         throw new ManagedSessionError(
           options.exposureCode ?? "provider_input_exposure",
           options.exposureMessage ??
             "prospective provider input plus reserved output exceeds the authenticated model context window",
         );
+      }
+      if (
+        options.stopAfterFirstPressureCompaction === true &&
+        request.sequence === 2 &&
+        pressureRejectedSequences.has(2)
+      ) {
+        throw new Error("stop after authenticated pressure compaction");
       }
       const transcript = await readPiSession(
         path.join(spec.workspace.sessionDirectory, `${spec.identity.sessionId}.jsonl`),
@@ -616,7 +824,16 @@ async function twoRoundHarness(
       };
     },
   };
-  return { spec, tools, modelRuntime, contextProvider, order, payloads, reservations };
+  return {
+    spec,
+    tools,
+    modelRuntime,
+    contextProvider,
+    order,
+    payloads,
+    reservations,
+    compactionAuthorizations,
+  };
 }
 
 function codexModel(id: string, maxTokens: number): Model<"openai-codex-responses"> {
@@ -681,7 +898,7 @@ function assistant(
 function failedAssistant(model: Model<Api>, message: string): AssistantMessage {
   return {
     role: "assistant",
-    content: [{ type: "text", text: "" }],
+    content: [],
     api: model.api,
     provider: model.provider,
     model: model.id,
