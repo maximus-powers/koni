@@ -135,7 +135,9 @@ function onFrame(frame) {
     if (
       (scenario === "failed_provider" ||
         scenario === "failed_provider_tool_call" ||
+        scenario === "failed_provider_terminal_tool_call" ||
         scenario === "rate_limit_provider_error" ||
+        scenario === "rate_limit_provider_error_with_pending_check" ||
         scenario === "uncanonical_provider_error") &&
       isInitialFailureHost()
     ) {
@@ -477,7 +479,9 @@ function appendAssistant() {
   const failed =
     ((scenario === "failed_provider" ||
       scenario === "failed_provider_tool_call" ||
+      scenario === "failed_provider_terminal_tool_call" ||
       scenario === "rate_limit_provider_error" ||
+      scenario === "rate_limit_provider_error_with_pending_check" ||
       scenario === "assignment_provider_error" ||
       scenario === "uncanonical_provider_error") &&
       isInitialFailureHost() &&
@@ -515,12 +519,38 @@ function appendAssistant() {
                       },
                     },
                   ]
-                : [
-                    {
-                      type: "thinking",
-                      thinking: "partial provider reasoning before a terminal error",
-                    },
-                  ]
+                : scenario === "failed_provider_terminal_tool_call"
+                  ? [
+                      {
+                        type: "thinking",
+                        thinking: "partial provider reasoning before a terminal error",
+                      },
+                      {
+                        type: "toolCall",
+                        id: "unaccepted-terminal-call",
+                        name: launch.spec.terminal.toolName,
+                        arguments: { result: "provider-plan" },
+                      },
+                    ]
+                  : scenario === "rate_limit_provider_error_with_pending_check"
+                    ? [
+                        {
+                          type: "thinking",
+                          thinking: "partial provider reasoning before a terminal error",
+                        },
+                        {
+                          type: "toolCall",
+                          id: "unaccepted-check-call",
+                          name: "koni_run_check",
+                          arguments: { checkId: "fixture-check" },
+                        },
+                      ]
+                    : [
+                        {
+                          type: "thinking",
+                          thinking: "partial provider reasoning before a terminal error",
+                        },
+                      ]
               : [{ type: "text", text: "provider response" }]
             : [
                 {
@@ -559,12 +589,14 @@ function appendAssistant() {
         ? {
             ...(scenario === "failed_provider" ||
             scenario === "failed_provider_tool_call" ||
+            scenario === "failed_provider_terminal_tool_call" ||
             scenario === "assignment_provider_error" ||
             scenario.startsWith("lead_sol_fallback")
               ? { responseId: "resp_fixture_provider_error" }
               : {}),
             errorMessage:
-              scenario === "rate_limit_provider_error"
+              scenario === "rate_limit_provider_error" ||
+              scenario === "rate_limit_provider_error_with_pending_check"
                 ? '429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account rate limit. Please try again later."}}'
                 : "Codex error: simulated terminal provider failure",
           }

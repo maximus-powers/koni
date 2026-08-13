@@ -797,6 +797,39 @@ describe("run authority provider reservation lifecycle", () => {
     ).toBe(true);
   }, 60_000);
 
+  it("auto-recovers a canonical provider error with an unaccepted terminal tool call", async () => {
+    const harness = await authorityHarness("failed_provider_terminal_tool_call");
+    const runId = await createRun(harness.client);
+
+    await waitFor(async () => {
+      const recovered = await harness.engine.store.getRun(runId);
+      return (
+        recovered.lifecycle.phase === "awaiting_approval" &&
+        Object.keys(recovered.attempts).length === 1 &&
+        onlyAttempt(recovered).status === "waiting_plan_review"
+      );
+    });
+
+    const recovered = await harness.engine.store.getRun(runId);
+    const attempt = onlyAttempt(recovered);
+    expect(attempt.authorityProviderRequests?.[0]?.retirement).toMatchObject({
+      protocol: "koni.provider-exposure-retirement.v1",
+      disposition: "operator_acknowledged_provider_error",
+      assistantEntryId: "assistant",
+      responseId: "resp_fixture_provider_error",
+    });
+    expect(
+      (attempt.authorityToolResults ?? []).some(
+        (result) => result.callId === "unaccepted-terminal-call",
+      ),
+    ).toBe(false);
+    expect(attempt.authorityToolResults?.at(-1)).toMatchObject({
+      callId: "terminal-call",
+      toolName: "koni_submit_output",
+      outcome: "accepted",
+    });
+  }, 60_000);
+
   it("keeps a canonical 429 blocked during its token-bucket backoff", async () => {
     const harness = await authorityHarness("rate_limit_provider_error");
     const runId = await createRun(harness.client);
@@ -812,6 +845,65 @@ describe("run authority provider reservation lifecycle", () => {
     expect(
       waiting.attempts[Object.keys(waiting.attempts)[0]!]!.authorityProviderRequests?.[0],
     ).not.toHaveProperty("retirement");
+  }, 60_000);
+
+  it("does not retire an unaccepted provider tool call with a durable pending check", async () => {
+    const harness = await authorityHarness("rate_limit_provider_error_with_pending_check");
+    const runId = await createRun(harness.client);
+
+    await waitFor(
+      async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked",
+    );
+    await harness.engine.server.mutateInternal(async ({ revision }) => {
+      const run = await harness.engine.store.getRun(runId);
+      const draft = structuredClone(run);
+      draft.revision += 1;
+      draft.updatedAt = new Date(Date.parse(run.updatedAt) + 1).toISOString();
+      const attempt = onlyAttempt(draft);
+      const resolvedCheck = {
+        protocol: "koni.resolved-agent-check.v1",
+        requestedCheckId: "fixture-check",
+        definitionHash: rawSha256("fixture-check-definition"),
+        kind: "command",
+        commands: [],
+      };
+      draft.pendingChecks = {
+        "check-pending-provider-call": {
+          id: "check-pending-provider-call",
+          attemptId: attempt.id,
+          specHash: attempt.launchSpecHash,
+          grantHash: rawSha256("fixture-check-grant"),
+          callId: "unaccepted-check-call",
+          method: "agent.tool",
+          idempotencyKey: "pending-provider-check",
+          requestHash: rawSha256("pending-provider-check-request"),
+          argumentsSha256: rawSha256(canonicalEncode({ checkId: "fixture-check" })),
+          argumentsSizeBytes: Buffer.byteLength(
+            canonicalEncode({ checkId: "fixture-check" }),
+            "utf8",
+          ),
+          requestedCheckId: "fixture-check",
+          resolvedCheckSha256: rawSha256(canonicalEncode(resolvedCheck)),
+          resolvedCheck,
+          preparedAt: draft.updatedAt,
+        },
+      };
+      const committed = await harness.engine.store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: run.revision }],
+      });
+      return { revision: committed.state.revision };
+    });
+
+    const controls = (await harness.client.request("run.controls", { runId })).result as {
+      runActions: Array<{ intent: string }>;
+    };
+    expect(controls.runActions.some((action) => action.intent === "retire_provider_exposure")).toBe(
+      false,
+    );
+    const blocked = await harness.engine.store.getRun(runId);
+    expect(blocked.lifecycle.phase).toBe("blocked");
+    expect(onlyAttempt(blocked).authorityProviderRequests?.[0]).not.toHaveProperty("retirement");
   }, 60_000);
 
   it("auto-recovers a ticket provider error by resetting the failed assignment", async () => {
@@ -1596,7 +1688,11 @@ function providerProgram(
         allowedTools:
           scenario === "synthesis_threshold"
             ? ["koni_read_file", "koni_submit_output"]
-            : ["koni_submit_output"],
+            : scenario === "rate_limit_provider_error_with_pending_check"
+              ? ["koni_run_check", "koni_submit_output"]
+              : scenario === "failed_provider_tool_call"
+                ? ["koni_write_file", "koni_submit_output"]
+                : ["koni_submit_output"],
         readPaths: ["."],
         writePaths: [],
         expectedRevision: input.nextAuthorityRevision,
@@ -1643,6 +1739,22 @@ function providerProgram(
           schemaHash: koniToolSchemaHash("koni_read_file", TERMINAL_OUTPUT_SCHEMA),
           executionMode: "parallel",
           maxResultBytes: koniToolMaxResultBytes("koni_read_file"),
+        });
+      }
+      if (scenario === "failed_provider_tool_call") {
+        (draft.tools as Array<(typeof draft.tools)[number]>).unshift({
+          name: "koni_write_file",
+          schemaHash: koniToolSchemaHash("koni_write_file", TERMINAL_OUTPUT_SCHEMA),
+          executionMode: "sequential",
+          maxResultBytes: koniToolMaxResultBytes("koni_write_file"),
+        });
+      }
+      if (scenario === "rate_limit_provider_error_with_pending_check") {
+        (draft.tools as Array<(typeof draft.tools)[number]>).unshift({
+          name: "koni_run_check",
+          schemaHash: koniToolSchemaHash("koni_run_check", TERMINAL_OUTPUT_SCHEMA),
+          executionMode: "sequential",
+          maxResultBytes: koniToolMaxResultBytes("koni_run_check"),
         });
       }
       if (scenario === "input_pressure_synthesis") {
@@ -1699,7 +1811,11 @@ function providerProgram(
         toolNames:
           scenario === "synthesis_threshold"
             ? ["koni_read_file", "koni_submit_output"]
-            : ["koni_submit_output"],
+            : scenario === "rate_limit_provider_error_with_pending_check"
+              ? ["koni_run_check", "koni_submit_output"]
+              : scenario === "failed_provider_tool_call"
+                ? ["koni_write_file", "koni_submit_output"]
+                : ["koni_submit_output"],
         terminalOutputSchema,
         contextContent: context,
         compactionSnapshot: {

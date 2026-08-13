@@ -19227,14 +19227,35 @@ export class RunAuthorityEngine {
       }
       const draft = nextRun(run, recoveredAt);
       for (const candidate of autoRetireable) {
+        const currentAttempt = run.attempts[candidate.attemptId];
         const mutable = draft.attempts[candidate.attemptId];
         const requestRecord = mutable?.authorityProviderRequests?.at(-1);
         if (
+          currentAttempt === undefined ||
           mutable === undefined ||
           requestRecord === undefined ||
           !isOpenProviderRequest(requestRecord)
         ) {
           // Exposure changed under us (a real settlement or concurrent retire won); do not clobber.
+          return this.#noOpInternal(revision);
+        }
+        let currentRetirement: NonNullable<AgentProviderRequestRecord["retirement"]> | undefined;
+        try {
+          const currentSpec = await this.#loadStoredLaunchSpec(run, currentAttempt);
+          currentRetirement = await deriveCanonicalProviderExposureRetirement(
+            currentSpec,
+            run,
+            currentAttempt,
+            candidate.retirement.authorizationSha256,
+            candidate.retirement.retiredAt,
+          );
+        } catch {
+          return this.#noOpInternal(revision);
+        }
+        if (
+          currentRetirement === undefined ||
+          !canonicalValuesEqual(currentRetirement, candidate.retirement)
+        ) {
           return this.#noOpInternal(revision);
         }
         requestRecord.retirement = structuredClone(candidate.retirement);
@@ -23269,17 +23290,17 @@ async function deriveCanonicalProviderExposureRetirement(
   const content = Array.isArray(message.content) ? message.content : [];
   const terminalToolCalls = content.filter((item) => isRecord(item) && item.type === "toolCall");
   const terminalToolCallIds = terminalToolCalls.map((item) => item.id);
+  const issuedToolNames = new Set(spec.tools.map((tool) => tool.name));
   const terminalToolCallsAreDurablyInert =
     terminalToolCalls.every(
       (item) =>
         typeof item.id === "string" &&
         item.id.length > 0 &&
         Buffer.byteLength(item.id, "utf8") <= 2_048 &&
-        (item.name === "koni_write_file" || item.name === "koni_edit_file") &&
-        !(attempt.authorityToolResults ?? []).some((result) => result.callId === item.id) &&
-        !Object.values(run.pendingEffects ?? {}).some(
-          (effect) => effect.attemptId === attempt.id && effect.callId === item.id,
-        ),
+        typeof item.name === "string" &&
+        issuedToolNames.has(item.name) &&
+        isRecord(item.arguments) &&
+        providerTerminalToolCallIsDurablyInert(run, attempt, item.id),
     ) && new Set(terminalToolCallIds).size === terminalToolCallIds.length;
   const canonicalProviderError =
     commonTerminalBoundary &&
@@ -23305,6 +23326,23 @@ async function deriveCanonicalProviderExposureRetirement(
     retiredAt,
   };
   return { ...material, sha256: canonicalHash(material) };
+}
+
+function providerTerminalToolCallIsDurablyInert(
+  run: Readonly<RunRecord>,
+  attempt: Readonly<AgentAttemptRecord>,
+  callId: string,
+): boolean {
+  return (
+    !(attempt.authorityToolResults ?? []).some((result) => result.callId === callId) &&
+    !Object.values(run.pendingEffects ?? {}).some(
+      (effect) => effect.attemptId === attempt.id && effect.callId === callId,
+    ) &&
+    !Object.values(run.pendingChecks ?? {}).some(
+      (check) => check.attemptId === attempt.id && check.callId === callId,
+    ) &&
+    !(run.checks ?? []).some((check) => check.attemptId === attempt.id && check.callId === callId)
+  );
 }
 
 function settledProviderRecord(record: AgentProviderRequestRecord): {
