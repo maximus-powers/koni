@@ -44,6 +44,11 @@ evidence matters independently.
 - Attach gates through one canonical `gate.applies_to` fact with inverse `gates`. Gates may cover
   data integrity, preflight capability, contamination, safety, statistical validity, resource
   limits, or reporting completeness.
+- A new reusable gate interface is an embedded `gate.spec.capability` contract, not a separate
+  capability node. Define its stable name and compatible version range inside the authorized gate
+  after proving the visible interfaces incompatible. Later asset resolution owns the provider
+  implementation; the provider's expected absence at gate-definition time is not itself a reason to
+  request wider graph authority.
 - Version assets and bind methods, datasets, seeds, environments, commands, and relevant hashes to
   each run plan.
 - Treat an asset implementation plan as one filesystem authority boundary. Normalize

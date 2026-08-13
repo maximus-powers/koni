@@ -277,7 +277,7 @@ operations:
     allow_upstream_requests: true
     proposal_operation: change-request
   review_contract: independent expected-red gate semantics review; require the configured typed command/result, capability, oracle, applicability, failure, and canonical gate.applies_to contract, but because this operation is gate-blocking-exempt and asset creation is a stop condition, do not require a downstream executable asset, runtime execution, or passing gate receipt at this boundary
-  output_contract: expected-red gate contract graph delta that reuses a visible compatible verifier capability whenever one exists, with one canonical gate.applies_to fact whose inverse gates view is compiler-derived, plus structured step outputs; a new capability requires an explicit incompatibility with every visible verifier interface
+  output_contract: expected-red gate contract graph delta that reuses a visible compatible verifier capability whenever one exists, with one canonical gate.applies_to fact whose inverse gates view is compiler-derived, plus structured step outputs; when every visible interface is incompatible, declare the smallest new embedded gate spec.capability name and version range inside the authorized new gate after stating that incompatibility—the embedded contract does not require a capability node or upstream change request, and later asset resolution owns its provider
   dispatch_priority: 530
   ranking_hints:
   - stage

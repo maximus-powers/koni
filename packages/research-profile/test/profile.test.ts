@@ -839,6 +839,48 @@ describe("research profile registrar", () => {
     });
   });
 
+  it("keeps a new gate capability contract inside gate definition", async () => {
+    const [agentSource, operationSource, sharedSource] = await Promise.all([
+      readFile(
+        path.resolve(import.meta.dirname, "../koni/baseline/agents/gate-designer.yaml"),
+        "utf8",
+      ),
+      readFile(
+        path.resolve(import.meta.dirname, "../koni/baseline/operations/research.yaml"),
+        "utf8",
+      ),
+      readFile(
+        path.resolve(
+          import.meta.dirname,
+          "../../core/skills/model-koni-work/references/empirical-research.md",
+        ),
+        "utf8",
+      ),
+    ]);
+    const agent = YAML.parse(agentSource) as { instructions: string };
+    const operations = YAML.parse(operationSource) as {
+      operations: Array<{ id: string; output_contract?: string }>;
+    };
+    const normalizedAgent = agent.instructions.replace(/\s+/gu, " ");
+    const normalizedShared = sharedSource.replace(/\s+/gu, " ");
+    const contract = operations.operations.find(
+      ({ id }) => id === "graph-compilation.node.define-gates",
+    )?.output_contract;
+
+    expect(normalizedAgent).toContain(
+      "Declare the new interface directly in the gate's embedded `spec.capability` object",
+    );
+    expect(normalizedAgent).toContain(
+      "This does not require a separate capability node, provider asset, or upstream change request",
+    );
+    expect(contract).toContain("embedded gate spec.capability");
+    expect(contract).toContain("does not require a capability node or upstream change request");
+    expect(normalizedShared).toContain(
+      "A new reusable gate interface is an embedded `gate.spec.capability` contract, not a separate capability node",
+    );
+    expect(normalizedShared).toContain("Later asset resolution owns the provider implementation");
+  });
+
   it("does not reopen an unselected compatible asset only because it owns no gate contracts", async () => {
     const source = await readFile(
       path.resolve(import.meta.dirname, "../koni/baseline/rules/research.yaml"),
