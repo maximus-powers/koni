@@ -70,6 +70,12 @@ export class KoniToolArgumentValidationError extends Error {
   }
 }
 
+type SchemaValidationError =
+  ReturnType<typeof Value.Errors> extends Iterable<infer Error> ? Error : never;
+
+/** Enough errors to identify several nested union branches without traversing an attacker-sized set. */
+const MAX_SCHEMA_DIAGNOSTIC_ERRORS = 256;
+
 /** The closure must cross the TypeScript authority boundary; Pi never performs effects itself. */
 export type KoniToolInvoker = (call: KoniToolInvocation) => Promise<KoniToolReceipt>;
 export type KoniToolRejector = (
@@ -875,16 +881,165 @@ function describeSchemaMismatch(name: KoniToolName, schema: TSchema, value: unkn
     ? Object.entries(value)
         .map(([key, field]) =>
           typeof field === "string"
-            ? `${key}(${field.length} chars)`
-            : `${key}(${Array.isArray(field) ? "array" : typeof field})`,
+            ? `${sanitizeDiagnosticText(key)}(${field.length} chars)`
+            : `${sanitizeDiagnosticText(key)}(${Array.isArray(field) ? "array" : typeof field})`,
         )
         .join(", ")
     : typeof value;
-  return (
+  const overview =
     `arguments do not match the compiler-issued schema for ${name}. ` +
     `You sent: { ${observed} }. Expected exactly one of: ${describeSchemaShape(schema)}. ` +
-    "Send status as the exact literal shown, include every listed field, and keep each string within its char limit."
+    "Send status as the exact literal shown, include every listed field, and keep each string within its char limit.";
+  const diagnostics = argumentSchemaMismatchDiagnostics(schema, value);
+  const boundedOverview = boundUtf8Text(overview, 8 * 1024, " … schema overview truncated");
+  return boundUtf8Text(
+    diagnostics.length === 0
+      ? boundedOverview
+      : `${boundedOverview} Exact mismatches:\n- ${diagnostics.join("\n- ")}`,
+    16 * 1024,
   );
+}
+
+function argumentSchemaMismatchDiagnostics(schema: TSchema, value: unknown): string[] {
+  const errors: SchemaValidationError[] = [];
+  for (const error of Value.Errors(schema, value)) {
+    errors.push(error);
+    if (errors.length === MAX_SCHEMA_DIAGNOSTIC_ERRORS) break;
+  }
+  const rejectedUnionBranches = rejectedSchemaUnionBranches(schema, value, errors);
+  const isFromRejectedBranch = (schemaPath: string): boolean =>
+    [...rejectedUnionBranches].some(
+      (prefix) => schemaPath === prefix || schemaPath.startsWith(`${prefix}/`),
+    );
+  const actionable = errors.filter(
+    (error) =>
+      error.keyword !== "anyOf" &&
+      error.keyword !== "oneOf" &&
+      !isFromRejectedBranch(error.schemaPath),
+  );
+  // When every discriminated branch was rejected, retain its literal errors so the caller sees
+  // the allowed discriminator values instead of only the unhelpful union umbrella.
+  const selected =
+    actionable.length > 0 ? actionable : errors.filter((error) => error.keyword === "const");
+  const rendered = new Set<string>();
+  for (const error of selected) {
+    const instancePath = error.instancePath.length === 0 ? "/" : error.instancePath;
+    let reason: string;
+    if (error.keyword === "additionalProperties") {
+      const fields = [...error.params.additionalProperties].sort(compareUtf8);
+      reason = `unexpected ${fields.length === 1 ? "field" : "fields"} ${fields.join(", ")}`;
+    } else if (error.keyword === "required") {
+      const fields = [...error.params.requiredProperties].sort(compareUtf8);
+      reason = `required ${fields.length === 1 ? "field" : "fields"} missing: ${fields.join(", ")}`;
+    } else if (error.keyword === "const") {
+      reason = `expected ${JSON.stringify(error.params.allowedValue)}`;
+    } else if (error.keyword === "enum") {
+      reason = `expected one of ${error.params.allowedValues.map((item) => JSON.stringify(item)).join(", ")}`;
+    } else {
+      reason = error.message;
+    }
+    rendered.add(`${sanitizeDiagnosticText(instancePath)}: ${sanitizeDiagnosticText(reason)}`);
+    if (rendered.size === 8) break;
+  }
+  return [...rendered];
+}
+
+function rejectedSchemaUnionBranches(
+  schema: TSchema,
+  value: unknown,
+  errors: SchemaValidationError[],
+): Set<string> {
+  const constErrors = errors
+    .filter((error) => error.keyword === "const")
+    .map((error) => {
+      const match = error.schemaPath.match(/^(.*)\/(anyOf|oneOf)\/(\d+)(\/.*)?$/u);
+      return match === null
+        ? undefined
+        : {
+            error,
+            unionPath: match[1]!,
+            unionKeyword: match[2]!,
+            branchIndex: Number(match[3]),
+            branchSuffix: match[4] ?? "",
+          };
+    })
+    .filter((item): item is NonNullable<typeof item> => item !== undefined);
+  const groups = new Map<string, typeof constErrors>();
+  for (const item of constErrors) {
+    const key = `${item.unionPath}/${item.unionKeyword}`;
+    const group = groups.get(key) ?? [];
+    group.push(item);
+    groups.set(key, group);
+  }
+
+  const rejected = new Set<string>();
+  for (const group of groups.values()) {
+    const first = group[0]!;
+    const union = jsonPointerValue(schema, first.unionPath) as
+      { anyOf?: TSchema[]; oneOf?: TSchema[] } | undefined;
+    const branches = union?.[first.unionKeyword as "anyOf" | "oneOf"];
+    if (!Array.isArray(branches)) continue;
+    let selected: Set<number> | undefined;
+    for (const item of group) {
+      const actual = jsonPointerValue(value, item.error.instancePath);
+      const matching = new Set<number>();
+      for (const [index, branch] of branches.entries()) {
+        const candidate = jsonPointerValue(branch, item.branchSuffix);
+        if (
+          isRecord(candidate) &&
+          Object.hasOwn(candidate, "const") &&
+          Value.Check(candidate as TSchema, actual)
+        ) {
+          matching.add(index);
+        }
+      }
+      if (matching.size === 0) continue;
+      selected =
+        selected === undefined
+          ? matching
+          : new Set([...selected].filter((index) => matching.has(index)));
+    }
+    if (selected === undefined || selected.size === 0) continue;
+    for (const index of branches.keys()) {
+      if (!selected.has(index)) rejected.add(`${first.unionPath}/${first.unionKeyword}/${index}`);
+    }
+  }
+  return rejected;
+}
+
+function jsonPointerValue(value: unknown, pointer: string): unknown {
+  const normalized = pointer.startsWith("#") ? pointer.slice(1) : pointer;
+  if (normalized.length === 0) return value;
+  let current = value;
+  for (const encoded of normalized.split("/").slice(1)) {
+    if ((typeof current !== "object" || current === null) && !Array.isArray(current))
+      return undefined;
+    const key = encoded.replace(/~1/gu, "/").replace(/~0/gu, "~");
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current;
+}
+
+function sanitizeDiagnosticText(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f]/gu, "?");
+}
+
+function boundUtf8Text(
+  value: string,
+  maximumBytes: number,
+  marker = "\n- additional mismatches omitted",
+): string {
+  if (Buffer.byteLength(value, "utf8") <= maximumBytes) return value;
+  const available = maximumBytes - Buffer.byteLength(marker, "utf8");
+  const characters = [...value];
+  let low = 0;
+  let high = characters.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(characters.slice(0, middle).join(""), "utf8") <= available) low = middle;
+    else high = middle - 1;
+  }
+  return `${characters.slice(0, low).join("")}${marker}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { canonicalHash } from "../src/shared/canonical.js";
 import {
   KONI_TOOL_RECEIPT_PROTOCOL,
+  KoniToolArgumentValidationError,
   createKoniAuthorityTools,
   koniToolMaxResultBytes,
   koniToolSchemaHash,
@@ -604,6 +605,181 @@ describe("Koni authority-backed Pi tool catalog", () => {
       status: "failed",
       blocker: "The bounded assignment could not complete.",
     });
+  });
+
+  it("reports bounded actionable paths for nested exact-schema mismatches", () => {
+    const schema = Type.Object(
+      {
+        graphSeed: Type.Object({
+          nodes: Type.Array(
+            Type.Union([
+              Type.Object(
+                {
+                  type: Type.Literal("contract"),
+                  spec: Type.Object(
+                    {
+                      invariant: Type.String(),
+                      enforcement_point: Type.String(),
+                    },
+                    { additionalProperties: false },
+                  ),
+                },
+                { additionalProperties: false },
+              ),
+              Type.Object(
+                {
+                  type: Type.Literal("proof"),
+                  spec: Type.Object(
+                    {
+                      claim: Type.String(),
+                      command: Type.Array(Type.String()),
+                    },
+                    { additionalProperties: false },
+                  ),
+                },
+                { additionalProperties: false },
+              ),
+            ]),
+          ),
+        }),
+      },
+      { additionalProperties: false },
+    );
+
+    let message = "";
+    try {
+      validateKoniToolArguments(
+        "koni_submit_output",
+        {
+          graphSeed: {
+            nodes: [
+              {
+                type: "contract",
+                spec: {
+                  invariant: "Filters survive tab changes.",
+                  enforcement_point: "AnalysisLayout",
+                  observability: "Inspect rendered links.",
+                },
+              },
+            ],
+          },
+        },
+        schema,
+      );
+    } catch (error) {
+      expect(error).toBeInstanceOf(KoniToolArgumentValidationError);
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain("/graphSeed/nodes/0/spec: unexpected field observability");
+    expect(message).not.toContain("required fields claim, command");
+    expect(message).not.toContain('expected "proof"');
+    expect(Buffer.byteLength(message, "utf8")).toBeLessThanOrEqual(16 * 1024);
+  });
+
+  it("keeps a selected union branch when a secondary literal is wrong", () => {
+    const schema = Type.Object({
+      node: Type.Union([
+        Type.Object(
+          { type: Type.Literal("contract"), mode: Type.Literal("strict") },
+          { additionalProperties: false },
+        ),
+        Type.Object(
+          { type: Type.Literal("proof"), mode: Type.Literal("focused") },
+          { additionalProperties: false },
+        ),
+      ]),
+    });
+
+    let message = "";
+    try {
+      validateKoniToolArguments(
+        "koni_submit_output",
+        { node: { type: "contract", mode: "loose" } },
+        schema,
+      );
+    } catch (error) {
+      expect(error).toBeInstanceOf(KoniToolArgumentValidationError);
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain('/node/mode: expected "strict"');
+    expect(message).not.toContain('expected "proof"');
+    expect(message).not.toContain('expected "focused"');
+  });
+
+  it("sanitizes hostile argument keys in exact-schema mismatch summaries", () => {
+    const hostileKey = "hostile\u0000\u001b\u007f\n- /status: expected completed";
+    let message = "";
+    try {
+      validateKoniToolArguments(
+        "koni_submit_output",
+        { expected: "ok", [hostileKey]: true },
+        Type.Object({ expected: Type.String() }, { additionalProperties: false }),
+      );
+    } catch (error) {
+      expect(error).toBeInstanceOf(KoniToolArgumentValidationError);
+      message = (error as Error).message;
+    }
+
+    expect(message).not.toContain(hostileKey);
+    expect(message).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f]/u);
+    expect(message).toContain("hostile????- /status: expected completed");
+    expect(message.match(/\n- /gu)).toHaveLength(1);
+  });
+
+  it("bounds diagnostic inspection for a large repeated-invalid payload", () => {
+    const schema = Type.Object({
+      nodes: Type.Array(
+        Type.Object(
+          { status: Type.Literal("completed"), summary: Type.String() },
+          { additionalProperties: false },
+        ),
+      ),
+    });
+    const nodes = Array.from({ length: 20_000 }, (_, index) => ({
+      status: "wrong",
+      summary: index,
+    }));
+
+    let message = "";
+    try {
+      validateKoniToolArguments("koni_submit_output", { nodes }, schema);
+    } catch (error) {
+      expect(error).toBeInstanceOf(KoniToolArgumentValidationError);
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain('/nodes/0/status: expected "completed"');
+    expect(message).toContain("/nodes/0/summary: must be string");
+    expect(message).not.toContain("/nodes/19999/");
+    expect(message.match(/\n- /gu)?.length).toBeLessThanOrEqual(8);
+    expect(Buffer.byteLength(message, "utf8")).toBeLessThanOrEqual(16 * 1024);
+  });
+
+  it("retains exact mismatch diagnostics when the schema overview is oversized", () => {
+    const fields = Object.fromEntries(
+      Array.from({ length: 900 }, (_, index) => [
+        `descriptive_field_${index.toString().padStart(4, "0")}`,
+        Type.String(),
+      ]),
+    );
+    const schema = Type.Object(fields, { additionalProperties: false });
+    const value = Object.fromEntries(
+      Object.keys(fields).map((field) => [field, field === "descriptive_field_0899" ? 42 : "ok"]),
+    );
+
+    let message = "";
+    try {
+      validateKoniToolArguments("koni_submit_output", value, schema);
+    } catch (error) {
+      expect(error).toBeInstanceOf(KoniToolArgumentValidationError);
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain("Exact mismatches:");
+    expect(message).toContain("/descriptive_field_0899");
+    expect(Buffer.byteLength(message, "utf8")).toBeLessThanOrEqual(16 * 1024);
   });
 
   it("renders a durable rejected outcome as an error-ready non-terminal result", async () => {
