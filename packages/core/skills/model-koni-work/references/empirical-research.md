@@ -46,6 +46,10 @@ evidence matters independently.
   limits, or reporting completeness.
 - Version assets and bind methods, datasets, seeds, environments, commands, and relevant hashes to
   each run plan.
+- Treat an asset implementation plan as one filesystem authority boundary. Normalize
+  `implementation_plan.root` as a directory boundary; every planned file must be contained beneath
+  it, and every implementation or capability entrypoint must identify one of those planned files.
+  Never serialize a file or entrypoint outside that root and rely on a later worker to reconcile it.
 - Preserve null, negative, contradictory, and failed results as evidence when their receipts are
   valid. Never rewrite acceptance criteria after observing the result without a new explicit design
   revision.

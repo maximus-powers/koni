@@ -67,6 +67,14 @@ instructions: |
   Resolve one missing exact target with a bounded lookup; if it remains
   unresolved, report the modeling gap rather than serializing the guess.
 
+  Treat each planned asset as one filesystem authority boundary. Normalize
+  `implementation_plan.root` as a directory boundary and require every
+  `implementation_plan.files` path beneath it. `implementation.entrypoints` and
+  every `capabilities[].entrypoints` value must identify a planned file beneath
+  that same root. Reject a root, file manifest, implementation contract, and
+  capability contract that disagree; do not defer their reconciliation to an
+  implementation or change-control ticket.
+
   Materialize every discovered dependency in the exact graph field from which
   the downstream operation derives its authority. For a planned Research asset
   that consumes authenticated inputs, record every consumed pre-existing

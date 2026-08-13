@@ -549,7 +549,7 @@ node_types:
             items:
               type: path
               pattern: ^program/assets(?:/.*)?$
-            description: Concrete asset entrypoints that provide this capability.
+            description: Concrete asset entrypoints that provide this capability. When implementation_plan is present, each entrypoint is contained beneath its root and also listed in implementation_plan.files.
       description: Typed capability providers with stable names, exact provided protocol versions, and concrete entrypoints.
     gate_contracts:
       type: object
@@ -584,7 +584,7 @@ node_types:
           items:
             type: path
             pattern: ^program/assets(?:/.*)?$
-          description: Planned project-relative product paths; the compiler independently inventories actual files.
+          description: Planned project-relative product paths contained beneath implementation_plan.root; the compiler independently inventories actual files.
     implementation:
       type: object
       required: false
@@ -602,7 +602,7 @@ node_types:
           items:
             type: path
             pattern: ^program/assets(?:/.*)?$
-          description: Nonempty unique project-relative product entrypoints under the planned root.
+          description: Nonempty unique project-relative product entrypoints. When implementation_plan is present, each entrypoint is under its root and also listed in implementation_plan.files.
     source_strategy:
       type: string
       required: false

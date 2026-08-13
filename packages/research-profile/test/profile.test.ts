@@ -10,6 +10,60 @@ import registerProfile, {
 } from "../extensions/profile.js";
 
 describe("research profile registrar", () => {
+  it("keeps every planned asset file and entrypoint inside one materialization root", async () => {
+    const [nodeSource, plannerSource, sharedGuidance] = await Promise.all([
+      readFile(path.resolve(import.meta.dirname, "../koni/baseline/graph/nodes.yaml"), "utf8"),
+      readFile(
+        path.resolve(import.meta.dirname, "../koni/baseline/agents/run-planner.yaml"),
+        "utf8",
+      ),
+      readFile(
+        path.resolve(
+          import.meta.dirname,
+          "../../core/skills/model-koni-work/references/empirical-research.md",
+        ),
+        "utf8",
+      ),
+    ]);
+    const nodeDocument = YAML.parse(nodeSource) as {
+      node_types: Array<{
+        id: string;
+        fields?: Record<
+          string,
+          {
+            properties?: Record<string, { description?: string }>;
+            items?: { properties?: Record<string, { description?: string }> };
+          }
+        >;
+      }>;
+    };
+    const assetFields = nodeDocument.node_types.find(({ id }) => id === "asset")?.fields;
+    const normalizedPlanner = plannerSource.replace(/\s+/gu, " ");
+    const normalizedGuidance = sharedGuidance.replace(/\s+/gu, " ");
+
+    expect(normalizedPlanner).toContain(
+      "Normalize `implementation_plan.root` as a directory boundary and require every `implementation_plan.files` path beneath it",
+    );
+    expect(normalizedPlanner).toContain(
+      "`implementation.entrypoints` and every `capabilities[].entrypoints` value must identify a planned file beneath that same root",
+    );
+    expect(normalizedGuidance).toContain(
+      "Treat an asset implementation plan as one filesystem authority boundary",
+    );
+    expect(normalizedGuidance).toContain(
+      "Never serialize a file or entrypoint outside that root and rely on a later worker to reconcile it",
+    );
+    expect(assetFields?.implementation_plan?.properties?.files?.description).toContain(
+      "contained beneath implementation_plan.root",
+    );
+    expect(assetFields?.implementation?.properties?.entrypoints?.description).toContain(
+      "also listed in implementation_plan.files",
+    );
+    expect(assetFields?.capabilities?.items?.properties?.entrypoints?.description).toContain(
+      "also listed in implementation_plan.files",
+    );
+  });
+
   it("keeps every automatic review-rework workflow bounded to two corrections", async () => {
     const source = await readFile(
       path.resolve(import.meta.dirname, "../koni/baseline/workflows/research.yaml"),
