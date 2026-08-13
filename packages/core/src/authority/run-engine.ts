@@ -226,6 +226,7 @@ import type {
   RunLeadJudgmentRecord,
   PlanningRevisionRecord,
   PlanningSynthesisRecord,
+  HeldSourceGrantRefreshAuthority,
   RecurringAssetGrantRefreshAuthority,
   TicketRecord,
   WorkspaceEffectIntentRecord,
@@ -5181,6 +5182,10 @@ export class RunAuthorityEngine {
             : {
                 recurringAssetGrantRefreshSha256s: semantic.recurringAssetGrantRefreshSha256s,
               }),
+          ...(semantic?.kind !== "assignment" ||
+          semantic.heldSourceGrantRefreshSha256s === undefined
+            ? {}
+            : { heldSourceGrantRefreshSha256s: semantic.heldSourceGrantRefreshSha256s }),
         });
       }
       case "ticket.validate":
@@ -5216,6 +5221,10 @@ export class RunAuthorityEngine {
             : {
                 recurringAssetGrantRefreshSha256s: semantic.recurringAssetGrantRefreshSha256s,
               }),
+          ...(semantic?.kind !== "assignment" ||
+          semantic.heldSourceGrantRefreshSha256s === undefined
+            ? {}
+            : { heldSourceGrantRefreshSha256s: semantic.heldSourceGrantRefreshSha256s }),
         });
       }
       case "output.validate":
@@ -5242,6 +5251,9 @@ export class RunAuthorityEngine {
             : {
                 recurringAssetGrantRefreshSha256s: semantic.recurringAssetGrantRefreshSha256s,
               }),
+          ...(semantic.heldSourceGrantRefreshSha256s === undefined
+            ? {}
+            : { heldSourceGrantRefreshSha256s: semantic.heldSourceGrantRefreshSha256s }),
         });
       }
       case "check.run": {
@@ -5261,6 +5273,9 @@ export class RunAuthorityEngine {
             : {
                 recurringAssetGrantRefreshSha256s: semantic.recurringAssetGrantRefreshSha256s,
               }),
+          ...(semantic.heldSourceGrantRefreshSha256s === undefined
+            ? {}
+            : { heldSourceGrantRefreshSha256s: semantic.heldSourceGrantRefreshSha256s }),
         });
       }
       case "rules.evaluate":
@@ -5283,6 +5298,9 @@ export class RunAuthorityEngine {
             : {
                 recurringAssetGrantRefreshSha256s: semantic.recurringAssetGrantRefreshSha256s,
               }),
+          ...(semantic.kind !== "assignment" || semantic.heldSourceGrantRefreshSha256s === undefined
+            ? {}
+            : { heldSourceGrantRefreshSha256s: semantic.heldSourceGrantRefreshSha256s }),
         });
       }
       case "review.record": {
@@ -5547,10 +5565,19 @@ export class RunAuthorityEngine {
         output: terminalOutput,
       });
       let recurringAssetGrantRefreshSha256s: Sha256Digest[] = [];
+      let heldSourceGrantRefreshSha256s: Sha256Digest[] = [];
       if (compiled.tickets !== undefined) {
         const compiledTickets = retainTicketAuthorityFields(run, structuredClone(compiled.tickets));
         if (compiled.graphHash !== undefined && compiled.graphRevision !== undefined) {
           recurringAssetGrantRefreshSha256s = appendRecurringAssetGrantRefreshAuthorities(
+            run,
+            compiledTickets,
+            record,
+            compiled.graphHash,
+            compiled.graphRevision,
+            draft.updatedAt,
+          );
+          heldSourceGrantRefreshSha256s = appendHeldSourceGrantRefreshAuthorities(
             run,
             compiledTickets,
             record,
@@ -5579,6 +5606,9 @@ export class RunAuthorityEngine {
               ...(recurringAssetGrantRefreshSha256s.length === 0
                 ? {}
                 : { recurringAssetGrantRefreshSha256s }),
+              ...(heldSourceGrantRefreshSha256s.length === 0
+                ? {}
+                : { heldSourceGrantRefreshSha256s }),
             }
           : { kind: "assignment", status: "failed", blocker: compiled.outcome.blocker };
       return compiled.artifactWrites === undefined ? {} : { writes: compiled.artifactWrites };
@@ -21941,6 +21971,86 @@ export function appendRecurringAssetGrantRefreshAuthorities(
     ticket.executionControl ??= {};
     ticket.executionControl.recurringAssetGrantRefreshes ??= [];
     ticket.executionControl.recurringAssetGrantRefreshes.push(refresh);
+    refreshSha256s.push(refresh.sha256);
+  }
+  return refreshSha256s.sort(compareUtf8);
+}
+
+export function appendHeldSourceGrantRefreshAuthorities(
+  previous: Readonly<RunRecord>,
+  compiled: Record<string, TicketRecord>,
+  action: Readonly<RunActionExecutionRecord>,
+  nextGraphHash: Sha256Digest,
+  nextGraphRevision: number,
+  recordedAt: string,
+): Sha256Digest[] {
+  if (
+    previous.graphHash === undefined ||
+    nextGraphRevision !== previous.graphRevision + 1 ||
+    action.boundary.kind !== "assignment_validation" ||
+    previous.actionExecutions?.[action.invocationId]?.boundary.sha256 !== action.boundary.sha256
+  ) {
+    throw new AuthorityRpcError(
+      "held_source_grant_refresh",
+      "held-source grant refresh lacks an exact graph-changing compiler action",
+    );
+  }
+  const application =
+    action.boundary.ticketId === undefined ? undefined : previous.tickets[action.boundary.ticketId];
+  const applicationAuthority = application?.executionControl?.controlTicketAuthority;
+  const applicationCausal =
+    applicationAuthority?.causal.role === "approved_application"
+      ? applicationAuthority.causal
+      : undefined;
+  if (application === undefined || applicationCausal === undefined) return [];
+  const refreshSha256s: Sha256Digest[] = [];
+  for (const [ticketId, ticket] of Object.entries(compiled)) {
+    const prior = previous.tickets[ticketId];
+    const hold = prior?.executionControl?.sourceHold;
+    if (
+      prior === undefined ||
+      hold === undefined ||
+      hold.proposalTicketId !== application.executionControl?.sourceProposalTicketId ||
+      applicationCausal.materialization.proposalTicketId !== hold.proposalTicketId ||
+      prior.status !== "blocked" ||
+      ticket.status !== "blocked" ||
+      ticket.gitCycleId === undefined ||
+      ticket.gitCycleId !== prior.gitCycleId ||
+      canonicalHash(ticket.executionControl?.sourceHold) !== canonicalHash(hold)
+    ) {
+      continue;
+    }
+    const priorProjection = ticketImmutableProjection(prior);
+    const refreshedProjection = ticketImmutableProjection(ticket);
+    if (priorProjection.sha256 === refreshedProjection.sha256) continue;
+    const material = {
+      protocol: "koni.held-source-grant-refresh.v1" as const,
+      runId: previous.id,
+      ticketId,
+      proposalTicketId: hold.proposalTicketId,
+      applicationTicketId: application.id,
+      configurationSha256: previous.compiledConfigHash,
+      actionInvocationId: action.invocationId,
+      actionBoundarySha256: action.boundary.sha256,
+      priorGraphHash: previous.graphHash,
+      priorGraphRevision: previous.graphRevision,
+      nextGraphHash,
+      nextGraphRevision,
+      priorProjection,
+      priorProjectionSha256: priorProjection.sha256,
+      refreshedProjection,
+      nextProjectionSha256: refreshedProjection.sha256,
+      executionEpoch: prior.executionEpoch ?? 0,
+      sourceCycleId: prior.gitCycleId,
+      recordedAt,
+    };
+    const refresh: HeldSourceGrantRefreshAuthority = {
+      ...material,
+      sha256: canonicalHash(material),
+    };
+    ticket.executionControl ??= {};
+    ticket.executionControl.heldSourceGrantRefreshes ??= [];
+    ticket.executionControl.heldSourceGrantRefreshes.push(refresh);
     refreshSha256s.push(refresh.sha256);
   }
   return refreshSha256s.sort(compareUtf8);

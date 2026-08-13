@@ -53,6 +53,7 @@ import {
   routablePlannedAssetRepairProposalIds,
   routePlannedAssetRepairProposals,
   routeSupersededGateRunProposals,
+  refreshHeldSourceTicketGrant,
   refreshSettledRecurringAssetTicketGrant,
   reopenCompletedRecurringAssetTicket,
   recurringAssetHasUnaddressedGateFailure,
@@ -1266,6 +1267,89 @@ describe("native compiler-authoritative run program", () => {
     expect(() => assertTicketDefinitionStable(ticket, definition)).toThrow(
       /changed under the same deterministic identity/u,
     );
+  });
+
+  it("refreshes only an exact held source grant for an approved application", () => {
+    const ticket = {
+      id: "TK-held-proof-source",
+      operationId: "assurance.proof.prepare",
+      status: "blocked",
+      blocker: "Awaiting upstream change proposal TK-proof-change",
+      executionEpoch: 0,
+      executionControl: {
+        sourceHold: {
+          proposalTicketId: "TK-proof-change",
+          requestSha256: digest("held-proof-request"),
+        },
+      },
+      targetNodeIds: ["proof-one"],
+      readNodeIds: ["proof-one"],
+      writeNodeIds: ["proof-one"],
+      readPaths: ["tests/old-proof.test.ts", "src/old-owner.ts"],
+      writePaths: ["tests/old-proof.test.ts"],
+      steps: [
+        {
+          id: "author-historical-baseline",
+          personaId: "implementer",
+          kind: "production",
+          dependsOn: [],
+          readNodeIds: ["proof-one"],
+          writeNodeIds: ["proof-one"],
+          readPaths: ["tests/old-proof.test.ts", "src/old-owner.ts"],
+          writePaths: ["tests/old-proof.test.ts"],
+          status: "completed",
+          attemptIds: ["attempt-held-proof"],
+        },
+      ],
+    } as unknown as TicketRecord;
+    const definition = {
+      id: ticket.id,
+      operation_registry_id: ticket.operationId,
+      target_node_ids: ["proof-one"],
+      scope: {
+        read_node_ids: ["proof-one"],
+        write_node_ids: ["proof-one"],
+        read_paths: ["tests/old-proof.test.ts", "src/current-owner.ts"],
+        write_paths: ["tests/old-proof.test.ts"],
+      },
+      workflow: [
+        {
+          id: "author-historical-baseline",
+          persona_id: "implementer",
+          kind: "production",
+          depends_on: [],
+          read_node_ids: ["proof-one"],
+          write_node_ids: ["proof-one"],
+          read_paths: ["tests/old-proof.test.ts", "src/current-owner.ts"],
+          write_paths: ["tests/old-proof.test.ts"],
+        },
+      ],
+    } as unknown as DerivedTicketDefinition;
+
+    expect(() => assertTicketDefinitionStable(ticket, definition)).toThrow(
+      /changed under the same deterministic identity/u,
+    );
+    expect(refreshHeldSourceTicketGrant(ticket, definition, "TK-unrelated-change")).toBe(false);
+    expect(ticket.readPaths).toContain("src/old-owner.ts");
+
+    expect(refreshHeldSourceTicketGrant(ticket, definition, "TK-proof-change")).toBe(true);
+    expect(ticket).toMatchObject({
+      status: "blocked",
+      executionEpoch: 0,
+      executionControl: {
+        sourceHold: { proposalTicketId: "TK-proof-change" },
+      },
+      readPaths: ["tests/old-proof.test.ts", "src/current-owner.ts"],
+      steps: [
+        expect.objectContaining({
+          id: "author-historical-baseline",
+          status: "completed",
+          attemptIds: ["attempt-held-proof"],
+          readPaths: ["tests/old-proof.test.ts", "src/current-owner.ts"],
+        }),
+      ],
+    });
+    expect(() => assertTicketDefinitionStable(ticket, definition)).not.toThrow();
   });
 
   it("reopens a retired recurring asset when a later approved repair becomes actionable", () => {

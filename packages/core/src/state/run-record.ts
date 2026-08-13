@@ -277,6 +277,29 @@ export interface RecurringAssetGrantRefreshAuthority {
   readonly sha256: Sha256Digest;
 }
 
+export interface HeldSourceGrantRefreshAuthority {
+  readonly protocol: "koni.held-source-grant-refresh.v1";
+  readonly runId: string;
+  readonly ticketId: string;
+  readonly proposalTicketId: string;
+  readonly applicationTicketId: string;
+  readonly configurationSha256: Sha256Digest;
+  readonly actionInvocationId: string;
+  readonly actionBoundarySha256: Sha256Digest;
+  readonly priorGraphHash: Sha256Digest;
+  readonly priorGraphRevision: number;
+  readonly nextGraphHash: Sha256Digest;
+  readonly nextGraphRevision: number;
+  readonly priorProjection: TicketImmutableProjection;
+  readonly priorProjectionSha256: Sha256Digest;
+  readonly refreshedProjection: TicketImmutableProjection;
+  readonly nextProjectionSha256: Sha256Digest;
+  readonly executionEpoch: number;
+  readonly sourceCycleId: string;
+  readonly recordedAt: string;
+  readonly sha256: Sha256Digest;
+}
+
 /**
  * Compiler-authored control/recovery transaction state carried with one ticket. It deliberately
  * contains identities and hashes only; scheduling policy is projected elsewhere from this record.
@@ -286,6 +309,8 @@ export interface TicketExecutionControlRecord {
   controlTicketAuthority?: CompilerControlTicketAuthority;
   /** Append-only compiler proof for a recurring asset's fresh-epoch grant replacement. */
   recurringAssetGrantRefreshes?: RecurringAssetGrantRefreshAuthority[];
+  /** Append-only compiler proof for a graph-changing application that refreshes its held source. */
+  heldSourceGrantRefreshes?: HeldSourceGrantRefreshAuthority[];
   changeControlScopeNodeIds?: string[];
   /** Immutable compiler request that caused this proposal ticket to exist. */
   proposalRequest?: {
@@ -933,6 +958,8 @@ export type RunActionSemanticResult =
       changeControlSha256?: Sha256Digest;
       /** Compiler-emitted recurring-asset grant replacements applied by this exact action. */
       recurringAssetGrantRefreshSha256s?: Sha256Digest[];
+      /** Compiler-emitted held-source grant replacements applied by this exact action. */
+      heldSourceGrantRefreshSha256s?: Sha256Digest[];
     }
   | { kind: "report"; reportId: string; bundleHash: Sha256Digest };
 
@@ -3257,6 +3284,11 @@ function assertRunActionSemanticResult(value: unknown): void {
           value.recurringAssetGrantRefreshSha256s.length === 0 ||
           value.recurringAssetGrantRefreshSha256s.length > 64 ||
           value.recurringAssetGrantRefreshSha256s.some((digest) => !isSha256Digest(digest)))) ||
+      (value.heldSourceGrantRefreshSha256s !== undefined &&
+        (!Array.isArray(value.heldSourceGrantRefreshSha256s) ||
+          value.heldSourceGrantRefreshSha256s.length === 0 ||
+          value.heldSourceGrantRefreshSha256s.length > 64 ||
+          value.heldSourceGrantRefreshSha256s.some((digest) => !isSha256Digest(digest)))) ||
       (value.status === "completed" &&
         (typeof value.summary !== "string" || value.summary.length === 0)) ||
       (value.status === "failed" &&
@@ -4253,6 +4285,80 @@ function assertRecurringAssetGrantRefreshAuthority(
   }
 }
 
+function assertHeldSourceGrantRefreshAuthority(
+  ticketId: string,
+  value: unknown,
+): asserts value is HeldSourceGrantRefreshAuthority {
+  if (!isRecord(value)) throw new Error(`invalid held-source grant refresh: ${ticketId}`);
+  const allowed = new Set([
+    "protocol",
+    "runId",
+    "ticketId",
+    "proposalTicketId",
+    "applicationTicketId",
+    "configurationSha256",
+    "actionInvocationId",
+    "actionBoundarySha256",
+    "priorGraphHash",
+    "priorGraphRevision",
+    "nextGraphHash",
+    "nextGraphRevision",
+    "priorProjection",
+    "priorProjectionSha256",
+    "refreshedProjection",
+    "nextProjectionSha256",
+    "executionEpoch",
+    "sourceCycleId",
+    "recordedAt",
+    "sha256",
+  ]);
+  if (
+    Object.keys(value).some((field) => !allowed.has(field)) ||
+    value.protocol !== "koni.held-source-grant-refresh.v1" ||
+    !isId(value.runId) ||
+    value.ticketId !== ticketId ||
+    !isId(value.proposalTicketId) ||
+    !isId(value.applicationTicketId) ||
+    !isSha256Digest(value.configurationSha256) ||
+    !isId(value.actionInvocationId) ||
+    !isSha256Digest(value.actionBoundarySha256) ||
+    !isSha256Digest(value.priorGraphHash) ||
+    !isNonnegativeSafeInteger(value.priorGraphRevision) ||
+    !isSha256Digest(value.nextGraphHash) ||
+    !isNonnegativeSafeInteger(value.nextGraphRevision) ||
+    !isRecord(value.priorProjection) ||
+    !isSha256Digest(value.priorProjectionSha256) ||
+    !isRecord(value.refreshedProjection) ||
+    !isSha256Digest(value.nextProjectionSha256) ||
+    !isNonnegativeSafeInteger(value.executionEpoch) ||
+    !isId(value.sourceCycleId) ||
+    typeof value.recordedAt !== "string" ||
+    value.recordedAt.length === 0 ||
+    !isSha256Digest(value.sha256)
+  ) {
+    throw new Error(`invalid held-source grant refresh: ${ticketId}`);
+  }
+  assertTicketImmutableProjection(
+    value.priorProjection,
+    `held-source prior projection: ${ticketId}`,
+  );
+  assertTicketImmutableProjection(
+    value.refreshedProjection,
+    `held-source refreshed projection: ${ticketId}`,
+  );
+  const { sha256, ...material } = value;
+  if (
+    value.priorProjection.id !== ticketId ||
+    value.refreshedProjection.id !== ticketId ||
+    value.priorProjectionSha256 !== value.priorProjection.sha256 ||
+    value.nextProjectionSha256 !== value.refreshedProjection.sha256 ||
+    value.nextGraphRevision !== value.priorGraphRevision + 1 ||
+    canonicalHash(material) !== sha256
+  ) {
+    throw new Error(`invalid held-source grant refresh authority: ${ticketId}`);
+  }
+}
+
 function assertTicketExecutionControl(
   ticketId: string,
   value: unknown,
@@ -4263,6 +4369,7 @@ function assertTicketExecutionControl(
   const allowed = new Set([
     "controlTicketAuthority",
     "recurringAssetGrantRefreshes",
+    "heldSourceGrantRefreshes",
     "changeControlScopeNodeIds",
     "proposalRequest",
     "sourceHold",
@@ -4293,6 +4400,17 @@ function assertTicketExecutionControl(
     }
     for (const refresh of value.recurringAssetGrantRefreshes) {
       assertRecurringAssetGrantRefreshAuthority(ticketId, refresh);
+    }
+  }
+  if (value.heldSourceGrantRefreshes !== undefined) {
+    if (
+      !Array.isArray(value.heldSourceGrantRefreshes) ||
+      value.heldSourceGrantRefreshes.length > 64
+    ) {
+      throw new Error(`invalid held-source grant refresh history: ${ticketId}`);
+    }
+    for (const refresh of value.heldSourceGrantRefreshes) {
+      assertHeldSourceGrantRefreshAuthority(ticketId, refresh);
     }
   }
   if (value.changeControlScopeNodeIds !== undefined) {
@@ -5362,13 +5480,28 @@ function assertCompilerControlTicketForRun(
       source !== undefined &&
       sourceProjection !== undefined &&
       (activelyHeldSource
-        ? ticketProjectionsDifferOnlyByDependencies(sourceProjection, causal.sourceTicketProjection)
-        : proposalHasReleasedSourceAuthority(run, ticket) &&
-          recurringAssetGrantRefreshChainAuthorizes(
+        ? ticketProjectionsDifferOnlyByDependencies(
+            sourceProjection,
+            causal.sourceTicketProjection,
+          ) ||
+          heldSourceGrantRefreshChainAuthorizes(
             source,
             sourceProjection,
             causal.sourceTicketProjection,
-          ));
+            ticket.id,
+          )
+        : proposalHasReleasedSourceAuthority(run, ticket) &&
+          (recurringAssetGrantRefreshChainAuthorizes(
+            source,
+            sourceProjection,
+            causal.sourceTicketProjection,
+          ) ||
+            heldSourceGrantRefreshChainAuthorizes(
+              source,
+              sourceProjection,
+              causal.sourceTicketProjection,
+              ticket.id,
+            )));
     const sourceStep = sourceProjection?.steps.find(
       (step) => step.id === causal.publication.sourceStepId,
     );
@@ -5567,6 +5700,23 @@ function recurringAssetGrantRefreshChainAuthorizes(
     cursor = checkpoint + 1;
   }
   for (const refresh of history.slice(cursor)) {
+    if (!ticketProjectionsDifferOnlyByDependencies(refresh.priorProjection, accepted)) return false;
+    accepted = refresh.refreshedProjection;
+  }
+  return ticketProjectionsDifferOnlyByDependencies(current, accepted);
+}
+
+function heldSourceGrantRefreshChainAuthorizes(
+  source: Readonly<TicketRecord>,
+  current: Readonly<TicketImmutableProjection>,
+  historical: Readonly<TicketImmutableProjection>,
+  proposalTicketId: string,
+): boolean {
+  const history = (source.executionControl?.heldSourceGrantRefreshes ?? []).filter(
+    (refresh) => refresh.proposalTicketId === proposalTicketId,
+  );
+  let accepted = historical;
+  for (const refresh of history) {
     if (!ticketProjectionsDifferOnlyByDependencies(refresh.priorProjection, accepted)) return false;
     accepted = refresh.refreshedProjection;
   }
@@ -6073,6 +6223,26 @@ function recurringAssetProjectionDefinitionMaterial(
   };
 }
 
+function heldSourceProjectionDefinitionMaterial(
+  projection: Readonly<TicketImmutableProjection>,
+): unknown {
+  return {
+    ...projection,
+    readNodeIds: [],
+    writeNodeIds: [],
+    readPaths: [],
+    writePaths: [],
+    steps: projection.steps.map((step) => ({
+      ...step,
+      readNodeIds: [],
+      writeNodeIds: [],
+      readPaths: [],
+      writePaths: [],
+    })),
+    sha256: "",
+  };
+}
+
 function assignmentSemanticCompilerStep(
   action: Readonly<RunActionExecutionRecord>,
 ): Readonly<RunActionExecutionRecord["plan"]["recipe"][number]> | undefined {
@@ -6195,6 +6365,124 @@ function assertRecurringAssetGrantRefreshMutation(
       !refreshEffect.output.recurringAssetGrantRefreshSha256s.includes(refresh.sha256)
     ) {
       throw new Error(`ticket added unauthenticated recurring-asset grant refresh: ${ticketId}`);
+    }
+  }
+}
+
+function assertHeldSourceGrantRefreshMutation(
+  previous: Readonly<RunRecord>,
+  next: Readonly<RunRecord>,
+): void {
+  for (const [ticketId, currentTicket] of Object.entries(next.tickets)) {
+    const priorTicket = previous.tickets[ticketId];
+    const priorHistory = priorTicket?.executionControl?.heldSourceGrantRefreshes ?? [];
+    const currentHistory = currentTicket.executionControl?.heldSourceGrantRefreshes ?? [];
+    if (
+      currentHistory.length < priorHistory.length ||
+      canonicalHash(currentHistory.slice(0, priorHistory.length)) !== canonicalHash(priorHistory)
+    ) {
+      throw new Error(`ticket rewrote held-source grant refresh authority: ${ticketId}`);
+    }
+    const added = currentHistory.slice(priorHistory.length);
+    if (added.length === 0) {
+      if (
+        priorTicket !== undefined &&
+        priorHistory.length > 0 &&
+        !ticketProjectionsDifferOnlyByDependencies(
+          ticketImmutableProjection(priorTicket),
+          ticketImmutableProjection(currentTicket),
+        ) &&
+        priorTicket.executionControl?.sourceHold !== undefined
+      ) {
+        throw new Error(`ticket changed a held-source grant without fresh authority: ${ticketId}`);
+      }
+      continue;
+    }
+    if (added.length !== 1 || priorTicket === undefined) {
+      throw new Error(`ticket added ambiguous held-source grant refresh authority: ${ticketId}`);
+    }
+    const refresh = added[0]!;
+    const priorProjection = ticketImmutableProjection(priorTicket);
+    const currentProjection = ticketImmutableProjection(currentTicket);
+    const priorHold = priorTicket.executionControl?.sourceHold;
+    const currentHold = currentTicket.executionControl?.sourceHold;
+    const priorAction = previous.actionExecutions?.[refresh.actionInvocationId];
+    const currentAction = next.actionExecutions?.[refresh.actionInvocationId];
+    const application = next.tickets[refresh.applicationTicketId];
+    const applicationAuthority = application?.executionControl?.controlTicketAuthority;
+    const applicationCausal =
+      applicationAuthority?.causal.role === "approved_application"
+        ? applicationAuthority.causal
+        : undefined;
+    const semanticCompilerStep =
+      currentAction === undefined ? undefined : assignmentSemanticCompilerStep(currentAction);
+    const refreshEffect =
+      currentAction === undefined || semanticCompilerStep === undefined
+        ? undefined
+        : currentAction.effects[
+            `${currentAction.invocationId}:recipe:${semanticCompilerStep.id}:${currentAction.plan.sha256}`
+          ];
+    const sourceCycle =
+      priorTicket.gitCycleId === undefined
+        ? undefined
+        : previous.git.ticketCycles[priorTicket.gitCycleId];
+    if (
+      priorHold === undefined ||
+      currentHold === undefined ||
+      canonicalHash(currentHold) !== canonicalHash(priorHold) ||
+      priorTicket.status !== "blocked" ||
+      currentTicket.status !== "blocked" ||
+      priorTicket.operationId !== currentTicket.operationId ||
+      currentTicket.executionEpoch !== priorTicket.executionEpoch ||
+      currentTicket.gitCycleId !== priorTicket.gitCycleId ||
+      currentTicket.worktreePath !== priorTicket.worktreePath ||
+      currentTicket.branch !== priorTicket.branch ||
+      sourceCycle?.status !== "active" ||
+      refresh.runId !== next.id ||
+      refresh.ticketId !== ticketId ||
+      refresh.proposalTicketId !== priorHold.proposalTicketId ||
+      refresh.applicationTicketId !== application?.id ||
+      refresh.configurationSha256 !== next.compiledConfigHash ||
+      refresh.actionInvocationId !== currentAction?.invocationId ||
+      refresh.actionBoundarySha256 !== currentAction?.boundary.sha256 ||
+      refresh.priorGraphHash !== previous.graphHash ||
+      refresh.priorGraphRevision !== previous.graphRevision ||
+      refresh.nextGraphHash !== next.graphHash ||
+      refresh.nextGraphRevision !== next.graphRevision ||
+      refresh.priorProjectionSha256 !== priorProjection.sha256 ||
+      canonicalHash(refresh.priorProjection) !== canonicalHash(priorProjection) ||
+      refresh.nextProjectionSha256 !== currentProjection.sha256 ||
+      canonicalHash(refresh.refreshedProjection) !== canonicalHash(currentProjection) ||
+      refresh.executionEpoch !== (priorTicket.executionEpoch ?? 0) ||
+      refresh.sourceCycleId !== priorTicket.gitCycleId ||
+      refresh.recordedAt !== next.updatedAt ||
+      canonicalHash(heldSourceProjectionDefinitionMaterial(priorProjection)) !==
+        canonicalHash(heldSourceProjectionDefinitionMaterial(currentProjection)) ||
+      previous.graphHash === next.graphHash ||
+      priorAction === undefined ||
+      currentAction === undefined ||
+      priorAction.boundary.kind !== "assignment_validation" ||
+      priorAction.boundary.sha256 !== refresh.actionBoundarySha256 ||
+      priorAction.semanticResult !== undefined ||
+      currentAction.boundary.ticketId !== application.id ||
+      applicationAuthority?.role !== "approved_application" ||
+      applicationCausal === undefined ||
+      application.executionControl?.sourceProposalTicketId !== priorHold.proposalTicketId ||
+      applicationCausal.materialization.proposalTicketId !== priorHold.proposalTicketId ||
+      !applicationCausal.materialization.targetNodeIds.some((nodeId) =>
+        priorProjection.targetNodeIds.includes(nodeId),
+      ) ||
+      currentAction.semanticResult?.kind !== "assignment" ||
+      currentAction.semanticResult.status !== "completed" ||
+      !currentAction.semanticResult.heldSourceGrantRefreshSha256s?.includes(refresh.sha256) ||
+      semanticCompilerStep === undefined ||
+      refreshEffect === undefined ||
+      priorAction.effects[refreshEffect.effectKey] !== undefined ||
+      !isRecord(refreshEffect.output) ||
+      !Array.isArray(refreshEffect.output.heldSourceGrantRefreshSha256s) ||
+      !refreshEffect.output.heldSourceGrantRefreshSha256s.includes(refresh.sha256)
+    ) {
+      throw new Error(`ticket added unauthenticated held-source grant refresh: ${ticketId}`);
     }
   }
 }
@@ -6758,6 +7046,7 @@ export function assertRunExecutionControlMutation(
   assertPlanningSessionMutation(previous.planningSession, next.planningSession);
   assertLeadJudgmentMutation(previous, next);
   assertTokenBudgetRecoveryMutation(previous, next);
+  assertHeldSourceGrantRefreshMutation(previous, next);
   assertRecurringAssetGrantRefreshMutation(previous, next);
   assertReviewReworkMutation(previous, next, receipt);
   assertCompilerReissueDiagnosisMutation(previous, next, receipt);

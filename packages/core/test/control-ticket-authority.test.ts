@@ -4,6 +4,7 @@ import {
   prepareRunActionExecution,
 } from "../src/authority/action-execution.js";
 import {
+  appendHeldSourceGrantRefreshAuthorities,
   appendRecurringAssetGrantRefreshAuthorities,
   retainTicketAuthorityFields,
 } from "../src/authority/run-engine.js";
@@ -62,6 +63,115 @@ type AuthorityAttack = Readonly<{
 }>;
 
 describe("canonical compiler control-ticket authority", () => {
+  it("binds a held source grant refresh to its exact approved graph-changing application", async () => {
+    const catalog = buildCatalog();
+    const run = baseRun(catalog);
+    const proposal = await proposalFixture(run, catalog, false, "-held-refresh");
+    const application = await applicationFixture(
+      run,
+      catalog,
+      proposal,
+      "-held-refresh",
+      "compile",
+    );
+    const proposalAuthority = proposal.executionControl!.controlTicketAuthority!;
+    if (proposalAuthority.causal.role !== "proposal") {
+      throw new Error("fixture proposal cause mismatch");
+    }
+    const source = run.tickets[proposalAuthority.causal.publication.sourceTicketId]!;
+    const sourceCycle = attachFixtureTicketCycle(run, source);
+    source.status = "blocked";
+    application.status = "running";
+    const applicationStep = application.steps[0]!;
+    applicationStep.status = "running";
+    const attemptId = "attempt-held-source-refresh";
+    run.attempts[attemptId] = attemptRecord(
+      application,
+      applicationStep.id,
+      attemptId,
+      terminalPolicyFor(attemptId),
+      digest("held-source-refresh-output"),
+    );
+    run.attempts[attemptId].status = "terminal_accepted";
+    run.attempts[attemptId].endedAt = undefined;
+    applicationStep.attemptIds = [attemptId];
+    const prepared = prepareRunActionExecution(run, {
+      kind: "assignment_validation",
+      stageId: run.currentPipelineStageId!,
+      selector: applicationStep.validationAction!,
+      checkout: "main",
+      ticketId: application.id,
+      ticketState: application.status,
+      stepId: applicationStep.id,
+      attemptId,
+      at: AT,
+    });
+    run.actionExecutions ??= {};
+    run.actionExecutions[prepared.invocationId] = structuredClone(prepared);
+    run.graphHash = digest("held-source-graph-before");
+    expect(() => assertRunRecord(run)).not.toThrow();
+
+    const next = structuredClone(run);
+    next.revision += 1;
+    next.updatedAt = "2026-07-18T05:01:00.000Z";
+    next.graphRevision += 1;
+    next.graphHash = digest("held-source-graph-after");
+    const refreshed = next.tickets[source.id]!;
+    refreshed.readPaths = ["src/current-owner.ts"];
+    refreshed.steps[0]!.readPaths = ["src/current-owner.ts"];
+    authorizeHeldSourceGrantRefresh(run, next, prepared.invocationId);
+
+    expect(refreshed).toMatchObject({
+      status: "blocked",
+      gitCycleId: sourceCycle.cycleId,
+      executionControl: {
+        sourceHold: proposalAuthority.causal.sourceHold,
+        heldSourceGrantRefreshes: [
+          expect.objectContaining({
+            priorProjectionSha256: ticketImmutableProjection(source).sha256,
+            nextProjectionSha256: ticketImmutableProjection(refreshed).sha256,
+          }),
+        ],
+      },
+    });
+    expect(() => assertRunRecord(next)).not.toThrow();
+    expect(() => assertRunExecutionControlMutation(run, next)).not.toThrow();
+
+    const released = structuredClone(next);
+    released.revision += 1;
+    released.updatedAt = "2026-07-18T05:02:00.000Z";
+    const releasedApplication = released.tickets[application.id]!;
+    releasedApplication.status = "completed";
+    for (const step of releasedApplication.steps) step.status = "completed";
+    const applicationCycle = attachFixtureTicketCycle(released, releasedApplication);
+    applicationCycle.status = "retired";
+    applicationCycle.integratedRunOid = released.git.run.headOid;
+    applicationCycle.squashCommitOid = released.git.run.headOid;
+    applicationCycle.integratedAt = released.updatedAt;
+    applicationCycle.retiredAt = released.updatedAt;
+    const releasedSource = released.tickets[source.id]!;
+    released.git.ticketCycles[sourceCycle.cycleId]!.status = "retired";
+    const releasedSourceCycle = released.git.ticketCycles[sourceCycle.cycleId]!;
+    releasedSourceCycle.supersessionSha256 = proposalAuthority.causal.publication.requestSha256;
+    releasedSourceCycle.archiveRef = `refs/koni/archive/${released.id}/tickets/${source.id}/cycles/${sourceCycle.cycleId}/${releasedSourceCycle.supersessionSha256.slice("sha256:".length)}`;
+    releasedSourceCycle.supersededAt = released.updatedAt;
+    releasedSourceCycle.retiredAt = released.updatedAt;
+    delete (releasedSourceCycle as unknown as Record<string, unknown>).integratedRunOid;
+    releasedSource.status = "queued";
+    releasedSource.executionEpoch = 1;
+    delete releasedSource.executionControl!.sourceHold;
+    delete releasedSource.gitCycleId;
+    releasedSource.worktreePath = undefined;
+    releasedSource.branch = undefined;
+    for (const step of releasedSource.steps) step.status = "pending";
+    expect(() => assertRunRecord(released)).not.toThrow();
+    expect(() => assertRunExecutionControlMutation(next, released)).not.toThrow();
+
+    const widened = structuredClone(next);
+    widened.tickets[source.id]!.writePaths = ["unrelated/widened-root"];
+    expect(() => assertRunExecutionControlMutation(next, widened)).toThrow();
+  });
+
   it("preserves a released proposal across an exact recurring-asset grant refresh", async () => {
     const catalog = buildCatalog();
     const run = baseRun(catalog);
@@ -1604,6 +1714,52 @@ function authorizeRecurringAssetGrantRefresh(
       context: action.plan.context,
     },
     { recurringAssetGrantRefreshSha256s: refreshSha256s },
+    next.updatedAt,
+  );
+}
+
+function authorizeHeldSourceGrantRefresh(
+  previous: Readonly<RunRecord>,
+  next: RunRecord,
+  actionInvocationId: string,
+): void {
+  const action = next.actionExecutions?.[actionInvocationId];
+  const priorAction = previous.actionExecutions?.[actionInvocationId];
+  if (action === undefined || priorAction === undefined || next.graphHash === undefined) {
+    throw new Error("fixture held-source refresh action is incomplete");
+  }
+  action.updatedAt = next.updatedAt;
+  const refreshSha256s = appendHeldSourceGrantRefreshAuthorities(
+    previous,
+    next.tickets,
+    priorAction,
+    next.graphHash,
+    next.graphRevision,
+    next.updatedAt,
+  );
+  action.semanticResult = {
+    kind: "assignment",
+    status: "completed",
+    summary: "Applied the approved graph change that refreshed the held source grant",
+    heldSourceGrantRefreshSha256s: refreshSha256s,
+  };
+  const semanticStep = ["check.run", "review.validate", "rules.evaluate", "project.validate"]
+    .map((primitive) => action.plan.recipe.find((step) => step.primitive === primitive))
+    .find((step) => step !== undefined);
+  if (semanticStep === undefined) throw new Error("fixture action has no semantic step");
+  const effectKey = `${action.invocationId}:recipe:${semanticStep.id}:${action.plan.sha256}`;
+  action.effects[effectKey] = createRunActionEffectReceipt(
+    {
+      invocationId: action.invocationId,
+      planSha256: action.plan.sha256,
+      effectKey,
+      actionId: action.plan.actionId,
+      actor: action.plan.actor,
+      phase: "recipe",
+      step: semanticStep,
+      context: action.plan.context,
+    },
+    { heldSourceGrantRefreshSha256s: refreshSha256s },
     next.updatedAt,
   );
 }

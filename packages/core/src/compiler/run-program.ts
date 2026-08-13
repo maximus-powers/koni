@@ -2704,6 +2704,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         input.run.git.run.worktree,
       ),
       integrationOperation(pinned.configuration, input.run.runTypeId),
+      executionCatalog.operations[synthetic.operation_registry_id]?.changeControl.role ===
+        "application"
+        ? synthetic.id
+        : undefined,
     );
     const graphBytes = encodeRunGraphArtifact(
       graphArtifact(
@@ -14337,6 +14341,7 @@ function reconcileTickets(
   projectRoot: string,
   recurringAssetReissues?: ReadonlySet<string>,
   syntheticIntegrationOperationId?: string,
+  approvedApplicationTicketId?: string,
 ): Record<string, TicketRecord> {
   const tickets = structuredClone(run.tickets);
   const applicableIds = new Set(definitions.map((definition) => definition.id));
@@ -14448,6 +14453,17 @@ function reconcileTickets(
     const existing = tickets[definition.id];
     if (existing !== undefined) {
       reconcileNeverStartedTicketNodeScope(existing, definition);
+      const heldByApprovedApplication =
+        existing.executionControl?.sourceHold !== undefined &&
+        run.tickets[approvedApplicationTicketId ?? ""]?.executionControl?.sourceProposalTicketId ===
+          existing.executionControl.sourceHold.proposalTicketId;
+      if (heldByApprovedApplication) {
+        refreshHeldSourceTicketGrant(
+          existing,
+          definition,
+          existing.executionControl!.sourceHold!.proposalTicketId,
+        );
+      }
       const recurringAssetReissueRequired = definition.target_node_ids.some(
         (nodeId) => recurringAssetReissues?.has(nodeId) ?? true,
       );
@@ -14972,6 +14988,75 @@ function ticketIsNeverStarted(ticket: Readonly<TicketRecord>): boolean {
         step.completedAt === undefined,
     )
   );
+}
+
+/**
+ * Refresh only the compiler-derived grant of a source that is already suspended behind the exact
+ * proposal being applied. The hold remains intact, so scheduler authority does not reopen here;
+ * the authority engine archives the source's prior checkout and opens the fresh epoch separately.
+ * Target, operation, and workflow identity remain immutable under the deterministic ticket id.
+ */
+export function refreshHeldSourceTicketGrant(
+  ticket: TicketRecord,
+  definition: DerivedTicketDefinition,
+  proposalTicketId: string,
+): boolean {
+  if (
+    ticket.status !== "blocked" ||
+    ticket.executionControl?.sourceHold?.proposalTicketId !== proposalTicketId ||
+    ticket.id !== definition.id ||
+    ticket.operationId !== definition.operation_registry_id ||
+    canonicalHash(ticket.targetNodeIds) !== canonicalHash(definition.target_node_ids) ||
+    ticket.steps.length !== definition.workflow.length ||
+    ticket.steps.some(
+      (step, index) =>
+        step.id !== definition.workflow[index]!.id ||
+        step.personaId !== definition.workflow[index]!.persona_id,
+    )
+  ) {
+    return false;
+  }
+  const before = canonicalHash({
+    readNodeIds: ticket.readNodeIds ?? [],
+    writeNodeIds: ticket.writeNodeIds ?? [],
+    readPaths: ticket.readPaths,
+    writePaths: ticket.writePaths,
+    steps: ticket.steps.map((step) => ({
+      readNodeIds: step.readNodeIds ?? null,
+      writeNodeIds: step.writeNodeIds ?? null,
+      readPaths: step.readPaths ?? null,
+      writePaths: step.writePaths ?? null,
+    })),
+  });
+  ticket.readNodeIds = [...definition.scope.read_node_ids];
+  ticket.writeNodeIds = [...definition.scope.write_node_ids];
+  ticket.readPaths = [...definition.scope.read_paths];
+  ticket.writePaths = [...definition.scope.write_paths];
+  for (const [index, step] of ticket.steps.entries()) {
+    const compiled = definition.workflow[index]!;
+    if (compiled.read_node_ids === undefined) delete step.readNodeIds;
+    else step.readNodeIds = [...compiled.read_node_ids];
+    if (compiled.write_node_ids === undefined) delete step.writeNodeIds;
+    else step.writeNodeIds = [...compiled.write_node_ids];
+    if (compiled.read_paths === undefined) delete step.readPaths;
+    else step.readPaths = [...compiled.read_paths];
+    if (compiled.write_paths === undefined) delete step.writePaths;
+    else step.writePaths = [...compiled.write_paths];
+  }
+  assertTicketDefinitionStable(ticket, definition);
+  const after = canonicalHash({
+    readNodeIds: ticket.readNodeIds ?? [],
+    writeNodeIds: ticket.writeNodeIds ?? [],
+    readPaths: ticket.readPaths,
+    writePaths: ticket.writePaths,
+    steps: ticket.steps.map((step) => ({
+      readNodeIds: step.readNodeIds ?? null,
+      writeNodeIds: step.writeNodeIds ?? null,
+      readPaths: step.readPaths ?? null,
+      writePaths: step.writePaths ?? null,
+    })),
+  });
+  return before !== after;
 }
 
 function ticketDefinitionFromArtifact(
