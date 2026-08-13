@@ -7927,13 +7927,52 @@ export function repairedProviderGateRecheckInstruction(
 
 export function upstreamChangeRequestInstructions(
   changeControl: CompiledChangeControl | undefined,
+  downstreamGraphPublicationStepIds: readonly string[] = [],
 ): string[] {
   if (changeControl?.role !== "ordinary" || !changeControl.allowUpstreamRequests) return [];
+  const changeBoundary =
+    downstreamGraphPublicationStepIds.length === 0
+      ? "outside this step's write authority"
+      : "outside this ticket's existing authority and its downstream publication steps";
   return [
-    'This step has an explicit upstream-change route. If satisfying the contract requires changing a read-only asset or another node outside this step\'s write authority, do not fabricate an inline substitute, weaken the contract, or upsert that node. Submit status "completed" with summary and upstreamChangeRequest, and omit graphDelta. Exact shape: {"status":"completed","summary":"...","upstreamChangeRequest":{"targetNodeIds":["the-existing-causal-node-id"],"fulfillment":"planned_asset_repair","summary":"...","reason":"..."}}.',
+    `This step has an explicit upstream-change route for work that the current workflow cannot satisfy. If satisfying the contract requires changing a read-only asset or another node ${changeBoundary}, do not fabricate an inline substitute, weaken the contract, or upsert that node. Submit status "completed" with summary and upstreamChangeRequest, and omit graphDelta. Exact shape: {"status":"completed","summary":"...","upstreamChangeRequest":{"targetNodeIds":["the-existing-causal-node-id"],"fulfillment":"planned_asset_repair","summary":"...","reason":"..."}}.`,
+    ...(downstreamGraphPublicationStepIds.length === 0
+      ? []
+      : [
+          `A graph mutation forbidden in this step is not an upstream change when the authored update remains within this ticket's existing authority and a later graph-owning workflow step already publishes it. Complete the current repository or evidence work, state the exact pending semantic update in the summary and predecessor evidence, and let the configured downstream step publish it. Downstream graph-publication steps: ${downstreamGraphPublicationStepIds.join(", ")}.`,
+        ]),
     'Use fulfillment "planned_asset_repair" only when the existing asset implementation workflow can satisfy the whole request by editing that asset\'s authored source files or contracts. Use "dynamic_scope_change" when fulfillment needs a new run or node, runtime execution/output, or authority beyond the existing asset source grant.',
     'Graph write authority does not make fields that derive this ticket\'s repository grant mutable during the active attempt. If accepted repository evidence contradicts a scope-bearing field, stop probing the rejected path and submit the upstreamChangeRequest without graphDelta; use fulfillment "dynamic_scope_change" for the correction even when the replacement path is already inside the issued grant.',
   ];
+}
+
+/** Identify later steps that can publish graph changes produced by the current workflow branch. */
+export function downstreamGraphPublicationStepIds(
+  definition: Pick<DerivedTicketDefinition, "workflow">,
+  step: Pick<DerivedWorkflowStep, "id">,
+): string[] {
+  const byId = new Map(definition.workflow.map((candidate) => [candidate.id, candidate]));
+  const dependsOnCurrent = (candidate: DerivedWorkflowStep): boolean => {
+    const pending = [...candidate.depends_on];
+    const visited = new Set<string>();
+    while (pending.length > 0) {
+      const predecessorId = pending.pop()!;
+      if (predecessorId === step.id) return true;
+      if (visited.has(predecessorId)) continue;
+      visited.add(predecessorId);
+      const predecessor = byId.get(predecessorId);
+      if (predecessor !== undefined) pending.push(...predecessor.depends_on);
+    }
+    return false;
+  };
+  return definition.workflow
+    .filter(
+      (candidate) =>
+        candidate.kind !== "review" &&
+        candidate.graph_mutation !== "forbidden" &&
+        dependsOnCurrent(candidate),
+    )
+    .map((candidate) => candidate.id);
 }
 
 export function reviewVerdictInstructions(
@@ -8252,7 +8291,10 @@ function ticketAttempt(
               `Repair history: ${JSON.stringify(plannedAssetRepairHistory)}`,
             ].join(" "),
           ]),
-      ...upstreamChangeRequestInstructions(proposalOperation?.changeControl),
+      ...upstreamChangeRequestInstructions(
+        proposalOperation?.changeControl,
+        downstreamGraphPublicationStepIds(definition, step),
+      ),
       ...rejectedSourceProposalPrompts,
       ...(proposalApproval === undefined
         ? []

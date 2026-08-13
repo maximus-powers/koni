@@ -71,6 +71,14 @@ semantic contract, that integration step may submit an empty candidate. Configur
 allowed at such a mixed initial-publication and repository-repair boundary; reserve required for a
 boundary whose successful outcome always changes semantic graph state.
 
+A forbidden graph mutation on an earlier step does not by itself require upstream change control.
+When a causally later graph-owning step can publish the authored update inside the same ticket, the
+handoff remains inside the workflow. Preserve the repository effect and its exact semantic handoff
+in predecessor evidence, then let that later step publish it. Reserve upstream change control for
+authority that the complete current workflow cannot satisfy: an outside node or resource, a new run
+or node, runtime output not yet produced, or a grant-derived field that must change before the
+active workflow can continue.
+
 ## Workflow DAG
 
 The following is the shipped Software 0.3 composition pattern, retained as historical context:

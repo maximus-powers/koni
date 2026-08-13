@@ -80,6 +80,24 @@ describe("Koni's Pi-native skills", () => {
     );
   });
 
+  it("keeps same-workflow publication separate from upstream change control", async () => {
+    const source = await readFile(
+      path.join(skillsRoot, "model-koni-work/references/execution-contracts.md"),
+      "utf8",
+    );
+    const normalized = source.replace(/\s+/gu, " ");
+
+    expect(normalized).toContain(
+      "A forbidden graph mutation on an earlier step does not by itself require upstream change control",
+    );
+    expect(normalized).toContain(
+      "Preserve the repository effect and its exact semantic handoff in predecessor evidence",
+    );
+    expect(normalized).toContain(
+      "Reserve upstream change control for authority that the complete current workflow cannot satisfy",
+    );
+  });
+
   it("teaches planners to revise validated artifacts as bounded graph diffs", async () => {
     const source = await readFile(path.join(skillsRoot, "model-koni-work/SKILL.md"), "utf8");
     const normalized = source.replace(/\s+/gu, " ");

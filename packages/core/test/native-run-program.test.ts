@@ -29,6 +29,7 @@ import {
   assertTicketDefinitionStable,
   commandInfrastructureFailure,
   currentNonpassingGateRepairEvidenceRequests,
+  downstreamGraphPublicationStepIds,
   effectiveAssignmentWriteScope,
   experimentBoundaryBlockedGateProviderNodeIds,
   existingStandaloneSupportRunForUpstreamRequest,
@@ -140,7 +141,11 @@ import {
   type TerminalFailureSettlementProof,
   type TerminalSuccessSettlementProof,
 } from "../src/state/run-record.js";
-import type { CompiledRuleEvaluation, DerivedTicketDefinition } from "../src/contracts/rules.js";
+import type {
+  CompiledRuleEvaluation,
+  DerivedTicketDefinition,
+  DerivedWorkflowStep,
+} from "../src/contracts/rules.js";
 import type { ReadyAssignment } from "../src/state/scheduler.js";
 import { attachFixtureTicketCycle, fixtureRunGit } from "./run-record-fixtures.js";
 
@@ -581,6 +586,58 @@ describe("native compiler-authoritative run program", () => {
         allowUpstreamRequests: true,
       } satisfies CompiledChangeControl),
     ).toEqual([]);
+  });
+
+  it("keeps same-workflow graph publication out of upstream change control", () => {
+    const implement = {
+      id: "implement",
+      graph_mutation: "forbidden",
+      depends_on: [],
+    } as unknown as DerivedWorkflowStep;
+    const verify = {
+      id: "verify",
+      graph_mutation: "forbidden",
+      depends_on: ["implement"],
+    } as unknown as DerivedWorkflowStep;
+    const integrate = {
+      id: "integrate",
+      graph_mutation: "required",
+      depends_on: ["verify"],
+    } as unknown as DerivedWorkflowStep;
+    const unrelated = {
+      id: "unrelated",
+      graph_mutation: "allowed",
+      depends_on: [],
+    } as unknown as DerivedWorkflowStep;
+    const review = {
+      id: "review",
+      kind: "review",
+      graph_mutation: "allowed",
+      depends_on: ["implement"],
+    } as unknown as DerivedWorkflowStep;
+    const definition = {
+      workflow: [implement, verify, integrate, unrelated, review],
+    } as unknown as DerivedTicketDefinition;
+
+    expect(downstreamGraphPublicationStepIds(definition, implement)).toEqual(["integrate"]);
+    const instructions = upstreamChangeRequestInstructions(
+      {
+        role: "ordinary",
+        allowUpstreamRequests: true,
+      } satisfies CompiledChangeControl,
+      downstreamGraphPublicationStepIds(definition, implement),
+    ).join(" ");
+    expect(instructions).toContain("later graph-owning workflow step");
+    expect(instructions).toContain("integrate");
+    expect(instructions).toContain("is not an upstream change");
+    expect(instructions).toContain("predecessor evidence");
+    expect(instructions).toContain("outside this ticket's existing authority");
+    expect(
+      upstreamChangeRequestInstructions({
+        role: "ordinary",
+        allowUpstreamRequests: true,
+      } satisfies CompiledChangeControl).join(" "),
+    ).toContain("outside this step's write authority");
   });
 
   it("does not let a recurring gate provider relabel an unchanged blocker as a repair", () => {
