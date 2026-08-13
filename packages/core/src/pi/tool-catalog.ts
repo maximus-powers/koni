@@ -466,7 +466,9 @@ export function createKoniAuthorityTools(options: KoniToolCatalogOptions): Autho
       : [];
     const description = source.terminal
       ? `${source.description} Exact compiler-issued shape: ${describeSchemaShape(terminalSchema)}.${nestedContracts.length === 0 ? "" : ` ${nestedContracts.join(". ")}.`} On every validation retry, resubmit the complete object instead of only the corrected section. Never add status, summary, or any other field unless it appears in that exact shape.`
-      : source.description;
+      : hasLargePayloadPresentationEnvelope(name)
+        ? `${source.description} Exact authority shape: ${describeSchemaShape(source.schema)}. Include every field shown; Pi's presentation envelope is non-authoritative and Koni validates the exact contract before any filesystem effect.`
+        : source.description;
     const schemaHash = canonicalHash(parameters);
     const maxResultBytes = source.maxResultBytes;
     const resultFromReceipt = (
@@ -595,7 +597,9 @@ export function validateKoniToolArguments(
   const authoritySchema =
     name === "koni_submit_output" && terminalOutputSchema !== undefined
       ? terminalOutputSchema
-      : presentationSchema;
+      : hasLargePayloadPresentationEnvelope(name)
+        ? CATALOG[name].schema
+        : presentationSchema;
   // Reject a JSON-serialized object once: some provider tool-call transports stringify structured
   // arguments (observed live: `graphDelta` declared object but delivered as a string, making the
   // success branch unsatisfiable). Parse-and-retry so a correct payload is not rejected for a
@@ -1002,9 +1006,20 @@ function resolveToolSchema(
   const current =
     name === "koni_submit_output" && terminalOutputSchema !== undefined
       ? transportToolSchema(name, terminalOutputSchema)
-      : CATALOG[name].schema;
+      : hasLargePayloadPresentationEnvelope(name)
+        ? relaxLargePayloadPresentationEnvelope(CATALOG[name].schema)
+        : CATALOG[name].schema;
   if (expectedSchemaHash === undefined || canonicalHash(current) === expectedSchemaHash)
     return current;
+  // Write/edit calls can carry multi-megabyte payloads. Launches issued before their Pi-facing
+  // envelope became presentation-only bound the exact catalog schema directly; reconstruct that
+  // strict definition without changing the authority contract used by either generation.
+  if (
+    hasLargePayloadPresentationEnvelope(name) &&
+    canonicalHash(CATALOG[name].schema) === expectedSchemaHash
+  ) {
+    return CATALOG[name].schema;
+  }
   // The immediately preceding transport kept the outer object exact while making nested
   // discriminators presentation-only. Preserve already-issued attempts across this upgrade.
   if (
@@ -1040,6 +1055,41 @@ function resolveToolSchema(
     return legacyAskQuestionSchema;
   }
   throw new Error(`unsupported historical schema hash for ${name}`);
+}
+
+function hasLargePayloadPresentationEnvelope(
+  name: KoniToolName,
+): name is "koni_write_file" | "koni_edit_file" {
+  return name === "koni_write_file" || name === "koni_edit_file";
+}
+
+/**
+ * Pi validates advertised parameters before Koni and echoes the complete arguments on failure.
+ * For write/edit calls that can include multi-megabyte source text, even a missing CAS field can
+ * consume the remaining context without reaching the durable authority rejection. Preserve every
+ * exact field name and its guidance for the provider, but leave presentation validation permissive;
+ * validate the unchanged catalog schema at authority before any filesystem effect.
+ */
+function relaxLargePayloadPresentationEnvelope(schema: TSchema): TSchema {
+  const properties = (schema as { properties?: Record<string, TSchema> }).properties;
+  const visibleFields = Object.fromEntries(
+    Object.entries(properties ?? {})
+      .sort(([left], [right]) => compareUtf8(left, right))
+      .map(([key, property]) => {
+        const description = (property as { description?: unknown }).description;
+        return [
+          key,
+          Type.Optional(
+            Type.Unknown(typeof description === "string" ? { description } : undefined),
+          ),
+        ];
+      }),
+  );
+  return Type.Object(visibleFields, {
+    additionalProperties: true,
+    description:
+      "Presentation envelope only. Koni validates the exact field types, required fields, bounds, and content-hash precondition before any filesystem effect.",
+  });
 }
 
 export function renderKoniToolReceipt(receipt: KoniToolReceipt): string {

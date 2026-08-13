@@ -228,6 +228,73 @@ describe("Koni authority-backed Pi tool catalog", () => {
     expect(result.details).toMatchObject({ outcome: "rejected", code: "tool_arguments" });
   });
 
+  it.each([
+    {
+      name: "koni_write_file" as const,
+      strictSchemaHash:
+        "sha256:98801c362bd663b62e52944813583d51d57fbb6edeb32e5fccd8d0cd1e689ffd" as const,
+      malformed: { path: "src/large.ts", content: "x".repeat(96 * 1024) },
+    },
+    {
+      name: "koni_edit_file" as const,
+      strictSchemaHash:
+        "sha256:31e306203c0db585ff13bb8acb8dd3255a6dabf82c100fb49ca6e8cb19bc5fc8" as const,
+      malformed: {
+        path: "src/large.ts",
+        oldText: "x".repeat(48 * 1024),
+        newText: "y".repeat(48 * 1024),
+      },
+    },
+  ])(
+    "forwards malformed large-payload $name calls to bounded authority rejection",
+    async ({ name, strictSchemaHash, malformed }) => {
+      let invocation: KoniToolInvocation | undefined;
+      const [current] = createKoniAuthorityTools({
+        names: [name],
+        async invoke(call) {
+          invocation = call;
+          return {
+            protocol: KONI_TOOL_RECEIPT_PROTOCOL,
+            receiptId: `receipt-malformed-${name}`,
+            outcome: "rejected",
+            code: "tool_arguments",
+            summary: "expectedSha256 is required by the exact authority contract",
+          };
+        },
+        reject,
+      });
+
+      expect(Value.Check(current!.definition.parameters, malformed)).toBe(true);
+      expect(() =>
+        validateKoniToolArguments(name, malformed, undefined, current!.schemaHash),
+      ).toThrow(/compiler-issued schema/u);
+      const result = await current!.definition.execute(
+        `malformed-${name}`,
+        malformed,
+        undefined,
+        undefined,
+        {} as never,
+      );
+      expect(invocation).toEqual({
+        callId: `malformed-${name}`,
+        name,
+        arguments: malformed,
+      });
+      expect(result.details).toMatchObject({ outcome: "rejected", code: "tool_arguments" });
+
+      const [historical] = createKoniAuthorityTools({
+        names: [name],
+        schemaHashes: { [name]: strictSchemaHash },
+        async invoke() {
+          return accepted(`receipt-historical-${name}`);
+        },
+        reject,
+      });
+      expect(historical!.schemaHash).toBe(strictSchemaHash);
+      expect(Value.Check(historical!.definition.parameters, malformed)).toBe(false);
+    },
+  );
+
   it("reconstructs a pre-relaxation flattened terminal transport by its issued hash", () => {
     const graphSeedSchema = Type.Object({
       nodes: Type.Array(
