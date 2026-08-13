@@ -901,26 +901,8 @@ function describeSchemaMismatch(name: KoniToolName, schema: TSchema, value: unkn
 }
 
 function argumentSchemaMismatchDiagnostics(schema: TSchema, value: unknown): string[] {
-  const errors: SchemaValidationError[] = [];
-  for (const error of Value.Errors(schema, value)) {
-    errors.push(error);
-    if (errors.length === MAX_SCHEMA_DIAGNOSTIC_ERRORS) break;
-  }
-  const rejectedUnionBranches = rejectedSchemaUnionBranches(schema, value, errors);
-  const isFromRejectedBranch = (schemaPath: string): boolean =>
-    [...rejectedUnionBranches].some(
-      (prefix) => schemaPath === prefix || schemaPath.startsWith(`${prefix}/`),
-    );
-  const actionable = errors.filter(
-    (error) =>
-      error.keyword !== "anyOf" &&
-      error.keyword !== "oneOf" &&
-      !isFromRejectedBranch(error.schemaPath),
-  );
-  // When every discriminated branch was rejected, retain its literal errors so the caller sees
-  // the allowed discriminator values instead of only the unhelpful union umbrella.
-  const selected =
-    actionable.length > 0 ? actionable : errors.filter((error) => error.keyword === "const");
+  const errors = boundedSchemaValidationErrors(schema, value);
+  const selected = errors.filter((error) => error.keyword !== "anyOf" && error.keyword !== "oneOf");
   const rendered = new Set<string>();
   for (const error of selected) {
     const instancePath = error.instancePath.length === 0 ? "/" : error.instancePath;
@@ -944,80 +926,123 @@ function argumentSchemaMismatchDiagnostics(schema: TSchema, value: unknown): str
   return [...rendered];
 }
 
-function rejectedSchemaUnionBranches(
-  schema: TSchema,
-  value: unknown,
-  errors: SchemaValidationError[],
-): Set<string> {
-  const constErrors = errors
-    .filter((error) => error.keyword === "const")
-    .map((error) => {
-      const match = error.schemaPath.match(/^(.*)\/(anyOf|oneOf)\/(\d+)(\/.*)?$/u);
-      return match === null
-        ? undefined
-        : {
-            error,
-            unionPath: match[1]!,
-            unionKeyword: match[2]!,
-            branchIndex: Number(match[3]),
-            branchSuffix: match[4] ?? "",
-          };
-    })
-    .filter((item): item is NonNullable<typeof item> => item !== undefined);
-  const groups = new Map<string, typeof constErrors>();
-  for (const item of constErrors) {
-    const key = `${item.unionPath}/${item.unionKeyword}`;
-    const group = groups.get(key) ?? [];
-    group.push(item);
-    groups.set(key, group);
-  }
-
-  const rejected = new Set<string>();
-  for (const group of groups.values()) {
-    const first = group[0]!;
-    const union = jsonPointerValue(schema, first.unionPath) as
-      { anyOf?: TSchema[]; oneOf?: TSchema[] } | undefined;
-    const branches = union?.[first.unionKeyword as "anyOf" | "oneOf"];
-    if (!Array.isArray(branches)) continue;
-    let selected: Set<number> | undefined;
-    for (const item of group) {
-      const actual = jsonPointerValue(value, item.error.instancePath);
-      const matching = new Set<number>();
-      for (const [index, branch] of branches.entries()) {
-        const candidate = jsonPointerValue(branch, item.branchSuffix);
-        if (
-          isRecord(candidate) &&
-          Object.hasOwn(candidate, "const") &&
-          Value.Check(candidate as TSchema, actual)
-        ) {
-          matching.add(index);
-        }
+function boundedSchemaValidationErrors(schema: TSchema, value: unknown): SchemaValidationError[] {
+  const errors: SchemaValidationError[] = [];
+  const append = (candidateSchema: TSchema, candidateValue: unknown, prefix: string): void => {
+    for (const error of Value.Errors(candidateSchema, candidateValue)) {
+      errors.push({
+        ...error,
+        instancePath: `${prefix}${error.instancePath}`,
+      });
+      if (errors.length === MAX_SCHEMA_DIAGNOSTIC_ERRORS) return;
+    }
+  };
+  const visit = (candidateSchema: TSchema, candidateValue: unknown, prefix: string): void => {
+    if (errors.length === MAX_SCHEMA_DIAGNOSTIC_ERRORS) return;
+    const union = candidateSchema as { anyOf?: TSchema[]; oneOf?: TSchema[] };
+    const unionKeyword = Array.isArray(union.anyOf)
+      ? "anyOf"
+      : Array.isArray(union.oneOf)
+        ? "oneOf"
+        : undefined;
+    if (unionKeyword !== undefined) {
+      const branches = union[unionKeyword]!;
+      const selected = selectDiagnosticUnionBranches(branches, candidateValue);
+      if (selected.length === 1) visit(selected[0]!, candidateValue, prefix);
+      else append({ ...candidateSchema, [unionKeyword]: selected }, candidateValue, prefix);
+      return;
+    }
+    const objectSchema = candidateSchema as {
+      type?: unknown;
+      properties?: Record<string, TSchema>;
+    };
+    if (
+      objectSchema.type === "object" &&
+      objectSchema.properties !== undefined &&
+      isRecord(candidateValue)
+    ) {
+      append(
+        {
+          ...candidateSchema,
+          properties: Object.fromEntries(
+            Object.keys(objectSchema.properties).map((key) => [key, {}]),
+          ),
+        },
+        candidateValue,
+        prefix,
+      );
+      for (const [key, propertySchema] of Object.entries(objectSchema.properties)) {
+        if (errors.length === MAX_SCHEMA_DIAGNOSTIC_ERRORS) return;
+        if (!Object.hasOwn(candidateValue, key)) continue;
+        visit(propertySchema, candidateValue[key], `${prefix}/${escapeJsonPointerToken(key)}`);
       }
-      if (matching.size === 0) continue;
-      selected =
-        selected === undefined
-          ? matching
-          : new Set([...selected].filter((index) => matching.has(index)));
+      return;
     }
-    if (selected === undefined || selected.size === 0) continue;
-    for (const index of branches.keys()) {
-      if (!selected.has(index)) rejected.add(`${first.unionPath}/${first.unionKeyword}/${index}`);
+    const arraySchema = candidateSchema as { type?: unknown; items?: TSchema };
+    if (
+      arraySchema.type === "array" &&
+      arraySchema.items !== undefined &&
+      Array.isArray(candidateValue)
+    ) {
+      append({ ...candidateSchema, items: {} }, candidateValue, prefix);
+      for (const [index, item] of candidateValue.entries()) {
+        if (errors.length === MAX_SCHEMA_DIAGNOSTIC_ERRORS) return;
+        visit(arraySchema.items, item, `${prefix}/${index}`);
+      }
+      return;
     }
-  }
-  return rejected;
+    append(candidateSchema, candidateValue, prefix);
+  };
+  visit(schema, value, "");
+  return errors;
 }
 
-function jsonPointerValue(value: unknown, pointer: string): unknown {
-  const normalized = pointer.startsWith("#") ? pointer.slice(1) : pointer;
-  if (normalized.length === 0) return value;
-  let current = value;
-  for (const encoded of normalized.split("/").slice(1)) {
-    if ((typeof current !== "object" || current === null) && !Array.isArray(current))
-      return undefined;
-    const key = encoded.replace(/~1/gu, "/").replace(/~0/gu, "~");
-    current = (current as Record<string, unknown>)[key];
+function selectDiagnosticUnionBranches(branches: readonly TSchema[], value: unknown): TSchema[] {
+  const scores = branches.map((branch) => schemaConstScore(branch, value));
+  const uncontradicted = scores
+    .map((score, index) => ({ score, index }))
+    .filter(({ score }) => score.matches > 0 && score.contradictions === 0);
+  const candidates =
+    uncontradicted.length > 0
+      ? uncontradicted
+      : scores.map((score, index) => ({ score, index })).filter(({ score }) => score.matches > 0);
+  if (candidates.length === 0) return [...branches];
+  const minimumContradictions = Math.min(...candidates.map(({ score }) => score.contradictions));
+  const leastContradicted = candidates.filter(
+    ({ score }) => score.contradictions === minimumContradictions,
+  );
+  const maximumMatches = Math.max(...leastContradicted.map(({ score }) => score.matches));
+  const selected = new Set(
+    leastContradicted
+      .filter(({ score }) => score.matches === maximumMatches)
+      .map(({ index }) => index),
+  );
+  return branches.filter((_branch, index) => selected.has(index));
+}
+
+function schemaConstScore(
+  schema: TSchema,
+  value: unknown,
+): { matches: number; contradictions: number } {
+  if (Object.hasOwn(schema, "const"))
+    return Value.Check(schema, value)
+      ? { matches: 1, contradictions: 0 }
+      : { matches: 0, contradictions: 1 };
+  const properties = (schema as { properties?: Record<string, TSchema> }).properties;
+  if (properties === undefined || !isRecord(value)) return { matches: 0, contradictions: 0 };
+  let matches = 0;
+  let contradictions = 0;
+  for (const [key, property] of Object.entries(properties)) {
+    if (!Object.hasOwn(value, key)) continue;
+    const nested = schemaConstScore(property, value[key]);
+    matches += nested.matches;
+    contradictions += nested.contradictions;
   }
-  return current;
+  return { matches, contradictions };
+}
+
+function escapeJsonPointerToken(value: string): string {
+  return value.replace(/~/gu, "~0").replace(/\//gu, "~1");
 }
 
 function sanitizeDiagnosticText(value: string): string {

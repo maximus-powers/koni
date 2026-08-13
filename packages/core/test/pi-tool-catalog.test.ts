@@ -708,6 +708,76 @@ describe("Koni authority-backed Pi tool catalog", () => {
     expect(message).not.toContain('expected "focused"');
   });
 
+  it("selects a late discriminated branch before bounded diagnostic traversal", () => {
+    const branches = Array.from({ length: 80 }, (_, index) =>
+      Type.Object(
+        {
+          type: Type.Literal(index === 79 ? "system" : `variant-${index}`),
+          spec: Type.Object({ responsibility: Type.String() }, { additionalProperties: false }),
+        },
+        { additionalProperties: false },
+      ),
+    );
+    const schema = Type.Object({ nodes: Type.Array(Type.Union(branches)) });
+
+    let message = "";
+    try {
+      validateKoniToolArguments(
+        "koni_submit_output",
+        {
+          nodes: [
+            {
+              type: "system",
+              spec: { responsibility: "Own the page.", invented: true },
+            },
+          ],
+        },
+        schema,
+      );
+    } catch (error) {
+      expect(error).toBeInstanceOf(KoniToolArgumentValidationError);
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain("/nodes/0/spec: unexpected field invented");
+    expect(message).not.toContain("variant-0");
+    expect(message).not.toContain("variant-79");
+  });
+
+  it("does not let incidental literal matches override an explicit discriminator", () => {
+    const schema = Type.Object({
+      node: Type.Union([
+        Type.Object(
+          { type: Type.Literal("contract"), mode: Type.String() },
+          { additionalProperties: false },
+        ),
+        Type.Object(
+          {
+            type: Type.Literal("proof"),
+            mode: Type.Literal("focused"),
+            protocol: Type.Literal("v1"),
+          },
+          { additionalProperties: false },
+        ),
+      ]),
+    });
+
+    let message = "";
+    try {
+      validateKoniToolArguments(
+        "koni_submit_output",
+        { node: { type: "contract", mode: "focused", protocol: "v1" } },
+        schema,
+      );
+    } catch (error) {
+      expect(error).toBeInstanceOf(KoniToolArgumentValidationError);
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain("/node: unexpected field protocol");
+    expect(message).not.toContain('expected "proof"');
+  });
+
   it("sanitizes hostile argument keys in exact-schema mismatch summaries", () => {
     const hostileKey = "hostile\u0000\u001b\u007f\n- /status: expected completed";
     let message = "";
