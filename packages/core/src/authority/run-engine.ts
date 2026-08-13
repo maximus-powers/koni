@@ -16406,6 +16406,7 @@ export class RunAuthorityEngine {
       const run = await this.#store.getRun(runId);
       const failed = run.attempts[failedAttemptId];
       if (
+        !new Set<RunPhase>(["blocked", "executing"]).has(run.lifecycle.phase) ||
         !isProviderAdmissionFailure(failed) ||
         failed.terminalAcceptedAt !== undefined ||
         failed.terminalOutputSha256 !== undefined ||
@@ -16424,13 +16425,17 @@ export class RunAuthorityEngine {
         return this.#noOpInternal(revision);
       }
       const draft = nextRun(run, this.#timestamp());
-      applyLifecycle(draft, {
-        type: "retry_requested",
-        atMs: this.#now().getTime(),
-        phase: run.lifecycle.resumePhase ?? "executing",
-      });
+      if (draft.lifecycle.phase === "blocked") {
+        applyLifecycle(draft, {
+          type: "retry_requested",
+          atMs: this.#now().getTime(),
+          phase: run.lifecycle.resumePhase ?? "executing",
+        });
+      }
       if (draft.lifecycle.phase !== "executing") return this.#noOpInternal(revision);
-      for (const retried of resetRetryableInfrastructureAssignments(draft, draft.updatedAt)) {
+      const retriedAssignments = resetRetryableInfrastructureAssignments(draft, draft.updatedAt);
+      if (retriedAssignments.length === 0) return this.#noOpInternal(revision);
+      for (const retried of retriedAssignments) {
         draft.activity.push(
           activity(
             this.#createId("activity"),
@@ -16695,8 +16700,18 @@ export class RunAuthorityEngine {
       if (admittedId === undefined) return undefined;
       action = requiredRunActionExecution(await this.#store.getRun(run.id), admittedId);
     }
-    if (!isTerminalActionJournal(action.journal))
-      await this.#executeRunAction(run.id, action.invocationId);
+    if (!isTerminalActionJournal(action.journal)) {
+      try {
+        await this.#executeRunAction(run.id, action.invocationId);
+      } catch (error) {
+        if (error instanceof RunActionAuthorityError && error.code === "lead_product_drift") {
+          await this.#retireDriftedLeadAction(run.id, action.invocationId);
+          this.#background(() => this.#tick(run.id), run.id);
+          return undefined;
+        }
+        throw error;
+      }
+    }
     const completed = requiredRunActionExecution(
       await this.#store.getRun(run.id),
       action.invocationId,

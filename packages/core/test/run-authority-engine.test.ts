@@ -3315,14 +3315,14 @@ describe("run authority engine", () => {
     expect(changedFrontier).toBe(true);
     expect(settled.lifecycle.phase).toBe("merge_ready");
     expect(settled.lifecycle.blocker).toBeUndefined();
-    expect(
-      Object.values(settled.actionExecutions ?? {}).some(
-        (action) =>
-          action.boundary.kind === "lead_launch" &&
-          action.settlement?.disposition === "abandoned" &&
-          action.settlement.reason.includes("graph/run-product evolution"),
-      ),
-    ).toBe(true);
+    const abandonedLead = Object.values(settled.actionExecutions ?? {}).find(
+      (action) =>
+        action.boundary.kind === "lead_launch" &&
+        action.settlement?.disposition === "abandoned" &&
+        action.settlement.reason.includes("graph/run-product evolution"),
+    );
+    expect(abandonedLead).toBeDefined();
+    expect(settled.attempts[abandonedLead!.boundary.attemptId!]).toBeUndefined();
     expect(
       Object.values(settled.attempts).filter((attempt) => attempt.kind === "lead"),
     ).toHaveLength(1);
@@ -4905,7 +4905,127 @@ describe("run authority engine", () => {
       ),
     ).toBe(true);
     client.close();
-  });
+  }, 30_000);
+
+  it("serializes concurrent provider-admission recoveries after the first callback reopens the run", async () => {
+    const root = await repository();
+    const base = directApprovalProgram();
+    const prepareAttempt = base.prepareAttempt.bind(base);
+    const failedTickets = new Set<string>();
+    const program: RunCompilerProgram = {
+      ...base,
+      async resolveRun(request) {
+        const resolved = await base.resolveRun(request);
+        return {
+          ...resolved,
+          executionConfig: { ...resolved.executionConfig, maxParallel: 2 },
+        };
+      },
+      async initializeApprovedPlan() {
+        const first = ticket();
+        const second = structuredClone(first);
+        second.id = "ticket-two";
+        second.title = "Implement independent feature";
+        second.targetNodeIds = ["change-two"];
+        second.writePaths = ["CHANGELOG.md"];
+        return {
+          graphHash: `sha256:${"c".repeat(64)}`,
+          graphRevision: 1,
+          tickets: { [first.id]: first, [second.id]: second },
+        };
+      },
+      async prepareAttempt(input) {
+        const prepared = await prepareAttempt(input);
+        const ticketId = input.assignment?.ticketId;
+        if (input.kind !== "ticket" || ticketId === undefined || failedTickets.has(ticketId)) {
+          return prepared;
+        }
+        failedTickets.add(ticketId);
+        return {
+          ...prepared,
+          factory: async () =>
+            new InfrastructureFailingAdapter(
+              prepared.spec,
+              "provider_input_exposure",
+              "Koni provider admission rejected: request exceeds the context window. prospective provider input plus reserved output exceeds the authenticated model context window",
+            ),
+        };
+      },
+    };
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(
+      client,
+      engine,
+      "concurrent-provider-admission-recovery",
+    );
+
+    try {
+      await waitFor(
+        async () => (await engine.store.getRun(runId)).lifecycle.phase === "merge_ready",
+      );
+    } catch (error) {
+      const current = await engine.store.getRun(runId);
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}: ${JSON.stringify({
+          lifecycle: current.lifecycle,
+          tickets: Object.values(current.tickets).map(({ id, status, blocker, steps }) => ({
+            id,
+            status,
+            blocker,
+            steps: steps.map(({ id: stepId, status: stepStatus }) => ({
+              id: stepId,
+              status: stepStatus,
+            })),
+          })),
+          attempts: Object.values(current.attempts).map(
+            ({ id, ticketId, status, failureCode }) => ({ id, ticketId, status, failureCode }),
+          ),
+          activity: current.activity.slice(-12).map(({ message }) => message),
+        })}`,
+        { cause: error },
+      );
+    }
+
+    const settled = await engine.store.getRun(runId);
+    expect(settled.lifecycle.blocker).toBeUndefined();
+    expect(
+      settled.activity.some((entry) =>
+        entry.message.includes("cannot apply retry_requested while run is executing"),
+      ),
+    ).toBe(false);
+    expect(
+      Object.values(settled.attempts).filter(
+        (attempt) => attempt.kind === "ticket" && attempt.failureCode === "provider_input_exposure",
+      ),
+    ).toHaveLength(2);
+    expect(
+      settled.activity.filter(
+        (entry) =>
+          entry.message === "Auto-retrying provider admission from a fresh contained attempt",
+      ),
+    ).toHaveLength(1);
+    const abandonedLead = Object.values(settled.actionExecutions ?? {}).find(
+      (action) =>
+        action.boundary.kind === "lead_launch" &&
+        action.settlement?.disposition === "abandoned" &&
+        action.settlement.reason.includes("graph/run-product evolution"),
+    );
+    expect(abandonedLead).toBeDefined();
+    expect(settled.attempts[abandonedLead!.boundary.attemptId!]).toBeUndefined();
+    client.close();
+  }, 30_000);
 
   it("bounds provider-admission recovery cycles rather than raw failed admissions", async () => {
     const root = await repository();
