@@ -15835,6 +15835,13 @@ function assertAgentToolIdentity(
   attempt: AgentAttemptRecord,
   grant: AuthorityGrant,
 ): void {
+  const planningSession = run.planningSession;
+  const expectedGrantId =
+    attempt.kind === "planning" &&
+    planningSession?.attemptId === attempt.id &&
+    planningSession.sessionId === attempt.sessionId
+      ? `grant-${attempt.id}-planning-revision-${planningSession.currentRevision}`
+      : `grant-${attempt.id}`;
   if (
     grant.runId !== run.id ||
     grant.attemptId !== attempt.id ||
@@ -15842,7 +15849,7 @@ function assertAgentToolIdentity(
     grant.ticketId !== attempt.ticketId ||
     grant.stepId !== attempt.stepId ||
     grant.generation !== run.generation ||
-    grant.grantId !== `grant-${attempt.id}`
+    grant.grantId !== expectedGrantId
   )
     fail("agent_tool_identity", "agent tool request does not match its immutable run assignment");
 }

@@ -617,17 +617,19 @@ export function validateKoniToolArguments(
     candidate !== null &&
     !Array.isArray(candidate);
   if (accepts(parsed)) return structuredClone(parsed);
-  // Repair nested fields the transport stringified (e.g. an object-typed `graphDelta` delivered as
-  // a JSON string). Only accepted when the repaired payload passes the exact compiled schema, so a
-  // genuinely-invalid submission is never silently coerced into acceptance.
-  const repaired = repairStringifiedObjectFields(parsed);
+  // Repair nested fields the transport stringified (for example an object-typed `graphDelta` or a
+  // null CAS precondition delivered as a JSON string). Only accept the repaired payload when it
+  // passes the exact compiled schema, so this transport normalization can never widen authority.
+  const repaired = repairStringifiedJsonFields(parsed, authoritySchema);
   if (repaired !== undefined && accepts(repaired)) return structuredClone(repaired);
   // A bare validation failure ("arguments do not match the schema") forces the agent to brute-force
   // the contract one field/const at a time (observed live: 100+ failed submit calls guessing the
   // status value, whole token budgets drained). Return a self-describing error that names the
   // allowed values, the actual-vs-max lengths, and the full expected shape, so the next call is
   // correct. This is provider-agnostic — it derives everything from the compiled schema.
-  throw new KoniToolArgumentValidationError(describeSchemaMismatch(name, authoritySchema, parsed));
+  throw new KoniToolArgumentValidationError(
+    describeSchemaMismatch(name, authoritySchema, repaired ?? parsed, repaired !== undefined),
+  );
 }
 
 /** Accept a JSON-string form of the arguments (a transport artifact) as if it were the object. */
@@ -849,19 +851,37 @@ function discriminatedArrayItemPresentation(items: Record<string, unknown>): TSc
   });
 }
 
-/** Parse any top-level string field whose content is a JSON object/array (transport un-stringify). */
-function repairStringifiedObjectFields(value: unknown): Record<string, unknown> | undefined {
+/** Parse top-level fields that carry a structured or scalar JSON value as transport text. */
+function repairStringifiedJsonFields(
+  value: unknown,
+  schema: TSchema,
+): Record<string, unknown> | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   let changed = false;
   const out: Record<string, unknown> = {};
   for (const [key, field] of Object.entries(value)) {
-    if (
-      typeof field === "string" &&
-      (field.trim().startsWith("{") || field.trim().startsWith("["))
-    ) {
+    if (typeof field === "string") {
+      const trimmed = field.trim();
+      const encodedJsonValue =
+        trimmed.startsWith("{") ||
+        trimmed.startsWith("[") ||
+        /^(?:null|true|false|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)$/u.test(trimmed);
       try {
-        const parsed = JSON.parse(field.trim());
-        if (typeof parsed === "object" && parsed !== null) {
+        const parsed = encodedJsonValue ? JSON.parse(trimmed) : undefined;
+        const fieldSchemas = topLevelFieldSchemas(schema, key);
+        const originalAlreadyMatches = fieldSchemas.some((fieldSchema) =>
+          Value.Check(fieldSchema, field),
+        );
+        const decodedMatches = fieldSchemas.some((fieldSchema) => Value.Check(fieldSchema, parsed));
+        const decodedHasExpectedContainerKind = fieldSchemas.some((fieldSchema) =>
+          schemaAllowsContainerKind(fieldSchema, parsed),
+        );
+        if (
+          encodedJsonValue &&
+          typeof parsed !== "string" &&
+          !originalAlreadyMatches &&
+          (decodedMatches || decodedHasExpectedContainerKind)
+        ) {
           out[key] = parsed;
           changed = true;
           continue;
@@ -875,8 +895,46 @@ function repairStringifiedObjectFields(value: unknown): Record<string, unknown> 
   return changed ? out : undefined;
 }
 
+/** Return every root-object schema that governs one submitted field, including union branches. */
+function topLevelFieldSchemas(schema: TSchema, key: string): TSchema[] {
+  const record = schema as unknown as Record<string, unknown>;
+  const result: TSchema[] = [];
+  if (isRecord(record.properties) && key in record.properties) {
+    result.push(record.properties[key] as TSchema);
+  }
+  for (const branchKey of ["anyOf", "allOf", "oneOf"] as const) {
+    const branches = record[branchKey];
+    if (!Array.isArray(branches)) continue;
+    for (const branch of branches) {
+      if (isRecord(branch)) result.push(...topLevelFieldSchemas(branch, key));
+    }
+  }
+  return result;
+}
+
+/** Match only the outer object/array kind so invalid nested data can still receive exact diagnostics. */
+function schemaAllowsContainerKind(schema: TSchema, value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const record = schema as unknown as Record<string, unknown>;
+  if (record.type === (Array.isArray(value) ? "array" : "object")) return true;
+  for (const branchKey of ["anyOf", "allOf", "oneOf"] as const) {
+    const branches = record[branchKey];
+    if (
+      Array.isArray(branches) &&
+      branches.some((branch) => isRecord(branch) && schemaAllowsContainerKind(branch, value))
+    )
+      return true;
+  }
+  return false;
+}
+
 /** Human-readable, agent-actionable description of why `value` failed `schema`, plus the shape. */
-function describeSchemaMismatch(name: KoniToolName, schema: TSchema, value: unknown): string {
+function describeSchemaMismatch(
+  name: KoniToolName,
+  schema: TSchema,
+  value: unknown,
+  decodedStringifiedFields = false,
+): string {
   const observed = isRecord(value)
     ? Object.entries(value)
         .map(([key, field]) =>
@@ -888,6 +946,9 @@ function describeSchemaMismatch(name: KoniToolName, schema: TSchema, value: unkn
     : typeof value;
   const overview =
     `arguments do not match the compiler-issued schema for ${name}. ` +
+    (decodedStringifiedFields
+      ? "Koni decoded JSON-string fields before validation; correct the exact decoded-field errors below rather than changing their transport representation. "
+      : "") +
     `You sent: { ${observed} }. Expected exactly one of: ${describeSchemaShape(schema)}. ` +
     "Send status as the exact literal shown, include every listed field, and keep each string within its char limit.";
   const diagnostics = argumentSchemaMismatchDiagnostics(schema, value);

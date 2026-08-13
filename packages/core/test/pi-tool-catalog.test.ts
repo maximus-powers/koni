@@ -296,6 +296,41 @@ describe("Koni authority-backed Pi tool catalog", () => {
     },
   );
 
+  it("decodes a provider-stringified null CAS precondition before exact write validation", () => {
+    expect(
+      validateKoniToolArguments("koni_write_file", {
+        path: "src/new-file.ts",
+        content: "export const ready = true;\n",
+        expectedSha256: "null",
+      }),
+    ).toEqual({
+      path: "src/new-file.ts",
+      content: "export const ready = true;\n",
+      expectedSha256: null,
+    });
+  });
+
+  it("preserves legitimate JSON-looking strings while repairing a different scalar field", () => {
+    const schema = Type.Object(
+      {
+        label: Type.String(),
+        count: Type.Number(),
+      },
+      { additionalProperties: false },
+    );
+
+    expect(
+      validateKoniToolArguments(
+        "koni_submit_output",
+        {
+          label: "null",
+          count: "3",
+        },
+        schema,
+      ),
+    ).toEqual({ label: "null", count: 3 });
+  });
+
   it("reconstructs a pre-relaxation flattened terminal transport by its issued hash", () => {
     const graphSeedSchema = Type.Object({
       nodes: Type.Array(
@@ -675,6 +710,71 @@ describe("Koni authority-backed Pi tool catalog", () => {
     expect(message).not.toContain("required fields claim, command");
     expect(message).not.toContain('expected "proof"');
     expect(Buffer.byteLength(message, "utf8")).toBeLessThanOrEqual(16 * 1024);
+  });
+
+  it("reports exact decoded-field errors after a provider stringifies nested objects", () => {
+    const schema = Type.Object(
+      {
+        title: Type.String(),
+        full: Type.Object(
+          {
+            architecture: Type.String(),
+            decisions: Type.String(),
+          },
+          { additionalProperties: false },
+        ),
+        graphSeed: Type.Object(
+          {
+            nodes: Type.Array(
+              Type.Object(
+                {
+                  key: Type.String(),
+                  type: Type.Literal("change"),
+                  spec: Type.Object(
+                    { target_state: Type.String() },
+                    { additionalProperties: false },
+                  ),
+                },
+                { additionalProperties: false },
+              ),
+            ),
+          },
+          { additionalProperties: false },
+        ),
+      },
+      { additionalProperties: false },
+    );
+
+    let message = "";
+    try {
+      validateKoniToolArguments(
+        "koni_submit_output",
+        {
+          title: "Analysis Guide",
+          full: JSON.stringify({ architecture: "Use the existing page owner." }),
+          graphSeed: JSON.stringify({
+            nodes: [
+              {
+                key: "analysis-guide",
+                type: "change",
+                target_state: "The guide is available.",
+              },
+            ],
+          }),
+        },
+        schema,
+      );
+    } catch (error) {
+      expect(error).toBeInstanceOf(KoniToolArgumentValidationError);
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain("Koni decoded JSON-string fields before validation");
+    expect(message).toContain("/full: required field missing: decisions");
+    expect(message).toContain("/graphSeed/nodes/0: unexpected field target_state");
+    expect(message).toContain("/graphSeed/nodes/0: required field missing: spec");
+    expect(message).not.toContain("/full: must be object");
+    expect(message).not.toContain("/graphSeed: must be object");
   });
 
   it("keeps a selected union branch when a secondary literal is wrong", () => {

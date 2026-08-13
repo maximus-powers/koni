@@ -9260,6 +9260,36 @@ describe("native compiler-authoritative run program", () => {
     await persistWrites(project.projectRoot, resolved.artifactWrites ?? []);
     const run = runRecord(project.projectRoot, runId, objective, resolved);
     run.workingSpecOwnerId = resolved.workingSpecOwnerId!;
+    run.planningSession = {
+      protocol: "koni.planning-session.v1",
+      attemptId: "attempt-context-plan",
+      sessionId: "session-context-plan",
+      status: "running",
+      currentRevision: 0,
+      revisions: [
+        {
+          protocol: "koni.planning-revision.v1",
+          revision: 0,
+          status: "running",
+          launchSpecSha256: digest("pending-context-plan-launch"),
+          grantSha256: digest("pending-context-plan-grant"),
+          budgetBaseline: {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
+          budgetPolicy: {
+            metric: "new_tokens",
+            limit: 120_000,
+            synthesisReserve: 20_000,
+            synthesisThreshold: 100_000,
+            onExhausted: "force_synthesis",
+          },
+          startedAt: FIXED_NOW.toISOString(),
+        },
+      ],
+    };
 
     const planning = await program.prepareAttempt({
       kind: "planning",
@@ -9270,6 +9300,9 @@ describe("native compiler-authoritative run program", () => {
       expectedAuthorityStateHash: digest("context-plan-state"),
       lineage: { branchEpoch: 0, reason: "initial" },
     });
+    expect(planning.authorityGrant?.grantId).toBe("grant-attempt-context-plan-planning-revision-0");
+    run.planningSession.revisions[0]!.launchSpecSha256 = planning.spec.specHash;
+    run.planningSession.revisions[0]!.grantSha256 = planning.spec.authority.grantHash;
     await persistWrites(project.projectRoot, planning.artifactWrites ?? []);
     const planningAttempt = attemptRecord(planning.spec, "planning", "running");
     run.attempts[planningAttempt.id] = planningAttempt;
@@ -9317,6 +9350,29 @@ describe("native compiler-authoritative run program", () => {
     run.graphHash = compiledPlan.graphHash;
     run.graphRevision = compiledPlan.graphRevision ?? 0;
     planningAttempt.terminalAcceptedAt = FIXED_NOW.toISOString();
+    const checkpointArtifact = {
+      ...(run.plan.title === undefined ? {} : { title: run.plan.title }),
+      full: run.plan.full,
+      concise: run.plan.concise,
+      graphSeed: run.plan.graphSeed,
+    };
+    const checkpointPath = `runs/${runId}/attempts/${planningAttempt.id}/planning/revisions/0/artifact.json`;
+    await persistWrites(project.projectRoot, [
+      {
+        path: checkpointPath,
+        bytes: Buffer.from(`${JSON.stringify(checkpointArtifact)}\n`, "utf8"),
+        expectedSha256: null,
+      },
+    ]);
+    Object.assign(run.planningSession.revisions[0]!, {
+      status: "awaiting_review",
+      artifactSha256: canonicalHash(checkpointArtifact),
+      graphSha256: run.graphHash,
+      transcriptSha256: digest("context-plan-transcript"),
+      checkpointPath,
+      completedAt: FIXED_NOW.toISOString(),
+    });
+    run.planningSession.status = "approving";
     materializeApprovedFixtureRun(run);
     const approved = await program.initializeApprovedPlan(run);
     await persistWrites(project.projectRoot, approved.artifactWrites ?? []);
@@ -9353,7 +9409,7 @@ describe("native compiler-authoritative run program", () => {
     const baselineId = approvedArtifact.contextual.canonicalWorkingSpecId;
     const baseline = approvedArtifact.contextual.records[baselineId]!;
     expect(baseline).toMatchObject({ protocol: "koni.working-spec.v1", version: 1 });
-    expect(baseline.baseline?.source.artifactPath).toContain("planning-output.json");
+    expect(baseline.baseline?.source.artifactPath).toBe(checkpointPath);
     const nativeNote = Object.values(approvedArtifact.contextual.records).find(
       (record) => record.protocol === "koni.graph-note.v2",
     )!;
