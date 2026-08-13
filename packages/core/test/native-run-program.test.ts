@@ -5537,7 +5537,7 @@ describe("native compiler-authoritative run program", () => {
         parentSessionId: "session-architecture",
       },
     });
-    expect(graphOnlyReviewPrepared.spec.budgets.tokens.maxNew).toBe(120_000);
+    expect(graphOnlyReviewPrepared.spec.budgets.tokens.maxNew).toBe(240_000);
     expect(graphOnlyReviewPrepared.spec.persona.initialPrompt).toContain(
       "preceding step is graph-only",
     );

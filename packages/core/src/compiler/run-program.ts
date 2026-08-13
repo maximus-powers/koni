@@ -15556,18 +15556,21 @@ function attemptTokenBudget(
   // execution budget field in a future schema.
   const semanticEnvelope = configured ?? 240_000;
   // Ticket work and independent verification both need a complete authenticated repository
-  // round-trip. Workers read, reason, edit, and check; reviewers read the current candidate and
-  // receipts before submitting a verdict. Halving either envelope can make an ordinary two-turn
-  // review exceed its allowance solely because the immutable starting context is substantial,
-  // causing identical automatic retries to spend more than one correctly sized attempt. Keep the
-  // full semantic envelope for those evidence-producing boundaries. Lead and integration remain
-  // lightweight, bounded judgments and retain the halved envelope.
+  // round-trip. Workers read, reason, edit, and check. Reviewers additionally receive the
+  // candidate and its cumulative evidence, then may need one contained compaction before they can
+  // submit a verdict. A review allowance no larger than the worker envelope can therefore expire
+  // after a valid inspection but before the terminal turn, causing repeated partial reviews to
+  // spend more than one complete review. Give verification two semantic envelopes while keeping
+  // ticket work at one; Lead and integration remain lightweight, bounded judgments.
+  const verificationEnvelope = Math.min(Number.MAX_SAFE_INTEGER, semanticEnvelope * 2);
   const maxNew =
     kind === "planning"
       ? configured!
-      : kind === "ticket" || kind === "verification"
-        ? Math.max(32_000, semanticEnvelope)
-        : Math.max(32_000, Math.floor(semanticEnvelope / 2));
+      : kind === "verification"
+        ? Math.max(32_000, verificationEnvelope)
+        : kind === "ticket"
+          ? Math.max(32_000, semanticEnvelope)
+          : Math.max(32_000, Math.floor(semanticEnvelope / 2));
   // The cache-inclusive ceiling is a worst-case exposure hold, not a spend target. Anthropic
   // usage reports re-read the entire cached prefix on every turn (observed live: a healthy
   // 14-turn implementer accumulated 905K cacheRead against 6.6K new tokens before crossing the
