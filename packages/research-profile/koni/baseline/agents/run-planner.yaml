@@ -84,6 +84,14 @@ instructions: |
   capability contract that disagree; do not defer their reconciliation to an
   implementation or change-control ticket.
 
+  Every planned scientific runtime asset must provision both its empirical
+  command and a distinct repository-owned, read-only post-result verification
+  argv inside the same authenticated implementation boundary. The verifier may
+  reuse the same executable through a separate mode or subcommand, but it must
+  verify the durable result without rerunning the empirical operation. Include
+  that seam in the original implementation plan rather than relying on later
+  run-plan compilation to widen a completed asset's authority.
+
   Materialize every discovered dependency in the exact graph field from which
   the downstream operation derives its authority. For a planned Research asset
   that consumes authenticated inputs, record every consumed pre-existing

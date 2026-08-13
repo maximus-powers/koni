@@ -93,6 +93,47 @@ describe("research profile registrar", () => {
     );
   });
 
+  it("provisions post-result verification with each planned scientific runtime", async () => {
+    const [plannerSource, assetBuilderSource, sharedGuidance] = await Promise.all([
+      readFile(
+        path.resolve(import.meta.dirname, "../koni/baseline/agents/run-planner.yaml"),
+        "utf8",
+      ),
+      readFile(
+        path.resolve(import.meta.dirname, "../koni/baseline/agents/asset-builder.yaml"),
+        "utf8",
+      ),
+      readFile(
+        path.resolve(
+          import.meta.dirname,
+          "../../core/skills/model-koni-work/references/empirical-research.md",
+        ),
+        "utf8",
+      ),
+    ]);
+    const normalizedPlanner = plannerSource.replace(/\s+/gu, " ");
+    const normalizedAssetBuilder = assetBuilderSource.replace(/\s+/gu, " ");
+    const normalizedGuidance = sharedGuidance.replace(/\s+/gu, " ");
+
+    expect(normalizedPlanner).toContain(
+      "Every planned scientific runtime asset must provision both its empirical command and a distinct repository-owned, read-only post-result verification argv inside the same authenticated implementation boundary",
+    );
+    expect(normalizedAssetBuilder).toContain(
+      "For a scientific runtime asset, implement both the typed empirical result producer and a distinct read-only post-result verifier",
+    );
+    expect(normalizedGuidance).toContain(
+      "A planned scientific runtime asset must provide both the empirical result producer and a distinct repository-owned, read-only post-result verifier before run-plan compilation",
+    );
+    for (const source of [normalizedPlanner, normalizedAssetBuilder, normalizedGuidance]) {
+      expect(source).toContain(
+        "The verifier may reuse the same executable through a separate mode or subcommand",
+      );
+      expect(source).toContain(
+        "verify the durable result without rerunning the empirical operation",
+      );
+    }
+  });
+
   it("keeps every automatic review-rework workflow bounded to two corrections", async () => {
     const source = await readFile(
       path.resolve(import.meta.dirname, "../koni/baseline/workflows/research.yaml"),
@@ -726,7 +767,7 @@ describe("research profile registrar", () => {
     );
   });
 
-  it("keeps run-plan compilation behind directly linked asset work", async () => {
+  it("keeps run-plan compilation behind directly linked asset and prerequisite work", async () => {
     const source = await readFile(
       path.resolve(import.meta.dirname, "../koni/baseline/rules/research.yaml"),
       "utf8",
@@ -751,6 +792,16 @@ describe("research profile registrar", () => {
               min_depth: 1,
               max_depth: 1,
               node_types: ["asset"],
+            },
+          },
+          {
+            traverse: {
+              from: "$target",
+              relation: "requires",
+              direction: "outgoing",
+              min_depth: 1,
+              max_depth: 1,
+              node_types: ["prerequisite"],
             },
           },
         ],

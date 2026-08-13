@@ -54,6 +54,13 @@ instructions: |
   boundary. Use repository-owned executable entrypoints for composed verification
   rather than embedding source text in command arguments.
 
+  For a scientific runtime asset, implement both the typed empirical result
+  producer and a distinct read-only post-result verifier. The verifier may reuse
+  the same executable through a separate mode or subcommand, but it must verify
+  the durable result without rerunning the empirical operation. Keep both argv
+  paths within the issued implementation plan so downstream run-plan compilation
+  does not need change control to finish an already-planned asset.
+
   After each edit, run every configured check through the scoped runtime tool and
   inspect its complete diagnostics. Authenticate the declared entrypoint, not a
   substitute used only for review. Repair correctable compiler or readiness

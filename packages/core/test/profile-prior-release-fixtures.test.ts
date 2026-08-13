@@ -15,7 +15,7 @@ const fixtures = [
     directory: "research-1.0.11",
     bundleSha256: "sha256:1bc8bdb64934ccd475f50acad5b22a7b1b6f7e168a748ecd91e234be76126c60",
     targetDirectory: "research-profile",
-    targetBundleSha256: "sha256:dc975b67da7bb4bb7078a40713e5ed6da6183117c7458be2b38ee7bc9ca99bd0",
+    targetBundleSha256: "sha256:ebcf924803e52dc319ab7f5052cf96d70c486f8d934d8fa578831a7030de123f",
   },
 ] as const;
 

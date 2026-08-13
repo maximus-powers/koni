@@ -35,9 +35,9 @@ const releases = [
     directory: "research-profile",
     fixtureDirectory: "research-1.0.11",
     oldVersion: "1.0.11",
-    newVersion: "1.1.32",
+    newVersion: "1.1.33",
     oldBundleSha256: "sha256:1bc8bdb64934ccd475f50acad5b22a7b1b6f7e168a748ecd91e234be76126c60",
-    newBundleSha256: "sha256:dc975b67da7bb4bb7078a40713e5ed6da6183117c7458be2b38ee7bc9ca99bd0",
+    newBundleSha256: "sha256:ebcf924803e52dc319ab7f5052cf96d70c486f8d934d8fa578831a7030de123f",
     parallelism: { source: 64, project: 17 },
   },
 ] as const;

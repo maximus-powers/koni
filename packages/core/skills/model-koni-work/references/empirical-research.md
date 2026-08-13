@@ -55,6 +55,12 @@ evidence matters independently.
   `implementation_plan.root` as a directory boundary; every planned file must be contained beneath
   it, and every implementation or capability entrypoint must identify one of those planned files.
   Never serialize a file or entrypoint outside that root and rely on a later worker to reconcile it.
+- A planned scientific runtime asset must provide both the empirical result producer and a distinct
+  repository-owned, read-only post-result verifier before run-plan compilation. The verifier may
+  reuse the same executable through a separate mode or subcommand, but it must verify the durable
+  result without rerunning the empirical operation. Keep both argv paths inside the original
+  authenticated implementation boundary; do not defer an expected verifier to change control after
+  the asset is complete.
 - Preserve null, negative, contradictory, and failed results as evidence when their receipts are
   valid. Never rewrite acceptance criteria after observing the result without a new explicit design
   revision.

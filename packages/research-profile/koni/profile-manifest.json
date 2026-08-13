@@ -2,12 +2,12 @@
   "protocol": "koni.profile-package.v1",
   "package": {
     "name": "@koni/research-profile",
-    "version": "1.1.32"
+    "version": "1.1.33"
   },
   "profile": {
     "id": "research",
     "display_name": "Research",
-    "version": "1.1.32",
+    "version": "1.1.33",
     "lineage": "koni.research"
   },
   "compatibility": {
@@ -32,8 +32,8 @@
       },
       {
         "path": "agents/asset-builder.yaml",
-        "sha256": "sha256:fd5877b62ef7309533a0194752743fa6d24b30674b262c832ecea7593ba3ef78",
-        "size_bytes": 4889,
+        "sha256": "sha256:50cd04731068fa7e44d320f12743dabff6e20f6a21a4fef2ae12c6b7fdc33811",
+        "size_bytes": 5354,
         "kind": "agent"
       },
       {
@@ -104,8 +104,8 @@
       },
       {
         "path": "agents/run-planner.yaml",
-        "sha256": "sha256:58e96901d0de87d6c8103258e8dbec9e4952474b1112dfa7d760e598a5bb7098",
-        "size_bytes": 7728,
+        "sha256": "sha256:da5977ebe1823b086dd6364e092f542943235f4f4606d73f9a8a0bdb861e573d",
+        "size_bytes": 8259,
         "kind": "agent"
       },
       {
@@ -140,7 +140,7 @@
       },
       {
         "path": "profile.yaml",
-        "sha256": "sha256:949552221b7aa684c85d07d714cca03e292a5b59dd26b6ce04d0f4b7ba86a69f",
+        "sha256": "sha256:7424d1901801095bc45795238146531c5698b8313cf0ba86d345af7e7970ed78",
         "size_bytes": 1319,
         "kind": "config"
       },
@@ -164,8 +164,8 @@
       },
       {
         "path": "rules/research.yaml",
-        "sha256": "sha256:cfc5cb8701c320407874e898a2a0e09e28fa1cfd1be94009e50d9c0ba205baa7",
-        "size_bytes": 42019,
+        "sha256": "sha256:85c3779b6014a3161331fe0ad054634a59985eb13f530ca384150ac20a26886e",
+        "size_bytes": 42285,
         "kind": "config"
       },
       {
@@ -206,5 +206,5 @@
       "sha256": "sha256:c807436b04f7d44ea65cce5cfa6ed8cba3c4e5d8d571034f7fecc25c9fd117a5"
     }
   ],
-  "bundle_sha256": "sha256:dc975b67da7bb4bb7078a40713e5ed6da6183117c7458be2b38ee7bc9ca99bd0"
+  "bundle_sha256": "sha256:ebcf924803e52dc319ab7f5052cf96d70c486f8d934d8fa578831a7030de123f"
 }

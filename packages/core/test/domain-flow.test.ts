@@ -48,7 +48,7 @@ afterEach(async () => {
 });
 
 describe("provider-free domain flows", () => {
-  it("defines an experiment gate before compiling a runtime that consumes its asset contract", async () => {
+  it("settles gate, asset, and prerequisite producers before compiling their runtime", async () => {
     const root = await temporaryRoot();
     const configuration = compileProfile("research-profile");
     const experiment = node(
@@ -127,6 +127,7 @@ describe("provider-free domain flows", () => {
         ruleIds: [
           "readiness.experiment-constitution",
           "ticket.define-gate",
+          "ticket.resolve-prerequisite-asset",
           "ticket.compile-run-plan",
         ],
         adapter,
@@ -138,6 +139,7 @@ describe("provider-free domain flows", () => {
     expect(evaluated.value.tickets.map(({ operation }) => operation).sort()).toEqual([
       "compile-run-plan",
       "define-gates",
+      "resolve-assets",
     ]);
     const compileTicket = evaluated.value.tickets.find(
       ({ operation }) => operation === "compile-run-plan",
@@ -145,11 +147,15 @@ describe("provider-free domain flows", () => {
     const defineGateTicket = evaluated.value.tickets.find(
       ({ operation }) => operation === "define-gates",
     )!;
+    const resolvePrerequisiteTicket = evaluated.value.tickets.find(
+      ({ operation }) => operation === "resolve-assets",
+    )!;
     expect(
       Object.fromEntries(deriveCompilerTicketDependencies(evaluated.value.tickets, root)),
     ).toEqual({
-      [compileTicket.id]: [defineGateTicket.id],
+      [compileTicket.id]: [defineGateTicket.id, resolvePrerequisiteTicket.id],
       [defineGateTicket.id]: [],
+      [resolvePrerequisiteTicket.id]: [],
     });
   });
 
