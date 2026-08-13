@@ -6513,7 +6513,7 @@ function sameScopeContinuationPrompt(
           `The parent attempt ended for this authority-recorded reason: ${parentFailure}. Account for it directly instead of re-deriving it: an exhausted budget means finish minimal remaining work and submit immediately; a transient provider failure means your prior work is intact, so proceed straight to submission; a tool-contract rejection means correct that exact call rather than retrying variations.`,
           ...(parentFailure.includes("input token budget exceeded")
             ? [
-                "Do not reissue an exact repository discovery call that already succeeded or was rejected as a duplicate. Treat its retained result or rejection as final; make at most one narrower request only for one decisive missing fact.",
+                "Reuse exact repository results while their bytes remain visible in the inherited conversation. After compaction, reacquire only the specific repository bytes needed to continue; do not vary equivalent arguments merely to evade a duplicate rejection. A repository mutation or configured check can invalidate earlier reads, so refresh only the affected evidence.",
               ]
             : []),
         ]),

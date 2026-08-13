@@ -396,6 +396,11 @@ const REPOSITORY_DISCOVERY_TOOLS = new Set<KoniToolName>([
   "koni_list_files",
   "koni_search_files",
 ]);
+const REPOSITORY_KNOWLEDGE_INVALIDATION_TOOLS = new Set<KoniToolName>([
+  "koni_write_file",
+  "koni_edit_file",
+  "koni_run_check",
+]);
 
 const RUN_DELETION_PREVIEW_PROTOCOL = "koni.run-deletion-preview.v1" as const;
 const RUN_MERGE_PREVIEW_PROTOCOL = "koni.run-merge-preview.v1" as const;
@@ -12546,6 +12551,7 @@ export class RunAuthorityEngine {
             summaryBytes: record.summaryBytes,
             firstKeptEntryId: record.firstKeptEntryId,
             tokensBefore: record.tokensBefore,
+            toolResultSequence: attempt.authorityToolResults?.at(-1)?.sequence ?? 0,
             recordedAt: draft.updatedAt,
           });
           const committed = await this.#store.commit({
@@ -24274,28 +24280,47 @@ export function inheritedRepositoryDiscoveryCalls(
   return total;
 }
 
-export function inheritedRepositoryDiscoveryDuplicate(
-  run: RunRecord,
+/**
+ * Find an exact discovery result whose bytes are still available to the active model context.
+ *
+ * Durable receipts prove that a call happened, but a Koni compaction checkpoint retains only the
+ * file identity and receipt digest, not arbitrary repository bytes. A later write/edit/check can
+ * also make an earlier read stale. Duplicate rejection is therefore scoped to the current visible
+ * knowledge epoch; cumulative call accounting remains conversation-fork aware and independently
+ * bounds reacquisition.
+ */
+export function modelVisibleRepositoryDiscoveryDuplicate(
   attempt: AgentAttemptRecord,
   toolName: KoniToolName,
   argumentsSha256: Sha256Digest,
 ): NonNullable<AgentAttemptRecord["authorityToolResults"]>[number] | undefined {
-  const seen = new Set<string>();
-  let cursor: AgentAttemptRecord | undefined = attempt;
-  while (cursor !== undefined && !seen.has(cursor.id)) {
-    seen.add(cursor.id);
-    const duplicate = (cursor.authorityToolResults ?? []).find(
+  const results = attempt.authorityToolResults ?? [];
+  const latestMutationSequence = results.reduce(
+    (latest, result) =>
+      result.outcome === "accepted" &&
+      REPOSITORY_KNOWLEDGE_INVALIDATION_TOOLS.has(result.toolName as KoniToolName)
+        ? Math.max(latest, result.sequence)
+        : latest,
+    0,
+  );
+  const latestCompaction = attempt.authorityCompactions?.at(-1);
+  // Compactions created before the causal watermark was introduced cannot prove which repository
+  // bytes survived. Conservatively permit reacquisition; the cumulative discovery-call budget
+  // remains unchanged and bounds it.
+  const latestCompactionSequence =
+    latestCompaction === undefined
+      ? 0
+      : (latestCompaction.toolResultSequence ?? Number.MAX_SAFE_INTEGER);
+  const visibilityBoundary = Math.max(latestMutationSequence, latestCompactionSequence);
+  return [...results]
+    .reverse()
+    .find(
       (result) =>
         result.outcome === "accepted" &&
         result.toolName === toolName &&
-        result.argumentsSha256 === argumentsSha256,
+        result.argumentsSha256 === argumentsSha256 &&
+        result.sequence > visibilityBoundary,
     );
-    if (duplicate !== undefined) return duplicate;
-    const lineage: AgentAttemptRecord["lineage"] = cursor.lineage;
-    if (lineage?.conversationFork === undefined || lineage.parentAttemptId === undefined) break;
-    cursor = run.attempts[lineage.parentAttemptId];
-  }
-  return undefined;
 }
 
 function enforceRepositoryCallBudget(
@@ -24319,18 +24344,12 @@ function enforceRepositoryCallBudget(
   }
   if (REPOSITORY_DISCOVERY_TOOLS.has(call.name)) {
     const argumentsSha256 = rawSha256(canonicalEncode(call.arguments));
-    const duplicate = inheritedRepositoryDiscoveryDuplicate(
-      run,
-      attempt,
-      call.name,
-      argumentsSha256,
-    );
+    const duplicate = modelVisibleRepositoryDiscoveryDuplicate(attempt, call.name, argumentsSha256);
     if (duplicate !== undefined) {
-      // Naming the exact earlier receipt turns recovery into a lookup instead of a re-plan:
-      // the observed cost of this rejection was one wasted provider turn per occurrence.
+      // Naming the exact visible receipt turns a redundant call into a lookup instead of a re-plan.
       throw new AuthorityRpcError(
         "duplicate_repository_discovery",
-        `this exact ${call.name} request already succeeded as authority call ${duplicate.sequence} in this inherited conversation (receipt ${duplicate.receiptSha256}); that result is retained in this transcript. Reuse it, or make a narrower, non-duplicate request.`,
+        `this exact ${call.name} request already succeeded as authority call ${duplicate.sequence} in the current visible conversation epoch (receipt ${duplicate.receiptSha256}); reuse that result instead of repeating the call.`,
         {
           details: {
             priorSequence: duplicate.sequence,

@@ -508,6 +508,8 @@ export interface AgentAuthorityCompactionRecord {
   summaryBytes: number;
   firstKeptEntryId: string;
   tokensBefore: number;
+  /** Last authority-tool result visible when this compaction was authorized. */
+  toolResultSequence?: number;
   recordedAt: string;
 }
 
@@ -7935,6 +7937,8 @@ function assertAttemptRecord(id: string, value: unknown): asserts value is Agent
       typeof entry.firstKeptEntryId === "string" &&
       entry.firstKeptEntryId.length > 0 &&
       isNonnegativeSafeInteger(entry.tokensBefore) &&
+      (entry.toolResultSequence === undefined ||
+        isNonnegativeSafeInteger(entry.toolResultSequence)) &&
       typeof entry.recordedAt === "string",
     `attempt authority compactions: ${id}`,
   );

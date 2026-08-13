@@ -14,10 +14,10 @@ import {
   configuredCheckResultRequiresDependencyReopen,
   configuredResultArtifactPaths,
   correctableAgentToolError,
-  inheritedRepositoryDiscoveryDuplicate,
   inheritedRepositoryDiscoveryCalls,
   isRecoverableAssignmentValidationAction,
   isExactSettledLeadLaunchReplay,
+  modelVisibleRepositoryDiscoveryDuplicate,
   needsHistoricalPreservedDeletionWorktreeRetirement,
   questionBatchPlanningRevisionIsCurrent,
   retainTicketAuthorityFields,
@@ -8952,7 +8952,7 @@ describe("run authority engine", () => {
     expect(inheritedRepositoryDiscoveryCalls(run, freshRoot)).toBe(2);
   });
 
-  it("rejects exact discovery duplicates inherited through an authenticated conversation fork", () => {
+  it("rejects an exact discovery duplicate only while its bytes remain model-visible", () => {
     const argumentsSha256 = rawSha256(canonicalEncode({ path: "src/owner.ts" }));
     const accepted = {
       sequence: 7,
@@ -8960,41 +8960,103 @@ describe("run authority engine", () => {
       outcome: "accepted",
       argumentsSha256,
       receiptSha256: rawSha256("retained repository read"),
+      recordedAt: "2026-08-13T12:00:00.000Z",
     } as NonNullable<AgentAttemptRecord["authorityToolResults"]>[number];
-    const parent = {
-      id: "parent",
+    const attempt = {
+      id: "attempt",
       authorityToolResults: [accepted],
       lineage: { branchEpoch: 0, reason: "initial" },
     } as unknown as AgentAttemptRecord;
+
+    expect(
+      modelVisibleRepositoryDiscoveryDuplicate(attempt, "koni_read_file", argumentsSha256),
+    ).toMatchObject({ sequence: 7, receiptSha256: accepted.receiptSha256 });
+
+    attempt.authorityCompactions = [
+      {
+        sequence: 1,
+        authorizationId: "compact-one",
+        summaryHash: rawSha256("summary"),
+        summaryBytes: 100,
+        firstKeptEntryId: "entry-after-read",
+        tokensBefore: 10_000,
+        toolResultSequence: 7,
+        recordedAt: "2026-08-13T12:00:01.000Z",
+      },
+    ];
+    expect(
+      modelVisibleRepositoryDiscoveryDuplicate(attempt, "koni_read_file", argumentsSha256),
+    ).toBeUndefined();
+
+    attempt.authorityToolResults!.push({
+      ...accepted,
+      sequence: 8,
+      receiptSha256: rawSha256("repository read after compaction"),
+      recordedAt: "2026-08-13T12:00:01.000Z",
+    });
+    expect(
+      modelVisibleRepositoryDiscoveryDuplicate(attempt, "koni_read_file", argumentsSha256),
+    ).toMatchObject({ sequence: 8 });
+
+    delete attempt.authorityCompactions[0]!.toolResultSequence;
+    expect(
+      modelVisibleRepositoryDiscoveryDuplicate(attempt, "koni_read_file", argumentsSha256),
+    ).toBeUndefined();
+  });
+
+  it("does not treat lineage metadata as visible repository bytes", () => {
+    const argumentsSha256 = rawSha256(canonicalEncode({ path: "src/owner.ts" }));
     const forked = {
       id: "forked",
       authorityToolResults: [],
       lineage: {
         branchEpoch: 1,
         reason: "recovery",
-        parentAttemptId: parent.id,
+        parentAttemptId: "parent",
         conversationFork: {
           parentLaunchSpecHash: rawSha256("parent launch"),
           parentTranscriptSha256: rawSha256("parent transcript"),
         },
       },
     } as unknown as AgentAttemptRecord;
-    const fresh = {
-      ...structuredClone(forked),
-      id: "fresh",
-      lineage: { branchEpoch: 1, reason: "rework", parentAttemptId: parent.id },
-    } as unknown as AgentAttemptRecord;
-    const run = {
-      attempts: { parent, forked, fresh },
-    } as unknown as RunRecord;
 
     expect(
-      inheritedRepositoryDiscoveryDuplicate(run, forked, "koni_read_file", argumentsSha256),
-    ).toMatchObject({ sequence: 7, receiptSha256: accepted.receiptSha256 });
-    expect(
-      inheritedRepositoryDiscoveryDuplicate(run, fresh, "koni_read_file", argumentsSha256),
+      modelVisibleRepositoryDiscoveryDuplicate(forked, "koni_read_file", argumentsSha256),
     ).toBeUndefined();
   });
+
+  for (const mutationTool of ["koni_write_file", "koni_edit_file", "koni_run_check"] as const) {
+    it(`allows an exact read refresh after accepted ${mutationTool} authority`, () => {
+      const argumentsSha256 = rawSha256(canonicalEncode({ path: "src/owner.ts" }));
+      const accepted = {
+        sequence: 1,
+        toolName: "koni_read_file",
+        outcome: "accepted",
+        argumentsSha256,
+        receiptSha256: rawSha256("repository read"),
+        recordedAt: "2026-08-13T12:00:00.000Z",
+      } as NonNullable<AgentAttemptRecord["authorityToolResults"]>[number];
+      const mutated = {
+        id: "mutated",
+        authorityToolResults: [
+          accepted,
+          {
+            sequence: 2,
+            toolName: mutationTool,
+            outcome: "accepted",
+            argumentsSha256: rawSha256("mutation arguments"),
+            receiptSha256: rawSha256("mutation receipt"),
+            recordedAt: "2026-08-13T12:00:01.000Z",
+          },
+        ],
+        lineage: { branchEpoch: 0, reason: "initial" },
+      } as unknown as AgentAttemptRecord;
+
+      expect(
+        modelVisibleRepositoryDiscoveryDuplicate(mutated, "koni_read_file", argumentsSha256),
+      ).toBeUndefined();
+    });
+  }
 
   it("reconciles a stalled attempt that no live process backs and re-drives the run", async () => {
     const root = await repository();

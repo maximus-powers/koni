@@ -4289,7 +4289,13 @@ describe("native compiler-authoritative run program", () => {
       "A terminal-tool receipt visible in inherited history belongs to the parent attempt",
     );
     expect(retried.spec.persona.initialPrompt).toContain(
-      "Do not reissue an exact repository discovery call that already succeeded or was rejected as a duplicate",
+      "Reuse exact repository results while their bytes remain visible in the inherited conversation",
+    );
+    expect(retried.spec.persona.initialPrompt).toContain(
+      "After compaction, reacquire only the specific repository bytes needed to continue",
+    );
+    expect(retried.spec.persona.initialPrompt).not.toContain(
+      "Do not reissue an exact repository discovery call that already succeeded",
     );
     expect(retried.spec.persona.initialPrompt).toContain(
       "An accepted inherited koni_read_resource receipt already satisfies skill loading",
