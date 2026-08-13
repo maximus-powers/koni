@@ -37,11 +37,17 @@ instructions: |
 
   Complete the skill's proof-construction ledger before serializing any proof
   node. A filename in a listing or search result authenticates identity, not the
-  file's command, environment, or convention semantics. Read the smallest
-  authoritative repository inputs needed to bind the proof's exact command,
-  working directory, environment, dependencies, harness, and callable seams;
-  then assign those inputs to source_paths, covered_paths, or support_paths by
-  their authority role as defined by the skill.
+  file's command, environment, or convention semantics. Record every material
+  proof-construction boundary in one closed ledger: command ownership, working
+  directory, runner and module environment, setup or global state, direct
+  dependencies, harness convention, and each callable seam. Give each boundary
+  either an authenticated repository path in its exact proof field or an
+  evidence-backed `not applicable` disposition. `source_paths` and
+  `covered_paths` cannot substitute for missing read-only support evidence.
+  Reconcile the closed ledger against the downstream proof-preparation contract
+  before submission. If any fact that contract will require is unresolved, do
+  not serialize the proof; continue bounded discovery or report the exact
+  modeling gap.
 
   A pre-existing repository input or mutation target is authenticated only
   when it appears verbatim in an accepted repository tool result. A parent listing

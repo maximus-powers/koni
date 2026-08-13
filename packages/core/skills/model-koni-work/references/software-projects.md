@@ -277,10 +277,14 @@ set.
 Give each product change one explicit strategy; do not pretend every task begins with a meaningful
 red test.
 
-Before dispatch, build one proof-construction ledger from the issued support evidence: the exact
-runner and working directory, required setup and environment, direct dependencies, established
-harness conventions, and the real callable seams or consumers for every oracle case. If any material
-entry is missing, correct the model or request authority before asking a proof author to guess.
+Before dispatch, build one proof-construction ledger from the issued support evidence: command
+ownership, the exact runner and working directory, required setup and environment, direct
+dependencies, established harness conventions, and the real callable seams or consumers for every
+oracle case. A proof-construction ledger is closed only when every material boundary has either an
+authenticated repository input in its exact authority field or an evidence-backed `not applicable`
+disposition. Proof source or covered product paths never stand in for missing support evidence. If
+any material entry remains open, correct the model or request authority before asking a proof author
+to guess.
 
 Build that ledger from inspected repository content before serializing the proof. A filename in a
 listing or search result authenticates identity, not its command, environment, or convention
@@ -291,7 +295,9 @@ matching its authority role: executable or proof-owned bytes in `source_paths`, 
 seams in `covered_paths`, and read-only environment or convention evidence in `support_paths`.
 Discard inspected alternatives that the selected proof does not use. Do not serialize the proof
 while any command, environment, dependency, or harness claim remains supported only by a familiar
-name or remembered convention.
+name or remembered convention. Reconcile the closed ledger against the downstream preparation
+contract before submission so planning grants every read-only fact that proof construction and
+review will require.
 
 Design the proof as executable behavior, not source inspection. Exercise each declared route through
 its production seam, keep the routes independently reachable, and isolate an expected absence so it

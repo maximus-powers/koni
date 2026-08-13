@@ -9,7 +9,7 @@ const fixtures = [
     directory: "coding-0.7.0",
     bundleSha256: "sha256:4e955f7fb5a6bbd58542f395471d2e3f1c87364840abd218f973b8f62a5c0c7e",
     targetDirectory: "coding-profile",
-    targetBundleSha256: "sha256:ea025c74db65bfabdc411be68b199b63b6aa8413a846dc8f2749c2894d6b237e",
+    targetBundleSha256: "sha256:9747ff76fd0f7b907ecb24c1a4a0a36e0b6f625b38b2f5567945ee9a7113dae6",
   },
   {
     directory: "research-1.0.11",

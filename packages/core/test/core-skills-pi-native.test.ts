@@ -156,6 +156,15 @@ describe("Koni's Pi-native skills", () => {
     expect(normalizedSoftwareReference).toContain(
       "A filename in a listing or search result authenticates identity, not its command, environment, or convention semantics",
     );
+    expect(normalizedSoftwareReference).toContain(
+      "A proof-construction ledger is closed only when every material boundary has either an authenticated repository input in its exact authority field or an evidence-backed `not applicable` disposition",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "Proof source or covered product paths never stand in for missing support evidence",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "Reconcile the closed ledger against the downstream preparation contract before submission",
+    );
     expect(normalizedExecutionReference).toContain(
       "A prior failed-review blocker is repair history, not current execution evidence",
     );

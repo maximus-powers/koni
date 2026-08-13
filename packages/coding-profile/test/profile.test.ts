@@ -380,8 +380,26 @@ describe("coding profile registrar", () => {
     expect(normalizedPlanner).toContain(
       "A filename in a listing or search result authenticates identity, not the file's command, environment, or convention semantics",
     );
+    expect(normalizedPlanner).toContain(
+      "Record every material proof-construction boundary in one closed ledger",
+    );
+    expect(normalizedPlanner).toContain(
+      "an authenticated repository path in its exact proof field or an evidence-backed `not applicable` disposition",
+    );
+    expect(normalizedPlanner).toContain(
+      "`source_paths` and `covered_paths` cannot substitute for missing read-only support evidence",
+    );
+    expect(normalizedPlanner).toContain(
+      "Reconcile the closed ledger against the downstream proof-preparation contract before submission",
+    );
     expect(normalizedSoftwareReference).toContain(
       "Place every repository input relied on by the selected proof in exactly the proof field matching its authority role",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "A proof-construction ledger is closed only when every material boundary has either an authenticated repository input in its exact authority field or an evidence-backed `not applicable` disposition",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "Proof source or covered product paths never stand in for missing support evidence",
     );
     expect(normalizedReviewer).toContain(
       "Treat the current authenticated predecessor execution as the evidence authority for the current review cycle",
