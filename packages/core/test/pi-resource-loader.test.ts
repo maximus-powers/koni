@@ -110,6 +110,12 @@ describe("contained Pi resource loader", () => {
     expect(result.loader.getAppendSystemPrompt()[1]).toContain(
       "do not reload the same immutable resource",
     );
+    expect(result.loader.getAppendSystemPrompt()[1]).toContain(
+      "continue from `nextOffsetChars` until `eof` is true before acting",
+    );
+    expect(result.loader.getAppendSystemPrompt()[1]).toContain(
+      "Read every reference that the selected SKILL.md marks as required to the same complete boundary",
+    );
     expect(result.loader.getAppendSystemPrompt()[1]).not.toContain(
       "load every skill whose description matches the task",
     );
