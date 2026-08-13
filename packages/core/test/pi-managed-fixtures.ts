@@ -11,9 +11,9 @@ import {
 import type { AuthorityBackedTool } from "../src/pi/managed-session.js";
 import {
   KONI_TOOL_RECEIPT_PROTOCOL,
-  koniToolSchemaHash,
+  createKoniAuthorityTools,
   koniToolMaxResultBytes,
-  renderKoniToolReceipt,
+  koniToolSchemaHash,
   type KoniToolReceipt,
 } from "../src/pi/tool-catalog.js";
 
@@ -22,7 +22,7 @@ export const TERMINAL_OUTPUT_SCHEMA = Type.Object(
   { result: Type.String() },
   { additionalProperties: false },
 );
-export const TOOL_SCHEMA_HASH = canonicalHash(TERMINAL_OUTPUT_SCHEMA);
+export const TOOL_SCHEMA_HASH = koniToolSchemaHash("koni_submit_output", TERMINAL_OUTPUT_SCHEMA);
 export const OUTPUT_SCHEMA_HASH = canonicalHash(TERMINAL_OUTPUT_SCHEMA);
 /** Exact secret-free descriptor seal for Pi 0.80.10's built-in gpt-5.6-terra catalog entry. */
 export const FIXTURE_MODEL_CATALOG_SHA256 =
@@ -35,43 +35,22 @@ export function fixtureTool(): AuthorityBackedTool {
     outcome: "accepted",
     summary: "submitted",
   });
-  const execute: AuthorityBackedTool["execute"] = async () => ({
-    content: [{ type: "text", text: renderKoniToolReceipt(acceptedReceipt()) }],
-    details: acceptedReceipt(),
-    terminate: true,
-  });
-  const reject: AuthorityBackedTool["reject"] = async (_callId, _args, rejection) => {
-    const receipt: KoniToolReceipt = {
-      protocol: KONI_TOOL_RECEIPT_PROTOCOL,
-      receiptId: "fixture-rejection",
-      outcome: "rejected",
-      code: rejection.code,
-      summary: rejection.summary,
-    };
-    return {
-      content: [{ type: "text", text: renderKoniToolReceipt(receipt) }],
-      details: receipt,
-    };
-  };
-  return {
-    name: TERMINAL_TOOL_NAME,
-    schemaHash: TOOL_SCHEMA_HASH,
-    maxResultBytes: koniToolMaxResultBytes("koni_submit_output"),
+  return createKoniAuthorityTools({
+    names: [TERMINAL_TOOL_NAME],
     terminalOutputSchema: TERMINAL_OUTPUT_SCHEMA,
-    terminalOutputSchemaHash: OUTPUT_SCHEMA_HASH,
-    execute,
-    reject,
-    definition: {
-      name: TERMINAL_TOOL_NAME,
-      label: "Submit output",
-      description: "Submit the terminal structured output to Koni authority",
-      parameters: TERMINAL_OUTPUT_SCHEMA,
-      executionMode: "sequential",
-      async execute() {
-        return execute("fixture-call", {});
-      },
+    async invoke() {
+      return acceptedReceipt();
     },
-  };
+    async reject(_call, rejection) {
+      return {
+        protocol: KONI_TOOL_RECEIPT_PROTOCOL,
+        receiptId: "fixture-rejection",
+        outcome: "rejected",
+        code: rejection.code,
+        summary: rejection.summary,
+      };
+    },
+  })[0]!;
 }
 
 export function fixtureLaunchSpec(options: {

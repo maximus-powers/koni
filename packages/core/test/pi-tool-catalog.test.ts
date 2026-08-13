@@ -159,20 +159,73 @@ describe("Koni authority-backed Pi tool catalog", () => {
 
     expect(Value.Check(tool!.definition.parameters, invalidDraft)).toBe(true);
     expect(Value.Check(tool!.terminalOutputSchema!, invalidDraft)).toBe(false);
-    expect(
+    expect(() =>
       validateKoniToolArguments(
         "koni_submit_output",
         invalidDraft,
         terminalOutputSchema,
         tool!.schemaHash,
       ),
-    ).toEqual(invalidDraft);
+    ).toThrow(/compiler-issued schema/u);
     expect(tool!.definition.description).toContain(
       'type "contract" allows only spec { enforcement_point, invariant }',
     );
     expect(tool!.definition.description).toContain(
       'type "proof" allows only spec { claim, command }',
     );
+  });
+
+  it("forwards malformed outer terminal shapes to bounded authority rejection", async () => {
+    const terminalOutputSchema = Type.Object(
+      {
+        full: Type.Object({ architecture: Type.String() }, { additionalProperties: false }),
+        concise: Type.Object(
+          { architecture: Type.Array(Type.String()) },
+          { additionalProperties: false },
+        ),
+        graphSeed: Type.Object({ nodes: Type.Array(Type.Unknown()) }),
+      },
+      { additionalProperties: false },
+    );
+    let invocation: KoniToolInvocation | undefined;
+    const [tool] = createKoniAuthorityTools({
+      names: ["koni_submit_output"],
+      terminalOutputSchema,
+      async invoke(call) {
+        invocation = call;
+        return {
+          protocol: KONI_TOOL_RECEIPT_PROTOCOL,
+          receiptId: "receipt-malformed-outer-shape",
+          outcome: "rejected",
+          code: "tool_arguments",
+          summary: "concise and graphSeed must be top-level fields",
+        };
+      },
+      reject,
+    });
+    const malformedDraft = {
+      full: {
+        architecture: "Use the existing seam.",
+        concise: { architecture: ["Reuse the owner."] },
+        graphSeed: { nodes: [] },
+      },
+    };
+
+    expect(Value.Check(tool!.definition.parameters, malformedDraft)).toBe(true);
+    expect(Value.Check(tool!.terminalOutputSchema!, malformedDraft)).toBe(false);
+    const result = await tool!.definition.execute(
+      "submit-malformed-outer-shape",
+      malformedDraft,
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(invocation).toMatchObject({
+      name: "koni_submit_output",
+      arguments: malformedDraft,
+    });
+    expect(result.terminate).toBeUndefined();
+    expect(result.details).toMatchObject({ outcome: "rejected", code: "tool_arguments" });
   });
 
   it("reconstructs a pre-relaxation flattened terminal transport by its issued hash", () => {
@@ -255,13 +308,84 @@ describe("Koni authority-backed Pi tool catalog", () => {
     ).toThrow(/compiler-issued schema/u);
   });
 
+  it("reconstructs the prior strict outer transport for an in-flight planning attempt", () => {
+    const terminalOutputSchema = Type.Object(
+      {
+        graphSeed: Type.Object({
+          nodes: Type.Array(
+            Type.Union([
+              Type.Object(
+                {
+                  type: Type.Literal("contract"),
+                  spec: Type.Object({ invariant: Type.String() }),
+                },
+                { additionalProperties: false },
+              ),
+              Type.Object(
+                {
+                  type: Type.Literal("proof"),
+                  spec: Type.Object({ claim: Type.String() }),
+                },
+                { additionalProperties: false },
+              ),
+            ]),
+          ),
+        }),
+      },
+      { additionalProperties: false },
+    );
+    const priorParameters = Type.Object(
+      {
+        graphSeed: Type.Object({
+          nodes: Type.Array(
+            Type.Object(
+              {
+                spec: Type.Object({}, { additionalProperties: true }),
+                type: Type.String({
+                  minLength: 1,
+                  description: 'Exact allowed literals: "contract", "proof"',
+                }),
+              },
+              {
+                additionalProperties: false,
+                description:
+                  'Presentation envelope only. type must be one of "contract", "proof"; authority validates the exact branch-owned spec.',
+              },
+            ),
+          ),
+        }),
+      },
+      { additionalProperties: false },
+    );
+    const priorSchemaHash = canonicalHash(priorParameters);
+    const [tool] = createKoniAuthorityTools({
+      names: ["koni_submit_output"],
+      terminalOutputSchema,
+      schemaHashes: { koni_submit_output: priorSchemaHash },
+      async invoke() {
+        return accepted("receipt-prior-strict-outer");
+      },
+      reject,
+    });
+
+    expect(tool!.schemaHash).toBe(priorSchemaHash);
+    expect(canonicalHash(tool!.definition.parameters)).toBe(priorSchemaHash);
+    expect(Value.Check(tool!.definition.parameters, { graphSeed: { nodes: [] } })).toBe(true);
+    expect(
+      Value.Check(tool!.definition.parameters, {
+        graphSeed: { nodes: [{ type: "change", spec: {} }] },
+      }),
+    ).toBe(true);
+  });
+
   it("derives an exact unique hash-bound inventory from one canonical schema catalog", () => {
+    const terminalOutputSchema = Type.Object(
+      { summary: Type.String() },
+      { additionalProperties: false },
+    );
     const tools = createKoniAuthorityTools({
       names: ["koni_read_file", "koni_edit_file", "koni_submit_output"],
-      terminalOutputSchema: Type.Object(
-        { summary: Type.String() },
-        { additionalProperties: false },
-      ),
+      terminalOutputSchema,
       async invoke() {
         return accepted("receipt-one");
       },
@@ -274,8 +398,11 @@ describe("Koni authority-backed Pi tool catalog", () => {
     ]);
     expect(tools[0]!.schemaHash).toBe(koniToolSchemaHash("koni_read_file"));
     expect(tools[0]!.maxResultBytes).toBe(koniToolMaxResultBytes("koni_read_file"));
-    expect(tools[2]!.schemaHash).toBe(canonicalHash(tools[2]!.terminalOutputSchema));
-    expect(tools[2]!.terminalOutputSchemaHash).toBe(tools[2]!.schemaHash);
+    expect(tools[2]!.schemaHash).toBe(
+      koniToolSchemaHash("koni_submit_output", terminalOutputSchema),
+    );
+    expect(tools[2]!.terminalOutputSchemaHash).toBe(canonicalHash(tools[2]!.terminalOutputSchema));
+    expect(tools[2]!.terminalOutputSchemaHash).not.toBe(tools[2]!.schemaHash);
     expect(() =>
       createKoniAuthorityTools({
         names: ["koni_context", "koni_context"],

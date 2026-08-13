@@ -588,14 +588,21 @@ export function validateKoniToolArguments(
   terminalOutputSchema?: TSchema,
   expectedSchemaHash?: Sha256Digest,
 ): Record<string, unknown> {
-  const schema = resolveToolSchema(name, terminalOutputSchema, expectedSchemaHash);
+  const presentationSchema = resolveToolSchema(name, terminalOutputSchema, expectedSchemaHash);
+  // The provider and Pi see the transport-representable presentation schema. Authority must never
+  // confuse that compatibility envelope with the compiler-issued terminal contract: validate the
+  // exact separately hash-bound schema here before any terminal effect can run.
+  const authoritySchema =
+    name === "koni_submit_output" && terminalOutputSchema !== undefined
+      ? terminalOutputSchema
+      : presentationSchema;
   // Reject a JSON-serialized object once: some provider tool-call transports stringify structured
   // arguments (observed live: `graphDelta` declared object but delivered as a string, making the
   // success branch unsatisfiable). Parse-and-retry so a correct payload is not rejected for a
   // transport artifact outside the agent's control.
   const parsed = coerceJsonObjectArguments(value);
   const accepts = (candidate: unknown): candidate is Record<string, unknown> =>
-    Value.Check(schema, candidate) &&
+    Value.Check(authoritySchema, candidate) &&
     typeof candidate === "object" &&
     candidate !== null &&
     !Array.isArray(candidate);
@@ -610,7 +617,7 @@ export function validateKoniToolArguments(
   // status value, whole token budgets drained). Return a self-describing error that names the
   // allowed values, the actual-vs-max lengths, and the full expected shape, so the next call is
   // correct. This is provider-agnostic — it derives everything from the compiled schema.
-  throw new KoniToolArgumentValidationError(describeSchemaMismatch(name, schema, parsed));
+  throw new KoniToolArgumentValidationError(describeSchemaMismatch(name, authoritySchema, parsed));
 }
 
 /** Accept a JSON-string form of the arguments (a transport artifact) as if it were the object. */
@@ -635,23 +642,34 @@ function coerceJsonObjectArguments(value: unknown): unknown {
  * description — while the schema hash and authority-side validation keep the exact compiled union.
  */
 function transportToolSchema(name: KoniToolName, schema: TSchema): TSchema {
-  return terminalTransportToolSchema(name, schema, true);
+  return terminalTransportToolSchema(name, schema, true, true);
+}
+
+/** Reconstruct launch specs issued before the outer terminal envelope became presentation-only. */
+function strictOuterTransportToolSchema(name: KoniToolName, schema: TSchema): TSchema {
+  return terminalTransportToolSchema(name, schema, true, false);
 }
 
 /** Reconstruct launch specs issued before nested discriminator validation moved to authority. */
 function legacyTransportToolSchema(name: KoniToolName, schema: TSchema): TSchema {
-  return terminalTransportToolSchema(name, schema, false);
+  return terminalTransportToolSchema(name, schema, false, false);
 }
 
 function terminalTransportToolSchema(
   name: KoniToolName,
   schema: TSchema,
   relaxNestedDiscriminators: boolean,
+  relaxOuterEnvelope: boolean,
 ): TSchema {
   if (name !== "koni_submit_output") return schema;
   const branches = (schema as { anyOf?: TSchema[] }).anyOf;
   if (!Array.isArray(branches) || branches.length === 0) {
-    return relaxNestedDiscriminators ? relaxNestedDiscriminatedArrays(schema) : schema;
+    const nestedPresentation = relaxNestedDiscriminators
+      ? relaxNestedDiscriminatedArrays(schema)
+      : schema;
+    return relaxOuterEnvelope
+      ? relaxTerminalPresentationEnvelope(nestedPresentation)
+      : nestedPresentation;
   }
   const byKey = new Map<
     string,
@@ -699,15 +717,42 @@ function terminalTransportToolSchema(
             .map((group) => group.map((field) => `\`${field}\``).join(" + "))
             .join("; ")} — sending fields from two shapes is refused and discards the attempt`),
   });
-  return relaxNestedDiscriminators ? relaxNestedDiscriminatedArrays(flattened) : flattened;
+  const nestedPresentation = relaxNestedDiscriminators
+    ? relaxNestedDiscriminatedArrays(flattened)
+    : flattened;
+  return relaxOuterEnvelope
+    ? relaxTerminalPresentationEnvelope(nestedPresentation)
+    : nestedPresentation;
+}
+
+/**
+ * Pi validates advertised parameters before Koni can issue a bounded durable rejection, and its
+ * validator echoes the complete submitted object on failure. A planning artifact can be several
+ * megabytes, so even a misplaced root field can consume the remaining context before authority
+ * sees the call. Keep the compiler-selected root field names visible to the provider, but make the
+ * presentation envelope permissive. Exact shape validation remains hash-bound at the terminal
+ * compiler boundary before any effect can be accepted.
+ */
+function relaxTerminalPresentationEnvelope(schema: TSchema): TSchema {
+  const properties = (schema as { properties?: Record<string, TSchema> }).properties;
+  const visibleFields = Object.fromEntries(
+    Object.keys(properties ?? {})
+      .sort(compareUtf8)
+      .map((key) => [key, Type.Optional(Type.Unknown())]),
+  );
+  const description = (schema as { description?: unknown }).description;
+  return Type.Object(visibleFields, {
+    additionalProperties: true,
+    ...(typeof description === "string" ? { description } : {}),
+  });
 }
 
 /**
  * Pi validates its advertised tool schema before calling Koni. Its generic validator expands every
  * branch of a nested discriminated union and echoes the complete submitted artifact, so one wrong
  * discriminator can consume tens of thousands of tokens without ever reaching Koni's bounded,
- * durable compiler rejection. Keep the outer transport shape strict, but make the discriminator
- * and its branch-owned object presentation-only. The exact terminal schema remains separately
+ * durable compiler rejection. Make the discriminator and its branch-owned object
+ * presentation-only; the outer envelope is relaxed separately. The exact terminal schema remains
  * hash-bound and is compiled by authority before any effect is accepted.
  */
 function relaxNestedDiscriminatedArrays(schema: TSchema): TSchema {
@@ -960,6 +1005,15 @@ function resolveToolSchema(
       : CATALOG[name].schema;
   if (expectedSchemaHash === undefined || canonicalHash(current) === expectedSchemaHash)
     return current;
+  // The immediately preceding transport kept the outer object exact while making nested
+  // discriminators presentation-only. Preserve already-issued attempts across this upgrade.
+  if (
+    name === "koni_submit_output" &&
+    terminalOutputSchema !== undefined &&
+    canonicalHash(strictOuterTransportToolSchema(name, terminalOutputSchema)) === expectedSchemaHash
+  ) {
+    return strictOuterTransportToolSchema(name, terminalOutputSchema);
+  }
   // Launch specs issued before the transport flatten bound the raw terminal union as the submit
   // tool's parameter schema; keep those in-flight attempts recoverable.
   if (
