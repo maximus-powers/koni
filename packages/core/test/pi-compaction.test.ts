@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ExtensionAPI, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { DynamicGraphContextSelector } from "../src/graph/context-selector.js";
 import { GraphSchema, TypedGraph, createGraphContextualState } from "../src/graph/model.js";
-import { canonicalHash, rawSha256 } from "../src/shared/canonical.js";
+import { canonicalEncode, canonicalHash, rawSha256 } from "../src/shared/canonical.js";
 import {
   createKoniManagedExtension,
   renderCompactionSummary,
@@ -12,6 +12,22 @@ import {
 import { fixtureLaunchSpec } from "./pi-managed-fixtures.js";
 
 const loadedSkillContent = "# using-superpowers\n\nPreserve compiler authority.\n";
+const retainedReadReceiptId = rawSha256("retained-read-source");
+const retainedReadReceipt = canonicalEncode({
+  protocol: "koni.tool-receipt.v1",
+  receiptId: retainedReadReceiptId,
+  outcome: "accepted",
+  summary: "Read src/example.ts",
+  value: {
+    path: "src/example.ts",
+    sha256: rawSha256("export const example = true;\n"),
+    sizeBytes: 29,
+    offset: 0,
+    nextOffset: 29,
+    eof: true,
+    content: "export const example = true;\n",
+  },
+});
 
 const snapshot: KoniCompactionSnapshot = {
   objective: "Implement the compiler-issued change.",
@@ -31,7 +47,16 @@ const snapshot: KoniCompactionSnapshot = {
       content: loadedSkillContent,
     },
   ],
-  receiptIds: ["receipt-one"],
+  retainedToolReceipts: [
+    {
+      receiptId: retainedReadReceiptId,
+      toolName: "koni_read_file",
+      outcome: "accepted",
+      sha256: rawSha256(retainedReadReceipt),
+      canonical: retainedReadReceipt,
+    },
+  ],
+  receiptIds: ["receipt-one", retainedReadReceiptId],
   checkIds: ["check-unit"],
   unresolvedQuestions: ["Which compatibility fixture remains?"],
   nextAction: "Submit the terminal structured output.",
@@ -314,6 +339,19 @@ describe("Koni Pi compaction extension", () => {
     expect(rendered).toContain(`sha256="${rawSha256(content)}"`);
   });
 
+  it("reissues exact authenticated continuation evidence instead of receipt identifiers alone", () => {
+    const spec = fixtureLaunchSpec({
+      cwd: "/tmp/koni-workspace",
+      sessionDirectory: "/tmp/koni-sessions/attempt-retained-evidence",
+    });
+    const rendered = renderCompactionSummary(spec, snapshot);
+
+    expect(rendered).toContain("## Retained authenticated tool evidence");
+    expect(rendered).toContain("export const example = true;");
+    expect(rendered).toContain(`sha256="${rawSha256(retainedReadReceipt)}"`);
+    expect(rendered.match(new RegExp(retainedReadReceiptId, "gu"))).toHaveLength(1);
+  });
+
   it("bounds the complete structured checkpoint rather than only each field", () => {
     const spec = fixtureLaunchSpec({
       cwd: "/tmp/koni-workspace",
@@ -343,6 +381,22 @@ describe("Koni Pi compaction extension", () => {
         ],
       }),
     ).toThrow(/loaded resource content.*unauthenticated/u);
+  });
+
+  it("rejects retained evidence whose canonical bytes do not match its durable hash", () => {
+    const spec = fixtureLaunchSpec({
+      cwd: "/tmp/koni-workspace",
+      sessionDirectory: "/tmp/koni-sessions/attempt-invalid-evidence",
+    });
+    expect(() =>
+      renderCompactionSummary(spec, {
+        ...snapshot,
+        retainedToolReceipts: snapshot.retainedToolReceipts!.map((receipt) => ({
+          ...receipt,
+          canonical: receipt.canonical.replace("example = true", "example = false"),
+        })),
+      }),
+    ).toThrow(/retained tool receipt.*unauthenticated/u);
   });
 });
 

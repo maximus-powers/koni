@@ -14,6 +14,7 @@ import {
 } from "../graph/context-selector.js";
 import type { AgentLaunchSpec } from "./launch-spec.js";
 import {
+  KONI_TOOL_NAMES,
   KONI_TOOL_RECEIPT_PROTOCOL,
   validateKoniToolReceipt,
   type KoniToolReceipt,
@@ -23,6 +24,9 @@ const MAX_CONTEXT_BYTES = 4 * 1024 * 1024;
 const MAX_SUMMARY_FIELD_BYTES = 64 * 1024;
 const MAX_SUMMARY_ITEMS = 1_024;
 const MAX_COMPACTION_SUMMARY_BYTES = 4 * 1024 * 1024;
+export const MAX_RETAINED_TOOL_RECEIPTS = 128;
+export const MAX_RETAINED_TOOL_RECEIPT_BYTES = 128 * 1024;
+export const MAX_RETAINED_TOOL_RECEIPTS_BYTES = 128 * 1024;
 
 export interface BoundAuthoritativeContext {
   runId: string;
@@ -63,6 +67,14 @@ export interface KoniCompactionSnapshot {
     relativePath: string;
     sha256: Sha256Digest;
     content: string;
+  }[];
+  /** Bounded canonical receipts whose exact evidence is needed after conversation compaction. */
+  retainedToolReceipts?: readonly {
+    receiptId: string;
+    toolName: string;
+    outcome: "accepted" | "rejected";
+    sha256: Sha256Digest;
+    canonical: string;
   }[];
   receiptIds: readonly string[];
   checkIds: readonly string[];
@@ -724,7 +736,16 @@ export function renderCompactionSummary(
     renderList("Files read or modified", snapshot.touchedFiles),
     renderList("Skills already loaded", snapshot.loadedResources ?? []),
     renderLoadedResourceContents(snapshot.loadedResourceContents ?? []),
-    renderList("Receipts", snapshot.receiptIds),
+    renderRetainedToolReceipts(snapshot.retainedToolReceipts ?? []),
+    renderList(
+      "Receipts",
+      snapshot.receiptIds.filter(
+        (receiptId) =>
+          !(snapshot.retainedToolReceipts ?? []).some(
+            (retained) => retained.receiptId === receiptId,
+          ),
+      ),
+    ),
     renderList("Checks", snapshot.checkIds),
     renderList("Unresolved questions", snapshot.unresolvedQuestions),
     "## Next required action",
@@ -822,6 +843,38 @@ function validateSnapshot(snapshot: KoniCompactionSnapshot): void {
       throw new Error("loaded resource content is malformed, oversized, or unauthenticated");
     }
   }
+  const retainedToolReceipts = snapshot.retainedToolReceipts ?? [];
+  if (retainedToolReceipts.length > MAX_RETAINED_TOOL_RECEIPTS) {
+    throw new Error("retainedToolReceipts exceeds the structured compaction item limit");
+  }
+  let retainedBytes = 0;
+  for (const retained of retainedToolReceipts) {
+    validateSummaryText(retained.receiptId, "retainedToolReceipts.receiptId");
+    validateSummaryText(retained.toolName, "retainedToolReceipts.toolName");
+    const bytes = Buffer.byteLength(retained.canonical, "utf8");
+    retainedBytes += bytes;
+    let receipt: KoniToolReceipt;
+    try {
+      const parsed: unknown = JSON.parse(retained.canonical);
+      validateKoniToolReceipt(parsed);
+      receipt = parsed;
+    } catch {
+      throw new Error("retained tool receipt is malformed or noncanonical");
+    }
+    if (
+      bytes === 0 ||
+      bytes > MAX_RETAINED_TOOL_RECEIPT_BYTES ||
+      retainedBytes > MAX_RETAINED_TOOL_RECEIPTS_BYTES ||
+      retained.canonical.includes("\u0000") ||
+      canonicalEncode(receipt) !== retained.canonical ||
+      rawSha256(retained.canonical) !== retained.sha256 ||
+      receipt.receiptId !== retained.receiptId ||
+      receipt.outcome !== retained.outcome ||
+      !KONI_TOOL_NAMES.includes(retained.toolName as (typeof KONI_TOOL_NAMES)[number])
+    ) {
+      throw new Error("retained tool receipt is oversized, unauthenticated, or mismatched");
+    }
+  }
 }
 
 function validateSummaryText(value: string, name: string): void {
@@ -851,6 +904,23 @@ function renderLoadedResourceContents(
       `<koni_loaded_skill_resource path="${xmlAttribute(resource.relativePath)}" sha256="${resource.sha256}">`,
       resource.content,
       "</koni_loaded_skill_resource>",
+      "",
+    ]),
+  ].join("\n");
+}
+
+function renderRetainedToolReceipts(
+  receipts: NonNullable<KoniCompactionSnapshot["retainedToolReceipts"]>,
+): string {
+  if (receipts.length === 0) return "";
+  return [
+    "## Retained authenticated tool evidence",
+    "These exact durable results survived compaction. Reuse them unless newer authenticated evidence makes them stale.",
+    "",
+    ...receipts.flatMap((receipt) => [
+      `<koni_retained_tool_receipt tool="${xmlAttribute(receipt.toolName)}" outcome="${receipt.outcome}" sha256="${receipt.sha256}">`,
+      receipt.canonical,
+      "</koni_retained_tool_receipt>",
       "",
     ]),
   ].join("\n");

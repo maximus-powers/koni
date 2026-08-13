@@ -105,7 +105,11 @@ import {
   type DynamicGraphSelectionRequest,
   type SelectedDynamicGraphContext,
 } from "../graph/context-selector.js";
-import type { KoniCompactionSnapshot } from "../pi/compaction.js";
+import {
+  MAX_RETAINED_TOOL_RECEIPTS,
+  MAX_RETAINED_TOOL_RECEIPTS_BYTES,
+  type KoniCompactionSnapshot,
+} from "../pi/compaction.js";
 import {
   AGENT_LAUNCH_SPEC_PROTOCOL,
   computeLaunchResourceSetHash,
@@ -1983,6 +1987,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     snapshot.touchedFiles = durable.touchedFiles;
     snapshot.loadedResources = durable.loadedResources;
     snapshot.loadedResourceContents = durable.loadedResourceContents;
+    snapshot.retainedToolReceipts = durable.retainedToolReceipts;
     snapshot.graphRefs = dynamic.envelope.selection.selected.map(
       (entry) => `${entry.id} (${entry.reason})`,
     );
@@ -6262,6 +6267,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     touchedFiles: string[];
     loadedResources: string[];
     loadedResourceContents: NonNullable<KoniCompactionSnapshot["loadedResourceContents"]>;
+    retainedToolReceipts: NonNullable<KoniCompactionSnapshot["retainedToolReceipts"]>;
   }> {
     const receiptIds = new Set<string>();
     const touchedFiles = new Set<string>();
@@ -6269,6 +6275,11 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       string,
       NonNullable<KoniCompactionSnapshot["loadedResourceContents"]>[number]
     >();
+    const retainedToolReceipts = new Map<
+      string,
+      NonNullable<KoniCompactionSnapshot["retainedToolReceipts"]>[number]
+    >();
+    const shadowedRetainedToolReceiptKeys = new Set<string>();
     for (const record of [...(attempt.authorityToolResults ?? [])].sort(
       (left, right) => left.sequence - right.sequence,
     )) {
@@ -6280,6 +6291,12 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       const value = optionalRecord(parsed.value);
       const loaded = loadedSkillResourceCheckpointFromReceipt(record, parsed, spec);
       if (loaded !== undefined) loadedResources.set(loaded.identity, loaded.resource);
+      applyRetainedToolReceipt(
+        retainedToolReceipts,
+        shadowedRetainedToolReceiptKeys,
+        record,
+        parsed,
+      );
       if (
         record.toolName === "koni_read_file" ||
         record.toolName === "koni_write_file" ||
@@ -6318,11 +6335,30 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       }
       visited.add(parent.id);
       const parentSpec = await this.#readRecordedLaunchSpec(run, parent);
-      for (const record of parent.authorityToolResults ?? []) {
-        if (record.toolName !== "koni_read_resource" || record.outcome !== "accepted") continue;
+      const parentRetainedToolReceipts = new Map<
+        string,
+        NonNullable<KoniCompactionSnapshot["retainedToolReceipts"]>[number]
+      >();
+      const parentShadowedKeys = new Set<string>();
+      for (const record of [...(parent.authorityToolResults ?? [])].sort(
+        (left, right) => left.sequence - right.sequence,
+      )) {
         const parsed = await this.#readAuthorityToolReceipt(run, parent, record);
         const loaded = loadedSkillResourceCheckpointFromReceipt(record, parsed, parentSpec);
         if (loaded !== undefined) loadedResources.set(loaded.identity, loaded.resource);
+        applyRetainedToolReceipt(parentRetainedToolReceipts, parentShadowedKeys, record, parsed);
+      }
+      for (const [key, receipt] of parentRetainedToolReceipts) {
+        if (
+          !shadowedRetainedToolReceiptKeys.has(key) &&
+          !(key.startsWith("file:") && shadowedRetainedToolReceiptKeys.has("file:*"))
+        ) {
+          retainedToolReceipts.set(key, receipt);
+        }
+      }
+      for (const key of parentShadowedKeys) shadowedRetainedToolReceiptKeys.add(key);
+      for (const key of parentRetainedToolReceipts.keys()) {
+        shadowedRetainedToolReceiptKeys.add(key);
       }
       descendant = parent;
     }
@@ -6333,6 +6369,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       loadedResourceContents: [...loadedResources.entries()]
         .sort(([left], [right]) => compareText(left, right))
         .map(([, resource]) => resource),
+      retainedToolReceipts: selectRetainedToolReceipts(retainedToolReceipts),
     };
   }
 
@@ -6470,6 +6507,124 @@ function loadedSkillResourceCheckpointFromReceipt(
       content: value.content,
     },
   };
+}
+
+function retainedToolReceiptCheckpoint(
+  record: Readonly<{ toolName: string; outcome: string }>,
+  receipt: unknown,
+):
+  | {
+      key: string;
+      receipt: NonNullable<KoniCompactionSnapshot["retainedToolReceipts"]>[number];
+    }
+  | undefined {
+  try {
+    validateKoniToolReceipt(receipt);
+  } catch {
+    return undefined;
+  }
+  if (record.outcome !== receipt.outcome) return undefined;
+  const value = optionalRecord(receipt.value);
+  let key: string | undefined;
+  if (
+    record.toolName === "koni_read_file" &&
+    record.outcome === "accepted" &&
+    typeof value?.path === "string" &&
+    typeof value.content === "string" &&
+    typeof value.sizeBytes === "number" &&
+    value.offset === 0 &&
+    value.nextOffset === value.sizeBytes &&
+    value.eof === true &&
+    Buffer.byteLength(value.content, "utf8") === value.sizeBytes &&
+    isSha256Digest(value.sha256) &&
+    rawSha256(value.content) === value.sha256
+  ) {
+    key = `file:${value.path}`;
+  } else if (
+    record.toolName === "koni_run_check" &&
+    record.outcome === "accepted" &&
+    typeof value?.checkId === "string"
+  ) {
+    key = `check:${value.checkId}`;
+  } else if (record.outcome === "rejected") {
+    key = `rejection:${record.toolName}`;
+  }
+  if (key === undefined) return undefined;
+  const canonical = canonicalEncode(receipt);
+  return {
+    key,
+    receipt: {
+      receiptId: receipt.receiptId,
+      toolName: record.toolName,
+      outcome: receipt.outcome,
+      sha256: rawSha256(canonical),
+      canonical,
+    },
+  };
+}
+
+function applyRetainedToolReceipt(
+  retained: Map<string, NonNullable<KoniCompactionSnapshot["retainedToolReceipts"]>[number]>,
+  shadowed: Set<string>,
+  record: Readonly<{ toolName: string; outcome: string }>,
+  receipt: unknown,
+): void {
+  const value = isRecord(receipt) ? optionalRecord(receipt.value) : undefined;
+  if (record.outcome === "accepted") {
+    const rejectionKey = `rejection:${record.toolName}`;
+    shadowed.add(rejectionKey);
+    retained.delete(rejectionKey);
+    if (
+      (record.toolName === "koni_read_file" ||
+        record.toolName === "koni_write_file" ||
+        record.toolName === "koni_edit_file") &&
+      typeof value?.path === "string"
+    ) {
+      const fileKey = `file:${value.path}`;
+      shadowed.add(fileKey);
+      retained.delete(fileKey);
+    }
+    if (record.toolName === "koni_run_check" && typeof value?.checkId === "string") {
+      for (const key of retained.keys()) {
+        if (key.startsWith("file:")) retained.delete(key);
+      }
+      shadowed.add("file:*");
+      const checkKey = `check:${value.checkId}`;
+      shadowed.add(checkKey);
+      retained.delete(checkKey);
+    }
+  }
+  const checkpoint = retainedToolReceiptCheckpoint(record, receipt);
+  if (checkpoint !== undefined) {
+    shadowed.add(checkpoint.key);
+    retained.set(checkpoint.key, checkpoint.receipt);
+  }
+}
+
+function selectRetainedToolReceipts(
+  candidates: ReadonlyMap<
+    string,
+    NonNullable<KoniCompactionSnapshot["retainedToolReceipts"]>[number]
+  >,
+): NonNullable<KoniCompactionSnapshot["retainedToolReceipts"]> {
+  const selected: NonNullable<KoniCompactionSnapshot["retainedToolReceipts"]>[number][] = [];
+  let bytes = 0;
+  const ordered = [...candidates.entries()].sort(([leftKey], [rightKey]) => {
+    const leftPriority = leftKey.startsWith("file:") ? 1 : 0;
+    const rightPriority = rightKey.startsWith("file:") ? 1 : 0;
+    return leftPriority - rightPriority || compareText(leftKey, rightKey);
+  });
+  for (const [, receipt] of ordered) {
+    const receiptBytes = Buffer.byteLength(receipt.canonical, "utf8");
+    if (
+      selected.length >= MAX_RETAINED_TOOL_RECEIPTS ||
+      bytes + receiptBytes > MAX_RETAINED_TOOL_RECEIPTS_BYTES
+    )
+      continue;
+    selected.push(receipt);
+    bytes += receiptBytes;
+  }
+  return selected;
 }
 
 function sameScopeContinuationPrompt(
@@ -15680,6 +15835,7 @@ function compactionSnapshot(run: RunRecord, descriptor: AttemptDescriptor): Koni
     touchedFiles: [],
     loadedResources: [],
     loadedResourceContents: [],
+    retainedToolReceipts: [],
     receiptIds: [],
     checkIds: descriptor.step?.validation_checks ?? [],
     unresolvedQuestions: Object.values(run.questions)

@@ -4419,6 +4419,129 @@ describe("native compiler-authoritative run program", () => {
       receiptIds: ["receipt-write-notes"],
     });
 
+    const sourceContent = "export const retainedEvidence = true;\n";
+    const sourceReceiptPath = `runs/${run.id}/attempts/${attempt.id}/tool-receipts/source.json`;
+    const sourceReceiptId = rawSha256("retained-source-receipt");
+    const sourceReceipt = {
+      protocol: "koni.tool-receipt.v1" as const,
+      receiptId: sourceReceiptId,
+      outcome: "accepted" as const,
+      summary: "Read src/example.ts",
+      value: {
+        path: "src/example.ts",
+        sha256: rawSha256(sourceContent),
+        sizeBytes: Buffer.byteLength(sourceContent, "utf8"),
+        offset: 0,
+        nextOffset: Buffer.byteLength(sourceContent, "utf8"),
+        eof: true,
+        content: sourceContent,
+      },
+    };
+    const canonicalSourceReceipt = canonicalEncode(sourceReceipt);
+    await persistWrites(project.projectRoot, [
+      {
+        path: sourceReceiptPath,
+        bytes: Buffer.from(`${JSON.stringify(sourceReceipt)}\n`, "utf8"),
+        expectedSha256: null,
+      },
+    ]);
+    attempt.authorityToolResults.push({
+      sequence: 2,
+      callId: "call-read-source",
+      toolName: "koni_read_file",
+      outcome: "accepted",
+      argumentsSha256: rawSha256("{}"),
+      argumentsSizeBytes: 2,
+      receiptSha256: rawSha256(canonicalSourceReceipt),
+      receiptSizeBytes: Buffer.byteLength(canonicalSourceReceipt, "utf8"),
+      artifactPath: sourceReceiptPath,
+      recordedAt: FIXED_NOW.toISOString(),
+    });
+    expect(
+      await restarted.refreshCompactionSnapshot({ run, attempt, spec: prepared.spec }),
+    ).toMatchObject({
+      retainedToolReceipts: [
+        {
+          receiptId: sourceReceiptId,
+          toolName: "koni_read_file",
+          outcome: "accepted",
+          sha256: rawSha256(canonicalSourceReceipt),
+          canonical: canonicalSourceReceipt,
+        },
+      ],
+    });
+
+    const checkReceiptPath = `runs/${run.id}/attempts/${attempt.id}/tool-receipts/check.json`;
+    const checkReceipt = {
+      protocol: "koni.tool-receipt.v1" as const,
+      receiptId: rawSha256("retained-check-receipt"),
+      outcome: "accepted" as const,
+      summary: "baseline-proof-set failed with an exact current diagnostic",
+      value: {
+        checkId: "baseline-proof-set",
+        accepted: false,
+        evidenceSha256: digest("retained-check-evidence"),
+        diagnostics: [{ commandIndex: 0, stdoutTail: "missing Analysis Guide tab" }],
+      },
+    };
+    const canonicalCheckReceipt = canonicalEncode(checkReceipt);
+    await persistWrites(project.projectRoot, [
+      {
+        path: checkReceiptPath,
+        bytes: Buffer.from(`${JSON.stringify(checkReceipt)}\n`, "utf8"),
+        expectedSha256: null,
+      },
+    ]);
+    attempt.authorityToolResults.push({
+      sequence: 3,
+      callId: "call-run-check",
+      toolName: "koni_run_check",
+      outcome: "accepted",
+      argumentsSha256: rawSha256("{}"),
+      argumentsSizeBytes: 2,
+      receiptSha256: rawSha256(canonicalCheckReceipt),
+      receiptSizeBytes: Buffer.byteLength(canonicalCheckReceipt, "utf8"),
+      artifactPath: checkReceiptPath,
+      recordedAt: FIXED_NOW.toISOString(),
+    });
+    expect(
+      await restarted.refreshCompactionSnapshot({ run, attempt, spec: prepared.spec }),
+    ).toMatchObject({
+      retainedToolReceipts: [
+        {
+          receiptId: checkReceipt.receiptId,
+          toolName: "koni_run_check",
+          canonical: canonicalCheckReceipt,
+        },
+      ],
+    });
+
+    const rereadReceiptPath = `runs/${run.id}/attempts/${attempt.id}/tool-receipts/source-after-check.json`;
+    const rereadReceipt = {
+      ...sourceReceipt,
+      receiptId: rawSha256("retained-source-after-check"),
+    };
+    const canonicalRereadReceipt = canonicalEncode(rereadReceipt);
+    await persistWrites(project.projectRoot, [
+      {
+        path: rereadReceiptPath,
+        bytes: Buffer.from(`${JSON.stringify(rereadReceipt)}\n`, "utf8"),
+        expectedSha256: null,
+      },
+    ]);
+    attempt.authorityToolResults.push({
+      sequence: 4,
+      callId: "call-reread-source",
+      toolName: "koni_read_file",
+      outcome: "accepted",
+      argumentsSha256: rawSha256("{}"),
+      argumentsSizeBytes: 2,
+      receiptSha256: rawSha256(canonicalRereadReceipt),
+      receiptSizeBytes: Buffer.byteLength(canonicalRereadReceipt, "utf8"),
+      artifactPath: rereadReceiptPath,
+      recordedAt: FIXED_NOW.toISOString(),
+    });
+
     const resourceReceiptPath = `runs/${run.id}/attempts/${attempt.id}/tool-receipts/resource.json`;
     const issuedSkill = prepared.spec.resources.entries.find(
       (entry) => entry.relativePath === "skills/using-superpowers/SKILL.md",
@@ -4449,7 +4572,7 @@ describe("native compiler-authoritative run program", () => {
       },
     ]);
     attempt.authorityToolResults.push({
-      sequence: 2,
+      sequence: 5,
       callId: "call-read-skill",
       toolName: "koni_read_resource",
       outcome: "accepted",
@@ -4471,7 +4594,13 @@ describe("native compiler-authoritative run program", () => {
           content: issuedSkill.content,
         },
       ],
-      receiptIds: ["receipt-read-skill", "receipt-write-notes"],
+      receiptIds: [
+        "receipt-read-skill",
+        "receipt-write-notes",
+        checkReceipt.receiptId,
+        sourceReceiptId,
+        rereadReceipt.receiptId,
+      ],
     });
 
     await persistWrites(project.projectRoot, [
@@ -4490,6 +4619,60 @@ describe("native compiler-authoritative run program", () => {
     const recoveryAttempt = attemptRecord(retried.spec, "planning", "running");
     run.attempts[recoveryAttempt.id] = recoveryAttempt;
     const coldRestart = await compilerProgram(project);
+    const recoveredSnapshot = await coldRestart.refreshCompactionSnapshot({
+      run,
+      attempt: recoveryAttempt,
+      spec: retried.spec,
+    });
+    expect(recoveredSnapshot).toMatchObject({
+      loadedResources: [`skills/using-superpowers/SKILL.md (${issuedSkill.sha256})`],
+      loadedResourceContents: [
+        {
+          relativePath: "skills/using-superpowers/SKILL.md",
+          sha256: issuedSkill.sha256,
+          content: issuedSkill.content,
+        },
+      ],
+      retainedToolReceipts: [
+        {
+          receiptId: checkReceipt.receiptId,
+          canonical: canonicalCheckReceipt,
+        },
+        {
+          receiptId: rereadReceipt.receiptId,
+          canonical: canonicalRereadReceipt,
+        },
+      ],
+    });
+
+    const childCheckReceiptPath = `runs/${run.id}/attempts/${recoveryAttempt.id}/tool-receipts/check.json`;
+    const childCheckReceipt = {
+      ...checkReceipt,
+      receiptId: rawSha256("child-check-receipt"),
+      value: { ...checkReceipt.value, checkId: "child-validation" },
+    };
+    const canonicalChildCheckReceipt = canonicalEncode(childCheckReceipt);
+    await persistWrites(project.projectRoot, [
+      {
+        path: childCheckReceiptPath,
+        bytes: Buffer.from(`${JSON.stringify(childCheckReceipt)}\n`, "utf8"),
+        expectedSha256: null,
+      },
+    ]);
+    recoveryAttempt.authorityToolResults = [
+      {
+        sequence: 1,
+        callId: "call-child-check",
+        toolName: "koni_run_check",
+        outcome: "accepted",
+        argumentsSha256: rawSha256("{}"),
+        argumentsSizeBytes: 2,
+        receiptSha256: rawSha256(canonicalChildCheckReceipt),
+        receiptSizeBytes: Buffer.byteLength(canonicalChildCheckReceipt, "utf8"),
+        artifactPath: childCheckReceiptPath,
+        recordedAt: FIXED_NOW.toISOString(),
+      },
+    ];
     expect(
       await coldRestart.refreshCompactionSnapshot({
         run,
@@ -4497,12 +4680,94 @@ describe("native compiler-authoritative run program", () => {
         spec: retried.spec,
       }),
     ).toMatchObject({
-      loadedResources: [`skills/using-superpowers/SKILL.md (${issuedSkill.sha256})`],
-      loadedResourceContents: [
+      retainedToolReceipts: [
+        { receiptId: checkReceipt.receiptId },
+        { receiptId: childCheckReceipt.receiptId },
+      ],
+    });
+
+    const childReadReceiptPath = `runs/${run.id}/attempts/${recoveryAttempt.id}/tool-receipts/read-source.json`;
+    const childReadReceipt = {
+      ...sourceReceipt,
+      receiptId: rawSha256("child-read-source"),
+    };
+    const canonicalChildReadReceipt = canonicalEncode(childReadReceipt);
+    await persistWrites(project.projectRoot, [
+      {
+        path: childReadReceiptPath,
+        bytes: Buffer.from(`${JSON.stringify(childReadReceipt)}\n`, "utf8"),
+        expectedSha256: null,
+      },
+    ]);
+    recoveryAttempt.authorityToolResults.push({
+      sequence: 2,
+      callId: "call-child-read-source",
+      toolName: "koni_read_file",
+      outcome: "accepted",
+      argumentsSha256: rawSha256("{}"),
+      argumentsSizeBytes: 2,
+      receiptSha256: rawSha256(canonicalChildReadReceipt),
+      receiptSizeBytes: Buffer.byteLength(canonicalChildReadReceipt, "utf8"),
+      artifactPath: childReadReceiptPath,
+      recordedAt: FIXED_NOW.toISOString(),
+    });
+    expect(
+      await coldRestart.refreshCompactionSnapshot({
+        run,
+        attempt: recoveryAttempt,
+        spec: retried.spec,
+      }),
+    ).toMatchObject({
+      retainedToolReceipts: [
+        { receiptId: checkReceipt.receiptId },
+        { receiptId: childCheckReceipt.receiptId },
+        { receiptId: childReadReceipt.receiptId },
+      ],
+    });
+
+    const childWriteReceiptPath = `runs/${run.id}/attempts/${recoveryAttempt.id}/tool-receipts/write-source.json`;
+    const childWriteReceipt = {
+      protocol: "koni.tool-receipt.v1" as const,
+      receiptId: rawSha256("child-write-source"),
+      outcome: "accepted" as const,
+      summary: "Wrote src/example.ts",
+      value: { path: "src/example.ts", sha256: rawSha256("new source") },
+    };
+    const canonicalChildWriteReceipt = canonicalEncode(childWriteReceipt);
+    await persistWrites(project.projectRoot, [
+      {
+        path: childWriteReceiptPath,
+        bytes: Buffer.from(`${JSON.stringify(childWriteReceipt)}\n`, "utf8"),
+        expectedSha256: null,
+      },
+    ]);
+    recoveryAttempt.authorityToolResults.push({
+      sequence: 3,
+      callId: "call-child-write-source",
+      toolName: "koni_write_file",
+      outcome: "accepted",
+      argumentsSha256: rawSha256("{}"),
+      argumentsSizeBytes: 2,
+      receiptSha256: rawSha256(canonicalChildWriteReceipt),
+      receiptSizeBytes: Buffer.byteLength(canonicalChildWriteReceipt, "utf8"),
+      artifactPath: childWriteReceiptPath,
+      recordedAt: FIXED_NOW.toISOString(),
+    });
+    expect(
+      await coldRestart.refreshCompactionSnapshot({
+        run,
+        attempt: recoveryAttempt,
+        spec: retried.spec,
+      }),
+    ).toMatchObject({
+      retainedToolReceipts: [
         {
-          relativePath: "skills/using-superpowers/SKILL.md",
-          sha256: issuedSkill.sha256,
-          content: issuedSkill.content,
+          receiptId: checkReceipt.receiptId,
+          canonical: canonicalCheckReceipt,
+        },
+        {
+          receiptId: childCheckReceipt.receiptId,
+          canonical: canonicalChildCheckReceipt,
         },
       ],
     });
@@ -4553,7 +4818,7 @@ describe("native compiler-authoritative run program", () => {
       },
     ]);
     attempt.authorityToolResults.push({
-      sequence: 3,
+      sequence: 6,
       callId: "call-list-tree",
       toolName: "koni_list_files",
       outcome: "accepted",
@@ -4567,8 +4832,15 @@ describe("native compiler-authoritative run program", () => {
     expect(
       await restarted.refreshCompactionSnapshot({ run, attempt, spec: prepared.spec }),
     ).toMatchObject({
-      touchedFiles: ["src/notes.ts"],
-      receiptIds: ["receipt-list-tree", "receipt-read-skill", "receipt-write-notes"],
+      touchedFiles: ["src/example.ts", "src/notes.ts"],
+      receiptIds: [
+        "receipt-list-tree",
+        "receipt-read-skill",
+        "receipt-write-notes",
+        checkReceipt.receiptId,
+        sourceReceiptId,
+        rereadReceipt.receiptId,
+      ],
     });
 
     await expect(
