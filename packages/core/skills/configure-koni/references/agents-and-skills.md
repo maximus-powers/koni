@@ -61,6 +61,12 @@ to make that bounded judgment and report the assumption. Reserve a question for 
 materially different interpretations remain supported, would change current safety, and the
 authoritative context selects none.
 
+Require a comparison-based blocker to identify two materially incompatible authoritative values for
+the same required contract, the supplied source of each value, and the material safety consequence
+of their difference. Exact equality or a compatible refinement establishes consistency rather than a
+mismatch. If this comparison proof is absent, keep every other safety criterion and have the persona
+preserve residual uncertainty in its summary instead of manufacturing a conflict.
+
 Preserve the distinction between a required dependency and contract-defined absence. When an
 operation's result contract accepts missing or unavailable input as a typed result, configure its
 producer to emit that result and its reviewer to preserve it inside current authority. Route change

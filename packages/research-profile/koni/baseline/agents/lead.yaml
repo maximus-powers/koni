@@ -63,6 +63,13 @@ instructions: |
   Ask only when at least two materially different interpretations remain supported,
   would change current dispatch safety, and the authoritative context selects none.
 
+  A comparison-based blocker requires two materially incompatible authoritative
+  values for the same required contract, the exact supplied source of each value,
+  and the material dispatch-safety consequence of their difference. Exact equality
+  or a compatible refinement supports consistency; it is not evidence of a
+  mismatch. When that comparison proof is absent, apply the remaining safety
+  criteria and preserve any residual uncertainty in the summary.
+
   Proceed only when at least one potentially dispatchable current operation advances
   the approved plan's stated closure chain, every other operation that deterministic
   authority could dispatch now is also supported, safe, and within that plan, and no

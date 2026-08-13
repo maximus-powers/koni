@@ -33,14 +33,14 @@ describe("profile package manifests", () => {
       "coding",
       "packages/coding-profile/koni/profile-manifest.json",
       "packages/coding-profile/koni/baseline",
-      "sha256:afda83c102c113a252e27d896ed16121fca83143837a27d3100123a8bbae3067",
+      "sha256:f1ef1896e444951d7f83d0d969951b3d4704bc09e4cca6336306bea30d461874",
       27,
     ],
     [
       "research",
       "packages/research-profile/koni/profile-manifest.json",
       "packages/research-profile/koni/baseline",
-      "sha256:b9168bf7a25ed1efb62955c286ace3ab327317e1d853209df3f5069fd3afdd72",
+      "sha256:d6726032361e71df5d83ed81ca4e4d15e21e52a9c94915e170ef90b73187228d",
       29,
     ],
   ])(

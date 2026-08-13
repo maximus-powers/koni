@@ -375,6 +375,15 @@ describe("research profile registrar", () => {
     expect(normalized).toContain(
       "Ask only when at least two materially different interpretations remain supported, would change current dispatch safety, and the authoritative context selects none",
     );
+    expect(normalized).toContain(
+      "A comparison-based blocker requires two materially incompatible authoritative values for the same required contract, the exact supplied source of each value, and the material dispatch-safety consequence of their difference",
+    );
+    expect(normalized).toContain(
+      "Exact equality or a compatible refinement supports consistency; it is not evidence of a mismatch",
+    );
+    expect(normalized).toContain(
+      "When that comparison proof is absent, apply the remaining safety criteria and preserve any residual uncertainty in the summary",
+    );
     expect(normalizedAgentsReference).toContain(
       "A qualitative gate must not turn conservative, reversible uncertainty into an operator confirmation",
     );
@@ -383,6 +392,15 @@ describe("research profile registrar", () => {
     );
     expect(normalizedAgentsReference).toContain(
       "A qualitative gate must consume the compiler-projected dependency settlement",
+    );
+    expect(normalizedAgentsReference).toContain(
+      "Require a comparison-based blocker to identify two materially incompatible authoritative values for the same required contract, the supplied source of each value, and the material safety consequence of their difference",
+    );
+    expect(normalizedAgentsReference).toContain(
+      "Exact equality or a compatible refinement establishes consistency rather than a mismatch",
+    );
+    expect(normalizedAgentsReference).toContain(
+      "If this comparison proof is absent, keep every other safety criterion and have the persona preserve residual uncertainty in its summary instead of manufacturing a conflict",
     );
     expect(normalizedAgentsReference).toContain(
       "Configure the Lead to treat each nonterminal ticket in the supplied current board as a compiler-derived current obligation",
