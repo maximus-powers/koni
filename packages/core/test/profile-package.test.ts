@@ -33,7 +33,7 @@ describe("profile package manifests", () => {
       "coding",
       "packages/coding-profile/koni/profile-manifest.json",
       "packages/coding-profile/koni/baseline",
-      "sha256:e296d085576e36f083ecfbb22ad011f36493db01282994789cd725c80d376f2a",
+      "sha256:677762313c301b4575255fb1a173facf76d6b9d408f714ce0bfdd67489536007",
       27,
     ],
     [

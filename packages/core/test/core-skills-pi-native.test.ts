@@ -134,6 +134,12 @@ describe("Koni's Pi-native skills", () => {
     expect(normalizedSoftwareReference).toContain(
       "A bounded search with no objective-specific match counts against that candidate",
     );
+    expect(normalizedSoftwareReference).toContain(
+      "Do not inspect or serialize that candidate's generic implementation seams until positive objective-specific evidence selects it",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "continue bounded owner discovery across the remaining plausible first-party roots",
+    );
   });
 
   it("binds proof planning and review rework to current authenticated evidence", async () => {

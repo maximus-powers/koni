@@ -469,11 +469,23 @@ describe("coding profile registrar", () => {
     expect(normalizedPlanner).toContain(
       "A bounded search with no objective-specific match is evidence against that candidate, not authority to model its generic seams",
     );
+    expect(normalizedPlanner).toContain(
+      "Do not inspect or serialize a candidate's generic implementation seams until positive objective-specific evidence selects it as the owner",
+    );
+    expect(normalizedPlanner).toContain(
+      "continue bounded owner discovery across the remaining plausible first-party roots",
+    );
     expect(normalizedSoftwareReference).toContain(
       "Require positive first-party evidence that binds the named surface to its selected owner",
     );
     expect(normalizedSoftwareReference).toContain(
       "Do not stop at the first lexically plausible package or directory",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "Do not inspect or serialize that candidate's generic implementation seams until positive objective-specific evidence selects it",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "continue bounded owner discovery across the remaining plausible first-party roots",
     );
     expect(normalizedReference).toContain(
       "Every pre-existing repository input or mutation target must appear verbatim in accepted repository evidence",

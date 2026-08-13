@@ -29,8 +29,11 @@ instructions: |
   is rejected or truncated, enumerate the plausible first-party roots and search
   them with bounded objective-specific terms. A bounded search with no
   objective-specific match is evidence against that candidate, not authority to
-  model its generic seams. If no candidate has positive ownership evidence,
-  report the exact modeling gap rather than selecting the first plausible name.
+  model its generic seams. Do not inspect or serialize a candidate's generic
+  implementation seams until positive objective-specific evidence selects it as
+  the owner; continue bounded owner discovery across the remaining plausible
+  first-party roots. If no candidate has positive ownership evidence, report the
+  exact modeling gap rather than selecting the first plausible name.
 
   Complete the skill's proof-construction ledger before serializing any proof
   node. A filename in a listing or search result authenticates identity, not the

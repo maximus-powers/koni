@@ -46,9 +46,11 @@ imports its entrypoint. A package, directory, or generic shared-component name i
 candidate. Do not stop at the first lexically plausible package or directory. A failed or truncated
 broad search does not select an owner. Enumerate the plausible first-party roots, search each with
 bounded objective-specific terms, and follow the positive match to its owning entrypoint. A bounded
-search with no objective-specific match counts against that candidate. If no candidate has positive
-ownership evidence, report the exact modeling gap instead of assigning generic seams from a
-convenient package.
+search with no objective-specific match counts against that candidate. Do not inspect or serialize
+that candidate's generic implementation seams until positive objective-specific evidence selects it;
+continue bounded owner discovery across the remaining plausible first-party roots. If no candidate
+has positive ownership evidence, report the exact modeling gap instead of assigning generic seams
+from a convenient package.
 
 ## Adapt the baseline ontology
 
