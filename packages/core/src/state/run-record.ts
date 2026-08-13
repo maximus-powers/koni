@@ -2346,7 +2346,9 @@ function assertPlanningRevisionRecord(
     checkpointed !== checkpointFieldsPresent ||
     (checkpointed && expectedRevision > 0 && revision.patchSha256 === undefined) ||
     (expectedRevision === 0 && revision.patchSha256 !== undefined) ||
-    (expectedRevision < currentRevision && revision.status !== "superseded")
+    (expectedRevision < currentRevision &&
+      revision.status !== "superseded" &&
+      revision.status !== "failed")
   ) {
     throw new Error(`run planning revision ${expectedRevision} checkpoint state is invalid`);
   }
@@ -7438,7 +7440,7 @@ function assertPlanningSessionMutation(
 
   if (
     next.revisions.length !== previous.revisions.length + 1 ||
-    nextPriorCurrent.status !== "superseded" ||
+    (nextPriorCurrent.status !== "superseded" && nextPriorCurrent.status !== "failed") ||
     next.revisions[next.currentRevision]?.status !== "running"
   ) {
     throw new Error("run appended an invalid planning revision transition");

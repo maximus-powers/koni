@@ -593,12 +593,16 @@ function validatePlanningRevision(draft: AgentLaunchSpecDraft): void {
   const initial = revision.revision === 0;
   if (
     (initial && revision.baseRevision !== null) ||
-    (!initial && revision.baseRevision !== revision.revision - 1)
+    (!initial &&
+      (typeof revision.baseRevision !== "number" ||
+        !Number.isSafeInteger(revision.baseRevision) ||
+        revision.baseRevision < 0 ||
+        revision.baseRevision >= revision.revision))
   ) {
     fail(
       "planning_revision",
       `${pointer}/baseRevision`,
-      "planning revision must name its exact contiguous base revision",
+      "planning revision must name an earlier validated base revision",
     );
   }
   if (

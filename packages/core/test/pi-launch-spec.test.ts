@@ -228,10 +228,10 @@ describe("immutable AgentLaunchSpec", () => {
       },
     ],
     [
-      "noncontiguous base revision",
+      "non-prior base revision",
       {
         revision: 2,
-        baseRevision: 0,
+        baseRevision: 2,
         priorCheckpointSha256: rawSha256("planning-checkpoint-0"),
         steeringSha256: rawSha256("planning-steering-2"),
       },

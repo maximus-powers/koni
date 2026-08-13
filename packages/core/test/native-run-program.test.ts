@@ -5104,6 +5104,81 @@ describe("native compiler-authoritative run program", () => {
     ).toBe(true);
     expect(Value.Check(prepared.terminalOutputSchema!, artifact)).toBe(false);
 
+    const secondSteering =
+      "Keep the validated revision-zero artifact and replace the unmaterialized guide file with the existing page composition seam.";
+    const secondSteeringPath = `runs/${runId}/attempts/attempt-plan/planning/revisions/2/steering.txt`;
+    await persistWrites(project.projectRoot, [
+      {
+        path: secondSteeringPath,
+        bytes: Buffer.from(secondSteering, "utf8"),
+        expectedSha256: null,
+      },
+    ]);
+    run.plan.revision = 2;
+    run.plan.steeringHistory.push({
+      at: new Date(FIXED_NOW.getTime() + 2_000).toISOString(),
+      instructions: secondSteering,
+    });
+    run.attempts["attempt-plan"]!.inputTokens = 125_000;
+    run.attempts["attempt-plan"]!.outputTokens = 8_000;
+    run.planningSession.currentRevision = 2;
+    run.planningSession.revisions[1]!.status = "failed";
+    run.planningSession.revisions[1]!.transcriptSha256 = digest(
+      "continuous-planning-transcript-1-failed",
+    );
+    run.planningSession.revisions[1]!.completedAt = new Date(
+      FIXED_NOW.getTime() + 2_000,
+    ).toISOString();
+    run.planningSession.revisions.push({
+      protocol: "koni.planning-revision.v1",
+      revision: 2,
+      status: "running",
+      launchSpecSha256: digest("continuous-planning-launch-2"),
+      grantSha256: digest("continuous-planning-grant-2"),
+      budgetBaseline: {
+        inputTokens: 125_000,
+        outputTokens: 8_000,
+        cacheReadTokens: 300,
+        cacheWriteTokens: 200,
+      },
+      budgetPolicy: structuredClone(run.planningSession.revisions[1]!.budgetPolicy),
+      startedAt: new Date(FIXED_NOW.getTime() + 3_000).toISOString(),
+      steering: {
+        sequence: 2,
+        instructionsSha256: rawSha256(secondSteering),
+        instructionsSizeBytes: Buffer.byteLength(secondSteering),
+        artifactPath: secondSteeringPath,
+        recordedAt: new Date(FIXED_NOW.getTime() + 3_000).toISOString(),
+      },
+    });
+
+    const afterFailedRevision = await program.preparePlanningRevision({
+      run,
+      attemptId: "attempt-plan",
+      sessionId: "session-plan",
+      nextAuthorityRevision: 8,
+      expectedAuthorityStateHash: digest("continuous-planning-authority-2"),
+    });
+    expect(afterFailedRevision.spec.planningRevision).toMatchObject({
+      revision: 2,
+      baseRevision: 0,
+      priorCheckpointSha256: artifactSha256,
+      steeringSha256: rawSha256(secondSteering),
+      budgetBaseline: run.planningSession.revisions[2]!.budgetBaseline,
+    });
+    expect(afterFailedRevision.spec.persona.initialPrompt).toContain(secondSteering);
+    expect(afterFailedRevision.spec.persona.initialPrompt).toContain(
+      `Base revision: 0\nBase artifact hash: ${artifactSha256}`,
+    );
+
+    run.planningSession.currentRevision = 1;
+    run.plan.revision = 1;
+    run.planningSession.revisions.pop();
+    run.planningSession.revisions[1]!.status = "running";
+    delete run.planningSession.revisions[1]!.transcriptSha256;
+    delete run.planningSession.revisions[1]!.completedAt;
+    run.attempts["attempt-plan"]!.inputTokens = 4_000;
+    run.attempts["attempt-plan"]!.outputTokens = 1_000;
     run.planningSession.revisions[1]!.launchSpecSha256 = prepared.spec.specHash;
     run.planningSession.revisions[1]!.grantSha256 = prepared.spec.authority.grantHash;
     await persistWrites(project.projectRoot, prepared.artifactWrites ?? []);

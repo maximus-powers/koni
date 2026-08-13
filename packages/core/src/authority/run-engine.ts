@@ -110,6 +110,7 @@ import type {
   ManagedPiSessionFactory,
   ManagedSessionOutcome,
 } from "../pi/managed-session.js";
+import { authenticatePlanningRevisionContinuation } from "../pi/managed-session.js";
 import {
   CUMULATIVE_TOOL_RETRY_INSTRUCTION,
   createKoniAuthorityTools,
@@ -10038,7 +10039,7 @@ export class RunAuthorityEngine {
     if (run.planningSession !== undefined) {
       const session = run.planningSession;
       const attempt = run.attempts[session.attemptId];
-      const prior = session.revisions[session.currentRevision];
+      const currentPlanningRevision = session.revisions[session.currentRevision];
       if (attempt !== undefined && hasUnsettledProviderRequest(attempt)) {
         const draft = nextRun(run, this.#timestamp());
         const reason =
@@ -10057,18 +10058,53 @@ export class RunAuthorityEngine {
         });
         return { result, revision: committed.state.revision };
       }
+      const settledReview =
+        run.lifecycle.phase === "awaiting_approval" &&
+        session.status === "awaiting_review" &&
+        attempt?.status === "waiting_plan_review" &&
+        currentPlanningRevision?.status === "awaiting_review" &&
+        currentPlanningRevision.artifactSha256 !== undefined &&
+        currentPlanningRevision.transcriptSha256 !== undefined;
+      const failedRevision =
+        run.lifecycle.phase === "blocked" &&
+        session.status === "blocked" &&
+        attempt !== undefined &&
+        new Set<AgentAttemptRecord["status"]>(["failed", "aborted", "interrupted"]).has(
+          attempt.status,
+        ) &&
+        currentPlanningRevision?.status === "failed";
       if (
-        run.lifecycle.phase !== "awaiting_approval" ||
-        session.status !== "awaiting_review" ||
         attempt === undefined ||
-        attempt.status !== "waiting_plan_review" ||
-        prior?.status !== "awaiting_review" ||
-        prior.artifactSha256 === undefined ||
-        prior.transcriptSha256 === undefined
+        currentPlanningRevision === undefined ||
+        (!settledReview && !failedRevision)
       ) {
         throw new AuthorityRpcError(
           "planning_revision_state",
-          "continuous planning can only revise the latest settled review checkpoint",
+          "continuous planning can only revise a settled checkpoint or continue from a failed revision with an earlier validated checkpoint",
+        );
+      }
+      const validatedBase = [...session.revisions]
+        .slice(0, session.currentRevision + 1)
+        .reverse()
+        .find(
+          (candidate) =>
+            candidate.artifactSha256 !== undefined &&
+            candidate.checkpointPath !== undefined &&
+            candidate.transcriptSha256 !== undefined,
+        );
+      if (validatedBase === undefined) {
+        throw new AuthorityRpcError(
+          "planning_revision_state",
+          "continuous planning has no prior validated checkpoint to revise",
+        );
+      }
+      const continuationTranscriptSha256 = failedRevision
+        ? await this.#authenticateFailedPlanningRevisionContinuation(run, attempt)
+        : currentPlanningRevision.transcriptSha256;
+      if (continuationTranscriptSha256 === undefined) {
+        throw new AuthorityRpcError(
+          "planning_revision_transcript",
+          "failed planning revision has no authenticated transcript boundary for continuation",
         );
       }
       const nextPlanningRevision = session.currentRevision + 1;
@@ -10080,7 +10116,12 @@ export class RunAuthorityEngine {
       applyLifecycle(draft, { type: "plan_revision_requested", atMs: this.#now().getTime() });
       draft.plan!.status = "planning";
       draft.planningSession!.status = "running";
-      draft.planningSession!.revisions[session.currentRevision]!.status = "superseded";
+      const mutableCurrentRevision = draft.planningSession!.revisions[session.currentRevision]!;
+      if (mutableCurrentRevision.status === "awaiting_review") {
+        mutableCurrentRevision.status = "superseded";
+      } else {
+        mutableCurrentRevision.transcriptSha256 = continuationTranscriptSha256;
+      }
       draft.planningSession!.currentRevision = nextPlanningRevision;
       draft.planningSession!.revisions.push({
         protocol: "koni.planning-revision.v1",
@@ -10096,7 +10137,7 @@ export class RunAuthorityEngine {
           cacheReadTokens: attempt.cacheReadTokens,
           cacheWriteTokens: attempt.cacheWriteTokens,
         },
-        budgetPolicy: structuredClone(prior.budgetPolicy),
+        budgetPolicy: structuredClone(currentPlanningRevision.budgetPolicy),
         startedAt: draft.updatedAt,
         steering: {
           sequence: nextPlanningRevision,
@@ -10192,7 +10233,7 @@ export class RunAuthorityEngine {
             runId,
             nextPlanningRevision,
             prepared,
-            prior.transcriptSha256!,
+            continuationTranscriptSha256,
           ),
         runId,
       );
@@ -11710,6 +11751,51 @@ export class RunAuthorityEngine {
       // Parent-entry anchoring is optional. Attempt/session identity remains hash-bound even when a
       // legacy or torn transcript cannot safely supply a leaf entry.
       return undefined;
+    }
+  }
+
+  async #authenticateFailedPlanningRevisionContinuation(
+    run: RunRecord,
+    attempt: AgentAttemptRecord,
+  ): Promise<Sha256Digest> {
+    const spec = await this.#loadStoredLaunchSpec(run, attempt);
+    const cached = this.#preparedPlanningAttempts.get(attempt.id);
+    let prepared: PreparedManagedAttempt;
+    if (this.#program.recoverAttempt !== undefined) {
+      prepared = await this.#program.recoverAttempt({ run, attempt, spec });
+    } else if (cached?.spec.specHash === spec.specHash) {
+      prepared = cached;
+    } else {
+      throw new AuthorityRpcError(
+        "planning_recovery_compiler",
+        "compiler cannot authenticate the failed planning revision",
+      );
+    }
+    assertPreparedIdentity(
+      prepared,
+      run.id,
+      attempt.id,
+      attempt.sessionId,
+      undefined,
+      "planning",
+      undefined,
+    );
+    assertRecoveredAuthorityPlan(prepared, spec, this.#projectRoot, this.#stateRoot);
+    const tools = resolvePreparedTools(
+      prepared,
+      (call) => this.#invokeAgentTool(prepared, call),
+      (call, rejection) => this.#rejectAgentTool(prepared, call, rejection),
+    );
+    try {
+      return await authenticatePlanningRevisionContinuation(spec, {
+        tools,
+        contextProvider: prepared.contextProvider ?? this.#createContextProvider(prepared),
+      });
+    } catch (error) {
+      throw new AuthorityRpcError(
+        "planning_revision_transcript",
+        `failed planning revision transcript cannot be authenticated: ${errorMessage(error)}`,
+      );
     }
   }
 
@@ -24188,6 +24274,30 @@ export function inheritedRepositoryDiscoveryCalls(
   return total;
 }
 
+export function inheritedRepositoryDiscoveryDuplicate(
+  run: RunRecord,
+  attempt: AgentAttemptRecord,
+  toolName: KoniToolName,
+  argumentsSha256: Sha256Digest,
+): NonNullable<AgentAttemptRecord["authorityToolResults"]>[number] | undefined {
+  const seen = new Set<string>();
+  let cursor: AgentAttemptRecord | undefined = attempt;
+  while (cursor !== undefined && !seen.has(cursor.id)) {
+    seen.add(cursor.id);
+    const duplicate = (cursor.authorityToolResults ?? []).find(
+      (result) =>
+        result.outcome === "accepted" &&
+        result.toolName === toolName &&
+        result.argumentsSha256 === argumentsSha256,
+    );
+    if (duplicate !== undefined) return duplicate;
+    const lineage: AgentAttemptRecord["lineage"] = cursor.lineage;
+    if (lineage?.conversationFork === undefined || lineage.parentAttemptId === undefined) break;
+    cursor = run.attempts[lineage.parentAttemptId];
+  }
+  return undefined;
+}
+
 function enforceRepositoryCallBudget(
   run: RunRecord,
   spec: AgentLaunchSpec,
@@ -24209,18 +24319,18 @@ function enforceRepositoryCallBudget(
   }
   if (REPOSITORY_DISCOVERY_TOOLS.has(call.name)) {
     const argumentsSha256 = rawSha256(canonicalEncode(call.arguments));
-    const duplicate = (attempt.authorityToolResults ?? []).find(
-      (result) =>
-        result.outcome === "accepted" &&
-        result.toolName === call.name &&
-        result.argumentsSha256 === argumentsSha256,
+    const duplicate = inheritedRepositoryDiscoveryDuplicate(
+      run,
+      attempt,
+      call.name,
+      argumentsSha256,
     );
     if (duplicate !== undefined) {
       // Naming the exact earlier receipt turns recovery into a lookup instead of a re-plan:
       // the observed cost of this rejection was one wasted provider turn per occurrence.
       throw new AuthorityRpcError(
         "duplicate_repository_discovery",
-        `this exact ${call.name} request already succeeded as authority call ${duplicate.sequence} in this planning session (receipt ${duplicate.receiptSha256}); that result is retained in this transcript. Reuse it, or make a narrower, non-duplicate request.`,
+        `this exact ${call.name} request already succeeded as authority call ${duplicate.sequence} in this inherited conversation (receipt ${duplicate.receiptSha256}); that result is retained in this transcript. Reuse it, or make a narrower, non-duplicate request.`,
         {
           details: {
             priorSequence: duplicate.sequence,

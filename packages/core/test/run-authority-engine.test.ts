@@ -14,6 +14,7 @@ import {
   configuredCheckResultRequiresDependencyReopen,
   configuredResultArtifactPaths,
   correctableAgentToolError,
+  inheritedRepositoryDiscoveryDuplicate,
   inheritedRepositoryDiscoveryCalls,
   isRecoverableAssignmentValidationAction,
   isExactSettledLeadLaunchReplay,
@@ -81,7 +82,12 @@ import {
   koniToolSchemaHash,
   type KoniToolName,
 } from "../src/pi/tool-catalog.js";
-import { canonicalHash, rawSha256, type Sha256Digest } from "../src/shared/canonical.js";
+import {
+  canonicalEncode,
+  canonicalHash,
+  rawSha256,
+  type Sha256Digest,
+} from "../src/shared/canonical.js";
 import { MAX_TRANSACTION_BYTES } from "../src/authority/durable-limits.js";
 import { newRunLifecycle, reduceRunLifecycle } from "../src/state/run-lifecycle.js";
 import { executeActionPlan } from "../src/compiler/action-recipes.js";
@@ -4542,13 +4548,15 @@ describe("run authority engine", () => {
     });
   });
 
-  it("retries a blocked continuous planning run in its stable attempt and session", async () => {
+  it("retries and steers blocked continuous planning in its stable attempt and session", async () => {
     const root = await repository();
     const base = fakeProgram();
     const prepareAttempt = base.prepareAttempt.bind(base);
     const preparePlanningRevision = base.preparePlanningRevision!.bind(base);
+    const recoverAttempt = base.recoverAttempt!.bind(base);
     let failFirstPlanner = true;
     let failFirstRevision = true;
+    let pendingFailedRevisionMessage = false;
     const program: RunCompilerProgram = {
       ...base,
       async initializeApprovedPlan() {
@@ -4574,6 +4582,30 @@ describe("run authority engine", () => {
           factory: async () => {
             throw new Error("simulated planning revision host failure");
           },
+        };
+      },
+      async recoverAttempt(input) {
+        const prepared = await recoverAttempt(input);
+        const pendingContent = "An admitted correction still awaits transcript delivery.";
+        return {
+          ...prepared,
+          contextProvider: contextProvider(
+            prepared.spec,
+            new Set(["failed", "aborted", "interrupted"]).has(input.attempt.status)
+              ? "revoked"
+              : "continue",
+            pendingFailedRevisionMessage
+              ? [
+                  {
+                    sequence: 1,
+                    mode: "steer",
+                    sha256: rawSha256(pendingContent),
+                    sizeBytes: Buffer.byteLength(pendingContent, "utf8"),
+                    content: pendingContent,
+                  },
+                ]
+              : [],
+          ),
         };
       },
     };
@@ -4678,22 +4710,180 @@ describe("run authority engine", () => {
         status: "blocked",
       },
     });
+    const initialSpec = validateAgentLaunchSpec(
+      JSON.parse(
+        (
+          await engine.store.readArtifact(
+            `runs/${runId}/attempts/${first.id}/launch-spec.json`,
+            16 * 1024 * 1024,
+          )
+        ).toString("utf8"),
+      ) as AgentLaunchSpec,
+    );
+    const failedRevisionSpec = validateAgentLaunchSpec(
+      JSON.parse(
+        (
+          await engine.store.readArtifact(
+            `runs/${runId}/attempts/${first.id}/planning/revisions/1/launch-spec.json`,
+            16 * 1024 * 1024,
+          )
+        ).toString("utf8"),
+      ) as AgentLaunchSpec,
+    );
+    const sessionFile = blockedRevision.attempts[first.id]!.sessionFile!;
+    const timestamp = blockedRevision.updatedAt;
+    await mkdir(path.dirname(sessionFile), { recursive: true, mode: 0o700 });
+    const revisionMap = {
+      protocol: "koni.planning-revision-map.v1",
+      specHash: failedRevisionSpec.specHash,
+      runId: failedRevisionSpec.identity.runId,
+      attemptId: failedRevisionSpec.identity.attemptId,
+      sessionId: failedRevisionSpec.identity.sessionId,
+      grantId: failedRevisionSpec.authority.grantId,
+      grantHash: failedRevisionSpec.authority.grantHash,
+      revision: failedRevisionSpec.planningRevision!.revision,
+      baseRevision: failedRevisionSpec.planningRevision!.baseRevision,
+      priorCheckpointSha256: failedRevisionSpec.planningRevision!.priorCheckpointSha256,
+      priorTranscriptSha256: blockedRevision.planningSession!.revisions[0]!.transcriptSha256,
+      steeringSha256: failedRevisionSpec.planningRevision!.steeringSha256,
+      budgetBaseline: failedRevisionSpec.planningRevision!.budgetBaseline,
+    };
+    const writeFailedRevisionTranscript = async (map: Readonly<Record<string, unknown>>) =>
+      writeFile(
+        sessionFile,
+        `${[
+          {
+            type: "session",
+            version: 3,
+            id: first.sessionId,
+            timestamp,
+            cwd: initialSpec.workspace.cwd,
+          },
+          {
+            type: "custom",
+            id: "failed-revision-attempt-map",
+            parentId: null,
+            timestamp,
+            customType: "koni.attempt-session-map",
+            data: {
+              protocol: "koni.attempt-session-map.v1",
+              specHash: initialSpec.specHash,
+              runId: initialSpec.identity.runId,
+              ticketId: initialSpec.identity.ticketId,
+              stepId: initialSpec.identity.stepId,
+              attemptId: initialSpec.identity.attemptId,
+              sessionId: initialSpec.identity.sessionId,
+              grantId: initialSpec.authority.grantId,
+              grantHash: initialSpec.authority.grantHash,
+              generation: initialSpec.authority.generation,
+              epoch: initialSpec.authority.epoch,
+              stateHash: initialSpec.authority.expectedStateHash,
+              resourceSetHash: initialSpec.resources.setHash,
+              model: initialSpec.model,
+              lineage: initialSpec.lineage,
+              sessionFile,
+            },
+          },
+          {
+            type: "custom",
+            id: "failed-revision-map",
+            parentId: "failed-revision-attempt-map",
+            timestamp,
+            customType: "koni.planning-revision-map",
+            data: map,
+          },
+          {
+            type: "model_change",
+            id: "failed-revision-model",
+            parentId: "failed-revision-map",
+            timestamp,
+            provider: failedRevisionSpec.model.provider,
+            modelId: failedRevisionSpec.model.id,
+          },
+          {
+            type: "thinking_level_change",
+            id: "failed-revision-thinking",
+            parentId: "failed-revision-model",
+            timestamp,
+            thinkingLevel: failedRevisionSpec.model.thinkingLevel,
+          },
+          {
+            type: "message",
+            id: "failed-revision-prompt",
+            parentId: "failed-revision-thinking",
+            timestamp,
+            message: { role: "user", content: failedRevisionSpec.persona.initialPrompt },
+          },
+        ]
+          .map((entry) => JSON.stringify(entry))
+          .join("\n")}\n`,
+        { mode: 0o600 },
+      );
+
+    await writeFailedRevisionTranscript({
+      protocol: "koni.planning-revision-map.v1",
+      revision: failedRevisionSpec.planningRevision!.revision,
+    });
+    await client.request("authority.ping");
+    await expect(
+      client.request(
+        "plan.revise",
+        {
+          runId,
+          instructions: "This continuation must reject the malformed prior revision map.",
+        },
+        {
+          expectedRevision: client.revision,
+          idempotencyKey: "reject-tampered-failed-planning-revision",
+        },
+      ),
+    ).rejects.toMatchObject({ code: "planning_revision_transcript" });
+    await writeFailedRevisionTranscript(revisionMap);
+    pendingFailedRevisionMessage = true;
+    await client.request("authority.ping");
+    await expect(
+      client.request(
+        "plan.revise",
+        {
+          runId,
+          instructions: "Do not abandon an admitted pending message from the failed revision.",
+        },
+        {
+          expectedRevision: client.revision,
+          idempotencyKey: "reject-pending-message-failed-planning-revision",
+        },
+      ),
+    ).rejects.toMatchObject({ code: "planning_revision_transcript" });
+    pendingFailedRevisionMessage = false;
 
     await client.request("authority.ping");
-    await client.request(
-      "run.resume",
-      { runId },
+    const continued = await client.request(
+      "plan.revise",
+      {
+        runId,
+        instructions: "Continue from the last validated checkpoint with a smaller correction.",
+      },
       {
         expectedRevision: client.revision,
-        idempotencyKey: "retry-blocked-planning-revision",
+        idempotencyKey: "steer-after-failed-planning-revision",
       },
     );
+    expect(continued.result).toMatchObject({
+      runId,
+      status: "planning",
+      planningSessionId: first.sessionId,
+      planningAttemptId: first.id,
+      revisionUsage: {
+        cumulative: expect.objectContaining({ total: expect.any(Number) }),
+        currentRevision: { new: 0, cache: 0, total: 0 },
+      },
+    });
     try {
       await waitFor(async () => {
         const current = await engine.store.getRun(runId);
         return (
           current.lifecycle.phase === "awaiting_approval" &&
-          current.planningSession?.currentRevision === 1
+          current.planningSession?.currentRevision === 2
         );
       });
     } catch (error) {
@@ -4707,9 +4897,27 @@ describe("run authority engine", () => {
     expect(revised.planningSession).toMatchObject({
       attemptId: first.id,
       sessionId: first.sessionId,
-      currentRevision: 1,
+      currentRevision: 2,
       status: "awaiting_review",
     });
+    expect(revised.planningSession?.revisions).toMatchObject([
+      { revision: 0, status: "superseded" },
+      {
+        revision: 1,
+        status: "failed",
+        transcriptSha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+      },
+      {
+        revision: 2,
+        status: "awaiting_review",
+        budgetBaseline: {
+          inputTokens: first.inputTokens,
+          outputTokens: first.outputTokens,
+          cacheReadTokens: first.cacheReadTokens,
+          cacheWriteTokens: first.cacheWriteTokens,
+        },
+      },
+    ]);
     client.close();
   });
 
@@ -8744,6 +8952,50 @@ describe("run authority engine", () => {
     expect(inheritedRepositoryDiscoveryCalls(run, freshRoot)).toBe(2);
   });
 
+  it("rejects exact discovery duplicates inherited through an authenticated conversation fork", () => {
+    const argumentsSha256 = rawSha256(canonicalEncode({ path: "src/owner.ts" }));
+    const accepted = {
+      sequence: 7,
+      toolName: "koni_read_file",
+      outcome: "accepted",
+      argumentsSha256,
+      receiptSha256: rawSha256("retained repository read"),
+    } as NonNullable<AgentAttemptRecord["authorityToolResults"]>[number];
+    const parent = {
+      id: "parent",
+      authorityToolResults: [accepted],
+      lineage: { branchEpoch: 0, reason: "initial" },
+    } as unknown as AgentAttemptRecord;
+    const forked = {
+      id: "forked",
+      authorityToolResults: [],
+      lineage: {
+        branchEpoch: 1,
+        reason: "recovery",
+        parentAttemptId: parent.id,
+        conversationFork: {
+          parentLaunchSpecHash: rawSha256("parent launch"),
+          parentTranscriptSha256: rawSha256("parent transcript"),
+        },
+      },
+    } as unknown as AgentAttemptRecord;
+    const fresh = {
+      ...structuredClone(forked),
+      id: "fresh",
+      lineage: { branchEpoch: 1, reason: "rework", parentAttemptId: parent.id },
+    } as unknown as AgentAttemptRecord;
+    const run = {
+      attempts: { parent, forked, fresh },
+    } as unknown as RunRecord;
+
+    expect(
+      inheritedRepositoryDiscoveryDuplicate(run, forked, "koni_read_file", argumentsSha256),
+    ).toMatchObject({ sequence: 7, receiptSha256: accepted.receiptSha256 });
+    expect(
+      inheritedRepositoryDiscoveryDuplicate(run, fresh, "koni_read_file", argumentsSha256),
+    ).toBeUndefined();
+  });
+
   it("reconciles a stalled attempt that no live process backs and re-drives the run", async () => {
     const root = await repository();
     const base = configuredValidationDirectProgram();
@@ -11774,7 +12026,13 @@ function fakeProgram(
     async preparePlanningRevision(input) {
       const session = input.run.planningSession!;
       const revision = session.revisions[session.currentRevision]!;
-      const prior = session.revisions[session.currentRevision - 1]!;
+      const prior = [...session.revisions]
+        .slice(0, session.currentRevision)
+        .reverse()
+        .find(
+          (candidate) =>
+            candidate.artifactSha256 !== undefined && candidate.checkpointPath !== undefined,
+        )!;
       const baseSpec = fixtureLaunchSpec({
         cwd: input.run.git.planning.worktree,
         sessionDirectory: path.join(input.run.projectRoot, ".sessions", input.attemptId),
@@ -11815,7 +12073,12 @@ function fakeProgram(
       return {
         spec,
         tools: [fixtureTool()],
-        contextProvider: contextProvider(spec),
+        contextProvider: contextProvider(
+          spec,
+          new Set(["failed", "aborted", "interrupted"]).has(attempt.status)
+            ? "revoked"
+            : "continue",
+        ),
         factory: (async () =>
           new CompletingAdapter(
             spec,
@@ -12597,7 +12860,17 @@ class HangingAdapter implements PiSessionAdapter {
   public dispose(): void {}
 }
 
-function contextProvider(spec: AgentLaunchSpec): KoniContextProvider {
+function contextProvider(
+  spec: AgentLaunchSpec,
+  status: "continue" | "revoked" = "continue",
+  authorizedMessages: ReadonlyArray<{
+    sequence: number;
+    mode: "steer" | "follow_up";
+    sha256: Sha256Digest;
+    sizeBytes: number;
+    content: string;
+  }> = [],
+): KoniContextProvider {
   return {
     async loadBoundContext() {
       throw new Error("not used in the offline engine seam");
@@ -12620,9 +12893,9 @@ function contextProvider(spec: AgentLaunchSpec): KoniContextProvider {
           generation: spec.authority.generation,
           epoch: spec.authority.epoch,
           stateHash: spec.authority.expectedStateHash,
-          status: "continue",
+          status,
           usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, newTokens: 0, allTokens: 0 },
-          authorizedMessages: [],
+          authorizedMessages,
           authorizedToolResults: [],
           authorizedCompactions: [],
         },

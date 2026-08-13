@@ -186,6 +186,7 @@ type PendingRecoveredToolAction = PendingRecoveredToolActionBase &
 
 interface AuthenticatedRecovery {
   projection: RecoveredSessionState;
+  transcriptSha256?: Sha256Digest;
   release(): Promise<void>;
 }
 
@@ -204,6 +205,45 @@ export interface ManagedPiSessionFactoryOptions {
 export interface ManagedPlanningRevisionOptions extends ManagedPiSessionFactoryOptions {
   priorTranscriptSha256: Sha256Digest;
   factory?: ManagedPiSessionFactory;
+}
+
+export async function authenticatePlanningRevisionContinuation(
+  spec: Readonly<AgentLaunchSpec>,
+  options: ManagedPiSessionFactoryOptions,
+): Promise<Sha256Digest> {
+  if (spec.planningRevision === undefined || spec.planningRevision.revision < 1) {
+    throw new ManagedSessionError(
+      "planning_revision",
+      "planning continuation authentication requires a later revision launch specification",
+    );
+  }
+  const boundTools = snapshotToolBindings(options.tools);
+  const terminalTool = validateToolBindings(spec, boundTools);
+  const authenticated = await inspectRecoveredSession(
+    spec,
+    options.contextProvider,
+    terminalTool.terminalOutputSchema!,
+    boundTools,
+    { authenticateRevokedContinuation: true },
+  );
+  try {
+    const disposition = authenticated.projection.disposition;
+    if (
+      authenticated.transcriptSha256 === undefined ||
+      (disposition.kind !== "prompt" &&
+        (disposition.kind !== "continue" ||
+          (authenticated.projection.pendingMessages?.length ?? 0) > 0 ||
+          (authenticated.projection.pendingToolActions?.length ?? 0) > 0))
+    ) {
+      throw new ManagedSessionError(
+        "planning_revision_transcript",
+        "failed planning revision is not at an authenticated continuation boundary",
+      );
+    }
+    return authenticated.transcriptSha256;
+  } finally {
+    await authenticated.release();
+  }
 }
 
 export class ManagedSessionError extends Error {
@@ -2204,6 +2244,7 @@ async function inspectRecoveredSession(
   contextProvider: KoniContextProvider,
   terminalOutputSchema: TSchema,
   tools: readonly AuthorityBackedTool[],
+  options: Readonly<{ authenticateRevokedContinuation?: boolean }> = {},
 ): Promise<AuthenticatedRecovery> {
   const sessionFile = expectedSessionFile(spec);
   const claim = await contextProvider.acquireRecoveryClaim(spec);
@@ -2298,6 +2339,7 @@ async function inspectRecoveredSession(
       );
     }
     const transcriptPartition = await currentAttemptEntries(spec, parsed);
+    const transcriptSha256 = transcriptSnapshotHash(parsed);
     const currentEntries = transcriptPartition.entries;
     const planningPartition =
       spec.planningRevision !== undefined && spec.planningRevision.revision > 0
@@ -2341,10 +2383,11 @@ async function inspectRecoveredSession(
             ),
           },
         },
+        transcriptSha256,
         release,
       };
     }
-    if (recoveryState.status === "revoked") {
+    if (recoveryState.status === "revoked" && options.authenticateRevokedContinuation !== true) {
       return {
         projection: {
           usage,
@@ -2354,6 +2397,7 @@ async function inspectRecoveredSession(
             reason: recoveryReason(recoveryState.reason, "attempt revoked by authority"),
           },
         },
+        transcriptSha256,
         release,
       };
     }
@@ -2370,6 +2414,7 @@ async function inspectRecoveredSession(
             ),
           },
         },
+        transcriptSha256,
         release,
       };
     }
@@ -2400,6 +2445,7 @@ async function inspectRecoveredSession(
               "Pi transcript contains a terminal submission that durable authority has not accepted",
           },
         },
+        transcriptSha256,
         release,
       };
     }
@@ -2412,6 +2458,7 @@ async function inspectRecoveredSession(
       }
       return {
         projection: { usage, ...providerProjection, disposition: { kind: "prompt" } },
+        transcriptSha256,
         release,
       };
     }
@@ -2428,6 +2475,7 @@ async function inspectRecoveredSession(
             ? {}
             : { pendingToolActions: transcript.pendingToolActions }),
         },
+        transcriptSha256,
         release,
       };
     }
@@ -2440,6 +2488,7 @@ async function inspectRecoveredSession(
           reason: "Pi transcript does not end at a provably safe continuation boundary",
         },
       },
+      transcriptSha256,
       release,
     };
   } catch (error) {

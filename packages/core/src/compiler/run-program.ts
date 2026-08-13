@@ -1301,20 +1301,26 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       );
     }
     const revision = session.revisions[session.currentRevision];
-    const base = session.revisions[session.currentRevision - 1];
+    const base = [...session.revisions]
+      .slice(0, session.currentRevision)
+      .reverse()
+      .find(
+        (candidate) =>
+          candidate.artifactSha256 !== undefined && candidate.checkpointPath !== undefined,
+      );
     if (
       revision === undefined ||
       revision.revision !== session.currentRevision ||
       revision.status !== "running" ||
       revision.steering === undefined ||
       base === undefined ||
-      base.revision !== revision.revision - 1 ||
+      base.revision >= revision.revision ||
       base.artifactSha256 === undefined ||
       base.checkpointPath === undefined
     ) {
       fail(
         "planning_revision_state",
-        "planning revision does not name one contiguous validated base checkpoint and steering event",
+        "planning revision does not name one prior validated base checkpoint and steering event",
       );
     }
     for (const field of [
@@ -2095,7 +2101,8 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         "planning revision output is not bound to the current stable planning session",
       );
     }
-    const baseRevision = input.revision - 1;
+    const parsedPatch = planningArtifactBoundary(() => parsePlanningArtifactPatch(input.patch));
+    const baseRevision = parsedPatch.baseRevision;
     const baseRecord = session.revisions[baseRevision];
     if (
       baseRecord === undefined ||
@@ -2138,7 +2145,6 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     }
 
     const pinned = await this.#loadPinned(input.run);
-    const parsedPatch = planningArtifactBoundary(() => parsePlanningArtifactPatch(input.patch));
     const artifact = planningArtifactBoundary(() =>
       applyPlanningArtifactPatch(baseValue, parsedPatch, {
         baseRevision,
