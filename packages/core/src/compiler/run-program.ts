@@ -1976,6 +1976,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     snapshot.receiptIds = durable.receiptIds;
     snapshot.touchedFiles = durable.touchedFiles;
     snapshot.loadedResources = durable.loadedResources;
+    snapshot.loadedResourceContents = durable.loadedResourceContents;
     snapshot.graphRefs = dynamic.envelope.selection.selected.map(
       (entry) => `${entry.id} (${entry.reason})`,
     );
@@ -6239,10 +6240,18 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     run: RunRecord,
     attempt: AgentAttemptRecord,
     spec: Readonly<AgentLaunchSpec>,
-  ): Promise<{ receiptIds: string[]; touchedFiles: string[]; loadedResources: string[] }> {
+  ): Promise<{
+    receiptIds: string[];
+    touchedFiles: string[];
+    loadedResources: string[];
+    loadedResourceContents: NonNullable<KoniCompactionSnapshot["loadedResourceContents"]>;
+  }> {
     const receiptIds = new Set<string>();
     const touchedFiles = new Set<string>();
-    const loadedResources = new Set<string>();
+    const loadedResources = new Map<
+      string,
+      NonNullable<KoniCompactionSnapshot["loadedResourceContents"]>[number]
+    >();
     for (const record of [...(attempt.authorityToolResults ?? [])].sort(
       (left, right) => left.sequence - right.sequence,
     )) {
@@ -6252,8 +6261,8 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       }
       receiptIds.add(parsed.receiptId);
       const value = optionalRecord(parsed.value);
-      const loaded = loadedSkillResourceFromReceipt(record, parsed, spec);
-      if (loaded !== undefined) loadedResources.add(loaded);
+      const loaded = loadedSkillResourceCheckpointFromReceipt(record, parsed, spec);
+      if (loaded !== undefined) loadedResources.set(loaded.identity, loaded.resource);
       if (
         record.toolName === "koni_read_file" ||
         record.toolName === "koni_write_file" ||
@@ -6295,15 +6304,18 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       for (const record of parent.authorityToolResults ?? []) {
         if (record.toolName !== "koni_read_resource" || record.outcome !== "accepted") continue;
         const parsed = await this.#readAuthorityToolReceipt(run, parent, record);
-        const loaded = loadedSkillResourceFromReceipt(record, parsed, parentSpec);
-        if (loaded !== undefined) loadedResources.add(loaded);
+        const loaded = loadedSkillResourceCheckpointFromReceipt(record, parsed, parentSpec);
+        if (loaded !== undefined) loadedResources.set(loaded.identity, loaded.resource);
       }
       descendant = parent;
     }
     return {
       receiptIds: [...receiptIds].sort(compareText),
       touchedFiles: [...touchedFiles].sort(compareText),
-      loadedResources: [...loadedResources].sort(compareText),
+      loadedResources: [...loadedResources.keys()].sort(compareText),
+      loadedResourceContents: [...loadedResources.entries()]
+        .sort(([left], [right]) => compareText(left, right))
+        .map(([, resource]) => resource),
     };
   }
 
@@ -6394,6 +6406,19 @@ export function loadedSkillResourceFromReceipt(
   receipt: unknown,
   spec: Readonly<AgentLaunchSpec>,
 ): string | undefined {
+  return loadedSkillResourceCheckpointFromReceipt(record, receipt, spec)?.identity;
+}
+
+function loadedSkillResourceCheckpointFromReceipt(
+  record: Readonly<{ toolName: string; outcome: string }>,
+  receipt: unknown,
+  spec: Readonly<AgentLaunchSpec>,
+):
+  | {
+      identity: string;
+      resource: NonNullable<KoniCompactionSnapshot["loadedResourceContents"]>[number];
+    }
+  | undefined {
   if (record.toolName !== "koni_read_resource" || record.outcome !== "accepted") return undefined;
   try {
     validateKoniToolReceipt(receipt);
@@ -6420,7 +6445,14 @@ export function loadedSkillResourceFromReceipt(
   ) {
     return undefined;
   }
-  return `${resource.relativePath} (${resource.sha256})`;
+  return {
+    identity: `${resource.relativePath} (${resource.sha256})`,
+    resource: {
+      relativePath: resource.relativePath,
+      sha256: resource.sha256,
+      content: value.content,
+    },
+  };
 }
 
 function sameScopeContinuationPrompt(
@@ -15496,6 +15528,7 @@ function compactionSnapshot(run: RunRecord, descriptor: AttemptDescriptor): Koni
     graphRefs: descriptor.graph?.nodes().map((node) => `${node.type}: ${node.title}`) ?? [],
     touchedFiles: [],
     loadedResources: [],
+    loadedResourceContents: [],
     receiptIds: [],
     checkIds: descriptor.step?.validation_checks ?? [],
     unresolvedQuestions: Object.values(run.questions)

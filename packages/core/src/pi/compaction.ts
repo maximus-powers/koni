@@ -58,6 +58,12 @@ export interface KoniCompactionSnapshot {
   touchedFiles: readonly string[];
   /** Fully read immutable skill resources retained across compaction. */
   loadedResources?: readonly string[];
+  /** Exact authenticated bytes for loaded skill resources whose original receipts may be dropped. */
+  loadedResourceContents?: readonly {
+    relativePath: string;
+    sha256: Sha256Digest;
+    content: string;
+  }[];
   receiptIds: readonly string[];
   checkIds: readonly string[];
   unresolvedQuestions: readonly string[];
@@ -713,6 +719,7 @@ export function renderCompactionSummary(
     renderList("Graph nodes and edges touched", snapshot.graphRefs),
     renderList("Files read or modified", snapshot.touchedFiles),
     renderList("Skills already loaded", snapshot.loadedResources ?? []),
+    renderLoadedResourceContents(snapshot.loadedResourceContents ?? []),
     renderList("Receipts", snapshot.receiptIds),
     renderList("Checks", snapshot.checkIds),
     renderList("Unresolved questions", snapshot.unresolvedQuestions),
@@ -789,6 +796,28 @@ function validateSnapshot(snapshot: KoniCompactionSnapshot): void {
       validateSummaryText(value, name);
     }
   }
+  const loadedResourceContents = snapshot.loadedResourceContents ?? [];
+  if (loadedResourceContents.length > MAX_SUMMARY_ITEMS) {
+    throw new Error("loadedResourceContents exceeds the structured compaction item limit");
+  }
+  const loadedIdentities = loadedResourceContents.map(
+    (resource) => `${resource.relativePath} (${resource.sha256})`,
+  );
+  if (canonicalEncode(loadedIdentities) !== canonicalEncode(snapshot.loadedResources ?? [])) {
+    throw new Error("loaded resource identities and reissued contents do not match");
+  }
+  for (const resource of loadedResourceContents) {
+    validateSummaryText(resource.relativePath, "loadedResourceContents.relativePath");
+    if (
+      !isSha256Digest(resource.sha256) ||
+      Buffer.byteLength(resource.content, "utf8") === 0 ||
+      Buffer.byteLength(resource.content, "utf8") > 1024 * 1024 ||
+      resource.content.includes("\u0000") ||
+      rawSha256(resource.content) !== resource.sha256
+    ) {
+      throw new Error("loaded resource content is malformed, oversized, or unauthenticated");
+    }
+  }
 }
 
 function validateSummaryText(value: string, name: string): void {
@@ -803,6 +832,23 @@ function renderList(title: string, items: readonly string[]): string {
     `## ${title}`,
     ...(items.length === 0 ? ["- None"] : items.map((item) => `- ${item}`)),
     "",
+  ].join("\n");
+}
+
+function renderLoadedResourceContents(
+  resources: NonNullable<KoniCompactionSnapshot["loadedResourceContents"]>,
+): string {
+  if (resources.length === 0) return "";
+  return [
+    "## Reissued loaded skill resources",
+    "These exact immutable bytes were fully read before compaction. Continue to apply them without rereading the resources.",
+    "",
+    ...resources.flatMap((resource) => [
+      `<koni_loaded_skill_resource path="${xmlAttribute(resource.relativePath)}" sha256="${resource.sha256}">`,
+      resource.content,
+      "</koni_loaded_skill_resource>",
+      "",
+    ]),
   ].join("\n");
 }
 

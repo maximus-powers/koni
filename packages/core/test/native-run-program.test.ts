@@ -4292,6 +4292,13 @@ describe("native compiler-authoritative run program", () => {
       await restarted.refreshCompactionSnapshot({ run, attempt, spec: prepared.spec }),
     ).toMatchObject({
       loadedResources: [`skills/using-superpowers/SKILL.md (${issuedSkill.sha256})`],
+      loadedResourceContents: [
+        {
+          relativePath: "skills/using-superpowers/SKILL.md",
+          sha256: issuedSkill.sha256,
+          content: issuedSkill.content,
+        },
+      ],
       receiptIds: ["receipt-read-skill", "receipt-write-notes"],
     });
 
@@ -4319,6 +4326,13 @@ describe("native compiler-authoritative run program", () => {
       }),
     ).toMatchObject({
       loadedResources: [`skills/using-superpowers/SKILL.md (${issuedSkill.sha256})`],
+      loadedResourceContents: [
+        {
+          relativePath: "skills/using-superpowers/SKILL.md",
+          sha256: issuedSkill.sha256,
+          content: issuedSkill.content,
+        },
+      ],
     });
 
     const nonFork = await program.prepareAttempt({

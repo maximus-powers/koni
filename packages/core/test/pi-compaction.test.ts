@@ -11,6 +11,8 @@ import {
 } from "../src/pi/compaction.js";
 import { fixtureLaunchSpec } from "./pi-managed-fixtures.js";
 
+const loadedSkillContent = "# using-superpowers\n\nPreserve compiler authority.\n";
+
 const snapshot: KoniCompactionSnapshot = {
   objective: "Implement the compiler-issued change.",
   plan: {
@@ -21,8 +23,13 @@ const snapshot: KoniCompactionSnapshot = {
   },
   graphRefs: ["claim:authority", "gate:verification"],
   touchedFiles: ["src/example.ts"],
-  loadedResources: [
-    "skills/using-superpowers/SKILL.md (sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)",
+  loadedResources: [`skills/using-superpowers/SKILL.md (${rawSha256(loadedSkillContent)})`],
+  loadedResourceContents: [
+    {
+      relativePath: "skills/using-superpowers/SKILL.md",
+      sha256: rawSha256(loadedSkillContent),
+      content: loadedSkillContent,
+    },
   ],
   receiptIds: ["receipt-one"],
   checkIds: ["check-unit"],
@@ -283,6 +290,30 @@ describe("Koni Pi compaction extension", () => {
     expect(rendered).toContain("## Unresolved questions");
   });
 
+  it("reissues the exact authenticated bytes of fully loaded skill resources", () => {
+    const spec = fixtureLaunchSpec({
+      cwd: "/tmp/koni-workspace",
+      sessionDirectory: "/tmp/koni-sessions/attempt-loaded-skill",
+    });
+    const content =
+      "Resolve repository ownership from positive first-party evidence, never lexical similarity.";
+    const rendered = renderCompactionSummary(spec, {
+      ...snapshot,
+      loadedResources: [`skills/model-koni-work/SKILL.md (${rawSha256(content)})`],
+      loadedResourceContents: [
+        {
+          relativePath: "skills/model-koni-work/SKILL.md",
+          sha256: rawSha256(content),
+          content,
+        },
+      ],
+    });
+
+    expect(rendered).toContain("## Reissued loaded skill resources");
+    expect(rendered).toContain(content);
+    expect(rendered).toContain(`sha256="${rawSha256(content)}"`);
+  });
+
   it("bounds the complete structured checkpoint rather than only each field", () => {
     const spec = fixtureLaunchSpec({
       cwd: "/tmp/koni-workspace",
@@ -294,6 +325,24 @@ describe("Koni Pi compaction extension", () => {
       graphRefs: Array.from({ length: 70 }, () => largeItem),
     };
     expect(() => renderCompactionSummary(spec, oversized)).toThrow("structured compaction exceeds");
+  });
+
+  it("rejects reissued skill bytes that do not match their authenticated identity", () => {
+    const spec = fixtureLaunchSpec({
+      cwd: "/tmp/koni-workspace",
+      sessionDirectory: "/tmp/koni-sessions/attempt-invalid-skill",
+    });
+    expect(() =>
+      renderCompactionSummary(spec, {
+        ...snapshot,
+        loadedResourceContents: [
+          {
+            ...snapshot.loadedResourceContents![0]!,
+            content: "tampered instructions",
+          },
+        ],
+      }),
+    ).toThrow(/loaded resource content.*unauthenticated/u);
   });
 });
 
