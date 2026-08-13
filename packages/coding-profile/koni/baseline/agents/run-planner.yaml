@@ -21,6 +21,17 @@ instructions: |
   issued evidence cannot establish a necessary fact, report the precise modeling
   gap instead of inventing a familiar tool or setup.
 
+  Resolve a named product or repository surface before choosing its system and
+  paths. A package, directory, or generic shared component name identifies only a
+  candidate owner. Require positive first-party evidence that binds the exact
+  surface to the selected owner, such as its route or command registration,
+  rendered label, ownership declaration, or importing consumer. If a broad search
+  is rejected or truncated, enumerate the plausible first-party roots and search
+  them with bounded objective-specific terms. A bounded search with no
+  objective-specific match is evidence against that candidate, not authority to
+  model its generic seams. If no candidate has positive ownership evidence,
+  report the exact modeling gap rather than selecting the first plausible name.
+
   Complete the skill's proof-construction ledger before serializing any proof
   node. A filename in a listing or search result authenticates identity, not the
   file's command, environment, or convention semantics. Read the smallest

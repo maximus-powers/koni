@@ -112,14 +112,27 @@ describe("Koni's Pi-native skills", () => {
   });
 
   it("grounds named repository work before modeling it", async () => {
-    const source = await readFile(path.join(skillsRoot, "model-koni-work/SKILL.md"), "utf8");
+    const [source, softwareReference] = await Promise.all([
+      readFile(path.join(skillsRoot, "model-koni-work/SKILL.md"), "utf8"),
+      readFile(path.join(skillsRoot, "model-koni-work/references/software-projects.md"), "utf8"),
+    ]);
     const normalized = source.replace(/\s+/gu, " ");
+    const normalizedSoftwareReference = softwareReference.replace(/\s+/gu, " ");
 
     expect(normalized).toContain(
       "Resolve a named repository work item from its authoritative definition before modeling it",
     );
     expect(normalized).toContain(
       "Do not infer its meaning from an identifier, title, or referenced predecessor",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "Require positive first-party evidence that binds the named surface to its selected owner",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "A failed or truncated broad search does not select an owner",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "A bounded search with no objective-specific match counts against that candidate",
     );
   });
 

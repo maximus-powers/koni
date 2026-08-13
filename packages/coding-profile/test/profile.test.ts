@@ -396,10 +396,7 @@ describe("coding profile registrar", () => {
 
   it("keeps downstream composition review within its own authority boundary", async () => {
     const [reviewerSource, workflowSource, executionReference] = await Promise.all([
-      readFile(
-        path.resolve(import.meta.dirname, "../koni/baseline/agents/reviewer.yaml"),
-        "utf8",
-      ),
+      readFile(path.resolve(import.meta.dirname, "../koni/baseline/agents/reviewer.yaml"), "utf8"),
       readFile(path.resolve(import.meta.dirname, "../koni/baseline/workflows.yaml"), "utf8"),
       readFile(
         path.resolve(
@@ -428,9 +425,16 @@ describe("coding profile registrar", () => {
   });
 
   it("plans repository paths only from accepted evidence", async () => {
-    const [plannerSource, executionReference] = await Promise.all([
+    const [plannerSource, softwareReference, executionReference] = await Promise.all([
       readFile(
         path.resolve(import.meta.dirname, "../koni/baseline/agents/run-planner.yaml"),
+        "utf8",
+      ),
+      readFile(
+        path.resolve(
+          import.meta.dirname,
+          "../../core/skills/model-koni-work/references/software-projects.md",
+        ),
         "utf8",
       ),
       readFile(
@@ -443,6 +447,7 @@ describe("coding profile registrar", () => {
     ]);
     const planner = YAML.parse(plannerSource) as { instructions: string };
     const normalizedPlanner = planner.instructions.replace(/\s+/gu, " ");
+    const normalizedSoftwareReference = softwareReference.replace(/\s+/gu, " ");
     const normalizedReference = executionReference.replace(/\s+/gu, " ");
 
     expect(normalizedPlanner).toContain(
@@ -455,6 +460,21 @@ describe("coding profile registrar", () => {
       "Before submission, reconcile every path-bearing graph field against that evidence ledger and new-output distinction",
     );
     expect(normalizedPlanner).toContain("A failed lookup never authenticates the attempted path");
+    expect(normalizedPlanner).toContain(
+      "A package, directory, or generic shared component name identifies only a candidate owner",
+    );
+    expect(normalizedPlanner).toContain(
+      "If a broad search is rejected or truncated, enumerate the plausible first-party roots and search them with bounded objective-specific terms",
+    );
+    expect(normalizedPlanner).toContain(
+      "A bounded search with no objective-specific match is evidence against that candidate, not authority to model its generic seams",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "Require positive first-party evidence that binds the named surface to its selected owner",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "Do not stop at the first lexically plausible package or directory",
+    );
     expect(normalizedReference).toContain(
       "Every pre-existing repository input or mutation target must appear verbatim in accepted repository evidence",
     );

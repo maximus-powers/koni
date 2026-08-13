@@ -39,6 +39,17 @@ exact project-root-relative paths. Distinguish:
 A directory is not automatically a system, and a function is not automatically an interface. Keep
 details as fields when they have no independent lifecycle, queries, relationships, or proof.
 
+Resolve a named product or repository surface before selecting its system and paths. Require
+positive first-party evidence that binds the named surface to its selected owner, such as its exact
+route or command registration, rendered label, maintained ownership declaration, or a consumer that
+imports its entrypoint. A package, directory, or generic shared-component name identifies only a
+candidate. Do not stop at the first lexically plausible package or directory. A failed or truncated
+broad search does not select an owner. Enumerate the plausible first-party roots, search each with
+bounded objective-specific terms, and follow the positive match to its owning entrypoint. A bounded
+search with no objective-specific match counts against that candidate. If no candidate has positive
+ownership evidence, report the exact modeling gap instead of assigning generic seams from a
+convenient package.
+
 ## Adapt the baseline ontology
 
 Retain or refine these default roles when the repository evidence supports them:

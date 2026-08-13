@@ -11,10 +11,10 @@ export const PROFILE_DEFINITIONS = Object.freeze([
   Object.freeze({
     packageDirectory: "coding-profile",
     packageName: "@koni/coding-profile",
-    packageVersion: "0.8.14",
+    packageVersion: "0.8.15",
     profileId: "software",
     displayName: "Coding",
-    profileVersion: "0.8.14",
+    profileVersion: "0.8.15",
     lineage: "koni.software",
     expectedFileCount: 27,
     migration: Object.freeze({
