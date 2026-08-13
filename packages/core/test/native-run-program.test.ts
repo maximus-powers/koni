@@ -4810,6 +4810,24 @@ describe("native compiler-authoritative run program", () => {
       ]),
     );
 
+    await expect(
+      program.compilePlanningRevision({
+        run,
+        attemptId: "attempt-plan",
+        revision: 1,
+        patch: {
+          baseRevision: 0,
+          baseArtifactSha256,
+          full: { verification: initial.plan.full.verification },
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: "planning_revision_noop",
+      details: [
+        "Apply the operator steering and submit only the fields or graph operations it changes.",
+      ],
+    });
+
     const priorPlanSha256 = canonicalHash(run.plan);
     await expect(
       program.compilePlanningRevision({

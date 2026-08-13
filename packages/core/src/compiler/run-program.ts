@@ -2145,6 +2145,14 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         protectedRootSpecFields: planningProtectedRootSpecFields(pinned.configuration),
       }),
     );
+    const artifactSha256 = canonicalHash(artifact);
+    if (artifactSha256 === baseRecord.artifactSha256) {
+      fail(
+        "planning_revision_noop",
+        "planning revision does not change its validated base checkpoint",
+        ["Apply the operator steering and submit only the fields or graph operations it changes."],
+      );
+    }
     const planningWorkspace = attemptWorkspace(input.run, "planning", "run-planning");
     const graph = compilePlanningSeed(
       pinned.configuration,
@@ -2173,7 +2181,6 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
     const graphValue = graphArtifact(input.run, pinned.configuration, graph, 0);
     const prefix = `runs/${input.run.id}/attempts/${input.attemptId}/planning/revisions/${input.revision}`;
     const patchSha256 = canonicalHash(parsedPatch);
-    const artifactSha256 = canonicalHash(artifact);
     const checkpoint = {
       protocol: "koni.planning-checkpoint.v1" as const,
       runId: input.run.id,
