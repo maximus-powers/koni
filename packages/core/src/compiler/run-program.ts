@@ -7932,6 +7932,21 @@ export function upstreamChangeRequestInstructions(
   ];
 }
 
+export function reviewVerdictInstructions(
+  stepKind: DerivedWorkflowStep["kind"],
+  changeControl: CompiledChangeControl | undefined,
+): string[] {
+  if (stepKind !== "review") return [];
+  if (changeControl?.role === "ordinary" && changeControl.allowUpstreamRequests) {
+    return [
+      'Before choosing a verdict, classify every demanded repair by authority. If any material repair requires changing graph state, scope, contract, or another read-only resource outside the current producer grant, do not use status "failed" or reviewVerdict "rejected" and do not spend local rework on it. Use status "completed" with reviewVerdict "changes_requested" and the authorized upstreamChangeRequest. Use status "failed" with reviewVerdict "rejected" and a precise blocker only when every demanded repair is executable by the configured rework producer. Use status "completed" with reviewVerdict "approved" only when no material finding remains.',
+    ];
+  }
+  return [
+    'Return an explicit typed review verdict. This operation has no upstream-change output route. Use status "failed" with reviewVerdict "rejected" and a precise blocker when any material finding remains, including an exact outside-grant repair that requires separately configured authority. Use status "completed" with reviewVerdict "approved" only when no material finding remains.',
+  ];
+}
+
 function ticketAttempt(
   run: RunRecord,
   definition: DerivedTicketDefinition,
@@ -8300,11 +8315,7 @@ function ticketAttempt(
             "For each existing node upsert, use that node's exact nodeHash from the injected context as expectedNodeHash. Never guess or derive a node hash; if it is absent, use koni_graph_context before submitting.",
           ]
         : []),
-      ...(step.kind === "review"
-        ? [
-            'Return an explicit typed review verdict. Use status "completed" with reviewVerdict "approved" only when the work passes. If any material finding remains, use status "failed" with reviewVerdict "rejected" and put the precise repair contract in blocker. For a genuinely out-of-scope repair, use reviewVerdict "changes_requested" with the authorized upstreamChangeRequest.',
-          ]
-        : []),
+      ...reviewVerdictInstructions(step.kind, proposalOperation?.changeControl),
       "Use the automatically injected authority context. Return a short outcome summary and only the graph delta permitted by this step. Do not author compiler-owned state.",
     ].join("\n\n"),
     context: {

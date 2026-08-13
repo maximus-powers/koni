@@ -158,6 +158,10 @@ operations:
   allowed_existing_node_types:
   - proof
   max_new_nodes: 0
+  change_control:
+    role: ordinary
+    allow_upstream_requests: true
+    proposal_operation: change-request
   checks:
   - baseline-proof-set
   proof_source_preparation_check: baseline-proof-set
@@ -1053,3 +1057,69 @@ operations:
   ranking_hints:
   - phase
   - objective-id
+- id: lifecycle.change-request
+  operation: change-request
+  stage: dynamic
+  target_types:
+  - proof
+  workflow: change-request
+  allowed_new_node_types: []
+  allowed_existing_node_types: []
+  allow_node_deletion: false
+  allow_gate_contract_edits: false
+  gate_blocking_exempt: false
+  change_control_barrier: false
+  single_flight_group: change-control
+  change_control:
+    role: proposal
+    proposal_step: propose-graph-delta
+    application_operations:
+    - apply-change-request
+    - no-op
+  review_contract: hash-bound proof-contract change proposal review
+  output_contract: typed bounded proof-contract application or no-op disposition
+  dispatch_priority: 910
+  ranking_hints:
+  - stage
+  - target-node-id
+- id: lifecycle.apply-change-request
+  operation: apply-change-request
+  stage: dynamic
+  target_types:
+  - proof
+  workflow: apply-change-request
+  allowed_new_node_types: []
+  allowed_existing_node_types:
+  - proof
+  allow_node_deletion: false
+  allow_gate_contract_edits: false
+  gate_blocking_exempt: true
+  change_control_barrier: false
+  single_flight_group: change-control
+  change_control:
+    role: application
+  review_contract: pre-commit approved proof-contract change review
+  output_contract: exact approved semantic proof graph delta
+  dispatch_priority: 920
+  ranking_hints:
+  - stage
+  - source-change-request-id
+- id: lifecycle.no-op
+  operation: no-op
+  stage: dynamic
+  target_types: []
+  workflow: change-request
+  allowed_new_node_types: []
+  allowed_existing_node_types: []
+  allow_node_deletion: false
+  allow_gate_contract_edits: false
+  gate_blocking_exempt: true
+  change_control_barrier: false
+  change_control:
+    role: disposition
+    outcome: no_op
+  review_contract: hash-bound no-op review
+  output_contract: explicit assertion that the reviewed proof contract already satisfies the request
+  dispatch_priority: 890
+  ranking_hints:
+  - source-change-request-id

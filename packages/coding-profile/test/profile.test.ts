@@ -10,6 +10,50 @@ import registerProfile, {
 } from "../extensions/profile.js";
 
 describe("coding profile registrar", () => {
+  it("routes proof-spec defects through bounded native change control", async () => {
+    const [operationsSource, workflowsSource] = await Promise.all([
+      readFile(path.resolve(import.meta.dirname, "../koni/baseline/operations.yaml"), "utf8"),
+      readFile(path.resolve(import.meta.dirname, "../koni/baseline/workflows.yaml"), "utf8"),
+    ]);
+    const operations = YAML.parse(operationsSource) as {
+      operations: Array<{
+        id: string;
+        operation: string;
+        change_control?: Record<string, unknown>;
+      }>;
+    };
+    const workflows = YAML.parse(workflowsSource) as {
+      workflows: Array<{ id: string; applies_to: string[]; review_rework_limit?: number }>;
+    };
+
+    expect(
+      operations.operations.find(({ id }) => id === "assurance.proof.prepare")?.change_control,
+    ).toEqual({
+      role: "ordinary",
+      allow_upstream_requests: true,
+      proposal_operation: "change-request",
+    });
+    expect(
+      operations.operations.find(({ id }) => id === "lifecycle.change-request")?.change_control,
+    ).toMatchObject({
+      role: "proposal",
+      proposal_step: "propose-graph-delta",
+      application_operations: ["apply-change-request", "no-op"],
+    });
+    expect(
+      operations.operations.find(({ id }) => id === "lifecycle.apply-change-request")
+        ?.change_control,
+    ).toEqual({ role: "application" });
+    expect(workflows.workflows.find(({ id }) => id === "change-request")).toMatchObject({
+      applies_to: ["change-request", "no-op"],
+      review_rework_limit: 2,
+    });
+    expect(workflows.workflows.find(({ id }) => id === "apply-change-request")).toMatchObject({
+      applies_to: ["apply-change-request"],
+      review_rework_limit: 2,
+    });
+  });
+
   it("keeps every automatic review-rework workflow bounded to two corrections", async () => {
     const source = await readFile(
       path.resolve(import.meta.dirname, "../koni/baseline/workflows.yaml"),

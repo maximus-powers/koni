@@ -60,6 +60,7 @@ import {
   recurringAssetReviewReworkPending,
   recurringAssetRequiresReissue,
   rejectedSourceProposalInstructions,
+  reviewVerdictInstructions,
   restoreSettledRecurringAssetTicket,
   shouldAttachCurrentGateRepairEvidence,
   shouldAttachPredecessorExecution,
@@ -555,6 +556,30 @@ describe("native compiler-authoritative run program", () => {
       implementAssetReviewManifestInstruction("implement-asset", "production"),
     ).toBeUndefined();
     expect(implementAssetReviewManifestInstruction("compile-run-plan", "review")).toBeUndefined();
+  });
+
+  it("keeps review verdict instructions within the compiled upstream-change capability", () => {
+    const routed = reviewVerdictInstructions("review", {
+      role: "ordinary",
+      allowUpstreamRequests: true,
+    } satisfies CompiledChangeControl).join(" ");
+    expect(routed).toContain('reviewVerdict "changes_requested"');
+    expect(routed).toContain("authorized upstreamChangeRequest");
+
+    const unrouted = reviewVerdictInstructions("review", {
+      role: "ordinary",
+      allowUpstreamRequests: false,
+    } satisfies CompiledChangeControl).join(" ");
+    expect(unrouted).toContain("has no upstream-change output route");
+    expect(unrouted).toContain('reviewVerdict "rejected"');
+    expect(unrouted).not.toContain('reviewVerdict "changes_requested"');
+    expect(unrouted).not.toContain("upstreamChangeRequest");
+    expect(
+      reviewVerdictInstructions("production", {
+        role: "ordinary",
+        allowUpstreamRequests: true,
+      } satisfies CompiledChangeControl),
+    ).toEqual([]);
   });
 
   it("does not let a recurring gate provider relabel an unchanged blocker as a repair", () => {
@@ -5663,6 +5688,12 @@ describe("native compiler-authoritative run program", () => {
     expect(reviewPrepared.spec.persona.initialPrompt).toContain(
       "compiler-authenticated predecessorExecution",
     );
+    expect(reviewPrepared.spec.persona.initialPrompt).toContain(
+      "This operation has no upstream-change output route",
+    );
+    expect(reviewPrepared.spec.persona.initialPrompt).not.toContain(
+      'reviewVerdict "changes_requested"',
+    );
     expect(reviewPrepared.contextContent).toContain('"predecessorExecution"');
     expect(reviewPrepared.contextContent).toContain("expected Sales Notes to be General");
     expect(reviewPrepared.contextContent).toContain("Objects are not valid as a React child");
@@ -6309,6 +6340,18 @@ describe("native compiler-authoritative run program", () => {
         parentSessionId: author.sessionId,
       },
     });
+    expect(reviewPrepared.spec.persona.initialPrompt).toContain(
+      "Before choosing a verdict, classify every demanded repair by authority",
+    );
+    expect(reviewPrepared.spec.persona.initialPrompt).toContain(
+      'do not use status "failed" or reviewVerdict "rejected"',
+    );
+    expect(reviewPrepared.spec.persona.initialPrompt).toContain(
+      'status "completed" with reviewVerdict "changes_requested" and the authorized upstreamChangeRequest',
+    );
+    expect(reviewPrepared.spec.persona.initialPrompt).toContain(
+      "only when every demanded repair is executable by the configured rework producer",
+    );
     await persistWrites(project.projectRoot, reviewPrepared.artifactWrites ?? []);
     const review = attemptRecord(reviewPrepared.spec, "verification", "terminal_accepted");
     review.reviewedGraphHash = run.graphHash;

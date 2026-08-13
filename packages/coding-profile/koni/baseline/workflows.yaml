@@ -581,3 +581,60 @@ workflows:
     write_paths: []
     expected_output: Independent review that criteria are sound, approaches are distinct and honestly evaluated on evidence, the winner beats every sibling under the decision rule, the adopting change is design-ready, and no throwaway prototype code was committed
     validation_action: review
+- id: change-request
+  version: 1.0.0
+  applies_to:
+  - change-request
+  - no-op
+  review_failure_reopen_from: scope-change
+  review_rework_limit: 2
+  steps:
+  - id: scope-change
+    kind: integration
+    agent: integrator
+    depends_on: []
+    graph_mutation: forbidden
+    expected_output: Bounded proof-contract repair analysis without semantic mutation
+    validation_action: compile-ticket
+  - id: propose-graph-delta
+    kind: integration
+    agent: integrator
+    depends_on:
+    - scope-change
+    expected_output: Typed proof-contract application operation, exact targets, summary, risks, and proposal
+    validation_action: compile-ticket
+  - id: risk-review
+    kind: review
+    agent: reviewer
+    depends_on:
+    - propose-graph-delta
+    expected_output: Independent review bound to the exact proposal hash
+    validation_action: review
+- id: apply-change-request
+  version: 1.0.0
+  applies_to:
+  - apply-change-request
+  review_failure_reopen_from: inspect-approved-change
+  review_rework_limit: 2
+  steps:
+  - id: inspect-approved-change
+    kind: integration
+    agent: integrator
+    depends_on: []
+    graph_mutation: forbidden
+    expected_output: Approved proposal and immutable contract provenance
+    validation_action: compile-ticket
+  - id: apply-approved-delta
+    kind: integration
+    agent: integrator
+    depends_on:
+    - inspect-approved-change
+    expected_output: Exact approved semantic proof graph delta
+    validation_action: compile-ticket
+  - id: verify
+    kind: review
+    agent: reviewer
+    depends_on:
+    - apply-approved-delta
+    expected_output: Independent review of the exact approved delta
+    validation_action: review
