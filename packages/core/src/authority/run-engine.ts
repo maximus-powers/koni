@@ -238,6 +238,8 @@ import {
   configuredCheckInfrastructureFailureForAttempt,
   deriveRunActionExecutionArchive,
   deriveRunActionExecutionArchiveSegment,
+  leadJudgmentFrontierSha256,
+  leadJudgmentProductSha256,
   MAX_TOKEN_BUDGET_AUTO_RECOVERIES_PER_SLICE,
   MAX_TOKEN_BUDGET_AUTO_RECOVERIES_PER_TICKET_STEP,
   terminalFailureBindingsForTicket,
@@ -1040,7 +1042,9 @@ export function acceptedLeadJudgmentForRun(
     if (
       judgment.trigger === trigger &&
       judgment.graphHash === run.graphHash &&
-      judgment.runOid === run.git.run.headOid
+      judgment.runOid === run.git.run.headOid &&
+      (trigger !== "compiler_deadlock" ||
+        judgment.frontierSha256 === leadJudgmentFrontierSha256(run))
     ) {
       return judgment;
     }
@@ -1052,7 +1056,9 @@ export function acceptedLeadJudgmentForRun(
     if (
       judgment.trigger === trigger &&
       judgment.graphHash === run.graphHash &&
-      judgment.disposition === "proceed"
+      judgment.disposition === "proceed" &&
+      (trigger !== "compiler_deadlock" ||
+        judgment.frontierSha256 === leadJudgmentFrontierSha256(run))
     ) {
       return judgment;
     }
@@ -11590,7 +11596,10 @@ export class RunAuthorityEngine {
           (judgment) =>
             judgment.attemptId === cursor!.id &&
             judgment.trigger === trigger &&
-            (judgment.graphHash !== run.graphHash || judgment.runOid !== run.git.run.headOid),
+            (judgment.graphHash !== run.graphHash ||
+              judgment.runOid !== run.git.run.headOid ||
+              (trigger === "compiler_deadlock" &&
+                judgment.frontierSha256 !== leadJudgmentFrontierSha256(run))),
         )
       ) {
         return true;
@@ -14679,10 +14688,14 @@ export class RunAuthorityEngine {
     draft: RunRecord,
     attempt: AgentAttemptRecord,
     output: LeadJudgmentOutput,
-  ): void {
+  ): boolean {
     const behavior = run.behavior;
     const graphHash = run.graphHash;
     const runOid = run.git.run.headOid;
+    const frontierSha256 =
+      leadJudgmentTriggerForAttempt(attempt) === "compiler_deadlock"
+        ? leadJudgmentFrontierSha256(run)
+        : undefined;
     if (behavior === undefined || graphHash === undefined || runOid === undefined) {
       throw new AuthorityRpcError(
         "lead_binding",
@@ -14697,8 +14710,35 @@ export class RunAuthorityEngine {
       );
     }
     const trigger = leadJudgmentTriggerForAttempt(attempt);
+    const launchAction =
+      attempt.launchActionInvocationId === undefined
+        ? undefined
+        : run.actionExecutions?.[attempt.launchActionInvocationId];
+    if (
+      launchAction?.boundary.kind !== "lead_launch" ||
+      launchAction.boundary.attemptId !== attempt.id ||
+      launchAction.boundary.stepId !== leadJudgmentStepId(trigger) ||
+      launchAction.boundary.productSha256 !== leadActionProductSha256(run, trigger)
+    ) {
+      draft.activity.push(
+        activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "compiler",
+          "Discarded a stale Lead judgment after its compiler-visible frontier changed; issuing a fresh judgment",
+          undefined,
+          "warning",
+        ),
+      );
+      return false;
+    }
     const priorTriggers = (run.leadJudgments ?? [])
-      .filter((judgment) => judgment.graphHash === graphHash && judgment.runOid === runOid)
+      .filter(
+        (judgment) =>
+          judgment.graphHash === graphHash &&
+          judgment.runOid === runOid &&
+          (judgment.trigger !== "compiler_deadlock" || judgment.frontierSha256 === frontierSha256),
+      )
       .map((judgment) => judgment.trigger);
     if (!shouldIssueLeadJudgment(behavior.runType, trigger, priorTriggers)) {
       throw new AuthorityRpcError(
@@ -14717,7 +14757,7 @@ export class RunAuthorityEngine {
           "warning",
         ),
       );
-      return;
+      return false;
     }
     draft.leadJudgments ??= [];
     draft.leadJudgments.push({
@@ -14728,6 +14768,7 @@ export class RunAuthorityEngine {
       stageId,
       graphHash,
       runOid,
+      ...(frontierSha256 === undefined ? {} : { frontierSha256 }),
       disposition: output.disposition,
       summary: output.summary,
       recordedAt: draft.updatedAt,
@@ -14750,6 +14791,7 @@ export class RunAuthorityEngine {
         remedy: "change_request",
       });
     }
+    return true;
   }
 
   async #invokeQuestionTool(
@@ -15648,7 +15690,7 @@ export class RunAuthorityEngine {
     if (attempt.kind === "lead") {
       const compiled = await this.#compileLeadJudgment(run, attempt, outcome.terminalOutput);
       if (this.#quiesceOutcomeSettlementClosed) return;
-      let proceed = false;
+      let shouldTick = false;
       await this.#server.mutateInternal(async ({ revision }) => {
         const current = await this.#store.getRun(runId);
         const currentAttempt = current.attempts[attemptId];
@@ -15662,9 +15704,9 @@ export class RunAuthorityEngine {
         )
           return this.#noOpInternal(revision);
         const draft = nextRun(current, this.#timestamp());
-        this.#applyLeadJudgment(current, draft, currentAttempt, compiled);
+        const applied = this.#applyLeadJudgment(current, draft, currentAttempt, compiled);
         finishAttemptRecord(draft.attempts[attemptId]!, outcome, draft.updatedAt, compiled.summary);
-        proceed = compiled.disposition === "proceed";
+        shouldTick = !applied || compiled.disposition === "proceed";
         const committed = await this.#store.commit({
           expectedRevision: revision,
           runWrites: [{ record: draft, expectedRevision: current.revision }],
@@ -15673,13 +15715,17 @@ export class RunAuthorityEngine {
           revision: committed.state.revision,
           events: [
             {
-              topic: compiled.disposition === "proceed" ? "run.lead.proceeded" : "run.lead.blocked",
+              topic: !applied
+                ? "run.lead.stale"
+                : compiled.disposition === "proceed"
+                  ? "run.lead.proceeded"
+                  : "run.lead.blocked",
               payload: { runId, attemptId, trigger: leadJudgmentTriggerForAttempt(currentAttempt) },
             },
           ],
         };
       });
-      if (proceed) await this.#tick(runId);
+      if (shouldTick) await this.#tick(runId);
       return;
     }
     // Ticket-level review steps intentionally use the verification persona/containment class,
@@ -16707,7 +16753,8 @@ export class RunAuthorityEngine {
               judgment.attemptId === accepted.attemptId &&
               judgment.trigger === accepted.trigger &&
               judgment.graphHash === accepted.graphHash &&
-              judgment.runOid === accepted.runOid
+              judgment.runOid === accepted.runOid &&
+              judgment.frontierSha256 === accepted.frontierSha256
             ),
         );
         if (remaining.length === 0) delete draft.leadJudgments;
@@ -16740,7 +16787,10 @@ export class RunAuthorityEngine {
         prior
           .filter(
             (judgment) =>
-              judgment.graphHash === run.graphHash && judgment.runOid === run.git.run.headOid,
+              judgment.graphHash === run.graphHash &&
+              judgment.runOid === run.git.run.headOid &&
+              (judgment.trigger !== "compiler_deadlock" ||
+                judgment.frontierSha256 === leadJudgmentFrontierSha256(run)),
           )
           .map((judgment) => judgment.trigger),
       )
@@ -21032,19 +21082,7 @@ function leadActionProductSha256(
       "Lead action requires pinned behavior, graph, and run Git identity",
     );
   }
-  return canonicalHash({
-    behaviorSha256: run.behavior.sha256,
-    graphHash: run.graphHash,
-    runOid: run.git.run.headOid,
-    stageId: run.currentPipelineStageId ?? null,
-    trigger,
-    priorJudgments: (run.leadJudgments ?? []).map((judgment) => ({
-      trigger: judgment.trigger,
-      disposition: judgment.disposition,
-      graphHash: judgment.graphHash,
-      runOid: judgment.runOid,
-    })),
-  });
+  return leadJudgmentProductSha256(run, trigger);
 }
 
 function leadJudgmentTriggerFromStepId(

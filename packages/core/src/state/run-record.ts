@@ -870,6 +870,8 @@ export interface RunLeadJudgmentRecord {
   stageId: string;
   graphHash: Sha256Digest;
   runOid: string;
+  /** Exact compiler-visible ticket frontier for deadlock judgments; absent on legacy records. */
+  frontierSha256?: Sha256Digest;
   disposition: "proceed" | "blocked";
   summary: string;
   recordedAt: string;
@@ -1488,6 +1490,80 @@ export interface RunRecord {
   reports?: RunReportRecord[];
   /** Exact synchronized/checkpointed/reviewed/reported product proof for behavior-backed runs. */
   postOrchestration?: RunPostOrchestrationRecord;
+}
+
+/** Exact ticket-board projection supplied to a bounded Lead judgment. */
+export function leadJudgmentTicketBoard(run: Readonly<Pick<RunRecord, "tickets">>) {
+  return Object.values(run.tickets)
+    .sort((left, right) => left.priority - right.priority || compareUtf8(left.id, right.id))
+    .map((ticket) => {
+      const settledDependencyIds = ticket.dependencyIds.filter((dependencyId) =>
+        ticketDependencySettled(run.tickets[dependencyId]),
+      );
+      const settled = new Set(settledDependencyIds);
+      return {
+        id: ticket.id,
+        operationId: ticket.operationId,
+        title: ticket.title,
+        status: ticket.status,
+        priority: ticket.priority,
+        dependencyIds: ticket.dependencyIds,
+        settledDependencyIds,
+        waitingOnDependencyIds: ticket.dependencyIds.filter(
+          (dependencyId) => !settled.has(dependencyId),
+        ),
+        ...(ticket.blocker === undefined ? {} : { blocker: ticket.blocker }),
+        scope: {
+          readNodeIds: ticket.readNodeIds ?? [],
+          writeNodeIds: ticket.writeNodeIds ?? [],
+          ...(ticket.readPaths === undefined ? {} : { readPaths: ticket.readPaths }),
+          ...(ticket.writePaths === undefined ? {} : { writePaths: ticket.writePaths }),
+        },
+        steps: ticket.steps.map((step) => ({
+          id: step.id,
+          ...(step.kind === undefined ? {} : { kind: step.kind }),
+          personaId: step.personaId,
+          status: step.status,
+          ...(step.summary === undefined ? {} : { summary: step.summary }),
+        })),
+      };
+    });
+}
+
+/** Bind a deadlock judgment to the exact compiler-visible ticket frontier it evaluated. */
+export function leadJudgmentFrontierSha256(
+  run: Readonly<Pick<RunRecord, "tickets">>,
+): Sha256Digest {
+  return canonicalHash(leadJudgmentTicketBoard(run));
+}
+
+/** Exact semantic product admitted before a compiler-owned Lead launch. */
+export function leadJudgmentProductSha256(
+  run: Readonly<RunRecord>,
+  trigger: RunLeadJudgmentRecord["trigger"],
+): Sha256Digest {
+  if (
+    run.behavior === undefined ||
+    run.graphHash === undefined ||
+    run.git.run.headOid === undefined
+  ) {
+    throw new Error("Lead action product requires pinned behavior, graph, and run Git identity");
+  }
+  return canonicalHash({
+    behaviorSha256: run.behavior.sha256,
+    graphHash: run.graphHash,
+    runOid: run.git.run.headOid,
+    stageId: run.currentPipelineStageId ?? null,
+    trigger,
+    priorJudgments: (run.leadJudgments ?? []).map((judgment) => ({
+      trigger: judgment.trigger,
+      disposition: judgment.disposition,
+      graphHash: judgment.graphHash,
+      runOid: judgment.runOid,
+      frontierSha256: judgment.frontierSha256 ?? null,
+    })),
+    frontierSha256: trigger === "compiler_deadlock" ? leadJudgmentFrontierSha256(run) : null,
+  });
 }
 
 export function createRunActionSettlement(
@@ -2362,6 +2438,7 @@ function assertLeadJudgments(
       !isSha256Digest(raw.graphHash) ||
       typeof raw.runOid !== "string" ||
       !/^[0-9a-f]{40,64}$/u.test(raw.runOid) ||
+      (raw.frontierSha256 !== undefined && !isSha256Digest(raw.frontierSha256)) ||
       (raw.disposition !== "proceed" && raw.disposition !== "blocked") ||
       typeof raw.summary !== "string" ||
       raw.summary.trim().length === 0 ||
@@ -2372,7 +2449,7 @@ function assertLeadJudgments(
     ) {
       throw new Error("run Lead judgment record is invalid");
     }
-    const bindingTrigger = `${raw.graphHash}\u0000${raw.runOid}\u0000${raw.trigger}`;
+    const bindingTrigger = `${raw.graphHash}\u0000${raw.runOid}\u0000${raw.trigger}\u0000${raw.frontierSha256 ?? "legacy"}`;
     if (bindingTriggers.has(bindingTrigger)) {
       throw new Error("run Lead judgment record is invalid");
     }
@@ -6679,6 +6756,7 @@ export function assertRunExecutionControlMutation(
   }>,
 ): void {
   assertPlanningSessionMutation(previous.planningSession, next.planningSession);
+  assertLeadJudgmentMutation(previous, next);
   assertTokenBudgetRecoveryMutation(previous, next);
   assertRecurringAssetGrantRefreshMutation(previous, next);
   assertReviewReworkMutation(previous, next, receipt);
@@ -6971,6 +7049,63 @@ export function assertRunExecutionControlMutation(
     if (exact === undefined || canonicalHash(exact) !== canonicalHash(proof)) {
       throw new Error(
         `run added terminal success proof without live completed settlement: ${sha256}`,
+      );
+    }
+  }
+}
+
+function assertLeadJudgmentMutation(
+  previous: Readonly<RunRecord>,
+  next: Readonly<RunRecord>,
+): void {
+  const nextByAttempt = new Map(
+    (next.leadJudgments ?? []).map((judgment) => [judgment.attemptId, judgment]),
+  );
+  for (const prior of previous.leadJudgments ?? []) {
+    const retained = nextByAttempt.get(prior.attemptId);
+    if (retained !== undefined) {
+      if (canonicalHash(prior) !== canonicalHash(retained)) {
+        throw new Error(`run changed immutable Lead judgment: ${prior.attemptId}`);
+      }
+      continue;
+    }
+    if (prior.trigger === "compiler_deadlock") {
+      throw new Error(`run deleted immutable deadlock Lead judgment: ${prior.attemptId}`);
+    }
+  }
+  const priorByAttempt = new Map(
+    (previous.leadJudgments ?? []).map((judgment) => [judgment.attemptId, judgment]),
+  );
+  for (const judgment of next.leadJudgments ?? []) {
+    const prior = priorByAttempt.get(judgment.attemptId);
+    if (prior !== undefined) continue;
+    const attempt = previous.attempts[judgment.attemptId];
+    const invocationId = attempt?.launchActionInvocationId;
+    const action =
+      invocationId === undefined ? undefined : previous.actionExecutions?.[invocationId];
+    const expectedStep =
+      judgment.trigger === "orchestration_entry"
+        ? "lead-orchestration-entry"
+        : "lead-compiler-deadlock";
+    const expectedFrontier =
+      judgment.trigger === "compiler_deadlock" ? leadJudgmentFrontierSha256(previous) : undefined;
+    if (
+      attempt?.kind !== "lead" ||
+      attempt.stepId !== expectedStep ||
+      action?.boundary.kind !== "lead_launch" ||
+      action.boundary.attemptId !== attempt.id ||
+      action.boundary.stepId !== expectedStep ||
+      action.boundary.productSha256 !== leadJudgmentProductSha256(previous, judgment.trigger) ||
+      action.journal.status !== "completed" ||
+      action.settlement?.disposition !== "completed" ||
+      judgment.behaviorSha256 !== previous.behavior?.sha256 ||
+      judgment.stageId !== previous.currentPipelineStageId ||
+      judgment.graphHash !== previous.graphHash ||
+      judgment.runOid !== previous.git.run.headOid ||
+      judgment.frontierSha256 !== expectedFrontier
+    ) {
+      throw new Error(
+        `run Lead judgment lacks exact launch-product authority: ${judgment.attemptId}`,
       );
     }
   }

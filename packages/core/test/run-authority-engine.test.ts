@@ -128,6 +128,7 @@ import {
   createCompilerControlTicketAuthority,
   createRunActionSettlement,
   createTerminalSuccessSettlementProof,
+  leadJudgmentFrontierSha256,
   ticketImmutableProjection,
 } from "../src/state/run-record.js";
 import { deriveChangeControlPublication } from "../src/state/change-control.js";
@@ -3062,6 +3063,161 @@ describe("run authority engine", () => {
     client.close();
   });
 
+  it("reissues bounded deadlock review when recovery changes the ticket frontier without changing graph or Git", async () => {
+    const root = await repository();
+    const base = directApprovalProgram();
+    const program: RunCompilerProgram = {
+      ...base,
+      async initializeApprovedPlan() {
+        const stalled = ticket();
+        stalled.steps = [];
+        return {
+          graphHash: `sha256:${"d".repeat(64)}`,
+          graphRevision: 1,
+          tickets: { [stalled.id]: stalled },
+        };
+      },
+      async compileLeadJudgmentOutput({ run, attemptId }) {
+        const deadlock = run.attempts[attemptId]?.stepId === "lead-compiler-deadlock";
+        return {
+          protocol: "koni.lead-judgment-output.v1",
+          disposition: deadlock ? "blocked" : "proceed",
+          summary: deadlock
+            ? `Blocked frontier with ${Object.keys(run.tickets).length} ticket(s)`
+            : "Enter deterministic orchestration",
+        };
+      },
+    };
+    let engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    let client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(client, engine, "changed-deadlock-frontier");
+    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "blocked");
+
+    const first = await engine.store.getRun(runId);
+    expect(
+      Object.values(first.attempts).filter(
+        (attempt) => attempt.kind === "lead" && attempt.stepId === "lead-compiler-deadlock",
+      ),
+    ).toHaveLength(1);
+
+    const preSettlement = structuredClone(first);
+    const staleJudgment = preSettlement.leadJudgments!.pop()!;
+    const forgedRebind = structuredClone(preSettlement);
+    const forgedResolver = ticket();
+    forgedResolver.id = "ticket-forged-terminal-resolver";
+    forgedResolver.steps = [];
+    forgedRebind.tickets[forgedResolver.id] = forgedResolver;
+    forgedRebind.leadJudgments!.push({
+      ...staleJudgment,
+      frontierSha256: leadJudgmentFrontierSha256(forgedRebind),
+    });
+    expect(() => assertRunExecutionControlMutation(preSettlement, forgedRebind)).toThrow(
+      /exact launch-product authority/u,
+    );
+    const deletedDeadlock = structuredClone(first);
+    deletedDeadlock.leadJudgments = deletedDeadlock.leadJudgments!.filter(
+      (judgment) => judgment.trigger !== "compiler_deadlock",
+    );
+    expect(() => assertRunExecutionControlMutation(first, deletedDeadlock)).toThrow(
+      /deleted immutable deadlock Lead judgment/u,
+    );
+
+    const changed = structuredClone(first);
+    changed.revision += 1;
+    changed.updatedAt = "2026-08-13T04:00:00.000Z";
+    const resolver = ticket();
+    resolver.id = "ticket-terminal-resolver";
+    resolver.title = "Resolve terminal failure";
+    resolver.steps = [];
+    changed.tickets[resolver.id] = resolver;
+    const state = await engine.store.state();
+    await engine.store.commit({
+      expectedRevision: state.revision,
+      runWrites: [{ record: changed, expectedRevision: first.revision }],
+    });
+
+    client.close();
+    await engine.stop();
+    engines.splice(engines.indexOf(engine), 1);
+    engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    await client.request(
+      "run.resume",
+      { runId },
+      {
+        expectedRevision: client.revision,
+        idempotencyKey: "resume-changed-deadlock-frontier",
+      },
+    );
+    try {
+      await waitFor(async () => {
+        const current = await engine.store.getRun(runId);
+        return (
+          current.lifecycle.phase === "blocked" &&
+          Object.values(current.attempts).filter(
+            (attempt) => attempt.kind === "lead" && attempt.stepId === "lead-compiler-deadlock",
+          ).length === 2
+        );
+      });
+    } catch (error) {
+      const current = await engine.store.getRun(runId);
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}: ${JSON.stringify({
+          lifecycle: current.lifecycle,
+          tickets: Object.keys(current.tickets),
+          leadJudgments: current.leadJudgments,
+          leadAttempts: Object.values(current.attempts)
+            .filter((attempt) => attempt.kind === "lead")
+            .map(({ id, stepId, status, error: attemptError }) => ({
+              id,
+              stepId,
+              status,
+              error: attemptError,
+            })),
+        })}`,
+      );
+    }
+
+    const second = await engine.store.getRun(runId);
+    expect(second.tickets["ticket-terminal-resolver"]).toBeDefined();
+    expect(second.lifecycle.blocker).toContain("Blocked frontier with 2 ticket(s)");
+    expect(
+      second.leadJudgments
+        ?.filter((judgment) => judgment.trigger === "compiler_deadlock")
+        .map((judgment) => judgment.frontierSha256),
+    ).toEqual([expect.stringMatching(/^sha256:/u), expect.stringMatching(/^sha256:/u)]);
+    expect(
+      new Set(
+        second.leadJudgments
+          ?.filter((judgment) => judgment.trigger === "compiler_deadlock")
+          .map((judgment) => judgment.frontierSha256),
+      ).size,
+    ).toBe(2);
+    client.close();
+  });
+
   it("rearms an exact never-started terminal resolver after source dependencies settle", () => {
     const source = ticket();
     source.id = "source-terminal";
@@ -4006,11 +4162,13 @@ describe("run authority engine", () => {
     const run = {
       graphHash: `sha256:${"b".repeat(64)}`,
       git: { run: { headOid: "2".repeat(40) } },
+      tickets: {},
       leadJudgments: [
         {
           trigger: "compiler_deadlock",
           graphHash: `sha256:${"a".repeat(64)}`,
           runOid: "1".repeat(40),
+          frontierSha256: canonicalHash([]),
           disposition: "proceed",
           summary: "stale deadlock diagnosis",
         },
@@ -4018,6 +4176,7 @@ describe("run authority engine", () => {
           trigger: "compiler_deadlock",
           graphHash: `sha256:${"b".repeat(64)}`,
           runOid: "2".repeat(40),
+          frontierSha256: canonicalHash([]),
           disposition: "proceed",
           summary: "current deadlock diagnosis",
         },
@@ -4027,6 +4186,52 @@ describe("run authority engine", () => {
     expect(acceptedLeadJudgmentForRun(run, "compiler_deadlock")?.summary).toBe(
       "current deadlock diagnosis",
     );
+  });
+
+  it("does not reuse a deadlock Lead judgment after the compiler-visible ticket frontier changes", () => {
+    const stalled = ticket();
+    stalled.status = "blocked";
+    stalled.blocker = "first terminal failure";
+    stalled.steps[0]!.status = "failed";
+    const run = {
+      graphHash: `sha256:${"b".repeat(64)}`,
+      git: { run: { headOid: "2".repeat(40) } },
+      tickets: { [stalled.id]: stalled },
+    } as unknown as RunRecord;
+    run.leadJudgments = [
+      {
+        protocol: "koni.lead-judgment-record.v1",
+        trigger: "compiler_deadlock",
+        attemptId: "attempt-lead-deadlock",
+        behaviorSha256: `sha256:${"c".repeat(64)}`,
+        stageId: "orchestration",
+        graphHash: run.graphHash!,
+        runOid: run.git.run.headOid!,
+        frontierSha256: leadJudgmentFrontierSha256(run),
+        disposition: "blocked",
+        summary: "The first terminal failure is not recoverable",
+        recordedAt: "2026-08-13T00:00:00.000Z",
+      },
+    ];
+
+    expect(acceptedLeadJudgmentForRun(run, "compiler_deadlock")?.summary).toContain(
+      "first terminal failure",
+    );
+
+    const boundFrontier = run.leadJudgments[0]!.frontierSha256!;
+    delete run.leadJudgments[0]!.frontierSha256;
+    expect(acceptedLeadJudgmentForRun(run, "compiler_deadlock")).toBeUndefined();
+    run.leadJudgments[0]!.frontierSha256 = boundFrontier;
+
+    const resolver = ticket();
+    resolver.id = "ticket-terminal-resolver";
+    resolver.title = "Resolve terminal failure";
+    resolver.status = "blocked";
+    resolver.blocker = "resolver token budget exceeded";
+    resolver.steps[0]!.status = "failed";
+    run.tickets[resolver.id] = resolver;
+
+    expect(acceptedLeadJudgmentForRun(run, "compiler_deadlock")).toBeUndefined();
   });
 
   it("invalidates a blocked entry Lead for an exactly approved queued proposal before it has a disposition", () => {
