@@ -5348,7 +5348,7 @@ export class RunAuthorityEngine {
           recorded: true,
           reason: actionStringArgument(args, "reason"),
           graphHash: draft.graphHash ?? null,
-          ticketsSha256: canonicalHash(draft.tickets),
+          ticketsSha256: canonicalTicketBoardHash(draft.tickets),
         });
       case "board.render":
       case "graph.inspect":
@@ -24850,7 +24850,8 @@ function createDirectCompilationTerminalReceipts(
     outcome: structuredClone(compiled.outcome),
     graphHash: compiled.graphHash ?? null,
     graphRevision: compiled.graphRevision ?? null,
-    ticketsSha256: compiled.tickets === undefined ? null : canonicalHash(compiled.tickets),
+    ticketsSha256:
+      compiled.tickets === undefined ? null : canonicalTicketBoardHash(compiled.tickets),
     activitySha256: canonicalHash(compiled.activity ?? []),
     artifactWrites: (compiled.artifactWrites ?? []).map((write) => ({
       path: write.path,
@@ -25648,6 +25649,28 @@ function encodeJsonArtifact(value: unknown): Buffer {
     );
   }
   return bytes;
+}
+
+function canonicalTicketBoardHash(tickets: Readonly<Record<string, TicketRecord>>): Sha256Digest {
+  // Ticket records intentionally use required `undefined` placeholders while they are mutable in
+  // memory. JSON persistence omits those object fields, so hash the same durable projection instead
+  // of asking the stricter canonical encoder to hash a representation that can never be written.
+  let encoded: string | undefined;
+  try {
+    encoded = JSON.stringify(tickets);
+  } catch (error) {
+    throw new AuthorityRpcError(
+      "ticket_board_json",
+      `ticket board cannot be projected to durable JSON: ${errorMessage(error)}`,
+    );
+  }
+  if (encoded === undefined) {
+    throw new AuthorityRpcError(
+      "ticket_board_json",
+      "ticket board cannot be projected to durable JSON",
+    );
+  }
+  return canonicalHash(JSON.parse(encoded) as JsonValue);
 }
 
 function isKoniToolReceipt(value: unknown): value is KoniToolReceipt {

@@ -8281,7 +8281,7 @@ describe("run authority engine", () => {
     const engine = await RunAuthorityEngine.open({
       projectRoot: root,
       version: "1.0.0",
-      program: semanticDirectReceiptProgram(),
+      program: semanticDirectReceiptProgram({ undefinedTicketField: true }),
       supervisor: new ManagedSessionSupervisor(),
     });
     engines.push(engine);
@@ -8346,6 +8346,7 @@ describe("run authority engine", () => {
       launchSpecSha256: attempt.launchSpecHash,
       compilerResult: {
         outcome: { status: "completed", summary: "Implemented feature" },
+        ticketsSha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
       },
     });
     client.close();
@@ -10930,7 +10931,11 @@ function configuredValidationDirectProgram(validationAction = "compile"): RunCom
 }
 
 function semanticDirectReceiptProgram(
-  options: { failedSubmission?: boolean; configuredValidation?: boolean } = {},
+  options: {
+    failedSubmission?: boolean;
+    configuredValidation?: boolean;
+    undefinedTicketField?: boolean;
+  } = {},
 ): RunCompilerProgram {
   const direct = directApprovalProgram();
   const catalog = semanticDirectCatalog();
@@ -11101,6 +11106,20 @@ function semanticDirectReceiptProgram(
 
   return {
     ...direct,
+    ...(options.undefinedTicketField === true
+      ? {
+          async compileAssignmentOutput(
+            input: Parameters<NonNullable<RunCompilerProgram["compileAssignmentOutput"]>>[0],
+          ) {
+            const tickets = structuredClone(input.run.tickets);
+            tickets[input.assignment.ticketId]!.blocker = undefined;
+            return {
+              outcome: { status: "completed" as const, summary: "Implemented feature" },
+              tickets,
+            };
+          },
+        }
+      : {}),
     ...(options.failedSubmission === true
       ? {
           async compileAssignmentOutput(
