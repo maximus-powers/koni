@@ -10,6 +10,35 @@ import registerProfile, {
 } from "../extensions/profile.js";
 
 describe("research profile registrar", () => {
+  it("keeps post-execution evidence out of prerequisite authority", async () => {
+    const [plannerSource, sharedGuidance] = await Promise.all([
+      readFile(
+        path.resolve(import.meta.dirname, "../koni/baseline/agents/run-planner.yaml"),
+        "utf8",
+      ),
+      readFile(
+        path.resolve(
+          import.meta.dirname,
+          "../../core/skills/model-koni-work/references/empirical-research.md",
+        ),
+        "utf8",
+      ),
+    ]);
+    const normalizedPlanner = plannerSource.replace(/\s+/gu, " ");
+    const normalizedGuidance = sharedGuidance.replace(/\s+/gu, " ");
+    const invariant =
+      "Never model a receipt, review, report, promotion decision, or other product that the dependent experiment or run is supposed to produce as a prerequisite or as that experiment's `requires` edge";
+
+    expect(normalizedPlanner).toContain(invariant);
+    expect(normalizedGuidance).toContain(invariant);
+    expect(normalizedPlanner).toContain(
+      "Prerequisites are antecedent readiness only; downstream evidence and reporting must materialize from the run, evidence, review, and report lifecycle after execution",
+    );
+    expect(normalizedGuidance).toContain(
+      "An authenticated product of already-completed work may be an antecedent input only when it exists before the dependent execution",
+    );
+  });
+
   it("keeps every planned asset file and entrypoint inside one materialization root", async () => {
     const [nodeSource, plannerSource, sharedGuidance] = await Promise.all([
       readFile(path.resolve(import.meta.dirname, "../koni/baseline/graph/nodes.yaml"), "utf8"),

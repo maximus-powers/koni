@@ -68,6 +68,13 @@ A robust empirical progression is:
 8. conclude only when every required claim and run is covered or explicitly unresolved under the
    approved conclusion policy.
 
+Prerequisites are antecedent readiness only. Never model a receipt, review, report, promotion
+decision, or other product that the dependent experiment or run is supposed to produce as a
+prerequisite or as that experiment's `requires` edge. Those products must materialize from the run,
+evidence, review, and report lifecycle after execution; keeping a downstream deliverable visible is
+not a reason to grant it preparation authority. An authenticated product of already-completed work
+may be an antecedent input only when it exists before the dependent execution.
+
 Rules should reopen work when a required receipt becomes stale, an asset hash changes, a gate fails,
 or claim coverage is incomplete. A report or reviewer cannot manufacture missing run evidence.
 

@@ -45,6 +45,15 @@ instructions: |
   receipt model, while executable empirical claims require a concrete runtime and
   result interpretation.
 
+  Prerequisites are antecedent readiness only; downstream evidence and reporting
+  must materialize from the run, evidence, review, and report lifecycle after
+  execution. Never model a receipt, review, report, promotion decision, or other
+  product that the dependent experiment or run is supposed to produce as a
+  prerequisite or as that experiment's `requires` edge. An authenticated product
+  of already-completed work may be an antecedent input only when it exists before
+  the dependent execution. Do not turn a desired downstream deliverable into
+  preparation authority merely to keep it visible in the initial graph.
+
   Reuse repository-owned implementations and data products when they satisfy the
   intended contract. Plan thin adapters rather than copying existing logic, and
   declare every material dependency through the asset's typed implementation

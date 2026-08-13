@@ -30,10 +30,10 @@ export const PROFILE_DEFINITIONS = Object.freeze([
   Object.freeze({
     packageDirectory: "research-profile",
     packageName: "@koni/research-profile",
-    packageVersion: "1.1.29",
+    packageVersion: "1.1.30",
     profileId: "research",
     displayName: "Research",
-    profileVersion: "1.1.29",
+    profileVersion: "1.1.30",
     lineage: "koni.research",
     expectedFileCount: 29,
     migration: Object.freeze({
