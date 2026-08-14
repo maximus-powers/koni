@@ -595,14 +595,14 @@ workflows:
     agent: integrator
     depends_on: []
     graph_mutation: forbidden
-    expected_output: Bounded proof-contract repair analysis without semantic mutation
+    expected_output: Bounded semantic correction-set analysis without mutation
     validation_action: compile-ticket
   - id: propose-graph-delta
     kind: integration
     agent: integrator
     depends_on:
     - scope-change
-    expected_output: Typed proof-contract application operation, exact targets, summary, risks, and proposal
+    expected_output: Typed complete correction-set application operation, exact targets, summary, risks, and proposal
     validation_action: compile-ticket
   - id: risk-review
     kind: review
@@ -630,7 +630,7 @@ workflows:
     agent: integrator
     depends_on:
     - inspect-approved-change
-    expected_output: Exact approved semantic proof graph delta
+    expected_output: Exact approved semantic graph delta over every selected correction target
     validation_action: compile-ticket
   - id: verify
     kind: review

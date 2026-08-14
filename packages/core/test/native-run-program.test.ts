@@ -8042,6 +8042,12 @@ describe("native compiler-authoritative run program", () => {
     expect(prepared.spec.persona.initialPrompt).toContain(
       'use fulfillment "dynamic_scope_change" for the correction',
     );
+    expect(prepared.spec.persona.initialPrompt).toContain(
+      "Target every existing causal node whose authored fields must change together for one internally consistent correction",
+    );
+    expect(prepared.spec.persona.initialPrompt).toContain(
+      "Do not target unrelated context nodes or defer a currently evidenced companion correction",
+    );
     expect(
       upstreamChangeRequestInstructions({
         role: "ordinary",

@@ -68,6 +68,13 @@ graph delta. Target the existing causal node and request dynamic scope for any c
 grant-derived field; the replacement path's membership in the old grant does not make the field
 mutable.
 
+An upstream request must identify the complete bounded semantic correction set supported by current
+evidence. Target every existing causal node whose authored fields must change together for one
+internally consistent correction. Do not target unrelated context nodes, but do not defer a
+currently evidenced companion correction merely because one node first exposed the defect. The
+configured proposal and application route must accept every node type that such a source operation
+can legitimately include in that correction set.
+
 Separate repository effects from graph effects at the workflow boundary. A filesystem-only step must
 declare graph mutation forbidden and omit the graph delta. Do not reconstruct or echo an existing
 node merely to report unchanged authored fields: a complete-node upsert can silently alter an

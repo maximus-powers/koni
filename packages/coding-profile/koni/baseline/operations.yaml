@@ -1062,6 +1062,10 @@ operations:
   stage: dynamic
   target_types:
   - proof
+  - contract
+  - flow
+  - defect
+  - risk
   workflow: change-request
   allowed_new_node_types: []
   allowed_existing_node_types: []
@@ -1077,8 +1081,8 @@ operations:
     application_operations:
     - apply-change-request
     - no-op
-  review_contract: hash-bound proof-contract change proposal review
-  output_contract: typed bounded proof-contract application or no-op disposition
+  review_contract: hash-bound bounded semantic correction proposal review
+  output_contract: typed application or no-op disposition over the complete bounded semantic correction set
   dispatch_priority: 910
   ranking_hints:
   - stage
@@ -1088,10 +1092,18 @@ operations:
   stage: dynamic
   target_types:
   - proof
+  - contract
+  - flow
+  - defect
+  - risk
   workflow: apply-change-request
   allowed_new_node_types: []
   allowed_existing_node_types:
   - proof
+  - contract
+  - flow
+  - defect
+  - risk
   allow_node_deletion: false
   allow_gate_contract_edits: false
   gate_blocking_exempt: true
@@ -1099,8 +1111,8 @@ operations:
   single_flight_group: change-control
   change_control:
     role: application
-  review_contract: pre-commit approved proof-contract change review
-  output_contract: exact approved semantic proof graph delta
+  review_contract: pre-commit approved bounded semantic correction review
+  output_contract: exact approved semantic graph delta over the complete correction set
   dispatch_priority: 920
   ranking_hints:
   - stage

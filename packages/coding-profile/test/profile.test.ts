@@ -37,14 +37,24 @@ describe("coding profile registrar", () => {
   });
 
   it("routes proof-spec defects through bounded native change control", async () => {
-    const [operationsSource, workflowsSource] = await Promise.all([
+    const [operationsSource, workflowsSource, executionReference] = await Promise.all([
       readFile(path.resolve(import.meta.dirname, "../koni/baseline/operations.yaml"), "utf8"),
       readFile(path.resolve(import.meta.dirname, "../koni/baseline/workflows.yaml"), "utf8"),
+      readFile(
+        path.resolve(
+          import.meta.dirname,
+          "../../core/skills/model-koni-work/references/execution-contracts.md",
+        ),
+        "utf8",
+      ),
     ]);
     const operations = YAML.parse(operationsSource) as {
       operations: Array<{
         id: string;
         operation: string;
+        target_types?: string[];
+        allowed_existing_node_types?: string[];
+        output_contract?: string;
         change_control?: Record<string, unknown>;
       }>;
     };
@@ -71,6 +81,18 @@ describe("coding profile registrar", () => {
       operations.operations.find(({ id }) => id === "lifecycle.apply-change-request")
         ?.change_control,
     ).toEqual({ role: "application" });
+    const proposal = operations.operations.find(({ id }) => id === "lifecycle.change-request");
+    const application = operations.operations.find(
+      ({ id }) => id === "lifecycle.apply-change-request",
+    );
+    const proofClosureNodeTypes = ["proof", "contract", "flow", "defect", "risk"];
+    expect(proposal?.target_types).toEqual(proofClosureNodeTypes);
+    expect(application?.target_types).toEqual(proofClosureNodeTypes);
+    expect(application?.allowed_existing_node_types).toEqual(proofClosureNodeTypes);
+    expect(proposal?.output_contract).toContain("complete bounded semantic correction set");
+    expect(executionReference.replace(/\s+/gu, " ")).toContain(
+      "Target every existing causal node whose authored fields must change together for one internally consistent correction",
+    );
     expect(workflows.workflows.find(({ id }) => id === "change-request")).toMatchObject({
       applies_to: ["change-request", "no-op"],
       review_rework_limit: 2,

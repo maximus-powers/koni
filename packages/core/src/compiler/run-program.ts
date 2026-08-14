@@ -8121,6 +8121,7 @@ export function upstreamChangeRequestInstructions(
       : "outside this ticket's existing authority and its downstream publication steps";
   return [
     `This step has an explicit upstream-change route for work that the current workflow cannot satisfy. If satisfying the contract requires changing a read-only asset or another node ${changeBoundary}, do not fabricate an inline substitute, weaken the contract, or upsert that node. Submit status "completed" with summary and upstreamChangeRequest, and omit graphDelta. Exact shape: {"status":"completed","summary":"...","upstreamChangeRequest":{"targetNodeIds":["the-existing-causal-node-id"],"fulfillment":"planned_asset_repair","summary":"...","reason":"..."}}.`,
+    "Target every existing causal node whose authored fields must change together for one internally consistent correction. Do not target unrelated context nodes or defer a currently evidenced companion correction merely because one node first exposed the defect.",
     ...(downstreamGraphPublicationStepIds.length === 0
       ? []
       : [
