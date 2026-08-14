@@ -4260,7 +4260,7 @@ export function selectContainedCompactionFirstKeptEntryId(
 
 function providerPressureCompactionFirstKeptEntryId(
   spec: Readonly<AgentLaunchSpec>,
-  sessionManager: Pick<SessionManager, "getLeafEntry">,
+  sessionManager: Pick<SessionManager, "getLeafEntry" | "getBranch">,
   failure: ManagedSessionError | undefined,
   preparedFirstKeptEntryId: string,
 ): string {
@@ -4297,7 +4297,83 @@ function providerPressureCompactionFirstKeptEntryId(
   ) {
     return preparedFirstKeptEntryId;
   }
-  return leafId;
+  return boundedToolExchangeBeforePressure(spec, sessionManager, leafId) ?? leafId;
+}
+
+/**
+ * Preserve a small, authenticated tool exchange immediately before an input-pressure error.
+ * Keeping only Pi's empty error boundary discards the native call/result relationship and can
+ * make a model replay the same read after every provider-free compaction. Large payloads still
+ * fall back to the error boundary so compaction always reduces the active provider suffix.
+ */
+function boundedToolExchangeBeforePressure(
+  spec: Readonly<AgentLaunchSpec>,
+  sessionManager: Pick<SessionManager, "getBranch">,
+  pressureEntryId: string,
+): string | undefined {
+  const branch = sessionManager.getBranch() as unknown as readonly PiSessionEntry[];
+  const pressureIndex = branch.findIndex((entry) => entry.id === pressureEntryId);
+  if (pressureIndex < 1) return undefined;
+  let boundaryStart = 0;
+  for (let index = pressureIndex - 1; index >= 0; index -= 1) {
+    if (branch[index]?.type !== "compaction") continue;
+    boundaryStart = index + 1;
+    break;
+  }
+
+  const resultEntry = branch[pressureIndex - 1];
+  const result =
+    resultEntry?.type === "message" && isRecord(resultEntry.message)
+      ? resultEntry.message
+      : undefined;
+  if (
+    result?.role !== "toolResult" ||
+    typeof result.toolName !== "string" ||
+    typeof result.toolCallId !== "string" ||
+    !isRecord(result.details) ||
+    !spec.tools.some((tool) => tool.name === result.toolName)
+  ) {
+    return undefined;
+  }
+  try {
+    validateKoniToolReceipt(result.details);
+  } catch {
+    return undefined;
+  }
+  if (
+    (result.details.outcome === "rejected") !== (result.isError === true) ||
+    userText(result.content) !== renderKoniToolReceipt(result.details)
+  ) {
+    return undefined;
+  }
+
+  let assistantIndex = pressureIndex - 2;
+  let assistantEntryId: string | undefined;
+  for (; assistantIndex >= boundaryStart; assistantIndex -= 1) {
+    const entry = branch[assistantIndex]!;
+    if (entry.type !== "message" || !isRecord(entry.message)) continue;
+    if (entry.message.role !== "assistant" || !Array.isArray(entry.message.content)) {
+      return undefined;
+    }
+    const toolCalls = entry.message.content.filter(
+      (block) => isRecord(block) && block.type === "toolCall",
+    );
+    if (
+      toolCalls.length !== 1 ||
+      toolCalls[0]!.id !== result.toolCallId ||
+      toolCalls[0]!.name !== result.toolName
+    ) {
+      return undefined;
+    }
+    assistantEntryId = entry.id;
+    break;
+  }
+  if (assistantEntryId === undefined) return undefined;
+
+  const suffixTokens = Math.ceil(
+    Buffer.byteLength(JSON.stringify(branch.slice(assistantIndex)), "utf8") / 4,
+  );
+  return suffixTokens <= containedCompactionKeepRecentTokens(spec) ? assistantEntryId : undefined;
 }
 
 /**

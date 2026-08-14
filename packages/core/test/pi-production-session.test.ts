@@ -1729,6 +1729,217 @@ describe("Pi 0.80.10 production session construction", () => {
     ).toBe(oversizedPreparedBoundary);
   });
 
+  it("retains only a bounded complete tool exchange across provider-input pressure compaction", () => {
+    const cwd = "/tmp/koni-pressure-tool-result";
+    const baseSpec = fixtureLaunchSpec({
+      cwd,
+      sessionDirectory: "/tmp/koni-pressure-tool-result-sessions",
+    });
+    const { specHash: _specHash, ...specDraft } = structuredClone(baseSpec);
+    const spec = createAgentLaunchSpec({
+      ...specDraft,
+      tools: [
+        ...specDraft.tools,
+        {
+          name: "koni_read_file",
+          schemaHash: koniToolSchemaHash("koni_read_file"),
+          executionMode: "parallel",
+          maxResultBytes: koniToolMaxResultBytes("koni_read_file"),
+        },
+      ],
+    });
+    const manager = SessionManager.inMemory(cwd);
+    manager.appendMessage({ role: "user", content: "Inspect the bounded source.", timestamp: 1 });
+    const callId = "call-pressure-read";
+    const assistantId = manager.appendMessage({
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: callId,
+          name: "koni_read_file",
+          arguments: { path: "src/guide.ts", offset: 0, maxBytes: 32_768 },
+        },
+      ],
+      api: spec.model.api,
+      provider: spec.model.provider,
+      model: spec.model.id,
+      usage: {
+        input: 10,
+        output: 5,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 15,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "toolUse",
+      timestamp: 2,
+    });
+    const content = "export const guide = true;\n";
+    const receipt = {
+      protocol: KONI_TOOL_RECEIPT_PROTOCOL,
+      receiptId: rawSha256("accepted-pressure-read"),
+      outcome: "accepted" as const,
+      summary: "Read src/guide.ts",
+      value: {
+        path: "src/guide.ts",
+        sha256: rawSha256(content),
+        sizeBytes: Buffer.byteLength(content, "utf8"),
+        content,
+        offset: 0,
+        nextOffset: content.length,
+        eof: true,
+      },
+    };
+    manager.appendMessage({
+      role: "toolResult",
+      toolCallId: callId,
+      toolName: "koni_read_file",
+      content: [{ type: "text", text: renderKoniToolReceipt(receipt) }],
+      details: receipt,
+      isError: false,
+      timestamp: 3,
+    });
+    const pressureMessage =
+      "Koni provider admission rejected: request exceeds the context window. prospective provider input plus reserved output exceeds the authenticated model context window";
+    const appendPressure = (target: SessionManager, timestamp: number): string =>
+      target.appendMessage({
+        role: "assistant",
+        content: [],
+        api: spec.model.api,
+        provider: spec.model.provider,
+        model: spec.model.id,
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "error",
+        errorMessage: pressureMessage,
+        timestamp,
+      });
+    const pressureBoundary = appendPressure(manager, 4);
+    const failure = new ManagedSessionError("provider_input_exposure", pressureMessage);
+
+    expect(
+      selectContainedCompactionFirstKeptEntryId(spec, manager, failure, pressureBoundary),
+    ).toBe(assistantId);
+
+    const parallelManager = SessionManager.inMemory(cwd);
+    parallelManager.appendMessage({
+      role: "user",
+      content: "Inspect the bounded sources.",
+      timestamp: 10,
+    });
+    parallelManager.appendMessage({
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: callId,
+          name: "koni_read_file",
+          arguments: { path: "src/guide.ts", offset: 0, maxBytes: 32_768 },
+        },
+        {
+          type: "toolCall",
+          id: "call-pressure-second-read",
+          name: "koni_read_file",
+          arguments: { path: "src/other.ts", offset: 0, maxBytes: 32_768 },
+        },
+      ],
+      api: spec.model.api,
+      provider: spec.model.provider,
+      model: spec.model.id,
+      usage: {
+        input: 10,
+        output: 5,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 15,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "toolUse",
+      timestamp: 11,
+    });
+    parallelManager.appendMessage({
+      role: "toolResult",
+      toolCallId: callId,
+      toolName: "koni_read_file",
+      content: [{ type: "text", text: renderKoniToolReceipt(receipt) }],
+      details: receipt,
+      isError: false,
+      timestamp: 12,
+    });
+    const parallelPressureBoundary = appendPressure(parallelManager, 13);
+    expect(
+      selectContainedCompactionFirstKeptEntryId(
+        spec,
+        parallelManager,
+        failure,
+        parallelPressureBoundary,
+      ),
+    ).toBe(parallelPressureBoundary);
+
+    const compactedManager = SessionManager.inMemory(cwd);
+    compactedManager.appendMessage({
+      role: "user",
+      content: "Inspect the bounded source.",
+      timestamp: 20,
+    });
+    const preCompactionAssistantId = compactedManager.appendMessage({
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: callId,
+          name: "koni_read_file",
+          arguments: { path: "src/guide.ts", offset: 0, maxBytes: 32_768 },
+        },
+      ],
+      api: spec.model.api,
+      provider: spec.model.provider,
+      model: spec.model.id,
+      usage: {
+        input: 10,
+        output: 5,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 15,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "toolUse",
+      timestamp: 21,
+    });
+    compactedManager.appendCompaction(
+      "Prior authenticated checkpoint.",
+      preCompactionAssistantId,
+      10,
+      undefined,
+      true,
+    );
+    compactedManager.appendMessage({
+      role: "toolResult",
+      toolCallId: callId,
+      toolName: "koni_read_file",
+      content: [{ type: "text", text: renderKoniToolReceipt(receipt) }],
+      details: receipt,
+      isError: false,
+      timestamp: 22,
+    });
+    const compactedPressureBoundary = appendPressure(compactedManager, 23);
+    expect(
+      selectContainedCompactionFirstKeptEntryId(
+        spec,
+        compactedManager,
+        failure,
+        compactedPressureBoundary,
+      ),
+    ).toBe(compactedPressureBoundary);
+  });
+
   it("rejects a self-consistent Pi compaction that authority never durably authorized", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "koni-production-unauthorized-compaction-"));
     temporary.push(root);
