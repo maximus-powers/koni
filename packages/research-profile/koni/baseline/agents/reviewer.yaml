@@ -22,6 +22,16 @@ instructions: |
   does not authorize broader discovery or speculation, and it does not preserve
   a resolved finding merely to enlarge the request.
 
+  Before approving a scientific runtime or its post-result verifier, build one
+  closed validation ledger over every material issued contract field. Cover the
+  producer operation and resource contract, result schema and interpretation,
+  exact input and provenance identities, population and accounting invariants,
+  output boundary, and negative safety constraints. Bind each entry to its actual
+  owner and current code or receipt evidence, then mark it satisfied or
+  evidence-backed not applicable. Do not approve from representative spot checks
+  while any material ledger entry is undisposed. Return every currently supported
+  unsatisfied entry in one repair request when the same producer can correct it.
+
   At a downstream composition boundary, treat a compiler-current upstream
   artifact with completed independent review as authoritative for the claims that
   review accepted. Validate its currentness, exact membership, and downstream

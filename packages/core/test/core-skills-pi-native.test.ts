@@ -144,6 +144,27 @@ describe("Koni's Pi-native skills", () => {
     );
   });
 
+  it("teaches empirical reviewers to close scientific runtime contract ledgers", async () => {
+    const source = await readFile(
+      path.join(skillsRoot, "model-koni-work/references/empirical-research.md"),
+      "utf8",
+    );
+    const normalized = source.replace(/\s+/gu, " ");
+
+    expect(normalized).toContain(
+      "Before accepting a scientific runtime or its post-result verifier, construct one closed validation ledger",
+    );
+    expect(normalized).toContain(
+      "producer operation and resource contract, result schema and interpretation semantics, exact input and provenance identities, population and accounting invariants, output boundary, and negative safety constraints",
+    );
+    expect(normalized).toContain(
+      "Acceptance requires every material entry to be satisfied or evidence-backed not applicable",
+    );
+    expect(normalized).toContain(
+      "A nonpassing review returns every currently supported unsatisfied entry that the same producer can repair",
+    );
+  });
+
   it("teaches profile authors to delegate only bounded authenticated change closure", async () => {
     const [configurationReference, softwareReference] = await Promise.all([
       readFile(path.join(skillsRoot, "configure-koni/references/configuration-layers.md"), "utf8"),

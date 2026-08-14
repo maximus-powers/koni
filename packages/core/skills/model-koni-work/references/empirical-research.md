@@ -65,6 +65,16 @@ evidence matters independently.
   valid. Never rewrite acceptance criteria after observing the result without a new explicit design
   revision.
 
+Before accepting a scientific runtime or its post-result verifier, construct one closed validation
+ledger. Include the producer operation and resource contract, result schema and interpretation
+semantics, exact input and provenance identities, population and accounting invariants, output
+boundary, and negative safety constraints. For each material entry, record its actual owner, input,
+observable output, current code or receipt evidence, and disposition. Acceptance requires every
+material entry to be satisfied or evidence-backed not applicable; representative spot checks do not
+close the ledger. Use cumulative repair history as a checklist seed, then re-evaluate every entry
+against the current candidate. A nonpassing review returns every currently supported unsatisfied
+entry that the same producer can repair, without widening discovery to invent findings.
+
 ## Compile gaps in causal order
 
 A robust empirical progression is:

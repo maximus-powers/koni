@@ -618,6 +618,15 @@ describe("research profile registrar", () => {
     expect(normalizedExecutionReference).toContain(
       "Validate currentness, exact membership, and downstream interactions; do not repeat that upstream semantic review from the same evidence",
     );
+    expect(normalizedReviewer).toContain(
+      "Before approving a scientific runtime or its post-result verifier, build one closed validation ledger over every material issued contract field",
+    );
+    expect(normalizedReviewer).toContain(
+      "Do not approve from representative spot checks while any material ledger entry is undisposed",
+    );
+    expect(normalizedReviewer).toContain(
+      "Return every currently supported unsatisfied entry in one repair request",
+    );
   });
 
   it("authenticates planned paths and routes grant-changing repairs", async () => {
