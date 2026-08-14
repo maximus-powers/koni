@@ -8274,6 +8274,7 @@ function ticketAttempt(
       ),
   );
   const mutationContract = assignmentMutationContract(configuration, definition);
+  const newNodeAuthorityPrompt = newNodeAuthorityInstruction(mutationContract, graphMutation);
   const compilerOwnedFields = assignmentCompilerOwnedFields(configuration, definition);
   const predecessorHasCommandEvidence = reviewPredecessorHasCommandEvidence(predecessorExecution);
   const proposalControl = durableTicket?.executionControl;
@@ -8371,6 +8372,7 @@ function ticketAttempt(
       `Execute ${definition.title}.`,
       `Current step: ${step.id}.`,
       `Graph write-authority nodes for this exact step: ${writeNodeIds.length === 0 ? "none" : writeNodeIds.join(", ")}. Every other graph node in context is read-only: never upsert or delete it. A referenced asset that needs a contract or source change requires the configured upstream-change route; visibility is not mutation authority.`,
+      ...(newNodeAuthorityPrompt === undefined ? [] : [newNodeAuthorityPrompt]),
       `Repository write-authority paths for this exact step: ${writePaths.length === 0 ? "none" : writePaths.join(", ")}. Never create, edit, or promise a file outside these paths.`,
       ...(step.validation_checks.length === 0
         ? []
@@ -10090,6 +10092,29 @@ function assignmentMutationContract(
         ...(edge.bidirectional === undefined ? {} : { bidirectional: edge.bidirectional }),
       })),
   };
+}
+
+function newNodeAuthorityInstruction(
+  mutationContract: JsonValue,
+  graphMutation: "allowed" | "forbidden" | "required",
+): string | undefined {
+  if (graphMutation === "forbidden" || !isRecord(mutationContract)) return undefined;
+  const maximum = mutationContract.maxNewNodes;
+  const nodeTypes = mutationContract.nodeTypes;
+  if (!Number.isSafeInteger(maximum) || (maximum as number) <= 0 || !Array.isArray(nodeTypes)) {
+    return undefined;
+  }
+  const allowedTypes = nodeTypes.flatMap((candidate) =>
+    isRecord(candidate) && candidate.allowedForNew === true && typeof candidate.id === "string"
+      ? [candidate.id]
+      : [],
+  );
+  if (allowedTypes.length === 0) return undefined;
+  return (
+    "New graph nodes are governed separately from existing-node write IDs. " +
+    `This step may create at most ${maximum as number} new graph nodes, limited to these configured types: ${allowedTypes.join(", ")}. ` +
+    "A missing node of an allowed type is not an authority gap: create it when the current output contract requires it, and connect it only through canonical edges in the injected mutationContract."
+  );
 }
 
 function assignmentCompilerOwnedFields(

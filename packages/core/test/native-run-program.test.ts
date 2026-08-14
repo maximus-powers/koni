@@ -5904,6 +5904,12 @@ describe("native compiler-authoritative run program", () => {
       "Every other graph node in context is read-only",
     );
     expect(prepared.spec.persona.initialPrompt).toContain(
+      "New graph nodes are governed separately from existing-node write IDs",
+    );
+    expect(prepared.spec.persona.initialPrompt).toContain(
+      "A missing node of an allowed type is not an authority gap",
+    );
+    expect(prepared.spec.persona.initialPrompt).toContain(
       "The operator explicitly authorized reviewed-blocker recovery 2",
     );
     expect(prepared.spec.persona.initialPrompt).toContain(
@@ -6532,6 +6538,9 @@ describe("native compiler-authoritative run program", () => {
     );
     expect(continuationPrepared.spec.persona.initialPrompt).not.toContain(
       "Graph write-authority nodes for this exact step: root-d7d843ce58bec8100965, system-notes-app",
+    );
+    expect(continuationPrepared.spec.persona.initialPrompt).not.toContain(
+      "New graph nodes are governed separately from existing-node write IDs",
     );
 
     const reworkTicket = run.tickets[architectureTicket.id]!;
