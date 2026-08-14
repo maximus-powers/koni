@@ -1091,6 +1091,17 @@ rules:
           max_depth: 1
           node_types:
           - asset
+      # Assets may author their canonical consumer link as `asset.used_by -> experiment` instead
+      # of duplicating the experiment-owned `assets` edge. Preserve the same producer-before-
+      # consumer dependency for that valid relationship direction.
+      - traverse:
+          from: $target
+          relation: used_by
+          direction: incoming
+          min_depth: 1
+          max_depth: 1
+          node_types:
+          - asset
       - traverse:
           from: $target
           relation: requires

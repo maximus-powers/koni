@@ -962,6 +962,16 @@ describe("research profile registrar", () => {
           {
             traverse: {
               from: "$target",
+              relation: "used_by",
+              direction: "incoming",
+              min_depth: 1,
+              max_depth: 1,
+              node_types: ["asset"],
+            },
+          },
+          {
+            traverse: {
+              from: "$target",
               relation: "requires",
               direction: "outgoing",
               min_depth: 1,

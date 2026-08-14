@@ -65,7 +65,6 @@ describe("provider-free domain flows", () => {
         observable_outcome: "A typed audit result distinguishes support from contradiction",
       },
       {
-        assets: ["asset-a"],
         methods: ["method-a"],
         metrics: ["metric-a"],
         requires: ["gate-a", "prerequisite-a"],
@@ -85,20 +84,27 @@ describe("provider-free domain flows", () => {
       failure_meaning: "The observation cannot execute",
       expected_red: true,
     });
-    const asset = node("asset-a", "asset", "Observation adapter", "draft", {
-      source_strategy: "internal",
-      capabilities: [
-        {
-          name: "observation.audit",
-          protocol_version: "1.0.0",
-          entrypoints: ["program/assets/observation-audit/audit.py"],
+    const asset = node(
+      "asset-a",
+      "asset",
+      "Observation adapter",
+      "draft",
+      {
+        source_strategy: "internal",
+        capabilities: [
+          {
+            name: "input.integrity",
+            protocol_version: "1.0.0",
+            entrypoints: ["program/assets/observation-audit/audit.py"],
+          },
+        ],
+        implementation_plan: {
+          root: "program/assets/observation-audit",
+          files: ["program/assets/observation-audit/audit.py"],
         },
-      ],
-      implementation_plan: {
-        root: "program/assets/observation-audit",
-        files: ["program/assets/observation-audit/audit.py"],
       },
-    });
+      { used_by: [experiment.id] },
+    );
     const graph = projection([
       experiment,
       gate,
@@ -150,6 +156,7 @@ describe("provider-free domain flows", () => {
     const resolvePrerequisiteTicket = evaluated.value.tickets.find(
       ({ operation }) => operation === "resolve-assets",
     )!;
+    expect(compileTicket.scope.read_node_ids).toContain(asset.id);
     expect(
       Object.fromEntries(deriveCompilerTicketDependencies(evaluated.value.tickets, root)),
     ).toEqual({
@@ -157,6 +164,11 @@ describe("provider-free domain flows", () => {
       [defineGateTicket.id]: [],
       [resolvePrerequisiteTicket.id]: [],
     });
+    const implementationTicket = assetReviewTicket(configuration, asset.id);
+    const dependenciesWithAssetProducer = Object.fromEntries(
+      deriveCompilerTicketDependencies([...evaluated.value.tickets, implementationTicket], root),
+    );
+    expect(dependenciesWithAssetProducer[compileTicket.id]).toContain(implementationTicket.id);
   });
 
   it("lets gate-definition tickets repair required gates missing canonical applicability links", async () => {
