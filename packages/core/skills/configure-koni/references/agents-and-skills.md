@@ -56,8 +56,15 @@ insufficient by itself to establish a blocker.
 
 Judge a current queued recovery or repair ticket from its own supplied objective, dependencies,
 scope, and compiler-issued creation authority. A blocked source is the input to that closure path;
-it does not establish that the current recovery or repair ticket is unreachable. Require the
-current ticket's authority to address the blocker, and preserve unrelated safety criteria.
+it does not establish that the current recovery or repair ticket is unreachable. Require the current
+ticket's authority to address the blocker, and preserve unrelated safety criteria.
+
+A defect confined to a waiting downstream ticket is not a current-frontier blocker when every
+potentially dispatchable current operation remains supported and safe. Completing safe current work
+may make a configured later workflow step eligible to validate or correct that defect within its
+issued authority. Configure the Lead to preserve the defect in its summary and behind its dependency
+gate, then proceed with that safe frontier. Block when the defect makes current dispatch unsafe,
+makes the stated closure chain unreachable, or no authorized later step can validate or correct it.
 
 A qualitative gate must not turn conservative, reversible uncertainty into an operator confirmation.
 When authoritative plan and ticket facts already support a safe bounded interpretation for current

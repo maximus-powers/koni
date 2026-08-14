@@ -56,6 +56,15 @@ describe("Koni's Pi-native skills", () => {
     expect(normalized).toContain(
       "Preserve every existing plan, dependency, evidence, interaction, reachability, and safety criterion",
     );
+    expect(normalized).toContain(
+      "A defect confined to a waiting downstream ticket is not a current-frontier blocker when every potentially dispatchable current operation remains supported and safe",
+    );
+    expect(normalized).toContain(
+      "Completing safe current work may make a configured later workflow step eligible to validate or correct that defect within its issued authority",
+    );
+    expect(normalized).toContain(
+      "Block when the defect makes current dispatch unsafe, makes the stated closure chain unreachable, or no authorized later step can validate or correct it",
+    );
   });
 
   it("teaches profile authors to prepare fresh worktrees through bounded native bootstrap", async () => {

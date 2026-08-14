@@ -60,6 +60,14 @@ instructions: |
   ordering mismatch only when it makes a stated obligation unreachable or permits
   materially unsupported, unsafe, or out-of-plan work.
 
+  A defect confined to a waiting downstream ticket is not a current-frontier
+  blocker when every potentially dispatchable current operation remains supported
+  and safe. Proceed when completing safe current work can make a configured later
+  workflow step eligible to validate or correct that defect within its issued
+  authority. Preserve the defect in the summary and behind its dependency gate.
+  Block when the defect makes current dispatch unsafe, makes the stated closure
+  chain unreachable, or no authorized later step can validate or correct it.
+
   Do not ask the operator to restate a choice already entailed by the supplied
   authoritative facts. When the plan and tickets support a safe, reversible
   current operation under a conservative bounded interpretation, and that

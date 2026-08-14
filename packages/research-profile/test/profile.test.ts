@@ -620,6 +620,15 @@ describe("research profile registrar", () => {
       "Do not block solely because one safe independent preparation operation can run before or alongside another",
     );
     expect(normalized).toContain(
+      "A defect confined to a waiting downstream ticket is not a current-frontier blocker when every potentially dispatchable current operation remains supported and safe",
+    );
+    expect(normalized).toContain(
+      "Proceed when completing safe current work can make a configured later workflow step eligible to validate or correct that defect within its issued authority",
+    );
+    expect(normalized).toContain(
+      "Block when the defect makes current dispatch unsafe, makes the stated closure chain unreachable, or no authorized later step can validate or correct it",
+    );
+    expect(normalized).toContain(
       "An eventual ticket absent from the current board is downstream work, not a missing path",
     );
     expect(normalized).toContain(
@@ -672,6 +681,12 @@ describe("research profile registrar", () => {
     );
     expect(normalizedAgentsReference).toContain(
       "Judge a current queued recovery or repair ticket from its own supplied objective, dependencies, scope, and compiler-issued creation authority",
+    );
+    expect(normalizedAgentsReference).toContain(
+      "A defect confined to a waiting downstream ticket is not a current-frontier blocker when every potentially dispatchable current operation remains supported and safe",
+    );
+    expect(normalizedAgentsReference).toContain(
+      "Completing safe current work may make a configured later workflow step eligible to validate or correct that defect within its issued authority",
     );
     expect(normalized).not.toContain(
       "when at least one current operation advances an approved path",
