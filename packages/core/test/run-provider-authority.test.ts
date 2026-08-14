@@ -330,6 +330,132 @@ describe("run authority provider reservation lifecycle", () => {
     });
   }, 60_000);
 
+  it("settles a billed response before clearing a cold-start provider hold", async () => {
+    const harness = await authorityHarness("normal");
+    const runId = await createRun(harness.client);
+    await waitFor(async () => {
+      const run = await harness.engine.store.getRun(runId);
+      return (
+        run.lifecycle.phase === "awaiting_approval" &&
+        onlyAttempt(run).status === "waiting_plan_review"
+      );
+    });
+
+    const settledRun = await harness.engine.store.getRun(runId);
+    const settledAttempt = onlyAttempt(settledRun);
+    const settledRequest = settledAttempt.authorityProviderRequests?.at(-1);
+    expect(settledRequest).toMatchObject({
+      assistantEntryId: "assistant",
+      settledAt: expect.any(String),
+    });
+    const expectedTotals = providerTotals(settledAttempt);
+    const expectedSettlement = {
+      assistantEntryId: settledRequest!.assistantEntryId,
+      assistantEntrySha256: settledRequest!.assistantEntrySha256,
+      inputTokens: settledRequest!.inputTokens,
+      outputTokens: settledRequest!.outputTokens,
+      cacheReadTokens: settledRequest!.cacheReadTokens,
+      cacheWriteTokens: settledRequest!.cacheWriteTokens,
+    };
+
+    await harness.engine.stop();
+    harness.client.close();
+
+    const transcript = await readFile(settledAttempt.sessionFile!, "utf8");
+    const entries = transcript
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const tail = entries.at(-1)!;
+    const tailMessage = tail.message as Record<string, unknown>;
+    expect(tailMessage.stopReason).toBe("toolUse");
+    await writeFile(
+      settledAttempt.sessionFile!,
+      `${transcript.trimEnd()}\n${JSON.stringify({
+        type: "message",
+        id: "local-persistence-error",
+        parentId: tail.id,
+        timestamp: new Date().toISOString(),
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "" }],
+          api: tailMessage.api,
+          provider: tailMessage.provider,
+          model: tailMessage.model,
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          },
+          stopReason: "error",
+          errorMessage: "ENOSPC: no space left on device, write",
+          timestamp: Date.now(),
+        },
+      })}\n`,
+    );
+
+    const stranded = structuredClone(settledRun);
+    const strandedAttempt = onlyAttempt(stranded);
+    const strandedRequest = strandedAttempt.authorityProviderRequests!.at(-1)!;
+    strandedAttempt.inputTokens -= strandedRequest.inputTokens!;
+    strandedAttempt.outputTokens -= strandedRequest.outputTokens!;
+    strandedAttempt.cacheReadTokens -= strandedRequest.cacheReadTokens!;
+    strandedAttempt.cacheWriteTokens -= strandedRequest.cacheWriteTokens!;
+    delete strandedRequest.assistantEntryId;
+    delete strandedRequest.assistantEntrySha256;
+    delete strandedRequest.inputTokens;
+    delete strandedRequest.outputTokens;
+    delete strandedRequest.cacheReadTokens;
+    delete strandedRequest.cacheWriteTokens;
+    delete strandedRequest.settledAt;
+    stranded.revision += 1;
+    stranded.updatedAt = new Date(Date.parse(settledRun.updatedAt) + 1).toISOString();
+    stranded.lifecycle = reduceRunLifecycle(stranded.lifecycle, {
+      type: "blocked",
+      atMs: Date.parse(stranded.updatedAt),
+      reason: "A prior provider request cannot be reconciled; its worst-case exposure remains held",
+      remedy: "resume",
+    }).state;
+    await overwriteRunAndTrust(harness.root, stranded);
+
+    const restarted = await RunAuthorityEngine.open({
+      projectRoot: harness.root,
+      version: "1.0.0",
+      program: providerProgram(
+        () => {},
+        () => {},
+        "normal",
+      ),
+      supervisor: new PiAttemptProcessSupervisor({
+        deferActivationUntilAuthorityCommit: true,
+        runtime: {
+          childEntry: fixtureEntry,
+          additionalEnvironment: { KONI_TEST_PROVIDER_SCENARIO: "normal" },
+        },
+      }),
+    });
+    engines.push(restarted);
+    await restarted.start();
+
+    await waitFor(async () => {
+      const recovered = await restarted.store.getRun(runId);
+      return (
+        recovered.lifecycle.phase === "awaiting_approval" && recovered.lifecycle.blocker == null
+      );
+    });
+    const recovered = await restarted.store.getRun(runId);
+    const recoveredAttempt = onlyAttempt(recovered);
+    expect(providerTotals(recoveredAttempt)).toEqual(expectedTotals);
+    expect(recoveredAttempt.authorityProviderRequests?.at(-1)).toMatchObject({
+      ...expectedSettlement,
+      settledAt: expect.any(String),
+    });
+    expect(recoveredAttempt.authorityProviderRequests?.at(-1)?.retirement).toBeUndefined();
+  }, 60_000);
+
   it("crosses once into authenticated synthesis and closes repository discovery", async () => {
     const harness = await authorityHarness("synthesis_threshold");
     const runId = await createRun(harness.client);
@@ -2100,6 +2226,18 @@ function providerTotals(attempt: ReturnType<typeof onlyAttempt>) {
     cacheRead: attempt.cacheReadTokens,
     cacheWrite: attempt.cacheWriteTokens,
   };
+}
+
+async function overwriteRunAndTrust(root: string, run: RunRecord): Promise<void> {
+  const runBytes = Buffer.from(`${JSON.stringify(run)}\n`, "utf8");
+  await writeFile(path.join(root, ".git", "koni", "runs", run.id, "run.json"), runBytes);
+  const statePath = path.join(root, ".git", "koni", "authority", "state.json");
+  const state = JSON.parse(await readFile(statePath, "utf8")) as {
+    runRecordSha256?: Record<string, string>;
+  };
+  state.runRecordSha256 ??= {};
+  state.runRecordSha256[run.id] = rawSha256(runBytes);
+  await writeFile(statePath, `${JSON.stringify(state)}\n`);
 }
 
 async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 15_000): Promise<void> {

@@ -19315,7 +19315,20 @@ export class RunAuthorityEngine {
    * Bounded by MAX_PROVIDER_EXPOSURE_AUTO_RECOVERIES so an abort-every-time loop cannot churn.
    */
   async #autoRecoverProviderExposure(runId: string, propagationAttempts = 0): Promise<void> {
-    const observed = await this.#store.getRun(runId);
+    let observed = await this.#store.getRun(runId);
+    if (
+      observed.lifecycle.phase !== "blocked" ||
+      !isProviderExposureHoldBlocker(observed.lifecycle.blocker)
+    ) {
+      this.#clearProviderRateLimitRecovery(runId);
+      return;
+    }
+    // A process or authority failure can strand a normal, billable assistant response between
+    // Pi's durable transcript append and Koni's settlement commit. Before classifying the held
+    // request as retireable or genuinely ambiguous, retry the exact transcript-derived settlement.
+    // Failed derivations remain conservative and flow into the existing bounded retirement path.
+    await this.#reconcileAllProviderExposureAfterStop(runId);
+    observed = await this.#store.getRun(runId);
     if (
       observed.lifecycle.phase !== "blocked" ||
       !isProviderExposureHoldBlocker(observed.lifecycle.blocker)
@@ -23860,6 +23873,7 @@ function isProviderExposureHoldBlocker(blocker: string | undefined): boolean {
   return (
     blocker !== undefined &&
     (blocker.includes("worst-case exposure is held") ||
+      blocker.includes("worst-case exposure remains held") ||
       blocker.includes("worst-case exposure blocks a successor attempt"))
   );
 }
