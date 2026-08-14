@@ -30,10 +30,10 @@ describe("coding profile registrar", () => {
     expect(budget).toEqual({
       metric: "new_tokens",
       limit: 160_000,
-      synthesis_reserve: 70_000,
+      synthesis_reserve: 120_000,
       on_exhausted: "force_synthesis",
     });
-    expect(budget.limit - budget.synthesis_reserve).toBe(90_000);
+    expect(budget.limit - budget.synthesis_reserve).toBe(40_000);
   });
 
   it("routes proof-spec defects through bounded native change control", async () => {

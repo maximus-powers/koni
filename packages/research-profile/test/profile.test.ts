@@ -10,6 +10,31 @@ import registerProfile, {
 } from "../extensions/profile.js";
 
 describe("research profile registrar", () => {
+  it("reserves a bounded Research Medium correction envelope after synthesis begins", async () => {
+    const source = await readFile(
+      path.resolve(import.meta.dirname, "../koni/baseline/run-types/medium.yaml"),
+      "utf8",
+    );
+    const document = YAML.parse(source) as {
+      planning: {
+        token_budget: {
+          limit: number;
+          synthesis_reserve: number;
+          on_exhausted: string;
+        };
+      };
+    };
+    const tokenBudget = document.planning.token_budget;
+
+    expect(tokenBudget).toEqual({
+      metric: "new_tokens",
+      limit: 160_000,
+      synthesis_reserve: 120_000,
+      on_exhausted: "force_synthesis",
+    });
+    expect(tokenBudget.limit - tokenBudget.synthesis_reserve).toBe(40_000);
+  });
+
   it("keeps negative constraints on the operation, resource, or effect they regulate", async () => {
     const sources = await Promise.all(
       ["run-planner", "gate-designer", "asset-builder", "reviewer"].map((agent) =>

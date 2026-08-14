@@ -21,11 +21,13 @@ planning:
   max_repository_tool_calls: 32
   token_budget:
     metric: new_tokens
-    # Terra's authenticated 272k context reserves 128k for an uncapped provider
-    # response. Keep the compiler-issued prompt ceiling below the remaining 144k
-    # capacity so a medium attempt is admissible without relying on recovery.
-    limit: 112000
-    synthesis_reserve: 72000
+    # Begin synthesis after the same bounded 40k exploration allowance, then keep
+    # enough cumulative revision allowance for a complete artifact and more than
+    # one compiler-guided correction. Per-request model context admission remains
+    # independently enforced by Core and must not be conflated with this cumulative
+    # revision-spend boundary.
+    limit: 160000
+    synthesis_reserve: 120000
     on_exhausted: force_synthesis
 profile:
   source: .koni/profile.yaml
