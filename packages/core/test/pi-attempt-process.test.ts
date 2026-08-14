@@ -1210,6 +1210,63 @@ describe("run-level attempt process pool", () => {
     await pool.dispose();
   });
 
+  it("reopens an authority-bound next planning revision after the prior host retires without a checkpoint status", async () => {
+    const { spec: base, options } = await fixture("deferred");
+    const { mode: _mode, ...launchOptions } = options;
+    const { specHash: _baseHash, ...baseDraft } = structuredClone(base);
+    const initial = createAgentLaunchSpec({
+      ...baseDraft,
+      identity: {
+        ...baseDraft.identity,
+        ticketId: "run-planning",
+        stepId: "combined-plan",
+      },
+      planningRevision: {
+        revision: 0,
+        baseRevision: null,
+        priorCheckpointSha256: null,
+        steeringSha256: null,
+        budgetBaseline: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+      },
+    });
+    const pool = new PiAttemptProcessSupervisor({ deferActivationUntilAuthorityCommit: true });
+
+    const first = await pool.launch(initial, launchOptions);
+    await pool.abortByRun(initial.identity.runId, "prior planning host failed after settlement");
+    await expect(first.outcome).resolves.toMatchObject({ status: "aborted" });
+    pool.resumeRun(initial.identity.runId);
+
+    const { specHash: _initialHash, ...revisionDraft } = structuredClone(initial);
+    const revision = createAgentLaunchSpec({
+      ...revisionDraft,
+      planningRevision: {
+        revision: 1,
+        baseRevision: 0,
+        priorCheckpointSha256: rawSha256("authority-accepted planning checkpoint zero"),
+        steeringSha256: rawSha256("planning steering one"),
+        budgetBaseline: {
+          inputTokens: 2,
+          outputTokens: 3,
+          cacheReadTokens: 5,
+          cacheWriteTokens: 7,
+        },
+      },
+    });
+
+    const continued = await pool.continuePlanningRevision(revision, {
+      ...launchOptions,
+      priorTranscriptSha256: rawSha256("planning transcript zero"),
+    });
+    await continued.session.abort("test completed");
+    await expect(continued.outcome).resolves.toMatchObject({ status: "aborted" });
+    await pool.dispose();
+  });
+
   it("exposes a created session for durable authority admission before activation", async () => {
     const { spec, options } = await fixture("deferred");
     const { mode: _mode, ...launchOptions } = options;

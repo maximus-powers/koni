@@ -553,7 +553,6 @@ function isPlanningRevisionSuccessor(
   const next = spec.planningRevision;
   return (
     mode === "planning_revision" &&
-    tombstone.terminalStatus === "checkpointed" &&
     tombstone.runId === spec.identity.runId &&
     tombstone.sessionId === spec.identity.sessionId &&
     tombstone.ticketId === spec.identity.ticketId &&
