@@ -22,6 +22,7 @@ import {
   questionBatchPlanningRevisionIsCurrent,
   retainTicketAuthorityFields,
   reopenCompletedConfiguredCheckDependencies,
+  resetSettledPreSemanticValidationAssignments,
   resetRetryableConfiguredCheckInfrastructureAssignments,
   resetRetryableInfrastructureAssignment,
   replacementTicketExecutionEpoch,
@@ -188,6 +189,64 @@ describe("run authority engine", () => {
     expect(resetRetryableConfiguredCheckInfrastructureAssignments(legacy, at)).toHaveLength(1);
     expect(resetRetryableConfiguredCheckInfrastructureAssignments(semantic, at)).toEqual([]);
     expect(semantic.tickets["ticket-one"]?.status).toBe("blocked");
+  });
+
+  it("reopens only an authenticated settled pre-semantic recovery and preserves the shared cap", () => {
+    const at = "2026-08-14T06:00:00.000Z";
+    const recovered = settledPreSemanticValidationRetryFixture(at);
+
+    expect(resetSettledPreSemanticValidationAssignments(recovered, at)).toEqual([
+      {
+        ticketId: "ticket-one",
+        ticketTitle: "Prepare proof",
+        stepId: "author-historical-baseline",
+      },
+    ]);
+    expect(recovered.tickets["ticket-one"]).toMatchObject({
+      status: "queued",
+      blocker: undefined,
+      steps: [
+        expect.objectContaining({
+          id: "author-historical-baseline",
+          status: "pending",
+          completedAt: undefined,
+        }),
+      ],
+    });
+
+    const unproven = settledPreSemanticValidationRetryFixture(at);
+    const recovery = unproven.actionExecutions!["action-recovery"]!;
+    recovery.journal = {
+      ...recovery.journal,
+      steps: recovery.journal.steps.map((candidate) =>
+        candidate.primitive === "recovery.dispatch"
+          ? {
+              ...candidate,
+              output: {
+                ...(candidate.output as Record<string, unknown>),
+                disposition: "preserved_compiler_result_for_operator_review",
+              },
+            }
+          : candidate,
+      ),
+    };
+    expect(resetSettledPreSemanticValidationAssignments(unproven, at)).toEqual([]);
+    expect(unproven.tickets["ticket-one"]?.status).toBe("blocked");
+
+    const exhausted = settledPreSemanticValidationRetryFixture(at);
+    exhausted.activity = [0, 1, 2].map((index) => ({
+      id: `activity-reissue-${index}`,
+      at,
+      kind: "compiler",
+      message:
+        "Recovered a settled pre-semantic validation failure for fresh reissue: " +
+        "ticket-one/author-historical-baseline",
+      ticketId: "ticket-one",
+      nodeId: undefined,
+      tone: "warning",
+    }));
+    expect(resetSettledPreSemanticValidationAssignments(exhausted, at)).toEqual([]);
+    expect(exhausted.tickets["ticket-one"]?.status).toBe("blocked");
   });
 
   it("rejects a delayed planning-question resolution from an earlier revision", () => {
@@ -13431,6 +13490,82 @@ function configuredCheckInfrastructureRetryFixture(
       },
     ],
   } as unknown as RunRecord;
+}
+
+function settledPreSemanticValidationRetryFixture(at: string): RunRecord {
+  const run = configuredCheckInfrastructureRetryFixture(at, {
+    summary: "configured validation rejected the submitted graph",
+  });
+  const ticket = run.tickets["ticket-one"]!;
+  ticket.blocker =
+    "Configured terminal validation required recovery; reissue from authenticated failure";
+  const parentInvocationId = "action-validation";
+  const recoveryInvocationId = "action-recovery";
+  run.actionExecutions = {
+    [parentInvocationId]: {
+      invocationId: parentInvocationId,
+      boundary: {
+        kind: "assignment_validation",
+        ticketId: ticket.id,
+        stepId: ticket.steps[0]!.id,
+        attemptId: "attempt-proof",
+      },
+      journal: {
+        status: "recovery_required",
+        recoveryActionId: "recover",
+        steps: [
+          {
+            stepId: "step-check",
+            primitive: "check.run",
+            phase: "recipe",
+            status: "failed",
+            error: "configured validation rejected the submitted graph",
+          },
+        ],
+      },
+      semanticResult: {
+        kind: "assignment",
+        status: "failed",
+        blocker:
+          "Configured terminal validation required recovery; reissue from authenticated failure",
+      },
+      settlement: { disposition: "failed" },
+      recoveryInvocationId,
+      recoverySettledAt: at,
+      settledAt: at,
+    },
+    [recoveryInvocationId]: {
+      invocationId: recoveryInvocationId,
+      boundary: {
+        kind: "recovery",
+        ticketId: ticket.id,
+        stepId: ticket.steps[0]!.id,
+        attemptId: "attempt-proof",
+        parentInvocationId,
+      },
+      journal: {
+        status: "completed",
+        steps: [
+          {
+            stepId: "step-recover",
+            primitive: "recovery.dispatch",
+            phase: "recipe",
+            status: "completed",
+            output: {
+              inspected: true,
+              bounded: true,
+              parentInvocationId,
+              disposition: "preserved_pre_semantic_state",
+            },
+          },
+        ],
+      },
+      settlement: { disposition: "completed" },
+      settledAt: at,
+    },
+  } as unknown as NonNullable<RunRecord["actionExecutions"]>;
+  run.activity = [];
+  return run;
 }
 
 function reissuableLifecycleCatalog(): CompiledStateMachineCatalog {

@@ -297,6 +297,8 @@ const MAX_PROVIDER_RESPONSE_TRANSCRIPT_OVERSHOOT_BYTES = 24 * 1024 * 1024;
  * correct deterministic compiler feedback instead of surfacing a recoverable operator block.
  */
 const MAX_PRE_SEMANTIC_VALIDATION_REISSUES = 3;
+const SETTLED_PRE_SEMANTIC_VALIDATION_REISSUE_ACTIVITY =
+  "Recovered a settled pre-semantic validation failure for fresh reissue";
 // A rejection normally reissues the held source so it can produce a corrected request. Bound
 // that semantic retry separately from infrastructure recovery: repeated denied scope requests
 // must eventually preserve the completed source evidence and let the ticket continue.
@@ -9222,6 +9224,18 @@ export class RunAuthorityEngine {
       }
     }
     if (draft.lifecycle.phase === "executing") {
+      for (const retried of resetSettledPreSemanticValidationAssignments(draft, resumedAt)) {
+        draft.activity.push(
+          activity(
+            this.#createId("activity"),
+            resumedAt,
+            "compiler",
+            `${SETTLED_PRE_SEMANTIC_VALIDATION_REISSUE_ACTIVITY}: ${retried.ticketId}/${retried.stepId}`,
+            retried.ticketId,
+            "warning",
+          ),
+        );
+      }
       for (const retried of resetRetryableConfiguredCheckInfrastructureAssignments(
         draft,
         resumedAt,
@@ -19987,7 +20001,7 @@ function preSemanticValidationReissueCount(
   ticketId: string,
   stepId: string,
 ): number {
-  return Object.values(run.attempts).filter(
+  const interruptedAttempts = Object.values(run.attempts).filter(
     (candidate) =>
       candidate.ticketId === ticketId &&
       candidate.stepId === stepId &&
@@ -19999,6 +20013,14 @@ function preSemanticValidationReissueCount(
           "Retired accepted output after configured recovery preserved pre-semantic state",
         ) === true),
   ).length;
+  const settledRecoveryResumes = run.activity.filter(
+    (entry) =>
+      entry.kind === "compiler" &&
+      entry.ticketId === ticketId &&
+      entry.message ===
+        `${SETTLED_PRE_SEMANTIC_VALIDATION_REISSUE_ACTIVITY}: ${ticketId}/${stepId}`,
+  ).length;
+  return interruptedAttempts + settledRecoveryResumes;
 }
 
 function compensationPreservedPreSemanticState(journal: ActionExecutionJournal): boolean {
@@ -22710,6 +22732,85 @@ function resetAssignmentAfterInterruption(
     ticket.blocker = undefined;
     ticket.updatedAt = at;
   }
+}
+
+/**
+ * Recover the exact terminal state emitted by older authorities after a configured recovery
+ * durably proved that validation left pre-semantic state unchanged. The settled attempt and
+ * action ledger remain immutable; explicit Resume only reissues the failed step when the complete
+ * parent/child recovery chain is present and the shared bounded retry allowance remains.
+ */
+export function resetSettledPreSemanticValidationAssignments(
+  run: RunRecord,
+  at: string,
+): Array<{ ticketId: string; ticketTitle: string; stepId: string }> {
+  const retried: Array<{ ticketId: string; ticketTitle: string; stepId: string }> = [];
+  for (const ticket of Object.values(run.tickets)) {
+    if (
+      ticket.status !== "blocked" ||
+      ticket.blocker !==
+        "Configured terminal validation required recovery; reissue from authenticated failure"
+    ) {
+      continue;
+    }
+    const step = ticket.steps.find((candidate) => candidate.status === "failed");
+    const attemptId = step?.attemptIds.at(-1);
+    const attempt = attemptId === undefined ? undefined : run.attempts[attemptId];
+    if (
+      step === undefined ||
+      attempt === undefined ||
+      attempt.status !== "completed" ||
+      attempt.terminalPolicy?.mode !== "failed_submission" ||
+      attempt.terminalOutputSha256 === undefined ||
+      attempt.terminalAcceptedAt === undefined ||
+      providerOutcomeAccountingIssue(attempt, undefined, false) !== undefined ||
+      preSemanticValidationReissueCount(run, ticket.id, step.id) >=
+        MAX_PRE_SEMANTIC_VALIDATION_REISSUES
+    ) {
+      continue;
+    }
+    const parent = Object.values(run.actionExecutions ?? {}).find(
+      (candidate) =>
+        candidate.boundary.kind === "assignment_validation" &&
+        candidate.boundary.ticketId === ticket.id &&
+        candidate.boundary.stepId === step.id &&
+        candidate.boundary.attemptId === attempt.id,
+    );
+    const recoveryInvocationId = parent?.recoveryInvocationId;
+    const recovery =
+      recoveryInvocationId === undefined ? undefined : run.actionExecutions?.[recoveryInvocationId];
+    if (
+      parent === undefined ||
+      parent.journal.status !== "recovery_required" ||
+      parent.settledAt === undefined ||
+      parent.recoverySettledAt === undefined ||
+      parent.settlement?.disposition !== "failed" ||
+      parent.semanticResult?.kind !== "assignment" ||
+      parent.semanticResult.status !== "failed" ||
+      parent.semanticResult.blocker !== ticket.blocker ||
+      recovery === undefined ||
+      recovery.boundary.kind !== "recovery" ||
+      recovery.boundary.parentInvocationId !== parent.invocationId ||
+      recovery.boundary.ticketId !== ticket.id ||
+      recovery.boundary.stepId !== step.id ||
+      recovery.boundary.attemptId !== attempt.id ||
+      recovery.journal.status !== "completed" ||
+      recovery.settledAt === undefined ||
+      recovery.settlement?.disposition !== "completed" ||
+      !recoveryPreservedPreSemanticState(recovery.journal)
+    ) {
+      continue;
+    }
+    step.status = "pending";
+    step.startedAt = undefined;
+    step.completedAt = undefined;
+    step.summary = undefined;
+    ticket.status = "queued";
+    ticket.blocker = undefined;
+    ticket.updatedAt = at;
+    retried.push({ ticketId: ticket.id, ticketTitle: ticket.title, stepId: step.id });
+  }
+  return retried;
 }
 
 /**
