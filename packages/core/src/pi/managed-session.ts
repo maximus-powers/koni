@@ -1023,7 +1023,7 @@ async function createProductionPiSession(
       contextProvider: options.contextProvider,
       beforeProviderRequest: () => beforeProviderRequest(),
       selectCompactionFirstKeptEntryId: (preparedFirstKeptEntryId) =>
-        providerPressureCompactionFirstKeptEntryId(
+        selectContainedCompactionFirstKeptEntryId(
           spec,
           sessionManager,
           providerRequestFailure,
@@ -4230,6 +4230,34 @@ function containedCompactionKeepRecentTokens(spec: Readonly<AgentLaunchSpec>): n
   return Math.max(2_000, Math.min(8_000, Math.floor(spec.budgets.tokens.maxInput / 32)));
 }
 
+export function selectContainedCompactionFirstKeptEntryId(
+  spec: Readonly<AgentLaunchSpec>,
+  sessionManager: Pick<SessionManager, "getLeafEntry" | "getBranch">,
+  failure: ManagedSessionError | undefined,
+  preparedFirstKeptEntryId: string,
+): string {
+  if (failure?.code === "provider_input_exposure" || failure?.code === "provider_token_exposure") {
+    return providerPressureCompactionFirstKeptEntryId(
+      spec,
+      sessionManager,
+      failure,
+      preparedFirstKeptEntryId,
+    );
+  }
+  const pressureBoundary = providerPressureCompactionFirstKeptEntryId(
+    spec,
+    sessionManager,
+    failure,
+    preparedFirstKeptEntryId,
+  );
+  if (pressureBoundary !== preparedFirstKeptEntryId) return pressureBoundary;
+  return rejectedToolDraftCompactionFirstKeptEntryId(
+    spec,
+    sessionManager,
+    preparedFirstKeptEntryId,
+  );
+}
+
 function providerPressureCompactionFirstKeptEntryId(
   spec: Readonly<AgentLaunchSpec>,
   sessionManager: Pick<SessionManager, "getLeafEntry">,
@@ -4270,6 +4298,129 @@ function providerPressureCompactionFirstKeptEntryId(
     return preparedFirstKeptEntryId;
   }
   return leafId;
+}
+
+/**
+ * A rejected authority result describes a correction to the immediately preceding complete draft.
+ * Pi's small recent-message window can otherwise retain only the rejection (or a following empty
+ * assistant message), forcing the model to reconstruct a planning artifact or file payload from
+ * the summary. Keep that exact issued tool call when its active suffix is safely bounded; authority
+ * still revalidates the next call against the immutable tool schema, grant, and run state.
+ */
+function rejectedToolDraftCompactionFirstKeptEntryId(
+  spec: Readonly<AgentLaunchSpec>,
+  sessionManager: Pick<SessionManager, "getBranch">,
+  preparedFirstKeptEntryId: string,
+): string {
+  const branch = sessionManager.getBranch() as unknown as readonly PiSessionEntry[];
+  const preparedIndex = branch.findIndex((entry) => entry.id === preparedFirstKeptEntryId);
+  if (preparedIndex < 0) return preparedFirstKeptEntryId;
+  let boundaryStart = 0;
+  for (let index = branch.length - 1; index >= 0; index -= 1) {
+    if (branch[index]?.type === "compaction") {
+      boundaryStart = index + 1;
+      break;
+    }
+  }
+
+  let resultIndex = branch.length - 1;
+  while (resultIndex >= boundaryStart) {
+    const entry = branch[resultIndex]!;
+    if (
+      entry.type === "message" &&
+      isRecord(entry.message) &&
+      entry.message.role === "assistant" &&
+      Array.isArray(entry.message.content) &&
+      entry.message.content.length === 0
+    ) {
+      resultIndex -= 1;
+      continue;
+    }
+    if (
+      entry.type === "custom" ||
+      entry.type === "model_change" ||
+      entry.type === "thinking_level_change"
+    ) {
+      resultIndex -= 1;
+      continue;
+    }
+    break;
+  }
+  const resultEntry = branch[resultIndex];
+  const resultMessage =
+    resultEntry?.type === "message" && isRecord(resultEntry.message)
+      ? resultEntry.message
+      : undefined;
+  if (
+    resultMessage?.role !== "toolResult" ||
+    typeof resultMessage.toolName !== "string" ||
+    resultMessage.isError !== true ||
+    typeof resultMessage.toolCallId !== "string" ||
+    !isRecord(resultMessage.details)
+  ) {
+    return preparedFirstKeptEntryId;
+  }
+  if (!spec.tools.some((tool) => tool.name === resultMessage.toolName)) {
+    return preparedFirstKeptEntryId;
+  }
+  try {
+    validateKoniToolReceipt(resultMessage.details);
+  } catch {
+    return preparedFirstKeptEntryId;
+  }
+  if (
+    resultMessage.details.outcome !== "rejected" ||
+    userText(resultMessage.content) !== renderKoniToolReceipt(resultMessage.details)
+  ) {
+    return preparedFirstKeptEntryId;
+  }
+
+  const callId = resultMessage.toolCallId;
+  const toolName = resultMessage.toolName;
+  let assistantIndex = resultIndex - 1;
+  for (; assistantIndex >= boundaryStart; assistantIndex -= 1) {
+    const entry = branch[assistantIndex]!;
+    if (entry.type !== "message" || !isRecord(entry.message)) continue;
+    if (entry.message.role !== "assistant" || !Array.isArray(entry.message.content)) {
+      return preparedFirstKeptEntryId;
+    }
+    const hasMatchingCall = entry.message.content.some(
+      (block) =>
+        isRecord(block) &&
+        block.type === "toolCall" &&
+        block.id === callId &&
+        block.name === toolName,
+    );
+    if (!hasMatchingCall) return preparedFirstKeptEntryId;
+    break;
+  }
+  if (
+    assistantIndex < boundaryStart ||
+    preparedIndex <= assistantIndex ||
+    branch[assistantIndex]?.id === undefined
+  ) {
+    return preparedFirstKeptEntryId;
+  }
+
+  const suffixTokens = Math.ceil(
+    Buffer.byteLength(JSON.stringify(branch.slice(assistantIndex)), "utf8") / 4,
+  );
+  const providerContextWindow =
+    typeof spec.model.catalogContextWindow === "number" &&
+    Number.isSafeInteger(spec.model.catalogContextWindow)
+      ? spec.model.catalogContextWindow
+      : spec.budgets.tokens.maxInput + spec.budgets.tokens.providerOutputHeadroom;
+  const providerInputCapacity = Math.max(
+    0,
+    providerContextWindow - spec.budgets.tokens.providerOutputHeadroom,
+  );
+  const maximumDraftSuffixTokens = Math.max(
+    containedCompactionKeepRecentTokens(spec),
+    Math.min(Math.floor(spec.budgets.tokens.maxInput / 2), Math.floor(providerInputCapacity / 2)),
+  );
+  return suffixTokens <= maximumDraftSuffixTokens
+    ? branch[assistantIndex]!.id
+    : preparedFirstKeptEntryId;
 }
 
 function exactProviderPayload(

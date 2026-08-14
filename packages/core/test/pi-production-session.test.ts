@@ -8,7 +8,12 @@ import {
   readPiSession,
   type PiSessionEntry,
 } from "../src/pi/session-transcript.js";
-import { ManagedPiSession, recoverManagedPiSession } from "../src/pi/managed-session.js";
+import {
+  ManagedSessionError,
+  ManagedPiSession,
+  recoverManagedPiSession,
+  selectContainedCompactionFirstKeptEntryId,
+} from "../src/pi/managed-session.js";
 import { createAgentLaunchSpec, type AgentLaunchSpec } from "../src/pi/launch-spec.js";
 import { sealPiModelDescriptor } from "../src/pi/model-catalog.js";
 import {
@@ -16,6 +21,7 @@ import {
   createKoniAuthorityTools,
   koniToolMaxResultBytes,
   koniToolSchemaHash,
+  renderKoniToolReceipt,
   type KoniToolInvocation,
   type KoniToolReceipt,
 } from "../src/pi/tool-catalog.js";
@@ -1548,6 +1554,179 @@ describe("Pi 0.80.10 production session construction", () => {
     });
     expect(recovered.recovery?.disposition).toEqual({ kind: "continue" });
     await recovered.dispose();
+  });
+
+  it("retains the latest rejected issued-tool draft across ordinary compaction", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "koni-production-rejected-draft-"));
+    temporary.push(root);
+    const cwd = path.join(root, "worktree");
+    await mkdir(cwd);
+    const baseSpec = fixtureLaunchSpec({
+      cwd,
+      sessionDirectory: path.join(root, "sessions", "attempt-rejected-draft"),
+      attemptId: "attempt-rejected-draft",
+      sessionId: "session-rejected-draft",
+    });
+    const { specHash: _specHash, ...specDraft } = structuredClone(baseSpec);
+    const spec = createAgentLaunchSpec({
+      ...specDraft,
+      tools: [
+        ...specDraft.tools,
+        {
+          name: "koni_write_file",
+          schemaHash: koniToolSchemaHash("koni_write_file"),
+          executionMode: "sequential",
+          maxResultBytes: koniToolMaxResultBytes("koni_write_file"),
+        },
+      ],
+    });
+    const manager = SessionManager.inMemory(cwd);
+    manager.appendMessage({
+      role: "user",
+      content: "Submit the complete artifact.",
+      timestamp: Date.now(),
+    });
+    const callId = "call-rejected-draft";
+    const assistantId = manager.appendMessage({
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: callId,
+          name: "koni_write_file",
+          arguments: {
+            path: "src/guide.test.tsx",
+            content: "complete working draft",
+          },
+        },
+      ],
+      api: spec.model.api,
+      provider: spec.model.provider,
+      model: spec.model.id,
+      usage: {
+        input: 10,
+        output: 5,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 15,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "toolUse",
+      timestamp: Date.now(),
+    });
+    const receipt = {
+      protocol: KONI_TOOL_RECEIPT_PROTOCOL,
+      receiptId: rawSha256("rejected-draft"),
+      outcome: "rejected" as const,
+      code: "tool_arguments",
+      summary: "Add expectedSha256 and retry the preceding draft.",
+    };
+    manager.appendMessage({
+      role: "toolResult",
+      toolCallId: callId,
+      toolName: "koni_write_file",
+      content: [{ type: "text", text: renderKoniToolReceipt(receipt) }],
+      details: receipt,
+      isError: true,
+      timestamp: Date.now(),
+    });
+    const preparedBoundary = manager.appendMessage({
+      role: "assistant",
+      content: [],
+      api: spec.model.api,
+      provider: spec.model.provider,
+      model: spec.model.id,
+      usage: {
+        input: 20,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 20,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    });
+
+    expect(
+      selectContainedCompactionFirstKeptEntryId(spec, manager, undefined, preparedBoundary),
+    ).toBe(assistantId);
+    expect(
+      selectContainedCompactionFirstKeptEntryId(
+        spec,
+        manager,
+        new ManagedSessionError(
+          "provider_input_exposure",
+          "a pressure error that does not match the durable leaf",
+        ),
+        preparedBoundary,
+      ),
+    ).toBe(preparedBoundary);
+
+    const oversized = SessionManager.inMemory(cwd);
+    oversized.appendMessage({ role: "user", content: "Write the file.", timestamp: Date.now() });
+    const oversizedCallId = "call-oversized-draft";
+    oversized.appendMessage({
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: oversizedCallId,
+          name: "koni_write_file",
+          arguments: {
+            path: "src/guide.test.tsx",
+            content: "x".repeat(25_000),
+          },
+        },
+      ],
+      api: spec.model.api,
+      provider: spec.model.provider,
+      model: spec.model.id,
+      usage: {
+        input: 10,
+        output: 5,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 15,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "toolUse",
+      timestamp: Date.now(),
+    });
+    oversized.appendMessage({
+      role: "toolResult",
+      toolCallId: oversizedCallId,
+      toolName: "koni_write_file",
+      content: [{ type: "text", text: renderKoniToolReceipt(receipt) }],
+      details: receipt,
+      isError: true,
+      timestamp: Date.now(),
+    });
+    const oversizedPreparedBoundary = oversized.appendMessage({
+      role: "assistant",
+      content: [],
+      api: spec.model.api,
+      provider: spec.model.provider,
+      model: spec.model.id,
+      usage: {
+        input: 20,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 20,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    });
+    expect(
+      selectContainedCompactionFirstKeptEntryId(
+        spec,
+        oversized,
+        undefined,
+        oversizedPreparedBoundary,
+      ),
+    ).toBe(oversizedPreparedBoundary);
   });
 
   it("rejects a self-consistent Pi compaction that authority never durably authorized", async () => {
