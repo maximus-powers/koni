@@ -4899,14 +4899,10 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
           .map((value) => optionalRecord(value))
           .filter((value): value is ConfigurationObject => value !== undefined)
       : [];
-    const matchingChecks = checks.filter(
-      (check) =>
-        check.requestedCheckId === input.checkId &&
-        check.accepted === true &&
-        check.passed === true,
-    );
-    if (matchingChecks.length !== 1) return undefined;
-    const projectedCheck = matchingChecks[0]!;
+    const projectedCheck = checks
+      .filter((check) => check.requestedCheckId === input.checkId)
+      .at(-1);
+    if (projectedCheck?.accepted !== true || projectedCheck.passed !== true) return undefined;
     const durableChecks = (input.run.checks ?? []).filter(
       (check) =>
         check.attemptId === attempt.id &&
@@ -5607,11 +5603,9 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         );
       }
       const checks: Record<string, unknown>[] = [];
-      for (const check of (run.checks ?? [])
-        .filter((candidate) => candidate.attemptId === attempt.id)
-        .sort((left, right) =>
-          compareText(`${left.recordedAt}\0${left.id}`, `${right.recordedAt}\0${right.id}`),
-        )) {
+      for (const check of (run.checks ?? []).filter(
+        (candidate) => candidate.attemptId === attempt.id,
+      )) {
         const commands: Record<string, unknown>[] = [];
         for (const command of check.commands) {
           const stdout = await this.#reviewCheckStream(

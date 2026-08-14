@@ -6831,6 +6831,14 @@ describe("native compiler-authoritative run program", () => {
         recordedAt: FIXED_NOW.toISOString(),
       },
     ];
+    const newestBaseline = run.checks[0]!;
+    run.checks.unshift({
+      ...structuredClone(newestBaseline),
+      id: "check-proof-baseline-earlier-pass",
+      callId: "call-proof-baseline-earlier-pass",
+      evidenceSha256: digest("proof-baseline-earlier-evidence"),
+      recordedAt: new Date(FIXED_NOW.getTime() - 1_000).toISOString(),
+    });
 
     const reviewStep = preparation.steps.find((step) => step.kind === "review")!;
     const reviewAssignment: ReadyAssignment = {
@@ -6840,6 +6848,80 @@ describe("native compiler-authoritative run program", () => {
       personaId: reviewStep.personaId,
       priority: preparation.priority,
     };
+    const reviewOutput = Buffer.from(
+      `${JSON.stringify({
+        status: "completed",
+        reviewVerdict: "approved",
+        summary: "The historical proof is independently reviewed and complete.",
+      })}\n`,
+      "utf8",
+    );
+    const laterRejectedBaseline = {
+      ...structuredClone(newestBaseline),
+      id: "check-aaa-proof-baseline-later-rejection",
+      callId: "call-proof-baseline-later-rejection",
+      accepted: false,
+      passed: false,
+      summary: "baseline-proof-set rejected after the prior pass",
+      evidenceSha256: digest("proof-baseline-later-rejection-evidence"),
+    };
+    run.checks.push(laterRejectedBaseline);
+    const rejectedReviewPrepared = await program.prepareAttempt({
+      kind: "verification",
+      run,
+      assignment: reviewAssignment,
+      attemptId: "attempt-proof-review-after-rejection",
+      sessionId: "session-proof-review-after-rejection",
+      nextAuthorityRevision: 6,
+      expectedAuthorityStateHash: digest("proof-authority-rejected-six"),
+      lineage: {
+        branchEpoch: 1,
+        reason: "review",
+        parentAttemptId: author.id,
+        parentSessionId: author.sessionId,
+      },
+    });
+    await persistWrites(project.projectRoot, rejectedReviewPrepared.artifactWrites ?? []);
+    const rejectedReview = attemptRecord(
+      rejectedReviewPrepared.spec,
+      "verification",
+      "terminal_accepted",
+    );
+    rejectedReview.reviewedGraphHash = run.graphHash;
+    rejectedReview.terminalAcceptedAt = FIXED_NOW.toISOString();
+    rejectedReview.terminalOutputSha256 = rawSha256(reviewOutput);
+    rejectedReview.terminalOutputSizeBytes = reviewOutput.byteLength;
+    run.attempts[rejectedReview.id] = rejectedReview;
+    reviewStep.status = "running";
+    reviewStep.attemptIds = [rejectedReview.id];
+    reviewStep.startedAt = FIXED_NOW.toISOString();
+    const rejectedReviewDirectory = path.join(
+      endpoint.stateRoot,
+      `runs/${run.id}/attempts/${rejectedReview.id}`,
+    );
+    await mkdir(rejectedReviewDirectory, { recursive: true });
+    await writeFile(
+      path.join(rejectedReviewDirectory, "launch-spec.json"),
+      `${JSON.stringify(rejectedReviewPrepared.spec)}\n`,
+    );
+    await writeFile(path.join(rejectedReviewDirectory, "terminal-output.json"), reviewOutput);
+    const rejectedCompilation = await program.compileAssignmentOutput({
+      run,
+      assignment: reviewAssignment,
+      attemptId: rejectedReview.id,
+      output: JSON.parse(reviewOutput.toString("utf8")),
+    });
+    expect(
+      Object.values(rejectedCompilation.tickets ?? {}).some(
+        (ticket) => ticket.operationId === "implementation.change.red-green",
+      ),
+    ).toBe(false);
+    delete run.attempts[rejectedReview.id];
+    reviewStep.status = "pending";
+    reviewStep.attemptIds = [];
+    reviewStep.startedAt = undefined;
+    run.checks.pop();
+
     const reviewPrepared = await program.prepareAttempt({
       kind: "verification",
       run,
@@ -6871,14 +6953,6 @@ describe("native compiler-authoritative run program", () => {
     const review = attemptRecord(reviewPrepared.spec, "verification", "terminal_accepted");
     review.reviewedGraphHash = run.graphHash;
     review.terminalAcceptedAt = FIXED_NOW.toISOString();
-    const reviewOutput = Buffer.from(
-      `${JSON.stringify({
-        status: "completed",
-        reviewVerdict: "approved",
-        summary: "The historical proof is independently reviewed and complete.",
-      })}\n`,
-      "utf8",
-    );
     review.terminalOutputSha256 = rawSha256(reviewOutput);
     review.terminalOutputSizeBytes = reviewOutput.byteLength;
     run.attempts[review.id] = review;
