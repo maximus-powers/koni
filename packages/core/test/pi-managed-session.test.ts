@@ -6,6 +6,7 @@ import {
   ManagedPiSession,
   ManagedSessionError,
   providerOutputLimit,
+  type ManagedTokenUsage,
   type ManagedPiSessionFactory,
   type PiSessionAdapter,
   type RecoveredSessionState,
@@ -384,6 +385,60 @@ describe("managed Pi session", () => {
     expect(adapter.abortCalls).toBe(1);
   });
 
+  it("accepts a terminal result from an admitted turn that crosses its desired token target", async () => {
+    const spec = tightNewTokenSpec(
+      "attempt-admitted-terminal-budget",
+      "session-admitted-terminal-budget",
+    );
+    const adapter = new AuthorityUsageSessionAdapter(spec);
+    adapter.promptBehavior = async () => {
+      adapter.emitAuthorityUsage({
+        input: 10,
+        output: 10,
+        cacheRead: 90,
+        cacheWrite: 0,
+        newTokens: 20,
+        allTokens: 110,
+      });
+      emitTerminal(adapter, { result: "synthesized" });
+    };
+    const session = await ManagedPiSession.create(spec, runtimeOptions(adapter));
+
+    await expect(session.start()).resolves.toEqual(
+      expect.objectContaining({
+        status: "completed",
+        terminalOutput: { result: "synthesized" },
+      }),
+    );
+    expect(adapter.abortCalls).toBe(0);
+  });
+
+  it("stops after an admitted nonterminal turn crosses its desired token target", async () => {
+    const spec = tightNewTokenSpec(
+      "attempt-admitted-nonterminal-budget",
+      "session-admitted-nonterminal-budget",
+    );
+    const adapter = new AuthorityUsageSessionAdapter(spec);
+    adapter.promptBehavior = async () =>
+      adapter.emitAuthorityUsage({
+        input: 10,
+        output: 10,
+        cacheRead: 90,
+        cacheWrite: 0,
+        newTokens: 20,
+        allTokens: 110,
+      });
+    const session = await ManagedPiSession.create(spec, runtimeOptions(adapter));
+
+    await expect(session.start()).resolves.toEqual(
+      expect.objectContaining({
+        status: "aborted",
+        reason: "new-token token budget exceeded",
+      }),
+    );
+    expect(adapter.abortCalls).toBe(1);
+  });
+
   it("does not report budget cancellation until Pi's abort has settled", async () => {
     const spec = fixtureLaunchSpec({
       cwd: "/tmp/koni-workspace",
@@ -743,6 +798,19 @@ class FakeSessionAdapter implements PiSessionAdapter {
   }
 }
 
+class AuthorityUsageSessionAdapter extends FakeSessionAdapter {
+  readonly #authorityUsageListeners = new Set<(usage: ManagedTokenUsage) => void>();
+
+  public subscribeAuthorityUsage(listener: (usage: ManagedTokenUsage) => void): () => void {
+    this.#authorityUsageListeners.add(listener);
+    return () => this.#authorityUsageListeners.delete(listener);
+  }
+
+  public emitAuthorityUsage(usage: ManagedTokenUsage): void {
+    for (const listener of this.#authorityUsageListeners) listener(usage);
+  }
+}
+
 function specFor(attemptId: string, sessionId: string): AgentLaunchSpec {
   return fixtureLaunchSpec({
     cwd: "/tmp/koni-workspace",
@@ -750,6 +818,21 @@ function specFor(attemptId: string, sessionId: string): AgentLaunchSpec {
     attemptId,
     sessionId,
   });
+}
+
+function tightNewTokenSpec(attemptId: string, sessionId: string): AgentLaunchSpec {
+  const base = specFor(attemptId, sessionId);
+  const { specHash: _hash, ...draft } = structuredClone(base);
+  draft.budgets.tokens = {
+    maxInput: 15,
+    maxOutput: 15,
+    maxCacheRead: 10_000,
+    maxCacheWrite: 10_000,
+    maxNew: 15,
+    maxAll: 10_000,
+    providerOutputHeadroom: base.budgets.tokens.providerOutputHeadroom,
+  };
+  return createAgentLaunchSpec(draft);
 }
 
 function runtimeOptions(adapter: FakeSessionAdapter) {

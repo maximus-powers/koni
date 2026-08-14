@@ -336,11 +336,6 @@ export class ManagedPiSession {
         assertMonotonicUsage(this.#usage, usage);
         Object.assign(this.#usage, usage);
         this.#emit({ type: "usage", usage: this.usage });
-        const violation = tokenBudgetViolation(this.spec, this.#usage);
-        if (violation !== undefined && this.#failure === undefined) {
-          this.#failure = violation;
-          this.#requestAbort(violation);
-        }
       } catch (error) {
         this.#failure = error instanceof Error ? error.message : String(error);
         this.#requestAbort(this.#failure, true);
@@ -616,6 +611,11 @@ export class ManagedPiSession {
       }
     }
 
+    if (this.#failure === undefined && this.#terminalCount === 0) {
+      const violation = tokenBudgetViolation(this.spec, this.#usage);
+      if (violation !== undefined) this.#requestAbort(violation);
+    }
+
     const aborted = await this.#settleAbortOutcome();
     if (aborted !== undefined) return aborted;
     if (this.#failure !== undefined) {
@@ -663,11 +663,6 @@ export class ManagedPiSession {
           return;
         }
         this.#emit({ type: "usage", usage: this.usage });
-        const violation = tokenBudgetViolation(this.spec, this.#usage);
-        if (violation !== undefined && this.#failure === undefined) {
-          this.#failure = violation;
-          this.#requestAbort(violation);
-        }
       }
       const toolCalls = event.message.content.filter((block) => block.type === "toolCall");
       const terminalCalls = toolCalls.filter((block) => block.name === this.spec.terminal.toolName);
