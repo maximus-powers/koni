@@ -86,6 +86,12 @@ authority that the complete current workflow cannot satisfy: an outside node or 
 or node, runtime output not yet produced, or a grant-derived field that must change before the
 active workflow can continue.
 
+Every workflow step whose operation exposes an upstream-change terminal branch must select a
+compiler-owned validation action. The settled source action is proposal-publication authority, not
+optional extra validation: without it, the runtime must reject the proposal instead of accepting an
+unauthenticated scope change. Keep the action appropriate to the step's existing checks and effects;
+do not add broader mutation merely to enable change control.
+
 ## Workflow DAG
 
 The following is the shipped Software 0.3 composition pattern, retained as historical context:

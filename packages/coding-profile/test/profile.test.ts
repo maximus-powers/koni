@@ -687,6 +687,7 @@ describe("coding profile registrar", () => {
           id: string;
           read_paths?: Array<{ field?: string }>;
           write_paths?: Array<{ field?: string }>;
+          validation_action?: string;
         }>;
       }>;
     };
@@ -705,6 +706,7 @@ describe("coding profile registrar", () => {
       ?.steps.find(({ id }) => id === "author-historical-baseline");
     expect(step?.read_paths?.map(({ field }) => field)).toContain("spec.support_paths");
     expect(step?.write_paths?.map(({ field }) => field)).not.toContain("spec.support_paths");
+    expect(step?.validation_action).toBe("compile-ticket");
 
     for (const checkId of ["baseline-proof-set", "promotion-proof-set"]) {
       expect(checks.checks.find(({ id }) => id === checkId)?.graph_set?.support_paths_field).toBe(

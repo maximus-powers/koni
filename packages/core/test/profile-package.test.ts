@@ -2,6 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import YAML from "yaml";
 import type {
   ProfileBaselineFile,
   ProfileMigration,
@@ -18,6 +19,55 @@ import { rawSha256 } from "../src/shared/canonical.js";
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
 describe("profile package manifests", () => {
+  it.each([
+    [
+      "coding",
+      "packages/coding-profile/koni/baseline/operations.yaml",
+      "packages/coding-profile/koni/baseline/workflows.yaml",
+    ],
+    [
+      "research",
+      "packages/research-profile/koni/baseline/operations/research.yaml",
+      "packages/research-profile/koni/baseline/workflows/research.yaml",
+    ],
+  ])(
+    "gives every advertised %s upstream route a source-settlement action",
+    (_name, operationsPath, workflowsPath) => {
+      const operations = YAML.parse(
+        readFileSync(resolve(repositoryRoot, operationsPath), "utf8"),
+      ) as {
+        operations: Array<{
+          operation: string;
+          change_control?: { allow_upstream_requests?: boolean };
+        }>;
+      };
+      const workflows = YAML.parse(
+        readFileSync(resolve(repositoryRoot, workflowsPath), "utf8"),
+      ) as {
+        workflows: Array<{
+          id: string;
+          applies_to: string[];
+          steps: Array<{ id: string; validation_action?: string }>;
+        }>;
+      };
+      const routedOperations = new Set(
+        operations.operations
+          .filter((operation) => operation.change_control?.allow_upstream_requests === true)
+          .map((operation) => operation.operation),
+      );
+
+      const unsatisfied = workflows.workflows.flatMap((workflow) =>
+        workflow.applies_to.some((operation) => routedOperations.has(operation))
+          ? workflow.steps
+              .filter((step) => step.validation_action === undefined)
+              .map((step) => `${workflow.id}/${step.id}`)
+          : [],
+      );
+
+      expect(unsatisfied).toEqual([]);
+    },
+  );
+
   it("assigns gate contracts and validates links only to compatible verifier assets", () => {
     const operations = readFileSync(
       resolve(repositoryRoot, "packages/research-profile/koni/baseline/operations/research.yaml"),
@@ -33,7 +83,7 @@ describe("profile package manifests", () => {
       "coding",
       "packages/coding-profile/koni/profile-manifest.json",
       "packages/coding-profile/koni/baseline",
-      "sha256:30085a75f94a4b3026929ce591180ca9f6352c6a4251a3af4a200c6e315f5180",
+      "sha256:02f8d8dccb1d0ef5ff68b95187f78e8a1e6d28ffeeab6d50e33eb76b96c737ac",
       27,
     ],
     [

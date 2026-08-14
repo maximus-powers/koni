@@ -124,6 +124,7 @@ workflows:
     - baseline-proof-set
     required_receipts:
     - proof_baseline_set
+    validation_action: compile-ticket
   - id: review
     kind: review
     agent: reviewer

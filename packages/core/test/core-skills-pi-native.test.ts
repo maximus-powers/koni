@@ -96,6 +96,12 @@ describe("Koni's Pi-native skills", () => {
     expect(normalized).toContain(
       "Reserve upstream change control for authority that the complete current workflow cannot satisfy",
     );
+    expect(normalized).toContain(
+      "Every workflow step whose operation exposes an upstream-change terminal branch must select a compiler-owned validation action",
+    );
+    expect(normalized).toContain(
+      "The settled source action is proposal-publication authority, not optional extra validation",
+    );
   });
 
   it("teaches reviewers to close the current bounded finding frontier before rework", async () => {
