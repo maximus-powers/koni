@@ -11,10 +11,13 @@ import {
   authorityRevisionStateHash,
   executionActionBoundaryLifecycleIsCurrent,
   inheritedRepositoryDiscoveryCalls,
+  providerErrorRecoveryClass,
+  providerExposureRecoveryPolicy,
   isProviderRateLimitErrorMessage,
   planningRevisionTokenUsage,
   providerRecoveryEpochAttempts,
   providerRateLimitRecoveryDelayMs,
+  providerZeroUsageTransportRecoveryDelayMs,
   recoverablePlanningTerminalAuthority,
   RunAuthorityEngine,
   type RunCompilerProgram,
@@ -200,6 +203,57 @@ describe("run authority provider reservation lifecycle", () => {
     expect([0, 1, 2, 3, 4, 12].map(providerRateLimitRecoveryDelayMs)).toEqual([
       60_000, 120_000, 240_000, 480_000, 900_000, 900_000,
     ]);
+  });
+
+  it("gives canonical zero-usage transport errors a delayed recovery tier", () => {
+    expect(
+      providerErrorRecoveryClass({
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: "fetch failed",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+        },
+      }),
+    ).toBe("zero_usage_transport");
+    expect(
+      providerErrorRecoveryClass({
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "partial work" }],
+        stopReason: "error",
+        errorMessage: "fetch failed",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+        },
+      }),
+    ).toBe("generic");
+    expect([0, 1, 2, 3, 8].map(providerZeroUsageTransportRecoveryDelayMs)).toEqual([
+      30_000, 60_000, 120_000, 240_000, 300_000,
+    ]);
+    expect(providerExposureRecoveryPolicy(["generic"], 2)).toEqual({ recoveryLimit: 3 });
+    expect(providerExposureRecoveryPolicy(["zero_usage_transport"], 2)).toEqual({
+      recoveryLimit: 6,
+    });
+    expect(providerExposureRecoveryPolicy(["zero_usage_transport"], 3)).toEqual({
+      recoveryLimit: 6,
+      delayMs: 30_000,
+    });
+    expect(providerExposureRecoveryPolicy(["rate_limit"], 1)).toEqual({
+      recoveryLimit: 12,
+      delayMs: 120_000,
+    });
+    expect(providerExposureRecoveryPolicy(["generic", "zero_usage_transport"], 3)).toEqual({
+      recoveryLimit: 3,
+    });
   });
 
   it("does not let a failed provider hold reset its own bounded recovery epoch", () => {

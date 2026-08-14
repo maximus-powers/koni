@@ -324,6 +324,14 @@ const MAX_PROVIDER_EXPOSURE_AUTO_RECOVERIES = 3;
 const MAX_PROVIDER_RATE_LIMIT_AUTO_RECOVERIES = 12;
 const MIN_PROVIDER_RATE_LIMIT_RECOVERY_DELAY_MS = 60_000;
 const MAX_PROVIDER_RATE_LIMIT_RECOVERY_DELAY_MS = 15 * 60_000;
+// A canonical provider error with an empty assistant payload and exact zero reported usage proves
+// that no model work survived in the authenticated transcript. Give this narrower, effect-free
+// failure a second bounded tier after the ordinary three immediate recoveries, spaced so a short
+// upstream network outage cannot burn the whole allowance in one burst. Retirement still retains
+// the request's conservative exposure bound; this changes retry timing, never accounting.
+const MAX_PROVIDER_ZERO_USAGE_TRANSPORT_AUTO_RECOVERIES = 6;
+const MIN_PROVIDER_ZERO_USAGE_TRANSPORT_RECOVERY_DELAY_MS = 30_000;
+const MAX_PROVIDER_ZERO_USAGE_TRANSPORT_RECOVERY_DELAY_MS = 5 * 60_000;
 // A provider admission rejection occurs before a canonical assistant turn exists. Re-drive it
 // from a fresh contained root, bounded just like provider-exposure recovery, so an oversized
 // inherited transcript never turns into an operator-only retry loop.
@@ -12557,13 +12565,13 @@ export class RunAuthorityEngine {
     Array<{
       attemptId: string;
       retirement: NonNullable<AgentProviderRequestRecord["retirement"]>;
-      rateLimited: boolean;
+      recoveryClass: ProviderErrorRecoveryClass;
     }>
   > {
     const retirements: Array<{
       attemptId: string;
       retirement: NonNullable<AgentProviderRequestRecord["retirement"]>;
-      rateLimited: boolean;
+      recoveryClass: ProviderErrorRecoveryClass;
     }> = [];
     for (const attempt of Object.values(run.attempts)) {
       if (!isProviderPredecessor(attempt.status) || !hasUnsettledProviderRequest(attempt)) continue;
@@ -12591,9 +12599,10 @@ export class RunAuthorityEngine {
         retirements.push({
           attemptId: attempt.id,
           retirement,
-          rateLimited:
-            retirement.disposition === "operator_acknowledged_provider_error" &&
-            (await attemptHasCanonicalProviderRateLimitError(spec, run, attempt)),
+          recoveryClass:
+            retirement.disposition === "operator_acknowledged_provider_error"
+              ? await attemptCanonicalProviderErrorRecoveryClass(spec, run, attempt)
+              : "generic",
         });
       }
     }
@@ -19748,18 +19757,19 @@ export class RunAuthorityEngine {
       return;
     }
     this.#clearProviderTerminalPropagationProbe(runId);
-    const rateLimited = autoRetireable.some((candidate) => candidate.rateLimited);
-    const recoveryLimit = rateLimited
-      ? MAX_PROVIDER_RATE_LIMIT_AUTO_RECOVERIES
-      : MAX_PROVIDER_EXPOSURE_AUTO_RECOVERIES;
-    if (rateLimited && alreadyRetired < recoveryLimit) {
+    const recoveryPolicy = providerExposureRecoveryPolicy(
+      autoRetireable.map((candidate) => candidate.recoveryClass),
+      alreadyRetired,
+    );
+    const recoveryLimit = recoveryPolicy.recoveryLimit;
+    if (recoveryPolicy.delayMs !== undefined && alreadyRetired < recoveryLimit) {
       const reservedAtMs = Math.max(
         ...autoRetireable.map((candidate) => {
           const request = observed.attempts[candidate.attemptId]?.authorityProviderRequests?.at(-1);
           return Date.parse(request?.reservedAt ?? "");
         }),
       );
-      const delayMs = providerRateLimitRecoveryDelayMs(alreadyRetired);
+      const delayMs = recoveryPolicy.delayMs;
       const remainingMs = Number.isFinite(reservedAtMs)
         ? reservedAtMs + delayMs - this.#now().getTime()
         : delayMs;
@@ -23372,19 +23382,87 @@ export function providerRateLimitRecoveryDelayMs(consecutiveRecoveries: number):
   );
 }
 
-async function attemptHasCanonicalProviderRateLimitError(
+export type ProviderErrorRecoveryClass = "generic" | "rate_limit" | "zero_usage_transport";
+
+export function providerErrorRecoveryClass(value: unknown): ProviderErrorRecoveryClass {
+  if (!isRecord(value) || value.role !== "assistant" || value.stopReason !== "error") {
+    return "generic";
+  }
+  if (
+    typeof value.errorMessage === "string" &&
+    isProviderRateLimitErrorMessage(value.errorMessage)
+  ) {
+    return "rate_limit";
+  }
+  const usage = value.usage;
+  if (
+    typeof value.errorMessage === "string" &&
+    value.errorMessage.trim().length > 0 &&
+    Array.isArray(value.content) &&
+    value.content.length === 0 &&
+    isRecord(usage) &&
+    usage.input === 0 &&
+    usage.output === 0 &&
+    usage.cacheRead === 0 &&
+    usage.cacheWrite === 0
+  ) {
+    return "zero_usage_transport";
+  }
+  return "generic";
+}
+
+export function providerZeroUsageTransportRecoveryDelayMs(
+  consecutiveExtendedRecoveries: number,
+): number {
+  const exponent = Number.isSafeInteger(consecutiveExtendedRecoveries)
+    ? Math.max(0, Math.min(30, consecutiveExtendedRecoveries))
+    : 0;
+  return Math.min(
+    MAX_PROVIDER_ZERO_USAGE_TRANSPORT_RECOVERY_DELAY_MS,
+    MIN_PROVIDER_ZERO_USAGE_TRANSPORT_RECOVERY_DELAY_MS * 2 ** exponent,
+  );
+}
+
+export function providerExposureRecoveryPolicy(
+  recoveryClasses: readonly ProviderErrorRecoveryClass[],
+  alreadyRetired: number,
+): { recoveryLimit: number; delayMs?: number } {
+  const rateLimited = recoveryClasses.some((value) => value === "rate_limit");
+  if (rateLimited) {
+    return {
+      recoveryLimit: MAX_PROVIDER_RATE_LIMIT_AUTO_RECOVERIES,
+      delayMs: providerRateLimitRecoveryDelayMs(alreadyRetired),
+    };
+  }
+  const zeroUsageTransport =
+    recoveryClasses.length > 0 &&
+    recoveryClasses.every((value) => value === "zero_usage_transport");
+  if (!zeroUsageTransport) return { recoveryLimit: MAX_PROVIDER_EXPOSURE_AUTO_RECOVERIES };
+  return {
+    recoveryLimit: MAX_PROVIDER_ZERO_USAGE_TRANSPORT_AUTO_RECOVERIES,
+    ...(alreadyRetired < MAX_PROVIDER_EXPOSURE_AUTO_RECOVERIES
+      ? {}
+      : {
+          delayMs: providerZeroUsageTransportRecoveryDelayMs(
+            alreadyRetired - MAX_PROVIDER_EXPOSURE_AUTO_RECOVERIES,
+          ),
+        }),
+  };
+}
+
+async function attemptCanonicalProviderErrorRecoveryClass(
   spec: Readonly<AgentLaunchSpec>,
   run: Readonly<RunRecord>,
   attempt: Readonly<AgentAttemptRecord>,
-): Promise<boolean> {
+): Promise<ProviderErrorRecoveryClass> {
   const baselineEntryId = attempt.authorityProviderRequests?.at(-1)?.baselineEntryId;
-  if (baselineEntryId === undefined) return false;
+  if (baselineEntryId === undefined) return "generic";
   try {
     const transcript = await readDurableAttemptTranscript(spec, run, attempt, {
       allowCommittedResponseTail: true,
     });
     const baselineIndex = transcript.entries.findIndex((entry) => entry.id === baselineEntryId);
-    if (baselineIndex < 0) return false;
+    if (baselineIndex < 0) return "generic";
     const assistant = transcript.entries
       .slice(baselineIndex + 1)
       .filter(
@@ -23392,15 +23470,9 @@ async function attemptHasCanonicalProviderRateLimitError(
           entry.type === "message" && isRecord(entry.message) && entry.message.role === "assistant",
       )
       .at(-1);
-    const message = assistant?.message;
-    return (
-      isRecord(message) &&
-      message.stopReason === "error" &&
-      typeof message.errorMessage === "string" &&
-      isProviderRateLimitErrorMessage(message.errorMessage)
-    );
+    return providerErrorRecoveryClass(assistant?.message);
   } catch {
-    return false;
+    return "generic";
   }
 }
 
