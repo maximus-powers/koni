@@ -29,6 +29,11 @@ instructions: |
   redundant merely because a completed or cancelled ticket overlaps its target
   or scope. All existing plan, dependency, evidence, interaction, reachability,
   and safety criteria still apply.
+  Judge a queued recovery or repair ticket from its own current objective,
+  dependencies, scope, and compiler-issued creation authority. A blocked source
+  is the input to that closure path; it does not prove the current recovery or
+  repair ticket is itself unreachable. Require the current ticket's authority
+  to address the blocker, and keep unrelated safety criteria intact.
   When the supplied facts leave dispatchability uncertain, include it in the safety
   judgment; do not claim knowledge of the scheduler's exact admission set.
 

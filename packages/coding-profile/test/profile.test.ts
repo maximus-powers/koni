@@ -343,6 +343,12 @@ describe("coding profile registrar", () => {
       "All existing plan, dependency, evidence, interaction, reachability, and safety criteria still apply",
     );
     expect(normalized).toContain(
+      "Judge a queued recovery or repair ticket from its own current objective, dependencies, scope, and compiler-issued creation authority",
+    );
+    expect(normalized).toContain(
+      "A blocked source is the input to that closure path; it does not prove the current recovery or repair ticket is itself unreachable",
+    );
+    expect(normalized).toContain(
       "Treat a ticket in `review` whose required steps are completed and whose supplied review has no blocker as a compiler-managed publication frontier",
     );
     expect(normalized).toContain(
@@ -411,6 +417,9 @@ describe("coding profile registrar", () => {
     );
     expect(normalizedAgentsReference).toContain(
       "If this comparison proof is absent, keep every other safety criterion and have the persona preserve residual uncertainty in its summary instead of manufacturing a conflict",
+    );
+    expect(normalizedAgentsReference).toContain(
+      "Judge a current queued recovery or repair ticket from its own supplied objective, dependencies, scope, and compiler-issued creation authority",
     );
   });
 

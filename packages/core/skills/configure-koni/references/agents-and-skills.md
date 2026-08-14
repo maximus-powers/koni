@@ -54,6 +54,11 @@ projects a later bounded repair, recheck, or recurring obligation. Preserve ever
 dependency, evidence, interaction, reachability, and safety criterion; only historical overlap is
 insufficient by itself to establish a blocker.
 
+Judge a current queued recovery or repair ticket from its own supplied objective, dependencies,
+scope, and compiler-issued creation authority. A blocked source is the input to that closure path;
+it does not establish that the current recovery or repair ticket is unreachable. Require the
+current ticket's authority to address the blocker, and preserve unrelated safety criteria.
+
 A qualitative gate must not turn conservative, reversible uncertainty into an operator confirmation.
 When authoritative plan and ticket facts already support a safe bounded interpretation for current
 work, and every unresolved downstream effect remains behind its existing gate, configure the persona

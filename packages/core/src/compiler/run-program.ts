@@ -7314,6 +7314,7 @@ function leadJudgmentAttempt(
         : "Judge the supplied compiler deadlock once; do not schedule, retry, poll, or mutate work.",
       "For dependency readiness, use the compiler-projected ticketBoard fields: only waitingOnDependencyIds establishes a current dependency wait; settledDependencyIds remains causal history and does not require a completed ticket status.",
       "When ticketBoard.scope.newNodeAuthority is present, it is compiler-issued creation authority distinct from existing-node write IDs. A missing node of a listed type is not by itself an authority gap; the eventual assignment remains constrained by its exact step and mutation contract.",
+      "Judge a queued recovery or repair ticket from its own current objective, dependencies, and authority. A blocked source is the input to that closure path, not proof that the current recovery or repair ticket is unreachable.",
       "Treat each nonterminal ticket in the current ticketBoard as a compiler-derived current obligation. Do not infer that it is stale or redundant merely because a completed or cancelled ticket overlaps its target or scope.",
       `Finish with exactly one ${LEAD_JUDGMENT_OUTPUT_PROTOCOL} output: disposition proceed or blocked, plus a concise summary.`,
     ].join("\n\n"),

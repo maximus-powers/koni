@@ -531,6 +531,12 @@ describe("research profile registrar", () => {
       "All existing plan, dependency, evidence, interaction, reachability, and safety criteria still apply",
     );
     expect(normalized).toContain(
+      "Judge a queued recovery or repair ticket from its own current objective, dependencies, scope, and compiler-issued creation authority",
+    );
+    expect(normalized).toContain(
+      "A blocked source is the input to that closure path; it does not prove the current recovery or repair ticket is itself unreachable",
+    );
+    expect(normalized).toContain(
       "Treat a ticket in `review` whose required steps are completed and whose supplied review has no blocker as a compiler-managed publication frontier",
     );
     expect(normalized).toContain(
@@ -599,6 +605,9 @@ describe("research profile registrar", () => {
     );
     expect(normalizedAgentsReference).toContain(
       "Preserve every existing plan, dependency, evidence, interaction, reachability, and safety criterion",
+    );
+    expect(normalizedAgentsReference).toContain(
+      "Judge a current queued recovery or repair ticket from its own supplied objective, dependencies, scope, and compiler-issued creation authority",
     );
     expect(normalized).not.toContain(
       "when at least one current operation advances an approved path",

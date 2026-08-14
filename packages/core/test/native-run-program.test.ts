@@ -3753,6 +3753,9 @@ describe("native compiler-authoritative run program", () => {
     expect(prepared.spec.persona.initialPrompt).toContain(
       "ticketBoard.scope.newNodeAuthority is present, it is compiler-issued creation authority distinct from existing-node write IDs",
     );
+    expect(prepared.spec.persona.initialPrompt).toContain(
+      "Judge a queued recovery or repair ticket from its own current objective, dependencies, and authority",
+    );
     expect(
       Value.Check(prepared.terminalOutputSchema!, {
         protocol: "koni.lead-judgment-output.v1",
