@@ -184,6 +184,40 @@ describe("research profile registrar", () => {
     expect(reworking.every((workflow) => workflow.review_rework_limit === 2)).toBe(true);
   });
 
+  it("automatically closes its bounded reviewed change-control route", async () => {
+    const [operationsSource, workflowsSource] = await Promise.all([
+      readFile(
+        path.resolve(import.meta.dirname, "../koni/baseline/operations/research.yaml"),
+        "utf8",
+      ),
+      readFile(
+        path.resolve(import.meta.dirname, "../koni/baseline/workflows/research.yaml"),
+        "utf8",
+      ),
+    ]);
+    const operations = YAML.parse(operationsSource) as {
+      operations: Array<{ id: string; change_control?: Record<string, unknown> }>;
+    };
+    const workflows = YAML.parse(workflowsSource) as {
+      workflows: Array<{ id: string; review_rework_limit?: number }>;
+    };
+
+    expect(
+      operations.operations.find(({ id }) => id === "lifecycle.change-request")?.change_control,
+    ).toMatchObject({
+      role: "proposal",
+      proposal_step: "propose-graph-delta",
+      decision_policy: "automatic",
+      application_operations: ["apply-change-request", "no-op"],
+    });
+    expect(workflows.workflows.find(({ id }) => id === "change-request")).toMatchObject({
+      review_rework_limit: 2,
+    });
+    expect(workflows.workflows.find(({ id }) => id === "apply-change-request")).toMatchObject({
+      review_rework_limit: 2,
+    });
+  });
+
   it("exposes an exact provider-version contract for capability-backed assets", async () => {
     const [nodeSource, edgeSource] = await Promise.all([
       readFile(path.resolve(import.meta.dirname, "../koni/baseline/graph/nodes.yaml"), "utf8"),
