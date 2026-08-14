@@ -25,6 +25,7 @@ import {
   resetSettledPreSemanticValidationAssignments,
   resetRetryableConfiguredCheckInfrastructureAssignments,
   resetRetryableInfrastructureAssignment,
+  retireBlockedEntryJudgmentsAfterExecutableAuthorityChange,
   replacementTicketExecutionEpoch,
   shouldRefreshIntegrationCandidateCycle,
   shouldRearmCancelledTerminalResolver,
@@ -3692,6 +3693,38 @@ describe("run authority engine", () => {
     expect(
       shouldRearmCancelledTerminalResolver(run, source, resolver, canonicalHash("other-failure")),
     ).toBe(false);
+
+    const currentGraphHash = canonicalHash("current-graph");
+    const currentRunOid = "current-run-oid";
+    const blockedCurrent = {
+      trigger: "orchestration_entry",
+      disposition: "blocked",
+      graphHash: currentGraphHash,
+      runOid: currentRunOid,
+      attemptId: "lead-blocked-current",
+    };
+    const proceedCurrent = {
+      ...blockedCurrent,
+      disposition: "proceed",
+      attemptId: "lead-proceed-current",
+    };
+    const blockedHistorical = {
+      ...blockedCurrent,
+      graphHash: canonicalHash("historical-graph"),
+      attemptId: "lead-blocked-historical",
+    };
+    const draft = {
+      graphHash: currentGraphHash,
+      git: { run: { headOid: currentRunOid } },
+      leadJudgments: [blockedCurrent, proceedCurrent, blockedHistorical],
+    } as unknown as RunRecord;
+
+    retireBlockedEntryJudgmentsAfterExecutableAuthorityChange(draft, draft);
+
+    expect(draft.leadJudgments?.map((judgment) => judgment.attemptId)).toEqual([
+      "lead-proceed-current",
+      "lead-blocked-historical",
+    ]);
   });
 
   it("advances to verification when the remaining ticket is terminally cancelled", async () => {

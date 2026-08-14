@@ -1082,6 +1082,24 @@ export function acceptedLeadJudgmentForRun(
   return undefined;
 }
 
+/** Retire only a blocked entry judgment whose missing executable authority was just restored. */
+export function retireBlockedEntryJudgmentsAfterExecutableAuthorityChange(
+  draft: RunRecord,
+  previous: Readonly<RunRecord>,
+): void {
+  const remaining = (draft.leadJudgments ?? []).filter(
+    (judgment) =>
+      !(
+        judgment.trigger === "orchestration_entry" &&
+        judgment.disposition === "blocked" &&
+        judgment.graphHash === previous.graphHash &&
+        judgment.runOid === previous.git.run.headOid
+      ),
+  );
+  if (remaining.length === 0) delete draft.leadJudgments;
+  else draft.leadJudgments = remaining;
+}
+
 function hasExactProposalApprovalInStatuses(
   run: Readonly<RunRecord>,
   statuses: ReadonlySet<TicketRecord["status"]>,
@@ -7812,6 +7830,10 @@ export class RunAuthorityEngine {
               draft.updatedAt,
               currentTicketExecutionEpoch(current, durable!),
             );
+            // Rearming restores the exact executable authority that the prior blocked entry
+            // judgment found absent. The graph and run commit do not change, so retire that
+            // judgment at this typed transition and require a fresh Lead decision.
+            retireBlockedEntryJudgmentsAfterExecutableAuthorityChange(draft, current);
           }
           mutableSource.updatedAt = draft.updatedAt;
           draft.activity.push(
@@ -7991,17 +8013,7 @@ export class RunAuthorityEngine {
       // executable authority is still absent. Approval makes that judgment stale even before the
       // derived application ticket changes the graph hash, so retire only this matching blocked
       // entry disposition and let the scheduler obtain a fresh Lead judgment.
-      const remainingJudgments = (draft.leadJudgments ?? []).filter(
-        (judgment) =>
-          !(
-            judgment.trigger === "orchestration_entry" &&
-            judgment.disposition === "blocked" &&
-            judgment.graphHash === run.graphHash &&
-            judgment.runOid === run.git.run.headOid
-          ),
-      );
-      if (remainingJudgments.length === 0) delete draft.leadJudgments;
-      else draft.leadJudgments = remainingJudgments;
+      retireBlockedEntryJudgmentsAfterExecutableAuthorityChange(draft, run);
     } else if (decision.disposition === "reject") {
       if (decision.transition === undefined) {
         throw new AuthorityRpcError(
@@ -9012,17 +9024,7 @@ export class RunAuthorityEngine {
       // judgment found missing. Retire only that now-stale blocked disposition; the immutable
       // attempt and activity records remain available for diagnosis, and the scheduler will
       // obtain a fresh judgment before issuing work.
-      const remainingJudgments = (draft.leadJudgments ?? []).filter(
-        (judgment) =>
-          !(
-            judgment.trigger === "orchestration_entry" &&
-            judgment.disposition === "blocked" &&
-            judgment.graphHash === run.graphHash &&
-            judgment.runOid === run.git.run.headOid
-          ),
-      );
-      if (remainingJudgments.length === 0) delete draft.leadJudgments;
-      else draft.leadJudgments = remainingJudgments;
+      retireBlockedEntryJudgmentsAfterExecutableAuthorityChange(draft, run);
     }
     if (compatibilityRepair !== undefined) {
       draft.activity.push(...structuredClone(compatibilityRepair.activity ?? []));
