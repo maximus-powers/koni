@@ -78,6 +78,77 @@ describe("Pi provider settlement projection", () => {
     });
   });
 
+  it("settles a completed response before a zero-usage local failure terminal", () => {
+    const completed = assistant({ stopReason: "toolUse", usage: usage() });
+    const toolResult = {
+      type: "message",
+      id: "tool-result",
+      parentId: completed.id,
+      message: { role: "toolResult" },
+    } as PiSessionEntry;
+    const localFailure = assistant({
+      id: "local-failure",
+      parentId: toolResult.id,
+      stopReason: "error",
+      usage: usage({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 }),
+      content: [{ type: "text", text: "" }],
+      errorMessage: "ENOSPC: no space left on device, write",
+    });
+
+    expect(
+      deriveProviderSettlement([baseline(), completed, toolResult, localFailure], "baseline"),
+    ).toEqual({
+      assistantEntryId: completed.id,
+      assistantEntrySha256: canonicalHash(completed),
+      usage: {
+        input: 10,
+        output: 5,
+        cacheRead: 2,
+        cacheWrite: 1,
+        newTokens: 15,
+        allTokens: 18,
+      },
+    });
+  });
+
+  it("rejects two trustworthy assistant responses inside one reservation", () => {
+    const first = assistant({ usage: usage() });
+    const second = assistant({
+      id: "assistant-two",
+      parentId: first.id,
+      usage: usage(),
+    });
+    expect(() => deriveProviderSettlement([baseline(), first, second], "baseline")).toThrow(
+      /multiple assistant turns/u,
+    );
+  });
+
+  it.each([
+    {
+      label: "a provider response identity",
+      responseId: "response-two",
+      usage: usage({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 }),
+    },
+    {
+      label: "nonzero provider usage",
+      usage: usage({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1 }),
+    },
+  ])("does not discard a trailing failure with $label", ({ responseId, usage: terminalUsage }) => {
+    const completed = assistant({ stopReason: "toolUse", usage: usage() });
+    const trailing = assistant({
+      id: "trailing-failure",
+      parentId: completed.id,
+      stopReason: "error",
+      usage: terminalUsage,
+      content: [{ type: "text", text: "" }],
+      errorMessage: "provider failed",
+      ...(responseId === undefined ? {} : { responseId }),
+    });
+    expect(() => deriveProviderSettlement([baseline(), completed, trailing], "baseline")).toThrow(
+      /multiple assistant turns/u,
+    );
+  });
+
   it("treats provider-raw totalTokens as observational when all components are complete", () => {
     expect(
       deriveProviderSettlement(
@@ -215,6 +286,8 @@ function assistant(options: {
   stopReason?: string;
   usage?: Record<string, unknown> | undefined;
   content?: unknown[];
+  errorMessage?: string;
+  responseId?: string;
 }): PiSessionEntry {
   const message: Record<string, unknown> = {
     role: "assistant",
@@ -222,6 +295,8 @@ function assistant(options: {
     stopReason: options.stopReason ?? "stop",
   };
   if (options.usage !== undefined) message.usage = options.usage;
+  if (options.errorMessage !== undefined) message.errorMessage = options.errorMessage;
+  if (options.responseId !== undefined) message.responseId = options.responseId;
   return {
     type: "message",
     id: options.id ?? "assistant-one",

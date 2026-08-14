@@ -213,6 +213,17 @@ export function deriveProviderSettlements(
       const entry = entries[index]!;
       if (!isAssistantEntry(entry)) continue;
       if (assistant !== undefined) {
+        // Pi can append a zero-usage assistant error after a completed tool-use response when a
+        // local tool/result persistence step fails. That terminal is not another provider turn:
+        // no later request was admitted, it has no provider response identity or usage, and it is
+        // the final durable entry. Preserve the completed response as the settlement boundary.
+        if (
+          boundary.nextBaselineEntryId === undefined &&
+          index === nextBaselineIndex &&
+          isTrailingLocalFailureAfterToolUse(assistant, entry)
+        ) {
+          continue;
+        }
         throw new Error(
           "Pi transcript contains multiple assistant turns after one provider reservation",
         );
@@ -243,6 +254,35 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isAssistantEntry(entry: PiSessionEntry): boolean {
   return entry.type === "message" && isRecord(entry.message) && entry.message.role === "assistant";
+}
+
+function isTrailingLocalFailureAfterToolUse(
+  completed: PiSessionEntry,
+  candidate: PiSessionEntry,
+): boolean {
+  const completedMessage = completed.message;
+  const candidateMessage = candidate.message;
+  if (
+    !isRecord(completedMessage) ||
+    completedMessage.stopReason !== "toolUse" ||
+    !isRecord(candidateMessage) ||
+    (candidateMessage.stopReason !== "error" && candidateMessage.stopReason !== "aborted") ||
+    Object.hasOwn(candidateMessage, "responseId") ||
+    typeof candidateMessage.errorMessage !== "string" ||
+    candidateMessage.errorMessage.length === 0 ||
+    !isRecord(candidateMessage.usage)
+  ) {
+    return false;
+  }
+  for (const field of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const) {
+    if (candidateMessage.usage[field] !== 0) return false;
+  }
+  return (
+    Array.isArray(candidateMessage.content) &&
+    candidateMessage.content.every(
+      (item) => isRecord(item) && item.type === "text" && item.text === "",
+    )
+  );
 }
 
 function strictAssistantUsage(entry: PiSessionEntry): KoniAttemptUsage {
