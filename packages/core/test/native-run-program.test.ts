@@ -8693,6 +8693,53 @@ describe("native compiler-authoritative run program", () => {
         }),
       ]),
     });
+    const currentScopedReceipt = run.checks.find(
+      (candidate) => candidate.id === "check-current-scoped-probe",
+    )!;
+    currentScopedReceipt.accepted = false;
+    currentScopedReceipt.passed = false;
+    currentScopedReceipt.summary = "scoped-probe-set produced one current rejected receipt";
+    const rejectedTerminalPolicy = await program.projectAssignmentTerminalPolicy({
+      run,
+      assignment,
+      attemptId: attempt.id,
+    });
+    expect(rejectedTerminalPolicy.retainedReceipts).toEqual([
+      expect.objectContaining({
+        runCheckId: currentScopedReceipt.id,
+        checkId: "scoped-operational-probe",
+        accepted: false,
+        passed: false,
+      }),
+    ]);
+    await expect(
+      program.compileAssignmentTerminalReplay({
+        run,
+        assignment,
+        attemptId: attempt.id,
+        projectionSha256: rejectedTerminalPolicy.sha256,
+        executions: [
+          { checkId: "scoped-probe-set", executions: [] },
+          { checkId: "exact-prerequisite-set", executions: [exactExecution] },
+        ],
+        retainedReceipts: rejectedTerminalPolicy.retainedReceipts,
+      }),
+    ).resolves.toMatchObject({
+      accepted: false,
+      passed: false,
+      terminalSatisfied: false,
+      checks: expect.arrayContaining([
+        expect.objectContaining({
+          checkId: "scoped-probe-set",
+          accepted: false,
+          passed: false,
+          retainedLeafCheckIds: ["scoped-operational-probe"],
+        }),
+      ]),
+    });
+    currentScopedReceipt.accepted = true;
+    currentScopedReceipt.passed = true;
+    currentScopedReceipt.summary = compiledCheck.summary;
     const noGraphChange = await program.compileAssignmentOutput({
       run,
       assignment,

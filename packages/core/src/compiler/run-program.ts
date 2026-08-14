@@ -476,6 +476,8 @@ export interface AssignmentTerminalPolicyRetainedReceipt {
   readonly commandIndex: number;
   readonly checkId: string;
   readonly executionPolicy: CheckExecutionPolicyBinding;
+  readonly accepted: boolean;
+  readonly passed: boolean;
 }
 
 export interface AssignmentTerminalPolicySourceCommand {
@@ -944,6 +946,8 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         ),
       );
       const retainedLeafCheckIds: string[] = [];
+      const retainedLeafAcceptance: boolean[] = [];
+      const retainedLeafPassing: boolean[] = [];
       for (const expected of policy.retainedLeafPolicies) {
         const match = [...selectedReceipts.entries()].find(
           ([key, receipt]) =>
@@ -959,8 +963,14 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         }
         unusedReceiptKeys.delete(match[0]);
         retainedLeafCheckIds.push(expected.checkId);
+        retainedLeafAcceptance.push(match[1].accepted);
+        retainedLeafPassing.push(match[1].passed);
       }
-      let passed = compiled.every((result) => result.passed);
+      const accepted =
+        compiled.every((result) => result.accepted) &&
+        retainedLeafAcceptance.every((value) => value);
+      let passed =
+        compiled.every((result) => result.passed) && retainedLeafPassing.every((value) => value);
       if (policy.resolvedCheck.kind === "graph") {
         passed = await evaluateRequestedGraphCheck(
           pinned.configuration,
@@ -973,7 +983,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       checkResults.push({
         checkId: policy.checkId,
         kind: policy.resolvedCheck.kind,
-        accepted: compiled.every((result) => result.accepted),
+        accepted,
         passed,
         replayedLeafCheckIds: policy.resolvedCheck.commands.map((command) => command.checkId),
         retainedLeafCheckIds,
@@ -12163,8 +12173,10 @@ function assertCurrentAssignmentChecks(
   // true` precisely because a research gate may be `expected_red`, and every gate in an observed
   // run was, yet demanding `passed` here made a correctly-red gate unable to complete its
   // `run-gate` ticket at all — the ticket reissued indefinitely with no route to any other outcome.
-  // Recording a red gate is the research result; treating it as satisfied is a separate question,
-  // and the stricter `passed` requirements guarding receipt retention and replay are left intact.
+  // Recording a red gate is the research result; treating it as satisfied is a separate question.
+  // Terminal replay carries the exact accepted/passed pair forward. Only an exact current
+  // nonpassing occurrence may remain available for an upstream change-control handoff; older
+  // nonpassing occurrences cannot be inherited as fresh evidence.
   const missing = step.validation_checks.filter(
     (checkId) =>
       !(run.checks ?? []).some(
@@ -16450,7 +16462,7 @@ function retainedTerminalReceipts(
       expected.set(`${leaf.checkId}\0${canonicalHash(leaf.executionPolicy)}`, leaf.executionPolicy);
     }
   }
-  const candidates = retainedReceiptsMatching(run, ticketId, expected, undefined);
+  const candidates = retainedReceiptsMatching(run, ticketId, expected, undefined, currentAttemptId);
   const checks = new Map((run.checks ?? []).map((check) => [check.id, check]));
   const selected: AssignmentTerminalPolicyRetainedReceipt[] = [];
   for (const key of [...expected.keys()].sort(compareText)) {
@@ -16479,6 +16491,7 @@ function retainedReceiptsMatching(
   ticketId: string,
   expected: ReadonlyMap<string, CheckExecutionPolicyBinding>,
   stepId: string | undefined,
+  currentAttemptId?: string,
 ): AssignmentTerminalPolicyRetainedReceipt[] {
   const output: AssignmentTerminalPolicyRetainedReceipt[] = [];
   for (const check of run.checks ?? []) {
@@ -16487,8 +16500,10 @@ function retainedReceiptsMatching(
       attempt === undefined ||
       attempt.ticketId !== ticketId ||
       (stepId !== undefined && attempt.stepId !== stepId) ||
-      !check.accepted ||
-      check.passed !== true
+      !(
+        (check.accepted && check.passed === true) ||
+        (check.attemptId === currentAttemptId && check.passed === false)
+      )
     )
       continue;
     for (const [commandIndex, command] of check.commands.entries()) {
@@ -16505,6 +16520,8 @@ function retainedReceiptsMatching(
           commandIndex,
           checkId: command.checkId,
           executionPolicy: structuredClone(policy),
+          accepted: check.accepted,
+          passed: check.passed === true,
         }),
       );
     }

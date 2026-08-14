@@ -722,6 +722,8 @@ export interface RuntimeAssignmentTerminalPolicyRetainedReceipt {
   readonly commandIndex: number;
   readonly checkId: string;
   readonly executionPolicy: CheckExecutionPolicyBinding;
+  readonly accepted: boolean;
+  readonly passed: boolean;
 }
 
 export interface RuntimeAssignmentTerminalPolicySourceCommand {
@@ -14423,7 +14425,7 @@ export class RunAuthorityEngine {
     // keeping graph checks strict. Older compilations predate the field, so fall back to the
     // original conjunction rather than loosening anything for a replay that cannot express it.
     const replaySettles = replay.terminalSatisfied ?? (replay.accepted && replay.passed);
-    if (!replay.accepted || !replaySettles) {
+    if ((!replay.accepted || !replaySettles) && upstreamChangeControl === undefined) {
       throw new AuthorityRpcError(
         "terminal_replay_failed",
         "compiler terminal validation replay did not pass",

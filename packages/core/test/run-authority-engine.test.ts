@@ -12840,8 +12840,10 @@ function semanticDirectReceiptProgram(
       const material = {
         protocol: "koni.assignment-terminal-replay.v1" as const,
         projectionSha256: input.projectionSha256,
-        accepted: true,
-        passed: true,
+        accepted: options.upstreamChangeControl !== true || options.omitUpstreamRequest === true,
+        passed: options.upstreamChangeControl !== true || options.omitUpstreamRequest === true,
+        terminalSatisfied:
+          options.upstreamChangeControl !== true || options.omitUpstreamRequest === true,
         checks: [],
         evidence: {},
       };
