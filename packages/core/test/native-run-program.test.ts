@@ -664,7 +664,7 @@ describe("native compiler-authoritative run program", () => {
     expect(instructions).toContain("predecessor evidence");
     expect(instructions).toContain("outside this ticket's existing authority");
     expect(instructions).toContain("complete bounded desired state");
-    expect(instructions).toContain("exact authored values");
+    expect(instructions).toContain("every exact authored value");
     expect(
       upstreamChangeRequestInstructions({
         role: "ordinary",
