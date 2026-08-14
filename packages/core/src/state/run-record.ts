@@ -1832,6 +1832,15 @@ function proposalReviewExhaustionBinding(
   const failedReviewAttemptId = review?.attemptIds.at(-1);
   const attempt =
     failedReviewAttemptId === undefined ? undefined : run.attempts[failedReviewAttemptId];
+  const failureBindings =
+    failedReviewAttemptId === undefined
+      ? []
+      : Object.values(run.terminalFailureProofs ?? {})
+          .filter((proof) => proof.attemptId === failedReviewAttemptId)
+          .map((proof) => terminalFailureBindingFromProof(run, proposal, proof))
+          .filter((binding): binding is TerminalFailureBindingRecord => binding !== undefined);
+  const failureBinding = failureBindings.length === 1 ? failureBindings[0] : undefined;
+  const configuredValidation = run.behavior !== undefined && review?.validationAction !== undefined;
   const reviewReworkCount = proposal.reviewReworkCount;
   const reviewReworkLimit = proposal.reviewReworkLimit;
   if (
@@ -1847,7 +1856,10 @@ function proposalReviewExhaustionBinding(
     attempt?.status !== "completed" ||
     attempt.ticketId !== proposal.id ||
     attempt.stepId !== review.id ||
-    attempt.terminalSummary !== proposal.blocker ||
+    (configuredValidation
+      ? failureBinding?.failureProof.semanticResult.status !== "failed" ||
+        failureBinding.failureProof.semanticResult.blocker !== proposal.blocker
+      : attempt.terminalSummary !== proposal.blocker) ||
     attempt.terminalPolicy === undefined ||
     attempt.terminalOutputSha256 === undefined ||
     attempt.terminalAcceptedAt === undefined ||
@@ -1875,6 +1887,7 @@ function proposalReviewExhaustionBinding(
     terminalPolicySha256: attempt.terminalPolicy.sha256,
     terminalOutputSha256: attempt.terminalOutputSha256,
     terminalAcceptedAt: attempt.terminalAcceptedAt,
+    failureSettlementSha256: failureBinding?.failureSettlementSha256 ?? null,
   };
 }
 

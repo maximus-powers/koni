@@ -144,6 +144,7 @@ import {
   createTerminalFailureSettlementProof,
   createTerminalSuccessSettlementProof,
   currentSourceCorrectionSeed,
+  deriveRunActionExecutionArchive,
   leadJudgmentFrontierSha256,
   sourceCorrectionSeedRoute,
   ticketImmutableProjection,
@@ -2247,6 +2248,8 @@ describe("run authority engine", () => {
     const firstBlocker = "The initial proposal selection still contained one ambiguity.";
     const blocker =
       "The immutable request contains two contradictory exact command arrays; reissue one unambiguous source request.";
+    const finalReviewSummary =
+      "Rejected the selection because its immutable request remains internally inconsistent.";
     const attempt = (
       id: string,
       summary: string,
@@ -2289,7 +2292,11 @@ describe("run authority engine", () => {
     const firstOutputSha256 = rawSha256("first rejected proposal review");
     const failedOutputSha256 = rawSha256("exhausted rejected proposal review");
     previous.attempts[firstAttemptId] = attempt(firstAttemptId, firstBlocker, firstOutputSha256);
-    previous.attempts[failedAttemptId] = attempt(failedAttemptId, blocker, failedOutputSha256);
+    previous.attempts[failedAttemptId] = attempt(
+      failedAttemptId,
+      finalReviewSummary,
+      failedOutputSha256,
+    );
     proposal.status = "blocked";
     proposal.blocker = blocker;
     proposal.updatedAt = previous.updatedAt;
@@ -2460,6 +2467,25 @@ describe("run authority engine", () => {
         : "unreachable",
     );
     assertRunExecutionControlMutation(previous, next);
+
+    const archived = structuredClone(next);
+    const failedReviewAction = Object.values(archived.actionExecutions ?? {}).find(
+      (action) => action.boundary.attemptId === failedAttemptId,
+    )!;
+    const archivedFailure = deriveRunActionExecutionArchive(archived, failedReviewAction);
+    archived.actionExecutionArchive ??= [];
+    archived.actionExecutionArchive.push(archivedFailure.row);
+    delete archived.actionExecutions![failedReviewAction.invocationId];
+    expect(() => assertRunRecord(archived)).not.toThrow();
+
+    const directFallback = structuredClone(previous);
+    delete directFallback.behavior;
+    directFallback.attempts[failedAttemptId]!.terminalSummary = blocker;
+    delete directFallback.actionExecutions;
+    delete directFallback.terminalFailureProofs;
+    expect(
+      routeExhaustedProposalReviewToSource(directFallback, proposal.id, directFallback.updatedAt),
+    ).toBe(true);
 
     const forged = structuredClone(next);
     const forgedProof = forged.tickets[proposal.id]!.executionControl!.proposalReviewExhaustion!;
