@@ -9252,6 +9252,19 @@ describe("native compiler-authoritative run program", () => {
       "Do not select no-op while the approved request remains unsatisfied",
     );
     expect(proposalPrepared.spec.persona.initialPrompt).toContain(
+      `Exact approved upstream request (${upstreamControl.publication.requestSha256}) required state: ${upstreamOutput.upstreamChangeRequest.summary}`,
+    );
+    expect(proposalPrepared.spec.persona.initialPrompt).toContain(
+      `Recorded reason: ${upstreamOutput.upstreamChangeRequest.reason}`,
+    );
+    expect(JSON.parse(proposalPrepared.contextContent ?? "null")).toMatchObject({
+      proposalRequest: {
+        requestSha256: upstreamControl.publication.requestSha256,
+        summary: upstreamOutput.upstreamChangeRequest.summary,
+        reason: upstreamOutput.upstreamChangeRequest.reason,
+      },
+    });
+    expect(proposalPrepared.spec.persona.initialPrompt).toContain(
       'Use changeApplication.operation "apply-change-request"',
     );
     await persistWrites(project.projectRoot, proposalPrepared.artifactWrites ?? []);

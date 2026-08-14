@@ -8428,6 +8428,23 @@ function ticketAttempt(
   const compilerOwnedFields = assignmentCompilerOwnedFields(configuration, definition);
   const predecessorHasCommandEvidence = reviewPredecessorHasCommandEvidence(predecessorExecution);
   const proposalControl = durableTicket?.executionControl;
+  const proposalAuthority = proposalControl?.controlTicketAuthority;
+  const proposalRequestContext =
+    proposalControl?.proposalRequest !== undefined &&
+    proposalAuthority?.role === "proposal" &&
+    proposalAuthority.causal.role === "proposal" &&
+    proposalAuthority.runId === run.id &&
+    proposalAuthority.ticketId === definition.id &&
+    proposalAuthority.causal.publication.requestSha256 ===
+      proposalControl.proposalRequest.requestSha256 &&
+    proposalAuthority.causal.publication.sourceTicketId ===
+      proposalControl.proposalRequest.sourceTicketId &&
+    proposalAuthority.causal.publication.sourceStepId ===
+      proposalControl.proposalRequest.sourceStepId &&
+    proposalAuthority.causal.publication.sourceOutputSha256 ===
+      proposalControl.proposalRequest.sourceOutputSha256
+      ? structuredClone(proposalAuthority.causal.publication)
+      : undefined;
   const proposalApproval =
     proposalControl?.proposalDecision?.decision === "approval" &&
     proposalControl.proposalApprovalSha256 === proposalControl.proposalDecision.sha256
@@ -8624,6 +8641,12 @@ function ticketAttempt(
       ...(proposalApproval === undefined
         ? []
         : [
+            ...(proposalRequestContext === undefined
+              ? []
+              : [
+                  `Exact approved upstream request (${proposalRequestContext.requestSha256}) required state: ${proposalRequestContext.summary}`,
+                  `Recorded reason: ${proposalRequestContext.reason}`,
+                ]),
             `Operator approval (${proposalApproval.approvalSha256}): ${proposalApproval.event.message ?? "Approved."}`,
             ...proposalAuditSteering,
             ...proposalAttemptInstructions,
@@ -8720,6 +8743,7 @@ function ticketAttempt(
         : { compilerReissueDiagnosis: activeCompilerReissueDiagnosis }),
       ...(plannedAssetRepairHistory.length === 0 ? {} : { plannedAssetRepairHistory }),
       ...(proposalApproval === undefined ? {} : { proposalApproval }),
+      ...(proposalRequestContext === undefined ? {} : { proposalRequest: proposalRequestContext }),
       ...(terminalRecoveryContext === undefined
         ? {}
         : { terminalRecovery: terminalRecoveryContext }),
