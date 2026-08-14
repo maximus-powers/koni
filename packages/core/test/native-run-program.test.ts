@@ -9581,6 +9581,64 @@ describe("native compiler-authoritative run program", () => {
         sourceFailureProof,
       }),
     ).resolves.toEqual(resolver);
+    const dependencyDriftRun = structuredClone(run);
+    dependencyDriftRun.tickets[applicationTicket.id]!.dependencyIds = [
+      ...dependencyDriftRun.tickets[applicationTicket.id]!.dependencyIds,
+      "TK-compiler-repair",
+    ];
+    const dependencyDriftReuse = deriveTerminalResolverReconciliation(executionCatalog, {
+      runId: dependencyDriftRun.id,
+      sourceTicketId: applicationTicket.id,
+      sourceBinding: applicationTicket.executionPolicyBinding!,
+      failureBindingSha256,
+      existingResolvers: [
+        {
+          ticketId: resolver!.id,
+          sourceTicketId: applicationTicket.id,
+          resolverOperationId: resolver!.operationId,
+          configurationSha256: dependencyDriftRun.compiledConfigHash,
+          catalogSha256: executionCatalog.sha256,
+          failureBindingSha256s: [failureBindingSha256],
+          terminal: false,
+        },
+      ],
+    });
+    await expect(
+      program.projectTerminalResolverTicket({
+        run: dependencyDriftRun,
+        reconciliation: dependencyDriftReuse,
+        sourceFailureProof,
+      }),
+    ).resolves.toEqual(resolver);
+    const scopeDriftRun = structuredClone(run);
+    scopeDriftRun.tickets[applicationTicket.id]!.readPaths = [
+      ...scopeDriftRun.tickets[applicationTicket.id]!.readPaths,
+      "unauthorized/source-scope",
+    ];
+    const scopeDriftReuse = deriveTerminalResolverReconciliation(executionCatalog, {
+      runId: scopeDriftRun.id,
+      sourceTicketId: applicationTicket.id,
+      sourceBinding: applicationTicket.executionPolicyBinding!,
+      failureBindingSha256,
+      existingResolvers: [
+        {
+          ticketId: resolver!.id,
+          sourceTicketId: applicationTicket.id,
+          resolverOperationId: resolver!.operationId,
+          configurationSha256: scopeDriftRun.compiledConfigHash,
+          catalogSha256: executionCatalog.sha256,
+          failureBindingSha256s: [failureBindingSha256],
+          terminal: false,
+        },
+      ],
+    });
+    await expect(
+      program.projectTerminalResolverTicket({
+        run: scopeDriftRun,
+        reconciliation: scopeDriftReuse,
+        sourceFailureProof,
+      }),
+    ).rejects.toMatchObject({ code: "control_ticket_authority" });
     const suppressed = deriveTerminalResolverReconciliation(executionCatalog, {
       runId: run.id,
       sourceTicketId: resolver!.id,

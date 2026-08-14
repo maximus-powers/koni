@@ -9641,6 +9641,16 @@ function preserveControlTicketCreationAuthority(
       delete reconciliation.sha256;
       (causal as unknown as { reconciliation: Record<string, unknown> }).reconciliation =
         reconciliation;
+      const sourceTicketProjection = {
+        ...causal.sourceTicketProjection,
+        dependencyIds: [],
+      } as Record<string, unknown>;
+      delete sourceTicketProjection.sha256;
+      (
+        causal as unknown as {
+          sourceTicketProjection: Record<string, unknown>;
+        }
+      ).sourceTicketProjection = sourceTicketProjection;
     }
     const authorityMaterial = copy as unknown as Record<string, unknown>;
     delete authorityMaterial.causal;
