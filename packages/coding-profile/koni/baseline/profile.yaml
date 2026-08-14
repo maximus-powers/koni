@@ -2,7 +2,7 @@ schema_version: '3.0'
 engine: '>=0.1,<0.2'
 profile:
   id: software
-  version: 0.8.27
+  version: 0.8.28
   description: Evidence-guided vertical software delivery with risk-adaptive, compiler-current proof
 initialization:
   root_node_type: objective

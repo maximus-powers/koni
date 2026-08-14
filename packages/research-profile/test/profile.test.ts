@@ -28,11 +28,11 @@ describe("research profile registrar", () => {
 
     expect(tokenBudget).toEqual({
       metric: "new_tokens",
-      limit: 160_000,
+      limit: 210_000,
       synthesis_reserve: 120_000,
       on_exhausted: "force_synthesis",
     });
-    expect(tokenBudget.limit - tokenBudget.synthesis_reserve).toBe(40_000);
+    expect(tokenBudget.limit - tokenBudget.synthesis_reserve).toBe(90_000);
   });
 
   it("keeps negative constraints on the operation, resource, or effect they regulate", async () => {

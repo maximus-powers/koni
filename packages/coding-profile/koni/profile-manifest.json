@@ -2,12 +2,12 @@
   "protocol": "koni.profile-package.v1",
   "package": {
     "name": "@koni/coding-profile",
-    "version": "0.8.27"
+    "version": "0.8.28"
   },
   "profile": {
     "id": "software",
     "display_name": "Coding",
-    "version": "0.8.27",
+    "version": "0.8.28",
     "lineage": "koni.software"
   },
   "compatibility": {
@@ -116,7 +116,7 @@
       },
       {
         "path": "profile.yaml",
-        "sha256": "sha256:f768a08f0075429077fe8cbad230547659115bab00292f021d35cf6c5465b09a",
+        "sha256": "sha256:f1fd1d3aebb5d55d75c71cdf1930e48565a9bbfdc7e5753497ee556796470473",
         "size_bytes": 1044,
         "kind": "config"
       },
@@ -158,7 +158,7 @@
       },
       {
         "path": "run-types/medium.yaml",
-        "sha256": "sha256:66cfe53a57c57e7ca97650189aabd48cdc308faf72f7a345ef8546817c4a0609",
+        "sha256": "sha256:f5ea65929124ec9bb5daed177ac26a3edc8a7137f2d32ea1c9d76921792d1c35",
         "size_bytes": 6716,
         "kind": "config"
       },
@@ -194,5 +194,5 @@
       "sha256": "sha256:76557e8ef44078c59656280cc2af17bdfab09797205e04eb35be906cd88b395d"
     }
   ],
-  "bundle_sha256": "sha256:38f5c7cab58be61bf8f2cb5544974e7745ebb2cd779360a24f7dcef09ac7b9bc"
+  "bundle_sha256": "sha256:30c89268997fd721214ba63736ea4979e445880d4c1fde5662f6aefded80967e"
 }
