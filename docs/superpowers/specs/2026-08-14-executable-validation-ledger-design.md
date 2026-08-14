@@ -16,6 +16,13 @@ whose compiled lifecycle can issue a current receipt or to an already-applicable
 Configured checks remain profile-owned; a planning graph patch cannot create or edit them. Narrative
 sections may summarize that authority but may not add another gate.
 
+Small models need the invariant at the terminal boundary as well as in the general modeling method.
+Immediately before submission, the planner scans every full and concise narrative section for
+imperative validation language. Each obligation must identify its exact graph proof or
+already-applicable configured check. An unbound discretionary instruction is deleted or moved to an
+explicit nonbinding proof limit; an unbound mandatory instruction becomes an exact modeling gap.
+Repository custom and familiar quality practices do not create executable authority by themselves.
+
 Useful validation without executable authority has two valid dispositions:
 
 1. Model the smallest graph proof covered by existing configured authority before dependent product
@@ -46,3 +53,4 @@ Compiler, reviewer, and ticket authority remain unchanged.
 - Prose and terminal summaries never substitute for graph proof or configured-check authority.
 - The rule is ecosystem-, language-, command-, and repository-neutral.
 - Existing schema-3 Pi ownership remains unchanged.
+- Terminal serialization cannot reintroduce an unbound gate after the graph ledger is closed.

@@ -290,6 +290,12 @@ describe("Koni's Pi-native skills", () => {
     expect(normalizedSoftwareReference).toContain(
       "A validation required by the intake, objective, repository contract, risk disposition, or approval contract cannot be downgraded",
     );
+    expect(normalizedSoftwareReference).toContain(
+      "At the terminal boundary, perform a literal obligation scan across every narrative section",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "An imperative validation statement must identify the exact graph proof or already-applicable configured check that owns it",
+    );
     expect(normalizedExecutionReference).toContain(
       "A prior failed-review blocker is repair history, not current execution evidence",
     );

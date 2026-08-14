@@ -11,5 +11,8 @@
    either models every mandatory validation as a graph proof covered by already-applicable
    configured authority or reports a modeling gap; only discretionary validation may be marked
    nonbinding. Then observe the complete run through review and closure.
+6. If small-model pressure still serializes a familiar repository command as a mandatory prose-only
+   gate, add a terminal-boundary obligation scan to the planner and shared skill, publish the next
+   Coding patch release, and preserve compiler and reviewer semantics.
 
 Do not modify Core compiler/runtime semantics or weaken reviewer evidence requirements.

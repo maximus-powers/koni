@@ -517,6 +517,12 @@ describe("coding profile registrar", () => {
     expect(normalizedPlanner).toContain(
       "A validation required by the intake, objective, repository contract, risk disposition, or approval contract cannot be downgraded",
     );
+    expect(normalizedPlanner).toContain(
+      "Immediately before calling the terminal tool, scan the complete full and concise artifact for imperative validation language",
+    );
+    expect(normalizedPlanner).toContain(
+      "Repository guidance, familiar quality practice, and a plausible command name do not create validation authority",
+    );
     expect(normalizedSoftwareReference).toContain(
       "Place every repository input relied on by the selected proof in exactly the proof field matching its authority role",
     );
@@ -534,6 +540,12 @@ describe("coding profile registrar", () => {
     );
     expect(normalizedSoftwareReference).toContain(
       "A validation required by the intake, objective, repository contract, risk disposition, or approval contract cannot be downgraded",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "At the terminal boundary, perform a literal obligation scan across every narrative section",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "An imperative validation statement must identify the exact graph proof or already-applicable configured check that owns it",
     );
     expect(normalizedExecutionReference).toContain(
       "Binding prose cannot create validation authority",

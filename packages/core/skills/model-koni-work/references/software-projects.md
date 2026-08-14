@@ -310,6 +310,14 @@ downgraded: model the smallest graph proof covered by existing configured author
 exact modeling gap. Only discretionary validation may be recorded as a nonbinding residual limit
 outside the approval claim. Never imply that a later agent's prose summary will satisfy it.
 
+At the terminal boundary, perform a literal obligation scan across every narrative section in the
+full and concise artifact. An imperative validation statement must identify the exact graph proof or
+already-applicable configured check that owns it. This includes instructions phrased as running,
+checking, verifying, requiring, or completing repository work. Delete an unbound discretionary
+instruction or move it to an explicit nonbinding `not_proven` limit; report a mandatory one as an
+exact modeling gap. Repository guidance, familiar quality practice, and a plausible command name do
+not create validation authority.
+
 Design the proof as executable behavior, not source inspection. Exercise each declared route through
 its production seam, keep the routes independently reachable, and isolate an expected absence so it
 cannot hide setup failure or prevent existing behavior from executing. Accept a historical signal
