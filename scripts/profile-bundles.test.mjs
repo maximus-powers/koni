@@ -12,14 +12,14 @@ const EXPECTATIONS = Object.freeze([
   Object.freeze({
     directory: "coding-profile",
     packageName: "@koni/coding-profile",
-    packageVersion: "0.8.29",
+    packageVersion: "0.8.30",
     profileId: "software",
-    profileVersion: "0.8.29",
+    profileVersion: "0.8.30",
     lineage: "koni.software",
     fileCount: 27,
     kinds: { config: 17, agent: 10, skill: 0, other: 0 },
     // Reviewed in-tree profile baseline.
-    digest: "sha256:058d71d0db00287d3e75fe17e49aaa7624ff378813926c857cf343f8bd9c7242",
+    digest: "sha256:9dc2482e92ad8609e3aceddf6cc5299897a3702696a8afc0a9c4da50c5c45bf4",
     migration: {
       id: "retire-inert-semantics-v1",
       kind: "retire_yaml_fields",

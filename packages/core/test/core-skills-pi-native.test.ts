@@ -278,6 +278,18 @@ describe("Koni's Pi-native skills", () => {
     expect(normalizedSoftwareReference).toContain(
       "Reconcile the closed ledger against the downstream preparation contract before submission",
     );
+    expect(normalizedSoftwareReference).toContain(
+      "Narrative verification may summarize typed proof and check obligations; it cannot add another mandatory gate",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "Configured checks remain profile-owned and cannot be created or edited by a planning graph patch",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "Only discretionary validation may be recorded as a nonbinding residual limit",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "A validation required by the intake, objective, repository contract, risk disposition, or approval contract cannot be downgraded",
+    );
     expect(normalizedExecutionReference).toContain(
       "A prior failed-review blocker is repair history, not current execution evidence",
     );
@@ -292,6 +304,15 @@ describe("Koni's Pi-native skills", () => {
     );
     expect(normalizedExecutionReference).toContain(
       "A route-only synopsis is not a complete change contract",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "Binding prose cannot create validation authority",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "must not add a mandatory check that the compiled successor cannot execute",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "Graph change control cannot create or edit profile-owned configured checks",
     );
     expect(normalizedExecutionReference).toContain(
       "A familiar command name is not evidence that an executable exists",

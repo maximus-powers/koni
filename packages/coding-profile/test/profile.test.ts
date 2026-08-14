@@ -504,6 +504,19 @@ describe("coding profile registrar", () => {
     expect(normalizedPlanner).toContain(
       "Reconcile the closed ledger against the downstream proof-preparation contract before submission",
     );
+    expect(normalizedPlanner).toContain("Close the executable validation ledger before submission");
+    expect(normalizedPlanner).toContain(
+      "Every verification described as required in plan prose, risk treatment, success signals, or approval claims must map to a graph proof whose compiled lifecycle can issue the current receipt or to an already-applicable configured check in the selected workflow",
+    );
+    expect(normalizedPlanner).toContain(
+      "Configured checks remain profile-owned and cannot be created or edited by a planning graph patch",
+    );
+    expect(normalizedPlanner).toContain(
+      "Only discretionary validation may be recorded as a nonbinding residual limit",
+    );
+    expect(normalizedPlanner).toContain(
+      "A validation required by the intake, objective, repository contract, risk disposition, or approval contract cannot be downgraded",
+    );
     expect(normalizedSoftwareReference).toContain(
       "Place every repository input relied on by the selected proof in exactly the proof field matching its authority role",
     );
@@ -512,6 +525,24 @@ describe("coding profile registrar", () => {
     );
     expect(normalizedSoftwareReference).toContain(
       "Proof source or covered product paths never stand in for missing support evidence",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "Narrative verification may summarize typed proof and check obligations; it cannot add another mandatory gate",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "Configured checks remain profile-owned and cannot be created or edited by a planning graph patch",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "A validation required by the intake, objective, repository contract, risk disposition, or approval contract cannot be downgraded",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "Binding prose cannot create validation authority",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "must not add a mandatory check that the compiled successor cannot execute",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "Graph change control cannot create or edit profile-owned configured checks",
     );
     expect(normalizedReviewer).toContain(
       "Treat the current authenticated predecessor execution as the evidence authority for the current review cycle",

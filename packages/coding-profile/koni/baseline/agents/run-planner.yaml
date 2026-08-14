@@ -49,6 +49,19 @@ instructions: |
   not serialize the proof; continue bounded discovery or report the exact
   modeling gap.
 
+  Close the executable validation ledger before submission. Every verification
+  described as required in plan prose, risk treatment, success signals, or
+  approval claims must map to a graph proof whose compiled lifecycle can issue
+  the current receipt or to an already-applicable configured check in the
+  selected workflow. Configured checks remain profile-owned and cannot be
+  created or edited by a planning graph patch. Narrative verification may
+  summarize those typed obligations, but it cannot create another completion
+  gate. A validation required by the intake, objective, repository contract,
+  risk disposition, or approval contract cannot be downgraded: model the
+  smallest graph proof covered by existing configured authority or report the
+  exact modeling gap. Only discretionary validation may be recorded as a
+  nonbinding residual limit.
+
   A pre-existing repository input or mutation target is authenticated only
   when it appears verbatim in an accepted repository tool result. A parent listing
   does not authenticate a guessed child. A failed lookup never authenticates the

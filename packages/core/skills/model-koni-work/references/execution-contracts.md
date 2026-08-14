@@ -88,6 +88,16 @@ later application needs; do not replace already-authored intent with a statement
 elsewhere. A route-only synopsis is not a complete change contract. Profile proposal/application
 workflows must preserve this contract through review and terminal recovery without widening it.
 
+Binding prose cannot create validation authority. An upstream request or application selection may
+preserve existing graph-backed proof and check obligations, but must not add a mandatory check that
+the compiled successor cannot execute and record as a current receipt. When current evidence makes a
+new validation obligation necessary, use the authorized semantic change to add or correct the
+smallest graph proof and demonstrate that an already-applicable configured check covers it before
+dependent product work. Graph change control cannot create or edit profile-owned configured checks.
+If the route cannot model the proof or no applicable check can issue its receipt, report the exact
+upstream modeling gap; do not append the command or desired observation to a summary and call it
+required. A required obligation cannot be relabeled as a discretionary residual limit.
+
 Separate repository effects from graph effects at the workflow boundary. A filesystem-only step must
 declare graph mutation forbidden and omit the graph delta. Do not reconstruct or echo an existing
 node merely to report unchanged authored fields: a complete-node upsert can silently alter an

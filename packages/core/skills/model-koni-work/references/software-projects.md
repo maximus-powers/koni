@@ -299,6 +299,17 @@ name or remembered convention. Reconcile the closed ledger against the downstrea
 contract before submission so planning grants every read-only fact that proof construction and
 review will require.
 
+Close an executable validation ledger across the whole planning artifact before approval. Every
+verification presented as required, a completion gate, a risk treatment, or part of an approval
+claim must resolve to a graph proof whose compiled lifecycle can issue the current receipt or to an
+already-applicable configured check in the selected workflow. Configured checks remain profile-owned
+and cannot be created or edited by a planning graph patch. Narrative verification may summarize
+typed proof and check obligations; it cannot add another mandatory gate. A validation required by
+the intake, objective, repository contract, risk disposition, or approval contract cannot be
+downgraded: model the smallest graph proof covered by existing configured authority or report the
+exact modeling gap. Only discretionary validation may be recorded as a nonbinding residual limit
+outside the approval claim. Never imply that a later agent's prose summary will satisfy it.
+
 Design the proof as executable behavior, not source inspection. Exercise each declared route through
 its production seam, keep the routes independently reachable, and isolate an expected absence so it
 cannot hide setup failure or prevent existing behavior from executing. Accept a historical signal
