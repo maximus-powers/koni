@@ -68,6 +68,28 @@ interface GitRunOptions {
   environment?: Readonly<Record<string, string>>;
 }
 
+const MAX_GIT_ERROR_DETAIL_BYTES = 4 * 1024;
+
+function gitErrorDetail(stderr: string): string {
+  const sanitized = stderr
+    .replace(/[\u0000-\u001f\u007f]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (sanitized.length === 0) return "";
+  if (Buffer.byteLength(sanitized, "utf8") <= MAX_GIT_ERROR_DETAIL_BYTES) return sanitized;
+  const ellipsis = "…";
+  const prefixBudget = MAX_GIT_ERROR_DETAIL_BYTES - Buffer.byteLength(ellipsis, "utf8");
+  let prefix = "";
+  let prefixBytes = 0;
+  for (const character of sanitized) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (prefixBytes + characterBytes > prefixBudget) break;
+    prefix += character;
+    prefixBytes += characterBytes;
+  }
+  return `${prefix.trimEnd()}${ellipsis}`;
+}
+
 export class GitCommandError extends Error {
   public readonly argv: readonly string[];
   public readonly exitCode: number | null;
@@ -80,7 +102,10 @@ export class GitCommandError extends Error {
     stderr: string,
     stdout = "",
   ) {
-    super(`git command failed (${exitCode ?? "signal"}): ${argv.join(" ")}`);
+    const detail = gitErrorDetail(stderr);
+    super(
+      `git command failed (${exitCode ?? "signal"}): ${argv.join(" ")}${detail.length === 0 ? "" : `: ${detail}`}`,
+    );
     this.name = "GitCommandError";
     this.argv = argv;
     this.exitCode = exitCode;

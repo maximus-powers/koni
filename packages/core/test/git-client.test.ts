@@ -24,6 +24,24 @@ async function repository(): Promise<string> {
 }
 
 describe("Git client", () => {
+  it("retains bounded sanitized stderr in command failures", () => {
+    const prefix = "git command failed (128): worktree add /bounded/path: ";
+    const error = new GitCommandError(
+      ["worktree", "add", "/bounded/path"],
+      128,
+      `fatal:\u0000 no space left on device\n${"🧪".repeat(100_000)}`,
+    );
+
+    expect(error.message).toContain("fatal: no space left on device");
+    expect(error.message).not.toMatch(/[\u0000-\u001f\u007f]/u);
+    expect(Buffer.byteLength(error.message, "utf8")).toBeLessThanOrEqual(8 * 1024);
+    expect(Buffer.byteLength(error.message.slice(prefix.length), "utf8")).toBeLessThanOrEqual(
+      4 * 1024,
+    );
+    expect(error.message).toMatch(/…$/u);
+    expect(error.stderr).toContain("\u0000");
+  });
+
   it("discovers the common directory and lists recent local branches", async () => {
     const root = await repository();
     await git(root, "branch", "feature");
