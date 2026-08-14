@@ -27,6 +27,7 @@ import {
   resetRetryableInfrastructureAssignment,
   retireBlockedEntryJudgmentsAfterExecutableAuthorityChange,
   replacementTicketExecutionEpoch,
+  routeExhaustedProposalReviewToSource,
   shouldRefreshIntegrationCandidateCycle,
   shouldRearmCancelledTerminalResolver,
   shouldRetireInapplicableTicket,
@@ -94,7 +95,10 @@ import {
 import { MAX_TRANSACTION_BYTES } from "../src/authority/durable-limits.js";
 import { newRunLifecycle, reduceRunLifecycle } from "../src/state/run-lifecycle.js";
 import { executeActionPlan } from "../src/compiler/action-recipes.js";
-import { NativeRunProgramError } from "../src/compiler/run-program.js";
+import {
+  exhaustedSourceProposalInstructions,
+  NativeRunProgramError,
+} from "../src/compiler/run-program.js";
 import {
   compileExecutionSemanticCatalog,
   type CompiledExecutionSemanticCatalog,
@@ -137,9 +141,11 @@ import {
   assertRunRecord,
   createCompilerControlTicketAuthority,
   createRunActionSettlement,
+  createTerminalFailureSettlementProof,
   createTerminalSuccessSettlementProof,
   currentSourceCorrectionSeed,
   leadJudgmentFrontierSha256,
+  sourceCorrectionSeedRoute,
   ticketImmutableProjection,
 } from "../src/state/run-record.js";
 import { deriveChangeControlPublication } from "../src/state/change-control.js";
@@ -2057,7 +2063,6 @@ describe("run authority engine", () => {
     await waitFor(
       async () => (await engine.store.getRun(runId)).lifecycle.phase === "awaiting_approval",
     );
-
     const current = await engine.store.getRun(runId);
     const draft = structuredClone(current);
     draft.revision += 1;
@@ -2139,6 +2144,387 @@ describe("run authority engine", () => {
     });
     expect(admitted.session.spec.identity.runId).toBe(runId);
     client.close();
+  }, 30_000);
+
+  it("returns an exhausted proposal review to its exact source correction lifecycle", async () => {
+    const root = await repository();
+    const direct = directApprovalProgram({ autoStart: false });
+    const program: RunCompilerProgram = {
+      ...direct,
+      async resolveRun(request) {
+        const resolved = await direct.resolveRun(request);
+        const actionMaterial = {
+          protocol: resolved.behavior.actions.protocol,
+          actions: resolved.behavior.actions.actions,
+          aliases: {
+            ...resolved.behavior.actions.aliases,
+            "review-result": "compile",
+          },
+        };
+        const actions = { ...actionMaterial, sha256: canonicalHash(actionMaterial) };
+        return {
+          ...resolved,
+          behavior: behaviorSnapshotWithPipeline(
+            resolved.behavior,
+            resolved.behavior.runType.pipeline,
+            actions,
+          ),
+        };
+      },
+    };
+    let engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const created = await client.request(
+      "run.create",
+      {
+        objective: "Return a contradictory proposal to its source without operator repair",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Return a contradictory proposal to its source" },
+      },
+      { expectedRevision: 0, idempotencyKey: "create-exhausted-proposal-review" },
+    );
+    const runId = (created.result as { runId: string }).runId;
+    await waitFor(
+      async () => (await engine.store.getRun(runId)).lifecycle.phase === "awaiting_approval",
+    );
+    await client.request("authority.ping");
+    await client.request(
+      "plan.approve",
+      { runId },
+      {
+        expectedRevision: client.revision,
+        idempotencyKey: "approve-exhausted-proposal-review",
+      },
+    );
+    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "paused");
+
+    const current = await engine.store.getRun(runId);
+    const previous = structuredClone(current);
+    previous.revision += 1;
+    previous.updatedAt = "2026-08-14T17:00:00.000Z";
+    const proposal = await addCanonicalProposalFixture(previous, {
+      fulfillment: "dynamic_scope_change",
+      decisionPolicy: "automatic",
+      sourceWritePaths: ["src"],
+    });
+    const source = previous.tickets[proposal.executionControl!.proposalRequest!.sourceTicketId]!;
+    const approvalMaterial = {
+      protocol: "koni.proposal-decision-authority.v3" as const,
+      runId: previous.id,
+      proposalTicketId: proposal.id,
+      requestSha256: proposal.executionControl!.proposalRequest!.requestSha256,
+      eventId: "proposal-policy-decision-exhausted-review",
+      decision: "approval" as const,
+      actor: "profile_policy" as const,
+      policyAuthoritySha256: proposal.executionControl!.controlTicketAuthority!.sha256,
+      message: "Automatically approved by the authenticated profile policy",
+      recordedAt: previous.updatedAt,
+    };
+    const approval = { ...approvalMaterial, sha256: canonicalHash(approvalMaterial) };
+    proposal.executionControl!.proposalDecision = approval;
+    proposal.executionControl!.proposalDecisionHistory = [approval];
+    proposal.executionControl!.proposalApprovalSha256 = approval.sha256;
+    proposal.executionControl!.proposalDisposition = {
+      kind: "approved",
+      authoritySha256: approval.sha256,
+    };
+    const review = proposal.steps.find((step) => step.kind === "review")!;
+    const prepare = proposal.steps.find((step) => step.id !== review.id)!;
+    const firstAttemptId = "attempt-proposal-review-one";
+    const failedAttemptId = "attempt-proposal-review-two";
+    const firstBlocker = "The initial proposal selection still contained one ambiguity.";
+    const blocker =
+      "The immutable request contains two contradictory exact command arrays; reissue one unambiguous source request.";
+    const attempt = (
+      id: string,
+      summary: string,
+      outputSha256: Sha256Digest,
+    ): AgentAttemptRecord => {
+      const terminalPolicyMaterial = {
+        protocol: "koni.agent-terminal-policy.v1" as const,
+        mode: "failed_submission" as const,
+        acceptedAt: previous.updatedAt,
+      };
+      return {
+        id,
+        sessionId: `session-${id}`,
+        sessionFile: undefined,
+        ticketId: proposal.id,
+        stepId: review.id,
+        personaId: review.personaId,
+        modelProvider: "fixture",
+        modelId: "fixture-model",
+        thinkingLevel: "off",
+        status: "completed",
+        launchSpecHash: rawSha256(`launch-${id}`),
+        startedAt: previous.updatedAt,
+        endedAt: previous.updatedAt,
+        terminalSummary: summary,
+        terminalOutputSha256: outputSha256,
+        terminalOutputSizeBytes: 64,
+        terminalAcceptedAt: previous.updatedAt,
+        terminalPolicy: {
+          ...terminalPolicyMaterial,
+          sha256: canonicalHash(terminalPolicyMaterial),
+        },
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        kind: "ticket",
+      };
+    };
+    const firstOutputSha256 = rawSha256("first rejected proposal review");
+    const failedOutputSha256 = rawSha256("exhausted rejected proposal review");
+    previous.attempts[firstAttemptId] = attempt(firstAttemptId, firstBlocker, firstOutputSha256);
+    previous.attempts[failedAttemptId] = attempt(failedAttemptId, blocker, failedOutputSha256);
+    proposal.status = "blocked";
+    proposal.blocker = blocker;
+    proposal.updatedAt = previous.updatedAt;
+    proposal.reviewReworkLimit = 1;
+    proposal.reviewReworkCount = 1;
+    proposal.reviewReworks = [
+      {
+        ordinal: 1,
+        mode: "automatic",
+        failedReviewAttemptId: firstAttemptId,
+        reopenFromStepId: prepare.id,
+        blocker: firstBlocker,
+        failureTerminalOutputSha256: firstOutputSha256,
+        openedAt: previous.updatedAt,
+      },
+    ];
+    prepare.status = "completed";
+    prepare.completedAt = previous.updatedAt;
+    review.status = "failed";
+    review.attemptIds = [firstAttemptId, failedAttemptId];
+    review.completedAt = previous.updatedAt;
+    const bindFailedReviewAction = async (attemptId: string, summary: string) => {
+      const preparedAction = prepareRunActionExecution(previous, {
+        kind: "assignment_validation",
+        stageId: previous.currentPipelineStageId ?? "orchestration",
+        selector: review.validationAction!,
+        checkout: "none",
+        ticketId: proposal.id,
+        ticketState: "running",
+        stepId: review.id,
+        attemptId,
+        at: previous.updatedAt,
+      });
+      const effects: RunActionExecutionRecord["effects"] = {};
+      const journal = await executeActionPlan(preparedAction.plan, {
+        execute: async (input) => {
+          const output = { valid: true };
+          effects[input.effectKey] = createRunActionEffectReceipt(
+            input,
+            output,
+            previous.updatedAt,
+          );
+          return output;
+        },
+      });
+      const action: RunActionExecutionRecord = {
+        ...structuredClone(preparedAction),
+        journal,
+        effects,
+        semanticResult: { kind: "assignment", status: "failed", blocker: summary },
+        updatedAt: previous.updatedAt,
+      };
+      action.settlement = createRunActionSettlement(
+        action,
+        "failed",
+        "proposal review rejected the request",
+        previous.updatedAt,
+      );
+      action.settledAt = action.settlement.settledAt;
+      previous.actionExecutions ??= {};
+      previous.actionExecutions[action.invocationId] = action;
+      const proof = createTerminalFailureSettlementProof(previous, action);
+      if (proof === undefined) throw new Error("proposal review fixture lacks failure proof");
+      previous.terminalFailureProofs ??= {};
+      previous.terminalFailureProofs[proof.sha256] = proof;
+      return proof;
+    };
+    const firstFailureProof = await bindFailedReviewAction(firstAttemptId, firstBlocker);
+    await bindFailedReviewAction(failedAttemptId, blocker);
+    proposal.reviewReworks[0]!.failureProofSha256 = firstFailureProof.sha256;
+
+    previous.lifecycle = reduceRunLifecycle(previous.lifecycle, {
+      type: "resume_requested",
+      atMs: Date.parse(previous.updatedAt),
+    }).state;
+    previous.lifecycle = reduceRunLifecycle(previous.lifecycle, {
+      type: "blocked",
+      atMs: Date.parse(previous.updatedAt) + 1,
+      reason: blocker,
+      remedy: "change_request",
+    }).state;
+    previous.currentPipelineStageId = previous.behavior!.runType.pipeline.find(
+      (stage) => stage.kind === "orchestration",
+    )!.id;
+
+    const request = proposal.executionControl!.proposalRequest!;
+    const cycleId = "cycle-exhausted-proposal-source";
+    const templateContext = createGitTicketTemplateContext({
+      id: source.id,
+      cycleId,
+      operation: source.operationId,
+      title: source.title,
+    });
+    const branchRef = renderTicketRef(
+      previous.git.policy!,
+      previous.git.runTemplate!,
+      templateContext,
+    );
+    const worktree = path.join(
+      previous.git.namespace.ticketRoot,
+      ...branchRef.slice("refs/heads/".length).split("/"),
+    );
+    const archiveRef = `refs/koni/archive/${runId}/tickets/${source.id}/cycles/${cycleId}/${request.requestSha256.slice("sha256:".length)}`;
+    const candidateWorktree = path.join(root, "fixture-exhausted-proposal-candidate");
+    const candidateBranch = "fixture-exhausted-proposal-candidate";
+    await git(
+      root,
+      "worktree",
+      "add",
+      "-b",
+      candidateBranch,
+      candidateWorktree,
+      previous.git.run.headOid!,
+    );
+    await mkdir(path.join(candidateWorktree, "src"), { recursive: true });
+    await writeFile(path.join(candidateWorktree, "src", "continued.ts"), "candidate request\n");
+    await git(candidateWorktree, "add", "src/continued.ts");
+    await git(candidateWorktree, "commit", "-m", "fixture exhausted proposal candidate");
+    const candidateOid = await gitOutput(candidateWorktree, "rev-parse", "HEAD");
+    await git(root, "update-ref", archiveRef, candidateOid);
+    await git(root, "worktree", "remove", candidateWorktree);
+    await git(root, "branch", "-D", candidateBranch);
+    source.gitCycleId = cycleId;
+    source.worktreePath = worktree;
+    source.branch = branchRef;
+    previous.git.ticketCycles[cycleId] = {
+      cycleId,
+      ticketId: source.id,
+      ordinal: 1,
+      status: "retired",
+      baseRunOid: previous.git.run.headOid!,
+      branchRef,
+      worktree,
+      ticketHeadOid: candidateOid,
+      integratedRunOid: undefined,
+      squashCommitOid: undefined,
+      createdAt: previous.updatedAt,
+      integratedAt: undefined,
+      retiredAt: previous.updatedAt,
+      blocker: undefined,
+      archiveRef,
+      supersessionSha256: request.requestSha256,
+      supersededAt: previous.updatedAt,
+      templateContext,
+    };
+    previous.git.ticketCycleOrder.push(cycleId);
+
+    const next = structuredClone(previous);
+    next.revision += 1;
+    next.updatedAt = "2026-08-14T17:00:01.000Z";
+    expect(routeExhaustedProposalReviewToSource(next, proposal.id, next.updatedAt)).toBe(true);
+    const routedProposal = next.tickets[proposal.id]!;
+    expect(routedProposal).toMatchObject({ status: "cancelled", blocker });
+    expect(routedProposal.executionControl?.proposalDisposition).toEqual({
+      kind: "approved",
+      authoritySha256: approval.sha256,
+    });
+    expect(routedProposal.executionControl?.proposalReviewExhaustion).toMatchObject({
+      failedReviewAttemptId: failedAttemptId,
+    });
+    expect(sourceCorrectionSeedRoute(next, next.tickets[source.id]!, routedProposal)).toBe(
+      "proposal_review_exhausted",
+    );
+    expect(exhaustedSourceProposalInstructions(next, source.id).join("\n")).toContain(blocker);
+    expect(exhaustedSourceProposalInstructions(next, source.id).join("\n")).toContain(
+      routedProposal.executionControl!.controlTicketAuthority!.causal.role === "proposal"
+        ? routedProposal.executionControl!.controlTicketAuthority!.causal.publication.reason
+        : "unreachable",
+    );
+    assertRunExecutionControlMutation(previous, next);
+
+    const forged = structuredClone(next);
+    const forgedProof = forged.tickets[proposal.id]!.executionControl!.proposalReviewExhaustion!;
+    forged.tickets[proposal.id]!.executionControl!.proposalReviewExhaustion = {
+      ...forgedProof,
+      failedReviewAttemptId: firstAttemptId,
+      sha256: rawSha256("forged exhausted proposal review"),
+    };
+    expect(() => assertRunExecutionControlMutation(previous, forged)).toThrow(
+      "proposal review exhaustion",
+    );
+
+    const state = await engine.store.state();
+    await engine.store.commit({
+      expectedRevision: state.revision,
+      runWrites: [{ record: previous, expectedRevision: current.revision }],
+    });
+    client.close();
+    await engine.stop();
+    engines.splice(engines.indexOf(engine), 1);
+    engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.1",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    await waitFor(async () => {
+      const run = await engine.store.getRun(runId);
+      return (
+        run.tickets[source.id]?.executionControl?.sourceCorrectionSeeds?.at(-1)?.route ===
+        "proposal_review_exhausted"
+      );
+    });
+    const recovered = await engine.store.getRun(runId);
+    expect(recovered.tickets[proposal.id]).toMatchObject({
+      status: "cancelled",
+      executionControl: {
+        proposalDisposition: {
+          kind: "approved",
+          authoritySha256: approval.sha256,
+        },
+        proposalReviewExhaustion: { failedReviewAttemptId: failedAttemptId },
+      },
+    });
+    expect(recovered.tickets[source.id]).toMatchObject({
+      status: "queued",
+      executionEpoch: 1,
+      executionControl: {
+        sourceCorrectionSeeds: [
+          expect.objectContaining({
+            route: "proposal_review_exhausted",
+            archivedCycleId: cycleId,
+            requestSha256: request.requestSha256,
+          }),
+        ],
+      },
+    });
+    expect(recovered.activity.map((entry) => entry.message)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Automatically returned malformed change request to its source"),
+        expect.stringContaining("Released source ticket after cancelled"),
+      ]),
+    );
   }, 30_000);
 
   it("routes a compiler-owned planned asset repair before the first Lead judgment can block", async () => {

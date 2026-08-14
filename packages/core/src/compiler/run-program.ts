@@ -7983,6 +7983,51 @@ export function rejectedSourceProposalInstructions(
   ];
 }
 
+function exhaustedSourceProposalContexts(run: Pick<RunRecord, "tickets">, sourceTicketId: string) {
+  return Object.values(run.tickets)
+    .flatMap((ticket) => {
+      const control = ticket.executionControl;
+      const proof = control?.proposalReviewExhaustion;
+      const authority = control?.controlTicketAuthority;
+      const request = control?.proposalRequest;
+      if (
+        proof === undefined ||
+        request?.sourceTicketId !== sourceTicketId ||
+        authority?.role !== "proposal" ||
+        authority.causal.role !== "proposal" ||
+        authority.causal.publication.requestSha256 !== request.requestSha256 ||
+        ticket.blocker === undefined
+      ) {
+        return [];
+      }
+      return [
+        {
+          proposalTicketId: ticket.id,
+          proof: structuredClone(proof),
+          request: structuredClone(authority.causal.publication),
+          blocker: ticket.blocker,
+        },
+      ];
+    })
+    .sort((left, right) => compareText(left.proposalTicketId, right.proposalTicketId));
+}
+
+/** Preserve exact compiler-authenticated proposal-review findings on the reissued source. */
+export function exhaustedSourceProposalInstructions(
+  run: Pick<RunRecord, "tickets">,
+  sourceTicketId: string,
+): string[] {
+  const contexts = exhaustedSourceProposalContexts(run, sourceTicketId);
+  if (contexts.length === 0) return [];
+  return [
+    ...contexts.map(
+      ({ proposalTicketId, proof, request, blocker }) =>
+        `Compiler review exhaustion ${proof.sha256} returned upstream request ${proposalTicketId} (${request.requestSha256}) to this source. Original required state: ${request.summary}\n\nRecorded reason: ${request.reason}\n\nIndependent review blocker: ${blocker}`,
+    ),
+    "Treat each exhausted review as binding corrective evidence for the replacement request. Preserve valid candidate work, correct every named inconsistency in the source-authored request, and do not reissue the same contradictory or incomplete authority.",
+  ];
+}
+
 /** The materialized application inherits every append-only clarification on its source approval. */
 export function approvedApplicationAuditSteering(
   run: Pick<RunRecord, "tickets">,
@@ -8580,6 +8625,8 @@ function ticketAttempt(
     step.id,
   );
   const rejectedSourceProposalPrompts = rejectedSourceProposalInstructions(run, definition.id);
+  const sourceProposalReviewExhaustions = exhaustedSourceProposalContexts(run, definition.id);
+  const exhaustedSourceProposalPrompts = exhaustedSourceProposalInstructions(run, definition.id);
   if (
     executionCatalog.operations[definition.operation_registry_id]?.changeControl.role ===
       "proposal" &&
@@ -8703,6 +8750,7 @@ function ticketAttempt(
         downstreamGraphPublicationStepIds(definition, step),
       ),
       ...rejectedSourceProposalPrompts,
+      ...exhaustedSourceProposalPrompts,
       ...(proposalApproval === undefined
         ? []
         : [
@@ -8807,6 +8855,7 @@ function ticketAttempt(
         ? {}
         : { compilerReissueDiagnosis: activeCompilerReissueDiagnosis }),
       ...(plannedAssetRepairHistory.length === 0 ? {} : { plannedAssetRepairHistory }),
+      ...(sourceProposalReviewExhaustions.length === 0 ? {} : { sourceProposalReviewExhaustions }),
       ...(proposalApproval === undefined ? {} : { proposalApproval }),
       ...(proposalRequestContext === undefined ? {} : { proposalRequest: proposalRequestContext }),
       ...(terminalRecoveryContext === undefined

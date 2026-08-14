@@ -242,6 +242,7 @@ import {
   configuredCheckInfrastructureFailureForAttempt,
   deriveRunActionExecutionArchive,
   deriveRunActionExecutionArchiveSegment,
+  deriveProposalReviewExhaustionAuthority,
   leadJudgmentFrontierSha256,
   leadJudgmentProductSha256,
   MAX_TOKEN_BUDGET_AUTO_RECOVERIES_PER_SLICE,
@@ -1861,6 +1862,7 @@ export class RunAuthorityEngine {
     // bounded ID snapshot, but validate every run against the authority state current at its read.
     const scan = await this.#store.runIdSnapshot();
     for (const runId of scan.runIds) {
+      await this.#autoReturnExhaustedProposalReview(runId);
       const run = await this.#store.getRun(runId);
       if (
         run.lifecycle.phase === "blocked" &&
@@ -1872,6 +1874,58 @@ export class RunAuthorityEngine {
         if (isTokenBudgetFailure(attempt)) await this.#autoRecoverTokenBudget(runId, attempt.id);
       }
     }
+  }
+
+  /** Reopen only the compiler-authenticated malformed-proposal boundary after startup or resume. */
+  async #autoReturnExhaustedProposalReview(runId: string): Promise<void> {
+    let redrive = false;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const current = await this.#store.getRun(runId);
+      if (!new Set<RunPhase>(["blocked", "executing"]).has(current.lifecycle.phase)) {
+        return this.#noOpInternal(revision);
+      }
+      const draft = nextRun(current, this.#timestamp());
+      const candidate = Object.values(draft.tickets)
+        .filter((ticket) => ticket.status === "blocked")
+        .sort((left, right) => left.priority - right.priority || left.id.localeCompare(right.id))
+        .find((ticket) => routeExhaustedProposalReviewToSource(draft, ticket.id, draft.updatedAt));
+      if (candidate === undefined) return this.#noOpInternal(revision);
+      if (draft.lifecycle.phase === "blocked") {
+        applyLifecycle(draft, {
+          type: "retry_requested",
+          atMs: this.#now().getTime(),
+          phase: current.lifecycle.resumePhase ?? "executing",
+        });
+      }
+      if (draft.lifecycle.phase !== "executing") return this.#noOpInternal(revision);
+      draft.activity.push(
+        activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "compiler",
+          `Automatically returned malformed change request to its source: ${candidate.title}`,
+          candidate.id,
+          "warning",
+        ),
+      );
+      redrive = true;
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: current.revision }],
+      });
+      return {
+        revision: committed.state.revision,
+        events: [
+          {
+            topic: "proposal.review_exhaustion.returned_to_source",
+            payload: { runId, proposalTicketId: candidate.id },
+          },
+        ],
+      };
+    });
+    if (!redrive) return;
+    this.#supervisor.resumeRun(runId);
+    await this.#tick(runId);
   }
 
   async #recoverConfiguredActions(runId: string): Promise<void> {
@@ -2044,6 +2098,19 @@ export class RunAuthorityEngine {
         ? undefined
         : blockedReviewRetryCandidate(run.tickets[assignment.ticketId]!);
     if (exhaustedReview?.failedReviewAttemptId !== attemptId) return;
+    if (routeExhaustedProposalReviewToSource(run, exhaustedReview.ticketId, run.updatedAt)) {
+      run.activity.push(
+        activity(
+          this.#createId("activity"),
+          run.updatedAt,
+          "compiler",
+          `Returned malformed change request to its source after independent review: ${exhaustedReview.ticketTitle}`,
+          exhaustedReview.ticketId,
+          "warning",
+        ),
+      );
+      return;
+    }
     applyLifecycle(run, {
       type: "blocked",
       atMs: this.#now().getTime(),
@@ -16155,6 +16222,7 @@ export class RunAuthorityEngine {
     const outputBytes = encodeJsonArtifact(outcome.terminalOutput);
     let publishTicket = false;
     let completionCommitted = false;
+    let exhaustedProposalReturned = false;
     let finishDisposition: ReturnType<typeof finishAssignment>["disposition"] | undefined;
     await this.#server.mutateInternal(async ({ revision }) => {
       const current = await this.#store.getRun(runId);
@@ -16244,6 +16312,22 @@ export class RunAuthorityEngine {
           mutableAttempt.terminalOutputSha256,
         );
       }
+      if (
+        finishDisposition === "review_exhausted" &&
+        routeExhaustedProposalReviewToSource(draft, assignment.ticketId, draft.updatedAt)
+      ) {
+        exhaustedProposalReturned = true;
+        draft.activity.push(
+          activity(
+            this.#createId("activity"),
+            draft.updatedAt,
+            "compiler",
+            `Returned malformed change request to its source after independent review: ${draft.tickets[assignment.ticketId]!.title}`,
+            assignment.ticketId,
+            "warning",
+          ),
+        );
+      }
       const changeControlSettlement =
         compiled.outcome.status === "completed"
           ? await this.#applyAssignmentChangeControl(
@@ -16297,6 +16381,10 @@ export class RunAuthorityEngine {
         return;
       }
       if (finishDisposition === "review_exhausted") {
+        if (exhaustedProposalReturned) {
+          await this.#tick(runId);
+          return;
+        }
         await this.#recordRunBlocker(runId, compiled.outcome.blocker);
         return;
       }
@@ -17258,6 +17346,10 @@ export class RunAuthorityEngine {
     }
     const advancement = this.#advancementToken(run, "executing")!;
     if (await this.#rearmSupersededProposals(runId, advancement)) {
+      await this.#tick(runId, advancement);
+      return;
+    }
+    if (await this.#routeExhaustedProposalReviewBeforeLead(runId, advancement)) {
       await this.#tick(runId, advancement);
       return;
     }
@@ -18295,6 +18387,41 @@ export class RunAuthorityEngine {
       return { revision: committed.state.revision };
     });
     return rearmed;
+  }
+
+  /** Return an already-settled malformed proposal to its authenticated source before Lead. */
+  async #routeExhaustedProposalReviewBeforeLead(
+    runId: string,
+    advancement: RunAdvancementToken,
+  ): Promise<boolean> {
+    let routed = false;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const current = await this.#store.getRun(runId);
+      if (!this.#matchesAdvancement(current, advancement)) return this.#noOpInternal(revision);
+      const draft = nextRun(current, this.#timestamp());
+      const candidate = Object.values(draft.tickets)
+        .filter((ticket) => ticket.status === "blocked")
+        .sort((left, right) => left.priority - right.priority || left.id.localeCompare(right.id))
+        .find((ticket) => routeExhaustedProposalReviewToSource(draft, ticket.id, draft.updatedAt));
+      if (candidate === undefined) return this.#noOpInternal(revision);
+      draft.activity.push(
+        activity(
+          this.#createId("activity"),
+          draft.updatedAt,
+          "compiler",
+          `Returned malformed change request to its source after independent review: ${candidate.title}`,
+          candidate.id,
+          "warning",
+        ),
+      );
+      routed = true;
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [{ record: draft, expectedRevision: current.revision }],
+      });
+      return { revision: committed.state.revision };
+    });
+    return routed;
   }
 
   /**
@@ -22172,6 +22299,25 @@ function rejectedSourceReissueCount(
       ticket.executionControl?.proposalRequest?.sourceTicketId === source.id &&
       ticket.executionControl.proposalDisposition?.kind === "rejected",
   ).length;
+}
+
+/**
+ * Convert one exhausted proposal review into a terminal compiler-owned return-to-source marker.
+ * Ordinary tickets deliberately return false and retain the supervised review boundary.
+ */
+export function routeExhaustedProposalReviewToSource(
+  run: RunRecord,
+  proposalTicketId: string,
+  recordedAt: string,
+): boolean {
+  const proposal = run.tickets[proposalTicketId];
+  if (proposal === undefined) return false;
+  const proof = deriveProposalReviewExhaustionAuthority(run, proposal);
+  if (proof === undefined) return false;
+  proposal.executionControl!.proposalReviewExhaustion = proof;
+  proposal.status = "cancelled";
+  proposal.updatedAt = recordedAt;
+  return true;
 }
 
 function sourceCorrectionSeedForRelease(

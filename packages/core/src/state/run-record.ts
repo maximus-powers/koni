@@ -326,7 +326,8 @@ export interface SourceCorrectionSeedAuthority {
   readonly ticketId: string;
   readonly proposalTicketId: string;
   readonly requestSha256: Sha256Digest;
-  readonly route: "planned_asset_repair" | "no_op" | "approved_application";
+  readonly route:
+    "planned_asset_repair" | "proposal_review_exhausted" | "no_op" | "approved_application";
   readonly releaseDecisionSha256: Sha256Digest;
   readonly archivedCycleId: string;
   readonly archiveRef: string;
@@ -337,6 +338,12 @@ export interface SourceCorrectionSeedAuthority {
   readonly priorExecutionEpoch: number;
   readonly nextExecutionEpoch: number;
   readonly recordedAt: string;
+  readonly sha256: Sha256Digest;
+}
+
+export interface ProposalReviewExhaustionAuthority {
+  readonly protocol: "koni.proposal-review-exhaustion.v1";
+  readonly failedReviewAttemptId: string;
   readonly sha256: Sha256Digest;
 }
 
@@ -353,6 +360,8 @@ export interface TicketExecutionControlRecord {
   heldSourceGrantRefreshes?: HeldSourceGrantRefreshAuthority[];
   /** Append-only authority for reusing exact archived bytes in a later correction epoch. */
   sourceCorrectionSeeds?: SourceCorrectionSeedAuthority[];
+  /** Compiler-authenticated exhausted review that returned a malformed proposal to its source. */
+  proposalReviewExhaustion?: ProposalReviewExhaustionAuthority;
   changeControlScopeNodeIds?: string[];
   /** Immutable compiler request that caused this proposal ticket to exist. */
   proposalRequest?: {
@@ -1746,7 +1755,13 @@ export function sourceReleaseDecisionForRun(
 ): SourceReleaseDecision {
   const proposalTerminal = proposal.status === "completed" || proposal.status === "cancelled";
   const disposition = proposal.executionControl?.proposalDisposition;
-  if (proposal.status === "cancelled" && disposition === undefined) {
+  const exhaustedReview = proposal.executionControl?.proposalReviewExhaustion;
+  if (
+    proposal.status === "cancelled" &&
+    (disposition === undefined ||
+      (exhaustedReview !== undefined &&
+        proposalReviewExhaustionMatchesRun(run, proposal, exhaustedReview)))
+  ) {
     return deriveSourceReleaseDecision({
       sourceTicketId: source.id,
       heldByProposalTicketId: proposal.id,
@@ -1806,6 +1821,100 @@ export function sourceReleaseDecisionForRun(
   });
 }
 
+function proposalReviewExhaustionBinding(
+  run: Readonly<RunRecord>,
+  proposal: Readonly<TicketRecord>,
+) {
+  const control = proposal.executionControl;
+  const request = control?.proposalRequest;
+  const authority = control?.controlTicketAuthority;
+  const review = [...proposal.steps].reverse().find((step) => step.kind === "review");
+  const failedReviewAttemptId = review?.attemptIds.at(-1);
+  const attempt =
+    failedReviewAttemptId === undefined ? undefined : run.attempts[failedReviewAttemptId];
+  const reviewReworkCount = proposal.reviewReworkCount;
+  const reviewReworkLimit = proposal.reviewReworkLimit;
+  if (
+    request === undefined ||
+    authority?.role !== "proposal" ||
+    authority.causal.role !== "proposal" ||
+    authority.runId !== run.id ||
+    authority.ticketId !== proposal.id ||
+    authority.causal.publication.requestSha256 !== request.requestSha256 ||
+    authority.causal.publication.sourceTicketId !== request.sourceTicketId ||
+    review?.status !== "failed" ||
+    failedReviewAttemptId === undefined ||
+    attempt?.status !== "completed" ||
+    attempt.ticketId !== proposal.id ||
+    attempt.stepId !== review.id ||
+    attempt.terminalSummary !== proposal.blocker ||
+    attempt.terminalPolicy === undefined ||
+    attempt.terminalOutputSha256 === undefined ||
+    attempt.terminalAcceptedAt === undefined ||
+    reviewReworkCount === undefined ||
+    reviewReworkLimit === undefined ||
+    reviewReworkLimit < 1 ||
+    reviewReworkCount < reviewReworkLimit ||
+    proposal.blocker === undefined ||
+    proposal.blocker.trim().length === 0
+  ) {
+    return undefined;
+  }
+  return {
+    protocol: "koni.proposal-review-exhaustion.v1",
+    runId: run.id,
+    proposalTicketId: proposal.id,
+    requestSha256: request.requestSha256,
+    sourceTicketId: request.sourceTicketId,
+    reviewStepId: review.id,
+    failedReviewAttemptId,
+    reviewReworkCount,
+    reviewReworkLimit,
+    blocker: proposal.blocker,
+    launchSpecHash: attempt.launchSpecHash,
+    terminalPolicySha256: attempt.terminalPolicy.sha256,
+    terminalOutputSha256: attempt.terminalOutputSha256,
+    terminalAcceptedAt: attempt.terminalAcceptedAt,
+  };
+}
+
+export function deriveProposalReviewExhaustionAuthority(
+  run: Readonly<RunRecord>,
+  proposal: Readonly<TicketRecord>,
+): ProposalReviewExhaustionAuthority | undefined {
+  const binding = proposalReviewExhaustionBinding(run, proposal);
+  const request = proposal.executionControl?.proposalRequest;
+  const source = request === undefined ? undefined : run.tickets[request.sourceTicketId];
+  const hold = source?.executionControl?.sourceHold;
+  if (
+    proposal.status !== "blocked" ||
+    binding === undefined ||
+    hold?.proposalTicketId !== proposal.id ||
+    hold.requestSha256 !== request?.requestSha256
+  ) {
+    return undefined;
+  }
+  return {
+    protocol: "koni.proposal-review-exhaustion.v1",
+    failedReviewAttemptId: binding.failedReviewAttemptId,
+    sha256: canonicalHash(binding),
+  };
+}
+
+function proposalReviewExhaustionMatchesRun(
+  run: Readonly<RunRecord>,
+  proposal: Readonly<TicketRecord>,
+  proof: Readonly<ProposalReviewExhaustionAuthority>,
+): boolean {
+  const binding = proposalReviewExhaustionBinding(run, proposal);
+  return (
+    proposal.status === "cancelled" &&
+    binding !== undefined &&
+    binding.failedReviewAttemptId === proof.failedReviewAttemptId &&
+    canonicalHash(binding) === proof.sha256
+  );
+}
+
 export function sourceCorrectionSeedRoute(
   run: Readonly<RunRecord>,
   source: Readonly<TicketRecord>,
@@ -1823,6 +1932,17 @@ export function sourceCorrectionSeedRoute(
     proposal.blocker === COMPILER_ROUTED_TO_PLANNED_ASSET_REPAIR
   ) {
     return "planned_asset_repair";
+  }
+  if (
+    release.reason === "cancelled" &&
+    proposal.executionControl?.proposalReviewExhaustion !== undefined &&
+    proposalReviewExhaustionMatchesRun(
+      run,
+      proposal,
+      proposal.executionControl.proposalReviewExhaustion,
+    )
+  ) {
+    return "proposal_review_exhausted";
   }
   if (release.reason === "no_op") return "no_op";
   if (release.reason === "application_completed") return "approved_application";
@@ -4545,6 +4665,7 @@ function assertSourceCorrectionSeedAuthority(
     !isId(value.proposalTicketId) ||
     !isSha256Digest(value.requestSha256) ||
     (value.route !== "planned_asset_repair" &&
+      value.route !== "proposal_review_exhausted" &&
       value.route !== "no_op" &&
       value.route !== "approved_application") ||
     !isSha256Digest(value.releaseDecisionSha256) ||
@@ -4575,6 +4696,22 @@ function assertSourceCorrectionSeedAuthority(
   }
 }
 
+function assertProposalReviewExhaustionAuthority(
+  ticketId: string,
+  value: unknown,
+): asserts value is ProposalReviewExhaustionAuthority {
+  if (!isRecord(value)) throw new Error(`invalid proposal review exhaustion: ${ticketId}`);
+  const allowed = new Set(["protocol", "failedReviewAttemptId", "sha256"]);
+  if (
+    Object.keys(value).some((field) => !allowed.has(field)) ||
+    value.protocol !== "koni.proposal-review-exhaustion.v1" ||
+    !isId(value.failedReviewAttemptId) ||
+    !isSha256Digest(value.sha256)
+  ) {
+    throw new Error(`invalid proposal review exhaustion: ${ticketId}`);
+  }
+}
+
 function assertTicketExecutionControl(
   ticketId: string,
   value: unknown,
@@ -4587,6 +4724,7 @@ function assertTicketExecutionControl(
     "recurringAssetGrantRefreshes",
     "heldSourceGrantRefreshes",
     "sourceCorrectionSeeds",
+    "proposalReviewExhaustion",
     "changeControlScopeNodeIds",
     "proposalRequest",
     "sourceHold",
@@ -4637,6 +4775,9 @@ function assertTicketExecutionControl(
     for (const seed of value.sourceCorrectionSeeds) {
       assertSourceCorrectionSeedAuthority(ticketId, seed);
     }
+  }
+  if (value.proposalReviewExhaustion !== undefined) {
+    assertProposalReviewExhaustionAuthority(ticketId, value.proposalReviewExhaustion);
   }
   if (value.changeControlScopeNodeIds !== undefined) {
     if (!isStringArray(value.changeControlScopeNodeIds)) {
@@ -5359,6 +5500,14 @@ function assertRunExecutionControlGraph(run: Readonly<RunRecord>): void {
     const control = ticket.executionControl;
     if (control === undefined) continue;
     const request = control.proposalRequest;
+    const proposalReviewExhaustion = control.proposalReviewExhaustion;
+    if (
+      proposalReviewExhaustion !== undefined &&
+      (request === undefined ||
+        !proposalReviewExhaustionMatchesRun(run, ticket, proposalReviewExhaustion))
+    ) {
+      throw new Error(`proposal review exhaustion differs from exact failed review: ${ticket.id}`);
+    }
     if (request !== undefined) {
       for (const decision of control.proposalDecisionHistory ?? []) {
         if (
@@ -7432,6 +7581,40 @@ function compilerCheckProducerIds(run: Readonly<RunRecord>, consumerTicketId: st
     .sort();
 }
 
+function assertProposalReviewExhaustionMutation(
+  previous: Readonly<RunRecord>,
+  next: Readonly<RunRecord>,
+): void {
+  for (const [ticketId, currentTicket] of Object.entries(next.tickets)) {
+    const priorTicket = previous.tickets[ticketId];
+    const priorProof = priorTicket?.executionControl?.proposalReviewExhaustion;
+    const currentProof = currentTicket.executionControl?.proposalReviewExhaustion;
+    if (priorProof !== undefined) {
+      if (currentProof === undefined || canonicalHash(currentProof) !== canonicalHash(priorProof)) {
+        throw new Error(`ticket rewrote proposal review exhaustion authority: ${ticketId}`);
+      }
+      continue;
+    }
+    if (currentProof === undefined || priorTicket === undefined) continue;
+    const expected = deriveProposalReviewExhaustionAuthority(next, priorTicket);
+    const { proposalReviewExhaustion: _currentProof, ...currentControl } =
+      currentTicket.executionControl ?? {};
+    if (
+      expected === undefined ||
+      canonicalHash(expected) !== canonicalHash(currentProof) ||
+      priorTicket.status !== "blocked" ||
+      currentTicket.status !== "cancelled" ||
+      currentTicket.blocker !== priorTicket.blocker ||
+      currentTicket.updatedAt !== next.updatedAt ||
+      ticketImmutableProjection(currentTicket).sha256 !==
+        ticketImmutableProjection(priorTicket).sha256 ||
+      canonicalHash(currentControl) !== canonicalHash(priorTicket.executionControl ?? {})
+    ) {
+      throw new Error(`ticket added unauthenticated proposal review exhaustion: ${ticketId}`);
+    }
+  }
+}
+
 /** Enforce append-only control evidence and immutable cross-ticket identities across one CAS. */
 export function assertRunExecutionControlMutation(
   previous: Readonly<RunRecord>,
@@ -7449,6 +7632,7 @@ export function assertRunExecutionControlMutation(
   assertHeldSourceGrantRefreshMutation(previous, next);
   assertRecurringAssetGrantRefreshMutation(previous, next);
   assertSourceCorrectionSeedMutation(previous, next);
+  assertProposalReviewExhaustionMutation(previous, next);
   assertReviewReworkMutation(previous, next, receipt);
   assertCompilerReissueDiagnosisMutation(previous, next, receipt);
   // This transition guard is an authority boundary in its own right. Validate the successor's
@@ -7952,7 +8136,14 @@ function proposalHasReleasedSourceAuthority(
 ): boolean {
   const disposition = proposal.executionControl?.proposalDisposition;
   const request = proposal.executionControl?.proposalRequest;
-  if (proposal.status === "cancelled" && disposition === undefined && request !== undefined) {
+  const exhaustedReview = proposal.executionControl?.proposalReviewExhaustion;
+  if (
+    proposal.status === "cancelled" &&
+    request !== undefined &&
+    (disposition === undefined ||
+      (exhaustedReview !== undefined &&
+        proposalReviewExhaustionMatchesRun(run, proposal, exhaustedReview)))
+  ) {
     return Object.values(run.git.ticketCycles).some(
       (cycle) =>
         cycle.ticketId === request.sourceTicketId &&
