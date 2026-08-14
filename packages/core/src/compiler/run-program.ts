@@ -12612,9 +12612,12 @@ export function hasExistingAssetImplementationTicket(
 ): boolean {
   return Object.values(run.tickets).some(
     (ticket) =>
-      ticket.status !== "cancelled" &&
       ticket.operationId === operationId &&
-      ticket.targetNodeIds.includes(assetId),
+      ticket.targetNodeIds.includes(assetId) &&
+      (ticket.status !== "cancelled" ||
+        (ticket.blocker === COMPILER_INAPPLICABLE_TICKET &&
+          ticket.steps.length > 0 &&
+          ticket.steps.every((step) => step.status === "skipped"))),
   );
 }
 
@@ -12685,6 +12688,39 @@ async function recurringAssetReissueNodeIds(
       if (node === undefined || manifestDefinition === undefined) {
         reissue.add(nodeId);
         continue;
+      }
+      const implementationPlan = optionalRecord(node.spec.implementation_plan);
+      const implementationRoot = optionalString(implementationPlan?.root);
+      const implementationFiles = Array.isArray(implementationPlan?.files)
+        ? implementationPlan.files.filter(
+            (file): file is string => typeof file === "string" && file.length > 0,
+          )
+        : [];
+      if (implementationRoot !== undefined && implementationFiles.length > 0) {
+        const readPaths = generatedAssetImplementationReadPaths(node, implementationRoot);
+        const repairRequest = pendingPlannedAssetRepairRequestForNode({
+          run,
+          configurationSha256: configuration.configuration_sha256,
+          node,
+          root: implementationRoot,
+          files: implementationFiles,
+          readPaths,
+        });
+        if (
+          repairRequest !== undefined &&
+          definition.id ===
+            generatedAssetRepairTicketId({
+              configurationSha256: configuration.configuration_sha256,
+              node,
+              root: implementationRoot,
+              files: implementationFiles,
+              readPaths,
+              request: repairRequest,
+            })
+        ) {
+          reissue.add(nodeId);
+          continue;
+        }
       }
       const outputField = optionalString(manifestDefinition.output_field);
       if (outputField === undefined) {
@@ -13154,16 +13190,16 @@ export function plannedAssetRepairProposalTargetNodeIds(
   return targetNodeIds;
 }
 
-export function plannedAssetRepairRequestForNode(
+export interface PlannedAssetRepairRequest {
+  readonly proposalTicketId: string;
+  readonly requestSha256: Sha256Digest;
+  readonly title: string;
+}
+
+export function plannedAssetRepairRequestsForNode(
   run: Pick<RunRecord, "tickets">,
   nodeId: string,
-):
-  | Readonly<{
-      proposalTicketId: string;
-      requestSha256: Sha256Digest;
-      title: string;
-    }>
-  | undefined {
+): PlannedAssetRepairRequest[] {
   const candidates = Object.values(run.tickets)
     .filter((proposal) => {
       const control = proposal.executionControl;
@@ -13188,15 +13224,25 @@ export function plannedAssetRepairRequestForNode(
       );
     })
     .sort((left, right) => left.id.localeCompare(right.id));
-  const proposal = candidates[0];
-  const request = proposal?.executionControl?.proposalRequest;
-  return proposal === undefined || request === undefined
-    ? undefined
-    : {
-        proposalTicketId: proposal.id,
-        requestSha256: request.requestSha256,
-        title: proposal.title,
-      };
+  return candidates.flatMap((proposal) => {
+    const request = proposal.executionControl?.proposalRequest;
+    return request === undefined
+      ? []
+      : [
+          {
+            proposalTicketId: proposal.id,
+            requestSha256: request.requestSha256,
+            title: proposal.title,
+          },
+        ];
+  });
+}
+
+export function plannedAssetRepairRequestForNode(
+  run: Pick<RunRecord, "tickets">,
+  nodeId: string,
+): PlannedAssetRepairRequest | undefined {
+  return plannedAssetRepairRequestsForNode(run, nodeId)[0];
 }
 
 export interface PlannedAssetRepairHistoryEntry {
@@ -14544,6 +14590,46 @@ export function assetImplementationFallbackEligible(
   );
 }
 
+export function generatedAssetRepairTicketId(
+  input: Readonly<{
+    configurationSha256: Sha256Digest;
+    node: Pick<GraphNode, "id">;
+    root: string;
+    files: readonly string[];
+    readPaths: readonly string[];
+    request?: PlannedAssetRepairRequest;
+  }>,
+): string {
+  return `TK-compat-${digestBody(
+    canonicalHash({
+      configuration_sha256: input.configurationSha256,
+      asset_id: input.node.id,
+      root: input.root,
+      files: [...input.files].sort(compareText),
+      read_paths: [...input.readPaths].sort(compareText),
+      ...(input.request === undefined
+        ? {}
+        : { repair_request_sha256: input.request.requestSha256 }),
+    }),
+  ).slice(0, 24)}`;
+}
+
+export function pendingPlannedAssetRepairRequestForNode(
+  input: Readonly<{
+    run: Pick<RunRecord, "tickets">;
+    configurationSha256: Sha256Digest;
+    node: Pick<GraphNode, "id">;
+    root: string;
+    files: readonly string[];
+    readPaths: readonly string[];
+  }>,
+): PlannedAssetRepairRequest | undefined {
+  return plannedAssetRepairRequestsForNode(input.run, input.node.id).find((request) => {
+    const ticketId = generatedAssetRepairTicketId({ ...input, request });
+    return input.run.tickets[ticketId]?.status !== "completed";
+  });
+}
+
 async function generatedAssetImplementationFallback(
   run: RunRecord,
   configuration: CompiledConfiguration,
@@ -14556,6 +14642,7 @@ async function generatedAssetImplementationFallback(
   if (operation?.operation !== "implement-asset") return undefined;
 
   const additions: DerivedTicketDefinition[] = [];
+  const supersededDefinitionIds = new Set<string>();
   for (const node of graph.nodes()) {
     if (!assetImplementationFallbackEligible(run, node)) continue;
     const plan = optionalRecord(node.spec.implementation_plan);
@@ -14565,38 +14652,41 @@ async function generatedAssetImplementationFallback(
       : [];
     const contracts = optionalRecord(node.spec.gate_contracts);
     if (root === undefined || files.length === 0) continue;
-    const repairRequest = plannedAssetRepairRequestForNode(run, node.id);
     const readPaths = generatedAssetImplementationReadPaths(node, root);
-    const id = `TK-compat-${digestBody(
-      canonicalHash({
-        configuration_sha256: configuration.configuration_sha256,
-        asset_id: node.id,
-        root,
-        files: [...files].sort(compareText),
-        read_paths: readPaths,
-        ...(repairRequest === undefined
-          ? {}
-          : { repair_request_sha256: repairRequest.requestSha256 }),
-      }),
-    ).slice(0, 24)}`;
+    const repairRequest = pendingPlannedAssetRepairRequestForNode({
+      run,
+      configurationSha256: configuration.configuration_sha256,
+      node,
+      root,
+      files,
+      readPaths,
+    });
+    const id = generatedAssetRepairTicketId({
+      configurationSha256: configuration.configuration_sha256,
+      node,
+      root,
+      files,
+      readPaths,
+      ...(repairRequest === undefined ? {} : { request: repairRequest }),
+    });
     const compatibilityTicket = run.tickets[id];
     const compatibilityRepairInFlight =
       compatibilityTicket !== undefined &&
       compatibilityTicket.status !== "completed" &&
       compatibilityTicket.status !== "cancelled";
-    const requestedRepair = repairRequest !== undefined && run.tickets[id]?.status !== "completed";
+    const requestedRepair = repairRequest !== undefined;
     const hasGateImplementationPlan =
       contracts !== undefined &&
       Object.keys(contracts).length > 0 &&
       (node.edges.validates?.length ?? 0) > 0;
     if (!hasGateImplementationPlan && !requestedRepair && !compatibilityRepairInFlight) continue;
-    const alreadyMaterialized = evaluation.tickets.some(
+    const alreadyMaterialized = evaluation.tickets.filter(
       (ticket) =>
         ticket.operation_registry_id === operationId &&
         ticket.target_node_ids.includes(node.id) &&
         ticket.scope.write_paths.includes(root),
     );
-    if (alreadyMaterialized) continue;
+    if (alreadyMaterialized.length > 0 && !requestedRepair) continue;
 
     const existingTickets = Object.values(run.tickets).filter(
       (ticket) =>
@@ -14642,11 +14732,17 @@ async function generatedAssetImplementationFallback(
         ruleId: "compiler.compatibility.generated-asset-implementation",
       }),
     );
+    if (requestedRepair) {
+      for (const definition of alreadyMaterialized) supersededDefinitionIds.add(definition.id);
+    }
   }
   if (additions.length === 0) return undefined;
   const material = {
     ...evaluation,
-    tickets: [...evaluation.tickets, ...additions],
+    tickets: [
+      ...evaluation.tickets.filter((definition) => !supersededDefinitionIds.has(definition.id)),
+      ...additions,
+    ],
   };
   return deepFreeze({
     ...material,

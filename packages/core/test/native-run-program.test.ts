@@ -40,6 +40,7 @@ import {
   gateRepairInstruction,
   graphDeltaReviewCandidateNodeIds,
   generatedAssetImplementationReadPaths,
+  generatedAssetRepairTicketId,
   hasExistingAssetImplementationTicket,
   hasManifestScopedDirectGateRecheck,
   manifestScopedDirectGateRechecks,
@@ -52,6 +53,7 @@ import {
   plannedAssetRepairProposalTargetNodeIds,
   plannedAssetRepairHistoryForAttempt,
   plannedAssetRepairRequestForNode,
+  pendingPlannedAssetRepairRequestForNode,
   routablePlannedAssetRepairProposalIds,
   routePlannedAssetRepairProposals,
   routeSupersededGateRunProposals,
@@ -948,6 +950,13 @@ describe("native compiler-authoritative run program", () => {
           targetNodeIds: ["asset-cancelled"],
           status: "cancelled",
         },
+        "TK-compiler-retired": {
+          operationId: "asset-resolution.asset.implement-asset",
+          targetNodeIds: ["asset-compiler-retired"],
+          status: "cancelled",
+          blocker: "Current compiler predicate no longer applies after prior execution",
+          steps: [{ id: "implement", status: "skipped" }],
+        },
       },
     } as unknown as Pick<RunRecord, "tickets">;
 
@@ -965,6 +974,13 @@ describe("native compiler-authoritative run program", () => {
         "asset-cancelled",
       ),
     ).toBe(false);
+    expect(
+      hasExistingAssetImplementationTicket(
+        run,
+        "asset-resolution.asset.implement-asset",
+        "asset-compiler-retired",
+      ),
+    ).toBe(true);
   });
 
   it("does not treat a completed asset ticket as materializing newly declared files", async () => {
@@ -1872,6 +1888,81 @@ describe("native compiler-authoritative run program", () => {
         internalAsset,
       ),
     ).toBe(false);
+  });
+
+  it("keeps each routed asset repair request actionable until its request-bound workflow completes", () => {
+    const request = (id: string, requestSeed: string) =>
+      ({
+        id,
+        title: `Change request: ${requestSeed}`,
+        status: "cancelled",
+        blocker: "Superseded by the existing planned asset implementation workflow",
+        targetNodeIds: ["asset-internal"],
+        steps: [{ id: "scope-change", status: "skipped", attemptIds: [] }],
+        executionControl: {
+          proposalRequest: {
+            requestSha256: digest(requestSeed),
+            sourceTicketId: `TK-source-${requestSeed}`,
+            sourceStepId: "run",
+            sourceOutputSha256: digest(`${requestSeed}-output`),
+            fulfillment: "planned_asset_repair",
+          },
+        },
+      }) as unknown as TicketRecord;
+    const first = request("TK-change-first", "first-repair");
+    const second = request("TK-change-second", "second-repair");
+    const node = {
+      id: "asset-internal",
+      type: "asset",
+      spec: {
+        source_strategy: "internal",
+        implementation_plan: {
+          root: "program/assets/internal",
+          files: ["program/assets/internal/run.py"],
+        },
+      },
+    } as unknown as GraphNode;
+    const ticketId = (proposal: TicketRecord) =>
+      generatedAssetRepairTicketId({
+        configurationSha256: digest("configuration"),
+        node,
+        root: "program/assets/internal",
+        files: ["program/assets/internal/run.py"],
+        readPaths: ["program/assets/internal"],
+        request: {
+          proposalTicketId: proposal.id,
+          requestSha256: proposal.executionControl!.proposalRequest!.requestSha256,
+          title: proposal.title,
+        },
+      });
+    const firstRepairId = ticketId(first);
+    const run = {
+      tickets: {
+        [first.id]: first,
+        [second.id]: second,
+        [firstRepairId]: {
+          id: firstRepairId,
+          operationId: "asset-resolution.asset.implement-asset",
+          targetNodeIds: [node.id],
+          status: "completed",
+        },
+      },
+    } as unknown as Pick<RunRecord, "tickets">;
+
+    expect(
+      pendingPlannedAssetRepairRequestForNode({
+        run,
+        configurationSha256: digest("configuration"),
+        node,
+        root: "program/assets/internal",
+        files: ["program/assets/internal/run.py"],
+        readPaths: ["program/assets/internal"],
+      }),
+    ).toEqual({
+      proposalTicketId: second.id,
+      requestSha256: second.executionControl!.proposalRequest!.requestSha256,
+      title: second.title,
+    });
   });
 
   it("projects cumulative authenticated planned-asset repair findings to the affected asset", () => {
