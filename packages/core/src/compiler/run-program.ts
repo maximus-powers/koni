@@ -8445,6 +8445,7 @@ function ticketAttempt(
         ? []
         : [
             `The compiler-authenticated terminal recovery proof is the exact source failure this resolver must address. Source ticket ${terminalRecoveryContext.sourceTicketId} failed with: ${terminalRecoveryContext.sourceFailureProof.semanticResult.blocker}`,
+            "The source failure describes the source attempt's authority, not this resolver's current authority. Use this attempt's current grant and mutationContract as the sole authority boundary. When the current grant or mutationContract authorizes the missing node, edge, path, or field, use that authority to repair the cause; do not repeat the source attempt's obsolete scope conclusion.",
             "Treat that immutable semantic result as current causal evidence. A clean worktree or absent output proves only that the failed attempt left no side effects; it does not make the recorded failure transient. Do not reissue the unchanged source contract unless the proof establishes retryability or the cause has since been materially repaired. Resolve the proved cause within this grant when possible; otherwise return a precise blocker instead of approving a deterministic no-op retry.",
           ]),
       ...(activeReviewRework === undefined

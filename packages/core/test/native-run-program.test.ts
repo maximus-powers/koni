@@ -9499,6 +9499,12 @@ describe("native compiler-authoritative run program", () => {
     expect(resolverPrepared.spec.persona.initialPrompt).toContain(
       sourceFailureProof.semanticResult.blocker,
     );
+    expect(resolverPrepared.spec.persona.initialPrompt).toContain(
+      "The source failure describes the source attempt's authority, not this resolver's current authority",
+    );
+    expect(resolverPrepared.spec.persona.initialPrompt).toContain(
+      "When the current grant or mutationContract authorizes the missing node, edge, path, or field, use that authority",
+    );
     await persistWrites(project.projectRoot, resolverPrepared.artifactWrites ?? []);
     run.attempts[resolverPrepared.spec.identity.attemptId] = attemptRecord(
       resolverPrepared.spec,
