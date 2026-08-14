@@ -5455,6 +5455,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         input.run,
         trigger,
         pinnedLeadJudgmentBehavior(input.run, configuration),
+        configuration,
       );
     }
     if (input.kind === "verification" && input.assignment === undefined) {
@@ -7222,11 +7223,17 @@ function leadJudgmentAttempt(
   run: RunRecord,
   trigger: LeadJudgmentTrigger,
   behavior: CompiledLeadJudgmentBehavior,
+  configuration: CompiledConfiguration,
 ): AttemptDescriptor {
   if (!behavior.triggers.includes(trigger)) {
     fail("lead_trigger", `Lead judgment behavior does not support trigger ${trigger}`);
   }
-  const tickets = leadJudgmentTicketBoard(run);
+  const tickets = leadJudgmentTicketBoard(run).map((ticket) => {
+    const newNodeAuthority = leadOperationNewNodeAuthority(configuration, ticket.operationId);
+    return newNodeAuthority === undefined
+      ? ticket
+      : { ...ticket, scope: { ...ticket.scope, newNodeAuthority } };
+  });
   const activeAttempts = Object.values(run.attempts)
     .filter((attempt) =>
       new Set<AttemptStatus>(["queued", "running", "waiting_question", "terminal_accepted"]).has(
@@ -7306,6 +7313,7 @@ function leadJudgmentAttempt(
         ? "Judge whether the approved run is ready to enter deterministic ticket orchestration."
         : "Judge the supplied compiler deadlock once; do not schedule, retry, poll, or mutate work.",
       "For dependency readiness, use the compiler-projected ticketBoard fields: only waitingOnDependencyIds establishes a current dependency wait; settledDependencyIds remains causal history and does not require a completed ticket status.",
+      "When ticketBoard.scope.newNodeAuthority is present, it is compiler-issued creation authority distinct from existing-node write IDs. A missing node of a listed type is not by itself an authority gap; the eventual assignment remains constrained by its exact step and mutation contract.",
       "Treat each nonterminal ticket in the current ticketBoard as a compiler-derived current obligation. Do not infer that it is stale or redundant merely because a completed or cancelled ticket overlaps its target or scope.",
       `Finish with exactly one ${LEAD_JUDGMENT_OUTPUT_PROTOCOL} output: disposition proceed or blocked, plus a concise summary.`,
     ].join("\n\n"),
@@ -7313,6 +7321,20 @@ function leadJudgmentAttempt(
     terminalSchema: leadJudgmentTerminalSchema(),
     toolProfile: "lead_judgment",
   };
+}
+
+function leadOperationNewNodeAuthority(
+  configuration: CompiledConfiguration,
+  operationId: string,
+): { maxNewNodes: number; nodeTypes: string[] } | undefined {
+  const operation = configuration.registries.operations[operationId];
+  const maxNewNodes = optionalSafeInteger(operation?.max_new_nodes) ?? 0;
+  const configuredTypes = operation?.allowed_new_node_types;
+  if (maxNewNodes <= 0 || !Array.isArray(configuredTypes)) return undefined;
+  const nodeTypes = [
+    ...new Set(configuredTypes.filter((value): value is string => typeof value === "string")),
+  ].sort(compareText);
+  return nodeTypes.length === 0 ? undefined : { maxNewNodes, nodeTypes };
 }
 
 function planningAttempt(

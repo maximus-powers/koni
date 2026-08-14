@@ -3694,7 +3694,7 @@ describe("native compiler-authoritative run program", () => {
     } as unknown as TicketRecord;
     run.tickets.consumer = {
       id: "consumer",
-      operationId: "fixture.consumer",
+      operationId: "execution.node.compile-run-plan",
       title: "Current consumer",
       summary: "Advance after obsolete work settles",
       status: "queued",
@@ -3735,6 +3735,9 @@ describe("native compiler-authoritative run program", () => {
     expect(prepared.contextContent).toContain('"trigger": "orchestration_entry"');
     expect(prepared.contextContent).toContain('"settledDependencyIds": [\n        "obsolete"');
     expect(prepared.contextContent).toContain('"waitingOnDependencyIds": []');
+    expect(prepared.contextContent).toContain(
+      '"newNodeAuthority": {\n          "maxNewNodes": 4,\n          "nodeTypes": [\n            "run"',
+    );
     expect(prepared.spec.persona.initialPrompt).toContain(
       "only waitingOnDependencyIds establishes a current dependency wait",
     );
@@ -3746,6 +3749,9 @@ describe("native compiler-authoritative run program", () => {
     );
     expect(prepared.spec.persona.initialPrompt).toContain(
       "Do not infer that it is stale or redundant merely because a completed or cancelled ticket overlaps its target or scope",
+    );
+    expect(prepared.spec.persona.initialPrompt).toContain(
+      "ticketBoard.scope.newNodeAuthority is present, it is compiler-issued creation authority distinct from existing-node write IDs",
     );
     expect(
       Value.Check(prepared.terminalOutputSchema!, {
