@@ -22,6 +22,8 @@ import type {
 export const CHANGE_CONTROL_PUBLICATION_PROTOCOL = "koni.change-control-publication.v1" as const;
 export const PROPOSAL_DECISION_PROTOCOL = "koni.proposal-decision.v1" as const;
 export const PROPOSAL_DECISION_AUTHORITY_PROTOCOL = "koni.proposal-decision-authority.v2" as const;
+export const PROFILE_POLICY_PROPOSAL_DECISION_AUTHORITY_PROTOCOL =
+  "koni.proposal-decision-authority.v3" as const;
 export const APPROVED_CHANGE_MATERIALIZATION_PROTOCOL =
   "koni.approved-change-materialization.v1" as const;
 export const SOURCE_RELEASE_DECISION_PROTOCOL = "koni.source-release-decision.v1" as const;
@@ -187,19 +189,32 @@ export function deriveChangeControlPublication(
   return deepFreeze({ ...material, sha256: canonicalHash(material) });
 }
 
-export interface ProposalApprovalAuthority {
-  readonly protocol: typeof PROPOSAL_DECISION_AUTHORITY_PROTOCOL;
+interface ProposalDecisionAuthorityBase {
   readonly runId: string;
   readonly proposalTicketId: string;
   readonly requestSha256: Sha256Digest;
   readonly eventId: string;
-  /** The operator disposition is part of the authority bytes; it cannot be reinterpreted later. */
-  readonly decision: "approval" | "rejection";
-  readonly actor: "operator";
   readonly recordedAt: string;
   readonly message: string;
   readonly sha256: Sha256Digest;
 }
+
+export type ProposalApprovalAuthority =
+  | (ProposalDecisionAuthorityBase &
+      Readonly<{
+        protocol: typeof PROPOSAL_DECISION_AUTHORITY_PROTOCOL;
+        /** The operator disposition is part of the authority bytes; it cannot be reinterpreted later. */
+        decision: "approval" | "rejection";
+        actor: "operator";
+      }>)
+  | (ProposalDecisionAuthorityBase &
+      Readonly<{
+        protocol: typeof PROFILE_POLICY_PROPOSAL_DECISION_AUTHORITY_PROTOCOL;
+        decision: "approval";
+        actor: "profile_policy";
+        /** Exact compiler control-ticket authority whose authenticated policy delegates approval. */
+        policyAuthoritySha256: Sha256Digest;
+      }>);
 
 export interface ProposalDecision {
   readonly protocol: typeof PROPOSAL_DECISION_PROTOCOL;
@@ -1041,15 +1056,22 @@ function uniquePublicOperation(
 }
 
 function assertApprovalAuthority(authority: ProposalApprovalAuthority): void {
-  if (authority.protocol !== PROPOSAL_DECISION_AUTHORITY_PROTOCOL) {
-    fail("change_control.approval_protocol", "proposal decision authority protocol is invalid");
-  }
   requireNonempty(authority.runId, "approval run id");
   requireNonempty(authority.proposalTicketId, "approval proposal ticket id");
   requireDigest(authority.requestSha256, "approval proposal request hash");
   requireNonempty(authority.eventId, "approval event id");
-  if (authority.actor !== "operator") {
-    fail("change_control.approval_actor", "proposal decision authority must be operator-authored");
+  const operatorAuthority =
+    authority.protocol === PROPOSAL_DECISION_AUTHORITY_PROTOCOL && authority.actor === "operator";
+  const profilePolicyAuthority =
+    authority.protocol === PROFILE_POLICY_PROPOSAL_DECISION_AUTHORITY_PROTOCOL &&
+    authority.actor === "profile_policy" &&
+    authority.decision === "approval" &&
+    isSha256Digest(authority.policyAuthoritySha256);
+  if (!operatorAuthority && !profilePolicyAuthority) {
+    fail(
+      "change_control.approval_actor",
+      "proposal decision authority lacks exact operator or authenticated profile-policy provenance",
+    );
   }
   requireNonempty(authority.recordedAt, "approval timestamp");
   requireNonempty(authority.message, "approval message");

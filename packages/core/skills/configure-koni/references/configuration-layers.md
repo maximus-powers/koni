@@ -43,3 +43,25 @@ For every project obligation, trace one chain:
 
 If a setting does not belong on this chain, in a run-control layer, or in Pi's repository
 environment, it may be prompt decoration rather than enforceable configuration.
+
+## Change-control decision ownership
+
+Keep `operator` as the default proposal `decision_policy`. Use `automatic` only for a closure route
+whose immutable proposal authority binds the exact trigger, request, permitted application
+operations, and reviewed correction boundary. The route must be limited to existing exact subjects,
+forbid new nodes and deletion, and require independent review before application. A route that can
+widen scope, choose among materially different outcomes, or authorize irreversible effects remains
+`operator`.
+
+```yaml
+change_control:
+  role: proposal
+  proposal_step: propose-correction
+  application_operations: [apply-correction, no-op]
+  decision_policy: automatic
+```
+
+Automatic approval does not make an agent an operator. Core derives a separate durable policy
+decision from the compiler-authenticated proposal authority. The application and its review retain
+their configured graph, filesystem, command, and effect limits. If those limits cannot express the
+needed correction, model a different operator-reviewed route instead of broadening this one.

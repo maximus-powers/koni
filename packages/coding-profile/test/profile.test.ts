@@ -64,6 +64,7 @@ describe("coding profile registrar", () => {
     ).toMatchObject({
       role: "proposal",
       proposal_step: "propose-graph-delta",
+      decision_policy: "automatic",
       application_operations: ["apply-change-request", "no-op"],
     });
     expect(

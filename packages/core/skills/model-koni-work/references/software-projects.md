@@ -490,9 +490,11 @@ intake, planner emphasis, or safe parallelism changes while the resolved lifecyc
   affected check, operation, workflow, and review invariant. Never silently relabel new behavior as
   `current_verification`, grant the baseline step product-write authority, or pretend prompt
   discipline separates bytes inside one path.
-- An invalid proof seam routes to explicit human-authorized scoped change control or a blocker. Do
-  not claim automatic bounded oracle replacement unless the installed compiler binds trigger
-  evidence, same-subject semantics, and replacement-generation provenance.
+- An invalid proof seam may use automatic scoped change control only when the authenticated profile
+  policy pre-authorizes same-subject correction over existing nodes with no deletion or scope
+  widening, and the compiler binds trigger evidence, request identity, application authority, and
+  independent review. Otherwise route it to explicit operator-authorized scoped change control or a
+  blocker.
 
 ## Discover repository-owned commands
 

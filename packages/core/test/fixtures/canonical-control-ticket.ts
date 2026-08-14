@@ -44,9 +44,10 @@ export async function attachCanonicalProposalFixture(
     targetNodeId?: string;
     summary?: string;
     reason?: string;
+    decisionPolicy?: "operator" | "automatic";
   }> = {},
 ): Promise<TicketRecord> {
-  const catalog = proposalCatalog();
+  const catalog = proposalCatalog(input.decisionPolicy ?? "operator");
   run.compiledConfigHash = catalog.configurationSha256;
   run.behavior = runBehaviorSnapshotFixture(run.runTypeId, "canonical-control-ticket");
   const targetNodeId = input.targetNodeId ?? "claim-one";
@@ -124,7 +125,9 @@ export async function attachCanonicalProposalFixture(
   return proposal;
 }
 
-function proposalCatalog(): CompiledExecutionSemanticCatalog {
+function proposalCatalog(
+  decisionPolicy: "operator" | "automatic",
+): CompiledExecutionSemanticCatalog {
   const registries = {
     operations: {
       ordinary: {
@@ -147,6 +150,7 @@ function proposalCatalog(): CompiledExecutionSemanticCatalog {
           role: "proposal",
           proposal_step: "prepare",
           application_operations: ["apply-change"],
+          decision_policy: decisionPolicy,
         },
       },
       application: {

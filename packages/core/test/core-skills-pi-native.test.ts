@@ -98,6 +98,34 @@ describe("Koni's Pi-native skills", () => {
     );
   });
 
+  it("teaches profile authors to delegate only bounded authenticated change closure", async () => {
+    const [configurationReference, softwareReference] = await Promise.all([
+      readFile(path.join(skillsRoot, "configure-koni/references/configuration-layers.md"), "utf8"),
+      readFile(path.join(skillsRoot, "model-koni-work/references/software-projects.md"), "utf8"),
+    ]);
+    const normalizedConfiguration = configurationReference.replace(/\s+/gu, " ");
+    const normalizedSoftware = softwareReference.replace(/\s+/gu, " ");
+
+    expect(normalizedConfiguration).toContain(
+      "Keep `operator` as the default proposal `decision_policy`",
+    );
+    expect(normalizedConfiguration).toContain(
+      "Use `automatic` only for a closure route whose immutable proposal authority",
+    );
+    expect(normalizedConfiguration).toContain(
+      "limited to existing exact subjects, forbid new nodes and deletion, and require independent review before application",
+    );
+    expect(normalizedConfiguration).toContain(
+      "A route that can widen scope, choose among materially different outcomes, or authorize irreversible effects remains `operator`",
+    );
+    expect(normalizedSoftware).toContain(
+      "An invalid proof seam may use automatic scoped change control only when the authenticated profile policy pre-authorizes",
+    );
+    expect(normalizedSoftware).toContain(
+      "same-subject correction over existing nodes with no deletion or scope widening",
+    );
+  });
+
   it("teaches planners to revise validated artifacts as bounded graph diffs", async () => {
     const source = await readFile(path.join(skillsRoot, "model-koni-work/SKILL.md"), "utf8");
     const normalized = source.replace(/\s+/gu, " ");

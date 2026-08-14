@@ -22,6 +22,7 @@ export type CompiledChangeControl =
       role: "proposal";
       proposalStep: string;
       applicationOperations: readonly string[];
+      decisionPolicy: "operator" | "automatic";
     }>
   | Readonly<{ role: "application" }>
   | Readonly<{ role: "disposition"; outcome: "no_op" }>;
@@ -124,7 +125,7 @@ const COMPILER_RECEIPT_TYPES = new Set([
 ]);
 const CHANGE_CONTROL_FIELDS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   ordinary: ["role", "allow_upstream_requests", "proposal_operation"],
-  proposal: ["role", "proposal_step", "application_operations"],
+  proposal: ["role", "proposal_step", "application_operations", "decision_policy"],
   application: ["role"],
   disposition: ["role", "outcome"],
 });
@@ -758,6 +759,15 @@ function compileChangeControl(
     });
   }
   if (role === "proposal") {
+    const decisionPolicy =
+      optionalNonemptyString(source.decision_policy, `${path}/decision_policy`) ?? "operator";
+    if (decisionPolicy !== "operator" && decisionPolicy !== "automatic") {
+      fail(
+        "execution.change_control_decision_policy",
+        `${path}/decision_policy`,
+        `unsupported proposal decision policy ${decisionPolicy}`,
+      );
+    }
     return deepFreeze({
       role,
       proposalStep: nonemptyString(source.proposal_step, `${path}/proposal_step`),
@@ -768,6 +778,7 @@ function compileChangeControl(
           false,
         ),
       ),
+      decisionPolicy,
     });
   }
   if (role === "application") return deepFreeze({ role });

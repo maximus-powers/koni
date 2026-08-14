@@ -76,6 +76,64 @@ describe("terminal policy durable runtime records", () => {
     expect(() => assertRunRecord(rejectedWithApproval)).toThrow(/retains approval authority/u);
   });
 
+  it("authenticates automatic approval only through the proposal's exact configured policy", async () => {
+    const run = fixtureRun();
+    const proposal = await attachCanonicalProposalFixture(run, {
+      targetNodeId: "claim-auto",
+      summary: "Repair a pre-authorized proof contract",
+      reason: "The current proof source cannot satisfy its approved oracle.",
+      decisionPolicy: "automatic",
+    });
+    const control = proposal.executionControl!;
+    const authority = control.controlTicketAuthority!;
+    const request = control.proposalRequest!;
+    const prior = structuredClone(run);
+    const decisionMaterial = {
+      protocol: "koni.proposal-decision-authority.v3" as const,
+      runId: run.id,
+      proposalTicketId: proposal.id,
+      requestSha256: request.requestSha256,
+      eventId: "automatic-proposal-decision",
+      decision: "approval" as const,
+      actor: "profile_policy" as const,
+      policyAuthoritySha256: authority.sha256,
+      message: "Automatically approved by the authenticated profile policy",
+      recordedAt: AT,
+    };
+    const decision = { ...decisionMaterial, sha256: canonicalHash(decisionMaterial) };
+    control.proposalDecision = decision;
+    control.proposalDecisionHistory = [decision];
+    control.proposalApprovalSha256 = decision.sha256;
+    control.proposalDisposition = { kind: "approved", authoritySha256: decision.sha256 };
+    proposal.status = "queued";
+
+    expect(() => assertRunRecord(run)).not.toThrow();
+    expect(() => assertRunExecutionControlMutation(prior, run)).not.toThrow();
+
+    const forged = structuredClone(run);
+    forged.tickets[proposal.id]!.executionControl!.proposalDecision!.policyAuthoritySha256 =
+      digest("foreign-policy");
+    const material = {
+      ...forged.tickets[proposal.id]!.executionControl!.proposalDecision!,
+    } as Record<string, unknown>;
+    delete material.sha256;
+    forged.tickets[proposal.id]!.executionControl!.proposalDecision!.sha256 =
+      canonicalHash(material);
+    forged.tickets[proposal.id]!.executionControl!.proposalDecisionHistory = [
+      forged.tickets[proposal.id]!.executionControl!.proposalDecision!,
+    ];
+    forged.tickets[proposal.id]!.executionControl!.proposalApprovalSha256 =
+      forged.tickets[proposal.id]!.executionControl!.proposalDecision!.sha256;
+    forged.tickets[proposal.id]!.executionControl!.proposalDisposition = {
+      kind: "approved",
+      authoritySha256: forged.tickets[proposal.id]!.executionControl!.proposalDecision!.sha256,
+    };
+    expect(() => assertRunRecord(forged)).not.toThrow();
+    expect(() => assertRunExecutionControlMutation(prior, forged)).toThrow(
+      /proposal decision|policy authority/u,
+    );
+  });
+
   it("accepts and fail-closes the optional plan title, pending pause, and activity tone", () => {
     const run = fixtureRun();
     run.plan = {

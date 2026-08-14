@@ -39,6 +39,7 @@ import {
   tokenBudgetRecoveryCount,
   type PreparedManagedAttempt,
   type RuntimeAssignmentTerminalPolicyProjection,
+  type RunAuthorityEngineOptions,
   type RunCompilerProgram,
 } from "../src/authority/run-engine.js";
 import {
@@ -1726,6 +1727,243 @@ describe("run authority engine", () => {
       ),
     ).rejects.toMatchObject({ code: "proposal_run_deleted" });
     client.close();
+  }, 30_000);
+
+  it("automatically approves only a compiler-authenticated proposal policy before Lead deadlock", async () => {
+    const root = await repository();
+    const program = directApprovalProgram({ autoStart: false });
+    let engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    let client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const created = await client.request(
+      "run.create",
+      {
+        objective: "Exercise one pre-authorized bounded change route",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Exercise one pre-authorized bounded change route" },
+      },
+      { expectedRevision: 0, idempotencyKey: "create-automatic-proposal-policy" },
+    );
+    const runId = (created.result as { runId: string }).runId;
+    await waitFor(
+      async () => (await engine.store.getRun(runId)).lifecycle.phase === "awaiting_approval",
+    );
+    await client.request("authority.ping");
+    await client.request(
+      "plan.approve",
+      { runId },
+      { expectedRevision: client.revision, idempotencyKey: "approve-automatic-proposal-plan" },
+    );
+    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "paused");
+
+    const paused = await engine.store.getRun(runId);
+    const draft = structuredClone(paused);
+    draft.revision += 1;
+    draft.updatedAt = "2026-08-13T00:00:00.000Z";
+    const proposal = await addCanonicalProposalFixture(draft, { decisionPolicy: "automatic" });
+    const policyAuthoritySha256 = proposal.executionControl!.controlTicketAuthority!.sha256;
+    const state = await engine.store.state();
+    await engine.store.commit({
+      expectedRevision: state.revision,
+      runWrites: [{ record: draft, expectedRevision: paused.revision }],
+    });
+    client.close();
+    await engine.stop();
+    engines.splice(engines.indexOf(engine), 1);
+
+    engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.1",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.1",
+    });
+    await client.request(
+      "run.resume",
+      { runId },
+      { expectedRevision: client.revision, idempotencyKey: "resume-automatic-proposal-policy" },
+    );
+    await waitFor(async () => {
+      const run = await engine.store.getRun(runId);
+      return run.tickets[proposal.id]?.executionControl?.proposalDecision !== undefined;
+    });
+    const approved = await engine.store.getRun(runId);
+    expect(approved.tickets[proposal.id]?.executionControl).toMatchObject({
+      proposalDecision: {
+        protocol: "koni.proposal-decision-authority.v3",
+        actor: "profile_policy",
+        decision: "approval",
+        policyAuthoritySha256,
+      },
+      proposalDecisionHistory: [
+        {
+          protocol: "koni.proposal-decision-authority.v3",
+          actor: "profile_policy",
+          decision: "approval",
+          policyAuthoritySha256,
+        },
+      ],
+      proposalApprovalSha256: expect.stringMatching(/^sha256:/u),
+      proposalDisposition: { kind: "approved" },
+    });
+    expect(approved.lifecycle.phase).not.toBe("blocked");
+    expect(
+      approved.activity.some((entry) =>
+        entry.message.includes("Automatically approved bounded change proposal"),
+      ),
+    ).toBe(true);
+    client.close();
+  }, 30_000);
+
+  it("does not approve a proposal when an assignment becomes terminal-accepted inside the policy race", async () => {
+    const root = await repository();
+    const program = directApprovalProgram({ autoStart: false });
+    let injected = false;
+    let engine!: RunAuthorityEngine;
+    const lifecycleFault: NonNullable<RunAuthorityEngineOptions["lifecycleFault"]> = async (
+      point,
+      input,
+    ) => {
+      if (point !== "before_proposal_policy_approval" || injected) return;
+      injected = true;
+      await engine.server.mutateInternal(async ({ revision }) => {
+        const current = await engine.store.getRun(input.runId);
+        const draft = structuredClone(current);
+        draft.revision += 1;
+        draft.updatedAt = "2026-08-13T00:01:00.000Z";
+        const concurrent = ticket();
+        concurrent.id = "ticket-concurrent-acceptance";
+        concurrent.targetNodeIds = ["change-concurrent"];
+        concurrent.steps[0]!.id = "concurrent-step";
+        concurrent.steps[0]!.attemptIds = ["attempt-concurrent-acceptance"];
+        draft.tickets[concurrent.id] = concurrent;
+        draft.attempts["attempt-concurrent-acceptance"] = {
+          id: "attempt-concurrent-acceptance",
+          sessionId: "session-concurrent-acceptance",
+          sessionFile: undefined,
+          ticketId: concurrent.id,
+          stepId: concurrent.steps[0]!.id,
+          personaId: concurrent.steps[0]!.personaId,
+          modelProvider: "fixture",
+          modelId: "fixture-model",
+          thinkingLevel: "off",
+          status: "terminal_accepted",
+          launchSpecHash: rawSha256("concurrent accepted launch"),
+          startedAt: draft.updatedAt,
+          endedAt: undefined,
+          terminalSummary: undefined,
+          terminalOutputSha256: rawSha256("concurrent accepted output"),
+          terminalOutputSizeBytes: 32,
+          terminalAcceptedAt: draft.updatedAt,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          kind: "ticket",
+        };
+        const committed = await engine.store.commit({
+          expectedRevision: revision,
+          runWrites: [{ record: draft, expectedRevision: current.revision }],
+        });
+        return { revision: committed.state.revision };
+      });
+    };
+    engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    let client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const created = await client.request(
+      "run.create",
+      {
+        objective: "Preserve an in-flight accepted assignment before policy approval",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Preserve an in-flight accepted assignment before policy approval" },
+      },
+      { expectedRevision: 0, idempotencyKey: "create-policy-approval-race" },
+    );
+    const runId = (created.result as { runId: string }).runId;
+    await waitFor(
+      async () => (await engine.store.getRun(runId)).lifecycle.phase === "awaiting_approval",
+    );
+    await client.request("authority.ping");
+    await client.request(
+      "plan.approve",
+      { runId },
+      { expectedRevision: client.revision, idempotencyKey: "approve-policy-approval-race-plan" },
+    );
+    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "paused");
+    const paused = await engine.store.getRun(runId);
+    const draft = structuredClone(paused);
+    draft.revision += 1;
+    draft.updatedAt = "2026-08-13T00:00:00.000Z";
+    const proposal = await addCanonicalProposalFixture(draft, { decisionPolicy: "automatic" });
+    draft.lifecycle = reduceRunLifecycle(draft.lifecycle, {
+      type: "resume_requested",
+      atMs: Date.parse(draft.updatedAt),
+    }).state;
+    draft.generation = draft.lifecycle.generation;
+    const state = await engine.store.state();
+    await engine.store.commit({
+      expectedRevision: state.revision,
+      runWrites: [
+        {
+          record: draft,
+          expectedRevision: paused.revision,
+          lifecycleActors: { run: "human" },
+        },
+      ],
+    });
+    client.close();
+    await engine.stop();
+    engines.splice(engines.indexOf(engine), 1);
+    engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.1",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+      lifecycleFault,
+    });
+    engines.push(engine);
+    await engine.start();
+    await waitFor(async () => injected);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const raced = await engine.store.getRun(runId);
+    expect(raced.attempts["attempt-concurrent-acceptance"]?.status).toBe("terminal_accepted");
+    expect(raced.tickets[proposal.id]?.status).toBe("proposed");
+    expect(raced.tickets[proposal.id]?.executionControl?.proposalDecision).toBeUndefined();
+    expect(
+      raced.activity.some((entry) =>
+        entry.message.includes("Automatically approved bounded change proposal"),
+      ),
+    ).toBe(false);
   }, 30_000);
 
   it("resumes a change-request-blocked execution and its suspended supervisor when its exact proposal is approved", async () => {
@@ -10770,9 +11008,10 @@ async function addCanonicalProposalFixture(
   run: RunRecord,
   options: Readonly<{
     fulfillment?: "planned_asset_repair" | "dynamic_scope_change";
+    decisionPolicy?: "operator" | "automatic";
   }> = {},
 ): Promise<TicketRecord> {
-  const catalog = proposalSemanticCatalog(run.compiledConfigHash);
+  const catalog = proposalSemanticCatalog(run.compiledConfigHash, options.decisionPolicy);
   const at = run.updatedAt;
   const source = proposalSourceTicket(catalog, at);
   run.tickets[source.id] = source;
@@ -10939,6 +11178,7 @@ async function addCanonicalProposalFixture(
 
 function proposalSemanticCatalog(
   configurationSha256: Sha256Digest,
+  decisionPolicy: "operator" | "automatic" = "operator",
 ): CompiledExecutionSemanticCatalog {
   const registries = {
     operations: {
@@ -10962,6 +11202,7 @@ function proposalSemanticCatalog(
           role: "proposal",
           proposal_step: "prepare",
           application_operations: ["apply-change"],
+          decision_policy: decisionPolicy,
         },
       },
       application: {

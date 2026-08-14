@@ -112,6 +112,21 @@ export interface TicketReviewReworkRecord {
   openedAt: string;
 }
 
+/** Raw durable proposal-decision data. Runtime validation enforces each protocol's exact union shape. */
+export interface ProposalDecisionAuthorityRecord {
+  protocol: "koni.proposal-decision-authority.v2" | "koni.proposal-decision-authority.v3";
+  runId: string;
+  proposalTicketId: string;
+  requestSha256: Sha256Digest;
+  eventId: string;
+  decision: "approval" | "rejection";
+  actor: string;
+  policyAuthoritySha256?: Sha256Digest;
+  message?: string;
+  recordedAt: string;
+  sha256: Sha256Digest;
+}
+
 export interface ReviewReworkOperatorAuthorization {
   protocol: "koni.review-rework-operator-authorization.v1";
   method: string;
@@ -333,31 +348,9 @@ export interface TicketExecutionControlRecord {
     applicationTicketId?: string;
   };
   /** Exact operator/authority event that approved or rejected this proposal. */
-  proposalDecision?: {
-    protocol: "koni.proposal-decision-authority.v2";
-    runId: string;
-    proposalTicketId: string;
-    requestSha256: Sha256Digest;
-    eventId: string;
-    decision: "approval" | "rejection";
-    actor: string;
-    message?: string;
-    recordedAt: string;
-    sha256: Sha256Digest;
-  };
+  proposalDecision?: ProposalDecisionAuthorityRecord;
   /** Bounded append-only audit of every accepted decision, including later audit-only steering. */
-  proposalDecisionHistory?: Array<{
-    protocol: "koni.proposal-decision-authority.v2";
-    runId: string;
-    proposalTicketId: string;
-    requestSha256: Sha256Digest;
-    eventId: string;
-    decision: "approval" | "rejection";
-    actor: string;
-    message?: string;
-    recordedAt: string;
-    sha256: Sha256Digest;
-  }>;
+  proposalDecisionHistory?: ProposalDecisionAuthorityRecord[];
   proposalApprovalSha256?: Sha256Digest;
   sourceProposalTicketId?: string;
   approvedApplicationSha256?: Sha256Digest;
@@ -7525,13 +7518,23 @@ function assertNewProposalDecisionAuthorities(
   current: readonly NonNullable<TicketExecutionControlRecord["proposalDecision"]>[],
 ): void {
   const request = next.tickets[ticketId]?.executionControl?.proposalRequest;
+  const policyAuthority = next.tickets[ticketId]?.executionControl?.controlTicketAuthority;
   for (const event of current.slice(prior.length)) {
+    const exactOperator =
+      event.protocol === "koni.proposal-decision-authority.v2" && event.actor === "operator";
+    const exactProfilePolicy =
+      event.protocol === "koni.proposal-decision-authority.v3" &&
+      event.actor === "profile_policy" &&
+      event.decision === "approval" &&
+      event.policyAuthoritySha256 === policyAuthority?.sha256 &&
+      policyAuthority?.role === "proposal" &&
+      policyAuthority.operation.changeControl.role === "proposal" &&
+      policyAuthority.operation.changeControl.decisionPolicy === "automatic";
     if (
-      event.protocol !== "koni.proposal-decision-authority.v2" ||
       event.runId !== next.id ||
       event.proposalTicketId !== ticketId ||
       event.requestSha256 !== request?.requestSha256 ||
-      event.actor !== "operator"
+      (!exactOperator && !exactProfilePolicy)
     ) {
       throw new Error(`ticket added unbound proposal decision authority: ${ticketId}`);
     }
@@ -7645,23 +7648,20 @@ function assertProposalDecisionEvent(
   ticketId: string,
   value: unknown,
 ): NonNullable<TicketExecutionControlRecord["proposalDecision"]> {
+  const commonFields = [
+    "protocol",
+    "runId",
+    "proposalTicketId",
+    "requestSha256",
+    "eventId",
+    "decision",
+    "actor",
+    "message",
+    "recordedAt",
+    "sha256",
+  ];
   if (
     !isRecord(value) ||
-    Object.keys(value).some(
-      (field) =>
-        ![
-          "protocol",
-          "runId",
-          "proposalTicketId",
-          "requestSha256",
-          "eventId",
-          "decision",
-          "actor",
-          "message",
-          "recordedAt",
-          "sha256",
-        ].includes(field),
-    ) ||
     !isId(value.eventId) ||
     (value.decision !== "approval" && value.decision !== "rejection") ||
     typeof value.actor !== "string" ||
@@ -7673,12 +7673,23 @@ function assertProposalDecisionEvent(
   ) {
     throw new Error(`invalid ticket proposal decision: ${ticketId}`);
   }
+  const operatorAuthority =
+    value.protocol === "koni.proposal-decision-authority.v2" &&
+    value.actor === "operator" &&
+    Object.keys(value).every((field) => commonFields.includes(field));
+  const profilePolicyAuthority =
+    value.protocol === "koni.proposal-decision-authority.v3" &&
+    value.actor === "profile_policy" &&
+    value.decision === "approval" &&
+    isSha256Digest(value.policyAuthoritySha256) &&
+    Object.keys(value).every(
+      (field) => commonFields.includes(field) || field === "policyAuthoritySha256",
+    );
   if (
-    value.protocol !== "koni.proposal-decision-authority.v2" ||
     !isId(value.runId) ||
     !isId(value.proposalTicketId) ||
     !isSha256Digest(value.requestSha256) ||
-    value.actor !== "operator"
+    (!operatorAuthority && !profilePolicyAuthority)
   ) {
     throw new Error(`invalid current ticket proposal decision authority: ${ticketId}`);
   }

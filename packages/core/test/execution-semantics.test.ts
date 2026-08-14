@@ -12,8 +12,8 @@ import { canonicalHash } from "../src/shared/canonical.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const EXPECTED_CATALOG_SHA256 = {
-  "coding-profile": "sha256:f523b4118d07d69d128622bc47a8ce817cc78a791ec19a49c767434f50d362bd",
-  "research-profile": "sha256:ecc05566dd08fc3a2c9d3fdd82cee8a4313b1fce4a8452fd33717c26820bdfaa",
+  "coding-profile": "sha256:1d330c894b236f7f478fdb43217fc903cdf7646c0f9ce4f83573e139b6dd9eca",
+  "research-profile": "sha256:178d191c1263d04f95286f3682cb346bef891a881561be1af5231dbe845f1521",
 } as const;
 
 describe("operation/workflow/check semantic catalog", () => {
@@ -47,6 +47,15 @@ describe("operation/workflow/check semantic catalog", () => {
         ).toMatchObject({
           max_new_nodes: 1,
           allowed_new_node_types: ["asset"],
+        });
+        expect(catalog.operations["lifecycle.change-request"]?.changeControl).toMatchObject({
+          role: "proposal",
+          decisionPolicy: "operator",
+        });
+      } else {
+        expect(catalog.operations["lifecycle.change-request"]?.changeControl).toMatchObject({
+          role: "proposal",
+          decisionPolicy: "automatic",
         });
       }
       for (const workflow of Object.values(catalog.workflows)) {

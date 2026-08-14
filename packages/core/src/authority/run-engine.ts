@@ -192,6 +192,7 @@ import {
 import {
   deriveApprovedChangeMaterialization,
   deriveProposalDecision,
+  PROFILE_POLICY_PROPOSAL_DECISION_AUTHORITY_PROTOCOL,
   PROPOSAL_DECISION_AUTHORITY_PROTOCOL,
   deriveSourceReleaseDecision,
   deriveTerminalResolverReconciliation,
@@ -1017,6 +1018,7 @@ export interface RunAuthorityEngineOptions {
       | "after_ticket_checkpoint"
       | "before_publication_settle"
       | "after_planned_asset_repair_route"
+      | "before_proposal_policy_approval"
       | "after_verification",
     input: Readonly<{ runId: string; ticketId?: string }>,
   ) => Promise<void> | void;
@@ -17111,6 +17113,10 @@ export class RunAuthorityEngine {
       await this.#tick(runId, advancement);
       return;
     }
+    if (await this.#approveConfiguredProposal(runId, advancement)) {
+      await this.#tick(runId, advancement);
+      return;
+    }
     if (await this.#materializeApprovedProposal(runId, advancement)) {
       await this.#tick(runId, advancement);
       return;
@@ -18224,6 +18230,144 @@ export class RunAuthorityEngine {
       await this.#lifecycleRacePoint("after_planned_asset_repair_route", runId, candidate.id);
     }
     return routed || retry;
+  }
+
+  /**
+   * Exercise only approval authority explicitly delegated by the proposal's immutable compiler
+   * catalog. The plan approval authenticates that catalog; the durable decision binds the exact
+   * proposal request and control-ticket authority, so this cannot approve an operator-policy or
+   * dynamically widened route.
+   */
+  async #approveConfiguredProposal(
+    runId: string,
+    advancement: RunAdvancementToken,
+  ): Promise<boolean> {
+    const observed = await this.#store.getRun(runId);
+    if (
+      !this.#matchesAdvancement(observed, advancement) ||
+      hasUnfinalizedAcceptedAssignment(observed)
+    )
+      return false;
+    const candidate = Object.values(observed.tickets)
+      .filter((ticket) => {
+        const control = ticket.executionControl;
+        const authority = control?.controlTicketAuthority;
+        const request = control?.proposalRequest;
+        const source = request === undefined ? undefined : observed.tickets[request.sourceTicketId];
+        const hold = source?.executionControl?.sourceHold;
+        return (
+          ticket.status === "proposed" &&
+          request !== undefined &&
+          authority?.role === "proposal" &&
+          authority.operation.changeControl.role === "proposal" &&
+          authority.operation.changeControl.decisionPolicy === "automatic" &&
+          control?.proposalApprovalSha256 === undefined &&
+          control?.proposalDecision === undefined &&
+          (control?.proposalDecisionHistory?.length ?? 0) === 0 &&
+          ticket.steps.every((step) => step.status === "pending" && step.attemptIds.length === 0) &&
+          hold?.proposalTicketId === ticket.id &&
+          hold.requestSha256 === request.requestSha256
+        );
+      })
+      .sort(
+        (left, right) =>
+          left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+      )[0];
+    if (candidate === undefined) return false;
+
+    await this.#lifecycleRacePoint("before_proposal_policy_approval", runId, candidate.id);
+    let approved = false;
+    await this.#server.mutateInternal(async ({ revision }) => {
+      const current = await this.#store.getRun(runId);
+      if (
+        !this.#matchesAdvancement(current, advancement) ||
+        hasUnfinalizedAcceptedAssignment(current)
+      )
+        return this.#noOpInternal(revision);
+      const exact = current.tickets[candidate.id];
+      if (exact === undefined || canonicalHash(exact) !== canonicalHash(candidate)) {
+        return this.#noOpInternal(revision);
+      }
+      const control = exact.executionControl!;
+      const request = control.proposalRequest!;
+      const policyAuthority = control.controlTicketAuthority!;
+      const recordedAt = this.#timestamp();
+      const authorityMaterial = {
+        protocol: PROFILE_POLICY_PROPOSAL_DECISION_AUTHORITY_PROTOCOL,
+        runId,
+        proposalTicketId: exact.id,
+        requestSha256: request.requestSha256,
+        eventId: `proposal-policy-decision-${randomUUID()}`,
+        decision: "approval" as const,
+        actor: "profile_policy" as const,
+        policyAuthoritySha256: policyAuthority.sha256,
+        message: "Automatically approved by the authenticated profile policy",
+        recordedAt,
+      };
+      const authority = { ...authorityMaterial, sha256: canonicalHash(authorityMaterial) };
+      const decision = deriveProposalDecision({
+        runId,
+        proposalTicketId: exact.id,
+        requestSha256: request.requestSha256,
+        status: exact.status,
+        decision: "approval",
+        authority,
+        ownsExecutionAuthority: false,
+      });
+      if (decision.disposition !== "approve" || decision.approvalSha256 !== authority.sha256) {
+        throw new AuthorityRpcError(
+          "proposal_policy_decision",
+          "authenticated profile policy did not derive an exact proposal approval",
+        );
+      }
+      const draft = nextRun(current, recordedAt);
+      const mutable = draft.tickets[exact.id]!;
+      const mutableControl = mutable.executionControl!;
+      mutable.status = "queued";
+      mutable.blocker = undefined;
+      mutable.updatedAt = recordedAt;
+      mutableControl.proposalDecision = structuredClone(authority);
+      mutableControl.proposalDecisionHistory = [structuredClone(authority)];
+      mutableControl.proposalApprovalSha256 = authority.sha256;
+      mutableControl.proposalDisposition = {
+        kind: "approved",
+        authoritySha256: authority.sha256,
+      };
+      draft.activity.push(
+        activity(
+          this.#createId("activity"),
+          recordedAt,
+          "compiler",
+          `Automatically approved bounded change proposal through authenticated profile policy: ${exact.title}`,
+          exact.id,
+          "success",
+        ),
+      );
+      const lifecycleActor = proposalLifecycleActor(current, exact.status, "queued", "approval");
+      const committed = await this.#store.commit({
+        expectedRevision: revision,
+        runWrites: [
+          {
+            record: draft,
+            expectedRevision: current.revision,
+            ...(lifecycleActor === undefined
+              ? {}
+              : { lifecycleActors: { tickets: { [exact.id]: lifecycleActor } } }),
+          },
+        ],
+      });
+      approved = true;
+      return {
+        revision: committed.state.revision,
+        events: [
+          {
+            topic: "proposal.policy.approved",
+            payload: { runId, proposalTicketId: exact.id },
+          },
+        ],
+      };
+    });
+    return approved;
   }
 
   async #tickBehaviorPostOrchestration(
@@ -19493,6 +19637,7 @@ export class RunAuthorityEngine {
       | "after_ticket_checkpoint"
       | "before_publication_settle"
       | "after_planned_asset_repair_route"
+      | "before_proposal_policy_approval"
       | "after_verification",
     runId: string,
     ticketId?: string,
