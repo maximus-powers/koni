@@ -98,6 +98,31 @@ describe("Koni's Pi-native skills", () => {
     );
   });
 
+  it("teaches reviewers to close the current bounded finding frontier before rework", async () => {
+    const [agentReference, executionReference] = await Promise.all([
+      readFile(path.join(skillsRoot, "configure-koni/references/agents-and-skills.md"), "utf8"),
+      readFile(path.join(skillsRoot, "model-koni-work/references/execution-contracts.md"), "utf8"),
+    ]);
+    const normalizedAgentReference = agentReference.replace(/\s+/gu, " ");
+    const normalizedExecutionReference = executionReference.replace(/\s+/gu, " ");
+
+    expect(normalizedAgentReference).toContain(
+      "Before reopening a producer, configure its reviewer to make one bounded pass over the complete issued review contract",
+    );
+    expect(normalizedAgentReference).toContain(
+      "all material findings already supported by current authorized evidence and repairable by that producer",
+    );
+    expect(normalizedAgentReference).toContain(
+      "must not widen discovery, speculate, or retain resolved findings merely to make the batch larger",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "A nonpassing review should return every material finding already supported by the current authorized evidence and repairable by the same reopened producer",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "Do not deliberately serialize inspectable findings across rework cycles",
+    );
+  });
+
   it("teaches profile authors to delegate only bounded authenticated change closure", async () => {
     const [configurationReference, softwareReference] = await Promise.all([
       readFile(path.join(skillsRoot, "configure-koni/references/configuration-layers.md"), "utf8"),

@@ -170,6 +170,12 @@ receipts. Carry forward only a finding that the current candidate and current re
 establish; never describe a current receipt as stale merely because an earlier cycle used different
 bytes or evidence.
 
+Before reopening the producer, make one bounded pass over the complete issued review contract. A
+nonpassing review should return every material finding already supported by the current authorized
+evidence and repairable by the same reopened producer. Do not deliberately serialize inspectable
+findings across rework cycles. Do not widen discovery or speculate merely to fill the batch, and do
+not retain a resolved historical finding when the current candidate no longer establishes it.
+
 At a downstream composition boundary, treat a compiler-current upstream artifact with completed
 independent review as authoritative for the claims that review accepted. Validate currentness, exact
 membership, and downstream interactions; do not repeat that upstream semantic review from the same

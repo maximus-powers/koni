@@ -481,6 +481,21 @@ describe("coding profile registrar", () => {
     expect(normalizedExecutionReference).toContain(
       "A prior failed-review blocker is repair history, not current execution evidence",
     );
+    expect(normalizedReviewer).toContain(
+      "Before reopening the producer, complete one bounded pass over the full issued review contract",
+    );
+    expect(normalizedReviewer).toContain(
+      "Return every material finding that the current authorized evidence already supports and that the same producer can repair",
+    );
+    expect(normalizedReviewer).toContain(
+      "Do not deliberately defer an inspectable finding to spend another rework cycle",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "A nonpassing review should return every material finding already supported by the current authorized evidence and repairable by the same reopened producer",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "Do not widen discovery or speculate merely to fill the batch",
+    );
   });
 
   it("keeps downstream composition review within its own authority boundary", async () => {

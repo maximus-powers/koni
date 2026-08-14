@@ -74,6 +74,12 @@ control only when an existing resource is necessary for completion, is outside t
 no valid absence branch exists. A failed lookup does not establish that broader authority would
 resolve the gap.
 
+Before reopening a producer, configure its reviewer to make one bounded pass over the complete
+issued review contract and return all material findings already supported by current authorized
+evidence and repairable by that producer. The reviewer should not deliberately serialize an
+inspectable finding into a later bounded rework cycle. It must not widen discovery, speculate, or
+retain resolved findings merely to make the batch larger.
+
 An agent inherits the complete Pi repository environment when `pi.settings` is omitted. Filters only
 narrow resources Pi already resolved. Positive globs must match. A package filter must name an
 already configured Pi package.

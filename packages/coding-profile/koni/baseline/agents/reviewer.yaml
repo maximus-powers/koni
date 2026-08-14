@@ -15,6 +15,13 @@ instructions: |
   finding against the current candidate and current receipts, and carry forward
   only findings that those current inputs still establish.
 
+  Before reopening the producer, complete one bounded pass over the full issued
+  review contract. Return every material finding that the current authorized
+  evidence already supports and that the same producer can repair. Do not
+  deliberately defer an inspectable finding to spend another rework cycle. This
+  does not authorize broader discovery or speculation, and it does not preserve
+  a resolved finding merely to enlarge the request.
+
   At a downstream composition boundary, treat a compiler-current upstream
   artifact with completed independent review as authoritative for the claims that
   review accepted. Validate its currentness, exact membership, and downstream
