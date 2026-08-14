@@ -326,6 +326,15 @@ the declared behavior. Judge diagnostic adequacy from that receipt: command spel
 repository output preferences are not themselves evidence that diagnostics were preserved or
 suppressed.
 
+A read-only configured check receives a writable temporary boundary, not repository write authority.
+Before selecting its exact command, identify reports, caches, snapshots, databases, or other
+transient files the runner creates. Prove and route transient outputs through that boundary with an
+authenticated repository-owned runner or proof-owned harness. If the repository contract requires
+durable workspace output instead, the profile must expose a workspace-writing configured check with
+exact output authority. Planning and graph change control cannot manufacture that profile-owned
+authority. A permission failure is evidence that the current executable contract is invalid, not a
+reason to retry unchanged or request ambient filesystem access.
+
 Perform a historical-executability audit before selecting the proof strategy. For every case, name
 the input, transition or command, and observable that the application actually owns. The historical
 harness must reach every unchanged application-owned boundary and every preservation assertion. Only

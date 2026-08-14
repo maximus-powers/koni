@@ -2,12 +2,12 @@
   "protocol": "koni.profile-package.v1",
   "package": {
     "name": "@koni/coding-profile",
-    "version": "0.8.31"
+    "version": "0.8.32"
   },
   "profile": {
     "id": "software",
     "display_name": "Coding",
-    "version": "0.8.31",
+    "version": "0.8.32",
     "lineage": "koni.software"
   },
   "compatibility": {
@@ -50,8 +50,8 @@
       },
       {
         "path": "agents/integrator.yaml",
-        "sha256": "sha256:0bda59ffb3627856a574e05a104f65da0fe87047b719dfe93d5457bc3183a5ab",
-        "size_bytes": 3035,
+        "sha256": "sha256:146049740fd4262756b769015705ea880b20909cfad5b05a09051b692d255ed9",
+        "size_bytes": 3537,
         "kind": "agent"
       },
       {
@@ -74,8 +74,8 @@
       },
       {
         "path": "agents/run-planner.yaml",
-        "sha256": "sha256:0a8724d4a87366ea3f1bf8145f14190fb3d47fa391a45097892237b553aeb674",
-        "size_bytes": 12652,
+        "sha256": "sha256:2f40e1a68afdec86e9c2a73dd98893aefe104fba2b5a185ea1dc3f7dfdc55fbd",
+        "size_bytes": 13297,
         "kind": "agent"
       },
       {
@@ -110,13 +110,13 @@
       },
       {
         "path": "operations.yaml",
-        "sha256": "sha256:9fd828c9560e7e67a2872cd27483edae864ac628654db355025e6032294bbb35",
-        "size_bytes": 48171,
+        "sha256": "sha256:41652abea79ea8a83caec22cbb21ebcccc6b05bac05cdd4f41529ef8a7a484b6",
+        "size_bytes": 48927,
         "kind": "config"
       },
       {
         "path": "profile.yaml",
-        "sha256": "sha256:05c350dabb95531ef247f3200f1dbee1ff4c4523fb4a5dff7b6ee4bf3d93cad5",
+        "sha256": "sha256:6780ac578969331fd1cb86a710c350c24a57f5c7ba921e251e53ca47e906b21d",
         "size_bytes": 1044,
         "kind": "config"
       },
@@ -194,5 +194,5 @@
       "sha256": "sha256:76557e8ef44078c59656280cc2af17bdfab09797205e04eb35be906cd88b395d"
     }
   ],
-  "bundle_sha256": "sha256:305cdb712b5b75d0b678129e3499de483ae49110d4a02d6715e376b33d00c41f"
+  "bundle_sha256": "sha256:496c65992c4f5cabd1ce4a4a556bc56aee451f32bef43df3ac33ebdf93c92783"
 }

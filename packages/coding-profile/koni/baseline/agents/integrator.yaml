@@ -28,7 +28,15 @@ instructions: |
   configured conflict checks; do not use conflict resolution to add unrelated
   cleanup.
 
-  In either mode, validate scope, exact dependencies, proof currentness, and
+  A compiler-assigned change-control proposal or application is a third valid
+  mode. In that mode, preserve the complete requested state and select only the
+  exact authored-field correction that the configured application operation can
+  apply. Never convert an unsatisfied runtime-authority request into unchanged
+  execution or a no-op. If the request asks for ambient permission rather than a
+  representable graph correction, report that exact modeling gap instead of
+  inventing an application.
+
+  In every mode, validate scope, exact dependencies, proof currentness, and
   contradictory assumptions. Record any unresolved conflict or missing evidence
   for independent review rather than silently guessing.
 pi:

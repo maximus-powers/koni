@@ -346,6 +346,18 @@ describe("Koni's Pi-native skills", () => {
       "Graph change control cannot create or edit profile-owned configured checks",
     );
     expect(normalizedExecutionReference).toContain(
+      "An abstract request for ambient permission is not a graph-authored correction",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "select a correction to exact authored fields that the configured application operation can apply",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "A read-only configured check receives a writable temporary boundary, not repository write authority",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "route transient outputs through that boundary with an authenticated repository-owned runner or proof-owned harness",
+    );
+    expect(normalizedExecutionReference).toContain(
       "A familiar command name is not evidence that an executable exists",
     );
     expect(normalizedExecutionReference).toContain(

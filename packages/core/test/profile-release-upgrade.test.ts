@@ -25,9 +25,9 @@ const releases = [
     directory: "coding-profile",
     fixtureDirectory: "coding-0.7.0",
     oldVersion: "0.7.0",
-    newVersion: "0.8.31",
+    newVersion: "0.8.32",
     oldBundleSha256: "sha256:4e955f7fb5a6bbd58542f395471d2e3f1c87364840abd218f973b8f62a5c0c7e",
-    newBundleSha256: "sha256:305cdb712b5b75d0b678129e3499de483ae49110d4a02d6715e376b33d00c41f",
+    newBundleSha256: "sha256:496c65992c4f5cabd1ce4a4a556bc56aee451f32bef43df3ac33ebdf93c92783",
     parallelism: { source: 5, project: 7 },
   },
   {

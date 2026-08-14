@@ -100,8 +100,19 @@ describe("coding profile registrar", () => {
     expect(application?.target_types).toEqual(proofClosureNodeTypes);
     expect(application?.allowed_existing_node_types).toEqual(proofClosureNodeTypes);
     expect(proposal?.output_contract).toContain("complete bounded semantic correction set");
+    expect(
+      operations.operations.find(({ id }) => id === "assurance.proof.prepare")?.output_contract,
+    ).toContain(
+      "correct the proof-owned command or harness to use the configured temporary-write boundary",
+    );
+    expect(proposal?.output_contract).toContain(
+      "select only a correction representable by the configured application operation",
+    );
     expect(executionReference.replace(/\s+/gu, " ")).toContain(
       "Target every existing causal node whose authored fields must change together for one internally consistent correction",
+    );
+    expect(executionReference.replace(/\s+/gu, " ")).toContain(
+      "An abstract request for ambient permission is not a graph-authored correction",
     );
     expect(workflows.workflows.find(({ id }) => id === "change-request")).toMatchObject({
       applies_to: ["change-request", "no-op"],
@@ -456,7 +467,7 @@ describe("coding profile registrar", () => {
   });
 
   it("grounds proof authority before planning and re-evaluates rework against current evidence", async () => {
-    const [plannerSource, reviewerSource, softwareReference, executionReference] =
+    const [plannerSource, reviewerSource, integratorSource, softwareReference, executionReference] =
       await Promise.all([
         readFile(
           path.resolve(import.meta.dirname, "../koni/baseline/agents/run-planner.yaml"),
@@ -464,6 +475,10 @@ describe("coding profile registrar", () => {
         ),
         readFile(
           path.resolve(import.meta.dirname, "../koni/baseline/agents/reviewer.yaml"),
+          "utf8",
+        ),
+        readFile(
+          path.resolve(import.meta.dirname, "../koni/baseline/agents/integrator.yaml"),
           "utf8",
         ),
         readFile(
@@ -483,6 +498,7 @@ describe("coding profile registrar", () => {
       ]);
     const normalizedPlanner = plannerSource.replace(/\s+/gu, " ");
     const normalizedReviewer = reviewerSource.replace(/\s+/gu, " ");
+    const normalizedIntegrator = integratorSource.replace(/\s+/gu, " ");
     const normalizedSoftwareReference = softwareReference.replace(/\s+/gu, " ");
     const normalizedExecutionReference = executionReference.replace(/\s+/gu, " ");
 
@@ -523,6 +539,15 @@ describe("coding profile registrar", () => {
     expect(normalizedPlanner).toContain(
       "Repository guidance, familiar quality practice, and a plausible command name do not create validation authority",
     );
+    expect(normalizedPlanner).toContain(
+      "A read-only configured check must route transient outputs to the configured temporary-write boundary",
+    );
+    expect(normalizedIntegrator).toContain(
+      "A compiler-assigned change-control proposal or application is a third valid mode",
+    );
+    expect(normalizedIntegrator).toContain(
+      "Never convert an unsatisfied runtime-authority request into unchanged execution or a no-op",
+    );
     expect(normalizedSoftwareReference).toContain(
       "Place every repository input relied on by the selected proof in exactly the proof field matching its authority role",
     );
@@ -546,6 +571,9 @@ describe("coding profile registrar", () => {
     );
     expect(normalizedSoftwareReference).toContain(
       "An imperative validation statement must identify the exact graph proof or already-applicable configured check that owns it",
+    );
+    expect(normalizedSoftwareReference).toContain(
+      "A read-only configured check receives a writable temporary boundary, not repository write authority",
     );
     expect(normalizedExecutionReference).toContain(
       "Binding prose cannot create validation authority",

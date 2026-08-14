@@ -88,6 +88,14 @@ later application needs; do not replace already-authored intent with a statement
 elsewhere. A route-only synopsis is not a complete change contract. Profile proposal/application
 workflows must preserve this contract through review and terminal recovery without widening it.
 
+An upstream request must select a correction to exact authored fields that the configured
+application operation can apply. An abstract request for ambient permission is not a graph-authored
+correction. When a read-only check fails because its runner writes repository-local transient
+output, correct the executable proof contract to route that output through its configured
+temporary-write boundary, or report the exact profile-owned check-authority gap. Do not request
+unchanged re-execution with wider ambient permission, and do not let proposal selection turn an
+unsatisfied request into a no-op.
+
 Binding prose cannot create validation authority. An upstream request or application selection may
 preserve existing graph-backed proof and check obligations, but must not add a mandatory check that
 the compiled successor cannot execute and record as a current receipt. When current evidence makes a

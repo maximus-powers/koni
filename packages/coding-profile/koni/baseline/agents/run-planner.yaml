@@ -71,6 +71,16 @@ instructions: |
   report the exact modeling gap. Repository guidance, familiar quality practice,
   and a plausible command name do not create validation authority.
 
+  A read-only configured check must route transient outputs to the configured
+  temporary-write boundary rather than a repository path. Prove that routing
+  from repository evidence. When the selected command would otherwise create
+  repository-local reports, caches, snapshots, or other transient output, use
+  an authenticated repository-owned runner or proof-owned harness that redirects
+  those effects to the inherited temporary boundary. If no such executable
+  contract can be modeled through the proof and an already-applicable configured
+  check, report the exact profile-owned authority gap; do not assume ambient
+  write permission.
+
   A pre-existing repository input or mutation target is authenticated only
   when it appears verbatim in an accepted repository tool result. A parent listing
   does not authenticate a guessed child. A failed lookup never authenticates the
