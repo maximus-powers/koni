@@ -1891,10 +1891,11 @@ describe("native compiler-authoritative run program", () => {
   });
 
   it("keeps each routed asset repair request actionable until its request-bound workflow completes", () => {
-    const request = (id: string, requestSeed: string) =>
+    const request = (id: string, requestSeed: string, updatedAt: string) =>
       ({
         id,
         title: `Change request: ${requestSeed}`,
+        updatedAt,
         status: "cancelled",
         blocker: "Superseded by the existing planned asset implementation workflow",
         targetNodeIds: ["asset-internal"],
@@ -1909,8 +1910,8 @@ describe("native compiler-authoritative run program", () => {
           },
         },
       }) as unknown as TicketRecord;
-    const first = request("TK-change-first", "first-repair");
-    const second = request("TK-change-second", "second-repair");
+    const first = request("TK-change-first", "first-repair", "2026-08-14T20:00:00.000Z");
+    const second = request("TK-change-second", "second-repair", "2026-08-14T20:01:00.000Z");
     const node = {
       id: "asset-internal",
       type: "asset",
@@ -1944,10 +1945,28 @@ describe("native compiler-authoritative run program", () => {
           id: firstRepairId,
           operationId: "asset-resolution.asset.implement-asset",
           targetNodeIds: [node.id],
-          status: "completed",
+          status: "cancelled",
+          blocker: "Current compiler predicate no longer applies after prior execution",
+          steps: ["implement", "verify", "integrate", "review"].map((stepId) => ({
+            id: stepId,
+            status: "skipped",
+            attemptIds: [`attempt-${stepId}`],
+          })),
         },
       },
-    } as unknown as Pick<RunRecord, "tickets">;
+      attempts: Object.fromEntries(
+        ["implement", "verify", "integrate", "review"].map((stepId) => [
+          `attempt-${stepId}`,
+          {
+            id: `attempt-${stepId}`,
+            ticketId: firstRepairId,
+            stepId,
+            ticketExecutionEpoch: 2,
+            status: "completed",
+          },
+        ]),
+      ),
+    } as unknown as Pick<RunRecord, "tickets" | "attempts">;
 
     expect(
       pendingPlannedAssetRepairRequestForNode({
@@ -1962,6 +1981,98 @@ describe("native compiler-authoritative run program", () => {
       proposalTicketId: second.id,
       requestSha256: second.executionControl!.proposalRequest!.requestSha256,
       title: second.title,
+    });
+
+    const incompleteCycle = structuredClone(run) as typeof run;
+    incompleteCycle.attempts["attempt-review"]!.ticketExecutionEpoch = 3;
+    expect(
+      pendingPlannedAssetRepairRequestForNode({
+        run: incompleteCycle,
+        configurationSha256: digest("configuration"),
+        node,
+        root: "program/assets/internal",
+        files: ["program/assets/internal/run.py"],
+        readPaths: ["program/assets/internal"],
+      }),
+    ).toEqual({
+      proposalTicketId: first.id,
+      requestSha256: first.executionControl!.proposalRequest!.requestSha256,
+      title: first.title,
+    });
+  });
+
+  it("does not let a later repair request preempt an earlier request-bound workflow", () => {
+    const request = (id: string, requestSeed: string, updatedAt: string) =>
+      ({
+        id,
+        title: `Change request: ${requestSeed}`,
+        updatedAt,
+        status: "cancelled",
+        blocker: "Superseded by the existing planned asset implementation workflow",
+        targetNodeIds: ["asset-internal"],
+        steps: [{ id: "scope-change", status: "skipped", attemptIds: [] }],
+        executionControl: {
+          proposalRequest: {
+            requestSha256: digest(requestSeed),
+            sourceTicketId: `TK-source-${requestSeed}`,
+            sourceStepId: "run",
+            sourceOutputSha256: digest(`${requestSeed}-output`),
+            fulfillment: "planned_asset_repair",
+          },
+        },
+      }) as unknown as TicketRecord;
+    const earlier = request("TK-change-z-earlier", "earlier-repair", "2026-08-14T20:00:00.000Z");
+    const later = request("TK-change-a-later", "later-repair", "2026-08-14T20:00:00.000Z");
+    const node = {
+      id: "asset-internal",
+      type: "asset",
+      spec: {
+        source_strategy: "internal",
+        implementation_plan: {
+          root: "program/assets/internal",
+          files: ["program/assets/internal/run.py"],
+        },
+      },
+    } as unknown as GraphNode;
+    const earlierRepairId = generatedAssetRepairTicketId({
+      configurationSha256: digest("configuration"),
+      node,
+      root: "program/assets/internal",
+      files: ["program/assets/internal/run.py"],
+      readPaths: ["program/assets/internal"],
+      request: {
+        proposalTicketId: earlier.id,
+        requestSha256: earlier.executionControl!.proposalRequest!.requestSha256,
+        title: earlier.title,
+      },
+    });
+    const run = {
+      tickets: {
+        [earlier.id]: earlier,
+        [later.id]: later,
+        [earlierRepairId]: {
+          id: earlierRepairId,
+          status: "queued",
+          operationId: "asset-resolution.asset.implement-asset",
+          targetNodeIds: [node.id],
+        },
+      },
+      attempts: {},
+    } as unknown as Pick<RunRecord, "tickets" | "attempts">;
+
+    expect(
+      pendingPlannedAssetRepairRequestForNode({
+        run,
+        configurationSha256: digest("configuration"),
+        node,
+        root: "program/assets/internal",
+        files: ["program/assets/internal/run.py"],
+        readPaths: ["program/assets/internal"],
+      }),
+    ).toEqual({
+      proposalTicketId: earlier.id,
+      requestSha256: earlier.executionControl!.proposalRequest!.requestSha256,
+      title: earlier.title,
     });
   });
 

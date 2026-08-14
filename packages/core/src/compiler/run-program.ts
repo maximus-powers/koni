@@ -13223,7 +13223,10 @@ export function plannedAssetRepairRequestsForNode(
         proposal.steps.every((step) => step.status === "skipped" && step.attemptIds.length === 0)
       );
     })
-    .sort((left, right) => left.id.localeCompare(right.id));
+    .sort(
+      (left, right) =>
+        left.updatedAt.localeCompare(right.updatedAt) || left.id.localeCompare(right.id),
+    );
   return candidates.flatMap((proposal) => {
     const request = proposal.executionControl?.proposalRequest;
     return request === undefined
@@ -14616,7 +14619,7 @@ export function generatedAssetRepairTicketId(
 
 export function pendingPlannedAssetRepairRequestForNode(
   input: Readonly<{
-    run: Pick<RunRecord, "tickets">;
+    run: Pick<RunRecord, "tickets" | "attempts">;
     configurationSha256: Sha256Digest;
     node: Pick<GraphNode, "id">;
     root: string;
@@ -14624,10 +14627,46 @@ export function pendingPlannedAssetRepairRequestForNode(
     readPaths: readonly string[];
   }>,
 ): PlannedAssetRepairRequest | undefined {
-  return plannedAssetRepairRequestsForNode(input.run, input.node.id).find((request) => {
-    const ticketId = generatedAssetRepairTicketId({ ...input, request });
-    return input.run.tickets[ticketId]?.status !== "completed";
-  });
+  const actionable = plannedAssetRepairRequestsForNode(input.run, input.node.id).flatMap(
+    (request) => {
+      const ticketId = generatedAssetRepairTicketId({ ...input, request });
+      const ticket = input.run.tickets[ticketId];
+      if (ticket?.status === "completed") return [];
+      if (
+        ticket?.status === "cancelled" &&
+        ticket.blocker === COMPILER_INAPPLICABLE_TICKET &&
+        ticket.steps.length > 0 &&
+        ticket.steps.every((step) => step.status === "skipped")
+      ) {
+        let completedEpochs: Set<number> | undefined;
+        for (const step of ticket.steps) {
+          const stepEpochs = new Set(
+            step.attemptIds.flatMap((attemptId) => {
+              const attempt = input.run.attempts[attemptId];
+              return attempt?.ticketId === ticket.id &&
+                attempt.stepId === step.id &&
+                attempt.status === "completed"
+                ? [attempt.ticketExecutionEpoch ?? 0]
+                : [];
+            }),
+          );
+          completedEpochs =
+            completedEpochs === undefined
+              ? stepEpochs
+              : new Set([...completedEpochs].filter((epoch) => stepEpochs.has(epoch)));
+          if (completedEpochs.size === 0) break;
+        }
+        if ((completedEpochs?.size ?? 0) > 0) return [];
+      }
+      return [{ request, ticket }];
+    },
+  );
+  return (
+    actionable.find(
+      ({ ticket }) =>
+        ticket !== undefined && ticket.status !== "completed" && ticket.status !== "cancelled",
+    ) ?? actionable[0]
+  )?.request;
 }
 
 async function generatedAssetImplementationFallback(
