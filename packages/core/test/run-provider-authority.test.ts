@@ -1477,6 +1477,51 @@ describe("run authority provider reservation lifecycle", () => {
     expect(run.lifecycle.blocker).toBeUndefined();
   }, 60_000);
 
+  it("admits an uncapped request whose conservative input estimate fits only the shared context", async () => {
+    const harness = await authorityHarness("uncapped_shared_context_headroom");
+    const runId = await createRun(harness.client);
+    await waitFor(async () => {
+      const run = await harness.engine.store.getRun(runId);
+      if (run.lifecycle.phase === "blocked" || run.lifecycle.phase === "failed") {
+        const attempt = onlyAttempt(run);
+        throw new Error(
+          `shared-context run stopped: ${run.lifecycle.blocker ?? run.lifecycle.terminalReason}; ${JSON.stringify(
+            {
+              status: attempt.status,
+              error: attempt.error,
+              requests: attempt.authorityProviderRequests,
+            },
+          )}`,
+        );
+      }
+      return run.lifecycle.phase === "awaiting_approval";
+    });
+
+    const attempt = onlyAttempt(await harness.engine.store.getRun(runId));
+    expect(attempt.authorityProviderRequests).toEqual([
+      expect.objectContaining({
+        payloadSizeBytes: 280_000,
+        prospectiveInputTokens: 144_096,
+        reservedOutputTokens: 128_000,
+        settledAt: expect.any(String),
+      }),
+    ]);
+  }, 60_000);
+
+  it("rejects an uncapped payload whose conservative estimate exceeds the whole shared context", async () => {
+    const harness = await authorityHarness("uncapped_payload_exceeds_shared_context");
+    const runId = await createRun(harness.client);
+    await waitFor(
+      async () => (await harness.engine.store.getRun(runId)).lifecycle.phase === "blocked",
+    );
+
+    const attempt = onlyAttempt(await harness.engine.store.getRun(runId));
+    expect(attempt.authorityProviderRequests).toEqual([]);
+    expect(attempt.error).toContain(
+      "prospective provider input plus reserved output exceeds the authenticated model context window",
+    );
+  }, 60_000);
+
   it("holds an unsettled terminal predecessor and admits no revision successor", async () => {
     const harness = await authorityHarness("normal");
     const runId = await createRun(harness.client);
@@ -1779,6 +1824,12 @@ function providerProgram(
           maxCacheRead: 1_920_000,
           maxCacheWrite: 1_920_000,
         };
+      }
+      if (
+        scenario === "uncapped_shared_context_headroom" ||
+        scenario === "uncapped_payload_exceeds_shared_context"
+      ) {
+        draft.model.catalogContextWindow = 272_000;
       }
       draft.issuedAt = new Date().toISOString();
       draft.authority = {

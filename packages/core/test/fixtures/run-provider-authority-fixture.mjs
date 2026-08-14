@@ -167,7 +167,8 @@ function onFrame(frame) {
     if (
       scenario === "response_overshoot" ||
       scenario === "synthesis_threshold" ||
-      scenario === "context_window_headroom"
+      scenario === "context_window_headroom" ||
+      scenario === "uncapped_shared_context_headroom"
     ) {
       requestSettlement();
       return;
@@ -224,6 +225,7 @@ function onFrame(frame) {
     (launch.mode === "recover" ||
       scenario === "normal" ||
       scenario === "torn_after_assistant" ||
+      scenario === "uncapped_shared_context_headroom" ||
       scenario.startsWith("assignment_") ||
       scenario.startsWith("lead_sol_fallback"))
   ) {
@@ -454,7 +456,15 @@ function requestReservation() {
   const payload =
     scenario === "context_window_headroom"
       ? sizedProviderPayload(103_386)
-      : { model: launch.spec.model.id, input: [{ role: "user", content: "work" }], stream: true };
+      : scenario === "uncapped_shared_context_headroom"
+        ? sizedProviderPayload(280_000)
+        : scenario === "uncapped_payload_exceeds_shared_context"
+          ? sizedProviderPayload(520_000)
+          : {
+              model: launch.spec.model.id,
+              input: [{ role: "user", content: "work" }],
+              stream: true,
+            };
   const encoded = JSON.stringify(payload);
   send({
     type: "authority_request",

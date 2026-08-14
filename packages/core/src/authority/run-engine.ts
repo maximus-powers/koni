@@ -23093,20 +23093,35 @@ function assertProviderExposureBudget(
   // compiler's explicit input target and model output maximum. Preserve that exact historical
   // admission boundary for resumability. Every new launch carries catalogContextWindow and uses
   // the stronger provider-total capacity check.
+  const providerContextWindow = spec.model.catalogContextWindow;
+  const hasSupportedOutputCap = providerApiHasSupportedOutputCap(spec.model.api);
   const providerInputHeadroom =
-    spec.model.catalogContextWindow === undefined
+    providerContextWindow === undefined
       ? maximum.maxInput
-      : spec.model.catalogContextWindow -
+      : providerContextWindow -
         request.reservedOutputTokens -
-        (providerApiHasSupportedOutputCap(spec.model.api)
-          ? 0
-          : UNCAPPED_PROVIDER_CONTEXT_FRAMING_RESERVE);
-  if (providerInputHeadroom < 1 || request.prospectiveInputTokens > providerInputHeadroom) {
+        (hasSupportedOutputCap ? 0 : UNCAPPED_PROVIDER_CONTEXT_FRAMING_RESERVE);
+  // An uncapped transport must reserve the model's full advertised output maximum even though
+  // input and output consume one shared context window. Do not reject a plausible input merely by
+  // adding two maxima that the provider cannot realize simultaneously. The provider still binds
+  // the exact shared context ceiling, while the authority reserves the smaller input allocation
+  // beside the full output hold. Gross payloads that cannot fit even with zero output remain
+  // provider-free failures.
+  const uncappedSharedContextInputLimit =
+    providerContextWindow === undefined || hasSupportedOutputCap
+      ? undefined
+      : providerContextWindow - UNCAPPED_PROVIDER_CONTEXT_FRAMING_RESERVE;
+  const providerInputAdmissionLimit = uncappedSharedContextInputLimit ?? providerInputHeadroom;
+  if (providerInputHeadroom < 1 || request.prospectiveInputTokens > providerInputAdmissionLimit) {
     throw new AuthorityRpcError(
       "provider_input_exposure",
       "prospective provider input plus reserved output exceeds the authenticated model context window",
     );
   }
+  const reservedInputExposure =
+    uncappedSharedContextInputLimit === undefined
+      ? request.prospectiveInputTokens
+      : Math.min(request.prospectiveInputTokens, providerInputHeadroom);
   const componentChecks: Array<[number, number, string]> = [
     [budgetUsage.inputTokens, maximum.maxInput, "input"],
     [budgetUsage.cacheReadTokens, maximum.maxCacheRead, "cache-read"],
@@ -23153,10 +23168,8 @@ function assertProviderExposureBudget(
   );
   if (
     checkedProviderSum(budgetUsage.outputTokens, request.reservedOutputTokens) > hardOutput ||
-    checkedProviderSum(newTokens, request.prospectiveInputTokens, request.reservedOutputTokens) >
-      hardNew ||
-    checkedProviderSum(allTokens, request.prospectiveInputTokens, request.reservedOutputTokens) >
-      hardAll
+    checkedProviderSum(newTokens, reservedInputExposure, request.reservedOutputTokens) > hardNew ||
+    checkedProviderSum(allTokens, reservedInputExposure, request.reservedOutputTokens) > hardAll
   ) {
     throw new AuthorityRpcError(
       "provider_token_exposure",
