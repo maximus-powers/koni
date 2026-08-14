@@ -194,7 +194,6 @@ import {
   deriveProposalDecision,
   PROFILE_POLICY_PROPOSAL_DECISION_AUTHORITY_PROTOCOL,
   PROPOSAL_DECISION_AUTHORITY_PROTOCOL,
-  deriveSourceReleaseDecision,
   deriveTerminalResolverReconciliation,
   deriveTerminalResolverRetryRequest,
   MAX_TERMINAL_RESOLVER_RETRIES,
@@ -231,6 +230,7 @@ import type {
   PlanningSynthesisRecord,
   HeldSourceGrantRefreshAuthority,
   RecurringAssetGrantRefreshAuthority,
+  SourceCorrectionSeedAuthority,
   TicketRecord,
   WorkspaceEffectIntentRecord,
 } from "../state/run-record.js";
@@ -250,6 +250,10 @@ import {
   terminalFailureBindingFromProof,
   tokenBudgetRecoveryAuthorityCounts,
   tokenBudgetRecoverySliceForAttempt,
+  sourceCorrectionSeedRoute,
+  sourceReleaseDecisionForRun,
+  terminalTicketAuthoritySha256,
+  currentSourceCorrectionSeed,
   ticketImmutableProjection,
 } from "../state/run-record.js";
 import {
@@ -6948,7 +6952,7 @@ export class RunAuthorityEngine {
           `source ${candidate.id} is held by a missing or mismatched proposal`,
         );
       }
-      const candidateRelease = runSourceReleaseDecision(run, candidate, candidateProposal);
+      const candidateRelease = sourceReleaseDecisionForRun(run, candidate, candidateProposal);
       if (candidateRelease.disposition === "release") {
         selected = {
           source: candidate,
@@ -6980,7 +6984,7 @@ export class RunAuthorityEngine {
         const currentProposal = current.tickets[proposal.id];
         if (
           currentProposal === undefined ||
-          runSourceReleaseDecision(current, currentSource, currentProposal).sha256 !==
+          sourceReleaseDecisionForRun(current, currentSource, currentProposal).sha256 !==
             release.sha256
         ) {
           throw new RunAdvancementStoppedError();
@@ -7054,7 +7058,7 @@ export class RunAuthorityEngine {
       }
       const currentProposal = current.tickets[proposal.id];
       if (currentProposal === undefined) return this.#noOpInternal(revision);
-      const currentRelease = runSourceReleaseDecision(current, currentSource, currentProposal);
+      const currentRelease = sourceReleaseDecisionForRun(current, currentSource, currentProposal);
       if (currentRelease.sha256 !== release.sha256 || currentRelease.disposition !== "release") {
         return this.#noOpInternal(revision);
       }
@@ -7078,11 +7082,23 @@ export class RunAuthorityEngine {
         mutable.blocker = undefined;
         mutable.updatedAt = draft.updatedAt;
       } else {
+        const correctionSeed = sourceCorrectionSeedForRelease(
+          current,
+          currentSource,
+          currentProposal,
+          currentRelease,
+          draft.updatedAt,
+        );
         resetTicketForFreshCycle(
           mutable,
           draft.updatedAt,
           currentTicketExecutionEpoch(current, currentSource),
         );
+        if (correctionSeed !== undefined) {
+          mutable.executionControl ??= {};
+          mutable.executionControl.sourceCorrectionSeeds ??= [];
+          mutable.executionControl.sourceCorrectionSeeds.push(correctionSeed);
+        }
       }
       delete mutable.executionControl!.sourceHold;
       if (Object.keys(mutable.executionControl!).length === 0) delete mutable.executionControl;
@@ -17780,6 +17796,7 @@ export class RunAuthorityEngine {
         const currentTicket = current.tickets[ticketId];
         if (currentTicket === undefined)
           throw new AuthorityRpcError("ticket_missing", `ticket does not exist: ${ticketId}`);
+        const currentCorrectionSeed = currentSourceCorrectionSeed(current, currentTicket);
         await this.#lifecycleRacePoint("before_ticket_cycle_open", runId, ticketId);
         await this.#git.openTicketCycle(
           current.git,
@@ -17787,6 +17804,18 @@ export class RunAuthorityEngine {
             ticketId,
             cycleId: cycleId!,
             ...(integrationCandidateOid === undefined ? {} : { integrationCandidateOid }),
+            ...(integrationCandidateOid !== undefined || currentCorrectionSeed === undefined
+              ? {}
+              : {
+                  continuation: {
+                    authoritySha256: currentCorrectionSeed.sha256,
+                    archivedCycleId: currentCorrectionSeed.archivedCycleId,
+                    archiveRef: currentCorrectionSeed.archiveRef,
+                    candidateBaseOid: currentCorrectionSeed.candidateBaseOid,
+                    candidateOid: currentCorrectionSeed.candidateOid,
+                    scope: ticketGitScope(currentTicket),
+                  },
+                }),
             ...(current.git.policy === undefined
               ? {}
               : {
@@ -21847,12 +21876,13 @@ function currentTicketExecutionEpoch(
 
 /** Return the fresh execution epoch required when checkout allocation replaces a retired cycle. */
 export function replacementTicketExecutionEpoch(
-  run: Readonly<Pick<RunRecord, "tickets" | "git">>,
+  run: Readonly<RunRecord>,
   ticket: Readonly<TicketRecord>,
 ): number | undefined {
   if (ticket.gitCycleId === undefined) return undefined;
   const cycle = run.git.ticketCycles[ticket.gitCycleId];
   if (cycle === undefined || new Set(["active", "candidate"]).has(cycle.status)) return undefined;
+  if (currentSourceCorrectionSeed(run, ticket) !== undefined) return undefined;
   return currentTicketExecutionEpoch(run, ticket) + 1;
 }
 
@@ -22131,105 +22161,6 @@ function terminalFailureBinding(
     : terminalFailureBindingsForTicket(run, ticket).get(attemptId);
 }
 
-function terminalTicketAuthoritySha256(ticket: Readonly<TicketRecord>): Sha256Digest {
-  return canonicalHash({
-    protocol: "koni.terminal-ticket-authority.v1",
-    ticketId: ticket.id,
-    operationId: ticket.operationId,
-    status: ticket.status,
-    executionPolicyBindingSha256: ticket.executionPolicyBinding?.sha256 ?? null,
-    executionControl: ticket.executionControl ?? null,
-    steps: ticket.steps.map((step) => ({
-      id: step.id,
-      status: step.status,
-      attemptIds: step.attemptIds,
-      summary: step.summary ?? null,
-      completedAt: step.completedAt ?? null,
-      executionPolicyBindingSha256: step.executionPolicyBinding?.sha256 ?? null,
-    })),
-  });
-}
-
-function runSourceReleaseDecision(
-  run: Readonly<RunRecord>,
-  source: Readonly<TicketRecord>,
-  proposal: Readonly<TicketRecord>,
-): SourceReleaseDecision {
-  const proposalTerminal = proposal.status === "completed" || proposal.status === "cancelled";
-  const disposition = proposal.executionControl?.proposalDisposition;
-  if (proposal.status === "cancelled" && disposition === undefined) {
-    return deriveSourceReleaseDecision({
-      sourceTicketId: source.id,
-      heldByProposalTicketId: proposal.id,
-      proposalTerminal: true,
-      proposalTerminalSha256: terminalTicketAuthoritySha256(proposal),
-      proposalDisposition: { kind: "cancelled" },
-    });
-  }
-  if (disposition?.kind === "rejected") {
-    return deriveSourceReleaseDecision({
-      sourceTicketId: source.id,
-      heldByProposalTicketId: proposal.id,
-      proposalTerminal,
-      ...(proposalTerminal
-        ? { proposalTerminalSha256: terminalTicketAuthoritySha256(proposal) }
-        : {}),
-      proposalDisposition: { kind: "rejected", authoritySha256: disposition.authoritySha256 },
-    });
-  }
-  if (disposition?.kind === "no_op") {
-    return deriveSourceReleaseDecision({
-      sourceTicketId: source.id,
-      heldByProposalTicketId: proposal.id,
-      proposalTerminal,
-      ...(proposalTerminal
-        ? { proposalTerminalSha256: terminalTicketAuthoritySha256(proposal) }
-        : {}),
-      proposalDisposition: { kind: "no_op", authoritySha256: disposition.authoritySha256 },
-    });
-  }
-  if (disposition?.kind === "application" && disposition.applicationTicketId !== undefined) {
-    const application = run.tickets[disposition.applicationTicketId];
-    const applicationApprovalSha256 = application?.executionControl?.approvedApplicationSha256;
-    if (application === undefined || applicationApprovalSha256 === undefined) {
-      throw new AuthorityRpcError(
-        "change_control_application_authority",
-        `proposal ${proposal.id} names a missing or unauthenticated application child`,
-      );
-    }
-    const applicationTerminal = application.status === "completed";
-    return deriveSourceReleaseDecision({
-      sourceTicketId: source.id,
-      heldByProposalTicketId: proposal.id,
-      proposalTerminal,
-      ...(proposalTerminal
-        ? { proposalTerminalSha256: terminalTicketAuthoritySha256(proposal) }
-        : {}),
-      proposalDisposition: {
-        kind: "application",
-        authoritySha256: disposition.authoritySha256,
-        applicationTicketId: application.id,
-        applicationApprovalSha256,
-        applicationTerminal,
-        ...(applicationTerminal
-          ? {
-              applicationTerminalSha256: terminalTicketAuthoritySha256(application),
-            }
-          : {}),
-      },
-    });
-  }
-  return deriveSourceReleaseDecision({
-    sourceTicketId: source.id,
-    heldByProposalTicketId: proposal.id,
-    proposalTerminal,
-    ...(proposalTerminal
-      ? { proposalTerminalSha256: terminalTicketAuthoritySha256(proposal) }
-      : {}),
-    proposalDisposition: { kind: "pending" },
-  });
-}
-
 function rejectedSourceReissueCount(
   run: Readonly<RunRecord>,
   source: Readonly<TicketRecord>,
@@ -22239,6 +22170,55 @@ function rejectedSourceReissueCount(
       ticket.executionControl?.proposalRequest?.sourceTicketId === source.id &&
       ticket.executionControl.proposalDisposition?.kind === "rejected",
   ).length;
+}
+
+function sourceCorrectionSeedForRelease(
+  run: Readonly<RunRecord>,
+  source: Readonly<TicketRecord>,
+  proposal: Readonly<TicketRecord>,
+  release: Readonly<SourceReleaseDecision>,
+  recordedAt: string,
+): SourceCorrectionSeedAuthority | undefined {
+  const route = sourceCorrectionSeedRoute(run, source, proposal);
+  const request = proposal.executionControl?.proposalRequest;
+  const authority = proposal.executionControl?.controlTicketAuthority;
+  const causal = authority?.causal;
+  const cycle =
+    source.gitCycleId === undefined ? undefined : run.git.ticketCycles[source.gitCycleId];
+  if (
+    route === undefined ||
+    release.disposition !== "release" ||
+    request === undefined ||
+    authority?.role !== "proposal" ||
+    causal?.role !== "proposal" ||
+    cycle?.ticketId !== source.id ||
+    cycle.status !== "retired" ||
+    cycle.archiveRef === undefined ||
+    cycle.supersessionSha256 !== request.requestSha256 ||
+    cycle.ticketHeadOid === cycle.baseRunOid
+  ) {
+    return undefined;
+  }
+  const priorExecutionEpoch = currentTicketExecutionEpoch(run, source);
+  const material = {
+    protocol: "koni.source-correction-seed.v1" as const,
+    runId: run.id,
+    ticketId: source.id,
+    proposalTicketId: proposal.id,
+    requestSha256: request.requestSha256,
+    route,
+    releaseDecisionSha256: release.sha256,
+    archivedCycleId: cycle.cycleId,
+    archiveRef: cycle.archiveRef,
+    candidateBaseOid: cycle.baseRunOid,
+    candidateOid: cycle.ticketHeadOid,
+    candidateProjection: structuredClone(causal.sourceTicketProjection),
+    releaseProjection: ticketImmutableProjection(source),
+    priorExecutionEpoch,
+    nextExecutionEpoch: priorExecutionEpoch + 1,
+    recordedAt,
+  };
+  return { ...material, sha256: canonicalHash(material) };
 }
 
 function proposalReviewAuthoritySha256(

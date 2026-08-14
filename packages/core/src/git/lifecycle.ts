@@ -95,6 +95,8 @@ export interface TicketGitCycleRecord {
   archiveRef?: string;
   supersessionSha256?: string;
   supersededAt?: string;
+  /** Exact source-correction authority whose archived candidate seeded this fresh cycle. */
+  continuationAuthoritySha256?: string;
   /** Required on policy-backed records; absent on legacy cycles. */
   templateContext?: GitTicketTemplateContext;
 }
@@ -223,6 +225,8 @@ export type GitLifecycleIntent =
       /** Preview commit that materializes a conflict candidate; absent on legacy intents. */
       ticketHeadOid?: string;
       integrationCandidateOid?: string;
+      continuationCandidateOid?: string;
+      continuationAuthoritySha256?: string;
       templateContext?: GitTicketTemplateContext;
     })
   | (GitIntentBase & {
@@ -566,7 +570,14 @@ export function assertRunGitLifecycleRecord(
       "archiveRef",
       "supersessionSha256",
       "supersededAt",
+      "continuationAuthoritySha256",
     ]);
+    if (
+      unknownCycle.continuationAuthoritySha256 !== undefined &&
+      !isSha256Value(unknownCycle.continuationAuthoritySha256)
+    ) {
+      throw new Error(`Git lifecycle ticket continuation authority is invalid: ${id}`);
+    }
     const hasSupersession =
       unknownCycle.archiveRef !== undefined ||
       unknownCycle.supersessionSha256 !== undefined ||
@@ -814,6 +825,20 @@ export function assertGitLifecycleIntent(value: unknown): asserts value is GitLi
     }
     if (value.integrationCandidateOid !== undefined) {
       assertOidValue(value.integrationCandidateOid, "ticket integration candidate OID");
+    }
+    const hasContinuationCandidate = value.continuationCandidateOid !== undefined;
+    const hasContinuationAuthority = value.continuationAuthoritySha256 !== undefined;
+    if (hasContinuationCandidate !== hasContinuationAuthority) {
+      throw new Error("ticket continuation materialization is incomplete");
+    }
+    if (hasContinuationCandidate) {
+      assertOidValue(value.continuationCandidateOid, "ticket continuation candidate OID");
+      if (!isSha256Value(value.continuationAuthoritySha256)) {
+        throw new Error("ticket continuation authority hash is invalid");
+      }
+      if (value.integrationCandidateOid !== undefined) {
+        throw new Error("ticket materialization cannot combine integration and continuation seeds");
+      }
     }
   }
   if (kind === "ticket_supersede") {
@@ -1422,6 +1447,15 @@ export class IsolatedGitLifecycle {
       cycleId: string;
       /** Exact conflicted Git candidate to expose as a clean conflict-marker preview. */
       integrationCandidateOid?: string;
+      /** Exact retired, scoped candidate authorized to seed this correction cycle. */
+      continuation?: {
+        authoritySha256: string;
+        archivedCycleId: string;
+        archiveRef: string;
+        candidateBaseOid: string;
+        candidateOid: string;
+        scope: GitPathScope;
+      };
       /** Required for policy-backed runs and persisted for commit/ref rendering. */
       templateContext?: GitTicketTemplateContext;
     },
@@ -1488,7 +1522,59 @@ export class IsolatedGitLifecycle {
       ? policyTicketWorktree(lifecycle.namespace.ticketRoot, branchRef)
       : path.join(lifecycle.namespace.ticketRoot, input.ticketId, "cycles", input.cycleId);
     let ticketHeadOid = runHead;
-    if (input.integrationCandidateOid !== undefined) {
+    if (input.integrationCandidateOid !== undefined && input.continuation !== undefined) {
+      throw invalidState("ticket cycle cannot combine integration and correction candidates");
+    }
+    if (input.continuation !== undefined) {
+      const continuation = input.continuation;
+      if (!isSha256Value(continuation.authoritySha256)) {
+        throw invalidState("ticket correction continuation requires exact authority");
+      }
+      assertNamespaceId(continuation.archivedCycleId, "archived ticket cycle ID");
+      assertOidValue(continuation.candidateBaseOid, "ticket correction candidate base OID");
+      assertOidValue(continuation.candidateOid, "ticket correction candidate OID");
+      const archived = lifecycle.ticketCycles[continuation.archivedCycleId];
+      if (
+        archived?.ticketId !== input.ticketId ||
+        archived.status !== "retired" ||
+        archived.archiveRef !== continuation.archiveRef ||
+        archived.baseRunOid !== continuation.candidateBaseOid ||
+        archived.ticketHeadOid !== continuation.candidateOid
+      ) {
+        throw invalidState("ticket correction continuation differs from its retired cycle");
+      }
+      const archivedOid = await repository.tryResolveRef(continuation.archiveRef);
+      if (archivedOid !== continuation.candidateOid) {
+        throw invalidState("ticket correction continuation archive moved or is missing");
+      }
+      const candidateScope = inspectGitPathScope(
+        await repository.diffPaths(continuation.candidateBaseOid, continuation.candidateOid),
+        continuation.scope,
+      );
+      assertAcceptedScope(candidateScope, continuation.archivedCycleId);
+      const preview = await repository.mergeTreeDetailed(runHead, continuation.candidateOid);
+      if (preview.treeOid === undefined || preview.conflictPaths.length > 0) {
+        throw invalidState("ticket correction candidate does not merge cleanly onto the run head");
+      }
+      if (preview.treeOid !== (await repository.treeOfCommit(runHead))) {
+        const timestamp = this.#timestamp();
+        ticketHeadOid = await repository.commitTree(
+          preview.treeOid,
+          [runHead],
+          commitMessage(
+            `Koni correction continuation: ${input.ticketId}`,
+            `Candidate ${continuation.candidateOid}\nAuthority ${continuation.authoritySha256}`,
+            {
+              "Koni-Run": lifecycle.runId,
+              "Koni-Ticket": input.ticketId,
+              "Koni-Correction-Candidate": continuation.candidateOid,
+              "Koni-Correction-Authority": continuation.authoritySha256,
+            },
+          ),
+          { ...this.#identity, timestamp },
+        );
+      }
+    } else if (input.integrationCandidateOid !== undefined) {
       assertOidValue(input.integrationCandidateOid, "ticket integration candidate OID");
       const preview = await repository.mergeTreeDetailed(runHead, input.integrationCandidateOid);
       if (preview.treeOid === undefined) {
@@ -1530,6 +1616,12 @@ export class IsolatedGitLifecycle {
       ...(input.integrationCandidateOid === undefined
         ? {}
         : { integrationCandidateOid: input.integrationCandidateOid }),
+      ...(input.continuation === undefined
+        ? {}
+        : {
+            continuationCandidateOid: input.continuation.candidateOid,
+            continuationAuthoritySha256: input.continuation.authoritySha256,
+          }),
       ...(input.templateContext === undefined
         ? {}
         : { templateContext: structuredClone(input.templateContext) }),
@@ -1564,6 +1656,9 @@ export class IsolatedGitLifecycle {
       integratedAt: undefined,
       retiredAt: undefined,
       blocker: undefined,
+      ...(input.continuation === undefined
+        ? {}
+        : { continuationAuthoritySha256: input.continuation.authoritySha256 }),
       ...(input.templateContext === undefined
         ? {}
         : { templateContext: structuredClone(input.templateContext) }),
@@ -2703,6 +2798,9 @@ export class IsolatedGitLifecycle {
               integratedAt: undefined,
               retiredAt: undefined,
               blocker: undefined,
+              ...(intent.continuationAuthoritySha256 === undefined
+                ? {}
+                : { continuationAuthoritySha256: intent.continuationAuthoritySha256 }),
               ...(intent.templateContext === undefined
                 ? {}
                 : { templateContext: structuredClone(intent.templateContext) }),

@@ -127,6 +127,7 @@ import type {
   RunBehaviorSnapshot,
   RunRecord,
   RunReportRecord,
+  SourceCorrectionSeedAuthority,
   TicketExecutionControlRecord,
   TicketRecord,
 } from "../src/state/run-record.js";
@@ -137,6 +138,7 @@ import {
   createCompilerControlTicketAuthority,
   createRunActionSettlement,
   createTerminalSuccessSettlementProof,
+  currentSourceCorrectionSeed,
   leadJudgmentFrontierSha256,
   ticketImmutableProjection,
 } from "../src/state/run-record.js";
@@ -2150,10 +2152,13 @@ describe("run authority engine", () => {
       executionControl: TicketRecord["executionControl"];
       retiredCycleStatus: string | undefined;
     }> = [];
+    const sourceCandidateContents: string[] = [];
     let proposalInstalled = false;
     let proposalReconciliations = 0;
     let sourceTicketId: string | undefined;
     let retiredCycleId: string | undefined;
+    let correctionReleasePrevious: RunRecord | undefined;
+    let correctionReleaseNext: RunRecord | undefined;
     const program: RunCompilerProgram = {
       ...direct,
       async reconcileTicketBoard(run) {
@@ -2169,11 +2174,30 @@ describe("run authority engine", () => {
           proposal.status = "cancelled";
           proposal.blocker = "Superseded by the existing planned asset implementation workflow";
           for (const step of proposal.steps) step.status = "skipped";
+          correctionReleasePrevious = { ...structuredClone(run), tickets };
         }
         return { tickets };
       },
       async prepareAttempt(input) {
+        const assignmentTicketId = input.assignment?.ticketId;
+        if (
+          proposalInstalled &&
+          input.kind === "ticket" &&
+          assignmentTicketId !== undefined &&
+          assignmentTicketId === sourceTicketId
+        ) {
+          const source = input.run.tickets[assignmentTicketId];
+          const worktree = source?.worktreePath;
+          sourceCandidateContents.push(
+            worktree === undefined
+              ? "missing worktree"
+              : await readFile(path.join(worktree, "src", "continued.ts"), "utf8").catch(
+                  () => "missing candidate",
+                ),
+          );
+        }
         if (proposalInstalled && input.kind === "lead") {
+          correctionReleaseNext ??= structuredClone(input.run);
           leadProposalStatuses.push(
             Object.values(input.run.tickets).find(
               (ticket) =>
@@ -2243,6 +2267,7 @@ describe("run authority engine", () => {
     draft.updatedAt = "2026-08-12T00:00:00.000Z";
     const proposal = await addCanonicalProposalFixture(draft, {
       fulfillment: "planned_asset_repair",
+      sourceWritePaths: ["src"],
     });
     const request = proposal.executionControl!.proposalRequest!;
     const source = draft.tickets[request.sourceTicketId]!;
@@ -2261,6 +2286,25 @@ describe("run authority engine", () => {
       ...branchRef.slice("refs/heads/".length).split("/"),
     );
     const archiveRef = `refs/koni/archive/${runId}/tickets/${source.id}/cycles/${cycleId}/${request.requestSha256.slice("sha256:".length)}`;
+    const candidateWorktree = path.join(root, "fixture-correction-candidate");
+    const candidateBranch = "fixture-correction-candidate";
+    await git(
+      root,
+      "worktree",
+      "add",
+      "-b",
+      candidateBranch,
+      candidateWorktree,
+      draft.git.run.headOid!,
+    );
+    await mkdir(path.join(candidateWorktree, "src"), { recursive: true });
+    await writeFile(path.join(candidateWorktree, "src", "continued.ts"), "reviewed candidate\n");
+    await git(candidateWorktree, "add", "src/continued.ts");
+    await git(candidateWorktree, "commit", "-m", "fixture correction candidate");
+    const candidateOid = await gitOutput(candidateWorktree, "rev-parse", "HEAD");
+    await git(root, "update-ref", archiveRef, candidateOid);
+    await git(root, "worktree", "remove", candidateWorktree);
+    await git(root, "branch", "-D", candidateBranch);
     source.gitCycleId = cycleId;
     source.worktreePath = worktree;
     source.branch = branchRef;
@@ -2272,7 +2316,7 @@ describe("run authority engine", () => {
       baseRunOid: draft.git.run.headOid!,
       branchRef,
       worktree,
-      ticketHeadOid: draft.git.run.headOid!,
+      ticketHeadOid: candidateOid,
       integratedRunOid: undefined,
       squashCommitOid: undefined,
       createdAt: draft.updatedAt,
@@ -2370,13 +2414,177 @@ describe("run authority engine", () => {
       status: "queued",
       executionEpoch: 1,
       gitCycleId: undefined,
-      executionControl: undefined,
+      executionControl: {
+        sourceCorrectionSeeds: [
+          expect.objectContaining({
+            route: "planned_asset_repair",
+            priorExecutionEpoch: 0,
+            nextExecutionEpoch: 1,
+          }),
+        ],
+      },
       retiredCycleStatus: "retired",
     });
     expect((await engine.store.getRun(runId)).tickets[proposal.id]).toMatchObject({
       status: "cancelled",
       blocker: "Superseded by the existing planned asset implementation workflow",
     });
+    await waitFor(async () => sourceCandidateContents.length > 0);
+    expect(sourceCandidateContents[0]).toBe("reviewed candidate\n");
+    const continued = await engine.store.getRun(runId);
+    const continuedSource = continued.tickets[source.id]!;
+    expect(
+      continued.git.ticketCycles[continuedSource.gitCycleId!]?.continuationAuthoritySha256,
+    ).toBe(continuedSource.executionControl?.sourceCorrectionSeeds?.at(-1)?.sha256);
+    const audited = structuredClone(continued);
+    const auditedProposal = audited.tickets[proposal.id]!;
+    const auditMaterial = {
+      protocol: "koni.proposal-decision-authority.v2" as const,
+      runId,
+      proposalTicketId: proposal.id,
+      requestSha256: auditedProposal.executionControl!.proposalRequest!.requestSha256,
+      eventId: "decision-audit-after-correction-release",
+      decision: "rejection" as const,
+      actor: "operator" as const,
+      message: "Retain this later audit note without rewriting the released checkpoint.",
+      recordedAt: "2026-08-14T23:59:59.000Z",
+    };
+    auditedProposal.executionControl!.proposalDecisionHistory = [
+      { ...auditMaterial, sha256: canonicalHash(auditMaterial) },
+    ];
+    assertRunRecord(audited);
+    expect(currentSourceCorrectionSeed(audited, audited.tickets[source.id]!)).toMatchObject({
+      sha256: continuedSource.executionControl?.sourceCorrectionSeeds?.at(-1)?.sha256,
+    });
+    const refreshRun = structuredClone(continued);
+    const refreshSource = refreshRun.tickets[source.id]!;
+    const refreshCycle = refreshRun.git.ticketCycles[refreshSource.gitCycleId!]!;
+    refreshSource.status = "queued";
+    for (const step of refreshSource.steps) {
+      step.status = "pending";
+      step.startedAt = undefined;
+      step.completedAt = undefined;
+    }
+    refreshRun.git.run.headOid = "c".repeat(40);
+    expect(shouldRefreshUnusedTicketCycle(refreshRun, refreshSource, refreshCycle)).toBe(true);
+    refreshCycle.status = "retired";
+    expect(replacementTicketExecutionEpoch(refreshRun, refreshSource)).toBeUndefined();
+    expect(currentSourceCorrectionSeed(refreshRun, refreshSource)?.sha256).toBe(
+      continuedSource.executionControl?.sourceCorrectionSeeds?.at(-1)?.sha256,
+    );
+
+    expect(correctionReleasePrevious).toBeDefined();
+    expect(correctionReleaseNext).toBeDefined();
+    const observedSeed =
+      correctionReleaseNext!.tickets[source.id]!.executionControl!.sourceCorrectionSeeds![0]!;
+    const exactReleaseNext = structuredClone(correctionReleasePrevious!);
+    exactReleaseNext.revision += 1;
+    exactReleaseNext.updatedAt = observedSeed.recordedAt;
+    exactReleaseNext.tickets[source.id] = structuredClone(
+      correctionReleaseNext!.tickets[source.id]!,
+    );
+    assertRunExecutionControlMutation(correctionReleasePrevious!, exactReleaseNext);
+    const rehashProjection = (
+      projection: SourceCorrectionSeedAuthority["releaseProjection"],
+      priority: number,
+    ) => {
+      const { sha256: _sha256, ...material } = { ...projection, priority };
+      return { ...material, sha256: canonicalHash(material) };
+    };
+    for (const mutate of [
+      (seed: SourceCorrectionSeedAuthority) => ({
+        ...seed,
+        requestSha256: rawSha256("forged-correction-request"),
+      }),
+      (seed: SourceCorrectionSeedAuthority) => ({
+        ...seed,
+        releaseDecisionSha256: rawSha256("forged-release-decision"),
+      }),
+      (seed: SourceCorrectionSeedAuthority) => ({
+        ...seed,
+        archiveRef: "refs/koni/archive/forged",
+      }),
+      (seed: SourceCorrectionSeedAuthority) => ({
+        ...seed,
+        nextExecutionEpoch: seed.nextExecutionEpoch + 1,
+      }),
+      (seed: SourceCorrectionSeedAuthority) => ({
+        ...seed,
+        candidateProjection: rehashProjection(
+          seed.candidateProjection,
+          seed.candidateProjection.priority + 1,
+        ),
+      }),
+      (seed: SourceCorrectionSeedAuthority) => ({
+        ...seed,
+        releaseProjection: rehashProjection(
+          seed.releaseProjection,
+          seed.releaseProjection.priority + 1,
+        ),
+      }),
+    ]) {
+      const forged = structuredClone(exactReleaseNext);
+      const seeds = forged.tickets[source.id]!.executionControl!.sourceCorrectionSeeds!;
+      const mutated = mutate(seeds[0]!);
+      const { sha256: _sha256, ...material } = mutated;
+      seeds[0] = { ...material, sha256: canonicalHash(material) };
+      expect(() => assertRunExecutionControlMutation(correctionReleasePrevious!, forged)).toThrow(
+        "unauthenticated source-correction seed",
+      );
+    }
+
+    const staleArchivePrevious = structuredClone(correctionReleasePrevious!);
+    const staleArchiveCycle = staleArchivePrevious.git.ticketCycles[retiredCycleId]!;
+    const staleSupersession = rawSha256("stale-prior-archive");
+    staleArchiveCycle.supersessionSha256 = staleSupersession;
+    staleArchiveCycle.archiveRef = `refs/koni/archive/${runId}/tickets/${source.id}/cycles/${retiredCycleId}/${staleSupersession.slice("sha256:".length)}`;
+    const staleArchiveNext = structuredClone(staleArchivePrevious);
+    staleArchiveNext.revision += 1;
+    staleArchiveNext.updatedAt = observedSeed.recordedAt;
+    staleArchiveNext.tickets[source.id] = structuredClone(exactReleaseNext.tickets[source.id]!);
+    const staleArchiveSeed =
+      staleArchiveNext.tickets[source.id]!.executionControl!.sourceCorrectionSeeds![0]!;
+    const { sha256: _staleSha256, ...staleArchiveMaterial } = {
+      ...staleArchiveSeed,
+      archiveRef: staleArchiveCycle.archiveRef,
+    };
+    staleArchiveNext.tickets[source.id]!.executionControl!.sourceCorrectionSeeds![0] = {
+      ...staleArchiveMaterial,
+      sha256: canonicalHash(staleArchiveMaterial),
+    };
+    expect(() => assertRunRecord(staleArchiveNext)).toThrow(
+      "source-correction seed history is invalid",
+    );
+    expect(() => assertRunExecutionControlMutation(staleArchivePrevious, staleArchiveNext)).toThrow(
+      "unauthenticated source-correction seed",
+    );
+
+    const deletedSeed = structuredClone(continued);
+    delete deletedSeed.tickets[source.id]!.executionControl!.sourceCorrectionSeeds;
+    expect(() => assertRunExecutionControlMutation(continued, deletedSeed)).toThrow(
+      "rewrote source-correction seed authority",
+    );
+
+    const rewrittenSeed = structuredClone(continued);
+    const rewrittenSeeds =
+      rewrittenSeed.tickets[source.id]!.executionControl!.sourceCorrectionSeeds!;
+    rewrittenSeeds[0] = {
+      ...rewrittenSeeds[0]!,
+      requestSha256: rawSha256("forged-correction-request"),
+    };
+    expect(() => assertRunExecutionControlMutation(continued, rewrittenSeed)).toThrow(
+      "rewrote source-correction seed authority",
+    );
+
+    const appendedWithoutRelease = structuredClone(continued);
+    appendedWithoutRelease.tickets[source.id]!.executionControl!.sourceCorrectionSeeds!.push(
+      structuredClone(
+        appendedWithoutRelease.tickets[source.id]!.executionControl!.sourceCorrectionSeeds![0]!,
+      ),
+    );
+    expect(() => assertRunExecutionControlMutation(continued, appendedWithoutRelease)).toThrow(
+      "unauthenticated source-correction seed",
+    );
     client.close();
   }, 30_000);
 
@@ -4482,7 +4690,7 @@ describe("run authority engine", () => {
     const run = {
       tickets: { [prior.id]: prior },
       git: fixtureRunGit("/tmp/koni-recurring-asset", "run-recurring-asset"),
-    } as unknown as Pick<RunRecord, "tickets" | "git">;
+    } as unknown as RunRecord;
     run.git.ticketCycles[prior.gitCycleId] = {
       cycleId: prior.gitCycleId,
       ticketId: prior.id,
@@ -4509,7 +4717,7 @@ describe("run authority engine", () => {
     const run = {
       tickets: { [ticket.id]: ticket },
       git: fixtureRunGit("/tmp/koni-cycle-replacement", "run-cycle-replacement"),
-    } as unknown as Pick<RunRecord, "tickets" | "git">;
+    } as unknown as RunRecord;
     run.git.ticketCycles[ticket.gitCycleId] = {
       cycleId: ticket.gitCycleId,
       ticketId: ticket.id,
@@ -11510,11 +11718,12 @@ async function addCanonicalProposalFixture(
   options: Readonly<{
     fulfillment?: "planned_asset_repair" | "dynamic_scope_change";
     decisionPolicy?: "operator" | "automatic";
+    sourceWritePaths?: readonly string[];
   }> = {},
 ): Promise<TicketRecord> {
   const catalog = proposalSemanticCatalog(run.compiledConfigHash, options.decisionPolicy);
   const at = run.updatedAt;
-  const source = proposalSourceTicket(catalog, at);
+  const source = proposalSourceTicket(catalog, at, options.sourceWritePaths ?? []);
   run.tickets[source.id] = source;
 
   const sourceOutputSha256 = rawSha256("proposal-source-output");
@@ -11794,7 +12003,11 @@ function proposalBinding(
   });
 }
 
-function proposalSourceTicket(catalog: CompiledExecutionSemanticCatalog, at: string): TicketRecord {
+function proposalSourceTicket(
+  catalog: CompiledExecutionSemanticCatalog,
+  at: string,
+  writePaths: readonly string[] = [],
+): TicketRecord {
   return {
     id: "ticket-one",
     operationId: "ordinary",
@@ -11809,7 +12022,7 @@ function proposalSourceTicket(catalog: CompiledExecutionSemanticCatalog, at: str
     readNodeIds: ["change-one"],
     writeNodeIds: ["change-one"],
     readPaths: [],
-    writePaths: [],
+    writePaths: [...writePaths],
     steps: [
       {
         id: "work",
@@ -11820,7 +12033,7 @@ function proposalSourceTicket(catalog: CompiledExecutionSemanticCatalog, at: str
         readNodeIds: ["change-one"],
         writeNodeIds: ["change-one"],
         readPaths: [],
-        writePaths: [],
+        writePaths: [...writePaths],
         validationAction: "compile",
         executionPolicyBinding: proposalBinding(catalog, "ordinary", "work"),
         status: "pending",

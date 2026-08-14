@@ -1089,6 +1089,217 @@ describe("pure TypeScript isolated Git lifecycle", () => {
     });
   });
 
+  it("continues a fresh correction cycle from one exact in-scope supersession archive", async () => {
+    const root = await repository();
+    const authority = lifecycle(root);
+    const journal = new MemoryJournal();
+    let state = await approvedRun(authority, journal, "run-correction-continuation");
+    state = await authority.openTicketCycle(state, ticket("TK-correct", "correct-1"), journal);
+    const prior = state.ticketCycles["correct-1"]!;
+    await writeFile(path.join(prior.worktree, "src", "correction.ts"), "reviewed candidate\n");
+    const supersessionSha256 = `sha256:${"a".repeat(64)}`;
+    state = await authority.supersedeTicketCycle(
+      state,
+      {
+        cycleId: prior.cycleId,
+        scope: sourceScope,
+        subject: "archive correction candidate",
+        supersessionSha256,
+      },
+      journal,
+    );
+    const retired = state.ticketCycles[prior.cycleId]!;
+    const continuationAuthoritySha256 = `sha256:${"b".repeat(64)}`;
+
+    state = await authority.openTicketCycle(
+      state,
+      {
+        ...ticket("TK-correct", "correct-2"),
+        continuation: {
+          authoritySha256: continuationAuthoritySha256,
+          archivedCycleId: retired.cycleId,
+          archiveRef: retired.archiveRef!,
+          candidateBaseOid: retired.baseRunOid,
+          candidateOid: retired.ticketHeadOid,
+          scope: sourceScope,
+        },
+      },
+      journal,
+    );
+
+    const continued = state.ticketCycles["correct-2"]!;
+    expect(continued).toMatchObject({
+      ticketId: "TK-correct",
+      status: "active",
+      baseRunOid: state.run.headOid,
+      continuationAuthoritySha256,
+    });
+    expect(continued.ticketHeadOid).not.toBe(continued.baseRunOid);
+    expect(await readFile(path.join(continued.worktree, "src", "correction.ts"), "utf8")).toBe(
+      "reviewed candidate\n",
+    );
+  });
+
+  it("rejects a correction continuation when its archive binding or write grant is false", async () => {
+    const root = await repository();
+    const authority = lifecycle(root);
+    const journal = new MemoryJournal();
+    let state = await approvedRun(authority, journal, "run-correction-rejection");
+    state = await authority.openTicketCycle(state, ticket("TK-correct", "correct-1"), journal);
+    const prior = state.ticketCycles["correct-1"]!;
+    await writeFile(path.join(prior.worktree, "outside.ts"), "outside grant\n");
+    const supersessionSha256 = `sha256:${"c".repeat(64)}`;
+    state = await authority.supersedeTicketCycle(
+      state,
+      {
+        cycleId: prior.cycleId,
+        scope: {
+          allowed: [{ kind: "exact", path: "outside.ts" }],
+          compilerOwned: [],
+        },
+        subject: "archive out-of-scope candidate",
+        supersessionSha256,
+      },
+      journal,
+    );
+    const retired = state.ticketCycles[prior.cycleId]!;
+    const continuation = {
+      authoritySha256: `sha256:${"d".repeat(64)}`,
+      archivedCycleId: retired.cycleId,
+      archiveRef: retired.archiveRef!,
+      candidateBaseOid: retired.baseRunOid,
+      candidateOid: retired.ticketHeadOid,
+      scope: sourceScope,
+    } as const;
+
+    await expect(
+      authority.openTicketCycle(
+        state,
+        {
+          ...ticket("TK-correct", "correct-wrong-archive"),
+          continuation: { ...continuation, archiveRef: "refs/koni/archive/missing" },
+        },
+        journal,
+      ),
+    ).rejects.toThrow("differs from its retired cycle");
+    await expect(
+      authority.openTicketCycle(
+        state,
+        { ...ticket("TK-correct", "correct-outside-grant"), continuation },
+        journal,
+      ),
+    ).rejects.toThrow("changed unauthorized paths");
+  });
+
+  it("rejects a correction candidate that conflicts with the current run head", async () => {
+    const root = await repository();
+    const authority = lifecycle(root);
+    const journal = new MemoryJournal();
+    let state = await approvedRun(authority, journal, "run-correction-conflict");
+    state = await authority.openTicketCycle(state, ticket("TK-correct", "correct-1"), journal);
+    const prior = state.ticketCycles["correct-1"]!;
+    await writeFile(path.join(prior.worktree, "src", "conflict.ts"), "candidate\n");
+    const supersessionSha256 = `sha256:${"e".repeat(64)}`;
+    state = await authority.supersedeTicketCycle(
+      state,
+      {
+        cycleId: prior.cycleId,
+        scope: sourceScope,
+        subject: "archive conflicting candidate",
+        supersessionSha256,
+      },
+      journal,
+    );
+    const retired = state.ticketCycles[prior.cycleId]!;
+
+    state = await authority.openTicketCycle(state, ticket("TK-other", "other-1"), journal);
+    await writeFile(
+      path.join(state.ticketCycles["other-1"]!.worktree, "src", "conflict.ts"),
+      "current run\n",
+    );
+    state = await authority.commitTicketCandidate(
+      state,
+      { cycleId: "other-1", scope: sourceScope, subject: "advance run conflict" },
+      journal,
+    );
+    const published = await authority.publishTicketCandidate(
+      state,
+      { cycleId: "other-1", scope: sourceScope, subject: "publish run conflict" },
+      journal,
+    );
+    if (published.status !== "integrated") throw new Error("expected run advancement");
+    state = published.lifecycle;
+
+    await expect(
+      authority.openTicketCycle(
+        state,
+        {
+          ...ticket("TK-correct", "correct-2"),
+          continuation: {
+            authoritySha256: `sha256:${"f".repeat(64)}`,
+            archivedCycleId: retired.cycleId,
+            archiveRef: retired.archiveRef!,
+            candidateBaseOid: retired.baseRunOid,
+            candidateOid: retired.ticketHeadOid,
+            scope: sourceScope,
+          },
+        },
+        journal,
+      ),
+    ).rejects.toThrow("does not merge cleanly");
+  });
+
+  it("recovers a correction continuation after its authenticated ref is created", async () => {
+    const root = await repository();
+    const journal = new MemoryJournal();
+    const healthy = lifecycle(root);
+    let state = await approvedRun(healthy, journal, "run-correction-recovery");
+    state = await healthy.openTicketCycle(state, ticket("TK-correct", "correct-1"), journal);
+    const prior = state.ticketCycles["correct-1"]!;
+    await writeFile(path.join(prior.worktree, "src", "recovered.ts"), "recover me\n");
+    const supersessionSha256 = `sha256:${"1".repeat(64)}`;
+    state = await healthy.supersedeTicketCycle(
+      state,
+      {
+        cycleId: prior.cycleId,
+        scope: sourceScope,
+        subject: "archive recoverable candidate",
+        supersessionSha256,
+      },
+      journal,
+    );
+    const retired = state.ticketCycles[prior.cycleId]!;
+    const continuationAuthoritySha256 = `sha256:${"2".repeat(64)}`;
+    const crashing = lifecycle(root, (point) => {
+      if (point === "after_ticket_ref") throw new Error("correction materialization crash");
+    });
+
+    await expect(
+      crashing.openTicketCycle(
+        state,
+        {
+          ...ticket("TK-correct", "correct-2"),
+          continuation: {
+            authoritySha256: continuationAuthoritySha256,
+            archivedCycleId: retired.cycleId,
+            archiveRef: retired.archiveRef!,
+            candidateBaseOid: retired.baseRunOid,
+            candidateOid: retired.ticketHeadOid,
+            scope: sourceScope,
+          },
+        },
+        journal,
+      ),
+    ).rejects.toThrow("correction materialization crash");
+    const recovered = await healthy.recoverIntent(state, onlyPending(journal), journal);
+    expect(recovered.status).toBe("completed");
+    const continued = recovered.lifecycle.ticketCycles["correct-2"]!;
+    expect(continued.continuationAuthoritySha256).toBe(continuationAuthoritySha256);
+    expect(await readFile(path.join(continued.worktree, "src", "recovered.ts"), "utf8")).toBe(
+      "recover me\n",
+    );
+  });
+
   it.each([
     "after_ticket_supersession_archive",
     "after_ticket_supersession_worktree_retired",

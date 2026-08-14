@@ -40,11 +40,16 @@ import {
 import type { QuestionPolicy } from "./question-policy.js";
 import { assertQuestionBatchRecord, type QuestionBatchRecord } from "./question-batch.js";
 import type { RunLifecycleState } from "./run-lifecycle.js";
-import { ticketDependencySettled } from "./ticket-dependency.js";
-import type {
-  ApprovedChangeMaterialization,
-  ChangeControlPublication,
-  TerminalResolverReconciliation,
+import {
+  COMPILER_ROUTED_TO_PLANNED_ASSET_REPAIR,
+  ticketDependencySettled,
+} from "./ticket-dependency.js";
+import {
+  deriveSourceReleaseDecision,
+  type SourceReleaseDecision,
+  type ApprovedChangeMaterialization,
+  type ChangeControlPublication,
+  type TerminalResolverReconciliation,
 } from "./change-control.js";
 import {
   assertLegacyRunGitMigrationRecord,
@@ -315,6 +320,26 @@ export interface HeldSourceGrantRefreshAuthority {
   readonly sha256: Sha256Digest;
 }
 
+export interface SourceCorrectionSeedAuthority {
+  readonly protocol: "koni.source-correction-seed.v1";
+  readonly runId: string;
+  readonly ticketId: string;
+  readonly proposalTicketId: string;
+  readonly requestSha256: Sha256Digest;
+  readonly route: "planned_asset_repair" | "no_op" | "approved_application";
+  readonly releaseDecisionSha256: Sha256Digest;
+  readonly archivedCycleId: string;
+  readonly archiveRef: string;
+  readonly candidateBaseOid: string;
+  readonly candidateOid: string;
+  readonly candidateProjection: TicketImmutableProjection;
+  readonly releaseProjection: TicketImmutableProjection;
+  readonly priorExecutionEpoch: number;
+  readonly nextExecutionEpoch: number;
+  readonly recordedAt: string;
+  readonly sha256: Sha256Digest;
+}
+
 /**
  * Compiler-authored control/recovery transaction state carried with one ticket. It deliberately
  * contains identities and hashes only; scheduling policy is projected elsewhere from this record.
@@ -326,6 +351,8 @@ export interface TicketExecutionControlRecord {
   recurringAssetGrantRefreshes?: RecurringAssetGrantRefreshAuthority[];
   /** Append-only compiler proof for a graph-changing application that refreshes its held source. */
   heldSourceGrantRefreshes?: HeldSourceGrantRefreshAuthority[];
+  /** Append-only authority for reusing exact archived bytes in a later correction epoch. */
+  sourceCorrectionSeeds?: SourceCorrectionSeedAuthority[];
   changeControlScopeNodeIds?: string[];
   /** Immutable compiler request that caused this proposal ticket to exist. */
   proposalRequest?: {
@@ -1690,6 +1717,116 @@ export function ticketImmutableProjection(
     integrationForTicketId: ticket.integrationForTicketId ?? null,
   };
   return { ...material, sha256: canonicalHash(material) };
+}
+
+export function terminalTicketAuthoritySha256(ticket: Readonly<TicketRecord>): Sha256Digest {
+  return canonicalHash({
+    protocol: "koni.terminal-ticket-authority.v1",
+    ticketId: ticket.id,
+    operationId: ticket.operationId,
+    status: ticket.status,
+    executionPolicyBindingSha256: ticket.executionPolicyBinding?.sha256 ?? null,
+    executionControl: ticket.executionControl ?? null,
+    steps: ticket.steps.map((step) => ({
+      id: step.id,
+      status: step.status,
+      attemptIds: step.attemptIds,
+      summary: step.summary ?? null,
+      completedAt: step.completedAt ?? null,
+      executionPolicyBindingSha256: step.executionPolicyBinding?.sha256 ?? null,
+    })),
+  });
+}
+
+/** Derive the exact durable source-release decision from one accepted run state. */
+export function sourceReleaseDecisionForRun(
+  run: Readonly<RunRecord>,
+  source: Readonly<TicketRecord>,
+  proposal: Readonly<TicketRecord>,
+): SourceReleaseDecision {
+  const proposalTerminal = proposal.status === "completed" || proposal.status === "cancelled";
+  const disposition = proposal.executionControl?.proposalDisposition;
+  if (proposal.status === "cancelled" && disposition === undefined) {
+    return deriveSourceReleaseDecision({
+      sourceTicketId: source.id,
+      heldByProposalTicketId: proposal.id,
+      proposalTerminal: true,
+      proposalTerminalSha256: terminalTicketAuthoritySha256(proposal),
+      proposalDisposition: { kind: "cancelled" },
+    });
+  }
+  if (disposition?.kind === "rejected" || disposition?.kind === "no_op") {
+    return deriveSourceReleaseDecision({
+      sourceTicketId: source.id,
+      heldByProposalTicketId: proposal.id,
+      proposalTerminal,
+      ...(proposalTerminal
+        ? { proposalTerminalSha256: terminalTicketAuthoritySha256(proposal) }
+        : {}),
+      proposalDisposition: {
+        kind: disposition.kind,
+        authoritySha256: disposition.authoritySha256,
+      },
+    });
+  }
+  if (disposition?.kind === "application" && disposition.applicationTicketId !== undefined) {
+    const application = run.tickets[disposition.applicationTicketId];
+    const applicationApprovalSha256 = application?.executionControl?.approvedApplicationSha256;
+    if (application === undefined || applicationApprovalSha256 === undefined) {
+      throw new Error(`proposal ${proposal.id} names a missing or unauthenticated application`);
+    }
+    const applicationTerminal = application.status === "completed";
+    return deriveSourceReleaseDecision({
+      sourceTicketId: source.id,
+      heldByProposalTicketId: proposal.id,
+      proposalTerminal,
+      ...(proposalTerminal
+        ? { proposalTerminalSha256: terminalTicketAuthoritySha256(proposal) }
+        : {}),
+      proposalDisposition: {
+        kind: "application",
+        authoritySha256: disposition.authoritySha256,
+        applicationTicketId: application.id,
+        applicationApprovalSha256,
+        applicationTerminal,
+        ...(applicationTerminal
+          ? { applicationTerminalSha256: terminalTicketAuthoritySha256(application) }
+          : {}),
+      },
+    });
+  }
+  return deriveSourceReleaseDecision({
+    sourceTicketId: source.id,
+    heldByProposalTicketId: proposal.id,
+    proposalTerminal,
+    ...(proposalTerminal
+      ? { proposalTerminalSha256: terminalTicketAuthoritySha256(proposal) }
+      : {}),
+    proposalDisposition: { kind: "pending" },
+  });
+}
+
+export function sourceCorrectionSeedRoute(
+  run: Readonly<RunRecord>,
+  source: Readonly<TicketRecord>,
+  proposal: Readonly<TicketRecord>,
+): SourceCorrectionSeedAuthority["route"] | undefined {
+  const request = proposal.executionControl?.proposalRequest;
+  if (request?.sourceTicketId !== source.id) {
+    return undefined;
+  }
+  const release = sourceReleaseDecisionForRun(run, source, proposal);
+  if (release.disposition !== "release") return undefined;
+  if (
+    release.reason === "cancelled" &&
+    request.fulfillment === "planned_asset_repair" &&
+    proposal.blocker === COMPILER_ROUTED_TO_PLANNED_ASSET_REPAIR
+  ) {
+    return "planned_asset_repair";
+  }
+  if (release.reason === "no_op") return "no_op";
+  if (release.reason === "application_completed") return "approved_application";
+  return undefined;
 }
 
 /** Create the compiler-authored authority before a control ticket is admitted to durable state. */
@@ -4376,6 +4513,68 @@ function assertHeldSourceGrantRefreshAuthority(
   }
 }
 
+function assertSourceCorrectionSeedAuthority(
+  ticketId: string,
+  value: unknown,
+): asserts value is SourceCorrectionSeedAuthority {
+  if (!isRecord(value)) throw new Error(`invalid source-correction seed: ${ticketId}`);
+  const allowed = new Set([
+    "protocol",
+    "runId",
+    "ticketId",
+    "proposalTicketId",
+    "requestSha256",
+    "route",
+    "releaseDecisionSha256",
+    "archivedCycleId",
+    "archiveRef",
+    "candidateBaseOid",
+    "candidateOid",
+    "candidateProjection",
+    "releaseProjection",
+    "priorExecutionEpoch",
+    "nextExecutionEpoch",
+    "recordedAt",
+    "sha256",
+  ]);
+  if (
+    Object.keys(value).some((field) => !allowed.has(field)) ||
+    value.protocol !== "koni.source-correction-seed.v1" ||
+    !isId(value.runId) ||
+    value.ticketId !== ticketId ||
+    !isId(value.proposalTicketId) ||
+    !isSha256Digest(value.requestSha256) ||
+    (value.route !== "planned_asset_repair" &&
+      value.route !== "no_op" &&
+      value.route !== "approved_application") ||
+    !isSha256Digest(value.releaseDecisionSha256) ||
+    !isId(value.archivedCycleId) ||
+    typeof value.archiveRef !== "string" ||
+    !/^[0-9a-f]{40,64}$/u.test(String(value.candidateBaseOid)) ||
+    !/^[0-9a-f]{40,64}$/u.test(String(value.candidateOid)) ||
+    !isRecord(value.candidateProjection) ||
+    !isRecord(value.releaseProjection) ||
+    !isNonnegativeSafeInteger(value.priorExecutionEpoch) ||
+    !isNonnegativeSafeInteger(value.nextExecutionEpoch) ||
+    value.nextExecutionEpoch !== value.priorExecutionEpoch + 1 ||
+    typeof value.recordedAt !== "string" ||
+    value.recordedAt.length === 0 ||
+    !isSha256Digest(value.sha256)
+  ) {
+    throw new Error(`invalid source-correction seed: ${ticketId}`);
+  }
+  assertTicketImmutableProjection(value.candidateProjection, `correction candidate: ${ticketId}`);
+  assertTicketImmutableProjection(value.releaseProjection, `correction release: ${ticketId}`);
+  const { sha256, ...material } = value;
+  if (
+    value.candidateProjection.id !== ticketId ||
+    value.releaseProjection.id !== ticketId ||
+    canonicalHash(material) !== sha256
+  ) {
+    throw new Error(`invalid source-correction seed authority: ${ticketId}`);
+  }
+}
+
 function assertTicketExecutionControl(
   ticketId: string,
   value: unknown,
@@ -4387,6 +4586,7 @@ function assertTicketExecutionControl(
     "controlTicketAuthority",
     "recurringAssetGrantRefreshes",
     "heldSourceGrantRefreshes",
+    "sourceCorrectionSeeds",
     "changeControlScopeNodeIds",
     "proposalRequest",
     "sourceHold",
@@ -4428,6 +4628,14 @@ function assertTicketExecutionControl(
     }
     for (const refresh of value.heldSourceGrantRefreshes) {
       assertHeldSourceGrantRefreshAuthority(ticketId, refresh);
+    }
+  }
+  if (value.sourceCorrectionSeeds !== undefined) {
+    if (!Array.isArray(value.sourceCorrectionSeeds) || value.sourceCorrectionSeeds.length > 1_024) {
+      throw new Error(`invalid source-correction seed history: ${ticketId}`);
+    }
+    for (const seed of value.sourceCorrectionSeeds) {
+      assertSourceCorrectionSeedAuthority(ticketId, seed);
     }
   }
   if (value.changeControlScopeNodeIds !== undefined) {
@@ -5136,6 +5344,17 @@ function assertRunExecutionControlGraph(run: Readonly<RunRecord>): void {
   const resolverFailures = new Set<string>();
   for (const ticket of Object.values(run.tickets)) {
     assertRecurringAssetGrantRefreshHistory(run, ticket);
+    assertSourceCorrectionSeedHistory(run, ticket);
+    const activeCycle =
+      ticket.gitCycleId === undefined ? undefined : run.git.ticketCycles[ticket.gitCycleId];
+    const correctionSeed = currentSourceCorrectionSeed(run, ticket);
+    if (
+      activeCycle !== undefined &&
+      (activeCycle.continuationAuthoritySha256 !== undefined || correctionSeed !== undefined) &&
+      activeCycle.continuationAuthoritySha256 !== correctionSeed?.sha256
+    ) {
+      throw new Error(`ticket Git cycle differs from source-correction authority: ${ticket.id}`);
+    }
     assertCompilerControlTicketForRun(run, ticket);
     const control = ticket.executionControl;
     if (control === undefined) continue;
@@ -5698,6 +5917,83 @@ function ticketProjectionsDifferOnlyByDependencies(
       sha256: historical.sha256,
     }) === canonicalHash(historical)
   );
+}
+
+function durableTicketExecutionEpoch(
+  run: Readonly<Pick<RunRecord, "git">>,
+  ticket: Readonly<TicketRecord>,
+): number {
+  if (ticket.executionEpoch !== undefined) return ticket.executionEpoch;
+  const cycle =
+    ticket.gitCycleId === undefined ? undefined : run.git.ticketCycles[ticket.gitCycleId];
+  return Math.max(0, (cycle?.ordinal ?? 1) - 1);
+}
+
+function sourceCorrectionSeedMatchesRun(
+  run: Readonly<RunRecord>,
+  ticket: Readonly<TicketRecord>,
+  seed: Readonly<SourceCorrectionSeedAuthority>,
+): boolean {
+  const proposal = run.tickets[seed.proposalTicketId];
+  const request = proposal?.executionControl?.proposalRequest;
+  const authority = proposal?.executionControl?.controlTicketAuthority;
+  const causal = authority?.causal;
+  const cycle = run.git.ticketCycles[seed.archivedCycleId];
+  if (
+    proposal === undefined ||
+    request?.sourceTicketId !== ticket.id ||
+    request.requestSha256 !== seed.requestSha256 ||
+    authority?.role !== "proposal" ||
+    causal?.role !== "proposal" ||
+    canonicalHash(causal.sourceTicketProjection) !== canonicalHash(seed.candidateProjection) ||
+    cycle?.ticketId !== ticket.id ||
+    cycle.status !== "retired" ||
+    cycle.archiveRef !== seed.archiveRef ||
+    cycle.supersessionSha256 !== seed.requestSha256 ||
+    cycle.baseRunOid !== seed.candidateBaseOid ||
+    cycle.ticketHeadOid !== seed.candidateOid
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/** Select only the exact archived correction authority for this ticket's current epoch. */
+export function currentSourceCorrectionSeed(
+  run: Readonly<RunRecord>,
+  ticket: Readonly<TicketRecord>,
+): SourceCorrectionSeedAuthority | undefined {
+  const seed = ticket.executionControl?.sourceCorrectionSeeds?.at(-1);
+  if (
+    seed === undefined ||
+    seed.nextExecutionEpoch !== durableTicketExecutionEpoch(run, ticket) ||
+    !sourceCorrectionSeedMatchesRun(run, ticket, seed) ||
+    !ticketProjectionsDifferOnlyByDependencies(
+      ticketImmutableProjection(ticket),
+      seed.releaseProjection,
+    )
+  ) {
+    return undefined;
+  }
+  return seed;
+}
+
+function assertSourceCorrectionSeedHistory(
+  run: Readonly<RunRecord>,
+  ticket: Readonly<TicketRecord>,
+): void {
+  const history = ticket.executionControl?.sourceCorrectionSeeds;
+  if (history === undefined || history.length === 0) return;
+  for (const [index, seed] of history.entries()) {
+    if (
+      seed.runId !== run.id ||
+      seed.ticketId !== ticket.id ||
+      !sourceCorrectionSeedMatchesRun(run, ticket, seed) ||
+      (index > 0 && seed.priorExecutionEpoch < history[index - 1]!.nextExecutionEpoch)
+    ) {
+      throw new Error(`source-correction seed history is invalid: ${ticket.id}`);
+    }
+  }
 }
 
 function recurringAssetGrantRefreshChainAuthorizes(
@@ -6504,6 +6800,93 @@ function assertHeldSourceGrantRefreshMutation(
   }
 }
 
+function assertSourceCorrectionSeedMutation(
+  previous: Readonly<RunRecord>,
+  next: Readonly<RunRecord>,
+): void {
+  for (const [ticketId, currentTicket] of Object.entries(next.tickets)) {
+    const priorTicket = previous.tickets[ticketId];
+    const priorHistory = priorTicket?.executionControl?.sourceCorrectionSeeds ?? [];
+    const currentHistory = currentTicket.executionControl?.sourceCorrectionSeeds ?? [];
+    if (
+      currentHistory.length < priorHistory.length ||
+      canonicalHash(currentHistory.slice(0, priorHistory.length)) !== canonicalHash(priorHistory)
+    ) {
+      throw new Error(`ticket rewrote source-correction seed authority: ${ticketId}`);
+    }
+    const added = currentHistory.slice(priorHistory.length);
+    if (added.length === 0) continue;
+    if (added.length !== 1 || priorTicket === undefined) {
+      throw new Error(`ticket added ambiguous source-correction seed authority: ${ticketId}`);
+    }
+    const seed = added[0]!;
+    const priorHold = priorTicket.executionControl?.sourceHold;
+    const proposal =
+      priorHold === undefined ? undefined : previous.tickets[priorHold.proposalTicketId];
+    const request = proposal?.executionControl?.proposalRequest;
+    const proposalAuthority = proposal?.executionControl?.controlTicketAuthority;
+    const proposalCausal =
+      proposalAuthority?.causal.role === "proposal" ? proposalAuthority.causal : undefined;
+    const cycle =
+      priorTicket.gitCycleId === undefined
+        ? undefined
+        : previous.git.ticketCycles[priorTicket.gitCycleId];
+    const route =
+      proposal === undefined
+        ? undefined
+        : sourceCorrectionSeedRoute(previous, priorTicket, proposal);
+    const release =
+      proposal === undefined
+        ? undefined
+        : sourceReleaseDecisionForRun(previous, priorTicket, proposal);
+    const priorEpoch = durableTicketExecutionEpoch(previous, priorTicket);
+    if (
+      priorHold === undefined ||
+      currentTicket.executionControl?.sourceHold !== undefined ||
+      proposal === undefined ||
+      request === undefined ||
+      route === undefined ||
+      release?.disposition !== "release" ||
+      proposalAuthority?.role !== "proposal" ||
+      proposalCausal === undefined ||
+      cycle?.ticketId !== ticketId ||
+      cycle.status !== "retired" ||
+      cycle.archiveRef === undefined ||
+      cycle.supersessionSha256 !== request.requestSha256 ||
+      cycle.ticketHeadOid === cycle.baseRunOid ||
+      currentTicket.status !== "queued" ||
+      currentTicket.executionEpoch !== priorEpoch + 1 ||
+      currentTicket.gitCycleId !== undefined ||
+      currentTicket.worktreePath !== undefined ||
+      currentTicket.branch !== undefined ||
+      currentTicket.steps.some((step) => step.status !== "pending") ||
+      seed.runId !== next.id ||
+      seed.ticketId !== ticketId ||
+      seed.proposalTicketId !== proposal.id ||
+      seed.requestSha256 !== request.requestSha256 ||
+      seed.route !== route ||
+      seed.releaseDecisionSha256 !== release.sha256 ||
+      seed.archivedCycleId !== cycle.cycleId ||
+      seed.archiveRef !== cycle.archiveRef ||
+      seed.candidateBaseOid !== cycle.baseRunOid ||
+      seed.candidateOid !== cycle.ticketHeadOid ||
+      canonicalHash(seed.candidateProjection) !==
+        canonicalHash(proposalCausal.sourceTicketProjection) ||
+      canonicalHash(seed.releaseProjection) !==
+        canonicalHash(ticketImmutableProjection(priorTicket)) ||
+      seed.priorExecutionEpoch !== priorEpoch ||
+      seed.nextExecutionEpoch !== currentTicket.executionEpoch ||
+      seed.recordedAt !== next.updatedAt ||
+      !ticketProjectionsDifferOnlyByDependencies(
+        ticketImmutableProjection(currentTicket),
+        seed.releaseProjection,
+      )
+    ) {
+      throw new Error(`ticket added unauthenticated source-correction seed: ${ticketId}`);
+    }
+  }
+}
+
 function assertReviewReworkMutation(
   previous: Readonly<RunRecord>,
   next: Readonly<RunRecord>,
@@ -7065,6 +7448,7 @@ export function assertRunExecutionControlMutation(
   assertTokenBudgetRecoveryMutation(previous, next);
   assertHeldSourceGrantRefreshMutation(previous, next);
   assertRecurringAssetGrantRefreshMutation(previous, next);
+  assertSourceCorrectionSeedMutation(previous, next);
   assertReviewReworkMutation(previous, next, receipt);
   assertCompilerReissueDiagnosisMutation(previous, next, receipt);
   // This transition guard is an authority boundary in its own right. Validate the successor's
