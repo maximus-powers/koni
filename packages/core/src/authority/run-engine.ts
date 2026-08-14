@@ -25867,24 +25867,14 @@ async function planWorkspaceEffect(
     };
   }
   const expectedSha256 = toolString(call.arguments, "expectedSha256") as Sha256Digest;
-  const current = await paths.inspectWritable(target);
-  if (current === undefined || current.sha256 !== expectedSha256) {
-    throw new AuthorityRpcError("write_cas", `edit target changed: ${target}`);
-  }
-  const text = current.bytes.toString("utf8");
-  if (!Buffer.from(text, "utf8").equals(current.bytes)) {
-    throw new AuthorityRpcError("edit_encoding", "edit target is not exact UTF-8 text");
-  }
   const oldText = toolString(call.arguments, "oldText");
-  const first = text.indexOf(oldText);
-  if (first < 0 || text.indexOf(oldText, first + oldText.length) >= 0) {
-    throw new AuthorityRpcError("edit_match", "edit text must match exactly once");
-  }
-  const next =
-    text.slice(0, first) +
-    toolStringAllowEmpty(call.arguments, "newText") +
-    text.slice(first + oldText.length);
-  return { path: target, expectedSha256, bytes: Buffer.from(next, "utf8") };
+  const bytes = await paths.planEdit(
+    target,
+    oldText,
+    toolStringAllowEmpty(call.arguments, "newText"),
+    expectedSha256,
+  );
+  return { path: target, expectedSha256, bytes };
 }
 
 async function applyWorkspaceEffect(

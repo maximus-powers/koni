@@ -27,6 +27,24 @@ describe("worktree path authority", () => {
     await expect(policy.read("secret.txt")).rejects.toMatchObject({ code: "read_scope" });
   });
 
+  it("rejects no-op edits while planning the crash-forward workspace effect", async () => {
+    const root = await temporary();
+    await writeFile(path.join(root, "allowed.txt"), "before\n");
+    const policy = await WorktreePathAuthority.create(root, {
+      readPaths: [],
+      writePaths: ["allowed.txt"],
+    });
+    const before = await policy.inspectWritable("allowed.txt");
+
+    await expect(
+      policy.planEdit("allowed.txt", "before", "before", before!.sha256),
+    ).rejects.toMatchObject({
+      code: "edit_input",
+      message: "edit must replace nonempty text with different text",
+    } satisfies Partial<PathAuthorityError>);
+    expect(await readFile(path.join(root, "allowed.txt"), "utf8")).toBe("before\n");
+  });
+
   it("classifies an absent in-scope read as a correctable path rejection", async () => {
     const root = await temporary();
     const policy = await WorktreePathAuthority.create(root, {

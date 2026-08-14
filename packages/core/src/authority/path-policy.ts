@@ -210,6 +210,17 @@ export class WorktreePathAuthority {
     newText: string,
     expectedSha256: Sha256Digest,
   ): Promise<Sha256Digest> {
+    const bytes = await this.planEdit(relative, oldText, newText, expectedSha256);
+    return this.write(relative, bytes, expectedSha256);
+  }
+
+  /** Validate and materialize an edit without applying it so the caller can durably journal it. */
+  public async planEdit(
+    relative: string,
+    oldText: string,
+    newText: string,
+    expectedSha256: Sha256Digest,
+  ): Promise<Buffer> {
     if (oldText.length === 0 || oldText === newText) {
       throw new PathAuthorityError(
         "edit_input",
@@ -221,15 +232,14 @@ export class WorktreePathAuthority {
       throw new PathAuthorityError("write_cas", `edit target changed: ${relative}`);
     }
     const text = current.bytes.toString("utf8");
+    if (!Buffer.from(text, "utf8").equals(current.bytes)) {
+      throw new PathAuthorityError("edit_encoding", "edit target is not exact UTF-8 text");
+    }
     const first = text.indexOf(oldText);
     if (first < 0 || text.indexOf(oldText, first + oldText.length) >= 0) {
       throw new PathAuthorityError("edit_match", "edit text must match exactly once");
     }
-    return this.write(
-      relative,
-      Buffer.from(text.slice(0, first) + newText + text.slice(first + oldText.length)),
-      expectedSha256,
-    );
+    return Buffer.from(text.slice(0, first) + newText + text.slice(first + oldText.length));
   }
 
   /** List a bounded, grant-filtered directory tree without following symlinks. */
