@@ -815,7 +815,13 @@ describe("research profile registrar", () => {
   });
 
   it("binds executable contracts to an authenticated launcher", async () => {
-    const [assetBuilderSource, integratorSource, executionReference] = await Promise.all([
+    const [
+      assetBuilderSource,
+      integratorSource,
+      plannerSource,
+      executionReference,
+      empiricalReference,
+    ] = await Promise.all([
       readFile(
         path.resolve(import.meta.dirname, "../koni/baseline/agents/asset-builder.yaml"),
         "utf8",
@@ -825,16 +831,29 @@ describe("research profile registrar", () => {
         "utf8",
       ),
       readFile(
+        path.resolve(import.meta.dirname, "../koni/baseline/agents/run-planner.yaml"),
+        "utf8",
+      ),
+      readFile(
         path.resolve(
           import.meta.dirname,
           "../../core/skills/model-koni-work/references/execution-contracts.md",
         ),
         "utf8",
       ),
+      readFile(
+        path.resolve(
+          import.meta.dirname,
+          "../../core/skills/model-koni-work/references/empirical-research.md",
+        ),
+        "utf8",
+      ),
     ]);
     const normalizedAssetBuilder = assetBuilderSource.replace(/\s+/gu, " ");
     const normalizedIntegrator = integratorSource.replace(/\s+/gu, " ");
+    const normalizedPlanner = plannerSource.replace(/\s+/gu, " ");
     const normalizedExecutionReference = executionReference.replace(/\s+/gu, " ");
+    const normalizedEmpiricalReference = empiricalReference.replace(/\s+/gu, " ");
 
     expect(normalizedAssetBuilder).toContain(
       "Bind every executable contract to a launcher established by accepted repository or runtime evidence",
@@ -848,6 +867,19 @@ describe("research profile registrar", () => {
     expect(normalizedExecutionReference).toContain(
       "A familiar command name is not evidence that an executable exists",
     );
+    for (const source of [
+      normalizedPlanner,
+      normalizedExecutionReference,
+      normalizedEmpiricalReference,
+    ]) {
+      expect(source).toContain(
+        "A read, listing, or planned-file declaration authenticates a path or content, not authority to invoke that path as `argv[0]`",
+      );
+      expect(source).toContain("Authenticate `argv[0]` itself as an executable launcher");
+      expect(source).toContain(
+        "place an authenticated runner at `argv[0]` and the planned source path in a later argument",
+      );
+    }
   });
 
   it("separates filesystem materialization from semantic graph publication", async () => {

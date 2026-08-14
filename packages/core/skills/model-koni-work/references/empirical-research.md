@@ -61,6 +61,12 @@ evidence matters independently.
   result without rerunning the empirical operation. Keep both argv paths inside the original
   authenticated implementation boundary; do not defer an expected verifier to change control after
   the asset is complete.
+- A read, listing, or planned-file declaration authenticates a path or content, not authority to
+  invoke that path as `argv[0]`. Authenticate `argv[0]` itself as an executable launcher from
+  accepted executable-header, mode, manifest, repository-command, or runtime evidence. When a
+  planned source file lacks direct-invocation evidence, place an authenticated runner at `argv[0]`
+  and the planned source path in a later argument, or report the modeling gap. Do not assume that an
+  implementation step will make a planned file executable.
 - Preserve null, negative, contradictory, and failed results as evidence when their receipts are
   valid. Never rewrite acceptance criteria after observing the result without a new explicit design
   revision.

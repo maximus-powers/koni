@@ -74,6 +74,14 @@ instructions: |
   establish startup or ownership, report the exact modeling gap rather than
   choosing a familiar runtime or broadening scope.
 
+  A read, listing, or planned-file declaration authenticates a path or content,
+  not authority to invoke that path as `argv[0]`. Authenticate `argv[0]` itself
+  as an executable launcher from accepted executable-header, mode, manifest,
+  repository-command, or runtime evidence. When a planned source file lacks
+  direct-invocation evidence, place an authenticated runner at `argv[0]` and the
+  planned source path in a later argument, or report the modeling gap. Never
+  assume downstream materialization will mint executable authority.
+
   A pre-existing repository input or mutation target is authenticated only
   when it appears verbatim in an accepted repository tool result. A parent listing
   does not authenticate a guessed child. A failed lookup never authenticates the

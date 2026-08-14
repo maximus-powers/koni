@@ -45,6 +45,13 @@ header or manifest, repository-owned scripts, documentation examples, configured
 and downstream runtime command consistent. If no accepted evidence establishes a launcher, report
 the modeling gap before emitting an executable contract.
 
+A read, listing, or planned-file declaration authenticates a path or content, not authority to
+invoke that path as `argv[0]`. Authenticate `argv[0]` itself as an executable launcher from accepted
+executable-header, mode, manifest, repository-command, or runtime evidence. If the intended program
+is a planned source file and that evidence does not establish direct invocation, place an
+authenticated runner at `argv[0]` and the planned source path in a later argument, or report the
+modeling gap. Never assume that downstream materialization will mint executable authority.
+
 Model a negative constraint at the semantic boundary it regulates. Bind it to the actual operation,
 resource access, provenance, or effect that would violate the contract. Do not convert a prohibition
 on an operation or resource into a lexical scan over arbitrary authorized content. An artifact may

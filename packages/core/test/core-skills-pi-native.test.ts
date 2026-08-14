@@ -297,6 +297,15 @@ describe("Koni's Pi-native skills", () => {
       "A familiar command name is not evidence that an executable exists",
     );
     expect(normalizedExecutionReference).toContain(
+      "A read, listing, or planned-file declaration authenticates a path or content, not authority to invoke that path as `argv[0]`",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "Authenticate `argv[0]` itself as an executable launcher",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "place an authenticated runner at `argv[0]` and the planned source path in a later argument",
+    );
+    expect(normalizedExecutionReference).toContain(
       "Keep the legacy default of one automatic rework unless the workflow explicitly sets `review_rework_limit`",
     );
     expect(normalizedExecutionReference).toContain(
