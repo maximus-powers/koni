@@ -9547,66 +9547,16 @@ describe("run authority engine", () => {
     client.close();
   }, 30_000);
 
-  it("binds a failed terminal policy before proving a recovered assignment failure", async () => {
+  it("reissues an assignment after configured recovery preserves pre-semantic state", async () => {
     const root = await repository();
-    const base = configuredValidationDirectProgram();
-    const compileAssignmentOutput = base.compileAssignmentOutput.bind(base);
-    let compilationCount = 0;
-    const program: RunCompilerProgram = {
-      ...base,
-      async resolveRun(request) {
-        const resolved = await base.resolveRun(request);
-        const source = resolved.behavior.actions.actions.compile!;
-        const recovery = compiledActionDefinition({
-          id: "recover-assignment-validation",
-          recipe: [{ id: "validate-project", primitive: "project.validate", arguments: {} }],
-        });
-        const { sha256: _sourceSha256, ...sourceMaterial } = source;
-        const primaryMaterial = {
-          ...structuredClone(sourceMaterial),
-          id: "compile-with-recovery",
-          aliases: [] as string[],
-          recovery: recovery.id,
-        };
-        const primary = { ...primaryMaterial, sha256: canonicalHash(primaryMaterial) };
-        const actionMaterial = {
-          protocol: resolved.behavior.actions.protocol,
-          actions: {
-            ...resolved.behavior.actions.actions,
-            [primary.id]: primary,
-            [recovery.id]: recovery,
-          },
-          aliases: {
-            ...resolved.behavior.actions.aliases,
-            [primary.id]: primary.id,
-            [recovery.id]: recovery.id,
-          },
-        };
-        const actions = { ...actionMaterial, sha256: canonicalHash(actionMaterial) };
-        return {
-          ...resolved,
-          behavior: behaviorSnapshotWithPipeline(
-            resolved.behavior,
-            resolved.behavior.runType.pipeline,
-            actions,
-          ),
-        };
-      },
-      async initializeApprovedPlan(run) {
-        const initialized = await base.initializeApprovedPlan(run);
-        initialized.tickets["ticket-one"]!.steps[0]!.validationAction = "compile-with-recovery";
-        return initialized;
-      },
-      async compileAssignmentOutput(input) {
-        compilationCount += 1;
-        if (compilationCount === 1) throw new Error("simulated recoverable validation failure");
-        return compileAssignmentOutput(input);
-      },
-    };
+    const fixture = configuredValidationRecoveryProgram({
+      preservePreSemanticState: true,
+      failCompilations: 1,
+    });
     const engine = await RunAuthorityEngine.open({
       projectRoot: root,
       version: "1.0.0",
-      program,
+      program: fixture.program,
       supervisor: new ManagedSessionSupervisor(),
     });
     engines.push(engine);
@@ -9624,38 +9574,135 @@ describe("run authority engine", () => {
 
     await waitFor(async () => {
       const current = await engine.store.getRun(runId);
-      return (
-        Object.values(current.terminalFailureProofs ?? {}).length > 0 ||
-        current.lifecycle.blocker ===
-          "recovered assignment failure lacks its exact semantic settlement proof"
+      return Object.values(current.actionExecutions ?? {}).some(
+        (action) =>
+          action.boundary.kind === "assignment_validation" &&
+          action.settlement?.disposition === "completed",
       );
     });
 
     const recovered = await engine.store.getRun(runId);
-    const attempt = Object.values(recovered.attempts).find(
+    expect(recovered.lifecycle.phase).not.toBe("blocked");
+    expect(recovered.lifecycle.blocker).toBeUndefined();
+    expect(fixture.compilationCount()).toBe(2);
+    const attempts = Object.values(recovered.attempts).filter(
+      (attempt) => attempt.ticketId === "ticket-one",
+    );
+    expect(attempts).toHaveLength(2);
+    const retired = attempts.find((attempt) => attempt.status === "interrupted");
+    expect(retired?.terminalSummary).toContain(
+      "Retired accepted output after configured recovery preserved pre-semantic state",
+    );
+    const retiredValidation = Object.values(recovered.actionExecutions ?? {}).find(
+      (action) =>
+        action.boundary.kind === "assignment_validation" &&
+        action.boundary.attemptId === retired?.id,
+    );
+    expect(retiredValidation?.settlement?.disposition).toBe("abandoned");
+    expect(
+      Object.values(recovered.terminalFailureProofs ?? {}).some(
+        (proof) => proof.attemptId === retired?.id,
+      ),
+    ).toBe(false);
+    expect(
+      recovered.tickets["ticket-one"]?.steps.every(
+        (step) => step.status === "completed" || step.status === "skipped",
+      ),
+    ).toBe(true);
+    client.close();
+  }, 30_000);
+
+  it("fails closed when configured recovery lacks pre-semantic preservation proof", async () => {
+    const root = await repository();
+    const fixture = configuredValidationRecoveryProgram({
+      preservePreSemanticState: false,
+      failCompilations: 1,
+    });
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program: fixture.program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(
+      client,
+      engine,
+      "reject-unproven-assignment-recovery",
+    );
+
+    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "blocked");
+    const blocked = await engine.store.getRun(runId);
+    const attempt = Object.values(blocked.attempts).find(
       (candidate) => candidate.ticketId === "ticket-one",
     )!;
-    const validation = Object.values(recovered.actionExecutions ?? {}).find(
-      (candidate) =>
-        candidate.boundary.kind === "assignment_validation" &&
-        candidate.boundary.attemptId === attempt.id,
-    )!;
-    const failureProof = Object.values(recovered.terminalFailureProofs ?? {}).find(
-      (proof) => proof.attemptId === attempt.id,
+    const validation = Object.values(blocked.actionExecutions ?? {}).find(
+      (action) =>
+        action.boundary.kind === "assignment_validation" &&
+        action.boundary.attemptId === attempt.id,
     );
-    expect(recovered.lifecycle.blocker).not.toBe(
-      "recovered assignment failure lacks its exact semantic settlement proof",
-    );
+    expect(fixture.compilationCount()).toBe(1);
     expect(attempt.terminalPolicy).toMatchObject({ mode: "failed_submission" });
-    expect(validation.settlement?.disposition).toBe("failed");
-    expect(failureProof).toMatchObject({
-      actionInvocationId: validation.invocationId,
-      terminalPolicySha256: attempt.terminalPolicy?.sha256,
-    });
-    expect(recovered.tickets["ticket-one"]).toMatchObject({
+    expect(validation?.settlement?.disposition).toBe("failed");
+    expect(blocked.tickets["ticket-one"]).toMatchObject({
       status: "blocked",
+      blocker: expect.stringContaining("did not preserve pre-semantic state"),
       steps: [expect.objectContaining({ status: "failed" })],
     });
+    expect(
+      Object.values(blocked.terminalFailureProofs ?? {}).some(
+        (proof) => proof.attemptId === attempt.id,
+      ),
+    ).toBe(true);
+    client.close();
+  }, 30_000);
+
+  it("bounds configured pre-semantic validation recovery to three reissues", async () => {
+    const root = await repository();
+    const fixture = configuredValidationRecoveryProgram({
+      preservePreSemanticState: true,
+      failCompilations: 10,
+    });
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program: fixture.program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(client, engine, "bound-assignment-recovery");
+
+    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "blocked");
+    const blocked = await engine.store.getRun(runId);
+    const attempts = Object.values(blocked.attempts).filter(
+      (attempt) => attempt.ticketId === "ticket-one",
+    );
+    expect(fixture.compilationCount()).toBe(4);
+    expect(attempts).toHaveLength(4);
+    expect(attempts.filter((attempt) => attempt.status === "interrupted")).toHaveLength(3);
+    const terminal = attempts.find((attempt) => attempt.status !== "interrupted")!;
+    expect(terminal.terminalPolicy).toMatchObject({ mode: "failed_submission" });
+    expect(blocked.tickets["ticket-one"]).toMatchObject({
+      status: "blocked",
+      blocker: expect.stringContaining("after 3 fresh attempts"),
+    });
+    expect(
+      Object.values(blocked.terminalFailureProofs ?? {}).some(
+        (proof) => proof.attemptId === terminal.id,
+      ),
+    ).toBe(true);
     client.close();
   }, 30_000);
 
@@ -11483,6 +11530,74 @@ function configuredValidationDirectProgram(validationAction = "compile"): RunCom
       };
     },
   };
+}
+
+function configuredValidationRecoveryProgram(options: {
+  preservePreSemanticState: boolean;
+  failCompilations: number;
+}): { program: RunCompilerProgram; compilationCount: () => number } {
+  const base = configuredValidationDirectProgram();
+  const compileAssignmentOutput = base.compileAssignmentOutput.bind(base);
+  let compilationCount = 0;
+  const program: RunCompilerProgram = {
+    ...base,
+    async resolveRun(request) {
+      const resolved = await base.resolveRun(request);
+      const source = resolved.behavior.actions.actions.compile!;
+      const recovery = compiledActionDefinition({
+        id: "recover-assignment-validation",
+        recipe: [
+          { id: "validate-project", primitive: "project.validate", arguments: {} },
+          ...(options.preservePreSemanticState
+            ? [{ id: "preserve-state", primitive: "recovery.dispatch", arguments: {} }]
+            : []),
+        ],
+      });
+      const { sha256: _sourceSha256, ...sourceMaterial } = source;
+      const primaryMaterial = {
+        ...structuredClone(sourceMaterial),
+        id: "compile-with-recovery",
+        aliases: [] as string[],
+        recovery: recovery.id,
+      };
+      const primary = { ...primaryMaterial, sha256: canonicalHash(primaryMaterial) };
+      const actionMaterial = {
+        protocol: resolved.behavior.actions.protocol,
+        actions: {
+          ...resolved.behavior.actions.actions,
+          [primary.id]: primary,
+          [recovery.id]: recovery,
+        },
+        aliases: {
+          ...resolved.behavior.actions.aliases,
+          [primary.id]: primary.id,
+          [recovery.id]: recovery.id,
+        },
+      };
+      const actions = { ...actionMaterial, sha256: canonicalHash(actionMaterial) };
+      return {
+        ...resolved,
+        behavior: behaviorSnapshotWithPipeline(
+          resolved.behavior,
+          resolved.behavior.runType.pipeline,
+          actions,
+        ),
+      };
+    },
+    async initializeApprovedPlan(run) {
+      const initialized = await base.initializeApprovedPlan(run);
+      initialized.tickets["ticket-one"]!.steps[0]!.validationAction = "compile-with-recovery";
+      return initialized;
+    },
+    async compileAssignmentOutput(input) {
+      compilationCount += 1;
+      if (compilationCount <= options.failCompilations) {
+        throw new Error("simulated recoverable validation failure");
+      }
+      return compileAssignmentOutput(input);
+    },
+  };
+  return { program, compilationCount: () => compilationCount };
 }
 
 function semanticDirectReceiptProgram(

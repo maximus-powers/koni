@@ -292,11 +292,11 @@ import {
 
 const MAX_PROVIDER_RESPONSE_TRANSCRIPT_OVERSHOOT_BYTES = 24 * 1024 * 1024;
 /**
- * Fresh attempts a single ticket step may consume before a compensated validation stops being
- * reissued and the run blocks for the operator. Bounds pathological churn (e.g. a graph that
- * moves under every launch) while absorbing the ordinary one-off CAS race.
+ * Fresh attempts a single ticket step may consume after configured validation proves it
+ * preserved pre-semantic state. Bounds pathological churn while letting a fresh model turn
+ * correct deterministic compiler feedback instead of surfacing a recoverable operator block.
  */
-const MAX_COMPENSATED_VALIDATION_REISSUES = 3;
+const MAX_PRE_SEMANTIC_VALIDATION_REISSUES = 3;
 // A rejection normally reissues the held source so it can produce a corrected request. Bound
 // that semantic retry separately from infrastructure recovery: repeated denied scope requests
 // must eventually preserve the completed source evidence and let the ticket continue.
@@ -5785,6 +5785,7 @@ export class RunAuthorityEngine {
         mutableParent.expectedRunRevision = draft.revision;
         mutableParent.updatedAt = draft.updatedAt;
         let recoveryBlocker: string | undefined;
+        let recoveryReissue: string | undefined;
         if (assignmentRecovery) {
           const attemptId = parent.boundary.attemptId;
           const attempt = attemptId === undefined ? undefined : draft.attempts[attemptId];
@@ -5802,41 +5803,73 @@ export class RunAuthorityEngine {
               "recovered validation lost its exact terminal-accepted assignment",
             );
           }
-          attempt.terminalPolicy = failedSubmissionTerminalPolicy(attempt.terminalAcceptedAt);
-          recoveryBlocker =
-            currentRecovery.journal.status === "completed"
-              ? "Configured terminal validation required recovery; reissue from authenticated failure"
-              : `Configured terminal validation recovery did not complete (${currentRecovery.journal.status})`;
-          finishAssignment(
-            draft,
-            assignment,
-            { status: "failed", blocker: recoveryBlocker },
-            draft.updatedAt,
+          const priorReissues = preSemanticValidationReissueCount(
+            run,
+            assignment.ticketId,
+            assignment.stepId,
           );
-          mutableParent.semanticResult = {
-            kind: "assignment",
-            status: "failed",
-            blocker: recoveryBlocker,
-          };
-          settleRunAction(
-            mutableParent,
-            "failed",
-            recoveryBlocker,
-            draft.updatedAt,
-            draft.revision,
-          );
-          const failureProof = createTerminalFailureSettlementProof(draft, mutableParent);
-          if (failureProof === undefined) {
-            throw new AuthorityRpcError(
-              "action_recovery_failure_proof",
-              "recovered assignment failure lacks its exact semantic settlement proof",
+          if (
+            currentRecovery.journal.status === "completed" &&
+            recoveryPreservedPreSemanticState(currentRecovery.journal) &&
+            priorReissues < MAX_PRE_SEMANTIC_VALIDATION_REISSUES
+          ) {
+            const failedStep = [...parent.journal.steps]
+              .reverse()
+              .find((step) => step.status === "failed");
+            recoveryReissue =
+              `Retired accepted output after configured recovery preserved pre-semantic state` +
+              `${failedStep?.error === undefined ? "" : ` (${failedStep.error})`}; reissuing the step fresh`;
+            const mutableAttempt = draft.attempts[attempt.id]!;
+            mutableAttempt.status = "interrupted";
+            mutableAttempt.error = recoveryReissue;
+            mutableAttempt.endedAt = draft.updatedAt;
+            mutableAttempt.terminalSummary = recoveryReissue;
+            resetAssignmentAfterInterruption(draft, assignment, draft.updatedAt);
+            settleRunAction(
+              mutableParent,
+              "abandoned",
+              recoveryReissue,
+              draft.updatedAt,
+              draft.revision,
             );
-          }
-          draft.terminalFailureProofs ??= {};
-          draft.terminalFailureProofs[failureProof.sha256] = failureProof;
-          const failedTicket = draft.tickets[assignment.ticketId];
-          if (failedTicket?.reviewReworks?.at(-1)?.failedReviewAttemptId === attempt.id) {
-            bindAutomaticReviewReworkFailureProof(failedTicket, attempt.id, failureProof.sha256);
+          } else {
+            attempt.terminalPolicy = failedSubmissionTerminalPolicy(attempt.terminalAcceptedAt);
+            recoveryBlocker =
+              currentRecovery.journal.status === "completed"
+                ? `Configured terminal validation recovery could not reissue the assignment` +
+                  `${priorReissues >= MAX_PRE_SEMANTIC_VALIDATION_REISSUES ? ` after ${MAX_PRE_SEMANTIC_VALIDATION_REISSUES} fresh attempts` : " because it did not preserve pre-semantic state"}`
+                : `Configured terminal validation recovery did not complete (${currentRecovery.journal.status})`;
+            finishAssignment(
+              draft,
+              assignment,
+              { status: "failed", blocker: recoveryBlocker },
+              draft.updatedAt,
+            );
+            mutableParent.semanticResult = {
+              kind: "assignment",
+              status: "failed",
+              blocker: recoveryBlocker,
+            };
+            settleRunAction(
+              mutableParent,
+              "failed",
+              recoveryBlocker,
+              draft.updatedAt,
+              draft.revision,
+            );
+            const failureProof = createTerminalFailureSettlementProof(draft, mutableParent);
+            if (failureProof === undefined) {
+              throw new AuthorityRpcError(
+                "action_recovery_failure_proof",
+                "recovered assignment failure lacks its exact semantic settlement proof",
+              );
+            }
+            draft.terminalFailureProofs ??= {};
+            draft.terminalFailureProofs[failureProof.sha256] = failureProof;
+            const failedTicket = draft.tickets[assignment.ticketId];
+            if (failedTicket?.reviewReworks?.at(-1)?.failedReviewAttemptId === attempt.id) {
+              bindAutomaticReviewReworkFailureProof(failedTicket, attempt.id, failureProof.sha256);
+            }
           }
           assignmentFailed = true;
           draft.activity.push(
@@ -5844,7 +5877,9 @@ export class RunAuthorityEngine {
               this.#createId("activity"),
               draft.updatedAt,
               "compiler",
-              recoveryBlocker,
+              recoveryReissue === undefined
+                ? recoveryBlocker!
+                : `${recoveryReissue}: ${assignment.ticketId}/${assignment.stepId} (recovery ${priorReissues + 1} of ${MAX_PRE_SEMANTIC_VALIDATION_REISSUES})`,
               assignment.ticketId,
             ),
           );
@@ -6000,6 +6035,10 @@ export class RunAuthorityEngine {
     }
     const compiledActionRun = await this.#store.getRun(runId);
     const compiledAction = requiredRunActionExecution(compiledActionRun, invocationId);
+    // Configured recovery can settle this action while #executeRunAction is awaiting its child.
+    // An abandoned action has already retired its accepted output and reissued the assignment;
+    // this stale settlement coroutine must not reinterpret the old journal and block the run.
+    if (compiledAction.settledAt !== undefined) return;
     const compiledAttemptId = compiledAction.boundary.attemptId;
     const compiledAttempt =
       compiledAttemptId === undefined ? undefined : compiledActionRun.attempts[compiledAttemptId];
@@ -6032,16 +6071,16 @@ export class RunAuthorityEngine {
       const exhausted =
         compiledAction.boundary.ticketId !== undefined &&
         compiledAction.boundary.stepId !== undefined &&
-        compensatedValidationReissueCount(
+        preSemanticValidationReissueCount(
           compiledActionRun,
           compiledAction.boundary.ticketId,
           compiledAction.boundary.stepId,
-        ) >= MAX_COMPENSATED_VALIDATION_REISSUES;
+        ) >= MAX_PRE_SEMANTIC_VALIDATION_REISSUES;
       throw new AuthorityRpcError(
         "action_validation_failed",
         `ticket validation action did not complete with its exact accepted assignment (${compiledAction.journal.status})` +
           `${compiledFailure?.error === undefined ? "" : `: ${compiledFailure.error}`}` +
-          `${exhausted ? `; automatic reissue is exhausted after ${MAX_COMPENSATED_VALIDATION_REISSUES} fresh attempts` : ""}`,
+          `${exhausted ? `; automatic reissue is exhausted after ${MAX_PRE_SEMANTIC_VALIDATION_REISSUES} fresh attempts` : ""}`,
       );
     }
     // A failed assignment is the report of an honest blocker, not a successful completion claim.
@@ -6325,12 +6364,12 @@ export class RunAuthorityEngine {
       ) {
         return this.#noOpInternal(revision);
       }
-      const priorCompensatedReissues = compensatedValidationReissueCount(
+      const priorCompensatedReissues = preSemanticValidationReissueCount(
         run,
         assignment.ticketId,
         assignment.stepId,
       );
-      if (priorCompensatedReissues >= MAX_COMPENSATED_VALIDATION_REISSUES)
+      if (priorCompensatedReissues >= MAX_PRE_SEMANTIC_VALIDATION_REISSUES)
         return this.#noOpInternal(revision);
       const failedStep = [...action.journal.steps]
         .reverse()
@@ -6352,7 +6391,7 @@ export class RunAuthorityEngine {
           this.#createId("activity"),
           draft.updatedAt,
           "compiler",
-          `${reason}: ${assignment.ticketId}/${assignment.stepId} (recovery ${priorCompensatedReissues + 1} of ${MAX_COMPENSATED_VALIDATION_REISSUES})`,
+          `${reason}: ${assignment.ticketId}/${assignment.stepId} (recovery ${priorCompensatedReissues + 1} of ${MAX_PRE_SEMANTIC_VALIDATION_REISSUES})`,
           assignment.ticketId,
         ),
       );
@@ -19938,13 +19977,12 @@ function assertAllowedParams(value: JsonValue | undefined, keys: readonly string
  * for retiring the accepted attempt and reissuing the step.
  */
 /**
- * How many times this step's accepted output has already been retired and reissued after a
- * compensated validation. Reissue exists for losses a fresh attempt can win — a `graph_delta_cas`
- * stale graph hash after a concurrent compile. Once the budget is spent the same rejection has
- * survived three independent attempts, which is the signal that it is deterministic rather than
- * raced, and that nothing inside this run's pinned configuration will change the outcome.
+ * How many times this step's accepted output has already been retired after validation proved
+ * that pre-semantic state was preserved. This single budget covers both in-journal compensation
+ * and a separately configured recovery action. Once spent, the rejection has survived three
+ * independent attempts and the run stops rather than churning provider work indefinitely.
  */
-function compensatedValidationReissueCount(
+function preSemanticValidationReissueCount(
   run: Readonly<RunRecord>,
   ticketId: string,
   stepId: string,
@@ -19954,9 +19992,12 @@ function compensatedValidationReissueCount(
       candidate.ticketId === ticketId &&
       candidate.stepId === stepId &&
       candidate.status === "interrupted" &&
-      candidate.terminalSummary?.startsWith(
+      (candidate.terminalSummary?.startsWith(
         "Retired accepted output after a compensated validation",
-      ) === true,
+      ) === true ||
+        candidate.terminalSummary?.startsWith(
+          "Retired accepted output after configured recovery preserved pre-semantic state",
+        ) === true),
   ).length;
 }
 
@@ -19964,6 +20005,17 @@ function compensationPreservedPreSemanticState(journal: ActionExecutionJournal):
   return journal.steps.some(
     (step) =>
       step.phase === "compensation" &&
+      step.primitive === "recovery.dispatch" &&
+      step.status === "completed" &&
+      isRecord(step.output) &&
+      step.output.disposition === "preserved_pre_semantic_state",
+  );
+}
+
+function recoveryPreservedPreSemanticState(journal: ActionExecutionJournal): boolean {
+  return journal.steps.some(
+    (step) =>
+      step.phase === "recipe" &&
       step.primitive === "recovery.dispatch" &&
       step.status === "completed" &&
       isRecord(step.output) &&
