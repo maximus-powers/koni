@@ -880,6 +880,18 @@ export type AgentTerminalPolicyRecord =
       sourcePreservationSha256s: Sha256Digest[];
       acceptedAt: string;
       sha256: Sha256Digest;
+    }
+  | {
+      protocol: "koni.agent-terminal-policy.v1";
+      /** Exact compiler-authenticated upstream route for current nonpassing configured checks. */
+      mode: "semantic_upstream_change_control";
+      changeControlSha256: Sha256Digest;
+      projectionSha256: Sha256Digest;
+      replayCompilationSha256: Sha256Digest;
+      receiptEvaluationSha256: Sha256Digest;
+      sourcePreservationSha256s: Sha256Digest[];
+      acceptedAt: string;
+      sha256: Sha256Digest;
     };
 
 export interface RunLeadJudgmentRecord {
@@ -3136,6 +3148,14 @@ function assertTerminalSuccessProofIndex(value: unknown, run: Readonly<RunRecord
       attempt.terminalOutputSha256 !== proof.terminalOutputSha256
     ) {
       throw new Error("run terminal success proof differs from durable attempt");
+    }
+    if (
+      attempt.terminalPolicy?.mode === "semantic_upstream_change_control" &&
+      proof.semanticResult.changeControlSha256 !== attempt.terminalPolicy.changeControlSha256
+    ) {
+      throw new Error(
+        "upstream terminal policy differs from durable change-control settlement proof",
+      );
     }
     const live = run.actionExecutions?.[proof.actionInvocationId];
     if (live !== undefined) {
@@ -8136,31 +8156,35 @@ function assertAgentTerminalPolicyRecord(
     value.protocol !== "koni.agent-terminal-policy.v1" ||
     (value.mode !== "legacy_pre_execution_policy" &&
       value.mode !== "failed_submission" &&
-      value.mode !== "semantic") ||
+      value.mode !== "semantic" &&
+      value.mode !== "semantic_upstream_change_control") ||
     typeof value.acceptedAt !== "string" ||
     value.acceptedAt.length === 0 ||
     !isSha256Digest(value.sha256)
   ) {
     throw new Error(`invalid attempt terminal policy: ${attemptId}`);
   }
-  const allowed =
-    value.mode === "semantic"
-      ? new Set([
-          "protocol",
-          "mode",
-          "projectionSha256",
-          "replayCompilationSha256",
-          "receiptEvaluationSha256",
-          "sourcePreservationSha256s",
-          "acceptedAt",
-          "sha256",
-        ])
-      : new Set(["protocol", "mode", "acceptedAt", "sha256"]);
+  const semantic = value.mode === "semantic" || value.mode === "semantic_upstream_change_control";
+  const allowed = semantic
+    ? new Set([
+        "protocol",
+        "mode",
+        ...(value.mode === "semantic_upstream_change_control" ? ["changeControlSha256"] : []),
+        "projectionSha256",
+        "replayCompilationSha256",
+        "receiptEvaluationSha256",
+        "sourcePreservationSha256s",
+        "acceptedAt",
+        "sha256",
+      ])
+    : new Set(["protocol", "mode", "acceptedAt", "sha256"]);
   if (Object.keys(value).some((field) => !allowed.has(field))) {
     throw new Error(`invalid attempt terminal policy field: ${attemptId}`);
   }
-  if (value.mode === "semantic") {
+  if (semantic) {
     if (
+      (value.mode === "semantic_upstream_change_control" &&
+        !isSha256Digest(value.changeControlSha256)) ||
       !isSha256Digest(value.projectionSha256) ||
       !isSha256Digest(value.replayCompilationSha256) ||
       !isSha256Digest(value.receiptEvaluationSha256) ||

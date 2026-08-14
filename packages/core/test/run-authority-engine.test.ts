@@ -8915,6 +8915,236 @@ describe("run authority engine", () => {
     client.close();
   }, 30_000);
 
+  it("closes a configured upstream request without claiming its rejected receipt passed", async () => {
+    const root = await repository();
+    const reached = deferred<void>();
+    const release = deferred<void>();
+    const program = semanticDirectReceiptProgram({
+      configuredValidation: true,
+      upstreamChangeControl: true,
+    });
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+      actionFault: async (point, input) => {
+        if (point !== "before_assignment_settle" || input.ticketId !== "ticket-one") return;
+        reached.resolve();
+        await release.promise;
+      },
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(
+      client,
+      engine,
+      "configured-upstream-terminal-closure",
+    );
+    await reached.promise;
+    const admitted = await engine.store.getRun(runId);
+    const admittedAttempt = Object.values(admitted.attempts).find(
+      (candidate) => candidate.ticketId === "ticket-one",
+    )!;
+    expect(admittedAttempt.status).toBe("terminal_accepted");
+    expect(admittedAttempt.terminalPolicy).toBeUndefined();
+    expect(
+      (admitted.checks ?? []).filter(
+        (check) =>
+          check.attemptId === admittedAttempt.id &&
+          check.requestedCheckId === "baseline-proof-set" &&
+          !check.accepted &&
+          check.passed === false,
+      ),
+    ).toHaveLength(1);
+    client.close();
+    await engine.server.stop();
+    const restarted = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program,
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(restarted);
+    await restarted.start();
+    await waitFor(async () => {
+      const run = await restarted.store.getRun(runId);
+      const attempt = Object.values(run.attempts).find(
+        (candidate) => candidate.ticketId === "ticket-one",
+      );
+      return run.lifecycle.phase === "blocked" || attempt?.terminalPolicy !== undefined;
+    });
+
+    const run = await restarted.store.getRun(runId);
+    const attempt = Object.values(run.attempts).find(
+      (candidate) => candidate.ticketId === "ticket-one",
+    )!;
+    const action = Object.values(run.actionExecutions ?? {}).find(
+      (candidate) => candidate.boundary.attemptId === attempt.id,
+    )!;
+    expect(run.lifecycle.blocker).toBeUndefined();
+    expect(run.lifecycle.phase).not.toBe("blocked");
+    expect(action.semanticResult).toMatchObject({
+      kind: "assignment",
+      status: "completed",
+      changeControlSha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+    });
+    expect(action.settlement?.disposition).toBe("completed");
+    const changeControlSha256 =
+      action.semanticResult?.kind === "assignment"
+        ? action.semanticResult.changeControlSha256
+        : undefined;
+    expect(attempt.terminalPolicy).toMatchObject({
+      mode: "semantic_upstream_change_control",
+      changeControlSha256,
+    });
+    const proposal = Object.values(run.tickets).find(
+      (ticket) => ticket.executionControl?.proposalRequest !== undefined,
+    );
+    expect(proposal).toMatchObject({
+      status: "proposed",
+      executionControl: {
+        proposalRequest: {
+          sourceTicketId: "ticket-one",
+          sourceStepId: "work",
+          requestSha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+        },
+        controlTicketAuthority: {
+          role: "proposal",
+          causal: {
+            role: "proposal",
+            sourceTerminalProof: {
+              attemptId: attempt.id,
+              terminalPolicySha256: attempt.terminalPolicy?.sha256,
+            },
+          },
+        },
+      },
+    });
+    expect(run.tickets["ticket-one"]).toMatchObject({
+      status: "blocked",
+      executionControl: {
+        sourceHold: {
+          proposalTicketId: proposal?.id,
+          requestSha256: proposal?.executionControl?.proposalRequest?.requestSha256,
+        },
+      },
+    });
+    expect(
+      run.activity.some((entry) =>
+        entry.message.includes("Opened change proposal and held source ticket"),
+      ),
+    ).toBe(true);
+
+    release.resolve();
+    assertRunRecord(run);
+    const tampered = structuredClone(run);
+    const tamperedAttempt = tampered.attempts[attempt.id]!;
+    if (tamperedAttempt.terminalPolicy?.mode !== "semantic_upstream_change_control") {
+      throw new Error("fixture settled without an upstream terminal policy");
+    }
+    const mismatchedPolicyMaterial = {
+      ...tamperedAttempt.terminalPolicy,
+      changeControlSha256: rawSha256("mismatched-upstream-change-control"),
+    };
+    delete (mismatchedPolicyMaterial as { sha256?: Sha256Digest }).sha256;
+    tamperedAttempt.terminalPolicy = {
+      ...mismatchedPolicyMaterial,
+      sha256: canonicalHash(mismatchedPolicyMaterial),
+    };
+    const priorProof = Object.values(tampered.terminalSuccessProofs ?? {}).find(
+      (proof) => proof.attemptId === attempt.id,
+    )!;
+    delete tampered.terminalSuccessProofs![priorProof.sha256];
+    const { sha256: _priorProofSha256, ...priorProofMaterial } = priorProof;
+    const mismatchedProofMaterial = {
+      ...priorProofMaterial,
+      terminalPolicySha256: tamperedAttempt.terminalPolicy.sha256,
+    };
+    const mismatchedProof = {
+      ...mismatchedProofMaterial,
+      sha256: canonicalHash(mismatchedProofMaterial),
+    };
+    tampered.terminalSuccessProofs![mismatchedProof.sha256] = mismatchedProof;
+    const tamperedProposal = tampered.tickets[proposal!.id]!;
+    const priorAuthority = tamperedProposal.executionControl?.controlTicketAuthority;
+    if (priorAuthority?.causal.role !== "proposal") {
+      throw new Error("fixture proposal lacks compiler causal authority");
+    }
+    const tamperedCatalog = proposalSemanticCatalog(tampered.compiledConfigHash, undefined, true);
+    const tamperedDefinition = proposalControlDefinition(tamperedCatalog, tamperedProposal.id);
+    tamperedProposal.executionControl!.controlTicketAuthority =
+      createCompilerControlTicketAuthority({
+        runId: tampered.id,
+        role: "proposal",
+        ticket: tamperedProposal,
+        operation: tamperedCatalog.operations[tamperedProposal.operationId]!,
+        workflow:
+          tamperedCatalog.workflows[
+            tamperedCatalog.operations[tamperedProposal.operationId]!.workflowId!
+          ]!,
+        definition: tamperedDefinition,
+        causal: {
+          ...priorAuthority.causal,
+          sourceTerminalProof: mismatchedProof,
+        },
+      });
+    let tamperError: unknown;
+    try {
+      assertRunRecord(tampered);
+    } catch (error) {
+      tamperError = error;
+    }
+    expect((tamperError as Error).stack).toContain(
+      "upstream terminal policy differs from durable change-control settlement proof",
+    );
+  }, 30_000);
+
+  it("keeps ordinary completion closed when its configured receipt is rejected", async () => {
+    const root = await repository();
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program: semanticDirectReceiptProgram({
+        configuredValidation: true,
+        upstreamChangeControl: true,
+        omitUpstreamRequest: true,
+      }),
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(
+      client,
+      engine,
+      "configured-rejected-receipt-ordinary-completion",
+    );
+    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "blocked");
+    const blocked = await engine.store.getRun(runId);
+    expect(blocked.lifecycle.blocker).toBe(
+      "terminal closure is missing required receipt(s): proof_baseline_set",
+    );
+    const attempt = Object.values(blocked.attempts).find(
+      (candidate) => candidate.ticketId === "ticket-one",
+    )!;
+    expect(attempt.status).toBe("terminal_accepted");
+    expect(attempt.terminalPolicy).toBeUndefined();
+    expect(Object.values(blocked.tickets).some((ticket) => ticket.status === "proposed")).toBe(
+      false,
+    );
+    client.close();
+  }, 30_000);
+
   it("accepts an honest assignment blocker without replaying completion checks", async () => {
     const root = await repository();
     const engine = await RunAuthorityEngine.open({
@@ -11450,6 +11680,7 @@ async function addCanonicalProposalFixture(
 function proposalSemanticCatalog(
   configurationSha256: Sha256Digest,
   decisionPolicy?: "operator" | "automatic",
+  configuredRejectedCheck = false,
 ): CompiledExecutionSemanticCatalog {
   const registries = {
     operations: {
@@ -11485,14 +11716,36 @@ function proposalSemanticCatalog(
       },
     },
     workflows: {
-      "ordinary-flow": proposalWorkflow("ordinary-flow", "ordinary-work", ["work"]),
+      "ordinary-flow": configuredRejectedCheck
+        ? {
+            id: "ordinary-flow",
+            version: "1.0.0",
+            applies_to: ["ordinary-work"],
+            steps: [
+              {
+                id: "work",
+                required: true,
+                checks: ["baseline-proof-set"],
+                required_receipts: ["proof_baseline_set"],
+              },
+            ],
+          }
+        : proposalWorkflow("ordinary-flow", "ordinary-work", ["work"]),
       "proposal-flow": proposalWorkflow("proposal-flow", "propose-change", ["prepare", "review"]),
       "application-flow": proposalWorkflow("application-flow", "apply-change", [
         "prepare",
         "review",
       ]),
     },
-    checks: {},
+    checks: configuredRejectedCheck
+      ? {
+          "baseline-proof-set": {
+            id: "baseline-proof-set",
+            kind: "graph",
+            receipt_type: "proof_baseline_set",
+          },
+        }
+      : {},
   };
   return compileExecutionSemanticCatalog({
     configuration_sha256: configurationSha256,
@@ -11831,6 +12084,8 @@ function semanticDirectReceiptProgram(
     correctableValidationCompilerError?: boolean;
     nonCorrectableValidationCompilerError?: boolean;
     onConfiguredCompilation?: (count: number) => void;
+    omitUpstreamRequest?: boolean;
+    upstreamChangeControl?: boolean;
     undefinedTicketField?: boolean;
   } = {},
 ): RunCompilerProgram {
@@ -11839,12 +12094,19 @@ function semanticDirectReceiptProgram(
   let configuredCompilationCount = 0;
   const usesProductionAuthority =
     options.correctableValidationCompilerError === true ||
-    options.nonCorrectableValidationCompilerError === true;
-  const requiredReceiptTypes = ["context-pack", "structured-output", "scoped-compile"];
-  const catalog = semanticDirectCatalog(usesProductionAuthority ? [] : requiredReceiptTypes);
-  const operationId = "implement";
-  const workflowId = "implement-flow";
-  const stepId = "implement";
+    options.nonCorrectableValidationCompilerError === true ||
+    options.upstreamChangeControl === true;
+  const requiredReceiptTypes =
+    options.upstreamChangeControl === true
+      ? ["proof_baseline_set"]
+      : ["context-pack", "structured-output", "scoped-compile"];
+  const catalog =
+    options.upstreamChangeControl === true
+      ? proposalSemanticCatalog(`sha256:${"b".repeat(64)}`, undefined, true)
+      : semanticDirectCatalog(usesProductionAuthority ? [] : requiredReceiptTypes);
+  const operationId = options.upstreamChangeControl === true ? "ordinary" : "implement";
+  const workflowId = options.upstreamChangeControl === true ? "ordinary-flow" : "implement-flow";
+  const stepId = options.upstreamChangeControl === true ? "work" : "implement";
   const terminalSchema =
     options.failedSubmission === true
       ? Type.Union([
@@ -11896,9 +12158,21 @@ function semanticDirectReceiptProgram(
       sessionId: input.sessionId,
       epoch: input.run.lifecycle.revision + 1,
       generation: input.run.generation,
-      allowedTools: [TERMINAL_TOOL_NAME],
+      allowedTools:
+        options.upstreamChangeControl === true
+          ? ["koni_run_check", TERMINAL_TOOL_NAME]
+          : [TERMINAL_TOOL_NAME],
       readPaths: [...ticket.readPaths],
       writePaths: [...ticket.writePaths],
+      ...(options.upstreamChangeControl === true
+        ? {
+            configuredChecks: {
+              ids: ["baseline-proof-set"],
+              networkAccess: false,
+              maxTimeoutMs: 1_000,
+            },
+          }
+        : {}),
       expectedRevision: input.nextAuthorityRevision,
       expectedStateHash: input.expectedAuthorityStateHash,
     };
@@ -11943,6 +12217,16 @@ function semanticDirectReceiptProgram(
         thinkingLevel: "high",
       },
       tools: [
+        ...(options.upstreamChangeControl === true
+          ? [
+              {
+                name: "koni_run_check" as const,
+                schemaHash: koniToolSchemaHash("koni_run_check", terminalSchema),
+                executionMode: "sequential" as const,
+                maxResultBytes: koniToolMaxResultBytes("koni_run_check"),
+              },
+            ]
+          : []),
         {
           name: TERMINAL_TOOL_NAME,
           schemaHash: terminalToolSchemaHash,
@@ -11992,23 +12276,28 @@ function semanticDirectReceiptProgram(
           }
         : { tools: [terminalFixtureTool(terminalSchema)] }),
       authorityGrant: grant,
-      toolNames: [TERMINAL_TOOL_NAME],
+      toolNames:
+        options.upstreamChangeControl === true
+          ? ["koni_run_check", TERMINAL_TOOL_NAME]
+          : [TERMINAL_TOOL_NAME],
       terminalOutputSchema: terminalSchema,
       contextContent,
       contextProvider: contextProvider(spec),
       factory: (async (_spec, factoryOptions) =>
-        usesProductionAuthority
-          ? new CorrectableConfiguredValidationAdapter(spec, factoryOptions.tools)
-          : new CompletingAdapter(
-              spec,
-              input.kind,
-              options.failedSubmission === true
-                ? {
-                    status: "failed",
-                    blocker: "The configured check could not establish an honest result",
-                  }
-                : undefined,
-            )) satisfies ManagedPiSessionFactory,
+        options.upstreamChangeControl === true
+          ? new RejectedCheckUpstreamAdapter(spec, factoryOptions.tools)
+          : usesProductionAuthority
+            ? new CorrectableConfiguredValidationAdapter(spec, factoryOptions.tools)
+            : new CompletingAdapter(
+                spec,
+                input.kind,
+                options.failedSubmission === true
+                  ? {
+                      status: "failed",
+                      blocker: "The configured check could not establish an honest result",
+                    }
+                  : undefined,
+              )) satisfies ManagedPiSessionFactory,
     };
   };
 
@@ -12019,8 +12308,14 @@ function semanticDirectReceiptProgram(
       catalogSha256: catalog.sha256,
       catalog,
       executionPolicyBinding: stepBinding,
-      validationCheckIds: [] as string[],
-      requiredReceiptTypes: usesProductionAuthority ? [] : requiredReceiptTypes,
+      validationCheckIds:
+        options.upstreamChangeControl === true ? ["baseline-proof-set"] : ([] as string[]),
+      requiredReceiptTypes:
+        options.upstreamChangeControl === true
+          ? requiredReceiptTypes
+          : usesProductionAuthority
+            ? []
+            : requiredReceiptTypes,
       validationChecks: [],
       composedReplayCheckIds: [] as string[],
       retainedReceipts: [],
@@ -12031,6 +12326,144 @@ function semanticDirectReceiptProgram(
 
   return {
     ...direct,
+    ...(options.upstreamChangeControl === true
+      ? {
+          async compileAssignmentOutput(
+            input: Parameters<NonNullable<RunCompilerProgram["compileAssignmentOutput"]>>[0],
+          ) {
+            const rejected = (input.run.checks ?? []).filter(
+              (check) =>
+                check.attemptId === input.attemptId &&
+                check.requestedCheckId === "baseline-proof-set" &&
+                check.definitionHash === catalog.checks["baseline-proof-set"]?.sha256 &&
+                check.executionPolicy?.bindingSha256 === stepBinding.sha256 &&
+                check.executionPolicy.receiptType === "proof_baseline_set" &&
+                !check.accepted &&
+                check.passed === false,
+            );
+            if (rejected.length !== 1) {
+              throw new NativeRunProgramError(
+                "assignment_checks_incomplete",
+                "upstream fixture requires one exact current rejected baseline check",
+              );
+            }
+            if (options.omitUpstreamRequest === true) {
+              return {
+                outcome: {
+                  status: "completed" as const,
+                  summary: "Incorrectly claimed ordinary completion with a rejected check",
+                },
+              };
+            }
+            const sourceOutputSha256 = rawSha256(canonicalEncode(input.output));
+            const publication = deriveChangeControlPublication(catalog, {
+              runId: input.run.id,
+              sourceTicketId: input.assignment.ticketId,
+              sourceStepId: input.assignment.stepId,
+              sourceOutputSha256,
+              sourceBinding: stepBinding,
+              targetNodeIds: ["change-one"],
+              summary: "Decide whether the upstream contract should change.",
+              reason: "The current configured proof check returned a nonpassing receipt",
+            });
+            const changeControlMaterial = {
+              protocol: "koni.assignment-change-control.v1" as const,
+              kind: "upstream_request" as const,
+              sourceTicketId: input.assignment.ticketId,
+              sourceStepId: input.assignment.stepId,
+              sourceBindingSha256: stepBinding.sha256,
+              sourceOutputSha256,
+              targetNodeIds: ["change-one"],
+              fulfillment: "dynamic_scope_change" as const,
+              summary: publication.summary,
+              reason: publication.reason,
+              publication,
+            };
+            return {
+              outcome: { status: "completed" as const, summary: publication.summary },
+              changeControl: {
+                ...changeControlMaterial,
+                sha256: canonicalHash(changeControlMaterial),
+              },
+            };
+          },
+          async projectChangeControlProposalTicket(input) {
+            const publication = input.changeControl.publication;
+            const source = input.run.tickets[input.changeControl.sourceTicketId]!;
+            const sourceHold = {
+              proposalTicketId: publication.proposalTicketId,
+              requestSha256: publication.requestSha256,
+            };
+            const definition = proposalControlDefinition(catalog, publication.proposalTicketId);
+            const proposalControl: TicketExecutionControlRecord = {
+              changeControlScopeNodeIds: [...publication.controlScopeNodeIds],
+              proposalRequest: {
+                requestSha256: publication.requestSha256,
+                sourceTicketId: publication.sourceTicketId,
+                sourceStepId: publication.sourceStepId,
+                sourceOutputSha256: publication.sourceOutputSha256,
+                fulfillment: input.changeControl.fulfillment,
+              },
+            };
+            const proposal = proposalTicketFromDefinition(
+              catalog,
+              definition,
+              `${publication.summary}\n\nReason: ${publication.reason}`,
+              proposalControl,
+              input.run.updatedAt,
+            );
+            const operation = catalog.operations[proposal.operationId]!;
+            const workflow = catalog.workflows[operation.workflowId!]!;
+            proposalControl.controlTicketAuthority = createCompilerControlTicketAuthority({
+              runId: input.run.id,
+              role: "proposal",
+              ticket: proposal,
+              operation,
+              workflow,
+              definition,
+              causal: {
+                role: "proposal",
+                publication,
+                sourceTicketProjection: ticketImmutableProjection(source),
+                sourceTerminalProof: input.sourceTerminalProof,
+                sourceHold,
+              },
+            });
+            return proposal;
+          },
+          async resolveAgentCheck(input) {
+            const check = catalog.checks[input.checkId]!;
+            return {
+              protocol: "koni.resolved-agent-check.v1",
+              requestedCheckId: check.id,
+              definitionHash: check.sha256,
+              kind: "graph",
+              commands: [],
+              executionPolicy: {
+                configurationSha256: catalog.configurationSha256,
+                catalogSha256: catalog.sha256,
+                bindingSha256: stepBinding.sha256,
+                checkId: check.id,
+                checkSha256: check.sha256,
+                effect: check.effect,
+                receiptType: check.receiptType,
+                receiptFreshness: check.receiptFreshness,
+                composedReplay: check.composedReplay,
+                retryPolicy: structuredClone(check.retryPolicy),
+                gatePolicyContexts: [],
+              },
+            };
+          },
+          async compileAgentCheckResult() {
+            return {
+              summary: "The configured baseline proof is currently nonpassing",
+              accepted: false,
+              passed: false,
+              evidence: { verdict: "failed", reason: "historical source is unavailable" },
+            };
+          },
+        }
+      : {}),
     ...(options.undefinedTicketField === true
       ? {
           async compileAssignmentOutput(
@@ -12058,7 +12491,8 @@ function semanticDirectReceiptProgram(
           },
         }
       : {}),
-    ...(usesProductionAuthority
+    ...(options.correctableValidationCompilerError === true ||
+    options.nonCorrectableValidationCompilerError === true
       ? {
           async compileAssignmentOutput(
             input: Parameters<NonNullable<RunCompilerProgram["compileAssignmentOutput"]>>[0],
@@ -12091,10 +12525,17 @@ function semanticDirectReceiptProgram(
       return { ...resolved, compiledConfigHash: catalog.configurationSha256 };
     },
     async initializeApprovedPlan() {
-      const configured = ticket();
+      const configured =
+        options.upstreamChangeControl === true
+          ? proposalSourceTicket(catalog, "2026-08-14T00:00:00.000Z")
+          : ticket();
+      configured.status = "queued";
+      configured.blocker = undefined;
+      configured.executionControl = {};
       configured.operationId = operationId;
       configured.executionPolicyBinding = operationBinding;
       configured.steps[0]!.executionPolicyBinding = stepBinding;
+      configured.steps[0]!.status = "pending";
       if (options.configuredValidation === true) {
         configured.steps[0]!.validationAction = "compile";
       }
@@ -12117,22 +12558,60 @@ function semanticDirectReceiptProgram(
         sessionId: spec.identity.sessionId,
         epoch: spec.authority.epoch,
         generation: spec.authority.generation,
-        allowedTools: [TERMINAL_TOOL_NAME],
+        allowedTools:
+          options.upstreamChangeControl === true
+            ? ["koni_run_check", TERMINAL_TOOL_NAME]
+            : [TERMINAL_TOOL_NAME],
         readPaths: [...ticket.readPaths],
         writePaths: [...ticket.writePaths],
+        ...(options.upstreamChangeControl === true
+          ? {
+              configuredChecks: {
+                ids: ["baseline-proof-set"],
+                networkAccess: false,
+                maxTimeoutMs: 1_000,
+              },
+            }
+          : {}),
         expectedRevision: spec.authority.expectedRevision,
         expectedStateHash: spec.authority.expectedStateHash,
       };
       return {
         spec,
-        tools: [terminalFixtureTool(terminalSchema)],
+        ...(options.upstreamChangeControl === true
+          ? {
+              compactionSnapshot: {
+                objective: run.objective,
+                plan: {
+                  architecture: "Approved",
+                  decisions: "Approved",
+                  risk: "Bounded",
+                  verification: "Pending",
+                },
+                graphRefs: [],
+                touchedFiles: [],
+                receiptIds: [],
+                checkIds: [],
+                unresolvedQuestions: [],
+                nextAction: "Route the rejected configured check through change control",
+              },
+            }
+          : { tools: [terminalFixtureTool(terminalSchema)] }),
         authorityGrant: grant,
-        toolNames: [TERMINAL_TOOL_NAME],
+        toolNames:
+          options.upstreamChangeControl === true
+            ? ["koni_run_check", TERMINAL_TOOL_NAME]
+            : [TERMINAL_TOOL_NAME],
         terminalOutputSchema: terminalSchema,
         contextContent,
         contextProvider: contextProvider(spec),
-        factory: (async () =>
-          new CompletingAdapter(spec, attempt.kind ?? "ticket")) satisfies ManagedPiSessionFactory,
+        factory: (async (_spec, factoryOptions) =>
+          options.upstreamChangeControl === true
+            ? new RejectedCheckUpstreamAdapter(spec, factoryOptions.tools)
+            : new CompletingAdapter(
+                spec,
+                attempt.kind ?? "ticket",
+              )) satisfies ManagedPiSessionFactory,
       };
     },
     async projectExecutionSemanticCatalog() {
@@ -12179,12 +12658,23 @@ function semanticDirectCatalog(
           {
             id: "implement",
             required: true,
+            ...(requiredReceiptTypes.includes("proof_baseline_set")
+              ? { checks: ["baseline-proof-set"] }
+              : {}),
             required_receipts: [...requiredReceiptTypes],
           },
         ],
       },
     },
-    checks: {},
+    checks: requiredReceiptTypes.includes("proof_baseline_set")
+      ? {
+          "baseline-proof-set": {
+            id: "baseline-proof-set",
+            kind: "graph",
+            receipt_type: "proof_baseline_set",
+          },
+        }
+      : {},
   };
   const configurationSha256 = canonicalHash(registries);
   return compileExecutionSemanticCatalog({
@@ -13066,6 +13556,71 @@ class CompletingAdapter implements PiSessionAdapter {
   public async abort(): Promise<void> {}
   public dispose(): void {}
   protected emit(event: AgentSessionEvent): void {
+    for (const listener of this.#listeners) listener(event);
+  }
+}
+
+class RejectedCheckUpstreamAdapter implements PiSessionAdapter {
+  public readonly sessionId: string;
+  public readonly sessionFile: string;
+  readonly #listeners = new Set<(event: AgentSessionEvent) => void>();
+  readonly #abort = new AbortController();
+
+  public constructor(
+    private readonly spec: AgentLaunchSpec,
+    private readonly tools: readonly AuthorityBackedTool[],
+  ) {
+    this.sessionId = spec.identity.sessionId;
+    this.sessionFile = path.join(spec.workspace.sessionDirectory, `${this.sessionId}.jsonl`);
+  }
+
+  public getActiveToolNames(): readonly string[] {
+    return this.tools.map((tool) => tool.name);
+  }
+  public appendMapping(): void {}
+  public subscribe(listener: (event: AgentSessionEvent) => void): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+  public async prompt(): Promise<void> {
+    await this.execute("configured-rejected-check", "koni_run_check", {
+      checkId: "baseline-proof-set",
+    });
+    await this.execute("configured-upstream-terminal", this.spec.terminal.toolName, {
+      result: "ticket",
+    });
+  }
+  public async continue(): Promise<void> {
+    await this.prompt();
+  }
+  public async steer(): Promise<void> {}
+  public async followUp(): Promise<void> {}
+  public async abort(): Promise<void> {
+    this.#abort.abort();
+  }
+  public dispose(): void {
+    this.#abort.abort();
+  }
+
+  private async execute(
+    toolCallId: string,
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<void> {
+    const tool = this.tools.find((candidate) => candidate.name === toolName);
+    if (tool === undefined) throw new Error(`missing configured fixture tool ${toolName}`);
+    this.emit({ type: "tool_execution_start", toolCallId, toolName, args });
+    const result = await tool.execute(toolCallId, args, this.#abort.signal);
+    this.emit({
+      type: "tool_execution_end",
+      toolCallId,
+      toolName,
+      result,
+      isError: (result.details as { outcome?: unknown }).outcome === "rejected",
+    });
+  }
+
+  private emit(event: AgentSessionEvent): void {
     for (const listener of this.#listeners) listener(event);
   }
 }

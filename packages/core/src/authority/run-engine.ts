@@ -6239,6 +6239,9 @@ export class RunAuthorityEngine {
                 outcomeTerminalPolicy.workspace,
                 attempt.terminalAcceptedAt,
                 terminalCompilerReceipts,
+                compiledChangeControl?.kind === "upstream_request"
+                  ? compiledChangeControl
+                  : undefined,
               );
             })();
       const draft = nextRun(run, this.#timestamp());
@@ -14346,6 +14349,10 @@ export class RunAuthorityEngine {
     workspace: string,
     acceptedAt: string,
     terminalCompilerReceipts: readonly CompilerTerminalReceiptAuthority[] = [],
+    upstreamChangeControl?: Extract<
+      RuntimeAssignmentChangeControlCompilation,
+      { kind: "upstream_request" }
+    >,
   ): Promise<AssignmentTerminalPolicySettlement> {
     const binding = executionPolicyBindingForAttempt(run, attempt);
     if (binding === undefined) {
@@ -14407,16 +14414,52 @@ export class RunAuthorityEngine {
       );
     }
     const compilerReceipts = [...prepared.compilerReceipts, ...terminalCompilerReceipts];
+    const receiptEvidence = terminalReceiptEvidence(
+      run,
+      attempt,
+      projection,
+      replay,
+      compilerReceipts,
+    );
     const receiptEvaluation = evaluateRequiredExecutionReceipts(
       projection.catalog,
       projection.executionPolicyBinding,
       {
-        receipts: terminalReceiptEvidence(run, attempt, projection, replay, compilerReceipts),
+        receipts: receiptEvidence,
         structuredOutputAccepted: true,
         commandRan: projection.validationChecks.some((policy) => policy.causalCommands.length > 0),
       },
     );
-    if (receiptEvaluation.missing.length > 0) {
+    const rejectedConfiguredReceiptTypes = new Set(
+      receiptEvidence.flatMap((receipt) => {
+        const check =
+          receipt.checkId === undefined ? undefined : projection.catalog.checks[receipt.checkId];
+        return check !== undefined &&
+          projection.validationCheckIds.includes(check.id) &&
+          receipt.status === "failed" &&
+          receipt.checkSha256 === check.sha256 &&
+          receipt.receiptType === check.receiptType &&
+          receipt.configurationSha256 === projection.configurationSha256 &&
+          receipt.catalogSha256 === projection.catalogSha256 &&
+          receipt.operationId === projection.executionPolicyBinding.operationId &&
+          receipt.workflowId === projection.executionPolicyBinding.workflowId &&
+          receipt.stepId === projection.executionPolicyBinding.stepId &&
+          receipt.bindingSha256 === projection.executionPolicyBinding.sha256 &&
+          receipt.integrityValid &&
+          receipt.current &&
+          receipt.linkedToCurrentOutput
+          ? [receipt.receiptType]
+          : [];
+      }),
+    );
+    const closesThroughUpstreamChangeControl = upstreamChangeControl !== undefined;
+    const missingReceiptsAreRejectedConfiguredChecks = receiptEvaluation.missing.every(
+      (receiptType) => rejectedConfiguredReceiptTypes.has(receiptType),
+    );
+    if (
+      receiptEvaluation.missing.length > 0 &&
+      (!closesThroughUpstreamChangeControl || !missingReceiptsAreRejectedConfiguredChecks)
+    ) {
       throw new AuthorityRpcError(
         "terminal_receipts_missing",
         `terminal closure is missing required receipt(s): ${receiptEvaluation.missing.join(", ")}`,
@@ -14428,15 +14471,26 @@ export class RunAuthorityEngine {
       projection,
       workspace,
     );
-    const terminalMaterial = {
-      protocol: "koni.agent-terminal-policy.v1" as const,
-      mode: "semantic" as const,
-      projectionSha256: projection.sha256,
-      replayCompilationSha256: replay.sha256,
-      receiptEvaluationSha256: receiptEvaluation.sha256,
-      sourcePreservationSha256s,
-      acceptedAt,
-    };
+    const terminalMaterial = closesThroughUpstreamChangeControl
+      ? {
+          protocol: "koni.agent-terminal-policy.v1" as const,
+          mode: "semantic_upstream_change_control" as const,
+          changeControlSha256: upstreamChangeControl.sha256,
+          projectionSha256: projection.sha256,
+          replayCompilationSha256: replay.sha256,
+          receiptEvaluationSha256: receiptEvaluation.sha256,
+          sourcePreservationSha256s,
+          acceptedAt,
+        }
+      : {
+          protocol: "koni.agent-terminal-policy.v1" as const,
+          mode: "semantic" as const,
+          projectionSha256: projection.sha256,
+          replayCompilationSha256: replay.sha256,
+          receiptEvaluationSha256: receiptEvaluation.sha256,
+          sourcePreservationSha256s,
+          acceptedAt,
+        };
     const record: AgentTerminalPolicyRecord = {
       ...terminalMaterial,
       sha256: canonicalHash(terminalMaterial),
@@ -14450,6 +14504,9 @@ export class RunAuthorityEngine {
       projectionSha256: projection.sha256,
       replay,
       receiptEvaluation,
+      ...(closesThroughUpstreamChangeControl
+        ? { upstreamChangeControlSha256: upstreamChangeControl.sha256 }
+        : {}),
       sourcePreservationSha256s,
       retryAudits: prepared.retryAudits,
       compilerReceipts,
