@@ -10,6 +10,32 @@ import registerProfile, {
 } from "../extensions/profile.js";
 
 describe("coding profile registrar", () => {
+  it("keeps the medium planning frontier while reserving correction headroom", async () => {
+    const source = await readFile(
+      path.resolve(import.meta.dirname, "../koni/baseline/run-types/medium.yaml"),
+      "utf8",
+    );
+    const document = YAML.parse(source) as {
+      planning: {
+        token_budget: {
+          metric: string;
+          limit: number;
+          synthesis_reserve: number;
+          on_exhausted: string;
+        };
+      };
+    };
+    const budget = document.planning.token_budget;
+
+    expect(budget).toEqual({
+      metric: "new_tokens",
+      limit: 160_000,
+      synthesis_reserve: 70_000,
+      on_exhausted: "force_synthesis",
+    });
+    expect(budget.limit - budget.synthesis_reserve).toBe(90_000);
+  });
+
   it("routes proof-spec defects through bounded native change control", async () => {
     const [operationsSource, workflowsSource] = await Promise.all([
       readFile(path.resolve(import.meta.dirname, "../koni/baseline/operations.yaml"), "utf8"),
