@@ -7667,12 +7667,18 @@ export class RunAuthorityEngine {
   ): Promise<boolean> {
     let run = await this.#store.getRun(runId);
     let integrationSourceIds = unsettledIntegrationSourceTicketIds(run);
+    let correctionSourceIds = currentSourceCorrectionTicketIds(run);
     if (
       !this.#matchesAdvancement(run, advancement) ||
       hasUnfinalizedAcceptedAssignment(run) ||
       this.#program.reconcileTicketBoard === undefined ||
       !Object.values(run.tickets).some((ticket) =>
-        shouldRetireInapplicableTicket(ticket, new Set(), integrationSourceIds),
+        shouldRetireInapplicableTicket(
+          ticket,
+          new Set(),
+          integrationSourceIds,
+          correctionSourceIds,
+        ),
       )
     )
       return false;
@@ -7682,7 +7688,12 @@ export class RunAuthorityEngine {
     const applicableIds = new Set(board.applicableTicketIds);
     const source = Object.values(run.tickets)
       .filter((ticket) =>
-        shouldRetireInapplicableTicket(ticket, applicableIds, integrationSourceIds),
+        shouldRetireInapplicableTicket(
+          ticket,
+          applicableIds,
+          integrationSourceIds,
+          correctionSourceIds,
+        ),
       )
       .sort(
         (left, right) =>
@@ -7711,6 +7722,7 @@ export class RunAuthorityEngine {
             currentSource,
             applicableIds,
             unsettledIntegrationSourceTicketIds(current),
+            currentSourceCorrectionTicketIds(current),
           )
         )
           throw new RunAdvancementStoppedError();
@@ -7730,6 +7742,7 @@ export class RunAuthorityEngine {
       run = await this.#store.getRun(runId);
       if (!this.#matchesAdvancement(run, advancement)) return false;
       integrationSourceIds = unsettledIntegrationSourceTicketIds(run);
+      correctionSourceIds = currentSourceCorrectionTicketIds(run);
     }
 
     let changed = false;
@@ -7740,7 +7753,12 @@ export class RunAuthorityEngine {
       if (
         currentSource === undefined ||
         currentSource.executionEpoch !== source.executionEpoch ||
-        !shouldRetireInapplicableTicket(currentSource, applicableIds, integrationSourceIds)
+        !shouldRetireInapplicableTicket(
+          currentSource,
+          applicableIds,
+          integrationSourceIds,
+          currentSourceCorrectionTicketIds(current),
+        )
       )
         return this.#noOpInternal(revision);
       if (cycleId !== undefined) {
@@ -22233,7 +22251,9 @@ export function shouldRetireInapplicableTicket(
   ticket: Readonly<TicketRecord>,
   applicableIds: ReadonlySet<string>,
   unsettledIntegrationSourceIds: ReadonlySet<string> = new Set(),
+  currentCorrectionSourceIds: ReadonlySet<string> = new Set(),
 ): boolean {
+  if (ticket.status === "queued" && currentCorrectionSourceIds.has(ticket.id)) return false;
   if (
     applicableIds.has(ticket.id) ||
     unsettledIntegrationSourceIds.has(ticket.id) ||
@@ -22252,6 +22272,14 @@ export function shouldRetireInapplicableTicket(
         ticket.worktreePath !== undefined &&
         ticket.branch !== undefined &&
         ticket.steps.every((step) => step.attemptIds.length === 0)))
+  );
+}
+
+function currentSourceCorrectionTicketIds(run: Readonly<RunRecord>): ReadonlySet<string> {
+  return new Set(
+    Object.values(run.tickets)
+      .filter((ticket) => currentSourceCorrectionSeed(run, ticket) !== undefined)
+      .map((ticket) => ticket.id),
   );
 }
 

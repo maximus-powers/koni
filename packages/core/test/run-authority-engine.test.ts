@@ -2545,6 +2545,29 @@ describe("run authority engine", () => {
         ],
       },
     });
+    expect(currentSourceCorrectionSeed(recovered, recovered.tickets[source.id]!)).toBeDefined();
+    expect(
+      shouldRetireInapplicableTicket(
+        recovered.tickets[source.id]!,
+        new Set(),
+        new Set(),
+        new Set([source.id]),
+      ),
+    ).toBe(false);
+    const staleCorrection = structuredClone(recovered.tickets[source.id]!);
+    staleCorrection.executionEpoch = (staleCorrection.executionEpoch ?? 0) + 1;
+    expect(shouldRetireInapplicableTicket(staleCorrection, new Set())).toBe(true);
+    const driftedCorrectionRun = structuredClone(recovered);
+    const driftedCorrection = driftedCorrectionRun.tickets[source.id]!;
+    driftedCorrection.readPaths = [...(driftedCorrection.readPaths ?? []), "drifted-input.txt"];
+    expect(currentSourceCorrectionSeed(driftedCorrectionRun, driftedCorrection)).toBeUndefined();
+    expect(shouldRetireInapplicableTicket(driftedCorrection, new Set())).toBe(true);
+    const blockedCorrection = structuredClone(recovered.tickets[source.id]!);
+    blockedCorrection.status = "blocked";
+    blockedCorrection.blocker = "The correction source is no longer applicable.";
+    expect(
+      shouldRetireInapplicableTicket(blockedCorrection, new Set(), new Set(), new Set([source.id])),
+    ).toBe(true);
     expect(recovered.activity.map((entry) => entry.message)).toEqual(
       expect.arrayContaining([
         expect.stringContaining("Automatically returned malformed change request to its source"),
