@@ -4355,7 +4355,10 @@ describe("native compiler-authoritative run program", () => {
       "After compaction, use the checkpoint's exact repair findings as causal authority",
     );
     expect(prepared.spec.persona.systemPrompt).toContain(
-      "Do not reread immutable evidence inputs merely to reconstruct the finding's rationale",
+      "A complete accepted receipt reissued in the checkpoint remains current unless a later mutation or expected-state change invalidates it",
+    );
+    expect(prepared.spec.persona.systemPrompt).toContain(
+      "When refresh is necessary, re-read only the affected mutable target or one specific missing fact",
     );
     await persistWrites(project.projectRoot, prepared.artifactWrites ?? []);
 

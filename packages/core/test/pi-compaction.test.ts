@@ -147,6 +147,9 @@ describe("Koni Pi compaction extension", () => {
       {},
     );
     expect(compacted.compaction.summary).toContain("# Koni attempt checkpoint");
+    expect(compacted.compaction.summary).toContain(
+      "Continue after every complete accepted tool receipt reissued in this checkpoint; do not repeat the same call solely because compaction occurred. Refresh evidence only after a later repository mutation, an explicit expected-state change, or when different arguments are needed for a distinct fact.",
+    );
     expect(compacted.compaction.summary).toContain("## Files read or modified");
     expect(compacted.compaction.summary).toContain("## Skills already loaded");
     expect(compacted.compaction.summary).toContain("skills/using-superpowers/SKILL.md");

@@ -737,6 +737,9 @@ export function renderCompactionSummary(
     renderList("Skills already loaded", snapshot.loadedResources ?? []),
     renderLoadedResourceContents(snapshot.loadedResourceContents ?? []),
     renderRetainedToolReceipts(snapshot.retainedToolReceipts ?? []),
+    "## Continuation boundary",
+    "Continue after every complete accepted tool receipt reissued in this checkpoint; do not repeat the same call solely because compaction occurred. Refresh evidence only after a later repository mutation, an explicit expected-state change, or when different arguments are needed for a distinct fact.",
+    "",
     renderList(
       "Receipts",
       snapshot.receiptIds.filter(
