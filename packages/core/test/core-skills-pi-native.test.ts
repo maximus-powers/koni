@@ -288,6 +288,12 @@ describe("Koni's Pi-native skills", () => {
       "Validate currentness, exact membership, and downstream interactions; do not repeat that upstream semantic review from the same evidence",
     );
     expect(normalizedExecutionReference).toContain(
+      "Carry the complete bounded desired state through every upstream request and proposal selection",
+    );
+    expect(normalizedExecutionReference).toContain(
+      "A route-only synopsis is not a complete change contract",
+    );
+    expect(normalizedExecutionReference).toContain(
       "A familiar command name is not evidence that an executable exists",
     );
     expect(normalizedExecutionReference).toContain(

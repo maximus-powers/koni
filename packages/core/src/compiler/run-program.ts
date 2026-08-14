@@ -7771,6 +7771,7 @@ export function approvedProposalAttemptInstructions(input: {
     return [
       "This proposal-selection step is intentionally read-only. Empty graph and repository write scopes, graph_mutation forbidden, and maxNewNodes 0 do not block selecting an authorized changeApplication: this step records the bounded selection, and the separately materialized application ticket performs any approved mutation with its own compiler-derived authority.",
       "For this approved proposal, submit the exact authorized changeApplication when the request remains unsatisfied. Do not select no-op while the approved request remains unsatisfied; no-op is allowed only when the requested state is already satisfied in the current scoped graph.",
+      "In changeApplication.summary, preserve the complete bounded requested state, including every exact authored value, identifier, path, command, binding, and relationship the application needs. This is not a route-only synopsis: a statement that details were authored elsewhere is not a complete application contract.",
       ...(input.applicationOperations.length === 0
         ? []
         : [
@@ -8122,6 +8123,7 @@ export function upstreamChangeRequestInstructions(
   return [
     `This step has an explicit upstream-change route for work that the current workflow cannot satisfy. If satisfying the contract requires changing a read-only asset or another node ${changeBoundary}, do not fabricate an inline substitute, weaken the contract, or upsert that node. Submit status "completed" with summary and upstreamChangeRequest, and omit graphDelta. Exact shape: {"status":"completed","summary":"...","upstreamChangeRequest":{"targetNodeIds":["the-existing-causal-node-id"],"fulfillment":"planned_asset_repair","summary":"...","reason":"..."}}.`,
     "Target every existing causal node whose authored fields must change together for one internally consistent correction. Do not target unrelated context nodes or defer a currently evidenced companion correction merely because one node first exposed the defect.",
+    "Carry the complete bounded desired state in upstreamChangeRequest.summary and reason: include every exact authored value, identifier, path, command, binding, and relationship the later application needs. Do not replace already-authored intent with a route-only synopsis or say the details exist elsewhere.",
     ...(downstreamGraphPublicationStepIds.length === 0
       ? []
       : [
@@ -8208,6 +8210,40 @@ function ticketAttempt(
   const ticketOwnedNodeIds =
     durableTicket === undefined ? [] : ticketCreatedNodeIds(run, durableTicket, graph);
   const terminalRecovery = durableTicket?.executionControl?.terminalRecovery;
+  const terminalRecoverySourceTicket =
+    terminalRecovery === undefined ? undefined : run.tickets[terminalRecovery.sourceTicketId];
+  const terminalRecoverySourceAuthority =
+    terminalRecoverySourceTicket?.executionControl?.controlTicketAuthority;
+  const sourceApprovedApplicationCausal =
+    terminalRecoverySourceAuthority?.role === "approved_application" &&
+    terminalRecoverySourceAuthority.causal.role === "approved_application" &&
+    terminalRecoverySourceAuthority.runId === run.id &&
+    terminalRecoverySourceAuthority.ticketId === terminalRecovery?.sourceTicketId &&
+    terminalRecoverySourceAuthority.causal.materialization.kind === "application" &&
+    terminalRecoverySourceAuthority.causal.materialization.authoritySha256 ===
+      terminalRecoverySourceTicket?.executionControl?.approvedApplicationSha256
+      ? terminalRecoverySourceAuthority.causal
+      : undefined;
+  const sourceApprovedApplication = sourceApprovedApplicationCausal?.materialization;
+  const sourceProposalTicket =
+    sourceApprovedApplication === undefined
+      ? undefined
+      : run.tickets[sourceApprovedApplication.proposalTicketId];
+  const sourceProposalAuthority = sourceProposalTicket?.executionControl?.controlTicketAuthority;
+  const sourceUpstreamRequest =
+    sourceApprovedApplication !== undefined &&
+    sourceProposalAuthority?.role === "proposal" &&
+    sourceProposalAuthority.causal.role === "proposal" &&
+    sourceProposalAuthority.runId === run.id &&
+    sourceProposalAuthority.ticketId === sourceApprovedApplication.proposalTicketId &&
+    sourceProposalAuthority.sha256 ===
+      sourceApprovedApplicationCausal?.proposalTicketAuthoritySha256 &&
+    sourceProposalAuthority.projectionSha256 ===
+      sourceApprovedApplicationCausal?.proposalTicketProjectionSha256 &&
+    sourceProposalAuthority.causal.publication.requestSha256 ===
+      sourceApprovedApplication.requestSha256
+      ? sourceProposalAuthority.causal.publication
+      : undefined;
   const terminalRecoveryContext =
     terminalRecovery === undefined
       ? undefined
@@ -8215,6 +8251,12 @@ function ticketAttempt(
           sourceTicketId: terminalRecovery.sourceTicketId,
           failureBindingSha256s: [...terminalRecovery.failureBindingSha256s],
           sourceFailureProof: structuredClone(terminalRecovery.sourceFailureProof),
+          ...(sourceApprovedApplication === undefined
+            ? {}
+            : { sourceApprovedApplication: structuredClone(sourceApprovedApplication) }),
+          ...(sourceUpstreamRequest === undefined
+            ? {}
+            : { sourceUpstreamRequest: structuredClone(sourceUpstreamRequest) }),
         };
   const compatibility: string[] = [];
   if (durableTicket?.executionPolicyBinding === undefined)
@@ -8446,6 +8488,16 @@ function ticketAttempt(
         ? []
         : [
             `The compiler-authenticated terminal recovery proof is the exact source failure this resolver must address. Source ticket ${terminalRecoveryContext.sourceTicketId} failed with: ${terminalRecoveryContext.sourceFailureProof.semanticResult.blocker}`,
+            ...(terminalRecoveryContext.sourceApprovedApplication === undefined
+              ? []
+              : [
+                  `The source application was bound to exact approved selection (${terminalRecoveryContext.sourceApprovedApplication.authoritySha256}): ${terminalRecoveryContext.sourceApprovedApplication.selectionSummary}`,
+                ]),
+            ...(terminalRecoveryContext.sourceUpstreamRequest === undefined
+              ? []
+              : [
+                  `The source upstream request (${terminalRecoveryContext.sourceUpstreamRequest.requestSha256}) required: ${terminalRecoveryContext.sourceUpstreamRequest.summary}\n\nRecorded reason: ${terminalRecoveryContext.sourceUpstreamRequest.reason}`,
+                ]),
             "The source failure describes the source attempt's authority, not this resolver's current authority. Use this attempt's current grant and mutationContract as the sole authority boundary. When the current grant or mutationContract authorizes the missing node, edge, path, or field, use that authority to repair the cause; do not repeat the source attempt's obsolete scope conclusion.",
             "Treat that immutable semantic result as current causal evidence. A clean worktree or absent output proves only that the failed attempt left no side effects; it does not make the recorded failure transient. Do not reissue the unchanged source contract unless the proof establishes retryability or the cause has since been materially repaired. Resolve the proved cause within this grant when possible; otherwise return a precise blocker instead of approving a deterministic no-op retry.",
           ]),

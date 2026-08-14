@@ -130,6 +130,8 @@ import { newRunLifecycle, reduceRunLifecycle } from "../src/state/run-lifecycle.
 import {
   deriveApprovedChangeMaterialization,
   deriveTerminalResolverReconciliation,
+  type ApprovedChangeMaterialization,
+  type ChangeControlPublication,
 } from "../src/state/change-control.js";
 import {
   assertRunRecord,
@@ -346,6 +348,10 @@ describe("native compiler-authoritative run program", () => {
     expect(selectionInstructions.join(" ")).toContain(
       "the separately materialized application ticket",
     );
+    expect(selectionInstructions.join(" ")).toContain(
+      "preserve the complete bounded requested state",
+    );
+    expect(selectionInstructions.join(" ")).toContain("not a route-only synopsis");
 
     const reviewInstructions = approvedProposalAttemptInstructions({
       approved: true,
@@ -632,6 +638,8 @@ describe("native compiler-authoritative run program", () => {
     expect(instructions).toContain("is not an upstream change");
     expect(instructions).toContain("predecessor evidence");
     expect(instructions).toContain("outside this ticket's existing authority");
+    expect(instructions).toContain("complete bounded desired state");
+    expect(instructions).toContain("exact authored values");
     expect(
       upstreamChangeRequestInstructions({
         role: "ordinary",
@@ -9080,6 +9088,10 @@ describe("native compiler-authoritative run program", () => {
     ]);
     if (applicationTicket === undefined) throw new Error("missing approved application ticket");
     run.tickets[applicationTicket.id] = applicationTicket;
+    const sourceProposalCausal = proposal.executionControl!.controlTicketAuthority!.causal;
+    if (sourceProposalCausal.role !== "proposal") {
+      throw new Error("fixture proposal lacks causal publication authority");
+    }
     const conflictingAuditMaterial = {
       protocol: "koni.proposal-decision-authority.v2" as const,
       runId: run.id,
@@ -9360,6 +9372,8 @@ describe("native compiler-authoritative run program", () => {
       }),
     ).resolves.toBeUndefined();
 
+    run.tickets[applicationTicket.id] = applicationTicket;
+
     const sourceFailureAttemptId = "attempt-source-terminal-failure";
     const sourceTerminalPolicyMaterial = {
       protocol: "koni.agent-terminal-policy.v1" as const,
@@ -9376,7 +9390,7 @@ describe("native compiler-authoritative run program", () => {
     };
     const sourceTerminalOutputSha256 = digest("source-terminal-failure-output");
     const sourceFailureAttempt: AgentAttemptRecord = {
-      ...structuredClone(attempt),
+      ...attemptRecord(applicationPrepared.spec, "ticket", "failed"),
       id: sourceFailureAttemptId,
       sessionId: "session-source-terminal-failure",
       status: "failed",
@@ -9386,11 +9400,13 @@ describe("native compiler-authoritative run program", () => {
       terminalSummary: "Exact configured source validation failed",
     };
     run.attempts[sourceFailureAttemptId] = sourceFailureAttempt;
-    const sourceFailureStep = ticket.steps.find((step) => step.id === assignment.stepId)!;
+    const sourceFailureStep = applicationTicket.steps.find(
+      (step) => step.id === "apply-approved-delta",
+    )!;
     sourceFailureStep.attemptIds.push(sourceFailureAttemptId);
     const sourceFailureProof = fixtureTerminalFailureProof({
       runId: run.id,
-      ticketId: ticket.id,
+      ticketId: applicationTicket.id,
       stepId: sourceFailureStep.id,
       attemptId: sourceFailureAttemptId,
       actionInvocationId: "source-terminal-failure-action",
@@ -9400,14 +9416,14 @@ describe("native compiler-authoritative run program", () => {
     run.terminalFailureProofs = { [sourceFailureProof.sha256]: sourceFailureProof };
     const failureBindingSha256 = terminalFailureBindingFromProof(
       run,
-      ticket,
+      applicationTicket,
       sourceFailureProof,
     )?.sha256;
     if (failureBindingSha256 === undefined) throw new Error("fixture source failure did not bind");
     const resolverReconciliation = deriveTerminalResolverReconciliation(executionCatalog, {
       runId: run.id,
-      sourceTicketId: ticket.id,
-      sourceBinding: ticket.executionPolicyBinding!,
+      sourceTicketId: applicationTicket.id,
+      sourceBinding: applicationTicket.executionPolicyBinding!,
       failureBindingSha256,
       existingResolvers: [],
     });
@@ -9425,7 +9441,7 @@ describe("native compiler-authoritative run program", () => {
       dependencyIds: [],
       executionControl: {
         terminalRecovery: {
-          sourceTicketId: ticket.id,
+          sourceTicketId: applicationTicket.id,
           failureBindingSha256s: [failureBindingSha256],
         },
       },
@@ -9443,13 +9459,13 @@ describe("native compiler-authoritative run program", () => {
     cancelledRun.tickets[cancelledResolver.id] = cancelledResolver;
     const cancelledReuse = deriveTerminalResolverReconciliation(executionCatalog, {
       runId: cancelledRun.id,
-      sourceTicketId: ticket.id,
-      sourceBinding: ticket.executionPolicyBinding!,
+      sourceTicketId: applicationTicket.id,
+      sourceBinding: applicationTicket.executionPolicyBinding!,
       failureBindingSha256,
       existingResolvers: [
         {
           ticketId: cancelledResolver.id,
-          sourceTicketId: ticket.id,
+          sourceTicketId: applicationTicket.id,
           resolverOperationId: cancelledResolver.operationId,
           configurationSha256: cancelledRun.compiledConfigHash,
           catalogSha256: executionCatalog.sha256,
@@ -9492,12 +9508,16 @@ describe("native compiler-authoritative run program", () => {
         sourceTicketId: string;
         failureBindingSha256s: Sha256Digest[];
         sourceFailureProof: TerminalFailureSettlementProof;
+        sourceApprovedApplication: ApprovedChangeMaterialization;
+        sourceUpstreamRequest: ChangeControlPublication;
       };
     };
     expect(resolverContext.terminalRecovery).toEqual({
-      sourceTicketId: ticket.id,
+      sourceTicketId: applicationTicket.id,
       failureBindingSha256s: [failureBindingSha256],
       sourceFailureProof,
+      sourceApprovedApplication: applicationMaterialization,
+      sourceUpstreamRequest: sourceProposalCausal.publication,
     });
     expect(resolverPrepared.spec.persona.initialPrompt).toContain(
       "compiler-authenticated terminal recovery proof",
@@ -9510,6 +9530,12 @@ describe("native compiler-authoritative run program", () => {
     );
     expect(resolverPrepared.spec.persona.initialPrompt).toContain(
       "When the current grant or mutationContract authorizes the missing node, edge, path, or field, use that authority",
+    );
+    expect(resolverPrepared.spec.persona.initialPrompt).toContain(
+      `The source application was bound to exact approved selection (${applicationMaterialization.authoritySha256}): ${applicationMaterialization.selectionSummary}`,
+    );
+    expect(resolverPrepared.spec.persona.initialPrompt).toContain(
+      `The source upstream request (${sourceProposalCausal.publication.requestSha256}) required: ${sourceProposalCausal.publication.summary}`,
     );
     await persistWrites(project.projectRoot, resolverPrepared.artifactWrites ?? []);
     run.attempts[resolverPrepared.spec.identity.attemptId] = attemptRecord(
@@ -9533,13 +9559,13 @@ describe("native compiler-authoritative run program", () => {
     ).resolves.toEqual({ outcome: resolverFailureOutput });
     const resolverReuse = deriveTerminalResolverReconciliation(executionCatalog, {
       runId: run.id,
-      sourceTicketId: ticket.id,
-      sourceBinding: ticket.executionPolicyBinding!,
+      sourceTicketId: applicationTicket.id,
+      sourceBinding: applicationTicket.executionPolicyBinding!,
       failureBindingSha256,
       existingResolvers: [
         {
           ticketId: resolver!.id,
-          sourceTicketId: ticket.id,
+          sourceTicketId: applicationTicket.id,
           resolverOperationId: resolver!.operationId,
           configurationSha256: run.compiledConfigHash,
           catalogSha256: executionCatalog.sha256,

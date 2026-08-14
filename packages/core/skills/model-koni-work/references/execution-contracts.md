@@ -75,6 +75,12 @@ currently evidenced companion correction merely because one node first exposed t
 configured proposal and application route must accept every node type that such a source operation
 can legitimately include in that correction set.
 
+Carry the complete bounded desired state through every upstream request and proposal selection.
+Preserve each exact authored value, identifier, path, command, binding, and relationship that the
+later application needs; do not replace already-authored intent with a statement that it exists
+elsewhere. A route-only synopsis is not a complete change contract. Profile proposal/application
+workflows must preserve this contract through review and terminal recovery without widening it.
+
 Separate repository effects from graph effects at the workflow boundary. A filesystem-only step must
 declare graph mutation forbidden and omit the graph delta. Do not reconstruct or echo an existing
 node merely to report unchanged authored fields: a complete-node upsert can silently alter an
