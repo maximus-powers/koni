@@ -14690,6 +14690,28 @@ export class RunAuthorityEngine {
           );
         }
         if (assignmentUsesConfiguredValidation(run, assignment)) {
+          // Configured validation executes asynchronously after terminal acceptance. Compile once
+          // before admitting that action so model-correctable contract failures remain ordinary
+          // rejected tool calls in this authenticated session instead of retiring the attempt.
+          // The action still compiles again under its serialized authority transition; this
+          // preflight is deliberately pure and does not publish compiler state.
+          try {
+            await this.#program.compileAssignmentOutput({
+              run,
+              assignment,
+              attemptId: attempt.id,
+              output: call.arguments,
+            });
+          } catch (error) {
+            // Surface only the compiler's typed, model-correctable contract diagnostics here.
+            // Infrastructure and integrity failures still execute through the admitted action's
+            // existing compensation/recovery boundary instead of being reclassified by preflight.
+            if (
+              correctableAgentToolError(error, { planning: false, terminal: true }) !== undefined
+            ) {
+              throw error;
+            }
+          }
           const execution = prepareAssignmentValidationExecution(
             run,
             attempt,
@@ -24458,6 +24480,7 @@ const CORRECTABLE_AUTHORITY_TOOL_ERROR_CODES = new Set([
 ]);
 
 const COMPILER_DIAGNOSTIC_TRUNCATION = "[compiler diagnostic truncated]";
+const CORRECTABLE_ASSIGNMENT_COMPILER_ERROR_CODES = new Set(["assignment_checks_incomplete"]);
 
 function boundedCompilerDiagnosticText(value: string, maximumBytes: number): string {
   const sanitized = value.replaceAll("\u0000", "\uFFFD");
@@ -24493,12 +24516,12 @@ export function correctableAgentToolError(
     };
   }
   if (
-    context.planning &&
     context.terminal &&
     error instanceof Error &&
     isRecord(error) &&
     error.name === "NativeRunProgramError" &&
     typeof error.code === "string" &&
+    (context.planning || CORRECTABLE_ASSIGNMENT_COMPILER_ERROR_CODES.has(error.code)) &&
     Array.isArray(error.details) &&
     error.details.every((detail) => typeof detail === "string")
   ) {
@@ -24513,7 +24536,9 @@ export function correctableAgentToolError(
     }
     return {
       code: error.code,
-      summary: cumulativePlanningCompilerSummary(error.message),
+      summary: context.planning
+        ? cumulativePlanningCompilerSummary(error.message)
+        : boundedCompilerDiagnosticText(error.message, 60 * 1024),
       ...(details.length === 0 ? {} : { value: { diagnostics: details } }),
     };
   }

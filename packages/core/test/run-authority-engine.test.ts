@@ -4878,6 +4878,31 @@ describe("run authority engine", () => {
     });
   });
 
+  it("persists assignment compiler diagnostics as correctable terminal-tool rejections", () => {
+    const assignment = correctableAgentToolError(
+      new NativeRunProgramError(
+        "assignment_checks_incomplete",
+        "assignment cannot complete without current accepted configured checks: baseline-proof-set",
+      ),
+      { planning: false, terminal: true },
+    );
+
+    expect(assignment).toEqual({
+      code: "assignment_checks_incomplete",
+      summary:
+        "assignment cannot complete without current accepted configured checks: baseline-proof-set",
+    });
+    expect(
+      correctableAgentToolError(
+        new NativeRunProgramError(
+          "assignment_drift",
+          "assignment no longer matches its pinned compiler definition",
+        ),
+        { planning: false, terminal: true },
+      ),
+    ).toBeUndefined();
+  });
+
   it("retries and steers blocked continuous planning in its stable attempt and session", async () => {
     const root = await repository();
     const base = fakeProgram();
@@ -9552,6 +9577,113 @@ describe("run authority engine", () => {
     client.close();
   }, 30_000);
 
+  it("corrects configured assignment compiler diagnostics before terminal acceptance", async () => {
+    const root = await repository();
+    let compilationCount = 0;
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program: semanticDirectReceiptProgram({
+        configuredValidation: true,
+        correctableValidationCompilerError: true,
+        onConfiguredCompilation: (count) => {
+          compilationCount = count;
+        },
+      }),
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(
+      client,
+      engine,
+      "correct-configured-validation-before-terminal-acceptance",
+    );
+
+    await waitFor(async () =>
+      Object.values((await engine.store.getRun(runId)).attempts).some(
+        (attempt) => attempt.ticketId === "ticket-one" && attempt.status === "completed",
+      ),
+    );
+
+    const run = await engine.store.getRun(runId);
+    const attempts = Object.values(run.attempts).filter(
+      (attempt) => attempt.ticketId === "ticket-one" && attempt.stepId === "implement",
+    );
+    expect(attempts).toHaveLength(1);
+    expect(
+      attempts[0]?.authorityToolResults?.map((result) => [result.outcome, result.toolName]),
+    ).toEqual([
+      ["rejected", "koni_submit_output"],
+      ["accepted", "koni_submit_output"],
+    ]);
+    expect(
+      Object.values(run.actionExecutions ?? {}).filter(
+        (action) => action.boundary.kind === "assignment_validation",
+      ),
+    ).toHaveLength(1);
+    expect(compilationCount).toBe(3);
+    client.close();
+  }, 30_000);
+
+  it("keeps typed assignment integrity failures at the configured action boundary", async () => {
+    const root = await repository();
+    let compilationCount = 0;
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program: semanticDirectReceiptProgram({
+        configuredValidation: true,
+        nonCorrectableValidationCompilerError: true,
+        onConfiguredCompilation: (count) => {
+          compilationCount = count;
+        },
+      }),
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const runId = await createAndApproveDirectRun(
+      client,
+      engine,
+      "keep-assignment-integrity-failure-at-action-boundary",
+    );
+
+    await waitFor(async () => (await engine.store.getRun(runId)).lifecycle.phase === "blocked");
+
+    const run = await engine.store.getRun(runId);
+    const attempts = Object.values(run.attempts).filter(
+      (attempt) => attempt.ticketId === "ticket-one" && attempt.stepId === "implement",
+    );
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).toMatchObject({
+      status: "terminal_accepted",
+      authorityToolResults: [expect.objectContaining({ outcome: "accepted" })],
+    });
+    expect(
+      Object.values(run.actionExecutions ?? {}).filter(
+        (action) => action.boundary.kind === "assignment_validation",
+      ),
+    ).toEqual([
+      expect.objectContaining({ journal: expect.objectContaining({ status: "failed" }) }),
+    ]);
+    expect(run.lifecycle.blocker).toContain(
+      "assignment no longer matches its pinned compiler definition",
+    );
+    expect(compilationCount).toBe(2);
+    client.close();
+  }, 30_000);
+
   it("records a durable blocker when compensated validation reissues are exhausted", async () => {
     const root = await repository();
     const base = configuredValidationDirectProgram("compile-with-compensation");
@@ -11696,15 +11828,23 @@ function semanticDirectReceiptProgram(
   options: {
     failedSubmission?: boolean;
     configuredValidation?: boolean;
+    correctableValidationCompilerError?: boolean;
+    nonCorrectableValidationCompilerError?: boolean;
+    onConfiguredCompilation?: (count: number) => void;
     undefinedTicketField?: boolean;
   } = {},
 ): RunCompilerProgram {
   const direct = directApprovalProgram();
-  const catalog = semanticDirectCatalog();
+  const compileAssignmentOutput = direct.compileAssignmentOutput.bind(direct);
+  let configuredCompilationCount = 0;
+  const usesProductionAuthority =
+    options.correctableValidationCompilerError === true ||
+    options.nonCorrectableValidationCompilerError === true;
+  const requiredReceiptTypes = ["context-pack", "structured-output", "scoped-compile"];
+  const catalog = semanticDirectCatalog(usesProductionAuthority ? [] : requiredReceiptTypes);
   const operationId = "implement";
   const workflowId = "implement-flow";
   const stepId = "implement";
-  const requiredReceiptTypes = ["context-pack", "structured-output", "scoped-compile"];
   const terminalSchema =
     options.failedSubmission === true
       ? Type.Union([
@@ -11724,6 +11864,9 @@ function semanticDirectReceiptProgram(
           ),
         ])
       : Type.Object({ result: Type.String() }, { additionalProperties: false });
+  const terminalToolSchemaHash = usesProductionAuthority
+    ? koniToolSchemaHash(TERMINAL_TOOL_NAME, terminalSchema)
+    : canonicalHash(terminalSchema);
   const contextContent = "Exact compiler-bound implementation context.";
   const operationBinding = resolveExecutionPolicyBinding(catalog, {
     configurationSha256: catalog.configurationSha256,
@@ -11802,7 +11945,7 @@ function semanticDirectReceiptProgram(
       tools: [
         {
           name: TERMINAL_TOOL_NAME,
-          schemaHash: canonicalHash(terminalSchema),
+          schemaHash: terminalToolSchemaHash,
           executionMode: "sequential",
           maxResultBytes: koniToolMaxResultBytes(TERMINAL_TOOL_NAME),
         },
@@ -11829,23 +11972,43 @@ function semanticDirectReceiptProgram(
     });
     return {
       spec,
-      tools: [terminalFixtureTool(terminalSchema)],
+      ...(usesProductionAuthority
+        ? {
+            compactionSnapshot: {
+              objective: input.run.objective,
+              plan: {
+                architecture: "Approved",
+                decisions: "Approved",
+                risk: "Bounded",
+                verification: "Pending",
+              },
+              graphRefs: [],
+              touchedFiles: [],
+              receiptIds: [],
+              checkIds: [],
+              unresolvedQuestions: [],
+              nextAction: "Correct the configured assignment result",
+            },
+          }
+        : { tools: [terminalFixtureTool(terminalSchema)] }),
       authorityGrant: grant,
       toolNames: [TERMINAL_TOOL_NAME],
       terminalOutputSchema: terminalSchema,
       contextContent,
       contextProvider: contextProvider(spec),
-      factory: (async () =>
-        new CompletingAdapter(
-          spec,
-          input.kind,
-          options.failedSubmission === true
-            ? {
-                status: "failed",
-                blocker: "The configured check could not establish an honest result",
-              }
-            : undefined,
-        )) satisfies ManagedPiSessionFactory,
+      factory: (async (_spec, factoryOptions) =>
+        usesProductionAuthority
+          ? new CorrectableConfiguredValidationAdapter(spec, factoryOptions.tools)
+          : new CompletingAdapter(
+              spec,
+              input.kind,
+              options.failedSubmission === true
+                ? {
+                    status: "failed",
+                    blocker: "The configured check could not establish an honest result",
+                  }
+                : undefined,
+            )) satisfies ManagedPiSessionFactory,
     };
   };
 
@@ -11857,7 +12020,7 @@ function semanticDirectReceiptProgram(
       catalog,
       executionPolicyBinding: stepBinding,
       validationCheckIds: [] as string[],
-      requiredReceiptTypes,
+      requiredReceiptTypes: usesProductionAuthority ? [] : requiredReceiptTypes,
       validationChecks: [],
       composedReplayCheckIds: [] as string[],
       retainedReceipts: [],
@@ -11892,6 +12055,34 @@ function semanticDirectReceiptProgram(
               throw new Error("fixture expected one failed assignment output");
             }
             return { outcome: { status: "failed" as const, blocker: output.blocker } };
+          },
+        }
+      : {}),
+    ...(usesProductionAuthority
+      ? {
+          async compileAssignmentOutput(
+            input: Parameters<NonNullable<RunCompilerProgram["compileAssignmentOutput"]>>[0],
+          ) {
+            configuredCompilationCount += 1;
+            options.onConfiguredCompilation?.(configuredCompilationCount);
+            if (configuredCompilationCount === 1) {
+              if (options.correctableValidationCompilerError === true) {
+                throw new NativeRunProgramError(
+                  "assignment_checks_incomplete",
+                  "assignment cannot complete without current accepted configured checks: baseline-proof-set",
+                );
+              }
+            }
+            if (
+              options.nonCorrectableValidationCompilerError === true &&
+              configuredCompilationCount <= 2
+            ) {
+              throw new NativeRunProgramError(
+                "assignment_drift",
+                "assignment no longer matches its pinned compiler definition",
+              );
+            }
+            return compileAssignmentOutput(input);
           },
         }
       : {}),
@@ -11967,7 +12158,9 @@ function semanticDirectReceiptProgram(
   };
 }
 
-function semanticDirectCatalog(): CompiledExecutionSemanticCatalog {
+function semanticDirectCatalog(
+  requiredReceiptTypes: readonly string[] = ["context-pack", "structured-output", "scoped-compile"],
+): CompiledExecutionSemanticCatalog {
   const registries = {
     operations: {
       implement: {
@@ -11986,7 +12179,7 @@ function semanticDirectCatalog(): CompiledExecutionSemanticCatalog {
           {
             id: "implement",
             required: true,
-            required_receipts: ["context-pack", "structured-output", "scoped-compile"],
+            required_receipts: [...requiredReceiptTypes],
           },
         ],
       },
@@ -12873,6 +13066,69 @@ class CompletingAdapter implements PiSessionAdapter {
   public async abort(): Promise<void> {}
   public dispose(): void {}
   protected emit(event: AgentSessionEvent): void {
+    for (const listener of this.#listeners) listener(event);
+  }
+}
+
+class CorrectableConfiguredValidationAdapter implements PiSessionAdapter {
+  public readonly sessionId: string;
+  public readonly sessionFile: string;
+  readonly #listeners = new Set<(event: AgentSessionEvent) => void>();
+  readonly #abort = new AbortController();
+
+  public constructor(
+    private readonly spec: AgentLaunchSpec,
+    private readonly tools: readonly AuthorityBackedTool[],
+  ) {
+    this.sessionId = spec.identity.sessionId;
+    this.sessionFile = path.join(spec.workspace.sessionDirectory, `${this.sessionId}.jsonl`);
+  }
+
+  public getActiveToolNames(): readonly string[] {
+    return this.tools.map((tool) => tool.name);
+  }
+  public appendMapping(): void {}
+  public subscribe(listener: (event: AgentSessionEvent) => void): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+  public async prompt(): Promise<void> {
+    const terminal = this.tools.find((tool) => tool.name === this.spec.terminal.toolName);
+    if (terminal === undefined) {
+      throw new Error(`missing terminal tool ${this.spec.terminal.toolName}`);
+    }
+    const output = { result: "ticket" };
+    for (const toolCallId of ["configured-submit-one", "configured-submit-two"]) {
+      this.emit({
+        type: "tool_execution_start",
+        toolCallId,
+        toolName: this.spec.terminal.toolName,
+        args: output,
+      });
+      const result = await terminal.execute(toolCallId, output, this.#abort.signal);
+      this.emit({
+        type: "tool_execution_end",
+        toolCallId,
+        toolName: this.spec.terminal.toolName,
+        result,
+        isError: (result.details as { outcome?: unknown }).outcome === "rejected",
+      });
+      if ((result.details as { outcome?: unknown }).outcome === "accepted") return;
+    }
+  }
+  public async continue(): Promise<void> {
+    await this.prompt();
+  }
+  public async steer(): Promise<void> {}
+  public async followUp(): Promise<void> {}
+  public async abort(): Promise<void> {
+    this.#abort.abort();
+  }
+  public dispose(): void {
+    this.#abort.abort();
+  }
+
+  private emit(event: AgentSessionEvent): void {
     for (const listener of this.#listeners) listener(event);
   }
 }
