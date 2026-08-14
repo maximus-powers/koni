@@ -5103,8 +5103,34 @@ describe("run authority engine", () => {
     expect(
       correctableAgentToolError(
         new NativeRunProgramError(
+          "assignment_output_ticket_drift",
+          "agent graph output changed ticket TK-asset under the same deterministic identity",
+          ["scope.read_paths", "workflow[integrate].read_paths"],
+        ),
+        { planning: false, terminal: true },
+      ),
+    ).toEqual({
+      code: "assignment_output_ticket_drift",
+      summary:
+        "agent graph output changed ticket TK-asset under the same deterministic identity\nscope.read_paths\nworkflow[integrate].read_paths",
+      value: {
+        diagnostics: ["scope.read_paths", "workflow[integrate].read_paths"],
+      },
+    });
+    expect(
+      correctableAgentToolError(
+        new NativeRunProgramError(
           "assignment_drift",
           "assignment no longer matches its pinned compiler definition",
+        ),
+        { planning: false, terminal: true },
+      ),
+    ).toBeUndefined();
+    expect(
+      correctableAgentToolError(
+        new NativeRunProgramError(
+          "ticket_definition_drift",
+          "stored ticket no longer matches its compiler definition",
         ),
         { planning: false, terminal: true },
       ),

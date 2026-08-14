@@ -24519,7 +24519,10 @@ const CORRECTABLE_AUTHORITY_TOOL_ERROR_CODES = new Set([
 ]);
 
 const COMPILER_DIAGNOSTIC_TRUNCATION = "[compiler diagnostic truncated]";
-const CORRECTABLE_ASSIGNMENT_COMPILER_ERROR_CODES = new Set(["assignment_checks_incomplete"]);
+const CORRECTABLE_ASSIGNMENT_COMPILER_ERROR_CODES = new Set([
+  "assignment_checks_incomplete",
+  "assignment_output_ticket_drift",
+]);
 
 function boundedCompilerDiagnosticText(value: string, maximumBytes: number): string {
   const sanitized = value.replaceAll("\u0000", "\uFFFD");

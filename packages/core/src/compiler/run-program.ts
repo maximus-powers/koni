@@ -2557,6 +2557,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         changeControl,
       };
     }
+    let submittedGraphDelta = false;
     const changes: Array<{
       kind: "added" | "modified" | "deleted";
       nodeId: string;
@@ -2581,6 +2582,7 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         normalizedDelta,
         ticketOwnedWritableNodeIds,
       );
+      submittedGraphDelta = true;
       const effectiveDelta = materializeCompilerFieldSources(
         pinned.configuration,
         input.run,
@@ -2724,25 +2726,77 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
       "agent graph output did not compile into a valid ticket board",
     );
     const graphRevision = input.run.graphRevision + 1;
-    const tickets = reconcileTickets(
-      input.run,
-      evaluation.tickets,
-      requireExecutionSemanticCatalog(pinned.configuration),
-      this.#now().toISOString(),
-      this.#projectRoot,
-      await recurringAssetReissueNodeIds(
+    let tickets: Record<string, TicketRecord>;
+    try {
+      tickets = reconcileTickets(
         input.run,
-        pinned.configuration,
-        graph,
-        evaluation,
-        input.run.git.run.worktree,
-      ),
-      integrationOperation(pinned.configuration, input.run.runTypeId),
-      executionCatalog.operations[synthetic.operation_registry_id]?.changeControl.role ===
-        "application"
-        ? synthetic.id
-        : undefined,
-    );
+        evaluation.tickets,
+        requireExecutionSemanticCatalog(pinned.configuration),
+        this.#now().toISOString(),
+        this.#projectRoot,
+        await recurringAssetReissueNodeIds(
+          input.run,
+          pinned.configuration,
+          graph,
+          evaluation,
+          input.run.git.run.worktree,
+        ),
+        integrationOperation(pinned.configuration, input.run.runTypeId),
+        executionCatalog.operations[synthetic.operation_registry_id]?.changeControl.role ===
+          "application"
+          ? synthetic.id
+          : undefined,
+      );
+    } catch (error) {
+      if (
+        !submittedGraphDelta ||
+        !(error instanceof NativeRunProgramError) ||
+        error.code !== "ticket_definition_drift"
+      )
+        throw error;
+
+      // A ticket-definition mismatch is model-correctable only when this exact submitted delta
+      // introduced it. First prove that the same durable run reconciles against the pre-delta
+      // graph. If that baseline is already invalid, its original integrity error remains fatal.
+      const baselineEvaluationRun =
+        priorRuleEvidence === undefined
+          ? input.run
+          : {
+              ...structuredClone(input.run),
+              ruleAuthorityEvidence: priorRuleEvidence as unknown as JsonValue,
+            };
+      const baselineEvaluation = requireValidation(
+        await this.#evaluateRules(
+          baselineEvaluationRun,
+          pinned.configuration,
+          evidenceInputGraph,
+          selfPreparationReview ? { selfPreparationReviewAttemptId: input.attemptId } : {},
+        ),
+        "rule_compilation_failed",
+        "current graph did not compile into a valid ticket board before the agent delta",
+      );
+      reconcileTickets(
+        input.run,
+        baselineEvaluation.tickets,
+        requireExecutionSemanticCatalog(pinned.configuration),
+        this.#now().toISOString(),
+        this.#projectRoot,
+        await recurringAssetReissueNodeIds(
+          input.run,
+          pinned.configuration,
+          evidenceInputGraph,
+          baselineEvaluation,
+          input.run.git.run.worktree,
+        ),
+        integrationOperation(pinned.configuration, input.run.runTypeId),
+      );
+      const baseMessage = error.message.split("\n", 1)[0]!;
+      throw new NativeRunProgramError(
+        "assignment_output_ticket_drift",
+        `agent graph output ${baseMessage}`,
+        error.details,
+      );
+    }
     const graphBytes = encodeRunGraphArtifact(
       graphArtifact(
         input.run,
@@ -14993,62 +15047,88 @@ export function assertTicketDefinitionStable(
   // block. The one explicit exception is handled before this assertion: a settled recurring asset
   // whose prior Git cycle has retired may receive the compiler's current grant before a required
   // fresh epoch opens. Its accepted attempts retain their original immutable launch specs.
-  const pinnedNodeScope = !ticketIsNeverStarted(ticket);
-  const nodeScopeDrift =
-    !pinnedNodeScope &&
-    (canonicalHash(ticket.targetNodeIds) !== canonicalHash(definition.target_node_ids) ||
-      (ticket.readNodeIds !== undefined &&
-        canonicalHash(ticket.readNodeIds) !== canonicalHash(definition.scope.read_node_ids)) ||
-      (ticket.writeNodeIds !== undefined &&
-        canonicalHash(ticket.writeNodeIds) !== canonicalHash(definition.scope.write_node_ids)) ||
-      ticket.steps.some(
-        (step, index) =>
-          (step.readNodeIds !== undefined &&
-            canonicalHash(step.readNodeIds) !==
-              canonicalHash(
-                definition.workflow[index]!.read_node_ids ?? definition.scope.read_node_ids,
-              )) ||
-          (step.writeNodeIds !== undefined &&
-            canonicalHash(step.writeNodeIds) !==
-              canonicalHash(
-                definition.workflow[index]!.write_node_ids ?? definition.scope.write_node_ids,
-              )),
-      ));
+  const drift: string[] = [];
+  if (ticketIsNeverStarted(ticket)) {
+    if (canonicalHash(ticket.targetNodeIds) !== canonicalHash(definition.target_node_ids))
+      drift.push("scope.target_node_ids");
+    if (
+      ticket.readNodeIds !== undefined &&
+      canonicalHash(ticket.readNodeIds) !== canonicalHash(definition.scope.read_node_ids)
+    )
+      drift.push("scope.read_node_ids");
+    if (
+      ticket.writeNodeIds !== undefined &&
+      canonicalHash(ticket.writeNodeIds) !== canonicalHash(definition.scope.write_node_ids)
+    )
+      drift.push("scope.write_node_ids");
+  }
+  if (ticket.operationId !== definition.operation_registry_id) drift.push("operation_registry_id");
+  if (canonicalHash(ticket.readPaths) !== canonicalHash(definition.scope.read_paths))
+    drift.push("scope.read_paths");
+  if (canonicalHash(ticket.writePaths) !== canonicalHash(definition.scope.write_paths))
+    drift.push("scope.write_paths");
   if (
-    nodeScopeDrift ||
-    ticket.operationId !== definition.operation_registry_id ||
-    canonicalHash(ticket.readPaths) !== canonicalHash(definition.scope.read_paths) ||
-    canonicalHash(ticket.writePaths) !== canonicalHash(definition.scope.write_paths) ||
     canonicalHash(ticket.steps.map((step) => [step.id, step.personaId])) !==
-      canonicalHash(definition.workflow.map((step) => [step.id, step.persona_id])) ||
-    ticket.steps.some(
-      (step, index) =>
-        (step.kind !== undefined && step.kind !== definition.workflow[index]!.kind) ||
-        (step.dependsOn !== undefined &&
-          canonicalHash(step.dependsOn) !==
-            canonicalHash(definition.workflow[index]!.depends_on)) ||
-        (step.readPaths !== undefined &&
-          canonicalHash(step.readPaths) !==
-            canonicalHash(definition.workflow[index]!.read_paths ?? definition.scope.read_paths)) ||
-        (step.writePaths !== undefined &&
-          canonicalHash(step.writePaths) !==
-            canonicalHash(
-              definition.workflow[index]!.write_paths ?? definition.scope.write_paths,
-            )) ||
-        (step.validationAction !== undefined &&
-          step.validationAction !== definition.workflow[index]!.validation_action),
-    ) ||
-    (ticket.reviewFailureReopenFrom !== undefined &&
-      ticket.reviewFailureReopenFrom !== definition.review_failure_reopen_from) ||
-    (ticket.reviewReworkLimit !== undefined &&
-      ticket.reviewReworkLimit !==
-        (definition.review_failure_reopen_from === undefined
-          ? undefined
-          : (definition.review_rework_limit ?? 1)))
+    canonicalHash(definition.workflow.map((step) => [step.id, step.persona_id]))
   )
+    drift.push("workflow.persona_ids");
+  for (const [index, step] of ticket.steps.entries()) {
+    const compiled = definition.workflow[index];
+    if (compiled === undefined) continue;
+    const prefix = `workflow[${step.id}]`;
+    if (ticketIsNeverStarted(ticket)) {
+      if (
+        step.readNodeIds !== undefined &&
+        canonicalHash(step.readNodeIds) !==
+          canonicalHash(compiled.read_node_ids ?? definition.scope.read_node_ids)
+      )
+        drift.push(`${prefix}.read_node_ids`);
+      if (
+        step.writeNodeIds !== undefined &&
+        canonicalHash(step.writeNodeIds) !==
+          canonicalHash(compiled.write_node_ids ?? definition.scope.write_node_ids)
+      )
+        drift.push(`${prefix}.write_node_ids`);
+    }
+    if (step.kind !== undefined && step.kind !== compiled.kind) drift.push(`${prefix}.kind`);
+    if (
+      step.dependsOn !== undefined &&
+      canonicalHash(step.dependsOn) !== canonicalHash(compiled.depends_on)
+    )
+      drift.push(`${prefix}.depends_on`);
+    if (
+      step.readPaths !== undefined &&
+      canonicalHash(step.readPaths) !==
+        canonicalHash(compiled.read_paths ?? definition.scope.read_paths)
+    )
+      drift.push(`${prefix}.read_paths`);
+    if (
+      step.writePaths !== undefined &&
+      canonicalHash(step.writePaths) !==
+        canonicalHash(compiled.write_paths ?? definition.scope.write_paths)
+    )
+      drift.push(`${prefix}.write_paths`);
+    if (step.validationAction !== undefined && step.validationAction !== compiled.validation_action)
+      drift.push(`${prefix}.validation_action`);
+  }
+  if (
+    ticket.reviewFailureReopenFrom !== undefined &&
+    ticket.reviewFailureReopenFrom !== definition.review_failure_reopen_from
+  )
+    drift.push("review_failure_reopen_from");
+  if (
+    ticket.reviewReworkLimit !== undefined &&
+    ticket.reviewReworkLimit !==
+      (definition.review_failure_reopen_from === undefined
+        ? undefined
+        : (definition.review_rework_limit ?? 1))
+  )
+    drift.push("review_rework_limit");
+  if (drift.length > 0)
     fail(
       "ticket_definition_drift",
       `ticket ${ticket.id} changed under the same deterministic identity`,
+      drift,
     );
 }
 

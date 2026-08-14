@@ -1284,7 +1284,10 @@ describe("native compiler-authoritative run program", () => {
     } as unknown as DerivedTicketDefinition;
 
     expect(() => assertTicketDefinitionStable(ticket, definition)).toThrow(
-      /changed under the same deterministic identity/u,
+      expect.objectContaining({
+        code: "ticket_definition_drift",
+        details: ["scope.read_paths", "workflow[implement].read_paths"],
+      }),
     );
     expect(refreshSettledRecurringAssetTicketGrant(ticket, definition, true)).toBe(true);
     expect(() => assertTicketDefinitionStable(ticket, definition)).not.toThrow();
@@ -1307,6 +1310,213 @@ describe("native compiler-authoritative run program", () => {
       ],
     });
   });
+
+  it("classifies only agent-caused post-delta path drift as correctable", async () => {
+    const project = await installedProject("research-profile");
+    await mkdir(path.join(project.projectRoot, "fixtures"), { recursive: true });
+    await writeFile(path.join(project.projectRoot, "fixtures", "support-one.json"), "{}\n");
+    await writeFile(path.join(project.projectRoot, "fixtures", "support-two.json"), "{}\n");
+    const program = await compilerProgram(project);
+    const runId = "run-agent-output-ticket-drift";
+    const objective = "Exercise one bounded fixture asset";
+    const resolved = await program.resolveRun({
+      runId,
+      objective,
+      runTypeId: "small",
+      targetRef: "refs/heads/main",
+      intake: {
+        goal: objective,
+        hypothesis: "The fixture asset can produce one bounded observation.",
+      },
+    });
+    await persistWrites(project.projectRoot, resolved.artifactWrites ?? []);
+    const run = runRecord(project.projectRoot, runId, objective, resolved);
+    const planning = await program.compilePlanningOutput({
+      run,
+      attemptId: "attempt-agent-output-ticket-drift-plan",
+      output: planningOutput(
+        {
+          hypothesis: "The fixture asset can produce one bounded observation.",
+        },
+        [
+          {
+            key: "fixture-experiment",
+            type: "experiment",
+            title: "Fixture experiment",
+            spec: {
+              objective,
+              target_claim_summary: "Observe the bounded fixture outcome.",
+              empirical_mode: "observation",
+              ablation_requirement: "not_applicable",
+              execution_protocol: "Run the fixture asset once.",
+              observable_outcome: "One typed observation is recorded.",
+            },
+          },
+          {
+            key: "fixture-asset",
+            type: "asset",
+            title: "Fixture asset",
+            spec: {
+              capabilities: [
+                {
+                  name: "fixture.asset",
+                  protocol_version: "1.0.0",
+                  entrypoints: ["program/assets/fixture/run.mjs"],
+                },
+              ],
+              implementation_plan: {
+                root: "program/assets/fixture",
+                files: ["program/assets/fixture/run.mjs"],
+              },
+              source_strategy: "internal",
+              support_paths: ["fixtures/support-one.json"],
+            },
+          },
+          {
+            key: "fixture-gate",
+            type: "gate",
+            title: "Fixture gate",
+            spec: {
+              applicability: "Before the fixture experiment runs.",
+              assertion: "The fixture asset is executable.",
+              capability: { name: "fixture.asset", protocol_range: ">=1.0.0 <2.0.0" },
+              command_result_contract: { verdict: "passed|failed|inconclusive" },
+              oracle_semantics: {
+                pass: "The fixture is ready.",
+                fail: "The fixture is not ready.",
+                inconclusive: "Fixture readiness is unknown.",
+                contract_error: "The verifier result is malformed.",
+              },
+              failure_meaning: "The experiment must not run.",
+              expected_red: true,
+            },
+          },
+        ],
+        [
+          { source: "$root", relation: "experiments", target: "fixture-experiment" },
+          { source: "fixture-experiment", relation: "assets", target: "fixture-asset" },
+          { source: "fixture-gate", relation: "applies_to", target: "fixture-experiment" },
+        ],
+      ),
+    });
+    run.plan = { ...planning.plan, status: "approved" };
+    run.graphHash = planning.graphHash;
+    run.graphRevision = planning.graphRevision ?? 0;
+    materializeApprovedFixtureRun(run);
+    const initialized = await program.initializeApprovedPlan(run);
+    await persistWrites(project.projectRoot, initialized.artifactWrites ?? []);
+    run.graphHash = initialized.graphHash;
+    run.graphRevision = initialized.graphRevision;
+    run.tickets = initialized.tickets;
+    const ticket = Object.values(run.tickets).find(
+      (candidate) => candidate.operationId === "asset-resolution.asset.implement-asset",
+    );
+    if (ticket === undefined)
+      throw new Error(
+        `fixture did not derive asset implementation: ${Object.values(run.tickets)
+          .map((candidate) => candidate.operationId)
+          .join(", ")}`,
+      );
+    const cycle = attachFixtureTicketCycle(run, ticket);
+    materializeFixtureCheckout(run.git.run.worktree, cycle.worktree);
+    await mkdir(path.join(cycle.worktree, "program", "assets", "fixture"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(cycle.worktree, "program", "assets", "fixture", "run.mjs"),
+      "export default {};\n",
+    );
+    ticket.status = "running";
+    for (const predecessorId of ["implement", "verify"]) {
+      const predecessor = ticket.steps.find((step) => step.id === predecessorId)!;
+      predecessor.status = "completed";
+      predecessor.startedAt = FIXED_NOW.toISOString();
+      predecessor.completedAt = FIXED_NOW.toISOString();
+      predecessor.summary = `${predecessorId} completed`;
+    }
+    const integrate = ticket.steps.find((step) => step.id === "integrate")!;
+    integrate.status = "running";
+    integrate.startedAt = FIXED_NOW.toISOString();
+    const assignment: ReadyAssignment = {
+      runId,
+      ticketId: ticket.id,
+      stepId: integrate.id,
+      personaId: integrate.personaId,
+      priority: ticket.priority,
+    };
+    const attempt: AgentAttemptRecord = {
+      id: "attempt-agent-output-ticket-drift",
+      sessionId: "session-agent-output-ticket-drift",
+      ticketId: ticket.id,
+      stepId: integrate.id,
+      personaId: integrate.personaId,
+      modelProvider: "openai-codex",
+      modelId: "gpt-5.6-luna",
+      thinkingLevel: "high",
+      status: "running",
+      launchSpecHash: digest("agent-output-ticket-drift-launch"),
+      sessionFile: undefined,
+      startedAt: FIXED_NOW.toISOString(),
+      endedAt: undefined,
+      terminalSummary: undefined,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      lineage: { branchEpoch: 0, reason: "initial" },
+      authorityMessages: [],
+      authorityToolResults: [],
+      authorityCompactions: [],
+      kind: "ticket",
+    };
+    run.attempts[attempt.id] = attempt;
+    integrate.attemptIds = [attempt.id];
+    const asset = (await program.projectGraph(run)).nodes.find((node) => node.type === "asset")!;
+    const driftOutput = {
+      status: "completed",
+      summary: "Integrated the verified asset with a mistyped support path",
+      graphDelta: {
+        protocol: "koni.graph-delta.v1",
+        expectedGraphHash: run.graphHash,
+        upsertNodes: [
+          {
+            expectedNodeHash: canonicalHash(asset),
+            node: {
+              ...structuredClone(asset),
+              spec: {
+                ...structuredClone(asset.spec),
+                support_paths: ["fixtures/support-two.json"],
+              },
+            },
+          },
+        ],
+        deleteNodes: [],
+        addEdges: [],
+        removeEdges: [],
+      },
+    };
+    await expect(
+      program.compileAssignmentOutput({
+        run,
+        assignment,
+        attemptId: attempt.id,
+        output: driftOutput,
+      }),
+    ).rejects.toMatchObject({
+      code: "assignment_output_ticket_drift",
+      details: ["scope.read_paths"],
+    });
+
+    ticket.readPaths = ["fixtures/pre-existing-drift.json"];
+    await expect(
+      program.compileAssignmentOutput({
+        run,
+        assignment,
+        attemptId: attempt.id,
+        output: driftOutput,
+      }),
+    ).rejects.toMatchObject({ code: "ticket_definition_drift" });
+  }, 30_000);
 
   it("does not refresh grant authority while a recurring asset attempt is in flight", () => {
     const ticket = {
