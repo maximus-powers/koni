@@ -80,6 +80,21 @@ describe("Koni's Pi-native skills", () => {
     );
   });
 
+  it("teaches profile authors to requeue compiler-current retired obligations", async () => {
+    const source = await readFile(
+      path.join(skillsRoot, "configure-koni/references/configuration-layers.md"),
+      "utf8",
+    );
+    const normalized = source.replace(/\s+/gu, " ");
+
+    expect(normalized).toContain(
+      "If the ticket machine has a distinct terminal retirement state, let only the compiler return that state to the queued state",
+    );
+    expect(normalized).toContain(
+      "A deterministic obligation can become inapplicable before execution and become current again after a prerequisite closes",
+    );
+  });
+
   it("keeps same-workflow publication separate from upstream change control", async () => {
     const source = await readFile(
       path.join(skillsRoot, "model-koni-work/references/execution-contracts.md"),

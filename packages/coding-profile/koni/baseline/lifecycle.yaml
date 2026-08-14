@@ -1,7 +1,7 @@
 schema_version: '3.0'
 module:
   id: software.lifecycle
-  version: 0.3.0
+  version: 0.3.1
 state_machines:
 - id: ticket
   initial: queued
@@ -100,6 +100,7 @@ state_machines:
   - id: reopen-stale-obligation
     from:
     - closed
+    - retired
     to: queued
     actors:
     - compiler

@@ -44,6 +44,13 @@ For every project obligation, trace one chain:
 If a setting does not belong on this chain, in a run-control layer, or in Pi's repository
 environment, it may be prompt decoration rather than enforceable configuration.
 
+Keep deterministic closure reversible at the configured lifecycle boundary. A deterministic
+obligation can become inapplicable before execution and become current again after a prerequisite
+closes. If the ticket machine has a distinct terminal retirement state, let only the compiler return
+that state to the queued state. Do not give agents or operators a general terminal-state reopening
+route, and do not make the compiler mint a different ticket identity to work around a missing
+lifecycle transition.
+
 ## Change-control decision ownership
 
 Keep `operator` as the default proposal `decision_policy`. Use `automatic` only for a closure route

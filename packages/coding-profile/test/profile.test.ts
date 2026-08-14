@@ -132,7 +132,7 @@ describe("coding profile registrar", () => {
         }),
         expect.objectContaining({
           id: "reopen-stale-obligation",
-          from: ["closed"],
+          from: ["closed", "retired"],
           to: "queued",
         }),
         expect.objectContaining({ id: "retire", from: ["proposed", "queued", "blocked"] }),
