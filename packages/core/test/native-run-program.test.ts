@@ -350,9 +350,15 @@ describe("native compiler-authoritative run program", () => {
       "the separately materialized application ticket",
     );
     expect(selectionInstructions.join(" ")).toContain(
+      "complete hash-bound approved request and reason are carried independently",
+    );
+    expect(selectionInstructions.join(" ")).toContain("Keep changeApplication.summary concise");
+    expect(selectionInstructions.join(" ")).toContain(
+      "does not replace or narrow the original request",
+    );
+    expect(selectionInstructions.join(" ")).not.toContain(
       "preserve the complete bounded requested state",
     );
-    expect(selectionInstructions.join(" ")).toContain("not a route-only synopsis");
 
     const reviewInstructions = approvedProposalAttemptInstructions({
       approved: true,
@@ -8968,6 +8974,8 @@ describe("native compiler-authoritative run program", () => {
     const externalTarget = (await program.projectGraph(run)).nodes.find(
       (node) => node.type === "literature",
     )!.id;
+    const applicationReferencePath = "program/assets/unlinked_reference/resolve.py";
+    const requestOnlyTail = `${"bounded-context ".repeat(90)}Required exact repository path: ${applicationReferencePath}`;
     const upstreamOutput = {
       status: "completed",
       summary: "The hypothesis requires a bounded upstream semantic correction",
@@ -8975,7 +8983,7 @@ describe("native compiler-authoritative run program", () => {
         targetNodeIds: [externalTarget, controlTarget],
         fulfillment: "dynamic_scope_change",
         summary: "Correct the bounded hypothesis contract",
-        reason: "The current formulation cannot represent the verified constraint",
+        reason: `The current formulation cannot represent the verified constraint. ${requestOnlyTail}`,
       },
     };
     expect(Value.Check(prepared.terminalOutputSchema!, upstreamOutput)).toBe(true);
@@ -9252,6 +9260,15 @@ describe("native compiler-authoritative run program", () => {
       "Do not select no-op while the approved request remains unsatisfied",
     );
     expect(proposalPrepared.spec.persona.initialPrompt).toContain(
+      "Keep changeApplication.summary concise",
+    );
+    expect(proposalPrepared.spec.persona.initialPrompt).toContain(
+      "does not replace or narrow the original request",
+    );
+    expect(proposalPrepared.spec.persona.initialPrompt).not.toContain(
+      "preserve the complete bounded requested state",
+    );
+    expect(proposalPrepared.spec.persona.initialPrompt).toContain(
       `Exact approved upstream request (${upstreamControl.publication.requestSha256}) required state: ${upstreamOutput.upstreamChangeRequest.summary}`,
     );
     expect(proposalPrepared.spec.persona.initialPrompt).toContain(
@@ -9273,14 +9290,13 @@ describe("native compiler-authoritative run program", () => {
       "ticket",
       "running",
     );
-    const applicationReferencePath = "program/assets/unlinked_reference/resolve.py";
     const applicationOutput = {
       status: "completed",
       summary: "Selected the exact bounded semantic application",
       changeApplication: {
         operation: "apply-change-request",
         targetNodeIds: [controlTarget],
-        summary: `Apply only the reviewed hypothesis contract correction using ${applicationReferencePath}`,
+        summary: "Apply only the reviewed hypothesis contract correction",
       },
     };
     expect(Value.Check(proposalPrepared.terminalOutputSchema!, applicationOutput)).toBe(true);
@@ -9563,6 +9579,14 @@ describe("native compiler-authoritative run program", () => {
       applicationPrepared,
       reviewApplicationPrepared,
     ]) {
+      expect(prepared.spec.persona.initialPrompt).toContain(applicationReferencePath);
+      expect(prepared.spec.persona.initialPrompt).toContain(requestOnlyTail);
+      expect(JSON.parse(prepared.contextContent ?? "null")).toMatchObject({
+        proposalRequest: {
+          requestSha256: upstreamControl.publication.requestSha256,
+          reason: upstreamOutput.upstreamChangeRequest.reason,
+        },
+      });
       expect(prepared.spec.persona.initialPrompt).toContain(
         `Exact approved application selection (${applicationMaterialization.authoritySha256}): ${applicationMaterialization.selectionSummary}`,
       );
@@ -9656,6 +9680,14 @@ describe("native compiler-authoritative run program", () => {
         expect.objectContaining({ kind: "semantic_node", id: "asset-unlinked-reference" }),
       ]),
     );
+    const completedApplicationRun = structuredClone(run);
+    completedApplicationRun.tickets[applicationTicket.id]!.status = "completed";
+    const completedObligation = approvedChangeObligationsForTargets(completedApplicationRun, [
+      controlTarget,
+    ])[0]!;
+    expect(completedObligation.summary).toContain(applicationReferencePath);
+    expect(completedObligation.summary).toContain(upstreamOutput.upstreamChangeRequest.reason);
+    expect(completedObligation.summary).toContain(applicationMaterialization.selectionSummary);
     delete run.tickets[applicationTicket.id];
 
     const noOpOutput = {

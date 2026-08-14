@@ -182,6 +182,7 @@ import {
 import {
   deriveChangeControlPublication,
   type ApprovedChangeMaterialization,
+  type ChangeControlPublication,
   type ExistingChangeControlProposal,
   type TerminalResolverReconciliation,
 } from "../state/change-control.js";
@@ -7705,6 +7706,76 @@ export interface ApprovedChangeObligationContext {
   readonly operatorSteering?: readonly string[];
 }
 
+function proposalRequestPublicationForTicket(
+  ticket: Readonly<TicketRecord> | undefined,
+): ChangeControlPublication | undefined {
+  const control = ticket?.executionControl;
+  const authority = control?.controlTicketAuthority;
+  const causal = authority?.causal;
+  const request = control?.proposalRequest;
+  if (
+    ticket === undefined ||
+    request === undefined ||
+    authority?.role !== "proposal" ||
+    causal?.role !== "proposal" ||
+    authority.ticketId !== ticket.id ||
+    causal.publication.proposalTicketId !== ticket.id ||
+    causal.publication.requestSha256 !== request.requestSha256 ||
+    causal.publication.sourceTicketId !== request.sourceTicketId ||
+    causal.publication.sourceStepId !== request.sourceStepId ||
+    causal.publication.sourceOutputSha256 !== request.sourceOutputSha256
+  ) {
+    return undefined;
+  }
+  return causal.publication;
+}
+
+function approvedApplicationRequestContext(
+  run: Pick<RunRecord, "tickets">,
+  ticket: Readonly<TicketRecord> | undefined,
+):
+  | Readonly<{
+      proposal: TicketRecord;
+      publication: ChangeControlPublication;
+      materialization: Extract<ApprovedChangeMaterialization, { kind: "application" }>;
+    }>
+  | undefined {
+  const control = ticket?.executionControl;
+  const authority = control?.controlTicketAuthority;
+  const causal = authority?.causal;
+  const proposalId = control?.sourceProposalTicketId;
+  const proposal = proposalId === undefined ? undefined : run.tickets[proposalId];
+  const publication = proposalRequestPublicationForTicket(proposal);
+  if (
+    ticket === undefined ||
+    proposal === undefined ||
+    publication === undefined ||
+    authority?.role !== "approved_application" ||
+    causal?.role !== "approved_application" ||
+    causal.materialization.kind !== "application" ||
+    causal.materialization.proposalTicketId !== proposal.id ||
+    causal.materialization.applicationTicketId !== ticket.id ||
+    causal.materialization.requestSha256 !== publication.requestSha256 ||
+    control?.approvedApplicationSha256 !== causal.materialization.authoritySha256
+  ) {
+    return undefined;
+  }
+  return { proposal, publication, materialization: causal.materialization };
+}
+
+function approvedApplicationObligationSummary(
+  run: Pick<RunRecord, "tickets">,
+  ticket: Readonly<TicketRecord>,
+): string | undefined {
+  const request = approvedApplicationRequestContext(run, ticket);
+  if (request === undefined) return undefined;
+  return [
+    `Approved request (${request.publication.requestSha256}): ${request.publication.summary}`,
+    `Recorded reason: ${request.publication.reason}`,
+    `Reviewed application selection: ${request.materialization.selectionSummary}`,
+  ].join("\n");
+}
+
 /** Preserve an approved semantic obligation after its control ticket has settled. */
 export function approvedChangeObligationsForTargets(
   run: Pick<RunRecord, "tickets">,
@@ -7717,16 +7788,22 @@ export function approvedChangeObligationsForTargets(
         ticket.status === "completed" &&
         ticket.executionControl?.controlTicketAuthority?.role === "approved_application" &&
         ticket.executionControl.approvedApplicationSha256 !== undefined &&
-        ticket.summary.trim().length > 0 &&
         ticket.targetNodeIds.some((nodeId) => targets.has(nodeId)),
     )
     .sort((left, right) => compareText(left.id, right.id))
-    .map((ticket) => ({
-      ticketId: ticket.id,
-      approvedApplicationSha256: ticket.executionControl!.approvedApplicationSha256!,
-      targetNodeIds: [...ticket.targetNodeIds],
-      summary: ticket.summary,
-    }));
+    .flatMap((ticket) => {
+      const summary = approvedApplicationObligationSummary(run, ticket) ?? ticket.summary.trim();
+      return summary.length === 0
+        ? []
+        : [
+            {
+              ticketId: ticket.id,
+              approvedApplicationSha256: ticket.executionControl!.approvedApplicationSha256!,
+              targetNodeIds: [...ticket.targetNodeIds],
+              summary,
+            },
+          ];
+    });
 }
 
 /** Control proposals authorize later work; they do not themselves inherit settled application work. */
@@ -7752,8 +7829,10 @@ export function approvedChangeObligationsForAttempt(
       const sourceProposalId = ticket.executionControl?.sourceProposalTicketId;
       const sourceProposal =
         sourceProposalId === undefined ? undefined : run.tickets[sourceProposalId];
-      const summary = sourceProposal?.summary.trim() || ticket.summary.trim();
-      if (summary.length === 0) return [];
+      const summary = approvedApplicationObligationSummary(run, ticket);
+      const legacySummary = sourceProposal?.summary.trim() || ticket.summary.trim();
+      const effectiveSummary = summary || legacySummary;
+      if (effectiveSummary.length === 0) return [];
       const sourceControl = sourceProposal?.executionControl;
       const approvalSha256 = sourceControl?.proposalApprovalSha256;
       return [
@@ -7761,7 +7840,7 @@ export function approvedChangeObligationsForAttempt(
           ticketId: ticket.id,
           approvedApplicationSha256: ticket.executionControl!.approvedApplicationSha256!,
           targetNodeIds: [...ticket.targetNodeIds],
-          summary,
+          summary: effectiveSummary,
           inFlight: true as const,
           ...(approvalSha256 === undefined
             ? {}
@@ -7841,7 +7920,7 @@ export function approvedProposalAttemptInstructions(input: {
     return [
       "This proposal-selection step is intentionally read-only. Empty graph and repository write scopes, graph_mutation forbidden, and maxNewNodes 0 do not block selecting an authorized changeApplication: this step records the bounded selection, and the separately materialized application ticket performs any approved mutation with its own compiler-derived authority.",
       "For this approved proposal, submit the exact authorized changeApplication when the request remains unsatisfied. Do not select no-op while the approved request remains unsatisfied; no-op is allowed only when the requested state is already satisfied in the current scoped graph.",
-      "In changeApplication.summary, preserve the complete bounded requested state, including every exact authored value, identifier, path, command, binding, and relationship the application needs. This is not a route-only synopsis: a statement that details were authored elsewhere is not a complete application contract.",
+      "The complete hash-bound approved request and reason are carried independently into every application attempt. Keep changeApplication.summary concise: identify the selected operation, targets, and only the smallest disambiguating interpretation needed for review. The summary does not replace or narrow the original request, so do not copy every authored value, identifier, path, command, binding, or relationship into this bounded field.",
       ...(input.applicationOperations.length === 0
         ? []
         : [
@@ -8428,23 +8507,10 @@ function ticketAttempt(
   const compilerOwnedFields = assignmentCompilerOwnedFields(configuration, definition);
   const predecessorHasCommandEvidence = reviewPredecessorHasCommandEvidence(predecessorExecution);
   const proposalControl = durableTicket?.executionControl;
-  const proposalAuthority = proposalControl?.controlTicketAuthority;
-  const proposalRequestContext =
-    proposalControl?.proposalRequest !== undefined &&
-    proposalAuthority?.role === "proposal" &&
-    proposalAuthority.causal.role === "proposal" &&
-    proposalAuthority.runId === run.id &&
-    proposalAuthority.ticketId === definition.id &&
-    proposalAuthority.causal.publication.requestSha256 ===
-      proposalControl.proposalRequest.requestSha256 &&
-    proposalAuthority.causal.publication.sourceTicketId ===
-      proposalControl.proposalRequest.sourceTicketId &&
-    proposalAuthority.causal.publication.sourceStepId ===
-      proposalControl.proposalRequest.sourceStepId &&
-    proposalAuthority.causal.publication.sourceOutputSha256 ===
-      proposalControl.proposalRequest.sourceOutputSha256
-      ? structuredClone(proposalAuthority.causal.publication)
-      : undefined;
+  const applicationRequestContext = approvedApplicationRequestContext(run, durableTicket);
+  const proposalRequestContext = structuredClone(
+    proposalRequestPublicationForTicket(durableTicket) ?? applicationRequestContext?.publication,
+  );
   const proposalApproval =
     proposalControl?.proposalDecision?.decision === "approval" &&
     proposalControl.proposalApprovalSha256 === proposalControl.proposalDecision.sha256
@@ -8478,9 +8544,8 @@ function ticketAttempt(
           proposalApproval.approvalSha256,
         );
   const approvedApplicationProposal =
-    proposalOperation?.changeControl.role === "application" &&
-    durableTicket?.executionControl?.sourceProposalTicketId !== undefined
-      ? run.tickets[durableTicket.executionControl.sourceProposalTicketId]
+    proposalOperation?.changeControl.role === "application"
+      ? applicationRequestContext?.proposal
       : undefined;
   const approvedApplicationCausal = durableTicket?.executionControl?.controlTicketAuthority?.causal;
   const approvedApplicationMaterialization =
@@ -8654,7 +8719,7 @@ function ticketAttempt(
       ...(approvedApplicationProposal === undefined
         ? []
         : [
-            `The approved change request defines the required state for this application: ${approvedApplicationProposal.summary}\n\nApplication graph write-authority nodes: ${definition.target_node_ids.join(", ")}. Request context may name causal nodes outside this application authority; treat those nodes as context only and never as an instruction to mutate them.`,
+            `The approved change request defines the required state for this application: ${applicationRequestContext!.publication.summary}\n\nRecorded reason: ${applicationRequestContext!.publication.reason}\n\nApplication graph write-authority nodes: ${definition.target_node_ids.join(", ")}. Request context may name causal nodes outside this application authority; treat those nodes as context only and never as an instruction to mutate them.`,
             ...(approvedApplicationMaterialization === undefined
               ? []
               : [
@@ -19216,9 +19281,9 @@ function attemptWorkspace(
 /**
  * Approved applications sometimes need to add a typed reference to an existing node that is not
  * yet connected to the write target. Preserve the exact write grant, but make nodes whose
- * repository paths are named verbatim in the reviewed, hash-bound application summary eligible
- * for dynamic read context. Terminal resolvers inherit the same provenance from their source
- * application so a failed application can be repaired without ambient graph visibility.
+ * repository paths are named verbatim in the original hash-bound request or its reviewed selection
+ * eligible for dynamic read context. Terminal resolvers inherit the same provenance from their
+ * source application so a failed application can be repaired without ambient graph visibility.
  */
 function approvedChangeContextReferencePaths(
   run: RunRecord,
@@ -19232,6 +19297,14 @@ function approvedChangeContextReferencePaths(
     visited.add(current.id);
     const control = current.executionControl;
     const causal = control?.controlTicketAuthority?.causal;
+    const requestContext = approvedApplicationRequestContext(run, current);
+    if (requestContext !== undefined) {
+      summaries.push(
+        requestContext.publication.summary,
+        requestContext.publication.reason,
+        requestContext.materialization.selectionSummary,
+      );
+    }
     const materializations = [
       control?.approvedMaterialization,
       ...(causal?.role === "approved_application" ? [causal.materialization] : []),
