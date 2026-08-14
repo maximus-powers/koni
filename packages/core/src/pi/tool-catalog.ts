@@ -1067,17 +1067,21 @@ function boundedSchemaValidationErrors(schema: TSchema, value: unknown): SchemaV
 }
 
 function selectDiagnosticUnionBranches(branches: readonly TSchema[], value: unknown): TSchema[] {
-  const scores = branches.map((branch) => schemaConstScore(branch, value));
+  const discriminated = selectConventionalDiscriminatorBranches(branches, value);
+  const candidateBranches = discriminated ?? branches;
+  const scores = candidateBranches.map((branch) => schemaConstScore(branch, value));
   const uncontradicted = scores
     .map((score, index) => ({ score, index }))
     .filter(({ score }) => score.matches > 0 && score.contradictions === 0);
-  const candidates =
+  const rankedCandidates =
     uncontradicted.length > 0
       ? uncontradicted
       : scores.map((score, index) => ({ score, index })).filter(({ score }) => score.matches > 0);
-  if (candidates.length === 0) return [...branches];
-  const minimumContradictions = Math.min(...candidates.map(({ score }) => score.contradictions));
-  const leastContradicted = candidates.filter(
+  if (rankedCandidates.length === 0) return [...candidateBranches];
+  const minimumContradictions = Math.min(
+    ...rankedCandidates.map(({ score }) => score.contradictions),
+  );
+  const leastContradicted = rankedCandidates.filter(
     ({ score }) => score.contradictions === minimumContradictions,
   );
   const maximumMatches = Math.max(...leastContradicted.map(({ score }) => score.matches));
@@ -1086,7 +1090,36 @@ function selectDiagnosticUnionBranches(branches: readonly TSchema[], value: unkn
       .filter(({ score }) => score.matches === maximumMatches)
       .map(({ index }) => index),
   );
-  return branches.filter((_branch, index) => selected.has(index));
+  return candidateBranches.filter((_branch, index) => selected.has(index));
+}
+
+/**
+ * Prefer the branch selected by an explicit schema discriminator before considering sibling
+ * literals. Graph edge schemas are a representative pressure case: `relation` selects the edge
+ * contract, while `source` and `target` are branch-owned values that should be diagnosed after
+ * that selection. Counting all three literals equally can select a sibling whose endpoints happen
+ * to match and then tell the model to change an already-correct relation.
+ */
+function selectConventionalDiscriminatorBranches(
+  branches: readonly TSchema[],
+  value: unknown,
+): TSchema[] | undefined {
+  if (!isRecord(value)) return undefined;
+  for (const key of ["type", "relation", "kind", "status", "disposition", "protocol"] as const) {
+    if (!Object.hasOwn(value, key)) continue;
+    const literals = branches.map((branch) => {
+      const properties = (branch as { properties?: Record<string, TSchema> }).properties;
+      const property = properties?.[key];
+      return property !== undefined && Object.hasOwn(property, "const")
+        ? (property as TSchema & { const: unknown })
+        : undefined;
+    });
+    if (literals.some((literal) => literal === undefined)) continue;
+    if (new Set(literals.map((literal) => canonicalHash(literal!.const))).size < 2) continue;
+    const selected = branches.filter((_branch, index) => Value.Check(literals[index]!, value[key]));
+    if (selected.length > 0) return selected;
+  }
+  return undefined;
 }
 
 function schemaConstScore(

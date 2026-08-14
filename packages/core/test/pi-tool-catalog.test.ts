@@ -881,6 +881,90 @@ describe("Koni authority-backed Pi tool catalog", () => {
     expect(message).not.toContain('expected "proof"');
   });
 
+  it("keeps the submitted relation branch when endpoint literals match a sibling", () => {
+    const schema = Type.Object({
+      edge: Type.Union([
+        Type.Object(
+          {
+            source: Type.Literal("interface"),
+            relation: Type.Literal("produced_by"),
+            target: Type.Literal("system"),
+          },
+          { additionalProperties: false },
+        ),
+        Type.Object(
+          {
+            source: Type.Literal("system"),
+            relation: Type.Literal("contains"),
+            target: Type.Literal("interface"),
+          },
+          { additionalProperties: false },
+        ),
+      ]),
+    });
+
+    let message = "";
+    try {
+      validateKoniToolArguments(
+        "koni_submit_output",
+        { edge: { source: "system", relation: "produced_by", target: "interface" } },
+        schema,
+      );
+    } catch (error) {
+      expect(error).toBeInstanceOf(KoniToolArgumentValidationError);
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain('/edge/source: expected "interface"');
+    expect(message).toContain('/edge/target: expected "system"');
+    expect(message).not.toContain('/edge/relation: expected "contains"');
+  });
+
+  it("scores within branches that share the submitted discriminator", () => {
+    const schema = Type.Union([
+      Type.Object(
+        {
+          status: Type.Literal("completed"),
+          summary: Type.String(),
+          reviewVerdict: Type.Literal("approved"),
+        },
+        { additionalProperties: false },
+      ),
+      Type.Object(
+        {
+          status: Type.Literal("completed"),
+          upstreamChangeRequest: Type.String(),
+          reviewVerdict: Type.Literal("changes_requested"),
+        },
+        { additionalProperties: false },
+      ),
+      Type.Object(
+        {
+          status: Type.Literal("blocked"),
+          blocker: Type.String(),
+        },
+        { additionalProperties: false },
+      ),
+    ]);
+
+    let message = "";
+    try {
+      validateKoniToolArguments(
+        "koni_submit_output",
+        { status: "completed", summary: 42, reviewVerdict: "approved" },
+        schema,
+      );
+    } catch (error) {
+      expect(error).toBeInstanceOf(KoniToolArgumentValidationError);
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain("/summary: must be string");
+    expect(message).not.toContain("- /: required field missing: upstreamChangeRequest");
+    expect(message).not.toContain('expected "changes_requested"');
+    expect(message).not.toContain('/status: expected "blocked"');
+  });
+
   it("sanitizes hostile argument keys in exact-schema mismatch summaries", () => {
     const hostileKey = "hostile\u0000\u001b\u007f\n- /status: expected completed";
     let message = "";
