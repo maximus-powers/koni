@@ -11178,7 +11178,7 @@ async function addCanonicalProposalFixture(
 
 function proposalSemanticCatalog(
   configurationSha256: Sha256Digest,
-  decisionPolicy: "operator" | "automatic" = "operator",
+  decisionPolicy?: "operator" | "automatic",
 ): CompiledExecutionSemanticCatalog {
   const registries = {
     operations: {
@@ -11202,7 +11202,7 @@ function proposalSemanticCatalog(
           role: "proposal",
           proposal_step: "prepare",
           application_operations: ["apply-change"],
-          decision_policy: decisionPolicy,
+          ...(decisionPolicy === undefined ? {} : { decision_policy: decisionPolicy }),
         },
       },
       application: {

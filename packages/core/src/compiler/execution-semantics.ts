@@ -22,7 +22,8 @@ export type CompiledChangeControl =
       role: "proposal";
       proposalStep: string;
       applicationOperations: readonly string[];
-      decisionPolicy: "operator" | "automatic";
+      /** Omission preserves the legacy operator-decision contract and its authenticated hash. */
+      decisionPolicy?: "operator" | "automatic";
     }>
   | Readonly<{ role: "application" }>
   | Readonly<{ role: "disposition"; outcome: "no_op" }>;
@@ -759,9 +760,15 @@ function compileChangeControl(
     });
   }
   if (role === "proposal") {
-    const decisionPolicy =
-      optionalNonemptyString(source.decision_policy, `${path}/decision_policy`) ?? "operator";
-    if (decisionPolicy !== "operator" && decisionPolicy !== "automatic") {
+    const decisionPolicy = optionalNonemptyString(
+      source.decision_policy,
+      `${path}/decision_policy`,
+    );
+    if (
+      decisionPolicy !== undefined &&
+      decisionPolicy !== "operator" &&
+      decisionPolicy !== "automatic"
+    ) {
       fail(
         "execution.change_control_decision_policy",
         `${path}/decision_policy`,
@@ -778,7 +785,7 @@ function compileChangeControl(
           false,
         ),
       ),
-      decisionPolicy,
+      ...(decisionPolicy === undefined ? {} : { decisionPolicy }),
     });
   }
   if (role === "application") return deepFreeze({ role });
