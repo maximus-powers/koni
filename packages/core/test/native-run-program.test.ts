@@ -28,6 +28,7 @@ import {
   assertRunPlanUsesRepositoryOwnedArgv,
   assertTicketDefinitionStable,
   commandInfrastructureFailure,
+  configuredCheckFailureInstructions,
   currentNonpassingGateRepairEvidenceRequests,
   downstreamGraphPublicationStepIds,
   effectiveAssignmentWriteScope,
@@ -592,6 +593,30 @@ describe("native compiler-authoritative run program", () => {
         allowUpstreamRequests: true,
       } satisfies CompiledChangeControl),
     ).toEqual([]);
+  });
+
+  it("keeps configured-check failure routing within the compiled upstream-change capability", () => {
+    const routed = configuredCheckFailureInstructions({
+      role: "ordinary",
+      allowUpstreamRequests: true,
+    } satisfies CompiledChangeControl).join(" ");
+    expect(routed).toContain(
+      "use the configured upstreamChangeRequest route instead of reporting the authority gap as a failed assignment",
+    );
+    expect(routed).toContain("does not claim that the rejected check passed");
+    expect(routed).not.toContain(
+      'Do not submit status "completed" after any required check returns accepted: false',
+    );
+
+    const unrouted = configuredCheckFailureInstructions({
+      role: "ordinary",
+      allowUpstreamRequests: false,
+    } satisfies CompiledChangeControl).join(" ");
+    expect(unrouted).toContain(
+      'Do not submit status "completed" after any required check returns accepted: false',
+    );
+    expect(unrouted).toContain('Submit status "failed" with the exact check blocker');
+    expect(unrouted).not.toContain("upstreamChangeRequest");
   });
 
   it("keeps same-workflow graph publication out of upstream change control", () => {
@@ -8039,7 +8064,16 @@ describe("native compiler-authoritative run program", () => {
     });
     expect(prepared.toolNames).toContain("koni_run_check");
     expect(prepared.spec.persona.initialPrompt).toContain(
+      "use the configured upstreamChangeRequest route instead of reporting the authority gap as a failed assignment",
+    );
+    expect(prepared.spec.persona.initialPrompt).toContain(
+      "does not claim that the rejected check passed",
+    );
+    expect(prepared.spec.persona.initialPrompt).not.toContain(
       'Do not submit status "completed" after any required check returns accepted: false',
+    );
+    expect(prepared.spec.persona.initialPrompt).not.toContain(
+      'Submit status "failed" with the exact check blocker unless you materially repair the cause',
     );
     expect(prepared.spec.persona.initialPrompt).toContain("upstreamChangeRequest");
     expect(prepared.spec.persona.initialPrompt).toContain('"planned_asset_repair"');
@@ -8688,6 +8722,45 @@ describe("native compiler-authoritative run program", () => {
       },
     };
     expect(Value.Check(prepared.terminalOutputSchema!, upstreamOutput)).toBe(true);
+    const acceptedRecordedChecks = structuredClone(run.checks!);
+    const rejectedConfiguredCheck = run.checks!.find(
+      (candidate) => candidate.requestedCheckId === "exact-prerequisite-set",
+    )!;
+    rejectedConfiguredCheck.accepted = false;
+    rejectedConfiguredCheck.passed = false;
+    rejectedConfiguredCheck.summary = "The current configured check exposed an upstream defect";
+    await expect(
+      program.compileAssignmentOutput({
+        run,
+        assignment,
+        attemptId: attempt.id,
+        output: upstreamOutput,
+      }),
+    ).resolves.toMatchObject({
+      outcome: { status: "completed", summary: upstreamOutput.summary },
+      changeControl: {
+        kind: "upstream_request",
+        targetNodeIds: upstreamOutput.upstreamChangeRequest.targetNodeIds,
+      },
+    });
+    await expect(
+      program.compileAssignmentOutput({
+        run,
+        assignment,
+        attemptId: attempt.id,
+        output: completedOutput,
+      }),
+    ).rejects.toMatchObject({ code: "assignment_checks_incomplete" });
+    rejectedConfiguredCheck.attemptId = "attempt-research-plan";
+    await expect(
+      program.compileAssignmentOutput({
+        run,
+        assignment,
+        attemptId: attempt.id,
+        output: upstreamOutput,
+      }),
+    ).rejects.toMatchObject({ code: "assignment_checks_incomplete" });
+    run.checks = acceptedRecordedChecks;
     const transportNullUpstreamOutput = {
       ...upstreamOutput,
       graphDelta: null,

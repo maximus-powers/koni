@@ -2518,7 +2518,13 @@ export class NativeRunCompilerProgram implements RunCompilerProgram {
         },
       };
     }
-    assertCurrentAssignmentChecks(input.run, input.assignment, input.attemptId, step);
+    assertCurrentAssignmentChecks(
+      input.run,
+      input.assignment,
+      input.attemptId,
+      step,
+      result.upstreamChangeRequest === undefined,
+    );
     let graph = graphRead.graph;
     const evidenceInputGraph = graph;
     const priorRuleEvidence = runRuleEvidence(
@@ -8111,6 +8117,20 @@ export function repairedProviderGateRecheckInstruction(
   ].join(" ");
 }
 
+/** Keep a rejected configured check aligned with the operation's compiled change-control route. */
+export function configuredCheckFailureInstructions(
+  changeControl: CompiledChangeControl | undefined,
+): string[] {
+  if (changeControl?.role === "ordinary" && changeControl.allowUpstreamRequests) {
+    return [
+      'A required configured check whose result is rejected cannot satisfy this assignment by itself. If the exact blocker requires changing read-only causal authority outside this assignment, use the configured upstreamChangeRequest route instead of reporting the authority gap as a failed assignment. That handoff uses status "completed" with upstreamChangeRequest and does not claim that the rejected check passed. For a blocker within this assignment\'s authority, submit status "failed" with the exact check blocker unless you materially repair the cause and rerun that check successfully in this attempt.',
+    ];
+  }
+  return [
+    'A required configured check whose result is rejected cannot satisfy this assignment. Do not submit status "completed" after any required check returns accepted: false. Submit status "failed" with the exact check blocker unless you materially repair the cause and rerun that check successfully in this attempt.',
+  ];
+}
+
 export function upstreamChangeRequestInstructions(
   changeControl: CompiledChangeControl | undefined,
   downstreamGraphPublicationStepIds: readonly string[] = [],
@@ -8444,7 +8464,7 @@ function ticketAttempt(
         ? []
         : [
             `Current-step validation checks (the only check IDs authorized in this attempt): ${step.validation_checks.join(", ")}. Do not call checks listed on earlier or later workflow steps.`,
-            'A required configured check whose result is rejected cannot satisfy this assignment. Do not submit status "completed" after any required check returns accepted: false. Submit status "failed" with the exact check blocker unless you materially repair the cause and rerun that check successfully in this attempt.',
+            ...configuredCheckFailureInstructions(proposalOperation?.changeControl),
           ]),
       ...(executionPolicyBinding.context.outputContract.text.length === 0
         ? []
@@ -12119,6 +12139,7 @@ function assertCurrentAssignmentChecks(
   assignment: ReadyAssignment,
   attemptId: string,
   step: DerivedWorkflowStep,
+  requireAccepted: boolean,
 ): void {
   if (step.validation_checks.length === 0) return;
   const attempt = run.attempts[attemptId];
@@ -12150,13 +12171,15 @@ function assertCurrentAssignmentChecks(
         (check) =>
           check.attemptId === attemptId &&
           check.requestedCheckId === checkId &&
-          check.accepted === true,
+          (!requireAccepted || check.accepted === true),
       ),
   );
   if (missing.length > 0) {
     fail(
       "assignment_checks_incomplete",
-      `assignment cannot complete without current accepted configured checks: ${missing.join(", ")}`,
+      requireAccepted
+        ? `assignment cannot complete without current accepted configured checks: ${missing.join(", ")}`
+        : `assignment cannot request upstream change without current configured check results: ${missing.join(", ")}`,
     );
   }
 }
