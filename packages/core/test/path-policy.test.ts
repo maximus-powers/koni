@@ -41,6 +41,28 @@ describe("worktree path authority", () => {
     } satisfies Partial<PathAuthorityError>);
   });
 
+  it("classifies absent in-scope discovery roots as correctable path rejections", async () => {
+    const root = await temporary();
+    await writeFile(path.join(root, "present.txt"), "needle\n");
+    const policy = await WorktreePathAuthority.create(root, {
+      readPaths: ["present.txt", "optional"],
+      writePaths: [],
+    });
+
+    await expect(policy.list("optional")).rejects.toMatchObject({
+      name: "PathAuthorityError",
+      code: "read_missing",
+      message: "read target does not exist: optional",
+    } satisfies Partial<PathAuthorityError>);
+    await expect(
+      policy.search("needle", { roots: ["present.txt", "optional"] }),
+    ).rejects.toMatchObject({
+      name: "PathAuthorityError",
+      code: "read_missing",
+      message: "read target does not exist: optional",
+    } satisfies Partial<PathAuthorityError>);
+  });
+
   it("rejects stale writes, symlinks, escapes, and compiler-owned paths", async () => {
     const root = await temporary();
     const outside = await temporary();

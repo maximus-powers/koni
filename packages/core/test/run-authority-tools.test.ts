@@ -287,6 +287,56 @@ describe("run authority model tools", () => {
     client.close();
   });
 
+  it("records an absent in-scope search root as a durable model-visible rejection", async () => {
+    const root = await repository();
+    const engine = await RunAuthorityEngine.open({
+      projectRoot: root,
+      version: "1.0.0",
+      program: questionProgram("missing-search-rejection"),
+      supervisor: new ManagedSessionSupervisor(),
+    });
+    engines.push(engine);
+    await engine.start();
+    const client = await AuthorityClient.connect({
+      projectRoot: root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const created = await client.request(
+      "run.create",
+      {
+        objective: "Continue after one absent optional search root",
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: "Continue after one absent optional search root" },
+      },
+      { expectedRevision: 0, idempotencyKey: "create-missing-search-rejection-run" },
+    );
+    const runId = (created.result as { runId: string }).runId;
+
+    await waitFor(async () => {
+      const current = await engine.store.getRun(runId);
+      if (current.lifecycle.phase === "blocked") {
+        throw new Error(`missing search run blocked: ${current.lifecycle.blocker ?? "unknown"}`);
+      }
+      return current.lifecycle.phase === "awaiting_approval";
+    });
+    const planned = await engine.store.getRun(runId);
+    expect(Object.values(planned.attempts)[0]!.authorityToolResults).toEqual([
+      expect.objectContaining({
+        callId: "missing-search-root",
+        toolName: "koni_search_files",
+        outcome: "rejected",
+      }),
+      expect.objectContaining({
+        callId: "missing-search-submit",
+        toolName: "koni_submit_output",
+        outcome: "accepted",
+      }),
+    ]);
+    client.close();
+  });
+
   it("rolls back rejected compiler mutations and leaves integrity errors fatal", async () => {
     const root = await repository();
     const engine = await RunAuthorityEngine.open({
@@ -431,6 +481,7 @@ function questionProgram(
     | "resource-read"
     | "correctable-rejection"
     | "missing-read-rejection"
+    | "missing-search-rejection"
     | "rejection-boundary"
     | "workspace-rejection" = "question",
 ): RunCompilerProgram {
@@ -444,11 +495,13 @@ function questionProgram(
           ? ["koni_search_files", "koni_submit_output"]
           : mode === "missing-read-rejection"
             ? ["koni_read_file", "koni_submit_output"]
-            : mode === "rejection-boundary"
-              ? ["koni_record_note", "koni_submit_output"]
-              : mode === "workspace-rejection"
-                ? ["koni_write_file", "koni_submit_output"]
-                : ["koni_read_file", "koni_ask_question", "koni_submit_output"];
+            : mode === "missing-search-rejection"
+              ? ["koni_search_files", "koni_submit_output"]
+              : mode === "rejection-boundary"
+                ? ["koni_record_note", "koni_submit_output"]
+                : mode === "workspace-rejection"
+                  ? ["koni_write_file", "koni_submit_output"]
+                  : ["koni_read_file", "koni_ask_question", "koni_submit_output"];
   return {
     async resolveRun(request) {
       return {
@@ -517,7 +570,9 @@ function questionProgram(
             ? ["large.ts"]
             : mode === "missing-read-rejection"
               ? ["optional/AGENTS.md"]
-              : ["README.md"],
+              : mode === "missing-search-rejection"
+                ? ["README.md", "optional"]
+                : ["README.md"],
         writePaths: mode === "workspace-rejection" ? ["notes.txt"] : [],
         expectedRevision: input.nextAuthorityRevision,
         expectedStateHash: input.expectedAuthorityStateHash,
@@ -955,6 +1010,7 @@ class RejectionAdapter implements PiSessionAdapter {
     private readonly mode:
       | "correctable-rejection"
       | "missing-read-rejection"
+      | "missing-search-rejection"
       | "rejection-boundary"
       | "workspace-rejection",
   ) {
@@ -980,6 +1036,20 @@ class RejectionAdapter implements PiSessionAdapter {
       await this.tool("koni_submit_output").execute(
         "missing-read-submit",
         { result: "continued after absent optional file" },
+        this.#abort.signal,
+      );
+      return;
+    }
+    if (this.mode === "missing-search-rejection") {
+      const denied = await this.tool("koni_search_files").execute(
+        "missing-search-root",
+        { query: "repository", roots: ["README.md", "optional"] },
+        this.#abort.signal,
+      );
+      expect(denied.details).toMatchObject({ outcome: "rejected", code: "read_missing" });
+      await this.tool("koni_submit_output").execute(
+        "missing-search-submit",
+        { result: "continued after absent optional search root" },
         this.#abort.signal,
       );
       return;

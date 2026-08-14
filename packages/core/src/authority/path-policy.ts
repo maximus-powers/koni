@@ -239,36 +239,38 @@ export class WorktreePathAuthority {
   ): Promise<AuthorizedPathEntry[]> {
     const normalized = normalizeRelative(relative);
     this.#requireScope(normalized, this.#readRoots, "read_scope");
-    const absolute = await this.#safeAbsolute(normalized, false);
-    const metadata = await lstat(absolute);
-    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-      throw new PathAuthorityError("list_type", "list target is not a real directory");
-    }
-    const limit = boundedLimit(options.limit, MAX_LIST_ENTRIES, "list limit");
-    const output: AuthorizedPathEntry[] = [];
-    const queue = [{ relative: normalized, absolute }];
-    while (queue.length > 0 && output.length < limit) {
-      const current = queue.shift()!;
-      const children = await readdir(current.absolute, { withFileTypes: true });
-      children.sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
-      for (const child of children) {
-        if (output.length >= limit) break;
-        const childRelative =
-          current.relative === "." ? child.name : `${current.relative}/${child.name}`;
-        if (!this.#isWithinScope(childRelative, this.#readRoots)) continue;
-        const childAbsolute = path.join(current.absolute, child.name);
-        const childMetadata = await lstat(childAbsolute);
-        if (childMetadata.isSymbolicLink()) continue;
-        if (childMetadata.isDirectory()) {
-          output.push({ path: childRelative, kind: "directory", sizeBytes: 0 });
-          if (options.recursive === true)
-            queue.push({ relative: childRelative, absolute: childAbsolute });
-        } else if (childMetadata.isFile()) {
-          output.push({ path: childRelative, kind: "file", sizeBytes: childMetadata.size });
+    return this.#withMissingRead(normalized, async () => {
+      const absolute = await this.#safeAbsolute(normalized, false);
+      const metadata = await lstat(absolute);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+        throw new PathAuthorityError("list_type", "list target is not a real directory");
+      }
+      const limit = boundedLimit(options.limit, MAX_LIST_ENTRIES, "list limit");
+      const output: AuthorizedPathEntry[] = [];
+      const queue = [{ relative: normalized, absolute }];
+      while (queue.length > 0 && output.length < limit) {
+        const current = queue.shift()!;
+        const children = await readdir(current.absolute, { withFileTypes: true });
+        children.sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
+        for (const child of children) {
+          if (output.length >= limit) break;
+          const childRelative =
+            current.relative === "." ? child.name : `${current.relative}/${child.name}`;
+          if (!this.#isWithinScope(childRelative, this.#readRoots)) continue;
+          const childAbsolute = path.join(current.absolute, child.name);
+          const childMetadata = await lstat(childAbsolute);
+          if (childMetadata.isSymbolicLink()) continue;
+          if (childMetadata.isDirectory()) {
+            output.push({ path: childRelative, kind: "directory", sizeBytes: 0 });
+            if (options.recursive === true)
+              queue.push({ relative: childRelative, absolute: childAbsolute });
+          } else if (childMetadata.isFile()) {
+            output.push({ path: childRelative, kind: "file", sizeBytes: childMetadata.size });
+          }
         }
       }
-    }
-    return output;
+      return output;
+    });
   }
 
   /** Literal UTF-8 search over bounded regular files in the exact read grant. */
@@ -294,22 +296,27 @@ export class WorktreePathAuthority {
     const limit = boundedLimit(options.limit, MAX_SEARCH_RESULTS, "search limit");
     const files = new Set<string>();
     for (const root of roots) {
-      const absolute = await this.#safeAbsolute(root, false);
-      const metadata = await lstat(absolute);
-      if (metadata.isSymbolicLink()) continue;
-      if (metadata.isFile()) {
-        files.add(root);
-      } else if (metadata.isDirectory()) {
-        for (const entry of await this.list(root, { recursive: true, limit: MAX_SEARCH_FILES })) {
-          if (
-            entry.kind === "file" &&
-            entry.sizeBytes <= MAX_READ_BYTES &&
-            !isNonTextSearchCandidate(entry.path)
-          ) {
-            files.add(entry.path);
+      await this.#withMissingRead(root, async () => {
+        const absolute = await this.#safeAbsolute(root, false);
+        const metadata = await lstat(absolute);
+        if (metadata.isSymbolicLink()) return;
+        if (metadata.isFile()) {
+          files.add(root);
+        } else if (metadata.isDirectory()) {
+          for (const entry of await this.list(root, {
+            recursive: true,
+            limit: MAX_SEARCH_FILES,
+          })) {
+            if (
+              entry.kind === "file" &&
+              entry.sizeBytes <= MAX_READ_BYTES &&
+              !isNonTextSearchCandidate(entry.path)
+            ) {
+              files.add(entry.path);
+            }
           }
         }
-      }
+      });
       if (files.size > MAX_SEARCH_FILES) {
         throw new PathAuthorityError(
           "search_files",
@@ -364,6 +371,18 @@ export class WorktreePathAuthority {
       }
     }
     return matches;
+  }
+
+  async #withMissingRead<T>(relative: string, operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error instanceof PathAuthorityError) throw error;
+      if (isCode(error, "ENOENT")) {
+        throw new PathAuthorityError("read_missing", `read target does not exist: ${relative}`);
+      }
+      throw error;
+    }
   }
 
   #requireScope(relative: string, roots: readonly string[], code: string): void {
