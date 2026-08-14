@@ -15897,11 +15897,14 @@ function attemptTokenBudget(
   const semanticEnvelope = configured ?? 240_000;
   // Ticket work and independent verification both need a complete authenticated repository
   // round-trip. Workers read, reason, edit, and check. Reviewers additionally receive the
-  // candidate and its cumulative evidence. Either may need one contained compaction before the
-  // terminal turn. A one-envelope attempt can therefore expire after valid inspection and force a
-  // fresh recovery to repeat the same authenticated work. Give both repository-working attempt
-  // kinds two semantic envelopes; Lead and integration remain lightweight, bounded judgments.
-  const repositoryWorkEnvelope = Math.min(Number.MAX_SAFE_INTEGER, semanticEnvelope * 2);
+  // candidate and its cumulative evidence. Real repository work can require more than one
+  // contained compaction before the terminal turn, especially when an uncapped provider output
+  // reserve leaves only a narrow context tail for edits and their receipts. A shorter allowance
+  // expires after valid inspection or a correctable compiler diagnostic, and bounded retries then
+  // repeat more authenticated context than one coherent attempt would spend. Give both
+  // repository-working attempt kinds three semantic envelopes; Lead and integration remain
+  // lightweight, bounded judgments.
+  const repositoryWorkEnvelope = Math.min(Number.MAX_SAFE_INTEGER, semanticEnvelope * 3);
   const maxNew =
     kind === "planning"
       ? configured!
