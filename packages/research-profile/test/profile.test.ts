@@ -76,6 +76,35 @@ describe("research profile registrar", () => {
     );
   });
 
+  it("routes executable asset safety claims through the reusable observed-boundary procedure", async () => {
+    const [skillSource, empiricalSource] = await Promise.all([
+      readFile(
+        path.resolve(import.meta.dirname, "../../core/skills/model-koni-work/SKILL.md"),
+        "utf8",
+      ),
+      readFile(
+        path.resolve(
+          import.meta.dirname,
+          "../../core/skills/model-koni-work/references/empirical-research.md",
+        ),
+        "utf8",
+      ),
+    ]);
+    const normalizedSkill = skillSource.replace(/\s+/gu, " ");
+    const normalizedEmpirical = empiricalSource.replace(/\s+/gu, " ");
+
+    expect(normalizedSkill).toContain(
+      "implementing or independently verifying a compiler-bounded executable Research asset",
+    );
+    expect(normalizedEmpirical).toContain(
+      "execute the actual owning entrypoint at its public seam with a bounded controlled fixture",
+    );
+    expect(normalizedEmpirical).toContain(
+      "Static syntax, token, import, or source-text inspection may establish structure; it cannot establish runtime effects",
+    );
+    expect(normalizedEmpirical).toContain("Substitute only dependencies outside the claimed owner");
+  });
+
   it("keeps post-execution evidence out of prerequisite authority", async () => {
     const [plannerSource, sharedGuidance] = await Promise.all([
       readFile(

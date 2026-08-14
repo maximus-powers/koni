@@ -165,6 +165,31 @@ describe("Koni's Pi-native skills", () => {
     );
   });
 
+  it("routes executable Research asset work through observed-boundary validation", async () => {
+    const [skillSource, empiricalSource] = await Promise.all([
+      readFile(path.join(skillsRoot, "model-koni-work/SKILL.md"), "utf8"),
+      readFile(path.join(skillsRoot, "model-koni-work/references/empirical-research.md"), "utf8"),
+    ]);
+    const normalizedSkill = skillSource.replace(/\s+/gu, " ");
+    const normalizedEmpirical = empiricalSource.replace(/\s+/gu, " ");
+
+    expect(normalizedSkill).toContain(
+      "implementing or independently verifying a compiler-bounded executable Research asset",
+    );
+    expect(normalizedEmpirical).toContain(
+      "execute the actual owning entrypoint at its public seam with a bounded controlled fixture",
+    );
+    expect(normalizedEmpirical).toContain(
+      "Snapshot every protected input and the complete allowed output boundary before execution and after settlement",
+    );
+    expect(normalizedEmpirical).toContain(
+      "Static syntax, token, import, or source-text inspection may establish structure; it cannot establish runtime effects",
+    );
+    expect(normalizedEmpirical).toContain(
+      "report the exact modeling or authority gap instead of claiming that the runtime contract passes",
+    );
+  });
+
   it("teaches profile authors to delegate only bounded authenticated change closure", async () => {
     const [configurationReference, softwareReference] = await Promise.all([
       readFile(path.join(skillsRoot, "configure-koni/references/configuration-layers.md"), "utf8"),

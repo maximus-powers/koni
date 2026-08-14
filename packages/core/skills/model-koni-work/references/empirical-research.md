@@ -71,6 +71,23 @@ evidence matters independently.
   valid. Never rewrite acceptance criteria after observing the result without a new explicit design
   revision.
 
+### Validate executable boundaries by observation
+
+For each runtime or effect claim, execute the actual owning entrypoint at its public seam with a
+bounded controlled fixture. Name the claimed owner, inputs, observable result, protected inputs, and
+allowed output boundary before writing the probe. Substitute only dependencies outside the claimed
+owner; a substitute for the owner cannot prove the owner's behavior.
+
+Snapshot every protected input and the complete allowed output boundary before execution and after
+settlement. Assert the declared result, permitted output changes, input immutability, and absence of
+each prohibited effect through observable state or an authenticated receipt. Keep the fixture and
+observation surface inside issued authority, and make cleanup bounded and recoverable.
+
+Static syntax, token, import, or source-text inspection may establish structure; it cannot establish
+runtime effects. If the issued boundary cannot safely execute the owner or observe the state needed
+for a material claim, report the exact modeling or authority gap instead of claiming that the
+runtime contract passes.
+
 Before accepting a scientific runtime or its post-result verifier, construct one closed validation
 ledger. Include the producer operation and resource contract, result schema and interpretation
 semantics, exact input and provenance identities, population and accounting invariants, output
